@@ -1646,29 +1646,28 @@ impl<'a> Lowerer<'a> {
                     }
                 }
 
-                if bare != "List" {
-                    if let Some(arg_tys) =
+                if bare != "List"
+                    && let Some(arg_tys) =
                         self.constructor_arg_types_from_expected(ctor_name, expected_ty)
-                    {
-                        let mut vars = Vec::new();
-                        let mut bindings = Vec::new();
-                        for (idx, arg) in args.iter().enumerate() {
-                            let var = self.fresh();
-                            let child_expected = arg_tys.get(idx);
-                            let val = self.lower_expr_value_with_expected_type(arg, child_expected);
-                            vars.push(var.clone());
-                            bindings.push((var, val));
-                        }
-                        let atom = util::mangle_ctor_atom(
-                            ctor_name,
-                            &self.constructor_atoms,
-                            self.handler_origin_module(),
-                        );
-                        let mut elems = vec![CExpr::Lit(CLit::Atom(atom))];
-                        elems.extend(vars.iter().map(|v| CExpr::Var(v.clone())));
-                        let tuple = CExpr::Tuple(elems);
-                        return self.wrap_let_bindings(bindings, tuple);
+                {
+                    let mut vars = Vec::new();
+                    let mut bindings = Vec::new();
+                    for (idx, arg) in args.iter().enumerate() {
+                        let var = self.fresh();
+                        let child_expected = arg_tys.get(idx);
+                        let val = self.lower_expr_value_with_expected_type(arg, child_expected);
+                        vars.push(var.clone());
+                        bindings.push((var, val));
                     }
+                    let atom = util::mangle_ctor_atom(
+                        ctor_name,
+                        &self.constructor_atoms,
+                        self.handler_origin_module(),
+                    );
+                    let mut elems = vec![CExpr::Lit(CLit::Atom(atom))];
+                    elems.extend(vars.iter().map(|v| CExpr::Var(v.clone())));
+                    let tuple = CExpr::Tuple(elems);
+                    return self.wrap_let_bindings(bindings, tuple);
                 }
             }
 
@@ -1689,7 +1688,9 @@ impl<'a> Lowerer<'a> {
                 return self.wrap_let_bindings(bindings, tuple);
             }
 
-            if matches!(expr.kind, ExprKind::Lambda { .. }) {
+            if matches!(expr.kind, ExprKind::Lambda { .. })
+                || self.lower_eta_reduced_effect_expr(expr).is_some()
+            {
                 let saved_ctx = self.lambda_effect_context.take();
                 let effects = crate::typechecker::effects_from_type(expected_ty);
                 if !effects.is_empty() {
@@ -1697,7 +1698,9 @@ impl<'a> Lowerer<'a> {
                     effects.sort();
                     self.lambda_effect_context = Some(self.canonicalize_effects(effects));
                 }
-                let ce = self.lower_expr_value(expr);
+                let ce = self
+                    .lower_eta_reduced_effect_expr(expr)
+                    .unwrap_or_else(|| self.lower_expr_value(expr));
                 self.lambda_effect_context = saved_ctx;
                 return ce;
             }
