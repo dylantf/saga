@@ -1,3 +1,5 @@
+module ActorTest
+
 import Std.Actor (
   Process,
   Actor,
@@ -8,7 +10,7 @@ import Std.Actor (
   Shutdown,
   Killed
 )
-import Std.Test (describe, test, assert_eq)
+import Std.Test (Testing, describe, test, assert_eq)
 
 type CounterMsg =
   | Increment Int
@@ -178,83 +180,87 @@ test_link_unlink () = {
   "ok"
 }
 
-describe "Actor" {
 
-  describe "spawn and send" {
-    test "spawn a process and exchange messages" {
-      let result = test_echo () with beam_actor
-      assert_eq result "hello"
-    }
+pub fun tests : Unit -> Unit needs {Testing}
+tests () = {
+  describe "Actor" (fun () -> {
 
-    test "with in arg position" {
-      assert_eq (test_echo () with beam_actor) "hello"
-    }
-  }
+    describe "spawn and send" (fun () -> {
+      test "spawn a process and exchange messages" (fun () -> {
+        let result = test_echo () with beam_actor
+        assert_eq result "hello"
+      })
 
-  describe "counter" {
-    test "accumulates state across messages" {
-      let result = test_counter_accumulate () with beam_actor
-      assert_eq result 8
-    }
+      test "with in arg position" (fun () -> {
+        assert_eq (test_echo () with beam_actor) "hello"
+      })
+    })
 
-    test "stop terminates the counter" {
-      let result = test_counter_stop () with beam_actor
-      assert_eq result (Nothing : Maybe Int)
-    }
-  }
+    describe "counter" (fun () -> {
+      test "accumulates state across messages" (fun () -> {
+        let result = test_counter_accumulate () with beam_actor
+        assert_eq result 8
+      })
 
-  describe "self" {
-    test "self returns current process pid" {
-      let result = test_self () with beam_actor
-      assert_eq result "ping"
-    }
+      test "stop terminates the counter" (fun () -> {
+        let result = test_counter_stop () with beam_actor
+        assert_eq result (Nothing : Maybe Int)
+      })
+    })
 
-    test "send preserves unit-valued messages" {
-      let result = test_send_unit () with beam_actor
-      assert_eq result "ok"
-    }
-  }
+    describe "self" (fun () -> {
+      test "self returns current process pid" (fun () -> {
+        let result = test_self () with beam_actor
+        assert_eq result "ping"
+      })
 
-  describe "timer" {
-    test "sleep pauses execution" {
-      let result = test_sleep () with beam_actor
-      assert_eq result "done"
-    }
+      test "send preserves unit-valued messages" (fun () -> {
+        let result = test_send_unit () with beam_actor
+        assert_eq result "ok"
+      })
+    })
 
-    test "receive with timeout" {
-      let result = test_receive_timeout () with beam_actor
-      assert_eq result (Nothing : Maybe Int)
-    }
-  }
+    describe "timer" (fun () -> {
+      test "sleep pauses execution" (fun () -> {
+        let result = test_sleep () with beam_actor
+        assert_eq result "done"
+      })
 
-  describe "monitor" {
-    test "receives Down when monitored process exits with Shutdown" {
-      let result = test_monitor_shutdown () with beam_actor
-      assert_eq result "Shutdown"
-    }
+      test "receive with timeout" (fun () -> {
+        let result = test_receive_timeout () with beam_actor
+        assert_eq result (Nothing : Maybe Int)
+      })
+    })
 
-    test "receives Down with Killed reason" {
-      let result = test_monitor_killed () with beam_actor
-      assert_eq result "Killed"
-    }
+    describe "monitor" (fun () -> {
+      test "receives Down when monitored process exits with Shutdown" (fun () -> {
+        let result = test_monitor_shutdown () with beam_actor
+        assert_eq result "Shutdown"
+      })
 
-    test "receives Down Normal when process finishes" {
-      let result = test_monitor_normal () with beam_actor
-      assert_eq result "Normal"
-    }
-  }
+      test "receives Down with Killed reason" (fun () -> {
+        let result = test_monitor_killed () with beam_actor
+        assert_eq result "Killed"
+      })
 
-  describe "exit" {
-    test "exit terminates a running process" {
-      let result = test_exit () with beam_actor
-      assert_eq result "exited"
-    }
-  }
+      test "receives Down Normal when process finishes" (fun () -> {
+        let result = test_monitor_normal () with beam_actor
+        assert_eq result "Normal"
+      })
+    })
 
-  describe "link" {
-    test "link and unlink don't crash" {
-      let result = test_link_unlink () with beam_actor
-      assert_eq result "ok"
-    }
-  }
+    describe "exit" (fun () -> {
+      test "exit terminates a running process" (fun () -> {
+        let result = test_exit () with beam_actor
+        assert_eq result "exited"
+      })
+    })
+
+    describe "link" (fun () -> {
+      test "link and unlink don't crash" (fun () -> {
+        let result = test_link_unlink () with beam_actor
+        assert_eq result "ok"
+      })
+    })
+  })
 }

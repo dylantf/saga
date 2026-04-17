@@ -1,375 +1,381 @@
+module DatetimeTest
+
 import Std.DateTime (Date, ParseError, NaiveDateTime)
-import Std.Test (describe, test, assert_eq, assert_true)
+import Std.Test (Testing, describe, test, assert_eq, assert_true)
 
-describe "DateTime" {
 
-  describe "to_iso8601" {
-    test "formats correctly" {
-      let dt = DateTime.new 2026 4 8 9 5 3
-      assert_eq (DateTime.to_iso8601 dt) "2026-04-08T09:05:03"
-    }
+pub fun tests : Unit -> Unit needs {Testing}
+tests () = {
+  describe "DateTime" (fun () -> {
 
-    test "pads single digits" {
-      let dt = DateTime.new 2026 1 2 3 4 5
-      assert_eq (DateTime.to_iso8601 dt) "2026-01-02T03:04:05"
-    }
-  }
+    describe "to_iso8601" (fun () -> {
+      test "formats correctly" (fun () -> {
+        let dt = DateTime.new 2026 4 8 9 5 3
+        assert_eq (DateTime.to_iso8601 dt) "2026-04-08T09:05:03"
+      })
 
-  describe "from_iso8601" {
-    test "parses valid datetime" {
-      let expected = DateTime.new 2026 12 25 0 0 0
-      assert_eq (DateTime.from_iso8601 "2026-12-25T00:00:00") (Ok expected)
-    }
+      test "pads single digits" (fun () -> {
+        let dt = DateTime.new 2026 1 2 3 4 5
+        assert_eq (DateTime.to_iso8601 dt) "2026-01-02T03:04:05"
+      })
+    })
 
-    test "rejects too short" {
-      assert_eq (DateTime.from_iso8601 "nope") (Err (InvalidDigits "nope"))
-    }
+    describe "from_iso8601" (fun () -> {
+      test "parses valid datetime" (fun () -> {
+        let expected = DateTime.new 2026 12 25 0 0 0
+        assert_eq (DateTime.from_iso8601 "2026-12-25T00:00:00") (Ok expected)
+      })
 
-    test "rejects invalid numbers" {
-      assert_eq (DateTime.from_iso8601 "abcd-ef-ghTij:kl:mn") (Err (InvalidDigits "abcd"))
-    }
+      test "rejects too short" (fun () -> {
+        assert_eq (DateTime.from_iso8601 "nope") (Err (InvalidDigits "nope"))
+      })
 
-    test "roundtrips" {
-      let dt = DateTime.new 2024 2 29 13 45 30
-      assert_eq (DateTime.from_iso8601 (DateTime.to_iso8601 dt)) (Ok dt)
-    }
-  }
+      test "rejects invalid numbers" (fun () -> {
+        assert_eq (DateTime.from_iso8601 "abcd-ef-ghTij:kl:mn") (Err (InvalidDigits "abcd"))
+      })
 
-  describe "add_seconds" {
-    test "adds positive seconds" {
-      let dt = DateTime.new 2026 4 8 10 0 0
-      let result = DateTime.add_seconds 90 dt
-      assert_eq result.minute 1
-      assert_eq result.second 30
-    }
+      test "roundtrips" (fun () -> {
+        let dt = DateTime.new 2024 2 29 13 45 30
+        assert_eq (DateTime.from_iso8601 (DateTime.to_iso8601 dt)) (Ok dt)
+      })
+    })
 
-    test "wraps across midnight" {
-      let dt = DateTime.new 2026 4 8 23 59 50
-      let result = DateTime.add_seconds 20 dt
-      assert_eq result.day 9
-      assert_eq result.hour 0
-      assert_eq result.minute 0
-      assert_eq result.second 10
-    }
-  }
+    describe "add_seconds" (fun () -> {
+      test "adds positive seconds" (fun () -> {
+        let dt = DateTime.new 2026 4 8 10 0 0
+        let result = DateTime.add_seconds 90 dt
+        assert_eq result.minute 1
+        assert_eq result.second 30
+      })
 
-  describe "add_days" {
-    test "adds days" {
-      let dt = DateTime.new 2026 4 8 12 0 0
-      let result = DateTime.add_days 10 dt
-      assert_eq result.day 18
-    }
+      test "wraps across midnight" (fun () -> {
+        let dt = DateTime.new 2026 4 8 23 59 50
+        let result = DateTime.add_seconds 20 dt
+        assert_eq result.day 9
+        assert_eq result.hour 0
+        assert_eq result.minute 0
+        assert_eq result.second 10
+      })
+    })
 
-    test "wraps across month" {
-      let dt = DateTime.new 2026 4 28 12 0 0
-      let result = DateTime.add_days 5 dt
-      assert_eq result.month 5
-      assert_eq result.day 3
-    }
+    describe "add_days" (fun () -> {
+      test "adds days" (fun () -> {
+        let dt = DateTime.new 2026 4 8 12 0 0
+        let result = DateTime.add_days 10 dt
+        assert_eq result.day 18
+      })
 
-    test "subtracts days" {
-      let dt = DateTime.new 2026 4 8 12 0 0
-      let result = DateTime.add_days (-5) dt
-      assert_eq result.day 3
-    }
-  }
+      test "wraps across month" (fun () -> {
+        let dt = DateTime.new 2026 4 28 12 0 0
+        let result = DateTime.add_days 5 dt
+        assert_eq result.month 5
+        assert_eq result.day 3
+      })
 
-  describe "add_hours" {
-    test "adds hours" {
-      let dt = DateTime.new 2026 4 8 10 0 0
-      let result = DateTime.add_hours 3 dt
-      assert_eq result.hour 13
-    }
-  }
+      test "subtracts days" (fun () -> {
+        let dt = DateTime.new 2026 4 8 12 0 0
+        let result = DateTime.add_days (-5) dt
+        assert_eq result.day 3
+      })
+    })
 
-  describe "add_minutes" {
-    test "adds minutes" {
-      let dt = DateTime.new 2026 4 8 10 0 0
-      let result = DateTime.add_minutes 90 dt
-      assert_eq result.hour 11
-      assert_eq result.minute 30
-    }
-  }
+    describe "add_hours" (fun () -> {
+      test "adds hours" (fun () -> {
+        let dt = DateTime.new 2026 4 8 10 0 0
+        let result = DateTime.add_hours 3 dt
+        assert_eq result.hour 13
+      })
+    })
 
-  describe "add_months" {
-    test "adds months within year" {
-      let dt = DateTime.new 2026 3 15 12 0 0
-      let result = DateTime.add_months 2 dt
-      assert_eq result.month 5
-      assert_eq result.year 2026
-    }
+    describe "add_minutes" (fun () -> {
+      test "adds minutes" (fun () -> {
+        let dt = DateTime.new 2026 4 8 10 0 0
+        let result = DateTime.add_minutes 90 dt
+        assert_eq result.hour 11
+        assert_eq result.minute 30
+      })
+    })
 
-    test "wraps across year" {
-      let dt = DateTime.new 2026 10 15 12 0 0
-      let result = DateTime.add_months 5 dt
-      assert_eq result.month 3
-      assert_eq result.year 2027
-    }
+    describe "add_months" (fun () -> {
+      test "adds months within year" (fun () -> {
+        let dt = DateTime.new 2026 3 15 12 0 0
+        let result = DateTime.add_months 2 dt
+        assert_eq result.month 5
+        assert_eq result.year 2026
+      })
 
-    test "clamps day - March 31 + 1 month = April 30" {
-      let dt = DateTime.new 2026 3 31 12 0 0
-      let result = DateTime.add_months 1 dt
-      assert_eq result.month 4
-      assert_eq result.day 30
-    }
+      test "wraps across year" (fun () -> {
+        let dt = DateTime.new 2026 10 15 12 0 0
+        let result = DateTime.add_months 5 dt
+        assert_eq result.month 3
+        assert_eq result.year 2027
+      })
 
-    test "subtracts months" {
-      let dt = DateTime.new 2026 4 15 12 0 0
-      let result = DateTime.add_months (-2) dt
-      assert_eq result.month 2
-      assert_eq result.year 2026
-    }
+      test "clamps day - March 31 + 1 month = April 30" (fun () -> {
+        let dt = DateTime.new 2026 3 31 12 0 0
+        let result = DateTime.add_months 1 dt
+        assert_eq result.month 4
+        assert_eq result.day 30
+      })
 
-    test "subtracts months across year" {
-      let dt = DateTime.new 2026 3 15 12 0 0
-      let result = DateTime.add_months (-5) dt
-      assert_eq result.month 10
-      assert_eq result.year 2025
-    }
+      test "subtracts months" (fun () -> {
+        let dt = DateTime.new 2026 4 15 12 0 0
+        let result = DateTime.add_months (-2) dt
+        assert_eq result.month 2
+        assert_eq result.year 2026
+      })
 
-    test "clamps day on subtraction - March 31 - 1 month = Feb 28" {
-      let dt = DateTime.new 2026 3 31 12 0 0
-      let result = DateTime.add_months (-1) dt
-      assert_eq result.month 2
-      assert_eq result.day 28
-    }
-  }
+      test "subtracts months across year" (fun () -> {
+        let dt = DateTime.new 2026 3 15 12 0 0
+        let result = DateTime.add_months (-5) dt
+        assert_eq result.month 10
+        assert_eq result.year 2025
+      })
 
-  describe "add_years" {
-    test "adds years" {
-      let dt = DateTime.new 2026 6 15 12 0 0
-      let result = DateTime.add_years 4 dt
-      assert_eq result.year 2030
-    }
+      test "clamps day on subtraction - March 31 - 1 month = Feb 28" (fun () -> {
+        let dt = DateTime.new 2026 3 31 12 0 0
+        let result = DateTime.add_months (-1) dt
+        assert_eq result.month 2
+        assert_eq result.day 28
+      })
+    })
 
-    test "clamps leap day" {
-      let dt = DateTime.new 2024 2 29 12 0 0
-      let result = DateTime.add_years 1 dt
-      assert_eq result.month 2
-      assert_eq result.day 28
-    }
+    describe "add_years" (fun () -> {
+      test "adds years" (fun () -> {
+        let dt = DateTime.new 2026 6 15 12 0 0
+        let result = DateTime.add_years 4 dt
+        assert_eq result.year 2030
+      })
 
-    test "subtracts years" {
-      let dt = DateTime.new 2026 6 15 12 0 0
-      let result = DateTime.add_years (-2) dt
-      assert_eq result.year 2024
-    }
-  }
+      test "clamps leap day" (fun () -> {
+        let dt = DateTime.new 2024 2 29 12 0 0
+        let result = DateTime.add_years 1 dt
+        assert_eq result.month 2
+        assert_eq result.day 28
+      })
 
-  describe "Ord" {
-    test "earlier < later" {
-      let a = DateTime.new 2026 1 1 0 0 0
-      let b = DateTime.new 2026 12 31 23 59 59
-      assert_eq (compare a b) Lt
-    }
+      test "subtracts years" (fun () -> {
+        let dt = DateTime.new 2026 6 15 12 0 0
+        let result = DateTime.add_years (-2) dt
+        assert_eq result.year 2024
+      })
+    })
 
-    test "same is Eq" {
-      let a = DateTime.new 2026 4 8 12 0 0
-      assert_eq (compare a a) Eq
-    }
+    describe "Ord" (fun () -> {
+      test "earlier < later" (fun () -> {
+        let a = DateTime.new 2026 1 1 0 0 0
+        let b = DateTime.new 2026 12 31 23 59 59
+        assert_eq (compare a b) Lt
+      })
 
-    test "later > earlier" {
-      let a = DateTime.new 2027 1 1 0 0 0
-      let b = DateTime.new 2026 12 31 23 59 59
-      assert_eq (compare a b) Gt
-    }
-  }
+      test "same is Eq" (fun () -> {
+        let a = DateTime.new 2026 4 8 12 0 0
+        assert_eq (compare a a) Eq
+      })
 
-  describe "calendar" {
-    test "day_of_week" {
-      # 2026-04-08 is a Wednesday (3)
-      let d = Date { year: 2026, month: 4, day: 8 }
-      assert_eq (DateTime.day_of_week d) 3
-    }
+      test "later > earlier" (fun () -> {
+        let a = DateTime.new 2027 1 1 0 0 0
+        let b = DateTime.new 2026 12 31 23 59 59
+        assert_eq (compare a b) Gt
+      })
+    })
 
-    test "is_leap_year" {
-      assert_true (DateTime.is_leap_year 2024)
-      assert_true (not (DateTime.is_leap_year 2026))
-    }
+    describe "calendar" (fun () -> {
+      test "day_of_week" (fun () -> {
+        # 2026-04-08 is a Wednesday (3)
+        let d = Date { year: 2026, month: 4, day: 8 }
+        assert_eq (DateTime.day_of_week d) 3
+      })
 
-    test "days_in_month" {
-      assert_eq (DateTime.days_in_month 2026 2) 28
-      assert_eq (DateTime.days_in_month 2024 2) 29
-      assert_eq (DateTime.days_in_month 2026 4) 30
-    }
-  }
+      test "is_leap_year" (fun () -> {
+        assert_true (DateTime.is_leap_year 2024)
+        assert_true (not (DateTime.is_leap_year 2026))
+      })
 
-  describe "format" {
-    test "custom format" {
-      let dt = DateTime.new 2026 4 8 9 5 3
-      assert_eq (DateTime.format "%d/%m/%Y" dt) "08/04/2026"
-    }
+      test "days_in_month" (fun () -> {
+        assert_eq (DateTime.days_in_month 2026 2) 28
+        assert_eq (DateTime.days_in_month 2024 2) 29
+        assert_eq (DateTime.days_in_month 2026 4) 30
+      })
+    })
 
-    test "literal percent" {
-      let dt = DateTime.new 2026 1 1 0 0 0
-      assert_eq (DateTime.format "100%%" dt) "100%"
-    }
+    describe "format" (fun () -> {
+      test "custom format" (fun () -> {
+        let dt = DateTime.new 2026 4 8 9 5 3
+        assert_eq (DateTime.format "%d/%m/%Y" dt) "08/04/2026"
+      })
 
-    test "short month name" {
-      let dt = DateTime.new 2026 4 8 0 0 0
-      assert_eq (DateTime.format "%b" dt) "Apr"
-    }
+      test "literal percent" (fun () -> {
+        let dt = DateTime.new 2026 1 1 0 0 0
+        assert_eq (DateTime.format "100%%" dt) "100%"
+      })
 
-    test "long month name" {
-      let dt = DateTime.new 2026 12 25 0 0 0
-      assert_eq (DateTime.format "%B" dt) "December"
-    }
+      test "short month name" (fun () -> {
+        let dt = DateTime.new 2026 4 8 0 0 0
+        assert_eq (DateTime.format "%b" dt) "Apr"
+      })
 
-    test "short weekday name" {
-      # 2026-04-08 is a Wednesday
-      let dt = DateTime.new 2026 4 8 0 0 0
-      assert_eq (DateTime.format "%a" dt) "Wed"
-    }
+      test "long month name" (fun () -> {
+        let dt = DateTime.new 2026 12 25 0 0 0
+        assert_eq (DateTime.format "%B" dt) "December"
+      })
 
-    test "long weekday name" {
-      let dt = DateTime.new 2026 4 8 0 0 0
-      assert_eq (DateTime.format "%A" dt) "Wednesday"
-    }
+      test "short weekday name" (fun () -> {
+        # 2026-04-08 is a Wednesday
+        let dt = DateTime.new 2026 4 8 0 0 0
+        assert_eq (DateTime.format "%a" dt) "Wed"
+      })
 
-    test "mixed format with names" {
-      let dt = DateTime.new 2026 4 8 14 30 0
-      assert_eq (DateTime.format "%a, %d %b %Y %H:%M" dt) "Wed, 08 Apr 2026 14:30"
-    }
+      test "long weekday name" (fun () -> {
+        let dt = DateTime.new 2026 4 8 0 0 0
+        assert_eq (DateTime.format "%A" dt) "Wednesday"
+      })
 
-    test "12-hour format PM" {
-      let dt = DateTime.new 2026 4 8 14 30 0
-      assert_eq (DateTime.format "%I:%M %p" dt) "02:30 PM"
-    }
+      test "mixed format with names" (fun () -> {
+        let dt = DateTime.new 2026 4 8 14 30 0
+        assert_eq (DateTime.format "%a, %d %b %Y %H:%M" dt) "Wed, 08 Apr 2026 14:30"
+      })
 
-    test "12-hour format AM" {
-      let dt = DateTime.new 2026 4 8 9 5 0
-      assert_eq (DateTime.format "%I:%M %p" dt) "09:05 AM"
-    }
+      test "12-hour format PM" (fun () -> {
+        let dt = DateTime.new 2026 4 8 14 30 0
+        assert_eq (DateTime.format "%I:%M %p" dt) "02:30 PM"
+      })
 
-    test "12-hour noon" {
-      let dt = DateTime.new 2026 4 8 12 0 0
-      assert_eq (DateTime.format "%I:%M %p" dt) "12:00 PM"
-    }
+      test "12-hour format AM" (fun () -> {
+        let dt = DateTime.new 2026 4 8 9 5 0
+        assert_eq (DateTime.format "%I:%M %p" dt) "09:05 AM"
+      })
 
-    test "12-hour midnight" {
-      let dt = DateTime.new 2026 4 8 0 0 0
-      assert_eq (DateTime.format "%I:%M %p" dt) "12:00 AM"
-    }
-  }
+      test "12-hour noon" (fun () -> {
+        let dt = DateTime.new 2026 4 8 12 0 0
+        assert_eq (DateTime.format "%I:%M %p" dt) "12:00 PM"
+      })
 
-  describe "parse" {
-    test "ISO 8601 via %FT%T" {
-      let expected = DateTime.new 2026 4 8 12 30 0
-      assert_eq (DateTime.parse "%FT%T" "2026-04-08T12:30:00") (Ok expected)
-    }
+      test "12-hour midnight" (fun () -> {
+        let dt = DateTime.new 2026 4 8 0 0 0
+        assert_eq (DateTime.format "%I:%M %p" dt) "12:00 AM"
+      })
+    })
 
-    test "custom format" {
-      let expected = DateTime.new 2026 4 8 9 5 3
-      assert_eq (DateTime.parse "%d/%m/%Y %H:%M:%S" "08/04/2026 09:05:03") (Ok expected)
-    }
+    describe "parse" (fun () -> {
+      test "ISO 8601 via %FT%T" (fun () -> {
+        let expected = DateTime.new 2026 4 8 12 30 0
+        assert_eq (DateTime.parse "%FT%T" "2026-04-08T12:30:00") (Ok expected)
+      })
 
-    test "date only" {
-      let expected = DateTime.new 2026 12 25 0 0 0
-      assert_eq (DateTime.parse "%Y-%m-%d" "2026-12-25") (Ok expected)
-    }
+      test "custom format" (fun () -> {
+        let expected = DateTime.new 2026 4 8 9 5 3
+        assert_eq (DateTime.parse "%d/%m/%Y %H:%M:%S" "08/04/2026 09:05:03") (Ok expected)
+      })
 
-    test "accepts unpadded month and day" {
-      let expected = DateTime.new 2026 4 8 0 0 0
-      assert_eq (DateTime.parse "%Y-%m-%d" "2026-4-8") (Ok expected)
-    }
+      test "date only" (fun () -> {
+        let expected = DateTime.new 2026 12 25 0 0 0
+        assert_eq (DateTime.parse "%Y-%m-%d" "2026-12-25") (Ok expected)
+      })
 
-    test "accepts unpadded time fields" {
-      let expected = DateTime.new 2026 4 8 9 5 3
-      assert_eq (DateTime.parse "%Y-%m-%d %H:%M:%S" "2026-4-8 9:5:3") (Ok expected)
-    }
+      test "accepts unpadded month and day" (fun () -> {
+        let expected = DateTime.new 2026 4 8 0 0 0
+        assert_eq (DateTime.parse "%Y-%m-%d" "2026-4-8") (Ok expected)
+      })
 
-    test "parses microseconds (right-padded)" {
-      let expected = NaiveDateTime {
-        year: 2026,
-        month: 4,
-        day: 8,
-        hour: 12,
-        minute: 30,
-        second: 45,
-        microsecond: 500000,
-      }
-      assert_eq (DateTime.parse "%Y-%m-%d %H:%M:%S.%f" "2026-04-08 12:30:45.5") (Ok expected)
-    }
+      test "accepts unpadded time fields" (fun () -> {
+        let expected = DateTime.new 2026 4 8 9 5 3
+        assert_eq (DateTime.parse "%Y-%m-%d %H:%M:%S" "2026-4-8 9:5:3") (Ok expected)
+      })
 
-    test "parses full 6-digit microseconds" {
-      let expected = NaiveDateTime {
-        year: 2026,
-        month: 4,
-        day: 8,
-        hour: 12,
-        minute: 30,
-        second: 45,
-        microsecond: 123456,
-      }
-      assert_eq (DateTime.parse "%Y-%m-%d %H:%M:%S.%f" "2026-04-08 12:30:45.123456") (Ok expected)
-    }
+      test "parses microseconds (right-padded)" (fun () -> {
+        let expected = NaiveDateTime {
+          year: 2026,
+          month: 4,
+          day: 8,
+          hour: 12,
+          minute: 30,
+          second: 45,
+          microsecond: 500000,
+        }
+        assert_eq (DateTime.parse "%Y-%m-%d %H:%M:%S.%f" "2026-04-08 12:30:45.5") (Ok expected)
+      })
 
-    test "time only fails without date fields" {
-      assert_eq (DateTime.parse "%H:%M:%S" "14:30:45") (Err (MissingField "year"))
-    }
+      test "parses full 6-digit microseconds" (fun () -> {
+        let expected = NaiveDateTime {
+          year: 2026,
+          month: 4,
+          day: 8,
+          hour: 12,
+          minute: 30,
+          second: 45,
+          microsecond: 123456,
+        }
+        assert_eq (DateTime.parse "%Y-%m-%d %H:%M:%S.%f" "2026-04-08 12:30:45.123456") (Ok expected)
+      })
 
-    test "rejects invalid digits" {
-      assert_eq (DateTime.parse "%Y-%m-%d" "abcd-ef-gh") (Err (InvalidDigits "abcd"))
-    }
+      test "time only fails without date fields" (fun () -> {
+        assert_eq (DateTime.parse "%H:%M:%S" "14:30:45") (Err (MissingField "year"))
+      })
 
-    test "rejects wrong literal" {
-      assert_eq (DateTime.parse "%Y-%m-%d" "2026/04/08") (Err (UnexpectedChar (
-        "-",
-        "/",
-      )))
-    }
+      test "rejects invalid digits" (fun () -> {
+        assert_eq (DateTime.parse "%Y-%m-%d" "abcd-ef-gh") (Err (InvalidDigits "abcd"))
+      })
 
-    test "ignores trailing input" {
-      let expected = DateTime.new 2026 1 1 0 0 0
-      assert_eq (DateTime.parse "%Y-%m-%d" "2026-01-01T12:00:00.123Z") (Ok expected)
-    }
+      test "rejects wrong literal" (fun () -> {
+        assert_eq (DateTime.parse "%Y-%m-%d" "2026/04/08") (Err (UnexpectedChar (
+          "-",
+          "/",
+        )))
+      })
 
-    test "parse short month name" {
-      let expected = DateTime.new 2026 4 8 0 0 0
-      assert_eq (DateTime.parse "%d %b %Y" "08 Apr 2026") (Ok expected)
-    }
+      test "ignores trailing input" (fun () -> {
+        let expected = DateTime.new 2026 1 1 0 0 0
+        assert_eq (DateTime.parse "%Y-%m-%d" "2026-01-01T12:00:00.123Z") (Ok expected)
+      })
 
-    test "parse long month name" {
-      let expected = DateTime.new 2026 12 25 0 0 0
-      assert_eq (DateTime.parse "%B %d, %Y" "December 25, 2026") (Ok expected)
-    }
+      test "parse short month name" (fun () -> {
+        let expected = DateTime.new 2026 4 8 0 0 0
+        assert_eq (DateTime.parse "%d %b %Y" "08 Apr 2026") (Ok expected)
+      })
 
-    test "roundtrip with month names" {
-      let dt = DateTime.new 2026 4 8 14 30 0
-      let fmt = "%d %b %Y %H:%M:%S"
-      assert_eq (DateTime.parse fmt (DateTime.format fmt dt)) (Ok dt)
-    }
+      test "parse long month name" (fun () -> {
+        let expected = DateTime.new 2026 12 25 0 0 0
+        assert_eq (DateTime.parse "%B %d, %Y" "December 25, 2026") (Ok expected)
+      })
 
-    test "roundtrip with format" {
-      let dt = DateTime.new 2024 2 29 13 45 30
-      let fmt = "%Y-%m-%d %H:%M:%S"
-      assert_eq (DateTime.parse fmt (DateTime.format fmt dt)) (Ok dt)
-    }
+      test "roundtrip with month names" (fun () -> {
+        let dt = DateTime.new 2026 4 8 14 30 0
+        let fmt = "%d %b %Y %H:%M:%S"
+        assert_eq (DateTime.parse fmt (DateTime.format fmt dt)) (Ok dt)
+      })
 
-    test "parse 12-hour PM" {
-      let expected = DateTime.new 2026 4 8 14 30 0
-      assert_eq (DateTime.parse "%Y-%m-%d %I:%M %p" "2026-04-08 02:30 PM") (Ok expected)
-    }
+      test "roundtrip with format" (fun () -> {
+        let dt = DateTime.new 2024 2 29 13 45 30
+        let fmt = "%Y-%m-%d %H:%M:%S"
+        assert_eq (DateTime.parse fmt (DateTime.format fmt dt)) (Ok dt)
+      })
 
-    test "parse 12-hour AM" {
-      let expected = DateTime.new 2026 4 8 9 5 0
-      assert_eq (DateTime.parse "%Y-%m-%d %I:%M %p" "2026-04-08 09:05 AM") (Ok expected)
-    }
+      test "parse 12-hour PM" (fun () -> {
+        let expected = DateTime.new 2026 4 8 14 30 0
+        assert_eq (DateTime.parse "%Y-%m-%d %I:%M %p" "2026-04-08 02:30 PM") (Ok expected)
+      })
 
-    test "parse 12-hour noon" {
-      let expected = DateTime.new 2026 4 8 12 0 0
-      assert_eq (DateTime.parse "%Y-%m-%d %I:%M %p" "2026-04-08 12:00 PM") (Ok expected)
-    }
+      test "parse 12-hour AM" (fun () -> {
+        let expected = DateTime.new 2026 4 8 9 5 0
+        assert_eq (DateTime.parse "%Y-%m-%d %I:%M %p" "2026-04-08 09:05 AM") (Ok expected)
+      })
 
-    test "parse 12-hour midnight" {
-      let expected = DateTime.new 2026 4 8 0 0 0
-      assert_eq (DateTime.parse "%Y-%m-%d %I:%M %p" "2026-04-08 12:00 AM") (Ok expected)
-    }
+      test "parse 12-hour noon" (fun () -> {
+        let expected = DateTime.new 2026 4 8 12 0 0
+        assert_eq (DateTime.parse "%Y-%m-%d %I:%M %p" "2026-04-08 12:00 PM") (Ok expected)
+      })
 
-    test "roundtrip 12-hour" {
-      let dt = DateTime.new 2026 4 8 14 30 0
-      let fmt = "%Y-%m-%d %I:%M:%S %p"
-      assert_eq (DateTime.parse fmt (DateTime.format fmt dt)) (Ok dt)
-    }
-  }
+      test "parse 12-hour midnight" (fun () -> {
+        let expected = DateTime.new 2026 4 8 0 0 0
+        assert_eq (DateTime.parse "%Y-%m-%d %I:%M %p" "2026-04-08 12:00 AM") (Ok expected)
+      })
+
+      test "roundtrip 12-hour" (fun () -> {
+        let dt = DateTime.new 2026 4 8 14 30 0
+        let fmt = "%Y-%m-%d %I:%M:%S %p"
+        assert_eq (DateTime.parse fmt (DateTime.format fmt dt)) (Ok dt)
+      })
+    })
+  })
 }

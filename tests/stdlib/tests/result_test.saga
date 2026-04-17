@@ -1,5 +1,8 @@
+module ResultTest
+
 import Std.Result as Result
 import Std.Test (
+  Testing,
   describe,
   test,
   assert_eq,
@@ -21,131 +24,135 @@ make_err s = Err s
 fun int_nothing : Unit -> Maybe Int
 int_nothing () = Nothing
 
-describe "Result" {
-  describe "is_ok" {
-    test "Ok is ok" {
-      make_ok 1 |> Result.is_ok |> assert_true
-    }
-    test "Err is not ok" {
-      make_err "bad" |> Result.is_ok |> assert_false
-    }
-  }
 
-  describe "is_err" {
-    test "Err is err" {
-      make_err "bad" |> Result.is_err |> assert_true
-    }
+pub fun tests : Unit -> Unit needs {Testing}
+tests () = {
+  describe "Result" (fun () -> {
+    describe "is_ok" (fun () -> {
+      test "Ok is ok" (fun () -> {
+        make_ok 1 |> Result.is_ok |> assert_true
+      })
+      test "Err is not ok" (fun () -> {
+        make_err "bad" |> Result.is_ok |> assert_false
+      })
+    })
 
-    test "Ok is not err" {
-      make_ok 1 |> Result.is_err |> assert_false
-    }
-  }
+    describe "is_err" (fun () -> {
+      test "Err is err" (fun () -> {
+        make_err "bad" |> Result.is_err |> assert_true
+      })
 
-  describe "map" {
-    test "transforms Ok" {
-      let result = make_ok 5 |> Result.map (fun x -> x * 2)
-      assert_eq result (make_ok 10)
-    }
+      test "Ok is not err" (fun () -> {
+        make_ok 1 |> Result.is_err |> assert_false
+      })
+    })
 
-    test "Err stays Err" {
-      let result = make_err "bad" |> Result.map (fun x -> x * 2)
-      assert_eq result (make_err "bad")
-    }
-  }
+    describe "map" (fun () -> {
+      test "transforms Ok" (fun () -> {
+        let result = make_ok 5 |> Result.map (fun x -> x * 2)
+        assert_eq result (make_ok 10)
+      })
 
-  describe "map_err" {
-    test "transforms Err" {
-      let result = make_err "bad" |> Result.map_err (fun e -> e <> "!")
-      assert_eq result (make_err "bad!")
-    }
+      test "Err stays Err" (fun () -> {
+        let result = make_err "bad" |> Result.map (fun x -> x * 2)
+        assert_eq result (make_err "bad")
+      })
+    })
 
-    test "Ok stays Ok" {
-      let result = make_ok 1 |> Result.map_err (fun e -> e <> "!")
-      assert_eq result (make_ok 1)
-    }
-  }
+    describe "map_err" (fun () -> {
+      test "transforms Err" (fun () -> {
+        let result = make_err "bad" |> Result.map_err (fun e -> e <> "!")
+        assert_eq result (make_err "bad!")
+      })
 
-  describe "unwrap" {
-    test "returns value from Ok" {
-      assert_eq (make_ok 42 |> Result.unwrap) 42
-    }
+      test "Ok stays Ok" (fun () -> {
+        let result = make_ok 1 |> Result.map_err (fun e -> e <> "!")
+        assert_eq result (make_ok 1)
+      })
+    })
 
-    test "panics on Err" {
-      assert_panics (fun () -> make_err "oops" |> Result.unwrap)
-    }
-  }
+    describe "unwrap" (fun () -> {
+      test "returns value from Ok" (fun () -> {
+        assert_eq (make_ok 42 |> Result.unwrap) 42
+      })
 
-  describe "unwrap_or" {
-    test "returns value from Ok" {
-      assert_eq (make_ok 42 |> Result.unwrap_or 0) 42
-    }
+      test "panics on Err" (fun () -> {
+        assert_panics (fun () -> make_err "oops" |> Result.unwrap)
+      })
+    })
 
-    test "returns default from Err" {
-      assert_eq (make_err "bad" |> Result.unwrap_or 0) 0
-    }
-  }
+    describe "unwrap_or" (fun () -> {
+      test "returns value from Ok" (fun () -> {
+        assert_eq (make_ok 42 |> Result.unwrap_or 0) 42
+      })
 
-  describe "and_then" {
-    test "chains on Ok" {
-      let result =
-        make_ok 5
-        |> Result.and_then (fun x -> make_ok (x * 2))
-      assert_eq result (make_ok 10)
-    }
+      test "returns default from Err" (fun () -> {
+        assert_eq (make_err "bad" |> Result.unwrap_or 0) 0
+      })
+    })
 
-    test "short-circuits on Err" {
-      make_err "bad"
-      |> Result.and_then (fun x -> make_ok (x + 1))
-      |> assert_err
-    }
-  }
+    describe "and_then" (fun () -> {
+      test "chains on Ok" (fun () -> {
+        let result =
+          make_ok 5
+          |> Result.and_then (fun x -> make_ok (x * 2))
+        assert_eq result (make_ok 10)
+      })
 
-  describe "or_else" {
-    test "returns Ok when present" {
-      make_ok 1 |> Result.or_else (make_ok 99) |> assert_ok
-    }
+      test "short-circuits on Err" (fun () -> {
+        make_err "bad"
+        |> Result.and_then (fun x -> make_ok (x + 1))
+        |> assert_err
+      })
+    })
 
-    test "returns fallback on Err" {
-      let result = make_err "bad" |> Result.or_else (make_ok 99)
-      assert_eq result (make_ok 99)
-    }
-  }
+    describe "or_else" (fun () -> {
+      test "returns Ok when present" (fun () -> {
+        make_ok 1 |> Result.or_else (make_ok 99) |> assert_ok
+      })
 
-  describe "to_maybe" {
-    test "Ok becomes Just" {
-      assert_eq (make_ok 42 |> Result.to_maybe) (Just 42)
-    }
+      test "returns fallback on Err" (fun () -> {
+        let result = make_err "bad" |> Result.or_else (make_ok 99)
+        assert_eq result (make_ok 99)
+      })
+    })
 
-    test "Err becomes Nothing" {
-      make_err "bad" |> Result.to_maybe |> assert_nothing
-    }
-  }
+    describe "to_maybe" (fun () -> {
+      test "Ok becomes Just" (fun () -> {
+        assert_eq (make_ok 42 |> Result.to_maybe) (Just 42)
+      })
 
-  describe "from_maybe" {
-    test "Just becomes Ok" {
-      Just 42 |> Result.from_maybe "missing" |> assert_ok
-    }
+      test "Err becomes Nothing" (fun () -> {
+        make_err "bad" |> Result.to_maybe |> assert_nothing
+      })
+    })
 
-    test "Nothing becomes Err" {
-      int_nothing () |> Result.from_maybe "missing" |> assert_err
-    }
-  }
+    describe "from_maybe" (fun () -> {
+      test "Just becomes Ok" (fun () -> {
+        Just 42 |> Result.from_maybe "missing" |> assert_ok
+      })
 
-  describe "flatten" {
-    test "flattens nested Ok" {
-      let result = Ok (make_ok 42) |> Result.flatten
-      assert_eq result (make_ok 42)
-    }
+      test "Nothing becomes Err" (fun () -> {
+        int_nothing () |> Result.from_maybe "missing" |> assert_err
+      })
+    })
 
-    test "flattens nested Err" {
-      Ok (make_err "inner") |> Result.flatten |> assert_err
-    }
+    describe "flatten" (fun () -> {
+      test "flattens nested Ok" (fun () -> {
+        let result = Ok (make_ok 42) |> Result.flatten
+        assert_eq result (make_ok 42)
+      })
 
-    test "outer Err stays Err" {
-      make_err "outer"
-      |> Result.map (fun _ -> make_ok 0)
-      |> Result.flatten
-      |> assert_err
-    }
-  }
+      test "flattens nested Err" (fun () -> {
+        Ok (make_err "inner") |> Result.flatten |> assert_err
+      })
+
+      test "outer Err stays Err" (fun () -> {
+        make_err "outer"
+        |> Result.map (fun _ -> make_ok 0)
+        |> Result.flatten
+        |> assert_err
+      })
+    })
+  })
 }

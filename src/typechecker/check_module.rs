@@ -382,25 +382,36 @@ pub type ModuleMap = HashMap<String, PathBuf>;
 /// and build a map from declared module name to file path.
 pub fn scan_project_modules(root: &Path) -> Result<ModuleMap, String> {
     let mut map = ModuleMap::new();
-    scan_dir(root, root, &mut map)?;
+    scan_dir(root, root, &mut map, &["_build", "deps", "tests"])?;
     Ok(map)
 }
 
-fn scan_dir(dir: &Path, root: &Path, map: &mut ModuleMap) -> Result<(), String> {
+/// Scan a source directory for modules without skipping `tests/` subdirectories.
+pub fn scan_source_dir(root: &Path) -> Result<ModuleMap, String> {
+    let mut map = ModuleMap::new();
+    scan_dir(root, root, &mut map, &["_build", "deps"])?;
+    Ok(map)
+}
+
+fn scan_dir(
+    dir: &Path,
+    root: &Path,
+    map: &mut ModuleMap,
+    skip_dirs: &[&str],
+) -> Result<(), String> {
     let entries =
         std::fs::read_dir(dir).map_err(|e| format!("cannot read {}: {}", dir.display(), e))?;
     for entry in entries {
         let entry = entry.map_err(|e| format!("read_dir error: {}", e))?;
         let path = entry.path();
         if path.is_dir() {
-            // Skip _build, deps, and tests directories
             if path
                 .file_name()
-                .is_some_and(|n| n == "_build" || n == "deps" || n == "tests")
+                .is_some_and(|n| skip_dirs.iter().any(|s| n == *s))
             {
                 continue;
             }
-            scan_dir(&path, root, map)?;
+            scan_dir(&path, root, map, skip_dirs)?;
         } else if path.extension().is_some_and(|ext| ext == "saga") {
             match extract_module_name(&path) {
                 Ok(Some(module_name)) => {

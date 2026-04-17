@@ -1,32 +1,38 @@
-import Std.Test (describe, test, skip, assert_eq)
+module MathTest
+
+import Std.Test (Testing, describe, test, skip, assert_eq)
 import MathLib (add, double)
 
-describe "MathLib" {
-  describe "add" {
-    test "adds two positive numbers" {
-      assert_eq (add 2 3) 5
-    }
 
-    test "adds negative numbers" {
-      assert_eq (add (-1) (-2)) (-3)
-    }
-  }
+pub fun tests : Unit -> Unit needs {Testing}
+tests () = {
+  describe "MathLib" (fun () -> {
+    describe "add" (fun () -> {
+      test "adds two positive numbers" (fun () -> {
+        assert_eq (add 2 3) 5
+      })
 
-  describe "double" {
-    test "doubles a number" {
-      assert_eq (double 5) 10
-    }
+      test "adds negative numbers" (fun () -> {
+        assert_eq (add (-1) (-2)) (-3)
+      })
+    })
 
-    test "doubles zero" {
-      assert_eq (double 0) 0
-    }
-  }
-}
+    describe "double" (fun () -> {
+      test "doubles a number" (fun () -> {
+        assert_eq (double 5) 10
+      })
 
-test "a simple assertion" {
-  assert_eq True True
-}
+      test "doubles zero" (fun () -> {
+        assert_eq (double 0) 0
+      })
+    })
+  })
 
-skip "a failing test" {
-  assert_eq True False
+  test "a simple assertion" (fun () -> {
+    assert_eq True True
+  })
+
+  skip "a failing test" (fun () -> {
+    assert_eq True False
+  })
 }

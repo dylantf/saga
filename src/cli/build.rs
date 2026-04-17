@@ -1,7 +1,5 @@
 use project_config::ProjectConfig;
-use saga::{
-    ast, codegen, derive, desugar, elaborate, lexer, parser, project_config, token, typechecker,
-};
+use saga::{ast, codegen, derive, desugar, elaborate, lexer, parser, project_config, typechecker};
 
 use std::collections::HashMap;
 use std::fs;
@@ -233,14 +231,13 @@ pub fn parse_and_typecheck(
     source_path: &str,
     checker: &mut typechecker::Checker,
 ) -> (ast::Program, typechecker::CheckResult) {
-    parse_and_typecheck_inner(source, source_path, checker, false)
+    parse_and_typecheck_inner(source, source_path, checker)
 }
 
 pub fn parse_and_typecheck_inner(
     source: &str,
     source_path: &str,
     checker: &mut typechecker::Checker,
-    test_mode: bool,
 ) -> (ast::Program, typechecker::CheckResult) {
     let tokens = match lexer::Lexer::new(source).lex() {
         Ok(t) => t,
@@ -254,7 +251,6 @@ pub fn parse_and_typecheck_inner(
         }
     };
     let mut parser = parser::Parser::new(tokens);
-    parser.test_mode = test_mode;
     let mut program = match parser.parse_program() {
         Ok(p) => p,
         Err(e) => {
@@ -268,9 +264,6 @@ pub fn parse_and_typecheck_inner(
     };
     let derive_errors = derive::expand_derives(&mut program);
     desugar::desugar_program(&mut program);
-    if test_mode {
-        synthesize_test_main(&mut program);
-    }
     for d in &derive_errors {
         print_tc_diagnostic(source, source_path, d);
     }
@@ -768,6 +761,15 @@ pub struct ProjectBuild {
 
 /// Build a project (with project.toml) into the given build directory.
 pub fn build_project(profile: &str) -> ProjectBuild {
+    build_project_ext(profile, &[], None)
+}
+
+/// Build a project with optional extra source directories and a custom main.
+pub fn build_project_ext(
+    profile: &str,
+    extra_source_dirs: &[PathBuf],
+    custom_main: Option<(&str, &str)>,
+) -> ProjectBuild {
     let build_start = Instant::now();
     let project_root = super::find_project_root().unwrap_or_else(|| {
         eprintln!("No project.toml found. Use `saga build <file.saga>` for single files.");
@@ -785,6 +787,21 @@ pub fn build_project(profile: &str) -> ProjectBuild {
     // Phase 1: Typecheck
     let mut checker = make_checker(Some(project_root.clone()));
 
+    // Add extra source directories to the module map (e.g. tests/)
+    for extra_dir in extra_source_dirs {
+        match typechecker::scan_source_dir(extra_dir) {
+            Ok(extra_map) => {
+                if let Some(map) = checker.module_map_mut() {
+                    map.extend(extra_map);
+                }
+            }
+            Err(e) => {
+                eprintln!("Error scanning {}: {}", extra_dir.display(), e);
+                std::process::exit(1);
+            }
+        }
+    }
+
     // Resolve dependencies and merge their modules into the module map
     if let Some(deps) = &config.deps
         && let Err(e) = project_config::resolve_deps(&mut checker, &project_root, deps)
@@ -793,15 +810,31 @@ pub fn build_project(profile: &str) -> ProjectBuild {
         std::process::exit(1);
     }
 
-    // If this project has a binary entry point, typecheck Main
-    let main_program = if has_bin {
+    let main_source = if let Some((display_path, source)) = custom_main {
+        Some(codegen::SourceFile {
+            path: display_path.to_string(),
+            source: source.to_string(),
+        })
+    } else if has_bin {
         let main_file = config.main_file();
         let main_path = project_root.join(main_file);
-        let main_source = fs::read_to_string(&main_path).unwrap_or_else(|e| {
+        let source = fs::read_to_string(&main_path).unwrap_or_else(|e| {
             eprintln!("Error reading {}: {}", main_file, e);
             std::process::exit(1);
         });
-        let (program, _) = parse_and_typecheck(&main_source, main_file, &mut checker);
+        Some(codegen::SourceFile {
+            path: main_file.to_string(),
+            source,
+        })
+    } else {
+        None
+    };
+
+    // If a custom main is provided, use that. Otherwise typecheck the project's
+    // main module for bin projects, or exposed modules for library projects.
+    let main_program = if let Some(source_file) = &main_source {
+        let (program, _) =
+            parse_and_typecheck(&source_file.source, &source_file.path, &mut checker);
         Some(program)
     } else {
         // Library-only: typecheck all exposed modules to trigger the dependency walk
@@ -952,14 +985,14 @@ pub fn build_project(profile: &str) -> ProjectBuild {
                 front_resolution: result.resolution.clone(),
             },
         );
-        let main_file = config.main_file();
-        let main_path = project_root.join(main_file);
-        let main_source = fs::read_to_string(&main_path).unwrap_or_default();
+        let source_file = main_source
+            .as_ref()
+            .expect("main source must exist for Main");
         source_files.insert(
             "Main".to_string(),
             codegen::SourceFile {
-                path: main_file.to_string(),
-                source: main_source,
+                path: source_file.path.clone(),
+                source: source_file.source.clone(),
             },
         );
     }
@@ -974,7 +1007,7 @@ pub fn build_project(profile: &str) -> ProjectBuild {
     };
 
     let mut modules_to_emit: Vec<&str> = user_modules.iter().map(|s| s.as_str()).collect();
-    if has_bin {
+    if has_bin || custom_main.is_some() {
         modules_to_emit.push("Main");
     }
 
@@ -1029,7 +1062,7 @@ pub fn build_project(profile: &str) -> ProjectBuild {
     run_erlc(&build_dir, build_start);
 
     // Write manifest for cache invalidation
-    if has_bin {
+    if has_bin || custom_main.is_some() {
         write_build_manifest(
             &build_dir,
             "main".to_string(),
@@ -1155,143 +1188,4 @@ pub struct ScriptBuild {
     pub build_dir: PathBuf,
     pub stdlib_dir: PathBuf,
     pub erlang_name: String,
-}
-
-/// Check if a desugared Let { name: "_" } is a test/describe call.
-fn is_test_decl(decl: &ast::Decl) -> bool {
-    let ast::Decl::Let { name, value, .. } = decl else {
-        return false;
-    };
-    if name != "_" {
-        return false;
-    }
-    // Walk App chain to find head Var
-    let mut e = value;
-    loop {
-        match &e.kind {
-            ast::ExprKind::App { func, .. } => e = func,
-            ast::ExprKind::Var { name } => {
-                return name == "test" || name == "describe" || name == "skip" || name == "only";
-            }
-            _ => return false,
-        }
-    }
-}
-
-/// If a test file has no explicit `main`, synthesize one at the AST level.
-/// Partitions declarations into top-level (functions, types, etc.) and test
-/// expressions, then wraps the test expressions in:
-///   main () = run_collected (fun () -> { <test exprs> })
-fn synthesize_test_main(program: &mut ast::Program) {
-    let has_main = program.iter().any(|d| {
-        matches!(d, ast::Decl::FunBinding { name, .. } if name == "main")
-            || matches!(d, ast::Decl::FunSignature { name, .. } if name == "main")
-    });
-    if has_main {
-        return;
-    }
-
-    let s = token::Span { start: 0, end: 0 };
-
-    let mut top_level = Vec::new();
-    let mut test_exprs = Vec::new();
-
-    for decl in std::mem::take(program) {
-        if is_test_decl(&decl) {
-            if let ast::Decl::Let { value, .. } = decl {
-                test_exprs.push(value);
-            }
-        } else {
-            top_level.push(decl);
-        }
-    }
-
-    if test_exprs.is_empty() {
-        *program = top_level;
-        return;
-    }
-
-    // Auto-import run_collected if not already imported
-    let has_run_collected = top_level.iter().any(|d| {
-        if let ast::Decl::Import {
-            exposing: Some(items),
-            ..
-        } = d
-        {
-            items.iter().any(|item| item == "run_collected")
-        } else {
-            false
-        }
-    });
-    if !has_run_collected {
-        top_level.push(ast::Decl::Import {
-            id: ast::NodeId::fresh(),
-            module_path: vec!["Std".to_string(), "Test".to_string()],
-            alias: None,
-            exposing: Some(vec!["run_collected".to_string()]),
-            span: s,
-        });
-    }
-
-    // Build: main () = run_collected (fun () -> { <test exprs> })
-    let stmts: Vec<ast::Annotated<ast::Stmt>> = test_exprs
-        .into_iter()
-        .map(|e| ast::Annotated {
-            node: ast::Stmt::Expr(e),
-            leading_trivia: vec![],
-            trailing_comment: None,
-            trailing_trivia: vec![],
-        })
-        .collect();
-
-    let block = ast::Expr::synth(
-        s,
-        ast::ExprKind::Block {
-            stmts,
-            dangling_trivia: vec![],
-        },
-    );
-
-    let lambda = ast::Expr::synth(
-        s,
-        ast::ExprKind::Lambda {
-            params: vec![ast::Pat::Lit {
-                id: ast::NodeId::fresh(),
-                value: ast::Lit::Unit,
-                span: s,
-            }],
-            body: Box::new(block),
-        },
-    );
-
-    let run_collected = ast::Expr::synth(
-        s,
-        ast::ExprKind::Var {
-            name: "run_collected".to_string(),
-        },
-    );
-
-    let body = ast::Expr::synth(
-        s,
-        ast::ExprKind::App {
-            func: Box::new(run_collected),
-            arg: Box::new(lambda),
-        },
-    );
-
-    top_level.push(ast::Decl::FunBinding {
-        id: ast::NodeId::fresh(),
-        name: "main".to_string(),
-        name_span: s,
-        params: vec![ast::Pat::Lit {
-            id: ast::NodeId::fresh(),
-            value: ast::Lit::Unit,
-            span: s,
-        }],
-        guard: None,
-        body,
-        span: s,
-    });
-
-    *program = top_level;
 }

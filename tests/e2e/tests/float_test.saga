@@ -1,41 +1,47 @@
-import Std.Test (describe, test, assert_eq)
+module FloatTest
 
-describe "Float" {
-  describe "parse" {
-    test "parses decimal" {
-      assert_eq (Float.parse "2.5") (Just 2.5)
-    }
+import Std.Test (Testing, describe, test, assert_eq)
 
-    test "parses integer-like string as float" {
-      assert_eq (Float.parse "2") (Just 2.0)
-    }
 
-    test "parses negative integer-like" {
-      assert_eq (Float.parse "-7") (Just (-7.0))
-    }
+pub fun tests : Unit -> Unit needs {Testing}
+tests () = {
+  describe "Float" (fun () -> {
+    describe "parse" (fun () -> {
+      test "parses decimal" (fun () -> {
+        assert_eq (Float.parse "2.5") (Just 2.5)
+      })
 
-    test "parses negative decimal" {
-      assert_eq (Float.parse "-1.5") (Just (-1.5))
-    }
+      test "parses integer-like string as float" (fun () -> {
+        assert_eq (Float.parse "2") (Just 2.0)
+      })
 
-    test "parses zero" {
-      assert_eq (Float.parse "0") (Just 0.0)
-    }
+      test "parses negative integer-like" (fun () -> {
+        assert_eq (Float.parse "-7") (Just (-7.0))
+      })
 
-    test "rejects empty string" {
-      assert_eq (Float.parse "") Nothing
-    }
+      test "parses negative decimal" (fun () -> {
+        assert_eq (Float.parse "-1.5") (Just (-1.5))
+      })
 
-    test "rejects non-numeric" {
-      assert_eq (Float.parse "abc") Nothing
-    }
+      test "parses zero" (fun () -> {
+        assert_eq (Float.parse "0") (Just 0.0)
+      })
 
-    test "rejects trailing garbage" {
-      assert_eq (Float.parse "2.5abc") Nothing
-    }
+      test "rejects empty string" (fun () -> {
+        assert_eq (Float.parse "") Nothing
+      })
 
-    test "rejects integer with trailing garbage" {
-      assert_eq (Float.parse "2abc") Nothing
-    }
-  }
+      test "rejects non-numeric" (fun () -> {
+        assert_eq (Float.parse "abc") Nothing
+      })
+
+      test "rejects trailing garbage" (fun () -> {
+        assert_eq (Float.parse "2.5abc") Nothing
+      })
+
+      test "rejects integer with trailing garbage" (fun () -> {
+        assert_eq (Float.parse "2abc") Nothing
+      })
+    })
+  })
 }

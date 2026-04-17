@@ -1,5 +1,7 @@
+module EffectsTest
+
 import Std.Fail (Fail)
-import Std.Test (describe, test, skip, assert_eq, assert_true)
+import Std.Test (Testing, describe, test, skip, assert_eq, assert_true)
 
 # --- Effect declarations ---
 
@@ -367,306 +369,310 @@ counter_bubble_outer () = counter_bubble_c () with {
 
 # --- Tests ---
 
-describe "effects" {
-  describe "basic effect and handler" {
-    test "named handler processes effect" {
-      let result = do_work () with silent_log
-      assert_eq result 30
-    }
-    test "inline handler" {
-      let result = do_work () with {
-        log _ = resume ()
-      }
-      assert_eq result 30
-    }
-  }
 
-  describe "multiple named handlers for same computation" {
-    test "same computation, different handlers yield same value" {
-      let a = do_work () with console_log
-      let b = do_work () with silent_log
-      assert_eq a b
-    }
-  }
-
-  describe "fail effect" {
-    test "successful computation wraps in Ok" {
-      let result = safe_div 10 2 with to_result
-      assert_eq result (Ok 5)
-    }
-    test "failing computation wraps in Err" {
-      let result = safe_div 10 0 with to_result
-      assert_eq result (Err "division by zero")
-    }
-    test "resume with fallback value" {
-      let result = safe_div 10 0 with int_fallback
-      assert_eq result 0
-    }
-    test "statement-level with remains delimited" {
-      let marker = swallow_marker ()
-      assert_eq marker "after"
-    }
-    test "terminal with still returns handler result" {
-      let result = terminal_to_result ()
-      assert_eq result (Err "division by zero")
-    }
-    test "let-bound with remains delimited" {
-      let marker = let_wrapped_fallback ()
-      assert_eq marker "after"
-    }
-    test "terminal with inside branch stays branch-local" {
-      let result = branch_terminal_with True
-      assert_eq result (Err "division by zero")
-    }
-    test "statement-level with inside branch remains delimited" {
-      let result = branch_statement_with True
-      assert_eq result "after"
-    }
-    test "nested with remains delimited" {
-      let result = nested_with_marker ()
-      assert_eq result "after"
-    }
-    test "nonterminal return clause does not swallow following code" {
-      let result = nonterminal_return_clause_marker ()
-      assert_eq result "after"
-    }
-    test "terminal return clause still applies" {
-      let result = terminal_return_clause ()
-      assert_eq result 6
-    }
-    test "return clause inside branch still applies" {
-      let result = return_clause_inside_branch True
-      assert_eq result 6
-    }
-    test "inline fail handler" {
-      let result = safe_div 10 0 with {
-        fail _ = resume 42
-      }
-      assert_eq result 42
-    }
-  }
-
-  describe "fail-to-result pattern" {
-    test "successful try" {
-      let result = try_fail (fun () -> {
-        let x = safe_div 100 4
-        parse_positive x
+pub fun tests : Unit -> Unit needs {Testing}
+tests () = {
+  describe "effects" (fun () -> {
+    describe "basic effect and handler" (fun () -> {
+      test "named handler processes effect" (fun () -> {
+        let result = do_work () with silent_log
+        assert_eq result 30
       })
-      assert_eq result (Ok 25)
-    }
-    test "failed try - division by zero" {
-      let result = try_fail (fun () -> safe_div 10 0)
-      assert_eq result (Err "division by zero")
-    }
-    test "failed try - negative number" {
-      let result = try_fail (fun () -> parse_positive (-5))
-      assert_eq result (Err "expected positive, got -5")
-    }
-    test "pipe results after try" {
-      let result =
-        try_fail (fun () -> safe_div 42 6)
-        |> Result.map (fun x -> x * 10)
-      assert_eq result (Ok 70)
-    }
-  }
-
-  describe "nested handler return composition" {
-    test "lexical order composes returns from inner to outer" {
-      let result = nested_named_returns_first_order ()
-      assert_eq result 22
-    }
-
-    test "reversed lexical order changes the composed result" {
-      let result = nested_named_returns_reversed_order ()
-      assert_eq result 41
-    }
-
-    test "stacked with matches list sugar" {
-      let result = stacked_named_returns_match_list_sugar ()
-      assert_eq result 22
-    }
-
-    test "return-only inline layer inside named handler still composes" {
-      let result = return_only_inline_inside_named_handler ()
-      assert_eq result 42
-    }
-
-    test "return-only inline layer outside named handler still composes" {
-      let result = return_only_inline_outside_named_handler ()
-      assert_eq result 41
-    }
-
-    test "returns stop at let binding boundary" {
-      let result = nested_returns_stop_at_binding_boundary ()
-      assert_eq result 23
-    }
-
-    test "returns stay local to the wrapped block result" {
-      let result = nested_returns_in_block_remain_local ()
-      assert_eq result 22
-    }
-
-    test "effects propagate across function boundaries before outer handlers apply" {
-      let result = counter_outer_wraps ()
-      assert_eq result 40
-    }
-
-    test "effect can bubble through multiple wrapped functions before being handled" {
-      let result = counter_bubble_outer ()
-      assert_eq result 81
-    }
-  }
-
-  describe "state effect" {
-    test "count up from 0" {
-      let (value, final_state) = run_state 0 (fun () -> count_up 5)
-      assert_eq value 5
-      assert_eq final_state 5
-    }
-    test "string accumulator" {
-      let (msg, _) = run_state "" build_msg
-      assert_eq msg "hello world"
-    }
-    test "get returns initial state" {
-      let (value, _) = run_state 42 (fun () -> get! ())
-      assert_eq value 42
-    }
-    test "put then get" {
-      let (value, _) = run_state 0 (fun () -> {
-        put! 99
-        get! ()
+      test "inline handler" (fun () -> {
+        let result = do_work () with {
+          log _ = resume ()
+        }
+        assert_eq result 30
       })
-      assert_eq value 99
-    }
-  }
+    })
 
-  describe "generic effects" {
-    test "generic fail to Result Ok" {
-      let result = safe_div_g 10 2 with to_result_g
-      assert_eq result (Ok 5 : Result Int String)
-    }
-    test "generic fail to Result Err" {
-      let result = safe_div_g 10 0 with to_result_g
-      assert_eq result (Err "division by zero" : Result Int String)
-    }
-    test "generic fail to default" {
-      let result = safe_div_g 10 0 with to_default_g
-      assert_eq result 0
-    }
-  }
-  describe "effect row polymorphism" {
-    test "handles Log for pure computation" {
-      let result = run_with_log (fun () -> {
-        log! "computing"
-        42
+    describe "multiple named handlers for same computation" (fun () -> {
+      test "same computation, different handlers yield same value" (fun () -> {
+        let a = do_work () with console_log
+        let b = do_work () with silent_log
+        assert_eq a b
       })
-      assert_eq result 42
-    }
-  }
+    })
 
-  describe "handler bindings" {
-    test "let-bound handler" {
-      let logger = silent_log
-      let result = do_work () with logger
-      assert_eq result 30
-    }
-    test "conditional handler selection" {
-      let dev = False
-      let logger = if dev then console_log else silent_log
-      let result = do_work () with logger
-      assert_eq result 30
-    }
-    test "handler expression" {
-      let my_handler = handler for Log {
-        log _ = resume ()
-      }
-      let result = do_work () with my_handler
-      assert_eq result 30
-    }
-    test "handler factory function" {
-      let logger = make_logger False
-      let result = do_work () with logger
-      assert_eq result 30
-    }
-  }
+    describe "fail effect" (fun () -> {
+      test "successful computation wraps in Ok" (fun () -> {
+        let result = safe_div 10 2 with to_result
+        assert_eq result (Ok 5)
+      })
+      test "failing computation wraps in Err" (fun () -> {
+        let result = safe_div 10 0 with to_result
+        assert_eq result (Err "division by zero")
+      })
+      test "resume with fallback value" (fun () -> {
+        let result = safe_div 10 0 with int_fallback
+        assert_eq result 0
+      })
+      test "statement-level with remains delimited" (fun () -> {
+        let marker = swallow_marker ()
+        assert_eq marker "after"
+      })
+      test "terminal with still returns handler result" (fun () -> {
+        let result = terminal_to_result ()
+        assert_eq result (Err "division by zero")
+      })
+      test "let-bound with remains delimited" (fun () -> {
+        let marker = let_wrapped_fallback ()
+        assert_eq marker "after"
+      })
+      test "terminal with inside branch stays branch-local" (fun () -> {
+        let result = branch_terminal_with True
+        assert_eq result (Err "division by zero")
+      })
+      test "statement-level with inside branch remains delimited" (fun () -> {
+        let result = branch_statement_with True
+        assert_eq result "after"
+      })
+      test "nested with remains delimited" (fun () -> {
+        let result = nested_with_marker ()
+        assert_eq result "after"
+      })
+      test "nonterminal return clause does not swallow following code" (fun () -> {
+        let result = nonterminal_return_clause_marker ()
+        assert_eq result "after"
+      })
+      test "terminal return clause still applies" (fun () -> {
+        let result = terminal_return_clause ()
+        assert_eq result 6
+      })
+      test "return clause inside branch still applies" (fun () -> {
+        let result = return_clause_inside_branch True
+        assert_eq result 6
+      })
+      test "inline fail handler" (fun () -> {
+        let result = safe_div 10 0 with {
+          fail _ = resume 42
+        }
+        assert_eq result 42
+      })
+    })
 
-  describe "multishot continuations" {
-    test "branching with double resume" {
-      let results = {
-        let x = if choose! () then 1 else 2
-        let y = if choose! () then 10 else 20
-        x + y
-      } with all_choices
-      assert_eq results [11, 21, 12, 22]
-    }
-  }
+    describe "fail-to-result pattern" (fun () -> {
+      test "successful try" (fun () -> {
+        let result = try_fail (fun () -> {
+          let x = safe_div 100 4
+          parse_positive x
+        })
+        assert_eq result (Ok 25)
+      })
+      test "failed try - division by zero" (fun () -> {
+        let result = try_fail (fun () -> safe_div 10 0)
+        assert_eq result (Err "division by zero")
+      })
+      test "failed try - negative number" (fun () -> {
+        let result = try_fail (fun () -> parse_positive (-5))
+        assert_eq result (Err "expected positive, got -5")
+      })
+      test "pipe results after try" (fun () -> {
+        let result =
+          try_fail (fun () -> safe_div 42 6)
+          |> Result.map (fun x -> x * 10)
+        assert_eq result (Ok 70)
+      })
+    })
 
-  describe "trait-constrained handlers" {
-    test "handler with trait constraint" {
-      let result = {
-        log_state! 42
-        log_state! 99
-        "done"
-      } with recording
+    describe "nested handler return composition" (fun () -> {
+      test "lexical order composes returns from inner to outer" (fun () -> {
+        let result = nested_named_returns_first_order ()
+        assert_eq result 22
+      })
+
+      test "reversed lexical order changes the composed result" (fun () -> {
+        let result = nested_named_returns_reversed_order ()
+        assert_eq result 41
+      })
+
+      test "stacked with matches list sugar" (fun () -> {
+        let result = stacked_named_returns_match_list_sugar ()
+        assert_eq result 22
+      })
+
+      test "return-only inline layer inside named handler still composes" (fun () -> {
+        let result = return_only_inline_inside_named_handler ()
+        assert_eq result 42
+      })
+
+      test "return-only inline layer outside named handler still composes" (fun () -> {
+        let result = return_only_inline_outside_named_handler ()
+        assert_eq result 41
+      })
+
+      test "returns stop at let binding boundary" (fun () -> {
+        let result = nested_returns_stop_at_binding_boundary ()
+        assert_eq result 23
+      })
+
+      test "returns stay local to the wrapped block result" (fun () -> {
+        let result = nested_returns_in_block_remain_local ()
+        assert_eq result 22
+      })
+
+      test "effects propagate across function boundaries before outer handlers apply" (fun () -> {
+        let result = counter_outer_wraps ()
+        assert_eq result 40
+      })
+
+      test "effect can bubble through multiple wrapped functions before being handled" (fun () -> {
+        let result = counter_bubble_outer ()
+        assert_eq result 81
+      })
+    })
+
+    describe "state effect" (fun () -> {
+      test "count up from 0" (fun () -> {
+        let (value, final_state) = run_state 0 (fun () -> count_up 5)
+        assert_eq value 5
+        assert_eq final_state 5
+      })
+      test "string accumulator" (fun () -> {
+        let (msg, _) = run_state "" build_msg
+        assert_eq msg "hello world"
+      })
+      test "get returns initial state" (fun () -> {
+        let (value, _) = run_state 42 (fun () -> get! ())
+        assert_eq value 42
+      })
+      test "put then get" (fun () -> {
+        let (value, _) = run_state 0 (fun () -> {
+          put! 99
+          get! ()
+        })
+        assert_eq value 99
+      })
+    })
+
+    describe "generic effects" (fun () -> {
+      test "generic fail to Result Ok" (fun () -> {
+        let result = safe_div_g 10 2 with to_result_g
+        assert_eq result (Ok 5 : Result Int String)
+      })
+      test "generic fail to Result Err" (fun () -> {
+        let result = safe_div_g 10 0 with to_result_g
+        assert_eq result (Err "division by zero" : Result Int String)
+      })
+      test "generic fail to default" (fun () -> {
+        let result = safe_div_g 10 0 with to_default_g
+        assert_eq result 0
+      })
+    })
+    describe "effect row polymorphism" (fun () -> {
+      test "handles Log for pure computation" (fun () -> {
+        let result = run_with_log (fun () -> {
+          log! "computing"
+          42
+        })
+        assert_eq result 42
+      })
+    })
+
+    describe "handler bindings" (fun () -> {
+      test "let-bound handler" (fun () -> {
+        let logger = silent_log
+        let result = do_work () with logger
+        assert_eq result 30
+      })
+      test "conditional handler selection" (fun () -> {
+        let dev = False
+        let logger = if dev then console_log else silent_log
+        let result = do_work () with logger
+        assert_eq result 30
+      })
+      test "handler expression" (fun () -> {
+        let my_handler = handler for Log {
+          log _ = resume ()
+        }
+        let result = do_work () with my_handler
+        assert_eq result 30
+      })
+      test "handler factory function" (fun () -> {
+        let logger = make_logger False
+        let result = do_work () with logger
+        assert_eq result 30
+      })
+    })
+
+    describe "multishot continuations" (fun () -> {
+      test "branching with double resume" (fun () -> {
+        let results = {
+          let x = if choose! () then 1 else 2
+          let y = if choose! () then 10 else 20
+          x + y
+        } with all_choices
+        assert_eq results [11, 21, 12, 22]
+      })
+    })
+
+    describe "trait-constrained handlers" (fun () -> {
+      test "handler with trait constraint" (fun () -> {
+        let result = {
+          log_state! 42
+          log_state! 99
+          "done"
+        } with recording
+        assert_eq result "done"
+      })
+    })
+  })
+
+  describe "validation with effects" (fun () -> {
+    test "valid input has no errors" (fun () -> {
+      let (_, errs) = {
+        require_non_empty "name" "Alice"
+        require_min 18 25
+      } with collecting
+      assert_eq errs []
+    })
+    test "single validation error" (fun () -> {
+      let (_, errs) = {
+        require_non_empty "name" ""
+        require_min 18 25
+      } with collecting
+      assert_eq errs ["name is required"]
+    })
+    test "multiple validation errors collected" (fun () -> {
+      let (_, errs) = {
+        require_non_empty "name" ""
+        require_min 18 15
+      } with collecting
+      assert_eq (List.length errs) 2
+    })
+  })
+
+  describe "finally" (fun () -> {
+    test "cleanup runs on normal completion" (fun () -> {
+      let result = work () with managed
       assert_eq result "done"
-    }
-  }
-}
+    })
 
-describe "validation with effects" {
-  test "valid input has no errors" {
-    let (_, errs) = {
-      require_non_empty "name" "Alice"
-      require_min 18 25
-    } with collecting
-    assert_eq errs []
-  }
-  test "single validation error" {
-    let (_, errs) = {
-      require_non_empty "name" ""
-      require_min 18 25
-    } with collecting
-    assert_eq errs ["name is required"]
-  }
-  test "multiple validation errors collected" {
-    let (_, errs) = {
-      require_non_empty "name" ""
-      require_min 18 15
-    } with collecting
-    assert_eq (List.length errs) 2
-  }
-}
+    test "cleanup runs on abort" (fun () -> {
+      let result = {
+        work_and_fail () with managed
+      } with to_result
+      assert_eq result (Err "something went wrong" : Result String String)
+    })
+  })
 
-describe "finally" {
-  test "cleanup runs on normal completion" {
-    let result = work () with managed
-    assert_eq result "done"
-  }
+  describe "scoped resources" (fun () -> {
+    test "normal completion with multiple resources" (fun () -> {
+      let result = {
+        let db = acquire_scoped! (fun () -> "postgres") (fun _ -> ())
+        let cache = acquire_scoped! (fun () -> "redis") (fun _ -> ())
+        db <> "+" <> cache
+      } with run_scoped
+      assert_eq result "postgres+redis"
+    })
 
-  test "cleanup runs on abort" {
-    let result = {
-      work_and_fail () with managed
-    } with to_result
-    assert_eq result (Err "something went wrong" : Result String String)
-  }
-}
-
-describe "scoped resources" {
-  test "normal completion with multiple resources" {
-    let result = {
-      let db = acquire_scoped! (fun () -> "postgres") (fun _ -> ())
-      let cache = acquire_scoped! (fun () -> "redis") (fun _ -> ())
-      db <> "+" <> cache
-    } with run_scoped
-    assert_eq result "postgres+redis"
-  }
-
-  test "abort still cleans up" {
-    let result = {
-      let _db = acquire_scoped! (fun () -> "postgres") (fun _ -> ())
-      let _cache = acquire_scoped! (fun () -> "redis") (fun _ -> ())
-      fail! "something broke"
-    } with {run_scoped, to_result}
-    assert_eq result (Err "something broke" : Result String String)
-  }
+    test "abort still cleans up" (fun () -> {
+      let result = {
+        let _db = acquire_scoped! (fun () -> "postgres") (fun _ -> ())
+        let _cache = acquire_scoped! (fun () -> "redis") (fun _ -> ())
+        fail! "something broke"
+      } with {run_scoped, to_result}
+      assert_eq result (Err "something broke" : Result String String)
+    })
+  })
 }

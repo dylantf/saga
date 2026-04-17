@@ -6,16 +6,20 @@ Spec for saga's built-in testing support.
 
 ## Overview
 
-Tests are written in separate `*_test.saga` files that import the modules they test. They only
-have access to `pub` items from those modules. Assertions use the effect system: a single
-`Test` effect with an `assert` operation, handled by the test runner. This means the runner
-controls behavior (fail-fast vs collect-all) without any changes to test code.
+Tests are ordinary saga modules discovered from the project's `tests/` directory. Each test
+module exports a `tests` function that uses the `Std.Test.Testing` effect to register test
+groups and test bodies. `saga test` collects all selected test modules, generates a synthetic
+entry module, compiles everything through the normal project pipeline, and runs the suite in a
+single BEAM VM.
+
+Assertions use `Std.Test.Test`. The runner handles `Test` per test body, so failures are
+fail-fast within a single test but do not stop the rest of the suite.
 
 ---
 
 ## File layout and discovery
 
-Tests live in a `tests/` directory at the project root (next to `project.toml`) by default:
+Tests live in a `tests/` directory at the project root by default:
 
 ```
 my_project/
@@ -28,7 +32,7 @@ my_project/
     user_test.saga
 ```
 
-The test directory is configurable via `project.toml`:
+The directory is configurable via `project.toml`:
 
 ```toml
 [project]
@@ -36,333 +40,118 @@ name = "my_project"
 tests_dir = "src/tests"    # default: "tests"
 ```
 
-This lets projects that keep source under `src/` colocate their tests:
+`saga test` discovers all `.saga` files under the configured test directory. Selected test
+files must declare a module and export `pub fun tests : Unit -> Unit needs {Testing}`.
 
-```
-my_project/
-  project.toml
-  src/
-    Main.saga
-    Math.saga
-    tests/
-      math_test.saga
-```
-
-`saga test` discovers all `*.saga` files under the configured test directory. No
-registration needed.
-
-### Visibility
-
-Test files are regular modules. They import the code under test with `import` and only see
-`pub` items. This is intentional: tests verify the public contract.
+Test files are regular modules. They import the code under test and only see `pub` items.
 
 ---
 
-## Syntax
+## Authoring
 
-Two new declaration forms: `test` and `describe`.
+Tests are defined with ordinary functions from `Std.Test`; there is no parser special-case or
+desugaring.
 
-### test
+```saga
+module MathTest
 
-```
-test "name" {
-  body
-}
-```
-
-A `test` declaration defines a single test case. The body is a block expression. The `Test`
-effect is implicitly available (the runner provides the handler). Tests can also use any
-other effects as long as they attach handlers via `with` inside the test body.
-
-### describe
-
-```
-describe "group name" {
-  test "case 1" { ... }
-  test "case 2" { ... }
-
-  describe "subgroup" {
-    test "case 3" { ... }
-  }
-}
-```
-
-`describe` groups tests for organization and reporting. It can contain `test` blocks, other
-`describe` blocks, and `let` bindings (for shared setup). Nesting is unlimited.
-
-`let` bindings inside a `describe` are visible to all tests and nested `describe`s in that
-scope. They are re-evaluated for each test (no shared mutable state between tests):
-
-```
-describe "Math" {
-  let x = 42
-
-  test "addition" {
-    assert_eq! (x + 1) 43
-  }
-
-  test "subtraction" {
-    assert_eq! (x - 1) 41
-  }
-}
-```
-
-### Top-level tests
-
-`test` can appear at the top level of a test file without a surrounding `describe`:
-
-```
-# tests/math_test.saga
 import Math
+import Std.Test (Testing, describe, test, skip, assert_eq)
 
-test "add works" {
-  assert_eq! (Math.add 2 3) 5
-}
+pub fun tests : Unit -> Unit needs {Testing}
+tests () = {
+  describe "addition" (fun () -> {
+    test "positive numbers" (fun () -> {
+      assert_eq (Math.add 2 3) 5
+    })
+  })
 
-describe "division" {
-  test "basic" {
-    assert_eq! (Math.div 10 2) 5
-  }
+  skip "division by zero" (fun () -> {
+    assert_eq (Math.div 10 0) 0
+  })
 }
 ```
+
+`describe` groups tests for reporting. `test`, `skip`, and `only` register individual test
+cases. Shared helper functions, types, handlers, and pure declarations live above `tests` like
+any other module code.
+
+Top-level `test` / `describe` declarations are not supported; everything is registered from the
+exported `tests` function.
 
 ---
 
-## The Test effect
+## Effects
 
-Defined in a new stdlib module `Std.Test`:
+`Std.Test` exposes two public effects:
 
-```
-module Std.Test
-
+```saga
 pub effect Test {
-  fun assert (ok: Bool) (msg: String) -> Unit
+  fun assert : (ok: Bool) -> (msg: String) -> Unit
+}
+
+pub effect Testing {
+  fun register_test : (name: String) -> (mode: TestMode) -> (body: Unit -> Unit needs {Test}) -> Unit
+  fun enter_group : (name: String) -> Unit
+  fun leave_group : Unit -> Unit
 }
 ```
 
-This is the only primitive. All assertion helpers are plain functions that call `assert!`:
+`Test` is the primitive assertion effect. Assertion helpers are ordinary functions that call
+`assert!` and therefore use `needs {Test}`.
 
-```
-pub fun assert_eq (a: x) (b: x) -> Unit needs {Test} where {x: Show + Eq}
-assert_eq a b =
-  assert! (a == b) ($"Expected {show b}, got {show a}")
+Users can define custom assertion helpers the same way:
 
-pub fun assert_neq (a: x) (b: x) -> Unit needs {Test} where {x: Show + Eq}
-assert_neq a b =
-  assert! (a != b) ($"Expected {show a} to not equal {show b}")
+```saga
+import Std.Test (Test)
 
-pub fun assert_true (cond: Bool) -> Unit needs {Test}
-assert_true cond = assert! cond "Expected True, got False"
-
-pub fun assert_false (cond: Bool) -> Unit needs {Test}
-assert_false cond = assert! (not cond) "Expected False, got True"
-
-pub fun assert_gt (a: x) (b: x) -> Unit needs {Test} where {x: Show + Ord}
-assert_gt a b =
-  assert! (a > b) ($"Expected {show a} to be greater than {show b}")
-
-pub fun assert_gte (a: x) (b: x) -> Unit needs {Test} where {x: Show + Ord}
-assert_gte a b =
-  assert! (a >= b) ($"Expected {show a} to be greater than or equal to {show b}")
-
-pub fun assert_lt (a: x) (b: x) -> Unit needs {Test} where {x: Show + Ord}
-assert_lt a b =
-  assert! (a < b) ($"Expected {show a} to be less than {show b}")
-
-pub fun assert_lte (a: x) (b: x) -> Unit needs {Test} where {x: Show + Ord}
-assert_lte a b =
-  assert! (a <= b) ($"Expected {show a} to be less than or equal to {show b}")
-
-pub fun assert_some (m: Maybe a) -> Unit needs {Test} where {a: Show}
-assert_some m = case m {
-  Some(_) -> assert! True ""
-  None -> assert! False "Expected Some(_), got None"
-}
-
-pub fun assert_none (m: Maybe a) -> Unit needs {Test} where {a: Show}
-assert_none m = case m {
-  Some(x) -> assert! False ($"Expected None, got Some({show x})")
-  None -> assert! True ""
-}
-
-pub fun assert_ok (r: Result a b) -> Unit needs {Test} where {a: Show, b: Show}
-assert_ok r = case r {
-  Ok(_) -> assert! True ""
-  Err(e) -> assert! False ($"Expected Ok(_), got Err({show e})")
-}
-
-pub fun assert_err (r: Result a b) -> Unit needs {Test} where {a: Show, b: Show}
-assert_err r = case r {
-  Ok(x) -> assert! False ($"Expected Err(_), got Ok({show x})")
-  Err(_) -> assert! True ""
-}
+pub fun assert_even : Int -> Unit needs {Test}
+assert_even n =
+  assert! (n % 2 == 0) $"Expected an even number, got {show n}"
 ```
 
-Users can define their own assertion helpers the same way. No special syntax needed, just
-call `assert!` with a bool and a message.
+`Testing` is used by `test`, `describe`, `skip`, and `only` during suite collection. Test
+modules usually only mention it in the type of their exported `tests` function.
 
 ---
 
-## Test runner
+## Runner behavior
 
 ### Command
 
 ```
-saga test              # run all tests in tests/
-saga test math         # filter: only tests whose path or describe/test name contains "math"
+saga test
+saga test math
 ```
+
+The filter matches selected test files by path / file name, then generates an entry module that
+imports only those test modules.
 
 ### Execution model
 
-For each test file:
+`saga test` performs three phases:
 
-1. Compile the file and its imports
-2. Walk the `describe`/`test` tree
-3. For each `test`, evaluate its body with the `Test` handler attached
-4. Collect results (pass/fail + failure message)
-5. Print results, then print summary
+1. Discover test modules and generate a synthetic `Main` module that calls `Std.Test.run_modules`
+2. Compile the project and selected test modules together through the standard build pipeline
+3. Collect all tests, apply global `only` normalization, then execute tests in module order
 
-Each test runs independently. A failure in one test does not prevent other tests from
-running.
+### Failure and panic handling
 
-### Handler strategy
+- The first failed assertion aborts that individual test.
+- A panic inside a test body is reported as a failed test, not a VM crash.
+- Other tests and modules continue running after a failure.
 
-The runner wraps each test body with a handler for `Test`. The default handler is
-**fail-fast within a test** (the first failed assertion stops that test), but
-**continues across tests** (other tests still run).
+### `only`
 
-Conceptually:
+`only` is global across the selected suite. If any `only` exists anywhere, every non-`only`
+test in every selected module is reported as skipped.
 
-```
-handler test_runner for Test {
-  assert ok msg =
-    if ok then resume ()
-    else msg   # abort this test, return the failure message
-}
-```
+### Output
 
-The test runner calls each test body, catches the abort, and records the result.
+The runner prints:
 
-### Output format
+- live per-test results
+- a per-module summary after each module
+- one overall summary at the end
 
-```
-math_test
-  ✓ add works
-  division
-    ✓ basic
-    ✗ handles zero (Expected 0, got panic)
-
-user_test
-  User
-    validation
-      ✓ rejects empty name
-      ✓ accepts valid user
-    age
-      ✗ must be positive (Expected 5 to be greater than 0)
-
-Tests: 4 passed, 2 failed, 6 total
-```
-
-The describe/test hierarchy maps directly to indented output. Passing tests get a check
-mark, failing tests get an X followed by the failure message.
-
-### Exit code
-
-`saga test` exits with code 0 if all tests pass, 1 if any test fails. This makes it
-usable in CI pipelines.
-
----
-
-## Testing with effects
-
-The effect system makes test isolation natural. Functions that use effects are testable
-by providing mock handlers:
-
-```
-# src
-pub effect Database {
-  fun query : (sql: String) -> List String
-}
-
-pub fun get_users : Unit -> List String needs {Database}
-get_users () = query! "SELECT name FROM users"
-
-# tests
-import App (get_users)
-
-describe "get_users" {
-  test "returns query results" {
-    let result = {
-      get_users ()
-    } with {
-      query sql -> resume ["alice", "bob"]
-    }
-    assert_eq! result ["alice", "bob"]
-  }
-}
-```
-
-No mocking libraries, no dependency injection. The test just provides a different handler.
-
----
-
-## AST representation
-
-Two new `Decl` variants:
-
-```rust
-Decl::Test {
-    name: String,      // "add works"
-    body: Box<Expr>,   // the block expression
-    span: Span,
-}
-
-Decl::Describe {
-    name: String,          // "division"
-    entries: Vec<Decl>,    // Test, Describe, or Let declarations
-    span: Span,
-}
-```
-
-`test` and `describe` are only legal inside test files (files under `tests/`). Encountering
-them in non-test files is a compile error.
-
----
-
-## Parser changes
-
-Two new keywords: `test` and `describe`.
-
-`test` parses as: `test` STRING_LITERAL BLOCK
-
-`describe` parses as: `describe` STRING_LITERAL `{` (decl)\* `}`
-
-Inside a `describe` block, the parser accepts `test`, `describe`, and `let` declarations.
-No function definitions, type definitions, imports, etc. Imports go at the top of the file
-as usual.
-
----
-
-## Type checking
-
-- `test` bodies are checked as expressions of type `Unit` with `Test` in the effect context
-  (the runner provides the handler, so `Test` is always available).
-- `describe` blocks recurse into their entries.
-- `let` bindings inside `describe` are added to the environment for nested entries.
-- No type signatures on tests. The name is a string, the body is `Unit`.
-
----
-
-## Implementation order
-
-1. **Keywords and parsing** - Add `test` and `describe` tokens, parse the new declaration
-   forms, add AST variants.
-2. **Std.Test module** - Define the `Test` effect and assertion helpers in
-   `src/stdlib/Test.saga`.
-3. **Type checking** - Handle `Decl::Test` and `Decl::Describe` in the type checker.
-   Inject `Test` into the effect context for test bodies.
-4. **Backend lowering** - Lower test declarations to BEAM functions. Each test becomes a
-   zero-arg function. Describe groups become a data structure the runner can walk.
-5. **Test runner** - Add `saga test` subcommand. Discover test files, compile them,
-   invoke the generated test functions, collect results, print the report.
-6. **Filter flag** - Support `saga test <pattern>` to filter by name.
+The process exits with code `1` if any test failed, otherwise `0`.

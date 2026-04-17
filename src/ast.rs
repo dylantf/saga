@@ -164,7 +164,7 @@ pub enum Decl {
         params: Vec<(String, TypeExpr)>,
         return_type: TypeExpr,
         effects: Vec<EffectRef>,
-        /// Row variable for open effect rows, e.g. `..e` in `needs {Assert, ..e}`
+        /// Row variable for open effect rows, e.g. `..e` in `needs {Test, ..e}`
         effect_row_var: Option<(String, Span)>,
         /// `where {a: Show + Eq, b: Ord}` - trait bounds on type variables
         where_clause: Vec<TraitBound>,
@@ -326,10 +326,6 @@ pub enum Decl {
         path: Vec<String>,
         span: Span,
     },
-
-    /// A bare expression at the top level (test/describe sugar in test files).
-    /// Converted to `Let { name: "_", .. }` by the desugar pass.
-    TopExpr { id: NodeId, value: Expr, span: Span },
 
     // --- Elaboration-only (never produced by the parser) ---
     /// Synthesized dictionary constructor function for a trait impl.
@@ -881,7 +877,7 @@ pub enum TypeExpr {
         from: Box<TypeExpr>,
         to: Box<TypeExpr>,
         effects: Vec<EffectRef>,
-        /// Row variable for open effect rows, e.g. `..e` in `needs {Assert, ..e}`
+        /// Row variable for open effect rows, e.g. `..e` in `needs {Test, ..e}`
         effect_row_var: Option<(String, Span)>,
         span: Span,
     },

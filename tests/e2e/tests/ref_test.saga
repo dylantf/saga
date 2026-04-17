@@ -1,6 +1,8 @@
+module RefTest
+
 import Std.Ref (MutRef, Ref, beam_ref, ets_ref)
 import Std.Actor (Process, Actor, Timer, beam_actor)
-import Std.Test (describe, test, assert_eq)
+import Std.Test (Testing, describe, test, assert_eq)
 
 # --- Helper functions ---
 
@@ -27,128 +29,13 @@ sum_with_ref xs = {
   get! acc
 }
 
-# --- Tests ---
-
-describe "Ref effect (beam_ref)" {
-  test "new and get" {
-    let result = {
-      let r = new! 42
-      get! r
-    } with beam_ref
-    assert_eq result 42
-  }
-
-  test "set overwrites value" {
-    let result = {
-      let r = new! 0
-      set! r 99
-      get! r
-    } with beam_ref
-    assert_eq result 99
-  }
-
-  test "modify returns new value" {
-    let result = {
-      let r = new! 10
-      modify! r (fun n -> n * 2)
-    } with beam_ref
-    assert_eq result 20
-  }
-
-  test "modify updates stored value" {
-    let result = {
-      let r = new! 10
-      let _ = modify! r (fun n -> n + 5)
-      get! r
-    } with beam_ref
-    assert_eq result 15
-  }
-
-  test "multiple refs are independent" {
-    let result = {
-      let a = new! 1
-      let b = new! 100
-      set! a 2
-      set! b 200
-      let va = get! a
-      let vb = get! b
-      va + vb
-    } with beam_ref
-    assert_eq result 202
-  }
-
-  test "string ref" {
-    let result = {
-      let r = new! "hello"
-      set! r "world"
-      get! r
-    } with beam_ref
-    assert_eq result "world"
-  }
-
-  test "count evens in list" {
-    let result = count_evens [1, 2, 3, 4, 5, 6] with beam_ref
-    assert_eq result 3
-  }
-
-  test "sum with ref accumulator" {
-    let result = sum_with_ref [1, 2, 3, 4, 5] with beam_ref
-    assert_eq result 15
-  }
-}
-
-describe "Ref effect (ets_ref)" {
-  test "new and get" {
-    let result = {
-      let r = new! 42
-      get! r
-    } with ets_ref
-    assert_eq result 42
-  }
-
-  test "set and get" {
-    let result = {
-      let r = new! 0
-      set! r 77
-      get! r
-    } with ets_ref
-    assert_eq result 77
-  }
-
-  test "modify returns new value" {
-    let result = {
-      let r = new! 5
-      modify! r (fun n -> n * 3)
-    } with ets_ref
-    assert_eq result 15
-  }
-
-  test "multiple refs are independent" {
-    let result = {
-      let a = new! 10
-      let b = new! 20
-      let _ = modify! a (fun n -> n + 1)
-      let _ = modify! b (fun n -> n + 2)
-      let va = get! a
-      let vb = get! b
-      va + vb
-    } with ets_ref
-    assert_eq result 33
-  }
-
-  test "count evens in list" {
-    let result = count_evens [2, 4, 6, 8] with ets_ref
-    assert_eq result 4
-  }
-}
-
-# --- Actor + Ref tests ---
+# --- Actor + Ref helpers ---
 
 # Message types for actor-ref tests
 type SetMsg = SetVal Int (Pid Int)
 type ReadMsg = ReadVal (Pid Int)
 
-# An actor that creates its own beam_ref — isolated to its process
+# An actor that creates its own beam_ref - isolated to its process
 fun local_ref_actor : Unit -> Unit needs {Process, Actor SetMsg}
 local_ref_actor () = {
   let r = new! 0 with beam_ref
@@ -169,69 +56,187 @@ shared_ref_writer r amount = {
   ()
 }
 
-describe "Ref with actors" {
-  test "beam_ref is process-local: actor has own state" {
-    let result = {
-      let pid = spawn! (fun () -> local_ref_actor ())
-      send! pid (SetVal 42 (self! ()))
-      receive {
-        n -> n
-      }
-    } with beam_actor
-    assert_eq result 42
-  }
+# --- Tests ---
 
-  test "ets_ref shared across processes" {
-    let result = {
-      # Parent creates a shared ref
-      let shared = new! 0 with ets_ref
+pub fun tests : Unit -> Unit needs {Testing}
+tests () = {
+  describe "Ref effect (beam_ref)" (fun () -> {
+    test "new and get" (fun () -> {
+      let result = {
+        let r = new! 42
+        get! r
+      } with beam_ref
+      assert_eq result 42
+    })
 
-      # Spawn a child that increments it
-      let me = self! ()
-      let _child = spawn! (fun () -> {
-        shared_ref_writer shared 10 with ets_ref
-        send! me 1
-        ()
-      })
+    test "set overwrites value" (fun () -> {
+      let result = {
+        let r = new! 0
+        set! r 99
+        get! r
+      } with beam_ref
+      assert_eq result 99
+    })
 
-      # Wait for child to finish
-      receive {
-        _ -> ()
-      }
+    test "modify returns new value" (fun () -> {
+      let result = {
+        let r = new! 10
+        modify! r (fun n -> n * 2)
+      } with beam_ref
+      assert_eq result 20
+    })
 
-      # Sleep briefly to ensure ETS write is visible
-      sleep! 10
+    test "modify updates stored value" (fun () -> {
+      let result = {
+        let r = new! 10
+        let _ = modify! r (fun n -> n + 5)
+        get! r
+      } with beam_ref
+      assert_eq result 15
+    })
 
-      # Parent reads the shared ref — should see the child's write
-      get! shared with ets_ref
-    } with beam_actor
-    assert_eq result 10
-  }
+    test "multiple refs are independent" (fun () -> {
+      let result = {
+        let a = new! 1
+        let b = new! 100
+        set! a 2
+        set! b 200
+        let va = get! a
+        let vb = get! b
+        va + vb
+      } with beam_ref
+      assert_eq result 202
+    })
 
-  test "ets_ref: multiple writers to same ref" {
-    let result = {
-      let shared = new! 0 with ets_ref
-      let me = self! ()
+    test "string ref" (fun () -> {
+      let result = {
+        let r = new! "hello"
+        set! r "world"
+        get! r
+      } with beam_ref
+      assert_eq result "world"
+    })
 
-      # Spawn two children that each add to the ref
-      let _c1 = spawn! (fun () -> {
-        shared_ref_writer shared 5 with ets_ref
-        send! me 1
-        ()
-      })
-      # Wait for first child before starting second (avoid race on modify)
-      receive { _ -> () }
+    test "count evens in list" (fun () -> {
+      let result = count_evens [1, 2, 3, 4, 5, 6] with beam_ref
+      assert_eq result 3
+    })
 
-      let _c2 = spawn! (fun () -> {
-        shared_ref_writer shared 7 with ets_ref
-        send! me 1
-        ()
-      })
-      receive { _ -> () }
+    test "sum with ref accumulator" (fun () -> {
+      let result = sum_with_ref [1, 2, 3, 4, 5] with beam_ref
+      assert_eq result 15
+    })
+  })
 
-      sleep! 10
-      get! shared with ets_ref
-    } with beam_actor
-    assert_eq result 12
-  }
+  describe "Ref effect (ets_ref)" (fun () -> {
+    test "new and get" (fun () -> {
+      let result = {
+        let r = new! 42
+        get! r
+      } with ets_ref
+      assert_eq result 42
+    })
+
+    test "set and get" (fun () -> {
+      let result = {
+        let r = new! 0
+        set! r 77
+        get! r
+      } with ets_ref
+      assert_eq result 77
+    })
+
+    test "modify returns new value" (fun () -> {
+      let result = {
+        let r = new! 5
+        modify! r (fun n -> n * 3)
+      } with ets_ref
+      assert_eq result 15
+    })
+
+    test "multiple refs are independent" (fun () -> {
+      let result = {
+        let a = new! 10
+        let b = new! 20
+        let _ = modify! a (fun n -> n + 1)
+        let _ = modify! b (fun n -> n + 2)
+        let va = get! a
+        let vb = get! b
+        va + vb
+      } with ets_ref
+      assert_eq result 33
+    })
+
+    test "count evens in list" (fun () -> {
+      let result = count_evens [2, 4, 6, 8] with ets_ref
+      assert_eq result 4
+    })
+  })
+
+  describe "Ref with actors" (fun () -> {
+    test "beam_ref is process-local: actor has own state" (fun () -> {
+      let result = {
+        let pid = spawn! (fun () -> local_ref_actor ())
+        send! pid (SetVal 42 (self! ()))
+        receive {
+          n -> n
+        }
+      } with beam_actor
+      assert_eq result 42
+    })
+
+    test "ets_ref shared across processes" (fun () -> {
+      let result = {
+        # Parent creates a shared ref
+        let shared = new! 0 with ets_ref
+
+        # Spawn a child that increments it
+        let me = self! ()
+        let _child = spawn! (fun () -> {
+          shared_ref_writer shared 10 with ets_ref
+          send! me 1
+          ()
+        })
+
+        # Wait for child to finish
+        receive {
+          _ -> ()
+        }
+
+        # Sleep briefly to ensure ETS write is visible
+        sleep! 10
+
+        # Parent reads the shared ref - should see the child's write
+        get! shared with ets_ref
+      } with beam_actor
+      assert_eq result 10
+    })
+
+    test "ets_ref: multiple writers to same ref" (fun () -> {
+      let result = {
+        let shared = new! 0 with ets_ref
+        let me = self! ()
+
+        # Spawn two children that each add to the ref
+        let _c1 = spawn! (fun () -> {
+          shared_ref_writer shared 5 with ets_ref
+          send! me 1
+          ()
+        })
+        # Wait for first child before starting second (avoid race on modify)
+        receive { _ -> () }
+
+        let _c2 = spawn! (fun () -> {
+          shared_ref_writer shared 7 with ets_ref
+          send! me 1
+          ()
+        })
+        receive { _ -> () }
+
+        sleep! 10
+        get! shared with ets_ref
+      } with beam_actor
+      assert_eq result 12
+    })
+  })
 }

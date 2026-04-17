@@ -181,7 +181,7 @@ pub struct Lowerer<'a> {
     /// Bare handler name -> canonical handler name (e.g. "collect_handler" -> "Std.Test.collect_handler").
     /// Built during init_module for resolving handler references in `with` expressions.
     handler_canonical: HashMap<String, String>,
-    /// Bare effect name -> canonical effect name (e.g. "Assert" -> "Std.Test.Assert").
+    /// Bare effect name -> canonical effect name (e.g. "Test" -> "Std.Test.Test").
     /// Built during init_module for canonicalizing effect names from the type system.
     effect_canonical: HashMap<String, String>,
     /// Typechecker result for the module currently being lowered.
@@ -1492,18 +1492,22 @@ impl<'a> Lowerer<'a> {
             });
         }
 
-        // If the program uses ets_ref, prepend ETS table creation to main's body.
+        // If the program uses ets_ref, prepend ETS table creation to the entry function.
         if self.check_result.needs_ets_ref_table
-            && let Some(main_def) = fun_defs.iter_mut().find(|f| f.name == "main")
+            && let Some(entry_def) = fun_defs
+                .iter_mut()
+                .find(|f| f.name == "main" || f.name == "tests")
         {
-            main_def.body = Self::wrap_with_ets_init(main_def.body.clone());
+            entry_def.body = Self::wrap_with_ets_init(entry_def.body.clone());
         }
 
         // If the program uses beam_vec, prepend ETS table creation for saga_vec_store.
         if self.check_result.needs_vec_table
-            && let Some(main_def) = fun_defs.iter_mut().find(|f| f.name == "main")
+            && let Some(entry_def) = fun_defs
+                .iter_mut()
+                .find(|f| f.name == "main" || f.name == "tests")
         {
-            main_def.body = Self::wrap_with_vec_init(main_def.body.clone());
+            entry_def.body = Self::wrap_with_vec_init(entry_def.body.clone());
         }
 
         CModule {

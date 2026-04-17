@@ -601,24 +601,25 @@ bs1 <> bs2                       # concatenation
 ## Testing
 
 ```
-import Std.Test (describe, test, skip, assert_eq, assert_neq)
+module MathTest
 
-# describe/test/skip are sugar: the block becomes a lambda argument
-# test "name" { body }  ->  test "name" (fun () -> { body })
-# describe "name" { body }  ->  describe "name" (fun () -> { body })
+import Std.Test (Testing, describe, test, skip, assert_eq, assert_neq)
 
-describe "Math" {
-  test "addition" {
-    assert_eq (1 + 2) 3
-  }
+pub fun tests : Unit -> Unit needs {Testing}
+tests () = {
+  describe "Math" (fun () -> {
+    test "addition" (fun () -> {
+      assert_eq (1 + 2) 3
+    })
 
-  test "subtraction" {
-    assert_eq (5 - 3) 2
-  }
+    test "subtraction" (fun () -> {
+      assert_eq (5 - 3) 2
+    })
 
-  skip "not ready yet" {
-    assert_eq 1 2
-  }
+    skip "not ready yet" (fun () -> {
+      assert_eq 1 2
+    })
+  })
 }
 
 # Run with: saga test

@@ -1,143 +1,149 @@
-import Std.Test (describe, test, assert_eq, assert_true, assert_false)
+module BaseTest
 
-describe "basics" {
+import Std.Test (Testing, describe, test, assert_eq, assert_true, assert_false)
 
-  describe "arithmetic" {
-    test "addition" {
-      assert_eq (1 + 2) 3
-    }
 
-    test "subtraction" {
-      assert_eq (10 - 3) 7
-    }
+pub fun tests : Unit -> Unit needs {Testing}
+tests () = {
+  describe "basics" (fun () -> {
 
-    test "multiplication" {
-      assert_eq (4 * 5) 20
-    }
+    describe "arithmetic" (fun () -> {
+      test "addition" (fun () -> {
+        assert_eq (1 + 2) 3
+      })
 
-    test "integer division" {
-      assert_eq (7 / 2) 3
-    }
+      test "subtraction" (fun () -> {
+        assert_eq (10 - 3) 7
+      })
 
-    test "modulo" {
-      assert_eq (10 % 3) 1
-    }
-  }
+      test "multiplication" (fun () -> {
+        assert_eq (4 * 5) 20
+      })
 
-  describe "booleans" {
-    test "and" {
-      assert_true (True && True)
-      assert_false (True && False)
-    }
+      test "integer division" (fun () -> {
+        assert_eq (7 / 2) 3
+      })
 
-    test "or" {
-      assert_true (True || False)
-      assert_false (False || False)
-    }
+      test "modulo" (fun () -> {
+        assert_eq (10 % 3) 1
+      })
+    })
 
-    test "equality" {
-      assert_true (1 == 1)
-      assert_false (1 == 2)
-    }
+    describe "booleans" (fun () -> {
+      test "and" (fun () -> {
+        assert_true (True && True)
+        assert_false (True && False)
+      })
 
-    test "comparison" {
-      assert_true (1 < 2)
-      assert_true (3 > 2)
-      assert_true (2 <= 2)
-      assert_true (2 >= 2)
-    }
-  }
+      test "or" (fun () -> {
+        assert_true (True || False)
+        assert_false (False || False)
+      })
 
-  describe "strings" {
-    test "concatenation" {
-      assert_eq ("hello" <> " " <> "world") "hello world"
-    }
+      test "equality" (fun () -> {
+        assert_true (1 == 1)
+        assert_false (1 == 2)
+      })
 
-    test "interpolation" {
-      let name = "saga"
-      assert_eq $"hello {name}" "hello saga"
-    }
-  }
+      test "comparison" (fun () -> {
+        assert_true (1 < 2)
+        assert_true (3 > 2)
+        assert_true (2 <= 2)
+        assert_true (2 >= 2)
+      })
+    })
 
-  describe "let bindings" {
-    test "simple binding" {
-      let x = 42
-      assert_eq x 42
-    }
+    describe "strings" (fun () -> {
+      test "concatenation" (fun () -> {
+        assert_eq ("hello" <> " " <> "world") "hello world"
+      })
 
-    test "binding with expression" {
-      let x = 2 + 3
-      assert_eq x 5
-    }
-  }
+      test "interpolation" (fun () -> {
+        let name = "saga"
+        assert_eq $"hello {name}" "hello saga"
+      })
+    })
 
-  describe "functions" {
-    test "lambda" {
-      let double = fun x -> x * 2
-      assert_eq (double 5) 10
-    }
+    describe "let bindings" (fun () -> {
+      test "simple binding" (fun () -> {
+        let x = 42
+        assert_eq x 42
+      })
 
-    test "pipe" {
-      let result = 5 |> fun x -> x * 2 |> fun x -> x + 1
-      assert_eq result 11
-    }
-  }
+      test "binding with expression" (fun () -> {
+        let x = 2 + 3
+        assert_eq x 5
+      })
+    })
 
-  describe "lists" {
-    test "literal" {
-      assert_eq [1, 2, 3] [1, 2, 3]
-    }
+    describe "functions" (fun () -> {
+      test "lambda" (fun () -> {
+        let double = fun x -> x * 2
+        assert_eq (double 5) 10
+      })
 
-    test "concatenation" {
-      assert_eq ([1, 2] <> [3, 4]) [1, 2, 3, 4]
-    }
+      test "pipe" (fun () -> {
+        let result = 5 |> fun x -> x * 2 |> fun x -> x + 1
+        assert_eq result 11
+      })
+    })
 
-    test "cons" {
-      assert_eq (1 :: 2 :: 3 :: []) [1, 2, 3]
-    }
+    describe "lists" (fun () -> {
+      test "literal" (fun () -> {
+        assert_eq [1, 2, 3] [1, 2, 3]
+      })
 
-    test "comprehension" {
-      assert_eq ([x * 2 | x <- [1, 2, 3]]) [2, 4, 6]
-    }
+      test "concatenation" (fun () -> {
+        assert_eq ([1, 2] <> [3, 4]) [1, 2, 3, 4]
+      })
 
-    test "comprehension with filter" {
-      assert_eq ([x | x <- [1, 2, 3, 4, 5], x > 3]) [4, 5]
-    }
-  }
+      test "cons" (fun () -> {
+        assert_eq (1 :: 2 :: 3 :: []) [1, 2, 3]
+      })
 
-  describe "tuples" {
-    test "pair" {
-      let p = (1, "hello")
-      assert_eq p (1, "hello")
-    }
+      test "comprehension" (fun () -> {
+        assert_eq ([x * 2 | x <- [1, 2, 3]]) [2, 4, 6]
+      })
 
-    test "triple" {
-      assert_eq (1, 2, 3) (1, 2, 3)
-    }
-  }
+      test "comprehension with filter" (fun () -> {
+        assert_eq ([x | x <- [1, 2, 3, 4, 5], x > 3]) [4, 5]
+      })
+    })
 
-  describe "pattern matching" {
-    test "case on int" {
-      let result = case 2 {
-        1 -> "one"
-        2 -> "two"
-        _ -> "other"
-      }
-      assert_eq result "two"
-    }
+    describe "tuples" (fun () -> {
+      test "pair" (fun () -> {
+        let p = (1, "hello")
+        assert_eq p (1, "hello")
+      })
 
-    test "case on list" {
-      let result = case [1, 2, 3] {
-        [] -> "empty"
-        [_] -> "one"
-        _ :: _ -> "many"
-      }
-      assert_eq result "many"
-    }
+      test "triple" (fun () -> {
+        assert_eq (1, 2, 3) (1, 2, 3)
+      })
+    })
 
-    test "let destructuring" {
-      let (a, b) = (10, 20)
-      assert_eq (a + b) 30
-    }
-  }
+    describe "pattern matching" (fun () -> {
+      test "case on int" (fun () -> {
+        let result = case 2 {
+          1 -> "one"
+          2 -> "two"
+          _ -> "other"
+        }
+        assert_eq result "two"
+      })
+
+      test "case on list" (fun () -> {
+        let result = case [1, 2, 3] {
+          [] -> "empty"
+          [_] -> "one"
+          _ :: _ -> "many"
+        }
+        assert_eq result "many"
+      })
+
+      test "let destructuring" (fun () -> {
+        let (a, b) = (10, 20)
+        assert_eq (a + b) 30
+      })
+    })
+  })
 }

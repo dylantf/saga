@@ -1,57 +1,63 @@
+module ArrayTest
+
 import Std.Array
-import Std.Test (describe, test, assert_eq)
+import Std.Test (Testing, describe, test, assert_eq)
 
-describe "Array" {
-  test "from_list and to_list round-trip" {
-    let arr = Array.from_list [1, 2, 3]
-    assert_eq (Array.to_list arr) [1, 2, 3]
-  }
 
-  test "size" {
-    let arr = Array.from_list [10, 20, 30, 40, 50]
-    assert_eq (Array.size arr) 5
-  }
+pub fun tests : Unit -> Unit needs {Testing}
+tests () = {
+  describe "Array" (fun () -> {
+    test "from_list and to_list round-trip" (fun () -> {
+      let arr = Array.from_list [1, 2, 3]
+      assert_eq (Array.to_list arr) [1, 2, 3]
+    })
 
-  test "size of empty array" {
-    let arr = Array.new ()
-    assert_eq (Array.size arr) 0
-  }
+    test "size" (fun () -> {
+      let arr = Array.from_list [10, 20, 30, 40, 50]
+      assert_eq (Array.size arr) 5
+    })
 
-  test "get in bounds" {
-    let arr = Array.from_list [10, 20, 30]
-    assert_eq (Array.get 0 arr) (Just 10)
-    assert_eq (Array.get 2 arr) (Just 30)
-  }
+    test "size of empty array" (fun () -> {
+      let arr = Array.new ()
+      assert_eq (Array.size arr) 0
+    })
 
-  test "get out of bounds" {
-    let arr = Array.from_list [10, 20, 30]
-    assert_eq (Array.get 99 arr) Nothing
-    assert_eq (Array.get (-1) arr) Nothing
-  }
+    test "get in bounds" (fun () -> {
+      let arr = Array.from_list [10, 20, 30]
+      assert_eq (Array.get 0 arr) (Just 10)
+      assert_eq (Array.get 2 arr) (Just 30)
+    })
 
-  test "set returns new array" {
-    let arr = Array.from_list [1, 2, 3]
-    let arr2 = Array.set 1 99 arr
-    assert_eq (Array.to_list arr2) [1, 99, 3]
-    # original unchanged
-    assert_eq (Array.to_list arr) [1, 2, 3]
-  }
+    test "get out of bounds" (fun () -> {
+      let arr = Array.from_list [10, 20, 30]
+      assert_eq (Array.get 99 arr) Nothing
+      assert_eq (Array.get (-1) arr) Nothing
+    })
 
-  test "map" {
-    let arr = Array.from_list [1, 2, 3]
-    let doubled = Array.map (fun x -> x * 2) arr
-    assert_eq (Array.to_list doubled) [2, 4, 6]
-  }
+    test "set returns new array" (fun () -> {
+      let arr = Array.from_list [1, 2, 3]
+      let arr2 = Array.set 1 99 arr
+      assert_eq (Array.to_list arr2) [1, 99, 3]
+      # original unchanged
+      assert_eq (Array.to_list arr) [1, 2, 3]
+    })
 
-  test "foldl" {
-    let arr = Array.from_list [1, 2, 3, 4, 5]
-    let sum = Array.foldl (fun acc x -> acc + x) 0 arr
-    assert_eq sum 15
-  }
+    test "map" (fun () -> {
+      let arr = Array.from_list [1, 2, 3]
+      let doubled = Array.map (fun x -> x * 2) arr
+      assert_eq (Array.to_list doubled) [2, 4, 6]
+    })
 
-  test "string array" {
-    let arr = Array.from_list ["hello", "world"]
-    assert_eq (Array.get 0 arr) (Just "hello")
-    assert_eq (Array.size arr) 2
-  }
+    test "foldl" (fun () -> {
+      let arr = Array.from_list [1, 2, 3, 4, 5]
+      let sum = Array.foldl (fun acc x -> acc + x) 0 arr
+      assert_eq sum 15
+    })
+
+    test "string array" (fun () -> {
+      let arr = Array.from_list ["hello", "world"]
+      assert_eq (Array.get 0 arr) (Just "hello")
+      assert_eq (Array.size arr) 2
+    })
+  })
 }

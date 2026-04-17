@@ -1,3 +1,5 @@
+module DynamicTest
+
 import Std.Dynamic (
   Dynamic,
   Decoder,
@@ -15,119 +17,123 @@ import Std.Dynamic (
   optional
 )
 import Std.List as List
-import Std.Test (describe, test, assert_eq)
+import Std.Test (Testing, describe, test, assert_eq)
 
-describe "Dynamic" {
 
-  describe "classify" {
-    test "classifies Int" {
-      assert_eq (classify (from_erlang 42)) "Int"
-    }
+pub fun tests : Unit -> Unit needs {Testing}
+tests () = {
+  describe "Dynamic" (fun () -> {
 
-    test "classifies String" {
-      assert_eq (classify (from_erlang "hello")) "String"
-    }
+    describe "classify" (fun () -> {
+      test "classifies Int" (fun () -> {
+        assert_eq (classify (from_erlang 42)) "Int"
+      })
 
-    test "classifies Bool" {
-      assert_eq (classify (from_erlang True)) "Bool"
-    }
+      test "classifies String" (fun () -> {
+        assert_eq (classify (from_erlang "hello")) "String"
+      })
 
-    test "classifies Float" {
-      assert_eq (classify (from_erlang 1.5)) "Float"
-    }
+      test "classifies Bool" (fun () -> {
+        assert_eq (classify (from_erlang True)) "Bool"
+      })
 
-    test "classifies List" {
-      assert_eq (classify (from_erlang [1, 2, 3])) "List"
-    }
+      test "classifies Float" (fun () -> {
+        assert_eq (classify (from_erlang 1.5)) "Float"
+      })
 
-    test "classifies Map" {
-      assert_eq (classify (from_erlang (Dict.from_list [("a", 1)]))) "Map"
-    }
-  }
+      test "classifies List" (fun () -> {
+        assert_eq (classify (from_erlang [1, 2, 3])) "List"
+      })
 
-  describe "decode_field" {
-    test "decodes string and int fields" {
-      let data =
-        from_erlang (Dict.from_list [
-          ("name", from_erlang "Alice"),
-          ("age", from_erlang 30),
-        ])
+      test "classifies Map" (fun () -> {
+        assert_eq (classify (from_erlang (Dict.from_list [("a", 1)]))) "Map"
+      })
+    })
 
-      let result = do {
-        Ok(name) <- decode_field "name" string data
-        Ok(age) <- decode_field "age" int data
-        Ok((name, age))
-      } else {
-        Err(e) -> Err(e)
-      }
+    describe "decode_field" (fun () -> {
+      test "decodes string and int fields" (fun () -> {
+        let data =
+          from_erlang (Dict.from_list [
+            ("name", from_erlang "Alice"),
+            ("age", from_erlang 30),
+          ])
 
-      assert_eq result (Ok ("Alice", 30))
-    }
+        let result = do {
+          Ok(name) <- decode_field "name" string data
+          Ok(age) <- decode_field "age" int data
+          Ok((name, age))
+        } else {
+          Err(e) -> Err(e)
+        }
 
-    test "fails fast on first wrong type" {
-      let data =
-        from_erlang (Dict.from_list [
-          ("name", from_erlang 42),
-          ("age", from_erlang "not a number"),
-        ])
+        assert_eq result (Ok ("Alice", 30))
+      })
 
-      let result = do {
-        Ok(name) <- decode_field "name" string data
-        Ok(age) <- decode_field "age" int data
-        Ok((name, age))
-      } else {
-        Err(e) -> Err(e)
-      }
+      test "fails fast on first wrong type" (fun () -> {
+        let data =
+          from_erlang (Dict.from_list [
+            ("name", from_erlang 42),
+            ("age", from_erlang "not a number"),
+          ])
 
-      assert_eq (Result.is_err result) True
-    }
+        let result = do {
+          Ok(name) <- decode_field "name" string data
+          Ok(age) <- decode_field "age" int data
+          Ok((name, age))
+        } else {
+          Err(e) -> Err(e)
+        }
 
-    test "reports missing field" {
-      let data = from_erlang (Dict.from_list [("name", from_erlang "Alice")])
+        assert_eq (Result.is_err result) True
+      })
 
-      let result = do {
-        Ok(name) <- decode_field "name" string data
-        Ok(age) <- decode_field "age" int data
-        Ok((name, age))
-      } else {
-        Err(e) -> Err(e)
-      }
+      test "reports missing field" (fun () -> {
+        let data = from_erlang (Dict.from_list [("name", from_erlang "Alice")])
 
-      assert_eq (Result.is_err result) True
-    }
+        let result = do {
+          Ok(name) <- decode_field "name" string data
+          Ok(age) <- decode_field "age" int data
+          Ok((name, age))
+        } else {
+          Err(e) -> Err(e)
+        }
 
-    test "decodes float and bool fields" {
-      let data =
-        from_erlang (Dict.from_list [
-          ("score", from_erlang 9.5),
-          ("active", from_erlang True),
-        ])
+        assert_eq (Result.is_err result) True
+      })
 
-      let result = do {
-        Ok(score) <- decode_field "score" float data
-        Ok(active) <- decode_field "active" bool data
-        Ok((score, active))
-      } else {
-        Err(e) -> Err(e)
-      }
+      test "decodes float and bool fields" (fun () -> {
+        let data =
+          from_erlang (Dict.from_list [
+            ("score", from_erlang 9.5),
+            ("active", from_erlang True),
+          ])
 
-      assert_eq result (Ok (9.5, True))
-    }
-  }
+        let result = do {
+          Ok(score) <- decode_field "score" float data
+          Ok(active) <- decode_field "active" bool data
+          Ok((score, active))
+        } else {
+          Err(e) -> Err(e)
+        }
 
-  describe "decode_element" {
-    test "decodes tuple elements" {
-      let data = from_erlang ("Bob", 25)
+        assert_eq result (Ok (9.5, True))
+      })
+    })
 
-      let result = do {
-        Ok(name) <- decode_element 0 string data
-        Ok(age) <- decode_element 1 int data
-        Ok((name, age))
-      } else {
-        Err(e) -> Err(e)
-      }
+    describe "decode_element" (fun () -> {
+      test "decodes tuple elements" (fun () -> {
+        let data = from_erlang ("Bob", 25)
 
-      assert_eq result (Ok ("Bob", 25))
-    }
-  }
+        let result = do {
+          Ok(name) <- decode_element 0 string data
+          Ok(age) <- decode_element 1 int data
+          Ok((name, age))
+        } else {
+          Err(e) -> Err(e)
+        }
+
+        assert_eq result (Ok ("Bob", 25))
+      })
+    })
+  })
 }

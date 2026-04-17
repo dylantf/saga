@@ -1045,7 +1045,6 @@ impl LanguageServer for Backend {
             Err(_) => return Ok(None),
         };
         let mut p = parser::Parser::new(tokens);
-        p.test_mode = source.contains("import Std.Test");
         let annotated = match p.parse_program_annotated() {
             Ok(prog) => prog,
             Err(_) => return Ok(None),

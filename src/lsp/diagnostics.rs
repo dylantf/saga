@@ -73,7 +73,6 @@ pub fn check(checker: typechecker::Checker, text: &str) -> CheckSnapshot {
     };
 
     let mut parser = parser::Parser::new(tokens);
-    parser.test_mode = text.contains("import Std.Test");
     let mut program = match parser.parse_program() {
         Ok(program) => program,
         Err(e) => {
