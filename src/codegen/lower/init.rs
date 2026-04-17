@@ -164,7 +164,6 @@ impl<'a> Lowerer<'a> {
     fn register_local_module_decls(
         &mut self,
         program: &ast::Program,
-        module_name: &str,
         source_module_name: &str,
         has_module_decl: bool,
         _effect_canonical: &HashMap<String, String>,
@@ -253,7 +252,7 @@ impl<'a> Lowerer<'a> {
                                 .resolved_effect_refs_for_module(source_module_name, &body.effects),
                             arms: body.arms.iter().map(|a| a.node.clone()).collect(),
                             return_clause: body.return_clause.clone(),
-                            source_module: Some(module_name.to_string()),
+                            source_module: Some(source_module_name.to_string()),
                         },
                     );
                 }
@@ -610,7 +609,9 @@ impl<'a> Lowerer<'a> {
                         .check_result
                         .env
                         .get(name)
-                        .map(|scheme| util::param_types_from_type(&self.check_result.sub.apply(&scheme.ty)))
+                        .map(|scheme| {
+                            util::param_types_from_type(&self.check_result.sub.apply(&scheme.ty))
+                        })
                         .unwrap_or_default();
                     let canonical = format!("{}.{}", source_module_name, name);
                     self.fun_info.entry(canonical).or_insert(FunInfo {
@@ -646,7 +647,6 @@ impl<'a> Lowerer<'a> {
             self.initialize_canonical_name_maps(program, &source_module_name);
         self.register_local_module_decls(
             program,
-            module_name,
             &source_module_name,
             has_module_decl,
             &effect_canonical,
