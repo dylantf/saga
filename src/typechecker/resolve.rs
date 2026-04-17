@@ -613,7 +613,6 @@ impl<'a> Resolver<'a> {
                     self.pop_value_scope();
                 }
             }
-            Decl::TopExpr { value, .. } => self.resolve_expr(value),
             Decl::DictConstructor { methods, .. } => {
                 for method in methods {
                     self.resolve_expr(method);

@@ -1,251 +1,257 @@
-import Std.Test (describe, test, assert_eq, assert_true, assert_false, assert_just, assert_nothing)
+module StringTest
+
+import Std.Test (Register, describe, test, assert_eq, assert_true, assert_false, assert_just, assert_nothing)
 import Std.String as Str
 
-describe "String" {
 
-  describe "length" {
-    test "empty string" {
-      "" |> Str.length |> assert_eq 0
-    }
+pub fun tests : Unit -> Unit needs {Register}
+tests () = {
+  describe "String" (fun () -> {
 
-    test "ascii string" {
-      "hello" |> Str.length |> assert_eq 5
-    }
-  }
+    describe "length" (fun () -> {
+      test "empty string" (fun () -> {
+        "" |> Str.length |> assert_eq 0
+      })
 
-  describe "is_empty" {
-    test "empty string" {
-      "" |> Str.is_empty |> assert_true
-    }
+      test "ascii string" (fun () -> {
+        "hello" |> Str.length |> assert_eq 5
+      })
+    })
 
-    test "non-empty string" {
-      "hi" |> Str.is_empty |> assert_false
-    }
-  }
+    describe "is_empty" (fun () -> {
+      test "empty string" (fun () -> {
+        "" |> Str.is_empty |> assert_true
+      })
 
-  describe "trim" {
-    test "removes whitespace" {
-      "  hello  " |> Str.trim |> assert_eq "hello"
-    }
-  }
+      test "non-empty string" (fun () -> {
+        "hi" |> Str.is_empty |> assert_false
+      })
+    })
 
-  describe "to_lower and to_upper" {
-    test "to_lower" {
-      "Hello World" |> Str.to_lower |> assert_eq "hello world"
-    }
+    describe "trim" (fun () -> {
+      test "removes whitespace" (fun () -> {
+        "  hello  " |> Str.trim |> assert_eq "hello"
+      })
+    })
 
-    test "to_upper" {
-      "Hello World" |> Str.to_upper |> assert_eq "HELLO WORLD"
-    }
-  }
+    describe "to_lower and to_upper" (fun () -> {
+      test "to_lower" (fun () -> {
+        "Hello World" |> Str.to_lower |> assert_eq "hello world"
+      })
 
-  describe "reverse" {
-    test "reverses a string" {
-      "hello" |> Str.reverse |> assert_eq "olleh"
-    }
-  }
+      test "to_upper" (fun () -> {
+        "Hello World" |> Str.to_upper |> assert_eq "HELLO WORLD"
+      })
+    })
 
-  describe "contains" {
-    test "true when present" {
-      "hello world" |> Str.contains "world" |> assert_true
-    }
+    describe "reverse" (fun () -> {
+      test "reverses a string" (fun () -> {
+        "hello" |> Str.reverse |> assert_eq "olleh"
+      })
+    })
 
-    test "false when absent" {
-      "hello world" |> Str.contains "xyz" |> assert_false
-    }
-  }
+    describe "contains" (fun () -> {
+      test "true when present" (fun () -> {
+        "hello world" |> Str.contains "world" |> assert_true
+      })
 
-  describe "starts_with" {
-    test "true" {
-      "hello world" |> Str.starts_with "hello" |> assert_true
-    }
+      test "false when absent" (fun () -> {
+        "hello world" |> Str.contains "xyz" |> assert_false
+      })
+    })
 
-    test "false" {
-      "hello world" |> Str.starts_with "world" |> assert_false
-    }
-  }
+    describe "starts_with" (fun () -> {
+      test "true" (fun () -> {
+        "hello world" |> Str.starts_with "hello" |> assert_true
+      })
 
-  describe "ends_with" {
-    test "true" {
-      "hello world" |> Str.ends_with "world" |> assert_true
-    }
+      test "false" (fun () -> {
+        "hello world" |> Str.starts_with "world" |> assert_false
+      })
+    })
 
-    test "false" {
-      "hello world" |> Str.ends_with "hello" |> assert_false
-    }
-  }
+    describe "ends_with" (fun () -> {
+      test "true" (fun () -> {
+        "hello world" |> Str.ends_with "world" |> assert_true
+      })
 
-  describe "split" {
-    test "splits by separator" {
-      "a,b,c" |> Str.split "," |> assert_eq ["a", "b", "c"]
-    }
+      test "false" (fun () -> {
+        "hello world" |> Str.ends_with "hello" |> assert_false
+      })
+    })
 
-    test "no separator found" {
-      "hello" |> Str.split "," |> assert_eq ["hello"]
-    }
-  }
+    describe "split" (fun () -> {
+      test "splits by separator" (fun () -> {
+        "a,b,c" |> Str.split "," |> assert_eq ["a", "b", "c"]
+      })
 
-  describe "replace" {
-    test "replaces first occurrence" {
-      "aaa" |> Str.replace "a" "b" |> assert_eq "baa"
-    }
-  }
+      test "no separator found" (fun () -> {
+        "hello" |> Str.split "," |> assert_eq ["hello"]
+      })
+    })
 
-  describe "replace_all" {
-    test "replaces all occurrences" {
-      "aaa" |> Str.replace_all "a" "b" |> assert_eq "bbb"
-    }
+    describe "replace" (fun () -> {
+      test "replaces first occurrence" (fun () -> {
+        "aaa" |> Str.replace "a" "b" |> assert_eq "baa"
+      })
+    })
 
-    test "no match is a no-op" {
-      "hello" |> Str.replace_all "x" "y" |> assert_eq "hello"
-    }
-  }
+    describe "replace_all" (fun () -> {
+      test "replaces all occurrences" (fun () -> {
+        "aaa" |> Str.replace_all "a" "b" |> assert_eq "bbb"
+      })
 
-  describe "join" {
-    test "joins with separator" {
-      Str.join ", " ["a", "b", "c"] |> assert_eq "a, b, c"
-    }
+      test "no match is a no-op" (fun () -> {
+        "hello" |> Str.replace_all "x" "y" |> assert_eq "hello"
+      })
+    })
 
-    test "single element" {
-      Str.join ", " ["a"] |> assert_eq "a"
-    }
+    describe "join" (fun () -> {
+      test "joins with separator" (fun () -> {
+        Str.join ", " ["a", "b", "c"] |> assert_eq "a, b, c"
+      })
 
-    test "empty list" {
-      Str.join ", " [] |> assert_eq ""
-    }
-  }
+      test "single element" (fun () -> {
+        Str.join ", " ["a"] |> assert_eq "a"
+      })
 
-  describe "slice" {
-    test "extracts substring" {
-      "hello world" |> Str.slice 6 5 |> assert_eq "world"
-    }
+      test "empty list" (fun () -> {
+        Str.join ", " [] |> assert_eq ""
+      })
+    })
 
-    test "from start" {
-      "hello world" |> Str.slice 0 5 |> assert_eq "hello"
-    }
-  }
+    describe "slice" (fun () -> {
+      test "extracts substring" (fun () -> {
+        "hello world" |> Str.slice 6 5 |> assert_eq "world"
+      })
 
-  describe "find" {
-    test "finds substring" {
-      "hello world" |> Str.find "world" |> assert_just
-    }
+      test "from start" (fun () -> {
+        "hello world" |> Str.slice 0 5 |> assert_eq "hello"
+      })
+    })
 
-    test "returns Nothing when absent" {
-      "hello" |> Str.find "xyz" |> assert_nothing
-    }
-  }
+    describe "find" (fun () -> {
+      test "finds substring" (fun () -> {
+        "hello world" |> Str.find "world" |> assert_just
+      })
 
-  describe "strip_prefix" {
-    test "strips matching prefix" {
-      "hello world" |> Str.strip_prefix "hello " |> assert_eq (Just "world")
-    }
+      test "returns Nothing when absent" (fun () -> {
+        "hello" |> Str.find "xyz" |> assert_nothing
+      })
+    })
 
-    test "no match returns Nothing" {
-      "hello" |> Str.strip_prefix "xyz" |> assert_nothing
-    }
-  }
+    describe "strip_prefix" (fun () -> {
+      test "strips matching prefix" (fun () -> {
+        "hello world" |> Str.strip_prefix "hello " |> assert_eq (Just "world")
+      })
 
-  describe "repeat" {
-    test "repeats string" {
-      "ab" |> Str.repeat 3 |> assert_eq "ababab"
-    }
+      test "no match returns Nothing" (fun () -> {
+        "hello" |> Str.strip_prefix "xyz" |> assert_nothing
+      })
+    })
 
-    test "zero times" {
-      "ab" |> Str.repeat 0 |> assert_eq ""
-    }
-  }
+    describe "repeat" (fun () -> {
+      test "repeats string" (fun () -> {
+        "ab" |> Str.repeat 3 |> assert_eq "ababab"
+      })
 
-  describe "pad_left" {
-    test "pads to width" {
-      "42" |> Str.pad_left 5 "0" |> assert_eq "00042"
-    }
+      test "zero times" (fun () -> {
+        "ab" |> Str.repeat 0 |> assert_eq ""
+      })
+    })
 
-    test "no padding needed" {
-      "hello" |> Str.pad_left 3 " " |> assert_eq "hello"
-    }
-  }
+    describe "pad_left" (fun () -> {
+      test "pads to width" (fun () -> {
+        "42" |> Str.pad_left 5 "0" |> assert_eq "00042"
+      })
 
-  describe "pad_right" {
-    test "pads to width" {
-      "hi" |> Str.pad_right 5 "." |> assert_eq "hi..."
-    }
+      test "no padding needed" (fun () -> {
+        "hello" |> Str.pad_left 3 " " |> assert_eq "hello"
+      })
+    })
 
-    test "no padding needed" {
-      "hello" |> Str.pad_right 3 " " |> assert_eq "hello"
-    }
-  }
+    describe "pad_right" (fun () -> {
+      test "pads to width" (fun () -> {
+        "hi" |> Str.pad_right 5 "." |> assert_eq "hi..."
+      })
 
-  describe "graphemes" {
-    test "splits into characters" {
-      "abc" |> Str.graphemes |> assert_eq ["a", "b", "c"]
-    }
-  }
+      test "no padding needed" (fun () -> {
+        "hello" |> Str.pad_right 3 " " |> assert_eq "hello"
+      })
+    })
 
-  describe "is_alpha" {
-    test "all letters" {
-      "hello" |> Str.is_alpha |> assert_true
-    }
+    describe "graphemes" (fun () -> {
+      test "splits into characters" (fun () -> {
+        "abc" |> Str.graphemes |> assert_eq ["a", "b", "c"]
+      })
+    })
 
-    test "contains digits" {
-      "hello1" |> Str.is_alpha |> assert_false
-    }
+    describe "is_alpha" (fun () -> {
+      test "all letters" (fun () -> {
+        "hello" |> Str.is_alpha |> assert_true
+      })
 
-    test "empty string" {
-      "" |> Str.is_alpha |> assert_false
-    }
-  }
+      test "contains digits" (fun () -> {
+        "hello1" |> Str.is_alpha |> assert_false
+      })
 
-  describe "is_digit" {
-    test "all digits" {
-      "12345" |> Str.is_digit |> assert_true
-    }
+      test "empty string" (fun () -> {
+        "" |> Str.is_alpha |> assert_false
+      })
+    })
 
-    test "contains letters" {
-      "123a" |> Str.is_digit |> assert_false
-    }
+    describe "is_digit" (fun () -> {
+      test "all digits" (fun () -> {
+        "12345" |> Str.is_digit |> assert_true
+      })
 
-    test "empty string" {
-      "" |> Str.is_digit |> assert_false
-    }
-  }
+      test "contains letters" (fun () -> {
+        "123a" |> Str.is_digit |> assert_false
+      })
 
-  describe "is_alphanumeric" {
-    test "letters and digits" {
-      "abc123" |> Str.is_alphanumeric |> assert_true
-    }
+      test "empty string" (fun () -> {
+        "" |> Str.is_digit |> assert_false
+      })
+    })
 
-    test "contains punctuation" {
-      "abc!" |> Str.is_alphanumeric |> assert_false
-    }
-  }
+    describe "is_alphanumeric" (fun () -> {
+      test "letters and digits" (fun () -> {
+        "abc123" |> Str.is_alphanumeric |> assert_true
+      })
 
-  describe "is_upper" {
-    test "all uppercase" {
-      "HELLO" |> Str.is_upper |> assert_true
-    }
+      test "contains punctuation" (fun () -> {
+        "abc!" |> Str.is_alphanumeric |> assert_false
+      })
+    })
 
-    test "mixed case" {
-      "Hello" |> Str.is_upper |> assert_false
-    }
-  }
+    describe "is_upper" (fun () -> {
+      test "all uppercase" (fun () -> {
+        "HELLO" |> Str.is_upper |> assert_true
+      })
 
-  describe "is_lower" {
-    test "all lowercase" {
-      "hello" |> Str.is_lower |> assert_true
-    }
+      test "mixed case" (fun () -> {
+        "Hello" |> Str.is_upper |> assert_false
+      })
+    })
 
-    test "mixed case" {
-      "Hello" |> Str.is_lower |> assert_false
-    }
-  }
+    describe "is_lower" (fun () -> {
+      test "all lowercase" (fun () -> {
+        "hello" |> Str.is_lower |> assert_true
+      })
 
-  describe "is_whitespace" {
-    test "spaces and tabs" {
-      "  \t " |> Str.is_whitespace |> assert_true
-    }
+      test "mixed case" (fun () -> {
+        "Hello" |> Str.is_lower |> assert_false
+      })
+    })
 
-    test "contains non-whitespace" {
-      " a " |> Str.is_whitespace |> assert_false
-    }
-  }
+    describe "is_whitespace" (fun () -> {
+      test "spaces and tabs" (fun () -> {
+        "  \t " |> Str.is_whitespace |> assert_true
+      })
+
+      test "contains non-whitespace" (fun () -> {
+        " a " |> Str.is_whitespace |> assert_false
+      })
+    })
+  })
 }

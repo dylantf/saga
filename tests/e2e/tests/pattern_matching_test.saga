@@ -1,4 +1,6 @@
-import Std.Test (describe, test, assert_eq, assert_true, assert_false)
+module PatternMatchingTest
+
+import Std.Test (Register, describe, test, assert_eq, assert_true, assert_false)
 
 # --- Types for testing ---
 
@@ -187,341 +189,345 @@ guarded_gate_chain n ok = do {
 
 # --- Tests ---
 
-describe "pattern matching" {
-
-  describe "ADT patterns" {
-    test "match Circle" {
-      assert_eq (describe_shape (Circle 5.0)) "circle"
-    }
-
-    test "match Rect" {
-      assert_eq (describe_shape (Rect 3.0 4.0)) "rectangle"
-    }
-
-    test "match Triangle" {
-      assert_eq (describe_shape (Triangle 3.0 4.0 5.0)) "triangle"
-    }
-
-    test "extract fields from constructors" {
-      assert_eq (area (Circle 5.0)) 25.0
-      assert_eq (area (Rect 3.0 4.0)) 12.0
-      assert_eq (area (Triangle 6.0 8.0 10.0)) 24.0
-    }
-  }
-
-  describe "record patterns with guards" {
-    test "quadrant I" {
-      assert_eq (quadrant (Point { x: 3, y: 4 })) "Q1"
-    }
-
-    test "quadrant II" {
-      assert_eq (quadrant (Point { x: -2, y: 5 })) "Q2"
-    }
-
-    test "quadrant III" {
-      assert_eq (quadrant (Point { x: -1, y: -1 })) "Q3"
-    }
-
-    test "quadrant IV" {
-      assert_eq (quadrant (Point { x: 3, y: -4 })) "Q4"
-    }
-
-    test "origin" {
-      assert_eq (quadrant (Point { x: 0, y: 0 })) "origin or axis"
-    }
-  }
-
-  describe "list patterns" {
-    test "empty list" {
-      assert_eq (describe_list ([] : List Int)) "empty"
-    }
-
-    test "single element" {
-      assert_eq (describe_list [42]) "one"
-    }
-
-    test "two elements" {
-      assert_eq (describe_list [1, 2]) "two"
-    }
-
-    test "many elements" {
-      assert_eq (describe_list [1, 2, 3]) "many"
-    }
-  }
-
-  describe "string patterns" {
-    test "prefix split" {
-      assert_eq (classify_log "[ERROR]: disk full") "Error: disk full"
-    }
-
-    test "prefix split warn" {
-      assert_eq (classify_log "[WARN]: low memory") "Warning: low memory"
-    }
-
-    test "exact match" {
-      assert_eq (classify_log "hello") "greeting"
-    }
-
-    test "wildcard fallback" {
-      assert_eq (classify_log "something else") "unknown"
-    }
-  }
-
-  describe "disjunctive patterns" {
-    test "circle matches fun shapes" {
-      assert_true (is_shape_fun (Circle 1.0))
-    }
-
-    test "rect matches fun shapes" {
-      assert_true (is_shape_fun (Rect 1.0 2.0))
-    }
-
-    test "triangle is not fun" {
-      assert_false (is_shape_fun (Triangle 1.0 2.0 3.0))
-    }
-
-    # Regression: or-pattern arms that bind a variable used to trigger a
-    # spurious "unused variable" warning on the first disjunct because the
-    # cloned arm bodies shared NodeIds, so resolve's usage→def map would
-    # overwrite the first arm's binding.
-    test "or-pattern binding resolves in first arm" {
-      assert_eq (first_or_only (1, Just 7)) 70
-    }
-
-    test "or-pattern binding resolves in second arm" {
-      assert_eq (first_or_only (2, Just 9)) 90
-    }
-
-    test "or-pattern fallthrough when no arm matches" {
-      assert_eq (first_or_only (3, Just 5)) 0
-    }
-  }
-
-  describe "function head guards" {
-    test "fizzbuzz 15 is FizzBuzz" {
-      assert_eq (fizzbuzz 15) "FizzBuzz"
-    }
-
-    test "fizzbuzz 3 is Fizz" {
-      assert_eq (fizzbuzz 3) "Fizz"
-    }
-
-    test "fizzbuzz 5 is Buzz" {
-      assert_eq (fizzbuzz 5) "Buzz"
-    }
-
-    test "fizzbuzz 7 is 7" {
-      assert_eq (fizzbuzz 7) "7"
-    }
-  }
-
-  describe "recursion" {
-    test "fibonacci" {
-      assert_eq (fib 0) 0
-      assert_eq (fib 1) 1
-      assert_eq (fib 10) 55
-    }
-  }
-
-  describe "recursive data structures (BST)" {
-    let tree = List.foldl bst_insert Empty [5, 3, 7, 1, 4, 6, 8]
-
-    test "in-order traversal is sorted" {
-      assert_eq (bst_to_list tree) [1, 3, 4, 5, 6, 7, 8]
-    }
-
-    test "contains inserted element" {
-      assert_true (bst_contains tree 4)
-    }
-
-    test "does not contain missing element" {
-      assert_false (bst_contains tree 9)
-    }
-  }
-
-  # Regression: the case scrutinee used to greedily parse `Ctor { ... }` as a
-  # record create even under `no_brace_app`, so `case f x Nothing { ... }`
-  # would swallow the case arms into a bogus `Nothing { ... }` record literal.
-  describe "case scrutinee ending in a bare constructor" {
-    test "application ending in Nothing" {
-      let r = case Maybe.or_else Nothing (Just 5) {
-        Just n -> n
-        Nothing -> 0
-      }
-      assert_eq r 5
-    }
-
-    test "application with trailing bare constructor arg" {
-      # Simulates `case derive sesh.date Nothing { ... }` shape
-      let pair = (True, Nothing)
-      let r = case Maybe.unwrap_or 99 (snd pair) {
-        n -> n
-      }
-      assert_eq r 99
-    }
-  }
-}
-
-describe "destructuring" {
-
-  describe "let destructuring" {
-    test "tuple destructuring" {
-      let (a, b) = (10, 20)
-      assert_eq a 10
-      assert_eq b 20
-    }
-
-    test "nested tuple destructuring" {
-      let ((a, b), (c, d)) = ((1, 2), (3, 4))
-      assert_eq (a + b + c + d) 10
-    }
-
-    test "record destructuring" {
-      let origin = Point { x: 5, y: 10 }
-      let Point { x, y } = origin
-      assert_eq x 5
-      assert_eq y 10
-    }
-
-    test "record destructuring with field alias" {
-      let p = Point { x: 7, y: 8 }
-      let Point { x: px, .. } = p
-      assert_eq px 7
-    }
-
-    test "single-constructor type destructuring" {
-      let Wrapped inner = Wrapped 42
-      assert_eq inner 42
-    }
-  }
-
-  describe "function argument destructuring" {
-    test "tuple args" {
-      assert_eq (add_pairs (1, 2) (3, 4)) (4, 6)
-    }
-  }
-
-  describe "tuples" {
-    test "swap" {
-      assert_eq (swap (1, 2)) (2, 1)
-    }
-
-    test "fst and snd" {
-      let p = ("hello", 42)
-      assert_eq (fst p) "hello"
-      assert_eq (snd p) 42
-    }
-
-    test "nested tuple pattern" {
-      let result = case ((1, 2), (3, 4)) {
-        ((a, b), (c, d)) -> a + b + c + d
-      }
-      assert_eq result 10
-    }
-  }
-}
-
-describe "records" {
-
-  describe "creation and access" {
-    test "create and access fields" {
-      let p = Point { x: 3, y: 4 }
-      assert_eq p.x 3
-      assert_eq p.y 4
-    }
-
-    test "record update" {
-      let p = Point { x: 3, y: 4 }
-      let p2 = { p | x: 10 }
-      assert_eq p2.x 10
-      assert_eq p2.y 4
-    }
-  }
-
-  describe "polymorphic records" {
-    test "int box" {
-      assert_eq (unwrap_box (Box { value: 42 })) 42
-    }
-
-    test "string box" {
-      assert_eq (unwrap_box (Box { value: "hello" })) "hello"
-    }
-
-    test "update same type" {
-      let b = Box { value: 42 }
-      let b2 = { b | value: 99 }
-      assert_eq (unwrap_box b2) 99
-    }
-  }
-
-  describe "anonymous record updates" {
-    test "update nested anonymous record" {
-      let h = House { year_built: 2005, address: { number: 123, street: "Fake Street" } }
-      let h2 = { h | address: { h.address | street: "Real Street" } }
-      assert_eq h2.address.street "Real Street"
-      assert_eq h2.address.number 123
-      assert_eq h2.year_built 2005
-    }
-
-    test "update named record containing anonymous record" {
-      let h = House { year_built: 2005, address: { number: 123, street: "Fake Street" } }
-      let h2 = { h | year_built: 2020 }
-      assert_eq h2.year_built 2020
-      assert_eq h2.address.street "Fake Street"
-    }
-  }
-}
-
-describe "do...else" {
-
-  test "successful chain" {
-    assert_eq (lookup_grade 1) (Ok "A")
-  }
-
-  test "early bail on first step" {
-    assert_eq (lookup_grade 99) (Err "no user 99")
-  }
-
-  test "success returns unwrapped value" {
-    assert_eq (score_or_zero 1) 95
-  }
-
-  test "failure returns default" {
-    assert_eq (score_or_zero 99) 0
-  }
-
-  test "constructor else arm can handle a later failed binding" {
-    assert_eq (guarded_gate_chain 1 False) 2
-  }
-
-  test "constructor else arm can handle a first-step mismatch" {
-    assert_eq (guarded_gate_chain (-1) True) 2
-  }
-
-  test "wildcard else arm handles constructors not matched by constructor else arm" {
-    assert_eq (guarded_gate_chain 0 True) 3
-  }
-}
-
-describe "list comprehensions" {
-
-  test "simple map" {
-    assert_eq ([x * 2 | x <- [1, 2, 3]]) [2, 4, 6]
-  }
-
-  test "filter" {
-    assert_eq ([x | x <- [1, 2, 3, 4, 5], x % 2 == 0]) [2, 4]
-  }
-
-  test "nested generators (cartesian product)" {
-    assert_eq ([x * 10 + y | x <- [1, 2], y <- [3, 4]]) [13, 14, 23, 24]
-  }
-
-  test "guard with transform" {
-    assert_eq ([x * 2 | x <- [1, 2, 3, 4, 5], x > 3]) [8, 10]
-  }
-
-  test "let binding in comprehension" {
-    assert_eq ([y | x <- [1, 2, 3, 4, 5], let y = x + 10, y > 13]) [14, 15]
-  }
+
+pub fun tests : Unit -> Unit needs {Register}
+tests () = {
+  describe "pattern matching" (fun () -> {
+
+    describe "ADT patterns" (fun () -> {
+      test "match Circle" (fun () -> {
+        assert_eq (describe_shape (Circle 5.0)) "circle"
+      })
+
+      test "match Rect" (fun () -> {
+        assert_eq (describe_shape (Rect 3.0 4.0)) "rectangle"
+      })
+
+      test "match Triangle" (fun () -> {
+        assert_eq (describe_shape (Triangle 3.0 4.0 5.0)) "triangle"
+      })
+
+      test "extract fields from constructors" (fun () -> {
+        assert_eq (area (Circle 5.0)) 25.0
+        assert_eq (area (Rect 3.0 4.0)) 12.0
+        assert_eq (area (Triangle 6.0 8.0 10.0)) 24.0
+      })
+    })
+
+    describe "record patterns with guards" (fun () -> {
+      test "quadrant I" (fun () -> {
+        assert_eq (quadrant (Point { x: 3, y: 4 })) "Q1"
+      })
+
+      test "quadrant II" (fun () -> {
+        assert_eq (quadrant (Point { x: -2, y: 5 })) "Q2"
+      })
+
+      test "quadrant III" (fun () -> {
+        assert_eq (quadrant (Point { x: -1, y: -1 })) "Q3"
+      })
+
+      test "quadrant IV" (fun () -> {
+        assert_eq (quadrant (Point { x: 3, y: -4 })) "Q4"
+      })
+
+      test "origin" (fun () -> {
+        assert_eq (quadrant (Point { x: 0, y: 0 })) "origin or axis"
+      })
+    })
+
+    describe "list patterns" (fun () -> {
+      test "empty list" (fun () -> {
+        assert_eq (describe_list ([] : List Int)) "empty"
+      })
+
+      test "single element" (fun () -> {
+        assert_eq (describe_list [42]) "one"
+      })
+
+      test "two elements" (fun () -> {
+        assert_eq (describe_list [1, 2]) "two"
+      })
+
+      test "many elements" (fun () -> {
+        assert_eq (describe_list [1, 2, 3]) "many"
+      })
+    })
+
+    describe "string patterns" (fun () -> {
+      test "prefix split" (fun () -> {
+        assert_eq (classify_log "[ERROR]: disk full") "Error: disk full"
+      })
+
+      test "prefix split warn" (fun () -> {
+        assert_eq (classify_log "[WARN]: low memory") "Warning: low memory"
+      })
+
+      test "exact match" (fun () -> {
+        assert_eq (classify_log "hello") "greeting"
+      })
+
+      test "wildcard fallback" (fun () -> {
+        assert_eq (classify_log "something else") "unknown"
+      })
+    })
+
+    describe "disjunctive patterns" (fun () -> {
+      test "circle matches fun shapes" (fun () -> {
+        assert_true (is_shape_fun (Circle 1.0))
+      })
+
+      test "rect matches fun shapes" (fun () -> {
+        assert_true (is_shape_fun (Rect 1.0 2.0))
+      })
+
+      test "triangle is not fun" (fun () -> {
+        assert_false (is_shape_fun (Triangle 1.0 2.0 3.0))
+      })
+
+      # Regression: or-pattern arms that bind a variable used to trigger a
+      # spurious "unused variable" warning on the first disjunct because the
+      # cloned arm bodies shared NodeIds, so resolve's usage→def map would
+      # overwrite the first arm's binding.
+      test "or-pattern binding resolves in first arm" (fun () -> {
+        assert_eq (first_or_only (1, Just 7)) 70
+      })
+
+      test "or-pattern binding resolves in second arm" (fun () -> {
+        assert_eq (first_or_only (2, Just 9)) 90
+      })
+
+      test "or-pattern fallthrough when no arm matches" (fun () -> {
+        assert_eq (first_or_only (3, Just 5)) 0
+      })
+    })
+
+    describe "function head guards" (fun () -> {
+      test "fizzbuzz 15 is FizzBuzz" (fun () -> {
+        assert_eq (fizzbuzz 15) "FizzBuzz"
+      })
+
+      test "fizzbuzz 3 is Fizz" (fun () -> {
+        assert_eq (fizzbuzz 3) "Fizz"
+      })
+
+      test "fizzbuzz 5 is Buzz" (fun () -> {
+        assert_eq (fizzbuzz 5) "Buzz"
+      })
+
+      test "fizzbuzz 7 is 7" (fun () -> {
+        assert_eq (fizzbuzz 7) "7"
+      })
+    })
+
+    describe "recursion" (fun () -> {
+      test "fibonacci" (fun () -> {
+        assert_eq (fib 0) 0
+        assert_eq (fib 1) 1
+        assert_eq (fib 10) 55
+      })
+    })
+
+    describe "recursive data structures (BST)" (fun () -> {
+      let tree = List.foldl bst_insert Empty [5, 3, 7, 1, 4, 6, 8]
+
+      test "in-order traversal is sorted" (fun () -> {
+        assert_eq (bst_to_list tree) [1, 3, 4, 5, 6, 7, 8]
+      })
+
+      test "contains inserted element" (fun () -> {
+        assert_true (bst_contains tree 4)
+      })
+
+      test "does not contain missing element" (fun () -> {
+        assert_false (bst_contains tree 9)
+      })
+    })
+
+    # Regression: the case scrutinee used to greedily parse `Ctor { ... }` as a
+    # record create even under `no_brace_app`, so `case f x Nothing { ... }`
+    # would swallow the case arms into a bogus `Nothing { ... }` record literal.
+    describe "case scrutinee ending in a bare constructor" (fun () -> {
+      test "application ending in Nothing" (fun () -> {
+        let r = case Maybe.or_else Nothing (Just 5) {
+          Just n -> n
+          Nothing -> 0
+        }
+        assert_eq r 5
+      })
+
+      test "application with trailing bare constructor arg" (fun () -> {
+        # Simulates `case derive sesh.date Nothing { ... }` shape
+        let pair = (True, Nothing)
+        let r = case Maybe.unwrap_or 99 (snd pair) {
+          n -> n
+        }
+        assert_eq r 99
+      })
+    })
+  })
+
+  describe "destructuring" (fun () -> {
+
+    describe "let destructuring" (fun () -> {
+      test "tuple destructuring" (fun () -> {
+        let (a, b) = (10, 20)
+        assert_eq a 10
+        assert_eq b 20
+      })
+
+      test "nested tuple destructuring" (fun () -> {
+        let ((a, b), (c, d)) = ((1, 2), (3, 4))
+        assert_eq (a + b + c + d) 10
+      })
+
+      test "record destructuring" (fun () -> {
+        let origin = Point { x: 5, y: 10 }
+        let Point { x, y } = origin
+        assert_eq x 5
+        assert_eq y 10
+      })
+
+      test "record destructuring with field alias" (fun () -> {
+        let p = Point { x: 7, y: 8 }
+        let Point { x: px, .. } = p
+        assert_eq px 7
+      })
+
+      test "single-constructor type destructuring" (fun () -> {
+        let Wrapped inner = Wrapped 42
+        assert_eq inner 42
+      })
+    })
+
+    describe "function argument destructuring" (fun () -> {
+      test "tuple args" (fun () -> {
+        assert_eq (add_pairs (1, 2) (3, 4)) (4, 6)
+      })
+    })
+
+    describe "tuples" (fun () -> {
+      test "swap" (fun () -> {
+        assert_eq (swap (1, 2)) (2, 1)
+      })
+
+      test "fst and snd" (fun () -> {
+        let p = ("hello", 42)
+        assert_eq (fst p) "hello"
+        assert_eq (snd p) 42
+      })
+
+      test "nested tuple pattern" (fun () -> {
+        let result = case ((1, 2), (3, 4)) {
+          ((a, b), (c, d)) -> a + b + c + d
+        }
+        assert_eq result 10
+      })
+    })
+  })
+
+  describe "records" (fun () -> {
+
+    describe "creation and access" (fun () -> {
+      test "create and access fields" (fun () -> {
+        let p = Point { x: 3, y: 4 }
+        assert_eq p.x 3
+        assert_eq p.y 4
+      })
+
+      test "record update" (fun () -> {
+        let p = Point { x: 3, y: 4 }
+        let p2 = { p | x: 10 }
+        assert_eq p2.x 10
+        assert_eq p2.y 4
+      })
+    })
+
+    describe "polymorphic records" (fun () -> {
+      test "int box" (fun () -> {
+        assert_eq (unwrap_box (Box { value: 42 })) 42
+      })
+
+      test "string box" (fun () -> {
+        assert_eq (unwrap_box (Box { value: "hello" })) "hello"
+      })
+
+      test "update same type" (fun () -> {
+        let b = Box { value: 42 }
+        let b2 = { b | value: 99 }
+        assert_eq (unwrap_box b2) 99
+      })
+    })
+
+    describe "anonymous record updates" (fun () -> {
+      test "update nested anonymous record" (fun () -> {
+        let h = House { year_built: 2005, address: { number: 123, street: "Fake Street" } }
+        let h2 = { h | address: { h.address | street: "Real Street" } }
+        assert_eq h2.address.street "Real Street"
+        assert_eq h2.address.number 123
+        assert_eq h2.year_built 2005
+      })
+
+      test "update named record containing anonymous record" (fun () -> {
+        let h = House { year_built: 2005, address: { number: 123, street: "Fake Street" } }
+        let h2 = { h | year_built: 2020 }
+        assert_eq h2.year_built 2020
+        assert_eq h2.address.street "Fake Street"
+      })
+    })
+  })
+
+  describe "do...else" (fun () -> {
+
+    test "successful chain" (fun () -> {
+      assert_eq (lookup_grade 1) (Ok "A")
+    })
+
+    test "early bail on first step" (fun () -> {
+      assert_eq (lookup_grade 99) (Err "no user 99")
+    })
+
+    test "success returns unwrapped value" (fun () -> {
+      assert_eq (score_or_zero 1) 95
+    })
+
+    test "failure returns default" (fun () -> {
+      assert_eq (score_or_zero 99) 0
+    })
+
+    test "constructor else arm can handle a later failed binding" (fun () -> {
+      assert_eq (guarded_gate_chain 1 False) 2
+    })
+
+    test "constructor else arm can handle a first-step mismatch" (fun () -> {
+      assert_eq (guarded_gate_chain (-1) True) 2
+    })
+
+    test "wildcard else arm handles constructors not matched by constructor else arm" (fun () -> {
+      assert_eq (guarded_gate_chain 0 True) 3
+    })
+  })
+
+  describe "list comprehensions" (fun () -> {
+
+    test "simple map" (fun () -> {
+      assert_eq ([x * 2 | x <- [1, 2, 3]]) [2, 4, 6]
+    })
+
+    test "filter" (fun () -> {
+      assert_eq ([x | x <- [1, 2, 3, 4, 5], x % 2 == 0]) [2, 4]
+    })
+
+    test "nested generators (cartesian product)" (fun () -> {
+      assert_eq ([x * 10 + y | x <- [1, 2], y <- [3, 4]]) [13, 14, 23, 24]
+    })
+
+    test "guard with transform" (fun () -> {
+      assert_eq ([x * 2 | x <- [1, 2, 3, 4, 5], x > 3]) [8, 10]
+    })
+
+    test "let binding in comprehension" (fun () -> {
+      assert_eq ([y | x <- [1, 2, 3, 4, 5], let y = x + 10, y > 13]) [14, 15]
+    })
+  })
 }

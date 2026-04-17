@@ -1,6 +1,6 @@
 use super::{ParseError, Parser};
 use crate::ast::*;
-use crate::token::{Span, StringKind, Token};
+use crate::token::{Span, Token};
 
 impl Parser {
     /// Parse record fields: `field: expr, field2: expr2, ...`
@@ -877,49 +877,6 @@ impl Parser {
                     kind: ExprKind::StringInterp {
                         parts: string_parts,
                         kind,
-                    },
-                })
-            }
-            Token::Ident(ref i)
-                if self.test_mode
-                    && (i == "test" || i == "describe" || i == "skip" || i == "only")
-                    && matches!(self.peek(), Token::String(..)) =>
-            {
-                // Parse test/describe sugar, preserving the block body as-is.
-                // Lambda wrapping (fun () -> body) happens in desugar.rs so
-                // the formatter can round-trip the original syntax.
-                let func_name = i.clone();
-                let name_str = self.expect_string()?;
-                let name_span = self.tokens[self.pos - 1].span;
-                let body = self.parse_expr(0)?;
-                let body_span = body.span;
-
-                let func = Expr {
-                    id: self.next_id(),
-                    span,
-                    kind: ExprKind::Var { name: func_name },
-                };
-                let name_lit = Expr {
-                    id: self.next_id(),
-                    span: name_span,
-                    kind: ExprKind::Lit {
-                        value: Lit::String(name_str, StringKind::Normal),
-                    },
-                };
-                let app1 = Expr {
-                    id: self.next_id(),
-                    span: span.to(name_span),
-                    kind: ExprKind::App {
-                        func: Box::new(func),
-                        arg: Box::new(name_lit),
-                    },
-                };
-                Ok(Expr {
-                    id: self.next_id(),
-                    span: span.to(body_span),
-                    kind: ExprKind::App {
-                        func: Box::new(app1),
-                        arg: Box::new(body),
                     },
                 })
             }

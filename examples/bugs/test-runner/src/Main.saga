@@ -1,3 +1,7 @@
+module Main
+
+# import Repro
+# import Repro.Sample
 import Std.IO (console, println)
 
 pub fun module_a : Unit -> Unit needs {Reg}

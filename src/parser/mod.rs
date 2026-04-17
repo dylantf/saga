@@ -39,9 +39,6 @@ pub struct Parser {
     /// When true, `{` is not treated as starting a function argument.
     /// Used when parsing case scrutinees where `{` begins the branch block.
     pub(super) no_brace_app: bool,
-    /// When true, `test` and `describe` followed by a string literal
-    /// are desugared into function calls. Only enabled for test files.
-    pub test_mode: bool,
 }
 
 #[derive(Debug)]
@@ -58,7 +55,6 @@ impl Parser {
             tokens,
             pos: 0,
             no_brace_app: false,
-            test_mode: false,
         }
     }
 
@@ -103,16 +99,6 @@ impl Parser {
             Token::Ident(s) => Ok(s),
             tok => Err(ParseError {
                 message: format!("expected identifier, got {:?}", tok),
-                span: self.tokens[self.pos - 1].span,
-            }),
-        }
-    }
-
-    pub(super) fn expect_string(&mut self) -> Result<String, ParseError> {
-        match self.advance() {
-            Token::String(s, _) => Ok(s),
-            tok => Err(ParseError {
-                message: format!("expected string literal, got {:?}", tok),
                 span: self.tokens[self.pos - 1].span,
             }),
         }

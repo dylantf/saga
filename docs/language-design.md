@@ -635,58 +635,60 @@ up after N failures - all in userspace, no language support needed.
 
 ## 13. Testing
 
-Tests use the effect system. `Std.Test` defines two effects: `Assert` (for
-assertions within a test) and `TestRunner` (for reporting pass/fail/skip).
-The `test`, `describe`, and `skip` functions are ordinary effect-performing
-functions, not language primitives.
-
-The parser provides syntactic sugar in test mode: `test "name" { body }`
-desugars to `test "name" (fun () -> { body })`, and likewise for `describe`
-and `skip`. This is purely cosmetic -- the curly-brace form is more readable
-but means the same thing.
+Tests use the effect system, but test authoring is entirely library-level.
+`Std.Test` defines `Test` (for assertions inside an individual test body) and
+`Register` (for registering tests and groups during collection). The `test`,
+`describe`, `skip`, and `only` helpers are ordinary functions, not language
+primitives.
 
 ```
-import Std.Test (describe, test, skip, assert_eq)
+module MathTest
+
+import Std.Test (Register, describe, test, skip, assert_eq)
 import MathLib (add, double)
 
-describe "MathLib" {
-  describe "add" {
-    test "adds positive numbers" {
-      assert_eq (add 2 3) 5
-    }
+pub fun tests : Unit -> Unit needs {Register}
+tests () = {
+  describe "MathLib" (fun () -> {
+    describe "add" (fun () -> {
+      test "adds positive numbers" (fun () -> {
+        assert_eq (add 2 3) 5
+      })
 
-    test "adds negative numbers" {
-      assert_eq (add (-1) (-2)) (-3)
-    }
-  }
+      test "adds negative numbers" (fun () -> {
+        assert_eq (add (-1) (-2)) (-3)
+      })
+    })
 
-  describe "double" {
-    test "doubles a number" {
-      assert_eq (double 5) 10
-    }
-  }
-}
+    describe "double" (fun () -> {
+      test "doubles a number" (fun () -> {
+        assert_eq (double 5) 10
+      })
+    })
+  })
 
-skip "not implemented yet" {
-  assert_eq 1 2
+  skip "not implemented yet" (fun () -> {
+    assert_eq 1 2
+  })
 }
 ```
 
 Test files live in a `tests/` directory (configurable via `project.toml`).
-Running `saga test` discovers all `.saga` files in that directory. If a test
-file has no explicit `main` function, the runner wraps its body in
-`main () = run (fun () -> { ... })`, which attaches the default
-`test_handler` and prints a summary.
+Running `saga test` discovers test modules, generates a synthetic entry module,
+builds the suite through the normal project pipeline, and runs everything in a
+single BEAM VM.
 
 Under the hood:
 
-- `test` runs the body with an `Assert` handler that collects failures via
-  multi-shot continuations, then reports pass/fail through `TestRunner`
-- `describe` calls `enter_group!` / `leave_group!` for indentation tracking
-- `skip` calls `skip_test!` without executing the body
-- `run` attaches `test_handler` (a named handler for `TestRunner`), threads
-  state through the computation, prints the summary, and calls `Process.exit 1`
-  if any test failed
+- `test` / `skip` / `only` perform `Register` to capture names, modes, and
+  thunks
+- `describe` performs `enter_group!` / `leave_group!` to preserve structure
+- `run_modules` collects all selected modules first, applies global `only`,
+  then executes tests one by one
+- each test body runs with a `Test` handler attached, so the first failed
+  assertion aborts that test only
+- panics are caught per test via `catch_panic`, so one crashing test does not
+  take down the suite
 
 The exit code behavior means `saga test` works directly in CI pipelines.
 

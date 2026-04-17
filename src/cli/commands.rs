@@ -1,4 +1,4 @@
-use saga::{codegen, elaborate, project_config, project_config::ProjectConfig};
+use saga::{codegen, elaborate, project_config, project_config::ProjectConfig, typechecker};
 
 use std::fs;
 use std::path::PathBuf;
@@ -390,72 +390,78 @@ pub fn cmd_test(filter: Option<&str>) {
         all_test_files
     };
 
-    // Build the main project first (compiles all non-test modules)
-    let pb = build_project("test");
+    let test_module_map = typechecker::scan_source_dir(&tests_dir).unwrap_or_else(|e| {
+        eprintln!("Error scanning test files: {}", e);
+        std::process::exit(1);
+    });
 
-    // Build and run each test file, reusing the project's compiled modules.
-    for test_file in &test_files {
-        let source = fs::read_to_string(test_file).unwrap_or_else(|e| {
-            eprintln!("Error reading {}: {}", test_file.display(), e);
-            std::process::exit(1);
-        });
-        let source_path = test_file.to_string_lossy().to_string();
+    let test_files: Vec<PathBuf> = test_files
+        .iter()
+        .map(|path| path.canonicalize().unwrap_or_else(|_| path.clone()))
+        .collect();
 
-        let mut checker = make_checker(Some(project_root.clone()));
+    let test_modules: Vec<String> = test_files
+        .iter()
+        .map(|path| {
+            test_module_map
+                .iter()
+                .find_map(|(name, module_path)| {
+                    let module_path = module_path
+                        .canonicalize()
+                        .unwrap_or_else(|_| module_path.clone());
+                    if module_path == *path {
+                        Some(name.clone())
+                    } else {
+                        None
+                    }
+                })
+                .unwrap_or_else(|| {
+                    let rel = path.strip_prefix(&project_root).unwrap_or(path);
+                    eprintln!(
+                        "Test file '{}' must declare a module to be used with `saga test`",
+                        rel.display()
+                    );
+                    std::process::exit(1);
+                })
+        })
+        .collect();
 
-        let (program, _) = parse_and_typecheck_inner(&source, &source_path, &mut checker, true);
-        let result = checker.to_result();
+    let entry_source = generate_test_entry_source(&test_modules);
+    let pb = build_project_ext(
+        "test",
+        std::slice::from_ref(&tests_dir),
+        Some(("_test_entry.saga", &entry_source)),
+    );
 
-        // Std modules needed for CodegenContext but beams come from global cache
-        let test_std_modules = compile_std_modules(&result);
-        let mut all_modules = pb.compiled_modules.clone();
-        all_modules.extend(test_std_modules);
+    exec_erl_with_timeout(
+        &pb.build_dir,
+        &pb.stdlib_dir,
+        &pb.extra_ebin_dirs,
+        "main",
+        Some(test_timeout()),
+    );
+}
 
-        // Elaborate only the test file
-        let elaborated = elaborate::elaborate(&program, &result);
-        all_modules.insert(
-            "_test".to_string(),
-            codegen::CompiledModule {
-                codegen_info: Default::default(),
-                elaborated: elaborated.clone(),
-                resolution: codegen::resolve::ResolutionMap::new(),
-                front_resolution: result.resolution.clone(),
-            },
-        );
-
-        // Emit only the test module
-        let test_ctx = codegen::CodegenContext {
-            modules: all_modules.clone(),
-            let_effect_bindings: result.let_effect_bindings.clone(),
-            prelude_imports: result.prelude_imports.clone(),
-        };
-        let test_source_file = codegen::SourceFile {
-            path: source_path.clone(),
-            source: source.clone(),
-        };
-        let core_src = codegen::emit_module_with_context(
-            "_test",
-            &elaborated,
-            &test_ctx,
-            &result,
-            Some(&test_source_file),
-            Some("main"),
-        );
-        let core_path = pb.build_dir.join("_test.core");
-        fs::write(&core_path, &core_src).unwrap_or_else(|e| {
-            eprintln!("Error writing {}: {}", core_path.display(), e);
-            std::process::exit(1);
-        });
-
-        run_erlc_file(&core_path, &pb.build_dir);
-        exec_erl_with_timeout(
-            &pb.build_dir,
-            &pb.stdlib_dir,
-            &pb.extra_ebin_dirs,
-            "_test",
-            Some(test_timeout()),
-        );
+fn generate_test_entry_source(test_modules: &[String]) -> String {
+    let mut source = String::new();
+    source.push_str("import Std.Test (run_modules)\n");
+    for module_name in test_modules {
+        source.push_str(&format!("import {}\n", module_name));
     }
+    source.push_str("\nmain () = run_modules [\n");
+    for (idx, module_name) in test_modules.iter().enumerate() {
+        let comma = if idx + 1 < test_modules.len() {
+            ","
+        } else {
+            ""
+        };
+        source.push_str(&format!(
+            "  (\"{}\", {}.tests){}\n",
+            module_name, module_name, comma
+        ));
+    }
+    source.push_str("]\n");
+    source
 }
 
 fn discover_test_files(dir: &std::path::Path) -> Vec<PathBuf> {
