@@ -113,23 +113,6 @@ fn desugar_decl(decl: &mut Decl) {
                 desugar_expr(&mut ann_method.node.body);
             }
         }
-        Decl::TopExpr { value, span, .. } => {
-            desugar_expr(value);
-            // Convert to Let { name: "_" } so the rest of the pipeline sees a normal decl
-            let value = std::mem::replace(
-                value,
-                Expr::synth(*span, ExprKind::Lit { value: Lit::Unit }),
-            );
-            let s = *span;
-            *decl = Decl::Let {
-                id: NodeId::fresh(),
-                name: "_".to_string(),
-                name_span: s,
-                annotation: None,
-                value,
-                span: s,
-            };
-        }
         // Declarations without expression bodies
         Decl::FunSignature { .. }
         | Decl::TypeDef { .. }

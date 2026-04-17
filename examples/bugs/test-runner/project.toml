@@ -1,0 +1,12 @@
+[project]
+name = "test-runner"
+
+[bin]
+main = "src/Main.saga"
+
+# [library]
+# module = "TestRunner"
+# expose = []
+
+# [deps]
+# some-lib = { path = "../some-lib" }

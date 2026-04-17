@@ -151,24 +151,6 @@ impl Parser {
             Token::Impl => self.parse_impl_def(),
             Token::Module => self.parse_module_decl(),
             Token::Import => self.parse_import_decl(),
-            Token::Ident(s)
-                if self.test_mode
-                    && (s == "test" || s == "describe" || s == "skip" || s == "only")
-                    && matches!(
-                        self.tokens.get(self.pos + 1).map(|t| &t.token),
-                        Some(Token::String(..))
-                    ) =>
-            {
-                // Top-level test/describe: bare expression.
-                // Desugar converts to Let { name: "_" } before typechecking.
-                let start = self.tokens[self.pos].span;
-                let value = self.parse_expr(0)?;
-                Ok(Decl::TopExpr {
-                    id: NodeId::fresh(),
-                    span: start.to(value.span),
-                    value,
-                })
-            }
             Token::Ident(_) => self.parse_fun_binding(),
             _ => Err(ParseError {
                 message: format!("Expected declaration, got {:?}", self.peek()),

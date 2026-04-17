@@ -1,5 +1,7 @@
+module AdvancedTest
+
 import Std.BitString as BitString
-import Std.Test (describe, test, assert_eq, assert_true, assert_false)
+import Std.Test (Register, describe, test, assert_eq, assert_true, assert_false)
 
 # --- Types for deriving tests ---
 
@@ -98,232 +100,236 @@ quicksort xs = case xs {
 
 # --- Tests ---
 
-describe "deriving" {
 
-  describe "Show" {
-    test "ADT with field" {
-      assert_eq (show (Dog 5)) "Dog(5)"
-    }
+pub fun tests : Unit -> Unit needs {Register}
+tests () = {
+  describe "deriving" (fun () -> {
 
-    test "ADT nullary constructor" {
-      assert_eq (show Cat) "Cat"
-    }
+    describe "Show" (fun () -> {
+      test "ADT with field" (fun () -> {
+        assert_eq (show (Dog 5)) "Dog(5)"
+      })
 
-    test "enum constructors" {
-      assert_eq (show Red) "Red"
-      assert_eq (show Green) "Green"
-      assert_eq (show Blue) "Blue"
-    }
-  }
+      test "ADT nullary constructor" (fun () -> {
+        assert_eq (show Cat) "Cat"
+      })
 
-  describe "Eq" {
-    test "equal ADT values" {
-      assert_true (Dog 5 == Dog 5)
-    }
+      test "enum constructors" (fun () -> {
+        assert_eq (show Red) "Red"
+        assert_eq (show Green) "Green"
+        assert_eq (show Blue) "Blue"
+      })
+    })
 
-    test "different ADT values" {
-      assert_false (Dog 5 == Dog 7)
-    }
+    describe "Eq" (fun () -> {
+      test "equal ADT values" (fun () -> {
+        assert_true (Dog 5 == Dog 5)
+      })
 
-    test "different constructors" {
-      assert_false (Dog 5 == Cat)
-    }
+      test "different ADT values" (fun () -> {
+        assert_false (Dog 5 == Dog 7)
+      })
 
-    test "enum equality" {
-      assert_true (Red == Red)
-      assert_false (Red == Blue)
-    }
-  }
+      test "different constructors" (fun () -> {
+        assert_false (Dog 5 == Cat)
+      })
 
-  describe "Ord" {
-    test "constructor ordering" {
-      assert_eq (compare Red Blue) Lt
-      assert_eq (compare Green Green) Eq
-      assert_eq (compare Blue Red) Gt
-    }
+      test "enum equality" (fun () -> {
+        assert_true (Red == Red)
+        assert_false (Red == Blue)
+      })
+    })
 
-    test "comparison operators" {
-      assert_true (Red < Blue)
-      assert_true (Blue > Green)
-      assert_true (Green <= Green)
-      assert_true (Green >= Green)
-    }
+    describe "Ord" (fun () -> {
+      test "constructor ordering" (fun () -> {
+        assert_eq (compare Red Blue) Lt
+        assert_eq (compare Green Green) Eq
+        assert_eq (compare Blue Red) Gt
+      })
 
-    test "Ord with fields - same constructor" {
-      let a = Scored 10 "first"
-      let b = Scored 20 "second"
-      assert_eq (compare a b) Lt
-    }
+      test "comparison operators" (fun () -> {
+        assert_true (Red < Blue)
+        assert_true (Blue > Green)
+        assert_true (Green <= Green)
+        assert_true (Green >= Green)
+      })
 
-    test "Ord with fields - same score" {
-      let a = Scored 10 "aaa"
-      let b = Scored 10 "zzz"
-      assert_eq (compare a b) Lt
-    }
-  }
+      test "Ord with fields - same constructor" (fun () -> {
+        let a = Scored 10 "first"
+        let b = Scored 20 "second"
+        assert_eq (compare a b) Lt
+      })
 
-  describe "Enum" {
-    test "to_enum" {
-      assert_eq (to_enum Red) 0
-      assert_eq (to_enum Green) 1
-      assert_eq (to_enum Blue) 2
-    }
+      test "Ord with fields - same score" (fun () -> {
+        let a = Scored 10 "aaa"
+        let b = Scored 10 "zzz"
+        assert_eq (compare a b) Lt
+      })
+    })
 
-    test "from_enum" {
-      assert_eq (from_enum 0 : Color) Red
-      assert_eq (from_enum 1 : Color) Green
-      assert_eq (from_enum 2 : Color) Blue
-    }
-  }
-}
+    describe "Enum" (fun () -> {
+      test "to_enum" (fun () -> {
+        assert_eq (to_enum Red) 0
+        assert_eq (to_enum Green) 1
+        assert_eq (to_enum Blue) 2
+      })
 
-describe "traits" {
+      test "from_enum" (fun () -> {
+        assert_eq (from_enum 0 : Color) Red
+        assert_eq (from_enum 1 : Color) Green
+        assert_eq (from_enum 2 : Color) Blue
+      })
+    })
+  })
 
-  describe "basic trait dispatch" {
-    test "User describe" {
-      let alice = User { name: "Alice", age: 30 }
-      assert_eq (describe_it alice) "Alice (age: 30)"
-    }
+  describe "traits" (fun () -> {
 
-    test "Point describe" {
-      let p = Point { x: 3, y: 4 }
-      assert_eq (describe_it p) "(3, 4)"
-    }
-  }
+    describe "basic trait dispatch" (fun () -> {
+      test "User describe" (fun () -> {
+        let alice = User { name: "Alice", age: 30 }
+        assert_eq (describe_it alice) "Alice (age: 30)"
+      })
 
-  describe "supertraits" {
-    test "verbose uses describe" {
-      let alice = User { name: "Alice", age: 30 }
-      assert_eq (verbose alice) "User: Alice (age: 30)"
-    }
-  }
+      test "Point describe" (fun () -> {
+        let p = Point { x: 3, y: 4 }
+        assert_eq (describe_it p) "(3, 4)"
+      })
+    })
 
-  describe "phantom type constraints" {
-    test "add same currency" {
-      let total = add_currency (usd 23.5) (usd 50.0)
-      assert_eq total (usd 73.5)
-    }
+    describe "supertraits" (fun () -> {
+      test "verbose uses describe" (fun () -> {
+        let alice = User { name: "Alice", age: 30 }
+        assert_eq (verbose alice) "User: Alice (age: 30)"
+      })
+    })
 
-    test "currency equality" {
-      assert_false (usd 23.5 == usd 50.0)
-      assert_true (usd 23.5 == usd 23.5)
-    }
-  }
-}
+    describe "phantom type constraints" (fun () -> {
+      test "add same currency" (fun () -> {
+        let total = add_currency (usd 23.5) (usd 50.0)
+        assert_eq total (usd 73.5)
+      })
 
-describe "val bindings" {
+      test "currency equality" (fun () -> {
+        assert_false (usd 23.5 == usd 50.0)
+        assert_true (usd 23.5 == usd 23.5)
+      })
+    })
+  })
 
-  test "string val" {
-    assert_eq greeting "hello world"
-  }
+  describe "val bindings" (fun () -> {
 
-  test "int val" {
-    assert_eq max_retries 5
-  }
+    test "string val" (fun () -> {
+      assert_eq greeting "hello world"
+    })
 
-  test "list val" {
-    assert_eq origins ["localhost", "example.com"]
-  }
-}
+    test "int val" (fun () -> {
+      assert_eq max_retries 5
+    })
 
-describe "sorting algorithms" {
+    test "list val" (fun () -> {
+      assert_eq origins ["localhost", "example.com"]
+    })
+  })
 
-  let nums = [5, 3, 8, 1, 9, 2, 7, 4, 6]
-  let sorted = [1, 2, 3, 4, 5, 6, 7, 8, 9]
+  describe "sorting algorithms" (fun () -> {
 
-  test "insertion sort" {
-    assert_eq (insertion_sort nums) sorted
-  }
+    let nums = [5, 3, 8, 1, 9, 2, 7, 4, 6]
+    let sorted = [1, 2, 3, 4, 5, 6, 7, 8, 9]
 
-  test "quicksort" {
-    assert_eq (quicksort nums) sorted
-  }
+    test "insertion sort" (fun () -> {
+      assert_eq (insertion_sort nums) sorted
+    })
 
-  test "sort empty list" {
-    assert_eq (insertion_sort []) ([] : List Int)
-    assert_eq (quicksort []) ([] : List Int)
-  }
+    test "quicksort" (fun () -> {
+      assert_eq (quicksort nums) sorted
+    })
 
-  test "sort single element" {
-    assert_eq (insertion_sort [1]) [1]
-    assert_eq (quicksort [1]) [1]
-  }
-}
+    test "sort empty list" (fun () -> {
+      assert_eq (insertion_sort []) ([] : List Int)
+      assert_eq (quicksort []) ([] : List Int)
+    })
 
-describe "FFI" {
+    test "sort single element" (fun () -> {
+      assert_eq (insertion_sort [1]) [1]
+      assert_eq (quicksort [1]) [1]
+    })
+  })
 
-  test "erlang lists:reverse" {
-    assert_eq (erl_reverse [1, 2, 3]) [3, 2, 1]
-  }
+  describe "FFI" (fun () -> {
 
-  test "erlang length" {
-    assert_eq (erl_length [1, 2, 3, 4, 5]) 5
-  }
-}
+    test "erlang lists:reverse" (fun () -> {
+      assert_eq (erl_reverse [1, 2, 3]) [3, 2, 1]
+    })
 
-describe "bitstrings" {
+    test "erlang length" (fun () -> {
+      assert_eq (erl_length [1, 2, 3, 4, 5]) 5
+    })
+  })
 
-  test "construction and size" {
-    let bs = <<72, 101, 108, 108, 111>>
-    assert_eq (BitString.size bs) 5
-  }
+  describe "bitstrings" (fun () -> {
 
-  test "from_list roundtrip" {
-    let bs = BitString.from_list [1, 2, 3]
-    assert_eq (BitString.to_list bs) [1, 2, 3]
-  }
+    test "construction and size" (fun () -> {
+      let bs = <<72, 101, 108, 108, 111>>
+      assert_eq (BitString.size bs) 5
+    })
 
-  test "concatenation" {
-    let a = <<1, 2>>
-    let b = <<3, 4>>
-    let combined = a <> b
-    assert_eq (BitString.to_list combined) [1, 2, 3, 4]
-  }
+    test "from_list roundtrip" (fun () -> {
+      let bs = BitString.from_list [1, 2, 3]
+      assert_eq (BitString.to_list bs) [1, 2, 3]
+    })
 
-  test "empty bitstring" {
-    let empty = <<>>
-    assert_true (BitString.is_empty empty)
-  }
+    test "concatenation" (fun () -> {
+      let a = <<1, 2>>
+      let b = <<3, 4>>
+      let combined = a <> b
+      assert_eq (BitString.to_list combined) [1, 2, 3, 4]
+    })
 
-  test "pattern matching on bitstring" {
-    let packet = <<1:8, 256:16/big, "hello">>
-    case packet {
-      <<tag:8, len:16/big, _rest/binary>> -> {
-        assert_eq tag 1
-        assert_eq len 256
+    test "empty bitstring" (fun () -> {
+      let empty = <<>>
+      assert_true (BitString.is_empty empty)
+    })
+
+    test "pattern matching on bitstring" (fun () -> {
+      let packet = <<1:8, 256:16/big, "hello">>
+      case packet {
+        <<tag:8, len:16/big, _rest/binary>> -> {
+          assert_eq tag 1
+          assert_eq len 256
+        }
+        _ -> assert_true False
       }
-      _ -> assert_true False
-    }
-  }
-}
+    })
+  })
 
-describe "partial application" {
+  describe "partial application" (fun () -> {
 
-  # Regression: under-applying a qualified imported function (e.g.
-  # `String.replace "m" ""`) used to lower to a direct call at the
-  # supplied arity (`std_string:replace/2`), which doesn't exist.
-  # The codegen now wraps it in a closure that captures the supplied
-  # args and takes the rest as fresh parameters.
-  describe "qualified imports inside HOFs" {
-    test "String.replace partial app inside List.map" {
-      let cleaned = ["12m", "15m", "20m"] |> List.map (String.replace "m" "")
-      assert_eq cleaned ["12", "15", "20"]
-    }
+    # Regression: under-applying a qualified imported function (e.g.
+    # `String.replace "m" ""`) used to lower to a direct call at the
+    # supplied arity (`std_string:replace/2`), which doesn't exist.
+    # The codegen now wraps it in a closure that captures the supplied
+    # args and takes the rest as fresh parameters.
+    describe "qualified imports inside HOFs" (fun () -> {
+      test "String.replace partial app inside List.map" (fun () -> {
+        let cleaned = ["12m", "15m", "20m"] |> List.map (String.replace "m" "")
+        assert_eq cleaned ["12", "15", "20"]
+      })
 
-    test "String.replace_all partial app inside List.map" {
-      let cleaned = ["a-b-c", "x-y-z"] |> List.map (String.replace_all "-" ".")
-      assert_eq cleaned ["a.b.c", "x.y.z"]
-    }
+      test "String.replace_all partial app inside List.map" (fun () -> {
+        let cleaned = ["a-b-c", "x-y-z"] |> List.map (String.replace_all "-" ".")
+        assert_eq cleaned ["a.b.c", "x.y.z"]
+      })
 
-    test "two-arg curried qualified function partial app" {
-      # String.repeat takes (n, s); partially applying n and mapping over strings
-      let tripled = ["hi", "yo"] |> List.map (String.repeat 3)
-      assert_eq tripled ["hihihi", "yoyoyo"]
-    }
+      test "two-arg curried qualified function partial app" (fun () -> {
+        # String.repeat takes (n, s); partially applying n and mapping over strings
+        let tripled = ["hi", "yo"] |> List.map (String.repeat 3)
+        assert_eq tripled ["hihihi", "yoyoyo"]
+      })
 
-    test "qualified partial app stored in let then mapped" {
-      let strip_m = String.replace "m" ""
-      assert_eq (["7m", "9m"] |> List.map strip_m) ["7", "9"]
-    }
-  }
+      test "qualified partial app stored in let then mapped" (fun () -> {
+        let strip_m = String.replace "m" ""
+        assert_eq (["7m", "9m"] |> List.map strip_m) ["7", "9"]
+      })
+    })
+  })
 }

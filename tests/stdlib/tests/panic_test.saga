@@ -1,24 +1,30 @@
-import Std.Test (describe, test, assert_panics, assert_ok, assert_err)
+module PanicTest
+
+import Std.Test (Register, describe, test, assert_panics, assert_ok, assert_err)
 import Std.List as List
 import Std.Process (catch_panic)
 
-describe "panic recovery" {
-  test "List.head on empty list panics" {
-    assert_panics (fun () -> List.head [])
-  }
 
-  test "catch_panic returns Ok on success" {
-    assert_ok (catch_panic (fun () -> 42))
-  }
-
-  test "catch_panic returns Err on panic" {
-    assert_err (catch_panic (fun () -> panic "boom") : Result Int String)
-  }
-
-  test "panic inside multi-expression thunk" {
-    assert_panics (fun () -> {
-      let _ = 1 + 1
-      panic "after some work"
+pub fun tests : Unit -> Unit needs {Register}
+tests () = {
+  describe "panic recovery" (fun () -> {
+    test "List.head on empty list panics" (fun () -> {
+      assert_panics (fun () -> List.head [])
     })
-  }
+
+    test "catch_panic returns Ok on success" (fun () -> {
+      assert_ok (catch_panic (fun () -> 42))
+    })
+
+    test "catch_panic returns Err on panic" (fun () -> {
+      assert_err (catch_panic (fun () -> panic "boom") : Result Int String)
+    })
+
+    test "panic inside multi-expression thunk" (fun () -> {
+      assert_panics (fun () -> {
+        let _ = 1 + 1
+        panic "after some work"
+      })
+    })
+  })
 }

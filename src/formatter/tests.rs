@@ -285,13 +285,6 @@ fn normalize_decl(d: &mut Decl) {
             *id = NID;
             *span = S;
         }
-        Decl::TopExpr {
-            id, value, span, ..
-        } => {
-            *id = NID;
-            *span = S;
-            normalize_expr(value);
-        }
         Decl::DictConstructor {
             id, methods, span, ..
         } => {

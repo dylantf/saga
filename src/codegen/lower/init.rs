@@ -610,7 +610,9 @@ impl<'a> Lowerer<'a> {
                         .check_result
                         .env
                         .get(name)
-                        .map(|scheme| util::param_types_from_type(&self.check_result.sub.apply(&scheme.ty)))
+                        .map(|scheme| {
+                            util::param_types_from_type(&self.check_result.sub.apply(&scheme.ty))
+                        })
                         .unwrap_or_default();
                     let canonical = format!("{}.{}", source_module_name, name);
                     self.fun_info.entry(canonical).or_insert(FunInfo {

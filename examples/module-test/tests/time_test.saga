@@ -1,26 +1,32 @@
-import Std.Test (describe, test, assert_eq, assert_true)
+module TimeTest
+
+import Std.Test (Register, describe, test, assert_eq, assert_true)
 import Std.Time (monotonic_ms)
 
-describe "Std.Time" {
-  describe "monotonic_ms" {
-    test "returns an Int" {
-      let t = monotonic_ms ()
-      # Monotonic time is relative -- just check it's a number we can do math with
-      assert_eq (t - t) 0
-    }
 
-    test "is monotonically increasing" {
-      let t1 = monotonic_ms ()
-      let t2 = monotonic_ms ()
-      assert_true (t2 >= t1)
-    }
+pub fun tests : Unit -> Unit needs {Register}
+tests () = {
+  describe "Std.Time" (fun () -> {
+    describe "monotonic_ms" (fun () -> {
+      test "returns an Int" (fun () -> {
+        let t = monotonic_ms ()
+        # Monotonic time is relative -- just check it's a number we can do math with
+        assert_eq (t - t) 0
+      })
 
-    test "can measure elapsed time" {
-      let start = monotonic_ms ()
-      # Do some trivial work
-      let _ = List.foldl (fun acc x -> acc + x) 0 [1, 2, 3, 4, 5]
-      let elapsed = monotonic_ms () - start
-      assert_true (elapsed >= 0)
-    }
-  }
+      test "is monotonically increasing" (fun () -> {
+        let t1 = monotonic_ms ()
+        let t2 = monotonic_ms ()
+        assert_true (t2 >= t1)
+      })
+
+      test "can measure elapsed time" (fun () -> {
+        let start = monotonic_ms ()
+        # Do some trivial work
+        let _ = List.foldl (fun acc x -> acc + x) 0 [1, 2, 3, 4, 5]
+        let elapsed = monotonic_ms () - start
+        assert_true (elapsed >= 0)
+      })
+    })
+  })
 }

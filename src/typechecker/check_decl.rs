@@ -1012,6 +1012,7 @@ impl Checker {
         let all_body_effs = if absorbed.is_empty() {
             all_body_effs
         } else {
+            self.call_site_absorbed.extend(absorbed.iter().cloned());
             all_body_effs.subtract(&absorbed)
         };
 

@@ -1,85 +1,91 @@
-import Std.Test (describe, test, assert_eq, assert_true, assert_false, assert_nothing, assert_panics)
+module MaybeTest
+
+import Std.Test (Register, describe, test, assert_eq, assert_true, assert_false, assert_nothing, assert_panics)
 import Std.Maybe as Maybe
 
-describe "Maybe" {
 
-  describe "is_just" {
-    test "Just is just" {
-      Just 1 |> Maybe.is_just |> assert_true
-    }
+pub fun tests : Unit -> Unit needs {Register}
+tests () = {
+  describe "Maybe" (fun () -> {
 
-    test "Nothing is not just" {
-      Nothing |> Maybe.is_just |> assert_false
-    }
-  }
+    describe "is_just" (fun () -> {
+      test "Just is just" (fun () -> {
+        Just 1 |> Maybe.is_just |> assert_true
+      })
 
-  describe "is_nothing" {
-    test "Nothing is nothing" {
-      Nothing |> Maybe.is_nothing |> assert_true
-    }
+      test "Nothing is not just" (fun () -> {
+        Nothing |> Maybe.is_just |> assert_false
+      })
+    })
 
-    test "Just is not nothing" {
-      Just 1 |> Maybe.is_nothing |> assert_false
-    }
-  }
+    describe "is_nothing" (fun () -> {
+      test "Nothing is nothing" (fun () -> {
+        Nothing |> Maybe.is_nothing |> assert_true
+      })
 
-  describe "map" {
-    test "transforms Just" {
-      let result = Just 5 |> Maybe.map (fun x -> x * 2)
-      assert_eq result (Just 10)
-    }
+      test "Just is not nothing" (fun () -> {
+        Just 1 |> Maybe.is_nothing |> assert_false
+      })
+    })
 
-    test "Nothing stays Nothing" {
-      Nothing |> Maybe.map (fun x -> x * 2) |> assert_nothing
-    }
-  }
+    describe "map" (fun () -> {
+      test "transforms Just" (fun () -> {
+        let result = Just 5 |> Maybe.map (fun x -> x * 2)
+        assert_eq result (Just 10)
+      })
 
-  describe "unwrap_or" {
-    test "returns value from Just" {
-      assert_eq (Just 42 |> Maybe.unwrap_or 0) 42
-    }
+      test "Nothing stays Nothing" (fun () -> {
+        Nothing |> Maybe.map (fun x -> x * 2) |> assert_nothing
+      })
+    })
 
-    test "returns default from Nothing" {
-      assert_eq (Nothing |> Maybe.unwrap_or 0) 0
-    }
-  }
+    describe "unwrap_or" (fun () -> {
+      test "returns value from Just" (fun () -> {
+        assert_eq (Just 42 |> Maybe.unwrap_or 0) 42
+      })
 
-  describe "unwrap" {
-    test "returns value from Just" {
-      assert_eq (Just 42 |> Maybe.unwrap) 42
-    }
+      test "returns default from Nothing" (fun () -> {
+        assert_eq (Nothing |> Maybe.unwrap_or 0) 0
+      })
+    })
 
-    test "panics on Nothing" {
-      let n = Nothing |> Maybe.map (fun x -> x + 1)
-      assert_panics (fun () -> Maybe.unwrap n)
-    }
-  }
+    describe "unwrap" (fun () -> {
+      test "returns value from Just" (fun () -> {
+        assert_eq (Just 42 |> Maybe.unwrap) 42
+      })
 
-  describe "and_then" {
-    test "chains on Just" {
-      let result = Just 2
-        |> Maybe.and_then (fun x -> if x == 0 then Nothing else Just (10 / x))
-      assert_eq result (Just 5)
-    }
+      test "panics on Nothing" (fun () -> {
+        let n = Nothing |> Maybe.map (fun x -> x + 1)
+        assert_panics (fun () -> Maybe.unwrap n)
+      })
+    })
 
-    test "short-circuits on Nothing" {
-      Nothing
-        |> Maybe.and_then (fun x -> Just (x + 1))
-        |> assert_nothing
-    }
-  }
+    describe "and_then" (fun () -> {
+      test "chains on Just" (fun () -> {
+        let result = Just 2
+          |> Maybe.and_then (fun x -> if x == 0 then Nothing else Just (10 / x))
+        assert_eq result (Just 5)
+      })
 
-  describe "or_else" {
-    test "returns Just when present" {
-      assert_eq (Just 1 |> Maybe.or_else (Just 99)) (Just 1)
-    }
+      test "short-circuits on Nothing" (fun () -> {
+        Nothing
+          |> Maybe.and_then (fun x -> Just (x + 1))
+          |> assert_nothing
+      })
+    })
 
-    test "returns fallback on Nothing" {
-      assert_eq (Nothing |> Maybe.or_else (Just 99)) (Just 99)
-    }
+    describe "or_else" (fun () -> {
+      test "returns Just when present" (fun () -> {
+        assert_eq (Just 1 |> Maybe.or_else (Just 99)) (Just 1)
+      })
 
-    test "returns Nothing when both Nothing" {
-      Nothing |> Maybe.or_else Nothing |> assert_nothing
-    }
-  }
+      test "returns fallback on Nothing" (fun () -> {
+        assert_eq (Nothing |> Maybe.or_else (Just 99)) (Just 99)
+      })
+
+      test "returns Nothing when both Nothing" (fun () -> {
+        Nothing |> Maybe.or_else Nothing |> assert_nothing
+      })
+    })
+  })
 }

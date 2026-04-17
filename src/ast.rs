@@ -327,10 +327,6 @@ pub enum Decl {
         span: Span,
     },
 
-    /// A bare expression at the top level (test/describe sugar in test files).
-    /// Converted to `Let { name: "_", .. }` by the desugar pass.
-    TopExpr { id: NodeId, value: Expr, span: Span },
-
     // --- Elaboration-only (never produced by the parser) ---
     /// Synthesized dictionary constructor function for a trait impl.
     /// e.g. `__dict_Describe_User` returns a tuple of method functions.

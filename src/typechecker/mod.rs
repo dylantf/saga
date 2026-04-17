@@ -1,7 +1,9 @@
 mod builtins;
 mod check_decl;
 mod check_module;
-pub use check_module::{BUILTIN_MODULES, ModuleMap, builtin_module_source, scan_project_modules};
+pub use check_module::{
+    BUILTIN_MODULES, ModuleMap, builtin_module_source, scan_project_modules, scan_source_dir,
+};
 mod check_traits;
 mod effects;
 pub(crate) mod exhaustiveness;
@@ -1537,6 +1539,10 @@ impl Checker {
 
     pub fn module_map(&self) -> Option<&check_module::ModuleMap> {
         self.modules.map.as_ref()
+    }
+
+    pub fn module_map_mut(&mut self) -> Option<&mut check_module::ModuleMap> {
+        self.modules.map.as_mut()
     }
 
     /// Typecheck a module by name, triggering the full dependency walk.
