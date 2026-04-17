@@ -90,6 +90,10 @@ val empty_result = TestResult {
   skipped: 0,
 }
 
+val green_check = "\x1b[32m✓\x1b[0m"
+val red_cross = "\x1b[31m✗\x1b[0m"
+val yellow_skip = "\x1b[33m○\x1b[0m"
+
 fun merge_results : TestResult -> TestResult -> TestResult
 merge_results left right = TestResult {
   passed: left.passed + right.passed,
@@ -107,21 +111,24 @@ format_timing ms =
 
 fun format_summary : TestResult -> Int -> String
 format_summary totals total_ms = {
-  let summary = $"{totals.passed} passed, {totals.failed} failed"
+  let passed = totals.passed
+  let failed = totals.failed
+  let skipped = totals.skipped
+  let summary = show passed <> " passed, " <> show failed <> " failed"
   let summary =
-    if totals.skipped > 0 then $"{summary}, {totals.skipped} skipped"
+    if skipped > 0 then summary <> ", " <> show skipped <> " skipped"
     else summary
-  $"{summary} {format_timing total_ms}"
+  summary <> " " <> format_timing total_ms
 }
 
 fun print_result : Int -> String -> TestStatus -> Int -> Unit needs {Stdio}
 print_result depth name status elapsed_ms = case status {
-  Passed -> println (indent depth $"✓ {name} {format_timing elapsed_ms}")
+  Passed -> println (indent depth (green_check <> " " <> name <> " " <> format_timing elapsed_ms))
   Failed msg -> {
-    println (indent depth $"✗ {name} {format_timing elapsed_ms}")
-    println (indent depth $"  {msg}")
+    println (indent depth (red_cross <> " " <> name <> " " <> format_timing elapsed_ms))
+    println (indent depth ("  " <> msg))
   }
-  Skipped -> println (indent depth $"○ {name} (skipped)")
+  Skipped -> println (indent depth (yellow_skip <> " " <> name <> " (skipped)"))
 }
 
 fun run_single : TestMode -> (Unit -> Unit needs {Test}) -> TestStatus

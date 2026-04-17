@@ -164,7 +164,7 @@ pub enum Decl {
         params: Vec<(String, TypeExpr)>,
         return_type: TypeExpr,
         effects: Vec<EffectRef>,
-        /// Row variable for open effect rows, e.g. `..e` in `needs {Assert, ..e}`
+        /// Row variable for open effect rows, e.g. `..e` in `needs {Test, ..e}`
         effect_row_var: Option<(String, Span)>,
         /// `where {a: Show + Eq, b: Ord}` - trait bounds on type variables
         where_clause: Vec<TraitBound>,
@@ -877,7 +877,7 @@ pub enum TypeExpr {
         from: Box<TypeExpr>,
         to: Box<TypeExpr>,
         effects: Vec<EffectRef>,
-        /// Row variable for open effect rows, e.g. `..e` in `needs {Assert, ..e}`
+        /// Row variable for open effect rows, e.g. `..e` in `needs {Test, ..e}`
         effect_row_var: Option<(String, Span)>,
         span: Span,
     },

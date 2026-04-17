@@ -181,7 +181,7 @@ pub struct Lowerer<'a> {
     /// Bare handler name -> canonical handler name (e.g. "collect_handler" -> "Std.Test.collect_handler").
     /// Built during init_module for resolving handler references in `with` expressions.
     handler_canonical: HashMap<String, String>,
-    /// Bare effect name -> canonical effect name (e.g. "Assert" -> "Std.Test.Assert").
+    /// Bare effect name -> canonical effect name (e.g. "Test" -> "Std.Test.Test").
     /// Built during init_module for canonicalizing effect names from the type system.
     effect_canonical: HashMap<String, String>,
     /// Typechecker result for the module currently being lowered.
