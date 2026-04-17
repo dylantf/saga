@@ -373,11 +373,11 @@ impl<'a> Lowerer<'a> {
         match expected_ty {
             Type::Record(fields) => Some(fields.iter().cloned().collect()),
             Type::Con(name, args) => {
-                let info = self
-                    .check_result
-                    .records
-                    .get(name)
-                    .or_else(|| self.check_result.records.get(crate::typechecker::bare_type_name(name)))?;
+                let info = self.check_result.records.get(name).or_else(|| {
+                    self.check_result
+                        .records
+                        .get(crate::typechecker::bare_type_name(name))
+                })?;
                 let mut subst = HashMap::new();
                 for (param_id, arg_ty) in info.type_params.iter().zip(args.iter()) {
                     subst.insert(*param_id, arg_ty.clone());
@@ -398,18 +398,16 @@ impl<'a> Lowerer<'a> {
         ctor_name: &str,
         expected_ty: &crate::typechecker::Type,
     ) -> Option<Vec<crate::typechecker::Type>> {
-        if matches!(expected_ty, crate::typechecker::Type::Var(_) | crate::typechecker::Type::Error)
-        {
+        if matches!(
+            expected_ty,
+            crate::typechecker::Type::Var(_) | crate::typechecker::Type::Error
+        ) {
             return None;
         }
-        let scheme = self
-            .check_result
-            .constructors
-            .get(ctor_name)
-            .or_else(|| {
-                let bare = ctor_name.rsplit('.').next().unwrap_or(ctor_name);
-                self.check_result.constructors.get(bare)
-            })?;
+        let scheme = self.check_result.constructors.get(ctor_name).or_else(|| {
+            let bare = ctor_name.rsplit('.').next().unwrap_or(ctor_name);
+            self.check_result.constructors.get(bare)
+        })?;
         let mut param_tys = Vec::new();
         let mut current = &scheme.ty;
         while let crate::typechecker::Type::Fun(param, ret, _) = current {
@@ -1615,7 +1613,10 @@ impl<'a> Lowerer<'a> {
                     && let crate::typechecker::Type::Con(_, type_args) = expected_ty
                     && let Some(elem_ty) = type_args.first()
                 {
-                    match (ctor_name.rsplit('.').next().unwrap_or(ctor_name), args.as_slice()) {
+                    match (
+                        ctor_name.rsplit('.').next().unwrap_or(ctor_name),
+                        args.as_slice(),
+                    ) {
                         ("Nil", []) => return CExpr::Nil,
                         ("Cons", [head, tail]) => {
                             let head_var = self.fresh();
@@ -1641,30 +1642,28 @@ impl<'a> Lowerer<'a> {
                     }
                 }
 
-                if bare != "List" {
-                    if let Some(arg_tys) =
+                if bare != "List"
+                    && let Some(arg_tys) =
                         self.constructor_arg_types_from_expected(ctor_name, expected_ty)
-                    {
-                        let mut vars = Vec::new();
-                        let mut bindings = Vec::new();
-                        for (idx, arg) in args.iter().enumerate() {
-                            let var = self.fresh();
-                            let child_expected = arg_tys.get(idx);
-                            let val =
-                                self.lower_expr_value_with_expected_type(arg, child_expected);
-                            vars.push(var.clone());
-                            bindings.push((var, val));
-                        }
-                        let atom = util::mangle_ctor_atom(
-                            ctor_name,
-                            &self.constructor_atoms,
-                            self.handler_origin_module(),
-                        );
-                        let mut elems = vec![CExpr::Lit(CLit::Atom(atom))];
-                        elems.extend(vars.iter().map(|v| CExpr::Var(v.clone())));
-                        let tuple = CExpr::Tuple(elems);
-                        return self.wrap_let_bindings(bindings, tuple);
+                {
+                    let mut vars = Vec::new();
+                    let mut bindings = Vec::new();
+                    for (idx, arg) in args.iter().enumerate() {
+                        let var = self.fresh();
+                        let child_expected = arg_tys.get(idx);
+                        let val = self.lower_expr_value_with_expected_type(arg, child_expected);
+                        vars.push(var.clone());
+                        bindings.push((var, val));
                     }
+                    let atom = util::mangle_ctor_atom(
+                        ctor_name,
+                        &self.constructor_atoms,
+                        self.handler_origin_module(),
+                    );
+                    let mut elems = vec![CExpr::Lit(CLit::Atom(atom))];
+                    elems.extend(vars.iter().map(|v| CExpr::Var(v.clone())));
+                    let tuple = CExpr::Tuple(elems);
+                    return self.wrap_let_bindings(bindings, tuple);
                 }
             }
 
@@ -1685,7 +1684,9 @@ impl<'a> Lowerer<'a> {
                 return self.wrap_let_bindings(bindings, tuple);
             }
 
-            if matches!(expr.kind, ExprKind::Lambda { .. }) {
+            if matches!(expr.kind, ExprKind::Lambda { .. })
+                || self.lower_eta_reduced_effect_expr(expr).is_some()
+            {
                 let saved_ctx = self.lambda_effect_context.take();
                 let effects = crate::typechecker::effects_from_type(expected_ty);
                 if !effects.is_empty() {
@@ -1693,7 +1694,9 @@ impl<'a> Lowerer<'a> {
                     effects.sort();
                     self.lambda_effect_context = Some(self.canonicalize_effects(effects));
                 }
-                let ce = self.lower_expr_value(expr);
+                let ce = self
+                    .lower_eta_reduced_effect_expr(expr)
+                    .unwrap_or_else(|| self.lower_expr_value(expr));
                 self.lambda_effect_context = saved_ctx;
                 return ce;
             }
@@ -1717,10 +1720,8 @@ impl<'a> Lowerer<'a> {
                             .get(field_name.as_str())
                             .expect("field missing in RecordCreate");
                         let child_expected = field_tys.get(field_name.as_str());
-                        let val = self.lower_expr_value_with_expected_type(
-                            field_expr,
-                            child_expected,
-                        );
+                        let val =
+                            self.lower_expr_value_with_expected_type(field_expr, child_expected);
                         vars.push(var.clone());
                         bindings.push((var, val));
                     }
@@ -1752,10 +1753,8 @@ impl<'a> Lowerer<'a> {
                             .get(field_name.as_str())
                             .expect("field missing in AnonRecordCreate");
                         let child_expected = field_tys.get(field_name.as_str());
-                        let val = self.lower_expr_value_with_expected_type(
-                            field_expr,
-                            child_expected,
-                        );
+                        let val =
+                            self.lower_expr_value_with_expected_type(field_expr, child_expected);
                         vars.push(var.clone());
                         bindings.push((var, val));
                     }
@@ -1779,10 +1778,8 @@ impl<'a> Lowerer<'a> {
         let mut bindings: Vec<(String, CExpr)> = Vec::new();
         for (i, arg) in args.iter().enumerate() {
             let v = self.fresh();
-            let ce = self.lower_expr_value_with_expected_type(
-                arg,
-                param_types.and_then(|tys| tys.get(i)),
-            );
+            let ce = self
+                .lower_expr_value_with_expected_type(arg, param_types.and_then(|tys| tys.get(i)));
             arg_vars.push(v.clone());
             bindings.push((v, ce));
         }
@@ -1861,9 +1858,13 @@ impl<'a> Lowerer<'a> {
         if let Some(arity) = total_arity
             && args.len() + effect_count + return_k_count == arity
         {
-            let param_types = self
-                .resolved_fun_info(head_expr.id, func_name)
-                .map(|f| f.param_types.iter().take(args.len()).cloned().collect::<Vec<_>>());
+            let param_types = self.resolved_fun_info(head_expr.id, func_name).map(|f| {
+                f.param_types
+                    .iter()
+                    .take(args.len())
+                    .cloned()
+                    .collect::<Vec<_>>()
+            });
             let (mut arg_vars, mut bindings) =
                 self.lower_call_args_with_expected_types(args, param_types.as_deref());
             if !callee_handler_entries.is_empty() {
@@ -1887,9 +1888,13 @@ impl<'a> Lowerer<'a> {
             let user_slots = arity.saturating_sub(effect_count + return_k_count);
             if args.len() < user_slots {
                 let remaining_user = user_slots - args.len();
-                let param_types = self
-                    .resolved_fun_info(head_expr.id, func_name)
-                    .map(|f| f.param_types.iter().take(args.len()).cloned().collect::<Vec<_>>());
+                let param_types = self.resolved_fun_info(head_expr.id, func_name).map(|f| {
+                    f.param_types
+                        .iter()
+                        .take(args.len())
+                        .cloned()
+                        .collect::<Vec<_>>()
+                });
                 let (arg_vars, bindings) =
                     self.lower_call_args_with_expected_types(args, param_types.as_deref());
                 let mut params: Vec<String> = Vec::new();
@@ -2262,7 +2267,10 @@ impl<'a> Lowerer<'a> {
                 let mut param_vars = lower_params(params);
                 let saved_handler_params = self.current_handler_params.clone();
                 let mut is_effectful_lambda = false;
-                let effects = self.lambda_effect_context.take().filter(|effs| !effs.is_empty());
+                let effects = self
+                    .lambda_effect_context
+                    .take()
+                    .filter(|effs| !effs.is_empty());
                 if let Some(effects) = effects {
                     let lambda_ops = self.effect_handler_ops(&effects);
                     for (eff, op) in &lambda_ops {
@@ -2870,9 +2878,13 @@ impl<'a> Lowerer<'a> {
             let user_slots = arity.saturating_sub(effect_count + return_k_count);
             if args.len() < user_slots {
                 let remaining_user = user_slots - args.len();
-                let param_types = self
-                    .resolved_fun_info(head.id, &qualified)
-                    .map(|f| f.param_types.iter().take(args.len()).cloned().collect::<Vec<_>>());
+                let param_types = self.resolved_fun_info(head.id, &qualified).map(|f| {
+                    f.param_types
+                        .iter()
+                        .take(args.len())
+                        .cloned()
+                        .collect::<Vec<_>>()
+                });
                 let (supplied_arg_vars, supplied_bindings) =
                     self.lower_call_args_with_expected_types(args, param_types.as_deref());
                 let mut closure_params: Vec<String> = Vec::new();
@@ -2906,9 +2918,13 @@ impl<'a> Lowerer<'a> {
             }
         }
 
-        let param_types = self
-            .resolved_fun_info(head.id, &qualified)
-            .map(|f| f.param_types.iter().take(args.len()).cloned().collect::<Vec<_>>());
+        let param_types = self.resolved_fun_info(head.id, &qualified).map(|f| {
+            f.param_types
+                .iter()
+                .take(args.len())
+                .cloned()
+                .collect::<Vec<_>>()
+        });
         let (mut arg_vars, mut bindings) =
             self.lower_call_args_with_expected_types(args, param_types.as_deref());
 
