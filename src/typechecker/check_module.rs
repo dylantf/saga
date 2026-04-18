@@ -527,6 +527,7 @@ pub const BUILTIN_MODULES: &[(&str, &str)] = &[
     ("Std.AtomicRef", include_str!("../stdlib/AtomicRef.saga")),
     ("Std.Vec", include_str!("../stdlib/Vec.saga")),
     ("Std.Array", include_str!("../stdlib/Array.saga")),
+    ("Std.Env", include_str!("../stdlib/Env.saga")),
 ];
 
 pub fn builtin_module_source(module_path: &[String]) -> Option<&'static str> {
