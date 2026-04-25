@@ -113,9 +113,7 @@ impl<'a> Lowerer<'a> {
     ) -> CExpr {
         let return_k = self.compose_return_k(handled_return_k, inherited_return_k);
         let is_direct_effectful_call = collect_fun_call(expr)
-            .map(|(name, _, _)| {
-                self.is_effectful(name) || self.current_effectful_vars.contains_key(name)
-            })
+            .map(|(name, head_expr, _)| self.is_effectful_call_name(head_expr.id, name))
             .unwrap_or(false);
 
         if is_direct_effectful_call {
@@ -438,7 +436,7 @@ impl<'a> Lowerer<'a> {
             let mut handled_effects = Vec::new();
             let mut inline_arms_by_op: HashMap<String, HandlerArm> = HashMap::new();
             for arm in &inline_arms {
-                if let Some(effect) = self.effect_for_handler_arm(arm) {
+                if let Some(effect) = self.effect_for_handler_arm(arm, None) {
                     if !handled_effects.contains(&effect) {
                         handled_effects.push(effect.clone());
                     }
@@ -594,7 +592,7 @@ impl<'a> Lowerer<'a> {
     fn build_op_handler_fun(&mut self, arm: &HandlerArm, source_module: Option<&str>) -> CExpr {
         let has_resume = arm.body.contains_resume();
         let op_info = self
-            .effect_for_handler_arm(arm)
+            .effect_for_handler_arm(arm, source_module)
             .and_then(|effect_name| {
                 self.effect_defs
                     .get(&effect_name)
@@ -645,7 +643,7 @@ impl<'a> Lowerer<'a> {
         }
 
         let saved_effectful_vars = self.current_effectful_vars.clone();
-        if let Some(effect_name) = self.effect_for_handler_arm(arm)
+        if let Some(effect_name) = self.effect_for_handler_arm(arm, source_module)
             && let Some(param_effs) = self
                 .op_param_absorbed_effects(&effect_name, &arm.op_name)
                 .cloned()
@@ -896,8 +894,13 @@ impl<'a> Lowerer<'a> {
         NamedHandlerItem::Static { canonical, info }
     }
 
-    fn effect_for_handler_arm(&self, arm: &HandlerArm) -> Option<String> {
-        self.resolved_handler_arm_effect(arm)
+    fn effect_for_handler_arm(
+        &self,
+        arm: &HandlerArm,
+        source_module: Option<&str>,
+    ) -> Option<String> {
+        let module_name = source_module.unwrap_or_else(|| self.current_semantic_module_name());
+        self.resolved_handler_arm_effect_for_module(arm, module_name)
     }
 
     fn static_arm_for_effect_op(
@@ -908,7 +911,14 @@ impl<'a> Lowerer<'a> {
     ) -> Option<(HandlerArm, Option<String>)> {
         info.arms
             .iter()
-            .find(|arm| self.handler_arm_matches_effect_op(arm, eff, op))
+            .find(|arm| {
+                self.handler_arm_matches_effect_op_for_module(
+                    arm,
+                    info.source_module.as_deref(),
+                    eff,
+                    op,
+                )
+            })
             .cloned()
             .map(|arm| (arm, info.source_module.clone()))
     }

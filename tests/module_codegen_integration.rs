@@ -14,6 +14,20 @@ fn emit_project_module(source: &str, module_name: &str, checker: &typechecker::C
         .parse_program()
         .expect("parse error");
     saga::desugar::desugar_program(&mut program);
+    let original_module_name = program
+        .iter()
+        .find_map(|d| {
+            if let saga::ast::Decl::ModuleDecl { path, .. } = d {
+                Some(path.join("."))
+            } else {
+                None
+            }
+        })
+        .unwrap_or_default();
+    let result = checker.to_result();
+    if let Some(cached_program) = result.programs().get(&original_module_name) {
+        return emit_from_program(cached_program, module_name, checker);
+    }
     emit_from_program(&program, module_name, checker)
 }
 

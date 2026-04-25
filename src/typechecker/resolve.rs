@@ -24,6 +24,12 @@ pub enum ResolvedValue {
     },
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedEffectOp {
+    pub effect: String,
+    pub op: String,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct ResolutionResult {
     pub values: HashMap<NodeId, ResolvedValue>,
@@ -35,8 +41,8 @@ pub struct ResolutionResult {
     pub impl_target_types: HashMap<NodeId, String>,
     pub effects: HashMap<NodeId, String>,
     pub handlers: HashMap<NodeId, ResolvedValue>,
-    pub effect_call_qualifiers: HashMap<NodeId, String>,
-    pub handler_arm_qualifiers: HashMap<NodeId, String>,
+    pub effect_calls: HashMap<NodeId, ResolvedEffectOp>,
+    pub handler_arms: HashMap<NodeId, ResolvedEffectOp>,
 }
 
 impl ResolutionResult {
@@ -76,16 +82,12 @@ impl ResolutionResult {
         self.handlers.get(&node_id)
     }
 
-    pub fn effect_call_qualifier(&self, node_id: NodeId) -> Option<&str> {
-        self.effect_call_qualifiers
-            .get(&node_id)
-            .map(|s| s.as_str())
+    pub fn effect_call(&self, node_id: NodeId) -> Option<&ResolvedEffectOp> {
+        self.effect_calls.get(&node_id)
     }
 
-    pub fn handler_arm_qualifier(&self, node_id: NodeId) -> Option<&str> {
-        self.handler_arm_qualifiers
-            .get(&node_id)
-            .map(|s| s.as_str())
+    pub fn handler_arm(&self, node_id: NodeId) -> Option<&ResolvedEffectOp> {
+        self.handler_arms.get(&node_id)
     }
 }
 
@@ -96,6 +98,7 @@ struct LocalModuleNames {
     types: HashMap<String, String>,
     traits: HashMap<String, String>,
     effects: HashMap<String, String>,
+    effect_ops: HashMap<String, HashSet<String>>,
     handlers: HashSet<String>,
 }
 
@@ -133,8 +136,17 @@ impl LocalModuleNames {
                     out.types.insert(name.clone(), qualify(name));
                     out.constructors.insert(name.clone());
                 }
-                Decl::EffectDef { name, .. } => {
-                    out.effects.insert(name.clone(), qualify(name));
+                Decl::EffectDef {
+                    name, operations, ..
+                } => {
+                    let canonical = qualify(name);
+                    out.effects.insert(name.clone(), canonical.clone());
+                    for op in operations {
+                        out.effect_ops
+                            .entry(op.node.name.clone())
+                            .or_default()
+                            .insert(canonical.clone());
+                    }
                 }
                 Decl::HandlerDef { name, .. } => {
                     out.handlers.insert(name.clone());
@@ -324,6 +336,38 @@ impl<'a> Resolver<'a> {
             .or_else(|| name.contains('.').then(|| name.to_string()))
     }
 
+    fn resolve_bare_effect_op_name(&self, op_name: &str) -> Option<String> {
+        let mut candidates = HashSet::new();
+        if let Some(local_effects) = self.locals.effect_ops.get(op_name) {
+            candidates.extend(local_effects.iter().cloned());
+        }
+        if let Some(imported_effects) = self.scope.effect_ops.get(op_name) {
+            candidates.extend(imported_effects.iter().cloned());
+        }
+
+        if candidates.len() == 1 {
+            candidates.into_iter().next()
+        } else {
+            None
+        }
+    }
+
+    fn resolve_effect_op_name(
+        &self,
+        op_name: &str,
+        qualifier: Option<&str>,
+    ) -> Option<ResolvedEffectOp> {
+        let effect = if let Some(qualifier) = qualifier {
+            self.resolve_effect_name(qualifier)?
+        } else {
+            self.resolve_bare_effect_op_name(op_name)?
+        };
+        Some(ResolvedEffectOp {
+            effect,
+            op: op_name.to_string(),
+        })
+    }
+
     fn record_type_ref(&mut self, id: NodeId, name: &str) {
         if let Some(resolved) = self.resolve_type_name(name) {
             self.result.types.insert(id, resolved);
@@ -430,13 +474,12 @@ impl<'a> Resolver<'a> {
     fn resolve_effect_call_expr(
         &mut self,
         expr_id: NodeId,
+        op_name: &str,
         qualifier: Option<&str>,
         args: &[Expr],
     ) {
-        if let Some(qualifier) = qualifier
-            && let Some(resolved) = self.resolve_effect_name(qualifier)
-        {
-            self.result.effect_call_qualifiers.insert(expr_id, resolved);
+        if let Some(resolved) = self.resolve_effect_op_name(op_name, qualifier) {
+            self.result.effect_calls.insert(expr_id, resolved);
         }
         self.resolve_exprs(args);
     }
@@ -449,10 +492,10 @@ impl<'a> Resolver<'a> {
                 }
             }
             HandlerItem::Arm(arm) | HandlerItem::Return(arm) => {
-                if let Some(qualifier) = &arm.qualifier
-                    && let Some(resolved) = self.resolve_effect_name(qualifier)
+                if let Some(resolved) =
+                    self.resolve_effect_op_name(&arm.op_name, arm.qualifier.as_deref())
                 {
-                    self.result.handler_arm_qualifiers.insert(arm.id, resolved);
+                    self.result.handler_arms.insert(arm.id, resolved);
                 }
                 self.resolve_scoped_params_body(
                     &arm.params,
@@ -700,8 +743,10 @@ impl<'a> Resolver<'a> {
                 }
             }
             ExprKind::EffectCall {
-                qualifier, args, ..
-            } => self.resolve_effect_call_expr(expr.id, qualifier.as_deref(), args),
+                name,
+                qualifier,
+                args,
+            } => self.resolve_effect_call_expr(expr.id, name, qualifier.as_deref(), args),
             ExprKind::With {
                 expr: inner,
                 handler,

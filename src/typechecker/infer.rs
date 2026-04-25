@@ -264,9 +264,11 @@ impl Checker {
             ExprKind::EffectCall {
                 name, qualifier, ..
             } => {
+                let resolved_effect_op = self.resolution.effect_call(node_id).cloned();
                 let resolved_qualifier = self
                     .resolution
-                    .effect_call_qualifier(node_id)
+                    .effect_call(node_id)
+                    .map(|resolved| resolved.effect.as_str())
                     .or(qualifier.as_deref())
                     .map(|s| s.to_string());
                 let op_sig = self.lookup_effect_op(name, resolved_qualifier.as_deref(), span)?;
@@ -307,7 +309,10 @@ impl Checker {
                     }
                 }
                 // Emit the effect onto the accumulator.
-                if let Some(effect_name) = self.effect_for_op(name, resolved_qualifier.as_deref()) {
+                if let Some(effect_name) = resolved_effect_op
+                    .map(|resolved| resolved.effect)
+                    .or_else(|| self.effect_for_op(name, resolved_qualifier.as_deref()))
+                {
                     let effect_args = self.current_effect_args(&effect_name);
                     self.emit_effect(effect_name.clone(), effect_args);
                 }

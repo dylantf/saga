@@ -356,7 +356,8 @@ impl Checker {
                 for arm in handler.inline_arms() {
                     let resolved_qualifier = self
                         .resolution
-                        .handler_arm_qualifier(arm.id)
+                        .handler_arm(arm.id)
+                        .map(|resolved| resolved.effect.as_str())
                         .or(arm.qualifier.as_deref())
                         .map(|s| s.to_string());
                     let op_sig = self
@@ -429,7 +430,11 @@ impl Checker {
                 // Unused handler warning
                 let mut unused = Vec::new();
                 for arm in handler.inline_arms() {
-                    if let Some(eff) = self.effect_for_op(&arm.op_name, arm.qualifier.as_deref())
+                    if let Some(eff) = self
+                        .resolution
+                        .handler_arm(arm.id)
+                        .map(|resolved| resolved.effect.clone())
+                        .or_else(|| self.effect_for_op(&arm.op_name, arm.qualifier.as_deref()))
                         && !handled_entries.iter().any(|e| e.name == eff)
                     {
                         unused.push(eff);

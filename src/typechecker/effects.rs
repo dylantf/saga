@@ -217,9 +217,14 @@ impl Checker {
                 for arm in handler.inline_arms() {
                     let resolved_qualifier = self
                         .resolution
-                        .handler_arm_qualifier(arm.id)
+                        .handler_arm(arm.id)
+                        .map(|resolved| resolved.effect.as_str())
                         .or(arm.qualifier.as_deref());
-                    if let Some(effect_name) = self.effect_for_op(&arm.op_name, resolved_qualifier)
+                    if let Some(effect_name) = self
+                        .resolution
+                        .handler_arm(arm.id)
+                        .map(|resolved| resolved.effect.clone())
+                        .or_else(|| self.effect_for_op(&arm.op_name, resolved_qualifier))
                     {
                         handled.insert(effect_name);
                     }
@@ -228,7 +233,6 @@ impl Checker {
         }
         handled
     }
-
     /// Extract handled effect names from a `Handler(...)` type in the env.
     /// Used as a fallback when a name is not in `self.handlers` (e.g. handle bindings).
     pub(crate) fn handler_effects_from_env(&mut self, name: &str) -> Option<Vec<String>> {
