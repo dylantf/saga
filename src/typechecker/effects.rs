@@ -8,7 +8,10 @@ use super::{Checker, Diagnostic, EffectEntry, EffectOpSig, EffectRow, Severity, 
 enum BareEffectOpResolution {
     Missing,
     Found(String),
-    Ambiguous,
+    /// Op resolves to >1 effect within the chosen tier (locals if any local
+    /// effect contributes, otherwise imports). Carries the candidate
+    /// canonical effect names for diagnostic listing.
+    Ambiguous(Vec<String>),
 }
 
 impl Checker {
@@ -189,7 +192,7 @@ impl Checker {
 
         match self.resolve_bare_effect_op(op_name) {
             BareEffectOpResolution::Found(effect_name) => Some(effect_name),
-            BareEffectOpResolution::Missing | BareEffectOpResolution::Ambiguous => None,
+            BareEffectOpResolution::Missing | BareEffectOpResolution::Ambiguous(_) => None,
         }
     }
 
@@ -413,12 +416,13 @@ impl Checker {
                         format!("undefined effect operation: {}", op_name),
                     ));
                 }
-                BareEffectOpResolution::Ambiguous => {
+                BareEffectOpResolution::Ambiguous(candidates) => {
+                    let display = candidates.join(", ");
                     return Err(Diagnostic::error_at(
                         span,
                         format!(
-                            "ambiguous effect operation '{}': found in multiple effects",
-                            op_name
+                            "ambiguous effect operation '{}': found in [{}]; qualify the call (e.g. `{}.{}!`)",
+                            op_name, display, candidates[0], op_name
                         ),
                     ));
                 }
@@ -458,16 +462,32 @@ impl Checker {
         None
     }
 
+    /// Tier-based bare effect-op lookup. Locally defined effects shadow
+    /// imported effects: if any local effect contributes the op name, only
+    /// locals are considered. Within the chosen tier, exactly one candidate
+    /// is `Found`; >1 is `Ambiguous` (with the candidate list); 0 is
+    /// `Missing`. The tier split is recovered from `current_module` —
+    /// canonical names with that prefix are local, the rest are imports.
     fn resolve_bare_effect_op(&self, op_name: &str) -> BareEffectOpResolution {
         let Some(candidates) = self.scope_map.effect_ops.get(op_name) else {
             return BareEffectOpResolution::Missing;
         };
-        match candidates.len() {
+        let local_prefix = self
+            .current_module
+            .as_deref()
+            .map(|m| format!("{}.", m));
+        let (locals, imports): (Vec<&String>, Vec<&String>) = candidates
+            .iter()
+            .partition(|c| local_prefix.as_deref().is_some_and(|p| c.starts_with(p)));
+        let chosen = if !locals.is_empty() { locals } else { imports };
+        match chosen.len() {
             0 => BareEffectOpResolution::Missing,
-            1 => {
-                BareEffectOpResolution::Found(candidates.iter().next().cloned().unwrap_or_default())
+            1 => BareEffectOpResolution::Found(chosen[0].clone()),
+            _ => {
+                let mut names: Vec<String> = chosen.into_iter().cloned().collect();
+                names.sort();
+                BareEffectOpResolution::Ambiguous(names)
             }
-            _ => BareEffectOpResolution::Ambiguous,
         }
     }
 }

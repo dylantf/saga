@@ -390,28 +390,26 @@ impl<'a> Resolver<'a> {
             .or_else(|| name.contains('.').then(|| name.to_string()))
     }
 
-    /// Resolve a bare effect op name to its canonical effect when exactly one
-    /// effect contributes that op into scope. Returns None for both "no
-    /// candidate" and ">1 candidate" (ambiguous) cases. Inference handles the
-    /// distinction via [`Checker::lookup_effect_op`], which consults
-    /// `scope_map.effect_ops` and produces the appropriate `Missing` vs
-    /// `Ambiguous` diagnostic. Recording nothing here keeps the resolver out
-    /// of the diagnostic business and lets the typechecker speak with one
-    /// voice.
+    /// Resolve a bare effect op name to its canonical effect using
+    /// tier-based shadowing: locally defined effects shadow imports. Within
+    /// whichever tier wins, return Some only when there is exactly one
+    /// candidate. None for "no candidate" and "ambiguous within the chosen
+    /// tier" — the typechecker's [`Checker::lookup_effect_op`] re-derives
+    /// the same tiers from `current_module` + `scope_map.effect_ops` to
+    /// emit the proper Missing/Ambiguous diagnostic.
     fn resolve_bare_effect_op_name(&self, op_name: &str) -> Option<String> {
-        let mut candidates = HashSet::new();
         if let Some(local_effects) = self.locals.effect_ops.get(op_name) {
-            candidates.extend(local_effects.iter().cloned());
+            if local_effects.len() == 1 {
+                return local_effects.iter().next().cloned();
+            }
+            return None;
         }
-        if let Some(imported_effects) = self.scope.effect_ops.get(op_name) {
-            candidates.extend(imported_effects.iter().cloned());
+        if let Some(imported_effects) = self.scope.effect_ops.get(op_name)
+            && imported_effects.len() == 1
+        {
+            return imported_effects.iter().next().cloned();
         }
-
-        if candidates.len() == 1 {
-            candidates.into_iter().next()
-        } else {
-            None
-        }
+        None
     }
 
     fn resolve_effect_op_name(

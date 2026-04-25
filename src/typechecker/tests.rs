@@ -4399,8 +4399,66 @@ main () = get! () with {store, cache}
     };
     assert!(
         err.message
-            .contains("ambiguous effect operation 'get': found in multiple effects"),
-        "expected ambiguous effect op error, got: {}",
+            .contains("ambiguous effect operation 'get': found in [A.Store, B.Cache]"),
+        "expected ambiguous effect op error with candidate list, got: {}",
+        err.message
+    );
+}
+
+#[test]
+fn local_effect_op_shadows_imported_when_names_collide() {
+    // Locally defined effects shadow imports for bare op resolution. Same
+    // tier rule as trait methods.
+    let env_module = r#"module Env
+
+pub effect Env {
+  fun get : String -> String
+}
+
+pub handler system_env for Env {
+  get key = resume "imported-value"
+}
+"#;
+    let main_src = r#"import Env (Env, system_env)
+
+effect Local {
+  fun get : String -> String
+}
+
+handler local_env for Local {
+  get key = resume "local-value"
+}
+
+main () = get! "HOME" with local_env
+"#;
+    check_with_project_files(&[("lib/Env.saga", env_module)], main_src).unwrap();
+}
+
+#[test]
+fn ambiguous_local_effect_ops_error_with_candidate_list() {
+    // Two locally defined effects with the same op name produce a proper
+    // ambiguous diagnostic listing the candidates.
+    let main_src = r#"effect A {
+  fun foo : Unit -> Int
+}
+
+effect B {
+  fun foo : Unit -> Int
+}
+
+handler a_h for A { foo () = resume 1 }
+handler b_h for B { foo () = resume 2 }
+
+main () = foo! () with {a_h, b_h}
+"#;
+    let err = match check(main_src) {
+        Ok(_) => panic!("expected ambiguous bare effect op"),
+        Err(err) => err,
+    };
+    assert!(
+        err.message
+            .contains("ambiguous effect operation 'foo': found in [A, B]"),
+        "expected ambiguous effect op error with candidate list, got: {}",
         err.message
     );
 }
@@ -4558,8 +4616,39 @@ main () = pp 1
         Err(err) => err,
     };
     assert!(
-        err.message.contains("undefined variable: pp"),
-        "expected ambiguous bare trait method to surface as undefined, got: {}",
+        err.message
+            .contains("ambiguous trait method 'pp': found in [A.Foo, B.Bar]"),
+        "expected ambiguous trait method error with candidate list, got: {}",
+        err.message
+    );
+}
+
+#[test]
+fn ambiguous_local_trait_methods_error_with_candidate_list() {
+    // Two locally defined traits with the same method name produce a proper
+    // ambiguous diagnostic listing the candidate traits — mirrors the
+    // effects parallel.
+    let main_src = r#"trait A a {
+  fun foo : a -> Int
+}
+
+trait B a {
+  fun foo : a -> Int
+}
+
+impl A for Int { foo x = 1 }
+impl B for Int { foo x = 2 }
+
+main () = foo 1
+"#;
+    let err = match check(main_src) {
+        Ok(_) => panic!("expected ambiguous bare trait method"),
+        Err(err) => err,
+    };
+    assert!(
+        err.message
+            .contains("ambiguous trait method 'foo': found in [A, B]"),
+        "expected ambiguous trait method error with candidate list, got: {}",
         err.message
     );
 }

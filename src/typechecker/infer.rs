@@ -22,6 +22,41 @@ fn collect_app_spine<'a>(
 }
 
 impl Checker {
+    /// When a bare `Var` lookup fails, probe `scope_map.trait_methods` with
+    /// the same tier-based shadowing rule the resolver uses. Locally defined
+    /// traits (canonical name prefixed by `current_module`) take precedence;
+    /// imports are consulted only when no local trait contributes the name.
+    /// Within the chosen tier, exactly one candidate is unambiguous and the
+    /// resolver would have routed it via the canonical env entry — if we got
+    /// here it means the chosen tier has >1 candidates, so emit an
+    /// ambiguous-method diagnostic listing them. Returns None when neither
+    /// tier contributes (the caller falls back to "undefined variable").
+    fn bare_trait_method_ambiguity_diag(
+        &self,
+        method_name: &str,
+        span: Span,
+    ) -> Option<Diagnostic> {
+        let candidates = self.scope_map.trait_methods.get(method_name)?;
+        let local_prefix = self.current_module.as_deref().map(|m| format!("{}.", m));
+        let (locals, imports): (Vec<&String>, Vec<&String>) = candidates
+            .iter()
+            .partition(|c| local_prefix.as_deref().is_some_and(|p| c.starts_with(p)));
+        let chosen = if !locals.is_empty() { locals } else { imports };
+        if chosen.len() < 2 {
+            return None;
+        }
+        let mut names: Vec<String> = chosen.into_iter().cloned().collect();
+        names.sort();
+        let display = names.join(", ");
+        Some(Diagnostic::error_at(
+            span,
+            format!(
+                "ambiguous trait method '{}': found in [{}]; qualify the call (e.g. `{}.{}`)",
+                method_name, display, names[0], method_name
+            ),
+        ))
+    }
+
     // --- Expression inference ---
     //
     // Effects accumulate on self.effect_row automatically. Isolation scopes
@@ -90,6 +125,8 @@ impl Checker {
                         self.record_reference(node_id, span, def_id);
                     }
                     Ok(ty)
+                } else if let Some(diag) = self.bare_trait_method_ambiguity_diag(name, span) {
+                    Err(diag)
                 } else {
                     Err(Diagnostic::error_at(
                         span,
