@@ -1,6 +1,8 @@
 #@ Standard I/O effect for printing and reading from the console.
 module Std.IO
 
+import Std.Base (Show, Debug, Ord, Semigroup, Enum)
+
 import Std.String
 import Std.IO.Unsafe (print_stdout, print_stderr, read_stdin)
 

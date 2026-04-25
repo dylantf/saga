@@ -1,6 +1,8 @@
 #@ Mutable vectors via an algebraic effect, backed by ETS composite keys.
 module Std.Vec
 
+import Std.Base (Show, Debug, Ord, Semigroup, Enum)
+
 #@ Opaque mutable vector handle. At runtime this is an Erlang reference
 #@ used as a composite key prefix into an ETS table. Elements are stored
 #@ at {VecId, Index} and the length at {VecId, 'length'}.

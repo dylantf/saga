@@ -2,6 +2,8 @@
 #@ Used internally by handler implementations.
 module Std.IO.Unsafe
 
+import Std.Base (Show, Debug, Ord, Semigroup, Enum)
+
 #@ Writes a string directly to stdout, bypassing the Stdio effect.
 #@ Use this in custom Stdio handler implementations.
 @builtin

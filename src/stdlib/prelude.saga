@@ -1,4 +1,4 @@
-import Std.Base (Ordering)
+import Std.Base (Ordering, Show, Debug, Semigroup, Ord, Enum)
 import Std.Bool (not)
 import Std.Maybe (Maybe)
 import Std.Result (Result)

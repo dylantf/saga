@@ -109,10 +109,9 @@ impl Checker {
         methods: &[&ast::TraitMethod],
     ) -> Result<(), Diagnostic> {
         // Compute canonical name early — used in scheme constraints below
-        let canonical_name = if let Some(module) = &self.current_module {
-            format!("{}.{}", module, name)
-        } else {
-            name.to_string()
+        let canonical_name = match &self.current_module {
+            Some(module) => super::canonical_join(module, name),
+            None => name.to_string(),
         };
 
         let self_param = type_params.first().map(|s| s.as_str()).unwrap_or("a");
@@ -197,14 +196,26 @@ impl Checker {
                 trait_param_id,
             ));
 
-            self.env.insert(
-                method_name,
-                Scheme {
-                    forall,
-                    constraints,
-                    ty: fun_ty,
-                },
-            );
+            // Insert under both bare and canonical names in the defining
+            // module's env. The bare entry is what `pub_names_for_tc` exports
+            // — importing modules pick it up via `binding_map` keyed by bare
+            // name, then re-register under canonical in their own env. The
+            // canonical entry here lets use sites within the defining module
+            // resolve through the same canonical-name contract every other
+            // module sees (the resolver records canonical for the local
+            // trait too, via `LocalModuleNames::trait_methods`). Bare
+            // visibility outside the defining module is gated by
+            // `scope_map.trait_methods`.
+            let scheme = Scheme {
+                forall,
+                constraints,
+                ty: fun_ty,
+            };
+            let canonical_method = super::canonical_join(&canonical_name, &method_name);
+            self.env.insert(method_name.clone(), scheme.clone());
+            if canonical_method != method_name {
+                self.env.insert(canonical_method, scheme);
+            }
         }
 
         // Record supertrait references for find-references
@@ -223,6 +234,18 @@ impl Checker {
                 .traits
                 .entry(canonical_name.clone())
                 .or_insert_with(|| canonical_name.clone());
+        }
+        // Local trait methods: register both bare visibility (for use sites
+        // in this module) and canonical forms in scope.values for qualified
+        // lookups. Mirrors the import-side registration in check_module.rs.
+        self.scope_map
+            .register_trait_methods(&canonical_name, methods.iter().map(|m| m.name.as_str()));
+        for method in methods {
+            let method_canonical = super::canonical_join(&canonical_name, &method.name);
+            self.scope_map
+                .values
+                .entry(method_canonical.clone())
+                .or_insert_with(|| method_canonical.clone());
         }
         // Resolve supertrait names to canonical form
         let resolved_supertraits: Vec<String> = supertraits

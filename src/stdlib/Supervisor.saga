@@ -1,6 +1,8 @@
 #@ Retry-based supervision for effectful computations.
 module Std.Supervisor
 
+import Std.Base (Show, Debug, Ord, Semigroup, Enum)
+
 import Std.Fail (Fail)
 import Std.Result (Result, Ok, Err)
 

@@ -1,6 +1,8 @@
 #@ Type-safe decoding of dynamically typed BEAM values.
 module Std.Dynamic
 
+import Std.Base (Show, Debug, Ord, Semigroup, Enum)
+
 # --- Core types ---
 
 #@ An opaque type wrapping a raw Erlang/BEAM term.

@@ -1467,11 +1467,21 @@ impl Elaborator {
     /// Returns (trait_name, method_index) if this is a trait method call.
     /// This is the evidence-first approach: the typechecker is the authority on
     /// whether a name refers to a trait method or a user-defined function.
+    ///
+    /// Prefers the resolver's `ResolvedTraitMethod` when present (recorded
+    /// per use-site NodeId). Falls back to the legacy name-keyed path for
+    /// nodes the resolver didn't decorate (e.g. synthesized AST during
+    /// derive expansion).
     fn resolve_trait_method(
         &self,
         name: &str,
         node_id: crate::ast::NodeId,
     ) -> Option<(String, usize)> {
+        if let Some(resolved) = self.resolution.trait_method(node_id)
+            && let Some(entry) = self.trait_methods.get(&resolved.method)
+        {
+            return Some(entry.clone());
+        }
         let evidence_list = self.evidence_by_node.get(&node_id)?;
         for ev in evidence_list {
             if let Some((trait_name, method_index)) = self.trait_methods.get(name)

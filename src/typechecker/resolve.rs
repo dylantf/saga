@@ -30,6 +30,12 @@ pub struct ResolvedEffectOp {
     pub op: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedTraitMethod {
+    pub trait_name: String,
+    pub method: String,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct ResolutionResult {
     pub values: HashMap<NodeId, ResolvedValue>,
@@ -43,6 +49,7 @@ pub struct ResolutionResult {
     pub handlers: HashMap<NodeId, ResolvedValue>,
     pub effect_calls: HashMap<NodeId, ResolvedEffectOp>,
     pub handler_arms: HashMap<NodeId, ResolvedEffectOp>,
+    pub trait_methods: HashMap<NodeId, ResolvedTraitMethod>,
 }
 
 impl ResolutionResult {
@@ -89,6 +96,10 @@ impl ResolutionResult {
     pub fn handler_arm(&self, node_id: NodeId) -> Option<&ResolvedEffectOp> {
         self.handler_arms.get(&node_id)
     }
+
+    pub fn trait_method(&self, node_id: NodeId) -> Option<&ResolvedTraitMethod> {
+        self.trait_methods.get(&node_id)
+    }
 }
 
 #[derive(Default)]
@@ -99,6 +110,10 @@ struct LocalModuleNames {
     traits: HashMap<String, String>,
     effects: HashMap<String, String>,
     effect_ops: HashMap<String, HashSet<String>>,
+    /// Bare trait method name -> canonical traits in the current module that
+    /// expose that method. Trait methods are no longer treated as ordinary
+    /// top-level values: their visibility tracks their owning trait.
+    trait_methods: HashMap<String, HashSet<String>>,
     handlers: HashSet<String>,
 }
 
@@ -121,9 +136,13 @@ impl LocalModuleNames {
                     out.top_level_values.insert(name.clone());
                 }
                 Decl::TraitDef { name, methods, .. } => {
-                    out.traits.insert(name.clone(), qualify(name));
+                    let canonical = qualify(name);
+                    out.traits.insert(name.clone(), canonical.clone());
                     for method in methods {
-                        out.top_level_values.insert(method.node.name.clone());
+                        out.trait_methods
+                            .entry(method.node.name.clone())
+                            .or_default()
+                            .insert(canonical.clone());
                     }
                 }
                 Decl::TypeDef { name, variants, .. } => {
@@ -257,11 +276,23 @@ impl<'a> Resolver<'a> {
         }
     }
 
+    fn is_locally_bound(&self, name: &str) -> bool {
+        self.value_scopes
+            .iter()
+            .rev()
+            .any(|scope| scope.contains_key(name))
+    }
+
     fn resolve_value_name(&self, name: &str) -> Option<ResolvedValue> {
         for scope in self.value_scopes.iter().rev() {
             if let Some(resolved) = scope.get(name) {
                 return Some(resolved.clone());
             }
+        }
+        if let Some(canonical_trait) = self.resolve_bare_trait_method_name(name) {
+            return Some(ResolvedValue::Global {
+                lookup_name: super::canonical_join(&canonical_trait, name),
+            });
         }
         if self.locals.top_level_values.contains(name) {
             return Some(ResolvedValue::Global {
@@ -273,6 +304,26 @@ impl<'a> Resolver<'a> {
             .map(|lookup_name| ResolvedValue::Global {
                 lookup_name: lookup_name.to_string(),
             })
+    }
+
+    /// Resolve a bare trait method name to its canonical trait when exactly
+    /// one trait contributes that method into scope. Mirrors
+    /// [`Self::resolve_bare_effect_op_name`] — None for both "no candidate"
+    /// and ">1 candidate" so the typechecker can produce a single diagnostic
+    /// for the missing/ambiguous distinction.
+    fn resolve_bare_trait_method_name(&self, method_name: &str) -> Option<String> {
+        let mut candidates = HashSet::new();
+        if let Some(local_traits) = self.locals.trait_methods.get(method_name) {
+            candidates.extend(local_traits.iter().cloned());
+        }
+        if let Some(imported_traits) = self.scope.trait_methods.get(method_name) {
+            candidates.extend(imported_traits.iter().cloned());
+        }
+        if candidates.len() == 1 {
+            candidates.into_iter().next()
+        } else {
+            None
+        }
     }
 
     fn resolve_handler_name(&self, name: &str) -> Option<ResolvedValue> {
@@ -677,6 +728,17 @@ impl<'a> Resolver<'a> {
         match &expr.kind {
             ExprKind::Lit { .. } => {}
             ExprKind::Var { name } => {
+                if !self.is_locally_bound(name)
+                    && let Some(canonical_trait) = self.resolve_bare_trait_method_name(name)
+                {
+                    self.result.trait_methods.insert(
+                        expr.id,
+                        ResolvedTraitMethod {
+                            trait_name: canonical_trait.clone(),
+                            method: name.clone(),
+                        },
+                    );
+                }
                 if let Some(resolved) = self.resolve_value_name(name) {
                     self.result.values.insert(expr.id, resolved);
                 }

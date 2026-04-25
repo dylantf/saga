@@ -1,6 +1,8 @@
 #@ Test framework with assertions, grouping, and focused/skipped test support.
 module Std.Test
 
+import Std.Base (Show, Debug, Ord, Semigroup, Enum)
+
 import Std.Base
 import Std.IO (Stdio, println, console)
 import Std.List

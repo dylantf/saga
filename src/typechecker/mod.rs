@@ -962,6 +962,11 @@ pub struct Checker {
 ///
 /// This allows each binding to be stored once in the env under its canonical name,
 /// with the ScopeMap handling all user-facing name form resolution.
+///
+/// Canonical names are dot-joined: `Module.Item` for module-level items,
+/// `Module.Trait.method` for trait methods, `Module.Effect.op` for effect ops.
+/// Use [`canonical_join`] to build them from parts so the convention stays
+/// in one place.
 #[derive(Debug, Clone, Default)]
 pub struct ScopeMap {
     /// User-visible name -> canonical name for value bindings (functions, let bindings).
@@ -978,6 +983,8 @@ pub struct ScopeMap {
     pub effect_ops: HashMap<String, HashSet<String>>,
     /// User-visible name -> canonical name for traits.
     pub traits: HashMap<String, String>,
+    /// Bare trait method name -> canonical traits that make that method visible.
+    pub trait_methods: HashMap<String, HashSet<String>>,
     /// Canonical name -> source module name (e.g. "Std.List.map" -> "Std.List").
     /// Used by LSP to determine import origins without a separate parallel map.
     pub origins: HashMap<String, String>,
@@ -1038,6 +1045,23 @@ impl ScopeMap {
         self.traits.get(name).map(|s| s.as_str())
     }
 
+    pub fn register_trait_method(&mut self, method_name: &str, canonical_trait: &str) {
+        self.trait_methods
+            .entry(method_name.to_string())
+            .or_default()
+            .insert(canonical_trait.to_string());
+    }
+
+    pub fn register_trait_methods<'a>(
+        &mut self,
+        canonical_trait: &str,
+        method_names: impl IntoIterator<Item = &'a str>,
+    ) {
+        for method_name in method_names {
+            self.register_trait_method(method_name, canonical_trait);
+        }
+    }
+
     /// Get the source module for a user-visible name, checking all name kinds.
     pub fn origin_of(&self, name: &str) -> Option<&str> {
         // Resolve the user-visible name to canonical, then look up origin
@@ -1083,8 +1107,9 @@ impl ScopeMap {
 
     /// Merge another scope_map into this one.
     ///
-    /// Most namespaces are first-insert-wins. Effect op visibility unions
-    /// candidates so overlapping exposed op names remain ambiguous.
+    /// Most namespaces are first-insert-wins. Effect op and trait method
+    /// visibility unions candidates so overlapping exposed names remain
+    /// ambiguous.
     pub fn merge(&mut self, other: &ScopeMap) {
         for (k, v) in &other.values {
             self.values.entry(k.clone()).or_insert_with(|| v.clone());
@@ -1111,6 +1136,12 @@ impl ScopeMap {
         }
         for (k, v) in &other.traits {
             self.traits.entry(k.clone()).or_insert_with(|| v.clone());
+        }
+        for (method_name, traits) in &other.trait_methods {
+            self.trait_methods
+                .entry(method_name.clone())
+                .or_default()
+                .extend(traits.iter().cloned());
         }
         for (k, v) in &other.origins {
             self.origins.entry(k.clone()).or_insert_with(|| v.clone());
@@ -1716,6 +1747,15 @@ impl Checker {
         self.resume_return_type = scope.resume_return_type;
         result
     }
+}
+
+/// Build a canonical dotted name by joining a parent path with a child segment.
+///
+/// Used wherever the typechecker mints canonical names: `Module.Item`,
+/// `Module.Trait.method`, `Module.Effect.op`. Centralizes the join convention
+/// so all callers agree on separator and ordering.
+pub fn canonical_join(parent: &str, child: &str) -> String {
+    format!("{}.{}", parent, child)
 }
 
 /// Extract all effect names from a type by walking Fun nodes' effect rows.
