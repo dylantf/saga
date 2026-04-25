@@ -353,7 +353,7 @@ main () = {
 #[test]
 fn beam_native_handler_named_reference_lowers_to_native_ops() {
     let src = r#"
-import Std.Actor (beam_actor)
+import Std.Actor (Process, beam_actor)
 
 main () = {
   let _pid = spawn! (fun () -> ())
@@ -372,7 +372,7 @@ main () = {
 #[test]
 fn beam_ref_uses_native_backed_cps_handler_path() {
     let src = r#"
-import Std.Ref (beam_ref)
+import Std.Ref (Ref, beam_ref)
 
 main () = {
   let r = new! 41
@@ -402,8 +402,8 @@ main () = {
 #[test]
 fn async_handler_with_beam_actor_lowers_without_scoped_binding_cycle() {
     let src = r#"
-import Std.Actor (beam_actor)
-import Std.Async (async_handler)
+import Std.Actor (Process, beam_actor)
+import Std.Async (Async, async_handler)
 
 main () = {
   let f = async! (fun () -> 1)

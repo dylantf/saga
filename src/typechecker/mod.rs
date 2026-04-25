@@ -974,6 +974,8 @@ pub struct ScopeMap {
     pub constructors: HashMap<String, String>,
     /// User-visible name -> canonical name for effects.
     pub effects: HashMap<String, String>,
+    /// Bare effect operation name -> canonical effects that make that op visible.
+    pub effect_ops: HashMap<String, HashSet<String>>,
     /// User-visible name -> canonical name for traits.
     pub traits: HashMap<String, String>,
     /// Canonical name -> source module name (e.g. "Std.List.map" -> "Std.List").
@@ -1013,6 +1015,23 @@ impl ScopeMap {
 
     pub fn resolve_effect(&self, name: &str) -> Option<&str> {
         self.effects.get(name).map(|s| s.as_str())
+    }
+
+    pub fn register_effect_op(&mut self, op_name: &str, canonical_effect: &str) {
+        self.effect_ops
+            .entry(op_name.to_string())
+            .or_default()
+            .insert(canonical_effect.to_string());
+    }
+
+    pub fn register_effect_ops<'a>(
+        &mut self,
+        canonical_effect: &str,
+        op_names: impl IntoIterator<Item = &'a str>,
+    ) {
+        for op_name in op_names {
+            self.register_effect_op(op_name, canonical_effect);
+        }
     }
 
     pub fn resolve_trait(&self, name: &str) -> Option<&str> {
@@ -1062,7 +1081,10 @@ impl ScopeMap {
         }
     }
 
-    /// Merge another scope_map into this one (first-insert-wins).
+    /// Merge another scope_map into this one.
+    ///
+    /// Most namespaces are first-insert-wins. Effect op visibility unions
+    /// candidates so overlapping exposed op names remain ambiguous.
     pub fn merge(&mut self, other: &ScopeMap) {
         for (k, v) in &other.values {
             self.values.entry(k.clone()).or_insert_with(|| v.clone());
@@ -1080,6 +1102,12 @@ impl ScopeMap {
         }
         for (k, v) in &other.effects {
             self.effects.entry(k.clone()).or_insert_with(|| v.clone());
+        }
+        for (op_name, effects) in &other.effect_ops {
+            self.effect_ops
+                .entry(op_name.clone())
+                .or_default()
+                .extend(effects.iter().cloned());
         }
         for (k, v) in &other.traits {
             self.traits.entry(k.clone()).or_insert_with(|| v.clone());

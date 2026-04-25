@@ -4311,6 +4311,154 @@ main () = {
     check_with_project_files(&[("lib/Db.saga", db_module)], main_src).unwrap();
 }
 
+fn env_module_source() -> &'static str {
+    r#"module Env
+
+pub effect Env {
+  fun get : String -> String
+}
+
+pub handler system_env for Env {
+  get key = resume "value"
+}
+"#
+}
+
+#[test]
+fn imported_handler_does_not_expose_private_effect_op_bare() {
+    let main_src = r#"import Env (system_env)
+
+main () = get! "HOME" with system_env
+"#;
+
+    let err = match check_with_project_files(&[("lib/Env.saga", env_module_source())], main_src) {
+        Ok(_) => panic!("expected bare private effect op to be unavailable"),
+        Err(err) => err,
+    };
+    assert!(
+        err.message.contains("undefined effect operation: get"),
+        "expected undefined bare op error, got: {}",
+        err.message
+    );
+}
+
+#[test]
+fn exposing_effect_exposes_its_ops_bare() {
+    let main_src = r#"import Env (Env, system_env)
+
+main () = get! "HOME" with system_env
+"#;
+
+    check_with_project_files(&[("lib/Env.saga", env_module_source())], main_src).unwrap();
+}
+
+#[test]
+fn imported_effect_op_remains_available_qualified_without_exposing() {
+    let main_src = r#"import Env
+
+main () = Env.Env.get! "HOME" with Env.system_env
+"#;
+
+    check_with_project_files(&[("lib/Env.saga", env_module_source())], main_src).unwrap();
+}
+
+#[test]
+fn exposed_imported_effect_ops_with_same_name_are_ambiguous() {
+    let a_module = r#"module A
+
+pub effect Store {
+  fun get : Unit -> Int
+}
+
+pub handler store for Store {
+  get () = resume 1
+}
+"#;
+    let b_module = r#"module B
+
+pub effect Cache {
+  fun get : Unit -> Int
+}
+
+pub handler cache for Cache {
+  get () = resume 2
+}
+"#;
+    let main_src = r#"import A (Store, store)
+import B (Cache, cache)
+
+main () = get! () with {store, cache}
+"#;
+
+    let err = match check_with_project_files(
+        &[("lib/A.saga", a_module), ("lib/B.saga", b_module)],
+        main_src,
+    ) {
+        Ok(_) => panic!("expected ambiguous bare effect op"),
+        Err(err) => err,
+    };
+    assert!(
+        err.message
+            .contains("ambiguous effect operation 'get': found in multiple effects"),
+        "expected ambiguous effect op error, got: {}",
+        err.message
+    );
+}
+
+#[test]
+fn only_exposed_imported_effect_op_is_bare_visible_when_names_collide() {
+    let a_module = r#"module A
+
+pub effect Store {
+  fun get : Unit -> Int
+}
+
+pub handler store for Store {
+  get () = resume 1
+}
+"#;
+    let b_module = r#"module B
+
+pub effect Cache {
+  fun get : Unit -> Int
+}
+
+pub handler cache for Cache {
+  get () = resume 2
+}
+"#;
+    let main_src = r#"import A (Store, store)
+import B (cache)
+
+main () = get! () with store
+"#;
+
+    check_with_project_files(
+        &[("lib/A.saga", a_module), ("lib/B.saga", b_module)],
+        main_src,
+    )
+    .unwrap();
+}
+
+#[test]
+fn effect_ops_cannot_be_exposed_directly() {
+    let main_src = r#"import Env (get)
+
+main () = Env.Env.get! "HOME" with Env.system_env
+"#;
+
+    let err = match check_with_project_files(&[("lib/Env.saga", env_module_source())], main_src) {
+        Ok(_) => panic!("expected direct op exposing to be rejected"),
+        Err(err) => err,
+    };
+    assert!(
+        err.message
+            .contains("'get' is not exported by module 'Env'"),
+        "expected invalid import error, got: {}",
+        err.message
+    );
+}
+
 #[test]
 fn imported_handler_binding_inside_wrapped_block_typechecks_in_inline_list() {
     let db_module = r#"module Db

@@ -847,7 +847,7 @@ fn cross_module_effectful_qualified_call() {
     // Logger.greet needs {Log}, so the call should thread _HandleLog + _ReturnK
     let main_src = "
 module Main
-import Logger
+import Logger (Log)
 
 
 main () = Logger.greet \"world\" with {
@@ -872,7 +872,7 @@ fn cross_module_effectful_exposed_call() {
     // Same as above but with exposed import
     let main_src = "
 module Main
-import Logger (greet)
+import Logger (Log, greet)
 
 
 main () = greet \"world\" with {
@@ -907,7 +907,7 @@ fn cross_module_effectful_compiles_with_erlc() {
     let logger_src = std::fs::read_to_string(fixtures_root().join("Logger.saga")).unwrap();
     let main_src = "
 module Main
-import Logger
+import Logger (Log)
 
 
 main () = Logger.greet \"world\" with {
@@ -1335,7 +1335,7 @@ fn handler_not_exposed_requires_qualified_with() {
     // For now, just verify the qualified handler lookup works.
     let src = "
 module Main
-import Logger (greet)
+import Logger (Log, greet)
 
 
 main () = greet \"world\" with {
@@ -1394,10 +1394,10 @@ main () = Clock.now! () with {system_clock}
 
 #[test]
 fn cross_module_effect_inline_handler_works() {
-    // Inline handler with bare op names should match imported effect ops
+    // Inline handler with bare op names should match exposed imported effect ops
     let src = "
 module Main
-import Logger
+import Logger (Log)
 
 
 main () = Logger.greet \"world\" with {
@@ -1415,7 +1415,7 @@ fn cross_module_effect_exposed_inline_handler() {
     // Exposed import + inline handler
     let src = "
 module Main
-import Logger (greet)
+import Logger (Log, greet)
 
 
 main () = greet \"world\" with {

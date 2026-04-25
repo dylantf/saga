@@ -5,6 +5,12 @@ use crate::token::Span;
 
 use super::{Checker, Diagnostic, EffectEntry, EffectOpSig, EffectRow, Severity, Type};
 
+enum BareEffectOpResolution {
+    Missing,
+    Found(String),
+    Ambiguous,
+}
+
 impl Checker {
     pub(crate) fn normalize_handler_effect_name(&mut self, effect_name: String) -> String {
         if effect_name.contains('.') {
@@ -178,29 +184,13 @@ impl Checker {
     /// (module-qualified) effect name, e.g. "Std.Fail.Fail".
     pub(crate) fn effect_for_op(&self, op_name: &str, qualifier: Option<&str>) -> Option<String> {
         if let Some(effect_name) = qualifier {
-            // Resolve qualifier through scope_map, matching lookup_effect_op's logic
-            let canonical = self
-                .scope_map
-                .resolve_effect(effect_name)
-                .map(|s| s.to_string())
-                .unwrap_or_else(|| effect_name.to_string());
-            if self.effects.contains_key(&canonical) {
-                return Some(canonical);
-            }
-            // Local module fallback
-            if let Some(m) = &self.current_module {
-                let qualified = format!("{}.{}", m, effect_name);
-                if self.effects.contains_key(&qualified) {
-                    return Some(qualified);
-                }
-            }
+            return self.resolve_effect_qualifier(effect_name);
         }
-        for (effect_name, info) in &self.effects {
-            if info.ops.iter().any(|o| o.name == op_name) {
-                return Some(effect_name.clone());
-            }
+
+        match self.resolve_bare_effect_op(op_name) {
+            BareEffectOpResolution::Found(effect_name) => Some(effect_name),
+            BareEffectOpResolution::Missing | BareEffectOpResolution::Ambiguous => None,
         }
-        None
     }
 
     /// Determine which effects a handler handles.
@@ -394,20 +384,12 @@ impl Checker {
     ) -> Result<EffectOpSig, Diagnostic> {
         if let Some(effect_name) = qualifier {
             // Resolve qualifier through scope_map (bare/aliased -> canonical)
-            let canonical = self
-                .scope_map
-                .resolve_effect(effect_name)
-                .map(|s| s.to_string())
-                .unwrap_or_else(|| effect_name.to_string());
+            let canonical = self.resolve_effect_qualifier(effect_name).ok_or_else(|| {
+                Diagnostic::error_at(span, format!("undefined effect: {}", effect_name))
+            })?;
             let info = self
                 .effects
                 .get(&canonical)
-                .or_else(|| {
-                    // Local module fallback: try Module.Name
-                    self.current_module
-                        .as_ref()
-                        .and_then(|m| self.effects.get(&format!("{}.{}", m, effect_name)))
-                })
                 .ok_or_else(|| {
                     Diagnostic::error_at(span, format!("undefined effect: {}", effect_name))
                 })?
@@ -420,25 +402,68 @@ impl Checker {
             })?;
             Ok(self.instantiate_effect_op(&canonical, op, &info.type_params))
         } else {
-            let mut found: Option<(String, EffectOpSig, Vec<u32>)> = None;
-            for (eff_name, info) in &self.effects {
-                if let Some(op) = info.ops.iter().find(|o| o.name == op_name) {
-                    if found.is_some() {
-                        return Err(Diagnostic::error_at(
-                            span,
-                            format!(
-                                "ambiguous effect operation '{}': found in multiple effects",
-                                op_name
-                            ),
-                        ));
-                    }
-                    found = Some((eff_name.clone(), op.clone(), info.type_params.clone()));
+            let eff_name = match self.resolve_bare_effect_op(op_name) {
+                BareEffectOpResolution::Missing => {
+                    return Err(Diagnostic::error_at(
+                        span,
+                        format!("undefined effect operation: {}", op_name),
+                    ));
                 }
-            }
-            let (eff_name, op, type_params) = found.ok_or_else(|| {
+                BareEffectOpResolution::Ambiguous => {
+                    return Err(Diagnostic::error_at(
+                        span,
+                        format!(
+                            "ambiguous effect operation '{}': found in multiple effects",
+                            op_name
+                        ),
+                    ));
+                }
+                BareEffectOpResolution::Found(eff_name) => eff_name,
+            };
+            let info = self.effects.get(&eff_name).ok_or_else(|| {
                 Diagnostic::error_at(span, format!("undefined effect operation: {}", op_name))
             })?;
+            let op = info
+                .ops
+                .iter()
+                .find(|o| o.name == op_name)
+                .ok_or_else(|| {
+                    Diagnostic::error_at(span, format!("undefined effect operation: {}", op_name))
+                })?
+                .clone();
+            let type_params = info.type_params.clone();
             Ok(self.instantiate_effect_op(&eff_name, &op, &type_params))
+        }
+    }
+
+    fn resolve_effect_qualifier(&self, effect_name: &str) -> Option<String> {
+        if let Some(canonical) = self.scope_map.resolve_effect(effect_name)
+            && self.effects.contains_key(canonical)
+        {
+            return Some(canonical.to_string());
+        }
+        if self.effects.contains_key(effect_name) {
+            return Some(effect_name.to_string());
+        }
+        if let Some(module) = &self.current_module {
+            let local_key = format!("{}.{}", module, effect_name);
+            if self.effects.contains_key(&local_key) {
+                return Some(local_key);
+            }
+        }
+        None
+    }
+
+    fn resolve_bare_effect_op(&self, op_name: &str) -> BareEffectOpResolution {
+        let Some(candidates) = self.scope_map.effect_ops.get(op_name) else {
+            return BareEffectOpResolution::Missing;
+        };
+        match candidates.len() {
+            0 => BareEffectOpResolution::Missing,
+            1 => {
+                BareEffectOpResolution::Found(candidates.iter().next().cloned().unwrap_or_default())
+            }
+            _ => BareEffectOpResolution::Ambiguous,
         }
     }
 }

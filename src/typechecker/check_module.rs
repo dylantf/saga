@@ -1215,12 +1215,16 @@ pub(super) fn resolve_import(
                     found = true;
                 }
                 // Effects can be exposed by name
-                if exports.effects.contains_key(name) {
+                if let Some(info) = exports.effects.get(name) {
                     let effect_canonical = format!("{}.{}", module_name, name);
                     scope
                         .effects
                         .entry(name.clone())
-                        .or_insert(effect_canonical);
+                        .or_insert(effect_canonical.clone());
+                    scope.register_effect_ops(
+                        &effect_canonical,
+                        info.ops.iter().map(|op| op.name.as_str()),
+                    );
                     found = true;
                 }
                 // Traits can be exposed by name

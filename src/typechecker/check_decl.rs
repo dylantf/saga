@@ -1744,6 +1744,8 @@ impl Checker {
                 needs,
             });
         }
+        self.scope_map
+            .register_effect_ops(&key, ops.iter().map(|op| op.name.as_str()));
         if let Some(info) = self.effects.get_mut(&key) {
             info.ops = ops;
             info.op_spans = op_spans;
