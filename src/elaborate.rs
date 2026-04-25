@@ -1465,22 +1465,31 @@ impl Elaborator {
 
     /// Check if a node has trait evidence that matches a known trait method name.
     /// Returns (trait_name, method_index) if this is a trait method call.
-    /// This is the evidence-first approach: the typechecker is the authority on
-    /// whether a name refers to a trait method or a user-defined function.
     ///
     /// Prefers the resolver's `ResolvedTraitMethod` when present (recorded
-    /// per use-site NodeId). Falls back to the legacy name-keyed path for
-    /// nodes the resolver didn't decorate (e.g. synthesized AST during
-    /// derive expansion).
+    /// per use-site NodeId). The resolver's `trait_name` is authoritative —
+    /// look the method index up *inside that specific trait*, not in the
+    /// flat name-keyed `self.trait_methods` table. The flat table contains
+    /// every imported trait's methods regardless of exposing, so a
+    /// method-name lookup can return the wrong trait when the same bare
+    /// name appears in multiple imported traits.
+    ///
+    /// Falls back to the legacy name-keyed + evidence path for nodes the
+    /// resolver didn't decorate (e.g. synthesized AST during derive
+    /// expansion).
     fn resolve_trait_method(
         &self,
         name: &str,
         node_id: crate::ast::NodeId,
     ) -> Option<(String, usize)> {
         if let Some(resolved) = self.resolution.trait_method(node_id)
-            && let Some(entry) = self.trait_methods.get(&resolved.method)
+            && let Some(info) = self.traits.get(&resolved.trait_name)
+            && let Some(idx) = info
+                .methods
+                .iter()
+                .position(|m| m.name == resolved.method)
         {
-            return Some(entry.clone());
+            return Some((resolved.trait_name.clone(), idx));
         }
         let evidence_list = self.evidence_by_node.get(&node_id)?;
         for ev in evidence_list {

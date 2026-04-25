@@ -412,6 +412,34 @@ impl<'a> Resolver<'a> {
         None
     }
 
+    /// Decompose a canonical method-style lookup name (`Module.Trait.method`
+    /// or `Trait.method`) and check whether the trait part names a known
+    /// trait — locally defined or imported (regardless of exposing, since
+    /// qualified access doesn't depend on bare visibility). Returns a
+    /// `ResolvedTraitMethod` for the elaborator to dispatch on so qualified
+    /// calls like `Module.Trait.method` get the same dictionary-method
+    /// access path that bare unambiguous trait method calls do.
+    fn qualified_trait_method(&self, canonical: &str) -> Option<ResolvedTraitMethod> {
+        let (trait_canonical, method) = canonical.rsplit_once('.')?;
+        let known_local = self
+            .locals
+            .traits
+            .values()
+            .any(|c| c == trait_canonical);
+        let known_imported = self
+            .scope
+            .traits
+            .values()
+            .any(|c| c == trait_canonical);
+        if !(known_local || known_imported) {
+            return None;
+        }
+        Some(ResolvedTraitMethod {
+            trait_name: trait_canonical.to_string(),
+            method: method.to_string(),
+        })
+    }
+
     fn resolve_effect_op_name(
         &self,
         op_name: &str,
@@ -752,10 +780,14 @@ impl<'a> Resolver<'a> {
             ExprKind::QualifiedName { module, name, .. } => {
                 let qualified = format!("{}.{}", module, name);
                 if let Some(resolved) = self.scope.resolve_value(&qualified) {
+                    let canonical = resolved.to_string();
+                    if let Some(trait_method) = self.qualified_trait_method(&canonical) {
+                        self.result.trait_methods.insert(expr.id, trait_method);
+                    }
                     self.result.values.insert(
                         expr.id,
                         ResolvedValue::Global {
-                            lookup_name: resolved.to_string(),
+                            lookup_name: canonical,
                         },
                     );
                 }

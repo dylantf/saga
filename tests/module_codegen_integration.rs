@@ -1031,6 +1031,71 @@ fn local_dict_names_are_module_qualified() {
     );
 }
 
+#[test]
+fn bare_method_dispatches_via_resolved_trait_when_imports_collide() {
+    // import A (Foo); import B (b_helper) → only A.Foo is bare-visible.
+    // Bare `pp 1` must dispatch to A.Foo's dict, not B.Bar's, regardless of
+    // HashMap iteration order in elaborate.rs::trait_methods.
+    let a_src = "module A\n\npub trait Foo a {\n  fun pp : a -> String\n}\n";
+    let b_src = "module B\n\npub trait Bar a {\n  fun pp : a -> String\n}\n\npub fun b_helper : Unit -> Unit\nb_helper () = ()\n";
+    let main_src = "module Main\n\nimport A (Foo)\nimport B (b_helper)\n\nimpl Foo for Int { pp x = \"from-A\" }\nimpl B.Bar for Int { pp x = \"from-B\" }\n\nmain () = pp 1\n";
+
+    with_temp_project_files(
+        &[("lib/A.saga", a_src), ("lib/B.saga", b_src)],
+        main_src,
+        |checker, program| {
+            let out = emit_from_program(program, "main", checker);
+            // The `pp 1` call site inside main/1 must dispatch via the
+            // A.Foo dict, not B.Bar's. (Both dict constructors are emitted
+            // as top-level functions because both impls exist; what matters
+            // is which one main/1 applies.)
+            let foo_dict = typechecker::make_dict_name("A.Foo", &[], "main", "Std.Int.Int");
+            let bar_dict = typechecker::make_dict_name("B.Bar", &[], "main", "Std.Int.Int");
+            let main_body_start = out.find("'main'/1 =").expect("missing main/1");
+            let main_body = &out[main_body_start..];
+            let main_body_end = main_body
+                .find("\n'")
+                .map(|i| main_body_start + i)
+                .unwrap_or(out.len());
+            let main_body_slice = &out[main_body_start..main_body_end];
+            assert!(
+                main_body_slice.contains(&format!("'{foo_dict}'")),
+                "main/1 should apply the A.Foo dict\n{main_body_slice}"
+            );
+            assert!(
+                !main_body_slice.contains(&format!("'{bar_dict}'")),
+                "main/1 must not apply the B.Bar dict (only A.Foo is exposed)\n{main_body_slice}"
+            );
+        },
+    );
+}
+
+#[test]
+fn qualified_trait_method_call_lowers_to_dict_dispatch() {
+    // Calling a trait method via its fully qualified name (Module.Trait.method)
+    // must produce a dictionary method access the same way bare calls do.
+    // Without ResolvedTraitMethod recorded for QualifiedName nodes, the
+    // elaborator would leave it as a regular Var lookup and the lowerer
+    // would emit an unresolved variable reference.
+    let a_src = "module A\n\npub trait Foo a {\n  fun pp : a -> String\n}\n";
+    let main_src = "module Main\n\nimport A\n\nimpl A.Foo for Int { pp x = \"qualified\" }\n\nmain () = A.Foo.pp 1\n";
+
+    with_temp_project_files(
+        &[("lib/A.saga", a_src)],
+        main_src,
+        |checker, program| {
+            let out = emit_from_program(program, "main", checker);
+            let foo_dict = typechecker::make_dict_name("A.Foo", &[], "main", "Std.Int.Int");
+            assert_contains(&out, &format!("'{foo_dict}'"));
+            assert!(
+                !out.contains("'A.Foo.pp'") && !out.contains("apply 'A.Foo.pp'"),
+                "qualified trait method should not lower as a raw name reference\n{out}"
+            );
+            assert_erlc_compiles(&out, "main");
+        },
+    );
+}
+
 // ---- Constructor atom mangling ----
 
 #[test]
