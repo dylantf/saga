@@ -1,4 +1,4 @@
-# Ambient effects: implicit context without argument plumbing.
+# Ambient reader: implicit context without argument plumbing.
 #
 # A common pain in plain functional code is threading "request-scoped"
 # values -- the current user, a request id, feature flags -- through
@@ -6,6 +6,11 @@
 # an ambient capability instead. Deep functions read them via `!`,
 # the request boundary installs a handler once, and the type system
 # still tracks the dependency through `needs {RequestContext}`.
+#
+# This is the reader monad expressed as an effect: every handler arm
+# just `resume`s with a closed-over value from the request.
+# See 57-ambient-writer.saga for the dual: an ambient sink instead of
+# an ambient source.
 
 import Std.Set
 

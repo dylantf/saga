@@ -510,6 +510,7 @@ pub const BUILTIN_MODULES: &[(&str, &str)] = &[
     ("Std.Tuple", include_str!("../stdlib/Tuple.saga")),
     ("Std.Actor", include_str!("../stdlib/Actor.saga")),
     ("Std.Fail", include_str!("../stdlib/Fail.saga")),
+    ("Std.Control", include_str!("../stdlib/Control.saga")),
     ("Std.Supervisor", include_str!("../stdlib/Supervisor.saga")),
     ("Std.Async", include_str!("../stdlib/Async.saga")),
     ("Std.IO.Unsafe", include_str!("../stdlib/IO.Unsafe.saga")),
