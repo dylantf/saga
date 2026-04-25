@@ -818,13 +818,27 @@ pub struct HandlerInfo {
 }
 
 #[derive(Debug, Clone)]
+pub struct TraitMethodInfo {
+    pub name: String,
+    pub param_types: Vec<Type>,
+    pub return_type: Type,
+    /// Var id assigned to the trait's self type parameter inside this method's
+    /// signature, if the method's user-written types reference it.
+    pub trait_param_id: Option<u32>,
+    /// Polymorphic scheme for the method, with constraints encoding the trait
+    /// bound (and any trait-level extra type-param bounds). This is the
+    /// authoritative scheme: trait methods live in their owning `TraitInfo`,
+    /// not in a flat per-name table.
+    pub scheme: Scheme,
+}
+
+#[derive(Debug, Clone)]
 pub struct TraitInfo {
     /// Type parameters: first is self, rest are extras.
     /// e.g. `trait ConvertTo a b` -> ["a", "b"]
     pub type_params: Vec<String>,
     pub supertraits: Vec<String>,
-    /// Method signatures: name -> (param_types, return_type, trait_self_param_var_id)
-    pub methods: Vec<(String, Vec<Type>, Type, Option<u32>)>,
+    pub methods: Vec<TraitMethodInfo>,
 }
 
 #[derive(Debug, Clone)]

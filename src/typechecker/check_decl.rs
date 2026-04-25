@@ -2285,11 +2285,13 @@ impl Checker {
                                         .keys()
                                         .any(|(tn, _, tt)| tn == t_name && tt == type_name);
                                     if has_impl {
-                                        for (m_name, _, _, _) in &t_info.methods {
-                                            if let Some(scheme) = self.env.get(m_name) {
-                                                // A trait method's scheme has the trait name
-                                                // in its constraints. If the env entry doesn't,
-                                                // it's a user function shadowing the method.
+                                        for tm in &t_info.methods {
+                                            // A user function shadowing a trait method by bare
+                                            // name will have its own env entry without this
+                                            // trait's constraint. Trait methods themselves no
+                                            // longer have bare env entries, so any hit here is
+                                            // either a user shadow or unrelated.
+                                            if let Some(scheme) = self.env.get(&tm.name) {
                                                 let is_trait_scheme = scheme
                                                     .constraints
                                                     .iter()
@@ -2298,7 +2300,7 @@ impl Checker {
                                                     hint = format!(
                                                         ". `{}` shadows trait method `{}.{}`. \
                                                          rename it to use the trait method",
-                                                        m_name, t_name, m_name
+                                                        tm.name, t_name, tm.name
                                                     );
                                                 }
                                             }

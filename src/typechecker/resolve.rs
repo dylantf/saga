@@ -307,23 +307,26 @@ impl<'a> Resolver<'a> {
     }
 
     /// Resolve a bare trait method name to its canonical trait when exactly
-    /// one trait contributes that method into scope. Mirrors
-    /// [`Self::resolve_bare_effect_op_name`] — None for both "no candidate"
-    /// and ">1 candidate" so the typechecker can produce a single diagnostic
-    /// for the missing/ambiguous distinction.
+    /// one trait contributes that method into scope. Locally defined traits
+    /// shadow imports — matches typical name resolution rules and lets test
+    /// fixtures redefine `Show`, `Eq`, etc. without colliding with the
+    /// prelude. Imports are consulted only when the current module has no
+    /// local trait contributing the method. Returns None for "no candidate"
+    /// and ">1 candidate within the chosen tier" so the typechecker can
+    /// produce a single diagnostic.
     fn resolve_bare_trait_method_name(&self, method_name: &str) -> Option<String> {
-        let mut candidates = HashSet::new();
         if let Some(local_traits) = self.locals.trait_methods.get(method_name) {
-            candidates.extend(local_traits.iter().cloned());
+            if local_traits.len() == 1 {
+                return local_traits.iter().next().cloned();
+            }
+            return None;
         }
-        if let Some(imported_traits) = self.scope.trait_methods.get(method_name) {
-            candidates.extend(imported_traits.iter().cloned());
+        if let Some(imported_traits) = self.scope.trait_methods.get(method_name)
+            && imported_traits.len() == 1
+        {
+            return imported_traits.iter().next().cloned();
         }
-        if candidates.len() == 1 {
-            candidates.into_iter().next()
-        } else {
-            None
-        }
+        None
     }
 
     fn resolve_handler_name(&self, name: &str) -> Option<ResolvedValue> {

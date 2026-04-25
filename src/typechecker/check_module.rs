@@ -758,20 +758,17 @@ impl Checker {
         for (name, info) in &self.trait_state.traits {
             if !mc.trait_state.traits.contains_key(name) {
                 mc.trait_state.traits.insert(name.clone(), info.clone());
-                for (method_name, _, _, _) in &info.methods {
-                    if let Some(scheme) = self.env.get(method_name) {
-                        if mc.env.get(method_name).is_none() {
-                            mc.env.insert(method_name.clone(), scheme.clone());
-                        }
-                        // Also copy canonical name entries so the resolve pass
-                        // can rewrite bare Var names to canonical form.
-                        for (user, canonical) in &self.scope_map.values {
-                            if user == method_name
-                                && canonical != method_name
-                                && mc.env.get(canonical).is_none()
-                            {
-                                mc.env.insert(canonical.clone(), scheme.clone());
-                            }
+                for method in &info.methods {
+                    // Copy canonical-keyed entries so use-site lookups
+                    // through ResolutionResult find the scheme. Schemes are
+                    // sourced from `TraitMethodInfo.scheme` (the authority);
+                    // env is the cached canonical-keyed view.
+                    for (user, canonical) in &self.scope_map.values {
+                        if user == &method.name
+                            && canonical != &method.name
+                            && mc.env.get(canonical).is_none()
+                        {
+                            mc.env.insert(canonical.clone(), method.scheme.clone());
                         }
                     }
                 }
@@ -867,8 +864,9 @@ impl Checker {
             doc_comments,
         } = exports;
 
-        // Traits and their methods: registered under both bare name (for local
-        // impl bodies) and canonical name (for the resolve pass to rewrite to).
+        // Traits and their methods. The full `Scheme` is owned by
+        // `TraitMethodInfo` on the imported module's `TraitInfo` — read it
+        // from there directly. `bindings` no longer carries trait methods.
         let binding_map: std::collections::HashMap<&str, &Scheme> =
             bindings.iter().map(|(n, s)| (n.as_str(), s)).collect();
         for (name, info) in traits {
@@ -884,21 +882,19 @@ impl Checker {
                     .entry(name.clone())
                     .or_insert_with(|| doc.clone());
             }
-            for (method_name, _, _, _) in &info.methods {
-                if let Some(&scheme) = binding_map.get(method_name.as_str()) {
-                    // Canonical name (Module.Trait.method). Use sites resolve
-                    // through ResolutionResult, which records the canonical
-                    // form, so `self.env.get(canonical)` is the lookup contract.
-                    // No bare-name insertion: bare visibility is gated by
-                    // scope_map.trait_methods and produced by the resolver.
-                    let canonical = super::canonical_join(&trait_canonical, method_name);
-                    if self.env.get(&canonical).is_none() {
-                        if let Some(&did) = def_ids.get(method_name.as_str()) {
-                            self.env
-                                .insert_with_def(canonical, scheme.clone(), did);
-                        } else {
-                            self.env.insert(canonical, scheme.clone());
-                        }
+            for method in &info.methods {
+                // Canonical name (Module.Trait.method). Use sites resolve
+                // through ResolutionResult, which records the canonical
+                // form, so `self.env.get(canonical)` is the lookup contract.
+                // No bare-name insertion: bare visibility is gated by
+                // scope_map.trait_methods and produced by the resolver.
+                let canonical = super::canonical_join(&trait_canonical, &method.name);
+                if self.env.get(&canonical).is_none() {
+                    if let Some(&did) = def_ids.get(method.name.as_str()) {
+                        self.env
+                            .insert_with_def(canonical, method.scheme.clone(), did);
+                    } else {
+                        self.env.insert(canonical, method.scheme.clone());
                     }
                 }
             }
@@ -1120,14 +1116,14 @@ pub(super) fn resolve_import(
             .then(|| super::canonical_join(prefix, trait_name));
         // Trait method canonical names live in scope.values so qualified
         // (Module.Trait.method) lookups resolve regardless of exposing.
-        for (method_name, _, _, _) in &info.methods {
-            let method_canonical = super::canonical_join(&trait_canonical, method_name);
+        for method in &info.methods {
+            let method_canonical = super::canonical_join(&trait_canonical, &method.name);
             scope
                 .values
                 .entry(method_canonical.clone())
                 .or_insert_with(|| method_canonical.clone());
             if let Some(prefix_canonical) = &alias_prefix {
-                let aliased = super::canonical_join(prefix_canonical, method_name);
+                let aliased = super::canonical_join(prefix_canonical, &method.name);
                 scope.values.entry(aliased).or_insert(method_canonical);
             }
         }
@@ -1138,7 +1134,7 @@ pub(super) fn resolve_import(
                 .or_insert_with(|| trait_canonical.clone());
             scope.register_trait_methods(
                 &trait_canonical,
-                info.methods.iter().map(|(m, _, _, _)| m.as_str()),
+                info.methods.iter().map(|m| m.name.as_str()),
             );
         }
     }
@@ -1248,7 +1244,7 @@ pub(super) fn resolve_import(
                         .or_insert(trait_canonical.clone());
                     scope.register_trait_methods(
                         &trait_canonical,
-                        info.methods.iter().map(|(m, _, _, _)| m.as_str()),
+                        info.methods.iter().map(|m| m.name.as_str()),
                     );
                     found = true;
                 }
@@ -1268,7 +1264,7 @@ pub(super) fn resolve_import(
                 let is_trait_method = exports
                     .traits
                     .values()
-                    .any(|info| info.methods.iter().any(|(m, _, _, _)| m == name));
+                    .any(|info| info.methods.iter().any(|m| &m.name == name));
                 if (is_trait_method || !scope.values.contains_key(&canonical)) && !is_handler {
                     return Err(format!("'{}' is not exported by module '{}'", name, prefix));
                 }
@@ -1622,15 +1618,9 @@ pub(super) fn public_names_for_tc(
             } => {
                 names.insert(name.clone());
             }
-            Decl::TraitDef {
-                public: true,
-                methods,
-                ..
-            } => {
-                for m in methods {
-                    names.insert(m.node.name.clone());
-                }
-            }
+            // Trait methods are owned by their `TraitInfo` (and exported via
+            // `ModuleExports.traits`), not by the flat public-value namespace.
+            // Intentionally not enumerated here.
             _ => {}
         }
     }

@@ -188,34 +188,29 @@ impl Checker {
                 None => vec![],
             };
 
-            // Preserve original data for TraitInfo storage
-            trait_method_sigs.push((
-                method_name.clone(),
-                param_types,
-                return_type,
-                trait_param_id,
-            ));
-
-            // Insert under both bare and canonical names in the defining
-            // module's env. The bare entry is what `pub_names_for_tc` exports
-            // — importing modules pick it up via `binding_map` keyed by bare
-            // name, then re-register under canonical in their own env. The
-            // canonical entry here lets use sites within the defining module
-            // resolve through the same canonical-name contract every other
-            // module sees (the resolver records canonical for the local
-            // trait too, via `LocalModuleNames::trait_methods`). Bare
-            // visibility outside the defining module is gated by
-            // `scope_map.trait_methods`.
             let scheme = Scheme {
                 forall,
                 constraints,
                 ty: fun_ty,
             };
+
+            // Single canonical-keyed env entry. Use sites in the defining
+            // module resolve through `ResolutionResult` to the canonical
+            // method name, and importers re-register under the same key from
+            // the scheme stored on `TraitMethodInfo` below. The scheme itself
+            // is owned by `TraitInfo.methods` — env is just a cached lookup
+            // view keyed by canonical name.
             let canonical_method = super::canonical_join(&canonical_name, &method_name);
-            self.env.insert(method_name.clone(), scheme.clone());
-            if canonical_method != method_name {
-                self.env.insert(canonical_method, scheme);
-            }
+            self.env
+                .insert(canonical_method, scheme.clone());
+
+            trait_method_sigs.push(super::TraitMethodInfo {
+                name: method_name,
+                param_types,
+                return_type,
+                trait_param_id,
+                scheme,
+            });
         }
 
         // Record supertrait references for find-references
@@ -306,13 +301,13 @@ impl Checker {
 
         // Check all required methods are provided
         let provided: Vec<&str> = methods.iter().map(|m| m.name.as_str()).collect();
-        for (required_name, _, _, _) in &trait_info.methods {
-            if !provided.contains(&required_name.as_str()) {
+        for required in &trait_info.methods {
+            if !provided.contains(&required.name.as_str()) {
                 return Err(Diagnostic::error_at(
                     span,
                     format!(
                         "impl {} for {} is missing method '{}'",
-                        trait_name, target_type, required_name
+                        trait_name, target_type, required.name
                     ),
                 ));
             }
@@ -334,7 +329,7 @@ impl Checker {
 
         // Check for extra methods not in the trait
         for name in &provided {
-            if !trait_info.methods.iter().any(|(n, _, _, _)| n == name) {
+            if !trait_info.methods.iter().any(|m| &m.name == name) {
                 return Err(Diagnostic::error_at(
                     span,
                     format!(
@@ -388,45 +383,30 @@ impl Checker {
             let trait_method = trait_info
                 .methods
                 .iter()
-                .find(|(n, _, _, _)| n == method_name)
+                .find(|tm| &tm.name == method_name)
                 .unwrap(); // already validated above
 
-            let trait_param_id = trait_method.3;
+            let trait_param_id = trait_method.trait_param_id;
             let expected_params: Vec<Type> = trait_method
-                .1
+                .param_types
                 .iter()
                 .map(|t| self.substitute_trait_param(trait_param_id, &target, t))
                 .collect();
             let expected_return =
-                self.substitute_trait_param(trait_param_id, &target, &trait_method.2);
+                self.substitute_trait_param(trait_param_id, &target, &trait_method.return_type);
 
             let saved_env = self.env.clone();
             let body_scope = self.enter_scope();
             let trait_saved_effs = self.save_effects();
 
-            // Re-insert the trait's method schemes so that method calls inside
-            // the impl body resolve to the trait signature, not to a user-defined
-            // function that happens to share the name. The saved_env restore at
-            // the end of this loop iteration will bring back the user's entry.
-            for (m_name, m_param_types, m_return_type, _) in &trait_info.methods {
-                let mut fun_ty = m_return_type.clone();
-                for pt in m_param_types.iter().rev() {
-                    fun_ty = Type::arrow(pt.clone(), fun_ty);
-                }
-                let mut forall = Vec::new();
-                super::collect_free_vars(&fun_ty, &mut forall);
-                let constraints: Vec<(String, u32, Vec<Type>)> = forall
-                    .iter()
-                    .map(|&var_id| (trait_name.to_string(), var_id, vec![]))
-                    .collect();
-                self.env.insert(
-                    m_name.clone(),
-                    Scheme {
-                        forall,
-                        constraints,
-                        ty: fun_ty,
-                    },
-                );
+            // Re-insert the trait's method schemes under bare name so that
+            // method calls inside the impl body resolve to the trait
+            // signature, not to a user-defined function that happens to
+            // share the name. The saved_env restore at the end of this loop
+            // iteration brings back the user's entry. Schemes are sourced
+            // from `TraitMethodInfo.scheme`, the single authority.
+            for tm in &trait_info.methods {
+                self.env.insert(tm.name.clone(), tm.scheme.clone());
             }
 
             // Bind params with expected types

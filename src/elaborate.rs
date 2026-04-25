@@ -379,9 +379,9 @@ impl Elaborator {
         // Register under both bare name and canonical name so lookups work
         // before and after the resolve pass rewrites Var nodes.
         for (trait_name, info) in &self.traits {
-            for (idx, (method_name, _, _, _)) in info.methods.iter().enumerate() {
+            for (idx, method) in info.methods.iter().enumerate() {
                 self.trait_methods
-                    .entry(method_name.clone())
+                    .entry(method.name.clone())
                     .or_insert_with(|| (trait_name.clone(), idx));
             }
         }
@@ -441,10 +441,10 @@ impl Elaborator {
                     // Order methods by trait declaration order
                     let mut ordered_methods = Vec::new();
                     if let Some(ref info) = trait_info {
-                        for (trait_method_name, _, _, _) in &info.methods {
+                        for trait_method in &info.methods {
                             if let Some(ann) = methods
                                 .iter()
-                                .find(|ann| ann.node.name == *trait_method_name)
+                                .find(|ann| ann.node.name == trait_method.name)
                             {
                                 let ImplMethod { params, body, .. } = &ann.node;
                                 let elab_body = self.elaborate_expr(body);

@@ -871,7 +871,7 @@ fn pure_function_no_needs_ok() {
 #[test]
 fn trait_method_in_env() {
     let checker = check("trait Greet a {\n  fun greet : (x: a) -> String\n}").unwrap();
-    let scheme = checker.env.get("greet").unwrap();
+    let scheme = checker.env.get("Greet.greet").unwrap();
     let ty = checker.sub.apply(&scheme.ty);
     match ty {
         Type::Fun(_, ret, _) => assert_eq!(*ret, Type::string()),
