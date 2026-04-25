@@ -1,0 +1,88 @@
+# Ambient effects: implicit context without argument plumbing.
+#
+# A common pain in plain functional code is threading "request-scoped"
+# values -- the current user, a request id, feature flags -- through
+# every layer of the call tree. Effects let us declare those values as
+# an ambient capability instead. Deep functions read them via `!`,
+# the request boundary installs a handler once, and the type system
+# still tracks the dependency through `needs {RequestContext}`.
+
+import Std.Set
+
+record User {
+  id: Int,
+  name: String,
+}
+
+record Request {
+  id: String,
+  user: User,
+  flags: Set String,
+}
+
+effect RequestContext {
+  fun current_user : Unit -> User
+  fun request_id : Unit -> String
+  fun feature_enabled : (name: String) -> Bool
+}
+
+# ----- Pure pricing helpers -----
+
+fun new_price : String -> Int
+new_price "book" = 12
+new_price "pen" = 2
+new_price _ = 5
+
+fun old_price : String -> Int
+old_price "book" = 15
+old_price "pen" = 3
+old_price _ = 7
+
+# ----- Deep in the call tree: no User/Request arguments needed -----
+
+fun price_for : (item: String) -> Int needs {RequestContext}
+price_for item =
+  if feature_enabled! "new_pricing" then new_price item
+  else old_price item
+
+fun cart_total : List String -> Int needs {RequestContext}
+cart_total [] = 0
+cart_total (item :: rest) = price_for item + cart_total rest
+
+fun checkout : (cart: List String) -> String needs {RequestContext}
+checkout cart = {
+  let user = current_user! ()
+  let rid = request_id! ()
+  let total = cart_total cart
+  $"[req={rid}] {user.name} checked out {List.length cart} items, total {total}"
+}
+
+# ----- The request boundary installs the context once -----
+
+fun handle : (req: Request) -> String
+handle req = {
+  checkout ["book", "pen", "mug"]
+} with {
+  current_user () = resume req.user
+  request_id () = resume req.id
+  feature_enabled name = resume Set.member name req.flags
+}
+
+main () = {
+  # Alice's request has the new_pricing flag enabled.
+  let alice_req = Request {
+    id: "req-001",
+    user: User { id: 1, name: "alice" },
+    flags: Set.from_list ["new_pricing"],
+  }
+
+  # Bob's request runs on the legacy pricing path.
+  let bob_req = Request {
+    id: "req-002",
+    user: User { id: 2, name: "bob" },
+    flags: Set.new (),
+  }
+
+  handle alice_req |> dbg
+  handle bob_req |> dbg
+}
