@@ -1,4 +1,4 @@
-import Std.Actor (beam_actor)
+import Std.Actor (Timer, beam_actor)
 
 main () = {
   dbg "Sleeping for 1 second..."

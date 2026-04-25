@@ -1,6 +1,8 @@
 #@ Short-circuit failure effect, parameterized by the error type.
 module Std.Fail
 
+import Std.Base (Show, Debug, Ord, Semigroup, Enum)
+
 #@ Effect for computations that can fail with an error of type `e`.
 pub effect Fail e {
   fun fail : e -> a

@@ -187,9 +187,7 @@ impl<'a> Lowerer<'a> {
             CExpr::Let(k_var, Box::new(k_ce), Box::new(body_ce))
         } else {
             let is_eff_call = collect_fun_call(expr)
-                .map(|(name, _, _)| {
-                    self.is_effectful(name) || self.current_effectful_vars.contains_key(name)
-                })
+                .map(|(name, head_expr, _)| self.is_effectful_call_name(head_expr.id, name))
                 .unwrap_or(false);
             if is_eff_call {
                 self.lower_expr_with_call_return_k(expr, return_k)
@@ -280,9 +278,7 @@ impl<'a> Lowerer<'a> {
                 Some(CExpr::Var(k_var.to_string())),
             )
         } else if collect_fun_call(expr)
-            .map(|(name, _, _)| {
-                self.is_effectful(name) || self.current_effectful_vars.contains_key(name)
-            })
+            .map(|(name, head_expr, _)| self.is_effectful_call_name(head_expr.id, name))
             .unwrap_or(false)
         {
             self.lower_expr_with_call_return_k(expr, Some(CExpr::Var(k_var.to_string())))
@@ -878,10 +874,7 @@ impl<'a> Lowerer<'a> {
                         Stmt::LetFun { .. } => unreachable!(),
                     };
                     let is_effectful_call = collect_fun_call(value_expr)
-                        .map(|(name, _, _)| {
-                            self.is_effectful(name)
-                                || self.current_effectful_vars.contains_key(name)
-                        })
+                        .map(|(name, head_expr, _)| self.is_effectful_call_name(head_expr.id, name))
                         .unwrap_or(false);
                     if is_effectful_call {
                         let (pat_opt, value_expr) = match first {
@@ -1094,10 +1087,7 @@ impl<'a> Lowerer<'a> {
                     // rest of the block as _ReturnK so CPS chains correctly
                     // (e.g. state-threading handlers need real continuations).
                     let is_effectful_call = collect_fun_call(value_expr)
-                        .map(|(name, _, _)| {
-                            self.is_effectful(name)
-                                || self.current_effectful_vars.contains_key(name)
-                        })
+                        .map(|(name, head_expr, _)| self.is_effectful_call_name(head_expr.id, name))
                         .unwrap_or(false);
                     if is_effectful_call {
                         let rest_k = self.lower_rest_block_with_k_k(pat_opt, rest, k_var);

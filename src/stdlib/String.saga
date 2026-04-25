@@ -1,6 +1,8 @@
 #@ Unicode string operations: slicing, searching, casing, and more.
 module Std.String
 
+import Std.Base (Show, Debug, Ord, Semigroup, Enum)
+
 import Std.Maybe (Maybe)
 
 impl Show for String {

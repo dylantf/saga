@@ -755,7 +755,6 @@ pub fn exec_erl_with_timeout(
 pub struct ProjectBuild {
     pub build_dir: PathBuf,
     pub stdlib_dir: PathBuf,
-    pub compiled_modules: HashMap<String, codegen::CompiledModule>,
     pub extra_ebin_dirs: Vec<PathBuf>,
 }
 
@@ -1076,7 +1075,6 @@ pub fn build_project_ext(
     ProjectBuild {
         build_dir,
         stdlib_dir,
-        compiled_modules,
         extra_ebin_dirs,
     }
 }

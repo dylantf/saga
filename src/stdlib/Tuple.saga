@@ -1,6 +1,8 @@
 #@ Operations on tuples.
 module Std.Tuple
 
+import Std.Base (Show, Debug, Ord, Semigroup, Enum)
+
 impl Debug for Unit {
   debug _ = "()"
 }

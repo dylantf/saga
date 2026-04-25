@@ -1,6 +1,8 @@
 #@ Mutable references via an algebraic effect, with process-local and ETS-backed handlers.
 module Std.Ref
 
+import Std.Base (Show, Debug, Ord, Semigroup, Enum)
+
 #@ Opaque mutable reference handle. At runtime this is an Erlang reference
 #@ used as a key into either the process dictionary or an ETS table,
 #@ depending on which handler is attached.

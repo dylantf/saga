@@ -1,6 +1,8 @@
 #@ Optional values: a type-safe alternative to null.
 module Std.Maybe
 
+import Std.Base (Show, Debug, Ord, Semigroup, Enum)
+
 impl Debug for Maybe a where {a: Debug} {
   debug m = case m {
     Nothing -> "Nothing"

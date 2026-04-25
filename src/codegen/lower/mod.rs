@@ -139,8 +139,6 @@ pub struct Lowerer<'a> {
     effect_defs: HashMap<String, EffectInfo>,
     /// Maps handler name -> handler arms + return clause.
     handler_defs: HashMap<String, HandlerInfo>,
-    /// Maps op_name -> effect name (reverse lookup).
-    op_to_effect: HashMap<String, String>,
     /// When lowering inside an effectful function, maps effect name -> handler param var name.
     current_handler_params: HashMap<String, String>,
     /// Set of "effect.op" keys whose current handler arm never calls resume.
@@ -222,7 +220,6 @@ impl<'a> Lowerer<'a> {
             fun_info: HashMap::new(),
             effect_defs: HashMap::new(),
             handler_defs: HashMap::new(),
-            op_to_effect: HashMap::new(),
             current_handler_params: HashMap::new(),
             no_resume_ops: std::collections::HashSet::new(),
             direct_ops: HashMap::new(),
@@ -278,12 +275,18 @@ impl<'a> Lowerer<'a> {
     fn resolved_fun_info(&self, node_id: crate::ast::NodeId, fallback: &str) -> Option<&FunInfo> {
         use super::resolve::ResolvedName;
         match self.resolved.get(&node_id) {
-            Some(ResolvedName::ImportedFun { canonical_name, .. })
-            | Some(ResolvedName::LocalFun { canonical_name, .. }) => self
+            // Local calls should use the current module's fully populated entry.
+            // A canonical entry can also exist from module metadata and may not
+            // include CPS-expanded handler/return parameters.
+            Some(ResolvedName::LocalFun { canonical_name, .. }) => self
+                .fun_info
+                .get(fallback)
+                .or_else(|| self.fun_info.get(canonical_name)),
+            Some(ResolvedName::ImportedFun { canonical_name, .. }) => self
                 .fun_info
                 .get(canonical_name)
                 .or_else(|| self.fun_info.get(fallback)),
-            None => self.fun_info.get(fallback),
+            None => None,
         }
     }
 
@@ -484,14 +487,20 @@ impl<'a> Lowerer<'a> {
             .and_then(|r| r.record_type(node_id))
     }
 
-    fn current_effect_call_qualifier(&self, node_id: crate::ast::NodeId) -> Option<&str> {
+    fn current_effect_call_effect(&self, node_id: crate::ast::NodeId) -> Option<&str> {
         self.front_resolution_for_module(self.current_semantic_module_name())
-            .and_then(|r| r.effect_call_qualifier(node_id))
+            .and_then(|r| r.effect_call(node_id))
+            .map(|resolved| resolved.effect.as_str())
     }
 
-    fn current_handler_arm_qualifier(&self, node_id: crate::ast::NodeId) -> Option<&str> {
-        self.front_resolution_for_module(self.current_semantic_module_name())
-            .and_then(|r| r.handler_arm_qualifier(node_id))
+    fn handler_arm_effect_for_module(
+        &self,
+        module_name: &str,
+        node_id: crate::ast::NodeId,
+    ) -> Option<&str> {
+        self.front_resolution_for_module(module_name)
+            .and_then(|r| r.handler_arm(node_id))
+            .map(|resolved| resolved.effect.as_str())
     }
 
     fn resolved_effect_ref_for_module(
@@ -526,15 +535,21 @@ impl<'a> Lowerer<'a> {
             .collect()
     }
 
+    fn canonical_effect_lookup(&self, effect_name: &str) -> String {
+        self.effect_canonical
+            .get(effect_name)
+            .cloned()
+            .unwrap_or_else(|| effect_name.to_string())
+    }
+
     fn resolved_effect_call_name(
         &self,
         node_id: crate::ast::NodeId,
-        op_name: &str,
+        _op_name: &str,
         _qualifier: Option<&str>,
     ) -> Option<String> {
-        self.current_effect_call_qualifier(node_id)
-            .map(|s| s.to_string())
-            .or_else(|| self.op_to_effect.get(op_name).cloned())
+        self.current_effect_call_effect(node_id)
+            .map(|resolved| self.canonical_effect_lookup(resolved))
     }
 
     fn resolved_handler_binding_name(&self, node_id: crate::ast::NodeId) -> Option<String> {
@@ -611,14 +626,24 @@ impl<'a> Lowerer<'a> {
             })
     }
 
-    fn resolved_handler_arm_effect(&self, arm: &HandlerArm) -> Option<String> {
-        self.current_handler_arm_qualifier(arm.id)
-            .map(|resolved| resolved.to_string())
-            .or_else(|| self.op_to_effect.get(&arm.op_name).cloned())
+    fn resolved_handler_arm_effect_for_module(
+        &self,
+        arm: &HandlerArm,
+        module_name: &str,
+    ) -> Option<String> {
+        self.handler_arm_effect_for_module(module_name, arm.id)
+            .map(|resolved| self.canonical_effect_lookup(resolved))
     }
 
-    fn handler_arm_matches_effect_op(&self, arm: &HandlerArm, eff: &str, op: &str) -> bool {
-        self.resolved_handler_arm_effect(arm)
+    fn handler_arm_matches_effect_op_for_module(
+        &self,
+        arm: &HandlerArm,
+        source_module: Option<&str>,
+        eff: &str,
+        op: &str,
+    ) -> bool {
+        let module_name = source_module.unwrap_or_else(|| self.current_semantic_module_name());
+        self.resolved_handler_arm_effect_for_module(arm, module_name)
             .is_some_and(|resolved| resolved == eff && arm.op_name == op)
     }
 
@@ -1001,18 +1026,14 @@ impl<'a> Lowerer<'a> {
     fn branch_is_effectful(&self, expr: &Expr) -> bool {
         collect_effect_call(expr).is_some()
             || collect_fun_call(expr)
-                .map(|(name, _, _)| {
-                    self.is_effectful(name) || self.current_effectful_vars.contains_key(name)
-                })
+                .map(|(name, head_expr, _)| self.is_effectful_call_name(head_expr.id, name))
                 .unwrap_or(false)
             || self.has_nested_effectful_expr(expr)
     }
 
-    /// Check if a function is effectful.
-    fn is_effectful(&self, name: &str) -> bool {
-        self.fun_info
-            .get(name)
-            .is_some_and(|f| !f.effects.is_empty())
+    fn is_effectful_call_name(&self, node_id: crate::ast::NodeId, name: &str) -> bool {
+        self.resolved_effects(node_id, name).is_some()
+            || self.current_effectful_vars.contains_key(name)
     }
 
     /// Get a function's arity.
@@ -1047,7 +1068,6 @@ impl<'a> Lowerer<'a> {
                     .filter(|e| !e.is_empty())
                     .cloned()
             }
-            // Not in resolution map -> local variable, no effects.
             None => None,
         }
     }
@@ -1839,10 +1859,6 @@ impl<'a> Lowerer<'a> {
         return_k: Option<CExpr>,
         call_span: Option<&crate::token::Span>,
     ) -> Option<CExpr> {
-        if !self.resolved.contains_key(&head_expr.id) {
-            return None;
-        }
-
         let callee_effects = self.resolved_effects(head_expr.id, func_name);
         let callee_ops = callee_effects
             .as_ref()

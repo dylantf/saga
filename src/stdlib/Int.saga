@@ -1,6 +1,8 @@
 #@ Integer conversion, arithmetic, and bitwise operations.
 module Std.Int
 
+import Std.Base (Show, Debug, Ord, Semigroup, Enum)
+
 impl Show for Int {
   show x = to_string x
 }

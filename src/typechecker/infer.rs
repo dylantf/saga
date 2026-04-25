@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use crate::ast::{Annotated, BinOp, CaseArm, Decl, Expr, ExprKind, Lit, NodeId, Pat, Stmt};
 
 use super::{Checker, Diagnostic, EffectRow, Scheme, Type};
@@ -20,6 +22,41 @@ fn collect_app_spine<'a>(
 }
 
 impl Checker {
+    /// When a bare `Var` lookup fails, probe `scope_map.trait_methods` with
+    /// the same tier-based shadowing rule the resolver uses. Locally defined
+    /// traits (canonical name prefixed by `current_module`) take precedence;
+    /// imports are consulted only when no local trait contributes the name.
+    /// Within the chosen tier, exactly one candidate is unambiguous and the
+    /// resolver would have routed it via the canonical env entry — if we got
+    /// here it means the chosen tier has >1 candidates, so emit an
+    /// ambiguous-method diagnostic listing them. Returns None when neither
+    /// tier contributes (the caller falls back to "undefined variable").
+    fn bare_trait_method_ambiguity_diag(
+        &self,
+        method_name: &str,
+        span: Span,
+    ) -> Option<Diagnostic> {
+        let candidates = self.scope_map.trait_methods.get(method_name)?;
+        let local_prefix = self.current_module.as_deref().map(|m| format!("{}.", m));
+        let (locals, imports): (Vec<&String>, Vec<&String>) = candidates
+            .iter()
+            .partition(|c| local_prefix.as_deref().is_some_and(|p| c.starts_with(p)));
+        let chosen = if !locals.is_empty() { locals } else { imports };
+        if chosen.len() < 2 {
+            return None;
+        }
+        let mut names: Vec<String> = chosen.into_iter().cloned().collect();
+        names.sort();
+        let display = names.join(", ");
+        Some(Diagnostic::error_at(
+            span,
+            format!(
+                "ambiguous trait method '{}': found in [{}]; qualify the call (e.g. `{}.{}`)",
+                method_name, display, names[0], method_name
+            ),
+        ))
+    }
+
     // --- Expression inference ---
     //
     // Effects accumulate on self.effect_row automatically. Isolation scopes
@@ -88,6 +125,8 @@ impl Checker {
                         self.record_reference(node_id, span, def_id);
                     }
                     Ok(ty)
+                } else if let Some(diag) = self.bare_trait_method_ambiguity_diag(name, span) {
+                    Err(diag)
                 } else {
                     Err(Diagnostic::error_at(
                         span,
@@ -264,9 +303,11 @@ impl Checker {
             ExprKind::EffectCall {
                 name, qualifier, ..
             } => {
+                let resolved_effect_op = self.resolution.effect_call(node_id).cloned();
                 let resolved_qualifier = self
                     .resolution
-                    .effect_call_qualifier(node_id)
+                    .effect_call(node_id)
+                    .map(|resolved| resolved.effect.as_str())
                     .or(qualifier.as_deref())
                     .map(|s| s.to_string());
                 let op_sig = self.lookup_effect_op(name, resolved_qualifier.as_deref(), span)?;
@@ -307,7 +348,10 @@ impl Checker {
                     }
                 }
                 // Emit the effect onto the accumulator.
-                if let Some(effect_name) = self.effect_for_op(name, resolved_qualifier.as_deref()) {
+                if let Some(effect_name) = resolved_effect_op
+                    .map(|resolved| resolved.effect)
+                    .or_else(|| self.effect_for_op(name, resolved_qualifier.as_deref()))
+                {
                     let effect_args = self.current_effect_args(&effect_name);
                     self.emit_effect(effect_name.clone(), effect_args);
                 }
@@ -1297,9 +1341,15 @@ impl Checker {
             );
         }
 
+        let resolved_ty = self.sub.apply(ty);
+        let effects: HashSet<String> = super::effects_from_type(&resolved_ty);
         self.env.insert_with_def(name.to_string(), scheme, pat_id);
-        if has_deferred_effects {
-            self.effect_meta.known_let_bindings.insert(name.to_string());
+        if has_deferred_effects && !effects.is_empty() {
+            let mut sorted: Vec<String> = effects.into_iter().collect();
+            sorted.sort();
+            self.effect_meta
+                .known_let_bindings
+                .insert(name.to_string(), sorted);
         }
         self.lsp.node_spans.insert(pat_id, var_span);
         self.record_type_at_span(var_span, ty);

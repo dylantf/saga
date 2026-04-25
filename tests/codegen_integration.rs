@@ -353,7 +353,7 @@ main () = {
 #[test]
 fn beam_native_handler_named_reference_lowers_to_native_ops() {
     let src = r#"
-import Std.Actor (beam_actor)
+import Std.Actor (Process, beam_actor)
 
 main () = {
   let _pid = spawn! (fun () -> ())
@@ -372,7 +372,7 @@ main () = {
 #[test]
 fn beam_ref_uses_native_backed_cps_handler_path() {
     let src = r#"
-import Std.Ref (beam_ref)
+import Std.Ref (Ref, beam_ref)
 
 main () = {
   let r = new! 41
@@ -402,8 +402,8 @@ main () = {
 #[test]
 fn async_handler_with_beam_actor_lowers_without_scoped_binding_cycle() {
     let src = r#"
-import Std.Actor (beam_actor)
-import Std.Async (async_handler)
+import Std.Actor (Process, beam_actor)
+import Std.Async (Async, async_handler)
 
 main () = {
   let f = async! (fun () -> 1)
@@ -2499,4 +2499,32 @@ main () = {
         "Std.File.fs should not lower exists as a local _script function\n{out}"
     );
     assert_core_compiles(&out);
+}
+
+#[test]
+fn local_let_shadow_of_top_level_effectful_fn_calls_local_value() {
+    // A `let` binding can shadow a top-level effectful function. The call site
+    // must dispatch to the local value, not silently route through the
+    // top-level function via raw-name lookup in fun_info / let_effect_bindings.
+    let src = r#"
+effect Echo {
+  fun emit : String -> Unit
+}
+
+handler silent for Echo {
+  emit _ = resume ()
+}
+
+fun shouter : String -> Int needs {Echo}
+shouter msg = { emit! msg; 99 }
+
+fun pure_lambda : String -> Int
+pure_lambda _ = 42
+
+main () = {
+  let shouter = pure_lambda
+  shouter "hi"
+} with silent
+"#;
+    assert_runs_and_stdout_contains(src, &["42"]);
 }

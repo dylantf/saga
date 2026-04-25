@@ -237,8 +237,6 @@ impl<'a> Lowerer<'a> {
                                 param_absorbed_effects,
                             },
                         );
-                        self.op_to_effect
-                            .insert(op.node.name.clone(), canonical_effect.clone());
                     }
                     self.effect_defs
                         .insert(canonical_effect, EffectInfo { ops });
@@ -374,9 +372,6 @@ impl<'a> Lowerer<'a> {
                                 param_absorbed_effects: op.param_absorbed_effects.clone(),
                             },
                         );
-                        self.op_to_effect
-                            .entry(op.name.clone())
-                            .or_insert_with(|| eff_def.name.clone());
                     }
                     self.effect_defs
                         .entry(eff_def.name.clone())
@@ -443,8 +438,6 @@ impl<'a> Lowerer<'a> {
                         param_absorbed_effects: op.param_absorbed_effects.clone(),
                     },
                 );
-                self.op_to_effect
-                    .insert(op.name.clone(), eff_def.name.clone());
             }
             self.effect_defs
                 .insert(eff_def.name.clone(), EffectInfo { ops: ops_map });

@@ -328,21 +328,7 @@ impl Checker {
             handler_arm_targets: self.lsp.handler_arm_targets.clone(),
             effect_call_targets: self.lsp.effect_call_targets.clone(),
             let_dict_params: self.let_dict_params.clone(),
-            let_effect_bindings: {
-                let mut let_effect_bindings = HashMap::new();
-                for name in &self.effect_meta.known_let_bindings {
-                    if let Some(scheme) = self.env.get(name) {
-                        let resolved = self.sub.apply(&scheme.ty);
-                        let effects: HashSet<String> = super::effects_from_type(&resolved);
-                        if !effects.is_empty() {
-                            let mut sorted: Vec<String> = effects.into_iter().collect();
-                            sorted.sort();
-                            let_effect_bindings.insert(name.clone(), sorted);
-                        }
-                    }
-                }
-                let_effect_bindings
-            },
+            let_effect_bindings: self.effect_meta.known_let_bindings.clone(),
             records: self.records.clone(),
             references: self.lsp.references.clone(),
             node_spans: self.lsp.node_spans.clone(),

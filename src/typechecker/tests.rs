@@ -871,7 +871,7 @@ fn pure_function_no_needs_ok() {
 #[test]
 fn trait_method_in_env() {
     let checker = check("trait Greet a {\n  fun greet : (x: a) -> String\n}").unwrap();
-    let scheme = checker.env.get("greet").unwrap();
+    let scheme = checker.env.get("Greet.greet").unwrap();
     let ty = checker.sub.apply(&scheme.ty);
     match ty {
         Type::Fun(_, ret, _) => assert_eq!(*ret, Type::string()),
@@ -4309,6 +4309,442 @@ main () = {
 "#;
 
     check_with_project_files(&[("lib/Db.saga", db_module)], main_src).unwrap();
+}
+
+fn env_module_source() -> &'static str {
+    r#"module Env
+
+pub effect Env {
+  fun get : String -> String
+}
+
+pub handler system_env for Env {
+  get key = resume "value"
+}
+"#
+}
+
+#[test]
+fn imported_handler_does_not_expose_private_effect_op_bare() {
+    let main_src = r#"import Env (system_env)
+
+main () = get! "HOME" with system_env
+"#;
+
+    let err = match check_with_project_files(&[("lib/Env.saga", env_module_source())], main_src) {
+        Ok(_) => panic!("expected bare private effect op to be unavailable"),
+        Err(err) => err,
+    };
+    assert!(
+        err.message.contains("undefined effect operation: get"),
+        "expected undefined bare op error, got: {}",
+        err.message
+    );
+}
+
+#[test]
+fn exposing_effect_exposes_its_ops_bare() {
+    let main_src = r#"import Env (Env, system_env)
+
+main () = get! "HOME" with system_env
+"#;
+
+    check_with_project_files(&[("lib/Env.saga", env_module_source())], main_src).unwrap();
+}
+
+#[test]
+fn imported_effect_op_remains_available_qualified_without_exposing() {
+    let main_src = r#"import Env
+
+main () = Env.Env.get! "HOME" with Env.system_env
+"#;
+
+    check_with_project_files(&[("lib/Env.saga", env_module_source())], main_src).unwrap();
+}
+
+#[test]
+fn exposed_imported_effect_ops_with_same_name_are_ambiguous() {
+    let a_module = r#"module A
+
+pub effect Store {
+  fun get : Unit -> Int
+}
+
+pub handler store for Store {
+  get () = resume 1
+}
+"#;
+    let b_module = r#"module B
+
+pub effect Cache {
+  fun get : Unit -> Int
+}
+
+pub handler cache for Cache {
+  get () = resume 2
+}
+"#;
+    let main_src = r#"import A (Store, store)
+import B (Cache, cache)
+
+main () = get! () with {store, cache}
+"#;
+
+    let err = match check_with_project_files(
+        &[("lib/A.saga", a_module), ("lib/B.saga", b_module)],
+        main_src,
+    ) {
+        Ok(_) => panic!("expected ambiguous bare effect op"),
+        Err(err) => err,
+    };
+    assert!(
+        err.message
+            .contains("ambiguous effect operation 'get': found in [A.Store, B.Cache]"),
+        "expected ambiguous effect op error with candidate list, got: {}",
+        err.message
+    );
+}
+
+#[test]
+fn local_effect_op_shadows_imported_when_names_collide() {
+    // Locally defined effects shadow imports for bare op resolution. Same
+    // tier rule as trait methods.
+    let env_module = r#"module Env
+
+pub effect Env {
+  fun get : String -> String
+}
+
+pub handler system_env for Env {
+  get key = resume "imported-value"
+}
+"#;
+    let main_src = r#"import Env (Env, system_env)
+
+effect Local {
+  fun get : String -> String
+}
+
+handler local_env for Local {
+  get key = resume "local-value"
+}
+
+main () = get! "HOME" with local_env
+"#;
+    check_with_project_files(&[("lib/Env.saga", env_module)], main_src).unwrap();
+}
+
+#[test]
+fn ambiguous_local_effect_ops_error_with_candidate_list() {
+    // Two locally defined effects with the same op name produce a proper
+    // ambiguous diagnostic listing the candidates.
+    let main_src = r#"effect A {
+  fun foo : Unit -> Int
+}
+
+effect B {
+  fun foo : Unit -> Int
+}
+
+handler a_h for A { foo () = resume 1 }
+handler b_h for B { foo () = resume 2 }
+
+main () = foo! () with {a_h, b_h}
+"#;
+    let err = match check(main_src) {
+        Ok(_) => panic!("expected ambiguous bare effect op"),
+        Err(err) => err,
+    };
+    assert!(
+        err.message
+            .contains("ambiguous effect operation 'foo': found in [A, B]"),
+        "expected ambiguous effect op error with candidate list, got: {}",
+        err.message
+    );
+}
+
+#[test]
+fn only_exposed_imported_effect_op_is_bare_visible_when_names_collide() {
+    let a_module = r#"module A
+
+pub effect Store {
+  fun get : Unit -> Int
+}
+
+pub handler store for Store {
+  get () = resume 1
+}
+"#;
+    let b_module = r#"module B
+
+pub effect Cache {
+  fun get : Unit -> Int
+}
+
+pub handler cache for Cache {
+  get () = resume 2
+}
+"#;
+    let main_src = r#"import A (Store, store)
+import B (cache)
+
+main () = get! () with store
+"#;
+
+    check_with_project_files(
+        &[("lib/A.saga", a_module), ("lib/B.saga", b_module)],
+        main_src,
+    )
+    .unwrap();
+}
+
+#[test]
+fn effect_ops_cannot_be_exposed_directly() {
+    let main_src = r#"import Env (get)
+
+main () = Env.Env.get! "HOME" with Env.system_env
+"#;
+
+    let err = match check_with_project_files(&[("lib/Env.saga", env_module_source())], main_src) {
+        Ok(_) => panic!("expected direct op exposing to be rejected"),
+        Err(err) => err,
+    };
+    assert!(
+        err.message
+            .contains("'get' is not exported by module 'Env'"),
+        "expected invalid import error, got: {}",
+        err.message
+    );
+}
+
+// --- Trait scope routing tests ---
+
+fn describe_module_source() -> &'static str {
+    r#"module Describe
+
+pub trait Describe a {
+  fun describe : a -> String
+}
+
+pub fun describe_thing : a -> String where {a: Describe}
+describe_thing x = describe x
+"#
+}
+
+#[test]
+fn imported_module_does_not_expose_trait_method_bare() {
+    let main_src = r#"import Describe (describe_thing)
+
+main () = describe 42
+"#;
+    let err = match check_with_project_files(
+        &[("lib/Describe.saga", describe_module_source())],
+        main_src,
+    ) {
+        Ok(_) => panic!("expected bare trait method to be unavailable"),
+        Err(err) => err,
+    };
+    assert!(
+        err.message.contains("undefined variable: describe"),
+        "expected undefined-variable error, got: {}",
+        err.message
+    );
+}
+
+#[test]
+fn exposing_trait_exposes_its_methods_bare() {
+    let main_src = r#"import Describe (Describe)
+
+impl Describe for Int {
+  describe x = "int"
+}
+
+main () = describe 42
+"#;
+    check_with_project_files(
+        &[("lib/Describe.saga", describe_module_source())],
+        main_src,
+    )
+    .unwrap();
+}
+
+#[test]
+fn imported_trait_method_remains_available_qualified_without_exposing() {
+    let main_src = r#"import Describe
+
+impl Describe.Describe for Int {
+  describe x = "int"
+}
+
+main () = Describe.Describe.describe 42
+"#;
+    check_with_project_files(
+        &[("lib/Describe.saga", describe_module_source())],
+        main_src,
+    )
+    .unwrap();
+}
+
+#[test]
+fn exposed_imported_trait_methods_with_same_name_are_ambiguous() {
+    let a_module = r#"module A
+
+pub trait Foo a {
+  fun pp : a -> String
+}
+"#;
+    let b_module = r#"module B
+
+pub trait Bar a {
+  fun pp : a -> String
+}
+"#;
+    let main_src = r#"import A (Foo)
+import B (Bar)
+
+impl Foo for Int { pp x = "a" }
+impl Bar for Int { pp x = "b" }
+
+main () = pp 1
+"#;
+
+    let err = match check_with_project_files(
+        &[("lib/A.saga", a_module), ("lib/B.saga", b_module)],
+        main_src,
+    ) {
+        Ok(_) => panic!("expected ambiguous bare trait method"),
+        Err(err) => err,
+    };
+    assert!(
+        err.message
+            .contains("ambiguous trait method 'pp': found in [A.Foo, B.Bar]"),
+        "expected ambiguous trait method error with candidate list, got: {}",
+        err.message
+    );
+}
+
+#[test]
+fn ambiguous_local_trait_methods_error_with_candidate_list() {
+    // Two locally defined traits with the same method name produce a proper
+    // ambiguous diagnostic listing the candidate traits — mirrors the
+    // effects parallel.
+    let main_src = r#"trait A a {
+  fun foo : a -> Int
+}
+
+trait B a {
+  fun foo : a -> Int
+}
+
+impl A for Int { foo x = 1 }
+impl B for Int { foo x = 2 }
+
+main () = foo 1
+"#;
+    let err = match check(main_src) {
+        Ok(_) => panic!("expected ambiguous bare trait method"),
+        Err(err) => err,
+    };
+    assert!(
+        err.message
+            .contains("ambiguous trait method 'foo': found in [A, B]"),
+        "expected ambiguous trait method error with candidate list, got: {}",
+        err.message
+    );
+}
+
+#[test]
+fn only_exposed_imported_trait_method_is_bare_visible_when_names_collide() {
+    let a_module = r#"module A
+
+pub trait Foo a {
+  fun pp : a -> String
+}
+"#;
+    let b_module = r#"module B
+
+pub trait Bar a {
+  fun pp : a -> String
+}
+
+pub fun b_helper : Unit -> Unit
+b_helper () = ()
+"#;
+    let main_src = r#"import A (Foo)
+import B (b_helper)
+
+impl Foo for Int { pp x = "a" }
+impl B.Bar for Int { pp x = "b" }
+
+main () = pp 1
+"#;
+    check_with_project_files(
+        &[("lib/A.saga", a_module), ("lib/B.saga", b_module)],
+        main_src,
+    )
+    .unwrap();
+}
+
+#[test]
+fn trait_methods_cannot_be_exposed_directly() {
+    let main_src = r#"import Describe (describe)
+
+main () = ()
+"#;
+    let err = match check_with_project_files(
+        &[("lib/Describe.saga", describe_module_source())],
+        main_src,
+    ) {
+        Ok(_) => panic!("expected direct method exposing to be rejected"),
+        Err(err) => err,
+    };
+    assert!(
+        err.message
+            .contains("'describe' is not exported by module 'Describe'"),
+        "expected invalid import error, got: {}",
+        err.message
+    );
+}
+
+#[test]
+fn local_trait_methods_remain_bare_visible() {
+    check(
+        r#"trait Local a {
+  fun lm : a -> Int
+}
+
+impl Local for Int {
+  lm x = x
+}
+
+main () = lm 42
+"#,
+    )
+    .unwrap();
+}
+
+#[test]
+fn local_trait_method_shadows_imported_when_names_collide() {
+    // When a local trait and an imported trait both contribute the same bare
+    // method name, the local trait's method wins for bare resolution. The
+    // resolver records nothing for the ambiguous union and inference falls
+    // back to the bare env entry, which only the local trait registers.
+    let main_src = r#"import Describe (Describe)
+
+trait LocalDescribe a {
+  fun describe : a -> String
+}
+
+impl Describe for Int { describe x = "int" }
+impl LocalDescribe for Int { describe x = "local-int" }
+
+main () = describe 42
+"#;
+    check_with_project_files(
+        &[("lib/Describe.saga", describe_module_source())],
+        main_src,
+    )
+    .unwrap();
 }
 
 #[test]

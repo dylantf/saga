@@ -1,6 +1,8 @@
 #@ Lightweight async/await built on top of the Actor model.
 module Std.Async
 
+import Std.Base (Show, Debug, Ord, Semigroup, Enum)
+
 import Std.Actor (Process, Actor)
 
 opaque type Future a = Future(Pid a)
