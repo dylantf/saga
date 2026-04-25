@@ -1148,9 +1148,14 @@ pub(crate) struct EffectMeta {
     pub known_funs: HashSet<String>,
     /// Annotation-provided effect type constraints: fn name -> [(effect_name, [concrete types])].
     pub fun_type_constraints: HashMap<String, Vec<(String, Vec<Type>)>>,
-    /// Registry of let bindings with deferred effects. Same story as known_funs:
-    /// only read at the CheckResult boundary for codegen, not for effect tracking.
-    pub known_let_bindings: HashSet<String>,
+    /// Registry of let bindings with deferred effects, keyed by binding name and
+    /// recording the effects observed at registration time.
+    ///
+    /// Captured at the binding's definition site (not looked up post-hoc in the
+    /// global env) so a local `let foo = pure_lambda` that shadows a top-level
+    /// effectful `foo` records the local lambda's effects (often empty), not
+    /// the top-level fn's. Only read at the CheckResult boundary for codegen.
+    pub known_let_bindings: HashMap<String, Vec<String>>,
 }
 
 /// State accumulated during typechecking for IDE/LSP features: hover types,

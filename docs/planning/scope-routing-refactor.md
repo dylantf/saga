@@ -166,12 +166,19 @@ Not a fundamental architectural change. This finishes a pattern the codebase is 
 
 ### Not changing
 
-- Resolution pass shape and `ResolutionResult` structure.
 - Typechecker pipeline ordering.
-- CPS transform, handler lowering, codegen.
+- CPS transform / handler lowering structure.
 - How `with` attaches handlers.
 - Qualified lookup paths.
 - `self.effects` population — stays fully populated with canonical entries for every loaded module.
+
+### What did change beyond the original plan (effects implementation)
+
+- **`ResolutionResult` grew a richer effect-call record.** `effect_call_qualifiers: HashMap<NodeId, String>` (qualifier-only) was replaced by `effect_calls: HashMap<NodeId, ResolvedEffectOp>` storing `(effect, op)` pairs. The same change applies to `handler_arms`. This makes the resolver authoritative for effect-call identity instead of forcing inference and codegen to re-derive it.
+- **Codegen's `op_to_effect` reverse map was removed.** Lowering now reads the resolver's per-NodeId answers via `current_effect_call_effect` / `handler_arm_effect_for_module`. Removing that global reverse map was the codegen mirror of the typechecker bug the refactor was originally about.
+- **Codegen handler-arm matching threads a `source_module`.** `effect_for_handler_arm` and `static_arm_for_effect_op` now take an originating-module argument so imported handlers' arms resolve through the right resolution map.
+- **Authoritative-resolver fallout.** A few codegen helpers used to fall back to raw-name lookups in `fun_info` when the resolver had no entry for a node. That fallback caused a silent miscompile on shadowed names (a `let foo = ...` shadowing a top-level effectful `foo` would be silently routed to the top-level fn). The fallback was dropped in `resolved_fun_info` (None arm), `resolved_effects` (None arm), and `is_effectful_call_name` (the `is_effectful(name)` raw lookup).
+- **`let_effect_bindings` now stores effects at registration time.** The map used to be populated by re-querying `self.env` after typechecking, which returned stale/wrong entries when a local let-binding shadowed a top-level fun. It is now computed from each binding's actual type at the point `generalize_let_binding` fires.
 
 ### Why downstream phases are unaffected
 
@@ -182,16 +189,30 @@ Every downstream consumer of effect metadata reads `self.effects` (or codegen's 
 
 So polymorphic type-param reads, handler registration lookups, codegen arity threading, and cross-module effect propagation all keep working. They operate on already-resolved canonical names, not on the bare-name scope we're tightening.
 
+## Status
+
+Effects half is implemented and merged into `scope-routing-refactor`. Traits half is the remaining work.
+
 ## Testing Strategy
 
-- Unit test: `import M (X)` where `X` is a handler whose effect `E` is defined in `M` — bare op of `E` must not resolve.
-- Unit test: `import M (E)` exposing the effect — bare ops resolve.
-- Unit test: `M.E.op` always resolves when `M` is imported (any form).
-- Unit test: two imported modules each defining effects with colliding op names — bare op is ambiguous only when both effects are exposed.
-- Integration test: `examples/scratch.saga` should fail to typecheck as currently written (requires either `import Std.Env (Envv)` or qualified `Std.Env.Envv.get!`).
+Unit tests in `src/typechecker/tests.rs`:
+
+- `imported_handler_does_not_expose_private_effect_op_bare` — `import M (handler)` where the effect is not exposed: bare op rejected.
+- `exposing_effect_exposes_its_ops_bare` — `import M (E)`: bare ops resolve.
+- `imported_effect_op_remains_available_qualified_without_exposing` — `M.E.op` always works.
+- `exposed_imported_effect_ops_with_same_name_are_ambiguous` — collision diagnosis.
+- `only_exposed_imported_effect_op_is_bare_visible_when_names_collide` — colliding op is unambiguous when only one effect is exposed.
+- `effect_ops_cannot_be_exposed_directly` — `import M (op)` is rejected at import time.
+
+Integration test in `tests/codegen_integration.rs`:
+
+- `local_let_shadow_of_top_level_effectful_fn_calls_local_value` — pinned the silent-miscompile bug exposed by removing codegen's raw-name fallbacks.
 
 ## Open Questions
 
-- Exposing individual ops (`import M (some_op)`) — supported, or effect-level only? Leaning "no" — ops come with their effect.
-- Should trait methods follow the same strict rule? Design call above.
+- Should trait methods follow the same strict rule? Design call in the Traits section above.
 - Does `register_qualified` need an analogous op-level helper, or is op injection handled at a different layer? Probably a dedicated helper, since op visibility is downstream of effect visibility.
+
+## Resolved Questions
+
+- Exposing individual ops (`import M (some_op)`) — **rejected at import time**. Ops come with their effect; this matches Elm/OCaml/Rust conventions and keeps op visibility cleanly downstream of effect visibility.

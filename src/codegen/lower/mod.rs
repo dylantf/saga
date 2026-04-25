@@ -286,7 +286,7 @@ impl<'a> Lowerer<'a> {
                 .fun_info
                 .get(canonical_name)
                 .or_else(|| self.fun_info.get(fallback)),
-            None => self.fun_info.get(fallback),
+            None => None,
         }
     }
 
@@ -1031,17 +1031,9 @@ impl<'a> Lowerer<'a> {
             || self.has_nested_effectful_expr(expr)
     }
 
-    /// Check if a function is effectful.
-    fn is_effectful(&self, name: &str) -> bool {
-        self.fun_info
-            .get(name)
-            .is_some_and(|f| !f.effects.is_empty())
-    }
-
     fn is_effectful_call_name(&self, node_id: crate::ast::NodeId, name: &str) -> bool {
         self.resolved_effects(node_id, name).is_some()
             || self.current_effectful_vars.contains_key(name)
-            || self.is_effectful(name)
     }
 
     /// Get a function's arity.
@@ -1076,7 +1068,7 @@ impl<'a> Lowerer<'a> {
                     .filter(|e| !e.is_empty())
                     .cloned()
             }
-            None => self.fun_effects(name).cloned(),
+            None => None,
         }
     }
 

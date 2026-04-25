@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use crate::ast::{Annotated, BinOp, CaseArm, Decl, Expr, ExprKind, Lit, NodeId, Pat, Stmt};
 
 use super::{Checker, Diagnostic, EffectRow, Scheme, Type};
@@ -1302,9 +1304,15 @@ impl Checker {
             );
         }
 
+        let resolved_ty = self.sub.apply(ty);
+        let effects: HashSet<String> = super::effects_from_type(&resolved_ty);
         self.env.insert_with_def(name.to_string(), scheme, pat_id);
-        if has_deferred_effects {
-            self.effect_meta.known_let_bindings.insert(name.to_string());
+        if has_deferred_effects && !effects.is_empty() {
+            let mut sorted: Vec<String> = effects.into_iter().collect();
+            sorted.sort();
+            self.effect_meta
+                .known_let_bindings
+                .insert(name.to_string(), sorted);
         }
         self.lsp.node_spans.insert(pat_id, var_span);
         self.record_type_at_span(var_span, ty);

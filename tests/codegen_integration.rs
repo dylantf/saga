@@ -2500,3 +2500,31 @@ main () = {
     );
     assert_core_compiles(&out);
 }
+
+#[test]
+fn local_let_shadow_of_top_level_effectful_fn_calls_local_value() {
+    // A `let` binding can shadow a top-level effectful function. The call site
+    // must dispatch to the local value, not silently route through the
+    // top-level function via raw-name lookup in fun_info / let_effect_bindings.
+    let src = r#"
+effect Echo {
+  fun emit : String -> Unit
+}
+
+handler silent for Echo {
+  emit _ = resume ()
+}
+
+fun shouter : String -> Int needs {Echo}
+shouter msg = { emit! msg; 99 }
+
+fun pure_lambda : String -> Int
+pure_lambda _ = 42
+
+main () = {
+  let shouter = pure_lambda
+  shouter "hi"
+} with silent
+"#;
+    assert_runs_and_stdout_contains(src, &["42"]);
+}
