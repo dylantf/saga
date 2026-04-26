@@ -300,6 +300,38 @@ tests () = {
         _ -> assert_true False
       }
     })
+
+    test "string literal in bitstring pattern splits on bytes" (fun () -> {
+      let line = <<"hello\r\nworld">>
+      case line {
+        <<head:5/binary, "\r\n", rest/binary>> -> {
+          assert_eq (BitString.to_list head) [104, 101, 108, 108, 111]
+          assert_eq (BitString.to_list rest) [119, 111, 114, 108, 100]
+        }
+        _ -> assert_true False
+      }
+    })
+
+    test "string literal pattern with variable preceding size" (fun () -> {
+      let bs = <<"AB::tail">>
+      let i = 2
+      case bs {
+        <<head:i/binary, "::", rest/binary>> -> {
+          assert_eq (BitString.to_list head) [65, 66]
+          assert_eq (BitString.to_list rest) [116, 97, 105, 108]
+        }
+        _ -> assert_true False
+      }
+    })
+
+    test "string literal pattern that doesn't match falls through" (fun () -> {
+      let bs = <<"no separator here">>
+      let result = case bs {
+        <<_:2/binary, "::", _rest/binary>> -> "matched"
+        _ -> "fell through"
+      }
+      assert_eq result "fell through"
+    })
   })
 
   describe "partial application" (fun () -> {

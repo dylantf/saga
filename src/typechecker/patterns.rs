@@ -198,6 +198,15 @@ impl Checker {
                         Type::float()
                     } else if has_spec(&ast::BitSegSpec::Binary) {
                         Type::con("BitString")
+                    } else if matches!(
+                        &seg.value,
+                        Pat::Lit {
+                            value: Lit::String(..),
+                            ..
+                        }
+                    ) {
+                        // String literal sugar: <<"\r\n">> matches the literal bytes.
+                        Type::string()
                     } else {
                         // integer (default), utf8 — both bind as Int
                         Type::int()
