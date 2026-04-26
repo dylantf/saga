@@ -17,7 +17,7 @@ outer_handler () = handler for Outer {
   outer_op _ = resume ()
 }
 
-fun framework_call : (Unit -> Unit needs {Outer}) -> Unit
+fun framework_call : (Unit -> Unit needs {Outer}) -> Unit needs {Outer}
 framework_call f = f ()
 
 main () = {
