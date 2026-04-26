@@ -1009,6 +1009,52 @@ impl Checker {
             }
             collect_row_vars(&resolved, &mut callback_row_vars);
         }
+        // Effects declared on a callback parameter must be handled by the HOF:
+        // either via an internal `with` block (in which case they were already
+        // subtracted from `all_body_effs` during `with` inference) or by
+        // declaring them in the function's own `needs` row (forward to caller).
+        // Without either, the lowerer has no source for the handler at the
+        // point the callback is invoked. Detect this here so the user gets a
+        // typechecker error instead of a codegen ICE.
+        if let Some(ann) = annotation {
+            let declared_row_for_check = innermost_effect_row(&self.sub.apply(ann))
+                .unwrap_or_else(EffectRow::empty);
+            let declared_names: std::collections::HashSet<String> = declared_row_for_check
+                .effects
+                .iter()
+                .map(|e| e.name.clone())
+                .collect();
+            let mut unhandled: Vec<String> = absorbed
+                .iter()
+                .filter(|eff| {
+                    all_body_effs.effects.iter().any(|e| &e.name == *eff)
+                        && !declared_names.contains(*eff)
+                })
+                .cloned()
+                .collect();
+            if !unhandled.is_empty() {
+                unhandled.sort();
+                let err_span = annotation_span.unwrap_or_else(|| match clauses[0] {
+                    Decl::FunBinding { span, .. } => *span,
+                    _ => unreachable!(),
+                });
+                return Err(Diagnostic::error_at(
+                    err_span,
+                    format!(
+                        "`{}` calls a callback parameter whose declared effect{} {{{}}} {} not handled; \
+                         either wrap the callback call in `with`, or add `needs {{{}}}` to the annotation \
+                         to forward the effect{} to the caller",
+                        name,
+                        if unhandled.len() == 1 { "" } else { "s" },
+                        unhandled.join(", "),
+                        if unhandled.len() == 1 { "is" } else { "are" },
+                        unhandled.join(", "),
+                        if unhandled.len() == 1 { "" } else { "s" },
+                    ),
+                ));
+            }
+        }
+
         let all_body_effs = if absorbed.is_empty() {
             all_body_effs
         } else {

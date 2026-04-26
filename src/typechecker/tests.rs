@@ -3291,7 +3291,14 @@ fn generic_effect_effarrow_polymorphic_hof() {
 }
 
 fun run_state : (init: s) -> (f: Unit -> a needs {State s}) -> (a, s)
-run_state init f = (f (), init)
+run_state init f = {
+  let state_fn = f () with {
+    get () = fun s -> (resume s) s
+    put new_s = fun _ -> (resume ()) new_s
+    return value = fun s -> (value, s)
+  }
+  state_fn init
+}
 
 fun use_it : Unit -> Int
 use_it () = {
@@ -5117,7 +5124,7 @@ fn nested_hof_absorption_does_not_leak_inner_closed_effects() {
         "effect Assert {\n  fun assert : Bool -> String -> Unit\n}\n\
          effect State s {\n  fun get : Unit -> s\n  fun put : s -> Unit\n}\n\
          fun use : (body: Unit -> Unit needs {Assert, ..e}) -> Unit needs {..e}\n\
-         use body = body ()\n\
+         use body = body () with { assert _ _ = resume () }\n\
          fun run_state : s -> (Unit -> a needs {State s}) -> (a, s)\n\
          run_state init f = {\n\
            let state_fn = f () with {\n\
@@ -5133,6 +5140,44 @@ fn nested_hof_absorption_does_not_leak_inner_closed_effects() {
            let _ = value\n\
            assert! True \"\"\n\
          })",
+    )
+    .unwrap();
+}
+
+#[test]
+fn closed_callback_effect_must_be_handled_or_forwarded() {
+    // A HOF whose callback parameter declares closed `needs {X}` must either
+    // install an internal `with` handler for X or forward X via the function's
+    // own `needs` clause. Otherwise the runtime has no way to source the
+    // handler when the callback is invoked, and the lowerer would ICE.
+    // Regression: typechecker used to silently absorb the effect.
+    let unhandled = "effect Outer {\n  fun outer_op : Unit -> Unit\n}\n\
+                     fun framework_call : (Unit -> Unit needs {Outer}) -> Unit\n\
+                     framework_call f = f ()";
+    let err = match check(unhandled) {
+        Ok(_) => panic!("expected typechecker error for unhandled callback effect"),
+        Err(e) => e,
+    };
+    assert!(
+        err.message.contains("Outer") && err.message.contains("not handled"),
+        "expected unhandled-callback-effect error, got: {}",
+        err.message
+    );
+
+    // Forwarding via the function's own `needs` is fine.
+    check(
+        "effect Outer {\n  fun outer_op : Unit -> Unit\n}\n\
+         fun framework_call : (Unit -> Unit needs {Outer}) -> Unit needs {Outer}\n\
+         framework_call f = f ()",
+    )
+    .unwrap();
+
+    // Internal `with` is also fine (existing pattern, already verified by
+    // run_state-style tests).
+    check(
+        "effect Outer {\n  fun outer_op : Unit -> Unit\n}\n\
+         fun framework_call : (Unit -> Unit needs {Outer}) -> Unit\n\
+         framework_call f = f () with { outer_op _ = resume () }",
     )
     .unwrap();
 }
