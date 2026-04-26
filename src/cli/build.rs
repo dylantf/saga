@@ -536,9 +536,7 @@ pub fn ensure_stdlib_cache(build_root: &Path) -> PathBuf {
         .map(|e| e.path())
         .collect();
 
-    for file in &compilable_files {
-        run_erlc_file(file, &temp_dir);
-    }
+    run_erlc_batch(&compilable_files, &temp_dir);
 
     // Clean up source files — only keep .beam
     // for file in &compilable_files {
@@ -617,38 +615,41 @@ fn copy_bridges_from_dir(dir: &Path, build_dir: &Path, count: &mut usize) -> Res
     Ok(())
 }
 
-/// Compile a single .core or .erl file with erlc.
-pub fn run_erlc_file(core_file: &Path, build_dir: &Path) {
+/// Compile a batch of .core/.erl files with a single erlc invocation.
+/// One BEAM startup amortized across all files.
+pub fn run_erlc_batch(files: &[PathBuf], out_dir: &Path) {
+    if files.is_empty() {
+        return;
+    }
     let verbose = super::is_verbose();
     let output = std::process::Command::new("erlc")
         .arg("-o")
-        .arg(build_dir)
-        .arg(core_file)
+        .arg(out_dir)
+        .args(files)
         .output()
         .unwrap_or_else(|e| {
             eprintln!("Failed to run erlc: {}", e);
             std::process::exit(1);
         });
 
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
     if !output.status.success() {
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let stderr = String::from_utf8_lossy(&output.stderr);
         if !stdout.is_empty() {
             eprintln!("{}", stdout.trim());
         }
         if !stderr.is_empty() {
             eprintln!("{}", stderr.trim());
         }
-        eprintln!("erlc failed on {}", core_file.display());
+        eprintln!("erlc failed");
         std::process::exit(1);
     }
 
     if verbose {
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let stderr = String::from_utf8_lossy(&output.stderr);
         let has_output = !stdout.trim().is_empty() || !stderr.trim().is_empty();
         if has_output {
-            eprintln!("  erlc {}", core_file.display());
+            eprintln!("  erlc ({} files)", files.len());
         }
         if !stdout.is_empty() {
             eprintln!("{}", stdout.trim());
@@ -672,9 +673,7 @@ pub fn run_erlc(build_dir: &Path, build_start: Instant) {
         .map(|e| e.path())
         .collect();
 
-    for file in &compilable_files {
-        run_erlc_file(file, build_dir);
-    }
+    run_erlc_batch(&compilable_files, build_dir);
 
     let elapsed = build_start.elapsed();
     eprintln!(
