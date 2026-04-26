@@ -334,18 +334,14 @@ impl Checker {
                 } else {
                     op_sig.needs.clone()
                 };
-                if op_sig.params.is_empty() {
-                    ty = Type::Fun(Box::new(Type::unit()), Box::new(ty), needs_row);
-                } else {
-                    for (i, (_, param_ty)) in op_sig.params.iter().rev().enumerate() {
-                        let row = if i == op_sig.params.len() - 1 {
-                            // Outermost arrow carries the needs
-                            needs_row.clone()
-                        } else {
-                            EffectRow::empty()
-                        };
-                        ty = Type::Fun(Box::new(param_ty.clone()), Box::new(ty), row);
-                    }
+                for (i, (_, param_ty)) in op_sig.params.iter().rev().enumerate() {
+                    let row = if i == op_sig.params.len() - 1 {
+                        // Outermost arrow carries the needs
+                        needs_row.clone()
+                    } else {
+                        EffectRow::empty()
+                    };
+                    ty = Type::Fun(Box::new(param_ty.clone()), Box::new(ty), row);
                 }
                 // Emit the effect onto the accumulator.
                 if let Some(effect_name) = resolved_effect_op

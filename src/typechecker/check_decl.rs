@@ -1234,6 +1234,24 @@ impl Checker {
             })?;
         }
 
+        // Zero-param bindings only make sense as eta-reduced function values
+        // (e.g. `add_five = add 5` where the body has type `Int -> Int`). When
+        // the body is a non-function value, the user wrote a constant under
+        // `fun`-binding syntax and should use `val` instead. The parser cannot
+        // distinguish these cases up-front because the body is typechecked here.
+        if arity == 0 && !matches!(self.sub.apply(&fun_ty), Type::Fun(_, _, _)) {
+            let span = match clauses[0] {
+                Decl::FunBinding { span, .. } => *span,
+                _ => unreachable!(),
+            };
+            return Err(Diagnostic::error_at(
+                span,
+                format!(
+                    "`{name}` has no parameters and its body is not a function; use `val {name} = ...` for constants"
+                ),
+            ));
+        }
+
         let scheme = self.build_fun_scheme(
             name,
             fun_ty,

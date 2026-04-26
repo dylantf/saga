@@ -18,6 +18,34 @@ type AnnotatedSignature = (
     Option<(String, Span)>,
 );
 
+/// Where a `fun name : ...` signature appears. Drives the error message when
+/// the signature has no `->` (zero parameters); saga functions must take at
+/// least one parameter, so a parameter-free signature is never legitimate
+/// regardless of how the body is written (eta-reduced bindings still have
+/// arrows in their annotated type).
+#[derive(Clone, Copy)]
+pub(super) enum SignatureSite {
+    TopLevel,
+    EffectOp,
+    TraitMethod,
+}
+
+impl SignatureSite {
+    fn zero_param_message(self, name: &str) -> String {
+        match self {
+            SignatureSite::TopLevel => format!(
+                "function `{name}` has no parameters; functions must take at least one parameter (use `val {name} = ...` for constants)"
+            ),
+            SignatureSite::EffectOp => format!(
+                "effect operation `{name}` has no parameters; use `fun {name} : Unit -> ...` for nullary operations"
+            ),
+            SignatureSite::TraitMethod => format!(
+                "trait method `{name}` has no parameters; use `fun {name} : Unit -> ...` for nullary methods"
+            ),
+        }
+    }
+}
+
 impl Parser {
     // Parse `Name` or `Module.Name`, returning the full qualified string.
     // Used where we want to preserve the qualification (e.g. needs lists).
@@ -365,7 +393,8 @@ impl Parser {
         let name_span = self.tokens[self.pos - 1].span;
 
         self.expect(Token::Colon)?;
-        let (params, return_type, effects, effect_row_var) = self.parse_annotated_signature()?;
+        let (params, return_type, effects, effect_row_var) =
+            self.parse_annotated_signature(SignatureSite::TopLevel, &name)?;
 
         // Parse optional `where {a: Show + Eq, b: Ord}`
         let where_clause = self.parse_where_clause()?;
@@ -492,7 +521,7 @@ impl Parser {
 
             self.expect(Token::Colon)?;
             let (params, return_type, effects, effect_row_var) =
-                self.parse_annotated_signature()?;
+                self.parse_annotated_signature(SignatureSite::EffectOp, &op_name)?;
             let op_end = self.tokens[self.pos - 1].span;
 
             let trailing_comment = self.take_trailing_comment(self.pos - 1);
@@ -775,7 +804,7 @@ impl Parser {
 
             self.expect(Token::Colon)?;
             let (params, return_type, _effects, _effect_row_var) =
-                self.parse_annotated_signature()?;
+                self.parse_annotated_signature(SignatureSite::TraitMethod, &method_name)?;
             let method_end = self.tokens[self.pos - 1].span;
 
             let trailing_comment = self.take_trailing_comment(self.pos - 1);
@@ -1054,8 +1083,15 @@ impl Parser {
 
     /// Parse an annotated type signature after the `:`.
     /// Each arrow segment can optionally have a label: `(label: Type) -> Type -> RetType`
-    /// Returns (params, return_type, effects).
-    fn parse_annotated_signature(&mut self) -> Result<AnnotatedSignature, ParseError> {
+    /// Returns (params, return_type, effects). Rejects zero-parameter signatures
+    /// with a site-specific message: saga functions must take at least one
+    /// parameter at every declaration site that uses an annotated signature.
+    fn parse_annotated_signature(
+        &mut self,
+        site: SignatureSite,
+        name: &str,
+    ) -> Result<AnnotatedSignature, ParseError> {
+        let sig_start = self.tokens[self.pos].span;
         // Collect all arrow segments: parse "A -> B -> C -> D" as [A, B, C, D]
         // Each segment is either (Some(label), type) or (None, type)
         let mut segments: Vec<(Option<String>, TypeExpr)> = Vec::new();
@@ -1095,9 +1131,14 @@ impl Parser {
         }
 
         if segments.len() < 2 {
-            // No arrow at all, e.g. `fun x : Int` -- just a constant annotation
+            // No arrow: zero-parameter signature. Saga functions require at
+            // least one parameter at every annotated declaration site.
             let (_label, ty) = segments.pop().unwrap();
-            return Ok((vec![], ty, effects, effect_row_var));
+            let span = sig_start.to(ty.span());
+            return Err(ParseError {
+                message: site.zero_param_message(name),
+                span,
+            });
         }
 
         // Last segment is the return type, rest are params

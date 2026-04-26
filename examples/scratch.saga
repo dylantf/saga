@@ -1,37 +1,40 @@
-pub effect Outer {
-  fun outer_op : Unit -> Unit
+record Foo {
+  foo: String,
+} deriving (Debug)
+
+val make_foo1 = Foo { foo: "foo" }
+
+val make_foo2 = Foo { foo: "foo2" }
+
+val make_int = 5
+
+effect Bar {
+  fun bar : Unit -> Unit
 }
 
-pub effect Inner {
-  fun inner_op : Unit -> Unit
+handler bar for Bar {
+  bar () = dbg "bar"
 }
 
-pub type Body =
-  | Streamed (Unit -> Unit needs {Inner})
-
-fun mk : (Unit -> Unit needs {Inner}) -> Body
-mk producer = Streamed producer
-
-fun outer_handler : Unit -> Handler Outer
-outer_handler () = handler for Outer {
-  outer_op _ = resume ()
+trait Baz a {
+  fun baz : a -> Unit
 }
 
-fun framework_call : (Unit -> Unit needs {Outer}) -> Unit needs {Outer}
-framework_call f = f ()
+impl Baz for Int {
+  baz x = dbg ("did a baz: " <> show x)
+}
 
 main () = {
-  let h = outer_handler ()
-  framework_call (fun () -> {
-    outer_op! ()
-    let body = mk (fun () -> inner_op! ())
-    case body {
-      Streamed producer -> {
-        let _ = producer () with {
-          inner_op _ = resume ()
-        }
-        ()
-      }
-    }
-  }) with h
+  let foo1 = make_foo1
+  dbg foo1
+
+  let foo2 = make_foo2
+  dbg foo2
+
+  let some_int = make_int
+  dbg some_int
+
+  baz 5
+
+  bar! () with bar
 }
