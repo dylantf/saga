@@ -135,5 +135,64 @@ tests () = {
         assert_eq (0x10 + 0x10) 32
       })
     })
+
+    describe "to_hex" (fun () -> {
+      test "zero" (fun () -> {
+        assert_eq (Int.to_hex 0) "0"
+      })
+
+      test "small values" (fun () -> {
+        assert_eq (Int.to_hex 1) "1"
+        assert_eq (Int.to_hex 10) "a"
+        assert_eq (Int.to_hex 15) "f"
+        assert_eq (Int.to_hex 16) "10"
+      })
+
+      test "byte boundary" (fun () -> {
+        assert_eq (Int.to_hex 255) "ff"
+        assert_eq (Int.to_hex 256) "100"
+      })
+
+      test "larger values" (fun () -> {
+        assert_eq (Int.to_hex 65535) "ffff"
+        assert_eq (Int.to_hex 0xDEAD_BEEF) "deadbeef"
+      })
+
+      test "negative" (fun () -> {
+        assert_eq (Int.to_hex (-255)) "-ff"
+        assert_eq (Int.to_hex (-1)) "-1"
+      })
+    })
+
+    describe "parse_hex" (fun () -> {
+      test "lowercase" (fun () -> {
+        "ff" |> Int.parse_hex |> assert_eq (Just 255)
+      })
+
+      test "uppercase" (fun () -> {
+        "FF" |> Int.parse_hex |> assert_eq (Just 255)
+      })
+
+      test "mixed case" (fun () -> {
+        "DeAdBeEf" |> Int.parse_hex |> assert_eq (Just 0xDEAD_BEEF)
+      })
+
+      test "negative" (fun () -> {
+        "-ff" |> Int.parse_hex |> assert_eq (Just (-255))
+      })
+
+      test "round-trip" (fun () -> {
+        let n = 0xCAFE_BABE
+        n |> Int.to_hex |> Int.parse_hex |> assert_eq (Just n)
+      })
+
+      test "invalid" (fun () -> {
+        "xyz" |> Int.parse_hex |> assert_nothing
+      })
+
+      test "empty" (fun () -> {
+        "" |> Int.parse_hex |> assert_nothing
+      })
+    })
   })
 }

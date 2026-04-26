@@ -87,3 +87,15 @@ pub fun shift_left : (bits: Int) -> (n: Int) -> Int
 #@ Bitwise shift right.
 @external("erlang", "std_int_bridge", "shift_right")
 pub fun shift_right : (bits: Int) -> (n: Int) -> Int
+
+# --- Hex conversion ---
+
+#@ Converts an integer into its equivalent lowercase hex string.
+#@ Negative numbers are prefixed with "-".
+@external("erlang", "std_int_bridge", "to_hex")
+pub fun to_hex : Int -> String
+
+#@ Parses a hex string (with optional "-" prefix) as an integer.
+#@ Accepts both upper and lower case digits. Returns Nothing if invalid.
+@external("erlang", "std_int_bridge", "parse_hex")
+pub fun parse_hex : String -> Maybe Int
