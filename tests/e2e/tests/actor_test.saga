@@ -167,6 +167,51 @@ test_exit () = {
   }
 }
 
+# Regression: spawn! invoked from a function whose `needs` row does NOT include
+# Actor. The spawn op's parameter declares `needs {Actor msg, ..e}`; the BEAM-
+# native handler is responsible for installing Actor in the spawned process.
+# Previously the lowerer added an explicit Actor handler param to the lambda,
+# which the spawn handler under-applied at runtime (badarity).
+fun spawn_in_process_only : (caller: Pid String) -> Unit needs {Process}
+spawn_in_process_only caller = {
+  let _ = spawn! (fun () -> send! caller "from-child")
+  ()
+}
+
+fun test_spawn_in_process_only : Unit -> String needs {Process, Actor String}
+test_spawn_in_process_only () = {
+  let me = self! ()
+  spawn_in_process_only me
+  receive {
+    msg -> msg
+    after 500 -> "timeout"
+  }
+}
+
+# Same shape, but the spawned lambda also calls self! itself — exercises that
+# Actor.self! inside the lambda lowers to a direct erlang:self() call when
+# the absorbed effect is satisfied by the BEAM-native handler. The child sends
+# back a fixed string after invoking self!, proving the spawn ran without a
+# badarity crash and the inner self! resolved.
+fun spawn_self_in_process_only : (caller: Pid String) -> Unit needs {Process}
+spawn_self_in_process_only caller = {
+  let _ = spawn! (fun () -> {
+    let _me = self! ()
+    send! caller "self-ok"
+  })
+  ()
+}
+
+fun test_spawn_self_in_process_only : Unit -> String needs {Process, Actor String}
+test_spawn_self_in_process_only () = {
+  let me = self! ()
+  spawn_self_in_process_only me
+  receive {
+    msg -> msg
+    after 500 -> "timeout"
+  }
+}
+
 fun test_link_unlink : Unit -> String needs {Process, Actor String, Link}
 test_link_unlink () = {
   let pid = spawn! (fun () -> {
@@ -260,6 +305,18 @@ tests () = {
       test "link and unlink don't crash" (fun () -> {
         let result = test_link_unlink () with beam_actor
         assert_eq result "ok"
+      })
+    })
+
+    describe "spawn from a function whose needs row excludes Actor" (fun () -> {
+      test "spawned lambda still runs" (fun () -> {
+        let result = test_spawn_in_process_only () with beam_actor
+        assert_eq result "from-child"
+      })
+
+      test "spawned lambda can call self!" (fun () -> {
+        let result = test_spawn_self_in_process_only () with beam_actor
+        assert_eq result "self-ok"
       })
     })
   })

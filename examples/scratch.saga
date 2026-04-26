@@ -1,48 +1,12 @@
-import Std.IO (console, println)
+import Std.Actor (Process, Timer, beam_actor)
 
-pub fun module_a : Unit -> Unit needs {Reg}
-module_a () = reg! "a" (fun () -> ())
-
-pub effect Reg {
-  fun reg : String -> (Unit -> Unit) -> Unit
-}
-
-record ItemData {
-  name: String,
-  body: Unit -> Unit,
-}
-
-pub type Entry = Item ItemData
-
-handler collect for Reg {
-  reg name body = {
-    let k = resume ()
-    fun entries -> k (Item (ItemData { name: name, body: body }) :: entries)
-  }
-  return _ = fun entries -> entries
-}
-
-fun reverse_entries : List Entry -> List Entry -> List Entry
-reverse_entries acc entries = case entries {
-  [] -> acc
-  entry :: rest -> reverse_entries (entry :: acc) rest
-}
-
-pub fun collect_one : (Unit -> Unit needs {Reg}) -> List Entry
-collect_one f = {
-  let entries_fn = {
-    f ()
-  } with collect
-  reverse_entries [] (entries_fn [])
-}
-
-pub fun has_a : List Entry -> Bool
-has_a entries = case entries {
-  [] -> False
-  Item item :: _ -> item.name == "a"
+fun spawn_in_effect : Unit -> Unit needs {Process}
+spawn_in_effect () = {
+  let _ = spawn! (fun () -> dbg "ran")
+  ()
 }
 
 main () = {
-  let entries = collect_one module_a
-  println (show (has_a entries))
-} with console
+  spawn_in_effect ()
+  sleep! 200
+} with beam_actor

@@ -231,22 +231,39 @@ impl<'a> Lowerer<'a> {
             // needs {Actor} and Actor handler params are already threaded), the
             // lambda captures them via closure — no extra params needed.
             let saved_ctx = self.lambda_effect_context.take();
+            let saved_direct_ops = self.direct_ops.clone();
             if let Some(ref pae) = op_param_absorbed
                 && let Some(effs) = pae.get(&source_idx)
             {
-                // Only add handler params for effects not already capturable
-                // from the enclosing scope.
-                let uncapturable: Vec<String> = effs
-                    .iter()
-                    .filter(|eff| {
-                        let ops = self.effect_handler_ops(&[(*eff).clone()]);
-                        ops.iter().any(|(e, op)| {
-                            let key = format!("{}.{}", e, op);
-                            !self.current_handler_params.contains_key(&key)
-                        })
-                    })
-                    .cloned()
-                    .collect();
+                let mut uncapturable: Vec<String> = Vec::new();
+                for eff in effs {
+                    let ops = self.effect_handler_ops(std::slice::from_ref(eff));
+                    if ops.is_empty() {
+                        continue;
+                    }
+                    let already_in_scope = ops.iter().all(|(e, op)| {
+                        self.current_handler_params
+                            .contains_key(&format!("{}.{}", e, op))
+                    });
+                    if already_in_scope {
+                        continue;
+                    }
+                    // The op being called declares this effect as absorbed on
+                    // its parameter -- meaning the handler invokes the lambda
+                    // in a context where the effect is in scope. For BEAM-native
+                    // handlers (e.g. spawn installing Actor in the new process),
+                    // that context is satisfied by direct erlang calls, not an
+                    // explicit handler param. Mark the ops as `direct_ops` so any
+                    // use in the lambda body lowers natively.
+                    if let Some(handler_canonical) = self.beam_native_handler_for_effect(eff) {
+                        for (e, op) in &ops {
+                            self.direct_ops
+                                .insert(format!("{}.{}", e, op), handler_canonical.clone());
+                        }
+                        continue;
+                    }
+                    uncapturable.push(eff.clone());
+                }
                 if !uncapturable.is_empty() {
                     self.lambda_effect_context = Some(uncapturable);
                 }
@@ -255,6 +272,7 @@ impl<'a> Lowerer<'a> {
                 .lower_eta_reduced_effect_expr(arg)
                 .unwrap_or_else(|| self.lower_expr_value(arg));
             self.lambda_effect_context = saved_ctx;
+            self.direct_ops = saved_direct_ops;
             bindings.push((v.clone(), ce));
             param_vars.push(v);
         }
@@ -1460,8 +1478,25 @@ impl<'a> Lowerer<'a> {
             .is_some_and(|module| super::beam_interop::is_beam_native_handler(module, canonical))
     }
 
-    fn use_direct_native_fast_path(&self, canonical: &str) -> bool {
-        let _ = canonical;
+    /// Find a BEAM-native handler that covers the given effect, if any.
+    /// Used to satisfy callback-parameter absorbed effects without threading
+    /// an explicit handler param: BEAM-native ops are installed as `direct_ops`
+    /// so any use inside the lambda body lowers to a direct erlang call.
+    pub(super) fn beam_native_handler_for_effect(&self, effect: &str) -> Option<String> {
+        for (canonical, info) in &self.handler_defs {
+            if !info.effects.iter().any(|e| e == effect) {
+                continue;
+            }
+            if let Some(module) = info.source_module.as_deref()
+                && super::beam_interop::is_beam_native_handler(module, canonical)
+            {
+                return Some(canonical.clone());
+            }
+        }
+        None
+    }
+
+    fn use_direct_native_fast_path(&self, _canonical: &str) -> bool {
         false
     }
 }
