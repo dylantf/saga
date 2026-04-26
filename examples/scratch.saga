@@ -1,12 +1,37 @@
-import Std.Actor (Process, Timer, beam_actor)
-
-fun spawn_in_effect : Unit -> Unit needs {Process}
-spawn_in_effect () = {
-  let _ = spawn! (fun () -> dbg "ran")
-  ()
+pub effect Outer {
+  fun outer_op : Unit -> Unit
 }
 
+pub effect Inner {
+  fun inner_op : Unit -> Unit
+}
+
+pub type Body =
+  | Streamed (Unit -> Unit needs {Inner})
+
+fun mk : (Unit -> Unit needs {Inner}) -> Body
+mk producer = Streamed producer
+
+fun outer_handler : Unit -> Handler Outer
+outer_handler () = handler for Outer {
+  outer_op _ = resume ()
+}
+
+fun framework_call : (Unit -> Unit needs {Outer}) -> Unit
+framework_call f = f ()
+
 main () = {
-  spawn_in_effect ()
-  sleep! 200
-} with beam_actor
+  let h = outer_handler ()
+  framework_call (fun () -> {
+    outer_op! ()
+    let body = mk (fun () -> inner_op! ())
+    case body {
+      Streamed producer -> {
+        let _ = producer () with {
+          inner_op _ = resume ()
+        }
+        ()
+      }
+    }
+  }) with h
+}

@@ -906,6 +906,12 @@ pub struct Checker {
     /// Functions whose bodies produce handlers, so applications like
     /// `make_state 0` can preserve handler metadata such as return clauses.
     pub(crate) handler_funs: HashMap<std::string::String, HandlerInfo>,
+    /// Handler info for `let h = <expr>` bindings whose RHS produces a handler.
+    /// Keyed by the let pattern's NodeId so the lowerer can look up handler
+    /// metadata (return clauses, effects) even after the per-function-clause
+    /// `self.handlers` save/restore wipes the in-scope entry.
+    pub(crate) let_binding_handlers:
+        HashMap<crate::ast::NodeId, HandlerInfo>,
     /// Context for resume typing: when inside a handler arm, the return type of the op being handled
     pub(crate) resume_type: Option<Type>,
     /// Context for resume return typing: when inside a handler arm, the answer type of the with-expression
@@ -1296,6 +1302,7 @@ impl Checker {
             effects: HashMap::new(),
             handlers: HashMap::new(),
             handler_funs: HashMap::new(),
+            let_binding_handlers: HashMap::new(),
             resume_type: None,
             resume_return_type: None,
             effect_meta: EffectMeta::default(),

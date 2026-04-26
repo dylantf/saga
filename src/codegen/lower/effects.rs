@@ -839,11 +839,11 @@ impl<'a> Lowerer<'a> {
 
         for stmt in stmts {
             if let Stmt::Let { pattern, value, .. } = &stmt.node
-                && let Pat::Var { name, .. } = pattern
+                && let Pat::Var { name, id: pat_id, .. } = pattern
                 && name == named_ref
                 && self.is_handler_value(value)
             {
-                self.lower_handle_binding(name, value);
+                self.lower_handle_binding(name, Some(*pat_id), value);
             }
         }
     }

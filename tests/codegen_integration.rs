@@ -271,6 +271,145 @@ main () = {
 }
 
 #[test]
+fn effectful_lambda_packed_in_adt_constructor_runs() {
+    // Regression: a lambda with effects stored inside an ADT constructor
+    // arg used to be lowered as a pure 1-arg closure (no handler params,
+    // no _ReturnK), because lower_ctor didn't thread expected field types
+    // into arg lowering. At the call site `producer () with h`, BEAM threw
+    // badarity. Also, case-arm-bound effectful values weren't registered
+    // in current_effectful_vars, so applications didn't CPS-expand.
+    let src = r#"
+effect Chunked {
+  fun write_chunk : Int -> Unit
+}
+
+type ResponseBody =
+  | Streamed (Unit -> Unit needs {Chunked})
+
+fun chunked_handler : Unit -> Handler Chunked
+chunked_handler () = handler for Chunked {
+  write_chunk _n = resume ()
+}
+
+fun make_response : Unit -> ResponseBody
+make_response () = Streamed (fun () -> {
+  write_chunk! 1
+  write_chunk! 2
+})
+
+fun run_response : ResponseBody -> Int
+run_response resp = case resp {
+  Streamed producer -> {
+    let h = chunked_handler ()
+    producer () with h
+    99
+  }
+}
+
+main () = run_response (make_response ())
+"#;
+
+    assert_runs_and_stdout_contains(src, &["99"]);
+}
+
+#[test]
+fn case_arm_in_k_threaded_block_registers_effectful_var_and_handler_binding() {
+    // Regression: when a case match on an ADT-packed effectful lambda lives
+    // inside a K-threaded block (i.e., the case arm body is lowered via
+    // `lower_block_with_k`/`ExprKind::Case` in K-threaded mode rather than
+    // the return-K block path), the lowerer would (1) skip registering the
+    // arm-bound `producer` in `current_effectful_vars` and (2) skip handler
+    // registration for `let h = factory ()`. This caused either a runtime
+    // arity mismatch (only 1 arg passed to a CPS-shaped lambda) or an ICE
+    // about an unknown handler item 'h'.
+    //
+    // The test framework triggers this in real code: `test "name"` takes
+    // an effectful lambda whose body holds the case match.
+    let src = r#"
+effect Chunked {
+  fun write_chunk : Int -> Unit
+}
+
+effect Wrap {
+  fun wrap : (Unit -> Int needs {Chunked}) -> Int
+}
+
+type Body =
+  | Streamed (Unit -> Unit needs {Chunked})
+
+fun mk : (Unit -> Unit needs {Chunked}) -> Body
+mk producer = Streamed producer
+
+fun named : Unit -> Handler Chunked
+named () = handler for Chunked {
+  write_chunk _ = resume ()
+}
+
+# wrapped_run is effectful (`needs {Wrap}`), so its body lowers in
+# K-threaded mode. The case arm exercises both fixed paths.
+fun wrapped_run : Unit -> Int needs {Wrap}
+wrapped_run () = {
+  let body = mk (fun () -> write_chunk! 1)
+  case body {
+    Streamed producer -> {
+      let h = named ()
+      let _ = producer () with h
+      55
+    }
+  }
+}
+
+handler wrap_h for Wrap {
+  wrap _ = resume 0
+}
+
+main () = wrapped_run () with wrap_h
+"#;
+
+    assert_runs_and_stdout_contains(src, &["55"]);
+}
+
+#[test]
+fn handler_factory_let_binding_runs_return_clause() {
+    // Regression: `let h = make_handler ()` registered the handler info in
+    // the typechecker's `self.handlers["h"]`, but the per-clause save/restore
+    // at check_decl.rs (around `saved_handlers = self.handlers.clone()`)
+    // wiped the entry before the lowerer saw it. As a result, the lowerer
+    // built the dynamic NamedHandlerItem with `has_return = false` and emitted
+    // the identity `_ReturnK` instead of the handler's return-clause lambda.
+    //
+    // Now the typechecker also stores let-binding handler info in a persistent
+    // map keyed by the pattern's NodeId, which the lowerer consults.
+    let src = r#"
+effect Chunked {
+  fun write_chunk : Int -> Unit
+}
+
+type Body =
+  | Streamed (Unit -> Unit needs {Chunked})
+
+fun make_handler : Unit -> Handler Chunked
+make_handler () = handler for Chunked {
+  write_chunk _ = resume ()
+  return _ = 777
+}
+
+main () = {
+  let body = Streamed (fun () -> ())
+  case body {
+    Streamed producer -> {
+      let h = make_handler ()
+      producer () with h
+    }
+  }
+}
+"#;
+
+    // The handler's `return` clause turns the success unit into 777.
+    assert_runs_and_stdout_contains(src, &["777"]);
+}
+
+#[test]
 fn eta_reduced_effect_op_callback_forwarded_through_wrapper_runs() {
     let src = r#"
 effect Inner {

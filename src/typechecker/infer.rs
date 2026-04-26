@@ -1126,10 +1126,15 @@ impl Checker {
                             has_deferred_effects,
                         );
                         // If the RHS is a handler, register it so `with name` works.
+                        // Also record under the pattern's NodeId in a persistent
+                        // map so the lowerer can recover the info after the
+                        // per-clause `handlers` save/restore wipes the entry.
                         if let Some(info) = self.extract_handler_info(value) {
-                            self.handlers.insert(name.clone(), info);
+                            self.handlers.insert(name.clone(), info.clone());
+                            self.let_binding_handlers.insert(*pat_id, info);
                         } else if let Some(info) = self.handler_info_from_type(&ty) {
-                            self.handlers.insert(name.clone(), info);
+                            self.handlers.insert(name.clone(), info.clone());
+                            self.let_binding_handlers.insert(*pat_id, info);
                         }
                     } else {
                         if let Err(e) = self.bind_pattern(pattern, &ty) {
