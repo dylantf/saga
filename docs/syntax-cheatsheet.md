@@ -581,6 +581,7 @@ case data {
   <<>> -> "empty"
   <<tag:8, rest/binary>> -> process tag rest
   <<len:16/big, payload:len/binary>> -> payload   # variable-sized
+  <<head:5/binary, "\r\n", rest/binary>> -> ...   # string literal segments match those bytes
   _ -> "unknown"
 }
 
