@@ -615,9 +615,19 @@ fn copy_bridges_from_dir(dir: &Path, build_dir: &Path, count: &mut usize) -> Res
     Ok(())
 }
 
-/// Compile a batch of .core/.erl files with a single erlc invocation.
-/// One BEAM startup amortized across all files.
+/// Max files per erlc invocation. Chunked to stay well under OS ARG_MAX
+/// (~2MB on Linux); at ~60 bytes/path this leaves ample headroom.
+const ERLC_BATCH_CHUNK: usize = 1000;
+
+/// Compile a batch of .core/.erl files with as few erlc invocations as possible.
+/// One BEAM startup is amortized across each chunk.
 pub fn run_erlc_batch(files: &[PathBuf], out_dir: &Path) {
+    for chunk in files.chunks(ERLC_BATCH_CHUNK) {
+        run_erlc_chunk(chunk, out_dir);
+    }
+}
+
+fn run_erlc_chunk(files: &[PathBuf], out_dir: &Path) {
     if files.is_empty() {
         return;
     }
