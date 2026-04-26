@@ -1,40 +1,9 @@
-record Foo {
-  foo: String,
-} deriving (Debug)
+import Std.BitString
 
-val make_foo1 = Foo { foo: "foo" }
-
-val make_foo2 = Foo { foo: "foo2" }
-
-val make_int = 5
-
-effect Bar {
-  fun bar : Unit -> Unit
+fun count : BitString -> Int
+count bs = case bs {
+  <<>> -> 0
+  <<_:8, rest/binary>> -> 1 + count rest
 }
 
-handler bar for Bar {
-  bar () = dbg "bar"
-}
-
-trait Baz a {
-  fun baz : a -> Unit
-}
-
-impl Baz for Int {
-  baz x = dbg ("did a baz: " <> show x)
-}
-
-main () = {
-  let foo1 = make_foo1
-  dbg foo1
-
-  let foo2 = make_foo2
-  dbg foo2
-
-  let some_int = make_int
-  dbg some_int
-
-  baz 5
-
-  bar! () with bar
-}
+main () = dbg (count (BitString.from_string "abc"))

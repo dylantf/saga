@@ -98,6 +98,15 @@ quicksort xs = case xs {
   }
 }
 
+# Regression: a `case` whose only arms are `<<>>` and `<<_:8, rest/binary>>`
+# used to crash erlc with `bs_start_match3` consistency check failure
+# because lowering omitted a wildcard fallthrough on the optimized path.
+fun count_bytes : BitString -> Int
+count_bytes bs = case bs {
+  <<>> -> 0
+  <<_:8, rest/binary>> -> 1 + count_bytes rest
+}
+
 # --- Tests ---
 
 
@@ -331,6 +340,14 @@ tests () = {
         _ -> "fell through"
       }
       assert_eq result "fell through"
+    })
+
+    # Regression: a `case` whose only arms are `<<>>` and `<<_:8, rest/binary>>`
+    # used to crash erlc with `bs_start_match3` consistency check failure
+    # because lowering omitted a wildcard fallthrough on the optimized path.
+    test "exhaustive bitstring case with empty and cons arms compiles" (fun () -> {
+      assert_eq (count_bytes (BitString.from_string "abc")) 3
+      assert_eq (count_bytes <<>>) 0
     })
   })
 

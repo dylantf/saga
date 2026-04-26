@@ -300,10 +300,18 @@ impl<'a> Lowerer<'a> {
             .iter()
             .all(|arm| arm.guard.as_ref().is_none_or(is_guard_safe))
         {
-            return CExpr::Case(
-                Box::new(CExpr::Var(scrut_var.to_string())),
-                self.lower_case_arms_inner(scrut_var, &arms_ref),
-            );
+            let mut lowered = self.lower_case_arms_inner(scrut_var, &arms_ref);
+            let has_total_catchall = arms_ref.iter().any(|arm| {
+                arm.guard.is_none() && Self::is_catchall_pat(&arm.pattern)
+            });
+            if !has_total_catchall {
+                lowered.push(CArm {
+                    pat: CPat::Wildcard,
+                    guard: None,
+                    body: self.case_clause_error_expr(),
+                });
+            }
+            return CExpr::Case(Box::new(CExpr::Var(scrut_var.to_string())), lowered);
         }
 
         self.lower_case_expr_chain(scrut_var, &arms_ref)
