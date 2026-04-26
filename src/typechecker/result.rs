@@ -45,6 +45,10 @@ pub struct CheckResult {
     pub effects: HashMap<String, EffectDefInfo>,
     /// Handler definitions (for LSP completion, lowerer).
     pub handlers: HashMap<String, HandlerInfo>,
+    /// Handler info for `let h = <expr>` bindings whose RHS produces a handler.
+    /// Keyed by the let pattern's NodeId. Persists past the per-clause
+    /// `handlers` save/restore so the lowerer can recover return-clause info.
+    pub let_binding_handlers: HashMap<crate::ast::NodeId, HandlerInfo>,
     /// Effect requirements per function.
     pub fun_effects: HashMap<String, HashSet<String>>,
     /// Per-node type information for Expr nodes (LSP hover).
@@ -295,6 +299,7 @@ impl Checker {
             traits: self.trait_state.traits.clone(),
             effects: self.effects.clone(),
             handlers: self.handlers.clone(),
+            let_binding_handlers: self.let_binding_handlers.clone(),
             fun_effects: {
                 let mut fun_effects = HashMap::new();
                 for name in &self.effect_meta.known_funs {

@@ -319,6 +319,9 @@ impl<'a> Lowerer<'a> {
                 self.handler_origin_module(),
             );
 
+            let saved_effectful_vars = self.current_effectful_vars.clone();
+            self.register_pat_effectful_vars(&arm.pattern);
+
             match &arm.guard {
                 None => {
                     result.push(CArm {
@@ -338,9 +341,62 @@ impl<'a> Lowerer<'a> {
                     unreachable!("complex guards should be handled by lower_case_expr_chain");
                 }
             }
+
+            self.current_effectful_vars = saved_effectful_vars;
         }
 
         result
+    }
+
+    /// Walk a pattern and register any variable bindings whose type carries
+    /// effects in `current_effectful_vars`, so calls to them at the use site
+    /// thread handler params + `_ReturnK`. Necessary for case-arm-bound
+    /// values like `Streamed producer -> producer () with h`.
+    fn register_pat_effectful_vars(&mut self, pat: &Pat) {
+        match pat {
+            Pat::Var { name, span, .. } => {
+                if let Some(ty) = self.check_result.type_at_span.get(span) {
+                    let effects = crate::typechecker::effects_from_type(ty);
+                    if !effects.is_empty() {
+                        let mut effs: Vec<String> = effects.into_iter().collect();
+                        effs.sort();
+                        let canonical = self.canonicalize_effects(effs);
+                        self.current_effectful_vars
+                            .insert(name.clone(), canonical);
+                    }
+                }
+            }
+            Pat::Constructor { args, .. } => {
+                for sub in args {
+                    self.register_pat_effectful_vars(sub);
+                }
+            }
+            Pat::Tuple { elements, .. } | Pat::ListPat { elements, .. } => {
+                for sub in elements {
+                    self.register_pat_effectful_vars(sub);
+                }
+            }
+            Pat::ConsPat { head, tail, .. } => {
+                self.register_pat_effectful_vars(head);
+                self.register_pat_effectful_vars(tail);
+            }
+            Pat::Record { fields, .. } | Pat::AnonRecord { fields, .. } => {
+                for (_, sub) in fields {
+                    if let Some(sub_pat) = sub {
+                        self.register_pat_effectful_vars(sub_pat);
+                    }
+                }
+            }
+            Pat::Or { patterns, .. } => {
+                for sub in patterns {
+                    self.register_pat_effectful_vars(sub);
+                }
+            }
+            Pat::StringPrefix { rest, .. } => {
+                self.register_pat_effectful_vars(rest);
+            }
+            _ => {}
+        }
     }
 
     fn lower_case_expr_chain(&mut self, scrut_var: &str, arms: &[&CaseArm]) -> CExpr {
@@ -354,7 +410,10 @@ impl<'a> Lowerer<'a> {
                 &self.constructor_atoms,
                 self.handler_origin_module(),
             );
+            let saved_effectful_vars = self.current_effectful_vars.clone();
+            self.register_pat_effectful_vars(&arm.pattern);
             let body_ce = self.lower_expr(&arm.body);
+            self.current_effectful_vars = saved_effectful_vars;
 
             let current = match &arm.guard {
                 None => {
@@ -505,11 +564,35 @@ impl<'a> Lowerer<'a> {
             }
             _ => {
                 // ADT constructor: tagged tuple {name, arg1, arg2, ...}
+                // Look up field types from the constructor's scheme so that
+                // lambda args inherit a `lambda_effect_context` and get the
+                // proper CPS expansion (handler params + _ReturnK).
+                let field_tys: Vec<Option<crate::typechecker::Type>> = {
+                    let scheme = self.check_result.constructors.get(name).or_else(|| {
+                        let bare = name.rsplit('.').next().unwrap_or(name);
+                        self.check_result.constructors.get(bare)
+                    });
+                    if let Some(scheme) = scheme {
+                        let mut tys = Vec::new();
+                        let mut current = &scheme.ty;
+                        while let crate::typechecker::Type::Fun(param, ret, _) = current {
+                            tys.push(Some((**param).clone()));
+                            current = ret;
+                        }
+                        tys
+                    } else {
+                        vec![None; args.len()]
+                    }
+                };
+
                 let mut vars: Vec<String> = Vec::new();
                 let mut bindings: Vec<(String, CExpr)> = Vec::new();
-                for arg in &args {
+                for (idx, arg) in args.iter().enumerate() {
                     let var = self.fresh();
-                    let val = self.lower_expr_value(arg);
+                    let val = match field_tys.get(idx).and_then(|t| t.as_ref()) {
+                        Some(ty) => self.lower_expr_value_with_expected_type(arg, Some(ty)),
+                        None => self.lower_expr_value(arg),
+                    };
                     vars.push(var.clone());
                     bindings.push((var, val));
                 }
@@ -840,10 +923,10 @@ impl<'a> Lowerer<'a> {
                 // Let bindings with handler values: detect and register the
                 // handler so `with name` resolves correctly.
                 if let Stmt::Let { pattern, value, .. } = first
-                    && let Pat::Var { name, .. } = pattern
+                    && let Pat::Var { name, id: pat_id, .. } = pattern
                     && self.is_handler_value(value)
                 {
-                    self.lower_handle_binding(name, value);
+                    self.lower_handle_binding(name, Some(*pat_id), value);
                     if let Some((var, _effects, _has_return)) =
                         self.handle_dynamic_vars.get(name.as_str()).cloned()
                     {
@@ -1012,7 +1095,10 @@ impl<'a> Lowerer<'a> {
                             self.handler_origin_module(),
                         );
                         let guard_ce = arm.guard.as_ref().map(|g| self.lower_expr_value(g));
+                        let saved_effectful_vars = self.current_effectful_vars.clone();
+                        self.register_pat_effectful_vars(&arm.pattern);
                         let body_ce = self.lower_branch_with_k(&arm.body, k_var);
+                        self.current_effectful_vars = saved_effectful_vars;
                         CArm {
                             pat,
                             guard: guard_ce,
@@ -1057,6 +1143,23 @@ impl<'a> Lowerer<'a> {
             [Stmt::Expr(e)] => self.lower_branch_with_k(e, k_var),
             [Stmt::Let { value, .. }] => self.lower_branch_with_k(value, k_var),
             [first, rest @ ..] => {
+                // Handler-value let binding: register so `with name` resolves.
+                // Mirrors the same detection in `lower_block_with_return_k`.
+                if let Stmt::Let { pattern, value, .. } = first
+                    && let Pat::Var { name, id: pat_id, .. } = pattern
+                    && self.is_handler_value(value)
+                {
+                    self.lower_handle_binding(name, Some(*pat_id), value);
+                    if let Some((var, _effects, _has_return)) =
+                        self.handle_dynamic_vars.get(name.as_str()).cloned()
+                    {
+                        let rhs_ce = self.lower_expr(value);
+                        let rest_ce = self.lower_block_with_k(rest, k_var);
+                        return CExpr::Let(var, Box::new(rhs_ce), Box::new(rest_ce));
+                    }
+                    return self.lower_block_with_k(rest, k_var);
+                }
+
                 let effect_info = match first {
                     Stmt::Expr(e) => collect_effect_call_expr(e)
                         .map(|(head, name, qual, args)| (None, head.id, name, qual, args)),
@@ -1243,7 +1346,12 @@ impl<'a> Lowerer<'a> {
     /// a compile-time alias. For conditionals, the condition is lowered and the
     /// handle binding stores a flag variable; handler dispatch uses both handlers'
     /// arms wrapped in a conditional at runtime.
-    pub(super) fn lower_handle_binding(&mut self, name: &str, value: &Expr) {
+    pub(super) fn lower_handle_binding(
+        &mut self,
+        name: &str,
+        pat_id: Option<crate::ast::NodeId>,
+        value: &Expr,
+    ) {
         if self.handle_dynamic_vars.contains_key(name) || self.handle_cond_vars.contains_key(name) {
             return;
         }
@@ -1299,11 +1407,12 @@ impl<'a> Lowerer<'a> {
         }
 
         // Dynamic handler: RHS is an arbitrary expression (e.g. function call).
-        // Look up effect names from the typechecker's check result.
-        let dynamic_info = self
-            .check_result
-            .handlers
-            .get(name)
+        // Look up effect names from the typechecker's check result. Prefer the
+        // pat-id-keyed entry, which survives the per-clause `handlers`
+        // save/restore in the typechecker.
+        let dynamic_info = pat_id
+            .and_then(|id| self.check_result.let_binding_handlers.get(&id))
+            .or_else(|| self.check_result.handlers.get(name))
             .map(|info| {
                 let effects = info
                     .effects
