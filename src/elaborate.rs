@@ -1484,10 +1484,7 @@ impl Elaborator {
     ) -> Option<(String, usize)> {
         if let Some(resolved) = self.resolution.trait_method(node_id)
             && let Some(info) = self.traits.get(&resolved.trait_name)
-            && let Some(idx) = info
-                .methods
-                .iter()
-                .position(|m| m.name == resolved.method)
+            && let Some(idx) = info.methods.iter().position(|m| m.name == resolved.method)
         {
             return Some((resolved.trait_name.clone(), idx));
         }

@@ -839,7 +839,9 @@ impl<'a> Lowerer<'a> {
 
         for stmt in stmts {
             if let Stmt::Let { pattern, value, .. } = &stmt.node
-                && let Pat::Var { name, id: pat_id, .. } = pattern
+                && let Pat::Var {
+                    name, id: pat_id, ..
+                } = pattern
                 && name == named_ref
                 && self.is_handler_value(value)
             {

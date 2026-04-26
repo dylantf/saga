@@ -421,16 +421,8 @@ impl<'a> Resolver<'a> {
     /// access path that bare unambiguous trait method calls do.
     fn qualified_trait_method(&self, canonical: &str) -> Option<ResolvedTraitMethod> {
         let (trait_canonical, method) = canonical.rsplit_once('.')?;
-        let known_local = self
-            .locals
-            .traits
-            .values()
-            .any(|c| c == trait_canonical);
-        let known_imported = self
-            .scope
-            .traits
-            .values()
-            .any(|c| c == trait_canonical);
+        let known_local = self.locals.traits.values().any(|c| c == trait_canonical);
+        let known_imported = self.scope.traits.values().any(|c| c == trait_canonical);
         if !(known_local || known_imported) {
             return None;
         }

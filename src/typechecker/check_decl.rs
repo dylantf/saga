@@ -1017,8 +1017,8 @@ impl Checker {
         // point the callback is invoked. Detect this here so the user gets a
         // typechecker error instead of a codegen ICE.
         if let Some(ann) = annotation {
-            let declared_row_for_check = innermost_effect_row(&self.sub.apply(ann))
-                .unwrap_or_else(EffectRow::empty);
+            let declared_row_for_check =
+                innermost_effect_row(&self.sub.apply(ann)).unwrap_or_else(EffectRow::empty);
             let declared_names: std::collections::HashSet<String> = declared_row_for_check
                 .effects
                 .iter()

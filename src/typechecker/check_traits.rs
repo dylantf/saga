@@ -201,8 +201,7 @@ impl Checker {
             // is owned by `TraitInfo.methods` — env is just a cached lookup
             // view keyed by canonical name.
             let canonical_method = super::canonical_join(&canonical_name, &method_name);
-            self.env
-                .insert(canonical_method, scheme.clone());
+            self.env.insert(canonical_method, scheme.clone());
 
             trait_method_sigs.push(super::TraitMethodInfo {
                 name: method_name,

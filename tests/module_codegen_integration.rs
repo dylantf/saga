@@ -1080,20 +1080,16 @@ fn qualified_trait_method_call_lowers_to_dict_dispatch() {
     let a_src = "module A\n\npub trait Foo a {\n  fun pp : a -> String\n}\n";
     let main_src = "module Main\n\nimport A\n\nimpl A.Foo for Int { pp x = \"qualified\" }\n\nmain () = A.Foo.pp 1\n";
 
-    with_temp_project_files(
-        &[("lib/A.saga", a_src)],
-        main_src,
-        |checker, program| {
-            let out = emit_from_program(program, "main", checker);
-            let foo_dict = typechecker::make_dict_name("A.Foo", &[], "main", "Std.Int.Int");
-            assert_contains(&out, &format!("'{foo_dict}'"));
-            assert!(
-                !out.contains("'A.Foo.pp'") && !out.contains("apply 'A.Foo.pp'"),
-                "qualified trait method should not lower as a raw name reference\n{out}"
-            );
-            assert_erlc_compiles(&out, "main");
-        },
-    );
+    with_temp_project_files(&[("lib/A.saga", a_src)], main_src, |checker, program| {
+        let out = emit_from_program(program, "main", checker);
+        let foo_dict = typechecker::make_dict_name("A.Foo", &[], "main", "Std.Int.Int");
+        assert_contains(&out, &format!("'{foo_dict}'"));
+        assert!(
+            !out.contains("'A.Foo.pp'") && !out.contains("apply 'A.Foo.pp'"),
+            "qualified trait method should not lower as a raw name reference\n{out}"
+        );
+        assert_erlc_compiles(&out, "main");
+    });
 }
 
 // ---- Constructor atom mangling ----

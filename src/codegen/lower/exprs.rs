@@ -361,8 +361,7 @@ impl<'a> Lowerer<'a> {
                         let mut effs: Vec<String> = effects.into_iter().collect();
                         effs.sort();
                         let canonical = self.canonicalize_effects(effs);
-                        self.current_effectful_vars
-                            .insert(name.clone(), canonical);
+                        self.current_effectful_vars.insert(name.clone(), canonical);
                     }
                 }
             }
@@ -923,7 +922,9 @@ impl<'a> Lowerer<'a> {
                 // Let bindings with handler values: detect and register the
                 // handler so `with name` resolves correctly.
                 if let Stmt::Let { pattern, value, .. } = first
-                    && let Pat::Var { name, id: pat_id, .. } = pattern
+                    && let Pat::Var {
+                        name, id: pat_id, ..
+                    } = pattern
                     && self.is_handler_value(value)
                 {
                     self.lower_handle_binding(name, Some(*pat_id), value);
@@ -1146,7 +1147,9 @@ impl<'a> Lowerer<'a> {
                 // Handler-value let binding: register so `with name` resolves.
                 // Mirrors the same detection in `lower_block_with_return_k`.
                 if let Stmt::Let { pattern, value, .. } = first
-                    && let Pat::Var { name, id: pat_id, .. } = pattern
+                    && let Pat::Var {
+                        name, id: pat_id, ..
+                    } = pattern
                     && self.is_handler_value(value)
                 {
                     self.lower_handle_binding(name, Some(*pat_id), value);

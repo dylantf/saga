@@ -4568,11 +4568,7 @@ impl Describe for Int {
 
 main () = describe 42
 "#;
-    check_with_project_files(
-        &[("lib/Describe.saga", describe_module_source())],
-        main_src,
-    )
-    .unwrap();
+    check_with_project_files(&[("lib/Describe.saga", describe_module_source())], main_src).unwrap();
 }
 
 #[test]
@@ -4585,11 +4581,7 @@ impl Describe.Describe for Int {
 
 main () = Describe.Describe.describe 42
 "#;
-    check_with_project_files(
-        &[("lib/Describe.saga", describe_module_source())],
-        main_src,
-    )
-    .unwrap();
+    check_with_project_files(&[("lib/Describe.saga", describe_module_source())], main_src).unwrap();
 }
 
 #[test]
@@ -4747,11 +4739,7 @@ impl LocalDescribe for Int { describe x = "local-int" }
 
 main () = describe 42
 "#;
-    check_with_project_files(
-        &[("lib/Describe.saga", describe_module_source())],
-        main_src,
-    )
-    .unwrap();
+    check_with_project_files(&[("lib/Describe.saga", describe_module_source())], main_src).unwrap();
 }
 
 #[test]

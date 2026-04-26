@@ -472,10 +472,7 @@ impl Checker {
         let Some(candidates) = self.scope_map.effect_ops.get(op_name) else {
             return BareEffectOpResolution::Missing;
         };
-        let local_prefix = self
-            .current_module
-            .as_deref()
-            .map(|m| format!("{}.", m));
+        let local_prefix = self.current_module.as_deref().map(|m| format!("{}.", m));
         let (locals, imports): (Vec<&String>, Vec<&String>) = candidates
             .iter()
             .partition(|c| local_prefix.as_deref().is_some_and(|p| c.starts_with(p)));

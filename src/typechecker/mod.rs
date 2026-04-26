@@ -910,8 +910,7 @@ pub struct Checker {
     /// Keyed by the let pattern's NodeId so the lowerer can look up handler
     /// metadata (return clauses, effects) even after the per-function-clause
     /// `self.handlers` save/restore wipes the in-scope entry.
-    pub(crate) let_binding_handlers:
-        HashMap<crate::ast::NodeId, HandlerInfo>,
+    pub(crate) let_binding_handlers: HashMap<crate::ast::NodeId, HandlerInfo>,
     /// Context for resume typing: when inside a handler arm, the return type of the op being handled
     pub(crate) resume_type: Option<Type>,
     /// Context for resume return typing: when inside a handler arm, the answer type of the with-expression

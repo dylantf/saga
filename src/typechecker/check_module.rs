@@ -1113,8 +1113,8 @@ pub(super) fn resolve_import(
     for (trait_name, info) in &exports.traits {
         ScopeMap::register_qualified(&mut scope.traits, module_name, prefix, trait_name);
         let trait_canonical = super::canonical_join(module_name, trait_name);
-        let alias_prefix = (prefix != module_name)
-            .then(|| super::canonical_join(prefix, trait_name));
+        let alias_prefix =
+            (prefix != module_name).then(|| super::canonical_join(prefix, trait_name));
         // Trait method canonical names live in scope.values so qualified
         // (Module.Trait.method) lookups resolve regardless of exposing.
         for method in &info.methods {
