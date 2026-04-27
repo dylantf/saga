@@ -1,49 +1,29 @@
-# Minimal repro for the codegen ICE:
-#
-#   thread 'main' panicked at src/codegen/lower/effects.rs:338:17:
-#   no handler param for op 'Outer.notify', handler_params: {}
-#
-# Shape of the bug: a factory function returns `Handler Inner`. The handler's
-# body performs an operation from a *different* effect (`Outer`) that is
-# expected to be available at the use site. Type checking accepts this, but
-# codegen can't lower the `event!`-style call inside the returned handler's
-# arms because the handler closure was compiled in the factory's context,
-# which has no `Outer` handler param.
-#
-# Inlining the handler at the use site (instead of building it via a factory)
-# avoids the bug — that's the workaround we're using in lib/Http.saga's
-# send_response for now. This file exists only to reproduce the issue
-# standalone for a compiler bug report.
+import Std.Actor (Process)
+import Std.Actor (beam_actor)
 
-effect Outer {
-  fun notify : String -> Unit
-}
-
-effect Inner {
-  fun do_thing : Int -> Unit
-}
-
-# Factory: returns a `Handler Inner` whose body uses the outer `Outer`
-# effect. The `needs {Outer}` on the handler block declares that the
-# handler's arms perform Outer operations and must be invoked in a scope
-# where Outer is handled.
-fun make_inner : Unit -> Handler Inner needs {Outer}
-make_inner () = handler for Inner needs {Outer} {
-  do_thing n = {
-    notify! $"got {n}"
-    resume ()
-  }
-}
-
-# Use site: Outer is handled (via the inline arm) at the same `with` block
-# where the factory-built `Inner` handler is attached. Type-checks fine.
-# Codegen panics here.
 main () = {
-  let h = make_inner ()
-  do_thing! 42 with h
+  dbg "main: starting"
+  let r = run ()
+  case r {
+    Ok _ -> dbg "main: ok"
+    Err e -> dbg ("main: err", e)
+  }
 } with {
-  notify msg = {
-    dbg msg
+  beam_actor,
+  report msg = {
+    dbg ("reported:", msg)
     resume ()
   }
+}
+pub effect Reporter {
+  fun report : String -> Unit
+}
+
+# Mix: stdlib Process + user-defined Reporter. This combination breaks.
+pub fun run : Unit -> Result Unit String needs {Process, Reporter}
+run () = {
+  dbg "run: BODY ENTERED"
+  report! "hello"
+  let _ = spawn! (fun () -> dbg "child ran")
+  Ok ()
 }

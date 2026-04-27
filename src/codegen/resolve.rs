@@ -976,15 +976,24 @@ fn register_import_scopes(
                 .collect();
 
             for (name, scheme) in &info.exports {
-                let (arity, _) =
+                let (arity, mut effects) =
                     crate::codegen::lower::util::arity_and_effects_from_type(&scheme.ty);
                 let dict_params =
                     crate::codegen::lower::util::dict_param_count(&scheme.constraints);
-                let effects = fun_effects_map
-                    .get(name.as_str())
-                    .cloned()
-                    .cloned()
-                    .unwrap_or_default();
+                // Merge with fun_effects (which strips beam-native effects in
+                // check_module.rs but is otherwise the authoritative annotation
+                // list). Effects from the type include beam-native ones; the
+                // lowered function emits handler params for *all* of them, so
+                // the resolver's arity calculation must match. This mirrors
+                // the supplementation in `lower/init.rs`.
+                if let Some(ann_effs) = fun_effects_map.get(name.as_str()) {
+                    for eff in ann_effs.iter() {
+                        if !effects.contains(eff) {
+                            effects.push(eff.clone());
+                        }
+                    }
+                }
+                effects.sort();
                 let handler_param_count: usize = effects
                     .iter()
                     .map(|eff| effect_op_counts.get(eff).copied().unwrap_or(0))
