@@ -1,0 +1,16 @@
+module Lib.Server
+
+import Std.Actor (Process)
+
+pub effect Reporter {
+  fun report : String -> Unit
+}
+
+# Mix: stdlib Process + user-defined Reporter. This combination breaks.
+pub fun run : Unit -> Result Unit String needs {Process, Reporter}
+run () = {
+  dbg "run: BODY ENTERED"
+  report! "hello"
+  let _ = spawn! (fun () -> dbg "child ran")
+  Ok ()
+}

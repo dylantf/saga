@@ -1,0 +1,19 @@
+module Main
+
+import Std.Actor (beam_actor)
+import Lib.Server (Reporter, run)
+
+main () = {
+  dbg "main: starting"
+  let r = run ()
+  case r {
+    Ok _ -> dbg "main: ok"
+    Err e -> dbg ("main: err", e)
+  }
+} with {
+  beam_actor,
+  report msg = {
+    dbg ("reported:", msg)
+    resume ()
+  },
+}

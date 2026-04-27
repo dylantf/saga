@@ -5133,6 +5133,44 @@ fn nested_hof_absorption_does_not_leak_inner_closed_effects() {
 }
 
 #[test]
+fn handler_factory_must_propagate_handler_needs() {
+    // A function that returns a `handler for E needs {X}` constructs a handler
+    // value whose arm bodies use X. With static handler threading, the arm
+    // closures capture handler params from the construction site — i.e. the
+    // factory function must have X in its own `needs` so the lowerer can
+    // route it. Without this, the codegen ICEs when lowering the arm body
+    // because `current_handler_params` has no X. Detect at typecheck.
+    let unhandled = "effect Outer {\n  fun notify : String -> Unit\n}\n\
+                     effect Inner {\n  fun do_thing : Int -> Unit\n}\n\
+                     fun make_inner : Unit -> Handler Inner\n\
+                     make_inner () = handler for Inner needs {Outer} {\n\
+                       do_thing n = { notify! \"x\"; resume () }\n\
+                     }";
+    let err = match check(unhandled) {
+        Ok(_) => panic!("expected typechecker error for handler factory missing needs"),
+        Err(e) => e,
+    };
+    assert!(
+        err.message.contains("Outer") && err.message.contains("needs"),
+        "expected handler-factory needs-propagation error, got: {}",
+        err.message
+    );
+
+    // Declaring `needs {Outer}` on the factory itself fixes it: the factory
+    // receives a hidden Outer handler param at call time and the arm closures
+    // capture it.
+    check(
+        "effect Outer {\n  fun notify : String -> Unit\n}\n\
+         effect Inner {\n  fun do_thing : Int -> Unit\n}\n\
+         fun make_inner : Unit -> Handler Inner needs {Outer}\n\
+         make_inner () = handler for Inner needs {Outer} {\n\
+           do_thing n = { notify! \"x\"; resume () }\n\
+         }",
+    )
+    .unwrap();
+}
+
+#[test]
 fn closed_callback_effect_must_be_handled_or_forwarded() {
     // A HOF whose callback parameter declares closed `needs {X}` must either
     // install an internal `with` handler for X or forward X via the function's

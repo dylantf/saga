@@ -499,7 +499,23 @@ impl Checker {
                     span,
                 };
                 self.register_handler(&synthetic_decl)?;
-                // register_handler inserted the Handler type into self.env
+                // The handler's `needs {X}` declares effects its arm bodies
+                // perform at runtime. For static threading, those handlers must
+                // be captured at the construction site — i.e. the surrounding
+                // scope must have them in scope. Emit them to the current
+                // effect row so the enclosing function declares (or handles)
+                // them. Without this, a handler factory like
+                // `make_inner () = handler for Inner needs {Outer} { ... }`
+                // would typecheck silently and the lowerer would later ICE
+                // because Outer isn't in `current_handler_params`.
+                let needs = self
+                    .handlers
+                    .get(&synthetic_name)
+                    .map(|info| info.needs_effects.clone())
+                    .unwrap_or_else(super::EffectRow::empty);
+                if !needs.effects.is_empty() {
+                    self.emit_effects(&needs);
+                }
                 let scheme = self.env.get(&synthetic_name).unwrap();
                 let ty = scheme.ty.clone();
                 self.record_type(node_id, &ty);

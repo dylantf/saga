@@ -1,0 +1,9 @@
+[project]
+name = "saga-effect-repro"
+
+[bin]
+main = "src/Main.saga"
+
+[library]
+module = "Lib"
+expose = ["Lib.Server"]

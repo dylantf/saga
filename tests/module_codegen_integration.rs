@@ -431,7 +431,7 @@ pub record Db {
 pub fun run : Unit -> Unit needs {Postgres, Transaction}
 run () = transaction! (fun () -> ping! ())
 
-pub fun connect : Unit -> Db
+pub fun connect : Unit -> Db needs {Postgres}
 connect () = {
   Db {
     postgres: handler for Postgres {
@@ -449,10 +449,10 @@ connect () = {
 
     let main_src = r#"module Main
 import Std.IO (console, println)
-import Db (connect, run)
+import Db (Postgres, connect, run)
 
 main () = {
-  let db = connect ()
+  let db = connect () with { ping () = resume () }
   let pg = db.postgres
   let tx = db.transactions
   {
