@@ -31,12 +31,97 @@ struct SharedState {
     document_texts: Mutex<std::collections::HashMap<Url, String>>,
     /// Project-wide symbol reference index for cross-module find-references.
     symbol_index: Mutex<symbol_index::SymbolIndex>,
+    /// Per-URI module name and import edges, used to fan out re-checks when an
+    /// imported module changes.
+    dep_graph: Mutex<DependencyGraph>,
 }
+
+/// Each LSP check request carries an `is_primary` flag. Primary requests come
+/// from the editor (did_open/did_change/did_save). Secondary requests are
+/// emitted by the fan-out logic when a primary check completes; secondaries
+/// do not themselves fan out, which keeps cyclic imports from looping.
+type CheckRequest = (Url, String, bool);
 
 struct Backend {
     client: Client,
     shared: Arc<SharedState>,
-    check_tx: tokio::sync::mpsc::UnboundedSender<(Url, String)>,
+    check_tx: tokio::sync::mpsc::UnboundedSender<CheckRequest>,
+}
+
+#[derive(Default)]
+struct DependencyGraph {
+    /// Module name -> URIs of files that import that module.
+    dependents: std::collections::HashMap<String, std::collections::HashSet<Url>>,
+    /// URI -> set of module names it imports (used to clean up stale reverse edges on re-check).
+    imports: std::collections::HashMap<Url, std::collections::HashSet<String>>,
+    /// URI -> its declared module name (so we can look up "who depends on this file").
+    module_of: std::collections::HashMap<Url, String>,
+}
+
+impl DependencyGraph {
+    fn update_file(
+        &mut self,
+        uri: &Url,
+        module_name: Option<String>,
+        new_imports: std::collections::HashSet<String>,
+    ) {
+        if let Some(old) = self.imports.remove(uri) {
+            for module in old {
+                if let Some(set) = self.dependents.get_mut(&module) {
+                    set.remove(uri);
+                    if set.is_empty() {
+                        self.dependents.remove(&module);
+                    }
+                }
+            }
+        }
+        for module in &new_imports {
+            self.dependents
+                .entry(module.clone())
+                .or_default()
+                .insert(uri.clone());
+        }
+        self.imports.insert(uri.clone(), new_imports);
+        match module_name {
+            Some(name) => {
+                self.module_of.insert(uri.clone(), name);
+            }
+            None => {
+                self.module_of.remove(uri);
+            }
+        }
+    }
+
+    /// URIs to re-check when the file at `uri` changes (i.e. files that import this file's module).
+    fn dependents_of(&self, uri: &Url) -> Vec<Url> {
+        let module = match self.module_of.get(uri) {
+            Some(m) => m,
+            None => return Vec::new(),
+        };
+        self.dependents
+            .get(module)
+            .map(|s| s.iter().cloned().collect())
+            .unwrap_or_default()
+    }
+}
+
+fn extract_module_info(
+    program: &[saga::ast::Decl],
+) -> (Option<String>, std::collections::HashSet<String>) {
+    let mut module_name = None;
+    let mut imports = std::collections::HashSet::new();
+    for decl in program {
+        match decl {
+            saga::ast::Decl::ModuleDecl { path, .. } => {
+                module_name = Some(path.join("."));
+            }
+            saga::ast::Decl::Import { module_path, .. } => {
+                imports.insert(module_path.join("."));
+            }
+            _ => {}
+        }
+    }
+    (module_name, imports)
 }
 
 impl SharedState {
@@ -72,7 +157,7 @@ impl SharedState {
                 let diagnostics = result.diagnostics.clone();
                 let snap = Arc::new(result);
                 eprintln!("[check_file] program={}", snap.program.is_some());
-                // Update the symbol index with references from this file.
+                // Update the symbol index and dependency graph from this file.
                 if let Some(ref program) = snap.program {
                     let mut idx = self.symbol_index.lock().unwrap_or_else(|e| e.into_inner());
                     idx.update_file(
@@ -82,6 +167,10 @@ impl SharedState {
                         &snap.line_index,
                         &snap.source,
                     );
+                    drop(idx);
+                    let (module_name, imports) = extract_module_info(program);
+                    let mut dep = self.dep_graph.lock().unwrap_or_else(|e| e.into_inner());
+                    dep.update_file(&uri, module_name, imports);
                 }
                 let mut last = self.last_check.lock().unwrap_or_else(|e| e.into_inner());
                 last.insert(uri, snap);
@@ -463,7 +552,7 @@ impl LanguageServer for Backend {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .insert(uri.clone(), text.clone());
-        let _ = self.check_tx.send((uri, text));
+        let _ = self.check_tx.send((uri, text, true));
     }
 
     async fn did_change(&self, params: DidChangeTextDocumentParams) {
@@ -474,14 +563,14 @@ impl LanguageServer for Backend {
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .insert(uri.clone(), change.text.clone());
-            let _ = self.check_tx.send((uri, change.text));
+            let _ = self.check_tx.send((uri, change.text, true));
         }
     }
 
     async fn did_save(&self, params: DidSaveTextDocumentParams) {
         if let Some(text) = &params.text {
             let uri = params.text_document.uri.clone();
-            let _ = self.check_tx.send((uri, text.clone()));
+            let _ = self.check_tx.send((uri, text.clone(), true));
         }
     }
 
@@ -1085,7 +1174,8 @@ impl LanguageServer for Backend {
 /// timer fires (no new edits for that file), the check runs on the blocking
 /// thread pool so hover/completion remain responsive on the async event loop.
 async fn debounce_loop(
-    mut rx: tokio::sync::mpsc::UnboundedReceiver<(Url, String)>,
+    mut rx: tokio::sync::mpsc::UnboundedReceiver<CheckRequest>,
+    tx: tokio::sync::mpsc::UnboundedSender<CheckRequest>,
     client: Client,
     shared: Arc<SharedState>,
 ) {
@@ -1093,28 +1183,38 @@ async fn debounce_loop(
     use tokio::time::{Duration, Instant, sleep_until};
 
     let debounce = Duration::from_millis(300);
-    let mut pending: HashMap<Url, (String, Instant)> = HashMap::new();
+    // Keyed by URI so rapid edits coalesce. The bool tracks whether any
+    // pending request for this URI is primary; primary status persists across
+    // coalescing so a secondary doesn't strip fan-out from a queued primary.
+    let mut pending: HashMap<Url, (String, Instant, bool)> = HashMap::new();
 
     loop {
-        // If nothing is pending, block until the next request arrives.
         if pending.is_empty() {
             match rx.recv().await {
-                Some((uri, text)) => {
-                    pending.insert(uri, (text, Instant::now() + debounce));
+                Some((uri, text, is_primary)) => {
+                    pending.insert(uri, (text, Instant::now() + debounce, is_primary));
                 }
                 None => break,
             }
         }
 
-        // Wait for either the earliest deadline or a new request.
-        let next_deadline = pending.values().map(|(_, d)| *d).min().unwrap();
+        let next_deadline = pending.values().map(|(_, d, _)| *d).min().unwrap();
 
         tokio::select! {
             biased;
             result = rx.recv() => {
                 match result {
-                    Some((uri, text)) => {
-                        pending.insert(uri, (text, Instant::now() + debounce));
+                    Some((uri, text, is_primary)) => {
+                        let entry = pending
+                            .entry(uri)
+                            .and_modify(|e| {
+                                e.0 = text.clone();
+                                e.1 = Instant::now() + debounce;
+                                e.2 = e.2 || is_primary;
+                            });
+                        if let std::collections::hash_map::Entry::Vacant(v) = entry {
+                            v.insert((text, Instant::now() + debounce, is_primary));
+                        }
                     }
                     None => break,
                 }
@@ -1123,22 +1223,47 @@ async fn debounce_loop(
                 let now = Instant::now();
                 let expired: Vec<Url> = pending
                     .iter()
-                    .filter(|(_, (_, deadline))| *deadline <= now)
+                    .filter(|(_, (_, deadline, _))| *deadline <= now)
                     .map(|(uri, _)| uri.clone())
                     .collect();
 
                 for uri in expired {
-                    let (text, _) = pending.remove(&uri).unwrap();
+                    let (text, _, is_primary) = pending.remove(&uri).unwrap();
                     let shared = Arc::clone(&shared);
                     let client = client.clone();
+                    let tx = tx.clone();
                     tokio::spawn(async move {
                         let uri2 = uri.clone();
-                        let result = tokio::task::spawn_blocking(move || {
-                            shared.check_file(uri2, &text)
+                        let text_for_check = text;
+                        let result = tokio::task::spawn_blocking({
+                            let shared = Arc::clone(&shared);
+                            let uri2 = uri2.clone();
+                            let text = text_for_check.clone();
+                            move || shared.check_file(uri2, &text)
                         })
                         .await;
                         if let Ok(diagnostics) = result {
-                            client.publish_diagnostics(uri, diagnostics, None).await;
+                            client
+                                .publish_diagnostics(uri.clone(), diagnostics, None)
+                                .await;
+                            if is_primary {
+                                let dependents = {
+                                    let dep = shared
+                                        .dep_graph
+                                        .lock()
+                                        .unwrap_or_else(|e| e.into_inner());
+                                    dep.dependents_of(&uri)
+                                };
+                                for dep_uri in dependents {
+                                    if dep_uri == uri {
+                                        continue;
+                                    }
+                                    let dep_text = shared.document_text(&dep_uri);
+                                    if let Some(t) = dep_text {
+                                        let _ = tx.send((dep_uri, t, false));
+                                    }
+                                }
+                            }
                         }
                     });
                 }
@@ -1160,9 +1285,15 @@ async fn main() {
             last_check: Mutex::new(std::collections::HashMap::new()),
             document_texts: Mutex::new(std::collections::HashMap::new()),
             symbol_index: Mutex::new(symbol_index::SymbolIndex::default()),
+            dep_graph: Mutex::new(DependencyGraph::default()),
         });
 
-        tokio::spawn(debounce_loop(check_rx, client.clone(), Arc::clone(&shared)));
+        tokio::spawn(debounce_loop(
+            check_rx,
+            check_tx.clone(),
+            client.clone(),
+            Arc::clone(&shared),
+        ));
 
         Backend {
             client,
