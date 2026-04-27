@@ -253,6 +253,85 @@ main () = {
 }
 
 #[test]
+fn cross_module_call_with_beam_native_and_user_effect_threads_all_handler_params() {
+    // Regression: when an imported function declares `needs {Process, X}` for
+    // some user-defined effect X, the function is lowered with handler params
+    // for both Process *and* X (the BEAM-native ops still flow through CPS
+    // lambdas — beam_actor's lowering installs them as direct-op fast paths).
+    //
+    // The cross-module resolver was discarding the type's effect row and only
+    // consulting `fun_effects`, which strips beam-native effects. As a result
+    // it computed the wrong expanded arity for the imported fun, treated the
+    // call as under-applied, and emitted a partial-application closure
+    // (`let r = fun (...) -> call lib:run(...)`) instead of a saturated call.
+    // The case-match on `r` then crashed at runtime with a `case_clause` since
+    // `r` was a closure rather than the `Result` it should have been.
+    let lib = r#"module Lib.Server
+
+import Std.Actor (Process)
+
+pub effect Reporter {
+  fun report : String -> Unit
+}
+
+pub fun run : Unit -> Result Unit String needs {Process, Reporter}
+run () = {
+  report! "hello"
+  let _ = spawn! (fun () -> ())
+  Ok ()
+}
+"#;
+
+    let main_src = r#"module Main
+
+import Std.Actor (beam_actor)
+import Lib.Server (Reporter, run)
+
+main () = {
+  let r = run ()
+  case r {
+    Ok _ -> ()
+    Err _ -> ()
+  }
+} with {
+  beam_actor,
+  report _ = {
+    resume ()
+  },
+}
+"#;
+
+    with_temp_project_files(
+        &[("lib/Server.saga", lib)],
+        main_src,
+        |checker, program| {
+            let out = emit_from_program(program, "main", checker);
+            // The call to lib_server:run must pass user arg + Reporter handler
+            // + Process handlers (spawn/send/exit) + ReturnK.
+            assert_contains(&out, "_Handle_Lib_Server_Reporter_report");
+            assert_contains(&out, "call 'lib_server':'run'");
+            // Saturated, not partial-applied: the bug emitted a closure
+            // whose parameter list included `_Handle_Lib_Server_Reporter_report`
+            // and other handler params. A correctly threaded call binds those
+            // handler vars in `let <_Handle_...> = ...` and passes them to the
+            // call. Detect the bug shape: the handler param appearing as a
+            // *closure parameter* (right after `fun (` rather than inside a
+            // `let <...>` binding).
+            let bug_shape = "_Handle_Lib_Server_Reporter_report,";
+            let bug_present = out.lines().any(|line| {
+                let trimmed = line.trim_start();
+                trimmed.starts_with("fun (") && trimmed.contains(bug_shape)
+            });
+            assert!(
+                !bug_present,
+                "imported run call appears to be wrapped in a partial-app closure:\n{out}"
+            );
+            assert_erlc_compiles(&out, "main");
+        },
+    );
+}
+
+#[test]
 fn imported_private_effect_factory_threads_handler_into_imported_effectful_call() {
     let db_module = r#"module Db
 
