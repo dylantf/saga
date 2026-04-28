@@ -1,5 +1,54 @@
 -module(saga_runtime).
--export([format_crash/3]).
+-export([format_crash/3, await_signal/1]).
+
+%% gen_event callbacks for the per-await signal handler installed below.
+-export([init/1, handle_event/2, handle_call/2, handle_info/2, terminate/2, code_change/3]).
+
+%% Block the calling process until the given OS signal arrives.
+%% `Kind' is a saga `SignalKind' constructor tuple. Installs an OS-level
+%% handler for the signal and registers a `gen_event' subscriber on
+%% `erl_signal_server' that forwards the signal back to this process. The
+%% default OTP handler (which would call `init:stop/0' for SIGTERM, etc.)
+%% is removed for the duration so saga code gets to run instead.
+await_signal(Kind) ->
+    Sig = signal_atom(Kind),
+    Self = self(),
+    Ref = make_ref(),
+    HandlerId = {?MODULE, Ref},
+    ok = os:set_signal(Sig, handle),
+    %% Remove the OTP default for this signal so it doesn't fire alongside us.
+    %% Idempotent across concurrent awaits — first removal wins, rest are no-ops.
+    _ = catch gen_event:delete_handler(erl_signal_server, erl_signal_handler, []),
+    ok = gen_event:add_handler(erl_signal_server, HandlerId, {Self, Sig, Ref}),
+    receive
+        {saga_signal, Ref} ->
+            _ = catch gen_event:delete_handler(erl_signal_server, HandlerId, []),
+            unit
+    end.
+
+signal_atom({'std_process_SigHup'}) -> sighup;
+signal_atom({'std_process_SigQuit'}) -> sigquit;
+signal_atom({'std_process_SigAbrt'}) -> sigabrt;
+signal_atom({'std_process_SigAlrm'}) -> sigalrm;
+signal_atom({'std_process_SigTerm'}) -> sigterm;
+signal_atom({'std_process_SigUsr1'}) -> sigusr1;
+signal_atom({'std_process_SigUsr2'}) -> sigusr2;
+signal_atom({'std_process_SigChld'}) -> sigchld;
+signal_atom({'std_process_SigTstp'}) -> sigtstp.
+
+%% gen_event callbacks. State is {TargetPid, SubscribedSignal, Ref}.
+init({Pid, Sig, Ref}) -> {ok, {Pid, Sig, Ref}}.
+
+handle_event(Sig, {Pid, Sig, Ref} = State) ->
+    Pid ! {saga_signal, Ref},
+    {ok, State};
+handle_event(_Other, State) ->
+    {ok, State}.
+
+handle_call(_Req, State) -> {ok, ok, State}.
+handle_info(_Info, State) -> {ok, State}.
+terminate(_Reason, _State) -> ok.
+code_change(_OldVsn, State, _Extra) -> {ok, State}.
 
 %% Format a BEAM runtime crash into a user-friendly error message.
 %% Called from the exec_erl catch-all clause.

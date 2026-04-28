@@ -5133,6 +5133,44 @@ fn nested_hof_absorption_does_not_leak_inner_closed_effects() {
 }
 
 #[test]
+fn effect_op_row_variable_freshens_per_call_site() {
+    // Regression: `instantiate_effect_op`'s `collect_vars` walked Type::Fun's
+    // params and return type but ignored the effect row, so a row variable
+    // appearing only in the effect row (e.g. `..e` in
+    // `spawn : (f: Unit -> Unit needs {Actor msg, ..e}) -> Pid msg
+    //   needs {Actor msg, ..e}`) was never freshened across call sites.
+    // After one call bound the row var, subsequent call sites inherited the
+    // binding and rejected callbacks whose effect row didn't match.
+    //
+    // Here the callback uses Process+Monitor+Timer+Actor+Logger (a closed,
+    // multi-effect row). The parent's row variable for spawn must bind to
+    // the lambda's extras, but only if it's fresh.
+    check(
+        "import Std.Actor (Process, Actor, Monitor, Timer)\n\
+         effect Logger {\n  fun log : String -> Unit\n}\n\
+         type Msg = Tick\n\
+         fun worker : Unit -> Unit\n  \
+           needs {Process, Actor Msg, Monitor, Timer, Logger}\n\
+         worker () = receive {\n  \
+           Tick -> {\n    \
+             log! \"x\"\n    \
+             let _pid = spawn! (fun () -> ())\n    \
+             let _ref = monitor! (self! ())\n    \
+             sleep! 1\n    \
+             worker ()\n  \
+           }\n\
+         }\n\
+         fun parent : Unit -> Unit\n  \
+           needs {Process, Actor Msg, Monitor, Timer, Logger}\n\
+         parent () = {\n  \
+           let _pid = spawn! (fun () -> worker ())\n  \
+           ()\n\
+         }",
+    )
+    .unwrap();
+}
+
+#[test]
 fn handler_factory_must_propagate_handler_needs() {
     // A function that returns a `handler for E needs {X}` constructs a handler
     // value whose arm bodies use X. With static handler threading, the arm

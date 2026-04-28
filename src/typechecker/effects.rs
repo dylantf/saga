@@ -281,9 +281,17 @@ impl Checker {
                     Type::Var(id) => {
                         vars.insert(*id);
                     }
-                    Type::Fun(a, b, _) => {
+                    Type::Fun(a, b, row) => {
                         collect_vars(a, vars);
                         collect_vars(b, vars);
+                        for entry in &row.effects {
+                            for arg in &entry.args {
+                                collect_vars(arg, vars);
+                            }
+                        }
+                        if let Some(tail) = &row.tail {
+                            collect_vars(tail, vars);
+                        }
                     }
                     Type::Con(_, args) => {
                         for a in args {
@@ -302,6 +310,14 @@ impl Checker {
                 collect_vars(t, &mut free_vars);
             }
             collect_vars(&op.return_type, &mut free_vars);
+            for entry in &op.needs.effects {
+                for arg in &entry.args {
+                    collect_vars(arg, &mut free_vars);
+                }
+            }
+            if let Some(tail) = &op.needs.tail {
+                collect_vars(tail, &mut free_vars);
+            }
             if free_vars.is_empty() {
                 return op.clone();
             }
@@ -342,9 +358,17 @@ impl Checker {
                 Type::Var(id) => {
                     vars.insert(*id);
                 }
-                Type::Fun(a, b, _) => {
+                Type::Fun(a, b, row) => {
                     collect_vars2(a, vars);
                     collect_vars2(b, vars);
+                    for entry in &row.effects {
+                        for arg in &entry.args {
+                            collect_vars2(arg, vars);
+                        }
+                    }
+                    if let Some(tail) = &row.tail {
+                        collect_vars2(tail, vars);
+                    }
                 }
                 Type::Con(_, args) => {
                     for a in args {
@@ -363,6 +387,14 @@ impl Checker {
             collect_vars2(t, &mut free_vars);
         }
         collect_vars2(&op.return_type, &mut free_vars);
+        for entry in &op.needs.effects {
+            for arg in &entry.args {
+                collect_vars2(arg, &mut free_vars);
+            }
+        }
+        if let Some(tail) = &op.needs.tail {
+            collect_vars2(tail, &mut free_vars);
+        }
         for id in free_vars {
             if !type_param_set.contains(&id) && !mapping.contains_key(&id) {
                 mapping.insert(id, self.fresh_var());

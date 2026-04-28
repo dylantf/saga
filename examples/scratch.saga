@@ -1,29 +1,26 @@
-import Std.Actor (Process)
-import Std.Actor (beam_actor)
+import Std.Process (Signal, beam_signal, SigTerm)
+import Std.Actor (Process, Actor, Timer, beam_actor)
+import Std.IO (console)
+
+type DrainEvent = SignalFired | DrainTimeout
+
+fun drain : Unit -> Unit needs {Process, Actor DrainEvent, Timer, Signal, Stdio}
+drain () = {
+  let me = self! ()
+  let _w1 = spawn! (fun () -> {
+    await_signal! SigTerm
+    send! me SignalFired
+  })
+  let _w2 = spawn! (fun () -> {
+    sleep! 2000
+    send! me DrainTimeout
+  })
+  receive {
+    SignalFired -> println "got signal, draining..."
+    DrainTimeout -> println "no signal in 2s, timeout fired"
+  }
+}
 
 main () = {
-  dbg "main: starting"
-  let r = run ()
-  case r {
-    Ok _ -> dbg "main: ok"
-    Err e -> dbg ("main: err", e)
-  }
-} with {
-  beam_actor,
-  report msg = {
-    dbg ("reported:", msg)
-    resume ()
-  }
-}
-pub effect Reporter {
-  fun report : String -> Unit
-}
-
-# Mix: stdlib Process + user-defined Reporter. This combination breaks.
-pub fun run : Unit -> Result Unit String needs {Process, Reporter}
-run () = {
-  dbg "run: BODY ENTERED"
-  report! "hello"
-  let _ = spawn! (fun () -> dbg "child ran")
-  Ok ()
-}
+  drain ()
+} with {console, beam_actor, beam_signal}

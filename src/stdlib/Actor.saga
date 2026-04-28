@@ -7,7 +7,7 @@ import Std.Base (Show, Debug, Ord, Semigroup, Enum)
 #@ Process identifier, parameterized by the message type the process accepts.
 #@ At runtime this is an Erlang pid. The constructor is exposed so handler
 #@ authors can build alternative implementations (e.g. sync handlers for testing).
-pub type Pid msg = Pid Int
+pub type Pid msg = Pid Int deriving (Eq, Debug)
 
 #@ Type variable `msg` is free per call site, inferred from the pid / spawned function.
 pub effect Process {

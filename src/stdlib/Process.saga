@@ -19,3 +19,28 @@ pub fun shutdown : (code: Int) -> a
 #@ Panics still crash the program by default — this is an opt-in recovery boundary.
 @builtin
 pub fun catch_panic : (f: Unit -> a needs {..e}) -> Result a String needs {..e}
+
+#@ OS signals that can be observed via the Signal effect.
+#@ Note: SIGINT (Ctrl-C) and SIGKILL are not in this list — SIGINT is claimed
+#@ by the BEAM break handler and SIGKILL is uncatchable at the OS level.
+#@ For graceful shutdown, send SIGTERM (e.g. `kill -TERM <pid>`).
+pub type SignalKind =
+  | SigHup
+  | SigQuit
+  | SigAbrt
+  | SigAlrm
+  | SigTerm
+  | SigUsr1
+  | SigUsr2
+  | SigChld
+  | SigTstp
+
+#@ Signal effect: blocks the calling process until the given OS signal arrives.
+pub effect Signal {
+  fun await_signal : (kind: SignalKind) -> Unit
+}
+
+#@ Native handler for the Signal effect.
+pub handler beam_signal for Signal {
+  # LSP error expected: compiler builtin. Op is lowered to a direct call into saga_runtime.
+}

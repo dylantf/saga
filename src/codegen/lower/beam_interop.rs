@@ -50,6 +50,12 @@ const BEAM_NATIVE_HANDLERS: &[BeamNativeHandler] = &[
         needs_ets_table: false,
         needs_vec_table: true,
     },
+    BeamNativeHandler {
+        source_module: "Std.Process",
+        canonical_name: "Std.Process.beam_signal",
+        needs_ets_table: false,
+        needs_vec_table: false,
+    },
 ];
 
 /// Check if a handler is BEAM-native by its source module and canonical name.
@@ -332,6 +338,16 @@ const BEAM_NATIVE_OPS: &[(&str, BeamNativeOp)] = &[
         BeamNativeOp {
             module: "ets",
             func: "insert",
+            param_count: 1,
+            arg_transform: ArgTransform::Identity,
+            exit_reason_arg: None,
+        },
+    ),
+    (
+        "await_signal",
+        BeamNativeOp {
+            module: "saga_runtime",
+            func: "await_signal",
             param_count: 1,
             arg_transform: ArgTransform::Identity,
             exit_reason_arg: None,
