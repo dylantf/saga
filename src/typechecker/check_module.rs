@@ -382,7 +382,12 @@ pub type ModuleMap = HashMap<String, PathBuf>;
 /// and build a map from declared module name to file path.
 pub fn scan_project_modules(root: &Path) -> Result<ModuleMap, String> {
     let mut map = ModuleMap::new();
-    scan_dir(root, root, &mut map, &["_build", "deps", "tests"])?;
+    for entry_point in ["src", "lib"] {
+        let dir = root.join(entry_point);
+        if dir.is_dir() {
+            scan_dir(&dir, root, &mut map, &[])?;
+        }
+    }
     Ok(map)
 }
 
