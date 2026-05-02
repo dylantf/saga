@@ -1,26 +1,62 @@
-import Std.Process (Signal, beam_signal, SigTerm)
-import Std.Actor (Process, Actor, Timer, beam_actor)
-import Std.IO (console)
+import Std.Fail (Fail)
 
-type DrainEvent = SignalFired | DrainTimeout
+type Wrap = Wrap Int
 
-fun drain : Unit -> Unit needs {Process, Actor DrainEvent, Timer, Signal, Stdio}
-drain () = {
-  let me = self! ()
-  let _w1 = spawn! (fun () -> {
-    await_signal! SigTerm
-    send! me SignalFired
-  })
-  let _w2 = spawn! (fun () -> {
-    sleep! 2000
-    send! me DrainTimeout
-  })
-  receive {
-    SignalFired -> println "got signal, draining..."
-    DrainTimeout -> println "no signal in 2s, timeout fired"
-  }
+type MyErr = MyErr String deriving (Debug)
+
+handler to_result for Fail a {
+  fail e = Err e
+  return v = Ok v
+}
+
+# field: returns a Wrap, may fail if input has wrong tag
+type Container = Good Wrap | Bad
+
+fun field : Container -> Wrap needs {Fail MyErr}
+field c = case c {
+  Good w -> w
+  Bad -> fail! (MyErr "bad container")
+}
+
+# int: extracts Int from Wrap, may fail if wrap value is zero
+fun int_of : Wrap -> Int needs {Fail MyErr}
+int_of w = case w {
+  Wrap n -> if n == 0 then fail! (MyErr "zero") else n
 }
 
 main () = {
-  drain ()
-} with {console, beam_actor, beam_signal}
+  # 1: int_of fails on its own
+  let r1 = int_of (Wrap 0) with to_result
+  case r1 {
+    Ok _ -> dbg "1: Ok (bad)"
+    Err _ -> dbg "1: Err (good)"
+  }
+
+  # 2: field fails on its own
+  let r2 = field Bad with to_result
+  case r2 {
+    Ok _ -> dbg "2: Ok (bad)"
+    Err _ -> dbg "2: Err (good)"
+  }
+
+  # 4: int_of (field (Good (Wrap 0))) — chained, int_of fails
+  let r4 = int_of (field (Good (Wrap 0))) with to_result
+  case r4 {
+    Ok _ -> dbg "4: Ok (bad)"
+    Err _ -> dbg "4: Err (good)"
+  }
+
+  # 5: int_of (field (Good (Wrap 7))) — chained, both succeed
+  let r5 = int_of (field (Good (Wrap 7))) with to_result
+  case r5 {
+    Ok n -> dbg $"5: Ok {n} (good)"
+    Err _ -> dbg "5: Err (bad)"
+  }
+
+  # 3: int_of (field Bad) — chained, field fails (last because it crashes)
+  let r3 = int_of (field Bad) with to_result
+  case r3 {
+    Ok _ -> dbg "3: Ok (bad)"
+    Err _ -> dbg "3: Err (good)"
+  }
+}
