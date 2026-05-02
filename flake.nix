@@ -78,6 +78,13 @@
           ];
 
           RUST_SRC_PATH = "${pkgs.rustPlatform.rustLibSrc}";
+
+          shellHook = ''
+            mkdir -p "$PWD/.dev-bin"
+            ln -sf "$PWD/target/debug/saga" "$PWD/.dev-bin/saga"
+            ln -sf "$PWD/target/debug/saga-lsp" "$PWD/.dev-bin/saga-lsp"
+            export PATH="$PWD/.dev-bin:$PATH"
+          '';
         };
       }
     );
