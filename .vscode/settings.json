@@ -6,6 +6,5 @@
     "**/.DS_Store": true,
     "**/Thumbs.db": true,
     "**/_build": false
-  },
-  "rust-analyzer.server.path": "rust-analyzer"
+  }
 }
