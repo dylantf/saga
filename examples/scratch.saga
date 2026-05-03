@@ -1,81 +1,45 @@
 import Std.Fail (Fail)
 
-opaque type Json = Json Inner
-
-type Inner = IInt Int | IStr String | INull
-
-type MyErr =
-  | InvalidJson String
-  | InvalidShape (expected: String) (found: String) (path: List String)
-  deriving (Debug)
+type Boxed = Boxed Inner
+type Inner = IInt Int | IStr String
+type Failure = Failure String deriving (Debug)
 
 handler to_result for Fail a {
   fail e = Err e
   return v = Ok v
 }
 
-fun unwrap : Json -> Inner
-unwrap j = case j {
-  Json v -> v
+fun field : Boxed -> Boxed needs {Fail Failure}
+field b = case b {
+  Boxed (IStr s) -> Boxed (IStr s)
+  Boxed (IInt _) -> fail! (Failure "container expected")
 }
 
-fun classify : Inner -> String
-classify v = case v {
-  IInt _ -> "Int"
-  IStr _ -> "String"
-  INull -> "null"
+fun int : Boxed -> Int needs {Fail Failure}
+int b = case b {
+  Boxed (IInt n) -> n
+  _ -> fail! (Failure "Int expected")
 }
 
-# Mirrors SagaJson.field
-fun field : String -> Json -> Json needs {Fail MyErr}
-field name j = case unwrap j {
-  IInt _ -> fail! (InvalidShape $"Object field '{name}'" "Int" [])
-  IStr _ -> fail! (InvalidShape $"Object field '{name}'" "String" [])
-  INull -> fail! (InvalidShape $"Object field '{name}'" "null" [])
-  # all branches fail; for the purposes of this repro, treat any input as "the field is here as a string"
+fun direct : Boxed -> Int needs {Fail Failure}
+direct b = int (field b)
+
+fun via_let : Boxed -> Int needs {Fail Failure}
+via_let b = {
+  let v = int (field b)
+  v
 }
-
-# Wait — we want field to succeed and int to fail. Rewrite so field returns
-# a Json wrapping IStr, then int fails.
-# Reset: field always returns Json (IStr "wrong")
-fun get_field : Json -> Json
-get_field _ = Json (IStr "wrong")
-
-# int — same shape as SagaJson.int
-fun int : Json -> Int needs {Fail MyErr}
-int j = case unwrap j {
-  IInt n -> n
-  _ -> fail! (InvalidShape "Int" (classify (unwrap j)) [])
-}
-
-# Mirrors J.run: handler attached inside this helper.
-fun run : (Json -> a needs {Fail MyErr}) -> Json -> Result a MyErr
-run decoder j = decoder j with to_result
 
 main () = {
-  let input = Json (IStr "ignored")
+  let input = Boxed (IStr "wrong")
 
-  # A: handler at call site
-  let r1 = int (get_field input) with to_result
-  case r1 {
-    Ok _ -> dbg "A: Ok (bad)"
+  case (direct input with to_result) {
+    Ok _ -> dbg "A: Ok (BUG)"
     Err _ -> dbg "A: Err (good)"
   }
 
-  # B: handler inside run helper, call passed as lambda
-  let r2 = run (fun j -> int (get_field j)) input
-  case r2 {
-    Ok _ -> dbg "B: Ok (bad)"
+  case (via_let input with to_result) {
+    Ok _ -> dbg "B: Ok (BUG)"
     Err _ -> dbg "B: Err (good)"
   }
-
-  # C: same as B but with named decoder function
-  let r3 = run my_decoder input
-  case r3 {
-    Ok _ -> dbg "C: Ok (bad)"
-    Err _ -> dbg "C: Err (good)"
-  }
 }
-
-fun my_decoder : Json -> Int needs {Fail MyErr}
-my_decoder j = int (get_field j)

@@ -957,10 +957,7 @@ impl<'a> Lowerer<'a> {
                         Stmt::Expr(e) => e,
                         Stmt::LetFun { .. } => unreachable!(),
                     };
-                    let is_effectful_call = collect_fun_call(value_expr)
-                        .map(|(name, head_expr, _)| self.is_effectful_call_name(head_expr.id, name))
-                        .unwrap_or(false);
-                    if is_effectful_call {
+                    if self.is_effectful_call_arg(value_expr) {
                         let (pat_opt, value_expr) = match first {
                             Stmt::Let { pattern, value, .. } => (Some(pattern), value),
                             Stmt::Expr(e) => (None, e),
@@ -1192,10 +1189,7 @@ impl<'a> Lowerer<'a> {
                     // Check for call to an effectful function. Capture the
                     // rest of the block as _ReturnK so CPS chains correctly
                     // (e.g. state-threading handlers need real continuations).
-                    let is_effectful_call = collect_fun_call(value_expr)
-                        .map(|(name, head_expr, _)| self.is_effectful_call_name(head_expr.id, name))
-                        .unwrap_or(false);
-                    if is_effectful_call {
+                    if self.is_effectful_call_arg(value_expr) {
                         let rest_k = self.lower_rest_block_with_k_k(pat_opt, rest, k_var);
                         return self.lower_expr_with_call_return_k(value_expr, Some(rest_k));
                     }
