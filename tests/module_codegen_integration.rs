@@ -1034,6 +1034,84 @@ main () = Logger.greet \"world\" with {
     );
 }
 
+/// Regression: a decoder defined in Main composes two effectful Lib functions
+/// (`Lib.unbox_int (Lib.unwrap b)`) and runs through `Lib.run_decoder`. The
+/// inner call must abort the chain when it fails, instead of leaking its
+/// `{error, _}` tuple to the outer return clause as a value (which would
+/// produce a garbage `Ok` wrapping the error).
+#[test]
+fn cross_module_nested_effectful_calls_abort_correctly() {
+    let lib_src = std::fs::read_to_string(fixtures_root().join("EffectChain.saga")).unwrap();
+    let main_src = "
+module Main
+import Std.Fail (Fail)
+import EffectChain (Box, Failure)
+
+fun decoder : Box -> Int needs {Fail Failure}
+decoder b = EffectChain.unbox_int (EffectChain.unwrap b)
+
+pub fun run_fail : Unit -> String
+run_fail () = {
+  let r = EffectChain.run_decoder decoder (EffectChain.Box (EffectChain.IS \"oops\"))
+  case r {
+    Ok _ -> \"ok-bug\"
+    Err _ -> \"err-good\"
+  }
+}
+
+pub fun run_ok : Unit -> String
+run_ok () = {
+  let r = EffectChain.run_decoder decoder (EffectChain.Box (EffectChain.II 42))
+  case r {
+    Ok _ -> \"ok-good\"
+    Err _ -> \"err-bug\"
+  }
+}
+";
+    let mut checker = make_project_checker();
+    let main_program = typecheck_source(main_src, &mut checker);
+
+    let lib_core = emit_project_module(&lib_src, "effectchain", &checker);
+    let main_core = emit_from_program(&main_program, "main", &checker);
+
+    let dir = assert_erlc_compiles(&lib_core, "effectchain");
+    let main_core_path = dir.join("main.core");
+    std::fs::write(&main_core_path, &main_core).unwrap();
+    let erlc = std::process::Command::new("erlc")
+        .arg("-o")
+        .arg(&dir)
+        .arg(&main_core_path)
+        .output()
+        .expect("failed to run erlc");
+    assert!(
+        erlc.status.success(),
+        "erlc failed on main:\n{main_core}\nstderr: {}",
+        String::from_utf8_lossy(&erlc.stderr)
+    );
+
+    let run = std::process::Command::new("erl")
+        .arg("-noshell")
+        .arg("-pa")
+        .arg(&dir)
+        .arg("-eval")
+        .arg(
+            "io:format(\"~s|~s~n\", [main:run_fail(unit), main:run_ok(unit)]), init:stop().",
+        )
+        .output()
+        .expect("failed to run erl");
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(
+        run.status.success(),
+        "erl failed:\nstderr: {}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&run.stdout);
+    assert!(
+        stdout.contains("err-good|ok-good"),
+        "expected 'err-good|ok-good', got: {stdout}"
+    );
+}
+
 // ---- Cross-module trait dicts ----
 
 #[test]

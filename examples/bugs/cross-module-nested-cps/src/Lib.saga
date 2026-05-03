@@ -1,0 +1,34 @@
+module Lib
+
+import Std.Fail (Fail)
+
+pub type Boxed = Boxed Inner
+
+pub type Inner = IInt Int | IStr String
+
+pub type Failure = Failure String deriving (Debug)
+
+pub handler to_result for Fail a {
+  fail e = Err e
+  return v = Ok v
+}
+
+pub fun field : Boxed -> Boxed needs {Fail Failure}
+field b = case b {
+  Boxed (IStr s) -> Boxed (IStr s)
+  Boxed (IInt _) -> fail! (Failure "expected container, got Int")
+}
+
+pub fun int : Boxed -> Int needs {Fail Failure}
+int b = case b {
+  Boxed (IInt n) -> n
+  _ -> fail! (Failure "expected Int")
+}
+
+#@ Compose the two primitives ENTIRELY INSIDE Lib. Returns Err correctly.
+pub fun diagnostic : Boxed -> Result Int Failure
+diagnostic b = int (field b) with to_result
+
+#@ User-supplied decoder runner — handler attached here, body comes from caller.
+pub fun run : (Boxed -> a needs {Fail Failure}) -> Boxed -> Result a Failure
+run decoder b = decoder b with to_result

@@ -48,17 +48,6 @@ cargo test --test stdlib_tests                 # Stdlib tests
 cargo clippy                                   # Lint
 ```
 
-## Documentation
-
-- [Language Design](docs/language-design.md) -- full language overview with examples
-- [Syntax Cheatsheet](docs/syntax-cheatsheet.md) -- all syntax (usefor for AI)
-- [Effects Guide](docs/effects-guide.md) -- deep dive into effects and handlers
-- [FFI](docs/ffi.md) -- calling Erlang from Saga
-- [Dependency Management](docs/dependency-management.md)
-- [Testing](docs/testing.md)
-- [Concurrency](docs/concurrency.md)
-- [Roadmap](docs/roadmap.md) -- what's implemented and what's planned
-
 ### Compiler internals
 
 - [Compiler Pipeline](docs/pipeline.md)

@@ -185,16 +185,11 @@ impl<'a> Lowerer<'a> {
             let k_ce = return_k.expect("nested terminal effectful expr requires return_k");
             let body_ce = self.lower_expr_with_k(expr, &k_var);
             CExpr::Let(k_var, Box::new(k_ce), Box::new(body_ce))
+        } else if self.is_effectful_call_arg(expr) {
+            self.lower_expr_with_call_return_k(expr, return_k)
         } else {
-            let is_eff_call = collect_fun_call(expr)
-                .map(|(name, head_expr, _)| self.is_effectful_call_name(head_expr.id, name))
-                .unwrap_or(false);
-            if is_eff_call {
-                self.lower_expr_with_call_return_k(expr, return_k)
-            } else {
-                let body_ce = self.lower_expr(expr);
-                self.apply_return_k_with(return_k, body_ce)
-            }
+            let body_ce = self.lower_expr(expr);
+            self.apply_return_k_with(return_k, body_ce)
         }
     }
 
@@ -277,10 +272,7 @@ impl<'a> Lowerer<'a> {
                 &args_owned,
                 Some(CExpr::Var(k_var.to_string())),
             )
-        } else if collect_fun_call(expr)
-            .map(|(name, head_expr, _)| self.is_effectful_call_name(head_expr.id, name))
-            .unwrap_or(false)
-        {
+        } else if self.is_effectful_call_arg(expr) {
             self.lower_expr_with_call_return_k(expr, Some(CExpr::Var(k_var.to_string())))
         } else if has_nested_effect_call(expr) || matches!(expr.kind, ExprKind::Block { .. }) {
             self.lower_expr_with_k_inner(expr, k_var)

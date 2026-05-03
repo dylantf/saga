@@ -1,0 +1,23 @@
+module EffectChain
+
+import Std.Fail (Fail)
+
+pub type Box = Box Inner
+pub type Inner = II Int | IS String
+pub type Failure = Failure String deriving (Debug)
+
+pub fun unbox_int : Box -> Int needs {Fail Failure}
+unbox_int (Box (II n)) = n
+unbox_int _ = fail! (Failure "expected II")
+
+pub fun unwrap : Box -> Box needs {Fail Failure}
+unwrap (Box (II n)) = Box (II n)
+unwrap _ = fail! (Failure "expected container")
+
+pub handler to_result for Fail a {
+  fail e = Err e
+  return v = Ok v
+}
+
+pub fun run_decoder : (Box -> a needs {Fail Failure}) -> Box -> Result a Failure
+run_decoder decoder b = decoder b with to_result

@@ -1040,7 +1040,7 @@ impl<'a> Lowerer<'a> {
     /// qualified resolved fun, or in-scope effectful variable). Used to decide
     /// when nested effectful calls in argument position must be CPS-chained
     /// rather than evaluated to a value.
-    fn is_effectful_call_arg(&self, arg: &Expr) -> bool {
+    pub(super) fn is_effectful_call_arg(&self, arg: &Expr) -> bool {
         if let Some((_module, func_name, head, _args)) = collect_qualified_call(arg) {
             return self.is_effectful_call_name(head.id, func_name);
         }

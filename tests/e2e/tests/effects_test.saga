@@ -123,6 +123,25 @@ swallow_marker () = {
 fun terminal_to_result : Unit -> Result Int String
 terminal_to_result () = safe_div 10 0 with to_result
 
+# Regression: nested effectful calls sharing a handler must CPS-chain so that
+# an aborting inner call skips the outer call. Previously the inner call's
+# error tuple leaked out as a value and crashed the outer call's clause match.
+fun parse_or_fail : Int -> Int needs {Fail String}
+parse_or_fail 0 = fail! "zero not allowed"
+parse_or_fail x = x
+
+fun double_positive : Int -> Int needs {Fail String}
+double_positive x = if x > 0 then x * 2 else fail! "not positive"
+
+fun nested_inner_fails : Unit -> Result Int String
+nested_inner_fails () = double_positive (parse_or_fail 0) with to_result
+
+fun nested_outer_fails : Unit -> Result Int String
+nested_outer_fails () = double_positive (parse_or_fail (-3)) with to_result
+
+fun nested_both_succeed : Unit -> Result Int String
+nested_both_succeed () = double_positive (parse_or_fail 5) with to_result
+
 fun let_wrapped_fallback : Unit -> String
 let_wrapped_fallback () = {
   let x = safe_div 10 0 with int_fallback
@@ -414,6 +433,18 @@ tests () = {
       test "terminal with still returns handler result" (fun () -> {
         let result = terminal_to_result ()
         assert_eq result (Err "division by zero")
+      })
+      test "nested effectful call: inner fails skips outer" (fun () -> {
+        let result = nested_inner_fails ()
+        assert_eq result (Err "zero not allowed")
+      })
+      test "nested effectful call: outer fails after inner succeeds" (fun () -> {
+        let result = nested_outer_fails ()
+        assert_eq result (Err "not positive")
+      })
+      test "nested effectful call: both succeed" (fun () -> {
+        let result = nested_both_succeed ()
+        assert_eq result (Ok 10)
       })
       test "let-bound with remains delimited" (fun () -> {
         let marker = let_wrapped_fallback ()
