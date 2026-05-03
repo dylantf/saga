@@ -122,7 +122,7 @@ fn make_project_checker() -> typechecker::Checker {
 }
 
 fn make_project_checker_for_root(root: PathBuf) -> typechecker::Checker {
-    let module_map = typechecker::scan_project_modules(&root).expect("scan failed");
+    let module_map = typechecker::scan_source_dir(&root).expect("scan failed");
     let mut checker = typechecker::Checker::with_project_root(root);
     checker.set_module_map(module_map);
     // Load prelude (which imports Std first, then stdlib modules)
