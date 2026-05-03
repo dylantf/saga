@@ -1,12 +1,12 @@
-#@ Cross-module nested CPS bug, third variant.
+#@ Cross-module CPS bug, fourth variant — higher-order callback.
 #@
-#@ The let-bound and direct-return variants are both fixed. This one isn't:
-#@ when the result of a cross-module chained effectful call is used as a
-#@ record field expression, the failure path doesn't reach the handler.
+#@ When a Lib HOF takes an effectful callback that succeeds, the result
+#@ is corrupted — even a successful computation produces a tagged tuple
+#@ that doesn't match Ok or Err at the call site.
 #@
 #@ Expected output:
-#@   A: Err (good)
-#@   B: Err (good)
+#@   A: Ok 7
+#@   B: Ok 7
 module Main
 
 import Std.IO (console)
@@ -18,26 +18,18 @@ handler local_to_result for Fail a {
   return v = Ok v
 }
 
-record Wrap { x: Int } deriving (Debug)
-
-# Direct return — works since the previous fix
-fun direct : Boxed -> Int needs {Fail Failure}
-direct b = Lib.int (Lib.field b)
-
-# Result of chain used as a record-literal field value
-fun in_record : Boxed -> Wrap needs {Fail Failure}
-in_record b = Wrap { x: Lib.int (Lib.field b) }
-
 main () = {
-  let input = Lib.Boxed (Lib.IStr "wrong")
+  let input = Lib.Boxed (Lib.IInt 7)
 
-  case (direct input with local_to_result) {
-    Ok _ -> println "A: Ok (BUG)"
-    Err _ -> println "A: Err (good)"
+  # A: call int directly through run — works
+  case Lib.run Lib.int input {
+    Ok n -> println $"A: Ok {n}"
+    Err _ -> println "A: Err (BUG)"
   }
 
-  case (in_record input with local_to_result) {
-    Ok _ -> println "B: Ok (BUG — should be Err)"
-    Err _ -> println "B: Err (good)"
+  # B: call int through Lib.map_via, then via run
+  case Lib.run (fun b -> Lib.map_via Lib.int b) input {
+    Ok n -> println $"B: Ok {n}"
+    Err _ -> println "B: Err (BUG)"
   }
 } with console

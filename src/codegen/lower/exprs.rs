@@ -1119,8 +1119,96 @@ impl<'a> Lowerer<'a> {
                 handler,
                 Some(CExpr::Var(k_var.to_string())),
             ),
+            ExprKind::RecordCreate { name, fields, .. } => {
+                self.lower_record_create_with_k(Some(name.as_str()), expr.id, fields, k_var)
+            }
+            ExprKind::AnonRecordCreate { fields } => {
+                self.lower_record_create_with_k(None, expr.id, fields, k_var)
+            }
             _ => self.lower_value_to_k(expr, k_var),
         }
+    }
+
+    /// Lower a record-creation expression and apply `k_var` to the constructed
+    /// tuple. Effectful field values are CPS-chained so an aborting handler
+    /// skips the rest of the construction (and `k_var`) instead of leaking its
+    /// abort tuple into a record slot.
+    fn lower_record_create_with_k(
+        &mut self,
+        name: Option<&str>,
+        node_id: crate::ast::NodeId,
+        fields: &[(String, crate::token::Span, Expr)],
+        k_var: &str,
+    ) -> CExpr {
+        use std::collections::HashMap;
+
+        let order: Vec<String> = match name {
+            Some(rname) => self
+                .resolved_record_fields(node_id, rname)
+                .cloned()
+                .unwrap_or_else(|| fields.iter().map(|(n, _, _)| n.clone()).collect()),
+            None => {
+                let names: Vec<&str> = fields.iter().map(|(n, _, _)| n.as_str()).collect();
+                let mut sorted: Vec<String> = names.iter().map(|s| s.to_string()).collect();
+                sorted.sort();
+                sorted
+            }
+        };
+        let field_map: HashMap<&str, &Expr> =
+            fields.iter().map(|(n, _, e)| (n.as_str(), e)).collect();
+
+        let tag = match name {
+            Some(rname) => super::util::mangle_ctor_atom(
+                rname,
+                &self.constructor_atoms,
+                self.handler_origin_module(),
+            ),
+            None => {
+                let names: Vec<&str> = fields.iter().map(|(n, _, _)| n.as_str()).collect();
+                crate::ast::anon_record_tag(&names)
+            }
+        };
+
+        let mut field_vars: Vec<String> = Vec::with_capacity(order.len());
+        let mut effectful_idxs: Vec<usize> = Vec::new();
+        let mut pure_bindings: Vec<(String, CExpr)> = Vec::new();
+        for (i, field_name) in order.iter().enumerate() {
+            let v = self.fresh();
+            field_vars.push(v.clone());
+            let e = field_map
+                .get(field_name.as_str())
+                .expect("field missing in record-create");
+            if self.is_effectful_call_arg(e) || self.has_nested_effectful_expr(e) {
+                effectful_idxs.push(i);
+            } else {
+                pure_bindings.push((v, self.lower_expr_value(e)));
+            }
+        }
+
+        let mut elems = vec![CExpr::Lit(CLit::Atom(tag))];
+        elems.extend(field_vars.iter().map(|v| CExpr::Var(v.clone())));
+        let tuple = CExpr::Tuple(elems);
+        let mut body = CExpr::Apply(
+            Box::new(CExpr::Var(k_var.to_string())),
+            vec![tuple],
+        );
+
+        for &i in effectful_idxs.iter().rev() {
+            let v = field_vars[i].clone();
+            let e = field_map
+                .get(order[i].as_str())
+                .expect("field missing in record-create");
+            let inner_k = CExpr::Fun(vec![v.clone()], Box::new(body));
+            let inner_k_var = self.fresh();
+            let inner_body = if self.is_effectful_call_arg(e) {
+                self.lower_expr_with_call_return_k(e, Some(CExpr::Var(inner_k_var.clone())))
+            } else {
+                self.lower_expr_with_k_inner(e, &inner_k_var)
+            };
+            body = CExpr::Let(inner_k_var, Box::new(inner_k), Box::new(inner_body));
+        }
+
+        self.wrap_let_bindings(pure_bindings, body)
     }
 
     /// Lower a branch expression with an outer continuation K.

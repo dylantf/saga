@@ -437,7 +437,7 @@ impl<'a> Lowerer<'a> {
     /// source module so constructor atoms and patterns resolve against the
     /// correct module. Returns `None` when lowering the current module's
     /// own code (the common case).
-    fn handler_origin_module(&self) -> Option<&str> {
+    pub(super) fn handler_origin_module(&self) -> Option<&str> {
         self.current_handler_source_module
             .as_deref()
             .filter(|m| *m != self.current_source_module)
@@ -611,7 +611,7 @@ impl<'a> Lowerer<'a> {
         self.record_fields.get(name)
     }
 
-    fn resolved_record_fields(
+    pub(super) fn resolved_record_fields(
         &self,
         node_id: crate::ast::NodeId,
         source_name: &str,
@@ -1016,6 +1016,9 @@ impl<'a> Lowerer<'a> {
                 Stmt::Let { value, .. } => self.branch_is_effectful(value),
                 Stmt::LetFun { body, .. } => self.branch_is_effectful(body),
             }),
+            ExprKind::RecordCreate { fields, .. } | ExprKind::AnonRecordCreate { fields } => {
+                fields.iter().any(|(_, _, e)| self.branch_is_effectful(e))
+            }
             _ => false,
         }
     }
@@ -1025,9 +1028,7 @@ impl<'a> Lowerer<'a> {
     /// containing either.
     fn branch_is_effectful(&self, expr: &Expr) -> bool {
         collect_effect_call(expr).is_some()
-            || collect_fun_call(expr)
-                .map(|(name, head_expr, _)| self.is_effectful_call_name(head_expr.id, name))
-                .unwrap_or(false)
+            || self.is_effectful_call_arg(expr)
             || self.has_nested_effectful_expr(expr)
     }
 
@@ -1041,11 +1042,11 @@ impl<'a> Lowerer<'a> {
     /// when nested effectful calls in argument position must be CPS-chained
     /// rather than evaluated to a value.
     pub(super) fn is_effectful_call_arg(&self, arg: &Expr) -> bool {
-        if let Some((_module, func_name, head, _args)) = collect_qualified_call(arg) {
-            return self.is_effectful_call_name(head.id, func_name);
+        if let Some((_module, func_name, head, args)) = collect_qualified_call(arg) {
+            return !args.is_empty() && self.is_effectful_call_name(head.id, func_name);
         }
-        if let Some((func_name, head, _args)) = collect_fun_call(arg) {
-            return self.is_effectful_call_name(head.id, func_name);
+        if let Some((func_name, head, args)) = collect_fun_call(arg) {
+            return !args.is_empty() && self.is_effectful_call_name(head.id, func_name);
         }
         false
     }
@@ -1630,7 +1631,7 @@ impl<'a> Lowerer<'a> {
         (rk_var, return_k)
     }
 
-    fn wrap_let_bindings(&self, bindings: Vec<(String, CExpr)>, body: CExpr) -> CExpr {
+    pub(super) fn wrap_let_bindings(&self, bindings: Vec<(String, CExpr)>, body: CExpr) -> CExpr {
         bindings.into_iter().rev().fold(body, |body, (var, val)| {
             CExpr::Let(var, Box::new(val), Box::new(body))
         })

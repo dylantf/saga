@@ -32,3 +32,7 @@ diagnostic b = int (field b) with to_result
 #@ User-supplied decoder runner — handler attached here, body comes from caller.
 pub fun run : (Boxed -> a needs {Fail Failure}) -> Boxed -> Result a Failure
 run decoder b = decoder b with to_result
+
+#@ HOF in Lib: takes an effectful callback and applies it.
+pub fun map_via : (Boxed -> a needs {Fail Failure, ..e}) -> Boxed -> a needs {Fail Failure, ..e}
+map_via f b = f b

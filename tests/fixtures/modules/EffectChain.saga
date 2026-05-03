@@ -21,3 +21,6 @@ pub handler to_result for Fail a {
 
 pub fun run_decoder : (Box -> a needs {Fail Failure}) -> Box -> Result a Failure
 run_decoder decoder b = decoder b with to_result
+
+pub fun map_via : (Box -> a needs {Fail Failure, ..e}) -> Box -> a needs {Fail Failure, ..e}
+map_via f b = f b
