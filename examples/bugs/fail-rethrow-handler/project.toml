@@ -1,0 +1,12 @@
+[project]
+name = "fail-rethrow-handler"
+
+[bin]
+main = "src/Main.saga"
+
+# [library]
+# module = "FailRethrowHandler"
+# expose = []
+
+# [deps]
+# some-lib = { path = "../some-lib" }

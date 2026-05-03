@@ -1,0 +1,12 @@
+[project]
+name = "nested-rethrow-handlers"
+
+[bin]
+main = "src/Main.saga"
+
+# [library]
+# module = "NestedRethrowHandlers"
+# expose = []
+
+# [deps]
+# some-lib = { path = "../some-lib" }

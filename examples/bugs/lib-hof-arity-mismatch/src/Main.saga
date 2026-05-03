@@ -1,0 +1,30 @@
+#@ Cross-module HOF arity mismatch.
+#@
+#@ Lib.at is a 3-param HOF whose middle parameter is an effectful callback.
+#@ Passing a Lib-defined callback (Lib.int) works.
+#@ Passing a Main-defined callback (`custom`) crashes:
+#@   Runtime error: function called with 3 argument(s), but expects 1
+#@   Stack trace: lib:at
+module Main
+
+import Std.IO (console)
+import Std.Fail (Fail)
+import Lib
+
+# Effectful callback defined in Main.
+fun custom : Int -> Int needs {Fail Lib.Failure}
+custom n = Lib.int n
+
+main () = {
+  # Works: Lib.at receives a Lib-defined callback
+  case Lib.run (fun n -> Lib.at "x" Lib.int n) 42 {
+    Ok n -> println $"lib callback Ok: {n}"
+    Err _ -> println "lib callback Err"
+  }
+
+  # Crashes: Lib.at receives a Main-defined callback
+  case Lib.run (fun n -> Lib.at "x" custom n) 42 {
+    Ok n -> println $"main callback Ok: {n}"
+    Err _ -> println "main callback Err"
+  }
+} with console

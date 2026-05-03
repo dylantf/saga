@@ -533,8 +533,23 @@ impl<'a> Lowerer<'a> {
         // BEAM-native ops are emitted first since they're self-contained
         // (direct BEAM calls, no closures). CPS handlers may reference them
         // (e.g. async_handler's body calls spawn!/send!), so they must come after.
+        //
+        // For each arm body: re-performing the same op (e.g. `fail e = fail! ...`
+        // — the "rethrow"/middleware pattern) must reach the outer handler
+        // stack, not recurse into this arm. We temporarily redirect this op's
+        // entry in `current_handler_params` back to the outer mapping
+        // (`saved_handler_params`) while lowering the body, then restore the
+        // inner mapping so siblings still see the new handler via closure
+        // capture.
         let mut handler_bindings: Vec<(String, CExpr)> = Vec::new();
-        for (_eff, op, var_name, plan) in &op_vars {
+        for (eff, op, var_name, plan) in &op_vars {
+            let key = format!("{}.{}", eff, op);
+            let inner_mapping = self.current_handler_params.remove(&key);
+            if let Some(outer_var) = saved_handler_params.get(&key) {
+                self.current_handler_params
+                    .insert(key.clone(), outer_var.clone());
+            }
+
             let binding = match plan {
                 OpHandlerPlan::Inline { arm } => self.build_op_handler_fun(arm, None),
                 OpHandlerPlan::Static {
@@ -565,6 +580,11 @@ impl<'a> Lowerer<'a> {
                 OpHandlerPlan::Passthrough => self.build_passthrough_handler_fun(),
             };
             handler_bindings.push((var_name.clone(), binding));
+
+            self.current_handler_params.remove(&key);
+            if let Some(inner) = inner_mapping {
+                self.current_handler_params.insert(key, inner);
+            }
         }
 
         self.current_handler_params = saved_handler_params;

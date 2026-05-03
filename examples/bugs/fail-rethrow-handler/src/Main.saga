@@ -1,0 +1,44 @@
+#@ Inline handler that re-performs the same effect ("middleware" pattern
+#@ from the docs — Handler Patterns / Re-entrant Effects) fails to
+#@ compile to BEAM:
+#@
+#@   sagajson: unbound variable '_Handle_Std_Fail_Fail_fail__N' in at/M
+#@   erlc failed
+#@
+#@ Same shape works as a named handler with explicit `needs {Fail e}`
+#@ — the bug appears to be specific to inline handler arms that
+#@ themselves call `fail!`.
+module Main
+
+import Std.IO (console)
+import Std.Fail (Fail)
+
+handler outer for Fail a {
+  fail e = Err e
+  return v = Ok v
+}
+
+# A function whose body is `fail!` directly (no inline handler).
+fun bare : Unit -> Int needs {Fail String}
+bare _ = fail! "bare boom"
+
+# A function that handles Fail with an inline handler that itself calls fail!.
+# Compiles, but erlc emits "unbound variable" when lowering.
+fun rethrowing : Unit -> Int needs {Fail String}
+rethrowing _ = bare () with {
+  fail e = fail! $"rethrown: {e}"
+}
+
+main () = {
+  let r1 : Result Int String = bare () with outer
+  case r1 {
+    Ok _ -> println "bare Ok (BUG)"
+    Err e -> println $"bare Err: {e}"
+  }
+
+  let r2 : Result Int String = rethrowing () with outer
+  case r2 {
+    Ok _ -> println "rethrowing Ok (BUG)"
+    Err e -> println $"rethrowing Err: {e}"
+  }
+} with console

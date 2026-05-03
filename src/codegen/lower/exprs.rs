@@ -180,6 +180,10 @@ impl<'a> Lowerer<'a> {
         if let Some((head_expr, op_name, qualifier, args)) = collect_effect_call_expr(expr) {
             let args_owned: Vec<Expr> = args.into_iter().cloned().collect();
             self.lower_effect_call(head_expr.id, op_name, qualifier, &args_owned, return_k)
+        } else if let ExprKind::With { expr, handler, .. } = &expr.kind
+            && return_k.is_some()
+        {
+            self.lower_with_inherited_return_k(expr, handler, return_k)
         } else if self.has_nested_effectful_expr(expr) {
             let k_var = self.fresh();
             let k_ce = return_k.expect("nested terminal effectful expr requires return_k");

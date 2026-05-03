@@ -1310,9 +1310,8 @@ run_direct () = {
 
 pub fun run_via_hof : Unit -> String
 run_via_hof () = {
-  let r = EffectChain.run_decoder
-    (fun b -> EffectChain.map_via EffectChain.unbox_int b)
-    (EffectChain.Box (EffectChain.II 7))
+  let input = EffectChain.Box (EffectChain.II 7)
+  let r = EffectChain.run_decoder (fun b -> EffectChain.map_via EffectChain.unbox_int b) input
   case r {
     Ok _ -> \"hof-ok\"
     Err _ -> \"hof-err\"
@@ -1360,6 +1359,89 @@ run_via_hof () = {
     assert!(
         stdout.contains("direct-ok|hof-ok"),
         "expected 'direct-ok|hof-ok', got: {stdout}"
+    );
+}
+
+/// Regression: a Main-defined effectful function passed as a callback to a
+/// cross-module HOF. The HOF (`EffectChain.at`) calls its callback in
+/// raw-CPS shape (`decoder(arg, H, K)`). The function-value reference for the
+/// callback must therefore be the raw CPS-expanded `FunRef` / `make_fun`,
+/// not an eta-wrapper that captures handlers in scope and supplies an
+/// identity continuation. Previously, local function references emitted such
+/// a wrapper while cross-module references emitted `make_fun`, causing the
+/// callback to be invoked with the wrong arity (3 vs 1) and crashing.
+#[test]
+fn cross_module_hof_callback_local_and_imported_match_arity() {
+    let lib_src = std::fs::read_to_string(fixtures_root().join("EffectChain.saga")).unwrap();
+    let main_src = "
+module Main
+import Std.Fail (Fail)
+import EffectChain (Box, Failure)
+
+fun custom : Box -> Int needs {Fail Failure}
+custom b = EffectChain.unbox_int b
+
+pub fun via_imported : Unit -> String
+via_imported () = {
+  let input = EffectChain.Box (EffectChain.II 7)
+  let r = EffectChain.run_decoder (fun b -> EffectChain.at \"x\" EffectChain.unbox_int b) input
+  case r {
+    Ok _ -> \"imp-ok\"
+    Err _ -> \"imp-err\"
+  }
+}
+
+pub fun via_local : Unit -> String
+via_local () = {
+  let input = EffectChain.Box (EffectChain.II 7)
+  let r = EffectChain.run_decoder (fun b -> EffectChain.at \"x\" custom b) input
+  case r {
+    Ok _ -> \"loc-ok\"
+    Err _ -> \"loc-err\"
+  }
+}
+";
+    let mut checker = make_project_checker();
+    let main_program = typecheck_source(main_src, &mut checker);
+
+    let lib_core = emit_project_module(&lib_src, "effectchain", &checker);
+    let main_core = emit_from_program(&main_program, "main", &checker);
+
+    let dir = assert_erlc_compiles(&lib_core, "effectchain");
+    let main_core_path = dir.join("main.core");
+    std::fs::write(&main_core_path, &main_core).unwrap();
+    let erlc = std::process::Command::new("erlc")
+        .arg("-o")
+        .arg(&dir)
+        .arg(&main_core_path)
+        .output()
+        .expect("failed to run erlc");
+    assert!(
+        erlc.status.success(),
+        "erlc failed on main:\n{main_core}\nstderr: {}",
+        String::from_utf8_lossy(&erlc.stderr)
+    );
+
+    let run = std::process::Command::new("erl")
+        .arg("-noshell")
+        .arg("-pa")
+        .arg(&dir)
+        .arg("-eval")
+        .arg(
+            "io:format(\"~s|~s~n\", [main:via_imported(unit), main:via_local(unit)]), init:stop().",
+        )
+        .output()
+        .expect("failed to run erl");
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(
+        run.status.success(),
+        "erl failed:\nstderr: {}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&run.stdout);
+    assert!(
+        stdout.contains("imp-ok|loc-ok"),
+        "expected 'imp-ok|loc-ok', got: {stdout}"
     );
 }
 

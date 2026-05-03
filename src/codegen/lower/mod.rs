@@ -663,27 +663,20 @@ impl<'a> Lowerer<'a> {
             if arity == 0 {
                 return CExpr::Call(erlang_mod, target_name, vec![]);
             }
-            if let Some(effects) = effects
+            if let Some(effects) = effects.as_ref()
                 && !effects.is_empty()
             {
-                let expanded_arity = self.expanded_arity(arity, &effects);
-                let erl_mod = erlang_mod.clone();
-                let erl_fn = target_name.clone();
-                return self
-                    .lower_effectful_fun_ref(&effects, expanded_arity, move |args| {
-                        CExpr::Call(erl_mod.clone(), erl_fn.clone(), args)
-                    })
-                    .unwrap_or_else(|| {
-                        CExpr::Call(
-                            "erlang".to_string(),
-                            "make_fun".to_string(),
-                            vec![
-                                CExpr::Lit(CLit::Atom(erlang_mod)),
-                                CExpr::Lit(CLit::Atom(target_name)),
-                                CExpr::Lit(CLit::Int(expanded_arity as i64)),
-                            ],
-                        )
-                    });
+                // Effectful function value: raw-CPS calling convention.
+                let expanded_arity = self.expanded_arity(arity, effects);
+                return CExpr::Call(
+                    "erlang".to_string(),
+                    "make_fun".to_string(),
+                    vec![
+                        CExpr::Lit(CLit::Atom(erlang_mod)),
+                        CExpr::Lit(CLit::Atom(target_name)),
+                        CExpr::Lit(CLit::Int(expanded_arity as i64)),
+                    ],
+                );
             }
             return CExpr::Call(
                 "erlang".to_string(),
@@ -702,18 +695,16 @@ impl<'a> Lowerer<'a> {
             } else {
                 CExpr::Apply(Box::new(CExpr::FunRef(name.to_string(), 0)), vec![])
             }
-        } else if let Some(effects) = effects
-            && !effects.is_empty()
-        {
-            let fun_name = name.to_string();
-            let lowered_arity = self.fun_arity(&fun_name).unwrap_or(arity);
-            self.lower_effectful_fun_ref(&effects, lowered_arity, |args| {
-                CExpr::Apply(
-                    Box::new(CExpr::FunRef(fun_name.clone(), lowered_arity)),
-                    args,
-                )
-            })
-            .unwrap_or_else(|| CExpr::FunRef(name.to_string(), lowered_arity))
+        } else if effects.as_ref().is_some_and(|e| !e.is_empty()) {
+            // Effectful function used as a value: emit a raw FunRef of the
+            // CPS-expanded arity. The calling convention for effectful function
+            // values is raw-CPS — call sites supply (user_args..., handlers...,
+            // _ReturnK). An eta-wrapper that captures handlers and supplies an
+            // identity continuation would be incompatible with HOFs whose body
+            // calls the callback in raw-CPS shape (e.g. `decoder n` lowering to
+            // `decoder(n, H, K)` in `Lib.at`).
+            let lowered_arity = self.fun_arity(name).unwrap_or(arity);
+            CExpr::FunRef(name.to_string(), lowered_arity)
         } else {
             let lowered_arity = self.fun_arity(name).unwrap_or(arity);
             CExpr::FunRef(name.to_string(), lowered_arity)
@@ -858,59 +849,6 @@ impl<'a> Lowerer<'a> {
         base_arity + op_count + if op_count > 0 { 1 } else { 0 }
     }
 
-    /// Try to generate a wrapper lambda for an effectful function used as a
-    /// value (eta reduction). The wrapper takes only user-visible args and
-    /// captures handler params from scope, threading them + a return
-    /// continuation to the CPS-expanded callee.
-    ///
-    /// Returns `None` if the required handler params aren't in scope (e.g.
-    /// the function is being passed to a HOF that handles the effects).
-    /// The caller should fall back to `make_fun`/`FunRef` in that case.
-    fn lower_effectful_fun_ref(
-        &mut self,
-        effects: &[String],
-        total_arity: usize,
-        make_call: impl FnOnce(Vec<CExpr>) -> CExpr,
-    ) -> Option<CExpr> {
-        let handler_ops = self.effect_handler_ops(effects);
-        let return_k_count = if handler_ops.is_empty() { 0 } else { 1 };
-        let user_arity = total_arity - handler_ops.len() - return_k_count;
-
-        // Check that all required handler params are in scope
-        for (eff, op) in &handler_ops {
-            let key = format!("{}.{}", eff, op);
-            if !self.current_handler_params.contains_key(&key) {
-                return None;
-            }
-        }
-
-        let mut params = Vec::new();
-        let mut call_args = Vec::new();
-        for _ in 0..user_arity {
-            let p = self.fresh();
-            call_args.push(CExpr::Var(p.clone()));
-            params.push(p);
-        }
-
-        for (eff, op) in &handler_ops {
-            let key = format!("{}.{}", eff, op);
-            let param = self.current_handler_params.get(&key).unwrap_or_else(|| {
-                panic!(
-                    "internal lowering error: missing handler param binding for '{}'",
-                    key
-                )
-            });
-            call_args.push(CExpr::Var(param.clone()));
-        }
-
-        if !handler_ops.is_empty() {
-            let rk = self.fresh();
-            call_args.push(CExpr::Fun(vec![rk.clone()], Box::new(CExpr::Var(rk))));
-        }
-
-        Some(CExpr::Fun(params, Box::new(make_call(call_args))))
-    }
-
     fn lower_eta_reduced_effect_op_ref(
         &mut self,
         node_id: crate::ast::NodeId,
@@ -1043,12 +981,44 @@ impl<'a> Lowerer<'a> {
     /// rather than evaluated to a value.
     pub(super) fn is_effectful_call_arg(&self, arg: &Expr) -> bool {
         if let Some((_module, func_name, head, args)) = collect_qualified_call(arg) {
-            return !args.is_empty() && self.is_effectful_call_name(head.id, func_name);
+            return self.call_performs_effect(head.id, func_name, args.len());
         }
         if let Some((func_name, head, args)) = collect_fun_call(arg) {
-            return !args.is_empty() && self.is_effectful_call_name(head.id, func_name);
+            return self.call_performs_effect(head.id, func_name, args.len());
         }
         false
+    }
+
+    /// True when an application is to an effectful function AND has enough
+    /// user arguments to actually perform the effect (i.e. it's saturated up
+    /// to the user-arity boundary). Bare references (`Lib.f`) and partial
+    /// applications (`Lib.wrap Lib.int`) are values, not effect-performing
+    /// calls — only fully-applied calls thread `_ReturnK` and should be
+    /// CPS-chained at the call site.
+    fn call_performs_effect(
+        &self,
+        head_id: crate::ast::NodeId,
+        name: &str,
+        user_args_supplied: usize,
+    ) -> bool {
+        if user_args_supplied == 0 {
+            return false;
+        }
+        let Some(effects) = self.resolved_effects(head_id, name) else {
+            return self.current_effectful_vars.contains_key(name) && user_args_supplied > 0;
+        };
+        if effects.is_empty() {
+            return false;
+        }
+        let Some(info) = self.resolved_fun_info(head_id, name) else {
+            return user_args_supplied > 0;
+        };
+        let handler_ops = self.effect_handler_ops(&effects);
+        let return_k_count = if handler_ops.is_empty() { 0 } else { 1 };
+        let user_arity = info
+            .arity
+            .saturating_sub(handler_ops.len() + return_k_count);
+        user_args_supplied >= user_arity && user_arity > 0
     }
 
     /// Get a function's arity.
@@ -2267,35 +2237,20 @@ impl<'a> Lowerer<'a> {
                         erlang_mod,
                         name: erl_name,
                         arity,
-                        effects,
                         ..
                     }) => {
                         if arity == 0 {
                             CExpr::Call(erlang_mod.clone(), erl_name.clone(), vec![])
-                        } else if !effects.is_empty() {
-                            // Effectful function used as a value (eta reduction).
-                            // Try to generate a wrapper that captures handlers
-                            // from scope. Falls back to make_fun if handlers
-                            // aren't available (e.g. passed to a HOF that
-                            // handles effects internally).
-                            let effects = effects.clone();
-                            let erl_mod = erlang_mod.clone();
-                            let erl_fn = erl_name.clone();
-                            self.lower_effectful_fun_ref(&effects, arity, |args| {
-                                CExpr::Call(erl_mod.clone(), erl_fn.clone(), args)
-                            })
-                            .unwrap_or_else(|| {
-                                CExpr::Call(
-                                    "erlang".to_string(),
-                                    "make_fun".to_string(),
-                                    vec![
-                                        CExpr::Lit(CLit::Atom(erl_mod)),
-                                        CExpr::Lit(CLit::Atom(erl_fn)),
-                                        CExpr::Lit(CLit::Int(arity as i64)),
-                                    ],
-                                )
-                            })
                         } else {
+                            // Function value: emit a `make_fun` reference at
+                            // the resolver-recorded arity, which already
+                            // includes CPS expansion (handlers + _ReturnK)
+                            // for effectful imports. The call site supplies
+                            // the extra args. An eta-wrapper that captured
+                            // handlers in scope would be incompatible with
+                            // HOFs whose body calls the callback in raw-CPS
+                            // shape (e.g. `Lib.at`'s `decoder n` lowering to
+                            // `decoder(n, H, K)`).
                             CExpr::Call(
                                 "erlang".to_string(),
                                 "make_fun".to_string(),
