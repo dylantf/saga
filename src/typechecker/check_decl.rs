@@ -1952,10 +1952,10 @@ impl Checker {
                             .params
                             .iter()
                             .map(|(label, t)| {
-                                (label.clone(), self.replace_vars(t, &handler_type_mapping))
+                                (label.clone(), Self::replace_vars(t, &handler_type_mapping))
                             })
                             .collect(),
-                        return_type: self.replace_vars(&op.return_type, &handler_type_mapping),
+                        return_type: Self::replace_vars(&op.return_type, &handler_type_mapping),
                         needs: op.needs.clone(),
                     };
                     matched_op = Some(specialized);

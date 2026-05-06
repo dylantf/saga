@@ -258,7 +258,7 @@ impl Checker {
             .iter()
             .map(|&id| (id, self.fresh_var()))
             .collect();
-        let ty = self.replace_vars(&scheme.ty, &mapping);
+        let ty = Self::replace_vars(&scheme.ty, &mapping);
         let constraints = scheme
             .constraints
             .iter()
@@ -266,7 +266,7 @@ impl Checker {
                 let fresh = mapping.get(var_id).cloned().unwrap_or(Type::Var(*var_id));
                 let extra_fresh: Vec<Type> = extra_types
                     .iter()
-                    .map(|ty| self.replace_vars(ty, &mapping))
+                    .map(|ty| Self::replace_vars(ty, &mapping))
                     .collect();
                 (trait_name.clone(), fresh, extra_fresh)
             })
@@ -274,12 +274,12 @@ impl Checker {
         (ty, constraints)
     }
 
-    pub(crate) fn replace_vars(&self, ty: &Type, mapping: &HashMap<u32, Type>) -> Type {
+    pub(crate) fn replace_vars(ty: &Type, mapping: &HashMap<u32, Type>) -> Type {
         match ty {
             Type::Var(id) => mapping.get(id).cloned().unwrap_or_else(|| ty.clone()),
             Type::Fun(a, b, row) => Type::Fun(
-                Box::new(self.replace_vars(a, mapping)),
-                Box::new(self.replace_vars(b, mapping)),
+                Box::new(Self::replace_vars(a, mapping)),
+                Box::new(Self::replace_vars(b, mapping)),
                 EffectRow {
                     effects: row
                         .effects
@@ -289,24 +289,26 @@ impl Checker {
                             args: entry
                                 .args
                                 .iter()
-                                .map(|t| self.replace_vars(t, mapping))
+                                .map(|t| Self::replace_vars(t, mapping))
                                 .collect(),
                         })
                         .collect(),
                     tail: row
                         .tail
                         .as_ref()
-                        .map(|t| Box::new(self.replace_vars(t, mapping))),
+                        .map(|t| Box::new(Self::replace_vars(t, mapping))),
                 },
             ),
             Type::Con(name, args) => Type::Con(
                 name.clone(),
-                args.iter().map(|a| self.replace_vars(a, mapping)).collect(),
+                args.iter()
+                    .map(|a| Self::replace_vars(a, mapping))
+                    .collect(),
             ),
             Type::Record(fields) => Type::Record(
                 fields
                     .iter()
-                    .map(|(fname, ty)| (fname.clone(), self.replace_vars(ty, mapping)))
+                    .map(|(fname, ty)| (fname.clone(), Self::replace_vars(ty, mapping)))
                     .collect(),
             ),
             Type::Error => Type::Error,
@@ -328,14 +330,14 @@ impl Checker {
                     args: entry
                         .args
                         .iter()
-                        .map(|t| self.replace_vars(t, mapping))
+                        .map(|t| Self::replace_vars(t, mapping))
                         .collect(),
                 })
                 .collect(),
             tail: row
                 .tail
                 .as_ref()
-                .map(|t| Box::new(self.replace_vars(t, mapping))),
+                .map(|t| Box::new(Self::replace_vars(t, mapping))),
         }
     }
 

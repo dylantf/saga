@@ -1661,7 +1661,7 @@ impl Checker {
         let fields = info
             .fields
             .iter()
-            .map(|(fname, ty)| (fname.clone(), self.replace_vars(ty, &mapping)))
+            .map(|(fname, ty)| (fname.clone(), Self::replace_vars(ty, &mapping)))
             .collect();
         let result_ty = Type::Con(
             name.into(),

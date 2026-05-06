@@ -232,8 +232,8 @@ impl Checker {
                             .iter()
                             .map(|&id| (id, self.fresh_var()))
                             .collect();
-                        let fresh_param = self.replace_vars(param_ty, &mapping);
-                        let fresh_ret = self.replace_vars(ret_ty, &mapping);
+                        let fresh_param = Self::replace_vars(param_ty, &mapping);
+                        let fresh_ret = Self::replace_vars(ret_ty, &mapping);
                         self.unify_at(&fresh_param, &expr_ty, with_span)?;
 
                         for ((effect_name, param_idx), trait_constraints) in
@@ -281,7 +281,7 @@ impl Checker {
                                     args: entry
                                         .args
                                         .iter()
-                                        .map(|t| self.replace_vars(t, &mapping))
+                                        .map(|t| Self::replace_vars(t, &mapping))
                                         .collect(),
                                 })
                                 .collect(),

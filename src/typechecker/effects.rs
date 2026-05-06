@@ -329,9 +329,9 @@ impl Checker {
                 params: op
                     .params
                     .iter()
-                    .map(|(label, t)| (label.clone(), self.replace_vars(t, &mapping)))
+                    .map(|(label, t)| (label.clone(), Self::replace_vars(t, &mapping)))
                     .collect(),
-                return_type: self.replace_vars(&op.return_type, &mapping),
+                return_type: Self::replace_vars(&op.return_type, &mapping),
                 needs: self.replace_vars_in_effect_row(&op.needs, &mapping),
             };
         }
@@ -406,9 +406,9 @@ impl Checker {
             params: op
                 .params
                 .iter()
-                .map(|(label, t)| (label.clone(), self.replace_vars(t, &mapping)))
+                .map(|(label, t)| (label.clone(), Self::replace_vars(t, &mapping)))
                 .collect(),
-            return_type: self.replace_vars(&op.return_type, &mapping),
+            return_type: Self::replace_vars(&op.return_type, &mapping),
             needs: self.replace_vars_in_effect_row(&op.needs, &mapping),
         }
     }
