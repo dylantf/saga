@@ -1,0 +1,5 @@
+[project]
+name = "dict-method-effectful-call"
+
+[bin]
+main = "src/Main.saga"

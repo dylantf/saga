@@ -1,0 +1,63 @@
+#@ Dict-elaborated effectful trait method call panics the lowerer.
+#@
+#@ A trait method call elaborates to ExprKind::DictMethodAccess, which
+#@ is a different AST shape from a Var- or QualifiedName-headed call.
+#@ The lowerer's effectful-call predicate (collect_fun_call,
+#@ collect_qualified_call) doesn't recognize this shape, so when an
+#@ impl method body uses an effect, no handler param is threaded at
+#@ the dispatch site. Codegen then panics at the leaf when looking up
+#@ the missing handler.
+#@
+#@ Reproduces with: saga run (from this directory).
+#@
+#@ Observed:
+#@   thread 'main' panicked at src/codegen/lower/effects.rs:338:17:
+#@   no handler param for op 'Std.Fail.Fail.fail', handler_params: {}
+#@
+#@ Expected output (once fixed):
+#@   neg: Err "neg"
+#@   ok: Ok 10
+#@
+#@ Root cause: lowerer effectful-call detection does not cover the
+#@ DictMethodAccess shape produced by elaboration of effectful trait
+#@ method calls. Fix is a behavior expansion of the predicate, not
+#@ pure consolidation — see
+#@ docs/planning/plans/effectful-call-detection-plan.md.
+module Main
+
+import Std.IO (console)
+import Std.Fail (Fail)
+
+pub trait Decoder a {
+  fun decode : a -> Int
+}
+
+pub type Box = Box Int
+
+impl Decoder for Box needs {Fail String} {
+  decode (Box n) = if n < 0 then fail! "neg" else n
+}
+
+pub handler to_result for Fail a {
+  fail e = Err e
+  return v = Ok v
+}
+
+#@ Outer effectful function. Its argument is `decode b`, a trait method
+#@ call that elaborates to DictMethodAccess and itself performs Fail.
+pub fun double : Int -> Int needs {Fail String}
+double n = n * 2
+
+pub fun run : Box -> Result Int String
+run b = double (decode b) with to_result
+
+main () = {
+  case run (Box (-1)) {
+    Ok n -> println $"neg: Ok {n}"
+    Err e -> println $"neg: Err \"{e}\""
+  }
+  case run (Box 5) {
+    Ok n -> println $"ok: Ok {n}"
+    Err e -> println $"ok: Err \"{e}\""
+  }
+} with console
