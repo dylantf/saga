@@ -966,24 +966,21 @@ impl<'a> Lowerer<'a> {
     /// containing either.
     fn branch_is_effectful(&self, expr: &Expr) -> bool {
         collect_effect_call(expr).is_some()
-            || self.is_effectful_call_arg(expr)
+            || self.expr_is_effectful_call(expr)
             || self.has_nested_effectful_expr(expr)
     }
 
-    fn is_effectful_call_name(&self, node_id: crate::ast::NodeId, name: &str) -> bool {
-        self.resolved_effects(node_id, name).is_some()
-            || self.current_effectful_vars.contains_key(name)
-    }
-
-    /// True if `arg` is itself a call to an effectful function (resolved fun,
-    /// qualified resolved fun, or in-scope effectful variable). Used to decide
-    /// when nested effectful calls in argument position must be CPS-chained
-    /// rather than evaluated to a value.
-    pub(super) fn is_effectful_call_arg(&self, arg: &Expr) -> bool {
-        if let Some((_module, func_name, head, args)) = collect_qualified_call(arg) {
+    /// Canonical predicate for "is this a saturated effectful function call?"
+    ///
+    /// Recognizes both `Mod.f x` (qualified head) and `f x` (Var head, where
+    /// `f` is either a resolved fun or an in-scope effectful variable). A bare
+    /// reference or partial application returns `false`; only fully-applied
+    /// calls thread `_ReturnK` and should be CPS-chained at the call site.
+    pub(super) fn expr_is_effectful_call(&self, expr: &Expr) -> bool {
+        if let Some((_module, func_name, head, args)) = collect_qualified_call(expr) {
             return self.call_performs_effect(head.id, func_name, args.len());
         }
-        if let Some((func_name, head, args)) = collect_fun_call(arg) {
+        if let Some((func_name, head, args)) = collect_fun_call(expr) {
             return self.call_performs_effect(head.id, func_name, args.len());
         }
         false
@@ -1875,7 +1872,7 @@ impl<'a> Lowerer<'a> {
             let effectful_arg_idxs: Vec<usize> = if is_effectful_outer {
                 args.iter()
                     .enumerate()
-                    .filter(|(_, a)| self.is_effectful_call_arg(a))
+                    .filter(|(_, a)| self.expr_is_effectful_call(a))
                     .map(|(i, _)| i)
                     .collect()
             } else {
@@ -1999,7 +1996,7 @@ impl<'a> Lowerer<'a> {
         let effectful_arg_idxs: Vec<usize> = args
             .iter()
             .enumerate()
-            .filter(|(_, a)| self.is_effectful_call_arg(a))
+            .filter(|(_, a)| self.expr_is_effectful_call(a))
             .map(|(i, _)| i)
             .collect();
 

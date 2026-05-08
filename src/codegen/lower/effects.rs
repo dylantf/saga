@@ -12,7 +12,7 @@ use crate::ast::{Expr, ExprKind, Handler, HandlerArm, HandlerItem, Pat, Stmt};
 use crate::codegen::cerl::{CArm, CExpr, CLit, CPat};
 
 use super::Lowerer;
-use super::util::{cerl_call, collect_fun_call};
+use super::util::cerl_call;
 
 struct PendingLet {
     var: String,
@@ -112,11 +112,7 @@ impl<'a> Lowerer<'a> {
         inherited_return_k: Option<CExpr>,
     ) -> CExpr {
         let return_k = self.compose_return_k(handled_return_k, inherited_return_k);
-        let is_direct_effectful_call = collect_fun_call(expr)
-            .map(|(name, head_expr, _)| self.is_effectful_call_name(head_expr.id, name))
-            .unwrap_or(false);
-
-        if is_direct_effectful_call {
+        if self.expr_is_effectful_call(expr) {
             self.lower_expr_with_call_return_k(expr, return_k)
         } else {
             self.lower_handled_expr_with_return_k(expr, return_k)

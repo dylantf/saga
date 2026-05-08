@@ -1,4 +1,4 @@
-use crate::ast::{BinOp, BitSegSpec, Expr, ExprKind, Lit, Pat, Stmt};
+use crate::ast::{BinOp, BitSegSpec, Expr, ExprKind, Lit, Pat};
 use crate::codegen::cerl::{BinSegFlags, BinSegSize, BinSegType, CBinSeg, CExpr, CLit, Endianness};
 use crate::typechecker::Type;
 use std::collections::{BTreeSet, HashMap};
@@ -239,32 +239,6 @@ pub(super) fn collect_effect_call_expr(
 
 pub(super) fn collect_effect_call(expr: &Expr) -> Option<(&str, Option<&str>, Vec<&Expr>)> {
     collect_effect_call_expr(expr).map(|(_, name, qualifier, args)| (name, qualifier, args))
-}
-
-/// Check if an expression contains effect calls nested inside if/case/block
-/// branches. These aren't detected by `collect_effect_call` (which only finds
-/// direct effect calls at the expression root) and need special CPS handling
-/// so that abort-style handlers can skip the outer continuation.
-pub(super) fn has_nested_effect_call(expr: &Expr) -> bool {
-    match &expr.kind {
-        ExprKind::If {
-            then_branch,
-            else_branch,
-            ..
-        } => branch_has_effect(then_branch) || branch_has_effect(else_branch),
-        ExprKind::Case { arms, .. } => arms.iter().any(|arm| branch_has_effect(&arm.node.body)),
-        ExprKind::Block { stmts, .. } => stmts.iter().any(|s| match &s.node {
-            Stmt::Expr(e) => branch_has_effect(e),
-            Stmt::Let { value, .. } => branch_has_effect(value),
-            Stmt::LetFun { body, .. } => branch_has_effect(body),
-        }),
-        _ => false,
-    }
-}
-
-/// Check if an expression is or contains an effect call (direct or nested).
-fn branch_has_effect(expr: &Expr) -> bool {
-    collect_effect_call(expr).is_some() || has_nested_effect_call(expr)
 }
 
 /// Convert a module path like `["Foo", "Bar", "Baz"]` to an Erlang module atom
