@@ -2195,8 +2195,8 @@ impl<'a> Lowerer<'a> {
             return call;
         }
 
-        if let Some((var_name, _, args)) = fun_call.as_ref()
-            && self.current_effectful_vars.contains_key(*var_name)
+        if self.expr_is_effectful_call(expr)
+            && let Some((var_name, _, args)) = fun_call.as_ref()
         {
             return self
                 .lower_effectful_var_call(var_name, args, None)

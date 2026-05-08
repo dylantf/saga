@@ -10,7 +10,21 @@ calling convention ([../evidence-passing.md](../evidence-passing.md)). The
 data structures introduced in Phase 4 are designed so that evidence
 passing becomes a localized field-deletion rather than a call-site rewrite.
 
-## Current state (verified, not from the older doc)
+## Status
+
+**Phase 1 + Phase 2 landed in branch `effectful-call-detection`.**
+`is_effectful_call_arg` is now `expr_is_effectful_call`;
+`is_effectful_call_name`, `has_nested_effect_call`, and `branch_has_effect`
+are deleted; every effectful-call dispatch in the lowerer routes through
+`expr_is_effectful_call`. Two BEAM-executing regression tests
+(`effectful_var_call_aborts_correctly`,
+`eta_reduced_effectful_lambda_aborts_correctly`) cover the
+let-bound-effectful-function shapes. Phase 3 is skipped; Phase 4 remains
+deferred until evidence passing kicks off. The "Current state" section
+below describes the codebase **before** Phase 1 landed and is preserved
+for historical context — drill into the source for current line numbers.
+
+## Current state (pre-Phase 1, kept for context)
 
 The audit-based work has already partially landed:
 
