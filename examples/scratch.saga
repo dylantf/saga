@@ -1,45 +1,9 @@
-import Std.Fail (Fail)
-
-type Boxed = Boxed Inner
-type Inner = IInt Int | IStr String
-type Failure = Failure String deriving (Debug)
-
-handler to_result for Fail a {
-  fail e = Err e
-  return v = Ok v
-}
-
-fun field : Boxed -> Boxed needs {Fail Failure}
-field b = case b {
-  Boxed (IStr s) -> Boxed (IStr s)
-  Boxed (IInt _) -> fail! (Failure "container expected")
-}
-
-fun int : Boxed -> Int needs {Fail Failure}
-int b = case b {
-  Boxed (IInt n) -> n
-  _ -> fail! (Failure "Int expected")
-}
-
-fun direct : Boxed -> Int needs {Fail Failure}
-direct b = int (field b)
-
-fun via_let : Boxed -> Int needs {Fail Failure}
-via_let b = {
-  let v = int (field b)
-  v
-}
+# import Std.IO.Unsafe (print_stdout)
 
 main () = {
-  let input = Boxed (IStr "wrong")
+  # Ok
+  let _ = Std.Int.add 5 2
 
-  case (direct input with to_result) {
-    Ok _ -> dbg "A: Ok (BUG)"
-    Err _ -> dbg "A: Err (good)"
-  }
-
-  case (via_let input with to_result) {
-    Ok _ -> dbg "B: Ok (BUG)"
-    Err _ -> dbg "B: Err (good)"
-  }
+  # Type error - unknown qualified name 'Std.IO.Unsafe.print_stdout'
+  Std.IO.Unsafe.print_stdout "Hello world"
 }
