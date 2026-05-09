@@ -186,6 +186,31 @@ pub(super) fn collect_dict_method_call(expr: &Expr) -> Option<(&Expr, usize, Vec
     }
 }
 
+/// Like `collect_fun_call`, but for an `App` chain whose ultimate head is a
+/// `Lambda` literal — `(fun x -> ...) y z`. Returns `Some((lambda, args))`
+/// where `lambda` is the head Lambda expr and `args` are the supplied
+/// arguments in order.
+pub(super) fn collect_lambda_head_call(expr: &Expr) -> Option<(&Expr, Vec<&Expr>)> {
+    let mut args: Vec<&Expr> = Vec::new();
+    let mut current = expr;
+    loop {
+        match &current.kind {
+            ExprKind::App { func, arg, .. } => {
+                args.push(arg);
+                current = func;
+            }
+            ExprKind::Lambda { .. } => {
+                if args.is_empty() {
+                    return None;
+                }
+                args.reverse();
+                return Some((current, args));
+            }
+            _ => return None,
+        }
+    }
+}
+
 /// Like `collect_fun_call`, but for qualified names (`Module.func arg1 arg2`).
 /// Returns `Some((module, func_name, head_expr, args))` if the head is a QualifiedName.
 pub(super) fn collect_qualified_call(expr: &Expr) -> Option<(&str, &str, &Expr, Vec<&Expr>)> {

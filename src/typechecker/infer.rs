@@ -255,7 +255,11 @@ impl Checker {
 
             ExprKind::Block { stmts, .. } => self.infer_block(stmts),
 
-            ExprKind::Lambda { params, body, .. } => self.infer_lambda(params, body),
+            ExprKind::Lambda { params, body, .. } => {
+                let ty = self.infer_lambda(params, body)?;
+                self.record_type(node_id, &ty);
+                Ok(ty)
+            }
 
             ExprKind::Case {
                 scrutinee, arms, ..
@@ -782,6 +786,7 @@ impl Checker {
                 if matches!(resolved_expected, Type::Fun(_, _, _))
                     && let Some(ty) = self.infer_lambda_against(params, body, &resolved_expected)?
                 {
+                    self.record_type(expr.id, &ty);
                     return Ok(ty);
                 }
                 let ty = self.infer_expr(expr)?;
@@ -802,7 +807,10 @@ impl Checker {
                 let resolved_param = self.sub.apply(expected_param);
                 if matches!(resolved_param, Type::Fun(_, _, _)) {
                     match self.infer_lambda_against(params, body, &resolved_param)? {
-                        Some(ty) => Ok(ty),
+                        Some(ty) => {
+                            self.record_type(arg.id, &ty);
+                            Ok(ty)
+                        }
                         None => self.infer_expr(arg),
                     }
                 } else {

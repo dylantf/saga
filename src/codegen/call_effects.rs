@@ -139,6 +139,13 @@ pub struct PopulatorInputs<'a> {
     /// expression to find the underlying `DictRef { name }`, then look up
     /// effects here.
     pub impl_effects_by_dict: &'a HashMap<String, Vec<String>>,
+    /// Lambda NodeId -> (sorted canonical effect names, is_open_row) derived
+    /// from the typechecker's per-node `Type::Fun(_, _, row)` for each
+    /// `ExprKind::Lambda` in the elaborated program. Used to classify
+    /// `App` call sites whose head is a lambda — `(fun x -> ...) y`. The
+    /// effect list spans every arrow in the lambda's full type, mirroring
+    /// `util::arity_and_effects_from_type`. Empty entry == pure lambda.
+    pub lambda_head_effects: &'a HashMap<NodeId, (Vec<String>, bool)>,
 }
 
 /// Pre-pass walker. Constructed with the data sources it needs and consumed by
@@ -587,8 +594,41 @@ impl<'a> Populator<'a> {
             ExprKind::DictMethodAccess { dict, .. } => {
                 self.classify_dict_method_call(dict, arg_count)
             }
-            // Lambda heads etc. — out of scope.
+            ExprKind::Lambda { .. } => self.classify_lambda_call(head.id, arg_count),
+            // Other head shapes — out of scope.
             _ => CallEffectInfo::pure(),
+        }
+    }
+
+    /// Classify a call whose head is a `Lambda`. The lambda's effect row is
+    /// recorded in `lambda_head_effects` (precomputed from the typechecker's
+    /// `type_at_node`). Pure lambdas yield `Pure`; effectful lambdas yield
+    /// `StaticOps` (closed) or `RowForwarded` (open). Saturation isn't
+    /// strictly required here — Saga's lambdas always match arrow arity at
+    /// call sites; if `supplied == 0` we early-return Pure for safety.
+    fn classify_lambda_call(&self, lambda_id: NodeId, supplied: usize) -> CallEffectInfo {
+        if supplied == 0 {
+            return CallEffectInfo::pure();
+        }
+        let Some((effects, is_open_row)) = self.inputs.lambda_head_effects.get(&lambda_id) else {
+            return CallEffectInfo::pure();
+        };
+        if effects.is_empty() {
+            return CallEffectInfo::pure();
+        }
+        let ops = self.collect_op_keys(effects);
+        if ops.is_empty() {
+            return CallEffectInfo::pure();
+        }
+        let kind = if *is_open_row {
+            CallEffectKind::RowForwarded { static_ops: ops }
+        } else {
+            CallEffectKind::StaticOps { ops }
+        };
+        CallEffectInfo {
+            kind,
+            user_arity: supplied,
+            needs_return_k: true,
         }
     }
 

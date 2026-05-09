@@ -1168,6 +1168,17 @@ impl<'a> Lowerer<'a> {
             head_open_row.insert(*node_id, open);
         }
 
+        // Pre-compute lambda effect rows from the typechecker's `type_at_node`.
+        // Walks every `ExprKind::Lambda` in the program and records the full
+        // effect-name list across the lambda's arrow chain along with
+        // open/closed-row status. Consumed by `classify_lambda_call` to
+        // classify `App` heads of shape `(fun x -> ...) y` as effectful.
+        let mut lambda_head_effects: HashMap<crate::ast::NodeId, (Vec<String>, bool)> =
+            HashMap::new();
+        for decl in program {
+            self.collect_lambda_head_effects_in_decl(decl, &mut lambda_head_effects);
+        }
+
         Populator::new(super::call_effects::PopulatorInputs {
             resolved: &self.resolved,
             fun_sigs: &fun_sigs,
@@ -1178,8 +1189,231 @@ impl<'a> Lowerer<'a> {
             pattern_effect_bindings: &pattern_effect_bindings,
             head_open_row: &head_open_row,
             impl_effects_by_dict: &self.impl_effects_by_dict,
+            lambda_head_effects: &lambda_head_effects,
         })
         .populate(program)
+    }
+
+    /// Walk a decl and record `(canonical_effects, is_open_row)` for every
+    /// `ExprKind::Lambda` whose typechecker-resolved type carries a non-empty
+    /// arrow chain. Effects are derived from the full `Type::Fun` chain (all
+    /// arrows) since a curried lambda's outer effect row may be empty while
+    /// inner arrows still bear effects. Empty effect lists are skipped — pure
+    /// lambdas need no entry; the populator treats absence as Pure.
+    fn collect_lambda_head_effects_in_decl(
+        &self,
+        decl: &Decl,
+        out: &mut HashMap<crate::ast::NodeId, (Vec<String>, bool)>,
+    ) {
+        match decl {
+            Decl::FunBinding { guard, body, .. } => {
+                if let Some(g) = guard {
+                    self.collect_lambda_head_effects_in_expr(g, out);
+                }
+                self.collect_lambda_head_effects_in_expr(body, out);
+            }
+            Decl::Let { value, .. } | Decl::Val { value, .. } => {
+                self.collect_lambda_head_effects_in_expr(value, out);
+            }
+            Decl::HandlerDef { body, .. } => {
+                for arm in &body.arms {
+                    self.collect_lambda_head_effects_in_expr(&arm.node.body, out);
+                    if let Some(fb) = &arm.node.finally_block {
+                        self.collect_lambda_head_effects_in_expr(fb, out);
+                    }
+                }
+                if let Some(rc) = &body.return_clause {
+                    self.collect_lambda_head_effects_in_expr(&rc.body, out);
+                    if let Some(fb) = &rc.finally_block {
+                        self.collect_lambda_head_effects_in_expr(fb, out);
+                    }
+                }
+            }
+            Decl::DictConstructor { methods, .. } => {
+                for m in methods {
+                    self.collect_lambda_head_effects_in_expr(m, out);
+                }
+            }
+            Decl::ImplDef { methods, .. } => {
+                for m in methods {
+                    self.collect_lambda_head_effects_in_expr(&m.node.body, out);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn collect_lambda_head_effects_in_expr(
+        &self,
+        expr: &Expr,
+        out: &mut HashMap<crate::ast::NodeId, (Vec<String>, bool)>,
+    ) {
+        if let ExprKind::Lambda { .. } = &expr.kind
+            && let Some(ty) = self.check_result.resolved_type_for_node(expr.id)
+        {
+            let (_, effects) = util::arity_and_effects_from_type(&ty);
+            let is_open_row = util::has_open_effect_row(&ty);
+            let canonical = self.canonicalize_effects(effects);
+            if !canonical.is_empty() {
+                out.insert(expr.id, (canonical, is_open_row));
+            }
+        }
+        match &expr.kind {
+            ExprKind::App { func, arg } => {
+                self.collect_lambda_head_effects_in_expr(func, out);
+                self.collect_lambda_head_effects_in_expr(arg, out);
+            }
+            ExprKind::BinOp { left, right, .. } => {
+                self.collect_lambda_head_effects_in_expr(left, out);
+                self.collect_lambda_head_effects_in_expr(right, out);
+            }
+            ExprKind::UnaryMinus { expr }
+            | ExprKind::FieldAccess { expr, .. }
+            | ExprKind::Ascription { expr, .. } => {
+                self.collect_lambda_head_effects_in_expr(expr, out);
+            }
+            ExprKind::If {
+                cond,
+                then_branch,
+                else_branch,
+                ..
+            } => {
+                self.collect_lambda_head_effects_in_expr(cond, out);
+                self.collect_lambda_head_effects_in_expr(then_branch, out);
+                self.collect_lambda_head_effects_in_expr(else_branch, out);
+            }
+            ExprKind::Case {
+                scrutinee, arms, ..
+            } => {
+                self.collect_lambda_head_effects_in_expr(scrutinee, out);
+                for arm in arms {
+                    if let Some(g) = &arm.node.guard {
+                        self.collect_lambda_head_effects_in_expr(g, out);
+                    }
+                    self.collect_lambda_head_effects_in_expr(&arm.node.body, out);
+                }
+            }
+            ExprKind::Block { stmts, .. } => {
+                for stmt in stmts {
+                    match &stmt.node {
+                        Stmt::Let { value, .. } => {
+                            self.collect_lambda_head_effects_in_expr(value, out);
+                        }
+                        Stmt::LetFun { guard, body, .. } => {
+                            if let Some(g) = guard {
+                                self.collect_lambda_head_effects_in_expr(g, out);
+                            }
+                            self.collect_lambda_head_effects_in_expr(body, out);
+                        }
+                        Stmt::Expr(e) => self.collect_lambda_head_effects_in_expr(e, out),
+                    }
+                }
+            }
+            ExprKind::Lambda { body, .. } => {
+                self.collect_lambda_head_effects_in_expr(body, out);
+            }
+            ExprKind::RecordCreate { fields, .. } | ExprKind::AnonRecordCreate { fields } => {
+                for (_, _, e) in fields {
+                    self.collect_lambda_head_effects_in_expr(e, out);
+                }
+            }
+            ExprKind::RecordUpdate { record, fields, .. } => {
+                self.collect_lambda_head_effects_in_expr(record, out);
+                for (_, _, e) in fields {
+                    self.collect_lambda_head_effects_in_expr(e, out);
+                }
+            }
+            ExprKind::EffectCall { args, .. }
+            | ExprKind::Tuple { elements: args }
+            | ExprKind::ListLit { elements: args }
+            | ExprKind::ForeignCall { args, .. } => {
+                for a in args {
+                    self.collect_lambda_head_effects_in_expr(a, out);
+                }
+            }
+            ExprKind::With { expr, handler } => {
+                self.collect_lambda_head_effects_in_expr(expr, out);
+                if let ast::Handler::Inline { items, .. } = handler.as_ref() {
+                    for item in items {
+                        match &item.node {
+                            ast::HandlerItem::Arm(arm) | ast::HandlerItem::Return(arm) => {
+                                self.collect_lambda_head_effects_in_expr(&arm.body, out);
+                                if let Some(fb) = &arm.finally_block {
+                                    self.collect_lambda_head_effects_in_expr(fb, out);
+                                }
+                            }
+                            ast::HandlerItem::Named(_) => {}
+                        }
+                    }
+                }
+            }
+            ExprKind::Resume { value } => self.collect_lambda_head_effects_in_expr(value, out),
+            ExprKind::Do {
+                bindings,
+                success,
+                else_arms,
+                ..
+            } => {
+                for (_, e) in bindings {
+                    self.collect_lambda_head_effects_in_expr(e, out);
+                }
+                self.collect_lambda_head_effects_in_expr(success, out);
+                for arm in else_arms {
+                    if let Some(g) = &arm.node.guard {
+                        self.collect_lambda_head_effects_in_expr(g, out);
+                    }
+                    self.collect_lambda_head_effects_in_expr(&arm.node.body, out);
+                }
+            }
+            ExprKind::Receive {
+                arms, after_clause, ..
+            } => {
+                for arm in arms {
+                    if let Some(g) = &arm.node.guard {
+                        self.collect_lambda_head_effects_in_expr(g, out);
+                    }
+                    self.collect_lambda_head_effects_in_expr(&arm.node.body, out);
+                }
+                if let Some((timeout, body)) = after_clause {
+                    self.collect_lambda_head_effects_in_expr(timeout, out);
+                    self.collect_lambda_head_effects_in_expr(body, out);
+                }
+            }
+            ExprKind::BitString { segments } => {
+                for seg in segments {
+                    self.collect_lambda_head_effects_in_expr(&seg.value, out);
+                    if let Some(size) = &seg.size {
+                        self.collect_lambda_head_effects_in_expr(size, out);
+                    }
+                }
+            }
+            ExprKind::HandlerExpr { body } => {
+                for arm in &body.arms {
+                    self.collect_lambda_head_effects_in_expr(&arm.node.body, out);
+                    if let Some(fb) = &arm.node.finally_block {
+                        self.collect_lambda_head_effects_in_expr(fb, out);
+                    }
+                }
+                if let Some(rc) = &body.return_clause {
+                    self.collect_lambda_head_effects_in_expr(&rc.body, out);
+                }
+            }
+            ExprKind::DictMethodAccess { dict, .. } => {
+                self.collect_lambda_head_effects_in_expr(dict, out);
+            }
+            ExprKind::Lit { .. }
+            | ExprKind::Var { .. }
+            | ExprKind::Constructor { .. }
+            | ExprKind::QualifiedName { .. }
+            | ExprKind::DictRef { .. }
+            | ExprKind::Pipe { .. }
+            | ExprKind::BinOpChain { .. }
+            | ExprKind::PipeBack { .. }
+            | ExprKind::ComposeForward { .. }
+            | ExprKind::Cons { .. }
+            | ExprKind::StringInterp { .. }
+            | ExprKind::ListComprehension { .. } => {}
+        }
     }
 
     fn collect_pattern_effect_bindings_in_decl(
@@ -2926,6 +3160,98 @@ impl<'a> Lowerer<'a> {
         Some(CExpr::Let(dict_var, Box::new(dict_ce), Box::new(body)))
     }
 
+    /// Lower a saturated effectful call whose head is a `Lambda` literal —
+    /// `(fun x -> body) y`. Returns `None` when `call_effects[app_id]`
+    /// classifies the call as pure; the caller then falls through to the
+    /// regular path where the lambda lowers as a pure closure.
+    ///
+    /// When effectful, the lambda is recompiled as effectful (taking
+    /// `_Evidence`/`_ReturnK` params, body lowered with evidence installed)
+    /// by setting `lambda_effect_context` for the duration of `lower_expr`
+    /// on the head. The call site threads evidence + return_k like any
+    /// other effectful call. This preserves §8: the body sees the *call-time*
+    /// evidence (passed as a param), not creation-time evidence.
+    fn lower_lambda_head_call(
+        &mut self,
+        app_id: NodeId,
+        lambda: &Expr,
+        args: &[&Expr],
+        return_k: Option<CExpr>,
+    ) -> Option<CExpr> {
+        let absorbed: Vec<String> = match self.call_effects.get(&app_id).map(|i| &i.kind) {
+            Some(super::call_effects::CallEffectKind::StaticOps { ops })
+            | Some(super::call_effects::CallEffectKind::RowForwarded { static_ops: ops })
+                if !ops.is_empty() =>
+            {
+                let mut effs: Vec<String> = ops.iter().map(|k| k.effect.clone()).collect();
+                effs.sort();
+                effs.dedup();
+                effs
+            }
+            _ => return None,
+        };
+
+        let saved_ctx = self.lambda_effect_context.take();
+        self.lambda_effect_context = Some(absorbed.clone());
+        let func_ce = self.lower_expr(lambda);
+        self.lambda_effect_context = saved_ctx;
+
+        let func_var = self.fresh();
+        let effectful_arg_idxs: Vec<usize> = args
+            .iter()
+            .enumerate()
+            .filter(|(_, a)| self.expr_is_effectful_call(a))
+            .map(|(i, _)| i)
+            .collect();
+
+        if !effectful_arg_idxs.is_empty() {
+            let mut arg_vars: Vec<String> = Vec::with_capacity(args.len());
+            let mut pure_bindings: Vec<(String, CExpr)> = Vec::new();
+            for (i, arg) in args.iter().enumerate() {
+                let v = self.fresh();
+                arg_vars.push(v.clone());
+                if !effectful_arg_idxs.contains(&i) {
+                    let ce = self.lower_expr_value(arg);
+                    pure_bindings.push((v, ce));
+                }
+            }
+
+            let mut call_args: Vec<CExpr> =
+                arg_vars.iter().map(|v| CExpr::Var(v.clone())).collect();
+            let (ev_var, ev_ce) = self.build_call_evidence(&absorbed);
+            call_args.push(CExpr::Var(ev_var.clone()));
+            let (rk_var, rk_ce) = self.effectful_call_return_k_binding(return_k);
+            call_args.push(CExpr::Var(rk_var.clone()));
+
+            let outer_call = CExpr::Apply(Box::new(CExpr::Var(func_var.clone())), call_args);
+            let mut body = CExpr::Let(rk_var, Box::new(rk_ce), Box::new(outer_call));
+            body = CExpr::Let(ev_var, Box::new(ev_ce), Box::new(body));
+
+            for &i in effectful_arg_idxs.iter().rev() {
+                let v = arg_vars[i].clone();
+                let inner_k = CExpr::Fun(vec![v], Box::new(body));
+                body = self.lower_expr_with_call_return_k(args[i], Some(inner_k));
+            }
+
+            let body = self.wrap_let_bindings(pure_bindings, body);
+            return Some(CExpr::Let(func_var, Box::new(func_ce), Box::new(body)));
+        }
+
+        let (mut arg_vars, mut bindings) = self.lower_call_args(args, None);
+        let (ev_var, ev_ce) = self.build_call_evidence(&absorbed);
+        bindings.push((ev_var.clone(), ev_ce));
+        arg_vars.push(ev_var);
+        let (rk_var, rk_ce) = self.effectful_call_return_k_binding(return_k);
+        bindings.push((rk_var.clone(), rk_ce));
+        arg_vars.push(rk_var);
+        let call = CExpr::Apply(
+            Box::new(CExpr::Var(func_var.clone())),
+            arg_vars.iter().map(|v| CExpr::Var(v.clone())).collect(),
+        );
+        let body = self.wrap_let_bindings(bindings, call);
+        Some(CExpr::Let(func_var, Box::new(func_ce), Box::new(body)))
+    }
+
     fn lower_generic_apply(&mut self, callee: &Expr, args: &[&Expr]) -> CExpr {
         let callee_arity = match &callee.kind {
             ExprKind::Var { name, .. } if self.resolved.contains_key(&callee.id) => {
@@ -3086,6 +3412,19 @@ impl<'a> Lowerer<'a> {
             callee = func.as_ref();
         }
         args_rev.reverse();
+
+        // Lambda-headed effectful call: `(fun x -> ...) y`. Populator tagged
+        // `expr.id` with `CallEffectInfo` based on the lambda's typechecker-
+        // resolved effect row. Route through `lower_lambda_head_call` so the
+        // lambda is compiled as effectful (params include `_Evidence`/
+        // `_ReturnK`) and the call threads evidence + return_k. Returns
+        // `None` for pure-classified calls — fall through to the plain path.
+        if matches!(callee.kind, ExprKind::Lambda { .. })
+            && let Some(call) = self.lower_lambda_head_call(expr.id, callee, &args_rev, None)
+        {
+            return call;
+        }
+
         self.lower_generic_apply(callee, &args_rev)
     }
 

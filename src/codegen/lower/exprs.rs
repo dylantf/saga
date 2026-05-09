@@ -126,7 +126,13 @@ impl<'a> Lowerer<'a> {
             }
             if let Some((dict, method_index, args)) = super::util::collect_dict_method_call(expr)
                 && let Some(call) =
-                    self.lower_dict_method_call(expr.id, dict, method_index, &args, return_k)
+                    self.lower_dict_method_call(expr.id, dict, method_index, &args, return_k.clone())
+            {
+                return call;
+            }
+            if let Some((lambda, args)) = super::util::collect_lambda_head_call(expr)
+                && let Some(call) =
+                    self.lower_lambda_head_call(expr.id, lambda, &args, return_k)
             {
                 return call;
             }

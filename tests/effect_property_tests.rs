@@ -657,6 +657,94 @@ result () = {
     check_result_string("op_called_in_a_loop_resumes_each_time", src, "1/2/3/xxx");
 }
 
+#[test]
+fn lambda_head_effectful_call_threads_evidence() {
+    // `(fun x -> ...) y` where the lambda body is effectful. The App head is
+    // a Lambda literal — neither Var, QualifiedName, nor DictMethodAccess —
+    // so prior to the fix the populator classified the call as Pure and the
+    // lowerer emitted a plain `Apply` with no evidence/return_k. The lambda
+    // body's `log!` calls then ran against missing evidence and crashed.
+    let src = r#"module Main
+
+effect Log {
+  fun log : String -> Unit
+}
+
+handler accumulating for Log {
+  log msg = msg <> "/" <> resume ()
+  return _ = "end"
+}
+
+pub fun result : Unit -> String
+result () = (fun x -> {
+  log! x
+  log! "y"
+}) "a" with accumulating
+"#;
+    check_result_string(
+        "lambda_head_effectful_call_threads_evidence",
+        src,
+        "a/y/end",
+    );
+}
+
+#[test]
+fn lambda_head_effectful_call_nested_in_outer_effectful_call() {
+    // Lambda-headed call appearing as the inner arg of an outer effectful
+    // call. Both calls thread evidence; the outer call CPS-chains the inner
+    // call as an effectful argument so the inner lambda body's ops have
+    // somewhere to resume to.
+    let src = r#"module Main
+
+effect Log {
+  fun log : String -> String
+}
+
+handler echo for Log {
+  log msg = "[" <> msg <> "]" <> resume "x"
+}
+
+pub fun result : Unit -> String
+result () = log! ((fun n -> log! n) "inner") with echo
+"#;
+    // Outer log! receives the inner result. Inner log!"inner" -> "[inner]x";
+    // outer log! "[inner]x" -> "[[inner]x]x".
+    check_result_string(
+        "lambda_head_effectful_call_nested_in_outer_effectful_call",
+        src,
+        "[[inner]x]x",
+    );
+}
+
+#[test]
+fn lambda_head_pure_call_under_effect_handler_stays_pure() {
+    // A pure-bodied lambda head used inside an effectful function should not
+    // be misclassified — no evidence/return_k threading. This guards against
+    // the populator over-applying the lambda-head rule.
+    let src = r#"module Main
+
+effect Log {
+  fun log : String -> Unit
+}
+
+handler echoing for Log {
+  log msg = msg <> "/" <> resume ()
+  return _ = "end"
+}
+
+pub fun result : Unit -> String
+result () = {
+  let n = (fun x -> x + 1) 41
+  log! (show n)
+} with echoing
+"#;
+    check_result_string(
+        "lambda_head_pure_call_under_effect_handler_stays_pure",
+        src,
+        "42/end",
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Fixtures: nested with blocks (handler stacking)
 // ---------------------------------------------------------------------------
