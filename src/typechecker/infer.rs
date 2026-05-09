@@ -504,14 +504,14 @@ impl Checker {
                 };
                 self.register_handler(&synthetic_decl)?;
                 // The handler's `needs {X}` declares effects its arm bodies
-                // perform at runtime. For static threading, those handlers must
-                // be captured at the construction site — i.e. the surrounding
-                // scope must have them in scope. Emit them to the current
-                // effect row so the enclosing function declares (or handles)
-                // them. Without this, a handler factory like
+                // perform at runtime. Those handlers must be captured at the
+                // construction site; i.e. the surrounding scope must have
+                // them in scope so its evidence carries them. Emit them to
+                // the current effect row so the enclosing function declares
+                // (or handles) them. Without this, a handler factory like
                 // `make_inner () = handler for Inner needs {Outer} { ... }`
                 // would typecheck silently and the lowerer would later ICE
-                // because Outer isn't in `current_handler_params`.
+                // because Outer isn't in the construction site's evidence.
                 let needs = self
                     .handlers
                     .get(&synthetic_name)

@@ -983,7 +983,7 @@ fn register_import_scopes(
                 // Merge with fun_effects (which strips beam-native effects in
                 // check_module.rs but is otherwise the authoritative annotation
                 // list). Effects from the type include beam-native ones; the
-                // lowered function emits handler params for *all* of them, so
+                // lowered function threads evidence covering *all* of them, so
                 // the resolver's arity calculation must match. This mirrors
                 // the supplementation in `lower/init.rs`.
                 if let Some(ann_effs) = fun_effects_map.get(name.as_str()) {

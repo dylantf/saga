@@ -94,39 +94,28 @@ struct EffectOpInfo {
     param_absorbed_effects: HashMap<usize, Vec<String>>,
 }
 
-/// All information about a top-level function needed by the lowerer.
-/// CPS metadata for a function. Used by the lowerer to determine how to
-/// thread handler parameters and return continuations through effectful calls.
-/// This is NOT name resolution -- name resolution is handled by the ResolutionMap.
-/// FunInfo only tracks arity/effects needed for CPS transformation.
+/// CPS metadata for a top-level function. Used by the lowerer to determine
+/// how to thread evidence and return continuations through effectful calls.
+/// This is NOT name resolution -- name resolution is handled by the
+/// ResolutionMap. FunInfo only tracks arity/effects needed for CPS
+/// transformation.
 #[derive(Debug, Clone, Default)]
 struct FunInfo {
-    /// Exported arity in the *current* (per-op handler params) calling
-    /// convention: base user args + per-op handler params + _ReturnK if
-    /// effectful. 0 if not yet known. The Phase 3 cutover will collapse this
-    /// to `user_arity + has_evidence + has_return_k`.
+    /// Exported arity: `user_arity + 2` (`_Evidence` + `_ReturnK`) when
+    /// effectful, `user_arity` when pure. 0 if not yet known.
     arity: usize,
-    /// Logical user-facing arity: just the base parameter count, before any
-    /// handler params or `_ReturnK` were appended. Populated alongside
-    /// `arity` at every FunInfo registration site. Phase 3c+ reads this.
-    #[allow(dead_code)]
-    user_arity: usize,
-    /// Effect names from `needs` clause (sorted). Used to determine which
-    /// handler params to thread through at call sites.
+    /// Effect names from `needs` clause (sorted). Used to derive the evidence
+    /// layout the callee expects.
     effects: Vec<String>,
-    /// Evidence layout for closed-row callees. `None` is the row-polymorphic
-    /// sentinel: callers must forward their full ambient evidence rather
-    /// than projecting against a known shape.
-    #[allow(dead_code)]
-    evidence_layout: Option<evidence::EvidenceLayout>,
     /// True when the callee's declared effect row has an open tail
-    /// (`needs {Foo, ..e}`). Phase 3 call-site lowering uses this to choose
-    /// `RowForwarded` (forward full evidence) vs `StaticOps` (project against
-    /// `evidence_layout`). Mirrors `util::has_open_effect_row` on the
+    /// (`needs {Foo, ..e}`). Call-site lowering uses this to choose
+    /// `RowForwarded` (forward full evidence) vs `StaticOps` (project the
+    /// caller's evidence). Mirrors `util::has_open_effect_row` on the
     /// declared/inferred type.
     is_open_row: bool,
     /// For EffArrow params: param_index -> absorbed effects. Used to inject
-    /// handler params into lambdas passed to effectful higher-order functions.
+    /// evidence threading into lambdas passed to effectful higher-order
+    /// functions.
     param_absorbed_effects: HashMap<usize, Vec<String>>,
     /// Source-level parameter types from the declared/inferred function type.
     /// Used to propagate expected callback shapes through containers at call sites
@@ -134,31 +123,12 @@ struct FunInfo {
     param_types: Vec<crate::typechecker::Type>,
 }
 
-impl FunInfo {
-    /// Whether an `_Evidence` parameter is part of this callee's signature
-    /// under the new convention. Today's emission still threads per-op
-    /// handler params; Phase 3c+ will switch to reading this directly.
-    #[allow(dead_code)]
-    fn has_evidence(&self) -> bool {
-        !self.effects.is_empty() || self.is_open_row
-    }
-
-    /// Whether a `_ReturnK` parameter is part of this callee's signature.
-    /// Currently coupled to `has_evidence`; tracked separately so Phase 5's
-    /// closed-row specialization can decouple them later.
-    #[allow(dead_code)]
-    fn has_return_k(&self) -> bool {
-        self.has_evidence()
-    }
-}
-
 /// Tracks the evidence vector currently in scope during lowering.
 ///
-/// Phase 3b infrastructure: an `_Evidence` parameter is threaded into every
-/// effectful function definition and at every effectful call site (between
-/// the existing per-op handler params and `_ReturnK`). Op calls and handler-
-/// param reads still go through the legacy machinery; Phase 3c/3d will swap
-/// them to read from this context and delete the legacy plumbing.
+/// An `_Evidence` parameter is threaded into every effectful function
+/// definition and at every effectful call site, paired with a trailing
+/// `_ReturnK` for the success continuation. Op-call emission reads handler
+/// closures out of this context via `evidence_op_lookup`.
 #[derive(Debug, Clone)]
 #[allow(dead_code, private_interfaces)]
 pub(super) struct EvidenceCtx {
@@ -266,17 +236,16 @@ pub struct Lowerer<'a> {
     /// Optional function name that should be exported even if it is not `pub`.
     /// Used by the build pipeline to mark the chosen entrypoint explicitly.
     entry_export: Option<String>,
-    /// Per-call effect metadata for every `App` node in the module being lowered.
-    /// Populated by the Phase 2 pre-pass after `init_module` and read for
-    /// parallel-checking against the inline call-effect computation. Phase 3
-    /// will consume this map directly to drive evidence threading.
+    /// Per-call effect metadata for every `App` node in the module being
+    /// lowered. Populated by the call-effects pre-pass after `init_module`,
+    /// then consumed at every effectful call site to drive evidence threading.
     call_effects: super::call_effects::CallEffectMap,
     /// Trait impl dict name -> sorted canonical effect names from the impl's
     /// `needs` clause. Populated during `lower_module` from the active and
-    /// imported modules' `TraitImplDict.impl_effects`. Read in two places:
-    /// (1) the Phase 2 pre-pass for `DictMethodAccess` call classification,
-    /// and (2) dict-constructor emission, where each method body is compiled
-    /// as effectful (params `_Evidence`/`_ReturnK`, evidence context installed)
+    /// imported modules' `TraitImplDict.impl_effects`. Read by (1) the
+    /// call-effects pre-pass for `DictMethodAccess` classification, and (2)
+    /// dict-constructor emission, where each method body is compiled as
+    /// effectful (params `_Evidence`/`_ReturnK`, evidence context installed)
     /// when its impl declares `needs`.
     impl_effects_by_dict: HashMap<String, Vec<String>>,
 }
@@ -1247,11 +1216,6 @@ impl<'a> Lowerer<'a> {
                             util::has_open_effect_row(&self.check_result.sub.apply(&scheme.ty))
                         })
                         .unwrap_or(false);
-                    let evidence_layout = if is_open_row {
-                        None
-                    } else {
-                        Some(evidence::EvidenceLayout::new(effects.iter().cloned()))
-                    };
                     if let Some(group) = clause_groups.iter_mut().find(|(n, _, _, _)| n == name) {
                         // Additional clause: just add to existing group
                         group.2.push((params, guard, body));
@@ -1261,9 +1225,7 @@ impl<'a> Lowerer<'a> {
                             name.clone(),
                             FunInfo {
                                 arity,
-                                user_arity: base_arity,
                                 effects,
-                                evidence_layout,
                                 is_open_row,
                                 param_absorbed_effects,
                                 param_types,
@@ -1288,7 +1250,6 @@ impl<'a> Lowerer<'a> {
                         name.clone(),
                         FunInfo {
                             arity: dict_params.len(),
-                            user_arity: dict_params.len(),
                             ..Default::default()
                         },
                     );
@@ -1311,8 +1272,8 @@ impl<'a> Lowerer<'a> {
         // `DictConstructor` nodes (which carry the field directly post-
         // elaboration, since the active module may not appear in
         // `check_result.codegen_info()`) and imported modules' TraitImplDicts.
-        // Used by both the Phase 2 pre-pass (to classify `DictMethodAccess`
-        // call sites) and dict-constructor emission below.
+        // Used by both the call-effects pre-pass (to classify
+        // `DictMethodAccess` call sites) and dict-constructor emission below.
         self.impl_effects_by_dict.clear();
         for (name, _, _, impl_effects) in &dict_constructors {
             self.impl_effects_by_dict
@@ -1326,11 +1287,11 @@ impl<'a> Lowerer<'a> {
             }
         }
 
-        // Phase 2 pre-pass: tag every `App` node in the elaborated program
-        // with `CallEffectInfo` so the lowerer can consume it via lookup.
-        // Runs after `init_module` + per-decl `fun_info` registration so all
-        // callees have arity/effect entries by the time we classify their
-        // call sites.
+        // Call-effects pre-pass: tag every `App` node in the elaborated
+        // program with `CallEffectInfo` so the lowerer can consume it via
+        // lookup. Runs after `init_module` + per-decl `fun_info` registration
+        // so all callees have arity/effect entries by the time we classify
+        // their call sites.
         self.call_effects = self.populate_call_effects(program);
         // Cross-module inlined handler bodies live in the elaborated programs
         // of compiled modules and are lowered through the active Lowerer.
@@ -1407,10 +1368,9 @@ impl<'a> Lowerer<'a> {
             let base_arity = arity - if has_effects { 2 } else { 0 };
             let effect_return_k = has_effects.then(|| CExpr::Var("_ReturnK".to_string()));
 
-            // Phase 3b: install the evidence context for the function body.
-            // Op calls and handler-param reads still go through the legacy
-            // path; this populates `current_evidence` for the threading work
-            // that 3c/3d will consume.
+            // Install the evidence context for the function body. Op-call
+            // emission inside the body reads handler closures out of
+            // `current_evidence`.
             let saved_evidence = self.current_evidence.clone();
             if has_effects {
                 let layout = evidence::EvidenceLayout::new(effects.iter().cloned());

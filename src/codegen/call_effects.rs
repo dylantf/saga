@@ -1,25 +1,25 @@
 //! Per-call effect metadata tagged ahead of lowering.
 //!
-//! This is the Phase 2 deliverable from `docs/planning/plans/evidence-passing-plan.md`.
-//! A pre-pass walks the elaborated program and produces a `NodeId -> CallEffectInfo`
-//! map for every `App` node. Phase 3's evidence-passing cutover will consume this map
-//! to drive evidence threading at each call site; this phase is purely additive
-//! and parallel-checked against the existing inline computation in the lowerer.
+//! A pre-pass walks the elaborated program and produces a `NodeId ->
+//! CallEffectInfo` map for every `App` node. The lowerer is a read-only
+//! consumer at every effectful call site, using the map to drive evidence
+//! threading and projection. This is the single writer for per-call effect
+//! metadata; adding a new call shape means teaching the populator one new
+//! branch, not auditing every dispatcher.
 //!
-//! The classification mirrors the inline `Lowerer::call_performs_effect` algorithm:
-//! - Resolve the head (`Var` / `QualifiedName`) via the `ResolutionMap`.
-//! - Look up the callee's expanded arity and effect row.
-//! - Saturated effectful call: `StaticOps` (closed row) or `RowForwarded` (open row).
-//! - Otherwise: `Pure`.
+//! Recognized head shapes:
+//! - `Var` and `QualifiedName` — resolved via the `ResolutionMap`.
+//! - `DictMethodAccess` — effectful trait method calls.
+//! - `Lambda` — `(fun x -> ...) y`. Effect row read from the typechecker's
+//!   per-node type.
 //!
-//! Effectful let-bindings (`let g = factory(); g x`) are tracked via a lexical scope
-//! stack mirroring the lowerer's `current_effectful_vars` mutation.
+//! Direct effect-op calls (`op!`) are tagged via `collect_effect_call`, not
+//! through `App`, and are out of scope for this module.
 //!
-//! Out-of-scope shapes (deferred to Phase 5):
-//! - `DictMethodAccess` (effectful trait methods) — known panic.
-//! - Lambda heads `(fun x -> ...) y`.
-//! - Direct effect-op calls `op!` — those are tagged via `collect_effect_call`,
-//!   not via `App`.
+//! Saturated effectful calls produce `StaticOps` (closed row) or
+//! `RowForwarded` (open row). Otherwise: `Pure`. Effectful let-bindings
+//! (`let g = factory(); g x`) are tracked via a lexical scope stack inside
+//! the populator.
 
 use std::collections::HashMap;
 
@@ -641,7 +641,9 @@ impl<'a> Populator<'a> {
                 self.classify_dict_method_call(dict, arg_count)
             }
             ExprKind::Lambda { .. } => self.classify_lambda_call(head.id, arg_count),
-            // Other head shapes — out of scope.
+            // Other head shapes have no callee identity that resolves to an
+            // effect row, so they classify as Pure. Add a branch here when a
+            // new effectful head shape is introduced.
             _ => CallEffectInfo::pure(),
         }
     }

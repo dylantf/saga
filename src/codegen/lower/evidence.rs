@@ -1,4 +1,4 @@
-//! Phase 1 infrastructure for the evidence-passing calling convention.
+//! Compile-time helpers for emitting evidence-vector operations in Core Erlang.
 //!
 //! The evidence vector is a Core Erlang tuple of per-effect entries, sorted
 //! canonically (alphabetically) by effect tag:
@@ -14,9 +14,6 @@
 //! `lower_handler_def_to_tuple`). Op closures themselves keep the same shape
 //! as today — `fun(Args..., K) -> ...`.
 //!
-//! This module is currently isolated infrastructure: nothing in the rest of
-//! the lowerer calls into it. Phase 3 will wire it up atomically.
-//!
 //! ## Static vs runtime helpers
 //!
 //! - **Closed rows** (the layout is statically known at lowering time): use
@@ -26,10 +23,6 @@
 //!   [`find_evidence`], [`insert_canonical`], or [`project_evidence`], which
 //!   emit calls into `std_evidence_bridge`. Bodies are O(n) linear over the
 //!   tuple; n is typically ≤5.
-
-// Phase 1 lands this infrastructure ahead of the Phase 3 cutover; everything
-// here is reachable only from unit tests until then.
-#![allow(dead_code)]
 
 use super::util::cerl_call;
 use crate::codegen::cerl::{CExpr, CLit};
@@ -60,6 +53,7 @@ impl EvidenceLayout {
     pub(super) fn tags(&self) -> &[String] {
         &self.tags
     }
+
 }
 
 /// Compile-time tuple index for `tag` in `layout`. Returns a 1-based index

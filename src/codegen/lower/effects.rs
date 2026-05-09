@@ -575,13 +575,13 @@ impl<'a> Lowerer<'a> {
             op_vars.push((eff.clone(), op.clone(), var_name, plan));
         }
 
-        // Phase 3b: build the new evidence vector for this `with` block.
-        // Group `op_vars` by canonical effect tag, build a `{EffectAtom, OpTuple}`
-        // entry per effect, and chain `insert_canonical` calls onto the
-        // inherited evidence (an empty tuple when there is no enclosing
-        // evidence in scope). Each op closure inside the entry refers to the
-        // corresponding handler binding by name (the binding itself is emitted
-        // by `attach_scoped_handler_bindings` below). The new evidence variable
+        // Build the new evidence vector for this `with` block. Group `op_vars`
+        // by canonical effect tag, build a `{EffectAtom, OpTuple}` entry per
+        // effect, and chain `insert_canonical` calls onto the inherited
+        // evidence (an empty tuple when there is no enclosing evidence in
+        // scope). Each op closure inside the entry refers to the corresponding
+        // handler binding by name (the binding itself is emitted by
+        // `attach_scoped_handler_bindings` below). The new evidence variable
         // is published to `current_evidence` for the body lowering and for any
         // call sites inside the body that need to thread evidence.
         //
@@ -664,11 +664,11 @@ impl<'a> Lowerer<'a> {
         };
         let result = self.lower_handled_inner_expr(expr, return_k_lambda, inherited_return_k);
 
-        // Phase 3b: handler arm bodies must see the *outer* evidence, not the
-        // new one we just installed for the body of `with`. A re-perform of
-        // the same op (`fail e = fail! ...`) inside an arm reaches the outer
-        // handler stack; if the arm body's effectful calls picked up the new
-        // evidence, they'd recurse into the just-installed entry instead.
+        // Handler arm bodies must see the *outer* evidence, not the new one
+        // we just installed for the body of `with`. A re-perform of the same
+        // op (`fail e = fail! ...`) inside an arm reaches the outer handler
+        // stack; if the arm body's effectful calls picked up the new evidence,
+        // they'd recurse into the just-installed entry instead.
         let saved_evidence_for_arms =
             std::mem::replace(&mut self.current_evidence, saved_evidence.clone());
 
@@ -728,10 +728,10 @@ impl<'a> Lowerer<'a> {
         // then transitively close through handler binding values.
         let mut needed: HashSet<String> = HashSet::new();
         result.collect_handle_refs(&mut needed);
-        // Phase 3b: also seed reachability with any free-variable references
-        // to the new evidence variable, so that the evidence binding (and
-        // transitively its handler-var dependencies) is retained when the
-        // body forwards evidence at call sites.
+        // Also seed reachability with any free-variable references to the new
+        // evidence variable, so that the evidence binding (and transitively
+        // its handler-var dependencies) is retained when the body forwards
+        // evidence at call sites.
         let (ev_var, _) = &evidence_binding;
         let mut body_free: HashSet<String> = HashSet::new();
         Self::collect_var_refs(&result, &mut body_free);

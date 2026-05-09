@@ -531,7 +531,7 @@ impl<'a> Lowerer<'a> {
                 // ADT constructor: tagged tuple {name, arg1, arg2, ...}
                 // Look up field types from the constructor's scheme so that
                 // lambda args inherit a `lambda_effect_context` and get the
-                // proper CPS expansion (handler params + _ReturnK).
+                // proper CPS expansion (evidence + _ReturnK).
                 let field_tys: Vec<Option<crate::typechecker::Type>> = {
                     let scheme = self.check_result.constructors.get(name).or_else(|| {
                         let bare = name.rsplit('.').next().unwrap_or(name);
@@ -735,7 +735,7 @@ impl<'a> Lowerer<'a> {
 
                 // Build the function body (same logic as top-level multi-clause funs)
                 let source_arity = pats::lower_params(clauses[0].0).len();
-                let (arity, user_arity, effects, is_open_row, param_absorbed_effects, param_types) =
+                let (arity, effects, is_open_row, param_absorbed_effects, param_types) =
                     self.check_result
                         .resolved_type_for_node(fun_id)
                         .map(|ty| {
@@ -752,7 +752,6 @@ impl<'a> Lowerer<'a> {
                             let param_types = param_types_from_type(&ty);
                             (
                                 expanded_arity,
-                                base_arity,
                                 effects,
                                 is_open_row,
                                 param_absorbed_effects,
@@ -760,23 +759,9 @@ impl<'a> Lowerer<'a> {
                             )
                         })
                         .unwrap_or_else(|| {
-                            (
-                                source_arity,
-                                source_arity,
-                                Vec::new(),
-                                false,
-                                HashMap::new(),
-                                Vec::new(),
-                            )
+                            (source_arity, Vec::new(), false, HashMap::new(), Vec::new())
                         });
                 let param_names: Vec<String> = (0..arity).map(|i| format!("_LF{}", i)).collect();
-                let evidence_layout = if is_open_row {
-                    None
-                } else {
-                    Some(super::evidence::EvidenceLayout::new(
-                        effects.iter().cloned(),
-                    ))
-                };
 
                 // Register in fun_info BEFORE lowering body so recursive
                 // calls are recognized as saturated apply
@@ -784,9 +769,7 @@ impl<'a> Lowerer<'a> {
                     fun_name.clone(),
                     FunInfo {
                         arity,
-                        user_arity,
                         effects: effects.clone(),
-                        evidence_layout,
                         is_open_row,
                         param_absorbed_effects: param_absorbed_effects.clone(),
                         param_types: param_types.clone(),
@@ -799,9 +782,9 @@ impl<'a> Lowerer<'a> {
                 let base_arity = arity - if has_effects { 2 } else { 0 };
                 let effect_return_k = has_effects.then(|| CExpr::Var("_ReturnK".to_string()));
 
-                // Phase 3b: install evidence context for the body of effectful
-                // local functions. The body still uses the legacy handler-param
-                // path; current_evidence is plumbed for 3c/3d to consume.
+                // Install the evidence context for the body of effectful
+                // local functions. Op-call emission inside the body reads
+                // handler closures out of `current_evidence`.
                 let saved_evidence = self.current_evidence.clone();
                 if has_effects {
                     self.current_evidence = Some(EvidenceCtx {

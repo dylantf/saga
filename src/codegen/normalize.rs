@@ -943,11 +943,11 @@ handler h for Log {
     /// Exercise `lift_to_let`: programs containing effect calls embedded in
     /// non-effect expressions (e.g. `1 + ask!()`, `add (ask!()) 2`) force
     /// normalization to lift the effect call out into a fresh let-binding.
-    /// The Phase 2 call-effects pre-pass keys every `App` site by NodeId, so
-    /// any future normalize change that drops or rewrites those ids on the
-    /// lift path would silently miscompile evidence threading. This test
-    /// pins the contract: every pre-normalize App id is reachable post-
-    /// normalize, even when the surrounding expression is rewritten.
+    /// The call-effects pre-pass keys every `App` site by NodeId, so any
+    /// future normalize change that drops or rewrites those ids on the lift
+    /// path would silently miscompile evidence threading. This test pins the
+    /// contract: every pre-normalize App id is reachable post-normalize,
+    /// even when the surrounding expression is rewritten.
     #[test]
     fn normalize_preserves_app_node_ids_through_lift_path() {
         let src = r#"
