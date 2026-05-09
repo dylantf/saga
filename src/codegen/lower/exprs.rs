@@ -100,6 +100,7 @@ impl<'a> Lowerer<'a> {
                     return call;
                 }
                 return self.lower_qualified_call(
+                    expr.id,
                     module,
                     func_name,
                     head,

@@ -3125,6 +3125,7 @@ impl<'a> Lowerer<'a> {
                 return self.lower_generic_apply(head, &args);
             }
             return self.lower_qualified_call(
+                expr.id,
                 module,
                 func_name,
                 head,
@@ -3929,6 +3930,7 @@ impl<'a> Lowerer<'a> {
     /// For effectful imported functions, handler params and _ReturnK are threaded.
     fn lower_qualified_call(
         &mut self,
+        app_id: NodeId,
         module: &str,
         func_name: &str,
         head: &Expr,
@@ -3942,23 +3944,30 @@ impl<'a> Lowerer<'a> {
             .cloned()
             .unwrap_or_else(|| module.to_lowercase());
 
-        let qualified = format!("{}.{}", module, func_name);
-        let callee_effects = self.resolved_effects(head.id, &qualified);
-        let callee_ops = callee_effects
-            .as_ref()
-            .map(|effs| self.effect_handler_ops(effs))
-            .unwrap_or_default();
+        // Source of truth: the per-call effect map populated pre-lowering.
+        let info = self.call_effects.get(&app_id);
+        let (is_effectful, callee_effects_vec): (bool, Vec<String>) = match info.map(|i| &i.kind) {
+            Some(super::call_effects::CallEffectKind::StaticOps { ops })
+            | Some(super::call_effects::CallEffectKind::RowForwarded { static_ops: ops }) => {
+                let mut effs: Vec<String> =
+                    ops.iter().map(|k| k.effect.clone()).collect();
+                effs.sort();
+                effs.dedup();
+                (!ops.is_empty(), effs)
+            }
+            _ => (false, Vec::new()),
+        };
 
         use super::resolve::ResolvedName;
 
+        let qualified = format!("{}.{}", module, func_name);
         // Detect partial application: if the call site supplies fewer user args
         // than the declared arity, emit a closure that captures the supplied
         // args and takes the remaining ones as fresh parameters. Without this,
         // an under-applied qualified call like `String.replace "m" ""` would
         // lower to `call std_string:replace/2`, which doesn't exist.
         let total_arity = self.resolved_fun_info(head.id, &qualified).map(|f| f.arity);
-        let effect_count = callee_ops.len();
-        let extras = if effect_count > 0 { 2 } else { 0 };
+        let extras = if is_effectful { 2 } else { 0 };
         if let Some(arity) = total_arity {
             let user_slots = arity.saturating_sub(extras);
             if args.len() < user_slots {
@@ -3981,7 +3990,7 @@ impl<'a> Lowerer<'a> {
                     .map(|v| CExpr::Var(v.clone()))
                     .collect();
                 all_args.extend(closure_params.iter().map(|p| CExpr::Var(p.clone())));
-                if !callee_ops.is_empty() {
+                if is_effectful {
                     let ev = "_Evidence".to_string();
                     closure_params.push(ev.clone());
                     all_args.push(CExpr::Var(ev));
@@ -4012,8 +4021,7 @@ impl<'a> Lowerer<'a> {
             self.lower_call_args_with_expected_types(args, param_types.as_deref());
 
         // Effectful callees take `_Evidence` and `_ReturnK`.
-        if !callee_ops.is_empty() {
-            let callee_effects_vec = callee_effects.clone().unwrap_or_default();
+        if is_effectful {
             let (ev_var, ev_ce) = self.build_call_evidence(&callee_effects_vec);
             bindings.push((ev_var.clone(), ev_ce));
             arg_vars.push(ev_var);
