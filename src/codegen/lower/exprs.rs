@@ -99,15 +99,15 @@ impl<'a> Lowerer<'a> {
                 ) {
                     return call;
                 }
-                return self.lower_qualified_call(
-                    expr.id,
+                return self.lower_qualified_call(super::QualifiedCallSite {
+                    app_id: expr.id,
                     module,
                     func_name,
                     head,
-                    &args,
+                    args: &args,
                     return_k,
-                    Some(&expr.span),
-                );
+                    call_span: Some(&expr.span),
+                });
             }
             if let Some((func_name, head_expr, args)) = collect_fun_call(expr) {
                 if let Some(call) = self.lower_resolved_fun_call(
@@ -1385,10 +1385,30 @@ impl<'a> Lowerer<'a> {
         })
     }
 
-    /// Lower a handle binding statement. For direct handler references, registers
-    /// a compile-time alias. For conditionals, the condition is lowered and the
-    /// handle binding stores a flag variable; handler dispatch uses both handlers'
-    /// arms wrapped in a conditional at runtime.
+    /// Lower a handle binding statement. Routes the binding into one of four
+    /// metadata stores depending on the RHS shape; `lower_with` later picks
+    /// the matching compilation strategy based on which store the name is in.
+    ///
+    /// Although evidence-wrapping itself only happens at the `with` boundary
+    /// (see [`Self::lower_with`]), the four paths still need to remain
+    /// distinct because each captures a different *source* of handler
+    /// information:
+    ///
+    /// - **Static alias** (`Var`): compile-time resolved canonical name in
+    ///   `handler_canonical`. The handler's arms are already in
+    ///   `handler_defs` from registration.
+    /// - **HandlerExpr**: arms are in the `value` expression itself; we
+    ///   register them under a synthetic name in `handler_defs`.
+    /// - **Conditional** (`If`): both branches resolve statically; we store
+    ///   the lowered condition + both canonicals in `handle_cond_vars` so
+    ///   `lower_with` can emit a runtime case-split.
+    /// - **Dynamic**: arbitrary RHS; we store the value's effect signature
+    ///   from the typechecker in `handle_dynamic_vars` so `lower_with` can
+    ///   emit a closure-call dispatch.
+    ///
+    /// Collapsing the four paths into one would hide these distinct
+    /// metadata flows behind a uniform interface without reducing branching
+    /// at the `with` boundary.
     pub(super) fn lower_handle_binding(
         &mut self,
         name: &str,

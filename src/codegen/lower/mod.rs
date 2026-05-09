@@ -36,6 +36,18 @@ pub(crate) fn lower_size_expr(expr: &Expr) -> CExpr {
     }
 }
 
+/// Bundled inputs to `Lowerer::lower_qualified_call`, gathered to keep its
+/// signature manageable. All borrows tie back to the same lowering invocation.
+pub(super) struct QualifiedCallSite<'a> {
+    pub app_id: NodeId,
+    pub module: &'a str,
+    pub func_name: &'a str,
+    pub head: &'a Expr,
+    pub args: &'a [&'a Expr],
+    pub return_k: Option<CExpr>,
+    pub call_span: Option<&'a crate::token::Span>,
+}
+
 fn count_lambda_params(body: &Expr) -> usize {
     match &body.kind {
         ExprKind::Lambda { params, body, .. } => params.len() + count_lambda_params(body),
@@ -1100,9 +1112,23 @@ impl<'a> Lowerer<'a> {
         }
 
         // Pre-compute open-row classification per resolved App-head NodeId.
-        // Mirrors the inline `head_open_row` lookup so the populator and
-        // inline path agree on RowForwarded vs StaticOps for both same-module
-        // and cross-module calls.
+        //
+        // This table is *not* redundant with `FunSig.is_open_row` (which the
+        // populator uses as a fallback at the use site). The two cover
+        // different data sources:
+        //
+        // - `FunSig.is_open_row` is built from the lowerer's `fun_info`
+        //   table at registration time. It only carries entries for
+        //   functions registered in the current module's `fun_info`.
+        // - This table consults `check_result.env` for local funs and
+        //   `ctx.modules[source_module].codegen_info.exports` for imported
+        //   funs. It catches imported callees whose names don't appear in
+        //   the local `fun_sigs` snapshot — which is the common case for
+        //   cross-module effectful calls.
+        //
+        // The populator at `classify_named_call` prefers this table and
+        // falls back to `FunSig.is_open_row` only when the head NodeId is
+        // unknown to the table.
         let mut head_open_row: HashMap<crate::ast::NodeId, bool> = HashMap::new();
         for (node_id, resolved) in self.resolved.iter() {
             use super::resolve::ResolvedName;
@@ -1133,16 +1159,16 @@ impl<'a> Lowerer<'a> {
             head_open_row.insert(*node_id, open);
         }
 
-        Populator::new(
-            &self.resolved,
-            &fun_sigs,
-            &let_fun_sigs,
-            &effect_ops,
-            &self.effect_canonical,
-            &self.ctx.let_effect_bindings,
-            &pattern_effect_bindings,
-            &head_open_row,
-        )
+        Populator::new(super::call_effects::PopulatorInputs {
+            resolved: &self.resolved,
+            fun_sigs: &fun_sigs,
+            let_fun_sigs: &let_fun_sigs,
+            effect_ops: &effect_ops,
+            effect_canonical: &self.effect_canonical,
+            let_effect_bindings: &self.ctx.let_effect_bindings,
+            pattern_effect_bindings: &pattern_effect_bindings,
+            head_open_row: &head_open_row,
+        })
         .populate(program)
     }
 
@@ -2511,6 +2537,17 @@ impl<'a> Lowerer<'a> {
         (var, value)
     }
 
+    /// Lower a saturated or partially-applied call to a *resolved* function
+    /// (`emit_call` semantics: BIF / external / local / imported with known
+    /// arity and param types). For runtime closure values bound to local
+    /// variables, see [`Self::lower_effectful_var_call`].
+    ///
+    /// The two helpers are *not* collapsible: resolved funs have a static
+    /// arity (so partial application emits a wrapper closure here, and arg
+    /// lowering can use callee-side expected types) and call via
+    /// `emit_call`; effectful vars have no static arity at the call site
+    /// and lower as `CExpr::Apply(Var, args)`. Merging them would replace
+    /// two focused branches with one branchier function.
     fn lower_resolved_fun_call(
         &mut self,
         app_id: NodeId,
@@ -2661,6 +2698,10 @@ impl<'a> Lowerer<'a> {
         None
     }
 
+    /// Lower a call to a runtime closure value bound to a local variable
+    /// whose type carries effects (e.g. `let g = factory(); g x`). See
+    /// [`Self::lower_resolved_fun_call`] for the resolved-fun counterpart
+    /// and the rationale for keeping the two paths separate.
     fn lower_effectful_var_call(
         &mut self,
         app_id: NodeId,
@@ -2821,15 +2862,15 @@ impl<'a> Lowerer<'a> {
             if self.resolved.contains_key(&head.id) {
                 return self.lower_generic_apply(head, &args);
             }
-            return self.lower_qualified_call(
-                expr.id,
+            return self.lower_qualified_call(QualifiedCallSite {
+                app_id: expr.id,
                 module,
                 func_name,
                 head,
-                &args,
-                None,
-                Some(&expr.span),
-            );
+                args: &args,
+                return_k: None,
+                call_span: Some(&expr.span),
+            });
         }
 
         let fun_call = collect_fun_call(expr);
@@ -3625,16 +3666,16 @@ impl<'a> Lowerer<'a> {
 
     /// Lower a qualified function call like `Math.abs x` to `call 'math':'abs'(X)`.
     /// For effectful imported functions, handler params and _ReturnK are threaded.
-    fn lower_qualified_call(
-        &mut self,
-        app_id: NodeId,
-        module: &str,
-        func_name: &str,
-        head: &Expr,
-        args: &[&Expr],
-        return_k: Option<CExpr>,
-        call_span: Option<&crate::token::Span>,
-    ) -> CExpr {
+    fn lower_qualified_call(&mut self, site: QualifiedCallSite<'_>) -> CExpr {
+        let QualifiedCallSite {
+            app_id,
+            module,
+            func_name,
+            head,
+            args,
+            return_k,
+            call_span,
+        } = site;
         let erlang_module = self
             .module_aliases
             .get(module)

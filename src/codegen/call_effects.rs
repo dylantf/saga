@@ -30,13 +30,45 @@ use crate::codegen::resolve::{ResolutionMap, ResolvedName};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CallEffectInfo {
     pub kind: CallEffectKind,
-    /// Logical user-argument count (excludes handler params and return_k).
-    /// Canonicalized to `0` for `Pure` entries — pure calls don't carry user-arity
-    /// metadata that any consumer needs, and pinning the value prevents the two
-    /// producers (this populator and the lowerer's inline path) from drifting.
+    /// Logical user-argument count (excludes evidence and return_k).
+    ///
+    /// **Invariant**: when `kind == CallEffectKind::Pure`, `user_arity` is
+    /// always `0`. The lowerer never reads `user_arity` on `Pure` entries,
+    /// and pinning the value to a single canonical zero prevents drift if a
+    /// future producer is added. Construct via [`CallEffectInfo::pure()`]
+    /// or [`CallEffectInfo::with_ops()`] to get the invariant enforced by
+    /// construction; ad-hoc construction must call
+    /// [`CallEffectInfo::debug_check()`] (debug builds verify it).
     pub user_arity: usize,
     /// Whether this call accepts a return continuation (i.e. it is effectful).
     pub needs_return_k: bool,
+}
+
+impl CallEffectInfo {
+    /// Pure call. No evidence threading, no return continuation.
+    pub fn pure() -> Self {
+        CallEffectInfo {
+            kind: CallEffectKind::Pure,
+            user_arity: 0,
+            needs_return_k: false,
+        }
+    }
+
+    /// Debug-builds-only invariant check: Pure entries must have user_arity 0
+    /// and needs_return_k == false. Call after ad-hoc construction.
+    #[inline]
+    pub fn debug_check(&self) {
+        if cfg!(debug_assertions) && matches!(self.kind, CallEffectKind::Pure) {
+            debug_assert_eq!(
+                self.user_arity, 0,
+                "CallEffectInfo: Pure kind requires user_arity == 0"
+            );
+            debug_assert!(
+                !self.needs_return_k,
+                "CallEffectInfo: Pure kind requires needs_return_k == false"
+            );
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -76,30 +108,36 @@ pub struct FunSig {
     pub is_open_row: bool,
 }
 
-/// Pre-pass walker. Constructed with the data sources it needs and consumed by
-/// `populate(program)`.
-pub struct Populator<'a> {
-    resolved: &'a ResolutionMap,
-    fun_sigs: &'a HashMap<String, FunSig>,
+/// Read-only inputs the populator consults during its walk. Bundled into a
+/// struct so the constructor doesn't carry a half-dozen reference parameters
+/// that all lifetime-tie back to the same lowering invocation.
+pub struct PopulatorInputs<'a> {
+    pub resolved: &'a ResolutionMap,
+    pub fun_sigs: &'a HashMap<String, FunSig>,
     /// Per-`Stmt::LetFun` signatures keyed by the LetFun's `id`. Pre-computed
     /// from the typechecker's resolved type for the LetFun node, mirroring the
     /// lowerer's dynamic `fun_info` registration in `lower_block`.
-    let_fun_sigs: &'a HashMap<NodeId, FunSig>,
+    pub let_fun_sigs: &'a HashMap<NodeId, FunSig>,
     /// Effect canonical name -> sorted op names.
-    effect_ops: &'a HashMap<String, Vec<String>>,
+    pub effect_ops: &'a HashMap<String, Vec<String>>,
     /// Bare effect name -> canonical effect name (mirrors `Lowerer::effect_canonical`).
     /// Effects from `let_effect_bindings` and pattern-bound vars use bare names;
     /// `effect_ops` is keyed canonically. This map bridges the two.
-    effect_canonical: &'a HashMap<String, String>,
+    pub effect_canonical: &'a HashMap<String, String>,
     /// Static let-binding effects from CodegenContext.
-    let_effect_bindings: &'a HashMap<String, Vec<String>>,
+    pub let_effect_bindings: &'a HashMap<String, Vec<String>>,
     /// Pattern-bound effectful variables keyed by the pattern's `NodeId`.
-    pattern_effect_bindings: &'a HashMap<NodeId, Vec<String>>,
-    /// `App` head NodeId -> `is_open_row` for resolved callees. Pre-computed
-    /// by the Lowerer using the same `check_result.env` / cross-module export
-    /// lookup the inline path uses, so populator and inline agree on
-    /// `RowForwarded` vs `StaticOps`.
-    head_open_row: &'a HashMap<NodeId, bool>,
+    pub pattern_effect_bindings: &'a HashMap<NodeId, Vec<String>>,
+    /// `App` head NodeId -> `is_open_row` for resolved callees. See the
+    /// construction site in `Lowerer::populate_call_effects` for why this
+    /// table is not subsumed by `FunSig.is_open_row`.
+    pub head_open_row: &'a HashMap<NodeId, bool>,
+}
+
+/// Pre-pass walker. Constructed with the data sources it needs and consumed by
+/// `populate(program)`.
+pub struct Populator<'a> {
+    inputs: PopulatorInputs<'a>,
     map: CallEffectMap,
     /// Stack of lexical scopes. Each frame maps a bound name to the absorbed
     /// effects that calls of that name should thread.
@@ -110,25 +148,9 @@ pub struct Populator<'a> {
 }
 
 impl<'a> Populator<'a> {
-    pub fn new(
-        resolved: &'a ResolutionMap,
-        fun_sigs: &'a HashMap<String, FunSig>,
-        let_fun_sigs: &'a HashMap<NodeId, FunSig>,
-        effect_ops: &'a HashMap<String, Vec<String>>,
-        effect_canonical: &'a HashMap<String, String>,
-        let_effect_bindings: &'a HashMap<String, Vec<String>>,
-        pattern_effect_bindings: &'a HashMap<NodeId, Vec<String>>,
-        head_open_row: &'a HashMap<NodeId, bool>,
-    ) -> Self {
+    pub fn new(inputs: PopulatorInputs<'a>) -> Self {
         Populator {
-            resolved,
-            fun_sigs,
-            let_fun_sigs,
-            effect_ops,
-            effect_canonical,
-            let_effect_bindings,
-            pattern_effect_bindings,
-            head_open_row,
+            inputs,
             map: HashMap::new(),
             scopes: Vec::new(),
             local_fun_sigs: Vec::new(),
@@ -136,7 +158,7 @@ impl<'a> Populator<'a> {
     }
 
     fn canonicalize(&self, bare: &str) -> String {
-        self.effect_canonical
+        self.inputs.effect_canonical
             .get(bare)
             .cloned()
             .unwrap_or_else(|| bare.to_string())
@@ -205,7 +227,7 @@ impl<'a> Populator<'a> {
 
     fn fun_param_effectful_vars(&self, name: &str, params: &[Pat]) -> HashMap<String, Vec<String>> {
         let mut out = HashMap::new();
-        let Some(info) = self.fun_sigs.get(name) else {
+        let Some(info) = self.inputs.fun_sigs.get(name) else {
             return out;
         };
         for (idx, effs) in &info.param_absorbed_effects {
@@ -234,7 +256,7 @@ impl<'a> Populator<'a> {
     fn record_pattern_effectful_vars(&mut self, pat: &Pat) {
         match pat {
             Pat::Var { id, name, .. } => {
-                if let Some(effects) = self.pattern_effect_bindings.get(id)
+                if let Some(effects) = self.inputs.pattern_effect_bindings.get(id)
                     && !effects.is_empty()
                 {
                     self.record_effectful_var(name.clone(), effects.clone());
@@ -281,6 +303,7 @@ impl<'a> Populator<'a> {
         // mutate scope before classification).
         if matches!(expr.kind, ExprKind::App { .. }) {
             let info = self.classify_app(expr);
+            info.debug_check();
             self.map.insert(expr.id, info);
         }
         self.walk_children(expr);
@@ -488,7 +511,7 @@ impl<'a> Populator<'a> {
                 // the binder, mirroring the lowerer's `current_effectful_vars`
                 // mutation in `lower_block`.
                 if let Pat::Var { name, .. } = pattern {
-                    if let Some(effs) = self.let_effect_bindings.get(name)
+                    if let Some(effs) = self.inputs.let_effect_bindings.get(name)
                         && !effs.is_empty()
                     {
                         self.record_effectful_var(name.clone(), effs.clone());
@@ -509,7 +532,7 @@ impl<'a> Populator<'a> {
                 // Mirror the lowerer: register the LetFun's signature into the
                 // top local fun frame BEFORE walking its body so recursive
                 // calls classify correctly.
-                if let Some(sig) = self.let_fun_sigs.get(id)
+                if let Some(sig) = self.inputs.let_fun_sigs.get(id)
                     && let Some(frame) = self.local_fun_sigs.last_mut()
                 {
                     frame.insert(name.clone(), sig.clone());
@@ -555,22 +578,12 @@ impl<'a> Populator<'a> {
                 self.classify_named_call(head.id, name, arg_count)
             }
             // Lambda heads, DictMethodAccess, etc. — out of scope for Phase 2.
-            // Mirror today's inline behavior (returns false / Pure) so the
-            // parallel-check stays clean.
-            _ => CallEffectInfo {
-                kind: CallEffectKind::Pure,
-                user_arity: 0,
-                needs_return_k: false,
-            },
+            _ => CallEffectInfo::pure(),
         }
     }
 
     fn classify_named_call(&self, head_id: NodeId, name: &str, supplied: usize) -> CallEffectInfo {
-        let pure = || CallEffectInfo {
-            kind: CallEffectKind::Pure,
-            user_arity: 0,
-            needs_return_k: false,
-        };
+        let pure = CallEffectInfo::pure;
 
         if supplied == 0 {
             return pure();
@@ -578,7 +591,7 @@ impl<'a> Populator<'a> {
 
         // Mirror `resolved_effects`: prefer ResolutionMap.effects, fall back
         // to fun_sigs (which holds CPS-expanded info for local funs).
-        let resolved = self.resolved.get(&head_id);
+        let resolved = self.inputs.resolved.get(&head_id);
         let canonical_name = match resolved {
             Some(ResolvedName::LocalFun { canonical_name, .. })
             | Some(ResolvedName::ImportedFun { canonical_name, .. }) => {
@@ -602,17 +615,19 @@ impl<'a> Populator<'a> {
                 // effectful var (mirrors `current_effectful_vars` fallback).
                 if let Some(effs) = self.lookup_effectful_var(name) {
                     let ops = self.collect_op_keys(&effs);
-                    let is_pure = ops.is_empty();
+                    if ops.is_empty() {
+                        // Either the var carried no effects, or the effects
+                        // didn't canonicalize against `effect_ops`. Either
+                        // way the call is Pure — and Pure must have
+                        // needs_return_k == false (see CallEffectInfo doc).
+                        return pure();
+                    }
                     return CallEffectInfo {
-                        kind: if is_pure {
-                            CallEffectKind::Pure
-                        } else {
-                            CallEffectKind::StaticOps { ops }
-                        },
+                        kind: CallEffectKind::StaticOps { ops },
                         // Effectful-var calls don't carry a precise user_arity;
-                        // mirror the inline check which only requires supplied > 0.
-                        user_arity: if is_pure { 0 } else { supplied },
-                        needs_return_k: !effs.is_empty(),
+                        // supplied > 0 is the gate (already checked above).
+                        user_arity: supplied,
+                        needs_return_k: true,
                     };
                 }
                 return pure();
@@ -626,20 +641,20 @@ impl<'a> Populator<'a> {
         // Need expanded arity from fun_sigs to compute user_arity.
         let Some(sig) = self.lookup_fun_sig(name, canonical_name.as_deref()) else {
             let ops = self.collect_op_keys(&effects);
-            // No FunSig snapshot. Mirror the inline fallback: effectful if
-            // effects exist, with the supplied arity as the best available
-            // user-arity. Any later path with fuller information will be
-            // checked against this by the debug parallel-check.
-            let is_pure = ops.is_empty();
+            // No FunSig snapshot. Effectful only if the effects canonicalized
+            // to known ops; supplied is the best-effort user-arity. Pure must
+            // not carry needs_return_k.
+            if ops.is_empty() {
+                return pure();
+            }
+            let kind = if self.inputs.head_open_row.get(&head_id).copied().unwrap_or(false) {
+                CallEffectKind::RowForwarded { static_ops: ops }
+            } else {
+                CallEffectKind::StaticOps { ops }
+            };
             return CallEffectInfo {
-                kind: if is_pure {
-                    CallEffectKind::Pure
-                } else if self.head_open_row.get(&head_id).copied().unwrap_or(false) {
-                    CallEffectKind::RowForwarded { static_ops: ops }
-                } else {
-                    CallEffectKind::StaticOps { ops }
-                },
-                user_arity: if is_pure { 0 } else { supplied },
+                kind,
+                user_arity: supplied,
                 needs_return_k: true,
             };
         };
@@ -659,6 +674,7 @@ impl<'a> Populator<'a> {
         // the FunSig-level flag, since FunSig keys may not capture every alias
         // for an imported function. The two should agree when both are set.
         let is_open_row = self
+            .inputs
             .head_open_row
             .get(&head_id)
             .copied()
@@ -687,11 +703,11 @@ impl<'a> Populator<'a> {
                 return Some(s);
             }
         }
-        if let Some(s) = self.fun_sigs.get(name) {
+        if let Some(s) = self.inputs.fun_sigs.get(name) {
             return Some(s);
         }
         if let Some(c) = canonical_name {
-            return self.fun_sigs.get(c);
+            return self.inputs.fun_sigs.get(c);
         }
         None
     }
@@ -703,7 +719,7 @@ impl<'a> Populator<'a> {
             // through bare; `effect_ops` is keyed canonically. Canonicalize
             // before lookup so the two stores agree.
             let canonical = self.canonicalize(eff);
-            if let Some(op_names) = self.effect_ops.get(&canonical) {
+            if let Some(op_names) = self.inputs.effect_ops.get(&canonical) {
                 for op in op_names {
                     out.push(OpKey {
                         effect: canonical.clone(),
