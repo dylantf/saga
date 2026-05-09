@@ -24,7 +24,10 @@
 use std::collections::HashMap;
 
 use crate::ast::{self, Decl, Expr, ExprKind, NodeId, Pat, Program, Stmt};
+use crate::codegen::CodegenContext;
+use crate::codegen::lower::util;
 use crate::codegen::resolve::{ResolutionMap, ResolvedName};
+use crate::typechecker::CheckResult;
 
 /// Per-call metadata. Keyed by the `NodeId` of an `App` node.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -113,11 +116,9 @@ pub struct FunSig {
 /// that all lifetime-tie back to the same lowering invocation.
 pub struct PopulatorInputs<'a> {
     pub resolved: &'a ResolutionMap,
+    pub check_result: &'a CheckResult,
+    pub ctx: &'a CodegenContext,
     pub fun_sigs: &'a HashMap<String, FunSig>,
-    /// Per-`Stmt::LetFun` signatures keyed by the LetFun's `id`. Pre-computed
-    /// from the typechecker's resolved type for the LetFun node, mirroring the
-    /// lowerer's dynamic `fun_info` registration in `lower_block`.
-    pub let_fun_sigs: &'a HashMap<NodeId, FunSig>,
     /// Effect canonical name -> sorted op names.
     pub effect_ops: &'a HashMap<String, Vec<String>>,
     /// Bare effect name -> canonical effect name (mirrors `Lowerer::effect_canonical`).
@@ -126,12 +127,6 @@ pub struct PopulatorInputs<'a> {
     pub effect_canonical: &'a HashMap<String, String>,
     /// Static let-binding effects from CodegenContext.
     pub let_effect_bindings: &'a HashMap<String, Vec<String>>,
-    /// Pattern-bound effectful variables keyed by the pattern's `NodeId`.
-    pub pattern_effect_bindings: &'a HashMap<NodeId, Vec<String>>,
-    /// `App` head NodeId -> `is_open_row` for resolved callees. See the
-    /// construction site in `Lowerer::populate_call_effects` for why this
-    /// table is not subsumed by `FunSig.is_open_row`.
-    pub head_open_row: &'a HashMap<NodeId, bool>,
     /// Trait impl dict name -> sorted canonical effect names from the impl's
     /// `needs` clause. Sourced from `TraitImplDict.impl_effects` (both the
     /// active module's and imported modules'). Used to classify
@@ -139,13 +134,6 @@ pub struct PopulatorInputs<'a> {
     /// expression to find the underlying `DictRef { name }`, then look up
     /// effects here.
     pub impl_effects_by_dict: &'a HashMap<String, Vec<String>>,
-    /// Lambda NodeId -> (sorted canonical effect names, is_open_row) derived
-    /// from the typechecker's per-node `Type::Fun(_, _, row)` for each
-    /// `ExprKind::Lambda` in the elaborated program. Used to classify
-    /// `App` call sites whose head is a lambda — `(fun x -> ...) y`. The
-    /// effect list spans every arrow in the lambda's full type, mirroring
-    /// `util::arity_and_effects_from_type`. Empty entry == pure lambda.
-    pub lambda_head_effects: &'a HashMap<NodeId, (Vec<String>, bool)>,
 }
 
 /// Pre-pass walker. Constructed with the data sources it needs and consumed by
@@ -159,23 +147,64 @@ pub struct Populator<'a> {
     /// Stack of local function frames mirroring the lowerer's dynamic
     /// `fun_info` mutations for `Stmt::LetFun`. Maps name -> FunSig.
     local_fun_sigs: Vec<HashMap<String, FunSig>>,
+    /// Resolved call head NodeId -> whether the callee's effect row is open.
+    head_open_row: HashMap<NodeId, bool>,
 }
 
 impl<'a> Populator<'a> {
     pub fn new(inputs: PopulatorInputs<'a>) -> Self {
+        let head_open_row = Self::collect_head_open_rows(&inputs);
         Populator {
             inputs,
             map: HashMap::new(),
             scopes: Vec::new(),
             local_fun_sigs: Vec::new(),
+            head_open_row,
         }
     }
 
     fn canonicalize(&self, bare: &str) -> String {
-        self.inputs.effect_canonical
+        self.inputs
+            .effect_canonical
             .get(bare)
             .cloned()
             .unwrap_or_else(|| bare.to_string())
+    }
+
+    fn canonicalize_effects(&self, effects: Vec<String>) -> Vec<String> {
+        effects.into_iter().map(|e| self.canonicalize(&e)).collect()
+    }
+
+    fn collect_head_open_rows(inputs: &PopulatorInputs<'_>) -> HashMap<NodeId, bool> {
+        let mut out = HashMap::new();
+        for (node_id, resolved) in inputs.resolved.iter() {
+            let open = match resolved {
+                ResolvedName::LocalFun { name, .. } => inputs
+                    .check_result
+                    .env
+                    .get(name)
+                    .map(|s| util::has_open_effect_row(&inputs.check_result.sub.apply(&s.ty)))
+                    .unwrap_or(false),
+                ResolvedName::ImportedFun {
+                    source_module,
+                    name: fun_name,
+                    ..
+                } => inputs
+                    .ctx
+                    .modules
+                    .get(source_module)
+                    .and_then(|m| {
+                        m.codegen_info
+                            .exports
+                            .iter()
+                            .find(|(n, _)| n == fun_name)
+                            .map(|(_, scheme)| util::has_open_effect_row(&scheme.ty))
+                    })
+                    .unwrap_or(false),
+            };
+            out.insert(*node_id, open);
+        }
+        out
     }
 
     pub fn populate(mut self, program: &Program) -> CallEffectMap {
@@ -269,11 +298,11 @@ impl<'a> Populator<'a> {
 
     fn record_pattern_effectful_vars(&mut self, pat: &Pat) {
         match pat {
-            Pat::Var { id, name, .. } => {
-                if let Some(effects) = self.inputs.pattern_effect_bindings.get(id)
+            Pat::Var { name, .. } => {
+                if let Some(effects) = self.pattern_effects(pat)
                     && !effects.is_empty()
                 {
-                    self.record_effectful_var(name.clone(), effects.clone());
+                    self.record_effectful_var(name.clone(), effects);
                 }
             }
             Pat::Constructor { args, .. } | Pat::Tuple { elements: args, .. } => {
@@ -309,6 +338,23 @@ impl<'a> Populator<'a> {
                 }
             }
             Pat::Wildcard { .. } | Pat::Lit { .. } => {}
+        }
+    }
+
+    fn pattern_effects(&self, pat: &Pat) -> Option<Vec<String>> {
+        let Pat::Var { span, .. } = pat else {
+            return None;
+        };
+        let ty = self.inputs.check_result.type_at_span.get(span)?;
+        let mut effects: Vec<String> = crate::typechecker::effects_from_type(ty)
+            .into_iter()
+            .collect();
+        effects.sort();
+        let canonical = self.canonicalize_effects(effects);
+        if canonical.is_empty() {
+            None
+        } else {
+            Some(canonical)
         }
     }
 
@@ -546,10 +592,10 @@ impl<'a> Populator<'a> {
                 // Mirror the lowerer: register the LetFun's signature into the
                 // top local fun frame BEFORE walking its body so recursive
                 // calls classify correctly.
-                if let Some(sig) = self.inputs.let_fun_sigs.get(id)
+                if let Some(sig) = self.let_fun_sig(*id, name)
                     && let Some(frame) = self.local_fun_sigs.last_mut()
                 {
-                    frame.insert(name.clone(), sig.clone());
+                    frame.insert(name.clone(), sig);
                 }
                 if let Some(g) = guard {
                     self.scopes.push(HashMap::new());
@@ -601,26 +647,26 @@ impl<'a> Populator<'a> {
     }
 
     /// Classify a call whose head is a `Lambda`. The lambda's effect row is
-    /// recorded in `lambda_head_effects` (precomputed from the typechecker's
-    /// `type_at_node`). Pure lambdas yield `Pure`; effectful lambdas yield
-    /// `StaticOps` (closed) or `RowForwarded` (open). Saturation isn't
-    /// strictly required here — Saga's lambdas always match arrow arity at
-    /// call sites; if `supplied == 0` we early-return Pure for safety.
+    /// derived from the typechecker's `type_at_node`. Pure lambdas yield
+    /// `Pure`; effectful lambdas yield `StaticOps` (closed) or `RowForwarded`
+    /// (open). Saturation isn't strictly required here — Saga's lambdas
+    /// always match arrow arity at call sites; if `supplied == 0` we
+    /// early-return Pure for safety.
     fn classify_lambda_call(&self, lambda_id: NodeId, supplied: usize) -> CallEffectInfo {
         if supplied == 0 {
             return CallEffectInfo::pure();
         }
-        let Some((effects, is_open_row)) = self.inputs.lambda_head_effects.get(&lambda_id) else {
+        let Some((effects, is_open_row)) = self.lambda_head_effects(lambda_id) else {
             return CallEffectInfo::pure();
         };
         if effects.is_empty() {
             return CallEffectInfo::pure();
         }
-        let ops = self.collect_op_keys(effects);
+        let ops = self.collect_op_keys(&effects);
         if ops.is_empty() {
             return CallEffectInfo::pure();
         }
-        let kind = if *is_open_row {
+        let kind = if is_open_row {
             CallEffectKind::RowForwarded { static_ops: ops }
         } else {
             CallEffectKind::StaticOps { ops }
@@ -752,7 +798,7 @@ impl<'a> Populator<'a> {
             if ops.is_empty() {
                 return pure();
             }
-            let kind = if self.inputs.head_open_row.get(&head_id).copied().unwrap_or(false) {
+            let kind = if self.head_open_row.get(&head_id).copied().unwrap_or(false) {
                 CallEffectKind::RowForwarded { static_ops: ops }
             } else {
                 CallEffectKind::StaticOps { ops }
@@ -779,7 +825,6 @@ impl<'a> Populator<'a> {
         // the FunSig-level flag, since FunSig keys may not capture every alias
         // for an imported function. The two should agree when both are set.
         let is_open_row = self
-            .inputs
             .head_open_row
             .get(&head_id)
             .copied()
@@ -815,6 +860,39 @@ impl<'a> Populator<'a> {
             return self.inputs.fun_sigs.get(c);
         }
         None
+    }
+
+    fn lambda_head_effects(&self, lambda_id: NodeId) -> Option<(Vec<String>, bool)> {
+        let ty = self.inputs.check_result.resolved_type_for_node(lambda_id)?;
+        let (_, effects) = util::arity_and_effects_from_type(&ty);
+        let is_open_row = util::has_open_effect_row(&ty);
+        let canonical = self.canonicalize_effects(effects);
+        if canonical.is_empty() {
+            None
+        } else {
+            Some((canonical, is_open_row))
+        }
+    }
+
+    fn let_fun_sig(&self, id: NodeId, name: &str) -> Option<FunSig> {
+        if let Some(ty) = self.inputs.check_result.resolved_type_for_node(id) {
+            let (base_arity, effects) = util::arity_and_effects_from_type(&ty);
+            let effects = self.canonicalize_effects(effects);
+            let handler_count = self.collect_op_keys(&effects).len();
+            let expanded_arity = base_arity + if handler_count > 0 { 2 } else { 0 };
+            let param_absorbed_effects = util::param_absorbed_effects_from_type(&ty)
+                .into_iter()
+                .map(|(idx, effs)| (idx, self.canonicalize_effects(effs)))
+                .collect();
+            return Some(FunSig {
+                arity: expanded_arity,
+                effects,
+                param_absorbed_effects,
+                is_open_row: util::has_open_effect_row(&ty),
+            });
+        }
+
+        self.inputs.fun_sigs.get(name).cloned()
     }
 
     fn collect_op_keys(&self, effects: &[String]) -> Vec<OpKey> {
@@ -854,7 +932,3 @@ fn peel_app(expr: &Expr) -> (&Expr, Vec<&Expr>) {
         }
     }
 }
-
-// Silence unused-import warnings under feature combinations.
-#[allow(dead_code)]
-fn _ast_marker(_: &ast::Program) {}

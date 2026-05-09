@@ -357,7 +357,7 @@ pub fn arity_and_evidence_from_type(ty: &Type) -> (usize, Vec<String>, bool) {
 /// Extract per-parameter absorbed effects from a function type.
 /// Returns a map of param_index -> sorted effect names for parameters
 /// that have EffArrow types (i.e., callbacks that carry effects).
-pub(super) fn param_absorbed_effects_from_type(ty: &Type) -> HashMap<usize, Vec<String>> {
+pub(crate) fn param_absorbed_effects_from_type(ty: &Type) -> HashMap<usize, Vec<String>> {
     let mut result = HashMap::new();
     let mut current = ty;
     let mut param_index = 0;
