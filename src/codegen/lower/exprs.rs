@@ -778,53 +778,47 @@ impl<'a> Lowerer<'a> {
 
                 // Build the function body (same logic as top-level multi-clause funs)
                 let source_arity = pats::lower_params(clauses[0].0).len();
-                let (
-                    arity,
-                    user_arity,
-                    effects,
-                    is_open_row,
-                    param_absorbed_effects,
-                    param_types,
-                ) = self
-                    .check_result
-                    .resolved_type_for_node(fun_id)
-                    .map(|ty| {
-                        let (base_arity, effects) = arity_and_effects_from_type(&ty);
-                        let effects = self.canonicalize_effects(effects);
-                        let is_open_row = super::util::has_open_effect_row(&ty);
-                        let handler_count = self.effect_handler_ops(&effects).len();
-                        // Phase 3b: effectful expanded arity = user + handlers + Evidence + ReturnK.
-                        let expanded_arity =
-                            base_arity + handler_count + if handler_count > 0 { 2 } else { 0 };
-                        let param_absorbed_effects = param_absorbed_effects_from_type(&ty)
-                            .into_iter()
-                            .map(|(idx, effs)| (idx, self.canonicalize_effects(effs)))
-                            .collect::<HashMap<usize, Vec<String>>>();
-                        let param_types = param_types_from_type(&ty);
-                        (
-                            expanded_arity,
-                            base_arity,
-                            effects,
-                            is_open_row,
-                            param_absorbed_effects,
-                            param_types,
-                        )
-                    })
-                    .unwrap_or_else(|| {
-                        (
-                            source_arity,
-                            source_arity,
-                            Vec::new(),
-                            false,
-                            HashMap::new(),
-                            Vec::new(),
-                        )
-                    });
+                let (arity, user_arity, effects, is_open_row, param_absorbed_effects, param_types) =
+                    self.check_result
+                        .resolved_type_for_node(fun_id)
+                        .map(|ty| {
+                            let (base_arity, effects) = arity_and_effects_from_type(&ty);
+                            let effects = self.canonicalize_effects(effects);
+                            let is_open_row = super::util::has_open_effect_row(&ty);
+                            let handler_count = self.effect_handler_ops(&effects).len();
+                            // Effectful expanded arity = user + Evidence + ReturnK.
+                            let expanded_arity = base_arity + if handler_count > 0 { 2 } else { 0 };
+                            let param_absorbed_effects = param_absorbed_effects_from_type(&ty)
+                                .into_iter()
+                                .map(|(idx, effs)| (idx, self.canonicalize_effects(effs)))
+                                .collect::<HashMap<usize, Vec<String>>>();
+                            let param_types = param_types_from_type(&ty);
+                            (
+                                expanded_arity,
+                                base_arity,
+                                effects,
+                                is_open_row,
+                                param_absorbed_effects,
+                                param_types,
+                            )
+                        })
+                        .unwrap_or_else(|| {
+                            (
+                                source_arity,
+                                source_arity,
+                                Vec::new(),
+                                false,
+                                HashMap::new(),
+                                Vec::new(),
+                            )
+                        });
                 let param_names: Vec<String> = (0..arity).map(|i| format!("_LF{}", i)).collect();
                 let evidence_layout = if is_open_row {
                     None
                 } else {
-                    Some(super::evidence::EvidenceLayout::new(effects.iter().cloned()))
+                    Some(super::evidence::EvidenceLayout::new(
+                        effects.iter().cloned(),
+                    ))
                 };
 
                 // Register in fun_info BEFORE lowering body so recursive
@@ -843,16 +837,6 @@ impl<'a> Lowerer<'a> {
                 );
 
                 let handler_ops = self.effect_handler_ops(&effects);
-                let handler_params: Vec<String> = handler_ops
-                    .iter()
-                    .map(|(eff, op)| Self::handler_param_name(eff, op))
-                    .collect();
-                let saved_handler_params = std::mem::take(&mut self.current_handler_params);
-                for ((eff, op), param) in handler_ops.iter().zip(handler_params.iter()) {
-                    let key = format!("{}.{}", eff, op);
-                    self.current_handler_params.insert(key, param.clone());
-                }
-
                 let saved_effectful_vars = std::mem::take(&mut self.current_effectful_vars);
                 for (idx, effs) in &param_absorbed_effects {
                     if let Some(pat) = clauses[0].0.get(*idx)
@@ -863,8 +847,8 @@ impl<'a> Lowerer<'a> {
                     }
                 }
 
-                let has_effects = !handler_params.is_empty();
-                let base_arity = arity - handler_params.len() - if has_effects { 2 } else { 0 };
+                let has_effects = !handler_ops.is_empty();
+                let base_arity = arity - if has_effects { 2 } else { 0 };
                 let effect_return_k = has_effects.then(|| CExpr::Var("_ReturnK".to_string()));
 
                 // Phase 3b: install evidence context for the body of effectful
@@ -882,7 +866,6 @@ impl<'a> Lowerer<'a> {
                 let fun_body = if clauses.len() == 1 && clauses[0].1.is_none() {
                     // Single clause, no guard
                     let mut params_ce = pats::lower_params(clauses[0].0);
-                    params_ce.extend(handler_params.iter().cloned());
                     if has_effects {
                         params_ce.push("_Evidence".to_string());
                         params_ce.push("_ReturnK".to_string());
@@ -949,7 +932,6 @@ impl<'a> Lowerer<'a> {
                     CExpr::Fun(
                         {
                             let mut params = param_names[..base_arity].to_vec();
-                            params.extend(handler_params.iter().cloned());
                             if has_effects {
                                 params.push("_Evidence".to_string());
                                 params.push("_ReturnK".to_string());
@@ -959,7 +941,6 @@ impl<'a> Lowerer<'a> {
                         Box::new(CExpr::Case(Box::new(scrutinee), arms)),
                     )
                 };
-                self.current_handler_params = saved_handler_params;
                 self.current_effectful_vars = saved_effectful_vars;
                 self.current_evidence = saved_evidence;
 

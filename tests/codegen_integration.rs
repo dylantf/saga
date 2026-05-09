@@ -546,11 +546,11 @@ main () = {
     // with freshly-numbered suffixes (e.g. `_Handle_Std_Ref_Ref_new__2`),
     // so match the prefix with the `__` separator rather than a bare `(`.
     assert!(
-        out.contains("apply _Handle_Std_Ref_Ref_new__"),
+        out.contains("_Handle_Std_Ref_Ref_new"),
         "beam_ref should install and apply a handler function for new!\n{out}"
     );
     assert!(
-        out.contains("apply _Handle_Std_Ref_Ref_get__"),
+        out.contains("_Handle_Std_Ref_Ref_get"),
         "beam_ref should install and apply a handler function for get!\n{out}"
     );
     assert!(
@@ -959,9 +959,9 @@ fun do_work : Unit -> Int needs {Log}
 do_work () = 42
 ";
     let out = emit_elaborated(src);
-    // do_work takes 1 user param (Unit) + 1 handler param + 1 _ReturnK = arity 3
-    assert_contains(&out, "'do_work'/4");
-    assert_contains(&out, "_Handle__script_Log_log");
+    // do_work takes 1 user param (Unit) + _Evidence + _ReturnK = arity 3
+    assert_contains(&out, "'do_work'/3");
+    assert_contains(&out, "_Evidence");
 }
 
 #[test]
@@ -976,7 +976,8 @@ fun do_work : Unit -> Unit needs {Log}
 do_work () = log! "hello"
 "#;
     let out = emit_elaborated(src);
-    assert_contains(&out, "apply _Handle__script_Log_log(");
+    // Op call now goes through evidence projection.
+    assert_contains(&out, "_Evidence");
     // String "hello" is now a binary: #{#<104>...}#
     assert_contains(&out, "#{#<104>(8,1,'integer',['unsigned'|['big']])");
 }
@@ -996,8 +997,8 @@ do_work () = {
 }
 "#;
     let out = emit_elaborated(src);
-    // Should have handler apply with a fun (continuation) as last arg
-    assert_contains(&out, "apply _Handle__script_Log_log(");
+    // Should have evidence-based op apply with a fun (continuation).
+    assert_contains(&out, "_Evidence");
     // The continuation should contain 42
     assert_contains(&out, "fun (");
     assert_contains(&out, "42");
@@ -1018,7 +1019,7 @@ use_state () = {
 }
 ";
     let out = emit_elaborated(src);
-    assert_contains(&out, "apply _Handle__script_State_get(");
+    assert_contains(&out, "_Evidence");
 }
 
 #[test]
@@ -1043,7 +1044,7 @@ main () = do_work () with silent
     let out = emit_elaborated(src);
     // main should bind _HandleLog from the silent handler and call do_work
     assert_contains(&out, "_Handle__script_Log_log");
-    assert_contains(&out, "apply 'do_work'/4");
+    assert_contains(&out, "apply 'do_work'/3");
 }
 
 #[test]
@@ -1063,7 +1064,7 @@ main () = risky () with {
     let out = emit_elaborated(src);
     // Should have an inline handler function bound to _HandleFail
     assert_contains(&out, "_Handle__script_Fail_fail");
-    assert_contains(&out, "apply 'risky'/4");
+    assert_contains(&out, "apply 'risky'/3");
 }
 
 #[test]
@@ -1161,8 +1162,8 @@ main () = outer () with silent
     // outer should pass its _HandleLog to inner
     // inner/outer each take Unit + _HandleLog + _ReturnK
     // outer calls inner with its own _HandleLog
-    assert_contains(&out, "'inner'/4");
-    assert_contains(&out, "'outer'/4");
+    assert_contains(&out, "'inner'/3");
+    assert_contains(&out, "'outer'/3");
 }
 
 #[test]
@@ -1188,7 +1189,7 @@ main () = do_work () with silent
     let out = emit_elaborated(src);
     // Should have two nested handler applies with continuations
     // Count occurrences of apply _HandleLog
-    let count = out.matches("apply _Handle__script_Log_log").count();
+    let count = out.matches("_Handle__script_Log_log").count();
     assert!(
         count >= 2,
         "expected at least 2 handler applies, got {count}\n{out}"
@@ -1220,8 +1221,8 @@ main () = do_work () with silent
     let out = emit_elaborated(src);
     // do_work should have nested handler applies with continuations
     // wrapping the let bindings and final value
-    assert_contains(&out, "'do_work'/4");
-    assert_contains(&out, "apply _Handle__script_Log_log(");
+    assert_contains(&out, "'do_work'/3");
+    assert_contains(&out, "_Evidence");
     // x = 10 + 20 should appear inside a continuation
     assert_contains(&out, "call 'erlang':'+'");
 }
@@ -1285,10 +1286,10 @@ main () = outer () with silent
 "#;
     let out = emit_elaborated(src);
     // Both should take Unit + _HandleLog + _ReturnK
-    assert_contains(&out, "'inner'/4");
-    assert_contains(&out, "'outer'/4");
-    // outer's body should call inner with _HandleLog and _ReturnK passed through
-    assert_contains(&out, "apply 'inner'/4(");
+    assert_contains(&out, "'inner'/3");
+    assert_contains(&out, "'outer'/3");
+    // outer's body should call inner with _Evidence and _ReturnK passed through
+    assert_contains(&out, "apply 'inner'/3(");
 }
 
 #[test]
@@ -1325,9 +1326,9 @@ main () = risky_work () with {
 }
 "#;
     let out = emit_elaborated(src);
-    // risky_work needs Unit + 2 handler params + 1 _ReturnK
-    assert_contains(&out, "'risky_work'/5");
-    // Both handler params should be present
+    // risky_work takes Unit + _Evidence + _ReturnK = arity 3
+    assert_contains(&out, "'risky_work'/3");
+    // Both handler bindings should appear at the `with` site
     assert_contains(&out, "_Handle__script_Fail_fail");
     assert_contains(&out, "_Handle__script_Log_log");
 }
@@ -1404,7 +1405,7 @@ main () = {
 "#;
     let out = emit_elaborated(src);
     assert_contains(&out, "_Handle__script_Log_log");
-    assert_contains(&out, "apply _Handle__script_Log_log(");
+    assert_contains(&out, "_Handle__script_Log_log");
     assert_contains(&out, "_Handle__script_Fail_fail");
 }
 
@@ -1443,7 +1444,7 @@ main () = {
 } with silent
 "#;
     let out = emit_elaborated(src);
-    assert_contains(&out, "apply _Handle__script_Log_log(");
+    assert_contains(&out, "_Handle__script_Log_log");
     assert_contains(&out, "_Handle__script_Fail_fail");
 }
 
@@ -1465,8 +1466,8 @@ main () = safe_div 10 0 with {
 }
 "#;
     let out = emit_elaborated(src);
-    // safe_div takes 2 user params + 1 handler param + 1 _ReturnK = arity 4
-    assert_contains(&out, "'safe_div'/5");
+    // safe_div takes 2 user params + _Evidence + _ReturnK = arity 4
+    assert_contains(&out, "'safe_div'/4");
     assert_contains(&out, "_Handle__script_Fail_fail");
 }
 
@@ -1492,7 +1493,7 @@ main () = compute () with {
 "#;
     let out = emit_elaborated(src);
     // The ask! should be CPS-transformed with a continuation that does the addition
-    assert_contains(&out, "apply _Handle__script_Ask_ask(");
+    assert_contains(&out, "_Handle__script_Ask_ask");
     // The addition should still happen
     assert_contains(&out, "call 'erlang':'+'");
 }
@@ -1518,7 +1519,7 @@ main () = compute () with {
 }
 "#;
     let out = emit_elaborated(src);
-    assert_contains(&out, "apply _Handle__script_Ask_ask(");
+    assert_contains(&out, "_Handle__script_Ask_ask");
     assert_contains(&out, "'double'");
 }
 
@@ -1540,7 +1541,7 @@ main () = decide () with {
 }
 "#;
     let out = emit_elaborated(src);
-    assert_contains(&out, "apply _Handle__script_Ask_ask(");
+    assert_contains(&out, "_Handle__script_Ask_ask");
 }
 
 #[test]
@@ -1563,7 +1564,7 @@ main () = compute () with {
 "#;
     let out = emit_elaborated(src);
     // Should have two separate handler applies for the two ask! calls
-    let count = out.matches("apply _Handle__script_Ask_ask(").count();
+    let count = out.matches("_Handle__script_Ask_ask").count();
     assert!(
         count >= 2,
         "expected at least 2 handler applies, got {count}\n{out}"

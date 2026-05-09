@@ -8,7 +8,7 @@
 /// - named/inline handler composition for `with` lowering
 use std::collections::{HashMap, HashSet, VecDeque};
 
-use crate::ast::{Expr, ExprKind, Handler, HandlerArm, HandlerItem, Pat, Stmt};
+use crate::ast::{Annotated, Expr, ExprKind, Handler, HandlerArm, HandlerItem, Pat, Stmt};
 use crate::codegen::cerl::{CArm, CExpr, CLit, CPat};
 
 use super::Lowerer;
@@ -166,6 +166,65 @@ impl<'a> Lowerer<'a> {
         CExpr::Fun(vec![param], Box::new(body))
     }
 
+    /// Read the per-op closure for `effect.op` out of the in-scope evidence
+    /// vector. Closed-row callers with the effect statically present in their
+    /// layout emit pure `element/2` chains; open-row callers (or callers whose
+    /// layout doesn't include this effect — happens at handler-arm bodies that
+    /// re-perform an effect not held by the current arm's caller layout) fall
+    /// back to the runtime bridge.
+    pub(super) fn evidence_op_lookup(&mut self, effect_name: &str, op_name: &str) -> CExpr {
+        let ev_ctx = self
+            .current_evidence
+            .clone()
+            .unwrap_or_else(|| panic!("no evidence in scope for op '{}.{}'", effect_name, op_name));
+        let op_index = self.evidence_op_index(effect_name, op_name) as i64;
+        let layout_has_tag = ev_ctx.layout.tags().iter().any(|t| t == effect_name);
+        let entry_op_tuple: CExpr = if !ev_ctx.is_open && layout_has_tag {
+            let eff_idx = super::evidence::evidence_index_of(&ev_ctx.layout, effect_name) as i64;
+            cerl_call(
+                "erlang",
+                "element",
+                vec![
+                    CExpr::Lit(CLit::Int(2)),
+                    cerl_call(
+                        "erlang",
+                        "element",
+                        vec![
+                            CExpr::Lit(CLit::Int(eff_idx)),
+                            CExpr::Var(ev_ctx.var.clone()),
+                        ],
+                    ),
+                ],
+            )
+        } else {
+            super::evidence::find_evidence(CExpr::Var(ev_ctx.var.clone()), effect_name)
+        };
+        cerl_call(
+            "erlang",
+            "element",
+            vec![CExpr::Lit(CLit::Int(op_index)), entry_op_tuple],
+        )
+    }
+
+    /// 1-based op index inside an effect's op tuple. Op tuples are sorted
+    /// alphabetically by op name (matches `effect_handler_ops` ordering for a
+    /// single effect and the canonical shape produced by handler emission).
+    fn evidence_op_index(&self, effect_name: &str, op_name: &str) -> usize {
+        let info = self
+            .effect_defs
+            .get(effect_name)
+            .unwrap_or_else(|| panic!("unknown effect '{}'", effect_name));
+        let mut ops: Vec<&String> = info.ops.keys().collect();
+        ops.sort();
+        match ops.iter().position(|n| n.as_str() == op_name) {
+            Some(i) => i + 1,
+            None => panic!(
+                "unknown op '{}' on effect '{}' (have: {:?})",
+                op_name, effect_name, ops
+            ),
+        }
+    }
+
     /// Lower an effect call: `op! args`.
     ///
     /// Emits: `apply _Handle_Effect_op(arg1, ..., argN, K)`
@@ -237,10 +296,11 @@ impl<'a> Lowerer<'a> {
                     if ops.is_empty() {
                         continue;
                     }
-                    let already_in_scope = ops.iter().all(|(e, op)| {
-                        self.current_handler_params
-                            .contains_key(&format!("{}.{}", e, op))
-                    });
+                    let already_in_scope = self
+                        .current_evidence
+                        .as_ref()
+                        .map(|ctx| ctx.is_open || ctx.layout.tags().iter().any(|t| t == eff))
+                        .unwrap_or(false);
                     if already_in_scope {
                         continue;
                     }
@@ -326,17 +386,8 @@ impl<'a> Lowerer<'a> {
             });
         }
 
-        // CPS path: apply Handler(arg1, ..., argN, K)
-        let handler_var = self
-            .current_handler_params
-            .get(&effect_key)
-            .unwrap_or_else(|| {
-                panic!(
-                    "no handler param for op '{}.{}', handler_params: {:?}",
-                    effect_name, op_name, self.current_handler_params
-                )
-            })
-            .clone();
+        // CPS path: read the per-op closure out of the evidence vector and apply it.
+        let handler_expr = self.evidence_op_lookup(&effect_name, op_name);
 
         let mut call_args: Vec<CExpr> = param_vars.into_iter().map(CExpr::Var).collect();
 
@@ -353,7 +404,7 @@ impl<'a> Lowerer<'a> {
         };
         call_args.push(k);
 
-        let apply = CExpr::Apply(Box::new(CExpr::Var(handler_var)), call_args);
+        let apply = CExpr::Apply(Box::new(handler_expr), call_args);
 
         // Wrap with let-bindings for args
         bindings.into_iter().rev().fold(apply, |body, (var, val)| {
@@ -419,6 +470,14 @@ impl<'a> Lowerer<'a> {
         handler: &Handler,
         inherited_return_k: Option<CExpr>,
     ) -> CExpr {
+        if let Some(rewritten) = self.lower_with_chain_after_local_handler_bindings(
+            expr,
+            handler,
+            inherited_return_k.clone(),
+        ) {
+            return rewritten;
+        }
+
         let normalized = self.normalize_with_handler(handler);
         let (inline_arms, explicit_return_clause) = match &normalized {
             WithHandlerLayer::Named { .. } => (Vec::new(), None),
@@ -468,20 +527,20 @@ impl<'a> Lowerer<'a> {
         let handler_ops = self.effect_handler_ops(&handled_effects);
 
         // For each op, build a handler function and bind it.
-        // Two passes: first register all param names (so handler arm bodies
-        // can reference sibling handlers via closure capture),
-        // then build the handler functions.
-        let saved_handler_params = self.current_handler_params.clone();
+        // Two passes: first allocate fresh closure binding names, then build
+        // the handler functions. Handler-arm bodies access sibling handlers
+        // through the evidence vector that this `with` installs, not via
+        // direct names; the per-binding name is just the closure's let-bound
+        // var (so it shows up in the emitted Core Erlang and gets reachability-
+        // pruned when unused).
         let saved_no_resume_ops = self.no_resume_ops.clone();
         let saved_direct_ops = self.direct_ops.clone();
 
-        // Pass 1: register all handler param variables (one per op)
+        // Pass 1: allocate handler-binding names and pick a per-op plan.
         let mut op_vars: Vec<(String, String, String, OpHandlerPlan)> = Vec::new();
         for (eff, op) in &handler_ops {
             let var_name = self.fresh_handler_binding_name(eff, op);
             let key = format!("{}.{}", eff, op);
-            self.current_handler_params
-                .insert(key.clone(), var_name.clone());
             let plan = match &named_item {
                 Some(item) => self.plan_named_op_handler(eff, op, item),
                 None => self.plan_inline_op_handler(eff, op, &inline_arms_by_op),
@@ -542,18 +601,20 @@ impl<'a> Lowerer<'a> {
                     .push(op.as_str());
                 effect_to_vars.insert((eff.clone(), op.clone()), var_name.clone());
             }
-            // Phase 3b coexistence: inherit only when the outer evidence is
-            // unambiguously in lexical scope at the point this `with` is
-            // lowered. Today's `with` lowering can place handler/value
-            // bindings that depend on names introduced *inside* the body
-            // (dynamic handler factories like `let db = connect (); pg = db.postgres`),
-            // and the topological placer would form a cycle if the inner
-            // evidence binding referenced the outer one. We sidestep this in
-            // the temporary coexistence by always rebuilding evidence from
-            // scratch at a `with` boundary; nothing reads evidence yet, and
-            // Phase 3c will reintroduce a sound inheritance scheme alongside
-            // the op-call rewrite.
-            let mut acc = CExpr::Tuple(Vec::new());
+            // Inherit the outer evidence by var-name. The dominance invariant
+            // — that `saved_evidence.var` is in scope at every site where the
+            // new evidence binding is placed — is preserved upstream: dynamic
+            // handler factories whose closures come from lets inside this
+            // wrapped block are rewritten ahead of lowering (see the named-
+            // chain rewrite earlier in this file) so the new evidence is only
+            // installed for the suffix where the dynamic handler tuples are
+            // bound. Non-dynamic withs install handlers that depend only on
+            // outer-scope values, so their evidence binding can safely live
+            // at the with boundary.
+            let mut acc = match &saved_evidence {
+                Some(ctx) => CExpr::Var(ctx.var.clone()),
+                None => CExpr::Tuple(Vec::new()),
+            };
             for (eff, mut ops) in effect_to_ops {
                 ops.sort();
                 ops.dedup();
@@ -570,24 +631,27 @@ impl<'a> Lowerer<'a> {
                 acc = super::evidence::insert_canonical(acc, entry);
             }
             let new_var = self.fresh();
-            // Layout must mirror the *value* we built. Since the temporary
-            // coexistence rebuilds evidence from `{}` rather than inheriting
-            // the outer tuple (see comment above), the layout only contains
-            // the effects this `with` actually installed. Phase 3c will
-            // restore inheritance and the layout will track the union again.
-            let new_layout = {
-                let mut tags: Vec<String> = Vec::new();
-                for (eff, _, _, _) in &op_vars {
-                    if !tags.contains(eff) {
-                        tags.push(eff.clone());
-                    }
+            // Layout mirrors the value we built: union of the inherited
+            // tags (when we kept the outer var) and the effects installed
+            // here. The is_open flag also propagates from the inherited
+            // context — a row-polymorphic outer caller's evidence may carry
+            // additional unknown effects beyond the static layout.
+            let mut tags: Vec<String> = Vec::new();
+            let mut is_open = false;
+            if let Some(ctx) = &saved_evidence {
+                tags.extend(ctx.layout.tags().iter().cloned());
+                is_open = ctx.is_open;
+            }
+            for (eff, _, _, _) in &op_vars {
+                if !tags.contains(eff) {
+                    tags.push(eff.clone());
                 }
-                super::evidence::EvidenceLayout::new(tags)
-            };
+            }
+            let new_layout = super::evidence::EvidenceLayout::new(tags);
             self.current_evidence = Some(super::EvidenceCtx {
                 var: new_var.clone(),
                 layout: new_layout,
-                is_open: false,
+                is_open,
             });
             ((new_var.clone(), acc), new_var)
         };
@@ -610,26 +674,15 @@ impl<'a> Lowerer<'a> {
 
         // Pass 2: build ALL handler functions unconditionally.
         // We'll prune unreachable ones after lowering the body.
-        // BEAM-native ops are emitted first since they're self-contained
-        // (direct BEAM calls, no closures). CPS handlers may reference them
-        // (e.g. async_handler's body calls spawn!/send!), so they must come after.
         //
-        // For each arm body: re-performing the same op (e.g. `fail e = fail! ...`
-        // — the "rethrow"/middleware pattern) must reach the outer handler
-        // stack, not recurse into this arm. We temporarily redirect this op's
-        // entry in `current_handler_params` back to the outer mapping
-        // (`saved_handler_params`) while lowering the body, then restore the
-        // inner mapping so siblings still see the new handler via closure
-        // capture.
+        // Re-performing the same op inside an arm body (`fail e = fail! ...`,
+        // the "rethrow"/middleware pattern) must reach the outer handler
+        // stack, not recurse into this arm. That's already enforced by
+        // restoring `current_evidence` to `saved_evidence` for arm-body
+        // lowering above — `evidence_op_lookup` reads the outer layout, so
+        // op calls inside arms naturally hit the outer handler entry.
         let mut handler_bindings: Vec<(String, CExpr)> = Vec::new();
-        for (eff, op, var_name, plan) in &op_vars {
-            let key = format!("{}.{}", eff, op);
-            let inner_mapping = self.current_handler_params.remove(&key);
-            if let Some(outer_var) = saved_handler_params.get(&key) {
-                self.current_handler_params
-                    .insert(key.clone(), outer_var.clone());
-            }
-
+        for (_eff, op, var_name, plan) in &op_vars {
             let binding = match plan {
                 OpHandlerPlan::Inline { arm } => self.build_op_handler_fun(arm, None),
                 OpHandlerPlan::Static {
@@ -660,14 +713,8 @@ impl<'a> Lowerer<'a> {
                 OpHandlerPlan::Passthrough => self.build_passthrough_handler_fun(),
             };
             handler_bindings.push((var_name.clone(), binding));
-
-            self.current_handler_params.remove(&key);
-            if let Some(inner) = inner_mapping {
-                self.current_handler_params.insert(key, inner);
-            }
         }
 
-        self.current_handler_params = saved_handler_params;
         self.no_resume_ops = saved_no_resume_ops;
         self.direct_ops = saved_direct_ops;
         // Restore the body-scope evidence we replaced during pass 2 (it is
@@ -724,6 +771,105 @@ impl<'a> Lowerer<'a> {
         }
 
         self.attach_scoped_handler_bindings(result, condition_bindings, handler_bindings)
+    }
+
+    /// If a nested `with` chain uses handler values bound inside the wrapped
+    /// block, the handler evidence cannot dominate the prefix that creates
+    /// those values. Lower:
+    ///
+    /// `{ prefix; let h = ...; suffix } with h`
+    ///
+    /// as:
+    ///
+    /// `{ prefix; let h = ...; suffix with h }`
+    ///
+    /// This is intentionally a lowering-only rewrite: it keeps dynamic handler
+    /// evidence scoped to the suffix where the handler tuple exists, avoiding
+    /// evidence bindings that reference lets which appear later in the input
+    /// Core Erlang chain.
+    fn lower_with_chain_after_local_handler_bindings(
+        &mut self,
+        expr: &Expr,
+        handler: &Handler,
+        inherited_return_k: Option<CExpr>,
+    ) -> Option<CExpr> {
+        let mut layers_outer_to_inner = vec![handler.clone()];
+        let mut base = expr;
+        while let ExprKind::With {
+            expr: inner,
+            handler,
+        } = &base.kind
+        {
+            layers_outer_to_inner.push((**handler).clone());
+            base = inner;
+        }
+
+        let ExprKind::Block {
+            stmts,
+            dangling_trivia,
+        } = &base.kind
+        else {
+            return None;
+        };
+
+        let local_handler_names: HashSet<String> = layers_outer_to_inner
+            .iter()
+            .filter_map(|layer| match layer {
+                Handler::Named(named) => Some(named.name.clone()),
+                Handler::Inline { .. } => None,
+            })
+            .collect();
+        if local_handler_names.is_empty() {
+            return None;
+        }
+
+        let split_at = stmts
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, stmt)| match &stmt.node {
+                Stmt::Let {
+                    pattern: Pat::Var { name, .. },
+                    value,
+                    ..
+                } if local_handler_names.contains(name) && self.is_handler_value(value) => {
+                    Some(idx)
+                }
+                _ => None,
+            })
+            .max()?;
+
+        if split_at + 1 >= stmts.len() {
+            return None;
+        }
+
+        let suffix = Expr::synth(
+            base.span,
+            ExprKind::Block {
+                stmts: stmts[split_at + 1..].to_vec(),
+                dangling_trivia: dangling_trivia.clone(),
+            },
+        );
+        let mut handled_suffix = suffix;
+        for layer in layers_outer_to_inner.into_iter().rev() {
+            handled_suffix = Expr::synth(
+                base.span,
+                ExprKind::With {
+                    expr: Box::new(handled_suffix),
+                    handler: Box::new(layer),
+                },
+            );
+        }
+
+        let mut rewritten_stmts = stmts[..=split_at].to_vec();
+        rewritten_stmts.push(Annotated::bare(Stmt::Expr(handled_suffix)));
+        let rewritten = Expr::synth(
+            base.span,
+            ExprKind::Block {
+                stmts: rewritten_stmts,
+                dangling_trivia: dangling_trivia.clone(),
+            },
+        );
+        Some(self.lower_expr_with_installed_return_k(&rewritten, inherited_return_k))
     }
 
     /// Build a per-op handler function from a single handler arm.
@@ -1500,7 +1646,6 @@ impl<'a> Lowerer<'a> {
         for (var, _) in &handler_bindings {
             relevant_names.insert(var.clone());
         }
-
         let mut pending: VecDeque<PendingLet> = condition_bindings
             .into_iter()
             .chain(handler_bindings)

@@ -998,11 +998,10 @@ fn register_import_scopes(
                     .iter()
                     .map(|eff| effect_op_counts.get(eff).copied().unwrap_or(0))
                     .sum();
-                // Phase 3b coexistence: effectful callees take handler params,
-                // an `_Evidence` parameter, and `_ReturnK`. The evidence and
-                // return-k slots are gated together by `has_effects`.
+                // Effectful callees take an `_Evidence` parameter and a
+                // `_ReturnK` (gated together by `has_effects`).
                 let extras = if handler_param_count > 0 { 2 } else { 0 };
-                let expanded_arity = arity + dict_params + handler_param_count + extras;
+                let expanded_arity = arity + dict_params + extras;
 
                 let scoped = ScopedName::ImportedFun {
                     erlang_mod: erlang_mod.clone(),
