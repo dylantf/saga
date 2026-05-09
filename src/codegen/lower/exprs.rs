@@ -990,7 +990,7 @@ impl<'a> Lowerer<'a> {
                 // Check if the value is a call to an effectful function. If so,
                 // capture the rest of the block as _ReturnK so abort-style handlers
                 // skip subsequent statements (same CPS treatment as `with`).
-                if return_k.is_some() {
+                {
                     let value_expr = match first {
                         Stmt::Let { value, .. } => value,
                         Stmt::Expr(e) => e,

@@ -1618,15 +1618,7 @@ result () = (work () with to_result_str) with tagger
 // `a ()` is a mid-block effectful call; the resume continuation produces the
 // wrong shape (the runtime gets Unit where the handler's `<>` chain expects
 // String). The simpler `let g = factory(); g x` shape (single call, last
-// stmt) works — see `effectful_var_binding_simple`. Flagged for the
-// evidence-passing cutover; do not fix in Phase 0.
-//
-// Phase 3 acceptance: this fixture must pass after the cutover. The bug shape
-// is exactly what design decision 8 (`docs/planning/plans/evidence-passing-plan.md`)
-// targets — effectful let-bindings whose closure must thread *current*
-// evidence at call time. Un-ignore when Phase 3 lands and add to the
-// regression net.
-#[ignore = "effectful var binding called mid-block miscompiles (pre-existing)"]
+// stmt) works — see `effectful_var_binding_simple`.
 #[test]
 fn effectful_var_binding_deferred_call() {
     // The factory returns a function that captures handler state at call time
@@ -1742,14 +1734,6 @@ result () = (work () with to_result_str) with collect
     );
 }
 
-// FIXME: same shape as `effectful_var_binding_deferred_call` but across
-// modules — the partially-applied effectful function bound via `let info = ...`
-// and called twice in stmt position miscompiles at runtime.
-//
-// Phase 3 acceptance: same root cause as the in-module variant. Cross-module
-// dispatch must publish the callee's `EvidenceLayout` via `ModuleCodegenInfo`
-// (Phase 3f) so the local binder threads ambient evidence correctly.
-#[ignore = "effectful var binding called mid-block miscompiles (pre-existing)"]
 #[test]
 fn cross_module_effectful_var_binding() {
     // The lib exports an effectful function; main partially applies it,
