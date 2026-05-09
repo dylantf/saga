@@ -2813,18 +2813,27 @@ impl<'a> Lowerer<'a> {
         return_k: Option<CExpr>,
         call_span: Option<&crate::token::Span>,
     ) -> Option<CExpr> {
-        let _ = app_id;
-        let callee_effects = self.resolved_effects(head_expr.id, func_name);
-        let callee_ops = callee_effects
-            .as_ref()
-            .map(|effs| self.effect_handler_ops(effs))
-            .unwrap_or_default();
-        let effect_count = callee_ops.len();
+        // Source of truth: the per-call effect map populated pre-lowering.
+        // `info` tells us whether this call is effectful (needs evidence + _ReturnK)
+        // and which effects the callee declares; both used to be recomputed here
+        // from `resolved_effects` + `effect_handler_ops`.
+        let info = self.call_effects.get(&app_id);
+        let (is_effectful, callee_effects_vec): (bool, Vec<String>) = match info.map(|i| &i.kind) {
+            Some(super::call_effects::CallEffectKind::StaticOps { ops })
+            | Some(super::call_effects::CallEffectKind::RowForwarded { static_ops: ops }) => {
+                let mut effs: Vec<String> =
+                    ops.iter().map(|k| k.effect.clone()).collect();
+                effs.sort();
+                effs.dedup();
+                (!ops.is_empty(), effs)
+            }
+            _ => (false, Vec::new()),
+        };
         let total_arity = self
             .resolved_fun_info(head_expr.id, func_name)
             .map(|f| f.arity);
         // Effectful callees take `_Evidence` and `_ReturnK`.
-        let extras = if effect_count > 0 { 2 } else { 0 };
+        let extras = if is_effectful { 2 } else { 0 };
 
         if let Some(arity) = total_arity
             && args.len() + extras == arity
@@ -2837,7 +2846,7 @@ impl<'a> Lowerer<'a> {
                     .collect::<Vec<_>>()
             });
 
-            let is_effectful_outer = effect_count > 0;
+            let is_effectful_outer = is_effectful;
             let effectful_arg_idxs: Vec<usize> = if is_effectful_outer {
                 args.iter()
                     .enumerate()
@@ -2868,7 +2877,6 @@ impl<'a> Lowerer<'a> {
                 let mut call_args: Vec<CExpr> =
                     arg_vars.iter().map(|v| CExpr::Var(v.clone())).collect();
                 // Effectful callee: thread evidence + _ReturnK.
-                let callee_effects_vec = callee_effects.clone().unwrap_or_default();
                 let (ev_var, ev_ce) = self.build_call_evidence(&callee_effects_vec);
                 call_args.push(CExpr::Var(ev_var.clone()));
                 let (rk_var, rk_ce) = self.effectful_call_return_k_binding(return_k);
@@ -2892,9 +2900,8 @@ impl<'a> Lowerer<'a> {
 
             let (mut arg_vars, mut bindings) =
                 self.lower_call_args_with_expected_types(args, param_types.as_deref());
-            if effect_count > 0 {
+            if is_effectful {
                 // Effectful callee: thread evidence + _ReturnK.
-                let callee_effects_vec = callee_effects.clone().unwrap_or_default();
                 let (ev_var, ev_ce) = self.build_call_evidence(&callee_effects_vec);
                 bindings.push((ev_var.clone(), ev_ce));
                 arg_vars.push(ev_var);
@@ -2927,7 +2934,7 @@ impl<'a> Lowerer<'a> {
                 let mut call_args: Vec<CExpr> =
                     arg_vars.iter().map(|v| CExpr::Var(v.clone())).collect();
                 call_args.extend(params.iter().map(|p| CExpr::Var(p.clone())));
-                if effect_count > 0 {
+                if is_effectful {
                     // Closure takes `_Evidence` and `_ReturnK` for the
                     // residual user args; the call forwards them straight
                     // through.
@@ -2954,8 +2961,22 @@ impl<'a> Lowerer<'a> {
         args: &[&Expr],
         return_k: Option<CExpr>,
     ) -> Option<CExpr> {
-        let _ = app_id;
-        let absorbed = self.current_effectful_vars.get(var_name).cloned()?;
+        // Source of truth: the per-call effect map, keyed by this App's NodeId.
+        // Pre-pass already walked the lexical scope and recorded the absorbed
+        // effects for the bound variable on its call-site App entry.
+        let absorbed: Vec<String> = match self.call_effects.get(&app_id).map(|i| &i.kind) {
+            Some(super::call_effects::CallEffectKind::StaticOps { ops })
+            | Some(super::call_effects::CallEffectKind::RowForwarded { static_ops: ops })
+                if !ops.is_empty() =>
+            {
+                let mut effs: Vec<String> =
+                    ops.iter().map(|k| k.effect.clone()).collect();
+                effs.sort();
+                effs.dedup();
+                effs
+            }
+            _ => return None,
+        };
 
         let effectful_arg_idxs: Vec<usize> = args
             .iter()
