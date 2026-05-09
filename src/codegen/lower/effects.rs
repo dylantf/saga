@@ -935,23 +935,9 @@ impl<'a> Lowerer<'a> {
             self.current_handler_finally = Some(fb.as_ref().clone());
         }
 
-        let saved_effectful_vars = self.current_effectful_vars.clone();
-        if let Some(effect_name) = self.effect_for_handler_arm(arm, source_module)
-            && let Some(param_effs) = self
-                .op_param_absorbed_effects(&effect_name, &arm.op_name)
-                .cloned()
-        {
-            for (idx, effs) in &param_effs {
-                if let Some(Pat::Var { name, .. }) = arm.params.get(*idx) {
-                    self.current_effectful_vars
-                        .insert(name.clone(), effs.clone());
-                }
-            }
-        }
         let mut body_ce = self.lower_handler_owned_expr(&arm.body);
 
         self.current_handler_finally = saved_finally;
-        self.current_effectful_vars = saved_effectful_vars;
 
         // Bind arm's params (possibly patterns) to the positional handler args
         for (i, pat) in arm.params.iter().enumerate().rev() {

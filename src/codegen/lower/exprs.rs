@@ -331,9 +331,6 @@ impl<'a> Lowerer<'a> {
                 self.handler_origin_module(),
             );
 
-            let saved_effectful_vars = self.current_effectful_vars.clone();
-            self.register_pat_effectful_vars(&arm.pattern);
-
             match &arm.guard {
                 None => {
                     result.push(CArm {
@@ -353,61 +350,9 @@ impl<'a> Lowerer<'a> {
                     unreachable!("complex guards should be handled by lower_case_expr_chain");
                 }
             }
-
-            self.current_effectful_vars = saved_effectful_vars;
         }
 
         result
-    }
-
-    /// Walk a pattern and register any variable bindings whose type carries
-    /// effects in `current_effectful_vars`, so calls to them at the use site
-    /// thread handler params + `_ReturnK`. Necessary for case-arm-bound
-    /// values like `Streamed producer -> producer () with h`.
-    fn register_pat_effectful_vars(&mut self, pat: &Pat) {
-        match pat {
-            Pat::Var { name, span, .. } => {
-                if let Some(ty) = self.check_result.type_at_span.get(span) {
-                    let effects = crate::typechecker::effects_from_type(ty);
-                    if !effects.is_empty() {
-                        let mut effs: Vec<String> = effects.into_iter().collect();
-                        effs.sort();
-                        let canonical = self.canonicalize_effects(effs);
-                        self.current_effectful_vars.insert(name.clone(), canonical);
-                    }
-                }
-            }
-            Pat::Constructor { args, .. } => {
-                for sub in args {
-                    self.register_pat_effectful_vars(sub);
-                }
-            }
-            Pat::Tuple { elements, .. } | Pat::ListPat { elements, .. } => {
-                for sub in elements {
-                    self.register_pat_effectful_vars(sub);
-                }
-            }
-            Pat::ConsPat { head, tail, .. } => {
-                self.register_pat_effectful_vars(head);
-                self.register_pat_effectful_vars(tail);
-            }
-            Pat::Record { fields, .. } | Pat::AnonRecord { fields, .. } => {
-                for (_, sub) in fields {
-                    if let Some(sub_pat) = sub {
-                        self.register_pat_effectful_vars(sub_pat);
-                    }
-                }
-            }
-            Pat::Or { patterns, .. } => {
-                for sub in patterns {
-                    self.register_pat_effectful_vars(sub);
-                }
-            }
-            Pat::StringPrefix { rest, .. } => {
-                self.register_pat_effectful_vars(rest);
-            }
-            _ => {}
-        }
     }
 
     fn lower_case_expr_chain(&mut self, scrut_var: &str, arms: &[&CaseArm]) -> CExpr {
@@ -421,10 +366,7 @@ impl<'a> Lowerer<'a> {
                 &self.constructor_atoms,
                 self.handler_origin_module(),
             );
-            let saved_effectful_vars = self.current_effectful_vars.clone();
-            self.register_pat_effectful_vars(&arm.pattern);
             let body_ce = self.lower_expr(&arm.body);
-            self.current_effectful_vars = saved_effectful_vars;
 
             let current = match &arm.guard {
                 None => {
@@ -840,15 +782,6 @@ impl<'a> Lowerer<'a> {
                 );
 
                 let handler_ops = self.effect_handler_ops(&effects);
-                let saved_effectful_vars = std::mem::take(&mut self.current_effectful_vars);
-                for (idx, effs) in &param_absorbed_effects {
-                    if let Some(pat) = clauses[0].0.get(*idx)
-                        && let Pat::Var { name, .. } = pat
-                    {
-                        self.current_effectful_vars
-                            .insert(name.clone(), effs.clone());
-                    }
-                }
 
                 let has_effects = !handler_ops.is_empty();
                 let base_arity = arity - if has_effects { 2 } else { 0 };
@@ -944,7 +877,6 @@ impl<'a> Lowerer<'a> {
                         Box::new(CExpr::Case(Box::new(scrutinee), arms)),
                     )
                 };
-                self.current_effectful_vars = saved_effectful_vars;
                 self.current_evidence = saved_evidence;
 
                 let rest_ce = if rest.is_empty() {
@@ -978,16 +910,6 @@ impl<'a> Lowerer<'a> {
                         return CExpr::Let(var, Box::new(rhs_ce), Box::new(rest_ce));
                     }
                     return self.lower_block_with_return_k(rest, return_k);
-                }
-
-                // If this let binding partially applies an effectful function,
-                // register the bound variable so call sites thread handlers.
-                if let Stmt::Let { pattern, .. } = first
-                    && let Pat::Var { name, .. } = pattern
-                    && let Some(effects) = self.ctx.let_effect_bindings.get(name).cloned()
-                    && !effects.is_empty()
-                {
-                    self.current_effectful_vars.insert(name.clone(), effects);
                 }
 
                 // Check if the value is a call to an effectful function. If so,
@@ -1135,10 +1057,7 @@ impl<'a> Lowerer<'a> {
                             self.handler_origin_module(),
                         );
                         let guard_ce = arm.guard.as_ref().map(|g| self.lower_expr_value(g));
-                        let saved_effectful_vars = self.current_effectful_vars.clone();
-                        self.register_pat_effectful_vars(&arm.pattern);
                         let body_ce = self.lower_branch_with_k(&arm.body, k_var);
-                        self.current_effectful_vars = saved_effectful_vars;
                         CArm {
                             pat,
                             guard: guard_ce,

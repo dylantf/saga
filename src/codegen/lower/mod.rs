@@ -36,32 +36,6 @@ pub(crate) fn lower_size_expr(expr: &Expr) -> CExpr {
     }
 }
 
-/// Count how many lambda params can be absorbed from the body of a top-level
-/// function definition. Peels nested lambdas so `fun x -> fun y -> body` counts 2.
-#[cfg(debug_assertions)]
-fn expr_kind_name(expr: &Expr) -> &'static str {
-    match &expr.kind {
-        ExprKind::App { .. } => "App",
-        ExprKind::Var { .. } => "Var",
-        ExprKind::QualifiedName { .. } => "QualifiedName",
-        ExprKind::Lambda { .. } => "Lambda",
-        ExprKind::EffectCall { .. } => "EffectCall",
-        ExprKind::DictMethodAccess { .. } => "DictMethodAccess",
-        _ => "Other",
-    }
-}
-
-#[cfg(debug_assertions)]
-fn app_arg_count(expr: &Expr) -> usize {
-    let mut count = 0;
-    let mut current = expr;
-    while let ExprKind::App { func, .. } = &current.kind {
-        count += 1;
-        current = func;
-    }
-    count
-}
-
 fn count_lambda_params(body: &Expr) -> usize {
     match &body.kind {
         ExprKind::Lambda { params, body, .. } => params.len() + count_lambda_params(body),
@@ -237,9 +211,6 @@ pub struct Lowerer<'a> {
     /// `let` bindings instead of going through CPS continuation-passing, avoiding
     /// closure allocation. Currently all BEAM-native ops satisfy this property.
     direct_ops: HashMap<String, String>,
-    /// When lowering inside a function, maps local variable name -> effects it absorbs.
-    /// Set from FunInfo.param_absorbed_effects for the current function.
-    current_effectful_vars: HashMap<String, Vec<String>>,
     /// Effects that the next lambda being lowered should accept as extra params.
     /// Set by the call site that passes the lambda to an effectful parameter.
     lambda_effect_context: Option<Vec<String>>,
@@ -315,7 +286,6 @@ impl<'a> Lowerer<'a> {
             current_evidence: None,
             no_resume_ops: std::collections::HashSet::new(),
             direct_ops: HashMap::new(),
-            current_effectful_vars: HashMap::new(),
             lambda_effect_context: None,
             constructor_atoms,
             resolved,
@@ -1722,36 +1692,6 @@ impl<'a> Lowerer<'a> {
         }
     }
 
-    /// True when an application is to an effectful function AND has enough
-    /// user arguments to actually perform the effect (i.e. it's saturated up
-    /// to the user-arity boundary). Bare references (`Lib.f`) and partial
-    /// applications (`Lib.wrap Lib.int`) are values, not effect-performing
-    /// calls — only fully-applied calls thread `_ReturnK` and should be
-    /// CPS-chained at the call site.
-    fn call_performs_effect(
-        &self,
-        head_id: crate::ast::NodeId,
-        name: &str,
-        user_args_supplied: usize,
-    ) -> bool {
-        if user_args_supplied == 0 {
-            return false;
-        }
-        let Some(effects) = self.resolved_effects(head_id, name) else {
-            return self.current_effectful_vars.contains_key(name) && user_args_supplied > 0;
-        };
-        if effects.is_empty() {
-            return false;
-        }
-        let Some(info) = self.resolved_fun_info(head_id, name) else {
-            return user_args_supplied > 0;
-        };
-        let handler_ops = self.effect_handler_ops(&effects);
-        let extras = if handler_ops.is_empty() { 0 } else { 2 };
-        let user_arity = info.arity.saturating_sub(extras);
-        user_args_supplied >= user_arity && user_arity > 0
-    }
-
     /// Get a function's arity.
     fn fun_arity(&self, name: &str) -> Option<usize> {
         self.fun_info.get(name).map(|f| f.arity)
@@ -1763,29 +1703,6 @@ impl<'a> Lowerer<'a> {
             .get(name)
             .map(|f| &f.effects)
             .filter(|e| !e.is_empty())
-    }
-
-    /// Get a function's effects from the resolution map, falling back to fun_info
-    /// for resolved names whose effect list was empty in the resolver.
-    fn resolved_effects(&self, node_id: crate::ast::NodeId, name: &str) -> Option<Vec<String>> {
-        use super::resolve::ResolvedName;
-        match self.resolved.get(&node_id) {
-            Some(ResolvedName::ImportedFun { effects, .. })
-            | Some(ResolvedName::LocalFun { effects, .. })
-                if !effects.is_empty() =>
-            {
-                Some(effects.clone())
-            }
-            Some(ResolvedName::ImportedFun { .. }) | Some(ResolvedName::LocalFun { .. }) => {
-                // Resolved as a function but effects were empty in the resolver.
-                // Fall back to fun_info which has CPS-expanded effect info.
-                self.resolved_fun_info(node_id, name)
-                    .map(|f| &f.effects)
-                    .filter(|e| !e.is_empty())
-                    .cloned()
-            }
-            None => None,
-        }
     }
 
     /// Emit a function call using the resolution map.
@@ -1818,26 +1735,6 @@ impl<'a> Lowerer<'a> {
             }
         };
         self.annotate(call, span)
-    }
-
-    /// Get a function's param absorbed effects.
-    fn param_absorbed_effects(&self, name: &str) -> Option<&HashMap<usize, Vec<String>>> {
-        self.fun_info
-            .get(name)
-            .map(|f| &f.param_absorbed_effects)
-            .filter(|m| !m.is_empty())
-    }
-
-    fn op_param_absorbed_effects(
-        &self,
-        effect_name: &str,
-        op_name: &str,
-    ) -> Option<&HashMap<usize, Vec<String>>> {
-        self.effect_defs
-            .get(effect_name)
-            .and_then(|effect| effect.ops.get(op_name))
-            .map(|op| &op.param_absorbed_effects)
-            .filter(|m| !m.is_empty())
     }
 
     pub fn lower_module(&mut self, module_name: &str, program: &ast::Program) -> CModule {
@@ -2054,20 +1951,6 @@ impl<'a> Lowerer<'a> {
             // Effects in scope for this function (drives _Evidence threading).
             let effects = self.fun_effects(&name).cloned().unwrap_or_default();
             let saved_direct_ops = std::mem::take(&mut self.direct_ops);
-            // Set up effectful variable tracking for HOF absorption.
-            // Map param indices to param names from the first clause's patterns.
-            let saved_effectful_vars = std::mem::take(&mut self.current_effectful_vars);
-            if let Some(param_effs) = self.param_absorbed_effects(&name).cloned() {
-                let first_clause_params = clauses[0].0;
-                for (idx, effs) in &param_effs {
-                    if let Some(pat) = first_clause_params.get(*idx)
-                        && let Pat::Var { name: src_name, .. } = pat
-                    {
-                        self.current_effectful_vars
-                            .insert(src_name.clone(), effs.clone());
-                    }
-                }
-            }
 
             let has_effects = !effects.is_empty() && !self.effect_handler_ops(&effects).is_empty();
             // Effectful arity = user + Evidence + ReturnK.
@@ -2224,7 +2107,6 @@ impl<'a> Lowerer<'a> {
             };
 
             self.direct_ops = saved_direct_ops;
-            self.current_effectful_vars = saved_effectful_vars;
             self.current_evidence = saved_evidence;
 
             // fun_span is available for future use (e.g. function-level metadata)
