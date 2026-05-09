@@ -145,6 +145,26 @@ fn assert_core_compiles(out: &str) {
     );
 }
 
+/// Compile the Phase 1 evidence bridge module into `dir` so tests that
+/// emit `std_evidence_bridge:*` calls (every `with`-boundary in 3b) can
+/// resolve them at runtime.
+fn compile_evidence_bridge_into(dir: &std::path::Path) {
+    let bridge_src = include_str!("../src/stdlib/evidence.bridge.erl");
+    let bridge_path = dir.join("std_evidence_bridge.erl");
+    std::fs::write(&bridge_path, bridge_src).unwrap();
+    let status = std::process::Command::new("erlc")
+        .arg("-o")
+        .arg(dir)
+        .arg(&bridge_path)
+        .output()
+        .expect("failed to run erlc on evidence bridge");
+    assert!(
+        status.status.success(),
+        "erlc failed on evidence bridge:\n{}",
+        String::from_utf8_lossy(&status.stderr)
+    );
+}
+
 fn assert_runs_and_stdout_contains(src: &str, needles: &[&str]) {
     use std::sync::atomic::{AtomicUsize, Ordering};
     static COUNTER: AtomicUsize = AtomicUsize::new(0);
@@ -167,6 +187,7 @@ fn assert_runs_and_stdout_contains(src: &str, needles: &[&str]) {
         out,
         String::from_utf8_lossy(&status.stderr)
     );
+    compile_evidence_bridge_into(&dir);
 
     let eval = if out.contains("'main'/1") {
         "io:format(\"~p~n\", ['_script':main(unit)]), init:stop()."

@@ -4,8 +4,21 @@
 use crate::ast::{self, Decl};
 use std::collections::{BTreeSet, HashMap};
 
+use super::evidence::EvidenceLayout;
 use super::util;
 use super::{EffectInfo, FunInfo, HandlerInfo, Lowerer};
+
+/// Build an `EvidenceLayout` for a closed-row callee with the given (already
+/// canonical, sorted) effect names. Returns `None` when `is_open_row` is true,
+/// which is the row-polymorphic sentinel that forces callers to forward full
+/// ambient evidence rather than projecting against a known shape.
+fn evidence_layout_for(effects: &[String], is_open_row: bool) -> Option<EvidenceLayout> {
+    if is_open_row {
+        None
+    } else {
+        Some(EvidenceLayout::new(effects.iter().cloned()))
+    }
+}
 
 fn count_lambda_params(body: &ast::Expr) -> usize {
     match &body.kind {
@@ -276,11 +289,15 @@ impl<'a> Lowerer<'a> {
                             sorted_effects.sort();
                         }
                         let expanded_arity = self.expanded_arity(real_arity, &sorted_effects);
+                        let evidence_layout = evidence_layout_for(&sorted_effects, false);
                         self.fun_info.insert(
                             name.clone(),
                             FunInfo {
                                 arity: expanded_arity,
+                                user_arity: real_arity,
                                 effects: sorted_effects,
+                                evidence_layout,
+                                is_open_row: false,
                                 param_absorbed_effects: HashMap::new(),
                                 param_types: Vec::new(),
                             },
@@ -351,6 +368,7 @@ impl<'a> Lowerer<'a> {
             for d in &info.trait_impl_dicts {
                 self.fun_info.entry(d.dict_name.clone()).or_insert(FunInfo {
                     arity: d.arity,
+                    user_arity: d.arity,
                     ..Default::default()
                 });
             }
@@ -381,17 +399,23 @@ impl<'a> Lowerer<'a> {
                 for (name, scheme) in &info.exports {
                     let (base_arity, effects) = util::arity_and_effects_from_type(&scheme.ty);
                     let effects = self.canonicalize_effects(effects);
+                    let is_open_row = util::has_open_effect_row(&scheme.ty);
                     let dict_param_count = util::dict_param_count(&scheme.constraints);
                     let expanded_arity =
                         self.expanded_arity(base_arity, &effects) + dict_param_count;
+                    let user_arity = base_arity + dict_param_count;
                     let param_absorbed = util::param_absorbed_effects_from_type(&scheme.ty);
                     let param_absorbed: HashMap<usize, Vec<String>> = param_absorbed
                         .into_iter()
                         .map(|(idx, effs)| (idx, self.canonicalize_effects(effs)))
                         .collect();
+                    let evidence_layout = evidence_layout_for(&effects, is_open_row);
                     let fi = FunInfo {
                         arity: expanded_arity,
+                        user_arity,
                         effects,
+                        evidence_layout,
+                        is_open_row,
                         param_absorbed_effects: param_absorbed,
                         param_types: util::param_types_from_type(&scheme.ty),
                     };
@@ -461,8 +485,10 @@ impl<'a> Lowerer<'a> {
         for (name, scheme) in &info.exports {
             let (base_arity, effects) = util::arity_and_effects_from_type(&scheme.ty);
             let effects = self.canonicalize_effects(effects);
+            let is_open_row = util::has_open_effect_row(&scheme.ty);
             let dict_param_count = util::dict_param_count(&scheme.constraints);
             let expanded_arity = self.expanded_arity(base_arity, &effects) + dict_param_count;
+            let user_arity = base_arity + dict_param_count;
             let param_effs = util::param_absorbed_effects_from_type(&scheme.ty);
             let param_effs: HashMap<usize, Vec<String>> = param_effs
                 .into_iter()
@@ -470,9 +496,13 @@ impl<'a> Lowerer<'a> {
                 .collect();
 
             let alias_qualified = format!("{}.{}", prefix, name);
+            let evidence_layout = evidence_layout_for(&effects, is_open_row);
             let fi = FunInfo {
                 arity: expanded_arity,
+                user_arity,
                 effects: effects.clone(),
+                evidence_layout: evidence_layout.clone(),
+                is_open_row,
                 param_absorbed_effects: param_effs.clone(),
                 param_types: util::param_types_from_type(&scheme.ty),
             };
@@ -483,7 +513,10 @@ impl<'a> Lowerer<'a> {
             if is_exposed(name) && exported_names.contains(name.as_str()) {
                 self.fun_info.entry(name.clone()).or_insert(FunInfo {
                     arity: expanded_arity,
+                    user_arity,
                     effects,
+                    evidence_layout,
+                    is_open_row,
                     param_absorbed_effects: param_effs,
                     param_types: util::param_types_from_type(&scheme.ty),
                 });
@@ -504,6 +537,7 @@ impl<'a> Lowerer<'a> {
         for d in &info.trait_impl_dicts {
             self.fun_info.entry(d.dict_name.clone()).or_insert(FunInfo {
                 arity: d.arity,
+                user_arity: d.arity,
                 ..Default::default()
             });
         }
@@ -598,6 +632,14 @@ impl<'a> Lowerer<'a> {
                         }
                     }
                     let arity = self.expanded_arity(base_arity, &effects);
+                    let is_open_row = self
+                        .check_result
+                        .env
+                        .get(name)
+                        .map(|scheme| {
+                            util::has_open_effect_row(&self.check_result.sub.apply(&scheme.ty))
+                        })
+                        .unwrap_or(false);
                     let param_types = self
                         .check_result
                         .env
@@ -606,10 +648,14 @@ impl<'a> Lowerer<'a> {
                             util::param_types_from_type(&self.check_result.sub.apply(&scheme.ty))
                         })
                         .unwrap_or_default();
+                    let evidence_layout = evidence_layout_for(&effects, is_open_row);
                     let canonical = format!("{}.{}", source_module_name, name);
                     self.fun_info.entry(canonical).or_insert(FunInfo {
                         arity,
+                        user_arity: base_arity,
                         effects,
+                        evidence_layout,
+                        is_open_row,
                         param_absorbed_effects,
                         param_types,
                     });

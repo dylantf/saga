@@ -586,6 +586,7 @@ impl<'a> Lowerer<'a> {
         self.current_handler_params = saved_handler_params;
         self.no_resume_ops = saved_no_resume_ops;
         self.direct_ops = saved_direct_ops;
+
         // Post-hoc reachability: scan the lowered body for _Handle_* references,
         // then transitively close through handler binding values.
         let mut needed: HashSet<String> = HashSet::new();

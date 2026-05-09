@@ -291,6 +291,22 @@ pub fn arity_and_effects_from_type(ty: &Type) -> (usize, Vec<String>) {
     (arity, effects.into_iter().collect())
 }
 
+/// Phase-3 variant of [`arity_and_effects_from_type`] that also reports
+/// whether any effect row along the arrow has an open tail. Returns
+/// `(user_arity, sorted_effect_names, has_open_row)`.
+///
+/// Under the evidence-passing convention, `user_arity` is the logical
+/// parameter count seen by source code: it does not include the
+/// `_Evidence` or `_ReturnK` parameters appended at lowering. The
+/// `has_open_row` flag chooses between `StaticOps` (closed-row, project at
+/// call sites against a known `EvidenceLayout`) and `RowForwarded`
+/// (open-row, forward full ambient evidence).
+pub fn arity_and_evidence_from_type(ty: &Type) -> (usize, Vec<String>, bool) {
+    let (user_arity, effects) = arity_and_effects_from_type(ty);
+    let is_open_row = has_open_effect_row(ty);
+    (user_arity, effects, is_open_row)
+}
+
 /// Extract per-parameter absorbed effects from a function type.
 /// Returns a map of param_index -> sorted effect names for parameters
 /// that have EffArrow types (i.e., callbacks that carry effects).

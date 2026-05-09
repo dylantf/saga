@@ -1,7 +1,26 @@
 use saga::{codegen, elaborate, lexer, parser, typechecker};
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
+
+/// Compile the Phase 1 evidence bridge into `dir` so emitted code can resolve
+/// the `std_evidence_bridge:*` calls produced at every `with`-boundary.
+fn compile_evidence_bridge_into(dir: &Path) {
+    let bridge_src = include_str!("../src/stdlib/evidence.bridge.erl");
+    let bridge_path = dir.join("std_evidence_bridge.erl");
+    std::fs::write(&bridge_path, bridge_src).unwrap();
+    let status = std::process::Command::new("erlc")
+        .arg("-o")
+        .arg(dir)
+        .arg(&bridge_path)
+        .output()
+        .expect("failed to run erlc on evidence bridge");
+    assert!(
+        status.status.success(),
+        "erlc failed on evidence bridge:\n{}",
+        String::from_utf8_lossy(&status.stderr)
+    );
+}
 
 fn fixtures_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/modules")
@@ -1085,6 +1104,8 @@ run_ok () = {
         String::from_utf8_lossy(&erlc.stderr)
     );
 
+    compile_evidence_bridge_into(&dir);
+
     let run = std::process::Command::new("erl")
         .arg("-noshell")
         .arg("-pa")
@@ -1170,6 +1191,8 @@ run_ok () = {
         String::from_utf8_lossy(&erlc.stderr)
     );
 
+    compile_evidence_bridge_into(&dir);
+
     let run = std::process::Command::new("erl")
         .arg("-noshell")
         .arg("-pa")
@@ -1253,6 +1276,8 @@ run_ok () = {
         String::from_utf8_lossy(&erlc.stderr)
     );
 
+    compile_evidence_bridge_into(&dir);
+
     let run = std::process::Command::new("erl")
         .arg("-noshell")
         .arg("-pa")
@@ -1328,6 +1353,8 @@ run_via_hof () = {
         "erlc failed on main:\n{main_core}\nstderr: {}",
         String::from_utf8_lossy(&erlc.stderr)
     );
+
+    compile_evidence_bridge_into(&dir);
 
     let run = std::process::Command::new("erl")
         .arg("-noshell")
@@ -1411,6 +1438,8 @@ via_local () = {
         "erlc failed on main:\n{main_core}\nstderr: {}",
         String::from_utf8_lossy(&erlc.stderr)
     );
+
+    compile_evidence_bridge_into(&dir);
 
     let run = std::process::Command::new("erl")
         .arg("-noshell")
@@ -1818,6 +1847,7 @@ run () = reveal (make_token \"hello\")
     );
 
     // Actually run it on the BEAM
+    compile_evidence_bridge_into(&dir);
     let run_output = std::process::Command::new("erl")
         .arg("-noshell")
         .arg("-pa")
@@ -2117,6 +2147,8 @@ run_ok () = {
         String::from_utf8_lossy(&erlc.stderr)
     );
 
+    compile_evidence_bridge_into(&dir);
+
     let run = std::process::Command::new("erl")
         .arg("-noshell")
         .arg("-pa")
@@ -2199,6 +2231,8 @@ run_ok () = {
         "erlc failed on main:\n{main_core}\nstderr: {}",
         String::from_utf8_lossy(&erlc.stderr)
     );
+
+    compile_evidence_bridge_into(&dir);
 
     let run = std::process::Command::new("erl")
         .arg("-noshell")

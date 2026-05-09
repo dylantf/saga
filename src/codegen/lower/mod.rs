@@ -115,11 +115,30 @@ struct EffectOpInfo {
 /// FunInfo only tracks arity/effects needed for CPS transformation.
 #[derive(Debug, Clone, Default)]
 struct FunInfo {
-    /// Exported arity (including handler params). 0 if not yet known (set by FunBinding).
+    /// Exported arity in the *current* (per-op handler params) calling
+    /// convention: base user args + per-op handler params + _ReturnK if
+    /// effectful. 0 if not yet known. The Phase 3 cutover will collapse this
+    /// to `user_arity + has_evidence + has_return_k`.
     arity: usize,
+    /// Logical user-facing arity: just the base parameter count, before any
+    /// handler params or `_ReturnK` were appended. Populated alongside
+    /// `arity` at every FunInfo registration site. Phase 3c+ reads this.
+    #[allow(dead_code)]
+    user_arity: usize,
     /// Effect names from `needs` clause (sorted). Used to determine which
     /// handler params to thread through at call sites.
     effects: Vec<String>,
+    /// Evidence layout for closed-row callees. `None` is the row-polymorphic
+    /// sentinel: callers must forward their full ambient evidence rather
+    /// than projecting against a known shape.
+    #[allow(dead_code)]
+    evidence_layout: Option<evidence::EvidenceLayout>,
+    /// True when the callee's declared effect row has an open tail
+    /// (`needs {Foo, ..e}`). Phase 3 call-site lowering uses this to choose
+    /// `RowForwarded` (forward full evidence) vs `StaticOps` (project against
+    /// `evidence_layout`). Mirrors `util::has_open_effect_row` on the
+    /// declared/inferred type.
+    is_open_row: bool,
     /// For EffArrow params: param_index -> absorbed effects. Used to inject
     /// handler params into lambdas passed to effectful higher-order functions.
     param_absorbed_effects: HashMap<usize, Vec<String>>,
@@ -127,6 +146,24 @@ struct FunInfo {
     /// Used to propagate expected callback shapes through containers at call sites
     /// without depending on fully specialized row-polymorphic instantiations.
     param_types: Vec<crate::typechecker::Type>,
+}
+
+impl FunInfo {
+    /// Whether an `_Evidence` parameter is part of this callee's signature
+    /// under the new convention. Today's emission still threads per-op
+    /// handler params; Phase 3c+ will switch to reading this directly.
+    #[allow(dead_code)]
+    fn has_evidence(&self) -> bool {
+        !self.effects.is_empty() || self.is_open_row
+    }
+
+    /// Whether a `_ReturnK` parameter is part of this callee's signature.
+    /// Currently coupled to `has_evidence`; tracked separately so Phase 5's
+    /// closed-row specialization can decouple them later.
+    #[allow(dead_code)]
+    fn has_return_k(&self) -> bool {
+        self.has_evidence()
+    }
 }
 
 /// Explicit lowering context for value-producing vs terminal positions.
@@ -871,6 +908,7 @@ impl<'a> Lowerer<'a> {
         format!("{}__{}", Self::handler_param_name(effect, op), suffix)
     }
 
+
     /// Compute the expanded arity for a function with the given base arity
     /// and effect requirements. Accounts for one handler param per op plus
     /// a _ReturnK param if there are any effects.
@@ -1211,7 +1249,7 @@ impl<'a> Lowerer<'a> {
                         arity: info.arity,
                         effects: info.effects.clone(),
                         param_absorbed_effects: info.param_absorbed_effects.clone(),
-                        is_open_row: self.fun_has_open_row(name),
+                        is_open_row: info.is_open_row,
                     },
                 )
             })
@@ -1590,29 +1628,6 @@ impl<'a> Lowerer<'a> {
             }
             Pat::Wildcard { .. } | Pat::Var { .. } | Pat::Lit { .. } => {}
         }
-    }
-
-    /// Look up whether a top-level function's declared/inferred type carries
-    /// an open effect row (`needs {Foo, ..e}`). Consults the local check_result
-    /// first (for module-local funs) and then cross-module codegen info.
-    fn fun_has_open_row(&self, name: &str) -> bool {
-        if let Some(scheme) = self.check_result.env.get(name)
-            && util::has_open_effect_row(&self.check_result.sub.apply(&scheme.ty))
-        {
-            return true;
-        }
-        // Canonical "Mod.name" form: try imported modules' exports.
-        if let Some((mod_part, fun_part)) = name.rsplit_once('.')
-            && let Some(compiled) = self.ctx.modules.get(mod_part)
-            && let Some((_, scheme)) = compiled
-                .codegen_info
-                .exports
-                .iter()
-                .find(|(n, _)| n == fun_part)
-        {
-            return util::has_open_effect_row(&scheme.ty);
-        }
-        false
     }
 
     fn collect_let_fun_sigs_in_decl(
@@ -2046,6 +2061,19 @@ impl<'a> Lowerer<'a> {
                         }
                     }
                     let arity = self.expanded_arity(base_arity, &effects);
+                    let is_open_row = self
+                        .check_result
+                        .env
+                        .get(name)
+                        .map(|scheme| {
+                            util::has_open_effect_row(&self.check_result.sub.apply(&scheme.ty))
+                        })
+                        .unwrap_or(false);
+                    let evidence_layout = if is_open_row {
+                        None
+                    } else {
+                        Some(evidence::EvidenceLayout::new(effects.iter().cloned()))
+                    };
                     if let Some(group) = clause_groups.iter_mut().find(|(n, _, _, _)| n == name) {
                         // Additional clause: just add to existing group
                         group.2.push((params, guard, body));
@@ -2055,7 +2083,10 @@ impl<'a> Lowerer<'a> {
                             name.clone(),
                             FunInfo {
                                 arity,
+                                user_arity: base_arity,
                                 effects,
+                                evidence_layout,
+                                is_open_row,
                                 param_absorbed_effects,
                                 param_types,
                             },
@@ -2078,6 +2109,7 @@ impl<'a> Lowerer<'a> {
                         name.clone(),
                         FunInfo {
                             arity: dict_params.len(),
+                            user_arity: dict_params.len(),
                             ..Default::default()
                         },
                     );
