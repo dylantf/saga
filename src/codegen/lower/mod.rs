@@ -1145,7 +1145,7 @@ impl<'a> Lowerer<'a> {
         let Some(effects) = effects_opt else {
             // Fall through to current_effectful_vars fallback.
             if self.current_effectful_vars.contains_key(&name) {
-                let effs = self.current_effectful_vars[&name].clone();
+                let effs = self.canonicalize_effects(self.current_effectful_vars[&name].clone());
                 let ops = self.collect_op_keys_inline(&effs);
                 let is_pure = ops.is_empty();
                 return CallEffectInfo {
@@ -1344,6 +1344,7 @@ impl<'a> Lowerer<'a> {
             &fun_sigs,
             &let_fun_sigs,
             &effect_ops,
+            &self.effect_canonical,
             &self.ctx.let_effect_bindings,
             &pattern_effect_bindings,
             &head_open_row,

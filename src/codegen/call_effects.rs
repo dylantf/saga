@@ -87,6 +87,10 @@ pub struct Populator<'a> {
     let_fun_sigs: &'a HashMap<NodeId, FunSig>,
     /// Effect canonical name -> sorted op names.
     effect_ops: &'a HashMap<String, Vec<String>>,
+    /// Bare effect name -> canonical effect name (mirrors `Lowerer::effect_canonical`).
+    /// Effects from `let_effect_bindings` and pattern-bound vars use bare names;
+    /// `effect_ops` is keyed canonically. This map bridges the two.
+    effect_canonical: &'a HashMap<String, String>,
     /// Static let-binding effects from CodegenContext.
     let_effect_bindings: &'a HashMap<String, Vec<String>>,
     /// Pattern-bound effectful variables keyed by the pattern's `NodeId`.
@@ -111,6 +115,7 @@ impl<'a> Populator<'a> {
         fun_sigs: &'a HashMap<String, FunSig>,
         let_fun_sigs: &'a HashMap<NodeId, FunSig>,
         effect_ops: &'a HashMap<String, Vec<String>>,
+        effect_canonical: &'a HashMap<String, String>,
         let_effect_bindings: &'a HashMap<String, Vec<String>>,
         pattern_effect_bindings: &'a HashMap<NodeId, Vec<String>>,
         head_open_row: &'a HashMap<NodeId, bool>,
@@ -120,6 +125,7 @@ impl<'a> Populator<'a> {
             fun_sigs,
             let_fun_sigs,
             effect_ops,
+            effect_canonical,
             let_effect_bindings,
             pattern_effect_bindings,
             head_open_row,
@@ -127,6 +133,13 @@ impl<'a> Populator<'a> {
             scopes: Vec::new(),
             local_fun_sigs: Vec::new(),
         }
+    }
+
+    fn canonicalize(&self, bare: &str) -> String {
+        self.effect_canonical
+            .get(bare)
+            .cloned()
+            .unwrap_or_else(|| bare.to_string())
     }
 
     pub fn populate(mut self, program: &Program) -> CallEffectMap {
@@ -686,10 +699,14 @@ impl<'a> Populator<'a> {
     fn collect_op_keys(&self, effects: &[String]) -> Vec<OpKey> {
         let mut out = Vec::new();
         for eff in effects {
-            if let Some(op_names) = self.effect_ops.get(eff) {
+            // Effect names from `let_effect_bindings` and pattern bindings come
+            // through bare; `effect_ops` is keyed canonically. Canonicalize
+            // before lookup so the two stores agree.
+            let canonical = self.canonicalize(eff);
+            if let Some(op_names) = self.effect_ops.get(&canonical) {
                 for op in op_names {
                     out.push(OpKey {
-                        effect: eff.clone(),
+                        effect: canonical.clone(),
                         op: op.clone(),
                     });
                 }
