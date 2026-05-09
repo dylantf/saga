@@ -640,3 +640,350 @@ pub fn normalize_effects(program: &Program) -> Program {
         })
         .collect()
 }
+
+#[cfg(test)]
+mod tests {
+    //! Regression: the call-effects pre-pass keys on `NodeId` and assumes
+    //! source `App` ids survive `normalize_effects`. Verify this remains true
+    //! so future normalize changes don't silently break the pre-pass.
+
+    use super::*;
+    use crate::lexer::Lexer;
+    use crate::parser::Parser;
+
+    fn parse(source: &str) -> Program {
+        let tokens = Lexer::new(source).lex().expect("lex");
+        Parser::new(tokens).parse_program().expect("parse")
+    }
+
+    fn collect_app_ids(program: &Program) -> Vec<NodeId> {
+        let mut ids = Vec::new();
+        for decl in program {
+            walk_decl(decl, &mut ids);
+        }
+        ids.sort_by_key(|id| id.0);
+        ids
+    }
+
+    fn walk_decl(decl: &Decl, ids: &mut Vec<NodeId>) {
+        match decl {
+            Decl::FunBinding { guard, body, .. } => {
+                if let Some(g) = guard {
+                    walk(g, ids);
+                }
+                walk(body, ids);
+            }
+            Decl::Let { value, .. } | Decl::Val { value, .. } => walk(value, ids),
+            Decl::HandlerDef {
+                body,
+                recovered_arms,
+                ..
+            } => {
+                walk_handler_body(body, ids);
+                for arm in recovered_arms {
+                    walk_handler_arm(&arm.node, ids);
+                }
+            }
+            Decl::ImplDef { methods, .. } => {
+                for method in methods {
+                    walk(&method.node.body, ids);
+                }
+            }
+            Decl::DictConstructor { methods, .. } => {
+                for method in methods {
+                    walk(method, ids);
+                }
+            }
+            Decl::FunSignature { .. }
+            | Decl::TypeDef { .. }
+            | Decl::RecordDef { .. }
+            | Decl::EffectDef { .. }
+            | Decl::TraitDef { .. }
+            | Decl::Import { .. }
+            | Decl::ModuleDecl { .. } => {}
+        }
+    }
+
+    fn walk_stmt(stmt: &Stmt, ids: &mut Vec<NodeId>) {
+        match stmt {
+            Stmt::Let { value, .. } | Stmt::Expr(value) => walk(value, ids),
+            Stmt::LetFun { guard, body, .. } => {
+                if let Some(g) = guard {
+                    walk(g, ids);
+                }
+                walk(body, ids);
+            }
+        }
+    }
+
+    fn walk_case_arm(arm: &CaseArm, ids: &mut Vec<NodeId>) {
+        if let Some(g) = &arm.guard {
+            walk(g, ids);
+        }
+        walk(&arm.body, ids);
+    }
+
+    fn walk_handler_body(body: &HandlerBody, ids: &mut Vec<NodeId>) {
+        for arm in &body.arms {
+            walk_handler_arm(&arm.node, ids);
+        }
+        if let Some(rc) = &body.return_clause {
+            walk_handler_arm(rc, ids);
+        }
+    }
+
+    fn walk_handler_arm(arm: &HandlerArm, ids: &mut Vec<NodeId>) {
+        walk(&arm.body, ids);
+        if let Some(fb) = &arm.finally_block {
+            walk(fb, ids);
+        }
+    }
+
+    fn walk_handler(handler: &Handler, ids: &mut Vec<NodeId>) {
+        match handler {
+            Handler::Named(_) => {}
+            Handler::Inline { items, .. } => {
+                for item in items {
+                    match &item.node {
+                        HandlerItem::Named(_) => {}
+                        HandlerItem::Arm(arm) | HandlerItem::Return(arm) => {
+                            walk_handler_arm(arm, ids);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    fn walk(expr: &Expr, ids: &mut Vec<NodeId>) {
+        if matches!(expr.kind, ExprKind::App { .. }) {
+            ids.push(expr.id);
+        }
+        match &expr.kind {
+            ExprKind::Lit { .. }
+            | ExprKind::Var { .. }
+            | ExprKind::Constructor { .. }
+            | ExprKind::QualifiedName { .. }
+            | ExprKind::DictRef { .. } => {}
+            ExprKind::App { func, arg } => {
+                walk(func, ids);
+                walk(arg, ids);
+            }
+            ExprKind::If {
+                cond,
+                then_branch,
+                else_branch,
+                ..
+            } => {
+                walk(cond, ids);
+                walk(then_branch, ids);
+                walk(else_branch, ids);
+            }
+            ExprKind::Case {
+                scrutinee, arms, ..
+            } => {
+                walk(scrutinee, ids);
+                for arm in arms {
+                    walk_case_arm(&arm.node, ids);
+                }
+            }
+            ExprKind::Block { stmts, .. } => {
+                for stmt in stmts {
+                    walk_stmt(&stmt.node, ids);
+                }
+            }
+            ExprKind::Lambda { body, .. } => walk(body, ids),
+            ExprKind::BinOp { left, right, .. } => {
+                walk(left, ids);
+                walk(right, ids);
+            }
+            ExprKind::UnaryMinus { expr } => walk(expr, ids),
+            ExprKind::FieldAccess { expr, .. } => walk(expr, ids),
+            ExprKind::RecordCreate { fields, .. } | ExprKind::AnonRecordCreate { fields } => {
+                for (_, _, value) in fields {
+                    walk(value, ids);
+                }
+            }
+            ExprKind::RecordUpdate { record, fields, .. } => {
+                walk(record, ids);
+                for (_, _, value) in fields {
+                    walk(value, ids);
+                }
+            }
+            ExprKind::EffectCall { args, .. } => {
+                for a in args {
+                    walk(a, ids);
+                }
+            }
+            ExprKind::With { expr, handler } => {
+                walk(expr, ids);
+                walk_handler(handler, ids);
+            }
+            ExprKind::Resume { value } => walk(value, ids),
+            ExprKind::Tuple { elements } | ExprKind::ListLit { elements } => {
+                for e in elements {
+                    walk(e, ids);
+                }
+            }
+            ExprKind::Do {
+                bindings,
+                success,
+                else_arms,
+                ..
+            } => {
+                for (_, e) in bindings {
+                    walk(e, ids);
+                }
+                walk(success, ids);
+                for arm in else_arms {
+                    walk_case_arm(&arm.node, ids);
+                }
+            }
+            ExprKind::Receive {
+                arms, after_clause, ..
+            } => {
+                for arm in arms {
+                    walk_case_arm(&arm.node, ids);
+                }
+                if let Some((timeout, body)) = after_clause {
+                    walk(timeout, ids);
+                    walk(body, ids);
+                }
+            }
+            ExprKind::BitString { segments } => {
+                for seg in segments {
+                    walk(&seg.value, ids);
+                    if let Some(size) = &seg.size {
+                        walk(size, ids);
+                    }
+                }
+            }
+            ExprKind::Ascription { expr, .. } => walk(expr, ids),
+            ExprKind::HandlerExpr { body } => walk_handler_body(body, ids),
+            ExprKind::Pipe { segments, .. }
+            | ExprKind::BinOpChain { segments, .. }
+            | ExprKind::PipeBack { segments }
+            | ExprKind::ComposeForward { segments } => {
+                for segment in segments {
+                    walk(&segment.node, ids);
+                }
+            }
+            ExprKind::Cons { head, tail } => {
+                walk(head, ids);
+                walk(tail, ids);
+            }
+            ExprKind::StringInterp { parts, .. } => {
+                for part in parts {
+                    if let StringPart::Expr(e) = part {
+                        walk(e, ids);
+                    }
+                }
+            }
+            ExprKind::ListComprehension { body, qualifiers } => {
+                walk(body, ids);
+                for q in qualifiers {
+                    match q {
+                        ComprehensionQualifier::Generator(_, e)
+                        | ComprehensionQualifier::Let(_, e)
+                        | ComprehensionQualifier::Guard(e) => walk(e, ids),
+                    }
+                }
+            }
+            ExprKind::DictMethodAccess { dict, .. } => walk(dict, ids),
+            ExprKind::ForeignCall { args, .. } => {
+                for arg in args {
+                    walk(arg, ids);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn normalize_preserves_app_node_ids() {
+        let src = r#"
+fun add : Int -> Int -> Int
+add x y = x + y
+
+effect Log {
+  fun log : String -> Int
+}
+
+fun main : Unit -> Int
+main () = {
+  let v = add 1 (add 2 3)
+  let local x = add x 1
+  let w = if v == 5 then local v else add v 2
+  let r = case w {
+    6 -> add w 1
+    _ -> add w 2
+  }
+  add v 4
+}
+
+handler h for Log {
+  log msg = {
+    let x = add 1 2
+    resume x
+  }
+  return value = add value 1
+}
+"#;
+        let parsed = parse(src);
+        let before = collect_app_ids(&parsed);
+        let normalized = normalize_effects(&parsed);
+        let after = collect_app_ids(&normalized);
+        assert!(
+            before.iter().all(|id| after.contains(id)),
+            "normalize dropped some App NodeIds. Before: {:?}, After: {:?}",
+            before,
+            after,
+        );
+    }
+
+    /// Exercise `lift_to_let`: programs containing effect calls embedded in
+    /// non-effect expressions (e.g. `1 + ask!()`, `add (ask!()) 2`) force
+    /// normalization to lift the effect call out into a fresh let-binding.
+    /// The call-effects pre-pass keys every `App` site by NodeId, so any
+    /// future normalize change that drops or rewrites those ids on the lift
+    /// path would silently miscompile evidence threading. This test pins the
+    /// contract: every pre-normalize App id is reachable post-normalize,
+    /// even when the surrounding expression is rewritten.
+    #[test]
+    fn normalize_preserves_app_node_ids_through_lift_path() {
+        let src = r#"
+fun add : Int -> Int -> Int
+add x y = x + y
+
+effect Ask {
+  fun ask : Unit -> Int
+}
+
+fun main : Unit -> Int needs {Ask}
+main () = {
+  let a = 1 + ask! ()
+  let b = add (ask! ()) 2
+  let c = add (add 1 (ask! ())) (ask! ())
+  let d = if (ask! ()) == 0 then add a 1 else add b 2
+  let e = case (ask! ()) {
+    0 -> add c 1
+    _ -> add d 2
+  }
+  add e (ask! ())
+}
+"#;
+        let parsed = parse(src);
+        let before = collect_app_ids(&parsed);
+        let normalized = normalize_effects(&parsed);
+        let after = collect_app_ids(&normalized);
+        let missing: Vec<NodeId> = before
+            .iter()
+            .filter(|id| !after.contains(id))
+            .copied()
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "normalize dropped App NodeIds on the lift path: {:?}",
+            missing,
+        );
+    }
+}

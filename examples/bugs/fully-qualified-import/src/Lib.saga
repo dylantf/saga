@@ -1,0 +1,4 @@
+module Lib
+
+pub fun foo : Unit -> Unit
+foo () = ()

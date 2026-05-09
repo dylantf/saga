@@ -1,7 +1,26 @@
 use saga::{codegen, elaborate, lexer, parser, typechecker};
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
+
+/// Compile the Phase 1 evidence bridge into `dir` so emitted code can resolve
+/// the `std_evidence_bridge:*` calls produced at every `with`-boundary.
+fn compile_evidence_bridge_into(dir: &Path) {
+    let bridge_src = include_str!("../src/stdlib/evidence.bridge.erl");
+    let bridge_path = dir.join("std_evidence_bridge.erl");
+    std::fs::write(&bridge_path, bridge_src).unwrap();
+    let status = std::process::Command::new("erlc")
+        .arg("-o")
+        .arg(dir)
+        .arg(&bridge_path)
+        .output()
+        .expect("failed to run erlc on evidence bridge");
+    assert!(
+        status.status.success(),
+        "erlc failed on evidence bridge:\n{}",
+        String::from_utf8_lossy(&status.stderr)
+    );
+}
 
 fn fixtures_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/modules")
@@ -301,34 +320,30 @@ main () = {
 }
 "#;
 
-    with_temp_project_files(
-        &[("lib/Server.saga", lib)],
-        main_src,
-        |checker, program| {
-            let out = emit_from_program(program, "main", checker);
-            // The call to lib_server:run must pass user arg + Reporter handler
-            // + Process handlers (spawn/send/exit) + ReturnK.
-            assert_contains(&out, "_Handle_Lib_Server_Reporter_report");
-            assert_contains(&out, "call 'lib_server':'run'");
-            // Saturated, not partial-applied: the bug emitted a closure
-            // whose parameter list included `_Handle_Lib_Server_Reporter_report`
-            // and other handler params. A correctly threaded call binds those
-            // handler vars in `let <_Handle_...> = ...` and passes them to the
-            // call. Detect the bug shape: the handler param appearing as a
-            // *closure parameter* (right after `fun (` rather than inside a
-            // `let <...>` binding).
-            let bug_shape = "_Handle_Lib_Server_Reporter_report,";
-            let bug_present = out.lines().any(|line| {
-                let trimmed = line.trim_start();
-                trimmed.starts_with("fun (") && trimmed.contains(bug_shape)
-            });
-            assert!(
-                !bug_present,
-                "imported run call appears to be wrapped in a partial-app closure:\n{out}"
-            );
-            assert_erlc_compiles(&out, "main");
-        },
-    );
+    with_temp_project_files(&[("lib/Server.saga", lib)], main_src, |checker, program| {
+        let out = emit_from_program(program, "main", checker);
+        // The call to lib_server:run must pass user arg + Reporter handler
+        // + Process handlers (spawn/send/exit) + ReturnK.
+        assert_contains(&out, "_Handle_Lib_Server_Reporter_report");
+        assert_contains(&out, "call 'lib_server':'run'");
+        // Saturated, not partial-applied: the bug emitted a closure
+        // whose parameter list included `_Handle_Lib_Server_Reporter_report`
+        // and other handler params. A correctly threaded call binds those
+        // handler vars in `let <_Handle_...> = ...` and passes them to the
+        // call. Detect the bug shape: the handler param appearing as a
+        // *closure parameter* (right after `fun (` rather than inside a
+        // `let <...>` binding).
+        let bug_shape = "_Handle_Lib_Server_Reporter_report,";
+        let bug_present = out.lines().any(|line| {
+            let trimmed = line.trim_start();
+            trimmed.starts_with("fun (") && trimmed.contains(bug_shape)
+        });
+        assert!(
+            !bug_present,
+            "imported run call appears to be wrapped in a partial-app closure:\n{out}"
+        );
+        assert_erlc_compiles(&out, "main");
+    });
 }
 
 #[test]
@@ -366,8 +381,7 @@ main () = {
             let out = emit_from_program(program, "main", checker);
             assert_contains(&out, "_Handle_Db_Postgres_ping");
             assert_contains(&out, "call 'db':'run'");
-            // The handler must be threaded into the imported effectful call as the
-            // middle argument of the (arg, handler, continuation) triple.
+            // The imported effectful call takes (arg, evidence, continuation).
             let call_idx = out
                 .find("call 'db':'run'")
                 .expect("expected call to db:run");
@@ -379,12 +393,7 @@ main () = {
             assert_eq!(
                 parts.len(),
                 3,
-                "expected (arg, handler, continuation), got: {args}"
-            );
-            assert!(
-                parts[1].starts_with("_Handle_Db_Postgres_ping"),
-                "expected handler in middle position, got: {}",
-                parts[1]
+                "expected (arg, evidence, continuation), got: {args}"
             );
             assert_erlc_compiles(&out, "main");
         },
@@ -985,13 +994,13 @@ main () = greet \"world\" with {
 
 #[test]
 fn cross_module_effectful_export_arity() {
-    // Logger.greet should be exported with expanded arity (1 + 1 handler + 1 ReturnK = 3)
+    // Logger.greet should be exported with expanded arity
+    // (1 user + _Evidence + _ReturnK = 3).
     let logger_src = std::fs::read_to_string(fixtures_root().join("Logger.saga")).unwrap();
     let mut checker = make_project_checker();
     let program = typecheck_source(&logger_src, &mut checker);
     let out = emit_from_program(&program, "logger", &checker);
 
-    // greet should be exported with arity 3 (name, _HandleLog, _ReturnK)
     assert_contains(&out, "'greet'/3");
 }
 
@@ -1089,14 +1098,14 @@ run_ok () = {
         String::from_utf8_lossy(&erlc.stderr)
     );
 
+    compile_evidence_bridge_into(&dir);
+
     let run = std::process::Command::new("erl")
         .arg("-noshell")
         .arg("-pa")
         .arg(&dir)
         .arg("-eval")
-        .arg(
-            "io:format(\"~s|~s~n\", [main:run_fail(unit), main:run_ok(unit)]), init:stop().",
-        )
+        .arg("io:format(\"~s|~s~n\", [main:run_fail(unit), main:run_ok(unit)]), init:stop().")
         .output()
         .expect("failed to run erl");
     let _ = std::fs::remove_dir_all(&dir);
@@ -1176,14 +1185,14 @@ run_ok () = {
         String::from_utf8_lossy(&erlc.stderr)
     );
 
+    compile_evidence_bridge_into(&dir);
+
     let run = std::process::Command::new("erl")
         .arg("-noshell")
         .arg("-pa")
         .arg(&dir)
         .arg("-eval")
-        .arg(
-            "io:format(\"~s|~s~n\", [main:run_fail(unit), main:run_ok(unit)]), init:stop().",
-        )
+        .arg("io:format(\"~s|~s~n\", [main:run_fail(unit), main:run_ok(unit)]), init:stop().")
         .output()
         .expect("failed to run erl");
     let _ = std::fs::remove_dir_all(&dir);
@@ -1261,14 +1270,14 @@ run_ok () = {
         String::from_utf8_lossy(&erlc.stderr)
     );
 
+    compile_evidence_bridge_into(&dir);
+
     let run = std::process::Command::new("erl")
         .arg("-noshell")
         .arg("-pa")
         .arg(&dir)
         .arg("-eval")
-        .arg(
-            "io:format(\"~s|~s~n\", [main:run_fail(unit), main:run_ok(unit)]), init:stop().",
-        )
+        .arg("io:format(\"~s|~s~n\", [main:run_fail(unit), main:run_ok(unit)]), init:stop().")
         .output()
         .expect("failed to run erl");
     let _ = std::fs::remove_dir_all(&dir);
@@ -1338,6 +1347,8 @@ run_via_hof () = {
         "erlc failed on main:\n{main_core}\nstderr: {}",
         String::from_utf8_lossy(&erlc.stderr)
     );
+
+    compile_evidence_bridge_into(&dir);
 
     let run = std::process::Command::new("erl")
         .arg("-noshell")
@@ -1421,6 +1432,8 @@ via_local () = {
         "erlc failed on main:\n{main_core}\nstderr: {}",
         String::from_utf8_lossy(&erlc.stderr)
     );
+
+    compile_evidence_bridge_into(&dir);
 
     let run = std::process::Command::new("erl")
         .arg("-noshell")
@@ -1828,6 +1841,7 @@ run () = reveal (make_token \"hello\")
     );
 
     // Actually run it on the BEAM
+    compile_evidence_bridge_into(&dir);
     let run_output = std::process::Command::new("erl")
         .arg("-noshell")
         .arg("-pa")
@@ -2127,14 +2141,14 @@ run_ok () = {
         String::from_utf8_lossy(&erlc.stderr)
     );
 
+    compile_evidence_bridge_into(&dir);
+
     let run = std::process::Command::new("erl")
         .arg("-noshell")
         .arg("-pa")
         .arg(&dir)
         .arg("-eval")
-        .arg(
-            "io:format(\"~s|~s~n\", [main:run_fail(unit), main:run_ok(unit)]), init:stop().",
-        )
+        .arg("io:format(\"~s|~s~n\", [main:run_fail(unit), main:run_ok(unit)]), init:stop().")
         .output()
         .expect("failed to run erl");
     let _ = std::fs::remove_dir_all(&dir);
@@ -2212,14 +2226,14 @@ run_ok () = {
         String::from_utf8_lossy(&erlc.stderr)
     );
 
+    compile_evidence_bridge_into(&dir);
+
     let run = std::process::Command::new("erl")
         .arg("-noshell")
         .arg("-pa")
         .arg(&dir)
         .arg("-eval")
-        .arg(
-            "io:format(\"~s|~s~n\", [main:run_fail(unit), main:run_ok(unit)]), init:stop().",
-        )
+        .arg("io:format(\"~s|~s~n\", [main:run_fail(unit), main:run_ok(unit)]), init:stop().")
         .output()
         .expect("failed to run erl");
     let _ = std::fs::remove_dir_all(&dir);

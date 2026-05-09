@@ -1,0 +1,9 @@
+module Main
+
+import Std.IO (console)
+
+main () = {
+  Lib.foo ()
+
+  println "Hello, world!"
+} with console

@@ -983,7 +983,7 @@ fn register_import_scopes(
                 // Merge with fun_effects (which strips beam-native effects in
                 // check_module.rs but is otherwise the authoritative annotation
                 // list). Effects from the type include beam-native ones; the
-                // lowered function emits handler params for *all* of them, so
+                // lowered function threads evidence covering *all* of them, so
                 // the resolver's arity calculation must match. This mirrors
                 // the supplementation in `lower/init.rs`.
                 if let Some(ann_effs) = fun_effects_map.get(name.as_str()) {
@@ -998,8 +998,10 @@ fn register_import_scopes(
                     .iter()
                     .map(|eff| effect_op_counts.get(eff).copied().unwrap_or(0))
                     .sum();
-                let return_k = if handler_param_count > 0 { 1 } else { 0 };
-                let expanded_arity = arity + dict_params + handler_param_count + return_k;
+                // Effectful callees take an `_Evidence` parameter and a
+                // `_ReturnK` (gated together by `has_effects`).
+                let extras = if handler_param_count > 0 { 2 } else { 0 };
+                let expanded_arity = arity + dict_params + extras;
 
                 let scoped = ScopedName::ImportedFun {
                     erlang_mod: erlang_mod.clone(),

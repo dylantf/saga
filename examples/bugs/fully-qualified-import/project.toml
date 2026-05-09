@@ -1,0 +1,12 @@
+[project]
+name = "fully-qualified-import"
+
+[bin]
+main = "src/Main.saga"
+
+# [library]
+# module = "FullyQualifiedImport"
+# expose = []
+
+# [deps]
+# some-lib = { path = "../some-lib" }

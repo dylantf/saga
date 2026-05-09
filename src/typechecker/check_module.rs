@@ -319,6 +319,11 @@ pub struct TraitImplDict {
     /// Where-clause constraints as (constraint_trait, param_index) pairs.
     /// Used by the elaborator to pass correct sub-dicts for parameterized impls.
     pub param_constraints: Vec<(String, usize)>,
+    /// Sorted, canonical effect names declared in the impl's `needs` clause.
+    /// Applies uniformly to every method dispatched through this dict — codegen
+    /// uses it to thread evidence at trait method call sites that elaborated
+    /// to `DictMethodAccess`. Empty when the impl has no `needs` clause.
+    pub impl_effects: Vec<String>,
 }
 
 /// Information about a module's exports needed by the lowerer/codegen.
@@ -1512,6 +1517,7 @@ fn collect_codegen_info(
                 target_type,
                 type_params,
                 where_clause,
+                needs,
                 ..
             } => {
                 // Resolve trait name to canonical form via scope_map
@@ -1559,6 +1565,17 @@ fn collect_codegen_info(
                         })
                     })
                     .collect();
+                let mut impl_effects: Vec<String> = needs
+                    .iter()
+                    .map(|e| {
+                        scope_map
+                            .resolve_effect(&e.name)
+                            .map(|s| s.to_string())
+                            .unwrap_or_else(|| e.name.clone())
+                    })
+                    .collect();
+                impl_effects.sort();
+                impl_effects.dedup();
                 trait_impl_dicts.push(TraitImplDict {
                     trait_name: canonical_trait,
                     trait_type_args: canonical_trait_type_args,
@@ -1566,6 +1583,7 @@ fn collect_codegen_info(
                     dict_name,
                     arity,
                     param_constraints,
+                    impl_effects,
                 });
             }
             _ => {}

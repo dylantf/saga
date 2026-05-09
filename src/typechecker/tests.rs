@@ -5173,11 +5173,11 @@ fn effect_op_row_variable_freshens_per_call_site() {
 #[test]
 fn handler_factory_must_propagate_handler_needs() {
     // A function that returns a `handler for E needs {X}` constructs a handler
-    // value whose arm bodies use X. With static handler threading, the arm
-    // closures capture handler params from the construction site — i.e. the
-    // factory function must have X in its own `needs` so the lowerer can
-    // route it. Without this, the codegen ICEs when lowering the arm body
-    // because `current_handler_params` has no X. Detect at typecheck.
+    // value whose arm bodies use X. The arm closures capture evidence from the
+    // construction site — i.e. the factory function must have X in its own
+    // `needs` so the lowerer threads it through. Without this, the codegen
+    // ICEs when lowering the arm body because the construction site's
+    // evidence has no X. Detect at typecheck.
     let unhandled = "effect Outer {\n  fun notify : String -> Unit\n}\n\
                      effect Inner {\n  fun do_thing : Int -> Unit\n}\n\
                      fun make_inner : Unit -> Handler Inner\n\
