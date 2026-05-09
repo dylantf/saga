@@ -1070,195 +1070,19 @@ impl<'a> Lowerer<'a> {
 
     /// Canonical predicate for "is this a saturated effectful function call?"
     ///
-    /// Recognizes both `Mod.f x` (qualified head) and `f x` (Var head, where
-    /// `f` is either a resolved fun or an in-scope effectful variable). A bare
-    /// reference or partial application returns `false`; only fully-applied
-    /// calls thread `_ReturnK` and should be CPS-chained at the call site.
+    /// Reads from the pre-populated `CallEffectMap`. Returns true when the
+    /// outer expression is an `App` whose entry classifies as effectful
+    /// (`StaticOps` or `RowForwarded`). Bare references and partial
+    /// applications are tagged `Pure` by the populator.
     pub(super) fn expr_is_effectful_call(&self, expr: &Expr) -> bool {
-        let inline = self.inline_expr_is_effectful_call(expr);
-        #[cfg(debug_assertions)]
-        self.verify_call_effects_at(expr);
-        inline
-    }
-
-    /// Phase 2 parallel-check. For an `App` node, compare the pre-pass's
-    /// `CallEffectInfo` against a freshly recomputed inline `CallEffectInfo`
-    /// from the lowerer's authoritative state. Hard-panics on:
-    ///
-    /// - missing entries (every `App` must be tagged), and
-    /// - structural disagreements when the populator was *confident*
-    ///   (`Pure` / `StaticOps` / `RowForwarded`).
-    ///
-    #[cfg(debug_assertions)]
-    pub(super) fn verify_call_effects_at(&self, expr: &Expr) {
         if !matches!(expr.kind, ExprKind::App { .. }) {
-            return;
+            return false;
         }
-        let Some(map_info) = self.call_effects.get(&expr.id) else {
-            panic!(
-                "[call_effects] App node missing entry: NodeId={:?} span={:?} kind={}",
-                expr.id,
-                expr.span,
-                expr_kind_name(expr),
-            );
-        };
-        let inline_info = self.inline_call_effect_info(expr);
-        if map_info != &inline_info {
-            panic!(
-                "[call_effects] disagreement at NodeId={:?} span={:?}\n  map:    {:?}\n  inline: {:?}",
-                expr.id, expr.span, map_info, inline_info,
-            );
-        }
-    }
-
-    /// Compute the `CallEffectInfo` an `App` node *would* produce by inline
-    /// inspection of the lowerer's authoritative state (resolution map +
-    /// fun_info + current_handler_params + current_effectful_vars). Used by
-    /// the parallel-check to detect drift between pre-pass and inline paths.
-    pub(super) fn inline_call_effect_info(
-        &self,
-        expr: &Expr,
-    ) -> super::call_effects::CallEffectInfo {
-        use super::call_effects::{CallEffectInfo, CallEffectKind, OpKey};
-
-        let pure = || CallEffectInfo {
-            kind: CallEffectKind::Pure,
-            user_arity: 0,
-            needs_return_k: false,
-        };
-
-        let (head_id, name, supplied) =
-            if let Some((_m, n, head, args)) = collect_qualified_call(expr) {
-                (head.id, n.to_string(), args.len())
-            } else if let Some((n, head, args)) = collect_fun_call(expr) {
-                (head.id, n.to_string(), args.len())
-            } else {
-                return pure();
-            };
-
-        if supplied == 0 {
-            return pure();
-        }
-
-        // Mirror call_performs_effect step by step.
-        let effects_opt = self.resolved_effects(head_id, &name);
-        let Some(effects) = effects_opt else {
-            // Fall through to current_effectful_vars fallback.
-            if self.current_effectful_vars.contains_key(&name) {
-                let effs = self.canonicalize_effects(self.current_effectful_vars[&name].clone());
-                let ops = self.collect_op_keys_inline(&effs);
-                let is_pure = ops.is_empty();
-                return CallEffectInfo {
-                    kind: if is_pure {
-                        CallEffectKind::Pure
-                    } else {
-                        CallEffectKind::StaticOps { ops }
-                    },
-                    user_arity: if is_pure { 0 } else { supplied },
-                    needs_return_k: !effs.is_empty(),
-                };
-            }
-            return pure();
-        };
-        if effects.is_empty() {
-            return pure();
-        }
-        let Some(info) = self.resolved_fun_info(head_id, &name) else {
-            let ops = self.collect_op_keys_inline(&effects);
-            let has_ops = !ops.is_empty();
-            let is_open_row = self.head_open_row(head_id, &name);
-            let kind = if !has_ops {
-                CallEffectKind::Pure
-            } else if is_open_row {
-                CallEffectKind::RowForwarded { static_ops: ops }
-            } else {
-                CallEffectKind::StaticOps { ops }
-            };
-            return CallEffectInfo {
-                kind,
-                user_arity: if has_ops { supplied } else { 0 },
-                needs_return_k: has_ops,
-            };
-        };
-        let handler_ops = self.effect_handler_ops(&effects);
-        // Effectful arity = user_args + Evidence + ReturnK.
-        let extras = if handler_ops.is_empty() { 0 } else { 2 };
-        let user_arity = info.arity.saturating_sub(extras);
-        if user_arity == 0 || supplied < user_arity {
-            return pure();
-        }
-
-        let mut ops: Vec<OpKey> = handler_ops
-            .iter()
-            .map(|(eff, op)| OpKey {
-                effect: eff.clone(),
-                op: op.clone(),
-            })
-            .collect();
-        ops.sort();
-        let has_ops = !ops.is_empty();
-
-        // Determine open-row from the head's resolved type.
-        let is_open_row = self.head_open_row(head_id, &name);
-        let kind = if !has_ops {
-            CallEffectKind::Pure
-        } else if is_open_row {
-            CallEffectKind::RowForwarded { static_ops: ops }
-        } else {
-            CallEffectKind::StaticOps { ops }
-        };
-        CallEffectInfo {
-            kind,
-            user_arity: if has_ops { user_arity } else { 0 },
-            needs_return_k: has_ops,
-        }
-    }
-
-    fn collect_op_keys_inline(&self, effects: &[String]) -> Vec<super::call_effects::OpKey> {
-        let mut out: Vec<super::call_effects::OpKey> = self
-            .effect_handler_ops(effects)
-            .into_iter()
-            .map(|(eff, op)| super::call_effects::OpKey { effect: eff, op })
-            .collect();
-        out.sort();
-        out
-    }
-
-    fn head_open_row(&self, head_id: crate::ast::NodeId, name: &str) -> bool {
-        // Local module: check_result.env. Imported module: walk codegen_info.
-        if let Some(scheme) = self.check_result.env.get(name)
-            && util::has_open_effect_row(&self.check_result.sub.apply(&scheme.ty))
-        {
-            return true;
-        }
-        use super::resolve::ResolvedName;
-        if let Some(ResolvedName::ImportedFun {
-            source_module,
-            name: fun_name,
-            ..
-        }) = self.resolved.get(&head_id)
-            && let Some(compiled) = self.ctx.modules.get(source_module)
-            && let Some((_, scheme)) = compiled
-                .codegen_info
-                .exports
-                .iter()
-                .find(|(n, _)| n == fun_name)
-        {
-            return util::has_open_effect_row(&scheme.ty);
-        }
-        false
-    }
-
-    /// Inline computation, kept verbatim from before Phase 2. Phase 3 will
-    /// delete this and route `expr_is_effectful_call` through the map only.
-    fn inline_expr_is_effectful_call(&self, expr: &Expr) -> bool {
-        if let Some((_module, func_name, head, args)) = collect_qualified_call(expr) {
-            return self.call_performs_effect(head.id, func_name, args.len());
-        }
-        if let Some((func_name, head, args)) = collect_fun_call(expr) {
-            return self.call_performs_effect(head.id, func_name, args.len());
-        }
-        false
+        matches!(
+            self.call_effects.get(&expr.id).map(|i| &i.kind),
+            Some(super::call_effects::CallEffectKind::StaticOps { .. })
+                | Some(super::call_effects::CallEffectKind::RowForwarded { .. })
+        )
     }
 
     /// Build the per-call effect map for the module currently being lowered.
@@ -3081,15 +2905,6 @@ impl<'a> Lowerer<'a> {
     }
 
     fn lower_app_expr(&mut self, expr: &Expr) -> CExpr {
-        // Phase 2 parallel-check: validate this App's pre-pass entry against
-        // the inline classification at the value-mode dispatch entry point.
-        // Tail-position calls go through `lower_expr_with_call_return_k`,
-        // which already triggers verification via `expr_is_effectful_call`;
-        // value-mode App lowering needs its own trigger so dispatch sites
-        // that don't gate on effectfulness still get checked.
-        #[cfg(debug_assertions)]
-        self.verify_call_effects_at(expr);
-
         if let Some((ctor_name, args)) = collect_ctor_call(expr) {
             return self.lower_ctor(ctor_name, args);
         }
