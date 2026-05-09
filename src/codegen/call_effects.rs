@@ -132,6 +132,13 @@ pub struct PopulatorInputs<'a> {
     /// construction site in `Lowerer::populate_call_effects` for why this
     /// table is not subsumed by `FunSig.is_open_row`.
     pub head_open_row: &'a HashMap<NodeId, bool>,
+    /// Trait impl dict name -> sorted canonical effect names from the impl's
+    /// `needs` clause. Sourced from `TraitImplDict.impl_effects` (both the
+    /// active module's and imported modules'). Used to classify
+    /// `App(DictMethodAccess { dict, .. }, ...)` call sites: walk the dict
+    /// expression to find the underlying `DictRef { name }`, then look up
+    /// effects here.
+    pub impl_effects_by_dict: &'a HashMap<String, Vec<String>>,
 }
 
 /// Pre-pass walker. Constructed with the data sources it needs and consumed by
@@ -577,7 +584,65 @@ impl<'a> Populator<'a> {
             ExprKind::QualifiedName { name, .. } => {
                 self.classify_named_call(head.id, name, arg_count)
             }
-            // Lambda heads, DictMethodAccess, etc. — out of scope for Phase 2.
+            ExprKind::DictMethodAccess { dict, .. } => {
+                self.classify_dict_method_call(dict, arg_count)
+            }
+            // Lambda heads etc. — out of scope.
+            _ => CallEffectInfo::pure(),
+        }
+    }
+
+    /// Classify a call whose head is a `DictMethodAccess` node.
+    ///
+    /// Effect resolution: walk the dict expression to find the underlying
+    /// `DictRef { name }`, peeling `App` chains for parameterized impls
+    /// (e.g. `__dict_Show_List __dict_Show_String`). Look up the impl's
+    /// declared effects in `impl_effects_by_dict`. The lookup is uniform
+    /// across all methods of the impl since impl-level `needs` applies to
+    /// every method body.
+    ///
+    /// Where-bounded dispatch (dict from a function parameter) ends in a
+    /// `Var` rather than `DictRef` and is classified as `RowForwarded`
+    /// with no static ops — the actual handler closures live in the dict
+    /// tuple's slots and are invoked through the caller's ambient evidence.
+    fn classify_dict_method_call(&self, dict: &Expr, supplied: usize) -> CallEffectInfo {
+        if supplied == 0 {
+            return CallEffectInfo::pure();
+        }
+        // Peel `App` chain inside the dict expression.
+        let mut current = dict;
+        while let ExprKind::App { func, .. } = &current.kind {
+            current = func;
+        }
+        match &current.kind {
+            ExprKind::DictRef { name, .. } => {
+                let Some(effects) = self.inputs.impl_effects_by_dict.get(name) else {
+                    return CallEffectInfo::pure();
+                };
+                if effects.is_empty() {
+                    return CallEffectInfo::pure();
+                }
+                let ops = self.collect_op_keys(effects);
+                if ops.is_empty() {
+                    return CallEffectInfo::pure();
+                }
+                CallEffectInfo {
+                    kind: CallEffectKind::StaticOps { ops },
+                    user_arity: supplied,
+                    needs_return_k: true,
+                }
+            }
+            ExprKind::Var { .. } => {
+                // Where-bounded dispatch (dict from a function parameter):
+                // the impl is unknown at this site, so we cannot tell whether
+                // it adds effects. Conservatively classify as pure — matches
+                // the trait method's declared signature, which is what the
+                // typechecker uses at the call site too. This means
+                // where-bounded effectful trait methods are not yet
+                // supported; landing them needs a separate channel that
+                // tracks the caller's view of the dict-param's impl effects.
+                CallEffectInfo::pure()
+            }
             _ => CallEffectInfo::pure(),
         }
     }

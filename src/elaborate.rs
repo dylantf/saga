@@ -67,6 +67,9 @@ struct Elaborator {
     let_dict_pat_ids: HashMap<String, HashSet<crate::ast::NodeId>>,
     /// Scope map values for canonical name bridging (user name -> canonical)
     scope_map_values: HashMap<String, String>,
+    /// Scope map effects for canonical name bridging (user name -> canonical
+    /// effect name, e.g. `"Fail"` -> `"Std.Fail.Fail"`).
+    scope_map_effects: HashMap<String, String>,
     /// Front-end resolution result for looking up canonical names by span/node id.
     resolution: crate::typechecker::ResolutionResult,
     /// Per-node type information for resolving record names in FieldAccess/RecordUpdate.
@@ -217,6 +220,7 @@ impl Elaborator {
             let_binding_arities,
             let_dict_pat_ids,
             scope_map_values: result.scope_map.values.clone(),
+            scope_map_effects: result.scope_map.effects.clone(),
             resolution: result.resolution.clone(),
             type_at_node: result.type_at_node.clone(),
             sub: result.sub.clone(),
@@ -409,6 +413,7 @@ impl Elaborator {
                     type_params,
                     where_clause,
                     methods,
+                    needs,
                     span,
                     ..
                 } => {
@@ -465,11 +470,23 @@ impl Elaborator {
                     // no dict params are needed. The dict is still nullary.
                     let _ = type_params; // acknowledge but don't use for now
 
+                    let mut impl_effects: Vec<String> = needs
+                        .iter()
+                        .map(|e| {
+                            self.scope_map_effects
+                                .get(&e.name)
+                                .cloned()
+                                .unwrap_or_else(|| e.name.clone())
+                        })
+                        .collect();
+                    impl_effects.sort();
+                    impl_effects.dedup();
                     output.push(Decl::DictConstructor {
                         id: NodeId::fresh(),
                         name: dict_name,
                         dict_params,
                         methods: ordered_methods,
+                        impl_effects,
                         span: *span,
                     });
                 }

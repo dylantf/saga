@@ -120,9 +120,15 @@ impl<'a> Lowerer<'a> {
                 ) {
                     return call;
                 }
-                if let Some(call) = self.lower_effectful_var_call(expr.id, func_name, &args, return_k) {
+                if let Some(call) = self.lower_effectful_var_call(expr.id, func_name, &args, return_k.clone()) {
                     return call;
                 }
+            }
+            if let Some((dict, method_index, args)) = super::util::collect_dict_method_call(expr)
+                && let Some(call) =
+                    self.lower_dict_method_call(expr.id, dict, method_index, &args, return_k)
+            {
+                return call;
             }
         }
 

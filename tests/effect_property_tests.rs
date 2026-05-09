@@ -588,6 +588,50 @@ result () = maybe_fail False with to_result_str
 }
 
 #[test]
+fn dict_method_effectful_call_threads_evidence() {
+    // Trait method calls elaborate to `App(DictMethodAccess, ...)`. When the
+    // selected impl declares `needs`, the call must thread evidence/return_k
+    // like any other effectful call. Regression test for the bug repro at
+    // `examples/bugs/dict-method-effectful-call/`. Exercises both the abort
+    // path (Box -1 → fail!) and the success path (Box 5 → 10).
+    let src = r#"module Main
+
+import Std.Fail (Fail)
+
+trait Decoder a {
+  fun decode : a -> Int
+}
+
+type Box = Box Int
+
+impl Decoder for Box needs {Fail String} {
+  decode (Box n) = if n < 0 then fail! "neg" else n
+}
+
+handler to_result for Fail a {
+  fail e = Err e
+  return v = Ok v
+}
+
+fun describe : Result Int String -> String
+describe (Ok n) = "ok:" <> show n
+describe (Err e) = "err:" <> e
+
+pub fun result : Unit -> String
+result () = {
+  let neg = decode (Box (-1)) with to_result
+  let pos = decode (Box 5) with to_result
+  describe neg <> ";" <> describe pos
+}
+"#;
+    check_result_string(
+        "dict_method_effectful_call_threads_evidence",
+        src,
+        "err:neg;ok:5",
+    );
+}
+
+#[test]
 fn op_called_in_a_loop_resumes_each_time() {
     let src = r#"module Main
 

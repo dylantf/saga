@@ -1,28 +1,18 @@
-#@ Dict-elaborated effectful trait method call panics the lowerer.
+#@ Regression test: dict-elaborated effectful trait method calls.
 #@
-#@ A trait method call elaborates to ExprKind::DictMethodAccess, which
-#@ is a different AST shape from a Var- or QualifiedName-headed call.
-#@ The lowerer's effectful-call predicate (collect_fun_call,
-#@ collect_qualified_call) doesn't recognize this shape, so when an
-#@ impl method body uses an effect, no handler param is threaded at
-#@ the dispatch site. Codegen then panics at the leaf when looking up
-#@ the missing handler.
+#@ A trait method call elaborates to App(DictMethodAccess, args). When
+#@ the selected impl declares `needs`, the call must thread evidence
+#@ and a return continuation through the dict tuple's method slot —
+#@ before the fix, that path was unrecognized by the populator and
+#@ codegen panicked at the leaf op lookup with "no handler param".
 #@
-#@ Reproduces with: saga run (from this directory).
-#@
-#@ Observed:
-#@   thread 'main' panicked at src/codegen/lower/effects.rs:338:17:
-#@   no handler param for op 'Std.Fail.Fail.fail', handler_params: {}
-#@
-#@ Expected output (once fixed):
+#@ Run from this directory: `saga run`. Expected output:
 #@   neg: Err "neg"
 #@   ok: Ok 10
 #@
-#@ Root cause: lowerer effectful-call detection does not cover the
-#@ DictMethodAccess shape produced by elaboration of effectful trait
-#@ method calls. Fix is a behavior expansion of the predicate, not
-#@ pure consolidation — see
-#@ docs/planning/plans/effectful-call-detection-plan.md.
+#@ See also the inline harness fixture
+#@ `dict_method_effectful_call_threads_evidence` in
+#@ tests/effect_property_tests.rs.
 module Main
 
 import Std.IO (console)

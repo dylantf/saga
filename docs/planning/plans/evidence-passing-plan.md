@@ -197,7 +197,7 @@ pub struct OpKey {
 - No emission change yet — lowerer still uses old computation post-
   lookup.
 
-### Phase 3 — The cutover
+### (DONE) Phase 3 — The cutover
 
 **Goal:** switch the calling convention to evidence passing across
 the whole compiler in one coherent PR. Convention has to flip
@@ -293,11 +293,11 @@ because they're cheap once the call sites are being touched anyway:
   change drops or rewrites them, Phase 3's evidence threading silently
   miscompiles.
 - **Make `user_arity` semantics explicit on `Pure` entries.** Phase 2's
-  parallel-check enforces *agreement* between map and inline, not a
+  parallel-check enforces _agreement_ between map and inline, not a
   particular value, and the two paths happen to agree only because they
   were tuned to. Phase 3 should either canonicalize `Pure.user_arity`
   to `0` everywhere (and update both producers) or add a debug assert
-  in the cutover code that `user_arity` is never *read* on `Pure`
+  in the cutover code that `user_arity` is never _read_ on `Pure`
   entries — whichever fits the consumer cleaner.
 - **Re-evaluate the `head_open_row` lookup table.** Phase 2 builds it
   in `populate_call_effects` by iterating the resolution map and
@@ -320,7 +320,7 @@ because they're cheap once the call sites are being touched anyway:
   ([examples/bugs/dict-method-effectful-call/](../../../examples/bugs/dict-method-effectful-call/))
   behavior unchanged (still panics — we'll address it in Phase 5).
 
-### Phase 4 — Cleanup
+### (DONE) Phase 4 — Cleanup
 
 **Goal:** delete the per-op-handler-param machinery now that nothing
 uses it. Trims a substantial amount of code that has been bug surface
