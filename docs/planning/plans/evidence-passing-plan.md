@@ -40,8 +40,8 @@ These decisions came out of a separate design session. Locked in:
    successful completion at a specific handler boundary; conceptually
    distinct from op invocation.
 8. **Effectful-var bindings.** `let g = factory(); g x` — `g` is a
-   closure that takes evidence + return_k like any effectful function.
-   Calling threads _current_ evidence at call time, not evidence at
+   closure that takes evidence + return*k like any effectful function.
+   Calling threads \_current* evidence at call time, not evidence at
    binding time.
 9. **BEAM-native effects: zero special-case.** Today's
    `build_beam_native_op_fun` synthesizes a CPS-shaped closure
@@ -54,12 +54,11 @@ These decisions came out of a separate design session. Locked in:
 
 ## Phases
 
-### Phase 0 — BEAM-execution property harness
+### (DONE) Phase 0 — BEAM-execution property harness
 
-**Status: precondition.** This is the regression net the cutover in
-Phase 3 will lean on. Build it before deciding to commit to the
-refactor; it works against the current convention so it has standalone
-value as a regression test of today's behavior.
+This is the regression net the cutover in Phase 3 will lean on. It
+works against the current convention so it has standalone value as a
+regression test of today's behavior.
 
 **Goal:** a CI-runnable test suite that compiles and executes
 effect-heavy Saga programs on BEAM, asserting observable output.
@@ -91,7 +90,7 @@ as `tests/module_codegen_integration.rs`.
 This phase is independently valuable; it can ship even if evidence
 passing never lands.
 
-### Phase 1 — Evidence runtime primitives
+### (DONE) Phase 1 — Evidence runtime primitives
 
 **Goal:** define the evidence-vector data layout and helper functions
 in isolation. No language-level emission change yet.

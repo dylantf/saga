@@ -390,6 +390,10 @@ fn stdlib_bridge_files() -> Vec<(&'static str, &'static str)> {
             "std_array_bridge.erl",
             include_str!("../stdlib/Array.bridge.erl"),
         ),
+        (
+            "std_evidence_bridge.erl",
+            include_str!("../stdlib/evidence.bridge.erl"),
+        ),
     ]
 }
 
