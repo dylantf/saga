@@ -8,7 +8,7 @@ pub(crate) mod init;
 mod pats;
 pub mod util;
 
-use crate::ast::{self, Decl, Expr, ExprKind, HandlerArm, Lit, Pat, Stmt};
+use crate::ast::{self, Decl, Expr, ExprKind, HandlerArm, Lit, NodeId, Pat, Stmt};
 use crate::codegen::cerl::{CArm, CExpr, CFunDef, CLit, CModule, CPat};
 use std::collections::HashMap;
 
@@ -2806,12 +2806,14 @@ impl<'a> Lowerer<'a> {
 
     fn lower_resolved_fun_call(
         &mut self,
+        app_id: NodeId,
         func_name: &str,
         head_expr: &Expr,
         args: &[&Expr],
         return_k: Option<CExpr>,
         call_span: Option<&crate::token::Span>,
     ) -> Option<CExpr> {
+        let _ = app_id;
         let callee_effects = self.resolved_effects(head_expr.id, func_name);
         let callee_ops = callee_effects
             .as_ref()
@@ -2947,10 +2949,12 @@ impl<'a> Lowerer<'a> {
 
     fn lower_effectful_var_call(
         &mut self,
+        app_id: NodeId,
         var_name: &str,
         args: &[&Expr],
         return_k: Option<CExpr>,
     ) -> Option<CExpr> {
+        let _ = app_id;
         let absorbed = self.current_effectful_vars.get(var_name).cloned()?;
 
         let effectful_arg_idxs: Vec<usize> = args
@@ -3091,7 +3095,7 @@ impl<'a> Lowerer<'a> {
                 return self.lower_ctor(func_name, args);
             }
             if let Some(call) =
-                self.lower_resolved_fun_call(func_name, head, &args, None, Some(&expr.span))
+                self.lower_resolved_fun_call(expr.id, func_name, head, &args, None, Some(&expr.span))
             {
                 return call;
             }
@@ -3149,7 +3153,7 @@ impl<'a> Lowerer<'a> {
         if let Some((func_name, head_expr, args)) = fun_call.as_ref()
             && self.resolved.contains_key(&head_expr.id)
             && let Some(call) =
-                self.lower_resolved_fun_call(func_name, head_expr, args, None, Some(&expr.span))
+                self.lower_resolved_fun_call(expr.id, func_name, head_expr, args, None, Some(&expr.span))
         {
             return call;
         }
@@ -3158,7 +3162,7 @@ impl<'a> Lowerer<'a> {
             && let Some((var_name, _, args)) = fun_call.as_ref()
         {
             return self
-                .lower_effectful_var_call(var_name, args, None)
+                .lower_effectful_var_call(expr.id, var_name, args, None)
                 .expect("effectful variable call should lower");
         }
 

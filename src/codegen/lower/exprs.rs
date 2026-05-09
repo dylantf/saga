@@ -90,6 +90,7 @@ impl<'a> Lowerer<'a> {
             if let Some((module, func_name, head, args)) = super::util::collect_qualified_call(expr)
             {
                 if let Some(call) = self.lower_resolved_fun_call(
+                    expr.id,
                     func_name,
                     head,
                     &args,
@@ -109,6 +110,7 @@ impl<'a> Lowerer<'a> {
             }
             if let Some((func_name, head_expr, args)) = collect_fun_call(expr) {
                 if let Some(call) = self.lower_resolved_fun_call(
+                    expr.id,
                     func_name,
                     head_expr,
                     &args,
@@ -117,7 +119,7 @@ impl<'a> Lowerer<'a> {
                 ) {
                     return call;
                 }
-                if let Some(call) = self.lower_effectful_var_call(func_name, &args, return_k) {
+                if let Some(call) = self.lower_effectful_var_call(expr.id, func_name, &args, return_k) {
                     return call;
                 }
             }
