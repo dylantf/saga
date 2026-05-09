@@ -129,7 +129,7 @@ linear in tuple size; n is typically ≤5.
 - `cargo clippy` clean.
 - No other compiler code calls into this module yet.
 
-### Phase 2 — Pre-pass for per-call evidence metadata
+### (DONE) Phase 2 — Pre-pass for per-call evidence metadata
 
 **Goal:** populate a `NodeId → CallEffectInfo` map ahead of lowering.
 The lowerer becomes a read-only consumer for "is this call effectful,

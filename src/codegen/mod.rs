@@ -1,3 +1,4 @@
+pub mod call_effects;
 pub mod cerl;
 pub mod lower;
 pub mod normalize;
@@ -18,6 +19,11 @@ pub struct CompiledModule {
     pub resolution: resolve::ResolutionMap,
     /// Front-end name resolution from the typechecker.
     pub front_resolution: crate::typechecker::ResolutionResult,
+    /// Per-call effect metadata produced by the Phase 2 pre-pass. Empty until
+    /// the module has been lowered (the Lowerer populates this map and writes
+    /// it back via `set_compiled_call_effects`). Phase 3's evidence-passing
+    /// cutover will consume it for cross-module evidence layout.
+    pub call_effects: call_effects::CallEffectMap,
 }
 
 pub struct ModuleSemantics<'a> {
@@ -101,6 +107,7 @@ pub fn compile_module_from_result(
         elaborated: normalized,
         resolution,
         front_resolution: mod_result.resolution.clone(),
+        call_effects: call_effects::CallEffectMap::new(),
     })
 }
 

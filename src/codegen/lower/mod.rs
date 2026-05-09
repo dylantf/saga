@@ -38,6 +38,19 @@ pub(crate) fn lower_size_expr(expr: &Expr) -> CExpr {
 
 /// Count how many lambda params can be absorbed from the body of a top-level
 /// function definition. Peels nested lambdas so `fun x -> fun y -> body` counts 2.
+#[cfg(debug_assertions)]
+fn expr_kind_name(expr: &Expr) -> &'static str {
+    match &expr.kind {
+        ExprKind::App { .. } => "App",
+        ExprKind::Var { .. } => "Var",
+        ExprKind::QualifiedName { .. } => "QualifiedName",
+        ExprKind::Lambda { .. } => "Lambda",
+        ExprKind::EffectCall { .. } => "EffectCall",
+        ExprKind::DictMethodAccess { .. } => "DictMethodAccess",
+        _ => "Other",
+    }
+}
+
 fn count_lambda_params(body: &Expr) -> usize {
     match &body.kind {
         ExprKind::Lambda { params, body, .. } => params.len() + count_lambda_params(body),
@@ -197,6 +210,11 @@ pub struct Lowerer<'a> {
     /// Optional function name that should be exported even if it is not `pub`.
     /// Used by the build pipeline to mark the chosen entrypoint explicitly.
     entry_export: Option<String>,
+    /// Per-call effect metadata for every `App` node in the module being lowered.
+    /// Populated by the Phase 2 pre-pass after `init_module` and read for
+    /// parallel-checking against the inline call-effect computation. Phase 3
+    /// will consume this map directly to drive evidence threading.
+    call_effects: super::call_effects::CallEffectMap,
 }
 
 impl<'a> Lowerer<'a> {
@@ -238,6 +256,7 @@ impl<'a> Lowerer<'a> {
             handle_cond_vars: HashMap::new(),
             handle_dynamic_vars: HashMap::new(),
             entry_export,
+            call_effects: super::call_effects::CallEffectMap::new(),
         }
     }
 
@@ -978,6 +997,56 @@ impl<'a> Lowerer<'a> {
     /// reference or partial application returns `false`; only fully-applied
     /// calls thread `_ReturnK` and should be CPS-chained at the call site.
     pub(super) fn expr_is_effectful_call(&self, expr: &Expr) -> bool {
+        let inline = self.inline_expr_is_effectful_call(expr);
+        #[cfg(debug_assertions)]
+        {
+            if matches!(expr.kind, ExprKind::App { .. }) {
+                let entry = self.call_effects.get(&expr.id);
+                match entry {
+                    Some(info) => {
+                        let map_says =
+                            !matches!(info.kind, super::call_effects::CallEffectKind::Pure);
+                        if map_says != inline {
+                            // Phase 2 "accumulating mode": log disagreements
+                            // but don't panic. Each one indicates a scope
+                            // shape the populator hasn't fully mirrored
+                            // (handler arm absorbed effects, case-arm binders,
+                            // etc.). Phase 3's cutover requires zero
+                            // disagreements; until then, the inline value
+                            // remains authoritative.
+                            eprintln!(
+                                "[call_effects parallel-check] disagreement at NodeId={:?} \
+                                 span={:?}: map={}, inline={}",
+                                expr.id, expr.span, map_says, inline,
+                            );
+                        }
+                    }
+                    None => {
+                        // Missing entries on `App` nodes ARE a structural bug
+                        // in the pre-pass — every `App` should have been
+                        // walked and tagged. Make this loud per the Phase 2
+                        // acceptance criteria.
+                        eprintln!(
+                            "[call_effects parallel-check] App node missing entry: \
+                             NodeId={:?} span={:?} kind={}",
+                            expr.id,
+                            expr.span,
+                            expr_kind_name(expr),
+                        );
+                        panic!(
+                            "App node {:?} missing call_effects entry — pre-pass missed a shape",
+                            expr.id,
+                        );
+                    }
+                }
+            }
+        }
+        inline
+    }
+
+    /// Inline computation, kept verbatim from before Phase 2. Phase 3 will
+    /// delete this and route `expr_is_effectful_call` through the map only.
+    fn inline_expr_is_effectful_call(&self, expr: &Expr) -> bool {
         if let Some((_module, func_name, head, args)) = collect_qualified_call(expr) {
             return self.call_performs_effect(head.id, func_name, args.len());
         }
@@ -985,6 +1054,291 @@ impl<'a> Lowerer<'a> {
             return self.call_performs_effect(head.id, func_name, args.len());
         }
         false
+    }
+
+    /// Build the per-call effect map for the module currently being lowered.
+    /// Snapshots the relevant `FunInfo` and `EffectDefs` and hands them to the
+    /// stand-alone `call_effects::Populator` walker.
+    fn populate_call_effects(
+        &self,
+        program: &ast::Program,
+    ) -> super::call_effects::CallEffectMap {
+        use super::call_effects::{FunSig, Populator};
+
+        let fun_sigs: HashMap<String, FunSig> = self
+            .fun_info
+            .iter()
+            .map(|(name, info)| {
+                (
+                    name.clone(),
+                    FunSig {
+                        arity: info.arity,
+                        effects: info.effects.clone(),
+                        param_absorbed_effects: info.param_absorbed_effects.clone(),
+                    },
+                )
+            })
+            .collect();
+
+        let effect_ops: HashMap<String, Vec<String>> = self
+            .effect_defs
+            .iter()
+            .map(|(eff, info)| {
+                let mut ops: Vec<String> = info.ops.keys().cloned().collect();
+                ops.sort();
+                (eff.clone(), ops)
+            })
+            .collect();
+
+        // Pre-compute FunSig for every Stmt::LetFun so the populator can
+        // recognise recursive and forward refs to local functions.
+        let mut let_fun_sigs: HashMap<crate::ast::NodeId, FunSig> = HashMap::new();
+        for decl in program {
+            self.collect_let_fun_sigs_in_decl(decl, &mut let_fun_sigs);
+        }
+
+        Populator::new(
+            &self.resolved,
+            &fun_sigs,
+            &let_fun_sigs,
+            &effect_ops,
+            &self.ctx.let_effect_bindings,
+        )
+        .populate(program)
+    }
+
+    fn collect_let_fun_sigs_in_decl(
+        &self,
+        decl: &Decl,
+        out: &mut HashMap<crate::ast::NodeId, super::call_effects::FunSig>,
+    ) {
+        match decl {
+            Decl::FunBinding { body, .. } => self.collect_let_fun_sigs_in_expr(body, out),
+            Decl::Val { value, .. } | Decl::Let { value, .. } => {
+                self.collect_let_fun_sigs_in_expr(value, out)
+            }
+            Decl::HandlerDef { body, .. } => {
+                for arm in &body.arms {
+                    self.collect_let_fun_sigs_in_expr(&arm.node.body, out);
+                    if let Some(fb) = &arm.node.finally_block {
+                        self.collect_let_fun_sigs_in_expr(fb, out);
+                    }
+                }
+                if let Some(rc) = &body.return_clause {
+                    self.collect_let_fun_sigs_in_expr(&rc.body, out);
+                }
+            }
+            Decl::DictConstructor { methods, .. } => {
+                for m in methods {
+                    self.collect_let_fun_sigs_in_expr(m, out);
+                }
+            }
+            Decl::ImplDef { methods, .. } => {
+                for m in methods {
+                    self.collect_let_fun_sigs_in_expr(&m.node.body, out);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn collect_let_fun_sigs_in_expr(
+        &self,
+        expr: &Expr,
+        out: &mut HashMap<crate::ast::NodeId, super::call_effects::FunSig>,
+    ) {
+        use super::call_effects::FunSig;
+
+        match &expr.kind {
+            ExprKind::App { func, arg } => {
+                self.collect_let_fun_sigs_in_expr(func, out);
+                self.collect_let_fun_sigs_in_expr(arg, out);
+            }
+            ExprKind::BinOp { left, right, .. } => {
+                self.collect_let_fun_sigs_in_expr(left, out);
+                self.collect_let_fun_sigs_in_expr(right, out);
+            }
+            ExprKind::UnaryMinus { expr } => self.collect_let_fun_sigs_in_expr(expr, out),
+            ExprKind::If {
+                cond,
+                then_branch,
+                else_branch,
+                ..
+            } => {
+                self.collect_let_fun_sigs_in_expr(cond, out);
+                self.collect_let_fun_sigs_in_expr(then_branch, out);
+                self.collect_let_fun_sigs_in_expr(else_branch, out);
+            }
+            ExprKind::Case {
+                scrutinee, arms, ..
+            } => {
+                self.collect_let_fun_sigs_in_expr(scrutinee, out);
+                for arm in arms {
+                    if let Some(g) = &arm.node.guard {
+                        self.collect_let_fun_sigs_in_expr(g, out);
+                    }
+                    self.collect_let_fun_sigs_in_expr(&arm.node.body, out);
+                }
+            }
+            ExprKind::Block { stmts, .. } => {
+                for stmt in stmts {
+                    match &stmt.node {
+                        Stmt::Let { value, .. } | Stmt::Expr(value) => {
+                            // Stmt::Expr's content is always an Expr; reuse Let arm.
+                            let _ = value;
+                            match &stmt.node {
+                                Stmt::Let { value, .. } => {
+                                    self.collect_let_fun_sigs_in_expr(value, out)
+                                }
+                                Stmt::Expr(e) => self.collect_let_fun_sigs_in_expr(e, out),
+                                Stmt::LetFun { .. } => unreachable!(),
+                            }
+                        }
+                        Stmt::LetFun {
+                            id, params, body, guard, ..
+                        } => {
+                            // Compute signature from the typechecker's resolved
+                            // type, mirroring exprs.rs lower_block's LetFun
+                            // registration.
+                            let source_arity = pats::lower_params(params).len();
+                            let sig = self
+                                .check_result
+                                .resolved_type_for_node(*id)
+                                .map(|ty| {
+                                    let (base_arity, effects) = util::arity_and_effects_from_type(&ty);
+                                    let effects = self.canonicalize_effects(effects);
+                                    let handler_count = self.effect_handler_ops(&effects).len();
+                                    let expanded_arity = base_arity
+                                        + handler_count
+                                        + if handler_count > 0 { 1 } else { 0 };
+                                    let param_absorbed: HashMap<usize, Vec<String>> =
+                                        util::param_absorbed_effects_from_type(&ty)
+                                            .into_iter()
+                                            .map(|(idx, effs)| {
+                                                (idx, self.canonicalize_effects(effs))
+                                            })
+                                            .collect();
+                                    FunSig {
+                                        arity: expanded_arity,
+                                        effects,
+                                        param_absorbed_effects: param_absorbed,
+                                    }
+                                })
+                                .unwrap_or_else(|| FunSig {
+                                    arity: source_arity,
+                                    ..Default::default()
+                                });
+                            out.insert(*id, sig);
+                            if let Some(g) = guard {
+                                self.collect_let_fun_sigs_in_expr(g, out);
+                            }
+                            self.collect_let_fun_sigs_in_expr(body, out);
+                        }
+                    }
+                }
+            }
+            ExprKind::Lambda { body, .. } => self.collect_let_fun_sigs_in_expr(body, out),
+            ExprKind::FieldAccess { expr, .. } => self.collect_let_fun_sigs_in_expr(expr, out),
+            ExprKind::RecordCreate { fields, .. } | ExprKind::AnonRecordCreate { fields } => {
+                for (_, _, e) in fields {
+                    self.collect_let_fun_sigs_in_expr(e, out);
+                }
+            }
+            ExprKind::RecordUpdate { record, fields, .. } => {
+                self.collect_let_fun_sigs_in_expr(record, out);
+                for (_, _, e) in fields {
+                    self.collect_let_fun_sigs_in_expr(e, out);
+                }
+            }
+            ExprKind::EffectCall { args, .. } => {
+                for a in args {
+                    self.collect_let_fun_sigs_in_expr(a, out);
+                }
+            }
+            ExprKind::With { expr, handler } => {
+                self.collect_let_fun_sigs_in_expr(expr, out);
+                if let crate::ast::Handler::Inline { items, .. } = handler.as_ref() {
+                    for item in items {
+                        match &item.node {
+                            crate::ast::HandlerItem::Arm(arm)
+                            | crate::ast::HandlerItem::Return(arm) => {
+                                self.collect_let_fun_sigs_in_expr(&arm.body, out);
+                                if let Some(fb) = &arm.finally_block {
+                                    self.collect_let_fun_sigs_in_expr(fb, out);
+                                }
+                            }
+                            crate::ast::HandlerItem::Named(_) => {}
+                        }
+                    }
+                }
+            }
+            ExprKind::Resume { value } => self.collect_let_fun_sigs_in_expr(value, out),
+            ExprKind::Tuple { elements } => {
+                for e in elements {
+                    self.collect_let_fun_sigs_in_expr(e, out);
+                }
+            }
+            ExprKind::Do {
+                bindings,
+                success,
+                else_arms,
+                ..
+            } => {
+                for (_, e) in bindings {
+                    self.collect_let_fun_sigs_in_expr(e, out);
+                }
+                self.collect_let_fun_sigs_in_expr(success, out);
+                for arm in else_arms {
+                    if let Some(g) = &arm.node.guard {
+                        self.collect_let_fun_sigs_in_expr(g, out);
+                    }
+                    self.collect_let_fun_sigs_in_expr(&arm.node.body, out);
+                }
+            }
+            ExprKind::Receive {
+                arms, after_clause, ..
+            } => {
+                for arm in arms {
+                    if let Some(g) = &arm.node.guard {
+                        self.collect_let_fun_sigs_in_expr(g, out);
+                    }
+                    self.collect_let_fun_sigs_in_expr(&arm.node.body, out);
+                }
+                if let Some((t, b)) = after_clause {
+                    self.collect_let_fun_sigs_in_expr(t, out);
+                    self.collect_let_fun_sigs_in_expr(b, out);
+                }
+            }
+            ExprKind::BitString { segments } => {
+                for seg in segments {
+                    self.collect_let_fun_sigs_in_expr(&seg.value, out);
+                    if let Some(s) = &seg.size {
+                        self.collect_let_fun_sigs_in_expr(s, out);
+                    }
+                }
+            }
+            ExprKind::Ascription { expr, .. } => self.collect_let_fun_sigs_in_expr(expr, out),
+            ExprKind::HandlerExpr { body } => {
+                for arm in &body.arms {
+                    self.collect_let_fun_sigs_in_expr(&arm.node.body, out);
+                    if let Some(fb) = &arm.node.finally_block {
+                        self.collect_let_fun_sigs_in_expr(fb, out);
+                    }
+                }
+                if let Some(rc) = &body.return_clause {
+                    self.collect_let_fun_sigs_in_expr(&rc.body, out);
+                }
+            }
+            ExprKind::DictMethodAccess { dict, .. } => {
+                self.collect_let_fun_sigs_in_expr(dict, out)
+            }
+            ExprKind::ForeignCall { args, .. } => {
+                for a in args {
+                    self.collect_let_fun_sigs_in_expr(a, out);
+                }
+            }
+            _ => {}
+        }
     }
 
     /// True when an application is to an effectful function AND has enough
@@ -1226,6 +1580,22 @@ impl<'a> Lowerer<'a> {
                     val_bindings.push((name, is_inline, value));
                 }
                 _ => {}
+            }
+        }
+
+        // Phase 2 pre-pass: tag every `App` node in the elaborated program
+        // with `CallEffectInfo` so the lowerer can consume it via lookup.
+        // Runs after `init_module` + per-decl `fun_info` registration so all
+        // callees have arity/effect entries by the time we classify their
+        // call sites.
+        self.call_effects = self.populate_call_effects(program);
+        // Cross-module inlined handler bodies live in the elaborated programs
+        // of compiled modules and are lowered through the active Lowerer.
+        // Tag their `App` nodes too so the parallel-check can see them.
+        for (_name, compiled) in self.ctx.modules.iter() {
+            let cross_map = self.populate_call_effects(&compiled.elaborated);
+            for (id, info) in cross_map {
+                self.call_effects.entry(id).or_insert(info);
             }
         }
 

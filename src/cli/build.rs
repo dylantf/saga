@@ -980,6 +980,7 @@ pub fn build_project_ext(
                 elaborated: normalized,
                 resolution,
                 front_resolution: mod_result.resolution.clone(),
+                call_effects: codegen::call_effects::CallEffectMap::new(),
             },
         );
     }
@@ -995,6 +996,7 @@ pub fn build_project_ext(
                 elaborated: main_elaborated,
                 resolution: codegen::resolve::ResolutionMap::new(),
                 front_resolution: result.resolution.clone(),
+                call_effects: codegen::call_effects::CallEffectMap::new(),
             },
         );
         let source_file = main_source
@@ -1155,6 +1157,7 @@ pub fn build_script(file: &str, profile: &str) -> ScriptBuild {
             elaborated,
             resolution: codegen::resolve::ResolutionMap::new(),
             front_resolution: result.resolution.clone(),
+            call_effects: codegen::call_effects::CallEffectMap::new(),
         },
     );
 
