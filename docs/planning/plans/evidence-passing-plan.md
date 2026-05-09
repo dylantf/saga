@@ -278,6 +278,34 @@ commits in one branch that merge together.
   build), so users' next `saga build` invalidates correctly without
   manual intervention.
 
+#### 3h. Carry-over tightening from Phase 2
+
+Items left as TODO at the close of Phase 2 that the cutover must absorb,
+because they're cheap once the call sites are being touched anyway:
+
+- **Extend the normalize NodeId stability test.** Today's
+  [`normalize::tests::normalize_preserves_app_node_ids`](../../../src/codegen/normalize.rs)
+  only covers a parse → normalize round-trip on a program with no effect
+  calls, so it never exercises `lift_to_let`. Add a fixture that contains
+  nested effect calls (`1 + ask!()`, etc.) so the lift path runs, and
+  assert that every pre-normalize `App` id is still reachable post-
+  normalize. The pre-pass keys on these ids; if a future normalize
+  change drops or rewrites them, Phase 3's evidence threading silently
+  miscompiles.
+- **Make `user_arity` semantics explicit on `Pure` entries.** Phase 2's
+  parallel-check enforces *agreement* between map and inline, not a
+  particular value, and the two paths happen to agree only because they
+  were tuned to. Phase 3 should either canonicalize `Pure.user_arity`
+  to `0` everywhere (and update both producers) or add a debug assert
+  in the cutover code that `user_arity` is never *read* on `Pure`
+  entries — whichever fits the consumer cleaner.
+- **Re-evaluate the `head_open_row` lookup table.** Phase 2 builds it
+  in `populate_call_effects` by iterating the resolution map and
+  consulting `check_result.env` / `ctx.modules[...].codegen_info.exports`.
+  If Phase 3a moves the `is_open_row` flag onto `FunInfo` directly
+  (likely, since the cutover already touches `FunInfo`), the per-call
+  table becomes redundant and can be deleted. Confirm during 3a.
+
 **Acceptance for Phase 3:**
 
 - Phase 0 property harness passes verbatim — every fixture produces

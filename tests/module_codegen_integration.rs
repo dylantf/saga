@@ -301,34 +301,30 @@ main () = {
 }
 "#;
 
-    with_temp_project_files(
-        &[("lib/Server.saga", lib)],
-        main_src,
-        |checker, program| {
-            let out = emit_from_program(program, "main", checker);
-            // The call to lib_server:run must pass user arg + Reporter handler
-            // + Process handlers (spawn/send/exit) + ReturnK.
-            assert_contains(&out, "_Handle_Lib_Server_Reporter_report");
-            assert_contains(&out, "call 'lib_server':'run'");
-            // Saturated, not partial-applied: the bug emitted a closure
-            // whose parameter list included `_Handle_Lib_Server_Reporter_report`
-            // and other handler params. A correctly threaded call binds those
-            // handler vars in `let <_Handle_...> = ...` and passes them to the
-            // call. Detect the bug shape: the handler param appearing as a
-            // *closure parameter* (right after `fun (` rather than inside a
-            // `let <...>` binding).
-            let bug_shape = "_Handle_Lib_Server_Reporter_report,";
-            let bug_present = out.lines().any(|line| {
-                let trimmed = line.trim_start();
-                trimmed.starts_with("fun (") && trimmed.contains(bug_shape)
-            });
-            assert!(
-                !bug_present,
-                "imported run call appears to be wrapped in a partial-app closure:\n{out}"
-            );
-            assert_erlc_compiles(&out, "main");
-        },
-    );
+    with_temp_project_files(&[("lib/Server.saga", lib)], main_src, |checker, program| {
+        let out = emit_from_program(program, "main", checker);
+        // The call to lib_server:run must pass user arg + Reporter handler
+        // + Process handlers (spawn/send/exit) + ReturnK.
+        assert_contains(&out, "_Handle_Lib_Server_Reporter_report");
+        assert_contains(&out, "call 'lib_server':'run'");
+        // Saturated, not partial-applied: the bug emitted a closure
+        // whose parameter list included `_Handle_Lib_Server_Reporter_report`
+        // and other handler params. A correctly threaded call binds those
+        // handler vars in `let <_Handle_...> = ...` and passes them to the
+        // call. Detect the bug shape: the handler param appearing as a
+        // *closure parameter* (right after `fun (` rather than inside a
+        // `let <...>` binding).
+        let bug_shape = "_Handle_Lib_Server_Reporter_report,";
+        let bug_present = out.lines().any(|line| {
+            let trimmed = line.trim_start();
+            trimmed.starts_with("fun (") && trimmed.contains(bug_shape)
+        });
+        assert!(
+            !bug_present,
+            "imported run call appears to be wrapped in a partial-app closure:\n{out}"
+        );
+        assert_erlc_compiles(&out, "main");
+    });
 }
 
 #[test]
@@ -1094,9 +1090,7 @@ run_ok () = {
         .arg("-pa")
         .arg(&dir)
         .arg("-eval")
-        .arg(
-            "io:format(\"~s|~s~n\", [main:run_fail(unit), main:run_ok(unit)]), init:stop().",
-        )
+        .arg("io:format(\"~s|~s~n\", [main:run_fail(unit), main:run_ok(unit)]), init:stop().")
         .output()
         .expect("failed to run erl");
     let _ = std::fs::remove_dir_all(&dir);
@@ -1181,9 +1175,7 @@ run_ok () = {
         .arg("-pa")
         .arg(&dir)
         .arg("-eval")
-        .arg(
-            "io:format(\"~s|~s~n\", [main:run_fail(unit), main:run_ok(unit)]), init:stop().",
-        )
+        .arg("io:format(\"~s|~s~n\", [main:run_fail(unit), main:run_ok(unit)]), init:stop().")
         .output()
         .expect("failed to run erl");
     let _ = std::fs::remove_dir_all(&dir);
@@ -1266,9 +1258,7 @@ run_ok () = {
         .arg("-pa")
         .arg(&dir)
         .arg("-eval")
-        .arg(
-            "io:format(\"~s|~s~n\", [main:run_fail(unit), main:run_ok(unit)]), init:stop().",
-        )
+        .arg("io:format(\"~s|~s~n\", [main:run_fail(unit), main:run_ok(unit)]), init:stop().")
         .output()
         .expect("failed to run erl");
     let _ = std::fs::remove_dir_all(&dir);
@@ -2132,9 +2122,7 @@ run_ok () = {
         .arg("-pa")
         .arg(&dir)
         .arg("-eval")
-        .arg(
-            "io:format(\"~s|~s~n\", [main:run_fail(unit), main:run_ok(unit)]), init:stop().",
-        )
+        .arg("io:format(\"~s|~s~n\", [main:run_fail(unit), main:run_ok(unit)]), init:stop().")
         .output()
         .expect("failed to run erl");
     let _ = std::fs::remove_dir_all(&dir);
@@ -2217,9 +2205,7 @@ run_ok () = {
         .arg("-pa")
         .arg(&dir)
         .arg("-eval")
-        .arg(
-            "io:format(\"~s|~s~n\", [main:run_fail(unit), main:run_ok(unit)]), init:stop().",
-        )
+        .arg("io:format(\"~s|~s~n\", [main:run_fail(unit), main:run_ok(unit)]), init:stop().")
         .output()
         .expect("failed to run erl");
     let _ = std::fs::remove_dir_all(&dir);

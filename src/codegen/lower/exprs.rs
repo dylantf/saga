@@ -10,8 +10,8 @@ use std::collections::HashMap;
 use super::pats;
 use super::util::{
     arity_and_effects_from_type, binop_call, collect_effect_call_expr, collect_fun_call, core_var,
-    lower_string_to_binary, mangle_ctor_atom,
-    param_absorbed_effects_from_type, param_types_from_type, pat_binding_var,
+    lower_string_to_binary, mangle_ctor_atom, param_absorbed_effects_from_type,
+    param_types_from_type, pat_binding_var,
 };
 use super::{FunInfo, LowerMode, Lowerer};
 
@@ -87,8 +87,7 @@ impl<'a> Lowerer<'a> {
         return_k: Option<CExpr>,
     ) -> CExpr {
         if self.expr_is_effectful_call(expr) {
-            if let Some((module, func_name, head, args)) =
-                super::util::collect_qualified_call(expr)
+            if let Some((module, func_name, head, args)) = super::util::collect_qualified_call(expr)
             {
                 if let Some(call) = self.lower_resolved_fun_call(
                     func_name,
@@ -282,7 +281,9 @@ impl<'a> Lowerer<'a> {
             )
         } else if self.expr_is_effectful_call(expr) {
             self.lower_expr_with_call_return_k(expr, Some(CExpr::Var(k_var.to_string())))
-        } else if self.has_nested_effectful_expr(expr) || matches!(expr.kind, ExprKind::Block { .. }) {
+        } else if self.has_nested_effectful_expr(expr)
+            || matches!(expr.kind, ExprKind::Block { .. })
+        {
             self.lower_expr_with_k_inner(expr, k_var)
         } else {
             self.lower_value_to_k(expr, k_var)
@@ -301,9 +302,9 @@ impl<'a> Lowerer<'a> {
             .all(|arm| arm.guard.as_ref().is_none_or(is_guard_safe))
         {
             let mut lowered = self.lower_case_arms_inner(scrut_var, &arms_ref);
-            let has_total_catchall = arms_ref.iter().any(|arm| {
-                arm.guard.is_none() && Self::is_catchall_pat(&arm.pattern)
-            });
+            let has_total_catchall = arms_ref
+                .iter()
+                .any(|arm| arm.guard.is_none() && Self::is_catchall_pat(&arm.pattern));
             if !has_total_catchall {
                 lowered.push(CArm {
                     pat: CPat::Wildcard,
@@ -1196,10 +1197,7 @@ impl<'a> Lowerer<'a> {
         let mut elems = vec![CExpr::Lit(CLit::Atom(tag))];
         elems.extend(field_vars.iter().map(|v| CExpr::Var(v.clone())));
         let tuple = CExpr::Tuple(elems);
-        let mut body = CExpr::Apply(
-            Box::new(CExpr::Var(k_var.to_string())),
-            vec![tuple],
-        );
+        let mut body = CExpr::Apply(Box::new(CExpr::Var(k_var.to_string())), vec![tuple]);
 
         for &i in effectful_idxs.iter().rev() {
             let v = field_vars[i].clone();

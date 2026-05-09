@@ -259,6 +259,21 @@ pub fn dict_param_count(constraints: &[(String, u32, Vec<crate::typechecker::Typ
         .count()
 }
 
+/// True if any effect row along the function arrow has an open tail
+/// (`needs {Foo, ..e}`). Used by the call-effects pre-pass to distinguish
+/// `StaticOps` (closed-row callees, project at the call boundary) from
+/// `RowForwarded` (open-row callees, forward full evidence).
+pub fn has_open_effect_row(ty: &Type) -> bool {
+    let mut current = ty;
+    while let Type::Fun(_, ret, row) = current {
+        if row.tail.is_some() {
+            return true;
+        }
+        current = ret;
+    }
+    false
+}
+
 /// Derive base arity and effect names from a typechecker `Type`.
 /// Returns `(base_param_count, sorted_effect_names)`.
 /// The expanded arity (for codegen) is: base + effects.len() + if effects is non-empty { 1 } else { 0 }.

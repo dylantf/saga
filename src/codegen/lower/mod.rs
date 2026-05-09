@@ -1,8 +1,8 @@
 pub(crate) mod beam_interop;
 mod builtins;
 mod effects;
-mod evidence;
 pub mod errors;
+mod evidence;
 mod exprs;
 pub(crate) mod init;
 mod pats;
@@ -49,6 +49,17 @@ fn expr_kind_name(expr: &Expr) -> &'static str {
         ExprKind::DictMethodAccess { .. } => "DictMethodAccess",
         _ => "Other",
     }
+}
+
+#[cfg(debug_assertions)]
+fn app_arg_count(expr: &Expr) -> usize {
+    let mut count = 0;
+    let mut current = expr;
+    while let ExprKind::App { func, .. } = &current.kind {
+        count += 1;
+        current = func;
+    }
+    count
 }
 
 fn count_lambda_params(body: &Expr) -> usize {
@@ -999,49 +1010,177 @@ impl<'a> Lowerer<'a> {
     pub(super) fn expr_is_effectful_call(&self, expr: &Expr) -> bool {
         let inline = self.inline_expr_is_effectful_call(expr);
         #[cfg(debug_assertions)]
-        {
-            if matches!(expr.kind, ExprKind::App { .. }) {
-                let entry = self.call_effects.get(&expr.id);
-                match entry {
-                    Some(info) => {
-                        let map_says =
-                            !matches!(info.kind, super::call_effects::CallEffectKind::Pure);
-                        if map_says != inline {
-                            // Phase 2 "accumulating mode": log disagreements
-                            // but don't panic. Each one indicates a scope
-                            // shape the populator hasn't fully mirrored
-                            // (handler arm absorbed effects, case-arm binders,
-                            // etc.). Phase 3's cutover requires zero
-                            // disagreements; until then, the inline value
-                            // remains authoritative.
-                            eprintln!(
-                                "[call_effects parallel-check] disagreement at NodeId={:?} \
-                                 span={:?}: map={}, inline={}",
-                                expr.id, expr.span, map_says, inline,
-                            );
-                        }
-                    }
-                    None => {
-                        // Missing entries on `App` nodes ARE a structural bug
-                        // in the pre-pass — every `App` should have been
-                        // walked and tagged. Make this loud per the Phase 2
-                        // acceptance criteria.
-                        eprintln!(
-                            "[call_effects parallel-check] App node missing entry: \
-                             NodeId={:?} span={:?} kind={}",
-                            expr.id,
-                            expr.span,
-                            expr_kind_name(expr),
-                        );
-                        panic!(
-                            "App node {:?} missing call_effects entry — pre-pass missed a shape",
-                            expr.id,
-                        );
-                    }
-                }
-            }
-        }
+        self.verify_call_effects_at(expr);
         inline
+    }
+
+    /// Phase 2 parallel-check. For an `App` node, compare the pre-pass's
+    /// `CallEffectInfo` against a freshly recomputed inline `CallEffectInfo`
+    /// from the lowerer's authoritative state. Hard-panics on:
+    ///
+    /// - missing entries (every `App` must be tagged), and
+    /// - structural disagreements when the populator was *confident*
+    ///   (`Pure` / `StaticOps` / `RowForwarded`).
+    ///
+    #[cfg(debug_assertions)]
+    pub(super) fn verify_call_effects_at(&self, expr: &Expr) {
+        if !matches!(expr.kind, ExprKind::App { .. }) {
+            return;
+        }
+        let Some(map_info) = self.call_effects.get(&expr.id) else {
+            panic!(
+                "[call_effects] App node missing entry: NodeId={:?} span={:?} kind={}",
+                expr.id,
+                expr.span,
+                expr_kind_name(expr),
+            );
+        };
+        let inline_info = self.inline_call_effect_info(expr);
+        if map_info != &inline_info {
+            panic!(
+                "[call_effects] disagreement at NodeId={:?} span={:?}\n  map:    {:?}\n  inline: {:?}",
+                expr.id, expr.span, map_info, inline_info,
+            );
+        }
+    }
+
+    /// Compute the `CallEffectInfo` an `App` node *would* produce by inline
+    /// inspection of the lowerer's authoritative state (resolution map +
+    /// fun_info + current_handler_params + current_effectful_vars). Used by
+    /// the parallel-check to detect drift between pre-pass and inline paths.
+    pub(super) fn inline_call_effect_info(
+        &self,
+        expr: &Expr,
+    ) -> super::call_effects::CallEffectInfo {
+        use super::call_effects::{CallEffectInfo, CallEffectKind, OpKey};
+
+        let pure_with_arity = |user_arity| CallEffectInfo {
+            kind: CallEffectKind::Pure,
+            user_arity,
+            needs_return_k: false,
+        };
+
+        let (head_id, name, supplied) =
+            if let Some((_m, n, head, args)) = collect_qualified_call(expr) {
+                (head.id, n.to_string(), args.len())
+            } else if let Some((n, head, args)) = collect_fun_call(expr) {
+                (head.id, n.to_string(), args.len())
+            } else {
+                return pure_with_arity(app_arg_count(expr));
+            };
+
+        if supplied == 0 {
+            return pure_with_arity(supplied);
+        }
+
+        // Mirror call_performs_effect step by step.
+        let effects_opt = self.resolved_effects(head_id, &name);
+        let Some(effects) = effects_opt else {
+            // Fall through to current_effectful_vars fallback.
+            if self.current_effectful_vars.contains_key(&name) {
+                let effs = self.current_effectful_vars[&name].clone();
+                let ops = self.collect_op_keys_inline(&effs);
+                let kind = if ops.is_empty() {
+                    CallEffectKind::Pure
+                } else {
+                    CallEffectKind::StaticOps { ops }
+                };
+                return CallEffectInfo {
+                    kind,
+                    user_arity: supplied,
+                    needs_return_k: !effs.is_empty(),
+                };
+            }
+            return pure_with_arity(supplied);
+        };
+        if effects.is_empty() {
+            return pure_with_arity(supplied);
+        }
+        let Some(info) = self.resolved_fun_info(head_id, &name) else {
+            let ops = self.collect_op_keys_inline(&effects);
+            let has_ops = !ops.is_empty();
+            let is_open_row = self.head_open_row(head_id, &name);
+            let kind = if !has_ops {
+                CallEffectKind::Pure
+            } else if is_open_row {
+                CallEffectKind::RowForwarded { static_ops: ops }
+            } else {
+                CallEffectKind::StaticOps { ops }
+            };
+            return CallEffectInfo {
+                kind,
+                user_arity: supplied,
+                needs_return_k: has_ops,
+            };
+        };
+        let handler_ops = self.effect_handler_ops(&effects);
+        let return_k_count = if handler_ops.is_empty() { 0 } else { 1 };
+        let user_arity = info
+            .arity
+            .saturating_sub(handler_ops.len() + return_k_count);
+        if user_arity == 0 || supplied < user_arity {
+            return pure_with_arity(supplied);
+        }
+
+        let mut ops: Vec<OpKey> = handler_ops
+            .iter()
+            .map(|(eff, op)| OpKey {
+                effect: eff.clone(),
+                op: op.clone(),
+            })
+            .collect();
+        ops.sort();
+        let has_ops = !ops.is_empty();
+
+        // Determine open-row from the head's resolved type.
+        let is_open_row = self.head_open_row(head_id, &name);
+        let kind = if !has_ops {
+            CallEffectKind::Pure
+        } else if is_open_row {
+            CallEffectKind::RowForwarded { static_ops: ops }
+        } else {
+            CallEffectKind::StaticOps { ops }
+        };
+        CallEffectInfo {
+            kind,
+            user_arity,
+            needs_return_k: has_ops,
+        }
+    }
+
+    fn collect_op_keys_inline(&self, effects: &[String]) -> Vec<super::call_effects::OpKey> {
+        let mut out: Vec<super::call_effects::OpKey> = self
+            .effect_handler_ops(effects)
+            .into_iter()
+            .map(|(eff, op)| super::call_effects::OpKey { effect: eff, op })
+            .collect();
+        out.sort();
+        out
+    }
+
+    fn head_open_row(&self, head_id: crate::ast::NodeId, name: &str) -> bool {
+        // Local module: check_result.env. Imported module: walk codegen_info.
+        if let Some(scheme) = self.check_result.env.get(name)
+            && util::has_open_effect_row(&self.check_result.sub.apply(&scheme.ty))
+        {
+            return true;
+        }
+        use super::resolve::ResolvedName;
+        if let Some(ResolvedName::ImportedFun {
+            source_module,
+            name: fun_name,
+            ..
+        }) = self.resolved.get(&head_id)
+            && let Some(compiled) = self.ctx.modules.get(source_module)
+            && let Some((_, scheme)) = compiled
+                .codegen_info
+                .exports
+                .iter()
+                .find(|(n, _)| n == fun_name)
+        {
+            return util::has_open_effect_row(&scheme.ty);
+        }
+        false
     }
 
     /// Inline computation, kept verbatim from before Phase 2. Phase 3 will
@@ -1059,10 +1198,7 @@ impl<'a> Lowerer<'a> {
     /// Build the per-call effect map for the module currently being lowered.
     /// Snapshots the relevant `FunInfo` and `EffectDefs` and hands them to the
     /// stand-alone `call_effects::Populator` walker.
-    fn populate_call_effects(
-        &self,
-        program: &ast::Program,
-    ) -> super::call_effects::CallEffectMap {
+    fn populate_call_effects(&self, program: &ast::Program) -> super::call_effects::CallEffectMap {
         use super::call_effects::{FunSig, Populator};
 
         let fun_sigs: HashMap<String, FunSig> = self
@@ -1075,6 +1211,7 @@ impl<'a> Lowerer<'a> {
                         arity: info.arity,
                         effects: info.effects.clone(),
                         param_absorbed_effects: info.param_absorbed_effects.clone(),
+                        is_open_row: self.fun_has_open_row(name),
                     },
                 )
             })
@@ -1097,14 +1234,385 @@ impl<'a> Lowerer<'a> {
             self.collect_let_fun_sigs_in_decl(decl, &mut let_fun_sigs);
         }
 
+        let mut pattern_effect_bindings: HashMap<crate::ast::NodeId, Vec<String>> = HashMap::new();
+        for decl in program {
+            self.collect_pattern_effect_bindings_in_decl(decl, &mut pattern_effect_bindings);
+        }
+
+        // Pre-compute open-row classification per resolved App-head NodeId.
+        // Mirrors the inline `head_open_row` lookup so the populator and
+        // inline path agree on RowForwarded vs StaticOps for both same-module
+        // and cross-module calls.
+        let mut head_open_row: HashMap<crate::ast::NodeId, bool> = HashMap::new();
+        for (node_id, resolved) in self.resolved.iter() {
+            use super::resolve::ResolvedName;
+            let open = match resolved {
+                ResolvedName::LocalFun { name, .. } => self
+                    .check_result
+                    .env
+                    .get(name)
+                    .map(|s| util::has_open_effect_row(&self.check_result.sub.apply(&s.ty)))
+                    .unwrap_or(false),
+                ResolvedName::ImportedFun {
+                    source_module,
+                    name: fun_name,
+                    ..
+                } => self
+                    .ctx
+                    .modules
+                    .get(source_module)
+                    .and_then(|m| {
+                        m.codegen_info
+                            .exports
+                            .iter()
+                            .find(|(n, _)| n == fun_name)
+                            .map(|(_, scheme)| util::has_open_effect_row(&scheme.ty))
+                    })
+                    .unwrap_or(false),
+            };
+            head_open_row.insert(*node_id, open);
+        }
+
         Populator::new(
             &self.resolved,
             &fun_sigs,
             &let_fun_sigs,
             &effect_ops,
             &self.ctx.let_effect_bindings,
+            &pattern_effect_bindings,
+            &head_open_row,
         )
         .populate(program)
+    }
+
+    fn collect_pattern_effect_bindings_in_decl(
+        &self,
+        decl: &Decl,
+        out: &mut HashMap<crate::ast::NodeId, Vec<String>>,
+    ) {
+        match decl {
+            Decl::FunBinding {
+                params,
+                guard,
+                body,
+                ..
+            } => {
+                for p in params {
+                    self.collect_pattern_effect_bindings_in_pat(p, out);
+                }
+                if let Some(g) = guard {
+                    self.collect_pattern_effect_bindings_in_expr(g, out);
+                }
+                self.collect_pattern_effect_bindings_in_expr(body, out);
+            }
+            Decl::Let { value, .. } | Decl::Val { value, .. } => {
+                self.collect_pattern_effect_bindings_in_expr(value, out)
+            }
+            Decl::HandlerDef { body, .. } => {
+                self.collect_pattern_effect_bindings_in_handler_body(body, out)
+            }
+            Decl::DictConstructor { methods, .. } => {
+                for m in methods {
+                    self.collect_pattern_effect_bindings_in_expr(m, out);
+                }
+            }
+            Decl::ImplDef { methods, .. } => {
+                for m in methods {
+                    for p in &m.node.params {
+                        self.collect_pattern_effect_bindings_in_pat(p, out);
+                    }
+                    self.collect_pattern_effect_bindings_in_expr(&m.node.body, out);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn collect_pattern_effect_bindings_in_handler_body(
+        &self,
+        body: &ast::HandlerBody,
+        out: &mut HashMap<crate::ast::NodeId, Vec<String>>,
+    ) {
+        for arm in &body.arms {
+            self.collect_pattern_effect_bindings_in_handler_arm(&arm.node, out);
+        }
+        if let Some(rc) = &body.return_clause {
+            self.collect_pattern_effect_bindings_in_handler_arm(rc, out);
+        }
+    }
+
+    fn collect_pattern_effect_bindings_in_handler_arm(
+        &self,
+        arm: &ast::HandlerArm,
+        out: &mut HashMap<crate::ast::NodeId, Vec<String>>,
+    ) {
+        for p in &arm.params {
+            self.collect_pattern_effect_bindings_in_pat(p, out);
+        }
+        self.collect_pattern_effect_bindings_in_expr(&arm.body, out);
+        if let Some(fb) = &arm.finally_block {
+            self.collect_pattern_effect_bindings_in_expr(fb, out);
+        }
+    }
+
+    fn collect_pattern_effect_bindings_in_case_arm(
+        &self,
+        arm: &ast::CaseArm,
+        out: &mut HashMap<crate::ast::NodeId, Vec<String>>,
+    ) {
+        self.collect_pattern_effect_bindings_in_pat(&arm.pattern, out);
+        if let Some(g) = &arm.guard {
+            self.collect_pattern_effect_bindings_in_expr(g, out);
+        }
+        self.collect_pattern_effect_bindings_in_expr(&arm.body, out);
+    }
+
+    fn collect_pattern_effect_bindings_in_expr(
+        &self,
+        expr: &Expr,
+        out: &mut HashMap<crate::ast::NodeId, Vec<String>>,
+    ) {
+        match &expr.kind {
+            ExprKind::App { func, arg } => {
+                self.collect_pattern_effect_bindings_in_expr(func, out);
+                self.collect_pattern_effect_bindings_in_expr(arg, out);
+            }
+            ExprKind::BinOp { left, right, .. } => {
+                self.collect_pattern_effect_bindings_in_expr(left, out);
+                self.collect_pattern_effect_bindings_in_expr(right, out);
+            }
+            ExprKind::UnaryMinus { expr }
+            | ExprKind::FieldAccess { expr, .. }
+            | ExprKind::Ascription { expr, .. } => {
+                self.collect_pattern_effect_bindings_in_expr(expr, out)
+            }
+            ExprKind::If {
+                cond,
+                then_branch,
+                else_branch,
+                ..
+            } => {
+                self.collect_pattern_effect_bindings_in_expr(cond, out);
+                self.collect_pattern_effect_bindings_in_expr(then_branch, out);
+                self.collect_pattern_effect_bindings_in_expr(else_branch, out);
+            }
+            ExprKind::Case {
+                scrutinee, arms, ..
+            } => {
+                self.collect_pattern_effect_bindings_in_expr(scrutinee, out);
+                for arm in arms {
+                    self.collect_pattern_effect_bindings_in_case_arm(&arm.node, out);
+                }
+            }
+            ExprKind::Block { stmts, .. } => {
+                for stmt in stmts {
+                    self.collect_pattern_effect_bindings_in_stmt(&stmt.node, out);
+                }
+            }
+            ExprKind::Lambda { params, body } => {
+                for p in params {
+                    self.collect_pattern_effect_bindings_in_pat(p, out);
+                }
+                self.collect_pattern_effect_bindings_in_expr(body, out);
+            }
+            ExprKind::RecordCreate { fields, .. } | ExprKind::AnonRecordCreate { fields } => {
+                for (_, _, e) in fields {
+                    self.collect_pattern_effect_bindings_in_expr(e, out);
+                }
+            }
+            ExprKind::RecordUpdate { record, fields, .. } => {
+                self.collect_pattern_effect_bindings_in_expr(record, out);
+                for (_, _, e) in fields {
+                    self.collect_pattern_effect_bindings_in_expr(e, out);
+                }
+            }
+            ExprKind::EffectCall { args, .. }
+            | ExprKind::Tuple { elements: args }
+            | ExprKind::ListLit { elements: args } => {
+                for a in args {
+                    self.collect_pattern_effect_bindings_in_expr(a, out);
+                }
+            }
+            ExprKind::With { expr, handler } => {
+                self.collect_pattern_effect_bindings_in_expr(expr, out);
+                match handler.as_ref() {
+                    ast::Handler::Named(_) => {}
+                    ast::Handler::Inline { items, .. } => {
+                        for item in items {
+                            match &item.node {
+                                ast::HandlerItem::Named(_) => {}
+                                ast::HandlerItem::Arm(arm) | ast::HandlerItem::Return(arm) => {
+                                    self.collect_pattern_effect_bindings_in_handler_arm(arm, out);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            ExprKind::Resume { value } => self.collect_pattern_effect_bindings_in_expr(value, out),
+            ExprKind::Do {
+                bindings,
+                success,
+                else_arms,
+                ..
+            } => {
+                for (p, e) in bindings {
+                    self.collect_pattern_effect_bindings_in_pat(p, out);
+                    self.collect_pattern_effect_bindings_in_expr(e, out);
+                }
+                self.collect_pattern_effect_bindings_in_expr(success, out);
+                for arm in else_arms {
+                    self.collect_pattern_effect_bindings_in_case_arm(&arm.node, out);
+                }
+            }
+            ExprKind::Receive {
+                arms, after_clause, ..
+            } => {
+                for arm in arms {
+                    self.collect_pattern_effect_bindings_in_case_arm(&arm.node, out);
+                }
+                if let Some((timeout, body)) = after_clause {
+                    self.collect_pattern_effect_bindings_in_expr(timeout, out);
+                    self.collect_pattern_effect_bindings_in_expr(body, out);
+                }
+            }
+            ExprKind::BitString { segments } => {
+                for seg in segments {
+                    self.collect_pattern_effect_bindings_in_expr(&seg.value, out);
+                    if let Some(size) = &seg.size {
+                        self.collect_pattern_effect_bindings_in_expr(size, out);
+                    }
+                }
+            }
+            ExprKind::HandlerExpr { body } => {
+                self.collect_pattern_effect_bindings_in_handler_body(body, out)
+            }
+            ExprKind::DictMethodAccess { dict, .. } => {
+                self.collect_pattern_effect_bindings_in_expr(dict, out)
+            }
+            ExprKind::ForeignCall { args, .. } => {
+                for a in args {
+                    self.collect_pattern_effect_bindings_in_expr(a, out);
+                }
+            }
+            ExprKind::Lit { .. }
+            | ExprKind::Var { .. }
+            | ExprKind::Constructor { .. }
+            | ExprKind::QualifiedName { .. }
+            | ExprKind::DictRef { .. }
+            | ExprKind::Pipe { .. }
+            | ExprKind::BinOpChain { .. }
+            | ExprKind::PipeBack { .. }
+            | ExprKind::ComposeForward { .. }
+            | ExprKind::Cons { .. }
+            | ExprKind::StringInterp { .. }
+            | ExprKind::ListComprehension { .. } => {}
+        }
+    }
+
+    fn collect_pattern_effect_bindings_in_stmt(
+        &self,
+        stmt: &Stmt,
+        out: &mut HashMap<crate::ast::NodeId, Vec<String>>,
+    ) {
+        match stmt {
+            Stmt::Let { pattern, value, .. } => {
+                self.collect_pattern_effect_bindings_in_pat(pattern, out);
+                self.collect_pattern_effect_bindings_in_expr(value, out);
+            }
+            Stmt::LetFun {
+                params,
+                guard,
+                body,
+                ..
+            } => {
+                for p in params {
+                    self.collect_pattern_effect_bindings_in_pat(p, out);
+                }
+                if let Some(g) = guard {
+                    self.collect_pattern_effect_bindings_in_expr(g, out);
+                }
+                self.collect_pattern_effect_bindings_in_expr(body, out);
+            }
+            Stmt::Expr(e) => self.collect_pattern_effect_bindings_in_expr(e, out),
+        }
+    }
+
+    fn collect_pattern_effect_bindings_in_pat(
+        &self,
+        pat: &Pat,
+        out: &mut HashMap<crate::ast::NodeId, Vec<String>>,
+    ) {
+        if let Pat::Var { id, span, .. } = pat
+            && let Some(ty) = self.check_result.type_at_span.get(span)
+        {
+            let mut effects: Vec<String> = crate::typechecker::effects_from_type(ty)
+                .into_iter()
+                .collect();
+            effects.sort();
+            let canonical = self.canonicalize_effects(effects);
+            if !canonical.is_empty() {
+                out.insert(*id, canonical);
+            }
+        }
+
+        match pat {
+            Pat::Constructor { args, .. }
+            | Pat::Tuple { elements: args, .. }
+            | Pat::ListPat { elements: args, .. } => {
+                for sub in args {
+                    self.collect_pattern_effect_bindings_in_pat(sub, out);
+                }
+            }
+            Pat::ConsPat { head, tail, .. } => {
+                self.collect_pattern_effect_bindings_in_pat(head, out);
+                self.collect_pattern_effect_bindings_in_pat(tail, out);
+            }
+            Pat::Record { fields, .. } | Pat::AnonRecord { fields, .. } => {
+                for (_, sub) in fields {
+                    if let Some(sub_pat) = sub {
+                        self.collect_pattern_effect_bindings_in_pat(sub_pat, out);
+                    }
+                }
+            }
+            Pat::Or { patterns, .. } => {
+                for sub in patterns {
+                    self.collect_pattern_effect_bindings_in_pat(sub, out);
+                }
+            }
+            Pat::StringPrefix { rest, .. } => {
+                self.collect_pattern_effect_bindings_in_pat(rest, out)
+            }
+            Pat::BitStringPat { segments, .. } => {
+                for seg in segments {
+                    self.collect_pattern_effect_bindings_in_pat(&seg.value, out);
+                }
+            }
+            Pat::Wildcard { .. } | Pat::Var { .. } | Pat::Lit { .. } => {}
+        }
+    }
+
+    /// Look up whether a top-level function's declared/inferred type carries
+    /// an open effect row (`needs {Foo, ..e}`). Consults the local check_result
+    /// first (for module-local funs) and then cross-module codegen info.
+    fn fun_has_open_row(&self, name: &str) -> bool {
+        if let Some(scheme) = self.check_result.env.get(name)
+            && util::has_open_effect_row(&self.check_result.sub.apply(&scheme.ty))
+        {
+            return true;
+        }
+        // Canonical "Mod.name" form: try imported modules' exports.
+        if let Some((mod_part, fun_part)) = name.rsplit_once('.')
+            && let Some(compiled) = self.ctx.modules.get(mod_part)
+            && let Some((_, scheme)) = compiled
+                .codegen_info
+                .exports
+                .iter()
+                .find(|(n, _)| n == fun_part)
+        {
+            return util::has_open_effect_row(&scheme.ty);
+        }
+        false
     }
 
     fn collect_let_fun_sigs_in_decl(
@@ -1195,7 +1703,11 @@ impl<'a> Lowerer<'a> {
                             }
                         }
                         Stmt::LetFun {
-                            id, params, body, guard, ..
+                            id,
+                            params,
+                            body,
+                            guard,
+                            ..
                         } => {
                             // Compute signature from the typechecker's resolved
                             // type, mirroring exprs.rs lower_block's LetFun
@@ -1205,7 +1717,8 @@ impl<'a> Lowerer<'a> {
                                 .check_result
                                 .resolved_type_for_node(*id)
                                 .map(|ty| {
-                                    let (base_arity, effects) = util::arity_and_effects_from_type(&ty);
+                                    let (base_arity, effects) =
+                                        util::arity_and_effects_from_type(&ty);
                                     let effects = self.canonicalize_effects(effects);
                                     let handler_count = self.effect_handler_ops(&effects).len();
                                     let expanded_arity = base_arity
@@ -1218,10 +1731,12 @@ impl<'a> Lowerer<'a> {
                                                 (idx, self.canonicalize_effects(effs))
                                             })
                                             .collect();
+                                    let is_open_row = util::has_open_effect_row(&ty);
                                     FunSig {
                                         arity: expanded_arity,
                                         effects,
                                         param_absorbed_effects: param_absorbed,
+                                        is_open_row,
                                     }
                                 })
                                 .unwrap_or_else(|| FunSig {
@@ -1329,9 +1844,7 @@ impl<'a> Lowerer<'a> {
                     self.collect_let_fun_sigs_in_expr(&rc.body, out);
                 }
             }
-            ExprKind::DictMethodAccess { dict, .. } => {
-                self.collect_let_fun_sigs_in_expr(dict, out)
-            }
+            ExprKind::DictMethodAccess { dict, .. } => self.collect_let_fun_sigs_in_expr(dict, out),
             ExprKind::ForeignCall { args, .. } => {
                 for a in args {
                     self.collect_let_fun_sigs_in_expr(a, out);
@@ -2403,8 +2916,7 @@ impl<'a> Lowerer<'a> {
             let (rk_var, rk_ce) = self.effectful_call_return_k_binding(return_k);
             call_args.push(CExpr::Var(rk_var.clone()));
 
-            let outer_call =
-                CExpr::Apply(Box::new(CExpr::Var(core_var(var_name))), call_args);
+            let outer_call = CExpr::Apply(Box::new(CExpr::Var(core_var(var_name))), call_args);
             let mut body = CExpr::Let(rk_var, Box::new(rk_ce), Box::new(outer_call));
 
             for &i in effectful_arg_idxs.iter().rev() {
@@ -2476,6 +2988,15 @@ impl<'a> Lowerer<'a> {
     }
 
     fn lower_app_expr(&mut self, expr: &Expr) -> CExpr {
+        // Phase 2 parallel-check: validate this App's pre-pass entry against
+        // the inline classification at the value-mode dispatch entry point.
+        // Tail-position calls go through `lower_expr_with_call_return_k`,
+        // which already triggers verification via `expr_is_effectful_call`;
+        // value-mode App lowering needs its own trigger so dispatch sites
+        // that don't gate on effectfulness still get checked.
+        #[cfg(debug_assertions)]
+        self.verify_call_effects_at(expr);
+
         if let Some((ctor_name, args)) = collect_ctor_call(expr) {
             return self.lower_ctor(ctor_name, args);
         }

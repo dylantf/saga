@@ -27,7 +27,7 @@ use crate::ast::{self, Decl, Expr, ExprKind, NodeId, Pat, Program, Stmt};
 use crate::codegen::resolve::{ResolutionMap, ResolvedName};
 
 /// Per-call metadata. Keyed by the `NodeId` of an `App` node.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CallEffectInfo {
     pub kind: CallEffectKind,
     /// Logical user-argument count (excludes handler params and return_k).
@@ -68,6 +68,9 @@ pub struct FunSig {
     pub effects: Vec<String>,
     /// param-index -> absorbed effects (for HOF effect absorption).
     pub param_absorbed_effects: HashMap<usize, Vec<String>>,
+    /// True if the callee's effect row has an open tail (`needs {Foo, ..e}`).
+    /// Open-row callees produce `RowForwarded` rather than `StaticOps`.
+    pub is_open_row: bool,
 }
 
 /// Pre-pass walker. Constructed with the data sources it needs and consumed by
@@ -83,6 +86,13 @@ pub struct Populator<'a> {
     effect_ops: &'a HashMap<String, Vec<String>>,
     /// Static let-binding effects from CodegenContext.
     let_effect_bindings: &'a HashMap<String, Vec<String>>,
+    /// Pattern-bound effectful variables keyed by the pattern's `NodeId`.
+    pattern_effect_bindings: &'a HashMap<NodeId, Vec<String>>,
+    /// `App` head NodeId -> `is_open_row` for resolved callees. Pre-computed
+    /// by the Lowerer using the same `check_result.env` / cross-module export
+    /// lookup the inline path uses, so populator and inline agree on
+    /// `RowForwarded` vs `StaticOps`.
+    head_open_row: &'a HashMap<NodeId, bool>,
     map: CallEffectMap,
     /// Stack of lexical scopes. Each frame maps a bound name to the absorbed
     /// effects that calls of that name should thread.
@@ -99,6 +109,8 @@ impl<'a> Populator<'a> {
         let_fun_sigs: &'a HashMap<NodeId, FunSig>,
         effect_ops: &'a HashMap<String, Vec<String>>,
         let_effect_bindings: &'a HashMap<String, Vec<String>>,
+        pattern_effect_bindings: &'a HashMap<NodeId, Vec<String>>,
+        head_open_row: &'a HashMap<NodeId, bool>,
     ) -> Self {
         Populator {
             resolved,
@@ -106,6 +118,8 @@ impl<'a> Populator<'a> {
             let_fun_sigs,
             effect_ops,
             let_effect_bindings,
+            pattern_effect_bindings,
+            head_open_row,
             map: HashMap::new(),
             scopes: Vec::new(),
             local_fun_sigs: Vec::new(),
@@ -144,6 +158,9 @@ impl<'a> Populator<'a> {
             Decl::HandlerDef { body, .. } => {
                 for arm in &body.arms {
                     self.scopes.push(HashMap::new());
+                    for param in &arm.node.params {
+                        self.record_pattern_effectful_vars(param);
+                    }
                     self.walk_expr(&arm.node.body);
                     if let Some(fb) = &arm.node.finally_block {
                         self.walk_expr(fb);
@@ -152,6 +169,9 @@ impl<'a> Populator<'a> {
                 }
                 if let Some(rc) = &body.return_clause {
                     self.scopes.push(HashMap::new());
+                    for param in &rc.params {
+                        self.record_pattern_effectful_vars(param);
+                    }
                     self.walk_expr(&rc.body);
                     self.scopes.pop();
                 }
@@ -167,11 +187,7 @@ impl<'a> Populator<'a> {
         }
     }
 
-    fn fun_param_effectful_vars(
-        &self,
-        name: &str,
-        params: &[Pat],
-    ) -> HashMap<String, Vec<String>> {
+    fn fun_param_effectful_vars(&self, name: &str, params: &[Pat]) -> HashMap<String, Vec<String>> {
         let mut out = HashMap::new();
         let Some(info) = self.fun_sigs.get(name) else {
             return out;
@@ -196,6 +212,51 @@ impl<'a> Populator<'a> {
     fn record_effectful_var(&mut self, name: String, effects: Vec<String>) {
         if let Some(frame) = self.scopes.last_mut() {
             frame.insert(name, effects);
+        }
+    }
+
+    fn record_pattern_effectful_vars(&mut self, pat: &Pat) {
+        match pat {
+            Pat::Var { id, name, .. } => {
+                if let Some(effects) = self.pattern_effect_bindings.get(id)
+                    && !effects.is_empty()
+                {
+                    self.record_effectful_var(name.clone(), effects.clone());
+                }
+            }
+            Pat::Constructor { args, .. } | Pat::Tuple { elements: args, .. } => {
+                for sub in args {
+                    self.record_pattern_effectful_vars(sub);
+                }
+            }
+            Pat::ListPat { elements, .. } => {
+                for sub in elements {
+                    self.record_pattern_effectful_vars(sub);
+                }
+            }
+            Pat::ConsPat { head, tail, .. } => {
+                self.record_pattern_effectful_vars(head);
+                self.record_pattern_effectful_vars(tail);
+            }
+            Pat::Record { fields, .. } | Pat::AnonRecord { fields, .. } => {
+                for (_, sub) in fields {
+                    if let Some(sub_pat) = sub {
+                        self.record_pattern_effectful_vars(sub_pat);
+                    }
+                }
+            }
+            Pat::Or { patterns, .. } => {
+                for sub in patterns {
+                    self.record_pattern_effectful_vars(sub);
+                }
+            }
+            Pat::StringPrefix { rest, .. } => self.record_pattern_effectful_vars(rest),
+            Pat::BitStringPat { segments, .. } => {
+                for seg in segments {
+                    self.record_pattern_effectful_vars(&seg.value);
+                }
+            }
+            Pat::Wildcard { .. } | Pat::Lit { .. } => {}
         }
     }
 
@@ -240,6 +301,7 @@ impl<'a> Populator<'a> {
                 self.walk_expr(scrutinee);
                 for arm in arms {
                     self.scopes.push(HashMap::new());
+                    self.record_pattern_effectful_vars(&arm.node.pattern);
                     if let Some(g) = &arm.node.guard {
                         self.walk_expr(g);
                     }
@@ -262,8 +324,7 @@ impl<'a> Populator<'a> {
                 self.scopes.pop();
             }
             ExprKind::FieldAccess { expr, .. } => self.walk_expr(expr),
-            ExprKind::RecordCreate { fields, .. }
-            | ExprKind::AnonRecordCreate { fields } => {
+            ExprKind::RecordCreate { fields, .. } | ExprKind::AnonRecordCreate { fields } => {
                 for (_, _, e) in fields {
                     self.walk_expr(e);
                 }
@@ -288,6 +349,9 @@ impl<'a> Populator<'a> {
                         match &item.node {
                             ast::HandlerItem::Arm(arm) | ast::HandlerItem::Return(arm) => {
                                 self.scopes.push(HashMap::new());
+                                for param in &arm.params {
+                                    self.record_pattern_effectful_vars(param);
+                                }
                                 self.walk_expr(&arm.body);
                                 if let Some(fb) = &arm.finally_block {
                                     self.walk_expr(fb);
@@ -321,6 +385,7 @@ impl<'a> Populator<'a> {
                 self.scopes.pop();
                 for arm in else_arms {
                     self.scopes.push(HashMap::new());
+                    self.record_pattern_effectful_vars(&arm.node.pattern);
                     if let Some(g) = &arm.node.guard {
                         self.walk_expr(g);
                     }
@@ -333,6 +398,7 @@ impl<'a> Populator<'a> {
             } => {
                 for arm in arms {
                     self.scopes.push(HashMap::new());
+                    self.record_pattern_effectful_vars(&arm.node.pattern);
                     if let Some(g) = &arm.node.guard {
                         self.walk_expr(g);
                     }
@@ -356,6 +422,9 @@ impl<'a> Populator<'a> {
             ExprKind::HandlerExpr { body } => {
                 for arm in &body.arms {
                     self.scopes.push(HashMap::new());
+                    for param in &arm.node.params {
+                        self.record_pattern_effectful_vars(param);
+                    }
                     self.walk_expr(&arm.node.body);
                     if let Some(fb) = &arm.node.finally_block {
                         self.walk_expr(fb);
@@ -364,6 +433,9 @@ impl<'a> Populator<'a> {
                 }
                 if let Some(rc) = &body.return_clause {
                     self.scopes.push(HashMap::new());
+                    for param in &rc.params {
+                        self.record_pattern_effectful_vars(param);
+                    }
                     self.walk_expr(&rc.body);
                     self.scopes.pop();
                 }
@@ -412,7 +484,11 @@ impl<'a> Populator<'a> {
                 }
             }
             Stmt::LetFun {
-                id, name, body, guard, ..
+                id,
+                name,
+                body,
+                guard,
+                ..
             } => {
                 // Mirror the lowerer: register the LetFun's signature into the
                 // top local fun frame BEFORE walking its body so recursive
@@ -440,11 +516,16 @@ impl<'a> Populator<'a> {
     fn value_effect_signature(&self, value: &Expr) -> Option<Vec<String>> {
         match self.map.get(&value.id)?.kind.clone() {
             CallEffectKind::Pure => None,
-            CallEffectKind::StaticOps { ops } | CallEffectKind::RowForwarded { static_ops: ops } => {
+            CallEffectKind::StaticOps { ops }
+            | CallEffectKind::RowForwarded { static_ops: ops } => {
                 let mut effects: Vec<String> = ops.into_iter().map(|k| k.effect).collect();
                 effects.sort();
                 effects.dedup();
-                if effects.is_empty() { None } else { Some(effects) }
+                if effects.is_empty() {
+                    None
+                } else {
+                    Some(effects)
+                }
             }
         }
     }
@@ -468,12 +549,7 @@ impl<'a> Populator<'a> {
         }
     }
 
-    fn classify_named_call(
-        &self,
-        head_id: NodeId,
-        name: &str,
-        supplied: usize,
-    ) -> CallEffectInfo {
+    fn classify_named_call(&self, head_id: NodeId, name: &str, supplied: usize) -> CallEffectInfo {
         let pure = || CallEffectInfo {
             kind: CallEffectKind::Pure,
             user_arity: supplied,
@@ -489,7 +565,9 @@ impl<'a> Populator<'a> {
         let resolved = self.resolved.get(&head_id);
         let canonical_name = match resolved {
             Some(ResolvedName::LocalFun { canonical_name, .. })
-            | Some(ResolvedName::ImportedFun { canonical_name, .. }) => Some(canonical_name.clone()),
+            | Some(ResolvedName::ImportedFun { canonical_name, .. }) => {
+                Some(canonical_name.clone())
+            }
             None => None,
         };
         let effects: Vec<String> = match resolved {
@@ -514,10 +592,8 @@ impl<'a> Populator<'a> {
                         } else {
                             CallEffectKind::StaticOps { ops }
                         },
-                        // The inline check returns `true` whenever an
-                        // effectful-var is called with at least one arg; it
-                        // does not enforce a stricter user_arity since the
-                        // var's exact shape isn't recorded. Mirror that.
+                        // Effectful-var calls don't carry a precise user_arity;
+                        // mirror the inline check which only requires supplied > 0.
                         user_arity: supplied,
                         needs_return_k: !effs.is_empty(),
                     };
@@ -532,12 +608,16 @@ impl<'a> Populator<'a> {
 
         // Need expanded arity from fun_sigs to compute user_arity.
         let Some(sig) = self.lookup_fun_sig(name, canonical_name.as_deref()) else {
-            // Inline path: returns true when fun_info missing but effects
-            // exist. Mirror that for the bool check; user_arity unknown.
             let ops = self.collect_op_keys(&effects);
+            // No FunSig snapshot. Mirror the inline fallback: effectful if
+            // effects exist, with the supplied arity as the best available
+            // user-arity. Any later path with fuller information will be
+            // checked against this by the debug parallel-check.
             return CallEffectInfo {
                 kind: if ops.is_empty() {
                     CallEffectKind::Pure
+                } else if self.head_open_row.get(&head_id).copied().unwrap_or(false) {
+                    CallEffectKind::RowForwarded { static_ops: ops }
                 } else {
                     CallEffectKind::StaticOps { ops }
                 },
@@ -556,12 +636,24 @@ impl<'a> Populator<'a> {
             return pure();
         }
 
+        // Prefer the per-call open-row signal (looked up by head NodeId) over
+        // the FunSig-level flag, since FunSig keys may not capture every alias
+        // for an imported function. The two should agree when both are set.
+        let is_open_row = self
+            .head_open_row
+            .get(&head_id)
+            .copied()
+            .unwrap_or(sig.is_open_row);
+        let kind = if !has_ops {
+            CallEffectKind::Pure
+        } else if is_open_row {
+            CallEffectKind::RowForwarded { static_ops: ops }
+        } else {
+            CallEffectKind::StaticOps { ops }
+        };
+
         CallEffectInfo {
-            kind: if has_ops {
-                CallEffectKind::StaticOps { ops }
-            } else {
-                CallEffectKind::Pure
-            },
+            kind,
             user_arity,
             needs_return_k: has_ops,
         }

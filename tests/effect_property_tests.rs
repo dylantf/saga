@@ -100,10 +100,7 @@ fn bridge_files() -> Vec<(&'static str, &'static str)> {
             "BitString.bridge.erl",
             include_str!("../src/stdlib/BitString.bridge.erl"),
         ),
-        (
-            "IO.bridge.erl",
-            include_str!("../src/stdlib/IO.bridge.erl"),
-        ),
+        ("IO.bridge.erl", include_str!("../src/stdlib/IO.bridge.erl")),
         (
             "Dynamic.bridge.erl",
             include_str!("../src/stdlib/Dynamic.bridge.erl"),
@@ -111,6 +108,10 @@ fn bridge_files() -> Vec<(&'static str, &'static str)> {
         (
             "Array.bridge.erl",
             include_str!("../src/stdlib/Array.bridge.erl"),
+        ),
+        (
+            "evidence.bridge.erl",
+            include_str!("../src/stdlib/evidence.bridge.erl"),
         ),
     ]
 }
@@ -142,7 +143,10 @@ fn build_stdlib() -> PathBuf {
         // so we just preserve it: write under the *referenced* filename.
         let on_disk = match filename {
             "runtime.erl" => "saga_runtime.erl".to_string(),
-            _ => format!("std_{}_bridge.erl", stem.split('.').next().unwrap().to_lowercase()),
+            _ => format!(
+                "std_{}_bridge.erl",
+                stem.split('.').next().unwrap().to_lowercase()
+            ),
         };
         let path = dir.join(&on_disk);
         std::fs::write(&path, source).unwrap();
@@ -160,9 +164,8 @@ fn build_stdlib() -> PathBuf {
     }
 
     // Build a one-off checker with prelude and emit each Std.* module.
-    let stdlib_root = std::env::temp_dir().join(format!(
-        "saga_effect_prop_stdlib_root_{pid}_{unique}"
-    ));
+    let stdlib_root =
+        std::env::temp_dir().join(format!("saga_effect_prop_stdlib_root_{pid}_{unique}"));
     std::fs::create_dir_all(&stdlib_root).unwrap();
     std::fs::write(
         stdlib_root.join("project.toml"),
@@ -429,12 +432,7 @@ fn check_result_int(fixture: &str, src: &str, expected: i64) {
 /// asserting the returned string equals `expected`.
 ///
 /// `modules` is a list of `(relative_file_path, source)` for non-main modules.
-fn check_cross_module(
-    fixture: &str,
-    modules: &[(&str, &str)],
-    main_src: &str,
-    expected: &str,
-) {
+fn check_cross_module(fixture: &str, modules: &[(&str, &str)], main_src: &str, expected: &str) {
     let root = fresh_dir(&format!("{fixture}_root"));
     std::fs::write(root.join("project.toml"), "[project]\nname=\"prop\"\n").unwrap();
     for (rel, src) in modules {
@@ -476,9 +474,10 @@ fn check_cross_module(
     // Emit each declared lib module from the cached programs in the result.
     let result = checker.to_result();
     for name in &lib_module_names {
-        let program = result.programs().get(name).unwrap_or_else(|| {
-            panic!("[{fixture}] checker did not load module {name}")
-        });
+        let program = result
+            .programs()
+            .get(name)
+            .unwrap_or_else(|| panic!("[{fixture}] checker did not load module {name}"));
         let erl_name = name.to_lowercase().replace('.', "_");
         let core = emit_program(program, &erl_name, &checker, None);
         compile_with_erlc(&dir, &core, &erl_name, fixture);
@@ -760,11 +759,7 @@ pub fun result : Unit -> String
 result () =
   (((work () with to_result_str) with tagger) with collect)
 "#;
-    check_result_string(
-        "nested_with_three_distinct_effects",
-        src,
-        "go/ok:[name]",
-    );
+    check_result_string("nested_with_three_distinct_effects", src, "go/ok:[name]");
 }
 
 // ---------------------------------------------------------------------------
@@ -1625,6 +1620,12 @@ result () = (work () with to_result_str) with tagger
 // String). The simpler `let g = factory(); g x` shape (single call, last
 // stmt) works — see `effectful_var_binding_simple`. Flagged for the
 // evidence-passing cutover; do not fix in Phase 0.
+//
+// Phase 3 acceptance: this fixture must pass after the cutover. The bug shape
+// is exactly what design decision 8 (`docs/planning/plans/evidence-passing-plan.md`)
+// targets — effectful let-bindings whose closure must thread *current*
+// evidence at call time. Un-ignore when Phase 3 lands and add to the
+// regression net.
 #[ignore = "effectful var binding called mid-block miscompiles (pre-existing)"]
 #[test]
 fn effectful_var_binding_deferred_call() {
@@ -1693,7 +1694,11 @@ result () = {
   show (get! counter)
 } with beam_ref
 "#;
-    check_result_string("ref_inside_effect_handler_persists_across_resumes", src, "3");
+    check_result_string(
+        "ref_inside_effect_handler_persists_across_resumes",
+        src,
+        "3",
+    );
 }
 
 #[test]
@@ -1740,6 +1745,10 @@ result () = (work () with to_result_str) with collect
 // FIXME: same shape as `effectful_var_binding_deferred_call` but across
 // modules — the partially-applied effectful function bound via `let info = ...`
 // and called twice in stmt position miscompiles at runtime.
+//
+// Phase 3 acceptance: same root cause as the in-module variant. Cross-module
+// dispatch must publish the callee's `EvidenceLayout` via `ModuleCodegenInfo`
+// (Phase 3f) so the local binder threads ambient evidence correctly.
 #[ignore = "effectful var binding called mid-block miscompiles (pre-existing)"]
 #[test]
 fn cross_module_effectful_var_binding() {
@@ -1783,6 +1792,12 @@ result () = {
 // Unit where the surrounding handler's `<>` chain expects String. Likely
 // the same root cause as `effectful_var_binding_deferred_call`: mid-block
 // effectful calls don't thread the continuation correctly.
+//
+// Phase 3 acceptance: this exercises `RowForwarded` end-to-end across module
+// boundaries — the very case decision 6 (closed-row vs open-row projection)
+// must handle. The Phase 2 pre-pass now classifies the call as
+// `RowForwarded`; Phase 3 needs the call-site emission (Phase 3d) to
+// forward the caller's full evidence rather than try to project.
 #[ignore = "open-row HOF callback called twice mid-block miscompiles (pre-existing)"]
 #[test]
 fn cross_module_open_row_higher_order() {
