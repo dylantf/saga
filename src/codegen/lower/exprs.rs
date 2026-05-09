@@ -10,7 +10,7 @@ use std::collections::HashMap;
 use super::pats;
 use super::util::{
     arity_and_effects_from_type, binop_call, collect_effect_call_expr, collect_fun_call, core_var,
-    has_nested_effect_call, lower_string_to_binary, mangle_ctor_atom,
+    lower_string_to_binary, mangle_ctor_atom,
     param_absorbed_effects_from_type, param_types_from_type, pat_binding_var,
 };
 use super::{FunInfo, LowerMode, Lowerer};
@@ -86,37 +86,41 @@ impl<'a> Lowerer<'a> {
         expr: &Expr,
         return_k: Option<CExpr>,
     ) -> CExpr {
-        if let Some((module, func_name, head, args)) = super::util::collect_qualified_call(expr) {
-            if let Some(call) = self.lower_resolved_fun_call(
-                func_name,
-                head,
-                &args,
-                return_k.clone(),
-                Some(&expr.span),
-            ) {
-                return call;
+        if self.expr_is_effectful_call(expr) {
+            if let Some((module, func_name, head, args)) =
+                super::util::collect_qualified_call(expr)
+            {
+                if let Some(call) = self.lower_resolved_fun_call(
+                    func_name,
+                    head,
+                    &args,
+                    return_k.clone(),
+                    Some(&expr.span),
+                ) {
+                    return call;
+                }
+                return self.lower_qualified_call(
+                    module,
+                    func_name,
+                    head,
+                    &args,
+                    return_k,
+                    Some(&expr.span),
+                );
             }
-            return self.lower_qualified_call(
-                module,
-                func_name,
-                head,
-                &args,
-                return_k,
-                Some(&expr.span),
-            );
-        }
-        if let Some((func_name, head_expr, args)) = collect_fun_call(expr) {
-            if let Some(call) = self.lower_resolved_fun_call(
-                func_name,
-                head_expr,
-                &args,
-                return_k.clone(),
-                Some(&expr.span),
-            ) {
-                return call;
-            }
-            if let Some(call) = self.lower_effectful_var_call(func_name, &args, return_k) {
-                return call;
+            if let Some((func_name, head_expr, args)) = collect_fun_call(expr) {
+                if let Some(call) = self.lower_resolved_fun_call(
+                    func_name,
+                    head_expr,
+                    &args,
+                    return_k.clone(),
+                    Some(&expr.span),
+                ) {
+                    return call;
+                }
+                if let Some(call) = self.lower_effectful_var_call(func_name, &args, return_k) {
+                    return call;
+                }
             }
         }
 
@@ -189,7 +193,7 @@ impl<'a> Lowerer<'a> {
             let k_ce = return_k.expect("nested terminal effectful expr requires return_k");
             let body_ce = self.lower_expr_with_k(expr, &k_var);
             CExpr::Let(k_var, Box::new(k_ce), Box::new(body_ce))
-        } else if self.is_effectful_call_arg(expr) {
+        } else if self.expr_is_effectful_call(expr) {
             self.lower_expr_with_call_return_k(expr, return_k)
         } else {
             let body_ce = self.lower_expr(expr);
@@ -276,9 +280,9 @@ impl<'a> Lowerer<'a> {
                 &args_owned,
                 Some(CExpr::Var(k_var.to_string())),
             )
-        } else if self.is_effectful_call_arg(expr) {
+        } else if self.expr_is_effectful_call(expr) {
             self.lower_expr_with_call_return_k(expr, Some(CExpr::Var(k_var.to_string())))
-        } else if has_nested_effect_call(expr) || matches!(expr.kind, ExprKind::Block { .. }) {
+        } else if self.has_nested_effectful_expr(expr) || matches!(expr.kind, ExprKind::Block { .. }) {
             self.lower_expr_with_k_inner(expr, k_var)
         } else {
             self.lower_value_to_k(expr, k_var)
@@ -961,7 +965,7 @@ impl<'a> Lowerer<'a> {
                         Stmt::Expr(e) => e,
                         Stmt::LetFun { .. } => unreachable!(),
                     };
-                    if self.is_effectful_call_arg(value_expr) {
+                    if self.expr_is_effectful_call(value_expr) {
                         let (pat_opt, value_expr) = match first {
                             Stmt::Let { pattern, value, .. } => (Some(pattern), value),
                             Stmt::Expr(e) => (None, e),
@@ -994,8 +998,8 @@ impl<'a> Lowerer<'a> {
                     // If so, build a continuation K from the remaining statements and
                     // thread it through branches so abort-style handlers skip the rest.
                     let value_has_nested = match first {
-                        Stmt::Expr(e) => has_nested_effect_call(e),
-                        Stmt::Let { value, .. } => has_nested_effect_call(value),
+                        Stmt::Expr(e) => self.has_nested_effectful_expr(e),
+                        Stmt::Let { value, .. } => self.has_nested_effectful_expr(value),
                         Stmt::LetFun { .. } => false,
                     };
 
@@ -1182,7 +1186,7 @@ impl<'a> Lowerer<'a> {
             let e = field_map
                 .get(field_name.as_str())
                 .expect("field missing in record-create");
-            if self.is_effectful_call_arg(e) || self.has_nested_effectful_expr(e) {
+            if self.expr_is_effectful_call(e) || self.has_nested_effectful_expr(e) {
                 effectful_idxs.push(i);
             } else {
                 pure_bindings.push((v, self.lower_expr_value(e)));
@@ -1204,7 +1208,7 @@ impl<'a> Lowerer<'a> {
                 .expect("field missing in record-create");
             let inner_k = CExpr::Fun(vec![v.clone()], Box::new(body));
             let inner_k_var = self.fresh();
-            let inner_body = if self.is_effectful_call_arg(e) {
+            let inner_body = if self.expr_is_effectful_call(e) {
                 self.lower_expr_with_call_return_k(e, Some(CExpr::Var(inner_k_var.clone())))
             } else {
                 self.lower_expr_with_k_inner(e, &inner_k_var)
@@ -1281,12 +1285,12 @@ impl<'a> Lowerer<'a> {
                     // Check for call to an effectful function. Capture the
                     // rest of the block as _ReturnK so CPS chains correctly
                     // (e.g. state-threading handlers need real continuations).
-                    if self.is_effectful_call_arg(value_expr) {
+                    if self.expr_is_effectful_call(value_expr) {
                         let rest_k = self.lower_rest_block_with_k_k(pat_opt, rest, k_var);
                         return self.lower_expr_with_call_return_k(value_expr, Some(rest_k));
                     }
 
-                    if has_nested_effect_call(value_expr) {
+                    if self.has_nested_effectful_expr(value_expr) {
                         // Value has nested effects: build inner K and thread through
                         let inner_k = self.lower_rest_block_with_k_k(pat_opt, rest, k_var);
                         let inner_k_var = self.fresh();
