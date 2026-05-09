@@ -31,6 +31,9 @@ use crate::codegen::resolve::{ResolutionMap, ResolvedName};
 pub struct CallEffectInfo {
     pub kind: CallEffectKind,
     /// Logical user-argument count (excludes handler params and return_k).
+    /// Canonicalized to `0` for `Pure` entries — pure calls don't carry user-arity
+    /// metadata that any consumer needs, and pinning the value prevents the two
+    /// producers (this populator and the lowerer's inline path) from drifting.
     pub user_arity: usize,
     /// Whether this call accepts a return continuation (i.e. it is effectful).
     pub needs_return_k: bool,
@@ -543,7 +546,7 @@ impl<'a> Populator<'a> {
             // parallel-check stays clean.
             _ => CallEffectInfo {
                 kind: CallEffectKind::Pure,
-                user_arity: arg_count,
+                user_arity: 0,
                 needs_return_k: false,
             },
         }
@@ -552,7 +555,7 @@ impl<'a> Populator<'a> {
     fn classify_named_call(&self, head_id: NodeId, name: &str, supplied: usize) -> CallEffectInfo {
         let pure = || CallEffectInfo {
             kind: CallEffectKind::Pure,
-            user_arity: supplied,
+            user_arity: 0,
             needs_return_k: false,
         };
 
@@ -586,15 +589,16 @@ impl<'a> Populator<'a> {
                 // effectful var (mirrors `current_effectful_vars` fallback).
                 if let Some(effs) = self.lookup_effectful_var(name) {
                     let ops = self.collect_op_keys(&effs);
+                    let is_pure = ops.is_empty();
                     return CallEffectInfo {
-                        kind: if ops.is_empty() {
+                        kind: if is_pure {
                             CallEffectKind::Pure
                         } else {
                             CallEffectKind::StaticOps { ops }
                         },
                         // Effectful-var calls don't carry a precise user_arity;
                         // mirror the inline check which only requires supplied > 0.
-                        user_arity: supplied,
+                        user_arity: if is_pure { 0 } else { supplied },
                         needs_return_k: !effs.is_empty(),
                     };
                 }
@@ -613,15 +617,16 @@ impl<'a> Populator<'a> {
             // effects exist, with the supplied arity as the best available
             // user-arity. Any later path with fuller information will be
             // checked against this by the debug parallel-check.
+            let is_pure = ops.is_empty();
             return CallEffectInfo {
-                kind: if ops.is_empty() {
+                kind: if is_pure {
                     CallEffectKind::Pure
                 } else if self.head_open_row.get(&head_id).copied().unwrap_or(false) {
                     CallEffectKind::RowForwarded { static_ops: ops }
                 } else {
                     CallEffectKind::StaticOps { ops }
                 },
-                user_arity: supplied,
+                user_arity: if is_pure { 0 } else { supplied },
                 needs_return_k: true,
             };
         };
@@ -655,7 +660,7 @@ impl<'a> Populator<'a> {
 
         CallEffectInfo {
             kind,
-            user_arity,
+            user_arity: if has_ops { user_arity } else { 0 },
             needs_return_k: has_ops,
         }
     }

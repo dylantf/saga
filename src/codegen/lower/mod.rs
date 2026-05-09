@@ -1121,9 +1121,9 @@ impl<'a> Lowerer<'a> {
     ) -> super::call_effects::CallEffectInfo {
         use super::call_effects::{CallEffectInfo, CallEffectKind, OpKey};
 
-        let pure_with_arity = |user_arity| CallEffectInfo {
+        let pure = || CallEffectInfo {
             kind: CallEffectKind::Pure,
-            user_arity,
+            user_arity: 0,
             needs_return_k: false,
         };
 
@@ -1133,11 +1133,11 @@ impl<'a> Lowerer<'a> {
             } else if let Some((n, head, args)) = collect_fun_call(expr) {
                 (head.id, n.to_string(), args.len())
             } else {
-                return pure_with_arity(app_arg_count(expr));
+                return pure();
             };
 
         if supplied == 0 {
-            return pure_with_arity(supplied);
+            return pure();
         }
 
         // Mirror call_performs_effect step by step.
@@ -1147,21 +1147,21 @@ impl<'a> Lowerer<'a> {
             if self.current_effectful_vars.contains_key(&name) {
                 let effs = self.current_effectful_vars[&name].clone();
                 let ops = self.collect_op_keys_inline(&effs);
-                let kind = if ops.is_empty() {
-                    CallEffectKind::Pure
-                } else {
-                    CallEffectKind::StaticOps { ops }
-                };
+                let is_pure = ops.is_empty();
                 return CallEffectInfo {
-                    kind,
-                    user_arity: supplied,
+                    kind: if is_pure {
+                        CallEffectKind::Pure
+                    } else {
+                        CallEffectKind::StaticOps { ops }
+                    },
+                    user_arity: if is_pure { 0 } else { supplied },
                     needs_return_k: !effs.is_empty(),
                 };
             }
-            return pure_with_arity(supplied);
+            return pure();
         };
         if effects.is_empty() {
-            return pure_with_arity(supplied);
+            return pure();
         }
         let Some(info) = self.resolved_fun_info(head_id, &name) else {
             let ops = self.collect_op_keys_inline(&effects);
@@ -1176,7 +1176,7 @@ impl<'a> Lowerer<'a> {
             };
             return CallEffectInfo {
                 kind,
-                user_arity: supplied,
+                user_arity: if has_ops { supplied } else { 0 },
                 needs_return_k: has_ops,
             };
         };
@@ -1185,7 +1185,7 @@ impl<'a> Lowerer<'a> {
         let extras = if handler_ops.is_empty() { 0 } else { 2 };
         let user_arity = info.arity.saturating_sub(extras);
         if user_arity == 0 || supplied < user_arity {
-            return pure_with_arity(supplied);
+            return pure();
         }
 
         let mut ops: Vec<OpKey> = handler_ops
@@ -1209,7 +1209,7 @@ impl<'a> Lowerer<'a> {
         };
         CallEffectInfo {
             kind,
-            user_arity,
+            user_arity: if has_ops { user_arity } else { 0 },
             needs_return_k: has_ops,
         }
     }

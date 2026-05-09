@@ -939,4 +939,51 @@ handler h for Log {
             after,
         );
     }
+
+    /// Exercise `lift_to_let`: programs containing effect calls embedded in
+    /// non-effect expressions (e.g. `1 + ask!()`, `add (ask!()) 2`) force
+    /// normalization to lift the effect call out into a fresh let-binding.
+    /// The Phase 2 call-effects pre-pass keys every `App` site by NodeId, so
+    /// any future normalize change that drops or rewrites those ids on the
+    /// lift path would silently miscompile evidence threading. This test
+    /// pins the contract: every pre-normalize App id is reachable post-
+    /// normalize, even when the surrounding expression is rewritten.
+    #[test]
+    fn normalize_preserves_app_node_ids_through_lift_path() {
+        let src = r#"
+fun add : Int -> Int -> Int
+add x y = x + y
+
+effect Ask {
+  fun ask : Unit -> Int
+}
+
+fun main : Unit -> Int needs {Ask}
+main () = {
+  let a = 1 + ask! ()
+  let b = add (ask! ()) 2
+  let c = add (add 1 (ask! ())) (ask! ())
+  let d = if (ask! ()) == 0 then add a 1 else add b 2
+  let e = case (ask! ()) {
+    0 -> add c 1
+    _ -> add d 2
+  }
+  add e (ask! ())
+}
+"#;
+        let parsed = parse(src);
+        let before = collect_app_ids(&parsed);
+        let normalized = normalize_effects(&parsed);
+        let after = collect_app_ids(&normalized);
+        let missing: Vec<NodeId> = before
+            .iter()
+            .filter(|id| !after.contains(id))
+            .copied()
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "normalize dropped App NodeIds on the lift path: {:?}",
+            missing,
+        );
+    }
 }
