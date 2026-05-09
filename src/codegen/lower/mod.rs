@@ -166,6 +166,26 @@ impl FunInfo {
     }
 }
 
+/// Tracks the evidence vector currently in scope during lowering.
+///
+/// Phase 3b infrastructure: an `_Evidence` parameter is threaded into every
+/// effectful function definition and at every effectful call site (between
+/// the existing per-op handler params and `_ReturnK`). Op calls and handler-
+/// param reads still go through the legacy machinery; Phase 3c/3d will swap
+/// them to read from this context and delete the legacy plumbing.
+#[derive(Debug, Clone)]
+#[allow(dead_code, private_interfaces)]
+pub(super) struct EvidenceCtx {
+    /// Core Erlang variable name holding the evidence tuple in scope.
+    pub(super) var: String,
+    /// Statically-known canonical effect tags in the evidence vector. Sorted.
+    pub(super) layout: evidence::EvidenceLayout,
+    /// True when the evidence has an open tail (additional effects may be
+    /// present at runtime beyond `layout`). Closed-row narrowing only
+    /// projects when `is_open` is false.
+    pub(super) is_open: bool,
+}
+
 /// Explicit lowering context for value-producing vs terminal positions.
 #[derive(Clone)]
 pub(super) enum LowerMode {
@@ -203,6 +223,12 @@ pub struct Lowerer<'a> {
     handler_defs: HashMap<String, HandlerInfo>,
     /// When lowering inside an effectful function, maps effect name -> handler param var name.
     current_handler_params: HashMap<String, String>,
+    /// Evidence context for the currently-lowered effectful scope. `None` in
+    /// pure code. Set by the function-entry plumbing for effectful functions
+    /// (var = `_Evidence`) and refreshed at `with` boundaries (var = a fresh
+    /// name bound to the inserted-canonical extension). Phase 3b feeds this
+    /// context but does not yet read from it for op calls; Phase 3c/3d will.
+    current_evidence: Option<EvidenceCtx>,
     /// Set of "effect.op" keys whose current handler arm never calls resume.
     /// Used to pass a cheap atom instead of a real continuation closure at the call site,
     /// avoiding the Erlang "a term is constructed but never used" warning.
@@ -288,6 +314,7 @@ impl<'a> Lowerer<'a> {
             effect_defs: HashMap::new(),
             handler_defs: HashMap::new(),
             current_handler_params: HashMap::new(),
+            current_evidence: None,
             no_resume_ops: std::collections::HashSet::new(),
             direct_ops: HashMap::new(),
             current_effectful_vars: HashMap::new(),
@@ -910,12 +937,14 @@ impl<'a> Lowerer<'a> {
 
 
     /// Compute the expanded arity for a function with the given base arity
-    /// and effect requirements. Accounts for one handler param per op plus
-    /// a _ReturnK param if there are any effects.
+    /// and effect requirements. Accounts for one handler param per op, the
+    /// `_Evidence` parameter (Phase 3b temp coexistence), and a `_ReturnK`
+    /// parameter if there are any effects.
     pub(super) fn expanded_arity(&self, base_arity: usize, effects: &[String]) -> usize {
         let ops = self.effect_handler_ops(effects);
         let op_count = ops.len();
-        base_arity + op_count + if op_count > 0 { 1 } else { 0 }
+        // `_Evidence` + `_ReturnK` for any effectful function.
+        base_arity + op_count + if op_count > 0 { 2 } else { 0 }
     }
 
     fn lower_eta_reduced_effect_op_ref(
@@ -945,11 +974,15 @@ impl<'a> Lowerer<'a> {
 
         if self.lambda_effect_context.is_some() {
             // Raw CPS shape: the caller expects to pass the handler and a
-            // return continuation as extra arguments.
+            // return continuation as extra arguments. Phase 3b adds an
+            // `_Evidence` slot between the handler and `_ReturnK` to keep
+            // arity consistent with all other effectful function values.
             let handler_param = Self::handler_param_name(&effect_name, op_name);
+            let evidence = "_Evidence".to_string();
             let return_k = "_ReturnK".to_string();
             runtime_args.push(CExpr::Var(return_k.clone()));
             params.push(handler_param.clone());
+            params.push(evidence);
             params.push(return_k);
             Some(CExpr::Fun(
                 params,
@@ -1152,10 +1185,11 @@ impl<'a> Lowerer<'a> {
             };
         };
         let handler_ops = self.effect_handler_ops(&effects);
-        let return_k_count = if handler_ops.is_empty() { 0 } else { 1 };
+        // Phase 3b coexistence: effectful arity = user + handlers + Evidence + ReturnK.
+        let extras = if handler_ops.is_empty() { 0 } else { 2 };
         let user_arity = info
             .arity
-            .saturating_sub(handler_ops.len() + return_k_count);
+            .saturating_sub(handler_ops.len() + extras);
         if user_arity == 0 || supplied < user_arity {
             return pure_with_arity(supplied);
         }
@@ -1736,9 +1770,10 @@ impl<'a> Lowerer<'a> {
                                         util::arity_and_effects_from_type(&ty);
                                     let effects = self.canonicalize_effects(effects);
                                     let handler_count = self.effect_handler_ops(&effects).len();
+                                    // Phase 3b: effectful expanded arity = user + handlers + Evidence + ReturnK.
                                     let expanded_arity = base_arity
                                         + handler_count
-                                        + if handler_count > 0 { 1 } else { 0 };
+                                        + if handler_count > 0 { 2 } else { 0 };
                                     let param_absorbed: HashMap<usize, Vec<String>> =
                                         util::param_absorbed_effects_from_type(&ty)
                                             .into_iter()
@@ -1894,10 +1929,10 @@ impl<'a> Lowerer<'a> {
             return user_args_supplied > 0;
         };
         let handler_ops = self.effect_handler_ops(&effects);
-        let return_k_count = if handler_ops.is_empty() { 0 } else { 1 };
+        let extras = if handler_ops.is_empty() { 0 } else { 2 };
         let user_arity = info
             .arity
-            .saturating_sub(handler_ops.len() + return_k_count);
+            .saturating_sub(handler_ops.len() + extras);
         user_args_supplied >= user_arity && user_arity > 0
     }
 
@@ -2233,8 +2268,29 @@ impl<'a> Lowerer<'a> {
             }
 
             let has_effects = !handler_param_names.is_empty();
-            let base_arity = arity - handler_param_names.len() - if has_effects { 1 } else { 0 };
+            // Phase 3b coexistence: arity = user + handlers + Evidence + ReturnK.
+            let base_arity = arity - handler_param_names.len() - if has_effects { 2 } else { 0 };
             let effect_return_k = has_effects.then(|| CExpr::Var("_ReturnK".to_string()));
+
+            // Phase 3b: install the evidence context for the function body.
+            // Op calls and handler-param reads still go through the legacy
+            // path; this populates `current_evidence` for the threading work
+            // that 3c/3d will consume.
+            let saved_evidence = self.current_evidence.clone();
+            if has_effects {
+                let layout =
+                    evidence::EvidenceLayout::new(effects.iter().cloned());
+                let is_open_row = self
+                    .fun_info
+                    .get(&name)
+                    .map(|f| f.is_open_row)
+                    .unwrap_or(false);
+                self.current_evidence = Some(EvidenceCtx {
+                    var: "_Evidence".to_string(),
+                    layout,
+                    is_open: is_open_row,
+                });
+            }
 
             // For effectful functions, _ReturnK is threaded explicitly into
             // terminal body lowering so handler aborts bypass normal return.
@@ -2276,6 +2332,7 @@ impl<'a> Lowerer<'a> {
                 params_ce.extend(eta_params.clone());
                 params_ce.extend(handler_param_names.iter().cloned());
                 if has_effects {
+                    params_ce.push("_Evidence".to_string());
                     params_ce.push("_ReturnK".to_string());
                 }
                 // For non-block bodies, lower_block didn't run, so apply return_k.
@@ -2300,6 +2357,7 @@ impl<'a> Lowerer<'a> {
                     (0..base_arity).map(|i| format!("_Arg{}", i)).collect();
                 arg_vars.extend(handler_param_names.iter().cloned());
                 if has_effects {
+                    arg_vars.push("_Evidence".to_string());
                     arg_vars.push("_ReturnK".to_string());
                 }
 
@@ -2369,6 +2427,7 @@ impl<'a> Lowerer<'a> {
             self.current_handler_params = saved_handler_params;
             self.direct_ops = saved_direct_ops;
             self.current_effectful_vars = saved_effectful_vars;
+            self.current_evidence = saved_evidence;
 
             // fun_span is available for future use (e.g. function-level metadata)
             let _ = fun_span;
@@ -2749,6 +2808,46 @@ impl<'a> Lowerer<'a> {
         }
     }
 
+    /// Phase 3b: build the evidence value to pass to a callee that declares
+    /// the given effects. Returns a fresh let-binding that produces the
+    /// evidence (`(var_name, value_expr)`).
+    ///
+    /// - Closed-row caller (`current_evidence` is `Some` with `is_open == false`)
+    ///   and callee effects are a strict subset: emit a runtime
+    ///   `project_evidence` narrowing call.
+    /// - Otherwise: forward the caller's evidence directly. When the caller
+    ///   has no evidence in scope (pure caller installing first effect via a
+    ///   `with` further out, or handler-bound value paths), emit an empty
+    ///   tuple as a placeholder so arity matches.
+    pub(super) fn build_call_evidence(
+        &mut self,
+        callee_effects: &[String],
+    ) -> (String, CExpr) {
+        let var = self.fresh();
+        let value = match &self.current_evidence {
+            Some(ctx) if !ctx.is_open => {
+                // Project when the callee asks for fewer effects than the
+                // caller's static layout carries. The runtime helper handles
+                // the case where no narrowing is required (returns the input
+                // tuple unchanged when tags match), but we skip the call when
+                // we can prove statically that no narrowing is needed.
+                let caller_tags: std::collections::HashSet<&str> =
+                    ctx.layout.tags().iter().map(|s| s.as_str()).collect();
+                let callee_subset = callee_effects.iter().all(|t| caller_tags.contains(t.as_str()));
+                let narrowing = callee_subset && callee_effects.len() < ctx.layout.tags().len();
+                if narrowing {
+                    let tags: Vec<&str> = callee_effects.iter().map(|s| s.as_str()).collect();
+                    evidence::project_evidence(CExpr::Var(ctx.var.clone()), &tags)
+                } else {
+                    CExpr::Var(ctx.var.clone())
+                }
+            }
+            Some(ctx) => CExpr::Var(ctx.var.clone()),
+            None => CExpr::Tuple(Vec::new()),
+        };
+        (var, value)
+    }
+
     fn lower_resolved_fun_call(
         &mut self,
         func_name: &str,
@@ -2771,10 +2870,11 @@ impl<'a> Lowerer<'a> {
         let total_arity = self
             .resolved_fun_info(head_expr.id, func_name)
             .map(|f| f.arity);
-        let return_k_count = if effect_count > 0 { 1 } else { 0 };
+        // Phase 3b: extras = handlers + _Evidence + _ReturnK when effectful.
+        let extras = if effect_count > 0 { 2 } else { 0 };
 
         if let Some(arity) = total_arity
-            && args.len() + effect_count + return_k_count == arity
+            && args.len() + effect_count + extras == arity
         {
             let param_types = self.resolved_fun_info(head_expr.id, func_name).map(|f| {
                 f.param_types
@@ -2825,12 +2925,17 @@ impl<'a> Lowerer<'a> {
                 for v in &handler_arg_vars {
                     call_args.push(CExpr::Var(v.clone()));
                 }
+                // Phase 3b: thread evidence after handler args, before _ReturnK.
+                let callee_effects_vec = callee_effects.clone().unwrap_or_default();
+                let (ev_var, ev_ce) = self.build_call_evidence(&callee_effects_vec);
+                call_args.push(CExpr::Var(ev_var.clone()));
                 let (rk_var, rk_ce) = self.effectful_call_return_k_binding(return_k);
                 call_args.push(CExpr::Var(rk_var.clone()));
 
                 let outer_call =
                     self.emit_call(func_name, head_expr.id, arity, call_args, call_span);
                 let mut body = CExpr::Let(rk_var, Box::new(rk_ce), Box::new(outer_call));
+                body = CExpr::Let(ev_var, Box::new(ev_ce), Box::new(body));
 
                 // Wrap body with each effectful arg's CPS continuation,
                 // innermost (rightmost) first so left-to-right order is preserved.
@@ -2853,6 +2958,11 @@ impl<'a> Lowerer<'a> {
                         func_name, eff, op, params_snapshot
                     )
                 });
+                // Phase 3b: thread evidence after handler args, before _ReturnK.
+                let callee_effects_vec = callee_effects.clone().unwrap_or_default();
+                let (ev_var, ev_ce) = self.build_call_evidence(&callee_effects_vec);
+                bindings.push((ev_var.clone(), ev_ce));
+                arg_vars.push(ev_var);
                 let (rk_var, rk_ce) = self.effectful_call_return_k_binding(return_k);
                 bindings.push((rk_var.clone(), rk_ce));
                 arg_vars.push(rk_var);
@@ -2863,7 +2973,7 @@ impl<'a> Lowerer<'a> {
         }
 
         if let Some(arity) = total_arity {
-            let user_slots = arity.saturating_sub(effect_count + return_k_count);
+            let user_slots = arity.saturating_sub(effect_count + extras);
             if args.len() < user_slots {
                 let remaining_user = user_slots - args.len();
                 let param_types = self.resolved_fun_info(head_expr.id, func_name).map(|f| {
@@ -2887,6 +2997,10 @@ impl<'a> Lowerer<'a> {
                         params.push(p.clone());
                         call_args.push(CExpr::Var(p.clone()));
                     }
+                    // Phase 3b: closure also takes _Evidence between handlers and _ReturnK.
+                    let ev = "_Evidence".to_string();
+                    params.push(ev.clone());
+                    call_args.push(CExpr::Var(ev));
                     let rk = "_ReturnK".to_string();
                     params.push(rk.clone());
                     call_args.push(CExpr::Var(rk));
@@ -2945,11 +3059,15 @@ impl<'a> Lowerer<'a> {
             for v in &handler_arg_vars {
                 call_args.push(CExpr::Var(v.clone()));
             }
+            // Phase 3b: thread evidence between handler args and _ReturnK.
+            let (ev_var, ev_ce) = self.build_call_evidence(&absorbed);
+            call_args.push(CExpr::Var(ev_var.clone()));
             let (rk_var, rk_ce) = self.effectful_call_return_k_binding(return_k);
             call_args.push(CExpr::Var(rk_var.clone()));
 
             let outer_call = CExpr::Apply(Box::new(CExpr::Var(core_var(var_name))), call_args);
             let mut body = CExpr::Let(rk_var, Box::new(rk_ce), Box::new(outer_call));
+            body = CExpr::Let(ev_var, Box::new(ev_ce), Box::new(body));
 
             for &i in effectful_arg_idxs.iter().rev() {
                 let v = arg_vars[i].clone();
@@ -2967,6 +3085,10 @@ impl<'a> Lowerer<'a> {
                 var_name, eff, op
             )
         });
+        // Phase 3b: thread evidence between handler args and _ReturnK.
+        let (ev_var, ev_ce) = self.build_call_evidence(&absorbed);
+        bindings.push((ev_var.clone(), ev_ce));
+        arg_vars.push(ev_var);
         let (rk_var, rk_ce) = self.effectful_call_return_k_binding(return_k);
         bindings.push((rk_var.clone(), rk_ce));
         arg_vars.push(rk_var);
@@ -3295,6 +3417,7 @@ impl<'a> Lowerer<'a> {
                     .lambda_effect_context
                     .take()
                     .filter(|effs| !effs.is_empty());
+                let saved_evidence = self.current_evidence.clone();
                 if let Some(effects) = effects {
                     let lambda_ops = self.effect_handler_ops(&effects);
                     for (eff, op) in &lambda_ops {
@@ -3303,8 +3426,16 @@ impl<'a> Lowerer<'a> {
                         let key = format!("{}.{}", eff, op);
                         self.current_handler_params.insert(key, handler_var);
                     }
-                    // Add _ReturnK parameter for effectful lambdas.
+                    // Phase 3b: add _Evidence parameter for effectful lambdas
+                    // (between handler params and _ReturnK), and install the
+                    // evidence context so call sites in the body thread it.
+                    param_vars.push("_Evidence".to_string());
                     param_vars.push("_ReturnK".to_string());
+                    self.current_evidence = Some(EvidenceCtx {
+                        var: "_Evidence".to_string(),
+                        layout: evidence::EvidenceLayout::new(effects.iter().cloned()),
+                        is_open: false,
+                    });
                     is_effectful_lambda = true;
                 }
                 let effect_return_k =
@@ -3316,6 +3447,7 @@ impl<'a> Lowerer<'a> {
                     self.lower_expr_with_installed_return_k(body, effect_return_k.clone())
                 };
                 self.current_handler_params = saved_handler_params;
+                self.current_evidence = saved_evidence;
                 // If lambda has complex params (tuples, constructors), wrap
                 // the body in a case expression for destructuring.
                 let body_ce = if !all_simple {
@@ -3897,9 +4029,9 @@ impl<'a> Lowerer<'a> {
         // lower to `call std_string:replace/2`, which doesn't exist.
         let total_arity = self.resolved_fun_info(head.id, &qualified).map(|f| f.arity);
         let effect_count = callee_ops.len();
-        let return_k_count = if effect_count > 0 { 1 } else { 0 };
+        let extras = if effect_count > 0 { 2 } else { 0 };
         if let Some(arity) = total_arity {
-            let user_slots = arity.saturating_sub(effect_count + return_k_count);
+            let user_slots = arity.saturating_sub(effect_count + extras);
             if args.len() < user_slots {
                 let remaining_user = user_slots - args.len();
                 let param_types = self.resolved_fun_info(head.id, &qualified).map(|f| {
@@ -3926,6 +4058,10 @@ impl<'a> Lowerer<'a> {
                         closure_params.push(p.clone());
                         all_args.push(CExpr::Var(p));
                     }
+                    // Phase 3b: closure also takes _Evidence between handlers and _ReturnK.
+                    let ev = "_Evidence".to_string();
+                    closure_params.push(ev.clone());
+                    all_args.push(CExpr::Var(ev));
                     let rk = "_ReturnK".to_string();
                     closure_params.push(rk.clone());
                     all_args.push(CExpr::Var(rk));
@@ -3960,6 +4096,11 @@ impl<'a> Lowerer<'a> {
                     module, func_name, eff, op
                 )
             });
+            // Phase 3b: thread evidence between handler args and _ReturnK.
+            let callee_effects_vec = callee_effects.clone().unwrap_or_default();
+            let (ev_var, ev_ce) = self.build_call_evidence(&callee_effects_vec);
+            bindings.push((ev_var.clone(), ev_ce));
+            arg_vars.push(ev_var);
             let (rk_var, rk_ce) = self.effectful_call_return_k_binding(return_k);
             bindings.push((rk_var.clone(), rk_ce));
             arg_vars.push(rk_var);

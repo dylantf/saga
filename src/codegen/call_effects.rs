@@ -628,8 +628,9 @@ impl<'a> Populator<'a> {
 
         let ops = self.collect_op_keys(&effects);
         let has_ops = !ops.is_empty();
-        let return_k_count = if has_ops { 1 } else { 0 };
-        let user_arity = sig.arity.saturating_sub(ops.len() + return_k_count);
+        // Phase 3b coexistence: effectful arity = user + handlers + Evidence + ReturnK.
+        let extras = if has_ops { 2 } else { 0 };
+        let user_arity = sig.arity.saturating_sub(ops.len() + extras);
 
         // Saturation gate from `call_performs_effect`.
         if user_arity == 0 || supplied < user_arity {

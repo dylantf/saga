@@ -13,7 +13,7 @@ use super::util::{
     lower_string_to_binary, mangle_ctor_atom, param_absorbed_effects_from_type,
     param_types_from_type, pat_binding_var,
 };
-use super::{FunInfo, LowerMode, Lowerer};
+use super::{EvidenceCtx, FunInfo, LowerMode, Lowerer};
 
 /// Returns true if `expr` is a valid Core Erlang guard expression:
 /// comparisons, arithmetic, boolean ops, unary minus, and literals/variables.
@@ -793,8 +793,9 @@ impl<'a> Lowerer<'a> {
                         let effects = self.canonicalize_effects(effects);
                         let is_open_row = super::util::has_open_effect_row(&ty);
                         let handler_count = self.effect_handler_ops(&effects).len();
+                        // Phase 3b: effectful expanded arity = user + handlers + Evidence + ReturnK.
                         let expanded_arity =
-                            base_arity + handler_count + if handler_count > 0 { 1 } else { 0 };
+                            base_arity + handler_count + if handler_count > 0 { 2 } else { 0 };
                         let param_absorbed_effects = param_absorbed_effects_from_type(&ty)
                             .into_iter()
                             .map(|(idx, effs)| (idx, self.canonicalize_effects(effs)))
@@ -863,13 +864,27 @@ impl<'a> Lowerer<'a> {
                 }
 
                 let has_effects = !handler_params.is_empty();
-                let base_arity = arity - handler_params.len() - if has_effects { 1 } else { 0 };
+                let base_arity = arity - handler_params.len() - if has_effects { 2 } else { 0 };
                 let effect_return_k = has_effects.then(|| CExpr::Var("_ReturnK".to_string()));
+
+                // Phase 3b: install evidence context for the body of effectful
+                // local functions. The body still uses the legacy handler-param
+                // path; current_evidence is plumbed for 3c/3d to consume.
+                let saved_evidence = self.current_evidence.clone();
+                if has_effects {
+                    self.current_evidence = Some(EvidenceCtx {
+                        var: "_Evidence".to_string(),
+                        layout: super::evidence::EvidenceLayout::new(effects.iter().cloned()),
+                        is_open: is_open_row,
+                    });
+                }
+
                 let fun_body = if clauses.len() == 1 && clauses[0].1.is_none() {
                     // Single clause, no guard
                     let mut params_ce = pats::lower_params(clauses[0].0);
                     params_ce.extend(handler_params.iter().cloned());
                     if has_effects {
+                        params_ce.push("_Evidence".to_string());
                         params_ce.push("_ReturnK".to_string());
                     }
                     let body = clauses[0].2;
@@ -936,6 +951,7 @@ impl<'a> Lowerer<'a> {
                             let mut params = param_names[..base_arity].to_vec();
                             params.extend(handler_params.iter().cloned());
                             if has_effects {
+                                params.push("_Evidence".to_string());
                                 params.push("_ReturnK".to_string());
                             }
                             params
@@ -945,6 +961,7 @@ impl<'a> Lowerer<'a> {
                 };
                 self.current_handler_params = saved_handler_params;
                 self.current_effectful_vars = saved_effectful_vars;
+                self.current_evidence = saved_evidence;
 
                 let rest_ce = if rest.is_empty() {
                     self.apply_return_k_with(return_k, CExpr::Tuple(vec![]))

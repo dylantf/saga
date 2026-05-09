@@ -88,7 +88,7 @@ main () = {
 "#;
     let out = emit_full(src);
     assert!(
-        out.contains("'build_msg'/4"),
+        out.contains("'build_msg'/5"),
         "expected eta-reduced effectful function ref to use lowered arity\n{out}"
     );
     assert!(
@@ -126,7 +126,7 @@ main () = {
 "#;
     let out = emit_full(src);
     assert!(
-        out.contains("'build_msg'/4"),
+        out.contains("'build_msg'/5"),
         "expected aliased effectful function ref to use lowered arity\n{out}"
     );
     assert!(
@@ -165,7 +165,7 @@ main () = run_all [fun () -> reg! "a"] with noop
 "#;
     let out = emit_full(src);
     assert!(
-        out.contains("fun (_Arg0, _Handle__script_Reg_reg, _ReturnK) ->"),
+        out.contains("fun (_Arg0, _Handle__script_Reg_reg, _Evidence, _ReturnK) ->"),
         "expected list callback lambda to receive lowered handler params\n{out}"
     );
 }
@@ -247,7 +247,7 @@ main () = run_holder (Holder { cb: fun () -> reg! "a" }) with noop
 "#;
     let out = emit_full(src);
     assert!(
-        out.contains("fun (_Arg0, _Handle__script_Reg_reg, _ReturnK) ->"),
+        out.contains("fun (_Arg0, _Handle__script_Reg_reg, _Evidence, _ReturnK) ->"),
         "expected record-contained callback lambda to receive lowered handler params\n{out}"
     );
 }
@@ -284,7 +284,7 @@ main () = run_wrap (Wrap (fun () -> reg! "a")) with noop
 "#;
     let out = emit_full(src);
     assert!(
-        out.contains("fun (_Arg0, _Handle__script_Reg_reg, _ReturnK) ->"),
+        out.contains("fun (_Arg0, _Handle__script_Reg_reg, _Evidence, _ReturnK) ->"),
         "expected ADT-contained callback lambda to receive lowered handler params\n{out}"
     );
 }
@@ -315,7 +315,7 @@ main () = {
     "#;
     let out = emit_full(src);
     assert!(
-        out.contains("'build_msg'/4"),
+        out.contains("'build_msg'/5"),
         "expected block-local effectful let-fun to use lowered arity\n{out}"
     );
     assert!(
@@ -353,7 +353,7 @@ main () = {
 "#;
     let out = emit_full(src);
     assert!(
-        out.contains("'count_down'/4"),
+        out.contains("'count_down'/5"),
         "expected recursive block-local effectful let-fun to use lowered arity\n{out}"
     );
     assert!(

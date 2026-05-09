@@ -516,6 +516,82 @@ impl<'a> Lowerer<'a> {
             op_vars.push((eff.clone(), op.clone(), var_name, plan));
         }
 
+        // Phase 3b: build the new evidence vector for this `with` block.
+        // Group `op_vars` by canonical effect tag, build a `{EffectAtom, OpTuple}`
+        // entry per effect, and chain `insert_canonical` calls onto the
+        // inherited evidence (an empty tuple when there is no enclosing
+        // evidence in scope). Each op closure inside the entry refers to the
+        // corresponding handler binding by name (the binding itself is emitted
+        // by `attach_scoped_handler_bindings` below). The new evidence variable
+        // is published to `current_evidence` for the body lowering and for any
+        // call sites inside the body that need to thread evidence.
+        //
+        // Op tuples must be sorted alphabetically by op name (the canonical
+        // shape — see `evidence::build_evidence_entry`); `op_vars` is built
+        // from `handler_ops`, which is already op-sorted.
+        let saved_evidence = self.current_evidence.clone();
+        let (evidence_binding, new_evidence_var) = {
+            let mut effect_to_ops: std::collections::BTreeMap<String, Vec<&str>> =
+                std::collections::BTreeMap::new();
+            let mut effect_to_vars: std::collections::HashMap<(String, String), String> =
+                std::collections::HashMap::new();
+            for (eff, op, var_name, _plan) in &op_vars {
+                effect_to_ops
+                    .entry(eff.clone())
+                    .or_default()
+                    .push(op.as_str());
+                effect_to_vars.insert((eff.clone(), op.clone()), var_name.clone());
+            }
+            // Phase 3b coexistence: inherit only when the outer evidence is
+            // unambiguously in lexical scope at the point this `with` is
+            // lowered. Today's `with` lowering can place handler/value
+            // bindings that depend on names introduced *inside* the body
+            // (dynamic handler factories like `let db = connect (); pg = db.postgres`),
+            // and the topological placer would form a cycle if the inner
+            // evidence binding referenced the outer one. We sidestep this in
+            // the temporary coexistence by always rebuilding evidence from
+            // scratch at a `with` boundary; nothing reads evidence yet, and
+            // Phase 3c will reintroduce a sound inheritance scheme alongside
+            // the op-call rewrite.
+            let mut acc = CExpr::Tuple(Vec::new());
+            for (eff, mut ops) in effect_to_ops {
+                ops.sort();
+                ops.dedup();
+                let op_closures: Vec<CExpr> = ops
+                    .iter()
+                    .map(|op| {
+                        let var = effect_to_vars
+                            .get(&(eff.clone(), (*op).to_string()))
+                            .expect("internal error: missing handler var for evidence entry");
+                        CExpr::Var(var.clone())
+                    })
+                    .collect();
+                let entry = super::evidence::build_evidence_entry(&eff, op_closures);
+                acc = super::evidence::insert_canonical(acc, entry);
+            }
+            let new_var = self.fresh();
+            // Layout must mirror the *value* we built. Since the temporary
+            // coexistence rebuilds evidence from `{}` rather than inheriting
+            // the outer tuple (see comment above), the layout only contains
+            // the effects this `with` actually installed. Phase 3c will
+            // restore inheritance and the layout will track the union again.
+            let new_layout = {
+                let mut tags: Vec<String> = Vec::new();
+                for (eff, _, _, _) in &op_vars {
+                    if !tags.contains(eff) {
+                        tags.push(eff.clone());
+                    }
+                }
+                super::evidence::EvidenceLayout::new(tags)
+            };
+            self.current_evidence = Some(super::EvidenceCtx {
+                var: new_var.clone(),
+                layout: new_layout,
+                is_open: false,
+            });
+            ((new_var.clone(), acc), new_var)
+        };
+
         // Lower the inner expression once handler params are in scope.
         let return_k_lambda = match (&explicit_return_clause, &named_item) {
             (Some(ret), _) => Some(self.build_return_lambda(ret, None)),
@@ -523,6 +599,14 @@ impl<'a> Lowerer<'a> {
             (None, None) => None,
         };
         let result = self.lower_handled_inner_expr(expr, return_k_lambda, inherited_return_k);
+
+        // Phase 3b: handler arm bodies must see the *outer* evidence, not the
+        // new one we just installed for the body of `with`. A re-perform of
+        // the same op (`fail e = fail! ...`) inside an arm reaches the outer
+        // handler stack; if the arm body's effectful calls picked up the new
+        // evidence, they'd recurse into the just-installed entry instead.
+        let saved_evidence_for_arms =
+            std::mem::replace(&mut self.current_evidence, saved_evidence.clone());
 
         // Pass 2: build ALL handler functions unconditionally.
         // We'll prune unreachable ones after lowering the body.
@@ -586,11 +670,33 @@ impl<'a> Lowerer<'a> {
         self.current_handler_params = saved_handler_params;
         self.no_resume_ops = saved_no_resume_ops;
         self.direct_ops = saved_direct_ops;
+        // Restore the body-scope evidence we replaced during pass 2 (it is
+        // unused after this point but kept symmetrical with the save). Then
+        // restore the caller's evidence as the function exits the `with`.
+        let _ = saved_evidence_for_arms;
+        self.current_evidence = saved_evidence;
+        let _ = new_evidence_var;
 
         // Post-hoc reachability: scan the lowered body for _Handle_* references,
         // then transitively close through handler binding values.
         let mut needed: HashSet<String> = HashSet::new();
         result.collect_handle_refs(&mut needed);
+        // Phase 3b: also seed reachability with any free-variable references
+        // to the new evidence variable, so that the evidence binding (and
+        // transitively its handler-var dependencies) is retained when the
+        // body forwards evidence at call sites.
+        let (ev_var, _) = &evidence_binding;
+        let mut body_free: HashSet<String> = HashSet::new();
+        Self::collect_var_refs(&result, &mut body_free);
+        if body_free.contains(ev_var) {
+            needed.insert(ev_var.clone());
+            // The evidence binding references every handler var it folds in,
+            // so pull them into `needed` directly.
+            for (eff, op, var_name, _) in &op_vars {
+                let _ = (eff, op);
+                needed.insert(var_name.clone());
+            }
+        }
         // Transitive closure: handler arms can reference other handler vars
         let mut changed = true;
         while changed {
@@ -610,6 +716,12 @@ impl<'a> Lowerer<'a> {
 
         // Only emit bindings that are actually referenced
         handler_bindings.retain(|(var, _)| needed.contains(var));
+
+        // Append the evidence binding as the final scoped binding so it is
+        // placed after all the handler bindings it references.
+        if needed.contains(&evidence_binding.0) {
+            handler_bindings.push(evidence_binding);
+        }
 
         self.attach_scoped_handler_bindings(result, condition_bindings, handler_bindings)
     }

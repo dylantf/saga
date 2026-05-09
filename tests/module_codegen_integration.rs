@@ -391,10 +391,11 @@ main () = {
             let args_end = after_call.find(')').expect("expected closing paren");
             let args = &after_call[args_start + 1..args_end];
             let parts: Vec<&str> = args.split(',').map(str::trim).collect();
+            // Phase 3b coexistence: (arg, handler, evidence, continuation).
             assert_eq!(
                 parts.len(),
-                3,
-                "expected (arg, handler, continuation), got: {args}"
+                4,
+                "expected (arg, handler, evidence, continuation), got: {args}"
             );
             assert!(
                 parts[1].starts_with("_Handle_Db_Postgres_ping"),
@@ -648,8 +649,8 @@ main () = run_log greet
         "expected imported effectful function value to lower as make_fun\n{out}"
     );
     assert!(
-        out.contains("'logger', 'greet', 3"),
-        "expected imported effectful function value to use CPS-expanded arity 3\n{out}"
+        out.contains("'logger', 'greet', 4"),
+        "expected imported effectful function value to use CPS-expanded arity 4\n{out}"
     );
 }
 
@@ -1000,14 +1001,14 @@ main () = greet \"world\" with {
 
 #[test]
 fn cross_module_effectful_export_arity() {
-    // Logger.greet should be exported with expanded arity (1 + 1 handler + 1 ReturnK = 3)
+    // Logger.greet should be exported with expanded arity
+    // (1 user + 1 handler + _Evidence + _ReturnK = 4 under Phase 3b coexistence).
     let logger_src = std::fs::read_to_string(fixtures_root().join("Logger.saga")).unwrap();
     let mut checker = make_project_checker();
     let program = typecheck_source(&logger_src, &mut checker);
     let out = emit_from_program(&program, "logger", &checker);
 
-    // greet should be exported with arity 3 (name, _HandleLog, _ReturnK)
-    assert_contains(&out, "'greet'/3");
+    assert_contains(&out, "'greet'/4");
 }
 
 #[test]
