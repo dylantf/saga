@@ -81,7 +81,6 @@ fn emit_elaborated_inner(src: &str, include_std_modules: bool) -> String {
                 codegen_info: info.clone(),
                 elaborated: Vec::new(),
                 resolution: codegen::resolve::ResolutionMap::new(),
-                intrinsics: codegen::resolve::IntrinsicMap::new(),
                 front_resolution: Default::default(),
                 call_effects: codegen::call_effects::CallEffectMap::new(),
             },
@@ -102,11 +101,9 @@ fn emit_elaborated_inner(src: &str, include_std_modules: bool) -> String {
             prelude_imports,
             &front_resolution,
         );
-        let intrinsics = codegen::resolve::resolve_intrinsics(&resolution, codegen_info_map);
         let entry = modules.entry(name.clone()).or_default();
         entry.elaborated = normalized;
         entry.resolution = resolution;
-        entry.intrinsics = intrinsics;
         entry.front_resolution = front_resolution;
     }
     let ctx = codegen::CodegenContext {

@@ -970,7 +970,6 @@ pub fn build_project_ext(
             &result.prelude_imports,
             &mod_result.resolution,
         );
-        let intrinsics = codegen::resolve::resolve_intrinsics(&resolution, codegen_info_map);
         compiled_modules.insert(
             module_name.clone(),
             codegen::CompiledModule {
@@ -980,7 +979,6 @@ pub fn build_project_ext(
                     .unwrap_or_default(),
                 elaborated: normalized,
                 resolution,
-                intrinsics,
                 front_resolution: mod_result.resolution.clone(),
                 call_effects: codegen::call_effects::CallEffectMap::new(),
             },
@@ -997,7 +995,6 @@ pub fn build_project_ext(
                 codegen_info: Default::default(),
                 elaborated: main_elaborated,
                 resolution: codegen::resolve::ResolutionMap::new(),
-                intrinsics: codegen::resolve::IntrinsicMap::new(),
                 front_resolution: result.resolution.clone(),
                 call_effects: codegen::call_effects::CallEffectMap::new(),
             },
@@ -1159,7 +1156,6 @@ pub fn build_script(file: &str, profile: &str) -> ScriptBuild {
             codegen_info: Default::default(),
             elaborated,
             resolution: codegen::resolve::ResolutionMap::new(),
-            intrinsics: codegen::resolve::IntrinsicMap::new(),
             front_resolution: result.resolution.clone(),
             call_effects: codegen::call_effects::CallEffectMap::new(),
         },

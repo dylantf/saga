@@ -6,9 +6,14 @@ on raw source spellings.
 
 ## Status
 
-Not started. Captures the **Medium #2** finding from the system review of the
-auto-load PR ([auto-load-qualified-modules.md](auto-load-qualified-modules.md)),
-plus the design suggestion from that review.
+Phase 1 and the core Phase 2 resolver cleanup are implemented.
+
+This plan originally captured the **Medium #2** finding from the system
+review of the auto-load PR
+([auto-load-qualified-modules.md](auto-load-qualified-modules.md)), plus the
+design suggestion from that review. The current code now has resolver-owned
+`ResolvedSymbol` / `ResolvedCodegenKind` identity for intrinsics, inline
+vals, external wrappers, and normal BEAM functions.
 
 ## Motivation
 
@@ -87,9 +92,12 @@ Findings from the auto-load PR review:
   distinguishes `LocalFun` vs `ImportedFun`. Both carry callable metadata
   (arity, effects); neither carries "intrinsic" or "inline-val" identity.
 - `ModuleCodegenInfo` ([typechecker/check_module.rs](../../../src/typechecker/check_module.rs))
-  has `exports: Vec<(String, Scheme)>`, `external_funs`, and (after the
-  current PR) `inline_vals: Vec<(String, Expr)>`. It does **not** mark
-  `@builtin` exports as such — the lowerer infers it by string match.
+  has `exports: Vec<(String, Scheme)>`, `external_funs`,
+  `intrinsic_exports`, and `inline_vals`. Phase 2 now consumes those
+  parallel metadata tables in the backend resolver and emits a single
+  `ResolvedSymbol` per use site. A future metadata cleanup can still
+  collapse those tables into `CodegenExport`, but the lowering decision is
+  no longer made by spelling or inline-cache membership.
 
 ## Proposed Design
 
@@ -277,35 +285,46 @@ user's function correctly.
    `catch_panic` routes to the user's function; `Std.Process.catch_panic`
    still lowers through the intrinsic recovery boundary.
 
-### Phase 2 — Structural cleanup (separate session, ~1–2 days)
+### Phase 2 — Structural cleanup
 
-Scope: collapse the parallel mechanisms into a unified
-`ResolvedSymbol`. No new user-visible behavior — pure refactor.
+Status: implemented for backend resolution and lowering.
 
-5. **Same migration for `@inline val`**. The `inline_vals` table on
-   `Lowerer` becomes a write-only cache of "values seen so far by
-   canonical name during lowering"; the *decision* "is this an inline
-   val?" comes from the resolver, not the table. Delete the
-   `arity == 0 && inline_vals.get(&canonical_name)` discriminators at
-   the `LocalFun` ref sites in `lower/mod.rs:2742` and `:3069`.
+The backend resolver now produces `ResolvedSymbol` with
+`ResolvedCodegenKind::{BeamFunction, ExternalFunction, Intrinsic, InlineVal}`.
+This removed the separate `IntrinsicMap` from `CompiledModule`,
+`ModuleSemantics`, `Lowerer`, and the CLI/test construction sites.
 
-6. **Collapse `external_funs` into the kind enum**. `@external`
-   exports get an `ExportCodegenKind::External` entry. The lowerer's
-   existing external-fun dispatch becomes a kind match.
+Implemented behavior:
 
-7. **Rename `ResolvedName` → `ResolvedSymbol`** with the unified
-   shape from the Proposed Design section. Last step deliberately:
-   `ResolutionMap` is consumed throughout the lowerer (`emit_call`,
-   `lower_qualified_call`, `lower_resolved_fun_call`, value-ref paths,
-   trait-dispatch sites), so the rename ripples broadly. Doing it
-   earlier means every intermediate commit has both names floating
-   around.
+1. **`@inline val` identity comes from resolution**. The lowerer's
+   `inline_vals` table remains the canonical lowered-RHS cache, but use
+   sites lower as inline only when the resolver produced
+   `ResolvedCodegenKind::InlineVal`.
+2. **Intrinsics are resolver-owned identity**. Bare, aliased, and
+   qualified intrinsic calls dispatch through
+   `ResolvedCodegenKind::Intrinsic { id, .. }`; user-defined functions
+   with the same spelling are normal resolved symbols.
+3. **External declarations have structural identity**. External exports
+   resolve as `ResolvedCodegenKind::ExternalFunction`, but normal calls
+   still go through the Saga wrapper module/function. This is important
+   because effectful Saga calls inflate arity to carry the evidence vector
+   and continuation, which native Erlang functions cannot accept. The
+   resolver also records the native target for the existing
+   imported-handler/private-helper bridge path.
+4. **`ResolvedName` is gone**. `ResolutionMap` is now
+   `HashMap<NodeId, ResolvedSymbol>`, and call-effect classification reads
+   canonical name/effects from the resolved symbol instead of matching
+   local/imported enum variants.
 
-8. **Delete the vestigial string-match fallback**. After step 7, the
-   parallel `NodeId → IntrinsicId` map from Phase 1 step 3 collapses
-   into `ResolvedCodegenKind::Intrinsic`. The
-   `try_lower_builtin_intrinsic` string match in `builtins.rs` can be
-   removed; `lower_intrinsic` is called directly from the kind match.
+Remaining optional cleanup:
+
+- Collapse `ModuleCodegenInfo.exports`, `external_funs`,
+  `intrinsic_exports`, and `inline_vals` into a single
+  `Vec<CodegenExport>`. The current patch already centralizes the lowering
+  decision in backend resolution, so this is metadata shape cleanup rather
+  than a correctness blocker.
+- Rename `ExternalFunction` or add helper methods if the wrapper-vs-native
+  distinction remains visually easy to misread.
 
 Risk notes for Phase 2:
 
