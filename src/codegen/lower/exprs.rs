@@ -120,19 +120,25 @@ impl<'a> Lowerer<'a> {
                 ) {
                     return call;
                 }
-                if let Some(call) = self.lower_effectful_var_call(expr.id, func_name, &args, return_k.clone()) {
+                if let Some(call) =
+                    self.lower_effectful_var_call(expr.id, func_name, &args, return_k.clone())
+                {
                     return call;
                 }
             }
             if let Some((dict, method_index, args)) = super::util::collect_dict_method_call(expr)
-                && let Some(call) =
-                    self.lower_dict_method_call(expr.id, dict, method_index, &args, return_k.clone())
+                && let Some(call) = self.lower_dict_method_call(
+                    expr.id,
+                    dict,
+                    method_index,
+                    &args,
+                    return_k.clone(),
+                )
             {
                 return call;
             }
             if let Some((lambda, args)) = super::util::collect_lambda_head_call(expr)
-                && let Some(call) =
-                    self.lower_lambda_head_call(expr.id, lambda, &args, return_k)
+                && let Some(call) = self.lower_lambda_head_call(expr.id, lambda, &args, return_k)
             {
                 return call;
             }
@@ -735,32 +741,32 @@ impl<'a> Lowerer<'a> {
 
                 // Build the function body (same logic as top-level multi-clause funs)
                 let source_arity = pats::lower_params(clauses[0].0).len();
-                let (arity, effects, is_open_row, param_absorbed_effects, param_types) =
-                    self.check_result
-                        .resolved_type_for_node(fun_id)
-                        .map(|ty| {
-                            let (base_arity, effects) = arity_and_effects_from_type(&ty);
-                            let effects = self.canonicalize_effects(effects);
-                            let is_open_row = super::util::has_open_effect_row(&ty);
-                            let handler_count = self.effect_handler_ops(&effects).len();
-                            // Effectful expanded arity = user + Evidence + ReturnK.
-                            let expanded_arity = base_arity + if handler_count > 0 { 2 } else { 0 };
-                            let param_absorbed_effects = param_absorbed_effects_from_type(&ty)
-                                .into_iter()
-                                .map(|(idx, effs)| (idx, self.canonicalize_effects(effs)))
-                                .collect::<HashMap<usize, Vec<String>>>();
-                            let param_types = param_types_from_type(&ty);
-                            (
-                                expanded_arity,
-                                effects,
-                                is_open_row,
-                                param_absorbed_effects,
-                                param_types,
-                            )
-                        })
-                        .unwrap_or_else(|| {
-                            (source_arity, Vec::new(), false, HashMap::new(), Vec::new())
-                        });
+                let (arity, effects, is_open_row, param_absorbed_effects, param_types) = self
+                    .check_result
+                    .resolved_type_for_node(fun_id)
+                    .map(|ty| {
+                        let (base_arity, effects) = arity_and_effects_from_type(&ty);
+                        let effects = self.canonicalize_effects(effects);
+                        let is_open_row = super::util::has_open_effect_row(&ty);
+                        let handler_count = self.effect_handler_ops(&effects).len();
+                        // Effectful expanded arity = user + Evidence + ReturnK.
+                        let expanded_arity = base_arity + if handler_count > 0 { 2 } else { 0 };
+                        let param_absorbed_effects = param_absorbed_effects_from_type(&ty)
+                            .into_iter()
+                            .map(|(idx, effs)| (idx, self.canonicalize_effects(effs)))
+                            .collect::<HashMap<usize, Vec<String>>>();
+                        let param_types = param_types_from_type(&ty);
+                        (
+                            expanded_arity,
+                            effects,
+                            is_open_row,
+                            param_absorbed_effects,
+                            param_types,
+                        )
+                    })
+                    .unwrap_or_else(|| {
+                        (source_arity, Vec::new(), false, HashMap::new(), Vec::new())
+                    });
                 let param_names: Vec<String> = (0..arity).map(|i| format!("_LF{}", i)).collect();
 
                 // Register in fun_info BEFORE lowering body so recursive

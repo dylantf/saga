@@ -976,7 +976,11 @@ impl Checker {
         prefix: Option<&str>,
         exposing: Option<&[crate::ast::ExposedItem]>,
     ) {
-        if !self.modules.registered_canonical.insert(module_name.to_string()) {
+        if !self
+            .modules
+            .registered_canonical
+            .insert(module_name.to_string())
+        {
             return;
         }
         let ModuleExports {

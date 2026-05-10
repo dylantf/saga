@@ -53,7 +53,6 @@ impl EvidenceLayout {
     pub(super) fn tags(&self) -> &[String] {
         &self.tags
     }
-
 }
 
 /// Compile-time tuple index for `tag` in `layout`. Returns a 1-based index

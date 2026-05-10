@@ -1090,6 +1090,123 @@ impl<'a> Lowerer<'a> {
         .populate(program)
     }
 
+    fn inline_val_deps_for_module(
+        expr: &Expr,
+        module_name: &str,
+        inline_exprs: &HashMap<String, Expr>,
+        out: &mut Vec<String>,
+    ) {
+        match &expr.kind {
+            ExprKind::Var { name, .. } => {
+                if inline_exprs.contains_key(name) && !out.contains(name) {
+                    out.push(name.clone());
+                }
+            }
+            ExprKind::QualifiedName { module, name, .. } if module == module_name => {
+                if inline_exprs.contains_key(name) && !out.contains(name) {
+                    out.push(name.clone());
+                }
+            }
+            ExprKind::App { func, arg, .. } => {
+                Self::inline_val_deps_for_module(func, module_name, inline_exprs, out);
+                Self::inline_val_deps_for_module(arg, module_name, inline_exprs, out);
+            }
+            ExprKind::Tuple { elements, .. } | ExprKind::ListLit { elements } => {
+                for e in elements {
+                    Self::inline_val_deps_for_module(e, module_name, inline_exprs, out);
+                }
+            }
+            ExprKind::Cons { head, tail }
+            | ExprKind::BinOp {
+                left: head,
+                right: tail,
+                ..
+            } => {
+                Self::inline_val_deps_for_module(head, module_name, inline_exprs, out);
+                Self::inline_val_deps_for_module(tail, module_name, inline_exprs, out);
+            }
+            ExprKind::UnaryMinus { expr, .. } | ExprKind::Ascription { expr, .. } => {
+                Self::inline_val_deps_for_module(expr, module_name, inline_exprs, out);
+            }
+            _ => {}
+        }
+    }
+
+    fn lower_inline_vals_for_module(
+        &mut self,
+        module_name: &str,
+        inline_exprs: &HashMap<String, Expr>,
+        expose_bare: bool,
+    ) {
+        let mut lowered = HashMap::new();
+        let mut visiting = std::collections::HashSet::new();
+        let names: Vec<String> = inline_exprs.keys().cloned().collect();
+        for name in names {
+            self.lower_inline_val_for_module(
+                module_name,
+                &name,
+                inline_exprs,
+                &mut lowered,
+                &mut visiting,
+                expose_bare,
+            );
+        }
+    }
+
+    fn lower_inline_val_for_module(
+        &mut self,
+        module_name: &str,
+        name: &str,
+        inline_exprs: &HashMap<String, Expr>,
+        lowered: &mut HashMap<String, CExpr>,
+        visiting: &mut std::collections::HashSet<String>,
+        expose_bare: bool,
+    ) -> Option<CExpr> {
+        let canonical = format!("{}.{}", module_name, name);
+        if let Some(existing) = self.inline_vals.get(&canonical).cloned() {
+            return Some(existing);
+        }
+        if let Some(existing) = lowered.get(name).cloned() {
+            return Some(existing);
+        }
+        let expr = inline_exprs.get(name)?;
+        if !visiting.insert(name.to_string()) {
+            return None;
+        }
+
+        let mut deps = Vec::new();
+        Self::inline_val_deps_for_module(expr, module_name, inline_exprs, &mut deps);
+        for dep in deps {
+            if dep != name {
+                self.lower_inline_val_for_module(
+                    module_name,
+                    &dep,
+                    inline_exprs,
+                    lowered,
+                    visiting,
+                    expose_bare,
+                );
+            }
+        }
+
+        let saved_source_module =
+            std::mem::replace(&mut self.current_source_module, module_name.to_string());
+        let lowered_expr = self.lower_expr(expr);
+        self.current_source_module = saved_source_module;
+
+        visiting.remove(name);
+        lowered.insert(name.to_string(), lowered_expr.clone());
+        self.inline_vals
+            .entry(canonical)
+            .or_insert_with(|| lowered_expr.clone());
+        if expose_bare {
+            self.inline_vals
+                .entry(name.to_string())
+                .or_insert_with(|| lowered_expr.clone());
+        }
+        Some(lowered_expr)
+    }
+
     /// Get a function's arity.
     fn fun_arity(&self, name: &str) -> Option<usize> {
         self.fun_info.get(name).map(|f| f.arity)
@@ -1344,29 +1461,45 @@ impl<'a> Lowerer<'a> {
         }
 
         // Process @inline vals first so their expressions are available for substitution
-        // when lowering function bodies. Local @inline vals are keyed by both the
-        // bare name (for in-module references) and the canonical name (for
-        // qualified self-references). Cross-module @inline vals are merged in
-        // below from each loaded module's `inline_vals` codegen entry, keyed
-        // canonically only — the bare-name form would leak module scope.
-        for &(name, is_inline, value) in &val_bindings {
-            if is_inline {
-                let lowered = self.lower_expr(value);
-                self.inline_vals.insert(name.to_string(), lowered.clone());
-                let canonical = format!("{}.{}", self.current_source_module, name);
-                self.inline_vals.entry(canonical).or_insert(lowered);
-            }
+        // when lowering function bodies. Lower each module's inline vals under
+        // that module's semantic identity, so sibling refs like `b = a` resolve
+        // against the defining module rather than the importing module.
+        let local_inline_exprs: HashMap<String, Expr> = val_bindings
+            .iter()
+            .filter(|&(_name, is_inline, _value)| *is_inline)
+            .map(|(name, _is_inline, value)| ((*name).to_string(), (*value).clone()))
+            .collect();
+        self.lower_inline_vals_for_module(
+            &self.current_source_module.clone(),
+            &local_inline_exprs,
+            true,
+        );
+
+        let imported_inline_exprs: Vec<(String, HashMap<String, Expr>)> = self
+            .ctx
+            .modules
+            .iter()
+            .filter(|(mod_name, _)| *mod_name != &self.current_source_module)
+            .map(|(mod_name, m)| {
+                (
+                    mod_name.clone(),
+                    m.codegen_info.inline_vals.iter().cloned().collect(),
+                )
+            })
+            .collect();
+        for (mod_name, inline_exprs) in imported_inline_exprs {
+            self.lower_inline_vals_for_module(&mod_name, &inline_exprs, false);
         }
         for (mod_name, m) in &self.ctx.modules {
             if mod_name == &self.current_source_module {
                 continue;
             }
-            for (val_name, expr) in &m.codegen_info.inline_vals {
+            for (val_name, _) in &m.codegen_info.inline_vals {
                 let canonical = format!("{}.{}", mod_name, val_name);
-                if !self.inline_vals.contains_key(&canonical) {
-                    let lowered = self.lower_expr(expr);
-                    self.inline_vals.insert(canonical, lowered);
-                }
+                debug_assert!(
+                    self.inline_vals.contains_key(&canonical),
+                    "imported inline val was not lowered canonically: {canonical}"
+                );
             }
         }
 
@@ -2609,19 +2742,25 @@ impl<'a> Lowerer<'a> {
                     Some(ResolvedName::LocalFun {
                         name,
                         source_module,
-                        canonical_name: _,
+                        canonical_name,
                         arity,
                         effects,
                     }) => {
-                        let eff = if !effects.is_empty() {
-                            Some(effects.clone())
+                        if arity == 0
+                            && let Some(inlined) = self.inline_vals.get(&canonical_name).cloned()
+                        {
+                            inlined
                         } else {
-                            self.resolved_fun_info(expr.id, &name)
-                                .map(|f| &f.effects)
-                                .cloned()
-                                .filter(|e| !e.is_empty())
-                        };
-                        self.lower_local_fun_ref(&name, arity, eff, source_module.as_deref())
+                            let eff = if !effects.is_empty() {
+                                Some(effects.clone())
+                            } else {
+                                self.resolved_fun_info(expr.id, &name)
+                                    .map(|f| &f.effects)
+                                    .cloned()
+                                    .filter(|e| !e.is_empty())
+                            };
+                            self.lower_local_fun_ref(&name, arity, eff, source_module.as_deref())
+                        }
                     }
                     _ => {
                         // Not in resolution map: this is a local variable
@@ -2930,19 +3069,31 @@ impl<'a> Lowerer<'a> {
                         ResolvedName::LocalFun {
                             name,
                             source_module,
-                            canonical_name: _,
+                            canonical_name,
                             arity,
                             effects,
                         } => {
-                            let eff = if !effects.is_empty() {
-                                Some(effects)
+                            if arity == 0
+                                && let Some(inlined) =
+                                    self.inline_vals.get(&canonical_name).cloned()
+                            {
+                                inlined
                             } else {
-                                self.resolved_fun_info(expr.id, &name)
-                                    .map(|f| &f.effects)
-                                    .cloned()
-                                    .filter(|e| !e.is_empty())
-                            };
-                            self.lower_local_fun_ref(&name, arity, eff, source_module.as_deref())
+                                let eff = if !effects.is_empty() {
+                                    Some(effects)
+                                } else {
+                                    self.resolved_fun_info(expr.id, &name)
+                                        .map(|f| &f.effects)
+                                        .cloned()
+                                        .filter(|e| !e.is_empty())
+                                };
+                                self.lower_local_fun_ref(
+                                    &name,
+                                    arity,
+                                    eff,
+                                    source_module.as_deref(),
+                                )
+                            }
                         }
                     }
                 } else {

@@ -1023,7 +1023,9 @@ pub(crate) fn resolve_names(
 /// Single-purpose: collects strings only, makes no resolution decisions.
 /// Deliberately not shared with `Resolver` — the two jobs (discovery vs.
 /// resolution) are kept separate by design.
-pub(crate) fn referenced_qualified_modules(program: &[Decl]) -> HashMap<String, crate::token::Span> {
+pub(crate) fn referenced_qualified_modules(
+    program: &[Decl],
+) -> HashMap<String, crate::token::Span> {
     let mut out: HashMap<String, crate::token::Span> = HashMap::new();
     for decl in program {
         walk_decl(decl, &mut out);
@@ -1031,7 +1033,11 @@ pub(crate) fn referenced_qualified_modules(program: &[Decl]) -> HashMap<String, 
     out
 }
 
-fn record_module(out: &mut HashMap<String, crate::token::Span>, module: &str, span: crate::token::Span) {
+fn record_module(
+    out: &mut HashMap<String, crate::token::Span>,
+    module: &str,
+    span: crate::token::Span,
+) {
     if !out.contains_key(module) {
         out.insert(module.to_string(), span);
     }
@@ -1256,7 +1262,10 @@ fn walk_handler(handler: &crate::ast::Handler, out: &mut HashMap<String, crate::
     }
 }
 
-fn walk_handler_body(body: &crate::ast::HandlerBody, out: &mut HashMap<String, crate::token::Span>) {
+fn walk_handler_body(
+    body: &crate::ast::HandlerBody,
+    out: &mut HashMap<String, crate::token::Span>,
+) {
     for arm in &body.arms {
         walk_handler_arm(&arm.node, out);
     }

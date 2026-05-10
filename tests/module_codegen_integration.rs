@@ -2301,6 +2301,33 @@ main () = Lib.answer
     );
 }
 
+/// Cross-module inline vals must be lowered under the defining module's
+/// semantic context. `answer = base` used to lower `base` against Main's
+/// resolver/inline table and could emit a bad `lib:base/0` reference.
+#[test]
+fn qualified_inline_val_cross_module_resolves_sibling_ref_in_defining_module() {
+    let lib = r#"module Lib
+
+@inline
+pub val base = 123
+
+@inline
+pub val answer = base
+"#;
+    let main = r#"module Main
+
+main () = Lib.answer
+"#;
+    let out = with_temp_project_files(&[("src/Lib.saga", lib)], main, |checker, program| {
+        emit_from_program(program, "main", checker)
+    });
+    assert_contains(&out, "123");
+    assert!(
+        !out.contains("'lib':'base'") && !out.contains("'main':'base'"),
+        "@inline val sibling refs must be substituted in the defining module:\n{out}"
+    );
+}
+
 /// Project module referenced by canonical name without `import Lib` should
 /// codegen the same way as if it had been imported: a real BEAM call.
 /// This is the codegen counterpart to the auto-load typecheck test.

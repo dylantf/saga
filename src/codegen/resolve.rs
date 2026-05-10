@@ -947,8 +947,7 @@ fn build_imported_fun_scoped(
     fun_effects_map: &HashMap<&str, &Vec<String>>,
     effect_op_counts: &HashMap<String, usize>,
 ) -> ScopedName {
-    let (arity, mut effects) =
-        crate::codegen::lower::util::arity_and_effects_from_type(&scheme.ty);
+    let (arity, mut effects) = crate::codegen::lower::util::arity_and_effects_from_type(&scheme.ty);
     let dict_params = crate::codegen::lower::util::dict_param_count(&scheme.constraints);
     // Merge with fun_effects (which strips beam-native effects in
     // check_module.rs but is otherwise the authoritative annotation list).

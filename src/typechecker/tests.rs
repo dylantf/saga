@@ -5863,8 +5863,7 @@ fn auto_load_skips_unknown_module_and_emits_existing_diagnostic() {
     .err()
     .expect("unknown qualified name must still error");
     assert!(
-        err.message.contains("unknown qualified name")
-            || err.message.contains("Bogus.Module.foo"),
+        err.message.contains("unknown qualified name") || err.message.contains("Bogus.Module.foo"),
         "expected 'unknown qualified name' diagnostic, got: {}",
         err.message
     );
