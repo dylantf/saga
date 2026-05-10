@@ -333,6 +333,10 @@ pub fn compile_std_modules(
 fn stdlib_bridge_files() -> Vec<(&'static str, &'static str)> {
     vec![
         (
+            "std_evidence_bridge.erl",
+            include_str!("../stdlib/evidence.bridge.erl"),
+        ),
+        (
             "std_file_bridge.erl",
             include_str!("../stdlib/File.bridge.erl"),
         ),
@@ -391,8 +395,8 @@ fn stdlib_bridge_files() -> Vec<(&'static str, &'static str)> {
             include_str!("../stdlib/Array.bridge.erl"),
         ),
         (
-            "std_evidence_bridge.erl",
-            include_str!("../stdlib/evidence.bridge.erl"),
+            "std_env_bridge.erl",
+            include_str!("../stdlib/Env.bridge.erl"),
         ),
     ]
 }
