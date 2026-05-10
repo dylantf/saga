@@ -67,6 +67,9 @@ struct Elaborator {
     let_dict_pat_ids: HashMap<String, HashSet<crate::ast::NodeId>>,
     /// Scope map values for canonical name bridging (user name -> canonical)
     scope_map_values: HashMap<String, String>,
+    /// Scope map effects for canonical name bridging (user name -> canonical
+    /// effect name, e.g. `"Fail"` -> `"Std.Fail.Fail"`).
+    scope_map_effects: HashMap<String, String>,
     /// Front-end resolution result for looking up canonical names by span/node id.
     resolution: crate::typechecker::ResolutionResult,
     /// Per-node type information for resolving record names in FieldAccess/RecordUpdate.
@@ -217,6 +220,7 @@ impl Elaborator {
             let_binding_arities,
             let_dict_pat_ids,
             scope_map_values: result.scope_map.values.clone(),
+            scope_map_effects: result.scope_map.effects.clone(),
             resolution: result.resolution.clone(),
             type_at_node: result.type_at_node.clone(),
             sub: result.sub.clone(),
@@ -379,9 +383,9 @@ impl Elaborator {
         // Register under both bare name and canonical name so lookups work
         // before and after the resolve pass rewrites Var nodes.
         for (trait_name, info) in &self.traits {
-            for (idx, (method_name, _, _, _)) in info.methods.iter().enumerate() {
+            for (idx, method) in info.methods.iter().enumerate() {
                 self.trait_methods
-                    .entry(method_name.clone())
+                    .entry(method.name.clone())
                     .or_insert_with(|| (trait_name.clone(), idx));
             }
         }
@@ -409,6 +413,7 @@ impl Elaborator {
                     type_params,
                     where_clause,
                     methods,
+                    needs,
                     span,
                     ..
                 } => {
@@ -441,10 +446,10 @@ impl Elaborator {
                     // Order methods by trait declaration order
                     let mut ordered_methods = Vec::new();
                     if let Some(ref info) = trait_info {
-                        for (trait_method_name, _, _, _) in &info.methods {
+                        for trait_method in &info.methods {
                             if let Some(ann) = methods
                                 .iter()
-                                .find(|ann| ann.node.name == *trait_method_name)
+                                .find(|ann| ann.node.name == trait_method.name)
                             {
                                 let ImplMethod { params, body, .. } = &ann.node;
                                 let elab_body = self.elaborate_expr(body);
@@ -465,11 +470,23 @@ impl Elaborator {
                     // no dict params are needed. The dict is still nullary.
                     let _ = type_params; // acknowledge but don't use for now
 
+                    let mut impl_effects: Vec<String> = needs
+                        .iter()
+                        .map(|e| {
+                            self.scope_map_effects
+                                .get(&e.name)
+                                .cloned()
+                                .unwrap_or_else(|| e.name.clone())
+                        })
+                        .collect();
+                    impl_effects.sort();
+                    impl_effects.dedup();
                     output.push(Decl::DictConstructor {
                         id: NodeId::fresh(),
                         name: dict_name,
                         dict_params,
                         methods: ordered_methods,
+                        impl_effects,
                         span: *span,
                     });
                 }
@@ -1465,13 +1482,29 @@ impl Elaborator {
 
     /// Check if a node has trait evidence that matches a known trait method name.
     /// Returns (trait_name, method_index) if this is a trait method call.
-    /// This is the evidence-first approach: the typechecker is the authority on
-    /// whether a name refers to a trait method or a user-defined function.
+    ///
+    /// Prefers the resolver's `ResolvedTraitMethod` when present (recorded
+    /// per use-site NodeId). The resolver's `trait_name` is authoritative —
+    /// look the method index up *inside that specific trait*, not in the
+    /// flat name-keyed `self.trait_methods` table. The flat table contains
+    /// every imported trait's methods regardless of exposing, so a
+    /// method-name lookup can return the wrong trait when the same bare
+    /// name appears in multiple imported traits.
+    ///
+    /// Falls back to the legacy name-keyed + evidence path for nodes the
+    /// resolver didn't decorate (e.g. synthesized AST during derive
+    /// expansion).
     fn resolve_trait_method(
         &self,
         name: &str,
         node_id: crate::ast::NodeId,
     ) -> Option<(String, usize)> {
+        if let Some(resolved) = self.resolution.trait_method(node_id)
+            && let Some(info) = self.traits.get(&resolved.trait_name)
+            && let Some(idx) = info.methods.iter().position(|m| m.name == resolved.method)
+        {
+            return Some((resolved.trait_name.clone(), idx));
+        }
         let evidence_list = self.evidence_by_node.get(&node_id)?;
         for ev in evidence_list {
             if let Some((trait_name, method_index)) = self.trait_methods.get(name)

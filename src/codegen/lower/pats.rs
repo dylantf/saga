@@ -153,10 +153,27 @@ impl Lowerer<'_> {
                 CPat::Binary(segs)
             }
             Pat::BitStringPat { segments, .. } => {
-                let segs = segments
-                    .iter()
-                    .map(|seg| self.lower_bit_segment_pat(seg, constructor_atoms, origin_module))
-                    .collect();
+                let mut segs = Vec::with_capacity(segments.len());
+                for seg in segments {
+                    // String literal sugar: expand to byte segments (mirrors
+                    // construction in `lower_bitstring_expr`).
+                    if let Pat::Lit {
+                        value: Lit::String(s, kind),
+                        ..
+                    } = &seg.value
+                    {
+                        let resolved = if kind.is_multiline() {
+                            process_string_escapes(s)
+                        } else {
+                            s.clone()
+                        };
+                        for b in resolved.as_bytes() {
+                            segs.push(CBinSeg::Byte(*b));
+                        }
+                        continue;
+                    }
+                    segs.push(self.lower_bit_segment_pat(seg, constructor_atoms, origin_module));
+                }
                 CPat::Binary(segs)
             }
             Pat::ListPat { .. } | Pat::ConsPat { .. } | Pat::Or { .. } => {

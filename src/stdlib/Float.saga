@@ -1,6 +1,8 @@
 #@ Floating-point conversion and arithmetic operations.
 module Std.Float
 
+import Std.Base (Show, Debug, Ord, Semigroup, Enum)
+
 impl Show for Float {
   show x = to_string x
 }

@@ -98,6 +98,15 @@ quicksort xs = case xs {
   }
 }
 
+# Regression: a `case` whose only arms are `<<>>` and `<<_:8, rest/binary>>`
+# used to crash erlc with `bs_start_match3` consistency check failure
+# because lowering omitted a wildcard fallthrough on the optimized path.
+fun count_bytes : BitString -> Int
+count_bytes bs = case bs {
+  <<>> -> 0
+  <<_:8, rest/binary>> -> 1 + count_bytes rest
+}
+
 # --- Tests ---
 
 
@@ -299,6 +308,46 @@ tests () = {
         }
         _ -> assert_true False
       }
+    })
+
+    test "string literal in bitstring pattern splits on bytes" (fun () -> {
+      let line = <<"hello\r\nworld">>
+      case line {
+        <<head:5/binary, "\r\n", rest/binary>> -> {
+          assert_eq (BitString.to_list head) [104, 101, 108, 108, 111]
+          assert_eq (BitString.to_list rest) [119, 111, 114, 108, 100]
+        }
+        _ -> assert_true False
+      }
+    })
+
+    test "string literal pattern with variable preceding size" (fun () -> {
+      let bs = <<"AB::tail">>
+      let i = 2
+      case bs {
+        <<head:i/binary, "::", rest/binary>> -> {
+          assert_eq (BitString.to_list head) [65, 66]
+          assert_eq (BitString.to_list rest) [116, 97, 105, 108]
+        }
+        _ -> assert_true False
+      }
+    })
+
+    test "string literal pattern that doesn't match falls through" (fun () -> {
+      let bs = <<"no separator here">>
+      let result = case bs {
+        <<_:2/binary, "::", _rest/binary>> -> "matched"
+        _ -> "fell through"
+      }
+      assert_eq result "fell through"
+    })
+
+    # Regression: a `case` whose only arms are `<<>>` and `<<_:8, rest/binary>>`
+    # used to crash erlc with `bs_start_match3` consistency check failure
+    # because lowering omitted a wildcard fallthrough on the optimized path.
+    test "exhaustive bitstring case with empty and cons arms compiles" (fun () -> {
+      assert_eq (count_bytes (BitString.from_string "abc")) 3
+      assert_eq (count_bytes <<>>) 0
     })
   })
 

@@ -1,0 +1,12 @@
+[project]
+name = "lib-hof-arity-mismatch"
+
+[bin]
+main = "src/Main.saga"
+
+# [library]
+# module = "LibHofArityMismatch"
+# expose = []
+
+# [deps]
+# some-lib = { path = "../some-lib" }

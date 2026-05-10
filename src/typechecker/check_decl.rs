@@ -96,6 +96,7 @@ impl Checker {
             }
         }
         self.process_imports(program)?;
+        self.auto_load_referenced_modules(program);
         self.resolution =
             super::resolve::resolve_names(program, &self.scope_map, self.current_module.as_deref());
         self.register_definitions(program)?;
@@ -452,6 +453,43 @@ impl Checker {
             }
         }
         Ok(())
+    }
+
+    /// For every module referenced via `Module.name` (canonical form) without
+    /// an explicit `import`, load the module's exports so its canonical keys
+    /// are registered in `self.env`/`self.constructors`/etc. Bare and aliased
+    /// scope entries are *not* injected — only the canonical form resolves.
+    ///
+    /// Unknown modules (typos, refs to nonexistent modules) are skipped here
+    /// and fail at resolve/infer time with the existing diagnostic. Failures
+    /// from loading a known module surface as collected diagnostics, with the
+    /// span pointing at the user's first reference site.
+    fn auto_load_referenced_modules(&mut self, program: &[Decl]) {
+        let referenced = super::resolve::referenced_qualified_modules(program);
+        for (module_name, ref_span) in &referenced {
+            if self.modules.registered_canonical.contains(module_name) {
+                continue;
+            }
+            let path: Vec<String> = module_name.split('.').map(str::to_string).collect();
+            let known = super::check_module::builtin_module_source(&path).is_some()
+                || self
+                    .modules
+                    .map
+                    .as_ref()
+                    .is_some_and(|m| m.contains_key(module_name));
+            if !known {
+                continue;
+            }
+            // load_module is idempotent — returns cached exports if already loaded.
+            // register_module_canonical_exports uses entry().or_insert so it's
+            // idempotent on the canonical-key side too.
+            match self.load_module(&path, *ref_span) {
+                Ok(exports) => {
+                    self.register_module_canonical_exports(&exports, module_name, None, None);
+                }
+                Err(d) => self.collected_diagnostics.push(d),
+            }
+        }
     }
 
     /// Pass 3: Register external functions so they're available in impl bodies.
@@ -1009,6 +1047,52 @@ impl Checker {
             }
             collect_row_vars(&resolved, &mut callback_row_vars);
         }
+        // Effects declared on a callback parameter must be handled by the HOF:
+        // either via an internal `with` block (in which case they were already
+        // subtracted from `all_body_effs` during `with` inference) or by
+        // declaring them in the function's own `needs` row (forward to caller).
+        // Without either, the lowerer has no source for the handler at the
+        // point the callback is invoked. Detect this here so the user gets a
+        // typechecker error instead of a codegen ICE.
+        if let Some(ann) = annotation {
+            let declared_row_for_check =
+                innermost_effect_row(&self.sub.apply(ann)).unwrap_or_else(EffectRow::empty);
+            let declared_names: std::collections::HashSet<String> = declared_row_for_check
+                .effects
+                .iter()
+                .map(|e| e.name.clone())
+                .collect();
+            let mut unhandled: Vec<String> = absorbed
+                .iter()
+                .filter(|eff| {
+                    all_body_effs.effects.iter().any(|e| &e.name == *eff)
+                        && !declared_names.contains(*eff)
+                })
+                .cloned()
+                .collect();
+            if !unhandled.is_empty() {
+                unhandled.sort();
+                let err_span = annotation_span.unwrap_or_else(|| match clauses[0] {
+                    Decl::FunBinding { span, .. } => *span,
+                    _ => unreachable!(),
+                });
+                return Err(Diagnostic::error_at(
+                    err_span,
+                    format!(
+                        "`{}` calls a callback parameter whose declared effect{} {{{}}} {} not handled; \
+                         either wrap the callback call in `with`, or add `needs {{{}}}` to the annotation \
+                         to forward the effect{} to the caller",
+                        name,
+                        if unhandled.len() == 1 { "" } else { "s" },
+                        unhandled.join(", "),
+                        if unhandled.len() == 1 { "is" } else { "are" },
+                        unhandled.join(", "),
+                        if unhandled.len() == 1 { "" } else { "s" },
+                    ),
+                ));
+            }
+        }
+
         let all_body_effs = if absorbed.is_empty() {
             all_body_effs
         } else {
@@ -1186,6 +1270,24 @@ impl Checker {
                     format!("type annotation mismatch for '{}': {}", name, e.message),
                 )
             })?;
+        }
+
+        // Zero-param bindings only make sense as eta-reduced function values
+        // (e.g. `add_five = add 5` where the body has type `Int -> Int`). When
+        // the body is a non-function value, the user wrote a constant under
+        // `fun`-binding syntax and should use `val` instead. The parser cannot
+        // distinguish these cases up-front because the body is typechecked here.
+        if arity == 0 && !matches!(self.sub.apply(&fun_ty), Type::Fun(_, _, _)) {
+            let span = match clauses[0] {
+                Decl::FunBinding { span, .. } => *span,
+                _ => unreachable!(),
+            };
+            return Err(Diagnostic::error_at(
+                span,
+                format!(
+                    "`{name}` has no parameters and its body is not a function; use `val {name} = ...` for constants"
+                ),
+            ));
         }
 
         let scheme = self.build_fun_scheme(
@@ -1744,6 +1846,8 @@ impl Checker {
                 needs,
             });
         }
+        self.scope_map
+            .register_effect_ops(&key, ops.iter().map(|op| op.name.as_str()));
         if let Some(info) = self.effects.get_mut(&key) {
             info.ops = ops;
             info.op_spans = op_spans;
@@ -1886,10 +1990,10 @@ impl Checker {
                             .params
                             .iter()
                             .map(|(label, t)| {
-                                (label.clone(), self.replace_vars(t, &handler_type_mapping))
+                                (label.clone(), Self::replace_vars(t, &handler_type_mapping))
                             })
                             .collect(),
-                        return_type: self.replace_vars(&op.return_type, &handler_type_mapping),
+                        return_type: Self::replace_vars(&op.return_type, &handler_type_mapping),
                         needs: op.needs.clone(),
                     };
                     matched_op = Some(specialized);
@@ -2283,11 +2387,13 @@ impl Checker {
                                         .keys()
                                         .any(|(tn, _, tt)| tn == t_name && tt == type_name);
                                     if has_impl {
-                                        for (m_name, _, _, _) in &t_info.methods {
-                                            if let Some(scheme) = self.env.get(m_name) {
-                                                // A trait method's scheme has the trait name
-                                                // in its constraints. If the env entry doesn't,
-                                                // it's a user function shadowing the method.
+                                        for tm in &t_info.methods {
+                                            // A user function shadowing a trait method by bare
+                                            // name will have its own env entry without this
+                                            // trait's constraint. Trait methods themselves no
+                                            // longer have bare env entries, so any hit here is
+                                            // either a user shadow or unrelated.
+                                            if let Some(scheme) = self.env.get(&tm.name) {
                                                 let is_trait_scheme = scheme
                                                     .constraints
                                                     .iter()
@@ -2296,7 +2402,7 @@ impl Checker {
                                                     hint = format!(
                                                         ". `{}` shadows trait method `{}.{}`. \
                                                          rename it to use the trait method",
-                                                        m_name, t_name, m_name
+                                                        tm.name, t_name, tm.name
                                                     );
                                                 }
                                             }

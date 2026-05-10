@@ -1,0 +1,7 @@
+module Lib
+
+@inline
+pub val bar = 123
+
+pub fun foo : Unit -> Unit
+foo () = ()

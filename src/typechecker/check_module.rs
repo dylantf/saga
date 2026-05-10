@@ -319,6 +319,11 @@ pub struct TraitImplDict {
     /// Where-clause constraints as (constraint_trait, param_index) pairs.
     /// Used by the elaborator to pass correct sub-dicts for parameterized impls.
     pub param_constraints: Vec<(String, usize)>,
+    /// Sorted, canonical effect names declared in the impl's `needs` clause.
+    /// Applies uniformly to every method dispatched through this dict — codegen
+    /// uses it to thread evidence at trait method call sites that elaborated
+    /// to `DictMethodAccess`. Empty when the impl has no `needs` clause.
+    pub impl_effects: Vec<String>,
 }
 
 /// Information about a module's exports needed by the lowerer/codegen.
@@ -342,6 +347,12 @@ pub struct ModuleCodegenInfo {
     /// External function mappings: (saga_name, erlang_module, erlang_func, arity).
     /// Includes both public and private externals (private ones are needed for handler inlining).
     pub external_funs: Vec<(String, String, String, usize)>,
+    /// Compiler intrinsic exports: source name -> intrinsic id.
+    pub intrinsic_exports: Vec<(String, crate::intrinsics::IntrinsicId)>,
+    /// Public `@inline val` declarations: name -> RHS expression.
+    /// Cross-module references substitute the expression at the use site
+    /// rather than calling a BEAM function (none is emitted for inline vals).
+    pub inline_vals: Vec<(String, crate::ast::Expr)>,
 }
 
 fn collect_effects_from_fun_type(ty: &Type) -> Vec<String> {
@@ -382,7 +393,12 @@ pub type ModuleMap = HashMap<String, PathBuf>;
 /// and build a map from declared module name to file path.
 pub fn scan_project_modules(root: &Path) -> Result<ModuleMap, String> {
     let mut map = ModuleMap::new();
-    scan_dir(root, root, &mut map, &["_build", "deps", "tests"])?;
+    for entry_point in ["src", "lib"] {
+        let dir = root.join(entry_point);
+        if dir.is_dir() {
+            scan_dir(&dir, root, &mut map, &[])?;
+        }
+    }
     Ok(map)
 }
 
@@ -510,6 +526,7 @@ pub const BUILTIN_MODULES: &[(&str, &str)] = &[
     ("Std.Tuple", include_str!("../stdlib/Tuple.saga")),
     ("Std.Actor", include_str!("../stdlib/Actor.saga")),
     ("Std.Fail", include_str!("../stdlib/Fail.saga")),
+    ("Std.Control", include_str!("../stdlib/Control.saga")),
     ("Std.Supervisor", include_str!("../stdlib/Supervisor.saga")),
     ("Std.Async", include_str!("../stdlib/Async.saga")),
     ("Std.IO.Unsafe", include_str!("../stdlib/IO.Unsafe.saga")),
@@ -552,6 +569,22 @@ impl Checker {
         let prefix = alias
             .map(|a| a.to_string())
             .unwrap_or_else(|| module_path.last().unwrap().to_string());
+        let exports = self.load_module(module_path, span)?;
+        self.inject_exports(&exports, &module_name, &prefix, exposing, span)
+    }
+
+    /// Parse, typecheck, and cache a module without injecting it into the
+    /// current checker's scope. Returns the module's exports.
+    ///
+    /// Used by `typecheck_import` (which then calls `inject_exports`) and by
+    /// the auto-load step for canonical-name references (which calls only
+    /// `register_module_canonical_exports`).
+    pub(crate) fn load_module(
+        &mut self,
+        module_path: &[String],
+        span: Span,
+    ) -> Result<ModuleExports, Diagnostic> {
+        let module_name = module_path.join(".");
 
         let is_builtin = builtin_module_source(module_path).is_some();
 
@@ -576,9 +609,9 @@ impl Checker {
             ));
         }
 
-        // Cache hit: inject cached exports
+        // Cache hit: return cached exports
         if let Some(exports) = self.modules.exports.get(&module_name).cloned() {
-            return self.inject_exports(&exports, &module_name, &prefix, exposing, span);
+            return Ok(exports);
         }
 
         // Resolve source: builtin modules are embedded, others looked up via module map
@@ -730,11 +763,10 @@ impl Checker {
             .codegen_info
             .insert(module_name.clone(), codegen_info);
 
-        // Cache and inject
+        // Cache the exports
         self.modules
             .exports
             .insert(module_name.clone(), exports.clone());
-        let result = self.inject_exports(&exports, &module_name, &prefix, exposing, span);
 
         // After loading any Std module, merge its exported impls into the base
         // snapshot so later builtin module checkers inherit impls from all
@@ -750,7 +782,7 @@ impl Checker {
             }
         }
 
-        result
+        Ok(exports)
     }
 
     /// Seed a builtin (Std.*) module checker with the parent's trait definitions,
@@ -759,20 +791,17 @@ impl Checker {
         for (name, info) in &self.trait_state.traits {
             if !mc.trait_state.traits.contains_key(name) {
                 mc.trait_state.traits.insert(name.clone(), info.clone());
-                for (method_name, _, _, _) in &info.methods {
-                    if let Some(scheme) = self.env.get(method_name) {
-                        if mc.env.get(method_name).is_none() {
-                            mc.env.insert(method_name.clone(), scheme.clone());
-                        }
-                        // Also copy canonical name entries so the resolve pass
-                        // can rewrite bare Var names to canonical form.
-                        for (user, canonical) in &self.scope_map.values {
-                            if user == method_name
-                                && canonical != method_name
-                                && mc.env.get(canonical).is_none()
-                            {
-                                mc.env.insert(canonical.clone(), scheme.clone());
-                            }
+                for method in &info.methods {
+                    // Copy canonical-keyed entries so use-site lookups
+                    // through ResolutionResult find the scheme. Schemes are
+                    // sourced from `TraitMethodInfo.scheme` (the authority);
+                    // env is the cached canonical-keyed view.
+                    for (user, canonical) in &self.scope_map.values {
+                        if user == &method.name
+                            && canonical != &method.name
+                            && mc.env.get(canonical).is_none()
+                        {
+                            mc.env.insert(canonical.clone(), method.scheme.clone());
                         }
                     }
                 }
@@ -849,11 +878,114 @@ impl Checker {
         exposing: Option<&[crate::ast::ExposedItem]>,
         span: Span,
     ) -> Result<(), Diagnostic> {
-        // Build and merge scope_map from the standalone resolver
+        self.register_module_canonical_exports(exports, module_name, Some(prefix), exposing);
+        self.merge_import_scope(exports, module_name, prefix, exposing, span)
+    }
+
+    /// Merge an import's scope_map entries (and exposing-list LSP/records side
+    /// effects) into this checker. This is the *scope injection* half of an
+    /// import — what makes bare/aliased forms resolvable.
+    ///
+    /// Auto-loaded modules (referenced only via canonical names) deliberately
+    /// skip this step so their bare/alias forms remain unresolvable without an
+    /// explicit `import` decl.
+    fn merge_import_scope(
+        &mut self,
+        exports: &ModuleExports,
+        module_name: &str,
+        prefix: &str,
+        exposing: Option<&[crate::ast::ExposedItem]>,
+        span: Span,
+    ) -> Result<(), Diagnostic> {
         let import_scope = resolve_import(exports, module_name, prefix, exposing)
             .map_err(|msg| Diagnostic::error_at(span, msg))?;
         self.scope_map.merge(&import_scope);
 
+        // Exposing-list side effects on records/adt_variants/LSP docs.
+        // (Validation and scope_map entries are handled by resolve_import above.)
+        if let Some(exposed) = exposing {
+            let binding_map: std::collections::HashMap<&str, &Scheme> = exports
+                .bindings
+                .iter()
+                .map(|(n, s)| (n.as_str(), s))
+                .collect();
+            let mut ctor_to_type: std::collections::HashMap<&str, &str> =
+                std::collections::HashMap::new();
+            for (type_name, ctors) in &exports.type_constructors {
+                for ctor in ctors {
+                    ctor_to_type.insert(ctor.as_str(), type_name.as_str());
+                }
+            }
+
+            for name in exposed {
+                let is_type = name.starts_with(|c: char| c.is_uppercase());
+                if is_type {
+                    if let Some(fields) = exports.record_defs.get(name.as_str()) {
+                        let record_canonical = format!("{}.{}", module_name, name);
+                        self.records.insert(record_canonical, fields.clone());
+                    }
+                    if let Some(ctors) = exports.type_constructors.get(name.as_str()) {
+                        let mut variants = Vec::new();
+                        for ctor in ctors {
+                            if let Some(&scheme) = binding_map.get(ctor.as_str()) {
+                                if let Some(&did) = exports.def_ids.get(ctor.as_str()) {
+                                    self.lsp
+                                        .constructor_def_ids
+                                        .entry(ctor.clone())
+                                        .or_insert(did);
+                                }
+                                variants.push((ctor.clone(), ctor_arity(&scheme.ty)));
+                            }
+                        }
+                        if !variants.is_empty() {
+                            self.adt_variants.insert(name.to_string(), variants);
+                        }
+                    }
+                    if ctor_to_type.contains_key(name.as_str())
+                        && let Some(&did) = exports.def_ids.get(name.as_str())
+                    {
+                        self.lsp
+                            .constructor_def_ids
+                            .entry(name.to_string())
+                            .or_insert(did);
+                    }
+                }
+                if let Some(doc) = exports.doc_comments.get(name.as_str()) {
+                    self.lsp
+                        .imported_docs
+                        .entry(name.to_string())
+                        .or_insert_with(|| doc.clone());
+                }
+            }
+        }
+
+        let _ = span;
+        Ok(())
+    }
+
+    /// Register a module's exports under canonical keys (env, traits,
+    /// trait_impls, effects, handlers, type_arity, constructors, records, etc.).
+    ///
+    /// This is the *loading* half of an import — what makes canonical names
+    /// (`Module.Name`) resolvable. Both explicit imports and the auto-load
+    /// step call this; only explicit imports follow up with `merge_import_scope`.
+    ///
+    /// `prefix` is used purely for aliased-form LSP doc-comment registration
+    /// (a no-op for auto-load, where we pass `None`).
+    pub(crate) fn register_module_canonical_exports(
+        &mut self,
+        exports: &ModuleExports,
+        module_name: &str,
+        prefix: Option<&str>,
+        exposing: Option<&[crate::ast::ExposedItem]>,
+    ) {
+        if !self
+            .modules
+            .registered_canonical
+            .insert(module_name.to_string())
+        {
+            return;
+        }
         let ModuleExports {
             bindings,
             type_constructors,
@@ -868,15 +1000,16 @@ impl Checker {
             doc_comments,
         } = exports;
 
-        // Traits and their methods: registered under both bare name (for local
-        // impl bodies) and canonical name (for the resolve pass to rewrite to).
+        // Traits and their methods. The full `Scheme` is owned by
+        // `TraitMethodInfo` on the imported module's `TraitInfo` — read it
+        // from there directly. `bindings` no longer carries trait methods.
         let binding_map: std::collections::HashMap<&str, &Scheme> =
             bindings.iter().map(|(n, s)| (n.as_str(), s)).collect();
         for (name, info) in traits {
-            let trait_canonical = format!("{}.{}", module_name, name);
+            let trait_canonical = super::canonical_join(module_name, name);
             self.trait_state
                 .traits
-                .entry(trait_canonical)
+                .entry(trait_canonical.clone())
                 .or_insert_with(|| info.clone());
             // Register doc comments for the trait itself
             if let Some(doc) = doc_comments.get(name) {
@@ -885,21 +1018,19 @@ impl Checker {
                     .entry(name.clone())
                     .or_insert_with(|| doc.clone());
             }
-            for (method_name, _, _, _) in &info.methods {
-                if let Some(&scheme) = binding_map.get(method_name.as_str()) {
-                    // Bare name (for local references and impl bodies)
-                    if self.env.get(method_name).is_none() {
-                        if let Some(&did) = def_ids.get(method_name.as_str()) {
-                            self.env
-                                .insert_with_def(method_name.clone(), scheme.clone(), did);
-                        } else {
-                            self.env.insert(method_name.clone(), scheme.clone());
-                        }
-                    }
-                    // Canonical name (Module.Trait.method) for after resolve pass rewrites
-                    let canonical = format!("{}.{}.{}", module_name, name, method_name);
-                    if self.env.get(&canonical).is_none() {
-                        self.env.insert(canonical, scheme.clone());
+            for method in &info.methods {
+                // Canonical name (Module.Trait.method). Use sites resolve
+                // through ResolutionResult, which records the canonical
+                // form, so `self.env.get(canonical)` is the lookup contract.
+                // No bare-name insertion: bare visibility is gated by
+                // scope_map.trait_methods and produced by the resolver.
+                let canonical = super::canonical_join(&trait_canonical, &method.name);
+                if self.env.get(&canonical).is_none() {
+                    if let Some(&did) = def_ids.get(method.name.as_str()) {
+                        self.env
+                            .insert_with_def(canonical, method.scheme.clone(), did);
+                    } else {
+                        self.env.insert(canonical, method.scheme.clone());
                     }
                 }
             }
@@ -983,8 +1114,10 @@ impl Checker {
                     .imported_docs
                     .entry(canonical)
                     .or_insert_with(|| doc.clone());
-                if prefix != module_name {
-                    let aliased = format!("{}.{}", prefix, name);
+                if let Some(p) = prefix
+                    && p != module_name
+                {
+                    let aliased = format!("{}.{}", p, name);
                     self.lsp
                         .imported_docs
                         .entry(aliased)
@@ -1019,61 +1152,7 @@ impl Checker {
                 .or_insert_with(|| fields.clone());
         }
 
-        // Exposed items: LSP metadata, records, adt_variants.
-        // Validation and scope_map entries are handled by resolve_import above.
-        if let Some(exposed) = exposing {
-            // Build reverse map for constructor-as-name detection
-            let mut ctor_to_type: std::collections::HashMap<&str, &str> =
-                std::collections::HashMap::new();
-            for (type_name, ctors) in type_constructors {
-                for ctor in ctors {
-                    ctor_to_type.insert(ctor.as_str(), type_name.as_str());
-                }
-            }
-
-            for name in exposed {
-                let is_type = name.starts_with(|c: char| c.is_uppercase());
-                if is_type {
-                    if let Some(fields) = record_defs.get(name.as_str()) {
-                        let record_canonical = format!("{}.{}", module_name, name);
-                        self.records.insert(record_canonical, fields.clone());
-                    }
-                    if let Some(ctors) = type_constructors.get(name) {
-                        let mut variants = Vec::new();
-                        for ctor in ctors {
-                            if let Some(&scheme) = binding_map.get(ctor.as_str()) {
-                                if let Some(&did) = def_ids.get(ctor.as_str()) {
-                                    self.lsp
-                                        .constructor_def_ids
-                                        .entry(ctor.clone())
-                                        .or_insert(did);
-                                }
-                                variants.push((ctor.clone(), ctor_arity(&scheme.ty)));
-                            }
-                        }
-                        if !variants.is_empty() {
-                            self.adt_variants.insert(name.clone(), variants);
-                        }
-                    }
-                    if ctor_to_type.contains_key(name.as_str())
-                        && let Some(&did) = def_ids.get(name.as_str())
-                    {
-                        self.lsp
-                            .constructor_def_ids
-                            .entry(name.clone())
-                            .or_insert(did);
-                    }
-                }
-                if let Some(doc) = doc_comments.get(name.as_str()) {
-                    self.lsp
-                        .imported_docs
-                        .entry(name.clone())
-                        .or_insert_with(|| doc.clone());
-                }
-            }
-        }
-
-        Ok(())
+        let _ = exposing;
     }
 }
 
@@ -1110,25 +1189,37 @@ pub(super) fn resolve_import(
         }
     }
 
-    // Traits: canonical + aliased + bare (traits are always available for impl/where
-    // when the module is imported, regardless of exposing clause)
-    for trait_name in exports.traits.keys() {
-        ScopeMap::register_qualified(&mut scope.traits, module_name, prefix, trait_name);
-        // Traits also get a bare entry (always available without qualification)
-        let trait_canonical = format!("{}.{}", module_name, trait_name);
-        scope
-            .traits
-            .entry(trait_name.clone())
-            .or_insert_with(|| trait_canonical);
-    }
-
-    // Trait methods: bare -> Module.Trait.method
-    // Trait methods are always unqualified in user code; the canonical form
-    // is used by the resolve pass to rewrite Var nodes.
+    // Traits: canonical + aliased qualified forms always available.
+    // Bare entries (and bare trait method visibility) are only added when
+    // there is no exposing clause; an explicit exposing list adds bare
+    // entries for the named traits below.
     for (trait_name, info) in &exports.traits {
-        for (method_name, _, _, _) in &info.methods {
-            let canonical = format!("{}.{}.{}", module_name, trait_name, method_name);
-            scope.values.entry(method_name.clone()).or_insert(canonical);
+        ScopeMap::register_qualified(&mut scope.traits, module_name, prefix, trait_name);
+        let trait_canonical = super::canonical_join(module_name, trait_name);
+        let alias_prefix =
+            (prefix != module_name).then(|| super::canonical_join(prefix, trait_name));
+        // Trait method canonical names live in scope.values so qualified
+        // (Module.Trait.method) lookups resolve regardless of exposing.
+        for method in &info.methods {
+            let method_canonical = super::canonical_join(&trait_canonical, &method.name);
+            scope
+                .values
+                .entry(method_canonical.clone())
+                .or_insert_with(|| method_canonical.clone());
+            if let Some(prefix_canonical) = &alias_prefix {
+                let aliased = super::canonical_join(prefix_canonical, &method.name);
+                scope.values.entry(aliased).or_insert(method_canonical);
+            }
+        }
+        if exposing.is_none() {
+            scope
+                .traits
+                .entry(trait_name.clone())
+                .or_insert_with(|| trait_canonical.clone());
+            scope.register_trait_methods(
+                &trait_canonical,
+                info.methods.iter().map(|m| m.name.as_str()),
+            );
         }
     }
 
@@ -1216,18 +1307,29 @@ pub(super) fn resolve_import(
                     found = true;
                 }
                 // Effects can be exposed by name
-                if exports.effects.contains_key(name) {
+                if let Some(info) = exports.effects.get(name) {
                     let effect_canonical = format!("{}.{}", module_name, name);
                     scope
                         .effects
                         .entry(name.clone())
-                        .or_insert(effect_canonical);
+                        .or_insert(effect_canonical.clone());
+                    scope.register_effect_ops(
+                        &effect_canonical,
+                        info.ops.iter().map(|op| op.name.as_str()),
+                    );
                     found = true;
                 }
                 // Traits can be exposed by name
-                if exports.traits.contains_key(name) {
-                    let trait_canonical = format!("{}.{}", module_name, name);
-                    scope.traits.entry(name.clone()).or_insert(trait_canonical);
+                if let Some(info) = exports.traits.get(name) {
+                    let trait_canonical = super::canonical_join(module_name, name);
+                    scope
+                        .traits
+                        .entry(name.clone())
+                        .or_insert(trait_canonical.clone());
+                    scope.register_trait_methods(
+                        &trait_canonical,
+                        info.methods.iter().map(|m| m.name.as_str()),
+                    );
                     found = true;
                 }
                 if !found {
@@ -1235,10 +1337,19 @@ pub(super) fn resolve_import(
                 }
             } else {
                 // Bare value -> canonical
-                let canonical = format!("{}.{}", module_name, name);
-                // Validate: must be a function/value in scope, or a handler name
+                let canonical = super::canonical_join(module_name, name);
+                // Validate: must be a function/value in scope, or a handler
+                // name. Trait method canonical entries also live in
+                // scope.values (so qualified Module.Trait.method resolves),
+                // but they are not exposable by bare method name — exposing a
+                // method requires exposing its trait. Reject any name that
+                // matches a method of an exported trait.
                 let is_handler = exports.handlers.contains_key(name);
-                if !scope.values.contains_key(&canonical) && !is_handler {
+                let is_trait_method = exports
+                    .traits
+                    .values()
+                    .any(|info| info.methods.iter().any(|m| &m.name == name));
+                if (is_trait_method || !scope.values.contains_key(&canonical)) && !is_handler {
                     return Err(format!("'{}' is not exported by module '{}'", name, prefix));
                 }
                 if scope.values.contains_key(&canonical) {
@@ -1343,6 +1454,8 @@ fn collect_codegen_info(
     let mut fun_effects = Vec::new();
     let mut trait_impl_dicts = Vec::new();
     let mut external_funs = Vec::new();
+    let mut intrinsic_exports = Vec::new();
+    let mut inline_vals = Vec::new();
 
     // Erlang module name: "Foo.Bar" -> "foo_bar"
     let erlang_module = module_name
@@ -1456,6 +1569,14 @@ fn collect_codegen_info(
                 annotations,
                 ..
             } => {
+                if annotations.iter().any(|a| a.name == "builtin") {
+                    let canonical = format!("{}.{}", module_name, name);
+                    let intrinsic = crate::intrinsics::intrinsic_id_for_canonical_name(&canonical)
+                        .unwrap_or_else(|| {
+                            panic!("@builtin declaration has no IntrinsicId mapping: {canonical}")
+                        });
+                    intrinsic_exports.push((name.clone(), intrinsic));
+                }
                 // Collect @external annotations for both public and private functions.
                 // Private externals are needed for handler body inlining.
                 if let Some(ext) = annotations.iter().find(|a| a.name == "external")
@@ -1479,6 +1600,7 @@ fn collect_codegen_info(
                 target_type,
                 type_params,
                 where_clause,
+                needs,
                 ..
             } => {
                 // Resolve trait name to canonical form via scope_map
@@ -1526,6 +1648,17 @@ fn collect_codegen_info(
                         })
                     })
                     .collect();
+                let mut impl_effects: Vec<String> = needs
+                    .iter()
+                    .map(|e| {
+                        scope_map
+                            .resolve_effect(&e.name)
+                            .map(|s| s.to_string())
+                            .unwrap_or_else(|| e.name.clone())
+                    })
+                    .collect();
+                impl_effects.sort();
+                impl_effects.dedup();
                 trait_impl_dicts.push(TraitImplDict {
                     trait_name: canonical_trait,
                     trait_type_args: canonical_trait_type_args,
@@ -1533,7 +1666,17 @@ fn collect_codegen_info(
                     dict_name,
                     arity,
                     param_constraints,
+                    impl_effects,
                 });
+            }
+            Decl::Val {
+                public: true,
+                name,
+                annotations,
+                value,
+                ..
+            } if annotations.iter().any(|a| a.name == "inline") => {
+                inline_vals.push((name.clone(), value.clone()));
             }
             _ => {}
         }
@@ -1548,6 +1691,8 @@ fn collect_codegen_info(
         type_constructors: exports.type_constructors.clone().into_iter().collect(),
         trait_impl_dicts,
         external_funs,
+        intrinsic_exports,
+        inline_vals,
     }
 }
 
@@ -1591,15 +1736,9 @@ pub(super) fn public_names_for_tc(
             } => {
                 names.insert(name.clone());
             }
-            Decl::TraitDef {
-                public: true,
-                methods,
-                ..
-            } => {
-                for m in methods {
-                    names.insert(m.node.name.clone());
-                }
-            }
+            // Trait methods are owned by their `TraitInfo` (and exported via
+            // `ModuleExports.traits`), not by the flat public-value namespace.
+            // Intentionally not enumerated here.
             _ => {}
         }
     }

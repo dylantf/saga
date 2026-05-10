@@ -237,8 +237,6 @@ impl<'a> Lowerer<'a> {
                                 param_absorbed_effects,
                             },
                         );
-                        self.op_to_effect
-                            .insert(op.node.name.clone(), canonical_effect.clone());
                     }
                     self.effect_defs
                         .insert(canonical_effect, EffectInfo { ops });
@@ -283,6 +281,7 @@ impl<'a> Lowerer<'a> {
                             FunInfo {
                                 arity: expanded_arity,
                                 effects: sorted_effects,
+                                is_open_row: false,
                                 param_absorbed_effects: HashMap::new(),
                                 param_types: Vec::new(),
                             },
@@ -374,9 +373,6 @@ impl<'a> Lowerer<'a> {
                                 param_absorbed_effects: op.param_absorbed_effects.clone(),
                             },
                         );
-                        self.op_to_effect
-                            .entry(op.name.clone())
-                            .or_insert_with(|| eff_def.name.clone());
                     }
                     self.effect_defs
                         .entry(eff_def.name.clone())
@@ -386,6 +382,7 @@ impl<'a> Lowerer<'a> {
                 for (name, scheme) in &info.exports {
                     let (base_arity, effects) = util::arity_and_effects_from_type(&scheme.ty);
                     let effects = self.canonicalize_effects(effects);
+                    let is_open_row = util::has_open_effect_row(&scheme.ty);
                     let dict_param_count = util::dict_param_count(&scheme.constraints);
                     let expanded_arity =
                         self.expanded_arity(base_arity, &effects) + dict_param_count;
@@ -397,6 +394,7 @@ impl<'a> Lowerer<'a> {
                     let fi = FunInfo {
                         arity: expanded_arity,
                         effects,
+                        is_open_row,
                         param_absorbed_effects: param_absorbed,
                         param_types: util::param_types_from_type(&scheme.ty),
                     };
@@ -443,8 +441,6 @@ impl<'a> Lowerer<'a> {
                         param_absorbed_effects: op.param_absorbed_effects.clone(),
                     },
                 );
-                self.op_to_effect
-                    .insert(op.name.clone(), eff_def.name.clone());
             }
             self.effect_defs
                 .insert(eff_def.name.clone(), EffectInfo { ops: ops_map });
@@ -468,6 +464,7 @@ impl<'a> Lowerer<'a> {
         for (name, scheme) in &info.exports {
             let (base_arity, effects) = util::arity_and_effects_from_type(&scheme.ty);
             let effects = self.canonicalize_effects(effects);
+            let is_open_row = util::has_open_effect_row(&scheme.ty);
             let dict_param_count = util::dict_param_count(&scheme.constraints);
             let expanded_arity = self.expanded_arity(base_arity, &effects) + dict_param_count;
             let param_effs = util::param_absorbed_effects_from_type(&scheme.ty);
@@ -480,6 +477,7 @@ impl<'a> Lowerer<'a> {
             let fi = FunInfo {
                 arity: expanded_arity,
                 effects: effects.clone(),
+                is_open_row,
                 param_absorbed_effects: param_effs.clone(),
                 param_types: util::param_types_from_type(&scheme.ty),
             };
@@ -491,6 +489,7 @@ impl<'a> Lowerer<'a> {
                 self.fun_info.entry(name.clone()).or_insert(FunInfo {
                     arity: expanded_arity,
                     effects,
+                    is_open_row,
                     param_absorbed_effects: param_effs,
                     param_types: util::param_types_from_type(&scheme.ty),
                 });
@@ -605,6 +604,14 @@ impl<'a> Lowerer<'a> {
                         }
                     }
                     let arity = self.expanded_arity(base_arity, &effects);
+                    let is_open_row = self
+                        .check_result
+                        .env
+                        .get(name)
+                        .map(|scheme| {
+                            util::has_open_effect_row(&self.check_result.sub.apply(&scheme.ty))
+                        })
+                        .unwrap_or(false);
                     let param_types = self
                         .check_result
                         .env
@@ -617,6 +624,7 @@ impl<'a> Lowerer<'a> {
                     self.fun_info.entry(canonical).or_insert(FunInfo {
                         arity,
                         effects,
+                        is_open_row,
                         param_absorbed_effects,
                         param_types,
                     });

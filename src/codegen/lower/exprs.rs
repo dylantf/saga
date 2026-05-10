@@ -10,10 +10,10 @@ use std::collections::HashMap;
 use super::pats;
 use super::util::{
     arity_and_effects_from_type, binop_call, collect_effect_call_expr, collect_fun_call, core_var,
-    has_nested_effect_call, lower_string_to_binary, mangle_ctor_atom,
-    param_absorbed_effects_from_type, param_types_from_type, pat_binding_var,
+    lower_string_to_binary, mangle_ctor_atom, param_absorbed_effects_from_type,
+    param_types_from_type, pat_binding_var,
 };
-use super::{FunInfo, LowerMode, Lowerer};
+use super::{EvidenceCtx, FunInfo, LowerMode, Lowerer};
 
 /// Returns true if `expr` is a valid Core Erlang guard expression:
 /// comparisons, arithmetic, boolean ops, unary minus, and literals/variables.
@@ -86,36 +86,60 @@ impl<'a> Lowerer<'a> {
         expr: &Expr,
         return_k: Option<CExpr>,
     ) -> CExpr {
-        if let Some((module, func_name, head, args)) = super::util::collect_qualified_call(expr) {
-            if let Some(call) = self.lower_resolved_fun_call(
-                func_name,
-                head,
-                &args,
-                return_k.clone(),
-                Some(&expr.span),
-            ) {
+        if self.expr_is_effectful_call(expr) {
+            if let Some((module, func_name, head, args)) = super::util::collect_qualified_call(expr)
+            {
+                if let Some(call) = self.lower_resolved_fun_call(
+                    expr.id,
+                    func_name,
+                    head,
+                    &args,
+                    return_k.clone(),
+                    Some(&expr.span),
+                ) {
+                    return call;
+                }
+                return self.lower_qualified_call(super::QualifiedCallSite {
+                    app_id: expr.id,
+                    module,
+                    func_name,
+                    head,
+                    args: &args,
+                    return_k,
+                    call_span: Some(&expr.span),
+                });
+            }
+            if let Some((func_name, head_expr, args)) = collect_fun_call(expr) {
+                if let Some(call) = self.lower_resolved_fun_call(
+                    expr.id,
+                    func_name,
+                    head_expr,
+                    &args,
+                    return_k.clone(),
+                    Some(&expr.span),
+                ) {
+                    return call;
+                }
+                if let Some(call) =
+                    self.lower_effectful_var_call(expr.id, func_name, &args, return_k.clone())
+                {
+                    return call;
+                }
+            }
+            if let Some((dict, method_index, args)) = super::util::collect_dict_method_call(expr)
+                && let Some(call) = self.lower_dict_method_call(
+                    expr.id,
+                    dict,
+                    method_index,
+                    &args,
+                    return_k.clone(),
+                )
+            {
                 return call;
             }
-            return self.lower_qualified_call(
-                module,
-                func_name,
-                head,
-                &args,
-                return_k,
-                Some(&expr.span),
-            );
-        }
-        if let Some((func_name, head_expr, args)) = collect_fun_call(expr) {
-            if let Some(call) = self.lower_resolved_fun_call(
-                func_name,
-                head_expr,
-                &args,
-                return_k.clone(),
-                Some(&expr.span),
-            ) {
-                return call;
-            }
-            if let Some(call) = self.lower_effectful_var_call(func_name, &args, return_k) {
+            if let Some((lambda, args)) = super::util::collect_lambda_head_call(expr)
+                && let Some(call) = self.lower_lambda_head_call(expr.id, lambda, &args, return_k)
+            {
                 return call;
             }
         }
@@ -180,23 +204,20 @@ impl<'a> Lowerer<'a> {
         if let Some((head_expr, op_name, qualifier, args)) = collect_effect_call_expr(expr) {
             let args_owned: Vec<Expr> = args.into_iter().cloned().collect();
             self.lower_effect_call(head_expr.id, op_name, qualifier, &args_owned, return_k)
+        } else if let ExprKind::With { expr, handler, .. } = &expr.kind
+            && return_k.is_some()
+        {
+            self.lower_with_inherited_return_k(expr, handler, return_k)
         } else if self.has_nested_effectful_expr(expr) {
             let k_var = self.fresh();
             let k_ce = return_k.expect("nested terminal effectful expr requires return_k");
             let body_ce = self.lower_expr_with_k(expr, &k_var);
             CExpr::Let(k_var, Box::new(k_ce), Box::new(body_ce))
+        } else if self.expr_is_effectful_call(expr) {
+            self.lower_expr_with_call_return_k(expr, return_k)
         } else {
-            let is_eff_call = collect_fun_call(expr)
-                .map(|(name, _, _)| {
-                    self.is_effectful(name) || self.current_effectful_vars.contains_key(name)
-                })
-                .unwrap_or(false);
-            if is_eff_call {
-                self.lower_expr_with_call_return_k(expr, return_k)
-            } else {
-                let body_ce = self.lower_expr(expr);
-                self.apply_return_k_with(return_k, body_ce)
-            }
+            let body_ce = self.lower_expr(expr);
+            self.apply_return_k_with(return_k, body_ce)
         }
     }
 
@@ -279,14 +300,11 @@ impl<'a> Lowerer<'a> {
                 &args_owned,
                 Some(CExpr::Var(k_var.to_string())),
             )
-        } else if collect_fun_call(expr)
-            .map(|(name, _, _)| {
-                self.is_effectful(name) || self.current_effectful_vars.contains_key(name)
-            })
-            .unwrap_or(false)
-        {
+        } else if self.expr_is_effectful_call(expr) {
             self.lower_expr_with_call_return_k(expr, Some(CExpr::Var(k_var.to_string())))
-        } else if has_nested_effect_call(expr) || matches!(expr.kind, ExprKind::Block { .. }) {
+        } else if self.has_nested_effectful_expr(expr)
+            || matches!(expr.kind, ExprKind::Block { .. })
+        {
             self.lower_expr_with_k_inner(expr, k_var)
         } else {
             self.lower_value_to_k(expr, k_var)
@@ -304,10 +322,18 @@ impl<'a> Lowerer<'a> {
             .iter()
             .all(|arm| arm.guard.as_ref().is_none_or(is_guard_safe))
         {
-            return CExpr::Case(
-                Box::new(CExpr::Var(scrut_var.to_string())),
-                self.lower_case_arms_inner(scrut_var, &arms_ref),
-            );
+            let mut lowered = self.lower_case_arms_inner(scrut_var, &arms_ref);
+            let has_total_catchall = arms_ref
+                .iter()
+                .any(|arm| arm.guard.is_none() && Self::is_catchall_pat(&arm.pattern));
+            if !has_total_catchall {
+                lowered.push(CArm {
+                    pat: CPat::Wildcard,
+                    guard: None,
+                    body: self.case_clause_error_expr(),
+                });
+            }
+            return CExpr::Case(Box::new(CExpr::Var(scrut_var.to_string())), lowered);
         }
 
         self.lower_case_expr_chain(scrut_var, &arms_ref)
@@ -509,11 +535,35 @@ impl<'a> Lowerer<'a> {
             }
             _ => {
                 // ADT constructor: tagged tuple {name, arg1, arg2, ...}
+                // Look up field types from the constructor's scheme so that
+                // lambda args inherit a `lambda_effect_context` and get the
+                // proper CPS expansion (evidence + _ReturnK).
+                let field_tys: Vec<Option<crate::typechecker::Type>> = {
+                    let scheme = self.check_result.constructors.get(name).or_else(|| {
+                        let bare = name.rsplit('.').next().unwrap_or(name);
+                        self.check_result.constructors.get(bare)
+                    });
+                    if let Some(scheme) = scheme {
+                        let mut tys = Vec::new();
+                        let mut current = &scheme.ty;
+                        while let crate::typechecker::Type::Fun(param, ret, _) = current {
+                            tys.push(Some((**param).clone()));
+                            current = ret;
+                        }
+                        tys
+                    } else {
+                        vec![None; args.len()]
+                    }
+                };
+
                 let mut vars: Vec<String> = Vec::new();
                 let mut bindings: Vec<(String, CExpr)> = Vec::new();
-                for arg in &args {
+                for (idx, arg) in args.iter().enumerate() {
                     let var = self.fresh();
-                    let val = self.lower_expr_value(arg);
+                    let val = match field_tys.get(idx).and_then(|t| t.as_ref()) {
+                        Some(ty) => self.lower_expr_value_with_expected_type(arg, Some(ty)),
+                        None => self.lower_expr_value(arg),
+                    };
                     vars.push(var.clone());
                     bindings.push((var, val));
                 }
@@ -691,23 +741,32 @@ impl<'a> Lowerer<'a> {
 
                 // Build the function body (same logic as top-level multi-clause funs)
                 let source_arity = pats::lower_params(clauses[0].0).len();
-                let (arity, effects, param_absorbed_effects, param_types) = self
+                let (arity, effects, is_open_row, param_absorbed_effects, param_types) = self
                     .check_result
                     .resolved_type_for_node(fun_id)
                     .map(|ty| {
                         let (base_arity, effects) = arity_and_effects_from_type(&ty);
                         let effects = self.canonicalize_effects(effects);
+                        let is_open_row = super::util::has_open_effect_row(&ty);
                         let handler_count = self.effect_handler_ops(&effects).len();
-                        let expanded_arity =
-                            base_arity + handler_count + if handler_count > 0 { 1 } else { 0 };
+                        // Effectful expanded arity = user + Evidence + ReturnK.
+                        let expanded_arity = base_arity + if handler_count > 0 { 2 } else { 0 };
                         let param_absorbed_effects = param_absorbed_effects_from_type(&ty)
                             .into_iter()
                             .map(|(idx, effs)| (idx, self.canonicalize_effects(effs)))
                             .collect::<HashMap<usize, Vec<String>>>();
                         let param_types = param_types_from_type(&ty);
-                        (expanded_arity, effects, param_absorbed_effects, param_types)
+                        (
+                            expanded_arity,
+                            effects,
+                            is_open_row,
+                            param_absorbed_effects,
+                            param_types,
+                        )
                     })
-                    .unwrap_or_else(|| (source_arity, Vec::new(), HashMap::new(), Vec::new()));
+                    .unwrap_or_else(|| {
+                        (source_arity, Vec::new(), false, HashMap::new(), Vec::new())
+                    });
                 let param_names: Vec<String> = (0..arity).map(|i| format!("_LF{}", i)).collect();
 
                 // Register in fun_info BEFORE lowering body so recursive
@@ -717,40 +776,35 @@ impl<'a> Lowerer<'a> {
                     FunInfo {
                         arity,
                         effects: effects.clone(),
+                        is_open_row,
                         param_absorbed_effects: param_absorbed_effects.clone(),
                         param_types: param_types.clone(),
                     },
                 );
 
                 let handler_ops = self.effect_handler_ops(&effects);
-                let handler_params: Vec<String> = handler_ops
-                    .iter()
-                    .map(|(eff, op)| Self::handler_param_name(eff, op))
-                    .collect();
-                let saved_handler_params = std::mem::take(&mut self.current_handler_params);
-                for ((eff, op), param) in handler_ops.iter().zip(handler_params.iter()) {
-                    let key = format!("{}.{}", eff, op);
-                    self.current_handler_params.insert(key, param.clone());
-                }
 
-                let saved_effectful_vars = std::mem::take(&mut self.current_effectful_vars);
-                for (idx, effs) in &param_absorbed_effects {
-                    if let Some(pat) = clauses[0].0.get(*idx)
-                        && let Pat::Var { name, .. } = pat
-                    {
-                        self.current_effectful_vars
-                            .insert(name.clone(), effs.clone());
-                    }
-                }
-
-                let has_effects = !handler_params.is_empty();
-                let base_arity = arity - handler_params.len() - if has_effects { 1 } else { 0 };
+                let has_effects = !handler_ops.is_empty();
+                let base_arity = arity - if has_effects { 2 } else { 0 };
                 let effect_return_k = has_effects.then(|| CExpr::Var("_ReturnK".to_string()));
+
+                // Install the evidence context for the body of effectful
+                // local functions. Op-call emission inside the body reads
+                // handler closures out of `current_evidence`.
+                let saved_evidence = self.current_evidence.clone();
+                if has_effects {
+                    self.current_evidence = Some(EvidenceCtx {
+                        var: "_Evidence".to_string(),
+                        layout: super::evidence::EvidenceLayout::new(effects.iter().cloned()),
+                        is_open: is_open_row,
+                    });
+                }
+
                 let fun_body = if clauses.len() == 1 && clauses[0].1.is_none() {
                     // Single clause, no guard
                     let mut params_ce = pats::lower_params(clauses[0].0);
-                    params_ce.extend(handler_params.iter().cloned());
                     if has_effects {
+                        params_ce.push("_Evidence".to_string());
                         params_ce.push("_ReturnK".to_string());
                     }
                     let body = clauses[0].2;
@@ -815,8 +869,8 @@ impl<'a> Lowerer<'a> {
                     CExpr::Fun(
                         {
                             let mut params = param_names[..base_arity].to_vec();
-                            params.extend(handler_params.iter().cloned());
                             if has_effects {
+                                params.push("_Evidence".to_string());
                                 params.push("_ReturnK".to_string());
                             }
                             params
@@ -824,8 +878,7 @@ impl<'a> Lowerer<'a> {
                         Box::new(CExpr::Case(Box::new(scrutinee), arms)),
                     )
                 };
-                self.current_handler_params = saved_handler_params;
-                self.current_effectful_vars = saved_effectful_vars;
+                self.current_evidence = saved_evidence;
 
                 let rest_ce = if rest.is_empty() {
                     self.apply_return_k_with(return_k, CExpr::Tuple(vec![]))
@@ -844,10 +897,12 @@ impl<'a> Lowerer<'a> {
                 // Let bindings with handler values: detect and register the
                 // handler so `with name` resolves correctly.
                 if let Stmt::Let { pattern, value, .. } = first
-                    && let Pat::Var { name, .. } = pattern
+                    && let Pat::Var {
+                        name, id: pat_id, ..
+                    } = pattern
                     && self.is_handler_value(value)
                 {
-                    self.lower_handle_binding(name, value);
+                    self.lower_handle_binding(name, Some(*pat_id), value);
                     if let Some((var, _effects, _has_return)) =
                         self.handle_dynamic_vars.get(name.as_str()).cloned()
                     {
@@ -858,32 +913,16 @@ impl<'a> Lowerer<'a> {
                     return self.lower_block_with_return_k(rest, return_k);
                 }
 
-                // If this let binding partially applies an effectful function,
-                // register the bound variable so call sites thread handlers.
-                if let Stmt::Let { pattern, .. } = first
-                    && let Pat::Var { name, .. } = pattern
-                    && let Some(effects) = self.ctx.let_effect_bindings.get(name).cloned()
-                    && !effects.is_empty()
-                {
-                    self.current_effectful_vars.insert(name.clone(), effects);
-                }
-
                 // Check if the value is a call to an effectful function. If so,
                 // capture the rest of the block as _ReturnK so abort-style handlers
                 // skip subsequent statements (same CPS treatment as `with`).
-                if return_k.is_some() {
+                {
                     let value_expr = match first {
                         Stmt::Let { value, .. } => value,
                         Stmt::Expr(e) => e,
                         Stmt::LetFun { .. } => unreachable!(),
                     };
-                    let is_effectful_call = collect_fun_call(value_expr)
-                        .map(|(name, _, _)| {
-                            self.is_effectful(name)
-                                || self.current_effectful_vars.contains_key(name)
-                        })
-                        .unwrap_or(false);
-                    if is_effectful_call {
+                    if self.expr_is_effectful_call(value_expr) {
                         let (pat_opt, value_expr) = match first {
                             Stmt::Let { pattern, value, .. } => (Some(pattern), value),
                             Stmt::Expr(e) => (None, e),
@@ -916,8 +955,8 @@ impl<'a> Lowerer<'a> {
                     // If so, build a continuation K from the remaining statements and
                     // thread it through branches so abort-style handlers skip the rest.
                     let value_has_nested = match first {
-                        Stmt::Expr(e) => has_nested_effect_call(e),
-                        Stmt::Let { value, .. } => has_nested_effect_call(value),
+                        Stmt::Expr(e) => self.has_nested_effectful_expr(e),
+                        Stmt::Let { value, .. } => self.has_nested_effectful_expr(value),
                         Stmt::LetFun { .. } => false,
                     };
 
@@ -1042,8 +1081,93 @@ impl<'a> Lowerer<'a> {
                 handler,
                 Some(CExpr::Var(k_var.to_string())),
             ),
+            ExprKind::RecordCreate { name, fields, .. } => {
+                self.lower_record_create_with_k(Some(name.as_str()), expr.id, fields, k_var)
+            }
+            ExprKind::AnonRecordCreate { fields } => {
+                self.lower_record_create_with_k(None, expr.id, fields, k_var)
+            }
             _ => self.lower_value_to_k(expr, k_var),
         }
+    }
+
+    /// Lower a record-creation expression and apply `k_var` to the constructed
+    /// tuple. Effectful field values are CPS-chained so an aborting handler
+    /// skips the rest of the construction (and `k_var`) instead of leaking its
+    /// abort tuple into a record slot.
+    fn lower_record_create_with_k(
+        &mut self,
+        name: Option<&str>,
+        node_id: crate::ast::NodeId,
+        fields: &[(String, crate::token::Span, Expr)],
+        k_var: &str,
+    ) -> CExpr {
+        use std::collections::HashMap;
+
+        let order: Vec<String> = match name {
+            Some(rname) => self
+                .resolved_record_fields(node_id, rname)
+                .cloned()
+                .unwrap_or_else(|| fields.iter().map(|(n, _, _)| n.clone()).collect()),
+            None => {
+                let names: Vec<&str> = fields.iter().map(|(n, _, _)| n.as_str()).collect();
+                let mut sorted: Vec<String> = names.iter().map(|s| s.to_string()).collect();
+                sorted.sort();
+                sorted
+            }
+        };
+        let field_map: HashMap<&str, &Expr> =
+            fields.iter().map(|(n, _, e)| (n.as_str(), e)).collect();
+
+        let tag = match name {
+            Some(rname) => super::util::mangle_ctor_atom(
+                rname,
+                &self.constructor_atoms,
+                self.handler_origin_module(),
+            ),
+            None => {
+                let names: Vec<&str> = fields.iter().map(|(n, _, _)| n.as_str()).collect();
+                crate::ast::anon_record_tag(&names)
+            }
+        };
+
+        let mut field_vars: Vec<String> = Vec::with_capacity(order.len());
+        let mut effectful_idxs: Vec<usize> = Vec::new();
+        let mut pure_bindings: Vec<(String, CExpr)> = Vec::new();
+        for (i, field_name) in order.iter().enumerate() {
+            let v = self.fresh();
+            field_vars.push(v.clone());
+            let e = field_map
+                .get(field_name.as_str())
+                .expect("field missing in record-create");
+            if self.expr_is_effectful_call(e) || self.has_nested_effectful_expr(e) {
+                effectful_idxs.push(i);
+            } else {
+                pure_bindings.push((v, self.lower_expr_value(e)));
+            }
+        }
+
+        let mut elems = vec![CExpr::Lit(CLit::Atom(tag))];
+        elems.extend(field_vars.iter().map(|v| CExpr::Var(v.clone())));
+        let tuple = CExpr::Tuple(elems);
+        let mut body = CExpr::Apply(Box::new(CExpr::Var(k_var.to_string())), vec![tuple]);
+
+        for &i in effectful_idxs.iter().rev() {
+            let v = field_vars[i].clone();
+            let e = field_map
+                .get(order[i].as_str())
+                .expect("field missing in record-create");
+            let inner_k = CExpr::Fun(vec![v.clone()], Box::new(body));
+            let inner_k_var = self.fresh();
+            let inner_body = if self.expr_is_effectful_call(e) {
+                self.lower_expr_with_call_return_k(e, Some(CExpr::Var(inner_k_var.clone())))
+            } else {
+                self.lower_expr_with_k_inner(e, &inner_k_var)
+            };
+            body = CExpr::Let(inner_k_var, Box::new(inner_k), Box::new(inner_body));
+        }
+
+        self.wrap_let_bindings(pure_bindings, body)
     }
 
     /// Lower a branch expression with an outer continuation K.
@@ -1064,6 +1188,25 @@ impl<'a> Lowerer<'a> {
             [Stmt::Expr(e)] => self.lower_branch_with_k(e, k_var),
             [Stmt::Let { value, .. }] => self.lower_branch_with_k(value, k_var),
             [first, rest @ ..] => {
+                // Handler-value let binding: register so `with name` resolves.
+                // Mirrors the same detection in `lower_block_with_return_k`.
+                if let Stmt::Let { pattern, value, .. } = first
+                    && let Pat::Var {
+                        name, id: pat_id, ..
+                    } = pattern
+                    && self.is_handler_value(value)
+                {
+                    self.lower_handle_binding(name, Some(*pat_id), value);
+                    if let Some((var, _effects, _has_return)) =
+                        self.handle_dynamic_vars.get(name.as_str()).cloned()
+                    {
+                        let rhs_ce = self.lower_expr(value);
+                        let rest_ce = self.lower_block_with_k(rest, k_var);
+                        return CExpr::Let(var, Box::new(rhs_ce), Box::new(rest_ce));
+                    }
+                    return self.lower_block_with_k(rest, k_var);
+                }
+
                 let effect_info = match first {
                     Stmt::Expr(e) => collect_effect_call_expr(e)
                         .map(|(head, name, qual, args)| (None, head.id, name, qual, args)),
@@ -1093,18 +1236,12 @@ impl<'a> Lowerer<'a> {
                     // Check for call to an effectful function. Capture the
                     // rest of the block as _ReturnK so CPS chains correctly
                     // (e.g. state-threading handlers need real continuations).
-                    let is_effectful_call = collect_fun_call(value_expr)
-                        .map(|(name, _, _)| {
-                            self.is_effectful(name)
-                                || self.current_effectful_vars.contains_key(name)
-                        })
-                        .unwrap_or(false);
-                    if is_effectful_call {
+                    if self.expr_is_effectful_call(value_expr) {
                         let rest_k = self.lower_rest_block_with_k_k(pat_opt, rest, k_var);
                         return self.lower_expr_with_call_return_k(value_expr, Some(rest_k));
                     }
 
-                    if has_nested_effect_call(value_expr) {
+                    if self.has_nested_effectful_expr(value_expr) {
                         // Value has nested effects: build inner K and thread through
                         let inner_k = self.lower_rest_block_with_k_k(pat_opt, rest, k_var);
                         let inner_k_var = self.fresh();
@@ -1249,11 +1386,36 @@ impl<'a> Lowerer<'a> {
         })
     }
 
-    /// Lower a handle binding statement. For direct handler references, registers
-    /// a compile-time alias. For conditionals, the condition is lowered and the
-    /// handle binding stores a flag variable; handler dispatch uses both handlers'
-    /// arms wrapped in a conditional at runtime.
-    pub(super) fn lower_handle_binding(&mut self, name: &str, value: &Expr) {
+    /// Lower a handle binding statement. Routes the binding into one of four
+    /// metadata stores depending on the RHS shape; `lower_with` later picks
+    /// the matching compilation strategy based on which store the name is in.
+    ///
+    /// Although evidence-wrapping itself only happens at the `with` boundary
+    /// (see [`Self::lower_with`]), the four paths still need to remain
+    /// distinct because each captures a different *source* of handler
+    /// information:
+    ///
+    /// - **Static alias** (`Var`): compile-time resolved canonical name in
+    ///   `handler_canonical`. The handler's arms are already in
+    ///   `handler_defs` from registration.
+    /// - **HandlerExpr**: arms are in the `value` expression itself; we
+    ///   register them under a synthetic name in `handler_defs`.
+    /// - **Conditional** (`If`): both branches resolve statically; we store
+    ///   the lowered condition + both canonicals in `handle_cond_vars` so
+    ///   `lower_with` can emit a runtime case-split.
+    /// - **Dynamic**: arbitrary RHS; we store the value's effect signature
+    ///   from the typechecker in `handle_dynamic_vars` so `lower_with` can
+    ///   emit a closure-call dispatch.
+    ///
+    /// Collapsing the four paths into one would hide these distinct
+    /// metadata flows behind a uniform interface without reducing branching
+    /// at the `with` boundary.
+    pub(super) fn lower_handle_binding(
+        &mut self,
+        name: &str,
+        pat_id: Option<crate::ast::NodeId>,
+        value: &Expr,
+    ) {
         if self.handle_dynamic_vars.contains_key(name) || self.handle_cond_vars.contains_key(name) {
             return;
         }
@@ -1309,11 +1471,12 @@ impl<'a> Lowerer<'a> {
         }
 
         // Dynamic handler: RHS is an arbitrary expression (e.g. function call).
-        // Look up effect names from the typechecker's check result.
-        let dynamic_info = self
-            .check_result
-            .handlers
-            .get(name)
+        // Look up effect names from the typechecker's check result. Prefer the
+        // pat-id-keyed entry, which survives the per-clause `handlers`
+        // save/restore in the typechecker.
+        let dynamic_info = pat_id
+            .and_then(|id| self.check_result.let_binding_handlers.get(&id))
+            .or_else(|| self.check_result.handlers.get(name))
             .map(|info| {
                 let effects = info
                     .effects

@@ -24,6 +24,18 @@ pub enum ResolvedValue {
     },
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedEffectOp {
+    pub effect: String,
+    pub op: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedTraitMethod {
+    pub trait_name: String,
+    pub method: String,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct ResolutionResult {
     pub values: HashMap<NodeId, ResolvedValue>,
@@ -35,8 +47,9 @@ pub struct ResolutionResult {
     pub impl_target_types: HashMap<NodeId, String>,
     pub effects: HashMap<NodeId, String>,
     pub handlers: HashMap<NodeId, ResolvedValue>,
-    pub effect_call_qualifiers: HashMap<NodeId, String>,
-    pub handler_arm_qualifiers: HashMap<NodeId, String>,
+    pub effect_calls: HashMap<NodeId, ResolvedEffectOp>,
+    pub handler_arms: HashMap<NodeId, ResolvedEffectOp>,
+    pub trait_methods: HashMap<NodeId, ResolvedTraitMethod>,
 }
 
 impl ResolutionResult {
@@ -76,16 +89,16 @@ impl ResolutionResult {
         self.handlers.get(&node_id)
     }
 
-    pub fn effect_call_qualifier(&self, node_id: NodeId) -> Option<&str> {
-        self.effect_call_qualifiers
-            .get(&node_id)
-            .map(|s| s.as_str())
+    pub fn effect_call(&self, node_id: NodeId) -> Option<&ResolvedEffectOp> {
+        self.effect_calls.get(&node_id)
     }
 
-    pub fn handler_arm_qualifier(&self, node_id: NodeId) -> Option<&str> {
-        self.handler_arm_qualifiers
-            .get(&node_id)
-            .map(|s| s.as_str())
+    pub fn handler_arm(&self, node_id: NodeId) -> Option<&ResolvedEffectOp> {
+        self.handler_arms.get(&node_id)
+    }
+
+    pub fn trait_method(&self, node_id: NodeId) -> Option<&ResolvedTraitMethod> {
+        self.trait_methods.get(&node_id)
     }
 }
 
@@ -96,6 +109,11 @@ struct LocalModuleNames {
     types: HashMap<String, String>,
     traits: HashMap<String, String>,
     effects: HashMap<String, String>,
+    effect_ops: HashMap<String, HashSet<String>>,
+    /// Bare trait method name -> canonical traits in the current module that
+    /// expose that method. Trait methods are no longer treated as ordinary
+    /// top-level values: their visibility tracks their owning trait.
+    trait_methods: HashMap<String, HashSet<String>>,
     handlers: HashSet<String>,
 }
 
@@ -118,9 +136,13 @@ impl LocalModuleNames {
                     out.top_level_values.insert(name.clone());
                 }
                 Decl::TraitDef { name, methods, .. } => {
-                    out.traits.insert(name.clone(), qualify(name));
+                    let canonical = qualify(name);
+                    out.traits.insert(name.clone(), canonical.clone());
                     for method in methods {
-                        out.top_level_values.insert(method.node.name.clone());
+                        out.trait_methods
+                            .entry(method.node.name.clone())
+                            .or_default()
+                            .insert(canonical.clone());
                     }
                 }
                 Decl::TypeDef { name, variants, .. } => {
@@ -133,8 +155,17 @@ impl LocalModuleNames {
                     out.types.insert(name.clone(), qualify(name));
                     out.constructors.insert(name.clone());
                 }
-                Decl::EffectDef { name, .. } => {
-                    out.effects.insert(name.clone(), qualify(name));
+                Decl::EffectDef {
+                    name, operations, ..
+                } => {
+                    let canonical = qualify(name);
+                    out.effects.insert(name.clone(), canonical.clone());
+                    for op in operations {
+                        out.effect_ops
+                            .entry(op.node.name.clone())
+                            .or_default()
+                            .insert(canonical.clone());
+                    }
                 }
                 Decl::HandlerDef { name, .. } => {
                     out.handlers.insert(name.clone());
@@ -245,11 +276,23 @@ impl<'a> Resolver<'a> {
         }
     }
 
+    fn is_locally_bound(&self, name: &str) -> bool {
+        self.value_scopes
+            .iter()
+            .rev()
+            .any(|scope| scope.contains_key(name))
+    }
+
     fn resolve_value_name(&self, name: &str) -> Option<ResolvedValue> {
         for scope in self.value_scopes.iter().rev() {
             if let Some(resolved) = scope.get(name) {
                 return Some(resolved.clone());
             }
+        }
+        if let Some(canonical_trait) = self.resolve_bare_trait_method_name(name) {
+            return Some(ResolvedValue::Global {
+                lookup_name: super::canonical_join(&canonical_trait, name),
+            });
         }
         if self.locals.top_level_values.contains(name) {
             return Some(ResolvedValue::Global {
@@ -261,6 +304,29 @@ impl<'a> Resolver<'a> {
             .map(|lookup_name| ResolvedValue::Global {
                 lookup_name: lookup_name.to_string(),
             })
+    }
+
+    /// Resolve a bare trait method name to its canonical trait when exactly
+    /// one trait contributes that method into scope. Locally defined traits
+    /// shadow imports — matches typical name resolution rules and lets test
+    /// fixtures redefine `Show`, `Eq`, etc. without colliding with the
+    /// prelude. Imports are consulted only when the current module has no
+    /// local trait contributing the method. Returns None for "no candidate"
+    /// and ">1 candidate within the chosen tier" so the typechecker can
+    /// produce a single diagnostic.
+    fn resolve_bare_trait_method_name(&self, method_name: &str) -> Option<String> {
+        if let Some(local_traits) = self.locals.trait_methods.get(method_name) {
+            if local_traits.len() == 1 {
+                return local_traits.iter().next().cloned();
+            }
+            return None;
+        }
+        if let Some(imported_traits) = self.scope.trait_methods.get(method_name)
+            && imported_traits.len() == 1
+        {
+            return imported_traits.iter().next().cloned();
+        }
+        None
     }
 
     fn resolve_handler_name(&self, name: &str) -> Option<ResolvedValue> {
@@ -322,6 +388,64 @@ impl<'a> Resolver<'a> {
             .resolve_effect(name)
             .map(|s| s.to_string())
             .or_else(|| name.contains('.').then(|| name.to_string()))
+    }
+
+    /// Resolve a bare effect op name to its canonical effect using
+    /// tier-based shadowing: locally defined effects shadow imports. Within
+    /// whichever tier wins, return Some only when there is exactly one
+    /// candidate. None for "no candidate" and "ambiguous within the chosen
+    /// tier" — the typechecker's [`Checker::lookup_effect_op`] re-derives
+    /// the same tiers from `current_module` + `scope_map.effect_ops` to
+    /// emit the proper Missing/Ambiguous diagnostic.
+    fn resolve_bare_effect_op_name(&self, op_name: &str) -> Option<String> {
+        if let Some(local_effects) = self.locals.effect_ops.get(op_name) {
+            if local_effects.len() == 1 {
+                return local_effects.iter().next().cloned();
+            }
+            return None;
+        }
+        if let Some(imported_effects) = self.scope.effect_ops.get(op_name)
+            && imported_effects.len() == 1
+        {
+            return imported_effects.iter().next().cloned();
+        }
+        None
+    }
+
+    /// Decompose a canonical method-style lookup name (`Module.Trait.method`
+    /// or `Trait.method`) and check whether the trait part names a known
+    /// trait — locally defined or imported (regardless of exposing, since
+    /// qualified access doesn't depend on bare visibility). Returns a
+    /// `ResolvedTraitMethod` for the elaborator to dispatch on so qualified
+    /// calls like `Module.Trait.method` get the same dictionary-method
+    /// access path that bare unambiguous trait method calls do.
+    fn qualified_trait_method(&self, canonical: &str) -> Option<ResolvedTraitMethod> {
+        let (trait_canonical, method) = canonical.rsplit_once('.')?;
+        let known_local = self.locals.traits.values().any(|c| c == trait_canonical);
+        let known_imported = self.scope.traits.values().any(|c| c == trait_canonical);
+        if !(known_local || known_imported) {
+            return None;
+        }
+        Some(ResolvedTraitMethod {
+            trait_name: trait_canonical.to_string(),
+            method: method.to_string(),
+        })
+    }
+
+    fn resolve_effect_op_name(
+        &self,
+        op_name: &str,
+        qualifier: Option<&str>,
+    ) -> Option<ResolvedEffectOp> {
+        let effect = if let Some(qualifier) = qualifier {
+            self.resolve_effect_name(qualifier)?
+        } else {
+            self.resolve_bare_effect_op_name(op_name)?
+        };
+        Some(ResolvedEffectOp {
+            effect,
+            op: op_name.to_string(),
+        })
     }
 
     fn record_type_ref(&mut self, id: NodeId, name: &str) {
@@ -430,13 +554,12 @@ impl<'a> Resolver<'a> {
     fn resolve_effect_call_expr(
         &mut self,
         expr_id: NodeId,
+        op_name: &str,
         qualifier: Option<&str>,
         args: &[Expr],
     ) {
-        if let Some(qualifier) = qualifier
-            && let Some(resolved) = self.resolve_effect_name(qualifier)
-        {
-            self.result.effect_call_qualifiers.insert(expr_id, resolved);
+        if let Some(resolved) = self.resolve_effect_op_name(op_name, qualifier) {
+            self.result.effect_calls.insert(expr_id, resolved);
         }
         self.resolve_exprs(args);
     }
@@ -449,10 +572,10 @@ impl<'a> Resolver<'a> {
                 }
             }
             HandlerItem::Arm(arm) | HandlerItem::Return(arm) => {
-                if let Some(qualifier) = &arm.qualifier
-                    && let Some(resolved) = self.resolve_effect_name(qualifier)
+                if let Some(resolved) =
+                    self.resolve_effect_op_name(&arm.op_name, arm.qualifier.as_deref())
                 {
-                    self.result.handler_arm_qualifiers.insert(arm.id, resolved);
+                    self.result.handler_arms.insert(arm.id, resolved);
                 }
                 self.resolve_scoped_params_body(
                     &arm.params,
@@ -626,6 +749,17 @@ impl<'a> Resolver<'a> {
         match &expr.kind {
             ExprKind::Lit { .. } => {}
             ExprKind::Var { name } => {
+                if !self.is_locally_bound(name)
+                    && let Some(canonical_trait) = self.resolve_bare_trait_method_name(name)
+                {
+                    self.result.trait_methods.insert(
+                        expr.id,
+                        ResolvedTraitMethod {
+                            trait_name: canonical_trait.clone(),
+                            method: name.clone(),
+                        },
+                    );
+                }
                 if let Some(resolved) = self.resolve_value_name(name) {
                     self.result.values.insert(expr.id, resolved);
                 }
@@ -638,10 +772,14 @@ impl<'a> Resolver<'a> {
             ExprKind::QualifiedName { module, name, .. } => {
                 let qualified = format!("{}.{}", module, name);
                 if let Some(resolved) = self.scope.resolve_value(&qualified) {
+                    let canonical = resolved.to_string();
+                    if let Some(trait_method) = self.qualified_trait_method(&canonical) {
+                        self.result.trait_methods.insert(expr.id, trait_method);
+                    }
                     self.result.values.insert(
                         expr.id,
                         ResolvedValue::Global {
-                            lookup_name: resolved.to_string(),
+                            lookup_name: canonical,
                         },
                     );
                 }
@@ -700,8 +838,10 @@ impl<'a> Resolver<'a> {
                 }
             }
             ExprKind::EffectCall {
-                qualifier, args, ..
-            } => self.resolve_effect_call_expr(expr.id, qualifier.as_deref(), args),
+                name,
+                qualifier,
+                args,
+            } => self.resolve_effect_call_expr(expr.id, name, qualifier.as_deref(), args),
             ExprKind::With {
                 expr: inner,
                 handler,
@@ -870,4 +1010,273 @@ pub(crate) fn resolve_names(
         resolver.resolve_decl(decl);
     }
     resolver.into_result()
+}
+
+/// Walk a program and collect every module name referenced via
+/// `ExprKind::QualifiedName`, keyed on first-occurrence span.
+///
+/// Used by the auto-load step in `check_program_inner` to discover modules
+/// the user has referenced by canonical name without an explicit `import`.
+/// The span lets auto-load attribute load failures to user code rather than
+/// a synthetic location.
+///
+/// Single-purpose: collects strings only, makes no resolution decisions.
+/// Deliberately not shared with `Resolver` — the two jobs (discovery vs.
+/// resolution) are kept separate by design.
+pub(crate) fn referenced_qualified_modules(
+    program: &[Decl],
+) -> HashMap<String, crate::token::Span> {
+    let mut out: HashMap<String, crate::token::Span> = HashMap::new();
+    for decl in program {
+        walk_decl(decl, &mut out);
+    }
+    out
+}
+
+fn record_module(
+    out: &mut HashMap<String, crate::token::Span>,
+    module: &str,
+    span: crate::token::Span,
+) {
+    if !out.contains_key(module) {
+        out.insert(module.to_string(), span);
+    }
+}
+
+fn walk_decl(decl: &Decl, out: &mut HashMap<String, crate::token::Span>) {
+    match decl {
+        Decl::FunBinding { guard, body, .. } => {
+            if let Some(g) = guard {
+                walk_expr(g, out);
+            }
+            walk_expr(body, out);
+        }
+        Decl::Let { value, .. } | Decl::Val { value, .. } => walk_expr(value, out),
+        Decl::HandlerDef { body, .. } => walk_handler_body(body, out),
+        Decl::ImplDef { methods, .. } => {
+            for m in methods {
+                walk_expr(&m.node.body, out);
+            }
+        }
+        Decl::DictConstructor { methods, .. } => {
+            for e in methods {
+                walk_expr(e, out);
+            }
+        }
+        // Type/effect/trait decls and metadata don't carry expressions
+        // that can hold ExprKind::QualifiedName.
+        Decl::FunSignature { .. }
+        | Decl::TypeDef { .. }
+        | Decl::RecordDef { .. }
+        | Decl::EffectDef { .. }
+        | Decl::TraitDef { .. }
+        | Decl::Import { .. }
+        | Decl::ModuleDecl { .. } => {}
+    }
+}
+
+fn walk_expr(expr: &Expr, out: &mut HashMap<String, crate::token::Span>) {
+    match &expr.kind {
+        ExprKind::QualifiedName { module, .. } => {
+            record_module(out, module, expr.span);
+        }
+        ExprKind::App { func, arg, .. } => {
+            walk_expr(func, out);
+            walk_expr(arg, out);
+        }
+        ExprKind::BinOp { left, right, .. } => {
+            walk_expr(left, out);
+            walk_expr(right, out);
+        }
+        ExprKind::UnaryMinus { expr, .. } => walk_expr(expr, out),
+        ExprKind::If {
+            cond,
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            walk_expr(cond, out);
+            walk_expr(then_branch, out);
+            walk_expr(else_branch, out);
+        }
+        ExprKind::Case {
+            scrutinee, arms, ..
+        } => {
+            walk_expr(scrutinee, out);
+            for a in arms {
+                if let Some(g) = &a.node.guard {
+                    walk_expr(g, out);
+                }
+                walk_expr(&a.node.body, out);
+            }
+        }
+        ExprKind::Block { stmts, .. } => {
+            for s in stmts {
+                walk_stmt(&s.node, out);
+            }
+        }
+        ExprKind::Lambda { body, .. } => walk_expr(body, out),
+        ExprKind::FieldAccess { expr, .. } => walk_expr(expr, out),
+        ExprKind::RecordCreate { fields, .. } | ExprKind::AnonRecordCreate { fields, .. } => {
+            for (_, _, e) in fields {
+                walk_expr(e, out);
+            }
+        }
+        ExprKind::RecordUpdate { record, fields, .. } => {
+            walk_expr(record, out);
+            for (_, _, e) in fields {
+                walk_expr(e, out);
+            }
+        }
+        ExprKind::EffectCall { args, .. } => {
+            for a in args {
+                walk_expr(a, out);
+            }
+        }
+        ExprKind::With { expr, handler } => {
+            walk_expr(expr, out);
+            walk_handler(handler, out);
+        }
+        ExprKind::Resume { value } => walk_expr(value, out),
+        ExprKind::Tuple { elements, .. } => {
+            for e in elements {
+                walk_expr(e, out);
+            }
+        }
+        ExprKind::Do {
+            bindings,
+            success,
+            else_arms,
+            ..
+        } => {
+            for (_, e) in bindings {
+                walk_expr(e, out);
+            }
+            walk_expr(success, out);
+            for a in else_arms {
+                if let Some(g) = &a.node.guard {
+                    walk_expr(g, out);
+                }
+                walk_expr(&a.node.body, out);
+            }
+        }
+        ExprKind::Receive {
+            arms, after_clause, ..
+        } => {
+            for a in arms {
+                if let Some(g) = &a.node.guard {
+                    walk_expr(g, out);
+                }
+                walk_expr(&a.node.body, out);
+            }
+            if let Some((t, b)) = after_clause {
+                walk_expr(t, out);
+                walk_expr(b, out);
+            }
+        }
+        ExprKind::BitString { segments } => {
+            for seg in segments {
+                walk_expr(&seg.value, out);
+                if let Some(s) = &seg.size {
+                    walk_expr(s, out);
+                }
+            }
+        }
+        ExprKind::Ascription { expr, .. } => walk_expr(expr, out),
+        ExprKind::HandlerExpr { body } => walk_handler_body(body, out),
+        ExprKind::Pipe { segments, .. } | ExprKind::BinOpChain { segments, .. } => {
+            for s in segments {
+                walk_expr(&s.node, out);
+            }
+        }
+        ExprKind::PipeBack { segments } | ExprKind::ComposeForward { segments } => {
+            for s in segments {
+                walk_expr(&s.node, out);
+            }
+        }
+        ExprKind::Cons { head, tail } => {
+            walk_expr(head, out);
+            walk_expr(tail, out);
+        }
+        ExprKind::ListLit { elements } => {
+            for e in elements {
+                walk_expr(e, out);
+            }
+        }
+        ExprKind::StringInterp { parts, .. } => {
+            for p in parts {
+                if let crate::ast::StringPart::Expr(e) = p {
+                    walk_expr(e, out);
+                }
+            }
+        }
+        ExprKind::ListComprehension { body, qualifiers } => {
+            walk_expr(body, out);
+            for q in qualifiers {
+                match q {
+                    crate::ast::ComprehensionQualifier::Generator(_, e)
+                    | crate::ast::ComprehensionQualifier::Let(_, e)
+                    | crate::ast::ComprehensionQualifier::Guard(e) => walk_expr(e, out),
+                }
+            }
+        }
+        ExprKind::ForeignCall { args, .. } => {
+            for a in args {
+                walk_expr(a, out);
+            }
+        }
+        ExprKind::DictMethodAccess { dict, .. } => walk_expr(dict, out),
+        ExprKind::Lit { .. }
+        | ExprKind::Var { .. }
+        | ExprKind::Constructor { .. }
+        | ExprKind::DictRef { .. } => {}
+    }
+}
+
+fn walk_stmt(stmt: &crate::ast::Stmt, out: &mut HashMap<String, crate::token::Span>) {
+    use crate::ast::Stmt;
+    match stmt {
+        Stmt::Let { value, .. } => walk_expr(value, out),
+        Stmt::LetFun { body, guard, .. } => {
+            if let Some(g) = guard {
+                walk_expr(g, out);
+            }
+            walk_expr(body, out);
+        }
+        Stmt::Expr(e) => walk_expr(e, out),
+    }
+}
+
+fn walk_handler(handler: &crate::ast::Handler, out: &mut HashMap<String, crate::token::Span>) {
+    use crate::ast::{Handler, HandlerItem};
+    match handler {
+        Handler::Named(_) => {}
+        Handler::Inline { items, .. } => {
+            for ann in items {
+                match &ann.node {
+                    HandlerItem::Named(_) => {}
+                    HandlerItem::Arm(arm) | HandlerItem::Return(arm) => walk_handler_arm(arm, out),
+                }
+            }
+        }
+    }
+}
+
+fn walk_handler_body(
+    body: &crate::ast::HandlerBody,
+    out: &mut HashMap<String, crate::token::Span>,
+) {
+    for arm in &body.arms {
+        walk_handler_arm(&arm.node, out);
+    }
+    if let Some(arm) = &body.return_clause {
+        walk_handler_arm(arm, out);
+    }
+}
+
+fn walk_handler_arm(arm: &crate::ast::HandlerArm, out: &mut HashMap<String, crate::token::Span>) {
+    walk_expr(&arm.body, out);
+    if let Some(f) = &arm.finally_block {
+        walk_expr(f, out);
+    }
 }

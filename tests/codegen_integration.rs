@@ -82,6 +82,7 @@ fn emit_elaborated_inner(src: &str, include_std_modules: bool) -> String {
                 elaborated: Vec::new(),
                 resolution: codegen::resolve::ResolutionMap::new(),
                 front_resolution: Default::default(),
+                call_effects: codegen::call_effects::CallEffectMap::new(),
             },
         );
     }
@@ -144,6 +145,26 @@ fn assert_core_compiles(out: &str) {
     );
 }
 
+/// Compile the Phase 1 evidence bridge module into `dir` so tests that
+/// emit `std_evidence_bridge:*` calls (every `with`-boundary in 3b) can
+/// resolve them at runtime.
+fn compile_evidence_bridge_into(dir: &std::path::Path) {
+    let bridge_src = include_str!("../src/stdlib/evidence.bridge.erl");
+    let bridge_path = dir.join("std_evidence_bridge.erl");
+    std::fs::write(&bridge_path, bridge_src).unwrap();
+    let status = std::process::Command::new("erlc")
+        .arg("-o")
+        .arg(dir)
+        .arg(&bridge_path)
+        .output()
+        .expect("failed to run erlc on evidence bridge");
+    assert!(
+        status.status.success(),
+        "erlc failed on evidence bridge:\n{}",
+        String::from_utf8_lossy(&status.stderr)
+    );
+}
+
 fn assert_runs_and_stdout_contains(src: &str, needles: &[&str]) {
     use std::sync::atomic::{AtomicUsize, Ordering};
     static COUNTER: AtomicUsize = AtomicUsize::new(0);
@@ -166,6 +187,7 @@ fn assert_runs_and_stdout_contains(src: &str, needles: &[&str]) {
         out,
         String::from_utf8_lossy(&status.stderr)
     );
+    compile_evidence_bridge_into(&dir);
 
     let eval = if out.contains("'main'/1") {
         "io:format(\"~p~n\", ['_script':main(unit)]), init:stop()."
@@ -271,6 +293,145 @@ main () = {
 }
 
 #[test]
+fn effectful_lambda_packed_in_adt_constructor_runs() {
+    // Regression: a lambda with effects stored inside an ADT constructor
+    // arg used to be lowered as a pure 1-arg closure (no handler params,
+    // no _ReturnK), because lower_ctor didn't thread expected field types
+    // into arg lowering. At the call site `producer () with h`, BEAM threw
+    // badarity. Also, case-arm-bound effectful values weren't registered
+    // in current_effectful_vars, so applications didn't CPS-expand.
+    let src = r#"
+effect Chunked {
+  fun write_chunk : Int -> Unit
+}
+
+type ResponseBody =
+  | Streamed (Unit -> Unit needs {Chunked})
+
+fun chunked_handler : Unit -> Handler Chunked
+chunked_handler () = handler for Chunked {
+  write_chunk _n = resume ()
+}
+
+fun make_response : Unit -> ResponseBody
+make_response () = Streamed (fun () -> {
+  write_chunk! 1
+  write_chunk! 2
+})
+
+fun run_response : ResponseBody -> Int
+run_response resp = case resp {
+  Streamed producer -> {
+    let h = chunked_handler ()
+    producer () with h
+    99
+  }
+}
+
+main () = run_response (make_response ())
+"#;
+
+    assert_runs_and_stdout_contains(src, &["99"]);
+}
+
+#[test]
+fn case_arm_in_k_threaded_block_registers_effectful_var_and_handler_binding() {
+    // Regression: when a case match on an ADT-packed effectful lambda lives
+    // inside a K-threaded block (i.e., the case arm body is lowered via
+    // `lower_block_with_k`/`ExprKind::Case` in K-threaded mode rather than
+    // the return-K block path), the lowerer would (1) skip registering the
+    // arm-bound `producer` in `current_effectful_vars` and (2) skip handler
+    // registration for `let h = factory ()`. This caused either a runtime
+    // arity mismatch (only 1 arg passed to a CPS-shaped lambda) or an ICE
+    // about an unknown handler item 'h'.
+    //
+    // The test framework triggers this in real code: `test "name"` takes
+    // an effectful lambda whose body holds the case match.
+    let src = r#"
+effect Chunked {
+  fun write_chunk : Int -> Unit
+}
+
+effect Wrap {
+  fun wrap : (Unit -> Int needs {Chunked}) -> Int
+}
+
+type Body =
+  | Streamed (Unit -> Unit needs {Chunked})
+
+fun mk : (Unit -> Unit needs {Chunked}) -> Body
+mk producer = Streamed producer
+
+fun named : Unit -> Handler Chunked
+named () = handler for Chunked {
+  write_chunk _ = resume ()
+}
+
+# wrapped_run is effectful (`needs {Wrap}`), so its body lowers in
+# K-threaded mode. The case arm exercises both fixed paths.
+fun wrapped_run : Unit -> Int needs {Wrap}
+wrapped_run () = {
+  let body = mk (fun () -> write_chunk! 1)
+  case body {
+    Streamed producer -> {
+      let h = named ()
+      let _ = producer () with h
+      55
+    }
+  }
+}
+
+handler wrap_h for Wrap {
+  wrap _ = resume 0
+}
+
+main () = wrapped_run () with wrap_h
+"#;
+
+    assert_runs_and_stdout_contains(src, &["55"]);
+}
+
+#[test]
+fn handler_factory_let_binding_runs_return_clause() {
+    // Regression: `let h = make_handler ()` registered the handler info in
+    // the typechecker's `self.handlers["h"]`, but the per-clause save/restore
+    // at check_decl.rs (around `saved_handlers = self.handlers.clone()`)
+    // wiped the entry before the lowerer saw it. As a result, the lowerer
+    // built the dynamic NamedHandlerItem with `has_return = false` and emitted
+    // the identity `_ReturnK` instead of the handler's return-clause lambda.
+    //
+    // Now the typechecker also stores let-binding handler info in a persistent
+    // map keyed by the pattern's NodeId, which the lowerer consults.
+    let src = r#"
+effect Chunked {
+  fun write_chunk : Int -> Unit
+}
+
+type Body =
+  | Streamed (Unit -> Unit needs {Chunked})
+
+fun make_handler : Unit -> Handler Chunked
+make_handler () = handler for Chunked {
+  write_chunk _ = resume ()
+  return _ = 777
+}
+
+main () = {
+  let body = Streamed (fun () -> ())
+  case body {
+    Streamed producer -> {
+      let h = make_handler ()
+      producer () with h
+    }
+  }
+}
+"#;
+
+    // The handler's `return` clause turns the success unit into 777.
+    assert_runs_and_stdout_contains(src, &["777"]);
+}
+
+#[test]
 fn eta_reduced_effect_op_callback_forwarded_through_wrapper_runs() {
     let src = r#"
 effect Inner {
@@ -353,7 +514,7 @@ main () = {
 #[test]
 fn beam_native_handler_named_reference_lowers_to_native_ops() {
     let src = r#"
-import Std.Actor (beam_actor)
+import Std.Actor (Process, beam_actor)
 
 main () = {
   let _pid = spawn! (fun () -> ())
@@ -372,7 +533,7 @@ main () = {
 #[test]
 fn beam_ref_uses_native_backed_cps_handler_path() {
     let src = r#"
-import Std.Ref (beam_ref)
+import Std.Ref (Ref, beam_ref)
 
 main () = {
   let r = new! 41
@@ -385,11 +546,11 @@ main () = {
     // with freshly-numbered suffixes (e.g. `_Handle_Std_Ref_Ref_new__2`),
     // so match the prefix with the `__` separator rather than a bare `(`.
     assert!(
-        out.contains("apply _Handle_Std_Ref_Ref_new__"),
+        out.contains("_Handle_Std_Ref_Ref_new"),
         "beam_ref should install and apply a handler function for new!\n{out}"
     );
     assert!(
-        out.contains("apply _Handle_Std_Ref_Ref_get__"),
+        out.contains("_Handle_Std_Ref_Ref_get"),
         "beam_ref should install and apply a handler function for get!\n{out}"
     );
     assert!(
@@ -402,8 +563,8 @@ main () = {
 #[test]
 fn async_handler_with_beam_actor_lowers_without_scoped_binding_cycle() {
     let src = r#"
-import Std.Actor (beam_actor)
-import Std.Async (async_handler)
+import Std.Actor (Process, beam_actor)
+import Std.Async (Async, async_handler)
 
 main () = {
   let f = async! (fun () -> 1)
@@ -798,9 +959,9 @@ fun do_work : Unit -> Int needs {Log}
 do_work () = 42
 ";
     let out = emit_elaborated(src);
-    // do_work takes 1 user param (Unit) + 1 handler param + 1 _ReturnK = arity 3
+    // do_work takes 1 user param (Unit) + _Evidence + _ReturnK = arity 3
     assert_contains(&out, "'do_work'/3");
-    assert_contains(&out, "_Handle__script_Log_log");
+    assert_contains(&out, "_Evidence");
 }
 
 #[test]
@@ -815,7 +976,8 @@ fun do_work : Unit -> Unit needs {Log}
 do_work () = log! "hello"
 "#;
     let out = emit_elaborated(src);
-    assert_contains(&out, "apply _Handle__script_Log_log(");
+    // Op call now goes through evidence projection.
+    assert_contains(&out, "_Evidence");
     // String "hello" is now a binary: #{#<104>...}#
     assert_contains(&out, "#{#<104>(8,1,'integer',['unsigned'|['big']])");
 }
@@ -835,8 +997,8 @@ do_work () = {
 }
 "#;
     let out = emit_elaborated(src);
-    // Should have handler apply with a fun (continuation) as last arg
-    assert_contains(&out, "apply _Handle__script_Log_log(");
+    // Should have evidence-based op apply with a fun (continuation).
+    assert_contains(&out, "_Evidence");
     // The continuation should contain 42
     assert_contains(&out, "fun (");
     assert_contains(&out, "42");
@@ -857,7 +1019,7 @@ use_state () = {
 }
 ";
     let out = emit_elaborated(src);
-    assert_contains(&out, "apply _Handle__script_State_get(");
+    assert_contains(&out, "_Evidence");
 }
 
 #[test]
@@ -1027,7 +1189,7 @@ main () = do_work () with silent
     let out = emit_elaborated(src);
     // Should have two nested handler applies with continuations
     // Count occurrences of apply _HandleLog
-    let count = out.matches("apply _Handle__script_Log_log").count();
+    let count = out.matches("_Handle__script_Log_log").count();
     assert!(
         count >= 2,
         "expected at least 2 handler applies, got {count}\n{out}"
@@ -1060,7 +1222,7 @@ main () = do_work () with silent
     // do_work should have nested handler applies with continuations
     // wrapping the let bindings and final value
     assert_contains(&out, "'do_work'/3");
-    assert_contains(&out, "apply _Handle__script_Log_log(");
+    assert_contains(&out, "_Evidence");
     // x = 10 + 20 should appear inside a continuation
     assert_contains(&out, "call 'erlang':'+'");
 }
@@ -1126,7 +1288,7 @@ main () = outer () with silent
     // Both should take Unit + _HandleLog + _ReturnK
     assert_contains(&out, "'inner'/3");
     assert_contains(&out, "'outer'/3");
-    // outer's body should call inner with _HandleLog and _ReturnK passed through
+    // outer's body should call inner with _Evidence and _ReturnK passed through
     assert_contains(&out, "apply 'inner'/3(");
 }
 
@@ -1164,9 +1326,9 @@ main () = risky_work () with {
 }
 "#;
     let out = emit_elaborated(src);
-    // risky_work needs Unit + 2 handler params + 1 _ReturnK
-    assert_contains(&out, "'risky_work'/4");
-    // Both handler params should be present
+    // risky_work takes Unit + _Evidence + _ReturnK = arity 3
+    assert_contains(&out, "'risky_work'/3");
+    // Both handler bindings should appear at the `with` site
     assert_contains(&out, "_Handle__script_Fail_fail");
     assert_contains(&out, "_Handle__script_Log_log");
 }
@@ -1243,7 +1405,7 @@ main () = {
 "#;
     let out = emit_elaborated(src);
     assert_contains(&out, "_Handle__script_Log_log");
-    assert_contains(&out, "apply _Handle__script_Log_log(");
+    assert_contains(&out, "_Handle__script_Log_log");
     assert_contains(&out, "_Handle__script_Fail_fail");
 }
 
@@ -1282,7 +1444,7 @@ main () = {
 } with silent
 "#;
     let out = emit_elaborated(src);
-    assert_contains(&out, "apply _Handle__script_Log_log(");
+    assert_contains(&out, "_Handle__script_Log_log");
     assert_contains(&out, "_Handle__script_Fail_fail");
 }
 
@@ -1304,7 +1466,7 @@ main () = safe_div 10 0 with {
 }
 "#;
     let out = emit_elaborated(src);
-    // safe_div takes 2 user params + 1 handler param + 1 _ReturnK = arity 4
+    // safe_div takes 2 user params + _Evidence + _ReturnK = arity 4
     assert_contains(&out, "'safe_div'/4");
     assert_contains(&out, "_Handle__script_Fail_fail");
 }
@@ -1331,7 +1493,7 @@ main () = compute () with {
 "#;
     let out = emit_elaborated(src);
     // The ask! should be CPS-transformed with a continuation that does the addition
-    assert_contains(&out, "apply _Handle__script_Ask_ask(");
+    assert_contains(&out, "_Handle__script_Ask_ask");
     // The addition should still happen
     assert_contains(&out, "call 'erlang':'+'");
 }
@@ -1357,7 +1519,7 @@ main () = compute () with {
 }
 "#;
     let out = emit_elaborated(src);
-    assert_contains(&out, "apply _Handle__script_Ask_ask(");
+    assert_contains(&out, "_Handle__script_Ask_ask");
     assert_contains(&out, "'double'");
 }
 
@@ -1379,7 +1541,7 @@ main () = decide () with {
 }
 "#;
     let out = emit_elaborated(src);
-    assert_contains(&out, "apply _Handle__script_Ask_ask(");
+    assert_contains(&out, "_Handle__script_Ask_ask");
 }
 
 #[test]
@@ -1402,7 +1564,7 @@ main () = compute () with {
 "#;
     let out = emit_elaborated(src);
     // Should have two separate handler applies for the two ask! calls
-    let count = out.matches("apply _Handle__script_Ask_ask(").count();
+    let count = out.matches("_Handle__script_Ask_ask").count();
     assert!(
         count >= 2,
         "expected at least 2 handler applies, got {count}\n{out}"
@@ -2499,4 +2661,32 @@ main () = {
         "Std.File.fs should not lower exists as a local _script function\n{out}"
     );
     assert_core_compiles(&out);
+}
+
+#[test]
+fn local_let_shadow_of_top_level_effectful_fn_calls_local_value() {
+    // A `let` binding can shadow a top-level effectful function. The call site
+    // must dispatch to the local value, not silently route through the
+    // top-level function via raw-name lookup in fun_info / let_effect_bindings.
+    let src = r#"
+effect Echo {
+  fun emit : String -> Unit
+}
+
+handler silent for Echo {
+  emit _ = resume ()
+}
+
+fun shouter : String -> Int needs {Echo}
+shouter msg = { emit! msg; 99 }
+
+fun pure_lambda : String -> Int
+pure_lambda _ = 42
+
+main () = {
+  let shouter = pure_lambda
+  shouter "hi"
+} with silent
+"#;
+    assert_runs_and_stdout_contains(src, &["42"]);
 }

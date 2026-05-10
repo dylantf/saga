@@ -1,0 +1,29 @@
+#@ Cross-module HOF + inline rethrow handler bug.
+#@
+#@ Lib.at is a cross-module HOF whose body installs an inline handler
+#@ that re-performs Fail. When Lib.at is given a *partially applied*
+#@ Lib HOF as its decoder argument, the value coming out of Lib.run
+#@ isn't a properly-tagged Result — pattern matching crashes with
+#@ case_clause.
+#@
+#@ A: Lib.at given a bare effectful function — works
+#@ B: Lib.at given a partially applied HOF — crashes
+module Main
+
+import Std.IO (console)
+import Std.Fail (Fail)
+import Lib
+
+main () = {
+  # A
+  case Lib.run (fun n -> Lib.at "outer" Lib.int n) 42 {
+    Ok n -> println $"A: Ok {n}"
+    Err _ -> println "A: Err"
+  }
+
+  # B — only difference is `(Lib.wrap Lib.int)` instead of `Lib.int`.
+  case Lib.run (fun n -> Lib.at "outer" (Lib.wrap Lib.int) n) 42 {
+    Ok n -> println $"B: Ok {n}"
+    Err _ -> println "B: Err"
+  }
+} with console

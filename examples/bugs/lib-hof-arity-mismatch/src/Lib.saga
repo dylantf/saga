@@ -1,0 +1,20 @@
+module Lib
+
+import Std.Fail (Fail)
+
+pub type Failure = Failure String deriving (Debug)
+
+pub fun int : Int -> Int needs {Fail Failure}
+int n = if n == 0 then fail! (Failure "zero") else n
+
+#@ HOF: applies an effectful callback. Same shape as SagaJson.at.
+pub fun at : String -> (Int -> a needs {Fail Failure, ..e}) -> Int -> a needs {Fail Failure, ..e}
+at _name decoder n = decoder n
+
+pub handler to_result for Fail a {
+  fail e = Err e
+  return v = Ok v
+}
+
+pub fun run : (Int -> a needs {Fail Failure}) -> Int -> Result a Failure
+run decoder n = decoder n with to_result

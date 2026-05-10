@@ -1,6 +1,8 @@
 #@ Immutable key-value dictionaries backed by Erlang maps.
 module Std.Dict
 
+import Std.Base (Show, Debug, Ord, Semigroup, Enum)
+
 import Std.List as List
 
 impl Debug for Dict k v where {k: Debug, v: Debug} {

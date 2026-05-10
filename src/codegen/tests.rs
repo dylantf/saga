@@ -88,7 +88,7 @@ main () = {
 "#;
     let out = emit_full(src);
     assert!(
-        out.contains("'build_msg'/4"),
+        out.contains("'build_msg'/3"),
         "expected eta-reduced effectful function ref to use lowered arity\n{out}"
     );
     assert!(
@@ -126,7 +126,7 @@ main () = {
 "#;
     let out = emit_full(src);
     assert!(
-        out.contains("'build_msg'/4"),
+        out.contains("'build_msg'/3"),
         "expected aliased effectful function ref to use lowered arity\n{out}"
     );
     assert!(
@@ -136,7 +136,7 @@ main () = {
 }
 
 #[test]
-fn effectful_callbacks_in_lists_get_lowered_handler_params() {
+fn effectful_callbacks_in_lists_get_evidence_threaded() {
     let src = r#"
 effect Reg {
   fun reg : String -> Unit
@@ -165,8 +165,8 @@ main () = run_all [fun () -> reg! "a"] with noop
 "#;
     let out = emit_full(src);
     assert!(
-        out.contains("fun (_Arg0, _Handle__script_Reg_reg, _ReturnK) ->"),
-        "expected list callback lambda to receive lowered handler params\n{out}"
+        out.contains("fun (_Arg0, _Evidence, _ReturnK) ->"),
+        "expected list callback lambda to receive threaded evidence\n{out}"
     );
 }
 
@@ -217,7 +217,7 @@ main () = run (fun () -> step! ()) with noop
 }
 
 #[test]
-fn effectful_callbacks_in_records_get_lowered_handler_params() {
+fn effectful_callbacks_in_records_get_evidence_threaded() {
     let src = r#"
 effect Reg {
   fun reg : String -> Unit
@@ -247,13 +247,13 @@ main () = run_holder (Holder { cb: fun () -> reg! "a" }) with noop
 "#;
     let out = emit_full(src);
     assert!(
-        out.contains("fun (_Arg0, _Handle__script_Reg_reg, _ReturnK) ->"),
-        "expected record-contained callback lambda to receive lowered handler params\n{out}"
+        out.contains("fun (_Arg0, _Evidence, _ReturnK) ->"),
+        "expected record-contained callback lambda to receive threaded evidence\n{out}"
     );
 }
 
 #[test]
-fn effectful_callbacks_in_adts_get_lowered_handler_params() {
+fn effectful_callbacks_in_adts_get_evidence_threaded() {
     let src = r#"
 effect Reg {
   fun reg : String -> Unit
@@ -284,8 +284,8 @@ main () = run_wrap (Wrap (fun () -> reg! "a")) with noop
 "#;
     let out = emit_full(src);
     assert!(
-        out.contains("fun (_Arg0, _Handle__script_Reg_reg, _ReturnK) ->"),
-        "expected ADT-contained callback lambda to receive lowered handler params\n{out}"
+        out.contains("fun (_Arg0, _Evidence, _ReturnK) ->"),
+        "expected ADT-contained callback lambda to receive threaded evidence\n{out}"
     );
 }
 
@@ -315,7 +315,7 @@ main () = {
     "#;
     let out = emit_full(src);
     assert!(
-        out.contains("'build_msg'/4"),
+        out.contains("'build_msg'/3"),
         "expected block-local effectful let-fun to use lowered arity\n{out}"
     );
     assert!(
@@ -353,7 +353,7 @@ main () = {
 "#;
     let out = emit_full(src);
     assert!(
-        out.contains("'count_down'/4"),
+        out.contains("'count_down'/3"),
         "expected recursive block-local effectful let-fun to use lowered arity\n{out}"
     );
     assert!(

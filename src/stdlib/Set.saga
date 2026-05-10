@@ -1,6 +1,8 @@
 #@ Immutable sets backed by Erlang's `sets` module (version 2).
 module Std.Set
 
+import Std.Base (Show, Debug, Ord, Semigroup, Enum)
+
 import Std.List
 
 impl Debug for Set a where {a: Debug} {

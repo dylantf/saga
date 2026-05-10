@@ -45,6 +45,10 @@ pub struct CheckResult {
     pub effects: HashMap<String, EffectDefInfo>,
     /// Handler definitions (for LSP completion, lowerer).
     pub handlers: HashMap<String, HandlerInfo>,
+    /// Handler info for `let h = <expr>` bindings whose RHS produces a handler.
+    /// Keyed by the let pattern's NodeId. Persists past the per-clause
+    /// `handlers` save/restore so the lowerer can recover return-clause info.
+    pub let_binding_handlers: HashMap<crate::ast::NodeId, HandlerInfo>,
     /// Effect requirements per function.
     pub fun_effects: HashMap<String, HashSet<String>>,
     /// Per-node type information for Expr nodes (LSP hover).
@@ -295,6 +299,7 @@ impl Checker {
             traits: self.trait_state.traits.clone(),
             effects: self.effects.clone(),
             handlers: self.handlers.clone(),
+            let_binding_handlers: self.let_binding_handlers.clone(),
             fun_effects: {
                 let mut fun_effects = HashMap::new();
                 for name in &self.effect_meta.known_funs {
@@ -328,21 +333,7 @@ impl Checker {
             handler_arm_targets: self.lsp.handler_arm_targets.clone(),
             effect_call_targets: self.lsp.effect_call_targets.clone(),
             let_dict_params: self.let_dict_params.clone(),
-            let_effect_bindings: {
-                let mut let_effect_bindings = HashMap::new();
-                for name in &self.effect_meta.known_let_bindings {
-                    if let Some(scheme) = self.env.get(name) {
-                        let resolved = self.sub.apply(&scheme.ty);
-                        let effects: HashSet<String> = super::effects_from_type(&resolved);
-                        if !effects.is_empty() {
-                            let mut sorted: Vec<String> = effects.into_iter().collect();
-                            sorted.sort();
-                            let_effect_bindings.insert(name.clone(), sorted);
-                        }
-                    }
-                }
-                let_effect_bindings
-            },
+            let_effect_bindings: self.effect_meta.known_let_bindings.clone(),
             records: self.records.clone(),
             references: self.lsp.references.clone(),
             node_spans: self.lsp.node_spans.clone(),

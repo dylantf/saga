@@ -1,0 +1,47 @@
+# Ambient writer: implicit accumulator without threading return values.
+#
+# Where the reader pattern (see 56-ambient-reader.saga) lets deep
+# functions PULL ambient context from the request boundary, the writer
+# pattern lets them PUSH events back out -- audit logs, metrics,
+# trace spans -- without folding extra values into every return type.
+#
+# `Tell` and `run_writer` come from Std.Control, where Reader and Writer
+# are provided as reusable building blocks.
+
+import Std.Control (Tell, run_writer)
+
+# ----- Deep in the call tree: emit events without changing return types -----
+
+record Event {
+  step: String,
+  detail: String,
+} deriving (Debug)
+
+fun reserve_inventory : (item: String) -> Unit needs {Tell Event}
+reserve_inventory item =
+  tell! (Event { step: "inventory", detail: $"reserved 1x {item}" })
+
+fun charge_card : (amount: Int) -> Unit needs {Tell Event}
+charge_card amount =
+  tell! (Event { step: "billing", detail: $"charged {amount} cents" })
+
+fun ship_order : (item: String) -> Unit needs {Tell Event}
+ship_order item =
+  tell! (Event { step: "shipping", detail: $"queued {item} for shipment" })
+
+# Note: place_order returns a plain String. The audit trail rides
+# alongside via the effect, not in the return type.
+fun place_order : (item: String) -> (price: Int) -> String needs {Tell Event}
+place_order item price = {
+  reserve_inventory item
+  charge_card price
+  ship_order item
+  $"order placed: {item}"
+}
+
+main () = {
+  let (result, audit) = run_writer (fun () -> place_order "book" 1299)
+  dbg result
+  dbg $"audit trail ({List.length audit} events):"
+  List.iter dbg audit
+}

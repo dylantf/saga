@@ -1,6 +1,8 @@
 #@ Date, time, and datetime types with formatting, parsing, and arithmetic.
 module Std.DateTime
 
+import Std.Base (Show, Debug, Ord, Semigroup, Enum)
+
 import Std.Int
 import Std.Maybe
 import Std.String

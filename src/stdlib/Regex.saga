@@ -1,6 +1,8 @@
 #@ Regular expression matching and replacement using POSIX-style patterns.
 module Std.Regex
 
+import Std.Base (Show, Debug, Ord, Semigroup, Enum)
+
 import Std.Maybe as Maybe (Maybe)
 
 #@ Returns True if the string matches the pattern.

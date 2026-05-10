@@ -1,6 +1,8 @@
 #@ Boolean operations.
 module Std.Bool
 
+import Std.Base (Show, Debug, Ord, Semigroup, Enum)
+
 impl Show for Bool {
   show b = case b {
     True -> "True"

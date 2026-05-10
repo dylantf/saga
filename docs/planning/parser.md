@@ -1,7 +1,5 @@
 # JSON Parser Library — Design Planning
 
-Status: **planning**. No code yet. This document captures the full design discussion so it can be picked up later without rebuilding context.
-
 ## Problem
 
 saga needs a JSON parser. JSON is ubiquitous — almost every real application deals with it at some boundary (HTTP APIs, config files, messages, etc.). The questions this document addresses:

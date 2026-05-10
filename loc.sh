@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
 exclude=(-not -path './target/*' -not -path '*/_build/*' -not -path '*/deps/*')
 

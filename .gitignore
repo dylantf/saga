@@ -5,3 +5,6 @@ editors/vscode/node_modules
 
 _build/
 deps/
+
+.direnv
+.dev-bin

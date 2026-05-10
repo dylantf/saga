@@ -818,13 +818,27 @@ pub struct HandlerInfo {
 }
 
 #[derive(Debug, Clone)]
+pub struct TraitMethodInfo {
+    pub name: String,
+    pub param_types: Vec<Type>,
+    pub return_type: Type,
+    /// Var id assigned to the trait's self type parameter inside this method's
+    /// signature, if the method's user-written types reference it.
+    pub trait_param_id: Option<u32>,
+    /// Polymorphic scheme for the method, with constraints encoding the trait
+    /// bound (and any trait-level extra type-param bounds). This is the
+    /// authoritative scheme: trait methods live in their owning `TraitInfo`,
+    /// not in a flat per-name table.
+    pub scheme: Scheme,
+}
+
+#[derive(Debug, Clone)]
 pub struct TraitInfo {
     /// Type parameters: first is self, rest are extras.
     /// e.g. `trait ConvertTo a b` -> ["a", "b"]
     pub type_params: Vec<String>,
     pub supertraits: Vec<String>,
-    /// Method signatures: name -> (param_types, return_type, trait_self_param_var_id)
-    pub methods: Vec<(String, Vec<Type>, Type, Option<u32>)>,
+    pub methods: Vec<TraitMethodInfo>,
 }
 
 #[derive(Debug, Clone)]
@@ -892,6 +906,11 @@ pub struct Checker {
     /// Functions whose bodies produce handlers, so applications like
     /// `make_state 0` can preserve handler metadata such as return clauses.
     pub(crate) handler_funs: HashMap<std::string::String, HandlerInfo>,
+    /// Handler info for `let h = <expr>` bindings whose RHS produces a handler.
+    /// Keyed by the let pattern's NodeId so the lowerer can look up handler
+    /// metadata (return clauses, effects) even after the per-function-clause
+    /// `self.handlers` save/restore wipes the in-scope entry.
+    pub(crate) let_binding_handlers: HashMap<crate::ast::NodeId, HandlerInfo>,
     /// Context for resume typing: when inside a handler arm, the return type of the op being handled
     pub(crate) resume_type: Option<Type>,
     /// Context for resume return typing: when inside a handler arm, the answer type of the with-expression
@@ -962,6 +981,11 @@ pub struct Checker {
 ///
 /// This allows each binding to be stored once in the env under its canonical name,
 /// with the ScopeMap handling all user-facing name form resolution.
+///
+/// Canonical names are dot-joined: `Module.Item` for module-level items,
+/// `Module.Trait.method` for trait methods, `Module.Effect.op` for effect ops.
+/// Use [`canonical_join`] to build them from parts so the convention stays
+/// in one place.
 #[derive(Debug, Clone, Default)]
 pub struct ScopeMap {
     /// User-visible name -> canonical name for value bindings (functions, let bindings).
@@ -974,8 +998,12 @@ pub struct ScopeMap {
     pub constructors: HashMap<String, String>,
     /// User-visible name -> canonical name for effects.
     pub effects: HashMap<String, String>,
+    /// Bare effect operation name -> canonical effects that make that op visible.
+    pub effect_ops: HashMap<String, HashSet<String>>,
     /// User-visible name -> canonical name for traits.
     pub traits: HashMap<String, String>,
+    /// Bare trait method name -> canonical traits that make that method visible.
+    pub trait_methods: HashMap<String, HashSet<String>>,
     /// Canonical name -> source module name (e.g. "Std.List.map" -> "Std.List").
     /// Used by LSP to determine import origins without a separate parallel map.
     pub origins: HashMap<String, String>,
@@ -1015,8 +1043,42 @@ impl ScopeMap {
         self.effects.get(name).map(|s| s.as_str())
     }
 
+    pub fn register_effect_op(&mut self, op_name: &str, canonical_effect: &str) {
+        self.effect_ops
+            .entry(op_name.to_string())
+            .or_default()
+            .insert(canonical_effect.to_string());
+    }
+
+    pub fn register_effect_ops<'a>(
+        &mut self,
+        canonical_effect: &str,
+        op_names: impl IntoIterator<Item = &'a str>,
+    ) {
+        for op_name in op_names {
+            self.register_effect_op(op_name, canonical_effect);
+        }
+    }
+
     pub fn resolve_trait(&self, name: &str) -> Option<&str> {
         self.traits.get(name).map(|s| s.as_str())
+    }
+
+    pub fn register_trait_method(&mut self, method_name: &str, canonical_trait: &str) {
+        self.trait_methods
+            .entry(method_name.to_string())
+            .or_default()
+            .insert(canonical_trait.to_string());
+    }
+
+    pub fn register_trait_methods<'a>(
+        &mut self,
+        canonical_trait: &str,
+        method_names: impl IntoIterator<Item = &'a str>,
+    ) {
+        for method_name in method_names {
+            self.register_trait_method(method_name, canonical_trait);
+        }
     }
 
     /// Get the source module for a user-visible name, checking all name kinds.
@@ -1062,7 +1124,11 @@ impl ScopeMap {
         }
     }
 
-    /// Merge another scope_map into this one (first-insert-wins).
+    /// Merge another scope_map into this one.
+    ///
+    /// Most namespaces are first-insert-wins. Effect op and trait method
+    /// visibility unions candidates so overlapping exposed names remain
+    /// ambiguous.
     pub fn merge(&mut self, other: &ScopeMap) {
         for (k, v) in &other.values {
             self.values.entry(k.clone()).or_insert_with(|| v.clone());
@@ -1081,8 +1147,20 @@ impl ScopeMap {
         for (k, v) in &other.effects {
             self.effects.entry(k.clone()).or_insert_with(|| v.clone());
         }
+        for (op_name, effects) in &other.effect_ops {
+            self.effect_ops
+                .entry(op_name.clone())
+                .or_default()
+                .extend(effects.iter().cloned());
+        }
         for (k, v) in &other.traits {
             self.traits.entry(k.clone()).or_insert_with(|| v.clone());
+        }
+        for (method_name, traits) in &other.trait_methods {
+            self.trait_methods
+                .entry(method_name.clone())
+                .or_default()
+                .extend(traits.iter().cloned());
         }
         for (k, v) in &other.origins {
             self.origins.entry(k.clone()).or_insert_with(|| v.clone());
@@ -1120,9 +1198,14 @@ pub(crate) struct EffectMeta {
     pub known_funs: HashSet<String>,
     /// Annotation-provided effect type constraints: fn name -> [(effect_name, [concrete types])].
     pub fun_type_constraints: HashMap<String, Vec<(String, Vec<Type>)>>,
-    /// Registry of let bindings with deferred effects. Same story as known_funs:
-    /// only read at the CheckResult boundary for codegen, not for effect tracking.
-    pub known_let_bindings: HashSet<String>,
+    /// Registry of let bindings with deferred effects, keyed by binding name and
+    /// recording the effects observed at registration time.
+    ///
+    /// Captured at the binding's definition site (not looked up post-hoc in the
+    /// global env) so a local `let foo = pure_lambda` that shadows a top-level
+    /// effectful `foo` records the local lambda's effects (often empty), not
+    /// the top-level fn's. Only read at the CheckResult boundary for codegen.
+    pub known_let_bindings: HashMap<String, Vec<String>>,
 }
 
 /// State accumulated during typechecking for IDE/LSP features: hover types,
@@ -1181,6 +1264,12 @@ pub struct ModuleContext {
     pub(crate) base_trait_impls: HashMap<(String, Vec<String>, String), ImplInfo>,
     /// Modules currently being typechecked (cycle detection).
     pub(crate) loading: HashSet<String>,
+    /// Modules whose canonical exports have been registered into this
+    /// checker's `env`/`constructors`/`effects`/etc. Tracks both explicit
+    /// imports (via `inject_exports`) and auto-loaded canonical references
+    /// (via `register_module_canonical_exports` directly). Used to skip
+    /// redundant re-registration.
+    pub(crate) registered_canonical: HashSet<String>,
 }
 
 /// Per-variable record candidate narrowing: var_id -> (candidate record names, span).
@@ -1218,6 +1307,7 @@ impl Checker {
             effects: HashMap::new(),
             handlers: HashMap::new(),
             handler_funs: HashMap::new(),
+            let_binding_handlers: HashMap::new(),
             resume_type: None,
             resume_return_type: None,
             effect_meta: EffectMeta::default(),
@@ -1577,7 +1667,7 @@ impl Checker {
         let fields = info
             .fields
             .iter()
-            .map(|(fname, ty)| (fname.clone(), self.replace_vars(ty, &mapping)))
+            .map(|(fname, ty)| (fname.clone(), Self::replace_vars(ty, &mapping)))
             .collect();
         let result_ty = Type::Con(
             name.into(),
@@ -1683,6 +1773,15 @@ impl Checker {
         self.resume_return_type = scope.resume_return_type;
         result
     }
+}
+
+/// Build a canonical dotted name by joining a parent path with a child segment.
+///
+/// Used wherever the typechecker mints canonical names: `Module.Item`,
+/// `Module.Trait.method`, `Module.Effect.op`. Centralizes the join convention
+/// so all callers agree on separator and ordering.
+pub fn canonical_join(parent: &str, child: &str) -> String {
+    format!("{}.{}", parent, child)
 }
 
 /// Extract all effect names from a type by walking Fun nodes' effect rows.

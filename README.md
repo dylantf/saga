@@ -1,6 +1,6 @@
 # Saga
 
-A functional programming language with algebraic effects and handlers, compiling to Core Erlang (BEAM). ML/Elm-inspired syntax, Hindley-Milner type inference, traits, and pattern matching with exhaustiveness checking.
+A functional programming language with algebraic effects and handlers, compiling to Core Erlang (BEAM). ML-inspired syntax, Hindley-Milner type inference, traits, and pattern matching with exhaustiveness checking.
 
 > **This project is a work in progress.** Saga is under active development and not yet stable. Expect breaking changes, incomplete features, and rough edges. It is not ready for production use. See the [LICENSE](LICENSE) for warranty and liability terms.
 
@@ -47,17 +47,6 @@ cargo test --test e2e                          # End-to-end tests
 cargo test --test stdlib_tests                 # Stdlib tests
 cargo clippy                                   # Lint
 ```
-
-## Documentation
-
-- [Language Design](docs/language-design.md) -- full language overview with examples
-- [Syntax Cheatsheet](docs/syntax-cheatsheet.md) -- all syntax (usefor for AI)
-- [Effects Guide](docs/effects-guide.md) -- deep dive into effects and handlers
-- [FFI](docs/ffi.md) -- calling Erlang from Saga
-- [Dependency Management](docs/dependency-management.md)
-- [Testing](docs/testing.md)
-- [Concurrency](docs/concurrency.md)
-- [Roadmap](docs/roadmap.md) -- what's implemented and what's planned
 
 ### Compiler internals
 

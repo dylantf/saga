@@ -12,6 +12,26 @@ use crate::codegen::cerl::{CArm, CExpr, CLit, CPat};
 use super::util::cerl_call;
 
 impl Lowerer<'_> {
+    pub(super) fn lower_intrinsic(
+        &mut self,
+        intrinsic: crate::intrinsics::IntrinsicId,
+        args: &[&crate::ast::Expr],
+    ) -> Option<CExpr> {
+        match intrinsic {
+            crate::intrinsics::IntrinsicId::PrintStdout => {
+                self.lower_builtin_print(args, false, false)
+            }
+            crate::intrinsics::IntrinsicId::PrintStderr => {
+                self.lower_builtin_print(args, true, false)
+            }
+            crate::intrinsics::IntrinsicId::Dbg => self.lower_builtin_dbg(args),
+            crate::intrinsics::IntrinsicId::CatchPanic => match args {
+                [thunk] => Some(self.lower_catch_panic(thunk)),
+                _ => None,
+            },
+        }
+    }
+
     /// Lower print/println/eprint/eprintln to io:format.
     /// `x` is always a String.
     pub(super) fn lower_builtin_print(

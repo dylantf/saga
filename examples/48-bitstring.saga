@@ -31,4 +31,14 @@ main () = {
   # Empty bitstring
   let empty = <<>>
   dbg (show (BitString.is_empty empty))
+
+  # String literals as pattern segments: split on a literal byte sequence
+  let line = <<"hello\r\nworld">>
+  case line {
+    <<head:5/binary, "\r\n", rest/binary>> -> {
+      dbg ("head: " <> debug head)
+      dbg ("rest: " <> debug rest)
+    }
+    _ -> dbg "no crlf"
+  }
 }

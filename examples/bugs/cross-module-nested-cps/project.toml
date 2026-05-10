@@ -1,11 +1,11 @@
 [project]
-name = "test-runner"
+name = "cross-module-nested-cps"
 
 [bin]
 main = "src/Main.saga"
 
 # [library]
-# module = "TestRunner"
+# module = "CrossModuleNestedCps"
 # expose = []
 
 # [deps]

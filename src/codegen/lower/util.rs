@@ -1,4 +1,4 @@
-use crate::ast::{BinOp, BitSegSpec, Expr, ExprKind, Lit, Pat, Stmt};
+use crate::ast::{BinOp, BitSegSpec, Expr, ExprKind, Lit, Pat};
 use crate::codegen::cerl::{BinSegFlags, BinSegSize, BinSegType, CBinSeg, CExpr, CLit, Endianness};
 use crate::typechecker::Type;
 use std::collections::{BTreeSet, HashMap};
@@ -164,6 +164,53 @@ pub(super) fn collect_fun_call(expr: &Expr) -> Option<(&str, &Expr, Vec<&Expr>)>
     }
 }
 
+/// Peel a chain of App nodes to find a `DictMethodAccess` head and its arguments.
+/// Returns `Some((dict_expr, method_index, args))` if the head is a `DictMethodAccess`,
+/// `None` otherwise. Used to recognize trait method calls (post-elaboration shape)
+/// for evidence-threaded emission.
+pub(super) fn collect_dict_method_call(expr: &Expr) -> Option<(&Expr, usize, Vec<&Expr>)> {
+    let mut args: Vec<&Expr> = Vec::new();
+    let mut current = expr;
+    loop {
+        match &current.kind {
+            ExprKind::App { func, arg, .. } => {
+                args.push(arg);
+                current = func;
+            }
+            ExprKind::DictMethodAccess { dict, method_index } => {
+                args.reverse();
+                return Some((dict.as_ref(), *method_index, args));
+            }
+            _ => return None,
+        }
+    }
+}
+
+/// Like `collect_fun_call`, but for an `App` chain whose ultimate head is a
+/// `Lambda` literal — `(fun x -> ...) y z`. Returns `Some((lambda, args))`
+/// where `lambda` is the head Lambda expr and `args` are the supplied
+/// arguments in order.
+pub(super) fn collect_lambda_head_call(expr: &Expr) -> Option<(&Expr, Vec<&Expr>)> {
+    let mut args: Vec<&Expr> = Vec::new();
+    let mut current = expr;
+    loop {
+        match &current.kind {
+            ExprKind::App { func, arg, .. } => {
+                args.push(arg);
+                current = func;
+            }
+            ExprKind::Lambda { .. } => {
+                if args.is_empty() {
+                    return None;
+                }
+                args.reverse();
+                return Some((current, args));
+            }
+            _ => return None,
+        }
+    }
+}
+
 /// Like `collect_fun_call`, but for qualified names (`Module.func arg1 arg2`).
 /// Returns `Some((module, func_name, head_expr, args))` if the head is a QualifiedName.
 pub(super) fn collect_qualified_call(expr: &Expr) -> Option<(&str, &str, &Expr, Vec<&Expr>)> {
@@ -241,32 +288,6 @@ pub(super) fn collect_effect_call(expr: &Expr) -> Option<(&str, Option<&str>, Ve
     collect_effect_call_expr(expr).map(|(_, name, qualifier, args)| (name, qualifier, args))
 }
 
-/// Check if an expression contains effect calls nested inside if/case/block
-/// branches. These aren't detected by `collect_effect_call` (which only finds
-/// direct effect calls at the expression root) and need special CPS handling
-/// so that abort-style handlers can skip the outer continuation.
-pub(super) fn has_nested_effect_call(expr: &Expr) -> bool {
-    match &expr.kind {
-        ExprKind::If {
-            then_branch,
-            else_branch,
-            ..
-        } => branch_has_effect(then_branch) || branch_has_effect(else_branch),
-        ExprKind::Case { arms, .. } => arms.iter().any(|arm| branch_has_effect(&arm.node.body)),
-        ExprKind::Block { stmts, .. } => stmts.iter().any(|s| match &s.node {
-            Stmt::Expr(e) => branch_has_effect(e),
-            Stmt::Let { value, .. } => branch_has_effect(value),
-            Stmt::LetFun { body, .. } => branch_has_effect(body),
-        }),
-        _ => false,
-    }
-}
-
-/// Check if an expression is or contains an effect call (direct or nested).
-fn branch_has_effect(expr: &Expr) -> bool {
-    collect_effect_call(expr).is_some() || has_nested_effect_call(expr)
-}
-
 /// Convert a module path like `["Foo", "Bar", "Baz"]` to an Erlang module atom
 /// name like `"foo_bar_baz"`.
 pub(super) fn module_name_to_erlang(path: &[String]) -> String {
@@ -283,6 +304,21 @@ pub fn dict_param_count(constraints: &[(String, u32, Vec<crate::typechecker::Typ
         .iter()
         .filter(|(trait_name, _, _)| trait_name != "Num" && trait_name != "Eq")
         .count()
+}
+
+/// True if any effect row along the function arrow has an open tail
+/// (`needs {Foo, ..e}`). Used by the call-effects pre-pass to distinguish
+/// `StaticOps` (closed-row callees, project at the call boundary) from
+/// `RowForwarded` (open-row callees, forward full evidence).
+pub fn has_open_effect_row(ty: &Type) -> bool {
+    let mut current = ty;
+    while let Type::Fun(_, ret, row) = current {
+        if row.tail.is_some() {
+            return true;
+        }
+        current = ret;
+    }
+    false
 }
 
 /// Derive base arity and effect names from a typechecker `Type`.
@@ -302,10 +338,26 @@ pub fn arity_and_effects_from_type(ty: &Type) -> (usize, Vec<String>) {
     (arity, effects.into_iter().collect())
 }
 
+/// Phase-3 variant of [`arity_and_effects_from_type`] that also reports
+/// whether any effect row along the arrow has an open tail. Returns
+/// `(user_arity, sorted_effect_names, has_open_row)`.
+///
+/// Under the evidence-passing convention, `user_arity` is the logical
+/// parameter count seen by source code: it does not include the
+/// `_Evidence` or `_ReturnK` parameters appended at lowering. The
+/// `has_open_row` flag chooses between `StaticOps` (closed-row, project at
+/// call sites against a known `EvidenceLayout`) and `RowForwarded`
+/// (open-row, forward full ambient evidence).
+pub fn arity_and_evidence_from_type(ty: &Type) -> (usize, Vec<String>, bool) {
+    let (user_arity, effects) = arity_and_effects_from_type(ty);
+    let is_open_row = has_open_effect_row(ty);
+    (user_arity, effects, is_open_row)
+}
+
 /// Extract per-parameter absorbed effects from a function type.
 /// Returns a map of param_index -> sorted effect names for parameters
 /// that have EffArrow types (i.e., callbacks that carry effects).
-pub(super) fn param_absorbed_effects_from_type(ty: &Type) -> HashMap<usize, Vec<String>> {
+pub(crate) fn param_absorbed_effects_from_type(ty: &Type) -> HashMap<usize, Vec<String>> {
     let mut result = HashMap::new();
     let mut current = ty;
     let mut param_index = 0;

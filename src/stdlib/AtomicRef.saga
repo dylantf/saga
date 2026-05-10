@@ -1,6 +1,8 @@
 #@ Process-safe mutable references backed by ETS with a lock server.
 module Std.AtomicRef
 
+import Std.Base (Show, Debug, Ord, Semigroup, Enum)
+
 import Std.Actor (Process, Actor, Monitor, beam_actor)
 import Std.Ref (MutRef, Ref, ets_ref)
 

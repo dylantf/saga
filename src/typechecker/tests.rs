@@ -871,7 +871,7 @@ fn pure_function_no_needs_ok() {
 #[test]
 fn trait_method_in_env() {
     let checker = check("trait Greet a {\n  fun greet : (x: a) -> String\n}").unwrap();
-    let scheme = checker.env.get("greet").unwrap();
+    let scheme = checker.env.get("Greet.greet").unwrap();
     let ty = checker.sub.apply(&scheme.ty);
     match ty {
         Type::Fun(_, ret, _) => assert_eq!(*ret, Type::string()),
@@ -3291,7 +3291,14 @@ fn generic_effect_effarrow_polymorphic_hof() {
 }
 
 fun run_state : (init: s) -> (f: Unit -> a needs {State s}) -> (a, s)
-run_state init f = (f (), init)
+run_state init f = {
+  let state_fn = f () with {
+    get () = fun s -> (resume s) s
+    put new_s = fun _ -> (resume ()) new_s
+    return value = fun s -> (value, s)
+  }
+  state_fn init
+}
 
 fun use_it : Unit -> Int
 use_it () = {
@@ -4311,6 +4318,430 @@ main () = {
     check_with_project_files(&[("lib/Db.saga", db_module)], main_src).unwrap();
 }
 
+fn env_module_source() -> &'static str {
+    r#"module Env
+
+pub effect Env {
+  fun get : String -> String
+}
+
+pub handler system_env for Env {
+  get key = resume "value"
+}
+"#
+}
+
+#[test]
+fn imported_handler_does_not_expose_private_effect_op_bare() {
+    let main_src = r#"import Env (system_env)
+
+main () = get! "HOME" with system_env
+"#;
+
+    let err = match check_with_project_files(&[("lib/Env.saga", env_module_source())], main_src) {
+        Ok(_) => panic!("expected bare private effect op to be unavailable"),
+        Err(err) => err,
+    };
+    assert!(
+        err.message.contains("undefined effect operation: get"),
+        "expected undefined bare op error, got: {}",
+        err.message
+    );
+}
+
+#[test]
+fn exposing_effect_exposes_its_ops_bare() {
+    let main_src = r#"import Env (Env, system_env)
+
+main () = get! "HOME" with system_env
+"#;
+
+    check_with_project_files(&[("lib/Env.saga", env_module_source())], main_src).unwrap();
+}
+
+#[test]
+fn imported_effect_op_remains_available_qualified_without_exposing() {
+    let main_src = r#"import Env
+
+main () = Env.Env.get! "HOME" with Env.system_env
+"#;
+
+    check_with_project_files(&[("lib/Env.saga", env_module_source())], main_src).unwrap();
+}
+
+#[test]
+fn exposed_imported_effect_ops_with_same_name_are_ambiguous() {
+    let a_module = r#"module A
+
+pub effect Store {
+  fun get : Unit -> Int
+}
+
+pub handler store for Store {
+  get () = resume 1
+}
+"#;
+    let b_module = r#"module B
+
+pub effect Cache {
+  fun get : Unit -> Int
+}
+
+pub handler cache for Cache {
+  get () = resume 2
+}
+"#;
+    let main_src = r#"import A (Store, store)
+import B (Cache, cache)
+
+main () = get! () with {store, cache}
+"#;
+
+    let err = match check_with_project_files(
+        &[("lib/A.saga", a_module), ("lib/B.saga", b_module)],
+        main_src,
+    ) {
+        Ok(_) => panic!("expected ambiguous bare effect op"),
+        Err(err) => err,
+    };
+    assert!(
+        err.message
+            .contains("ambiguous effect operation 'get': found in [A.Store, B.Cache]"),
+        "expected ambiguous effect op error with candidate list, got: {}",
+        err.message
+    );
+}
+
+#[test]
+fn local_effect_op_shadows_imported_when_names_collide() {
+    // Locally defined effects shadow imports for bare op resolution. Same
+    // tier rule as trait methods.
+    let env_module = r#"module Env
+
+pub effect Env {
+  fun get : String -> String
+}
+
+pub handler system_env for Env {
+  get key = resume "imported-value"
+}
+"#;
+    let main_src = r#"import Env (Env, system_env)
+
+effect Local {
+  fun get : String -> String
+}
+
+handler local_env for Local {
+  get key = resume "local-value"
+}
+
+main () = get! "HOME" with local_env
+"#;
+    check_with_project_files(&[("lib/Env.saga", env_module)], main_src).unwrap();
+}
+
+#[test]
+fn ambiguous_local_effect_ops_error_with_candidate_list() {
+    // Two locally defined effects with the same op name produce a proper
+    // ambiguous diagnostic listing the candidates.
+    let main_src = r#"effect A {
+  fun foo : Unit -> Int
+}
+
+effect B {
+  fun foo : Unit -> Int
+}
+
+handler a_h for A { foo () = resume 1 }
+handler b_h for B { foo () = resume 2 }
+
+main () = foo! () with {a_h, b_h}
+"#;
+    let err = match check(main_src) {
+        Ok(_) => panic!("expected ambiguous bare effect op"),
+        Err(err) => err,
+    };
+    assert!(
+        err.message
+            .contains("ambiguous effect operation 'foo': found in [A, B]"),
+        "expected ambiguous effect op error with candidate list, got: {}",
+        err.message
+    );
+}
+
+#[test]
+fn only_exposed_imported_effect_op_is_bare_visible_when_names_collide() {
+    let a_module = r#"module A
+
+pub effect Store {
+  fun get : Unit -> Int
+}
+
+pub handler store for Store {
+  get () = resume 1
+}
+"#;
+    let b_module = r#"module B
+
+pub effect Cache {
+  fun get : Unit -> Int
+}
+
+pub handler cache for Cache {
+  get () = resume 2
+}
+"#;
+    let main_src = r#"import A (Store, store)
+import B (cache)
+
+main () = get! () with store
+"#;
+
+    check_with_project_files(
+        &[("lib/A.saga", a_module), ("lib/B.saga", b_module)],
+        main_src,
+    )
+    .unwrap();
+}
+
+#[test]
+fn effect_ops_cannot_be_exposed_directly() {
+    let main_src = r#"import Env (get)
+
+main () = Env.Env.get! "HOME" with Env.system_env
+"#;
+
+    let err = match check_with_project_files(&[("lib/Env.saga", env_module_source())], main_src) {
+        Ok(_) => panic!("expected direct op exposing to be rejected"),
+        Err(err) => err,
+    };
+    assert!(
+        err.message
+            .contains("'get' is not exported by module 'Env'"),
+        "expected invalid import error, got: {}",
+        err.message
+    );
+}
+
+// --- Trait scope routing tests ---
+
+fn describe_module_source() -> &'static str {
+    r#"module Describe
+
+pub trait Describe a {
+  fun describe : a -> String
+}
+
+pub fun describe_thing : a -> String where {a: Describe}
+describe_thing x = describe x
+"#
+}
+
+#[test]
+fn imported_module_does_not_expose_trait_method_bare() {
+    let main_src = r#"import Describe (describe_thing)
+
+main () = describe 42
+"#;
+    let err = match check_with_project_files(
+        &[("lib/Describe.saga", describe_module_source())],
+        main_src,
+    ) {
+        Ok(_) => panic!("expected bare trait method to be unavailable"),
+        Err(err) => err,
+    };
+    assert!(
+        err.message.contains("undefined variable: describe"),
+        "expected undefined-variable error, got: {}",
+        err.message
+    );
+}
+
+#[test]
+fn exposing_trait_exposes_its_methods_bare() {
+    let main_src = r#"import Describe (Describe)
+
+impl Describe for Int {
+  describe x = "int"
+}
+
+main () = describe 42
+"#;
+    check_with_project_files(&[("lib/Describe.saga", describe_module_source())], main_src).unwrap();
+}
+
+#[test]
+fn imported_trait_method_remains_available_qualified_without_exposing() {
+    let main_src = r#"import Describe
+
+impl Describe.Describe for Int {
+  describe x = "int"
+}
+
+main () = Describe.Describe.describe 42
+"#;
+    check_with_project_files(&[("lib/Describe.saga", describe_module_source())], main_src).unwrap();
+}
+
+#[test]
+fn exposed_imported_trait_methods_with_same_name_are_ambiguous() {
+    let a_module = r#"module A
+
+pub trait Foo a {
+  fun pp : a -> String
+}
+"#;
+    let b_module = r#"module B
+
+pub trait Bar a {
+  fun pp : a -> String
+}
+"#;
+    let main_src = r#"import A (Foo)
+import B (Bar)
+
+impl Foo for Int { pp x = "a" }
+impl Bar for Int { pp x = "b" }
+
+main () = pp 1
+"#;
+
+    let err = match check_with_project_files(
+        &[("lib/A.saga", a_module), ("lib/B.saga", b_module)],
+        main_src,
+    ) {
+        Ok(_) => panic!("expected ambiguous bare trait method"),
+        Err(err) => err,
+    };
+    assert!(
+        err.message
+            .contains("ambiguous trait method 'pp': found in [A.Foo, B.Bar]"),
+        "expected ambiguous trait method error with candidate list, got: {}",
+        err.message
+    );
+}
+
+#[test]
+fn ambiguous_local_trait_methods_error_with_candidate_list() {
+    // Two locally defined traits with the same method name produce a proper
+    // ambiguous diagnostic listing the candidate traits — mirrors the
+    // effects parallel.
+    let main_src = r#"trait A a {
+  fun foo : a -> Int
+}
+
+trait B a {
+  fun foo : a -> Int
+}
+
+impl A for Int { foo x = 1 }
+impl B for Int { foo x = 2 }
+
+main () = foo 1
+"#;
+    let err = match check(main_src) {
+        Ok(_) => panic!("expected ambiguous bare trait method"),
+        Err(err) => err,
+    };
+    assert!(
+        err.message
+            .contains("ambiguous trait method 'foo': found in [A, B]"),
+        "expected ambiguous trait method error with candidate list, got: {}",
+        err.message
+    );
+}
+
+#[test]
+fn only_exposed_imported_trait_method_is_bare_visible_when_names_collide() {
+    let a_module = r#"module A
+
+pub trait Foo a {
+  fun pp : a -> String
+}
+"#;
+    let b_module = r#"module B
+
+pub trait Bar a {
+  fun pp : a -> String
+}
+
+pub fun b_helper : Unit -> Unit
+b_helper () = ()
+"#;
+    let main_src = r#"import A (Foo)
+import B (b_helper)
+
+impl Foo for Int { pp x = "a" }
+impl B.Bar for Int { pp x = "b" }
+
+main () = pp 1
+"#;
+    check_with_project_files(
+        &[("lib/A.saga", a_module), ("lib/B.saga", b_module)],
+        main_src,
+    )
+    .unwrap();
+}
+
+#[test]
+fn trait_methods_cannot_be_exposed_directly() {
+    let main_src = r#"import Describe (describe)
+
+main () = ()
+"#;
+    let err = match check_with_project_files(
+        &[("lib/Describe.saga", describe_module_source())],
+        main_src,
+    ) {
+        Ok(_) => panic!("expected direct method exposing to be rejected"),
+        Err(err) => err,
+    };
+    assert!(
+        err.message
+            .contains("'describe' is not exported by module 'Describe'"),
+        "expected invalid import error, got: {}",
+        err.message
+    );
+}
+
+#[test]
+fn local_trait_methods_remain_bare_visible() {
+    check(
+        r#"trait Local a {
+  fun lm : a -> Int
+}
+
+impl Local for Int {
+  lm x = x
+}
+
+main () = lm 42
+"#,
+    )
+    .unwrap();
+}
+
+#[test]
+fn local_trait_method_shadows_imported_when_names_collide() {
+    // When a local trait and an imported trait both contribute the same bare
+    // method name, the local trait's method wins for bare resolution. The
+    // resolver records nothing for the ambiguous union and inference falls
+    // back to the bare env entry, which only the local trait registers.
+    let main_src = r#"import Describe (Describe)
+
+trait LocalDescribe a {
+  fun describe : a -> String
+}
+
+impl Describe for Int { describe x = "int" }
+impl LocalDescribe for Int { describe x = "local-int" }
+
+main () = describe 42
+"#;
+    check_with_project_files(&[("lib/Describe.saga", describe_module_source())], main_src).unwrap();
+}
+
 #[test]
 fn imported_handler_binding_inside_wrapped_block_typechecks_in_inline_list() {
     let db_module = r#"module Db
@@ -4681,7 +5112,7 @@ fn nested_hof_absorption_does_not_leak_inner_closed_effects() {
         "effect Assert {\n  fun assert : Bool -> String -> Unit\n}\n\
          effect State s {\n  fun get : Unit -> s\n  fun put : s -> Unit\n}\n\
          fun use : (body: Unit -> Unit needs {Assert, ..e}) -> Unit needs {..e}\n\
-         use body = body ()\n\
+         use body = body () with { assert _ _ = resume () }\n\
          fun run_state : s -> (Unit -> a needs {State s}) -> (a, s)\n\
          run_state init f = {\n\
            let state_fn = f () with {\n\
@@ -4697,6 +5128,120 @@ fn nested_hof_absorption_does_not_leak_inner_closed_effects() {
            let _ = value\n\
            assert! True \"\"\n\
          })",
+    )
+    .unwrap();
+}
+
+#[test]
+fn effect_op_row_variable_freshens_per_call_site() {
+    // Regression: `instantiate_effect_op`'s `collect_vars` walked Type::Fun's
+    // params and return type but ignored the effect row, so a row variable
+    // appearing only in the effect row (e.g. `..e` in
+    // `spawn : (f: Unit -> Unit needs {Actor msg, ..e}) -> Pid msg
+    //   needs {Actor msg, ..e}`) was never freshened across call sites.
+    // After one call bound the row var, subsequent call sites inherited the
+    // binding and rejected callbacks whose effect row didn't match.
+    //
+    // Here the callback uses Process+Monitor+Timer+Actor+Logger (a closed,
+    // multi-effect row). The parent's row variable for spawn must bind to
+    // the lambda's extras, but only if it's fresh.
+    check(
+        "import Std.Actor (Process, Actor, Monitor, Timer)\n\
+         effect Logger {\n  fun log : String -> Unit\n}\n\
+         type Msg = Tick\n\
+         fun worker : Unit -> Unit\n  \
+           needs {Process, Actor Msg, Monitor, Timer, Logger}\n\
+         worker () = receive {\n  \
+           Tick -> {\n    \
+             log! \"x\"\n    \
+             let _pid = spawn! (fun () -> ())\n    \
+             let _ref = monitor! (self! ())\n    \
+             sleep! 1\n    \
+             worker ()\n  \
+           }\n\
+         }\n\
+         fun parent : Unit -> Unit\n  \
+           needs {Process, Actor Msg, Monitor, Timer, Logger}\n\
+         parent () = {\n  \
+           let _pid = spawn! (fun () -> worker ())\n  \
+           ()\n\
+         }",
+    )
+    .unwrap();
+}
+
+#[test]
+fn handler_factory_must_propagate_handler_needs() {
+    // A function that returns a `handler for E needs {X}` constructs a handler
+    // value whose arm bodies use X. The arm closures capture evidence from the
+    // construction site — i.e. the factory function must have X in its own
+    // `needs` so the lowerer threads it through. Without this, the codegen
+    // ICEs when lowering the arm body because the construction site's
+    // evidence has no X. Detect at typecheck.
+    let unhandled = "effect Outer {\n  fun notify : String -> Unit\n}\n\
+                     effect Inner {\n  fun do_thing : Int -> Unit\n}\n\
+                     fun make_inner : Unit -> Handler Inner\n\
+                     make_inner () = handler for Inner needs {Outer} {\n\
+                       do_thing n = { notify! \"x\"; resume () }\n\
+                     }";
+    let err = match check(unhandled) {
+        Ok(_) => panic!("expected typechecker error for handler factory missing needs"),
+        Err(e) => e,
+    };
+    assert!(
+        err.message.contains("Outer") && err.message.contains("needs"),
+        "expected handler-factory needs-propagation error, got: {}",
+        err.message
+    );
+
+    // Declaring `needs {Outer}` on the factory itself fixes it: the factory
+    // receives a hidden Outer handler param at call time and the arm closures
+    // capture it.
+    check(
+        "effect Outer {\n  fun notify : String -> Unit\n}\n\
+         effect Inner {\n  fun do_thing : Int -> Unit\n}\n\
+         fun make_inner : Unit -> Handler Inner needs {Outer}\n\
+         make_inner () = handler for Inner needs {Outer} {\n\
+           do_thing n = { notify! \"x\"; resume () }\n\
+         }",
+    )
+    .unwrap();
+}
+
+#[test]
+fn closed_callback_effect_must_be_handled_or_forwarded() {
+    // A HOF whose callback parameter declares closed `needs {X}` must either
+    // install an internal `with` handler for X or forward X via the function's
+    // own `needs` clause. Otherwise the runtime has no way to source the
+    // handler when the callback is invoked, and the lowerer would ICE.
+    // Regression: typechecker used to silently absorb the effect.
+    let unhandled = "effect Outer {\n  fun outer_op : Unit -> Unit\n}\n\
+                     fun framework_call : (Unit -> Unit needs {Outer}) -> Unit\n\
+                     framework_call f = f ()";
+    let err = match check(unhandled) {
+        Ok(_) => panic!("expected typechecker error for unhandled callback effect"),
+        Err(e) => e,
+    };
+    assert!(
+        err.message.contains("Outer") && err.message.contains("not handled"),
+        "expected unhandled-callback-effect error, got: {}",
+        err.message
+    );
+
+    // Forwarding via the function's own `needs` is fine.
+    check(
+        "effect Outer {\n  fun outer_op : Unit -> Unit\n}\n\
+         fun framework_call : (Unit -> Unit needs {Outer}) -> Unit needs {Outer}\n\
+         framework_call f = f ()",
+    )
+    .unwrap();
+
+    // Internal `with` is also fine (existing pattern, already verified by
+    // run_state-style tests).
+    check(
+        "effect Outer {\n  fun outer_op : Unit -> Unit\n}\n\
+         fun framework_call : (Unit -> Unit needs {Outer}) -> Unit\n\
+         framework_call f = f () with { outer_op _ = resume () }",
     )
     .unwrap();
 }
@@ -5233,4 +5778,113 @@ fn phantom_trait_method_wrong_impl_type_args_fails() {
          }",
     );
     assert!(result.is_err());
+}
+
+// --- Auto-load of canonical qualified-name references ---
+//
+// Together these pin down the contract documented in
+// `docs/planning/plans/auto-load-qualified-modules.md`:
+//
+//   "Canonical is global; imports control aliases."
+//
+// Auto-loading a module on first canonical reference must register canonical
+// keys (so `Module.name` resolves) without injecting any bare/alias entries
+// into scope (so `name`/`Alias.name` still require an explicit `import`).
+
+#[test]
+fn auto_load_stdlib_qualified_typechecks_without_explicit_import() {
+    // Std.IO.Unsafe is *not* in the prelude, so this used to fail with
+    // "unknown qualified name". With auto-load it should typecheck.
+    check(
+        "main () = {\n\
+         Std.IO.Unsafe.print_stdout \"hello\"\n\
+         }",
+    )
+    .expect("Std.IO.Unsafe.print_stdout must resolve via auto-load");
+}
+
+#[test]
+fn auto_load_project_module_qualified_typechecks_without_explicit_import() {
+    let lib = "module Lib\n\
+               pub fun foo : Unit -> Unit\n\
+               foo () = ()\n";
+    let main = "module Main\n\
+                main () = Lib.foo ()\n";
+    check_with_project_files(&[("src/Lib.saga", lib)], main)
+        .expect("Lib.foo must resolve via auto-load when Lib is in the project module map");
+}
+
+#[test]
+fn auto_load_does_not_inject_alias_prefix_into_scope() {
+    // Pinned-down version of the scope-leak prevention. After a canonical
+    // reference loads Std.IO.Unsafe, the alias-prefix form `Unsafe.print_stdout`
+    // must NOT become resolvable — that would require an explicit
+    // `import Std.IO.Unsafe` to merge the alias into scope_map.
+    let result = check(
+        "main () = {\n\
+         let _ = Std.IO.Unsafe.print_stdout \"first\"\n\
+         Unsafe.print_stdout \"second\"\n\
+         }",
+    );
+    assert!(
+        result.is_err(),
+        "alias-prefix form 'Unsafe.print_stdout' must not resolve without an explicit import"
+    );
+}
+
+#[test]
+fn auto_load_does_not_inject_bare_name_into_scope() {
+    // Same protection as the alias case but stricter: bare `print_stdout` must
+    // not become resolvable just because a canonical sibling reference loaded
+    // the module. The user must `import Std.IO.Unsafe (print_stdout)` to expose
+    // the bare form.
+    let result = check(
+        "main () = {\n\
+         let _ = Std.IO.Unsafe.print_stdout \"first\"\n\
+         print_stdout \"second\"\n\
+         }",
+    );
+    assert!(
+        result.is_err(),
+        "bare 'print_stdout' must not resolve without an exposing import"
+    );
+}
+
+#[test]
+fn auto_load_skips_unknown_module_and_emits_existing_diagnostic() {
+    // Auto-load should silently skip module names that aren't in the builtin
+    // set or project module map; resolve/infer then emit the existing
+    // diagnostic so error messages are unchanged for typos.
+    let err = check(
+        "main () = {\n\
+         Bogus.Module.foo ()\n\
+         }",
+    )
+    .err()
+    .expect("unknown qualified name must still error");
+    assert!(
+        err.message.contains("unknown qualified name") || err.message.contains("Bogus.Module.foo"),
+        "expected 'unknown qualified name' diagnostic, got: {}",
+        err.message
+    );
+}
+
+#[test]
+fn auto_load_typo_does_not_block_real_canonical_reference_in_same_file() {
+    // Mixed: a real auto-loadable canonical ref alongside a typo. The auto-
+    // load step skipping the typo must not poison the real reference. The
+    // typo errors; the real ref typechecks.
+    let err = check(
+        "main () = {\n\
+         let _ = Std.IO.Unsafe.print_stdout \"real\"\n\
+         Bogus.Module.foo ()\n\
+         }",
+    )
+    .err()
+    .expect("Bogus.Module.foo must still error");
+    assert!(
+        !err.message.contains("Std.IO.Unsafe"),
+        "typo's diagnostic should be about Bogus.Module, not the real reference: {}",
+        err.message
+    );
 }

@@ -337,6 +337,13 @@ pub enum Decl {
         dict_params: Vec<String>,
         /// Method implementations as lambda expressions, ordered by trait method declaration order
         methods: Vec<Expr>,
+        /// Sorted, canonical effect names from the impl's `needs` clause.
+        /// Applies uniformly to every method dispatched through this dict —
+        /// codegen uses it to compile each method body as effectful (params
+        /// `_Evidence`/`_ReturnK`, evidence context installed) and to thread
+        /// evidence at trait method call sites that elaborated to
+        /// `DictMethodAccess`. Empty when the impl has no `needs` clause.
+        impl_effects: Vec<String>,
         span: Span,
     },
 }

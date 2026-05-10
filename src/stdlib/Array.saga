@@ -1,5 +1,7 @@
 module Std.Array
 
+import Std.Base (Show, Debug, Ord, Semigroup, Enum)
+
 import Std.Maybe (Maybe)
 
 #@ A persistent, immutable indexed collection backed by Erlang's `array` module.

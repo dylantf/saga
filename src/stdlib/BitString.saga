@@ -1,6 +1,8 @@
 #@ Operations on raw binary data (Erlang bitstrings).
 module Std.BitString
 
+import Std.Base (Show, Debug, Ord, Semigroup, Enum)
+
 import Std.Maybe (Maybe)
 import Std.Result (Result)
 import Std.List

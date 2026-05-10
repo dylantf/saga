@@ -1,0 +1,36 @@
+#@ Classic monadic effects: Reader (ambient environment) and Writer
+#@ (ambient append-only log), expressed as algebraic effects.
+module Std.Control
+
+import Std.List as List
+
+#@ Reader effect: an ambient read-only environment of type `r`.
+#@ Use `ask!` to read the environment from anywhere in the call tree;
+#@ install with `run_reader env (fun () -> ...)`.
+pub effect Reader r {
+  fun ask : Unit -> r
+}
+
+#@ Run a Reader-effecting computation against the given environment.
+pub fun run_reader : (env: r) -> (f: Unit -> a needs {Reader r}) -> a
+run_reader env f = f () with {
+  ask () = resume env
+}
+
+#@ Writer effect: an ambient append-only sink of type `w`. Use `tell!`
+#@ to push a value from anywhere in the call tree; install with
+#@ `run_writer (fun () -> ...)` to recover the pair (result, log).
+pub effect Tell w {
+  fun tell : w -> Unit
+}
+
+#@ Run a Tell-effecting computation, returning its value paired with
+#@ everything told, in chronological order.
+pub fun run_writer : (f: Unit -> a needs {Tell w}) -> (a, List w)
+run_writer f = {
+  let writer_fn = f () with {
+    tell event = fun acc -> (resume ()) (event :: acc)
+    return value = fun acc -> (value, List.reverse acc)
+  }
+  writer_fn []
+}

@@ -1,7 +1,26 @@
 use saga::{codegen, elaborate, lexer, parser, typechecker};
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
+
+/// Compile the Phase 1 evidence bridge into `dir` so emitted code can resolve
+/// the `std_evidence_bridge:*` calls produced at every `with`-boundary.
+fn compile_evidence_bridge_into(dir: &Path) {
+    let bridge_src = include_str!("../src/stdlib/evidence.bridge.erl");
+    let bridge_path = dir.join("std_evidence_bridge.erl");
+    std::fs::write(&bridge_path, bridge_src).unwrap();
+    let status = std::process::Command::new("erlc")
+        .arg("-o")
+        .arg(dir)
+        .arg(&bridge_path)
+        .output()
+        .expect("failed to run erlc on evidence bridge");
+    assert!(
+        status.status.success(),
+        "erlc failed on evidence bridge:\n{}",
+        String::from_utf8_lossy(&status.stderr)
+    );
+}
 
 fn fixtures_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/modules")
@@ -14,6 +33,20 @@ fn emit_project_module(source: &str, module_name: &str, checker: &typechecker::C
         .parse_program()
         .expect("parse error");
     saga::desugar::desugar_program(&mut program);
+    let original_module_name = program
+        .iter()
+        .find_map(|d| {
+            if let saga::ast::Decl::ModuleDecl { path, .. } = d {
+                Some(path.join("."))
+            } else {
+                None
+            }
+        })
+        .unwrap_or_default();
+    let result = checker.to_result();
+    if let Some(cached_program) = result.programs().get(&original_module_name) {
+        return emit_from_program(cached_program, module_name, checker);
+    }
     emit_from_program(&program, module_name, checker)
 }
 
@@ -108,7 +141,7 @@ fn make_project_checker() -> typechecker::Checker {
 }
 
 fn make_project_checker_for_root(root: PathBuf) -> typechecker::Checker {
-    let module_map = typechecker::scan_project_modules(&root).expect("scan failed");
+    let module_map = typechecker::scan_source_dir(&root).expect("scan failed");
     let mut checker = typechecker::Checker::with_project_root(root);
     checker.set_module_map(module_map);
     // Load prelude (which imports Std first, then stdlib modules)
@@ -239,6 +272,81 @@ main () = {
 }
 
 #[test]
+fn cross_module_call_with_beam_native_and_user_effect_threads_all_handler_params() {
+    // Regression: when an imported function declares `needs {Process, X}` for
+    // some user-defined effect X, the function is lowered with handler params
+    // for both Process *and* X (the BEAM-native ops still flow through CPS
+    // lambdas — beam_actor's lowering installs them as direct-op fast paths).
+    //
+    // The cross-module resolver was discarding the type's effect row and only
+    // consulting `fun_effects`, which strips beam-native effects. As a result
+    // it computed the wrong expanded arity for the imported fun, treated the
+    // call as under-applied, and emitted a partial-application closure
+    // (`let r = fun (...) -> call lib:run(...)`) instead of a saturated call.
+    // The case-match on `r` then crashed at runtime with a `case_clause` since
+    // `r` was a closure rather than the `Result` it should have been.
+    let lib = r#"module Lib.Server
+
+import Std.Actor (Process)
+
+pub effect Reporter {
+  fun report : String -> Unit
+}
+
+pub fun run : Unit -> Result Unit String needs {Process, Reporter}
+run () = {
+  report! "hello"
+  let _ = spawn! (fun () -> ())
+  Ok ()
+}
+"#;
+
+    let main_src = r#"module Main
+
+import Std.Actor (beam_actor)
+import Lib.Server (Reporter, run)
+
+main () = {
+  let r = run ()
+  case r {
+    Ok _ -> ()
+    Err _ -> ()
+  }
+} with {
+  beam_actor,
+  report _ = {
+    resume ()
+  },
+}
+"#;
+
+    with_temp_project_files(&[("lib/Server.saga", lib)], main_src, |checker, program| {
+        let out = emit_from_program(program, "main", checker);
+        // The call to lib_server:run must pass user arg + Reporter handler
+        // + Process handlers (spawn/send/exit) + ReturnK.
+        assert_contains(&out, "_Handle_Lib_Server_Reporter_report");
+        assert_contains(&out, "call 'lib_server':'run'");
+        // Saturated, not partial-applied: the bug emitted a closure
+        // whose parameter list included `_Handle_Lib_Server_Reporter_report`
+        // and other handler params. A correctly threaded call binds those
+        // handler vars in `let <_Handle_...> = ...` and passes them to the
+        // call. Detect the bug shape: the handler param appearing as a
+        // *closure parameter* (right after `fun (` rather than inside a
+        // `let <...>` binding).
+        let bug_shape = "_Handle_Lib_Server_Reporter_report,";
+        let bug_present = out.lines().any(|line| {
+            let trimmed = line.trim_start();
+            trimmed.starts_with("fun (") && trimmed.contains(bug_shape)
+        });
+        assert!(
+            !bug_present,
+            "imported run call appears to be wrapped in a partial-app closure:\n{out}"
+        );
+        assert_erlc_compiles(&out, "main");
+    });
+}
+
+#[test]
 fn imported_private_effect_factory_threads_handler_into_imported_effectful_call() {
     let db_module = r#"module Db
 
@@ -273,8 +381,7 @@ main () = {
             let out = emit_from_program(program, "main", checker);
             assert_contains(&out, "_Handle_Db_Postgres_ping");
             assert_contains(&out, "call 'db':'run'");
-            // The handler must be threaded into the imported effectful call as the
-            // middle argument of the (arg, handler, continuation) triple.
+            // The imported effectful call takes (arg, evidence, continuation).
             let call_idx = out
                 .find("call 'db':'run'")
                 .expect("expected call to db:run");
@@ -286,12 +393,7 @@ main () = {
             assert_eq!(
                 parts.len(),
                 3,
-                "expected (arg, handler, continuation), got: {args}"
-            );
-            assert!(
-                parts[1].starts_with("_Handle_Db_Postgres_ping"),
-                "expected handler in middle position, got: {}",
-                parts[1]
+                "expected (arg, evidence, continuation), got: {args}"
             );
             assert_erlc_compiles(&out, "main");
         },
@@ -417,7 +519,7 @@ pub record Db {
 pub fun run : Unit -> Unit needs {Postgres, Transaction}
 run () = transaction! (fun () -> ping! ())
 
-pub fun connect : Unit -> Db
+pub fun connect : Unit -> Db needs {Postgres}
 connect () = {
   Db {
     postgres: handler for Postgres {
@@ -435,10 +537,10 @@ connect () = {
 
     let main_src = r#"module Main
 import Std.IO (console, println)
-import Db (connect, run)
+import Db (Postgres, connect, run)
 
 main () = {
-  let db = connect ()
+  let db = connect () with { ping () = resume () }
   let pg = db.postgres
   let tx = db.transactions
   {
@@ -847,7 +949,7 @@ fn cross_module_effectful_qualified_call() {
     // Logger.greet needs {Log}, so the call should thread _HandleLog + _ReturnK
     let main_src = "
 module Main
-import Logger
+import Logger (Log)
 
 
 main () = Logger.greet \"world\" with {
@@ -872,7 +974,7 @@ fn cross_module_effectful_exposed_call() {
     // Same as above but with exposed import
     let main_src = "
 module Main
-import Logger (greet)
+import Logger (Log, greet)
 
 
 main () = greet \"world\" with {
@@ -892,13 +994,13 @@ main () = greet \"world\" with {
 
 #[test]
 fn cross_module_effectful_export_arity() {
-    // Logger.greet should be exported with expanded arity (1 + 1 handler + 1 ReturnK = 3)
+    // Logger.greet should be exported with expanded arity
+    // (1 user + _Evidence + _ReturnK = 3).
     let logger_src = std::fs::read_to_string(fixtures_root().join("Logger.saga")).unwrap();
     let mut checker = make_project_checker();
     let program = typecheck_source(&logger_src, &mut checker);
     let out = emit_from_program(&program, "logger", &checker);
 
-    // greet should be exported with arity 3 (name, _HandleLog, _ReturnK)
     assert_contains(&out, "'greet'/3");
 }
 
@@ -907,7 +1009,7 @@ fn cross_module_effectful_compiles_with_erlc() {
     let logger_src = std::fs::read_to_string(fixtures_root().join("Logger.saga")).unwrap();
     let main_src = "
 module Main
-import Logger
+import Logger (Log)
 
 
 main () = Logger.greet \"world\" with {
@@ -938,6 +1040,421 @@ main () = Logger.greet \"world\" with {
         output.status.success(),
         "erlc failed on main:\n{main_core}\nstderr: {}",
         String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// Regression: a decoder defined in Main composes two effectful Lib functions
+/// (`Lib.unbox_int (Lib.unwrap b)`) and runs through `Lib.run_decoder`. The
+/// inner call must abort the chain when it fails, instead of leaking its
+/// `{error, _}` tuple to the outer return clause as a value (which would
+/// produce a garbage `Ok` wrapping the error).
+#[test]
+fn cross_module_nested_effectful_calls_abort_correctly() {
+    let lib_src = std::fs::read_to_string(fixtures_root().join("EffectChain.saga")).unwrap();
+    let main_src = "
+module Main
+import Std.Fail (Fail)
+import EffectChain (Box, Failure)
+
+fun decoder : Box -> Int needs {Fail Failure}
+decoder b = EffectChain.unbox_int (EffectChain.unwrap b)
+
+pub fun run_fail : Unit -> String
+run_fail () = {
+  let r = EffectChain.run_decoder decoder (EffectChain.Box (EffectChain.IS \"oops\"))
+  case r {
+    Ok _ -> \"ok-bug\"
+    Err _ -> \"err-good\"
+  }
+}
+
+pub fun run_ok : Unit -> String
+run_ok () = {
+  let r = EffectChain.run_decoder decoder (EffectChain.Box (EffectChain.II 42))
+  case r {
+    Ok _ -> \"ok-good\"
+    Err _ -> \"err-bug\"
+  }
+}
+";
+    let mut checker = make_project_checker();
+    let main_program = typecheck_source(main_src, &mut checker);
+
+    let lib_core = emit_project_module(&lib_src, "effectchain", &checker);
+    let main_core = emit_from_program(&main_program, "main", &checker);
+
+    let dir = assert_erlc_compiles(&lib_core, "effectchain");
+    let main_core_path = dir.join("main.core");
+    std::fs::write(&main_core_path, &main_core).unwrap();
+    let erlc = std::process::Command::new("erlc")
+        .arg("-o")
+        .arg(&dir)
+        .arg(&main_core_path)
+        .output()
+        .expect("failed to run erlc");
+    assert!(
+        erlc.status.success(),
+        "erlc failed on main:\n{main_core}\nstderr: {}",
+        String::from_utf8_lossy(&erlc.stderr)
+    );
+
+    compile_evidence_bridge_into(&dir);
+
+    let run = std::process::Command::new("erl")
+        .arg("-noshell")
+        .arg("-pa")
+        .arg(&dir)
+        .arg("-eval")
+        .arg("io:format(\"~s|~s~n\", [main:run_fail(unit), main:run_ok(unit)]), init:stop().")
+        .output()
+        .expect("failed to run erl");
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(
+        run.status.success(),
+        "erl failed:\nstderr: {}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&run.stdout);
+    assert!(
+        stdout.contains("err-good|ok-good"),
+        "expected 'err-good|ok-good', got: {stdout}"
+    );
+}
+
+/// Regression: same chain as the test above, but the result is bound via
+/// `let v = ...` inside a block before being returned. The let-RHS dispatch
+/// must recognize qualified effectful calls (`Lib.f (Lib.g b)`), not just
+/// Var-headed calls. Otherwise the rest of the block is not threaded as the
+/// inner call's `_ReturnK` and an aborting handler's error tuple gets bound
+/// to `v` and then wrapped as `Ok`.
+#[test]
+fn cross_module_nested_effectful_calls_via_let_abort_correctly() {
+    let lib_src = std::fs::read_to_string(fixtures_root().join("EffectChain.saga")).unwrap();
+    let main_src = "
+module Main
+import Std.Fail (Fail)
+import EffectChain (Box, Failure)
+
+handler local_to_result for Fail a {
+  fail e = Err e
+  return v = Ok v
+}
+
+fun via_let : Box -> Int needs {Fail Failure}
+via_let b = {
+  let v = EffectChain.unbox_int (EffectChain.unwrap b)
+  v
+}
+
+pub fun run_fail : Unit -> String
+run_fail () = {
+  let r = via_let (EffectChain.Box (EffectChain.IS \"oops\")) with local_to_result
+  case r {
+    Ok _ -> \"ok-bug\"
+    Err _ -> \"err-good\"
+  }
+}
+
+pub fun run_ok : Unit -> String
+run_ok () = {
+  let r = via_let (EffectChain.Box (EffectChain.II 7)) with local_to_result
+  case r {
+    Ok _ -> \"ok-good\"
+    Err _ -> \"err-bug\"
+  }
+}
+";
+    let mut checker = make_project_checker();
+    let main_program = typecheck_source(main_src, &mut checker);
+
+    let lib_core = emit_project_module(&lib_src, "effectchain", &checker);
+    let main_core = emit_from_program(&main_program, "main", &checker);
+
+    let dir = assert_erlc_compiles(&lib_core, "effectchain");
+    let main_core_path = dir.join("main.core");
+    std::fs::write(&main_core_path, &main_core).unwrap();
+    let erlc = std::process::Command::new("erlc")
+        .arg("-o")
+        .arg(&dir)
+        .arg(&main_core_path)
+        .output()
+        .expect("failed to run erlc");
+    assert!(
+        erlc.status.success(),
+        "erlc failed on main:\n{main_core}\nstderr: {}",
+        String::from_utf8_lossy(&erlc.stderr)
+    );
+
+    compile_evidence_bridge_into(&dir);
+
+    let run = std::process::Command::new("erl")
+        .arg("-noshell")
+        .arg("-pa")
+        .arg(&dir)
+        .arg("-eval")
+        .arg("io:format(\"~s|~s~n\", [main:run_fail(unit), main:run_ok(unit)]), init:stop().")
+        .output()
+        .expect("failed to run erl");
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(
+        run.status.success(),
+        "erl failed:\nstderr: {}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&run.stdout);
+    assert!(
+        stdout.contains("err-good|ok-good"),
+        "expected 'err-good|ok-good', got: {stdout}"
+    );
+}
+
+/// Regression: an effectful cross-module call chain used as a record-literal
+/// field value. The record-literal lowering must CPS-chain effectful field
+/// expressions, otherwise an aborting handler's `{error, _}` tuple gets bound
+/// into the record slot and the outer return clause wraps the whole record
+/// as `Ok`.
+#[test]
+fn cross_module_nested_effectful_calls_in_record_field_abort_correctly() {
+    let lib_src = std::fs::read_to_string(fixtures_root().join("EffectChain.saga")).unwrap();
+    let main_src = "
+module Main
+import Std.Fail (Fail)
+import EffectChain (Box, Failure)
+
+handler local_to_result for Fail a {
+  fail e = Err e
+  return v = Ok v
+}
+
+record Wrap { x: Int }
+
+fun in_record : Box -> Wrap needs {Fail Failure}
+in_record b = Wrap { x: EffectChain.unbox_int (EffectChain.unwrap b) }
+
+pub fun run_fail : Unit -> String
+run_fail () = {
+  let r = in_record (EffectChain.Box (EffectChain.IS \"oops\")) with local_to_result
+  case r {
+    Ok _ -> \"ok-bug\"
+    Err _ -> \"err-good\"
+  }
+}
+
+pub fun run_ok : Unit -> String
+run_ok () = {
+  let r = in_record (EffectChain.Box (EffectChain.II 7)) with local_to_result
+  case r {
+    Ok _ -> \"ok-good\"
+    Err _ -> \"err-bug\"
+  }
+}
+";
+    let mut checker = make_project_checker();
+    let main_program = typecheck_source(main_src, &mut checker);
+
+    let lib_core = emit_project_module(&lib_src, "effectchain", &checker);
+    let main_core = emit_from_program(&main_program, "main", &checker);
+
+    let dir = assert_erlc_compiles(&lib_core, "effectchain");
+    let main_core_path = dir.join("main.core");
+    std::fs::write(&main_core_path, &main_core).unwrap();
+    let erlc = std::process::Command::new("erlc")
+        .arg("-o")
+        .arg(&dir)
+        .arg(&main_core_path)
+        .output()
+        .expect("failed to run erlc");
+    assert!(
+        erlc.status.success(),
+        "erlc failed on main:\n{main_core}\nstderr: {}",
+        String::from_utf8_lossy(&erlc.stderr)
+    );
+
+    compile_evidence_bridge_into(&dir);
+
+    let run = std::process::Command::new("erl")
+        .arg("-noshell")
+        .arg("-pa")
+        .arg(&dir)
+        .arg("-eval")
+        .arg("io:format(\"~s|~s~n\", [main:run_fail(unit), main:run_ok(unit)]), init:stop().")
+        .output()
+        .expect("failed to run erl");
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(
+        run.status.success(),
+        "erl failed:\nstderr: {}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&run.stdout);
+    assert!(
+        stdout.contains("err-good|ok-good"),
+        "expected 'err-good|ok-good', got: {stdout}"
+    );
+}
+
+/// Regression: passing a bare cross-module effectful function reference
+/// (`EffectChain.unbox_int`) as an argument to a higher-order cross-module
+/// function. The bare reference is a *value*, not a call — the lowerer's
+/// effectful-call predicate must not classify it as a call to be CPS-chained.
+/// Previously, the partial-application detection swallowed the outer call
+/// entirely and the lambda body returned an eta-wrapper instead of invoking
+/// the HOF, producing a closure where an `Ok`/`Err` tuple was expected.
+#[test]
+fn cross_module_effectful_fun_ref_passed_to_hof() {
+    let lib_src = std::fs::read_to_string(fixtures_root().join("EffectChain.saga")).unwrap();
+    let main_src = "
+module Main
+import Std.Fail (Fail)
+import EffectChain (Box, Failure)
+
+pub fun run_direct : Unit -> String
+run_direct () = {
+  let r = EffectChain.run_decoder EffectChain.unbox_int (EffectChain.Box (EffectChain.II 7))
+  case r {
+    Ok _ -> \"direct-ok\"
+    Err _ -> \"direct-err\"
+  }
+}
+
+pub fun run_via_hof : Unit -> String
+run_via_hof () = {
+  let input = EffectChain.Box (EffectChain.II 7)
+  let r = EffectChain.run_decoder (fun b -> EffectChain.map_via EffectChain.unbox_int b) input
+  case r {
+    Ok _ -> \"hof-ok\"
+    Err _ -> \"hof-err\"
+  }
+}
+";
+    let mut checker = make_project_checker();
+    let main_program = typecheck_source(main_src, &mut checker);
+
+    let lib_core = emit_project_module(&lib_src, "effectchain", &checker);
+    let main_core = emit_from_program(&main_program, "main", &checker);
+
+    let dir = assert_erlc_compiles(&lib_core, "effectchain");
+    let main_core_path = dir.join("main.core");
+    std::fs::write(&main_core_path, &main_core).unwrap();
+    let erlc = std::process::Command::new("erlc")
+        .arg("-o")
+        .arg(&dir)
+        .arg(&main_core_path)
+        .output()
+        .expect("failed to run erlc");
+    assert!(
+        erlc.status.success(),
+        "erlc failed on main:\n{main_core}\nstderr: {}",
+        String::from_utf8_lossy(&erlc.stderr)
+    );
+
+    compile_evidence_bridge_into(&dir);
+
+    let run = std::process::Command::new("erl")
+        .arg("-noshell")
+        .arg("-pa")
+        .arg(&dir)
+        .arg("-eval")
+        .arg(
+            "io:format(\"~s|~s~n\", [main:run_direct(unit), main:run_via_hof(unit)]), init:stop().",
+        )
+        .output()
+        .expect("failed to run erl");
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(
+        run.status.success(),
+        "erl failed:\nstderr: {}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&run.stdout);
+    assert!(
+        stdout.contains("direct-ok|hof-ok"),
+        "expected 'direct-ok|hof-ok', got: {stdout}"
+    );
+}
+
+/// Regression: a Main-defined effectful function passed as a callback to a
+/// cross-module HOF. The HOF (`EffectChain.at`) calls its callback in
+/// raw-CPS shape (`decoder(arg, H, K)`). The function-value reference for the
+/// callback must therefore be the raw CPS-expanded `FunRef` / `make_fun`,
+/// not an eta-wrapper that captures handlers in scope and supplies an
+/// identity continuation. Previously, local function references emitted such
+/// a wrapper while cross-module references emitted `make_fun`, causing the
+/// callback to be invoked with the wrong arity (3 vs 1) and crashing.
+#[test]
+fn cross_module_hof_callback_local_and_imported_match_arity() {
+    let lib_src = std::fs::read_to_string(fixtures_root().join("EffectChain.saga")).unwrap();
+    let main_src = "
+module Main
+import Std.Fail (Fail)
+import EffectChain (Box, Failure)
+
+fun custom : Box -> Int needs {Fail Failure}
+custom b = EffectChain.unbox_int b
+
+pub fun via_imported : Unit -> String
+via_imported () = {
+  let input = EffectChain.Box (EffectChain.II 7)
+  let r = EffectChain.run_decoder (fun b -> EffectChain.at \"x\" EffectChain.unbox_int b) input
+  case r {
+    Ok _ -> \"imp-ok\"
+    Err _ -> \"imp-err\"
+  }
+}
+
+pub fun via_local : Unit -> String
+via_local () = {
+  let input = EffectChain.Box (EffectChain.II 7)
+  let r = EffectChain.run_decoder (fun b -> EffectChain.at \"x\" custom b) input
+  case r {
+    Ok _ -> \"loc-ok\"
+    Err _ -> \"loc-err\"
+  }
+}
+";
+    let mut checker = make_project_checker();
+    let main_program = typecheck_source(main_src, &mut checker);
+
+    let lib_core = emit_project_module(&lib_src, "effectchain", &checker);
+    let main_core = emit_from_program(&main_program, "main", &checker);
+
+    let dir = assert_erlc_compiles(&lib_core, "effectchain");
+    let main_core_path = dir.join("main.core");
+    std::fs::write(&main_core_path, &main_core).unwrap();
+    let erlc = std::process::Command::new("erlc")
+        .arg("-o")
+        .arg(&dir)
+        .arg(&main_core_path)
+        .output()
+        .expect("failed to run erlc");
+    assert!(
+        erlc.status.success(),
+        "erlc failed on main:\n{main_core}\nstderr: {}",
+        String::from_utf8_lossy(&erlc.stderr)
+    );
+
+    compile_evidence_bridge_into(&dir);
+
+    let run = std::process::Command::new("erl")
+        .arg("-noshell")
+        .arg("-pa")
+        .arg(&dir)
+        .arg("-eval")
+        .arg(
+            "io:format(\"~s|~s~n\", [main:via_imported(unit), main:via_local(unit)]), init:stop().",
+        )
+        .output()
+        .expect("failed to run erl");
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(
+        run.status.success(),
+        "erl failed:\nstderr: {}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&run.stdout);
+    assert!(
+        stdout.contains("imp-ok|loc-ok"),
+        "expected 'imp-ok|loc-ok', got: {stdout}"
     );
 }
 
@@ -1015,6 +1532,67 @@ fn local_dict_names_are_module_qualified() {
         !out.contains("'__dict_Show_Animal'") && !out.contains("'__dict_Std_Base_Show_Animal'"),
         "dict name should be module-qualified\n{out}"
     );
+}
+
+#[test]
+fn bare_method_dispatches_via_resolved_trait_when_imports_collide() {
+    // import A (Foo); import B (b_helper) → only A.Foo is bare-visible.
+    // Bare `pp 1` must dispatch to A.Foo's dict, not B.Bar's, regardless of
+    // HashMap iteration order in elaborate.rs::trait_methods.
+    let a_src = "module A\n\npub trait Foo a {\n  fun pp : a -> String\n}\n";
+    let b_src = "module B\n\npub trait Bar a {\n  fun pp : a -> String\n}\n\npub fun b_helper : Unit -> Unit\nb_helper () = ()\n";
+    let main_src = "module Main\n\nimport A (Foo)\nimport B (b_helper)\n\nimpl Foo for Int { pp x = \"from-A\" }\nimpl B.Bar for Int { pp x = \"from-B\" }\n\nmain () = pp 1\n";
+
+    with_temp_project_files(
+        &[("lib/A.saga", a_src), ("lib/B.saga", b_src)],
+        main_src,
+        |checker, program| {
+            let out = emit_from_program(program, "main", checker);
+            // The `pp 1` call site inside main/1 must dispatch via the
+            // A.Foo dict, not B.Bar's. (Both dict constructors are emitted
+            // as top-level functions because both impls exist; what matters
+            // is which one main/1 applies.)
+            let foo_dict = typechecker::make_dict_name("A.Foo", &[], "main", "Std.Int.Int");
+            let bar_dict = typechecker::make_dict_name("B.Bar", &[], "main", "Std.Int.Int");
+            let main_body_start = out.find("'main'/1 =").expect("missing main/1");
+            let main_body = &out[main_body_start..];
+            let main_body_end = main_body
+                .find("\n'")
+                .map(|i| main_body_start + i)
+                .unwrap_or(out.len());
+            let main_body_slice = &out[main_body_start..main_body_end];
+            assert!(
+                main_body_slice.contains(&format!("'{foo_dict}'")),
+                "main/1 should apply the A.Foo dict\n{main_body_slice}"
+            );
+            assert!(
+                !main_body_slice.contains(&format!("'{bar_dict}'")),
+                "main/1 must not apply the B.Bar dict (only A.Foo is exposed)\n{main_body_slice}"
+            );
+        },
+    );
+}
+
+#[test]
+fn qualified_trait_method_call_lowers_to_dict_dispatch() {
+    // Calling a trait method via its fully qualified name (Module.Trait.method)
+    // must produce a dictionary method access the same way bare calls do.
+    // Without ResolvedTraitMethod recorded for QualifiedName nodes, the
+    // elaborator would leave it as a regular Var lookup and the lowerer
+    // would emit an unresolved variable reference.
+    let a_src = "module A\n\npub trait Foo a {\n  fun pp : a -> String\n}\n";
+    let main_src = "module Main\n\nimport A\n\nimpl A.Foo for Int { pp x = \"qualified\" }\n\nmain () = A.Foo.pp 1\n";
+
+    with_temp_project_files(&[("lib/A.saga", a_src)], main_src, |checker, program| {
+        let out = emit_from_program(program, "main", checker);
+        let foo_dict = typechecker::make_dict_name("A.Foo", &[], "main", "Std.Int.Int");
+        assert_contains(&out, &format!("'{foo_dict}'"));
+        assert!(
+            !out.contains("'A.Foo.pp'") && !out.contains("apply 'A.Foo.pp'"),
+            "qualified trait method should not lower as a raw name reference\n{out}"
+        );
+        assert_erlc_compiles(&out, "main");
+    });
 }
 
 // ---- Constructor atom mangling ----
@@ -1263,6 +1841,7 @@ run () = reveal (make_token \"hello\")
     );
 
     // Actually run it on the BEAM
+    compile_evidence_bridge_into(&dir);
     let run_output = std::process::Command::new("erl")
         .arg("-noshell")
         .arg("-pa")
@@ -1335,7 +1914,7 @@ fn handler_not_exposed_requires_qualified_with() {
     // For now, just verify the qualified handler lookup works.
     let src = "
 module Main
-import Logger (greet)
+import Logger (Log, greet)
 
 
 main () = greet \"world\" with {
@@ -1394,10 +1973,10 @@ main () = Clock.now! () with {system_clock}
 
 #[test]
 fn cross_module_effect_inline_handler_works() {
-    // Inline handler with bare op names should match imported effect ops
+    // Inline handler with bare op names should match exposed imported effect ops
     let src = "
 module Main
-import Logger
+import Logger (Log)
 
 
 main () = Logger.greet \"world\" with {
@@ -1415,7 +1994,7 @@ fn cross_module_effect_exposed_inline_handler() {
     // Exposed import + inline handler
     let src = "
 module Main
-import Logger (greet)
+import Logger (Log, greet)
 
 
 main () = greet \"world\" with {
@@ -1496,4 +2075,399 @@ pub handler my_store for Store {
         // The case match at the call site should also use 'ok'/'error'
         assert_contains(&out, "'ok'");
     });
+}
+
+/// Regression: `let g = factory_call; g x` shape — the let-RHS evaluates to
+/// an effectful function value (here, a partial application of the cross-
+/// module HOF `EffectChain.at`). The binder `g` is then an in-scope
+/// effectful variable; calling `g x` must thread handlers and `_ReturnK`
+/// like any other saturated effectful call so an aborting handler skips the
+/// surrounding block instead of letting the abort tuple fall through.
+#[test]
+fn effectful_var_call_aborts_correctly() {
+    let lib_src = std::fs::read_to_string(fixtures_root().join("EffectChain.saga")).unwrap();
+    let main_src = "
+module Main
+import Std.Fail (Fail)
+import EffectChain (Box, Failure)
+
+handler local_to_result for Fail a {
+  fail e = Err e
+  return v = Ok v
+}
+
+fun decode : Box -> Int needs {Fail Failure}
+decode b = {
+  let g = EffectChain.at \"field\" EffectChain.unbox_int
+  g b
+}
+
+pub fun run_fail : Unit -> String
+run_fail () = {
+  let r = decode (EffectChain.Box (EffectChain.IS \"oops\")) with local_to_result
+  case r {
+    Ok _ -> \"ok-bug\"
+    Err _ -> \"err-good\"
+  }
+}
+
+pub fun run_ok : Unit -> String
+run_ok () = {
+  let r = decode (EffectChain.Box (EffectChain.II 42)) with local_to_result
+  case r {
+    Ok _ -> \"ok-good\"
+    Err _ -> \"err-bug\"
+  }
+}
+";
+    let mut checker = make_project_checker();
+    let main_program = typecheck_source(main_src, &mut checker);
+
+    let lib_core = emit_project_module(&lib_src, "effectchain", &checker);
+    let main_core = emit_from_program(&main_program, "main", &checker);
+
+    let dir = assert_erlc_compiles(&lib_core, "effectchain");
+    let main_core_path = dir.join("main.core");
+    std::fs::write(&main_core_path, &main_core).unwrap();
+    let erlc = std::process::Command::new("erlc")
+        .arg("-o")
+        .arg(&dir)
+        .arg(&main_core_path)
+        .output()
+        .expect("failed to run erlc");
+    assert!(
+        erlc.status.success(),
+        "erlc failed on main:\n{main_core}\nstderr: {}",
+        String::from_utf8_lossy(&erlc.stderr)
+    );
+
+    compile_evidence_bridge_into(&dir);
+
+    let run = std::process::Command::new("erl")
+        .arg("-noshell")
+        .arg("-pa")
+        .arg(&dir)
+        .arg("-eval")
+        .arg("io:format(\"~s|~s~n\", [main:run_fail(unit), main:run_ok(unit)]), init:stop().")
+        .output()
+        .expect("failed to run erl");
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(
+        run.status.success(),
+        "erl failed:\nstderr: {}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&run.stdout);
+    assert!(
+        stdout.contains("err-good|ok-good"),
+        "expected 'err-good|ok-good', got: {stdout}"
+    );
+}
+
+/// Regression: an eta-reduced reference to an effectful function bound to a
+/// local. `let g = Lib.f` (no application) followed by `g x` is the
+/// first-class-callback shape: the binder's type carries the effect row, so
+/// the call site must look up the effectful var and thread handlers.
+#[test]
+fn eta_reduced_effectful_lambda_aborts_correctly() {
+    let lib_src = std::fs::read_to_string(fixtures_root().join("EffectChain.saga")).unwrap();
+    let main_src = "
+module Main
+import Std.Fail (Fail)
+import EffectChain (Box, Failure)
+
+handler local_to_result for Fail a {
+  fail e = Err e
+  return v = Ok v
+}
+
+fun decode : Box -> Int needs {Fail Failure}
+decode b = {
+  let g = EffectChain.unbox_int
+  g b
+}
+
+pub fun run_fail : Unit -> String
+run_fail () = {
+  let r = decode (EffectChain.Box (EffectChain.IS \"oops\")) with local_to_result
+  case r {
+    Ok _ -> \"ok-bug\"
+    Err _ -> \"err-good\"
+  }
+}
+
+pub fun run_ok : Unit -> String
+run_ok () = {
+  let r = decode (EffectChain.Box (EffectChain.II 42)) with local_to_result
+  case r {
+    Ok _ -> \"ok-good\"
+    Err _ -> \"err-bug\"
+  }
+}
+";
+    let mut checker = make_project_checker();
+    let main_program = typecheck_source(main_src, &mut checker);
+
+    let lib_core = emit_project_module(&lib_src, "effectchain", &checker);
+    let main_core = emit_from_program(&main_program, "main", &checker);
+
+    let dir = assert_erlc_compiles(&lib_core, "effectchain");
+    let main_core_path = dir.join("main.core");
+    std::fs::write(&main_core_path, &main_core).unwrap();
+    let erlc = std::process::Command::new("erlc")
+        .arg("-o")
+        .arg(&dir)
+        .arg(&main_core_path)
+        .output()
+        .expect("failed to run erlc");
+    assert!(
+        erlc.status.success(),
+        "erlc failed on main:\n{main_core}\nstderr: {}",
+        String::from_utf8_lossy(&erlc.stderr)
+    );
+
+    compile_evidence_bridge_into(&dir);
+
+    let run = std::process::Command::new("erl")
+        .arg("-noshell")
+        .arg("-pa")
+        .arg(&dir)
+        .arg("-eval")
+        .arg("io:format(\"~s|~s~n\", [main:run_fail(unit), main:run_ok(unit)]), init:stop().")
+        .output()
+        .expect("failed to run erl");
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(
+        run.status.success(),
+        "erl failed:\nstderr: {}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&run.stdout);
+    assert!(
+        stdout.contains("err-good|ok-good"),
+        "expected 'err-good|ok-good', got: {stdout}"
+    );
+}
+
+// --- Codegen-side coverage for canonical-name auto-load ---
+//
+// These pin the codegen analogue of the typecheck-side rule:
+// loaded modules must be resolvable canonically without an explicit import,
+// and decls without a BEAM function (`@builtin`, `@inline val`) must intercept
+// at the use site for both bare AND qualified spellings.
+
+/// Qualified-form `Std.IO.Unsafe.print_stdout` is `@builtin`: it has no BEAM
+/// implementation. Lowering must inline it as `io:format`, *not* emit a call
+/// to `std_io_unsafe:print_stdout/1` (which would crash at runtime). The bare
+/// form has always inlined; this regression-tests the qualified path.
+#[test]
+fn qualified_call_to_builtin_inlines_as_io_format() {
+    let main = r#"main () = {
+  Std.IO.Unsafe.print_stdout "hi"
+}
+"#;
+    let out = with_temp_project_files(&[], main, |checker, program| {
+        emit_from_program(program, "_script", checker)
+    });
+    assert_contains(&out, "call 'io':'format'");
+    assert!(
+        !out.contains("'std_io_unsafe':'print_stdout'"),
+        "qualified call to @builtin must not emit a real BEAM call:\n{out}"
+    );
+}
+
+#[test]
+fn aliased_call_to_builtin_inlines_as_io_format() {
+    let main = r#"import Std.IO.Unsafe as U
+
+main () = {
+  U.print_stdout "hi"
+}
+"#;
+    let out = with_temp_project_files(&[], main, |checker, program| {
+        emit_from_program(program, "_script", checker)
+    });
+    assert_contains(&out, "call 'io':'format'");
+    assert!(
+        !out.contains("'std_io_unsafe':'print_stdout'"),
+        "aliased call to @builtin must not emit a real BEAM call:\n{out}"
+    );
+}
+
+#[test]
+fn user_defined_print_stdout_bare_is_not_hijacked_by_intrinsic() {
+    let main = r#"module Main
+
+fun print_stdout : String -> Unit
+print_stdout _ = ()
+
+main () = {
+  print_stdout "hi"
+}
+"#;
+    let out = with_temp_project_files(&[], main, |checker, program| {
+        emit_from_program(program, "main", checker)
+    });
+    assert!(
+        !out.contains("call 'io':'format'"),
+        "user-defined print_stdout must not lower as Std.IO.Unsafe.print_stdout:\n{out}"
+    );
+    assert_contains(&out, "'print_stdout'/1");
+}
+
+#[test]
+fn user_defined_dbg_bare_is_not_hijacked_by_intrinsic() {
+    let main = r#"module Main
+
+fun dbg : String -> String
+dbg value = value
+
+main () = dbg "hi"
+"#;
+    let out = with_temp_project_files(&[], main, |checker, program| {
+        emit_from_program(program, "main", checker)
+    });
+    assert!(
+        !out.contains("call 'io':'format'"),
+        "user-defined dbg must not lower as Std.IO.dbg:\n{out}"
+    );
+    assert_contains(&out, "'dbg'/2");
+}
+
+#[test]
+fn user_defined_print_stdout_qualified_is_not_hijacked_by_intrinsic() {
+    let lib = r#"module Lib
+
+pub fun print_stdout : String -> Unit
+print_stdout _ = ()
+"#;
+    let main = r#"module Main
+
+main () = {
+  Lib.print_stdout "hi"
+}
+"#;
+    let out = with_temp_project_files(&[("src/Lib.saga", lib)], main, |checker, program| {
+        emit_from_program(program, "main", checker)
+    });
+    assert!(
+        !out.contains("call 'io':'format'"),
+        "qualified user-defined print_stdout must not lower as intrinsic:\n{out}"
+    );
+    assert!(
+        out.contains("call 'lib':'print_stdout'") || out.contains("'lib', 'print_stdout'"),
+        "expected user-defined lib:print_stdout reference:\n{out}"
+    );
+}
+
+#[test]
+fn user_defined_catch_panic_bare_is_not_hijacked_by_intrinsic() {
+    let main = r#"module Main
+
+fun catch_panic : String -> String
+catch_panic value = value
+
+main () = catch_panic "hi"
+"#;
+    let out = with_temp_project_files(&[], main, |checker, program| {
+        emit_from_program(program, "main", checker)
+    });
+    assert!(
+        !out.contains("try"),
+        "user-defined catch_panic must not lower as Std.Process.catch_panic:\n{out}"
+    );
+    assert_contains(&out, "'catch_panic'/1");
+}
+
+#[test]
+fn qualified_std_process_catch_panic_lowers_as_intrinsic() {
+    let main = r#"module Main
+
+main () = Std.Process.catch_panic (fun () -> 42)
+"#;
+    let out = with_temp_project_files(&[], main, |checker, program| {
+        emit_from_program(program, "main", checker)
+    });
+    assert_contains(&out, "try");
+    assert!(
+        !out.contains("'std_process':'catch_panic'"),
+        "Std.Process.catch_panic must lower as intrinsic, not a BEAM call:\n{out}"
+    );
+}
+
+/// Cross-module qualified reference to an `@inline val` must substitute the
+/// RHS expression at the use site. No BEAM function is emitted for inline
+/// vals, so a direct call would fail at runtime (`undef`).
+#[test]
+fn qualified_inline_val_cross_module_substitutes_rhs() {
+    let lib = r#"module Lib
+
+@inline
+pub val answer = 123
+"#;
+    let main = r#"module Main
+
+main () = Lib.answer
+"#;
+    let out = with_temp_project_files(&[("src/Lib.saga", lib)], main, |checker, program| {
+        emit_from_program(program, "main", checker)
+    });
+    // Substitution should produce a literal 123 in main, with no call to lib:answer/0.
+    assert_contains(&out, "123");
+    assert!(
+        !out.contains("'lib':'answer'"),
+        "@inline val cross-module ref must not emit a BEAM call:\n{out}"
+    );
+}
+
+/// Cross-module inline vals must be lowered under the defining module's
+/// semantic context. `answer = base` used to lower `base` against Main's
+/// resolver/inline table and could emit a bad `lib:base/0` reference.
+#[test]
+fn qualified_inline_val_cross_module_resolves_sibling_ref_in_defining_module() {
+    let lib = r#"module Lib
+
+@inline
+pub val base = 123
+
+@inline
+pub val answer = base
+"#;
+    let main = r#"module Main
+
+main () = Lib.answer
+"#;
+    let out = with_temp_project_files(&[("src/Lib.saga", lib)], main, |checker, program| {
+        emit_from_program(program, "main", checker)
+    });
+    assert_contains(&out, "123");
+    assert!(
+        !out.contains("'lib':'base'") && !out.contains("'main':'base'"),
+        "@inline val sibling refs must be substituted in the defining module:\n{out}"
+    );
+}
+
+/// Project module referenced by canonical name without `import Lib` should
+/// codegen the same way as if it had been imported: a real BEAM call.
+/// This is the codegen counterpart to the auto-load typecheck test.
+#[test]
+fn qualified_call_to_project_module_lowers_without_explicit_import() {
+    let lib = r#"module Lib
+
+pub fun greet : (name: String) -> String
+greet name = name
+"#;
+    let main = r#"module Main
+
+main () = Lib.greet "world"
+"#;
+    let out = with_temp_project_files(&[("src/Lib.saga", lib)], main, |checker, program| {
+        emit_from_program(program, "main", checker)
+    });
+    // Either a direct call or a make_fun reference is fine — both require the
+    // canonical 'lib':'greet' identity to be wired through codegen.
+    assert!(
+        out.contains("call 'lib':'greet'") || out.contains("'lib', 'greet'"),
+        "expected canonical 'lib':'greet' reference in output:\n{out}"
+    );
 }

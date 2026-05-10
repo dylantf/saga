@@ -1,0 +1,53 @@
+#@ Regression test: dict-elaborated effectful trait method calls.
+#@
+#@ A trait method call elaborates to App(DictMethodAccess, args). When
+#@ the selected impl declares `needs`, the call must thread evidence
+#@ and a return continuation through the dict tuple's method slot —
+#@ before the fix, that path was unrecognized by the populator and
+#@ codegen panicked at the leaf op lookup with "no handler param".
+#@
+#@ Run from this directory: `saga run`. Expected output:
+#@   neg: Err "neg"
+#@   ok: Ok 10
+#@
+#@ See also the inline harness fixture
+#@ `dict_method_effectful_call_threads_evidence` in
+#@ tests/effect_property_tests.rs.
+module Main
+
+import Std.IO (console)
+import Std.Fail (Fail)
+
+pub trait Decoder a {
+  fun decode : a -> Int
+}
+
+pub type Box = Box Int
+
+impl Decoder for Box needs {Fail String} {
+  decode (Box n) = if n < 0 then fail! "neg" else n
+}
+
+pub handler to_result for Fail a {
+  fail e = Err e
+  return v = Ok v
+}
+
+#@ Outer effectful function. Its argument is `decode b`, a trait method
+#@ call that elaborates to DictMethodAccess and itself performs Fail.
+pub fun double : Int -> Int needs {Fail String}
+double n = n * 2
+
+pub fun run : Box -> Result Int String
+run b = double (decode b) with to_result
+
+main () = {
+  case run (Box (-1)) {
+    Ok n -> println $"neg: Ok {n}"
+    Err e -> println $"neg: Err \"{e}\""
+  }
+  case run (Box 5) {
+    Ok n -> println $"ok: Ok {n}"
+    Err e -> println $"ok: Err \"{e}\""
+  }
+} with console

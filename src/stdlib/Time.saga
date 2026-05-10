@@ -1,6 +1,8 @@
 #@ Monotonic time for measuring durations.
 module Std.Time
 
+import Std.Base (Show, Debug, Ord, Semigroup, Enum)
+
 #@ Returns the current monotonic time in milliseconds.
 #@ Useful for measuring elapsed time between two points.
 #@ The absolute value is meaningless -- only differences matter.

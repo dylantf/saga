@@ -1,6 +1,8 @@
 #@ File system operations through an algebraic effect.
 module Std.File
 
+import Std.Base (Show, Debug, Ord, Semigroup, Enum)
+
 #@ Errors that can occur during file operations.
 pub type FileError =
   | NotFound

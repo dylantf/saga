@@ -232,8 +232,8 @@ impl Checker {
                             .iter()
                             .map(|&id| (id, self.fresh_var()))
                             .collect();
-                        let fresh_param = self.replace_vars(param_ty, &mapping);
-                        let fresh_ret = self.replace_vars(ret_ty, &mapping);
+                        let fresh_param = Self::replace_vars(param_ty, &mapping);
+                        let fresh_ret = Self::replace_vars(ret_ty, &mapping);
                         self.unify_at(&fresh_param, &expr_ty, with_span)?;
 
                         for ((effect_name, param_idx), trait_constraints) in
@@ -281,7 +281,7 @@ impl Checker {
                                     args: entry
                                         .args
                                         .iter()
-                                        .map(|t| self.replace_vars(t, &mapping))
+                                        .map(|t| Self::replace_vars(t, &mapping))
                                         .collect(),
                                 })
                                 .collect(),
@@ -356,7 +356,8 @@ impl Checker {
                 for arm in handler.inline_arms() {
                     let resolved_qualifier = self
                         .resolution
-                        .handler_arm_qualifier(arm.id)
+                        .handler_arm(arm.id)
+                        .map(|resolved| resolved.effect.as_str())
                         .or(arm.qualifier.as_deref())
                         .map(|s| s.to_string());
                     let op_sig = self
@@ -429,7 +430,11 @@ impl Checker {
                 // Unused handler warning
                 let mut unused = Vec::new();
                 for arm in handler.inline_arms() {
-                    if let Some(eff) = self.effect_for_op(&arm.op_name, arm.qualifier.as_deref())
+                    if let Some(eff) = self
+                        .resolution
+                        .handler_arm(arm.id)
+                        .map(|resolved| resolved.effect.clone())
+                        .or_else(|| self.effect_for_op(&arm.op_name, arm.qualifier.as_deref()))
                         && !handled_entries.iter().any(|e| e.name == eff)
                     {
                         unused.push(eff);

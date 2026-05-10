@@ -9,7 +9,7 @@ use std::time::Instant;
 use super::color;
 use super::diagnostics::{byte_offset_to_line_col, print_tc_diagnostic};
 
-const BUILD_HASH: &str = env!("DYLANG_BUILD_HASH");
+const BUILD_HASH: &str = env!("SAGA_BUILD_HASH");
 /// Compute a hash of the embedded stdlib sources and bridge files.
 fn stdlib_content_hash() -> String {
     use std::hash::{Hash, Hasher};
@@ -333,6 +333,10 @@ pub fn compile_std_modules(
 fn stdlib_bridge_files() -> Vec<(&'static str, &'static str)> {
     vec![
         (
+            "std_evidence_bridge.erl",
+            include_str!("../stdlib/evidence.bridge.erl"),
+        ),
+        (
             "std_file_bridge.erl",
             include_str!("../stdlib/File.bridge.erl"),
         ),
@@ -540,9 +544,7 @@ pub fn ensure_stdlib_cache(build_root: &Path) -> PathBuf {
         .map(|e| e.path())
         .collect();
 
-    for file in &compilable_files {
-        run_erlc_file(file, &temp_dir);
-    }
+    run_erlc_batch(&compilable_files, &temp_dir);
 
     // Clean up source files — only keep .beam
     // for file in &compilable_files {
@@ -621,38 +623,51 @@ fn copy_bridges_from_dir(dir: &Path, build_dir: &Path, count: &mut usize) -> Res
     Ok(())
 }
 
-/// Compile a single .core or .erl file with erlc.
-pub fn run_erlc_file(core_file: &Path, build_dir: &Path) {
+/// Max files per erlc invocation. Chunked to stay well under OS ARG_MAX
+/// (~2MB on Linux); at ~60 bytes/path this leaves ample headroom.
+const ERLC_BATCH_CHUNK: usize = 1000;
+
+/// Compile a batch of .core/.erl files with as few erlc invocations as possible.
+/// One BEAM startup is amortized across each chunk.
+pub fn run_erlc_batch(files: &[PathBuf], out_dir: &Path) {
+    for chunk in files.chunks(ERLC_BATCH_CHUNK) {
+        run_erlc_chunk(chunk, out_dir);
+    }
+}
+
+fn run_erlc_chunk(files: &[PathBuf], out_dir: &Path) {
+    if files.is_empty() {
+        return;
+    }
     let verbose = super::is_verbose();
     let output = std::process::Command::new("erlc")
         .arg("-o")
-        .arg(build_dir)
-        .arg(core_file)
+        .arg(out_dir)
+        .args(files)
         .output()
         .unwrap_or_else(|e| {
             eprintln!("Failed to run erlc: {}", e);
             std::process::exit(1);
         });
 
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
     if !output.status.success() {
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let stderr = String::from_utf8_lossy(&output.stderr);
         if !stdout.is_empty() {
             eprintln!("{}", stdout.trim());
         }
         if !stderr.is_empty() {
             eprintln!("{}", stderr.trim());
         }
-        eprintln!("erlc failed on {}", core_file.display());
+        eprintln!("erlc failed");
         std::process::exit(1);
     }
 
     if verbose {
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let stderr = String::from_utf8_lossy(&output.stderr);
         let has_output = !stdout.trim().is_empty() || !stderr.trim().is_empty();
         if has_output {
-            eprintln!("  erlc {}", core_file.display());
+            eprintln!("  erlc ({} files)", files.len());
         }
         if !stdout.is_empty() {
             eprintln!("{}", stdout.trim());
@@ -676,9 +691,7 @@ pub fn run_erlc(build_dir: &Path, build_start: Instant) {
         .map(|e| e.path())
         .collect();
 
-    for file in &compilable_files {
-        run_erlc_file(file, build_dir);
-    }
+    run_erlc_batch(&compilable_files, build_dir);
 
     let elapsed = build_start.elapsed();
     eprintln!(
@@ -759,7 +772,6 @@ pub fn exec_erl_with_timeout(
 pub struct ProjectBuild {
     pub build_dir: PathBuf,
     pub stdlib_dir: PathBuf,
-    pub compiled_modules: HashMap<String, codegen::CompiledModule>,
     pub extra_ebin_dirs: Vec<PathBuf>,
 }
 
@@ -972,6 +984,7 @@ pub fn build_project_ext(
                 elaborated: normalized,
                 resolution,
                 front_resolution: mod_result.resolution.clone(),
+                call_effects: codegen::call_effects::CallEffectMap::new(),
             },
         );
     }
@@ -987,6 +1000,7 @@ pub fn build_project_ext(
                 elaborated: main_elaborated,
                 resolution: codegen::resolve::ResolutionMap::new(),
                 front_resolution: result.resolution.clone(),
+                call_effects: codegen::call_effects::CallEffectMap::new(),
             },
         );
         let source_file = main_source
@@ -1080,7 +1094,6 @@ pub fn build_project_ext(
     ProjectBuild {
         build_dir,
         stdlib_dir,
-        compiled_modules,
         extra_ebin_dirs,
     }
 }
@@ -1148,6 +1161,7 @@ pub fn build_script(file: &str, profile: &str) -> ScriptBuild {
             elaborated,
             resolution: codegen::resolve::ResolutionMap::new(),
             front_resolution: result.resolution.clone(),
+            call_effects: codegen::call_effects::CallEffectMap::new(),
         },
     );
 

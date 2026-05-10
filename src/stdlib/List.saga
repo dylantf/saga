@@ -1,6 +1,8 @@
 #@ Operations on linked lists: transforming, searching, sorting, and more.
 module Std.List
 
+import Std.Base (Show, Debug, Ord, Semigroup, Enum)
+
 import Std.Base (Ordering)
 import Std.Maybe (Maybe)
 

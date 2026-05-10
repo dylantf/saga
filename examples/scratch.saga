@@ -1,4 +1,4 @@
-import Std.Env (system_env)
+import Std.Env (Env, system_env)
 import Std.IO (console, println)
 
 main () = {
