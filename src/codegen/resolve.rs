@@ -454,7 +454,7 @@ pub fn resolve_intrinsics(
 ) -> IntrinsicMap {
     let mut canonical_intrinsics: HashMap<String, crate::intrinsics::IntrinsicId> = HashMap::new();
     for (module_name, info) in codegen_info {
-        for (name, intrinsic) in &info.builtins {
+        for (name, intrinsic) in &info.intrinsic_exports {
             canonical_intrinsics.insert(format!("{module_name}.{name}"), *intrinsic);
         }
     }

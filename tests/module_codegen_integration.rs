@@ -2316,6 +2316,25 @@ main () = {
 }
 
 #[test]
+fn user_defined_dbg_bare_is_not_hijacked_by_intrinsic() {
+    let main = r#"module Main
+
+fun dbg : String -> String
+dbg value = value
+
+main () = dbg "hi"
+"#;
+    let out = with_temp_project_files(&[], main, |checker, program| {
+        emit_from_program(program, "main", checker)
+    });
+    assert!(
+        !out.contains("call 'io':'format'"),
+        "user-defined dbg must not lower as Std.IO.dbg:\n{out}"
+    );
+    assert_contains(&out, "'dbg'/2");
+}
+
+#[test]
 fn user_defined_print_stdout_qualified_is_not_hijacked_by_intrinsic() {
     let lib = r#"module Lib
 

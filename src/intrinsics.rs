@@ -15,7 +15,3 @@ pub fn intrinsic_id_for_canonical_name(name: &str) -> Option<IntrinsicId> {
         _ => None,
     }
 }
-
-pub fn intrinsic_id_for_export(module_name: &str, export_name: &str) -> Option<IntrinsicId> {
-    intrinsic_id_for_canonical_name(&format!("{module_name}.{export_name}"))
-}
