@@ -24,7 +24,7 @@ fn main() {
         git_hash
     };
 
-    println!("cargo:rustc-env=DYLANG_BUILD_HASH={build_hash}");
+    println!("cargo:rustc-env=SAGA_BUILD_HASH={build_hash}");
 
     // Tell cargo to rerun when stdlib files change (so include_str! picks up changes)
     let mut stdlib_files: Vec<_> = std::fs::read_dir("src/stdlib")
@@ -40,7 +40,7 @@ fn main() {
     for path in &stdlib_files {
         println!("cargo:rerun-if-changed={}", path.display());
     }
-    // Compiler changes also need to invalidate DYLANG_BUILD_HASH so stdlib and
+    // Compiler changes also need to invalidate SAGA_BUILD_HASH so stdlib and
     // project caches are not reused across incompatible lowering/codegen builds.
     println!("cargo:rerun-if-changed=src");
 }

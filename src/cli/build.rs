@@ -9,7 +9,7 @@ use std::time::Instant;
 use super::color;
 use super::diagnostics::{byte_offset_to_line_col, print_tc_diagnostic};
 
-const BUILD_HASH: &str = env!("DYLANG_BUILD_HASH");
+const BUILD_HASH: &str = env!("SAGA_BUILD_HASH");
 /// Compute a hash of the embedded stdlib sources and bridge files.
 fn stdlib_content_hash() -> String {
     use std::hash::{Hash, Hasher};

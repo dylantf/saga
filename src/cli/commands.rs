@@ -8,7 +8,7 @@ use super::build::*;
 use super::color;
 
 fn test_timeout() -> Duration {
-    let secs = std::env::var("DYLANG_TEST_TIMEOUT_SECS")
+    let secs = std::env::var("SAGA_TEST_TIMEOUT_SECS")
         .ok()
         .and_then(|s| s.parse::<u64>().ok())
         .filter(|&s| s > 0)
