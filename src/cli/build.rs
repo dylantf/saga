@@ -578,16 +578,25 @@ pub fn ensure_stdlib_cache(build_root: &Path) -> PathBuf {
 }
 
 /// Scan project and dependency directories for .erl bridge files and copy them to the build directory.
+/// Only descends into the conventional source roots (`src/`, `lib/`, `tests/`), mirroring the module
+/// scanner. Anything outside those is invisible by definition, which keeps us from tripping over
+/// unrelated `.erl` files in places like `.direnv` or `.git`.
 fn copy_project_bridges(roots: &[&Path], build_dir: &Path) {
     let mut count = 0;
     for root in roots {
-        if let Err(e) = copy_bridges_from_dir(root, build_dir, &mut count) {
-            eprintln!(
-                "Error scanning for bridge files in {}: {}",
-                root.display(),
-                e
-            );
-            std::process::exit(1);
+        for source_dir in ["src", "lib", "tests"] {
+            let dir = root.join(source_dir);
+            if !dir.is_dir() {
+                continue;
+            }
+            if let Err(e) = copy_bridges_from_dir(&dir, build_dir, &mut count) {
+                eprintln!(
+                    "Error scanning for bridge files in {}: {}",
+                    dir.display(),
+                    e
+                );
+                std::process::exit(1);
+            }
         }
     }
     // Bridge file count is an internal detail -- don't show to user.
@@ -599,12 +608,6 @@ fn copy_bridges_from_dir(dir: &Path, build_dir: &Path, count: &mut usize) -> Res
         let entry = entry.map_err(|e| format!("read_dir error: {}", e))?;
         let path = entry.path();
         if path.is_dir() {
-            if path
-                .file_name()
-                .is_some_and(|n| n == "_build" || n == "tests" || n == "deps")
-            {
-                continue;
-            }
             copy_bridges_from_dir(&path, build_dir, count)?;
         } else if path.extension().is_some_and(|ext| ext == "erl") {
             let filename = path.file_name().unwrap();
