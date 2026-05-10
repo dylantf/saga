@@ -5779,3 +5779,112 @@ fn phantom_trait_method_wrong_impl_type_args_fails() {
     );
     assert!(result.is_err());
 }
+
+// --- Auto-load of canonical qualified-name references ---
+//
+// Together these pin down the contract documented in
+// `docs/planning/plans/auto-load-qualified-modules.md`:
+//
+//   "Canonical is global; imports control aliases."
+//
+// Auto-loading a module on first canonical reference must register canonical
+// keys (so `Module.name` resolves) without injecting any bare/alias entries
+// into scope (so `name`/`Alias.name` still require an explicit `import`).
+
+#[test]
+fn auto_load_stdlib_qualified_typechecks_without_explicit_import() {
+    // Std.IO.Unsafe is *not* in the prelude, so this used to fail with
+    // "unknown qualified name". With auto-load it should typecheck.
+    check(
+        "main () = {\n\
+         Std.IO.Unsafe.print_stdout \"hello\"\n\
+         }",
+    )
+    .expect("Std.IO.Unsafe.print_stdout must resolve via auto-load");
+}
+
+#[test]
+fn auto_load_project_module_qualified_typechecks_without_explicit_import() {
+    let lib = "module Lib\n\
+               pub fun foo : Unit -> Unit\n\
+               foo () = ()\n";
+    let main = "module Main\n\
+                main () = Lib.foo ()\n";
+    check_with_project_files(&[("src/Lib.saga", lib)], main)
+        .expect("Lib.foo must resolve via auto-load when Lib is in the project module map");
+}
+
+#[test]
+fn auto_load_does_not_inject_alias_prefix_into_scope() {
+    // Pinned-down version of the scope-leak prevention. After a canonical
+    // reference loads Std.IO.Unsafe, the alias-prefix form `Unsafe.print_stdout`
+    // must NOT become resolvable — that would require an explicit
+    // `import Std.IO.Unsafe` to merge the alias into scope_map.
+    let result = check(
+        "main () = {\n\
+         let _ = Std.IO.Unsafe.print_stdout \"first\"\n\
+         Unsafe.print_stdout \"second\"\n\
+         }",
+    );
+    assert!(
+        result.is_err(),
+        "alias-prefix form 'Unsafe.print_stdout' must not resolve without an explicit import"
+    );
+}
+
+#[test]
+fn auto_load_does_not_inject_bare_name_into_scope() {
+    // Same protection as the alias case but stricter: bare `print_stdout` must
+    // not become resolvable just because a canonical sibling reference loaded
+    // the module. The user must `import Std.IO.Unsafe (print_stdout)` to expose
+    // the bare form.
+    let result = check(
+        "main () = {\n\
+         let _ = Std.IO.Unsafe.print_stdout \"first\"\n\
+         print_stdout \"second\"\n\
+         }",
+    );
+    assert!(
+        result.is_err(),
+        "bare 'print_stdout' must not resolve without an exposing import"
+    );
+}
+
+#[test]
+fn auto_load_skips_unknown_module_and_emits_existing_diagnostic() {
+    // Auto-load should silently skip module names that aren't in the builtin
+    // set or project module map; resolve/infer then emit the existing
+    // diagnostic so error messages are unchanged for typos.
+    let err = check(
+        "main () = {\n\
+         Bogus.Module.foo ()\n\
+         }",
+    )
+    .err()
+    .expect("unknown qualified name must still error");
+    assert!(
+        err.message.contains("unknown qualified name") || err.message.contains("Bogus.Module.foo"),
+        "expected 'unknown qualified name' diagnostic, got: {}",
+        err.message
+    );
+}
+
+#[test]
+fn auto_load_typo_does_not_block_real_canonical_reference_in_same_file() {
+    // Mixed: a real auto-loadable canonical ref alongside a typo. The auto-
+    // load step skipping the typo must not poison the real reference. The
+    // typo errors; the real ref typechecks.
+    let err = check(
+        "main () = {\n\
+         let _ = Std.IO.Unsafe.print_stdout \"real\"\n\
+         Bogus.Module.foo ()\n\
+         }",
+    )
+    .err()
+    .expect("Bogus.Module.foo must still error");
+    assert!(
+        !err.message.contains("Std.IO.Unsafe"),
+        "typo's diagnostic should be about Bogus.Module, not the real reference: {}",
+        err.message
+    );
+}

@@ -211,7 +211,7 @@ pub struct Lowerer<'a> {
     /// e.g. "NotFound" -> "std_file_NotFound", "Ok" -> "ok".
     /// Built by resolve::build_constructor_atoms before lowering.
     constructor_atoms: super::resolve::ConstructorAtoms,
-    /// Pre-resolved name resolution map: NodeId -> ResolvedName.
+    /// Pre-resolved name resolution map: NodeId -> ResolvedSymbol.
     /// Built by resolve::resolve_names before lowering.
     resolved: super::resolve::ResolutionMap,
     /// @inline val name -> lowered expression. Substituted at reference sites.
@@ -326,18 +326,17 @@ impl<'a> Lowerer<'a> {
     }
 
     fn resolved_fun_info(&self, node_id: crate::ast::NodeId, fallback: &str) -> Option<&FunInfo> {
-        use super::resolve::ResolvedName;
         match self.resolved.get(&node_id) {
-            // Local calls should use the current module's fully populated entry.
-            // A canonical entry can also exist from module metadata and may not
-            // include CPS-expanded handler/return parameters.
-            Some(ResolvedName::LocalFun { canonical_name, .. }) => self
+            Some(resolved)
+                if resolved.source_module.as_deref() == Some(&self.current_source_module) =>
+            {
+                self.fun_info
+                    .get(fallback)
+                    .or_else(|| self.fun_info.get(&resolved.canonical_name))
+            }
+            Some(resolved) => self
                 .fun_info
-                .get(fallback)
-                .or_else(|| self.fun_info.get(canonical_name)),
-            Some(ResolvedName::ImportedFun { canonical_name, .. }) => self
-                .fun_info
-                .get(canonical_name)
+                .get(&resolved.canonical_name)
                 .or_else(|| self.fun_info.get(fallback)),
             None => None,
         }
@@ -643,11 +642,13 @@ impl<'a> Lowerer<'a> {
     }
 
     fn resolved_env_lookup_name(&self, node_id: crate::ast::NodeId, fallback: &str) -> String {
-        use super::resolve::ResolvedName;
-
         match self.resolved.get(&node_id) {
-            Some(ResolvedName::LocalFun { name, .. }) => name.clone(),
-            Some(ResolvedName::ImportedFun { canonical_name, .. }) => canonical_name.clone(),
+            Some(resolved)
+                if resolved.source_module.as_deref() == Some(&self.current_source_module) =>
+            {
+                resolved.name.clone()
+            }
+            Some(resolved) => resolved.canonical_name.clone(),
             None => self
                 .current_value_ref(node_id)
                 .map(|resolved| match resolved {
@@ -743,11 +744,7 @@ impl<'a> Lowerer<'a> {
         }
 
         if arity == 0 {
-            if let Some(inlined) = self.inline_vals.get(name) {
-                inlined.clone()
-            } else {
-                CExpr::Apply(Box::new(CExpr::FunRef(name.to_string(), 0)), vec![])
-            }
+            CExpr::Apply(Box::new(CExpr::FunRef(name.to_string(), 0)), vec![])
         } else if effects.as_ref().is_some_and(|e| !e.is_empty()) {
             // Effectful function used as a value: emit a raw FunRef of the
             // CPS-expanded arity. The calling convention for effectful function
@@ -1090,6 +1087,123 @@ impl<'a> Lowerer<'a> {
         .populate(program)
     }
 
+    fn inline_val_deps_for_module(
+        expr: &Expr,
+        module_name: &str,
+        inline_exprs: &HashMap<String, Expr>,
+        out: &mut Vec<String>,
+    ) {
+        match &expr.kind {
+            ExprKind::Var { name, .. } => {
+                if inline_exprs.contains_key(name) && !out.contains(name) {
+                    out.push(name.clone());
+                }
+            }
+            ExprKind::QualifiedName { module, name, .. } if module == module_name => {
+                if inline_exprs.contains_key(name) && !out.contains(name) {
+                    out.push(name.clone());
+                }
+            }
+            ExprKind::App { func, arg, .. } => {
+                Self::inline_val_deps_for_module(func, module_name, inline_exprs, out);
+                Self::inline_val_deps_for_module(arg, module_name, inline_exprs, out);
+            }
+            ExprKind::Tuple { elements, .. } | ExprKind::ListLit { elements } => {
+                for e in elements {
+                    Self::inline_val_deps_for_module(e, module_name, inline_exprs, out);
+                }
+            }
+            ExprKind::Cons { head, tail }
+            | ExprKind::BinOp {
+                left: head,
+                right: tail,
+                ..
+            } => {
+                Self::inline_val_deps_for_module(head, module_name, inline_exprs, out);
+                Self::inline_val_deps_for_module(tail, module_name, inline_exprs, out);
+            }
+            ExprKind::UnaryMinus { expr, .. } | ExprKind::Ascription { expr, .. } => {
+                Self::inline_val_deps_for_module(expr, module_name, inline_exprs, out);
+            }
+            _ => {}
+        }
+    }
+
+    fn lower_inline_vals_for_module(
+        &mut self,
+        module_name: &str,
+        inline_exprs: &HashMap<String, Expr>,
+        expose_bare: bool,
+    ) {
+        let mut lowered = HashMap::new();
+        let mut visiting = std::collections::HashSet::new();
+        let names: Vec<String> = inline_exprs.keys().cloned().collect();
+        for name in names {
+            self.lower_inline_val_for_module(
+                module_name,
+                &name,
+                inline_exprs,
+                &mut lowered,
+                &mut visiting,
+                expose_bare,
+            );
+        }
+    }
+
+    fn lower_inline_val_for_module(
+        &mut self,
+        module_name: &str,
+        name: &str,
+        inline_exprs: &HashMap<String, Expr>,
+        lowered: &mut HashMap<String, CExpr>,
+        visiting: &mut std::collections::HashSet<String>,
+        expose_bare: bool,
+    ) -> Option<CExpr> {
+        let canonical = format!("{}.{}", module_name, name);
+        if let Some(existing) = self.inline_vals.get(&canonical).cloned() {
+            return Some(existing);
+        }
+        if let Some(existing) = lowered.get(name).cloned() {
+            return Some(existing);
+        }
+        let expr = inline_exprs.get(name)?;
+        if !visiting.insert(name.to_string()) {
+            return None;
+        }
+
+        let mut deps = Vec::new();
+        Self::inline_val_deps_for_module(expr, module_name, inline_exprs, &mut deps);
+        for dep in deps {
+            if dep != name {
+                self.lower_inline_val_for_module(
+                    module_name,
+                    &dep,
+                    inline_exprs,
+                    lowered,
+                    visiting,
+                    expose_bare,
+                );
+            }
+        }
+
+        let saved_source_module =
+            std::mem::replace(&mut self.current_source_module, module_name.to_string());
+        let lowered_expr = self.lower_expr(expr);
+        self.current_source_module = saved_source_module;
+
+        visiting.remove(name);
+        lowered.insert(name.to_string(), lowered_expr.clone());
+        self.inline_vals
+            .entry(canonical)
+            .or_insert_with(|| lowered_expr.clone());
+        if expose_bare {
+            self.inline_vals
+                .entry(name.to_string())
+                .or_insert_with(|| lowered_expr.clone());
+        }
+        Some(lowered_expr)
+    }
+
     /// Get a function's arity.
     fn fun_arity(&self, name: &str) -> Option<usize> {
         self.fun_info.get(name).map(|f| f.arity)
@@ -1112,18 +1226,60 @@ impl<'a> Lowerer<'a> {
         call_args: Vec<CExpr>,
         span: Option<&crate::token::Span>,
     ) -> CExpr {
-        use super::resolve::ResolvedName;
         let call = match self.resolved.get(&head_node_id) {
-            Some(ResolvedName::ImportedFun {
-                erlang_mod,
-                name: erl_name,
-                ..
-            }) => CExpr::Call(erlang_mod.clone(), erl_name.clone(), call_args),
-            Some(ResolvedName::LocalFun {
-                name,
-                source_module,
-                ..
-            }) => self.lower_local_fun_call(name, arity, call_args, source_module.as_deref()),
+            Some(resolved) => match &resolved.kind {
+                super::resolve::ResolvedCodegenKind::BeamFunction {
+                    erlang_mod: Some(erlang_mod),
+                    name,
+                    ..
+                } => CExpr::Call(erlang_mod.clone(), name.clone(), call_args),
+                super::resolve::ResolvedCodegenKind::ExternalFunction {
+                    erlang_mod,
+                    name,
+                    target_erlang_mod,
+                    target_name,
+                    ..
+                } if resolved.source_module.as_deref() != Some(&self.current_source_module) => {
+                    if self.current_handler_source_module.as_deref()
+                        == resolved.source_module.as_deref()
+                    {
+                        CExpr::Call(target_erlang_mod.clone(), target_name.clone(), call_args)
+                    } else {
+                        CExpr::Call(erlang_mod.clone(), name.clone(), call_args)
+                    }
+                }
+                super::resolve::ResolvedCodegenKind::ExternalFunction { name, .. } => self
+                    .lower_local_fun_call(
+                        name,
+                        arity,
+                        call_args,
+                        resolved.source_module.as_deref(),
+                    ),
+                super::resolve::ResolvedCodegenKind::BeamFunction { name, .. } => self
+                    .lower_local_fun_call(
+                        name,
+                        arity,
+                        call_args,
+                        resolved.source_module.as_deref(),
+                    ),
+                super::resolve::ResolvedCodegenKind::Intrinsic { .. }
+                | super::resolve::ResolvedCodegenKind::InlineVal => {
+                    // Intrinsics are intercepted by `lower_intrinsic` at the
+                    // qualified/bare-call dispatch sites above; inline vals
+                    // are values, not callables, and so cannot legally appear
+                    // as a call head in a well-typed program. This arm exists
+                    // so the match is exhaustive.
+                    debug_assert!(
+                        false,
+                        "intrinsic/inline_val should be intercepted upstream: {}",
+                        resolved.canonical_name,
+                    );
+                    CExpr::Apply(
+                        Box::new(CExpr::FunRef(func_name.to_string(), arity)),
+                        call_args,
+                    )
+                }
+            },
             _ => {
                 // Not in resolution map: local function or variable apply
                 CExpr::Apply(
@@ -1133,6 +1289,103 @@ impl<'a> Lowerer<'a> {
             }
         };
         self.annotate(call, span)
+    }
+
+    fn lower_resolved_value_ref(
+        &mut self,
+        node_id: crate::ast::NodeId,
+        resolved: super::resolve::ResolvedSymbol,
+    ) -> CExpr {
+        match resolved.kind {
+            super::resolve::ResolvedCodegenKind::InlineVal => self
+                .inline_vals
+                .get(&resolved.canonical_name)
+                .cloned()
+                .unwrap_or_else(|| {
+                    panic!(
+                        "resolved inline val was not lowered canonically: {} (source_module={:?}, current_module={})",
+                        resolved.canonical_name,
+                        resolved.source_module,
+                        self.current_source_module,
+                    )
+                }),
+            super::resolve::ResolvedCodegenKind::Intrinsic { arity, .. } => {
+                CExpr::FunRef(resolved.name, arity)
+            }
+            super::resolve::ResolvedCodegenKind::ExternalFunction {
+                erlang_mod,
+                name,
+                target_erlang_mod,
+                target_name,
+                arity,
+                ..
+            } => {
+                if resolved.source_module.as_deref() == Some(&self.current_source_module) {
+                    return self.lower_local_fun_ref(
+                        &name,
+                        arity,
+                        None,
+                        resolved.source_module.as_deref(),
+                    );
+                }
+                let (erlang_mod, name) = if self.current_handler_source_module.as_deref()
+                    == resolved.source_module.as_deref()
+                {
+                    (target_erlang_mod, target_name)
+                } else {
+                    (erlang_mod, name)
+                };
+                if arity == 0 {
+                    CExpr::Call(erlang_mod, name, vec![])
+                } else {
+                    CExpr::Call(
+                        "erlang".to_string(),
+                        "make_fun".to_string(),
+                        vec![
+                            CExpr::Lit(CLit::Atom(erlang_mod)),
+                            CExpr::Lit(CLit::Atom(name)),
+                            CExpr::Lit(CLit::Int(arity as i64)),
+                        ],
+                    )
+                }
+            }
+            super::resolve::ResolvedCodegenKind::BeamFunction {
+                erlang_mod: Some(erlang_mod),
+                name,
+                arity,
+                ..
+            } => {
+                if arity == 0 {
+                    CExpr::Call(erlang_mod, name, vec![])
+                } else {
+                    CExpr::Call(
+                        "erlang".to_string(),
+                        "make_fun".to_string(),
+                        vec![
+                            CExpr::Lit(CLit::Atom(erlang_mod)),
+                            CExpr::Lit(CLit::Atom(name)),
+                            CExpr::Lit(CLit::Int(arity as i64)),
+                        ],
+                    )
+                }
+            }
+            super::resolve::ResolvedCodegenKind::BeamFunction {
+                name,
+                arity,
+                effects,
+                ..
+            } => {
+                let eff = if !effects.is_empty() {
+                    Some(effects)
+                } else {
+                    self.resolved_fun_info(node_id, &name)
+                        .map(|f| &f.effects)
+                        .cloned()
+                        .filter(|e| !e.is_empty())
+                };
+                self.lower_local_fun_ref(&name, arity, eff, resolved.source_module.as_deref())
+            }
+        }
     }
 
     pub fn lower_module(&mut self, module_name: &str, program: &ast::Program) -> CModule {
@@ -1344,11 +1597,45 @@ impl<'a> Lowerer<'a> {
         }
 
         // Process @inline vals first so their expressions are available for substitution
-        // when lowering function bodies.
-        for &(name, is_inline, value) in &val_bindings {
-            if is_inline {
-                let lowered = self.lower_expr(value);
-                self.inline_vals.insert(name.to_string(), lowered);
+        // when lowering function bodies. Lower each module's inline vals under
+        // that module's semantic identity, so sibling refs like `b = a` resolve
+        // against the defining module rather than the importing module.
+        let local_inline_exprs: HashMap<String, Expr> = val_bindings
+            .iter()
+            .filter(|&(_name, is_inline, _value)| *is_inline)
+            .map(|(name, _is_inline, value)| ((*name).to_string(), (*value).clone()))
+            .collect();
+        self.lower_inline_vals_for_module(
+            &self.current_source_module.clone(),
+            &local_inline_exprs,
+            true,
+        );
+
+        let imported_inline_exprs: Vec<(String, HashMap<String, Expr>)> = self
+            .ctx
+            .modules
+            .iter()
+            .filter(|(mod_name, _)| *mod_name != &self.current_source_module)
+            .map(|(mod_name, m)| {
+                (
+                    mod_name.clone(),
+                    m.codegen_info.inline_vals.iter().cloned().collect(),
+                )
+            })
+            .collect();
+        for (mod_name, inline_exprs) in imported_inline_exprs {
+            self.lower_inline_vals_for_module(&mod_name, &inline_exprs, false);
+        }
+        for (mod_name, m) in &self.ctx.modules {
+            if mod_name == &self.current_source_module {
+                continue;
+            }
+            for (val_name, _) in &m.codegen_info.inline_vals {
+                let canonical = format!("{}.{}", mod_name, val_name);
+                debug_assert!(
+                    self.inline_vals.contains_key(&canonical),
+                    "imported inline val was not lowered canonically: {canonical}"
+                );
             }
         }
 
@@ -2428,16 +2715,16 @@ impl<'a> Lowerer<'a> {
         }
 
         let qualified_call = collect_qualified_call(expr);
-        if let Some((_module, func_name, _head, args)) = qualified_call.as_ref()
-            && *func_name == "catch_panic"
-            && args.len() == 1
-        {
-            return self.lower_catch_panic(args[0]);
-        }
         if let Some((module, func_name, head, args)) = qualified_call {
             let qualified = format!("{}.{}", module, func_name);
             if self.is_known_constructor(&qualified) || self.is_known_constructor(func_name) {
                 return self.lower_ctor(func_name, args);
+            }
+            if let Some(resolved) = self.resolved.get(&head.id)
+                && let super::resolve::ResolvedCodegenKind::Intrinsic { id, .. } = &resolved.kind
+                && let Some(ce) = self.lower_intrinsic(*id, &args)
+            {
+                return ce;
             }
             if let Some(call) = self.lower_resolved_fun_call(
                 expr.id,
@@ -2464,20 +2751,12 @@ impl<'a> Lowerer<'a> {
         }
 
         let fun_call = collect_fun_call(expr);
-        if let Some((func_name, _head, args)) = fun_call.as_ref() {
-            let lowered = match *func_name {
-                "print_stdout" | "Std.IO.Unsafe.print_stdout" => {
-                    self.lower_builtin_print(args, false, false)
-                }
-                "print_stderr" | "Std.IO.Unsafe.print_stderr" => {
-                    self.lower_builtin_print(args, true, false)
-                }
-                "dbg" | "Std.IO.dbg" => self.lower_builtin_dbg(args),
-                _ => None,
-            };
-            if let Some(ce) = lowered {
-                return ce;
-            }
+        if let Some((_func_name, head, args)) = fun_call.as_ref()
+            && let Some(resolved) = self.resolved.get(&head.id)
+            && let super::resolve::ResolvedCodegenKind::Intrinsic { id, .. } = &resolved.kind
+            && let Some(ce) = self.lower_intrinsic(*id, args)
+        {
+            return ce;
         }
 
         if let Some((func_name, _head, args)) = fun_call.as_ref()
@@ -2492,13 +2771,6 @@ impl<'a> Lowerer<'a> {
             };
             let error = self.make_error(kind, CExpr::Var(v.clone()), Some(&expr.span));
             return CExpr::Let(v, Box::new(arg), Box::new(error));
-        }
-
-        if let Some((func_name, _head, args)) = fun_call.as_ref()
-            && (*func_name == "catch_panic" || *func_name == "Std.Process.catch_panic")
-            && args.len() == 1
-        {
-            return self.lower_catch_panic(args[0]);
         }
 
         if let Some((func_name, head_expr, args)) = fun_call.as_ref()
@@ -2561,62 +2833,14 @@ impl<'a> Lowerer<'a> {
             },
 
             ExprKind::Var { name, .. } => {
-                use super::resolve::ResolvedName;
                 match self.resolved.get(&expr.id).cloned() {
-                    Some(ResolvedName::ImportedFun {
-                        erlang_mod,
-                        name: erl_name,
-                        arity,
-                        ..
-                    }) => {
-                        if arity == 0 {
-                            CExpr::Call(erlang_mod.clone(), erl_name.clone(), vec![])
-                        } else {
-                            // Function value: emit a `make_fun` reference at
-                            // the resolver-recorded arity, which already
-                            // includes CPS expansion (handlers + _ReturnK)
-                            // for effectful imports. The call site supplies
-                            // the extra args. An eta-wrapper that captured
-                            // handlers in scope would be incompatible with
-                            // HOFs whose body calls the callback in raw-CPS
-                            // shape (e.g. `Lib.at`'s `decoder n` lowering to
-                            // `decoder(n, H, K)`).
-                            CExpr::Call(
-                                "erlang".to_string(),
-                                "make_fun".to_string(),
-                                vec![
-                                    CExpr::Lit(CLit::Atom(erlang_mod.clone())),
-                                    CExpr::Lit(CLit::Atom(erl_name.clone())),
-                                    CExpr::Lit(CLit::Int(arity as i64)),
-                                ],
-                            )
-                        }
-                    }
-                    Some(ResolvedName::LocalFun {
-                        name,
-                        source_module,
-                        canonical_name: _,
-                        arity,
-                        effects,
-                    }) => {
-                        let eff = if !effects.is_empty() {
-                            Some(effects.clone())
-                        } else {
-                            self.resolved_fun_info(expr.id, &name)
-                                .map(|f| &f.effects)
-                                .cloned()
-                                .filter(|e| !e.is_empty())
-                        };
-                        self.lower_local_fun_ref(&name, arity, eff, source_module.as_deref())
-                    }
+                    Some(resolved) => self.lower_resolved_value_ref(expr.id, resolved),
                     _ => {
                         // Not in resolution map: this is a local variable
                         // (function param, let binding, lambda param, case binding, etc.).
                         // The resolver is authoritative — if it didn't resolve the name,
                         // it's not a module-level or imported function.
-                        if let Some(inlined) = self.inline_vals.get(name) {
-                            inlined.clone()
-                        } else if let Some(tuple) = self.lower_handler_def_to_tuple(name) {
+                        if let Some(tuple) = self.lower_handler_def_to_tuple(name) {
                             // Handler used as a value (e.g. returned from a function,
                             // passed as argument): convert to tuple-of-lambdas.
                             tuple
@@ -2885,47 +3109,8 @@ impl<'a> Lowerer<'a> {
                 if self.is_known_constructor(&qualified) || self.is_known_constructor(name) {
                     return self.lower_ctor(name, vec![]);
                 }
-                use super::resolve::ResolvedName;
                 if let Some(resolved) = self.resolved.get(&expr.id).cloned() {
-                    match resolved {
-                        ResolvedName::ImportedFun {
-                            erlang_mod,
-                            name: erl_name,
-                            arity,
-                            ..
-                        } => {
-                            if arity == 0 {
-                                CExpr::Call(erlang_mod.clone(), erl_name.clone(), vec![])
-                            } else {
-                                CExpr::Call(
-                                    "erlang".to_string(),
-                                    "make_fun".to_string(),
-                                    vec![
-                                        CExpr::Lit(CLit::Atom(erlang_mod.clone())),
-                                        CExpr::Lit(CLit::Atom(erl_name.clone())),
-                                        CExpr::Lit(CLit::Int(arity as i64)),
-                                    ],
-                                )
-                            }
-                        }
-                        ResolvedName::LocalFun {
-                            name,
-                            source_module,
-                            canonical_name: _,
-                            arity,
-                            effects,
-                        } => {
-                            let eff = if !effects.is_empty() {
-                                Some(effects)
-                            } else {
-                                self.resolved_fun_info(expr.id, &name)
-                                    .map(|f| &f.effects)
-                                    .cloned()
-                                    .filter(|e| !e.is_empty())
-                            };
-                            self.lower_local_fun_ref(&name, arity, eff, source_module.as_deref())
-                        }
-                    }
+                    self.lower_resolved_value_ref(expr.id, resolved)
                 } else {
                     CExpr::Var(core_var(name))
                 }
@@ -3144,40 +3329,29 @@ impl<'a> Lowerer<'a> {
             }
 
             ExprKind::DictRef { name, .. } => {
-                use super::resolve::ResolvedName;
-                match self.resolved.get(&expr.id) {
-                    Some(ResolvedName::ImportedFun {
-                        erlang_mod,
-                        name: erl_name,
-                        arity,
-                        ..
-                    }) => {
-                        if *arity == 0 {
-                            CExpr::Call(erlang_mod.clone(), erl_name.clone(), vec![])
-                        } else {
-                            CExpr::Call(
-                                "erlang".to_string(),
-                                "make_fun".to_string(),
-                                vec![
-                                    CExpr::Lit(CLit::Atom(erlang_mod.clone())),
-                                    CExpr::Lit(CLit::Atom(erl_name.clone())),
-                                    CExpr::Lit(CLit::Int(*arity as i64)),
-                                ],
+                if let Some(resolved) = self.resolved.get(&expr.id).cloned() {
+                    match &resolved.kind {
+                        super::resolve::ResolvedCodegenKind::BeamFunction { .. }
+                        | super::resolve::ResolvedCodegenKind::ExternalFunction { .. } => {
+                            self.lower_resolved_value_ref(expr.id, resolved)
+                        }
+                        super::resolve::ResolvedCodegenKind::Intrinsic { .. }
+                        | super::resolve::ResolvedCodegenKind::InlineVal => {
+                            panic!(
+                                "dict ref resolved to non-dictionary codegen kind: {}",
+                                resolved.canonical_name
                             )
                         }
                     }
-                    _ => {
-                        if let Some(arity) = self.fun_arity(name) {
-                            if arity == 0 {
-                                CExpr::Apply(Box::new(CExpr::FunRef(name.clone(), 0)), vec![])
-                            } else {
-                                CExpr::FunRef(name.clone(), arity)
-                            }
-                        } else {
-                            // Dict param variable (passed as function argument)
-                            CExpr::Var(core_var(name))
-                        }
+                } else if let Some(arity) = self.fun_arity(name) {
+                    if arity == 0 {
+                        CExpr::Apply(Box::new(CExpr::FunRef(name.clone(), 0)), vec![])
+                    } else {
+                        CExpr::FunRef(name.clone(), arity)
                     }
+                } else {
+                    // Dict param variable (passed as function argument)
+                    CExpr::Var(core_var(name))
                 }
             }
 
@@ -3313,8 +3487,6 @@ impl<'a> Lowerer<'a> {
             _ => (false, Vec::new()),
         };
 
-        use super::resolve::ResolvedName;
-
         let qualified = format!("{}.{}", module, func_name);
         // Detect partial application: if the call site supplies fewer user args
         // than the declared arity, emit a closure that captures the supplied
@@ -3353,10 +3525,24 @@ impl<'a> Lowerer<'a> {
                     closure_params.push(rk.clone());
                     all_args.push(CExpr::Var(rk));
                 }
-                let call = match self.resolved.get(&head.id) {
-                    Some(ResolvedName::ImportedFun {
-                        erlang_mod, name, ..
+                let call = match self.resolved.get(&head.id).map(|r| &r.kind) {
+                    Some(super::resolve::ResolvedCodegenKind::BeamFunction {
+                        erlang_mod: Some(erlang_mod),
+                        name,
+                        ..
                     }) => CExpr::Call(erlang_mod.clone(), name.clone(), all_args),
+                    Some(super::resolve::ResolvedCodegenKind::ExternalFunction {
+                        erlang_mod,
+                        name,
+                        ..
+                    }) if self
+                        .resolved
+                        .get(&head.id)
+                        .and_then(|r| r.source_module.as_deref())
+                        != Some(&self.current_source_module) =>
+                    {
+                        CExpr::Call(erlang_mod.clone(), name.clone(), all_args)
+                    }
                     _ => CExpr::Call(erlang_module.clone(), func_name.to_string(), all_args),
                 };
                 let call = self.annotate(call, call_span);
@@ -3386,10 +3572,24 @@ impl<'a> Lowerer<'a> {
         }
 
         let call_args: Vec<CExpr> = arg_vars.iter().map(|v| CExpr::Var(v.clone())).collect();
-        let call = match self.resolved.get(&head.id) {
-            Some(ResolvedName::ImportedFun {
-                erlang_mod, name, ..
+        let call = match self.resolved.get(&head.id).map(|r| &r.kind) {
+            Some(super::resolve::ResolvedCodegenKind::BeamFunction {
+                erlang_mod: Some(erlang_mod),
+                name,
+                ..
             }) => CExpr::Call(erlang_mod.clone(), name.clone(), call_args),
+            Some(super::resolve::ResolvedCodegenKind::ExternalFunction {
+                erlang_mod,
+                name,
+                ..
+            }) if self
+                .resolved
+                .get(&head.id)
+                .and_then(|r| r.source_module.as_deref())
+                != Some(&self.current_source_module) =>
+            {
+                CExpr::Call(erlang_mod.clone(), name.clone(), call_args)
+            }
             _ => CExpr::Call(erlang_module, func_name.to_string(), call_args),
         };
         let call = self.annotate(call, call_span);

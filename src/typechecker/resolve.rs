@@ -1011,3 +1011,272 @@ pub(crate) fn resolve_names(
     }
     resolver.into_result()
 }
+
+/// Walk a program and collect every module name referenced via
+/// `ExprKind::QualifiedName`, keyed on first-occurrence span.
+///
+/// Used by the auto-load step in `check_program_inner` to discover modules
+/// the user has referenced by canonical name without an explicit `import`.
+/// The span lets auto-load attribute load failures to user code rather than
+/// a synthetic location.
+///
+/// Single-purpose: collects strings only, makes no resolution decisions.
+/// Deliberately not shared with `Resolver` — the two jobs (discovery vs.
+/// resolution) are kept separate by design.
+pub(crate) fn referenced_qualified_modules(
+    program: &[Decl],
+) -> HashMap<String, crate::token::Span> {
+    let mut out: HashMap<String, crate::token::Span> = HashMap::new();
+    for decl in program {
+        walk_decl(decl, &mut out);
+    }
+    out
+}
+
+fn record_module(
+    out: &mut HashMap<String, crate::token::Span>,
+    module: &str,
+    span: crate::token::Span,
+) {
+    if !out.contains_key(module) {
+        out.insert(module.to_string(), span);
+    }
+}
+
+fn walk_decl(decl: &Decl, out: &mut HashMap<String, crate::token::Span>) {
+    match decl {
+        Decl::FunBinding { guard, body, .. } => {
+            if let Some(g) = guard {
+                walk_expr(g, out);
+            }
+            walk_expr(body, out);
+        }
+        Decl::Let { value, .. } | Decl::Val { value, .. } => walk_expr(value, out),
+        Decl::HandlerDef { body, .. } => walk_handler_body(body, out),
+        Decl::ImplDef { methods, .. } => {
+            for m in methods {
+                walk_expr(&m.node.body, out);
+            }
+        }
+        Decl::DictConstructor { methods, .. } => {
+            for e in methods {
+                walk_expr(e, out);
+            }
+        }
+        // Type/effect/trait decls and metadata don't carry expressions
+        // that can hold ExprKind::QualifiedName.
+        Decl::FunSignature { .. }
+        | Decl::TypeDef { .. }
+        | Decl::RecordDef { .. }
+        | Decl::EffectDef { .. }
+        | Decl::TraitDef { .. }
+        | Decl::Import { .. }
+        | Decl::ModuleDecl { .. } => {}
+    }
+}
+
+fn walk_expr(expr: &Expr, out: &mut HashMap<String, crate::token::Span>) {
+    match &expr.kind {
+        ExprKind::QualifiedName { module, .. } => {
+            record_module(out, module, expr.span);
+        }
+        ExprKind::App { func, arg, .. } => {
+            walk_expr(func, out);
+            walk_expr(arg, out);
+        }
+        ExprKind::BinOp { left, right, .. } => {
+            walk_expr(left, out);
+            walk_expr(right, out);
+        }
+        ExprKind::UnaryMinus { expr, .. } => walk_expr(expr, out),
+        ExprKind::If {
+            cond,
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            walk_expr(cond, out);
+            walk_expr(then_branch, out);
+            walk_expr(else_branch, out);
+        }
+        ExprKind::Case {
+            scrutinee, arms, ..
+        } => {
+            walk_expr(scrutinee, out);
+            for a in arms {
+                if let Some(g) = &a.node.guard {
+                    walk_expr(g, out);
+                }
+                walk_expr(&a.node.body, out);
+            }
+        }
+        ExprKind::Block { stmts, .. } => {
+            for s in stmts {
+                walk_stmt(&s.node, out);
+            }
+        }
+        ExprKind::Lambda { body, .. } => walk_expr(body, out),
+        ExprKind::FieldAccess { expr, .. } => walk_expr(expr, out),
+        ExprKind::RecordCreate { fields, .. } | ExprKind::AnonRecordCreate { fields, .. } => {
+            for (_, _, e) in fields {
+                walk_expr(e, out);
+            }
+        }
+        ExprKind::RecordUpdate { record, fields, .. } => {
+            walk_expr(record, out);
+            for (_, _, e) in fields {
+                walk_expr(e, out);
+            }
+        }
+        ExprKind::EffectCall { args, .. } => {
+            for a in args {
+                walk_expr(a, out);
+            }
+        }
+        ExprKind::With { expr, handler } => {
+            walk_expr(expr, out);
+            walk_handler(handler, out);
+        }
+        ExprKind::Resume { value } => walk_expr(value, out),
+        ExprKind::Tuple { elements, .. } => {
+            for e in elements {
+                walk_expr(e, out);
+            }
+        }
+        ExprKind::Do {
+            bindings,
+            success,
+            else_arms,
+            ..
+        } => {
+            for (_, e) in bindings {
+                walk_expr(e, out);
+            }
+            walk_expr(success, out);
+            for a in else_arms {
+                if let Some(g) = &a.node.guard {
+                    walk_expr(g, out);
+                }
+                walk_expr(&a.node.body, out);
+            }
+        }
+        ExprKind::Receive {
+            arms, after_clause, ..
+        } => {
+            for a in arms {
+                if let Some(g) = &a.node.guard {
+                    walk_expr(g, out);
+                }
+                walk_expr(&a.node.body, out);
+            }
+            if let Some((t, b)) = after_clause {
+                walk_expr(t, out);
+                walk_expr(b, out);
+            }
+        }
+        ExprKind::BitString { segments } => {
+            for seg in segments {
+                walk_expr(&seg.value, out);
+                if let Some(s) = &seg.size {
+                    walk_expr(s, out);
+                }
+            }
+        }
+        ExprKind::Ascription { expr, .. } => walk_expr(expr, out),
+        ExprKind::HandlerExpr { body } => walk_handler_body(body, out),
+        ExprKind::Pipe { segments, .. } | ExprKind::BinOpChain { segments, .. } => {
+            for s in segments {
+                walk_expr(&s.node, out);
+            }
+        }
+        ExprKind::PipeBack { segments } | ExprKind::ComposeForward { segments } => {
+            for s in segments {
+                walk_expr(&s.node, out);
+            }
+        }
+        ExprKind::Cons { head, tail } => {
+            walk_expr(head, out);
+            walk_expr(tail, out);
+        }
+        ExprKind::ListLit { elements } => {
+            for e in elements {
+                walk_expr(e, out);
+            }
+        }
+        ExprKind::StringInterp { parts, .. } => {
+            for p in parts {
+                if let crate::ast::StringPart::Expr(e) = p {
+                    walk_expr(e, out);
+                }
+            }
+        }
+        ExprKind::ListComprehension { body, qualifiers } => {
+            walk_expr(body, out);
+            for q in qualifiers {
+                match q {
+                    crate::ast::ComprehensionQualifier::Generator(_, e)
+                    | crate::ast::ComprehensionQualifier::Let(_, e)
+                    | crate::ast::ComprehensionQualifier::Guard(e) => walk_expr(e, out),
+                }
+            }
+        }
+        ExprKind::ForeignCall { args, .. } => {
+            for a in args {
+                walk_expr(a, out);
+            }
+        }
+        ExprKind::DictMethodAccess { dict, .. } => walk_expr(dict, out),
+        ExprKind::Lit { .. }
+        | ExprKind::Var { .. }
+        | ExprKind::Constructor { .. }
+        | ExprKind::DictRef { .. } => {}
+    }
+}
+
+fn walk_stmt(stmt: &crate::ast::Stmt, out: &mut HashMap<String, crate::token::Span>) {
+    use crate::ast::Stmt;
+    match stmt {
+        Stmt::Let { value, .. } => walk_expr(value, out),
+        Stmt::LetFun { body, guard, .. } => {
+            if let Some(g) = guard {
+                walk_expr(g, out);
+            }
+            walk_expr(body, out);
+        }
+        Stmt::Expr(e) => walk_expr(e, out),
+    }
+}
+
+fn walk_handler(handler: &crate::ast::Handler, out: &mut HashMap<String, crate::token::Span>) {
+    use crate::ast::{Handler, HandlerItem};
+    match handler {
+        Handler::Named(_) => {}
+        Handler::Inline { items, .. } => {
+            for ann in items {
+                match &ann.node {
+                    HandlerItem::Named(_) => {}
+                    HandlerItem::Arm(arm) | HandlerItem::Return(arm) => walk_handler_arm(arm, out),
+                }
+            }
+        }
+    }
+}
+
+fn walk_handler_body(
+    body: &crate::ast::HandlerBody,
+    out: &mut HashMap<String, crate::token::Span>,
+) {
+    for arm in &body.arms {
+        walk_handler_arm(&arm.node, out);
+    }
+    if let Some(arm) = &body.return_clause {
+        walk_handler_arm(arm, out);
+    }
+}
+
+fn walk_handler_arm(arm: &crate::ast::HandlerArm, out: &mut HashMap<String, crate::token::Span>) {
+    walk_expr(&arm.body, out);
+    if let Some(f) = &arm.finally_block {
+        walk_expr(f, out);
+    }
+}

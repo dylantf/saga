@@ -26,7 +26,7 @@ use std::collections::HashMap;
 use crate::ast::{self, Decl, Expr, ExprKind, NodeId, Pat, Program, Stmt};
 use crate::codegen::CodegenContext;
 use crate::codegen::lower::util;
-use crate::codegen::resolve::{ResolutionMap, ResolvedName};
+use crate::codegen::resolve::{ResolutionMap, ResolvedCodegenKind};
 use crate::typechecker::CheckResult;
 
 /// Per-call metadata. Keyed by the `NodeId` of an `App` node.
@@ -178,29 +178,35 @@ impl<'a> Populator<'a> {
     fn collect_head_open_rows(inputs: &PopulatorInputs<'_>) -> HashMap<NodeId, bool> {
         let mut out = HashMap::new();
         for (node_id, resolved) in inputs.resolved.iter() {
-            let open = match resolved {
-                ResolvedName::LocalFun { name, .. } => inputs
+            // A symbol is "local" (look it up in the current module's env)
+            // when it's a current-module BeamFunction (erlang_mod = None) or
+            // when it carries no source_module at all (e.g. block-local funs).
+            let local = matches!(
+                &resolved.kind,
+                ResolvedCodegenKind::BeamFunction {
+                    erlang_mod: None, ..
+                }
+            ) || resolved.source_module.is_none();
+            let open = if local {
+                inputs
                     .check_result
                     .env
-                    .get(name)
+                    .get(&resolved.name)
                     .map(|s| util::has_open_effect_row(&inputs.check_result.sub.apply(&s.ty)))
-                    .unwrap_or(false),
-                ResolvedName::ImportedFun {
-                    source_module,
-                    name: fun_name,
-                    ..
-                } => inputs
-                    .ctx
-                    .modules
-                    .get(source_module)
+                    .unwrap_or(false)
+            } else {
+                resolved
+                    .source_module
+                    .as_deref()
+                    .and_then(|src| inputs.ctx.modules.get(src))
                     .and_then(|m| {
                         m.codegen_info
                             .exports
                             .iter()
-                            .find(|(n, _)| n == fun_name)
+                            .find(|(n, _)| n == &resolved.name)
                             .map(|(_, scheme)| util::has_open_effect_row(&scheme.ty))
                     })
-                    .unwrap_or(false),
+                    .unwrap_or(false)
             };
             out.insert(*node_id, open);
         }
@@ -745,20 +751,9 @@ impl<'a> Populator<'a> {
         // Mirror `resolved_effects`: prefer ResolutionMap.effects, fall back
         // to fun_sigs (which holds CPS-expanded info for local funs).
         let resolved = self.inputs.resolved.get(&head_id);
-        let canonical_name = match resolved {
-            Some(ResolvedName::LocalFun { canonical_name, .. })
-            | Some(ResolvedName::ImportedFun { canonical_name, .. }) => {
-                Some(canonical_name.clone())
-            }
-            None => None,
-        };
+        let canonical_name = resolved.map(|resolved| resolved.canonical_name.clone());
         let effects: Vec<String> = match resolved {
-            Some(ResolvedName::ImportedFun { effects, .. })
-            | Some(ResolvedName::LocalFun { effects, .. })
-                if !effects.is_empty() =>
-            {
-                effects.clone()
-            }
+            Some(resolved) if !resolved.effects().is_empty() => resolved.effects().to_vec(),
             Some(_) => self
                 .lookup_fun_sig(name, canonical_name.as_deref())
                 .map(|s| s.effects.clone())

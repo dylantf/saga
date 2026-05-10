@@ -6,4 +6,6 @@ main () = {
   Lib.foo ()
 
   println "Hello, world!"
+
+  println $"The inlined val is {Lib.bar}"
 } with console
