@@ -1,9 +1,10 @@
-# import Std.IO.Unsafe (print_stdout)
+import Std.Env (Env, system_env)
+import Std.IO (console, println)
 
 main () = {
-  # Ok
-  let _ = Std.Int.add 5 2
-
-  # Type error - unknown qualified name 'Std.IO.Unsafe.print_stdout'
-  Std.IO.Unsafe.print_stdout "Hello world"
-}
+  let home = get! "HOME"
+  case home {
+    Just h -> println h
+    Nothing -> println "Couldn't find $HOME"
+  }
+} with {console, system_env}
