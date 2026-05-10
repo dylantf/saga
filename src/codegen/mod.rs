@@ -17,6 +17,7 @@ pub struct CompiledModule {
     pub codegen_info: ModuleCodegenInfo,
     pub elaborated: ast::Program,
     pub resolution: resolve::ResolutionMap,
+    pub intrinsics: resolve::IntrinsicMap,
     /// Front-end name resolution from the typechecker.
     pub front_resolution: crate::typechecker::ResolutionResult,
     /// Per-call effect metadata produced by the call-effects pre-pass. Empty
@@ -30,6 +31,7 @@ pub struct ModuleSemantics<'a> {
     pub codegen_info: &'a ModuleCodegenInfo,
     pub elaborated: &'a ast::Program,
     pub resolution: &'a resolve::ResolutionMap,
+    pub intrinsics: &'a resolve::IntrinsicMap,
     pub front_resolution: &'a crate::typechecker::ResolutionResult,
 }
 
@@ -64,6 +66,7 @@ impl CodegenContext {
             codegen_info: &m.codegen_info,
             elaborated: &m.elaborated,
             resolution: &m.resolution,
+            intrinsics: &m.intrinsics,
             front_resolution: &m.front_resolution,
         })
     }
@@ -76,6 +79,7 @@ impl CodegenContext {
                     codegen_info: &m.codegen_info,
                     elaborated: &m.elaborated,
                     resolution: &m.resolution,
+                    intrinsics: &m.intrinsics,
                     front_resolution: &m.front_resolution,
                 },
             )
@@ -102,10 +106,12 @@ pub fn compile_module_from_result(
         &result.prelude_imports,
         &mod_result.resolution,
     );
+    let intrinsics = resolve::resolve_intrinsics(&resolution, codegen_info);
     Some(CompiledModule {
         codegen_info: info,
         elaborated: normalized,
         resolution,
+        intrinsics,
         front_resolution: mod_result.resolution.clone(),
         call_effects: call_effects::CallEffectMap::new(),
     })
@@ -147,10 +153,12 @@ pub fn emit_module_with_context(
         &ctx.prelude_imports,
         front_resolution,
     );
+    let mut intrinsic_map = resolve::resolve_intrinsics(&resolution_map, &codegen_info);
     // Merge in pre-computed resolution maps from all compiled modules.
     // Their NodeIds don't overlap with ours, so this is a simple extend.
     for compiled in ctx.modules.values() {
         resolution_map.extend(compiled.resolution.iter().map(|(k, v)| (*k, v.clone())));
+        intrinsic_map.extend(compiled.intrinsics.iter().map(|(k, v)| (*k, *v)));
     }
     let source_info =
         source_file.map(|sf| lower::errors::SourceInfo::new(sf.path.clone(), &sf.source));
@@ -158,6 +166,7 @@ pub fn emit_module_with_context(
         ctx,
         constructor_atoms,
         resolution_map,
+        intrinsic_map,
         check_result,
         source_info,
         entry_export.map(str::to_string),

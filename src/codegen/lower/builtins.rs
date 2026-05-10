@@ -12,25 +12,23 @@ use crate::codegen::cerl::{CArm, CExpr, CLit, CPat};
 use super::util::cerl_call;
 
 impl Lowerer<'_> {
-    /// Dispatch a function-call name (bare or canonical) to its inlined
-    /// `@builtin` lowering, if one exists. The single source of truth for
-    /// which names map to which builtins; called from both the qualified
-    /// (`Std.IO.Unsafe.print_stdout`) and unqualified (`print_stdout`) call
-    /// paths so behavior is identical regardless of source spelling.
-    pub(super) fn try_lower_builtin_intrinsic(
+    pub(super) fn lower_intrinsic(
         &mut self,
-        name: &str,
+        intrinsic: crate::intrinsics::IntrinsicId,
         args: &[&crate::ast::Expr],
     ) -> Option<CExpr> {
-        match name {
-            "print_stdout" | "Std.IO.Unsafe.print_stdout" => {
+        match intrinsic {
+            crate::intrinsics::IntrinsicId::PrintStdout => {
                 self.lower_builtin_print(args, false, false)
             }
-            "print_stderr" | "Std.IO.Unsafe.print_stderr" => {
+            crate::intrinsics::IntrinsicId::PrintStderr => {
                 self.lower_builtin_print(args, true, false)
             }
-            "dbg" | "Std.IO.dbg" => self.lower_builtin_dbg(args),
-            _ => None,
+            crate::intrinsics::IntrinsicId::Dbg => self.lower_builtin_dbg(args),
+            crate::intrinsics::IntrinsicId::CatchPanic => match args {
+                [thunk] => Some(self.lower_catch_panic(thunk)),
+                _ => None,
+            },
         }
     }
 

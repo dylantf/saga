@@ -214,6 +214,8 @@ pub struct Lowerer<'a> {
     /// Pre-resolved name resolution map: NodeId -> ResolvedName.
     /// Built by resolve::resolve_names before lowering.
     resolved: super::resolve::ResolutionMap,
+    /// Pre-resolved compiler intrinsics keyed by source node.
+    intrinsics: super::resolve::IntrinsicMap,
     /// @inline val name -> lowered expression. Substituted at reference sites.
     inline_vals: HashMap<String, CExpr>,
     /// Bare handler name -> canonical handler name (e.g. "collect_handler" -> "Std.Test.collect_handler").
@@ -255,6 +257,7 @@ impl<'a> Lowerer<'a> {
         ctx: &'a super::CodegenContext,
         constructor_atoms: super::resolve::ConstructorAtoms,
         resolved: super::resolve::ResolutionMap,
+        intrinsics: super::resolve::IntrinsicMap,
         check_result: &crate::typechecker::CheckResult,
         source_info: Option<SourceInfo>,
         entry_export: Option<String>,
@@ -278,6 +281,7 @@ impl<'a> Lowerer<'a> {
             lambda_effect_context: None,
             constructor_atoms,
             resolved,
+            intrinsics,
             current_handler_k: None,
             current_handler_finally: None,
             current_handler_source_module: None,
@@ -2579,21 +2583,14 @@ impl<'a> Lowerer<'a> {
         }
 
         let qualified_call = collect_qualified_call(expr);
-        if let Some((_module, func_name, _head, args)) = qualified_call.as_ref()
-            && *func_name == "catch_panic"
-            && args.len() == 1
-        {
-            return self.lower_catch_panic(args[0]);
-        }
         if let Some((module, func_name, head, args)) = qualified_call {
             let qualified = format!("{}.{}", module, func_name);
             if self.is_known_constructor(&qualified) || self.is_known_constructor(func_name) {
                 return self.lower_ctor(func_name, args);
             }
-            // @builtin functions are inlined here rather than lowered to a real
-            // BEAM call, since they have no implementation on the BEAM side.
-            // Mirrors the bare-name dispatch below.
-            if let Some(ce) = self.try_lower_builtin_intrinsic(&qualified, &args) {
+            if let Some(intrinsic) = self.intrinsics.get(&head.id).copied()
+                && let Some(ce) = self.lower_intrinsic(intrinsic, &args)
+            {
                 return ce;
             }
             if let Some(call) = self.lower_resolved_fun_call(
@@ -2621,8 +2618,9 @@ impl<'a> Lowerer<'a> {
         }
 
         let fun_call = collect_fun_call(expr);
-        if let Some((func_name, _head, args)) = fun_call.as_ref()
-            && let Some(ce) = self.try_lower_builtin_intrinsic(func_name, args)
+        if let Some((_func_name, head, args)) = fun_call.as_ref()
+            && let Some(intrinsic) = self.intrinsics.get(&head.id).copied()
+            && let Some(ce) = self.lower_intrinsic(intrinsic, args)
         {
             return ce;
         }
@@ -2639,13 +2637,6 @@ impl<'a> Lowerer<'a> {
             };
             let error = self.make_error(kind, CExpr::Var(v.clone()), Some(&expr.span));
             return CExpr::Let(v, Box::new(arg), Box::new(error));
-        }
-
-        if let Some((func_name, _head, args)) = fun_call.as_ref()
-            && (*func_name == "catch_panic" || *func_name == "Std.Process.catch_panic")
-            && args.len() == 1
-        {
-            return self.lower_catch_panic(args[0]);
         }
 
         if let Some((func_name, head_expr, args)) = fun_call.as_ref()

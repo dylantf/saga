@@ -2276,6 +2276,106 @@ fn qualified_call_to_builtin_inlines_as_io_format() {
     );
 }
 
+#[test]
+fn aliased_call_to_builtin_inlines_as_io_format() {
+    let main = r#"import Std.IO.Unsafe as U
+
+main () = {
+  U.print_stdout "hi"
+}
+"#;
+    let out = with_temp_project_files(&[], main, |checker, program| {
+        emit_from_program(program, "_script", checker)
+    });
+    assert_contains(&out, "call 'io':'format'");
+    assert!(
+        !out.contains("'std_io_unsafe':'print_stdout'"),
+        "aliased call to @builtin must not emit a real BEAM call:\n{out}"
+    );
+}
+
+#[test]
+fn user_defined_print_stdout_bare_is_not_hijacked_by_intrinsic() {
+    let main = r#"module Main
+
+fun print_stdout : String -> Unit
+print_stdout _ = ()
+
+main () = {
+  print_stdout "hi"
+}
+"#;
+    let out = with_temp_project_files(&[], main, |checker, program| {
+        emit_from_program(program, "main", checker)
+    });
+    assert!(
+        !out.contains("call 'io':'format'"),
+        "user-defined print_stdout must not lower as Std.IO.Unsafe.print_stdout:\n{out}"
+    );
+    assert_contains(&out, "'print_stdout'/1");
+}
+
+#[test]
+fn user_defined_print_stdout_qualified_is_not_hijacked_by_intrinsic() {
+    let lib = r#"module Lib
+
+pub fun print_stdout : String -> Unit
+print_stdout _ = ()
+"#;
+    let main = r#"module Main
+
+main () = {
+  Lib.print_stdout "hi"
+}
+"#;
+    let out = with_temp_project_files(&[("src/Lib.saga", lib)], main, |checker, program| {
+        emit_from_program(program, "main", checker)
+    });
+    assert!(
+        !out.contains("call 'io':'format'"),
+        "qualified user-defined print_stdout must not lower as intrinsic:\n{out}"
+    );
+    assert!(
+        out.contains("call 'lib':'print_stdout'") || out.contains("'lib', 'print_stdout'"),
+        "expected user-defined lib:print_stdout reference:\n{out}"
+    );
+}
+
+#[test]
+fn user_defined_catch_panic_bare_is_not_hijacked_by_intrinsic() {
+    let main = r#"module Main
+
+fun catch_panic : String -> String
+catch_panic value = value
+
+main () = catch_panic "hi"
+"#;
+    let out = with_temp_project_files(&[], main, |checker, program| {
+        emit_from_program(program, "main", checker)
+    });
+    assert!(
+        !out.contains("try"),
+        "user-defined catch_panic must not lower as Std.Process.catch_panic:\n{out}"
+    );
+    assert_contains(&out, "'catch_panic'/1");
+}
+
+#[test]
+fn qualified_std_process_catch_panic_lowers_as_intrinsic() {
+    let main = r#"module Main
+
+main () = Std.Process.catch_panic (fun () -> 42)
+"#;
+    let out = with_temp_project_files(&[], main, |checker, program| {
+        emit_from_program(program, "main", checker)
+    });
+    assert_contains(&out, "try");
+    assert!(
+        !out.contains("'std_process':'catch_panic'"),
+        "Std.Process.catch_panic must lower as intrinsic, not a BEAM call:\n{out}"
+    );
+}
+
 /// Cross-module qualified reference to an `@inline val` must substitute the
 /// RHS expression at the use site. No BEAM function is emitted for inline
 /// vals, so a direct call would fail at runtime (`undef`).

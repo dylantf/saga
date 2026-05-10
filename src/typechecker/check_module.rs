@@ -347,6 +347,8 @@ pub struct ModuleCodegenInfo {
     /// External function mappings: (saga_name, erlang_module, erlang_func, arity).
     /// Includes both public and private externals (private ones are needed for handler inlining).
     pub external_funs: Vec<(String, String, String, usize)>,
+    /// Compiler intrinsics exported by this module: source name -> intrinsic id.
+    pub builtins: Vec<(String, crate::intrinsics::IntrinsicId)>,
     /// Public `@inline val` declarations: name -> RHS expression.
     /// Cross-module references substitute the expression at the use site
     /// rather than calling a BEAM function (none is emitted for inline vals).
@@ -1451,6 +1453,7 @@ fn collect_codegen_info(
     let mut fun_effects = Vec::new();
     let mut trait_impl_dicts = Vec::new();
     let mut external_funs = Vec::new();
+    let mut builtins = Vec::new();
     let mut inline_vals = Vec::new();
 
     // Erlang module name: "Foo.Bar" -> "foo_bar"
@@ -1565,6 +1568,12 @@ fn collect_codegen_info(
                 annotations,
                 ..
             } => {
+                if annotations.iter().any(|a| a.name == "builtin")
+                    && let Some(intrinsic) =
+                        crate::intrinsics::intrinsic_id_for_export(module_name, name)
+                {
+                    builtins.push((name.clone(), intrinsic));
+                }
                 // Collect @external annotations for both public and private functions.
                 // Private externals are needed for handler body inlining.
                 if let Some(ext) = annotations.iter().find(|a| a.name == "external")
@@ -1679,6 +1688,7 @@ fn collect_codegen_info(
         type_constructors: exports.type_constructors.clone().into_iter().collect(),
         trait_impl_dicts,
         external_funs,
+        builtins,
         inline_vals,
     }
 }

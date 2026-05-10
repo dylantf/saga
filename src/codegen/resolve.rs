@@ -183,6 +183,9 @@ pub enum ResolvedName {
 /// Resolution table: maps each AST NodeId to its resolved meaning.
 pub type ResolutionMap = HashMap<NodeId, ResolvedName>;
 
+/// Resolution table for compiler intrinsics keyed by source node.
+pub type IntrinsicMap = HashMap<NodeId, crate::intrinsics::IntrinsicId>;
+
 /// Internal representation of a name in scope during resolution.
 #[derive(Debug, Clone)]
 #[allow(clippy::enum_variant_names)]
@@ -443,6 +446,30 @@ pub fn resolve_names(
     resolve_program(program, &mut lexical, &mut map, front_resolution);
 
     map
+}
+
+pub fn resolve_intrinsics(
+    resolution: &ResolutionMap,
+    codegen_info: &HashMap<String, ModuleCodegenInfo>,
+) -> IntrinsicMap {
+    let mut canonical_intrinsics: HashMap<String, crate::intrinsics::IntrinsicId> = HashMap::new();
+    for (module_name, info) in codegen_info {
+        for (name, intrinsic) in &info.builtins {
+            canonical_intrinsics.insert(format!("{module_name}.{name}"), *intrinsic);
+        }
+    }
+
+    let mut out = IntrinsicMap::new();
+    for (node_id, resolved) in resolution {
+        let canonical = match resolved {
+            ResolvedName::LocalFun { canonical_name, .. }
+            | ResolvedName::ImportedFun { canonical_name, .. } => canonical_name,
+        };
+        if let Some(intrinsic) = canonical_intrinsics.get(canonical).copied() {
+            out.insert(*node_id, intrinsic);
+        }
+    }
+    out
 }
 
 // ---------------------------------------------------------------------------

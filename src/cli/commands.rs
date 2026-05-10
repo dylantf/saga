@@ -273,6 +273,7 @@ pub fn cmd_emit(file: &str) {
             codegen_info: Default::default(),
             elaborated: elaborated.clone(),
             resolution: codegen::resolve::ResolutionMap::new(),
+            intrinsics: codegen::resolve::IntrinsicMap::new(),
             front_resolution: result.resolution.clone(),
             call_effects: codegen::call_effects::CallEffectMap::new(),
         },
