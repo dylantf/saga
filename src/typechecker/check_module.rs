@@ -347,6 +347,10 @@ pub struct ModuleCodegenInfo {
     /// External function mappings: (saga_name, erlang_module, erlang_func, arity).
     /// Includes both public and private externals (private ones are needed for handler inlining).
     pub external_funs: Vec<(String, String, String, usize)>,
+    /// Public `@inline val` declarations: name -> RHS expression.
+    /// Cross-module references substitute the expression at the use site
+    /// rather than calling a BEAM function (none is emitted for inline vals).
+    pub inline_vals: Vec<(String, crate::ast::Expr)>,
 }
 
 fn collect_effects_from_fun_type(ty: &Type) -> Vec<String> {
@@ -562,6 +566,22 @@ impl Checker {
         let prefix = alias
             .map(|a| a.to_string())
             .unwrap_or_else(|| module_path.last().unwrap().to_string());
+        let exports = self.load_module(module_path, span)?;
+        self.inject_exports(&exports, &module_name, &prefix, exposing, span)
+    }
+
+    /// Parse, typecheck, and cache a module without injecting it into the
+    /// current checker's scope. Returns the module's exports.
+    ///
+    /// Used by `typecheck_import` (which then calls `inject_exports`) and by
+    /// the auto-load step for canonical-name references (which calls only
+    /// `register_module_canonical_exports`).
+    pub(crate) fn load_module(
+        &mut self,
+        module_path: &[String],
+        span: Span,
+    ) -> Result<ModuleExports, Diagnostic> {
+        let module_name = module_path.join(".");
 
         let is_builtin = builtin_module_source(module_path).is_some();
 
@@ -586,9 +606,9 @@ impl Checker {
             ));
         }
 
-        // Cache hit: inject cached exports
+        // Cache hit: return cached exports
         if let Some(exports) = self.modules.exports.get(&module_name).cloned() {
-            return self.inject_exports(&exports, &module_name, &prefix, exposing, span);
+            return Ok(exports);
         }
 
         // Resolve source: builtin modules are embedded, others looked up via module map
@@ -740,11 +760,10 @@ impl Checker {
             .codegen_info
             .insert(module_name.clone(), codegen_info);
 
-        // Cache and inject
+        // Cache the exports
         self.modules
             .exports
             .insert(module_name.clone(), exports.clone());
-        let result = self.inject_exports(&exports, &module_name, &prefix, exposing, span);
 
         // After loading any Std module, merge its exported impls into the base
         // snapshot so later builtin module checkers inherit impls from all
@@ -760,7 +779,7 @@ impl Checker {
             }
         }
 
-        result
+        Ok(exports)
     }
 
     /// Seed a builtin (Std.*) module checker with the parent's trait definitions,
@@ -856,11 +875,110 @@ impl Checker {
         exposing: Option<&[crate::ast::ExposedItem]>,
         span: Span,
     ) -> Result<(), Diagnostic> {
-        // Build and merge scope_map from the standalone resolver
+        self.register_module_canonical_exports(exports, module_name, Some(prefix), exposing);
+        self.merge_import_scope(exports, module_name, prefix, exposing, span)
+    }
+
+    /// Merge an import's scope_map entries (and exposing-list LSP/records side
+    /// effects) into this checker. This is the *scope injection* half of an
+    /// import — what makes bare/aliased forms resolvable.
+    ///
+    /// Auto-loaded modules (referenced only via canonical names) deliberately
+    /// skip this step so their bare/alias forms remain unresolvable without an
+    /// explicit `import` decl.
+    fn merge_import_scope(
+        &mut self,
+        exports: &ModuleExports,
+        module_name: &str,
+        prefix: &str,
+        exposing: Option<&[crate::ast::ExposedItem]>,
+        span: Span,
+    ) -> Result<(), Diagnostic> {
         let import_scope = resolve_import(exports, module_name, prefix, exposing)
             .map_err(|msg| Diagnostic::error_at(span, msg))?;
         self.scope_map.merge(&import_scope);
 
+        // Exposing-list side effects on records/adt_variants/LSP docs.
+        // (Validation and scope_map entries are handled by resolve_import above.)
+        if let Some(exposed) = exposing {
+            let binding_map: std::collections::HashMap<&str, &Scheme> = exports
+                .bindings
+                .iter()
+                .map(|(n, s)| (n.as_str(), s))
+                .collect();
+            let mut ctor_to_type: std::collections::HashMap<&str, &str> =
+                std::collections::HashMap::new();
+            for (type_name, ctors) in &exports.type_constructors {
+                for ctor in ctors {
+                    ctor_to_type.insert(ctor.as_str(), type_name.as_str());
+                }
+            }
+
+            for name in exposed {
+                let is_type = name.starts_with(|c: char| c.is_uppercase());
+                if is_type {
+                    if let Some(fields) = exports.record_defs.get(name.as_str()) {
+                        let record_canonical = format!("{}.{}", module_name, name);
+                        self.records.insert(record_canonical, fields.clone());
+                    }
+                    if let Some(ctors) = exports.type_constructors.get(name.as_str()) {
+                        let mut variants = Vec::new();
+                        for ctor in ctors {
+                            if let Some(&scheme) = binding_map.get(ctor.as_str()) {
+                                if let Some(&did) = exports.def_ids.get(ctor.as_str()) {
+                                    self.lsp
+                                        .constructor_def_ids
+                                        .entry(ctor.clone())
+                                        .or_insert(did);
+                                }
+                                variants.push((ctor.clone(), ctor_arity(&scheme.ty)));
+                            }
+                        }
+                        if !variants.is_empty() {
+                            self.adt_variants.insert(name.to_string(), variants);
+                        }
+                    }
+                    if ctor_to_type.contains_key(name.as_str())
+                        && let Some(&did) = exports.def_ids.get(name.as_str())
+                    {
+                        self.lsp
+                            .constructor_def_ids
+                            .entry(name.to_string())
+                            .or_insert(did);
+                    }
+                }
+                if let Some(doc) = exports.doc_comments.get(name.as_str()) {
+                    self.lsp
+                        .imported_docs
+                        .entry(name.to_string())
+                        .or_insert_with(|| doc.clone());
+                }
+            }
+        }
+
+        let _ = span;
+        Ok(())
+    }
+
+    /// Register a module's exports under canonical keys (env, traits,
+    /// trait_impls, effects, handlers, type_arity, constructors, records, etc.).
+    ///
+    /// This is the *loading* half of an import — what makes canonical names
+    /// (`Module.Name`) resolvable. Both explicit imports and the auto-load
+    /// step call this; only explicit imports follow up with `merge_import_scope`.
+    ///
+    /// `prefix` is used purely for aliased-form LSP doc-comment registration
+    /// (a no-op for auto-load, where we pass `None`).
+    pub(crate) fn register_module_canonical_exports(
+        &mut self,
+        exports: &ModuleExports,
+        module_name: &str,
+        prefix: Option<&str>,
+        exposing: Option<&[crate::ast::ExposedItem]>,
+    ) {
+        if !self.modules.registered_canonical.insert(module_name.to_string()) {
+            return;
+        }
         let ModuleExports {
             bindings,
             type_constructors,
@@ -989,8 +1107,10 @@ impl Checker {
                     .imported_docs
                     .entry(canonical)
                     .or_insert_with(|| doc.clone());
-                if prefix != module_name {
-                    let aliased = format!("{}.{}", prefix, name);
+                if let Some(p) = prefix
+                    && p != module_name
+                {
+                    let aliased = format!("{}.{}", p, name);
                     self.lsp
                         .imported_docs
                         .entry(aliased)
@@ -1025,61 +1145,7 @@ impl Checker {
                 .or_insert_with(|| fields.clone());
         }
 
-        // Exposed items: LSP metadata, records, adt_variants.
-        // Validation and scope_map entries are handled by resolve_import above.
-        if let Some(exposed) = exposing {
-            // Build reverse map for constructor-as-name detection
-            let mut ctor_to_type: std::collections::HashMap<&str, &str> =
-                std::collections::HashMap::new();
-            for (type_name, ctors) in type_constructors {
-                for ctor in ctors {
-                    ctor_to_type.insert(ctor.as_str(), type_name.as_str());
-                }
-            }
-
-            for name in exposed {
-                let is_type = name.starts_with(|c: char| c.is_uppercase());
-                if is_type {
-                    if let Some(fields) = record_defs.get(name.as_str()) {
-                        let record_canonical = format!("{}.{}", module_name, name);
-                        self.records.insert(record_canonical, fields.clone());
-                    }
-                    if let Some(ctors) = type_constructors.get(name) {
-                        let mut variants = Vec::new();
-                        for ctor in ctors {
-                            if let Some(&scheme) = binding_map.get(ctor.as_str()) {
-                                if let Some(&did) = def_ids.get(ctor.as_str()) {
-                                    self.lsp
-                                        .constructor_def_ids
-                                        .entry(ctor.clone())
-                                        .or_insert(did);
-                                }
-                                variants.push((ctor.clone(), ctor_arity(&scheme.ty)));
-                            }
-                        }
-                        if !variants.is_empty() {
-                            self.adt_variants.insert(name.clone(), variants);
-                        }
-                    }
-                    if ctor_to_type.contains_key(name.as_str())
-                        && let Some(&did) = def_ids.get(name.as_str())
-                    {
-                        self.lsp
-                            .constructor_def_ids
-                            .entry(name.clone())
-                            .or_insert(did);
-                    }
-                }
-                if let Some(doc) = doc_comments.get(name.as_str()) {
-                    self.lsp
-                        .imported_docs
-                        .entry(name.clone())
-                        .or_insert_with(|| doc.clone());
-                }
-            }
-        }
-
-        Ok(())
+        let _ = exposing;
     }
 }
 
@@ -1381,6 +1447,7 @@ fn collect_codegen_info(
     let mut fun_effects = Vec::new();
     let mut trait_impl_dicts = Vec::new();
     let mut external_funs = Vec::new();
+    let mut inline_vals = Vec::new();
 
     // Erlang module name: "Foo.Bar" -> "foo_bar"
     let erlang_module = module_name
@@ -1586,6 +1653,15 @@ fn collect_codegen_info(
                     impl_effects,
                 });
             }
+            Decl::Val {
+                public: true,
+                name,
+                annotations,
+                value,
+                ..
+            } if annotations.iter().any(|a| a.name == "inline") => {
+                inline_vals.push((name.clone(), value.clone()));
+            }
             _ => {}
         }
     }
@@ -1599,6 +1675,7 @@ fn collect_codegen_info(
         type_constructors: exports.type_constructors.clone().into_iter().collect(),
         trait_impl_dicts,
         external_funs,
+        inline_vals,
     }
 }
 

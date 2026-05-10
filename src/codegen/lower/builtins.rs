@@ -12,6 +12,28 @@ use crate::codegen::cerl::{CArm, CExpr, CLit, CPat};
 use super::util::cerl_call;
 
 impl Lowerer<'_> {
+    /// Dispatch a function-call name (bare or canonical) to its inlined
+    /// `@builtin` lowering, if one exists. The single source of truth for
+    /// which names map to which builtins; called from both the qualified
+    /// (`Std.IO.Unsafe.print_stdout`) and unqualified (`print_stdout`) call
+    /// paths so behavior is identical regardless of source spelling.
+    pub(super) fn try_lower_builtin_intrinsic(
+        &mut self,
+        name: &str,
+        args: &[&crate::ast::Expr],
+    ) -> Option<CExpr> {
+        match name {
+            "print_stdout" | "Std.IO.Unsafe.print_stdout" => {
+                self.lower_builtin_print(args, false, false)
+            }
+            "print_stderr" | "Std.IO.Unsafe.print_stderr" => {
+                self.lower_builtin_print(args, true, false)
+            }
+            "dbg" | "Std.IO.dbg" => self.lower_builtin_dbg(args),
+            _ => None,
+        }
+    }
+
     /// Lower print/println/eprint/eprintln to io:format.
     /// `x` is always a String.
     pub(super) fn lower_builtin_print(

@@ -96,6 +96,7 @@ impl Checker {
             }
         }
         self.process_imports(program)?;
+        self.auto_load_referenced_modules(program);
         self.resolution =
             super::resolve::resolve_names(program, &self.scope_map, self.current_module.as_deref());
         self.register_definitions(program)?;
@@ -452,6 +453,43 @@ impl Checker {
             }
         }
         Ok(())
+    }
+
+    /// For every module referenced via `Module.name` (canonical form) without
+    /// an explicit `import`, load the module's exports so its canonical keys
+    /// are registered in `self.env`/`self.constructors`/etc. Bare and aliased
+    /// scope entries are *not* injected — only the canonical form resolves.
+    ///
+    /// Unknown modules (typos, refs to nonexistent modules) are skipped here
+    /// and fail at resolve/infer time with the existing diagnostic. Failures
+    /// from loading a known module surface as collected diagnostics, with the
+    /// span pointing at the user's first reference site.
+    fn auto_load_referenced_modules(&mut self, program: &[Decl]) {
+        let referenced = super::resolve::referenced_qualified_modules(program);
+        for (module_name, ref_span) in &referenced {
+            if self.modules.registered_canonical.contains(module_name) {
+                continue;
+            }
+            let path: Vec<String> = module_name.split('.').map(str::to_string).collect();
+            let known = super::check_module::builtin_module_source(&path).is_some()
+                || self
+                    .modules
+                    .map
+                    .as_ref()
+                    .is_some_and(|m| m.contains_key(module_name));
+            if !known {
+                continue;
+            }
+            // load_module is idempotent — returns cached exports if already loaded.
+            // register_module_canonical_exports uses entry().or_insert so it's
+            // idempotent on the canonical-key side too.
+            match self.load_module(&path, *ref_span) {
+                Ok(exports) => {
+                    self.register_module_canonical_exports(&exports, module_name, None, None);
+                }
+                Err(d) => self.collected_diagnostics.push(d),
+            }
+        }
     }
 
     /// Pass 3: Register external functions so they're available in impl bodies.

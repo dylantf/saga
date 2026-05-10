@@ -1264,6 +1264,12 @@ pub struct ModuleContext {
     pub(crate) base_trait_impls: HashMap<(String, Vec<String>, String), ImplInfo>,
     /// Modules currently being typechecked (cycle detection).
     pub(crate) loading: HashSet<String>,
+    /// Modules whose canonical exports have been registered into this
+    /// checker's `env`/`constructors`/`effects`/etc. Tracks both explicit
+    /// imports (via `inject_exports`) and auto-loaded canonical references
+    /// (via `register_module_canonical_exports` directly). Used to skip
+    /// redundant re-registration.
+    pub(crate) registered_canonical: HashSet<String>,
 }
 
 /// Per-variable record candidate narrowing: var_id -> (candidate record names, span).

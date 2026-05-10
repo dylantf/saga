@@ -417,7 +417,16 @@ pub fn resolve_names(
     let local_funs = collect_local_fun_arities(program);
     register_local_scope_funs(&mut scope, &local_funs, &source_module_name);
     let effect_op_counts = build_effect_op_counts(codegen_info);
-    register_import_scopes(
+    // Canonical-form qualified entries are driven by what's been *loaded*
+    // (every module in `codegen_info`), independent of explicit imports.
+    // Imports below add the bare/alias surface on top.
+    register_canonical_qualified_scope(
+        codegen_info,
+        &source_module_name,
+        &effect_op_counts,
+        &mut qualified_scope,
+    );
+    register_import_aliases(
         program,
         prelude_imports,
         codegen_info,
@@ -927,7 +936,100 @@ fn build_effect_op_counts(
     effect_op_counts
 }
 
-fn register_import_scopes(
+/// Build the `ScopedName::ImportedFun` for a single module export, applying
+/// the standard arity/effect/evidence-param expansion. Shared by canonical
+/// and alias registration so both compute the same scoped value.
+fn build_imported_fun_scoped(
+    mod_name: &str,
+    erlang_mod: &str,
+    name: &str,
+    scheme: &crate::typechecker::Scheme,
+    fun_effects_map: &HashMap<&str, &Vec<String>>,
+    effect_op_counts: &HashMap<String, usize>,
+) -> ScopedName {
+    let (arity, mut effects) =
+        crate::codegen::lower::util::arity_and_effects_from_type(&scheme.ty);
+    let dict_params = crate::codegen::lower::util::dict_param_count(&scheme.constraints);
+    // Merge with fun_effects (which strips beam-native effects in
+    // check_module.rs but is otherwise the authoritative annotation list).
+    // Effects from the type include beam-native ones; the lowered function
+    // threads evidence covering *all* of them, so the resolver's arity
+    // calculation must match. This mirrors the supplementation in `lower/init.rs`.
+    if let Some(ann_effs) = fun_effects_map.get(name) {
+        for eff in ann_effs.iter() {
+            if !effects.contains(eff) {
+                effects.push(eff.clone());
+            }
+        }
+    }
+    effects.sort();
+    let handler_param_count: usize = effects
+        .iter()
+        .map(|eff| effect_op_counts.get(eff).copied().unwrap_or(0))
+        .sum();
+    // Effectful callees take an `_Evidence` parameter and a `_ReturnK`
+    // (gated together by `has_effects`).
+    let extras = if handler_param_count > 0 { 2 } else { 0 };
+    let expanded_arity = arity + dict_params + extras;
+
+    ScopedName::ImportedFun {
+        erlang_mod: erlang_mod.to_string(),
+        name: name.to_string(),
+        source_module: mod_name.to_string(),
+        canonical_name: format!("{}.{}", mod_name, name),
+        arity: expanded_arity,
+        effects,
+    }
+}
+
+/// Register canonical-form (`Module.name`) entries in `qualified_scope` for
+/// every loaded module. Driven purely by `codegen_info` — the set of modules
+/// the front end has loaded — not by the program's `Decl::Import` nodes.
+///
+/// This is the codegen analogue of `register_module_canonical_exports` in the
+/// typechecker: canonical names are global, available the moment a module is
+/// loaded. Imports only add bare/alias surface on top (see
+/// `register_import_aliases`).
+fn register_canonical_qualified_scope(
+    codegen_info: &HashMap<String, ModuleCodegenInfo>,
+    source_module_name: &str,
+    effect_op_counts: &HashMap<String, usize>,
+    qualified_scope: &mut HashMap<String, ScopedName>,
+) {
+    for (mod_name, info) in codegen_info {
+        // The current module's own functions are registered through
+        // `register_local_scope_funs` as LocalFun, not as imports.
+        if mod_name == source_module_name {
+            continue;
+        }
+        let mod_path: Vec<String> = mod_name.split('.').map(String::from).collect();
+        let erlang_mod = module_name_to_erlang(&mod_path);
+        let fun_effects_map: HashMap<&str, &Vec<String>> = info
+            .fun_effects
+            .iter()
+            .map(|(n, effs)| (n.as_str(), effs))
+            .collect();
+        for (name, scheme) in &info.exports {
+            let scoped = build_imported_fun_scoped(
+                mod_name,
+                &erlang_mod,
+                name,
+                scheme,
+                &fun_effects_map,
+                effect_op_counts,
+            );
+            let canonical = format!("{}.{}", mod_name, name);
+            qualified_scope.entry(canonical).or_insert(scoped);
+        }
+    }
+}
+
+/// Register the *aliased* and *exposed* surfaces for each `Decl::Import`:
+/// alias-prefix qualified names (`MyAlias.fn`) and exposed bare names (`fn`).
+/// Canonical entries are handled separately by
+/// `register_canonical_qualified_scope` and are not the responsibility of
+/// import nodes.
+fn register_import_aliases(
     program: &Program,
     prelude_imports: &[Decl],
     codegen_info: &HashMap<String, ModuleCodegenInfo>,
@@ -950,8 +1052,7 @@ fn register_import_scopes(
         } = decl
         {
             let mod_name = module_path.join(".");
-            let mod_path_strs: Vec<String> = module_path.to_vec();
-            let erlang_mod = module_name_to_erlang(&mod_path_strs);
+            let erlang_mod = module_name_to_erlang(module_path);
             let alias = import_alias
                 .as_deref()
                 .unwrap_or_else(|| module_path.last().map(|s| s.as_str()).unwrap_or(""));
@@ -976,54 +1077,23 @@ fn register_import_scopes(
                 .collect();
 
             for (name, scheme) in &info.exports {
-                let (arity, mut effects) =
-                    crate::codegen::lower::util::arity_and_effects_from_type(&scheme.ty);
-                let dict_params =
-                    crate::codegen::lower::util::dict_param_count(&scheme.constraints);
-                // Merge with fun_effects (which strips beam-native effects in
-                // check_module.rs but is otherwise the authoritative annotation
-                // list). Effects from the type include beam-native ones; the
-                // lowered function threads evidence covering *all* of them, so
-                // the resolver's arity calculation must match. This mirrors
-                // the supplementation in `lower/init.rs`.
-                if let Some(ann_effs) = fun_effects_map.get(name.as_str()) {
-                    for eff in ann_effs.iter() {
-                        if !effects.contains(eff) {
-                            effects.push(eff.clone());
-                        }
-                    }
+                if !alias_differs && !is_exposed(name) {
+                    continue;
                 }
-                effects.sort();
-                let handler_param_count: usize = effects
-                    .iter()
-                    .map(|eff| effect_op_counts.get(eff).copied().unwrap_or(0))
-                    .sum();
-                // Effectful callees take an `_Evidence` parameter and a
-                // `_ReturnK` (gated together by `has_effects`).
-                let extras = if handler_param_count > 0 { 2 } else { 0 };
-                let expanded_arity = arity + dict_params + extras;
-
-                let scoped = ScopedName::ImportedFun {
-                    erlang_mod: erlang_mod.clone(),
-                    name: name.clone(),
-                    source_module: mod_name.clone(),
-                    canonical_name: format!("{}.{}", mod_name, name),
-                    arity: expanded_arity,
-                    effects,
-                };
-
-                let canonical = format!("{}.{}", mod_name, name);
-                qualified_scope
-                    .entry(canonical)
-                    .or_insert_with(|| scoped.clone());
-
+                let scoped = build_imported_fun_scoped(
+                    &mod_name,
+                    &erlang_mod,
+                    name,
+                    scheme,
+                    &fun_effects_map,
+                    effect_op_counts,
+                );
                 if alias_differs {
                     let aliased = format!("{}.{}", alias, name);
                     qualified_scope
                         .entry(aliased)
                         .or_insert_with(|| scoped.clone());
                 }
-
                 if is_exposed(name) && !local_funs.contains_key(name) {
                     scope.entry(name.clone()).or_insert(scoped);
                 }

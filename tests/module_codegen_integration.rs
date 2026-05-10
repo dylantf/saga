@@ -2248,3 +2248,80 @@ run_ok () = {
         "expected 'err-good|ok-good', got: {stdout}"
     );
 }
+
+// --- Codegen-side coverage for canonical-name auto-load ---
+//
+// These pin the codegen analogue of the typecheck-side rule:
+// loaded modules must be resolvable canonically without an explicit import,
+// and decls without a BEAM function (`@builtin`, `@inline val`) must intercept
+// at the use site for both bare AND qualified spellings.
+
+/// Qualified-form `Std.IO.Unsafe.print_stdout` is `@builtin`: it has no BEAM
+/// implementation. Lowering must inline it as `io:format`, *not* emit a call
+/// to `std_io_unsafe:print_stdout/1` (which would crash at runtime). The bare
+/// form has always inlined; this regression-tests the qualified path.
+#[test]
+fn qualified_call_to_builtin_inlines_as_io_format() {
+    let main = r#"main () = {
+  Std.IO.Unsafe.print_stdout "hi"
+}
+"#;
+    let out = with_temp_project_files(&[], main, |checker, program| {
+        emit_from_program(program, "_script", checker)
+    });
+    assert_contains(&out, "call 'io':'format'");
+    assert!(
+        !out.contains("'std_io_unsafe':'print_stdout'"),
+        "qualified call to @builtin must not emit a real BEAM call:\n{out}"
+    );
+}
+
+/// Cross-module qualified reference to an `@inline val` must substitute the
+/// RHS expression at the use site. No BEAM function is emitted for inline
+/// vals, so a direct call would fail at runtime (`undef`).
+#[test]
+fn qualified_inline_val_cross_module_substitutes_rhs() {
+    let lib = r#"module Lib
+
+@inline
+pub val answer = 123
+"#;
+    let main = r#"module Main
+
+main () = Lib.answer
+"#;
+    let out = with_temp_project_files(&[("src/Lib.saga", lib)], main, |checker, program| {
+        emit_from_program(program, "main", checker)
+    });
+    // Substitution should produce a literal 123 in main, with no call to lib:answer/0.
+    assert_contains(&out, "123");
+    assert!(
+        !out.contains("'lib':'answer'"),
+        "@inline val cross-module ref must not emit a BEAM call:\n{out}"
+    );
+}
+
+/// Project module referenced by canonical name without `import Lib` should
+/// codegen the same way as if it had been imported: a real BEAM call.
+/// This is the codegen counterpart to the auto-load typecheck test.
+#[test]
+fn qualified_call_to_project_module_lowers_without_explicit_import() {
+    let lib = r#"module Lib
+
+pub fun greet : (name: String) -> String
+greet name = name
+"#;
+    let main = r#"module Main
+
+main () = Lib.greet "world"
+"#;
+    let out = with_temp_project_files(&[("src/Lib.saga", lib)], main, |checker, program| {
+        emit_from_program(program, "main", checker)
+    });
+    // Either a direct call or a make_fun reference is fine — both require the
+    // canonical 'lib':'greet' identity to be wired through codegen.
+    assert!(
+        out.contains("call 'lib':'greet'") || out.contains("'lib', 'greet'"),
+        "expected canonical 'lib':'greet' reference in output:\n{out}"
+    );
+}

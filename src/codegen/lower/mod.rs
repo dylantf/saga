@@ -1344,11 +1344,29 @@ impl<'a> Lowerer<'a> {
         }
 
         // Process @inline vals first so their expressions are available for substitution
-        // when lowering function bodies.
+        // when lowering function bodies. Local @inline vals are keyed by both the
+        // bare name (for in-module references) and the canonical name (for
+        // qualified self-references). Cross-module @inline vals are merged in
+        // below from each loaded module's `inline_vals` codegen entry, keyed
+        // canonically only — the bare-name form would leak module scope.
         for &(name, is_inline, value) in &val_bindings {
             if is_inline {
                 let lowered = self.lower_expr(value);
-                self.inline_vals.insert(name.to_string(), lowered);
+                self.inline_vals.insert(name.to_string(), lowered.clone());
+                let canonical = format!("{}.{}", self.current_source_module, name);
+                self.inline_vals.entry(canonical).or_insert(lowered);
+            }
+        }
+        for (mod_name, m) in &self.ctx.modules {
+            if mod_name == &self.current_source_module {
+                continue;
+            }
+            for (val_name, expr) in &m.codegen_info.inline_vals {
+                let canonical = format!("{}.{}", mod_name, val_name);
+                if !self.inline_vals.contains_key(&canonical) {
+                    let lowered = self.lower_expr(expr);
+                    self.inline_vals.insert(canonical, lowered);
+                }
             }
         }
 
@@ -2439,6 +2457,12 @@ impl<'a> Lowerer<'a> {
             if self.is_known_constructor(&qualified) || self.is_known_constructor(func_name) {
                 return self.lower_ctor(func_name, args);
             }
+            // @builtin functions are inlined here rather than lowered to a real
+            // BEAM call, since they have no implementation on the BEAM side.
+            // Mirrors the bare-name dispatch below.
+            if let Some(ce) = self.try_lower_builtin_intrinsic(&qualified, &args) {
+                return ce;
+            }
             if let Some(call) = self.lower_resolved_fun_call(
                 expr.id,
                 func_name,
@@ -2464,20 +2488,10 @@ impl<'a> Lowerer<'a> {
         }
 
         let fun_call = collect_fun_call(expr);
-        if let Some((func_name, _head, args)) = fun_call.as_ref() {
-            let lowered = match *func_name {
-                "print_stdout" | "Std.IO.Unsafe.print_stdout" => {
-                    self.lower_builtin_print(args, false, false)
-                }
-                "print_stderr" | "Std.IO.Unsafe.print_stderr" => {
-                    self.lower_builtin_print(args, true, false)
-                }
-                "dbg" | "Std.IO.dbg" => self.lower_builtin_dbg(args),
-                _ => None,
-            };
-            if let Some(ce) = lowered {
-                return ce;
-            }
+        if let Some((func_name, _head, args)) = fun_call.as_ref()
+            && let Some(ce) = self.try_lower_builtin_intrinsic(func_name, args)
+        {
+            return ce;
         }
 
         if let Some((func_name, _head, args)) = fun_call.as_ref()
@@ -2884,6 +2898,11 @@ impl<'a> Lowerer<'a> {
                 let qualified = format!("{}.{}", module, name);
                 if self.is_known_constructor(&qualified) || self.is_known_constructor(name) {
                     return self.lower_ctor(name, vec![]);
+                }
+                // @inline val cross-module reference: substitute the lowered
+                // RHS expression. Mirrors the bare-name path in `lower_var`.
+                if let Some(inlined) = self.inline_vals.get(&qualified) {
+                    return inlined.clone();
                 }
                 use super::resolve::ResolvedName;
                 if let Some(resolved) = self.resolved.get(&expr.id).cloned() {
