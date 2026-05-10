@@ -1046,6 +1046,20 @@ impl<'a> Lowerer<'a> {
     /// Snapshots the relevant `FunInfo` and `EffectDefs` and hands them to the
     /// stand-alone `call_effects::Populator` walker.
     fn populate_call_effects(&self, program: &ast::Program) -> super::call_effects::CallEffectMap {
+        self.populate_call_effects_with_check(program, &self.check_result)
+    }
+
+    /// Variant that uses an explicit `CheckResult` for type-at-span lookups.
+    /// When the lowerer runs the pre-pass over a foreign module's elaborated
+    /// AST (e.g. handler arm bodies imported from another module), the active
+    /// module's `check_result` does not contain that module's spans, so
+    /// pattern-effect lookups silently miss. Cross-module walks must thread
+    /// the source module's `CheckResult` here.
+    fn populate_call_effects_with_check(
+        &self,
+        program: &ast::Program,
+        check_result: &crate::typechecker::CheckResult,
+    ) -> super::call_effects::CallEffectMap {
         use super::call_effects::{FunSig, Populator};
 
         let fun_sigs: HashMap<String, FunSig> = self
@@ -1076,7 +1090,7 @@ impl<'a> Lowerer<'a> {
 
         Populator::new(super::call_effects::PopulatorInputs {
             resolved: &self.resolved,
-            check_result: &self.check_result,
+            check_result,
             ctx: self.ctx,
             fun_sigs: &fun_sigs,
             effect_ops: &effect_ops,
@@ -1549,8 +1563,17 @@ impl<'a> Lowerer<'a> {
         // Cross-module inlined handler bodies live in the elaborated programs
         // of compiled modules and are lowered through the active Lowerer.
         // Tag their `App` nodes too so the parallel-check can see them.
-        for (_name, compiled) in self.ctx.modules.iter() {
-            let cross_map = self.populate_call_effects(&compiled.elaborated);
+        for (name, compiled) in self.ctx.modules.iter() {
+            // Use the source module's CheckResult so type_at_span lookups in
+            // the populator (e.g. for handler arm parameters) hit. The active
+            // module's check_result only carries spans from its own source.
+            let module_check = self
+                .check_result
+                .module_check_results()
+                .get(name)
+                .unwrap_or(&self.check_result);
+            let cross_map =
+                self.populate_call_effects_with_check(&compiled.elaborated, module_check);
             for (id, info) in cross_map {
                 self.call_effects.entry(id).or_insert(info);
             }
