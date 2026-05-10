@@ -1263,10 +1263,22 @@ impl<'a> Lowerer<'a> {
                         resolved.source_module.as_deref(),
                     ),
                 super::resolve::ResolvedCodegenKind::Intrinsic { .. }
-                | super::resolve::ResolvedCodegenKind::InlineVal => CExpr::Apply(
-                    Box::new(CExpr::FunRef(func_name.to_string(), arity)),
-                    call_args,
-                ),
+                | super::resolve::ResolvedCodegenKind::InlineVal => {
+                    // Intrinsics are intercepted by `lower_intrinsic` at the
+                    // qualified/bare-call dispatch sites above; inline vals
+                    // are values, not callables, and so cannot legally appear
+                    // as a call head in a well-typed program. This arm exists
+                    // so the match is exhaustive.
+                    debug_assert!(
+                        false,
+                        "intrinsic/inline_val should be intercepted upstream: {}",
+                        resolved.canonical_name,
+                    );
+                    CExpr::Apply(
+                        Box::new(CExpr::FunRef(func_name.to_string(), arity)),
+                        call_args,
+                    )
+                }
             },
             _ => {
                 // Not in resolution map: local function or variable apply
@@ -1291,8 +1303,10 @@ impl<'a> Lowerer<'a> {
                 .cloned()
                 .unwrap_or_else(|| {
                     panic!(
-                        "resolved inline val was not lowered canonically: {}",
-                        resolved.canonical_name
+                        "resolved inline val was not lowered canonically: {} (source_module={:?}, current_module={})",
+                        resolved.canonical_name,
+                        resolved.source_module,
+                        self.current_source_module,
                     )
                 }),
             super::resolve::ResolvedCodegenKind::Intrinsic { arity, .. } => {
@@ -3316,7 +3330,19 @@ impl<'a> Lowerer<'a> {
 
             ExprKind::DictRef { name, .. } => {
                 if let Some(resolved) = self.resolved.get(&expr.id).cloned() {
-                    self.lower_resolved_value_ref(expr.id, resolved)
+                    match &resolved.kind {
+                        super::resolve::ResolvedCodegenKind::BeamFunction { .. }
+                        | super::resolve::ResolvedCodegenKind::ExternalFunction { .. } => {
+                            self.lower_resolved_value_ref(expr.id, resolved)
+                        }
+                        super::resolve::ResolvedCodegenKind::Intrinsic { .. }
+                        | super::resolve::ResolvedCodegenKind::InlineVal => {
+                            panic!(
+                                "dict ref resolved to non-dictionary codegen kind: {}",
+                                resolved.canonical_name
+                            )
+                        }
+                    }
                 } else if let Some(arity) = self.fun_arity(name) {
                     if arity == 0 {
                         CExpr::Apply(Box::new(CExpr::FunRef(name.clone(), 0)), vec![])

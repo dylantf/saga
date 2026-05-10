@@ -183,10 +183,11 @@ pub enum ResolvedCodegenKind {
         effects: Vec<String>,
     },
     /// A compiler intrinsic selected by declaration identity, never spelling.
+    /// Intrinsics lower via `lower_intrinsic` and never flow through the
+    /// effect-bearing call path, so no `effects` field is carried.
     Intrinsic {
         id: crate::intrinsics::IntrinsicId,
         arity: usize,
-        effects: Vec<String>,
     },
     /// An `@inline val`; lowering clones the canonical lowered RHS.
     InlineVal,
@@ -205,9 +206,8 @@ impl ResolvedCodegenKind {
     pub fn effects(&self) -> &[String] {
         match self {
             ResolvedCodegenKind::BeamFunction { effects, .. }
-            | ResolvedCodegenKind::ExternalFunction { effects, .. }
-            | ResolvedCodegenKind::Intrinsic { effects, .. } => effects,
-            ResolvedCodegenKind::InlineVal => &[],
+            | ResolvedCodegenKind::ExternalFunction { effects, .. } => effects,
+            ResolvedCodegenKind::Intrinsic { .. } | ResolvedCodegenKind::InlineVal => &[],
         }
     }
 }
@@ -937,49 +937,77 @@ fn collect_local_fun_arities(program: &Program) -> HashMap<String, usize> {
     local_funs
 }
 
+/// Classify a declaration into its codegen kind by consulting the module's
+/// `intrinsic_exports` / `inline_vals` / `external_funs` tables. Shared by
+/// local-scope registration (`erlang_mod_for_beam = None`) and imported-scope
+/// registration (`erlang_mod_for_beam = Some(...)`).
+///
+/// `erlang_mod_for_external` is the erlang module name of the *defining*
+/// module — used as `ExternalFunction.erlang_mod` (the Saga wrapper's home).
+fn classify_codegen_kind(
+    info: Option<&ModuleCodegenInfo>,
+    name: &str,
+    declared_arity: usize,
+    arity: usize,
+    erlang_mod_for_beam: Option<String>,
+    erlang_mod_for_external: &str,
+    effects: Vec<String>,
+) -> ResolvedCodegenKind {
+    if let Some((_, intrinsic)) =
+        info.and_then(|info| info.intrinsic_exports.iter().find(|(n, _)| n == name))
+    {
+        return ResolvedCodegenKind::Intrinsic {
+            id: *intrinsic,
+            arity,
+        };
+    }
+    if info.is_some_and(|info| info.inline_vals.iter().any(|(n, _)| n == name)) {
+        return ResolvedCodegenKind::InlineVal;
+    }
+    if let Some((_, target_mod, target_fun, _)) = info.and_then(|info| {
+        info.external_funs
+            .iter()
+            .find(|(n, _, _, external_arity)| n == name && *external_arity == declared_arity)
+    }) {
+        return ResolvedCodegenKind::ExternalFunction {
+            erlang_mod: erlang_mod_for_external.to_string(),
+            name: name.to_string(),
+            target_erlang_mod: target_mod.clone(),
+            target_name: target_fun.clone(),
+            arity,
+            effects,
+        };
+    }
+    ResolvedCodegenKind::BeamFunction {
+        erlang_mod: erlang_mod_for_beam,
+        name: name.to_string(),
+        arity,
+        effects,
+    }
+}
+
 fn register_local_scope_funs(
     scope: &mut HashMap<String, ScopedName>,
     local_funs: &HashMap<String, usize>,
     source_module_name: &str,
     info: Option<&ModuleCodegenInfo>,
 ) {
+    let source_erlang_mod = module_name_to_erlang(
+        &source_module_name
+            .split('.')
+            .map(String::from)
+            .collect::<Vec<_>>(),
+    );
     for (name, arity) in local_funs {
-        let kind = if let Some((_, intrinsic)) =
-            info.and_then(|info| info.intrinsic_exports.iter().find(|(n, _)| n == name))
-        {
-            ResolvedCodegenKind::Intrinsic {
-                id: *intrinsic,
-                arity: *arity,
-                effects: Vec::new(),
-            }
-        } else if info.is_some_and(|info| info.inline_vals.iter().any(|(n, _)| n == name)) {
-            ResolvedCodegenKind::InlineVal
-        } else if let Some((_, target_mod, target_fun, _)) = info.and_then(|info| {
-            info.external_funs
-                .iter()
-                .find(|(n, _, _, external_arity)| n == name && *external_arity == *arity)
-        }) {
-            ResolvedCodegenKind::ExternalFunction {
-                erlang_mod: module_name_to_erlang(
-                    &source_module_name
-                        .split('.')
-                        .map(String::from)
-                        .collect::<Vec<_>>(),
-                ),
-                name: name.clone(),
-                target_erlang_mod: target_mod.clone(),
-                target_name: target_fun.clone(),
-                arity: *arity,
-                effects: Vec::new(),
-            }
-        } else {
-            ResolvedCodegenKind::BeamFunction {
-                erlang_mod: None,
-                name: name.clone(),
-                arity: *arity,
-                effects: Vec::new(),
-            }
-        };
+        let kind = classify_codegen_kind(
+            info,
+            name,
+            *arity,
+            *arity,
+            None,
+            &source_erlang_mod,
+            Vec::new(),
+        );
         scope.insert(
             name.clone(),
             ScopedName::Symbol {
@@ -1043,36 +1071,15 @@ fn build_imported_fun_scoped(
     let expanded_arity = arity + dict_params + extras;
     let canonical_name = format!("{}.{}", mod_name, name);
 
-    let kind = if let Some((_, intrinsic)) = info.intrinsic_exports.iter().find(|(n, _)| n == name)
-    {
-        ResolvedCodegenKind::Intrinsic {
-            id: *intrinsic,
-            arity: expanded_arity,
-            effects,
-        }
-    } else if info.inline_vals.iter().any(|(n, _)| n == name) {
-        ResolvedCodegenKind::InlineVal
-    } else if let Some((_, target_mod, target_fun, _)) = info
-        .external_funs
-        .iter()
-        .find(|(n, _, _, external_arity)| n == name && *external_arity == arity)
-    {
-        ResolvedCodegenKind::ExternalFunction {
-            erlang_mod: erlang_mod.to_string(),
-            name: name.to_string(),
-            target_erlang_mod: target_mod.clone(),
-            target_name: target_fun.clone(),
-            arity: expanded_arity,
-            effects,
-        }
-    } else {
-        ResolvedCodegenKind::BeamFunction {
-            erlang_mod: Some(erlang_mod.to_string()),
-            name: name.to_string(),
-            arity: expanded_arity,
-            effects,
-        }
-    };
+    let kind = classify_codegen_kind(
+        Some(info),
+        name,
+        arity,
+        expanded_arity,
+        Some(erlang_mod.to_string()),
+        erlang_mod,
+        effects,
+    );
 
     ScopedName::Symbol {
         name: name.to_string(),

@@ -178,19 +178,27 @@ impl<'a> Populator<'a> {
     fn collect_head_open_rows(inputs: &PopulatorInputs<'_>) -> HashMap<NodeId, bool> {
         let mut out = HashMap::new();
         for (node_id, resolved) in inputs.resolved.iter() {
-            let open = match &resolved.kind {
+            // A symbol is "local" (look it up in the current module's env)
+            // when it's a current-module BeamFunction (erlang_mod = None) or
+            // when it carries no source_module at all (e.g. block-local funs).
+            let local = matches!(
+                &resolved.kind,
                 ResolvedCodegenKind::BeamFunction {
                     erlang_mod: None, ..
-                } => inputs
+                }
+            ) || resolved.source_module.is_none();
+            let open = if local {
+                inputs
                     .check_result
                     .env
                     .get(&resolved.name)
                     .map(|s| util::has_open_effect_row(&inputs.check_result.sub.apply(&s.ty)))
-                    .unwrap_or(false),
-                _ => inputs
-                    .ctx
-                    .modules
-                    .get(resolved.source_module.as_deref().unwrap_or_default())
+                    .unwrap_or(false)
+            } else {
+                resolved
+                    .source_module
+                    .as_deref()
+                    .and_then(|src| inputs.ctx.modules.get(src))
                     .and_then(|m| {
                         m.codegen_info
                             .exports
@@ -198,7 +206,7 @@ impl<'a> Populator<'a> {
                             .find(|(n, _)| n == &resolved.name)
                             .map(|(_, scheme)| util::has_open_effect_row(&scheme.ty))
                     })
-                    .unwrap_or(false),
+                    .unwrap_or(false)
             };
             out.insert(*node_id, open);
         }
