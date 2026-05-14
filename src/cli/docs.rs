@@ -1,26 +1,42 @@
 use std::fmt::Write;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use saga::ast::*;
 use saga::lexer::Lexer;
 use saga::parser::Parser;
-use saga::typechecker::BUILTIN_MODULES;
 
-/// Generate markdown documentation for all stdlib modules.
-pub fn generate_docs(output_dir: &Path) {
+/// One module to be rendered: declared module name and the path of the source file.
+pub struct DocModule {
+    pub name: String,
+    pub path: PathBuf,
+}
+
+/// Generate markdown documentation for the given modules.
+///
+/// Writes one `<ModuleName>.md` per module under `output_dir`, plus an `index.md`
+/// linking them with one-line summaries pulled from each module's doc comment.
+pub fn generate_docs(modules: &[DocModule], output_dir: &Path) {
     fs::create_dir_all(output_dir).unwrap_or_else(|e| {
         eprintln!("Error creating output directory: {}", e);
         std::process::exit(1);
     });
 
-    let mut modules_generated = 0;
+    let mut summaries: Vec<(String, Option<String>)> = Vec::new();
 
-    for &(module_name, source) in BUILTIN_MODULES {
-        let tokens = match Lexer::new(source).lex() {
+    for module in modules {
+        let source = match fs::read_to_string(&module.path) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("Error reading {}: {}", module.path.display(), e);
+                continue;
+            }
+        };
+
+        let tokens = match Lexer::new(&source).lex() {
             Ok(t) => t,
             Err(e) => {
-                eprintln!("Lex error in {}: {:?}", module_name, e);
+                eprintln!("Lex error in {}: {:?}", module.name, e);
                 continue;
             }
         };
@@ -28,27 +44,61 @@ pub fn generate_docs(output_dir: &Path) {
         let program = match Parser::new(tokens).parse_program() {
             Ok(p) => p,
             Err(e) => {
-                eprintln!("Parse error in {}: {}", module_name, e.message);
+                eprintln!("Parse error in {}: {}", module.name, e.message);
                 continue;
             }
         };
 
-        let mdx = render_module(module_name, &program);
-        let filename = format!("{}.md", module_name);
-        let out_path = output_dir.join(&filename);
+        let mdx = render_module(&module.name, &program);
+        let out_path = output_dir.join(format!("{}.md", module.name));
         fs::write(&out_path, &mdx).unwrap_or_else(|e| {
             eprintln!("Error writing {}: {}", out_path.display(), e);
             std::process::exit(1);
         });
-        modules_generated += 1;
+
+        summaries.push((module.name.clone(), module_summary(&program)));
     }
+
+    summaries.sort_by(|a, b| a.0.cmp(&b.0));
+    let index = render_index(&summaries);
+    let index_path = output_dir.join("index.md");
+    fs::write(&index_path, &index).unwrap_or_else(|e| {
+        eprintln!("Error writing {}: {}", index_path.display(), e);
+        std::process::exit(1);
+    });
 
     eprintln!(
         "  {} Generated docs for {} modules in {}",
         super::color::green("Done."),
-        modules_generated,
+        summaries.len(),
         output_dir.display()
     );
+}
+
+fn module_summary(decls: &[Decl]) -> Option<String> {
+    for decl in decls {
+        if let Decl::ModuleDecl { doc, .. } = decl {
+            let line = doc.iter().find(|l| !l.trim().is_empty())?;
+            return Some(line.trim().to_string());
+        }
+    }
+    None
+}
+
+fn render_index(summaries: &[(String, Option<String>)]) -> String {
+    let mut out = String::new();
+    writeln!(out, "---").unwrap();
+    writeln!(out, "title: Modules").unwrap();
+    writeln!(out, "---").unwrap();
+    writeln!(out).unwrap();
+    writeln!(out, "# Modules\n").unwrap();
+    for (name, summary) in summaries {
+        match summary {
+            Some(s) => writeln!(out, "- [{0}]({0}.md) — {1}", name, s).unwrap(),
+            None => writeln!(out, "- [{0}]({0}.md)", name).unwrap(),
+        }
+    }
+    out
 }
 
 fn render_module(module_name: &str, decls: &[Decl]) -> String {
@@ -78,15 +128,6 @@ fn render_module(module_name: &str, decls: &[Decl]) -> String {
     let mut traits = Vec::new();
     let mut vals = Vec::new();
 
-    // Build a map of fun signatures so we can pair them with bindings
-    let signatures: std::collections::HashMap<&str, &Decl> = decls
-        .iter()
-        .filter_map(|d| match d {
-            Decl::FunSignature { name, public, .. } if *public => Some((name.as_str(), d)),
-            _ => None,
-        })
-        .collect();
-
     for decl in decls {
         match decl {
             Decl::TypeDef { public: true, .. } => types.push(decl),
@@ -96,8 +137,6 @@ fn render_module(module_name: &str, decls: &[Decl]) -> String {
             Decl::HandlerDef { public: true, .. } => handlers.push(decl),
             Decl::TraitDef { public: true, .. } => traits.push(decl),
             Decl::Val { public: true, .. } => vals.push(decl),
-            // Pub functions without a separate signature (just binding)
-            // are uncommon in stdlib, skip for now
             _ => {}
         }
     }
@@ -149,9 +188,6 @@ fn render_module(module_name: &str, decls: &[Decl]) -> String {
             render_fun_signature(&mut out, decl);
         }
     }
-
-    // Suppress unused variable warning
-    let _ = signatures;
 
     out
 }

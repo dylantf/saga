@@ -480,3 +480,65 @@ fn discover_test_files(dir: &std::path::Path) -> Vec<PathBuf> {
     files.sort();
     files
 }
+
+pub fn cmd_docs(output: Option<&str>, dir: Option<&str>) {
+    let output_dir = output
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("_build/docs"));
+
+    let modules: Vec<super::docs::DocModule> = match dir {
+        Some(dir_str) => {
+            let dir_path = PathBuf::from(dir_str);
+            if !dir_path.is_dir() {
+                eprintln!("Error: --dir path '{}' is not a directory", dir_str);
+                std::process::exit(1);
+            }
+            let map = typechecker::scan_source_dir(&dir_path).unwrap_or_else(|e| {
+                eprintln!("Error scanning {}: {}", dir_path.display(), e);
+                std::process::exit(1);
+            });
+            map.into_iter()
+                .map(|(name, path)| super::docs::DocModule { name, path })
+                .collect()
+        }
+        None => {
+            let project_root = super::find_project_root().unwrap_or_else(|| {
+                eprintln!(
+                    "No project.toml found. Use `saga docs --dir <path>` to document an arbitrary directory."
+                );
+                std::process::exit(1);
+            });
+            let config = ProjectConfig::load(&project_root);
+            if let Err(e) = config.validate() {
+                eprintln!("Error in project.toml: {}", e);
+                std::process::exit(1);
+            }
+            let lib = config.library.as_ref().unwrap_or_else(|| {
+                eprintln!(
+                    "Project has no [library] section to document. Use `saga docs --dir <path>` to document an arbitrary directory."
+                );
+                std::process::exit(1);
+            });
+            let map = typechecker::scan_project_modules(&project_root).unwrap_or_else(|e| {
+                eprintln!("Error scanning project: {}", e);
+                std::process::exit(1);
+            });
+            let mut modules = Vec::with_capacity(lib.expose.len());
+            for exposed in &lib.expose {
+                match map.get(exposed) {
+                    Some(path) => modules.push(super::docs::DocModule {
+                        name: exposed.clone(),
+                        path: path.clone(),
+                    }),
+                    None => {
+                        eprintln!("Error: exposed module '{}' not found in project", exposed);
+                        std::process::exit(1);
+                    }
+                }
+            }
+            modules
+        }
+    };
+
+    super::docs::generate_docs(&modules, &output_dir);
+}

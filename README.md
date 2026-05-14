@@ -31,7 +31,8 @@ saga check file.saga       # Type check only
 saga emit file.saga        # Print generated Core Erlang to stdout
 saga test                  # Run project test suite (tests/*.saga)
 saga install               # Fetch and compile Hex/git dependencies
-saga docs                  # Generate stdlib documentation (markdown)
+saga docs                  # Generate markdown docs for the current project's exposed modules
+saga docs --dir <path>     # Document every .saga module under <path> (no project.toml needed)
 ```
 
 ## Running tests

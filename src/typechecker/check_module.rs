@@ -396,16 +396,18 @@ pub fn scan_project_modules(root: &Path) -> Result<ModuleMap, String> {
     for entry_point in ["src", "lib"] {
         let dir = root.join(entry_point);
         if dir.is_dir() {
-            scan_dir(&dir, root, &mut map, &[])?;
+            scan_dir(&dir, root, &mut map, &[], false)?;
         }
     }
     Ok(map)
 }
 
 /// Scan a source directory for modules without skipping `tests/` subdirectories.
+/// Allows the reserved `Std` namespace, since this is used to render the stdlib's
+/// own docs and similar tooling outside the project-validation path.
 pub fn scan_source_dir(root: &Path) -> Result<ModuleMap, String> {
     let mut map = ModuleMap::new();
-    scan_dir(root, root, &mut map, &["_build", "deps"])?;
+    scan_dir(root, root, &mut map, &["_build", "deps"], true)?;
     Ok(map)
 }
 
@@ -414,6 +416,7 @@ fn scan_dir(
     root: &Path,
     map: &mut ModuleMap,
     skip_dirs: &[&str],
+    allow_std: bool,
 ) -> Result<(), String> {
     let entries =
         std::fs::read_dir(dir).map_err(|e| format!("cannot read {}: {}", dir.display(), e))?;
@@ -427,11 +430,11 @@ fn scan_dir(
             {
                 continue;
             }
-            scan_dir(&path, root, map, skip_dirs)?;
+            scan_dir(&path, root, map, skip_dirs, allow_std)?;
         } else if path.extension().is_some_and(|ext| ext == "saga") {
             match extract_module_name(&path) {
                 Ok(Some(module_name)) => {
-                    if module_name.starts_with("Std.") || module_name == "Std" {
+                    if !allow_std && (module_name.starts_with("Std.") || module_name == "Std") {
                         let rel = path.strip_prefix(root).unwrap_or(&path);
                         return Err(format!(
                             "module '{}' in {} uses the reserved `Std` namespace",

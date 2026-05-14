@@ -75,11 +75,26 @@ enum Command {
         #[arg(long)]
         width: Option<usize>,
     },
-    /// Generate documentation
+    /// Generate markdown documentation for a project's public API
+    ///
+    /// Default (no `--dir`): runs in the current project. Requires a
+    /// `project.toml` with a `[library]` section, and documents the modules
+    /// listed in `expose`.
+    ///
+    /// With `--dir <path>`: documents every `.saga` module found under that
+    /// directory, ignoring any project.toml. Used to render the stdlib's
+    /// own docs, or any directory of modules outside a project.
+    ///
+    /// Output: one `<ModuleName>.md` per module plus an `index.md` linking
+    /// them with one-line summaries pulled from each module's doc comment.
     Docs {
         /// Output directory (default: _build/docs/)
         #[arg(long, short)]
         output: Option<String>,
+        /// Document every module under this directory instead of the current
+        /// project's exposed modules. No project.toml is required.
+        #[arg(long)]
+        dir: Option<String>,
     },
 }
 
@@ -127,11 +142,8 @@ fn main() {
         } => {
             cli::commands::cmd_fmt(&file, write, debug, width);
         }
-        Command::Docs { output } => {
-            let output_dir = output
-                .map(std::path::PathBuf::from)
-                .unwrap_or_else(|| std::path::PathBuf::from("_build/docs"));
-            cli::docs::generate_docs(&output_dir);
+        Command::Docs { output, dir } => {
+            cli::commands::cmd_docs(output.as_deref(), dir.as_deref());
         }
     }
 }

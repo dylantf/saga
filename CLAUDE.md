@@ -24,6 +24,8 @@ cargo run --bin saga -- check file.saga     # Type check only
 cargo run --bin saga -- emit file.saga      # Print Core Erlang to stdout
 cargo run --bin saga -- test              # Run project test suite (tests/*.saga)
 cargo run --bin saga -- install           # Fetch and compile Hex/git dependencies
+cargo run --bin saga -- docs              # Generate markdown docs for the current project's exposed modules
+cargo run --bin saga -- docs --dir <path> # Document every .saga module under <path> (no project.toml needed)
 ```
 
 Requires `erlc` and `erl` on PATH (Erlang/OTP) for `run`/`build`/`test` commands. Hex packages with NIFs require `rebar3` on PATH.
