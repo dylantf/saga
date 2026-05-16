@@ -21,7 +21,7 @@
 //! (`let g = factory(); g x`) are tracked via a lexical scope stack inside
 //! the populator.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::ast::{self, Decl, Expr, ExprKind, NodeId, Pat, Program, Stmt};
 use crate::codegen::CodegenContext;
@@ -109,6 +109,11 @@ pub struct FunSig {
     /// True if the callee's effect row has an open tail (`needs {Foo, ..e}`).
     /// Open-row callees produce `RowForwarded` rather than `StaticOps`.
     pub is_open_row: bool,
+    /// Source-level parameter types. Used to detect callback parameters
+    /// whose type has an open effect row but no named effects — these need
+    /// CPS threading at call sites even though `param_absorbed_effects`
+    /// (named-effects only) misses them.
+    pub param_types: Vec<crate::typechecker::Type>,
 }
 
 /// Read-only inputs the populator consults during its walk. Bundled into a
@@ -144,6 +149,13 @@ pub struct Populator<'a> {
     /// Stack of lexical scopes. Each frame maps a bound name to the absorbed
     /// effects that calls of that name should thread.
     scopes: Vec<HashMap<String, Vec<String>>>,
+    /// Stack of lexical scopes for variables whose type is an open-row
+    /// callable (e.g. a function parameter `f: Unit -> Unit needs {..e}`).
+    /// These have no static effects to pin, but the call site must still
+    /// route through the CPS path so the caller's ambient evidence is
+    /// forwarded into the callee. Parallel to `scopes` — pushed/popped
+    /// together so lookups walk the same lexical structure.
+    open_row_vars: Vec<HashSet<String>>,
     /// Stack of local function frames mirroring the lowerer's dynamic
     /// `fun_info` mutations for `Stmt::LetFun`. Maps name -> FunSig.
     local_fun_sigs: Vec<HashMap<String, FunSig>>,
@@ -158,6 +170,7 @@ impl<'a> Populator<'a> {
             inputs,
             map: HashMap::new(),
             scopes: Vec::new(),
+            open_row_vars: Vec::new(),
             local_fun_sigs: Vec::new(),
             head_open_row,
         }
@@ -184,7 +197,8 @@ impl<'a> Populator<'a> {
             let local = matches!(
                 &resolved.kind,
                 ResolvedCodegenKind::BeamFunction {
-                    erlang_mod: None, ..
+                    erlang_mod: None,
+                    ..
                 }
             ) || resolved.source_module.is_none();
             let open = if local {
@@ -220,31 +234,49 @@ impl<'a> Populator<'a> {
         self.map
     }
 
+    /// Push parallel frames onto `scopes` and `open_row_vars`. Use
+    /// `push_scope_with` when the caller has already built the effects frame
+    /// (e.g. from `fun_param_effectful_vars`).
+    fn push_scope(&mut self) {
+        self.scopes.push(HashMap::new());
+        self.open_row_vars.push(HashSet::new());
+    }
+
+    fn push_scope_with(&mut self, frame: HashMap<String, Vec<String>>, open_row: HashSet<String>) {
+        self.scopes.push(frame);
+        self.open_row_vars.push(open_row);
+    }
+
+    fn pop_scope(&mut self) {
+        self.scopes.pop();
+        self.open_row_vars.pop();
+    }
+
     fn walk_decl(&mut self, decl: &Decl) {
         match decl {
             Decl::FunBinding {
                 name, params, body, ..
             } => {
-                let frame = self.fun_param_effectful_vars(name, params);
-                self.scopes.push(frame);
+                let (frame, open_row) = self.fun_param_effectful_vars(name, params);
+                self.push_scope_with(frame, open_row);
                 self.walk_expr(body);
-                self.scopes.pop();
+                self.pop_scope();
             }
             Decl::Val { value, .. } | Decl::Let { value, .. } => {
-                self.scopes.push(HashMap::new());
+                self.push_scope();
                 self.walk_expr(value);
-                self.scopes.pop();
+                self.pop_scope();
             }
             Decl::ImplDef { methods, .. } => {
                 for m in methods {
-                    self.scopes.push(HashMap::new());
+                    self.push_scope();
                     self.walk_expr(&m.node.body);
-                    self.scopes.pop();
+                    self.pop_scope();
                 }
             }
             Decl::HandlerDef { body, .. } => {
                 for arm in &body.arms {
-                    self.scopes.push(HashMap::new());
+                    self.push_scope();
                     for param in &arm.node.params {
                         self.record_pattern_effectful_vars(param);
                     }
@@ -252,39 +284,69 @@ impl<'a> Populator<'a> {
                     if let Some(fb) = &arm.node.finally_block {
                         self.walk_expr(fb);
                     }
-                    self.scopes.pop();
+                    self.pop_scope();
                 }
                 if let Some(rc) = &body.return_clause {
-                    self.scopes.push(HashMap::new());
+                    self.push_scope();
                     for param in &rc.params {
                         self.record_pattern_effectful_vars(param);
                     }
                     self.walk_expr(&rc.body);
-                    self.scopes.pop();
+                    self.pop_scope();
                 }
             }
             Decl::DictConstructor { methods, .. } => {
                 for m in methods {
-                    self.scopes.push(HashMap::new());
+                    self.push_scope();
                     self.walk_expr(m);
-                    self.scopes.pop();
+                    self.pop_scope();
                 }
             }
             _ => {}
         }
     }
 
-    fn fun_param_effectful_vars(&self, name: &str, params: &[Pat]) -> HashMap<String, Vec<String>> {
-        let mut out = HashMap::new();
+    fn fun_param_effectful_vars(
+        &self,
+        name: &str,
+        params: &[Pat],
+    ) -> (HashMap<String, Vec<String>>, HashSet<String>) {
+        let mut effects = HashMap::new();
+        let mut open_row = HashSet::new();
         let Some(info) = self.inputs.fun_sigs.get(name) else {
-            return out;
+            return (effects, open_row);
         };
         for (idx, effs) in &info.param_absorbed_effects {
             if let Some(Pat::Var { name: pname, .. }) = params.get(*idx) {
-                out.insert(pname.clone(), effs.clone());
+                effects.insert(pname.clone(), effs.clone());
             }
         }
-        out
+        // Callback parameters whose type is an open-row function (`f: Unit ->
+        // Unit needs {..e}`) have no named effects to absorb but must still
+        // route through the CPS path so the caller's ambient evidence is
+        // forwarded into them. `param_absorbed_effects` only tracks named
+        // effects, so detect these directly off the param types.
+        for (idx, pty) in info.param_types.iter().enumerate() {
+            if let Some(Pat::Var { name: pname, .. }) = params.get(idx)
+                && !effects.contains_key(pname)
+                && Self::type_is_effectful_callable(pty)
+            {
+                open_row.insert(pname.clone());
+            }
+        }
+        (effects, open_row)
+    }
+
+    /// True when `ty` is a function value whose effect row carries either
+    /// named effects or an open tail. Callers that bind such a value need to
+    /// route through the CPS path even when the effect row resolves to empty
+    /// named effects (the open tail still forwards the caller's evidence).
+    fn type_is_effectful_callable(ty: &crate::typechecker::Type) -> bool {
+        let crate::typechecker::Type::Fun(..) = ty else {
+            return false;
+        };
+        let (_, effects) = util::arity_and_effects_from_type(ty);
+        !effects.is_empty() || util::has_open_effect_row(ty)
     }
 
     fn lookup_effectful_var(&self, name: &str) -> Option<Vec<String>> {
@@ -296,9 +358,19 @@ impl<'a> Populator<'a> {
         None
     }
 
+    fn lookup_open_row_var(&self, name: &str) -> bool {
+        self.open_row_vars.iter().rev().any(|f| f.contains(name))
+    }
+
     fn record_effectful_var(&mut self, name: String, effects: Vec<String>) {
         if let Some(frame) = self.scopes.last_mut() {
             frame.insert(name, effects);
+        }
+    }
+
+    fn record_open_row_var(&mut self, name: String) {
+        if let Some(frame) = self.open_row_vars.last_mut() {
+            frame.insert(name);
         }
     }
 
@@ -309,6 +381,8 @@ impl<'a> Populator<'a> {
                     && !effects.is_empty()
                 {
                     self.record_effectful_var(name.clone(), effects);
+                } else if self.pattern_is_open_row_callable(pat) {
+                    self.record_open_row_var(name.clone());
                 }
             }
             Pat::Constructor { args, .. } | Pat::Tuple { elements: args, .. } => {
@@ -347,12 +421,42 @@ impl<'a> Populator<'a> {
         }
     }
 
+    /// True when the pattern binds a value whose type is an open-row
+    /// function with no named effects. These values still need CPS
+    /// threading at call sites — see `type_is_effectful_callable`.
+    fn pattern_is_open_row_callable(&self, pat: &Pat) -> bool {
+        let Pat::Var { span, .. } = pat else {
+            return false;
+        };
+        let Some(raw_ty) = self.inputs.check_result.type_at_span.get(span) else {
+            return false;
+        };
+        let resolved = self.inputs.check_result.sub.apply(raw_ty);
+        if !matches!(resolved, crate::typechecker::Type::Fun(..)) {
+            return false;
+        }
+        let (_, effects) = util::arity_and_effects_from_type(&resolved);
+        // `pattern_effects` already handles the named-effects case; here we
+        // only want to flag bindings whose effects come solely from the open
+        // row tail.
+        effects.is_empty() && util::has_open_effect_row(&resolved)
+    }
+
     fn pattern_effects(&self, pat: &Pat) -> Option<Vec<String>> {
         let Pat::Var { span, .. } = pat else {
             return None;
         };
-        let ty = self.inputs.check_result.type_at_span.get(span)?;
-        let mut effects: Vec<String> = crate::typechecker::effects_from_type(ty)
+        let raw_ty = self.inputs.check_result.type_at_span.get(span)?;
+        // The typechecker records pattern-bound types before the surrounding
+        // unification finishes (e.g. constructor-pattern args are bound with a
+        // freshly instantiated parameter type, then the scrutinee is unified
+        // against the constructor's result type). Apply the substitution here
+        // so a pattern var like `r` in `r :: rest` resolves to its actual
+        // function type — otherwise effectful function values pulled out of a
+        // list via pattern match get classified as pure and the call site
+        // misses evidence threading.
+        let resolved = self.inputs.check_result.sub.apply(raw_ty);
+        let mut effects: Vec<String> = crate::typechecker::effects_from_type(&resolved)
             .into_iter()
             .collect();
         effects.sort();
@@ -393,40 +497,40 @@ impl<'a> Populator<'a> {
                 ..
             } => {
                 self.walk_expr(cond);
-                self.scopes.push(HashMap::new());
+                self.push_scope();
                 self.walk_expr(then_branch);
-                self.scopes.pop();
-                self.scopes.push(HashMap::new());
+                self.pop_scope();
+                self.push_scope();
                 self.walk_expr(else_branch);
-                self.scopes.pop();
+                self.pop_scope();
             }
             ExprKind::Case {
                 scrutinee, arms, ..
             } => {
                 self.walk_expr(scrutinee);
                 for arm in arms {
-                    self.scopes.push(HashMap::new());
+                    self.push_scope();
                     self.record_pattern_effectful_vars(&arm.node.pattern);
                     if let Some(g) = &arm.node.guard {
                         self.walk_expr(g);
                     }
                     self.walk_expr(&arm.node.body);
-                    self.scopes.pop();
+                    self.pop_scope();
                 }
             }
             ExprKind::Block { stmts, .. } => {
-                self.scopes.push(HashMap::new());
+                self.push_scope();
                 self.local_fun_sigs.push(HashMap::new());
                 for stmt in stmts {
                     self.walk_stmt(&stmt.node);
                 }
                 self.local_fun_sigs.pop();
-                self.scopes.pop();
+                self.pop_scope();
             }
             ExprKind::Lambda { body, .. } => {
-                self.scopes.push(HashMap::new());
+                self.push_scope();
                 self.walk_expr(body);
-                self.scopes.pop();
+                self.pop_scope();
             }
             ExprKind::FieldAccess { expr, .. } => self.walk_expr(expr),
             ExprKind::RecordCreate { fields, .. } | ExprKind::AnonRecordCreate { fields } => {
@@ -446,14 +550,14 @@ impl<'a> Populator<'a> {
                 }
             }
             ExprKind::With { expr, handler } => {
-                self.scopes.push(HashMap::new());
+                self.push_scope();
                 self.walk_expr(expr);
-                self.scopes.pop();
+                self.pop_scope();
                 if let ast::Handler::Inline { items, .. } = handler.as_ref() {
                     for item in items {
                         match &item.node {
                             ast::HandlerItem::Arm(arm) | ast::HandlerItem::Return(arm) => {
-                                self.scopes.push(HashMap::new());
+                                self.push_scope();
                                 for param in &arm.params {
                                     self.record_pattern_effectful_vars(param);
                                 }
@@ -461,7 +565,7 @@ impl<'a> Populator<'a> {
                                 if let Some(fb) = &arm.finally_block {
                                     self.walk_expr(fb);
                                 }
-                                self.scopes.pop();
+                                self.pop_scope();
                             }
                             ast::HandlerItem::Named(_) => {}
                         }
@@ -481,34 +585,34 @@ impl<'a> Populator<'a> {
                 ..
             } => {
                 for (_, e) in bindings {
-                    self.scopes.push(HashMap::new());
+                    self.push_scope();
                     self.walk_expr(e);
-                    self.scopes.pop();
+                    self.pop_scope();
                 }
-                self.scopes.push(HashMap::new());
+                self.push_scope();
                 self.walk_expr(success);
-                self.scopes.pop();
+                self.pop_scope();
                 for arm in else_arms {
-                    self.scopes.push(HashMap::new());
+                    self.push_scope();
                     self.record_pattern_effectful_vars(&arm.node.pattern);
                     if let Some(g) = &arm.node.guard {
                         self.walk_expr(g);
                     }
                     self.walk_expr(&arm.node.body);
-                    self.scopes.pop();
+                    self.pop_scope();
                 }
             }
             ExprKind::Receive {
                 arms, after_clause, ..
             } => {
                 for arm in arms {
-                    self.scopes.push(HashMap::new());
+                    self.push_scope();
                     self.record_pattern_effectful_vars(&arm.node.pattern);
                     if let Some(g) = &arm.node.guard {
                         self.walk_expr(g);
                     }
                     self.walk_expr(&arm.node.body);
-                    self.scopes.pop();
+                    self.pop_scope();
                 }
                 if let Some((timeout, body)) = after_clause {
                     self.walk_expr(timeout);
@@ -526,7 +630,7 @@ impl<'a> Populator<'a> {
             ExprKind::Ascription { expr, .. } => self.walk_expr(expr),
             ExprKind::HandlerExpr { body } => {
                 for arm in &body.arms {
-                    self.scopes.push(HashMap::new());
+                    self.push_scope();
                     for param in &arm.node.params {
                         self.record_pattern_effectful_vars(param);
                     }
@@ -534,15 +638,15 @@ impl<'a> Populator<'a> {
                     if let Some(fb) = &arm.node.finally_block {
                         self.walk_expr(fb);
                     }
-                    self.scopes.pop();
+                    self.pop_scope();
                 }
                 if let Some(rc) = &body.return_clause {
-                    self.scopes.push(HashMap::new());
+                    self.push_scope();
                     for param in &rc.params {
                         self.record_pattern_effectful_vars(param);
                     }
                     self.walk_expr(&rc.body);
-                    self.scopes.pop();
+                    self.pop_scope();
                 }
             }
             ExprKind::DictMethodAccess { dict, .. } => self.walk_expr(dict),
@@ -604,13 +708,13 @@ impl<'a> Populator<'a> {
                     frame.insert(name.clone(), sig);
                 }
                 if let Some(g) = guard {
-                    self.scopes.push(HashMap::new());
+                    self.push_scope();
                     self.walk_expr(g);
-                    self.scopes.pop();
+                    self.pop_scope();
                 }
-                self.scopes.push(HashMap::new());
+                self.push_scope();
                 self.walk_expr(body);
-                self.scopes.pop();
+                self.pop_scope();
             }
             Stmt::Expr(e) => self.walk_expr(e),
         }
@@ -778,6 +882,15 @@ impl<'a> Populator<'a> {
                         needs_return_k: true,
                     };
                 }
+                // Open-row callable vars (`f: Unit -> Unit needs {..e}`)
+                // would also need CPS threading at the call site, but
+                // making that work requires bridging pure function values
+                // into the CPS calling convention at every point a function
+                // value crosses into an open-row position (lambdas in
+                // lists, function refs passed as args, etc.). That's wider
+                // than the scope of the current fix; track via repro3 in
+                // examples/bugs/badarity-effects.
+                let _ = self.lookup_open_row_var(name);
                 return pure();
             }
         };
@@ -886,6 +999,7 @@ impl<'a> Populator<'a> {
                 effects,
                 param_absorbed_effects,
                 is_open_row: util::has_open_effect_row(&ty),
+                param_types: util::param_types_from_type(&ty),
             });
         }
 

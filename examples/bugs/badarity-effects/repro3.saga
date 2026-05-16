@@ -1,0 +1,25 @@
+module Main
+
+import Std.IO (console, println)
+
+effect Foo {
+  fun foo : Unit -> Unit
+}
+
+fun bar : Unit -> Unit needs {Foo}
+bar () = foo! ()
+
+# Wrap function: takes an effectful function value, calls it directly
+# (not inside a `with` block), with a row-polymorphic effect parameter.
+fun wrap : (Unit -> Unit needs {..e}) -> Unit -> Unit needs {Stdio, ..e}
+wrap f () = {
+  println "before"
+  f ()
+  println "after"
+}
+
+main () = {
+  wrap bar () with {
+    foo () = resume ()
+  }
+} with console

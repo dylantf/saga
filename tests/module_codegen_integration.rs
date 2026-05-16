@@ -2249,6 +2249,171 @@ run_ok () = {
     );
 }
 
+/// Regression: pulling an effectful function out of a list via a cons pattern
+/// (`r :: rest`) and calling `r input` from inside another effectful function
+/// was emitting a plain 1-arg `apply` instead of the CPS-aware
+/// `apply r(input, Evidence, ReturnK)` call, causing a `badarity` crash at
+/// runtime ("function called with 1 argument(s), but expects 3").
+///
+/// Root cause was in the codegen call-effects pre-pass: it read the recorded
+/// type for pattern-bound variables out of `type_at_span` without applying the
+/// typechecker substitution. Constructor-pattern args (and therefore `r` in
+/// the desugared `Cons(r, rest)`) are bound with a freshly instantiated
+/// parameter type *before* unification with the scrutinee finishes, so the
+/// stored type was a raw `Type::Var(a)` carrying no effects. The pattern var
+/// was then classified as pure and the call site missed evidence threading.
+#[test]
+fn pattern_bound_effectful_function_in_list_threads_evidence() {
+    let main_src = "
+module Main
+
+effect Skip {
+  fun skip : Unit -> a
+}
+
+handler skip_to_default for Skip {
+  skip () = \"default\"
+}
+
+fun route : String -> (String -> String needs {..e}) -> String -> String
+  needs {Skip, ..e}
+route pattern h input =
+  if input == pattern then h input
+  else skip! ()
+
+fun choose : List (String -> String needs {Skip, ..e}) -> String -> String
+  needs {..e}
+choose routes input = case routes {
+  [] -> \"no match\"
+  r :: rest -> r input with {
+    skip () = choose rest input
+  }
+}
+
+fun greet : String -> String
+greet _ = \"hello\"
+
+fun bye : String -> String
+bye _ = \"goodbye\"
+
+fun r1 : String -> String needs {Skip}
+r1 input = route \"/\" greet input
+
+fun r2 : String -> String needs {Skip}
+r2 input = route \"/bye\" bye input
+
+pub fun run_match : Unit -> String
+run_match () = choose [r1, r2] \"/bye\"
+
+pub fun run_miss : Unit -> String
+run_miss () = choose [r1, r2] \"/nope\"
+";
+    let mut checker = make_project_checker();
+    let main_program = typecheck_source(main_src, &mut checker);
+    let main_core = emit_from_program(&main_program, "main", &checker);
+
+    let dir = assert_erlc_compiles(&main_core, "main");
+    compile_evidence_bridge_into(&dir);
+
+    let run = std::process::Command::new("erl")
+        .arg("-noshell")
+        .arg("-pa")
+        .arg(&dir)
+        .arg("-eval")
+        .arg("io:format(\"~s|~s~n\", [main:run_match(unit), main:run_miss(unit)]), init:stop().")
+        .output()
+        .expect("failed to run erl");
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(
+        run.status.success(),
+        "erl failed:\nstderr: {}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&run.stdout);
+    assert!(
+        stdout.contains("goodbye|no match"),
+        "expected 'goodbye|no match', got: {stdout}"
+    );
+}
+
+/// Regression: a let-bound lambda whose inferred type carries effects must
+/// compile to a CPS-expanded `fun(Input, _Evidence, _ReturnK) -> ...` so call
+/// sites that thread evidence don't hit a `badarity` (3 args vs 1) crash.
+///
+/// Before the fix, `let r1 = fun input -> route ... input` (where `route`
+/// performs `Skip`) compiled to a plain `fun(Input) -> ...`. Top-level
+/// `fun r1 : ... needs {Skip}` declarations correctly added the two CPS
+/// params, but the let-binding lowering path called `lower_expr_value(value)`
+/// without an expected type, so the lambda lowering recipe at mod.rs never
+/// saw the effect row and emitted a `/1` closure. The fix passes the
+/// pattern's resolved type as the expected type, routing the lambda through
+/// `lower_expr_value_with_expected_type` which sets `lambda_effect_context`
+/// for the duration of lowering.
+#[test]
+fn let_bound_effectful_lambda_compiles_as_cps_value() {
+    let main_src = "
+module Main
+
+effect Skip {
+  fun skip : Unit -> a
+}
+
+fun route : String -> (String -> String needs {..e}) -> String -> String
+  needs {Skip, ..e}
+route pattern h input =
+  if input == pattern then h input
+  else skip! ()
+
+fun choose : List (String -> String needs {Skip, ..e}) -> String -> String
+  needs {..e}
+choose routes input = case routes {
+  [] -> \"no match\"
+  r :: rest -> r input with {
+    skip () = choose rest input
+  }
+}
+
+fun greet : String -> String
+greet _ = \"hello\"
+
+fun bye : String -> String
+bye _ = \"goodbye\"
+
+pub fun run : Unit -> String
+run () = {
+  let r1 = fun input -> route \"/\" greet input
+  let r2 = fun input -> route \"/bye\" bye input
+  choose [r1, r2] \"/bye\"
+}
+";
+    let mut checker = make_project_checker();
+    let main_program = typecheck_source(main_src, &mut checker);
+    let main_core = emit_from_program(&main_program, "main", &checker);
+
+    let dir = assert_erlc_compiles(&main_core, "main");
+    compile_evidence_bridge_into(&dir);
+
+    let run = std::process::Command::new("erl")
+        .arg("-noshell")
+        .arg("-pa")
+        .arg(&dir)
+        .arg("-eval")
+        .arg("io:format(\"~s~n\", [main:run(unit)]), init:stop().")
+        .output()
+        .expect("failed to run erl");
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(
+        run.status.success(),
+        "erl failed:\nstderr: {}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&run.stdout);
+    assert!(
+        stdout.contains("goodbye"),
+        "expected 'goodbye', got: {stdout}"
+    );
+}
+
 // --- Codegen-side coverage for canonical-name auto-load ---
 //
 // These pin the codegen analogue of the typecheck-side rule:

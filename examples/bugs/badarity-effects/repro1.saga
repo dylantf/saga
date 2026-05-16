@@ -1,0 +1,37 @@
+import Std.IO (console, println)
+
+effect Skip {
+  fun skip : Unit -> a
+}
+
+fun route : String -> (String -> String needs {..e}) -> String -> String
+  needs {Skip, ..e}
+route pattern h input =
+  if input == pattern then h input
+  else skip! ()
+
+fun choose : List (String -> String needs {Skip, ..e}) -> String -> String
+  needs {..e}
+choose routes input = case routes {
+  [] -> "no match"
+  r :: rest -> r input with {
+    skip () = choose rest input
+  }
+}
+
+fun greet : String -> String
+greet _ = "hello!"
+
+fun bye : String -> String
+bye _ = "goodbye!"
+
+fun r1 : String -> String needs {Skip}
+r1 input = route "/" greet input
+
+fun r2 : String -> String needs {Skip}
+r2 input = route "/bye" bye input
+
+main () = {
+  let result = choose [r1, r2] "/bye"
+  println result
+} with console

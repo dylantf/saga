@@ -707,7 +707,8 @@ impl<'a> Lowerer<'a> {
             [Stmt::Expr(e)] => self.lower_block_terminal_expr_with_return_k(e, return_k),
             [Stmt::Let { pattern, value, .. }] => {
                 let var = pat_binding_var(pattern).unwrap_or_else(|| self.fresh());
-                let val_ce = self.lower_expr_value(value);
+                let expected = self.let_pat_resolved_type(pattern);
+                let val_ce = self.lower_expr_value_with_expected_type(value, expected.as_ref());
                 let body = self.apply_return_k_with(return_k, CExpr::Var(var.clone()));
                 CExpr::Let(var, Box::new(val_ce), Box::new(body))
             }
@@ -979,7 +980,12 @@ impl<'a> Lowerer<'a> {
                                 assert,
                                 span,
                                 ..
-                            } => (Some(pattern), *assert, *span, self.lower_expr_value(value)),
+                            } => {
+                                let expected = self.let_pat_resolved_type(pattern);
+                                let val_ce = self
+                                    .lower_expr_value_with_expected_type(value, expected.as_ref());
+                                (Some(pattern), *assert, *span, val_ce)
+                            }
                             Stmt::Expr(e) => (None, false, e.span, self.lower_expr_value(e)),
                             Stmt::LetFun { .. } => unreachable!(),
                         };

@@ -1073,6 +1073,7 @@ impl<'a> Lowerer<'a> {
                         effects: info.effects.clone(),
                         param_absorbed_effects: info.param_absorbed_effects.clone(),
                         is_open_row: info.is_open_row,
+                        param_types: info.param_types.clone(),
                     },
                 )
             })
@@ -1995,7 +1996,22 @@ impl<'a> Lowerer<'a> {
         })
     }
 
-    fn lower_expr_value_with_expected_type(
+    /// Look up the resolved type bound by a let pattern. Used when lowering
+    /// `let r = fun ... -> ...` so the lambda lowers with its full
+    /// effectful arity (`_Evidence`/`_ReturnK`) when its type carries effects.
+    /// The typechecker records the binding's raw type at the pattern's span
+    /// (see `generalize_let_binding`); we apply the substitution here for the
+    /// same reason as in `call_effects::pattern_effects`; the recorded type
+    /// can still contain unresolved row variables.
+    pub(super) fn let_pat_resolved_type(&self, pat: &Pat) -> Option<crate::typechecker::Type> {
+        let Pat::Var { span, .. } = pat else {
+            return None;
+        };
+        let raw = self.check_result.type_at_span.get(span)?;
+        Some(self.check_result.sub.apply(raw))
+    }
+
+    pub(super) fn lower_expr_value_with_expected_type(
         &mut self,
         expr: &Expr,
         expected_ty: Option<&crate::typechecker::Type>,
@@ -2220,6 +2236,19 @@ impl<'a> Lowerer<'a> {
     ///   `with` further out, or handler-bound value paths), emit an empty
     ///   tuple as a placeholder so arity matches.
     pub(super) fn build_call_evidence(&mut self, callee_effects: &[String]) -> (String, CExpr) {
+        self.build_call_evidence_with(callee_effects, false)
+    }
+
+    /// `is_row_forward` is reserved for a future fix to handle row-
+    /// polymorphic callees correctly; today the call paths still pass
+    /// `false` and the helper behaves identically to `build_call_evidence`.
+    /// See the open-row badarity bug at
+    /// `examples/bugs/badarity-effects/repro3.saga`.
+    pub(super) fn build_call_evidence_with(
+        &mut self,
+        callee_effects: &[String],
+        _is_row_forward: bool,
+    ) -> (String, CExpr) {
         let var = self.fresh();
         let value = match &self.current_evidence {
             Some(ctx) if !ctx.is_open => {
@@ -2272,16 +2301,29 @@ impl<'a> Lowerer<'a> {
         // and which effects the callee declares; both used to be recomputed here
         // from `resolved_effects` + `effect_handler_ops`.
         let info = self.call_effects.get(&app_id);
-        let (is_effectful, callee_effects_vec): (bool, Vec<String>) = match info.map(|i| &i.kind) {
-            Some(super::call_effects::CallEffectKind::StaticOps { ops })
-            | Some(super::call_effects::CallEffectKind::RowForwarded { static_ops: ops }) => {
-                let mut effs: Vec<String> = ops.iter().map(|k| k.effect.clone()).collect();
-                effs.sort();
-                effs.dedup();
-                (!ops.is_empty(), effs)
-            }
-            _ => (false, Vec::new()),
-        };
+        // `is_row_forward` says "callee is row-polymorphic, forward caller's
+        // ambient evidence unchanged (don't project)". Without distinguishing
+        // it from `StaticOps`, a call to e.g. `wrap : ... -> ... needs
+        // {Stdio, ..e}` would project the caller's evidence down to just
+        // `{Stdio}` and drop the entries that the open-row tail is supposed
+        // to carry through into `wrap`'s body.
+        let (is_effectful, callee_effects_vec, is_row_forward): (bool, Vec<String>, bool) =
+            match info.map(|i| &i.kind) {
+                Some(super::call_effects::CallEffectKind::StaticOps { ops }) => {
+                    let mut effs: Vec<String> = ops.iter().map(|k| k.effect.clone()).collect();
+                    effs.sort();
+                    effs.dedup();
+                    (!ops.is_empty(), effs, false)
+                }
+                Some(super::call_effects::CallEffectKind::RowForwarded { static_ops }) => {
+                    let mut effs: Vec<String> =
+                        static_ops.iter().map(|k| k.effect.clone()).collect();
+                    effs.sort();
+                    effs.dedup();
+                    (true, effs, true)
+                }
+                _ => (false, Vec::new(), false),
+            };
         let total_arity = self
             .resolved_fun_info(head_expr.id, func_name)
             .map(|f| f.arity);
@@ -2330,7 +2372,8 @@ impl<'a> Lowerer<'a> {
                 let mut call_args: Vec<CExpr> =
                     arg_vars.iter().map(|v| CExpr::Var(v.clone())).collect();
                 // Effectful callee: thread evidence + _ReturnK.
-                let (ev_var, ev_ce) = self.build_call_evidence(&callee_effects_vec);
+                let (ev_var, ev_ce) =
+                    self.build_call_evidence_with(&callee_effects_vec, is_row_forward);
                 call_args.push(CExpr::Var(ev_var.clone()));
                 let (rk_var, rk_ce) = self.effectful_call_return_k_binding(return_k);
                 call_args.push(CExpr::Var(rk_var.clone()));
@@ -2355,7 +2398,8 @@ impl<'a> Lowerer<'a> {
                 self.lower_call_args_with_expected_types(args, param_types.as_deref());
             if is_effectful {
                 // Effectful callee: thread evidence + _ReturnK.
-                let (ev_var, ev_ce) = self.build_call_evidence(&callee_effects_vec);
+                let (ev_var, ev_ce) =
+                    self.build_call_evidence_with(&callee_effects_vec, is_row_forward);
                 bindings.push((ev_var.clone(), ev_ce));
                 arg_vars.push(ev_var);
                 let (rk_var, rk_ce) = self.effectful_call_return_k_binding(return_k);
@@ -2421,15 +2465,26 @@ impl<'a> Lowerer<'a> {
         // Source of truth: the per-call effect map, keyed by this App's NodeId.
         // Pre-pass already walked the lexical scope and recorded the absorbed
         // effects for the bound variable on its call-site App entry.
-        let absorbed: Vec<String> = match self.call_effects.get(&app_id).map(|i| &i.kind) {
-            Some(super::call_effects::CallEffectKind::StaticOps { ops })
-            | Some(super::call_effects::CallEffectKind::RowForwarded { static_ops: ops })
-                if !ops.is_empty() =>
-            {
+        //
+        // `is_row_forward` distinguishes two effectful shapes:
+        //   - `StaticOps`: callee asks for a specific set of effects. Caller
+        //     projects its evidence to that set.
+        //   - `RowForwarded`: callee is row-polymorphic (e.g. an open-row
+        //     callback param). Caller forwards its full ambient evidence
+        //     without narrowing — including when `static_ops` is empty, which
+        //     is the open-row-only case (`f: Unit -> Unit needs {..e}`).
+        let (absorbed, is_row_forward) = match self.call_effects.get(&app_id).map(|i| &i.kind) {
+            Some(super::call_effects::CallEffectKind::StaticOps { ops }) if !ops.is_empty() => {
                 let mut effs: Vec<String> = ops.iter().map(|k| k.effect.clone()).collect();
                 effs.sort();
                 effs.dedup();
-                effs
+                (effs, false)
+            }
+            Some(super::call_effects::CallEffectKind::RowForwarded { static_ops }) => {
+                let mut effs: Vec<String> = static_ops.iter().map(|k| k.effect.clone()).collect();
+                effs.sort();
+                effs.dedup();
+                (effs, true)
             }
             _ => return None,
         };
@@ -2460,7 +2515,7 @@ impl<'a> Lowerer<'a> {
             let mut call_args: Vec<CExpr> =
                 arg_vars.iter().map(|v| CExpr::Var(v.clone())).collect();
             // Effectful var call: thread evidence + _ReturnK.
-            let (ev_var, ev_ce) = self.build_call_evidence(&absorbed);
+            let (ev_var, ev_ce) = self.build_call_evidence_with(&absorbed, is_row_forward);
             call_args.push(CExpr::Var(ev_var.clone()));
             let (rk_var, rk_ce) = self.effectful_call_return_k_binding(return_k);
             call_args.push(CExpr::Var(rk_var.clone()));
@@ -2480,7 +2535,7 @@ impl<'a> Lowerer<'a> {
 
         let (mut arg_vars, mut bindings) = self.lower_call_args(args, None);
         // Effectful var call: thread evidence + _ReturnK.
-        let (ev_var, ev_ce) = self.build_call_evidence(&absorbed);
+        let (ev_var, ev_ce) = self.build_call_evidence_with(&absorbed, is_row_forward);
         bindings.push((ev_var.clone(), ev_ce));
         arg_vars.push(ev_var);
         let (rk_var, rk_ce) = self.effectful_call_return_k_binding(return_k);
@@ -3499,16 +3554,29 @@ impl<'a> Lowerer<'a> {
 
         // Source of truth: the per-call effect map populated pre-lowering.
         let info = self.call_effects.get(&app_id);
-        let (is_effectful, callee_effects_vec): (bool, Vec<String>) = match info.map(|i| &i.kind) {
-            Some(super::call_effects::CallEffectKind::StaticOps { ops })
-            | Some(super::call_effects::CallEffectKind::RowForwarded { static_ops: ops }) => {
-                let mut effs: Vec<String> = ops.iter().map(|k| k.effect.clone()).collect();
-                effs.sort();
-                effs.dedup();
-                (!ops.is_empty(), effs)
-            }
-            _ => (false, Vec::new()),
-        };
+        // `is_row_forward` says "callee is row-polymorphic, forward caller's
+        // ambient evidence unchanged (don't project)". Without distinguishing
+        // it from `StaticOps`, a call to e.g. `wrap : ... -> ... needs
+        // {Stdio, ..e}` would project the caller's evidence down to just
+        // `{Stdio}` and drop the entries that the open-row tail is supposed
+        // to carry through into `wrap`'s body.
+        let (is_effectful, callee_effects_vec, is_row_forward): (bool, Vec<String>, bool) =
+            match info.map(|i| &i.kind) {
+                Some(super::call_effects::CallEffectKind::StaticOps { ops }) => {
+                    let mut effs: Vec<String> = ops.iter().map(|k| k.effect.clone()).collect();
+                    effs.sort();
+                    effs.dedup();
+                    (!ops.is_empty(), effs, false)
+                }
+                Some(super::call_effects::CallEffectKind::RowForwarded { static_ops }) => {
+                    let mut effs: Vec<String> =
+                        static_ops.iter().map(|k| k.effect.clone()).collect();
+                    effs.sort();
+                    effs.dedup();
+                    (true, effs, true)
+                }
+                _ => (false, Vec::new(), false),
+            };
 
         let qualified = format!("{}.{}", module, func_name);
         // Detect partial application: if the call site supplies fewer user args
@@ -3586,7 +3654,8 @@ impl<'a> Lowerer<'a> {
 
         // Effectful callees take `_Evidence` and `_ReturnK`.
         if is_effectful {
-            let (ev_var, ev_ce) = self.build_call_evidence(&callee_effects_vec);
+            let (ev_var, ev_ce) =
+                self.build_call_evidence_with(&callee_effects_vec, is_row_forward);
             bindings.push((ev_var.clone(), ev_ce));
             arg_vars.push(ev_var);
             let (rk_var, rk_ce) = self.effectful_call_return_k_binding(return_k);

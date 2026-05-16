@@ -373,7 +373,7 @@ pub(crate) fn param_absorbed_effects_from_type(ty: &Type) -> HashMap<usize, Vec<
 }
 
 /// Extract the source-level parameter types from a function type.
-pub(super) fn param_types_from_type(ty: &Type) -> Vec<Type> {
+pub(crate) fn param_types_from_type(ty: &Type) -> Vec<Type> {
     let mut params = Vec::new();
     let mut current = ty;
     while let Type::Fun(param, ret, _) = current {
