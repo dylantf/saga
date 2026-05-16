@@ -1719,7 +1719,8 @@ impl<'a> Lowerer<'a> {
                 .get(&name)
                 .map(|f| f.is_open_row)
                 .unwrap_or(false);
-            let has_effects = (!effects.is_empty() && !self.effect_handler_ops(&effects).is_empty())
+            let has_effects = (!effects.is_empty()
+                && !self.effect_handler_ops(&effects).is_empty())
                 || is_open_row;
             // Effectful arity = user + Evidence + ReturnK.
             let base_arity = arity - if has_effects { 2 } else { 0 };
@@ -2052,10 +2053,7 @@ impl<'a> Lowerer<'a> {
         self.check_result.type_at_span.get(span).cloned()
     }
 
-    fn cps_function_shape_from_type(
-        &self,
-        ty: &crate::typechecker::Type,
-    ) -> Option<CpsShape> {
+    fn cps_function_shape_from_type(&self, ty: &crate::typechecker::Type) -> Option<CpsShape> {
         RuntimeFunctionShape::from_type(ty, |effects| self.canonicalize_effects(effects))
             .cps_shape()
     }
@@ -2233,7 +2231,11 @@ impl<'a> Lowerer<'a> {
         let call = CExpr::Apply(Box::new(CExpr::Var(fun_var.clone())), apply_args);
         let adapter = CExpr::Fun(
             params,
-            Box::new(CExpr::Let(ev_var, Box::new(narrowed_evidence), Box::new(call))),
+            Box::new(CExpr::Let(
+                ev_var,
+                Box::new(narrowed_evidence),
+                Box::new(call),
+            )),
         );
         CExpr::Let(fun_var, Box::new(actual_fun), Box::new(adapter))
     }
@@ -2357,11 +2359,7 @@ impl<'a> Lowerer<'a> {
             }
 
             if let Some(shape) = self.cps_function_shape_from_type(expected_ty) {
-                return self.lower_cps_function_value_with_expected_shape(
-                    expr,
-                    expected_ty,
-                    shape,
-                );
+                return self.lower_cps_function_value_with_expected_shape(expr, expected_ty, shape);
             }
 
             // Expected is a pure function type, but the actual expression
@@ -3281,9 +3279,7 @@ impl<'a> Lowerer<'a> {
                     param_vars.push("_ReturnK".to_string());
                     self.current_evidence = Some(EvidenceCtx {
                         var: "_Evidence".to_string(),
-                        layout: evidence::EvidenceLayout::new(
-                            shape.static_effects.iter().cloned(),
-                        ),
+                        layout: evidence::EvidenceLayout::new(shape.static_effects.iter().cloned()),
                         is_open: shape.is_open_row,
                     });
                     is_effectful_lambda = true;

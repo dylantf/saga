@@ -1,5 +1,5 @@
 -module(saga_runtime).
--export([format_crash/3, await_signal/1]).
+-export([format_crash/3, format_caught_panic/2, await_signal/1]).
 
 %% gen_event callbacks for the per-await signal handler installed below.
 -export([init/1, handle_event/2, handle_call/2, handle_info/2, terminate/2, code_change/3]).
@@ -101,6 +101,11 @@ format_saga_error(Kind, Msg, Module, Function, File, Line, StackTrace) ->
         "" -> ok;
         _ -> io:format(standard_error, "~ts", [TraceStr])
     end.
+
+format_caught_panic(_Class, {saga_error, _Kind, Msg, _Module, _Function, _File, _Line}) ->
+    Msg;
+format_caught_panic(Class, Reason) ->
+    iolist_to_binary(format_reason(Class, Reason)).
 
 format_reason(error, badarith) ->
     "arithmetic error (e.g. division by zero)";

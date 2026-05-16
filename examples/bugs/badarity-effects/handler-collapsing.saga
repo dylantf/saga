@@ -1,0 +1,65 @@
+import Std.IO (console, println)
+
+# Repro: multi-arm handler operations with ADT constructor patterns.
+#
+# Saga docs show multi-arm handler ops work with scalar patterns:
+#
+#   handler dev_env for Env {
+#     get_env "DATABASE_URL" = resume (Just "localhost:5432/dev")
+#     get_env "APP_SECRET"   = resume (Just "dev-secret")
+#     get_env _              = resume Nothing
+#   }
+#
+# But the same shape with ADT constructor patterns silently installs only
+# the LAST clause — invocations with other variants crash at runtime with
+# "no matching clause for the given arguments".
+#
+# The workaround is to use a single arm with an inner case expression.
+
+type Reason =
+  | First String
+  | Second String
+  | Third String
+
+effect Fail {
+  fun fail : Reason -> a
+}
+
+fun call_first : Unit -> String needs {Fail}
+call_first () = fail! (First "1st")
+
+fun call_second : Unit -> String needs {Fail}
+call_second () = fail! (Second "2nd")
+
+fun call_third : Unit -> String needs {Fail}
+call_third () = fail! (Third "3rd")
+
+# --- Broken form (uncomment to reproduce the bug) ---
+#
+# Multi-arm with ADT patterns: at runtime only the last arm is installed,
+# so calls with First/Second crash:
+#
+#   "Runtime error: no matching clause for the given arguments"
+#
+# fun broken : (Unit -> String needs {Fail}) -> String
+# broken thunk = thunk () with {
+#   fail (First msg)  = "got First: "  <> msg
+#   fail (Second msg) = "got Second: " <> msg
+#   fail (Third msg)  = "got Third: "  <> msg
+# }
+
+# --- Working form: single arm, inner case ---
+fun fixed : (Unit -> String needs {Fail}) -> String
+fixed thunk = thunk () with {
+  fail reason = case reason {
+    First msg -> "got First: " <> msg
+    Second msg -> "got Second: " <> msg
+    Third msg -> "got Third: " <> msg
+  }
+}
+
+main () = {
+  println (fixed call_first)
+  println (fixed call_second)
+  println (fixed call_third)
+} with console

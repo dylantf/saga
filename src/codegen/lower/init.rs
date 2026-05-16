@@ -281,9 +281,7 @@ impl<'a> Lowerer<'a> {
                             .env
                             .get(name)
                             .map(|scheme| {
-                                util::has_open_effect_row(
-                                    &self.check_result.sub.apply(&scheme.ty),
-                                )
+                                util::has_open_effect_row(&self.check_result.sub.apply(&scheme.ty))
                             })
                             .unwrap_or(false);
                         let expanded_arity =

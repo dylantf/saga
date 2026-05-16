@@ -55,7 +55,9 @@ fn collect_list_literal_elements(expr: &Expr) -> Option<Vec<&Expr>> {
         }
         elements.push(elem.as_ref());
         match &tail.kind {
-            ExprKind::Constructor { name: tail_name, .. } if tail_name == "Nil" => {
+            ExprKind::Constructor {
+                name: tail_name, ..
+            } if tail_name == "Nil" => {
                 return Some(elements);
             }
             ExprKind::App { .. } => {
@@ -1048,9 +1050,7 @@ impl Checker {
         let Type::Con(name, expected_elem_tys) = &resolved else {
             return Ok(None);
         };
-        if super::bare_type_name(name) != "Tuple"
-            || expected_elem_tys.len() != elements.len()
-        {
+        if super::bare_type_name(name) != "Tuple" || expected_elem_tys.len() != elements.len() {
             return Ok(None);
         }
 

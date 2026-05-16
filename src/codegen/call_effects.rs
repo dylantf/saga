@@ -424,7 +424,7 @@ impl<'a> Populator<'a> {
         if !matches!(resolved, crate::typechecker::Type::Fun(..)) {
             return false;
         }
-        util::has_open_effect_row(&resolved)
+        util::has_open_effect_row(resolved)
     }
 
     fn pattern_effects(&self, pat: &Pat) -> Option<Vec<String>> {
@@ -823,10 +823,8 @@ impl<'a> Populator<'a> {
         // Mirror `resolved_effects`: prefer ResolutionMap.effects, fall back
         // to fun_sigs (which holds CPS-expanded info for local funs).
         let resolved = self.inputs.resolved.get(&head_id);
-        let resolved_shape = resolved.map(|resolved| self.runtime_shape_from_resolved_head(
-            head_id,
-            resolved,
-        ));
+        let resolved_shape =
+            resolved.map(|resolved| self.runtime_shape_from_resolved_head(head_id, resolved));
         if matches!(
             resolved_shape,
             Some(RuntimeFunctionShape::Intrinsic | RuntimeFunctionShape::InlineVal)
@@ -1018,11 +1016,9 @@ impl<'a> Populator<'a> {
         resolved: &crate::codegen::resolve::ResolvedSymbol,
     ) -> RuntimeFunctionShape {
         let fallback_ty = self.inputs.check_result.resolved_type_for_node(head_id);
-        RuntimeFunctionShape::from_resolved_symbol(
-            resolved,
-            fallback_ty.as_ref(),
-            |effects| self.canonicalize_effects(effects),
-        )
+        RuntimeFunctionShape::from_resolved_symbol(resolved, fallback_ty.as_ref(), |effects| {
+            self.canonicalize_effects(effects)
+        })
     }
 
     fn call_kind_from_cps_shape(&self, shape: &CpsShape) -> Option<CallEffectKind> {

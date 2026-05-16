@@ -3,6 +3,7 @@ module PanicTest
 import Std.Test (Testing, describe, test, assert_panics, assert_ok, assert_err)
 import Std.List as List
 import Std.Process (catch_panic)
+import Std.Int as Int
 
 
 pub fun tests : Unit -> Unit needs {Testing}
@@ -18,6 +19,10 @@ tests () = {
 
     test "catch_panic returns Err on panic" (fun () -> {
       assert_err (catch_panic (fun () -> panic "boom") : Result Int String)
+    })
+
+    test "catch_panic returns Err on BEAM arithmetic error" (fun () -> {
+      assert_err (catch_panic (fun () -> Int.div 10 0) : Result Int String)
     })
 
     test "panic inside multi-expression thunk" (fun () -> {

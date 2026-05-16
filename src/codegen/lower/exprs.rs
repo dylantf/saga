@@ -757,8 +757,7 @@ impl<'a> Lowerer<'a> {
                         let shape = RuntimeFunctionShape::from_type(&ty, |effects| {
                             self.canonicalize_effects(effects)
                         });
-                        let is_open_row =
-                            shape.cps_shape().is_some_and(|shape| shape.is_open_row);
+                        let is_open_row = shape.cps_shape().is_some_and(|shape| shape.is_open_row);
                         let expanded_arity = shape.expanded_arity(base_arity);
                         let param_absorbed_effects = param_absorbed_effects_from_type(&ty)
                             .into_iter()

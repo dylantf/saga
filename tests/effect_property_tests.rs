@@ -2064,6 +2064,46 @@ result () = {
 }
 
 #[test]
+fn inline_handler_multi_arm_adt_patterns_dispatch_by_pattern() {
+    let src = r#"module Main
+
+type Reason =
+  | First String
+  | Second String
+  | Third String
+
+effect Fail {
+  fun fail : Reason -> a
+}
+
+fun call_first : Unit -> String needs {Fail}
+call_first () = fail! (First "1st")
+
+fun call_second : Unit -> String needs {Fail}
+call_second () = fail! (Second "2nd")
+
+fun call_third : Unit -> String needs {Fail}
+call_third () = fail! (Third "3rd")
+
+fun recover : (Unit -> String needs {Fail}) -> String
+recover thunk = thunk () with {
+  fail (First msg) = "got First: " <> msg
+  fail (Second msg) = "got Second: " <> msg
+  fail (Third msg) = "got Third: " <> msg
+}
+
+pub fun result : Unit -> String
+result () =
+  recover call_first <> "/" <> recover call_second <> "/" <> recover call_third
+"#;
+    check_result_string(
+        "inline_handler_multi_arm_adt_patterns_dispatch_by_pattern",
+        src,
+        "got First: 1st/got Second: 2nd/got Third: 3rd",
+    );
+}
+
+#[test]
 fn open_row_callback_param_normalizes_function_value_shape() {
     let src = r#"module Main
 
@@ -2095,7 +2135,11 @@ result () = {
   before _ = resume ()
 }
 "#;
-    check_result_string("open_row_callback_param_normalizes_function_value_shape", src, "ok");
+    check_result_string(
+        "open_row_callback_param_normalizes_function_value_shape",
+        src,
+        "ok",
+    );
 }
 
 #[test]
@@ -2328,9 +2372,5 @@ first fs = case fs {
 pub fun result : Unit -> String
 result () = first [a, b, c]
 "#;
-    check_result_string(
-        "pure_only_list_runs_without_adapter_wrapping",
-        src,
-        "a",
-    );
+    check_result_string("pure_only_list_runs_without_adapter_wrapping", src, "a");
 }

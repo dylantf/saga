@@ -43,7 +43,7 @@ enum NamedHandlerItem {
 #[derive(Clone)]
 enum OpHandlerPlan {
     Inline {
-        arm: HandlerArm,
+        arms: Vec<HandlerArm>,
     },
     Static {
         arm: HandlerArm,
@@ -511,7 +511,7 @@ impl<'a> Lowerer<'a> {
             (item.effects().to_vec(), HashMap::new())
         } else {
             let mut handled_effects = Vec::new();
-            let mut inline_arms_by_op: HashMap<String, HandlerArm> = HashMap::new();
+            let mut inline_arms_by_op: HashMap<String, Vec<HandlerArm>> = HashMap::new();
             for arm in &inline_arms {
                 if let Some(effect) = self.effect_for_handler_arm(arm, None) {
                     if !handled_effects.contains(&effect) {
@@ -519,9 +519,14 @@ impl<'a> Lowerer<'a> {
                     }
                     if arm.qualifier.is_some() {
                         inline_arms_by_op
-                            .insert(format!("{}.{}", effect, arm.op_name), arm.clone());
+                            .entry(format!("{}.{}", effect, arm.op_name))
+                            .or_default()
+                            .push(arm.clone());
                     } else {
-                        inline_arms_by_op.insert(arm.op_name.clone(), arm.clone());
+                        inline_arms_by_op
+                            .entry(arm.op_name.clone())
+                            .or_default()
+                            .push(arm.clone());
                     }
                 }
             }
@@ -550,7 +555,9 @@ impl<'a> Lowerer<'a> {
                 None => self.plan_inline_op_handler(eff, op, &inline_arms_by_op),
             };
             match &plan {
-                OpHandlerPlan::Inline { arm } if !arm.body.contains_resume() => {
+                OpHandlerPlan::Inline { arms }
+                    if arms.iter().all(|arm| !arm.body.contains_resume()) =>
+                {
                     self.no_resume_ops.insert(key.clone());
                 }
                 OpHandlerPlan::BeamNative { handler_canonical } => {
@@ -688,7 +695,7 @@ impl<'a> Lowerer<'a> {
         let mut handler_bindings: Vec<(String, CExpr)> = Vec::new();
         for (_eff, op, var_name, plan) in &op_vars {
             let binding = match plan {
-                OpHandlerPlan::Inline { arm } => self.build_op_handler_fun(arm, None),
+                OpHandlerPlan::Inline { arms } => self.build_inline_op_handler_fun(arms),
                 OpHandlerPlan::Static {
                     handler_canonical, ..
                 } if self.is_beam_native_handler_canonical(handler_canonical) => {
@@ -977,6 +984,135 @@ impl<'a> Lowerer<'a> {
         self.current_handler_source_module = saved_source_module;
         self.current_handler_k = prev_handler_k;
         CExpr::Fun(fun_params, Box::new(body_ce))
+    }
+
+    fn build_inline_op_handler_fun(&mut self, arms: &[HandlerArm]) -> CExpr {
+        match arms {
+            [] => self.build_passthrough_handler_fun(),
+            [arm] => self.build_op_handler_fun(arm, None),
+            [first, ..] => self.build_multi_arm_inline_op_handler_fun(first, arms),
+        }
+    }
+
+    fn build_multi_arm_inline_op_handler_fun(
+        &mut self,
+        first: &HandlerArm,
+        arms: &[HandlerArm],
+    ) -> CExpr {
+        let has_resume = arms.iter().any(|arm| arm.body.contains_resume());
+        let op_info = self
+            .effect_for_handler_arm(first, None)
+            .and_then(|effect_name| {
+                self.effect_defs
+                    .get(&effect_name)
+                    .and_then(|info| info.ops.get(&first.op_name))
+            })
+            .cloned();
+        let source_param_count = op_info
+            .as_ref()
+            .map(|op| op.source_param_count)
+            .unwrap_or(first.params.len());
+        let runtime_param_positions = op_info
+            .as_ref()
+            .map(|op| op.runtime_param_positions.clone())
+            .unwrap_or_else(|| (0..source_param_count).collect());
+        let runtime_param_count = op_info
+            .as_ref()
+            .map(|op| op.runtime_param_count)
+            .unwrap_or(source_param_count);
+
+        let k_var = if has_resume {
+            self.fresh()
+        } else {
+            "_".to_string()
+        };
+        let param_vars: Vec<String> = (0..runtime_param_count)
+            .map(|i| format!("_HArg{}", i))
+            .collect();
+        let mut fun_params = param_vars.clone();
+        fun_params.push(k_var.clone());
+
+        let prev_handler_k = self.current_handler_k.replace(k_var);
+        let saved_finally = self.current_handler_finally.take();
+        let saved_source_module = self.current_handler_source_module.clone();
+        self.current_handler_source_module = None;
+
+        let scrutinee = if runtime_param_count == 1 {
+            CExpr::Var(param_vars[0].clone())
+        } else {
+            CExpr::Values(
+                param_vars
+                    .iter()
+                    .map(|param| CExpr::Var(param.clone()))
+                    .collect(),
+            )
+        };
+
+        let mut case_arms = Vec::new();
+        for arm in arms {
+            self.current_handler_finally = arm.finally_block.as_ref().map(|fb| fb.as_ref().clone());
+            let mut body_ce = self.lower_handler_owned_expr(&arm.body);
+            if let (Some(fb), false) = (&arm.finally_block, arm.body.contains_resume()) {
+                let cleanup_ce = self.lower_expr(fb);
+                let result_var = self.fresh();
+                body_ce = CExpr::Let(
+                    result_var.clone(),
+                    Box::new(body_ce),
+                    Box::new(CExpr::Let(
+                        "_".to_string(),
+                        Box::new(cleanup_ce),
+                        Box::new(CExpr::Var(result_var)),
+                    )),
+                );
+            }
+
+            for (source_idx, pat) in arm.params.iter().enumerate().rev() {
+                if !runtime_param_positions.contains(&source_idx) {
+                    let (var, wrapped_body) = self.destructure_pat(pat, body_ce);
+                    body_ce = CExpr::Let(
+                        var,
+                        Box::new(CExpr::Lit(CLit::Atom("unit".to_string()))),
+                        Box::new(wrapped_body),
+                    );
+                }
+            }
+
+            let runtime_pats: Vec<CPat> = runtime_param_positions
+                .iter()
+                .take(runtime_param_count)
+                .map(|&source_idx| {
+                    arm.params
+                        .get(source_idx)
+                        .map(|pat| {
+                            self.lower_pat(
+                                pat,
+                                &self.constructor_atoms,
+                                self.handler_origin_module(),
+                            )
+                        })
+                        .unwrap_or(CPat::Wildcard)
+                })
+                .collect();
+            let pat = if runtime_param_count == 1 {
+                runtime_pats.into_iter().next().unwrap_or(CPat::Wildcard)
+            } else {
+                CPat::Values(runtime_pats)
+            };
+            case_arms.push(CArm {
+                pat,
+                guard: None,
+                body: body_ce,
+            });
+        }
+
+        self.current_handler_finally = saved_finally;
+        self.current_handler_source_module = saved_source_module;
+        self.current_handler_k = prev_handler_k;
+
+        CExpr::Fun(
+            fun_params,
+            Box::new(CExpr::Case(Box::new(scrutinee), case_arms)),
+        )
     }
 
     /// Lower a handler expression to a tuple of per-op handler lambdas.
@@ -1291,14 +1427,14 @@ impl<'a> Lowerer<'a> {
         &self,
         eff: &str,
         op: &str,
-        inline_arms_by_op: &HashMap<String, HandlerArm>,
+        inline_arms_by_op: &HashMap<String, Vec<HandlerArm>>,
     ) -> OpHandlerPlan {
         let qualified_key = format!("{}.{}", eff, op);
-        if let Some(arm) = inline_arms_by_op
+        if let Some(arms) = inline_arms_by_op
             .get(&qualified_key)
             .or_else(|| inline_arms_by_op.get(op))
         {
-            return OpHandlerPlan::Inline { arm: arm.clone() };
+            return OpHandlerPlan::Inline { arms: arms.clone() };
         }
         OpHandlerPlan::Passthrough
     }

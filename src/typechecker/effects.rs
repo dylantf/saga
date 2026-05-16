@@ -537,9 +537,7 @@ impl Checker {
             for entry in &row.effects {
                 if let Some(existing) = union.iter().find(|e| e.matches(entry)) {
                     let existing_args = existing.args.clone();
-                    for (existing_arg, new_arg) in
-                        existing_args.iter().zip(entry.args.iter())
-                    {
+                    for (existing_arg, new_arg) in existing_args.iter().zip(entry.args.iter()) {
                         self.unify_at(existing_arg, new_arg, span)?;
                     }
                 } else {

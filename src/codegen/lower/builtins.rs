@@ -152,15 +152,17 @@ impl Lowerer<'_> {
                 CArm {
                     pat: CPat::Wildcard,
                     guard: None,
-                    body: cerl_call(
-                        "erlang",
-                        "raise",
-                        vec![
-                            CExpr::Var(class_var.clone()),
-                            CExpr::Var(reason_var.clone()),
-                            CExpr::Var(trace_var.clone()),
-                        ],
-                    ),
+                    body: CExpr::Tuple(vec![
+                        CExpr::Lit(CLit::Atom("error".into())),
+                        cerl_call(
+                            "saga_runtime",
+                            "format_caught_panic",
+                            vec![
+                                CExpr::Var(class_var.clone()),
+                                CExpr::Var(reason_var.clone()),
+                            ],
+                        ),
+                    ]),
                 },
             ],
         );
