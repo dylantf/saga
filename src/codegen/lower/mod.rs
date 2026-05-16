@@ -142,6 +142,14 @@ pub(super) struct EvidenceCtx {
     pub(super) is_open: bool,
 }
 
+/// Expected runtime shape for a function value that is being placed into an
+/// effectful or open-row function slot.
+#[derive(Debug, Clone)]
+struct CpsFunctionShape {
+    static_effects: Vec<String>,
+    is_open_row: bool,
+}
+
 /// Explicit lowering context for value-producing vs terminal positions.
 #[derive(Clone)]
 pub(super) enum LowerMode {
@@ -193,9 +201,10 @@ pub struct Lowerer<'a> {
     /// `let` bindings instead of going through CPS continuation-passing, avoiding
     /// closure allocation. Currently all BEAM-native ops satisfy this property.
     direct_ops: HashMap<String, String>,
-    /// Effects that the next lambda being lowered should accept as extra params.
-    /// Set by the call site that passes the lambda to an effectful parameter.
-    lambda_effect_context: Option<Vec<String>>,
+    /// Runtime function shape that the next lambda/effect-op ref should use.
+    /// Set by typed value-boundary lowering when a function value is placed
+    /// into an effectful or open-row slot.
+    lambda_effect_context: Option<CpsFunctionShape>,
     /// Variable name for the continuation parameter in the current handler function.
     /// Set by `build_handler_fun`, read by `Expr::Resume`.
     current_handler_k: Option<String>,
@@ -899,6 +908,16 @@ impl<'a> Lowerer<'a> {
         base_arity + if op_count > 0 { 2 } else { 0 }
     }
 
+    pub(super) fn expanded_arity_for_row(
+        &self,
+        base_arity: usize,
+        effects: &[String],
+        is_open_row: bool,
+    ) -> usize {
+        let op_count = self.effect_handler_ops(effects).len();
+        base_arity + if op_count > 0 || is_open_row { 2 } else { 0 }
+    }
+
     fn lower_eta_reduced_effect_op_ref(
         &mut self,
         node_id: crate::ast::NodeId,
@@ -924,7 +943,7 @@ impl<'a> Lowerer<'a> {
             params.push(param);
         }
 
-        if self.lambda_effect_context.is_some() {
+        if let Some(shape) = self.lambda_effect_context.clone() {
             // Raw CPS shape: the resulting closure is passed to a slot that
             // expects an effectful function value, so it takes `_Evidence`
             // and `_ReturnK` and reads the per-op handler out of the
@@ -938,8 +957,8 @@ impl<'a> Lowerer<'a> {
             let saved_evidence = self.current_evidence.clone();
             self.current_evidence = Some(EvidenceCtx {
                 var: evidence,
-                layout: evidence::EvidenceLayout::new([effect_name.clone()]),
-                is_open: true,
+                layout: evidence::EvidenceLayout::new(shape.static_effects.iter().cloned()),
+                is_open: shape.is_open_row,
             });
             let handler_expr = self.evidence_op_lookup(&effect_name, op_name);
             self.current_evidence = saved_evidence;
@@ -988,6 +1007,21 @@ impl<'a> Lowerer<'a> {
             return None;
         }
         self.lower_eta_reduced_effect_op_ref(effect_call_id, op_name, qualifier)
+    }
+
+    fn is_eta_reduced_effect_expr(expr: &Expr) -> bool {
+        let mut args = Vec::new();
+        let mut current = expr;
+        loop {
+            match &current.kind {
+                ExprKind::App { func, arg, .. } => {
+                    args.push(arg.as_ref());
+                    current = func.as_ref();
+                }
+                ExprKind::EffectCall { .. } => return args.is_empty(),
+                _ => return false,
+            }
+        }
     }
 
     /// Check if an expression contains effectful calls nested inside if/case/block
@@ -1475,7 +1509,6 @@ impl<'a> Lowerer<'a> {
                             base_arity = declared_arity;
                         }
                     }
-                    let arity = self.expanded_arity(base_arity, &effects);
                     let is_open_row = self
                         .check_result
                         .env
@@ -1484,6 +1517,7 @@ impl<'a> Lowerer<'a> {
                             util::has_open_effect_row(&self.check_result.sub.apply(&scheme.ty))
                         })
                         .unwrap_or(false);
+                    let arity = self.expanded_arity_for_row(base_arity, &effects, is_open_row);
                     if let Some(group) = clause_groups.iter_mut().find(|(n, _, _, _)| n == name) {
                         // Additional clause: just add to existing group
                         group.2.push((params, guard, body));
@@ -1674,7 +1708,13 @@ impl<'a> Lowerer<'a> {
             let effects = self.fun_effects(&name).cloned().unwrap_or_default();
             let saved_direct_ops = std::mem::take(&mut self.direct_ops);
 
-            let has_effects = !effects.is_empty() && !self.effect_handler_ops(&effects).is_empty();
+            let is_open_row = self
+                .fun_info
+                .get(&name)
+                .map(|f| f.is_open_row)
+                .unwrap_or(false);
+            let has_effects = (!effects.is_empty() && !self.effect_handler_ops(&effects).is_empty())
+                || is_open_row;
             // Effectful arity = user + Evidence + ReturnK.
             let base_arity = arity - if has_effects { 2 } else { 0 };
             let effect_return_k = has_effects.then(|| CExpr::Var("_ReturnK".to_string()));
@@ -1685,11 +1725,6 @@ impl<'a> Lowerer<'a> {
             let saved_evidence = self.current_evidence.clone();
             if has_effects {
                 let layout = evidence::EvidenceLayout::new(effects.iter().cloned());
-                let is_open_row = self
-                    .fun_info
-                    .get(&name)
-                    .map(|f| f.is_open_row)
-                    .unwrap_or(false);
                 self.current_evidence = Some(EvidenceCtx {
                     var: "_Evidence".to_string(),
                     layout,
@@ -1853,7 +1888,10 @@ impl<'a> Lowerer<'a> {
                 .iter()
                 .map(|m| {
                     if !impl_effects.is_empty() {
-                        self.lambda_effect_context = Some(impl_effects.clone());
+                        self.lambda_effect_context = Some(CpsFunctionShape {
+                            static_effects: impl_effects.clone(),
+                            is_open_row: false,
+                        });
                     }
                     let ce = self.lower_expr(m);
                     self.lambda_effect_context = None;
@@ -2011,6 +2049,90 @@ impl<'a> Lowerer<'a> {
         Some(self.check_result.sub.apply(raw))
     }
 
+    fn cps_function_shape_from_type(
+        &self,
+        ty: &crate::typechecker::Type,
+    ) -> Option<CpsFunctionShape> {
+        if !matches!(ty, crate::typechecker::Type::Fun(..)) {
+            return None;
+        }
+        let (_, effects) = util::arity_and_effects_from_type(ty);
+        let static_effects = self.canonicalize_effects(effects);
+        let is_open_row = util::has_open_effect_row(ty);
+        if static_effects.is_empty() && !is_open_row {
+            return None;
+        }
+        Some(CpsFunctionShape {
+            static_effects,
+            is_open_row,
+        })
+    }
+
+    fn expr_has_cps_function_shape(&self, expr: &Expr) -> bool {
+        self.check_result
+            .resolved_type_for_node(expr.id)
+            .and_then(|ty| self.cps_function_shape_from_type(&ty))
+            .is_some()
+    }
+
+    fn wrap_pure_function_value_as_cps_adapter(
+        &mut self,
+        expr: &Expr,
+        expected_ty: &crate::typechecker::Type,
+    ) -> CExpr {
+        let (user_arity, _) = util::arity_and_effects_from_type(expected_ty);
+        let fun_var = self.fresh();
+        let result_var = self.fresh();
+        let mut params = Vec::with_capacity(user_arity + 2);
+        let mut apply_args = Vec::with_capacity(user_arity);
+        for _ in 0..user_arity {
+            let param = self.fresh();
+            apply_args.push(CExpr::Var(param.clone()));
+            params.push(param);
+        }
+        params.push("_Evidence".to_string());
+        params.push("_ReturnK".to_string());
+
+        let pure_fun = self.lower_expr_value(expr);
+        let pure_call = CExpr::Apply(Box::new(CExpr::Var(fun_var.clone())), apply_args);
+        let return_call = CExpr::Apply(
+            Box::new(CExpr::Var("_ReturnK".to_string())),
+            vec![CExpr::Var(result_var.clone())],
+        );
+        let adapter = CExpr::Fun(
+            params,
+            Box::new(CExpr::Let(
+                result_var,
+                Box::new(pure_call),
+                Box::new(return_call),
+            )),
+        );
+        CExpr::Let(fun_var, Box::new(pure_fun), Box::new(adapter))
+    }
+
+    fn lower_cps_function_value_with_expected_shape(
+        &mut self,
+        expr: &Expr,
+        expected_ty: &crate::typechecker::Type,
+        expected_shape: CpsFunctionShape,
+    ) -> CExpr {
+        if matches!(expr.kind, ExprKind::Lambda { .. }) || Self::is_eta_reduced_effect_expr(expr) {
+            let saved_ctx = self.lambda_effect_context.take();
+            self.lambda_effect_context = Some(expected_shape);
+            let ce = self
+                .lower_eta_reduced_effect_expr(expr)
+                .unwrap_or_else(|| self.lower_expr_value(expr));
+            self.lambda_effect_context = saved_ctx;
+            return ce;
+        }
+
+        if self.expr_has_cps_function_shape(expr) {
+            self.lower_expr_value(expr)
+        } else {
+            self.wrap_pure_function_value_as_cps_adapter(expr, expected_ty)
+        }
+    }
+
     pub(super) fn lower_expr_value_with_expected_type(
         &mut self,
         expr: &Expr,
@@ -2097,21 +2219,12 @@ impl<'a> Lowerer<'a> {
                 return self.wrap_let_bindings(bindings, tuple);
             }
 
-            if matches!(expr.kind, ExprKind::Lambda { .. })
-                || self.lower_eta_reduced_effect_expr(expr).is_some()
-            {
-                let saved_ctx = self.lambda_effect_context.take();
-                let effects = crate::typechecker::effects_from_type(expected_ty);
-                if !effects.is_empty() {
-                    let mut effects: Vec<String> = effects.into_iter().collect();
-                    effects.sort();
-                    self.lambda_effect_context = Some(self.canonicalize_effects(effects));
-                }
-                let ce = self
-                    .lower_eta_reduced_effect_expr(expr)
-                    .unwrap_or_else(|| self.lower_expr_value(expr));
-                self.lambda_effect_context = saved_ctx;
-                return ce;
+            if let Some(shape) = self.cps_function_shape_from_type(expected_ty) {
+                return self.lower_cps_function_value_with_expected_shape(
+                    expr,
+                    expected_ty,
+                    shape,
+                );
             }
 
             match &expr.kind {
@@ -2212,7 +2325,10 @@ impl<'a> Lowerer<'a> {
             if let Some(pe) = param_effects
                 && let Some(effs) = pe.get(&i)
             {
-                self.lambda_effect_context = Some(effs.clone());
+                self.lambda_effect_context = Some(CpsFunctionShape {
+                    static_effects: effs.clone(),
+                    is_open_row: false,
+                });
             }
             let ce = self
                 .lower_eta_reduced_effect_expr(arg)
@@ -2239,18 +2355,17 @@ impl<'a> Lowerer<'a> {
         self.build_call_evidence_with(callee_effects, false)
     }
 
-    /// `is_row_forward` is reserved for a future fix to handle row-
-    /// polymorphic callees correctly; today the call paths still pass
-    /// `false` and the helper behaves identically to `build_call_evidence`.
-    /// See the open-row badarity bug at
-    /// `examples/bugs/badarity-effects/repro3.saga`.
+    /// When `is_row_forward` is true, the callee is row-polymorphic and must
+    /// receive the caller's full evidence, including entries not known in the
+    /// callee's static effect list.
     pub(super) fn build_call_evidence_with(
         &mut self,
         callee_effects: &[String],
-        _is_row_forward: bool,
+        is_row_forward: bool,
     ) -> (String, CExpr) {
         let var = self.fresh();
         let value = match &self.current_evidence {
+            Some(ctx) if is_row_forward => CExpr::Var(ctx.var.clone()),
             Some(ctx) if !ctx.is_open => {
                 // Project when the callee asks for fewer effects than the
                 // caller's static layout carries. The runtime helper handles
@@ -2270,7 +2385,10 @@ impl<'a> Lowerer<'a> {
                     CExpr::Var(ctx.var.clone())
                 }
             }
-            Some(ctx) => CExpr::Var(ctx.var.clone()),
+            Some(ctx) => {
+                let tags: Vec<&str> = callee_effects.iter().map(|s| s.as_str()).collect();
+                evidence::project_evidence(CExpr::Var(ctx.var.clone()), &tags)
+            }
             None => CExpr::Tuple(Vec::new()),
         };
         (var, value)
@@ -2675,7 +2793,10 @@ impl<'a> Lowerer<'a> {
         };
 
         let saved_ctx = self.lambda_effect_context.take();
-        self.lambda_effect_context = Some(absorbed.clone());
+        self.lambda_effect_context = Some(CpsFunctionShape {
+            static_effects: absorbed.clone(),
+            is_open_row: false,
+        });
         let func_ce = self.lower_expr(lambda);
         self.lambda_effect_context = saved_ctx;
 
@@ -3001,20 +3122,19 @@ impl<'a> Lowerer<'a> {
                 });
                 let mut param_vars = lower_params(params);
                 let mut is_effectful_lambda = false;
-                let effects = self
-                    .lambda_effect_context
-                    .take()
-                    .filter(|effs| !effs.is_empty());
+                let shape = self.lambda_effect_context.take();
                 let saved_evidence = self.current_evidence.clone();
-                if let Some(effects) = effects {
+                if let Some(shape) = shape {
                     // Effectful lambdas take `_Evidence` and `_ReturnK`; the
                     // body reads per-op handlers out of the evidence vector.
                     param_vars.push("_Evidence".to_string());
                     param_vars.push("_ReturnK".to_string());
                     self.current_evidence = Some(EvidenceCtx {
                         var: "_Evidence".to_string(),
-                        layout: evidence::EvidenceLayout::new(effects.iter().cloned()),
-                        is_open: false,
+                        layout: evidence::EvidenceLayout::new(
+                            shape.static_effects.iter().cloned(),
+                        ),
+                        is_open: shape.is_open_row,
                     });
                     is_effectful_lambda = true;
                 }

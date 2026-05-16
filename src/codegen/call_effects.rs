@@ -771,11 +771,11 @@ impl<'a> Populator<'a> {
         let Some((effects, is_open_row)) = self.lambda_head_effects(lambda_id) else {
             return CallEffectInfo::pure();
         };
-        if effects.is_empty() {
+        if effects.is_empty() && !is_open_row {
             return CallEffectInfo::pure();
         }
         let ops = self.collect_op_keys(&effects);
-        if ops.is_empty() {
+        if ops.is_empty() && !is_open_row {
             return CallEffectInfo::pure();
         }
         let kind = if is_open_row {
@@ -855,6 +855,13 @@ impl<'a> Populator<'a> {
         // Mirror `resolved_effects`: prefer ResolutionMap.effects, fall back
         // to fun_sigs (which holds CPS-expanded info for local funs).
         let resolved = self.inputs.resolved.get(&head_id);
+        if matches!(
+            resolved.map(|r| &r.kind),
+            Some(super::resolve::ResolvedCodegenKind::Intrinsic { .. })
+                | Some(super::resolve::ResolvedCodegenKind::InlineVal)
+        ) {
+            return pure();
+        }
         let canonical_name = resolved.map(|resolved| resolved.canonical_name.clone());
         let effects: Vec<String> = match resolved {
             Some(resolved) if !resolved.effects().is_empty() => resolved.effects().to_vec(),
@@ -882,33 +889,30 @@ impl<'a> Populator<'a> {
                         needs_return_k: true,
                     };
                 }
-                // Open-row callable vars (`f: Unit -> Unit needs {..e}`)
-                // would also need CPS threading at the call site, but
-                // making that work requires bridging pure function values
-                // into the CPS calling convention at every point a function
-                // value crosses into an open-row position (lambdas in
-                // lists, function refs passed as args, etc.). That's wider
-                // than the scope of the current fix; track via repro3 in
-                // examples/bugs/badarity-effects.
-                let _ = self.lookup_open_row_var(name);
+                if self.lookup_open_row_var(name) {
+                    return CallEffectInfo {
+                        kind: CallEffectKind::RowForwarded {
+                            static_ops: Vec::new(),
+                        },
+                        user_arity: supplied,
+                        needs_return_k: true,
+                    };
+                }
                 return pure();
             }
         };
 
-        if effects.is_empty() {
-            return pure();
-        }
-
         // Need expanded arity from fun_sigs to compute user_arity.
         let Some(sig) = self.lookup_fun_sig(name, canonical_name.as_deref()) else {
             let ops = self.collect_op_keys(&effects);
+            let is_open_row = self.head_open_row.get(&head_id).copied().unwrap_or(false);
             // No FunSig snapshot. Effectful only if the effects canonicalized
-            // to known ops; supplied is the best-effort user-arity. Pure must
-            // not carry needs_return_k.
-            if ops.is_empty() {
+            // to known ops or the callee has an open row; supplied is the
+            // best-effort user-arity. Pure must not carry needs_return_k.
+            if ops.is_empty() && !is_open_row {
                 return pure();
             }
-            let kind = if self.head_open_row.get(&head_id).copied().unwrap_or(false) {
+            let kind = if is_open_row {
                 CallEffectKind::RowForwarded { static_ops: ops }
             } else {
                 CallEffectKind::StaticOps { ops }
@@ -922,15 +926,6 @@ impl<'a> Populator<'a> {
 
         let ops = self.collect_op_keys(&effects);
         let has_ops = !ops.is_empty();
-        // Effectful arity = user + Evidence + ReturnK.
-        let extras = if has_ops { 2 } else { 0 };
-        let user_arity = sig.arity.saturating_sub(extras);
-
-        // Saturation gate from `call_performs_effect`.
-        if user_arity == 0 || supplied < user_arity {
-            return pure();
-        }
-
         // Prefer the per-call open-row signal (looked up by head NodeId) over
         // the FunSig-level flag, since FunSig keys may not capture every alias
         // for an imported function. The two should agree when both are set.
@@ -939,8 +934,19 @@ impl<'a> Populator<'a> {
             .get(&head_id)
             .copied()
             .unwrap_or(sig.is_open_row);
+        if effects.is_empty() && !is_open_row {
+            return pure();
+        }
+        // Effectful/open-row arity = user + Evidence + ReturnK.
+        let extras = if has_ops || is_open_row { 2 } else { 0 };
+        let user_arity = sig.arity.saturating_sub(extras);
+
+        // Saturation gate from `call_performs_effect`.
+        if user_arity == 0 || supplied < user_arity {
+            return pure();
+        }
         let kind = if !has_ops {
-            CallEffectKind::Pure
+            CallEffectKind::RowForwarded { static_ops: ops }
         } else if is_open_row {
             CallEffectKind::RowForwarded { static_ops: ops }
         } else {
@@ -949,8 +955,8 @@ impl<'a> Populator<'a> {
 
         CallEffectInfo {
             kind,
-            user_arity: if has_ops { user_arity } else { 0 },
-            needs_return_k: has_ops,
+            user_arity,
+            needs_return_k: has_ops || is_open_row,
         }
     }
 
@@ -977,7 +983,7 @@ impl<'a> Populator<'a> {
         let (_, effects) = util::arity_and_effects_from_type(&ty);
         let is_open_row = util::has_open_effect_row(&ty);
         let canonical = self.canonicalize_effects(effects);
-        if canonical.is_empty() {
+        if canonical.is_empty() && !is_open_row {
             None
         } else {
             Some((canonical, is_open_row))
@@ -988,8 +994,9 @@ impl<'a> Populator<'a> {
         if let Some(ty) = self.inputs.check_result.resolved_type_for_node(id) {
             let (base_arity, effects) = util::arity_and_effects_from_type(&ty);
             let effects = self.canonicalize_effects(effects);
+            let is_open_row = util::has_open_effect_row(&ty);
             let handler_count = self.collect_op_keys(&effects).len();
-            let expanded_arity = base_arity + if handler_count > 0 { 2 } else { 0 };
+            let expanded_arity = base_arity + if handler_count > 0 || is_open_row { 2 } else { 0 };
             let param_absorbed_effects = util::param_absorbed_effects_from_type(&ty)
                 .into_iter()
                 .map(|(idx, effs)| (idx, self.canonicalize_effects(effs)))
@@ -998,7 +1005,7 @@ impl<'a> Populator<'a> {
                 arity: expanded_arity,
                 effects,
                 param_absorbed_effects,
-                is_open_row: util::has_open_effect_row(&ty),
+                is_open_row,
                 param_types: util::param_types_from_type(&ty),
             });
         }

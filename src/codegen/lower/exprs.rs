@@ -751,7 +751,8 @@ impl<'a> Lowerer<'a> {
                         let is_open_row = super::util::has_open_effect_row(&ty);
                         let handler_count = self.effect_handler_ops(&effects).len();
                         // Effectful expanded arity = user + Evidence + ReturnK.
-                        let expanded_arity = base_arity + if handler_count > 0 { 2 } else { 0 };
+                        let expanded_arity =
+                            base_arity + if handler_count > 0 || is_open_row { 2 } else { 0 };
                         let param_absorbed_effects = param_absorbed_effects_from_type(&ty)
                             .into_iter()
                             .map(|(idx, effs)| (idx, self.canonicalize_effects(effs)))
@@ -785,7 +786,7 @@ impl<'a> Lowerer<'a> {
 
                 let handler_ops = self.effect_handler_ops(&effects);
 
-                let has_effects = !handler_ops.is_empty();
+                let has_effects = !handler_ops.is_empty() || is_open_row;
                 let base_arity = arity - if has_effects { 2 } else { 0 };
                 let effect_return_k = has_effects.then(|| CExpr::Var("_ReturnK".to_string()));
 

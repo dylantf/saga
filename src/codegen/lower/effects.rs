@@ -321,7 +321,10 @@ impl<'a> Lowerer<'a> {
                     uncapturable.push(eff.clone());
                 }
                 if !uncapturable.is_empty() {
-                    self.lambda_effect_context = Some(uncapturable);
+                    self.lambda_effect_context = Some(super::CpsFunctionShape {
+                        static_effects: uncapturable,
+                        is_open_row: false,
+                    });
                 }
             }
             let ce = self

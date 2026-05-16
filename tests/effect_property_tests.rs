@@ -2062,3 +2062,38 @@ result () = {
 "#;
     check_result_string("handler_resume_with_complex_value", src, "got:42");
 }
+
+#[test]
+fn open_row_callback_param_normalizes_function_value_shape() {
+    let src = r#"module Main
+
+effect Foo {
+  fun foo : Unit -> Unit
+}
+
+effect Tick {
+  fun tick : Unit -> Unit
+}
+
+fun bar : Unit -> Unit needs {Foo}
+bar () = foo! ()
+
+fun wrap : (Unit -> Unit needs {..e}) -> Unit -> String needs {Tick, ..e}
+wrap f () = {
+  tick! ()
+  f ()
+  tick! ()
+  "ok"
+}
+
+pub fun result : Unit -> String
+result () = {
+  wrap bar () with {
+    foo () = resume ()
+  }
+} with {
+  tick () = resume ()
+}
+"#;
+    check_result_string("open_row_callback_param_normalizes_function_value_shape", src, "ok");
+}

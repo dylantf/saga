@@ -275,13 +275,24 @@ impl<'a> Lowerer<'a> {
                                 .collect();
                             sorted_effects.sort();
                         }
-                        let expanded_arity = self.expanded_arity(real_arity, &sorted_effects);
+                        let is_open_row = self
+                            .check_result
+                            .env
+                            .get(name)
+                            .map(|scheme| {
+                                util::has_open_effect_row(
+                                    &self.check_result.sub.apply(&scheme.ty),
+                                )
+                            })
+                            .unwrap_or(false);
+                        let expanded_arity =
+                            self.expanded_arity_for_row(real_arity, &sorted_effects, is_open_row);
                         self.fun_info.insert(
                             name.clone(),
                             FunInfo {
                                 arity: expanded_arity,
                                 effects: sorted_effects,
-                                is_open_row: false,
+                                is_open_row,
                                 param_absorbed_effects: HashMap::new(),
                                 param_types: Vec::new(),
                             },
@@ -385,7 +396,8 @@ impl<'a> Lowerer<'a> {
                     let is_open_row = util::has_open_effect_row(&scheme.ty);
                     let dict_param_count = util::dict_param_count(&scheme.constraints);
                     let expanded_arity =
-                        self.expanded_arity(base_arity, &effects) + dict_param_count;
+                        self.expanded_arity_for_row(base_arity, &effects, is_open_row)
+                            + dict_param_count;
                     let param_absorbed = util::param_absorbed_effects_from_type(&scheme.ty);
                     let param_absorbed: HashMap<usize, Vec<String>> = param_absorbed
                         .into_iter()
@@ -466,7 +478,8 @@ impl<'a> Lowerer<'a> {
             let effects = self.canonicalize_effects(effects);
             let is_open_row = util::has_open_effect_row(&scheme.ty);
             let dict_param_count = util::dict_param_count(&scheme.constraints);
-            let expanded_arity = self.expanded_arity(base_arity, &effects) + dict_param_count;
+            let expanded_arity =
+                self.expanded_arity_for_row(base_arity, &effects, is_open_row) + dict_param_count;
             let param_effs = util::param_absorbed_effects_from_type(&scheme.ty);
             let param_effs: HashMap<usize, Vec<String>> = param_effs
                 .into_iter()
@@ -603,7 +616,6 @@ impl<'a> Lowerer<'a> {
                             base_arity = declared;
                         }
                     }
-                    let arity = self.expanded_arity(base_arity, &effects);
                     let is_open_row = self
                         .check_result
                         .env
@@ -612,6 +624,7 @@ impl<'a> Lowerer<'a> {
                             util::has_open_effect_row(&self.check_result.sub.apply(&scheme.ty))
                         })
                         .unwrap_or(false);
+                    let arity = self.expanded_arity_for_row(base_arity, &effects, is_open_row);
                     let param_types = self
                         .check_result
                         .env
