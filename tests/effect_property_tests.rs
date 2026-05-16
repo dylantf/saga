@@ -2067,22 +2067,22 @@ result () = {
 fn open_row_callback_param_normalizes_function_value_shape() {
     let src = r#"module Main
 
-effect Foo {
-  fun foo : Unit -> Unit
+effect BeforeFoo {
+  fun before : String -> Unit
 }
 
-effect Tick {
-  fun tick : Unit -> Unit
+effect Foo {
+  fun foo : Unit -> Unit
 }
 
 fun bar : Unit -> Unit needs {Foo}
 bar () = foo! ()
 
-fun wrap : (Unit -> Unit needs {..e}) -> Unit -> String needs {Tick, ..e}
+fun wrap : (Unit -> Unit needs {..e}) -> Unit -> String needs {BeforeFoo, ..e}
 wrap f () = {
-  tick! ()
+  before! "before"
   f ()
-  tick! ()
+  before! "after"
   "ok"
 }
 
@@ -2092,7 +2092,7 @@ result () = {
     foo () = resume ()
   }
 } with {
-  tick () = resume ()
+  before _ = resume ()
 }
 "#;
     check_result_string("open_row_callback_param_normalizes_function_value_shape", src, "ok");

@@ -2065,11 +2065,10 @@ impl<'a> Lowerer<'a> {
         })
     }
 
-    fn expr_has_cps_function_shape(&self, expr: &Expr) -> bool {
+    fn expr_cps_function_shape(&self, expr: &Expr) -> Option<CpsFunctionShape> {
         self.check_result
             .resolved_type_for_node(expr.id)
             .and_then(|ty| self.cps_function_shape_from_type(&ty))
-            .is_some()
     }
 
     fn wrap_pure_function_value_as_cps_adapter(
@@ -2107,6 +2106,48 @@ impl<'a> Lowerer<'a> {
         CExpr::Let(fun_var, Box::new(pure_fun), Box::new(adapter))
     }
 
+    fn adapt_cps_function_value_to_expected_shape(
+        &mut self,
+        expr: &Expr,
+        expected_ty: &crate::typechecker::Type,
+        actual_shape: CpsFunctionShape,
+    ) -> CExpr {
+        if actual_shape.is_open_row {
+            return self.lower_expr_value(expr);
+        }
+
+        let (user_arity, _) = util::arity_and_effects_from_type(expected_ty);
+        let fun_var = self.fresh();
+        let ev_var = self.fresh();
+        let mut params = Vec::with_capacity(user_arity + 2);
+        let mut apply_args = Vec::with_capacity(user_arity + 2);
+        for _ in 0..user_arity {
+            let param = self.fresh();
+            apply_args.push(CExpr::Var(param.clone()));
+            params.push(param);
+        }
+        params.push("_Evidence".to_string());
+        params.push("_ReturnK".to_string());
+
+        let tags: Vec<&str> = actual_shape
+            .static_effects
+            .iter()
+            .map(|s| s.as_str())
+            .collect();
+        apply_args.push(CExpr::Var(ev_var.clone()));
+        apply_args.push(CExpr::Var("_ReturnK".to_string()));
+
+        let actual_fun = self.lower_expr_value(expr);
+        let narrowed_evidence =
+            evidence::project_evidence(CExpr::Var("_Evidence".to_string()), &tags);
+        let call = CExpr::Apply(Box::new(CExpr::Var(fun_var.clone())), apply_args);
+        let adapter = CExpr::Fun(
+            params,
+            Box::new(CExpr::Let(ev_var, Box::new(narrowed_evidence), Box::new(call))),
+        );
+        CExpr::Let(fun_var, Box::new(actual_fun), Box::new(adapter))
+    }
+
     fn lower_cps_function_value_with_expected_shape(
         &mut self,
         expr: &Expr,
@@ -2123,8 +2164,8 @@ impl<'a> Lowerer<'a> {
             return ce;
         }
 
-        if self.expr_has_cps_function_shape(expr) {
-            self.lower_expr_value(expr)
+        if let Some(actual_shape) = self.expr_cps_function_shape(expr) {
+            self.adapt_cps_function_value_to_expected_shape(expr, expected_ty, actual_shape)
         } else {
             self.wrap_pure_function_value_as_cps_adapter(expr, expected_ty)
         }
