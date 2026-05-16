@@ -1,6 +1,6 @@
 # Compiler Cleanups
 
-Four threads of accumulated complexity that, if pulled, would meaningfully
+Five threads of accumulated complexity that, if pulled, would meaningfully
 reduce the surface area of the compiler without changing semantics. None of
 these are urgent — the compiler works. They're worth doing when bandwidth
 allows, in roughly the order listed, because each makes the next easier.
@@ -58,42 +58,64 @@ surface every subsequent cleanup has to dodge.
 
 ## 2. Finish Phase 4 of effectful-call detection
 
-**The smell.** Two parallel sources of truth for "is this var an effectful
-function value": `current_effectful_vars` (mutated by the lowerer as it
-walks) and the `call_effects::CallEffectMap` (populated by the pre-pass
-ahead of lowering). The plan in
-[plans/effectful-call-detection-plan.md](plans/effectful-call-detection-plan.md)
-explicitly calls for the pre-pass to be the only writer. Phase 4 landed
-the pre-pass and the parallel-check assertions, but the inline mutations
-in the lowerer never got deleted.
+**The smell.** The original smell was two parallel sources of truth for
+"is this var an effectful function value": lowerer-local mutable tracking
+and the `call_effects::CallEffectMap` pre-pass. That has mostly been
+resolved: the current lowerer no longer has a `current_effectful_vars`
+field, and `call_effects.rs` owns the lexical scope walk for
+effectful/open-row function values.
 
-**Why it costs.** Every bug in this area requires checking both. Did the
-pre-pass tag this var? Did the lowerer's mutable state also tag it? Do
-they agree? When they disagree, you can't trust either until you've
-traced the divergence. The parallel-check assertions catch _some_ of
-these mid-build, but only for shapes that exercise both paths in tests.
+What remains is weaker but still worth cleaning up: the ownership is
+implicit. Comments still reference the old mirror relationship, and some
+shape decisions are split between the pre-pass and lowerer helpers. The
+pre-pass is the single writer in practice, but the code does not make
+that boundary as obvious as it should.
 
-The other cost is policy drift. New call shapes get added to the
-pre-pass without being added to the lowerer's inline tracking, or vice
-versa. The two diverge over time even if neither is broken in isolation.
+**Why it costs.** New call shapes are still easy to add in the wrong
+place. A contributor can inspect the lowerer first, see several branches
+that pattern-match on `CallEffectKind`, and assume call classification is
+partly a lowering concern. That is how policy drift starts even after
+the duplicate state has been deleted.
 
-**Shape of the fix.** Audit the lowerer for every mutation of
-`current_effectful_vars` (chiefly the `Stmt::Let` paths and any branch-
-local tracking). Move that logic into the pre-pass scope walk. Delete the
-field. The lowerer becomes a pure consumer of `call_effects`.
+The other cost is that #5 depends on this boundary being crisp. Runtime
+function shape should feed the pre-pass and lowerer from one shared
+helper, but the pre-pass should remain the only phase that decides "this
+specific `App` node is effectful and needs evidence."
+
+**Shape of the fix.** Treat this as a small audit-and-contract cleanup,
+not a major implementation task:
+
+1. Search for stale references to lowerer-side effectful-var tracking
+   (`current_effectful_vars`, "mirrors the lowerer", "inline check",
+   etc.) and rewrite them to say `call_effects` is authoritative.
+2. Add a short module-level invariant to `call_effects.rs`: every
+   effectful function call through `App` must have exactly one
+   `CallEffectInfo` entry before lowering; the lowerer may consume but
+   not infer per-call effectfulness.
+3. Keep lowerer helpers that pattern-match `CallEffectKind`, but make
+   them extraction/translation helpers only. They should never inspect
+   lexical scopes to decide whether a call is effectful.
+4. Add a narrow debug assertion at lowerer effectful-call dispatch sites:
+   when `expr_is_effectful_call(expr)` is true, lowering must find a
+   corresponding effectful path (`resolved`, variable, lambda, dict
+   method). Missing paths should be loud.
+5. If any remaining lowerer-local classification is found during the
+   audit, move it into the pre-pass before starting #5.
+
+Current status: mostly done. The valuable output is documentation,
+assertions, and deleting stale comments, plus any small drift discovered
+while doing that audit.
 
 **Watch for.**
 
-- Some of the inline mutations are subtle — they happen inside branch
-  lowering, case arm walks, or as side effects of resolving handler
-  bindings. The pre-pass already has its own scope stack but doesn't
-  necessarily mirror every walk the lowerer does. Some logic may need
-  to be taught to the pre-pass that the lowerer currently learns by
-  accident.
-- This is a precondition for the next two cleanups working cleanly.
-  Helpers that want to ask "is this argument an effectful call?" should
-  consult the map, not reach into lowerer mutable state. As long as the
-  inline path exists, those helpers stay ambiguous.
+- Do not move value-shape normalization into `call_effects`. The pre-pass
+  classifies calls; the lowerer still owns emitting adapters and Core
+  Erlang values.
+- Pattern-bound variables, let-bound values, block-local `let fun`, and
+  open-row-only callback params are the regression-sensitive scope cases.
+  Keep focused tests around them.
+- Intrinsics and inline vals should be classified as pure/non-call-effect
+  by this pre-pass because builtin lowering intercepts them elsewhere.
 
 Independent of #1, but easier after it — the pre-pass and lowerer agree
 on more when types are fully resolved.
@@ -212,14 +234,163 @@ pre-pass map about callee shapes) and ideally after #3 (so the helper
 uses the consolidated lowering surface), but doable independently if
 that ordering doesn't fit.
 
+## 5. Centralize runtime function-shape decisions
+
+**The smell.** Several compiler phases independently answer adjacent
+questions about function values:
+
+- The typechecker says whether a function type is pure, closed-effectful,
+  or open-row.
+- `call_effects` classifies calls as `Pure`, `StaticOps`, or
+  `RowForwarded`.
+- The lowerer decides whether a function value should be emitted as a
+  pure closure or CPS-shaped closure.
+- Intrinsics and inline vals sit in the same resolution map as ordinary
+  functions, but must be intercepted before normal call/value lowering.
+
+These answers are closely related but not represented by one shared
+concept. Recent open-row callback work added `CpsFunctionShape` in the
+lowerer and taught the pre-pass about open-row-only calls. That fixed the
+bug, but it also made the duplication visible: "runtime function shape"
+is now a real compiler concept, just not yet named in one place.
+
+**Why it costs.** When the answers drift, the failure mode is usually a
+runtime arity crash or evidence-layout mismatch, not a type error. The
+same source type can be:
+
+- accepted by the typechecker,
+- classified one way by the pre-pass,
+- emitted with a different runtime arity by `fun_info`,
+- then invoked through yet another path by lowerer helpers or builtins.
+
+The `repro3` family demonstrated both halves: open-row callback params
+needed CPS calls, and values passed into those params needed CPS-shaped
+normalization. `Std.Process.catch_panic` then showed a related intrinsic
+edge: it has an open-row function type, but it is not an ordinary
+resolved function call and must remain owned by builtin lowering.
+
+**Shape of the fix.** Introduce a small shared representation for
+runtime function shape, probably in a codegen utility module:
+
+```rust
+enum RuntimeFunctionShape {
+    Pure,
+    CpsClosed { static_effects: Vec<String> },
+    CpsOpen { static_effects: Vec<String> },
+    Intrinsic,
+    InlineVal,
+}
+```
+
+The exact enum may differ. A likely first version is:
+
+```rust
+struct CpsShape {
+    static_effects: Vec<String>,
+    is_open_row: bool,
+}
+
+enum RuntimeFunctionShape {
+    Pure,
+    Cps(CpsShape),
+    Intrinsic,
+    InlineVal,
+}
+```
+
+The important part is that codegen has one helper that maps a resolved
+type/symbol pair to the runtime shape.
+Then:
+
+- `fun_info` arity expansion uses it.
+- `call_effects` maps it to `CallEffectKind`.
+- `lower_expr_value_with_expected_type` uses it for value-boundary
+  normalization.
+- intrinsic/inline-val handling is explicit rather than discovered as a
+  late special case.
+
+This helper should be pure and boring: no lowering, no mutation, no Core
+Erlang construction. Just "given the type and resolved symbol kind, what
+runtime shape does this function value/call have?"
+
+**Implementation plan.**
+
+1. Add `src/codegen/runtime_shape.rs` or place the helper in
+   `src/codegen/lower/util.rs` if keeping it lowerer-local is simpler at
+   first. Prefer a new module if both `call_effects` and `lower` consume
+   it directly.
+2. Move the current lowerer-only `CpsFunctionShape` into that shared
+   module as `CpsShape` (or equivalent). Keep it small: static effect
+   names plus `is_open_row`.
+3. Add constructors:
+   - `RuntimeFunctionShape::from_type(ty, canonicalize_effect)`
+   - `RuntimeFunctionShape::from_resolved_symbol(resolved, fallback_ty,
+     canonicalize_effect)`
+   - `expanded_arity(base_arity)` on the shape, returning
+     `base_arity + 2` for CPS shapes and `base_arity` for pure/builtin
+     value shapes.
+4. Replace the scattered `arity_and_effects_from_type` +
+   `has_open_effect_row` + `expanded_arity_for_row` call sites in
+   `init.rs`, block-local `let fun` lowering, and `call_effects::let_fun_sig`.
+   This should be a mechanical pass with no behavior change.
+5. Replace `Lowerer::cps_function_shape_from_type` with the shared
+   helper. `lower_expr_value_with_expected_type` should still own
+   adapter emission; it just asks the shared shape helper what runtime
+   slot shape is expected.
+6. Teach `call_effects` to translate `RuntimeFunctionShape` into
+   `CallEffectKind` through one function:
+
+   ```rust
+   fn call_kind_from_shape(shape, ops) -> CallEffectKind
+   ```
+
+   This removes repeated "if ops empty but open row" branches from
+   `classify_named_call`, `classify_lambda_call`, and `let_fun_sig`.
+7. Keep intrinsic and inline-val handling explicit in the shape enum.
+   The pre-pass maps them to `Pure` call info because normal evidence
+   threading does not own builtin interception.
+8. After the mechanical replacement, delete `expanded_arity_for_row` if
+   it becomes redundant. Leave `arity_and_effects_from_type` available
+   for truly type-level queries, but remove comments that describe the
+   old per-op arity convention.
+
+**Suggested commit slices.**
+
+1. Extract `CpsShape`/`RuntimeFunctionShape` and switch only the lowerer
+   value-boundary normalizer to use it.
+2. Switch arity expansion (`FunInfo`, imported exports, local `let fun`)
+   to shape-driven expansion.
+3. Switch `call_effects` classification to shape-driven translation.
+4. Delete redundant helpers/comments and add focused tests if any branch
+   was not already covered.
+
+**Watch for.**
+
+- Do not collapse call shape and value shape too aggressively. A partial
+  application, a saturated call, and a function value all share the same
+  underlying convention, but they need different lowering actions.
+- Intrinsics are not ordinary functions even when their Saga type looks
+  like one. The shape helper should make that explicit so builtin
+  interception remains ahead of normal call lowering.
+- This cleanup is easier after #1 because resolved types become
+  reliable, and easier after #2 because the pre-pass becomes the only
+  writer of call classifications. It can still be started earlier by
+  extracting just the common "pure vs CPS closed vs CPS open" predicate.
+
+Medium risk. It is mostly a refactor, but it touches the boundary where
+static types become BEAM arities, so it deserves focused regression
+coverage around open rows, partial application, intrinsics, and
+function values stored in containers.
+
 ## Cross-cutting note
 
-What ties these four together: each one is a place where a fact is
+What ties these five together: each one is a place where a fact is
 _computed in one part of the compiler and read by another in a form that
 might be stale_. Type substitution (#1), effectful-var tracking (#2),
-continuation/mode decisions (#3), constructor mangling and calling
-conventions (#4). The fix in every case is the same shape — compute
-once, freeze, expose a single source of truth.
+continuation/mode decisions (#3), constructor mangling and builtin
+calling conventions (#4), runtime function shape (#5). The fix in every
+case is the same shape — compute once, freeze, expose a single source of
+truth.
 
 That's worth keeping in mind when adding new state to the lowerer or
 typechecker. The fifth one of these is already being written; the

@@ -10,6 +10,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 
 use crate::ast::{Annotated, Expr, ExprKind, Handler, HandlerArm, HandlerItem, Pat, Stmt};
 use crate::codegen::cerl::{CArm, CExpr, CLit, CPat};
+use crate::codegen::runtime_shape::CpsShape;
 
 use super::Lowerer;
 use super::util::cerl_call;
@@ -321,7 +322,7 @@ impl<'a> Lowerer<'a> {
                     uncapturable.push(eff.clone());
                 }
                 if !uncapturable.is_empty() {
-                    self.lambda_effect_context = Some(super::CpsFunctionShape {
+                    self.lambda_effect_context = Some(CpsShape {
                         static_effects: uncapturable,
                         is_open_row: false,
                     });

@@ -10,6 +10,7 @@ pub mod util;
 
 use crate::ast::{self, Decl, Expr, ExprKind, HandlerArm, Lit, NodeId, Pat, Stmt};
 use crate::codegen::cerl::{CArm, CExpr, CFunDef, CLit, CModule, CPat};
+use crate::codegen::runtime_shape::{CpsShape, RuntimeFunctionShape};
 use std::collections::HashMap;
 
 use errors::{ErrorInfo, ErrorKind, SourceInfo};
@@ -142,14 +143,6 @@ pub(super) struct EvidenceCtx {
     pub(super) is_open: bool,
 }
 
-/// Expected runtime shape for a function value that is being placed into an
-/// effectful or open-row function slot.
-#[derive(Debug, Clone)]
-struct CpsFunctionShape {
-    static_effects: Vec<String>,
-    is_open_row: bool,
-}
-
 /// Explicit lowering context for value-producing vs terminal positions.
 #[derive(Clone)]
 pub(super) enum LowerMode {
@@ -204,7 +197,7 @@ pub struct Lowerer<'a> {
     /// Runtime function shape that the next lambda/effect-op ref should use.
     /// Set by typed value-boundary lowering when a function value is placed
     /// into an effectful or open-row slot.
-    lambda_effect_context: Option<CpsFunctionShape>,
+    lambda_effect_context: Option<CpsShape>,
     /// Variable name for the continuation parameter in the current handler function.
     /// Set by `build_handler_fun`, read by `Expr::Resume`.
     current_handler_k: Option<String>,
@@ -1509,15 +1502,28 @@ impl<'a> Lowerer<'a> {
                             base_arity = declared_arity;
                         }
                     }
-                    let is_open_row = self
+                    let shape = self
                         .check_result
                         .env
                         .get(name)
                         .map(|scheme| {
-                            util::has_open_effect_row(&self.check_result.sub.apply(&scheme.ty))
+                            let ty = self.check_result.sub.apply(&scheme.ty);
+                            RuntimeFunctionShape::from_type(&ty, |effects| {
+                                self.canonicalize_effects(effects)
+                            })
                         })
-                        .unwrap_or(false);
-                    let arity = self.expanded_arity_for_row(base_arity, &effects, is_open_row);
+                        .unwrap_or_else(|| {
+                            if effects.is_empty() {
+                                RuntimeFunctionShape::Pure
+                            } else {
+                                RuntimeFunctionShape::Cps(CpsShape {
+                                    static_effects: effects.clone(),
+                                    is_open_row: false,
+                                })
+                            }
+                        });
+                    let is_open_row = shape.cps_shape().is_some_and(|shape| shape.is_open_row);
+                    let arity = shape.expanded_arity(base_arity);
                     if let Some(group) = clause_groups.iter_mut().find(|(n, _, _, _)| n == name) {
                         // Additional clause: just add to existing group
                         group.2.push((params, guard, body));
@@ -1888,7 +1894,7 @@ impl<'a> Lowerer<'a> {
                 .iter()
                 .map(|m| {
                     if !impl_effects.is_empty() {
-                        self.lambda_effect_context = Some(CpsFunctionShape {
+                        self.lambda_effect_context = Some(CpsShape {
                             static_effects: impl_effects.clone(),
                             is_open_row: false,
                         });
@@ -2049,23 +2055,12 @@ impl<'a> Lowerer<'a> {
     fn cps_function_shape_from_type(
         &self,
         ty: &crate::typechecker::Type,
-    ) -> Option<CpsFunctionShape> {
-        if !matches!(ty, crate::typechecker::Type::Fun(..)) {
-            return None;
-        }
-        let (_, effects) = util::arity_and_effects_from_type(ty);
-        let static_effects = self.canonicalize_effects(effects);
-        let is_open_row = util::has_open_effect_row(ty);
-        if static_effects.is_empty() && !is_open_row {
-            return None;
-        }
-        Some(CpsFunctionShape {
-            static_effects,
-            is_open_row,
-        })
+    ) -> Option<CpsShape> {
+        RuntimeFunctionShape::from_type(ty, |effects| self.canonicalize_effects(effects))
+            .cps_shape()
     }
 
-    fn expr_cps_function_shape(&self, expr: &Expr) -> Option<CpsFunctionShape> {
+    fn expr_cps_function_shape(&self, expr: &Expr) -> Option<CpsShape> {
         self.check_result
             .resolved_type_for_node(expr.id)
             .and_then(|ty| self.cps_function_shape_from_type(&ty))
@@ -2110,7 +2105,7 @@ impl<'a> Lowerer<'a> {
         &mut self,
         expr: &Expr,
         expected_ty: &crate::typechecker::Type,
-        actual_shape: CpsFunctionShape,
+        actual_shape: CpsShape,
     ) -> CExpr {
         if actual_shape.is_open_row {
             return self.lower_expr_value(expr);
@@ -2152,7 +2147,7 @@ impl<'a> Lowerer<'a> {
         &mut self,
         expr: &Expr,
         expected_ty: &crate::typechecker::Type,
-        expected_shape: CpsFunctionShape,
+        expected_shape: CpsShape,
     ) -> CExpr {
         if matches!(expr.kind, ExprKind::Lambda { .. }) || Self::is_eta_reduced_effect_expr(expr) {
             let saved_ctx = self.lambda_effect_context.take();
@@ -2363,7 +2358,7 @@ impl<'a> Lowerer<'a> {
             if let Some(pe) = param_effects
                 && let Some(effs) = pe.get(&i)
             {
-                self.lambda_effect_context = Some(CpsFunctionShape {
+                self.lambda_effect_context = Some(CpsShape {
                     static_effects: effs.clone(),
                     is_open_row: false,
                 });
@@ -2831,7 +2826,7 @@ impl<'a> Lowerer<'a> {
         };
 
         let saved_ctx = self.lambda_effect_context.take();
-        self.lambda_effect_context = Some(CpsFunctionShape {
+        self.lambda_effect_context = Some(CpsShape {
             static_effects: absorbed.clone(),
             is_open_row: false,
         });

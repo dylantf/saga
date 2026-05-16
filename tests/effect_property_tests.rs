@@ -2097,3 +2097,46 @@ result () = {
 "#;
     check_result_string("open_row_callback_param_normalizes_function_value_shape", src, "ok");
 }
+
+#[test]
+fn open_row_pattern_bound_callback_forwards_static_prefix_and_tail() {
+    let src = r#"module Main
+
+effect Foo {
+  fun foo : Unit -> Unit
+}
+
+effect Skip {
+  fun skip : Unit -> a
+}
+
+fun do_foo : Unit -> Unit needs {Foo}
+do_foo () = foo! ()
+
+fun route : Bool -> (Unit -> Unit needs {..e}) -> Unit -> Unit needs {Skip, ..e}
+route match h () =
+  if match then h ()
+  else skip! ()
+
+fun choose : List (Unit -> Unit needs {Skip, ..e}) -> Unit -> Unit needs {..e}
+choose rs () = case rs {
+  [] -> ()
+  r :: rest -> r () with {
+    skip () = choose rest ()
+  }
+}
+
+pub fun result : Unit -> String
+result () = {
+  choose [route True do_foo] () with {
+    foo () = resume ()
+  }
+  "ok"
+}
+"#;
+    check_result_string(
+        "open_row_pattern_bound_callback_forwards_static_prefix_and_tail",
+        src,
+        "ok",
+    );
+}

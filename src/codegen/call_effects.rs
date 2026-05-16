@@ -27,6 +27,7 @@ use crate::ast::{self, Decl, Expr, ExprKind, NodeId, Pat, Program, Stmt};
 use crate::codegen::CodegenContext;
 use crate::codegen::lower::util;
 use crate::codegen::resolve::{ResolutionMap, ResolvedCodegenKind};
+use crate::codegen::runtime_shape::{CpsShape, RuntimeFunctionShape};
 use crate::typechecker::CheckResult;
 
 /// Per-call metadata. Keyed by the `NodeId` of an `App` node.
@@ -325,28 +326,15 @@ impl<'a> Populator<'a> {
         // Unit needs {..e}`) have no named effects to absorb but must still
         // route through the CPS path so the caller's ambient evidence is
         // forwarded into them. `param_absorbed_effects` only tracks named
-        // effects, so detect these directly off the param types.
+        // effects, so detect the open-row tail directly off the param types.
         for (idx, pty) in info.param_types.iter().enumerate() {
             if let Some(Pat::Var { name: pname, .. }) = params.get(idx)
-                && !effects.contains_key(pname)
-                && Self::type_is_effectful_callable(pty)
+                && util::has_open_effect_row(pty)
             {
                 open_row.insert(pname.clone());
             }
         }
         (effects, open_row)
-    }
-
-    /// True when `ty` is a function value whose effect row carries either
-    /// named effects or an open tail. Callers that bind such a value need to
-    /// route through the CPS path even when the effect row resolves to empty
-    /// named effects (the open tail still forwards the caller's evidence).
-    fn type_is_effectful_callable(ty: &crate::typechecker::Type) -> bool {
-        let crate::typechecker::Type::Fun(..) = ty else {
-            return false;
-        };
-        let (_, effects) = util::arity_and_effects_from_type(ty);
-        !effects.is_empty() || util::has_open_effect_row(ty)
     }
 
     fn lookup_effectful_var(&self, name: &str) -> Option<Vec<String>> {
@@ -381,7 +369,8 @@ impl<'a> Populator<'a> {
                     && !effects.is_empty()
                 {
                     self.record_effectful_var(name.clone(), effects);
-                } else if self.pattern_is_open_row_callable(pat) {
+                }
+                if self.pattern_is_open_row_callable(pat) {
                     self.record_open_row_var(name.clone());
                 }
             }
@@ -421,9 +410,10 @@ impl<'a> Populator<'a> {
         }
     }
 
-    /// True when the pattern binds a value whose type is an open-row
-    /// function with no named effects. These values still need CPS
-    /// threading at call sites — see `type_is_effectful_callable`.
+    /// True when the pattern binds a value whose function type has an
+    /// open-row effect tail. This is tracked independently from named effects:
+    /// `Unit -> Unit needs {Skip, ..e}` must classify as `RowForwarded`
+    /// with pinned `Skip` ops, not as a closed `StaticOps(Skip)` call.
     fn pattern_is_open_row_callable(&self, pat: &Pat) -> bool {
         let Pat::Var { span, .. } = pat else {
             return false;
@@ -434,11 +424,7 @@ impl<'a> Populator<'a> {
         if !matches!(resolved, crate::typechecker::Type::Fun(..)) {
             return false;
         }
-        let (_, effects) = util::arity_and_effects_from_type(&resolved);
-        // `pattern_effects` already handles the named-effects case; here we
-        // only want to flag bindings whose effects come solely from the open
-        // row tail.
-        effects.is_empty() && util::has_open_effect_row(&resolved)
+        util::has_open_effect_row(&resolved)
     }
 
     fn pattern_effects(&self, pat: &Pat) -> Option<Vec<String>> {
@@ -758,20 +744,11 @@ impl<'a> Populator<'a> {
         if supplied == 0 {
             return CallEffectInfo::pure();
         }
-        let Some((effects, is_open_row)) = self.lambda_head_effects(lambda_id) else {
+        let Some(shape) = self.lambda_head_shape(lambda_id) else {
             return CallEffectInfo::pure();
         };
-        if effects.is_empty() && !is_open_row {
+        let Some(kind) = self.call_kind_from_cps_shape(&shape) else {
             return CallEffectInfo::pure();
-        }
-        let ops = self.collect_op_keys(&effects);
-        if ops.is_empty() && !is_open_row {
-            return CallEffectInfo::pure();
-        }
-        let kind = if is_open_row {
-            CallEffectKind::RowForwarded { static_ops: ops }
-        } else {
-            CallEffectKind::StaticOps { ops }
         };
         CallEffectInfo {
             kind,
@@ -862,24 +839,30 @@ impl<'a> Populator<'a> {
             None => {
                 // Not a resolved fun. Treat as effectful if it's an in-scope
                 // effectful var (mirrors `current_effectful_vars` fallback).
+                let is_open_row = self.lookup_open_row_var(name);
                 if let Some(effs) = self.lookup_effectful_var(name) {
                     let ops = self.collect_op_keys(&effs);
-                    if ops.is_empty() {
+                    if ops.is_empty() && !is_open_row {
                         // Either the var carried no effects, or the effects
                         // didn't canonicalize against `effect_ops`. Either
                         // way the call is Pure — and Pure must have
                         // needs_return_k == false (see CallEffectInfo doc).
                         return pure();
                     }
+                    let kind = if is_open_row {
+                        CallEffectKind::RowForwarded { static_ops: ops }
+                    } else {
+                        CallEffectKind::StaticOps { ops }
+                    };
                     return CallEffectInfo {
-                        kind: CallEffectKind::StaticOps { ops },
+                        kind,
                         // Effectful-var calls don't carry a precise user_arity;
                         // supplied > 0 is the gate (already checked above).
                         user_arity: supplied,
                         needs_return_k: true,
                     };
                 }
-                if self.lookup_open_row_var(name) {
+                if is_open_row {
                     return CallEffectInfo {
                         kind: CallEffectKind::RowForwarded {
                             static_ops: Vec::new(),
@@ -968,25 +951,18 @@ impl<'a> Populator<'a> {
         None
     }
 
-    fn lambda_head_effects(&self, lambda_id: NodeId) -> Option<(Vec<String>, bool)> {
+    fn lambda_head_shape(&self, lambda_id: NodeId) -> Option<CpsShape> {
         let ty = self.inputs.check_result.resolved_type_for_node(lambda_id)?;
-        let (_, effects) = util::arity_and_effects_from_type(&ty);
-        let is_open_row = util::has_open_effect_row(&ty);
-        let canonical = self.canonicalize_effects(effects);
-        if canonical.is_empty() && !is_open_row {
-            None
-        } else {
-            Some((canonical, is_open_row))
-        }
+        self.runtime_shape_from_type(&ty).cps_shape()
     }
 
     fn let_fun_sig(&self, id: NodeId, name: &str) -> Option<FunSig> {
         if let Some(ty) = self.inputs.check_result.resolved_type_for_node(id) {
             let (base_arity, effects) = util::arity_and_effects_from_type(&ty);
             let effects = self.canonicalize_effects(effects);
-            let is_open_row = util::has_open_effect_row(&ty);
-            let handler_count = self.collect_op_keys(&effects).len();
-            let expanded_arity = base_arity + if handler_count > 0 || is_open_row { 2 } else { 0 };
+            let shape = self.runtime_shape_from_type(&ty);
+            let is_open_row = shape.cps_shape().is_some_and(|shape| shape.is_open_row);
+            let expanded_arity = shape.expanded_arity(base_arity);
             let param_absorbed_effects = util::param_absorbed_effects_from_type(&ty)
                 .into_iter()
                 .map(|(idx, effs)| (idx, self.canonicalize_effects(effs)))
@@ -1021,6 +997,21 @@ impl<'a> Populator<'a> {
         }
         out.sort();
         out
+    }
+
+    fn runtime_shape_from_type(&self, ty: &crate::typechecker::Type) -> RuntimeFunctionShape {
+        RuntimeFunctionShape::from_type(ty, |effects| self.canonicalize_effects(effects))
+    }
+
+    fn call_kind_from_cps_shape(&self, shape: &CpsShape) -> Option<CallEffectKind> {
+        let ops = self.collect_op_keys(&shape.static_effects);
+        if ops.is_empty() && !shape.is_open_row {
+            None
+        } else if shape.is_open_row {
+            Some(CallEffectKind::RowForwarded { static_ops: ops })
+        } else {
+            Some(CallEffectKind::StaticOps { ops })
+        }
     }
 }
 

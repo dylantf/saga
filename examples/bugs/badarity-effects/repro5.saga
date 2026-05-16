@@ -1,0 +1,46 @@
+import Std.IO (console, println)
+
+# Repro of the /whoami crash, follow-up to the earlier fixed cases.
+#
+# Mirrors Edda's actual shape:
+#   - do_foo is an effectful "route handler" (analogue of `whoami`).
+#   - route is a combinator that calls the handler conditionally (analogue
+#     of `route GET path h`). Effectful in {Skip, ..e}.
+#   - choose pulls from a list and falls through on skip (analogue of `choose`).
+#
+# The Foo handler is installed at the outermost `with`, far from the call
+# site, matching how `handle` provides ReqCtx for `whoami`.
+
+effect Foo {
+  fun foo : Unit -> Unit
+}
+
+effect Skip {
+  fun skip : Unit -> a
+}
+
+fun do_foo : Unit -> Unit needs {Foo}
+do_foo () = foo! ()
+
+fun route : Bool -> (Unit -> Unit needs {..e}) -> Unit -> Unit needs {Skip, ..e}
+route match h () =
+  if match then h ()
+  else skip! ()
+
+fun choose : List (Unit -> Unit needs {Skip, ..e}) -> Unit -> Unit needs {..e}
+choose rs () = case rs {
+  [] -> ()
+  r :: rest -> r () with {
+    skip () = choose rest ()
+  }
+}
+
+main () = {
+  # Expected: prints "foo!".
+  choose [route True do_foo] () with {
+    foo () = {
+      println "foo!"
+      resume ()
+    }
+  }
+} with console

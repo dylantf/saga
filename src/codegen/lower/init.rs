@@ -2,6 +2,7 @@
 /// function metadata, imports, and type constructors from the program's
 /// declarations and imported module codegen info.
 use crate::ast::{self, Decl};
+use crate::codegen::runtime_shape::{CpsShape, RuntimeFunctionShape};
 use std::collections::{BTreeSet, HashMap};
 
 use super::util;
@@ -393,11 +394,12 @@ impl<'a> Lowerer<'a> {
                 for (name, scheme) in &info.exports {
                     let (base_arity, effects) = util::arity_and_effects_from_type(&scheme.ty);
                     let effects = self.canonicalize_effects(effects);
-                    let is_open_row = util::has_open_effect_row(&scheme.ty);
+                    let shape = RuntimeFunctionShape::from_type(&scheme.ty, |effects| {
+                        self.canonicalize_effects(effects)
+                    });
+                    let is_open_row = shape.cps_shape().is_some_and(|shape| shape.is_open_row);
                     let dict_param_count = util::dict_param_count(&scheme.constraints);
-                    let expanded_arity =
-                        self.expanded_arity_for_row(base_arity, &effects, is_open_row)
-                            + dict_param_count;
+                    let expanded_arity = shape.expanded_arity(base_arity) + dict_param_count;
                     let param_absorbed = util::param_absorbed_effects_from_type(&scheme.ty);
                     let param_absorbed: HashMap<usize, Vec<String>> = param_absorbed
                         .into_iter()
@@ -476,10 +478,12 @@ impl<'a> Lowerer<'a> {
         for (name, scheme) in &info.exports {
             let (base_arity, effects) = util::arity_and_effects_from_type(&scheme.ty);
             let effects = self.canonicalize_effects(effects);
-            let is_open_row = util::has_open_effect_row(&scheme.ty);
+            let shape = RuntimeFunctionShape::from_type(&scheme.ty, |effects| {
+                self.canonicalize_effects(effects)
+            });
+            let is_open_row = shape.cps_shape().is_some_and(|shape| shape.is_open_row);
             let dict_param_count = util::dict_param_count(&scheme.constraints);
-            let expanded_arity =
-                self.expanded_arity_for_row(base_arity, &effects, is_open_row) + dict_param_count;
+            let expanded_arity = shape.expanded_arity(base_arity) + dict_param_count;
             let param_effs = util::param_absorbed_effects_from_type(&scheme.ty);
             let param_effs: HashMap<usize, Vec<String>> = param_effs
                 .into_iter()
@@ -616,15 +620,28 @@ impl<'a> Lowerer<'a> {
                             base_arity = declared;
                         }
                     }
-                    let is_open_row = self
+                    let shape = self
                         .check_result
                         .env
                         .get(name)
                         .map(|scheme| {
-                            util::has_open_effect_row(&self.check_result.sub.apply(&scheme.ty))
+                            let ty = self.check_result.sub.apply(&scheme.ty);
+                            RuntimeFunctionShape::from_type(&ty, |effects| {
+                                self.canonicalize_effects(effects)
+                            })
                         })
-                        .unwrap_or(false);
-                    let arity = self.expanded_arity_for_row(base_arity, &effects, is_open_row);
+                        .unwrap_or_else(|| {
+                            if effects.is_empty() {
+                                RuntimeFunctionShape::Pure
+                            } else {
+                                RuntimeFunctionShape::Cps(CpsShape {
+                                    static_effects: effects.clone(),
+                                    is_open_row: false,
+                                })
+                            }
+                        });
+                    let is_open_row = shape.cps_shape().is_some_and(|shape| shape.is_open_row);
+                    let arity = shape.expanded_arity(base_arity);
                     let param_types = self
                         .check_result
                         .env

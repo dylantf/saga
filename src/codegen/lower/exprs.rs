@@ -3,6 +3,7 @@
 /// Effect system lowering is in effects.rs.
 use crate::ast::{self, BinOp, BitSegment, CaseArm, Expr, ExprKind, Lit, Pat, Stmt};
 use crate::codegen::cerl::{CArm, CBinSeg, CExpr, CLit, CPat};
+use crate::codegen::runtime_shape::RuntimeFunctionShape;
 use crate::token::Span;
 use crate::typechecker::Type;
 use std::collections::HashMap;
@@ -748,11 +749,12 @@ impl<'a> Lowerer<'a> {
                     .map(|ty| {
                         let (base_arity, effects) = arity_and_effects_from_type(&ty);
                         let effects = self.canonicalize_effects(effects);
-                        let is_open_row = super::util::has_open_effect_row(&ty);
-                        let handler_count = self.effect_handler_ops(&effects).len();
-                        // Effectful expanded arity = user + Evidence + ReturnK.
-                        let expanded_arity =
-                            base_arity + if handler_count > 0 || is_open_row { 2 } else { 0 };
+                        let shape = RuntimeFunctionShape::from_type(&ty, |effects| {
+                            self.canonicalize_effects(effects)
+                        });
+                        let is_open_row =
+                            shape.cps_shape().is_some_and(|shape| shape.is_open_row);
+                        let expanded_arity = shape.expanded_arity(base_arity);
                         let param_absorbed_effects = param_absorbed_effects_from_type(&ty)
                             .into_iter()
                             .map(|(idx, effs)| (idx, self.canonicalize_effects(effs)))

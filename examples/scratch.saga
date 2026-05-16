@@ -1,3 +1,16 @@
+effect Foo {
+  fun foo : Unit -> Unit
+}
+
+fun do_foo : Unit -> Unit needs {Foo}
+do_foo () = foo! ()
+
+# Indirect call to effectful h with row-polymorphic effect param.
+fun call_through : (Unit -> Unit needs {..e}) -> Unit -> Unit needs {..e}
+call_through h () = h ()
+
 main () = {
-  dbg "Hello world"
+  call_through do_foo () with {
+    foo () = resume ()
+  }
 }

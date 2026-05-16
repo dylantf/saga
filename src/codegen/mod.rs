@@ -3,6 +3,7 @@ pub mod cerl;
 pub mod lower;
 pub mod normalize;
 pub mod resolve;
+pub mod runtime_shape;
 #[cfg(test)]
 mod tests;
 
