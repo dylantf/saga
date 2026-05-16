@@ -52,9 +52,12 @@ pub struct CheckResult {
     /// Effect requirements per function.
     pub fun_effects: HashMap<String, HashSet<String>>,
     /// Per-node type information for Expr nodes (LSP hover).
-    /// Types may contain unresolved variables; use `type_at_node()` to get resolved types.
+    /// Finalized through the current substitution at the `CheckResult`
+    /// boundary; display helpers still prettify remaining free variables.
     pub type_at_node: HashMap<crate::ast::NodeId, super::Type>,
     /// Per-span type information for Pat bindings (LSP hover).
+    /// Finalized through the current substitution at the `CheckResult`
+    /// boundary; display helpers still prettify remaining free variables.
     pub type_at_span: HashMap<crate::token::Span, super::Type>,
     /// Maps handler arm span -> (effect op definition span, source module) (LSP go-to-def, level 2).
     pub handler_arm_targets: HashMap<crate::token::Span, (crate::token::Span, Option<String>)>,
@@ -169,15 +172,12 @@ impl CheckResult {
 
     /// Resolved type map keyed by node id. Intended for downstream compiler passes.
     pub fn resolved_type_at_node_map(&self) -> HashMap<crate::ast::NodeId, super::Type> {
-        self.type_at_node
-            .iter()
-            .map(|(id, ty)| (*id, self.sub.apply(ty)))
-            .collect()
+        self.type_at_node.clone()
     }
 
     /// Look up a resolved type by node id for downstream compiler passes.
     pub fn resolved_type_for_node(&self, node_id: crate::ast::NodeId) -> Option<super::Type> {
-        self.type_at_node.get(&node_id).map(|ty| self.sub.apply(ty))
+        self.type_at_node.get(&node_id).cloned()
     }
 
     /// Look up the resolved type at a span (for Pat bindings), applying the substitution.
@@ -289,6 +289,18 @@ impl Checker {
     /// checking the prelude).
     pub fn to_result(&self) -> CheckResult {
         let diagnostics = self.collected_diagnostics.clone();
+        let type_at_node = self
+            .lsp
+            .type_at_node
+            .iter()
+            .map(|(id, ty)| (*id, self.sub.apply(ty)))
+            .collect();
+        let type_at_span = self
+            .lsp
+            .type_at_span
+            .iter()
+            .map(|(span, ty)| (*span, self.sub.apply(ty)))
+            .collect();
         CheckResult {
             env: self.env.clone(),
             sub: self.sub.clone(),
@@ -328,8 +340,8 @@ impl Checker {
                 }
                 fun_effects
             },
-            type_at_node: self.lsp.type_at_node.clone(),
-            type_at_span: self.lsp.type_at_span.clone(),
+            type_at_node,
+            type_at_span,
             handler_arm_targets: self.lsp.handler_arm_targets.clone(),
             effect_call_targets: self.lsp.effect_call_targets.clone(),
             let_dict_params: self.let_dict_params.clone(),

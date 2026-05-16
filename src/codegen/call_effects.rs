@@ -428,10 +428,9 @@ impl<'a> Populator<'a> {
         let Pat::Var { span, .. } = pat else {
             return false;
         };
-        let Some(raw_ty) = self.inputs.check_result.type_at_span.get(span) else {
+        let Some(resolved) = self.inputs.check_result.type_at_span.get(span) else {
             return false;
         };
-        let resolved = self.inputs.check_result.sub.apply(raw_ty);
         if !matches!(resolved, crate::typechecker::Type::Fun(..)) {
             return false;
         }
@@ -446,16 +445,7 @@ impl<'a> Populator<'a> {
         let Pat::Var { span, .. } = pat else {
             return None;
         };
-        let raw_ty = self.inputs.check_result.type_at_span.get(span)?;
-        // The typechecker records pattern-bound types before the surrounding
-        // unification finishes (e.g. constructor-pattern args are bound with a
-        // freshly instantiated parameter type, then the scrutinee is unified
-        // against the constructor's result type). Apply the substitution here
-        // so a pattern var like `r` in `r :: rest` resolves to its actual
-        // function type — otherwise effectful function values pulled out of a
-        // list via pattern match get classified as pure and the call site
-        // misses evidence threading.
-        let resolved = self.inputs.check_result.sub.apply(raw_ty);
+        let resolved = self.inputs.check_result.type_at_span.get(span)?;
         let mut effects: Vec<String> = crate::typechecker::effects_from_type(&resolved)
             .into_iter()
             .collect();

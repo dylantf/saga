@@ -72,10 +72,9 @@ struct Elaborator {
     scope_map_effects: HashMap<String, String>,
     /// Front-end resolution result for looking up canonical names by span/node id.
     resolution: crate::typechecker::ResolutionResult,
-    /// Per-node type information for resolving record names in FieldAccess/RecordUpdate.
+    /// Finalized per-node type information for resolving record names in
+    /// FieldAccess/RecordUpdate.
     type_at_node: HashMap<crate::ast::NodeId, Type>,
-    /// Substitution for resolving type variables.
-    sub: crate::typechecker::Substitution,
 }
 
 impl Elaborator {
@@ -223,7 +222,6 @@ impl Elaborator {
             scope_map_effects: result.scope_map.effects.clone(),
             resolution: result.resolution.clone(),
             type_at_node: result.type_at_node.clone(),
-            sub: result.sub.clone(),
         }
     }
 
@@ -654,9 +652,8 @@ impl Elaborator {
     /// Resolve the record type name from a node's inferred type.
     fn resolve_record_name(&self, node_id: crate::ast::NodeId) -> Option<String> {
         let ty = self.type_at_node.get(&node_id)?;
-        let resolved = self.sub.apply(ty);
-        match resolved {
-            Type::Con(name, _) => Some(name),
+        match ty {
+            Type::Con(name, _) => Some(name.clone()),
             Type::Record(fields) => {
                 let names: Vec<&str> = fields.iter().map(|(n, _)| n.as_str()).collect();
                 Some(crate::ast::anon_record_tag(&names))

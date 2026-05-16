@@ -86,8 +86,7 @@ fn resolve_record_fields(
     // 2. Check per-span types (local let bindings, pattern bindings, params).
     for (span, ty) in &result.type_at_span {
         if span.end <= source.len() && &source[span.start..span.end] == receiver {
-            let resolved = result.sub.apply(ty);
-            if let Some(fields) = extract_record_fields(result, &resolved) {
+            if let Some(fields) = extract_record_fields(result, ty) {
                 return Some(fields);
             }
         }
@@ -99,8 +98,7 @@ fn resolve_record_fields(
             && span.end <= source.len()
             && &source[span.start..span.end] == receiver
         {
-            let resolved = result.sub.apply(ty);
-            if let Some(fields) = extract_record_fields(result, &resolved) {
+            if let Some(fields) = extract_record_fields(result, ty) {
                 return Some(fields);
             }
         }

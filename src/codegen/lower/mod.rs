@@ -2037,16 +2037,13 @@ impl<'a> Lowerer<'a> {
     /// Look up the resolved type bound by a let pattern. Used when lowering
     /// `let r = fun ... -> ...` so the lambda lowers with its full
     /// effectful arity (`_Evidence`/`_ReturnK`) when its type carries effects.
-    /// The typechecker records the binding's raw type at the pattern's span
-    /// (see `generalize_let_binding`); we apply the substitution here for the
-    /// same reason as in `call_effects::pattern_effects`; the recorded type
-    /// can still contain unresolved row variables.
+    /// `CheckResult` finalizes span types through the typechecker substitution,
+    /// so downstream lowering can read this map directly.
     pub(super) fn let_pat_resolved_type(&self, pat: &Pat) -> Option<crate::typechecker::Type> {
         let Pat::Var { span, .. } = pat else {
             return None;
         };
-        let raw = self.check_result.type_at_span.get(span)?;
-        Some(self.check_result.sub.apply(raw))
+        self.check_result.type_at_span.get(span).cloned()
     }
 
     fn cps_function_shape_from_type(
