@@ -654,8 +654,9 @@ impl<'a> Populator<'a> {
             Stmt::Let { pattern, value, .. } => {
                 self.walk_expr(value);
                 // After walking the value, propagate effectful-binding info to
-                // the binder, mirroring the lowerer's `current_effectful_vars`
-                // mutation in `lower_block`.
+                // the binder. `call_effects` is the authoritative owner of
+                // this lexical classification; the lowerer only consumes the
+                // completed per-App map.
                 if let Pat::Var { name, .. } = pattern {
                     if let Some(effs) = self.inputs.let_effect_bindings.get(name)
                         && !effs.is_empty()
@@ -822,10 +823,13 @@ impl<'a> Populator<'a> {
         // Mirror `resolved_effects`: prefer ResolutionMap.effects, fall back
         // to fun_sigs (which holds CPS-expanded info for local funs).
         let resolved = self.inputs.resolved.get(&head_id);
+        let resolved_shape = resolved.map(|resolved| self.runtime_shape_from_resolved_head(
+            head_id,
+            resolved,
+        ));
         if matches!(
-            resolved.map(|r| &r.kind),
-            Some(super::resolve::ResolvedCodegenKind::Intrinsic { .. })
-                | Some(super::resolve::ResolvedCodegenKind::InlineVal)
+            resolved_shape,
+            Some(RuntimeFunctionShape::Intrinsic | RuntimeFunctionShape::InlineVal)
         ) {
             return pure();
         }
@@ -838,7 +842,8 @@ impl<'a> Populator<'a> {
                 .unwrap_or_default(),
             None => {
                 // Not a resolved fun. Treat as effectful if it's an in-scope
-                // effectful var (mirrors `current_effectful_vars` fallback).
+                // effectful var recorded by this pre-pass's lexical scope
+                // walk.
                 let is_open_row = self.lookup_open_row_var(name);
                 if let Some(effs) = self.lookup_effectful_var(name) {
                     let ops = self.collect_op_keys(&effs);
@@ -878,7 +883,11 @@ impl<'a> Populator<'a> {
         // Need expanded arity from fun_sigs to compute user_arity.
         let Some(sig) = self.lookup_fun_sig(name, canonical_name.as_deref()) else {
             let ops = self.collect_op_keys(&effects);
-            let is_open_row = self.head_open_row.get(&head_id).copied().unwrap_or(false);
+            let is_open_row = resolved_shape
+                .as_ref()
+                .and_then(|shape| shape.cps_shape())
+                .map(|shape| shape.is_open_row)
+                .unwrap_or_else(|| self.head_open_row.get(&head_id).copied().unwrap_or(false));
             // No FunSig snapshot. Effectful only if the effects canonicalized
             // to known ops or the callee has an open row; supplied is the
             // best-effort user-arity. Pure must not carry needs_return_k.
@@ -1001,6 +1010,19 @@ impl<'a> Populator<'a> {
 
     fn runtime_shape_from_type(&self, ty: &crate::typechecker::Type) -> RuntimeFunctionShape {
         RuntimeFunctionShape::from_type(ty, |effects| self.canonicalize_effects(effects))
+    }
+
+    fn runtime_shape_from_resolved_head(
+        &self,
+        head_id: NodeId,
+        resolved: &crate::codegen::resolve::ResolvedSymbol,
+    ) -> RuntimeFunctionShape {
+        let fallback_ty = self.inputs.check_result.resolved_type_for_node(head_id);
+        RuntimeFunctionShape::from_resolved_symbol(
+            resolved,
+            fallback_ty.as_ref(),
+            |effects| self.canonicalize_effects(effects),
+        )
     }
 
     fn call_kind_from_cps_shape(&self, shape: &CpsShape) -> Option<CallEffectKind> {

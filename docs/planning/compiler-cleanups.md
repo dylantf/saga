@@ -106,6 +106,19 @@ Current status: mostly done. The valuable output is documentation,
 assertions, and deleting stale comments, plus any small drift discovered
 while doing that audit.
 
+Latest progress:
+
+- `call_effects.rs` now documents the single-writer invariant at the
+  module boundary.
+- Stale lowerer-side `current_effectful_vars` comments have been removed
+  from codegen.
+- Lowering now debug-asserts if an `App` was classified as effectful by
+  the pre-pass but no effectful dispatch path handles it.
+- The `repro5` class of bug tightened the scope contract: a variable can
+  have both pinned static effects and an open-row tail. The pre-pass must
+  preserve both facts and classify the call as `RowForwarded { static_ops
+  }`, not closed `StaticOps`.
+
 **Watch for.**
 
 - Do not move value-shape normalization into `call_effects`. The pre-pass
@@ -248,11 +261,14 @@ questions about function values:
 - Intrinsics and inline vals sit in the same resolution map as ordinary
   functions, but must be intercepted before normal call/value lowering.
 
-These answers are closely related but not represented by one shared
-concept. Recent open-row callback work added `CpsFunctionShape` in the
-lowerer and taught the pre-pass about open-row-only calls. That fixed the
-bug, but it also made the duplication visible: "runtime function shape"
-is now a real compiler concept, just not yet named in one place.
+These answers are closely related but were not originally represented by
+one shared concept. Recent open-row callback work first added a lowerer-
+local `CpsFunctionShape`, then this cleanup extracted that into
+`src/codegen/runtime_shape.rs` as `CpsShape` /
+`RuntimeFunctionShape`. That fixed real drift, but the larger point
+remains: "runtime function shape" is now a compiler concept and should
+keep becoming the source of truth where codegen crosses from types to
+BEAM arities.
 
 **Why it costs.** When the answers drift, the failure mode is usually a
 runtime arity crash or evidence-layout mismatch, not a type error. The
@@ -315,37 +331,38 @@ runtime shape does this function value/call have?"
 
 **Implementation plan.**
 
-1. Add `src/codegen/runtime_shape.rs` or place the helper in
-   `src/codegen/lower/util.rs` if keeping it lowerer-local is simpler at
-   first. Prefer a new module if both `call_effects` and `lower` consume
-   it directly.
-2. Move the current lowerer-only `CpsFunctionShape` into that shared
-   module as `CpsShape` (or equivalent). Keep it small: static effect
-   names plus `is_open_row`.
-3. Add constructors:
+1. Done: add `src/codegen/runtime_shape.rs`.
+2. Done: move the lowerer-only CPS shape into that shared module as
+   `CpsShape`.
+3. Done for the first useful surface: add constructors/helpers:
    - `RuntimeFunctionShape::from_type(ty, canonicalize_effect)`
    - `RuntimeFunctionShape::from_resolved_symbol(resolved, fallback_ty,
      canonicalize_effect)`
    - `expanded_arity(base_arity)` on the shape, returning
      `base_arity + 2` for CPS shapes and `base_arity` for pure/builtin
      value shapes.
-4. Replace the scattered `arity_and_effects_from_type` +
+4. In progress: replace the scattered `arity_and_effects_from_type` +
    `has_open_effect_row` + `expanded_arity_for_row` call sites in
    `init.rs`, block-local `let fun` lowering, and `call_effects::let_fun_sig`.
-   This should be a mechanical pass with no behavior change.
-5. Replace `Lowerer::cps_function_shape_from_type` with the shared
+   Most type-backed paths now use `RuntimeFunctionShape::expanded_arity`;
+   annotation/import fallback paths that only have an effect list still use
+   the older helper.
+5. Done: replace `Lowerer::cps_function_shape_from_type` with the shared
    helper. `lower_expr_value_with_expected_type` should still own
    adapter emission; it just asks the shared shape helper what runtime
    slot shape is expected.
-6. Teach `call_effects` to translate `RuntimeFunctionShape` into
+6. Partly done: teach `call_effects` to translate `RuntimeFunctionShape` into
    `CallEffectKind` through one function:
 
    ```rust
    fn call_kind_from_shape(shape, ops) -> CallEffectKind
    ```
 
-   This removes repeated "if ops empty but open row" branches from
-   `classify_named_call`, `classify_lambda_call`, and `let_fun_sig`.
+   Lambda classification, intrinsic/inline resolved heads, no-`FunSig`
+   resolved heads, and local `let fun` signatures use the shared shape
+   helper now. Some saturated resolved-name classification still has local
+   branching around `FunSig` arity and should be collapsed carefully in a
+   later pass.
 7. Keep intrinsic and inline-val handling explicit in the shape enum.
    The pre-pass maps them to `Pure` call info because normal evidence
    threading does not own builtin interception.
@@ -356,12 +373,14 @@ runtime shape does this function value/call have?"
 
 **Suggested commit slices.**
 
-1. Extract `CpsShape`/`RuntimeFunctionShape` and switch only the lowerer
+1. Done: extract `CpsShape`/`RuntimeFunctionShape` and switch the lowerer
    value-boundary normalizer to use it.
-2. Switch arity expansion (`FunInfo`, imported exports, local `let fun`)
-   to shape-driven expansion.
-3. Switch `call_effects` classification to shape-driven translation.
-4. Delete redundant helpers/comments and add focused tests if any branch
+2. Mostly done: switch arity expansion (`FunInfo`, imported exports,
+   local `let fun`) to shape-driven expansion where full types are
+   available.
+3. In progress: switch `call_effects` classification to shape-driven
+   translation.
+4. Remaining: delete redundant helpers/comments and add focused tests if any branch
    was not already covered.
 
 **Watch for.**

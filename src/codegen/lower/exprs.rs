@@ -143,6 +143,11 @@ impl<'a> Lowerer<'a> {
             {
                 return call;
             }
+            debug_assert!(
+                false,
+                "effectful App {:?} was classified by call_effects but no lowerer dispatch path handled it",
+                expr.id
+            );
         }
 
         self.lower_expr(expr)
