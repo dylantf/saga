@@ -5888,3 +5888,143 @@ fn auto_load_typo_does_not_block_real_canonical_reference_in_same_file() {
         err.message
     );
 }
+
+// --- Row widening across multi-element forms ---
+//
+// When N effectful function values appear at the same row-polymorphic
+// position (list elements, case arm bodies, if/else branches, tuple
+// elements, anonymous record fields paired with a shared row variable),
+// the row variable should solve to the UNION of element rows rather than
+// pinning to the first one. The "Edda driver" case is a list of route
+// handlers with heterogeneous effects passed to a dispatch combinator.
+
+#[test]
+fn list_literal_widens_row_across_heterogeneous_effects() {
+    check(
+        "effect Foo {\n  fun foo : Unit -> Unit\n}\n\
+         effect Bar {\n  fun bar : Unit -> Unit\n}\n\
+         fun do_foo : Unit -> Unit needs {Foo}\n\
+         do_foo () = foo! ()\n\
+         fun do_bar : Unit -> Unit needs {Bar}\n\
+         do_bar () = bar! ()\n\
+         fun pure_thing : Unit -> Unit\n\
+         pure_thing () = ()\n\
+         fun take_callbacks : List (Unit -> Unit needs {..e}) -> Unit needs {..e}\n\
+         take_callbacks fs = case fs {\n  [] -> ()\n  f :: _ -> f ()\n}\n\
+         fun caller : Unit -> Unit needs {Foo, Bar}\n\
+         caller () = take_callbacks [pure_thing, do_foo, do_bar]",
+    )
+    .unwrap();
+}
+
+#[test]
+fn list_literal_pure_only_stays_closed() {
+    // Joining over only pure (closed empty) rows produces a closed empty
+    // row — no spurious widening, no row variables leak.
+    check(
+        "fun a : Unit -> Unit\na () = ()\n\
+         fun b : Unit -> Unit\nb () = ()\n\
+         fun pure_only : Unit -> Unit\n\
+         pure_only () = case [a, b] {\n  [] -> ()\n  f :: _ -> f ()\n}",
+    )
+    .unwrap();
+}
+
+#[test]
+fn list_literal_single_element_still_typechecks() {
+    // Regression for the path I/O of the new spine handler: a one-element
+    // list literal (which exercises the spine detection's terminal Nil
+    // branch on the first iteration) must still typecheck the same as
+    // before. Joining over one element returns it unchanged.
+    check(
+        "effect Foo {\n  fun foo : Unit -> Unit\n}\n\
+         fun do_foo : Unit -> Unit needs {Foo}\n\
+         do_foo () = foo! ()\n\
+         fun take_callbacks : List (Unit -> Unit needs {..e}) -> Unit needs {..e}\n\
+         take_callbacks fs = case fs {\n  [] -> ()\n  f :: _ -> f ()\n}\n\
+         fun caller : Unit -> Unit needs {Foo}\n\
+         caller () = take_callbacks [do_foo]",
+    )
+    .unwrap();
+}
+
+#[test]
+fn case_arms_widen_row_when_branches_return_callbacks() {
+    check(
+        "effect Foo {\n  fun foo : Unit -> Unit\n}\n\
+         effect Bar {\n  fun bar : Unit -> Unit\n}\n\
+         fun do_foo : Unit -> Unit needs {Foo}\n\
+         do_foo () = foo! ()\n\
+         fun do_bar : Unit -> Unit needs {Bar}\n\
+         do_bar () = bar! ()\n\
+         fun pick : Bool -> Unit -> Unit needs {Foo, Bar}\n\
+         pick flag = case flag {\n  True -> do_foo\n  False -> do_bar\n}",
+    )
+    .unwrap();
+}
+
+#[test]
+fn case_arms_non_function_result_unchanged() {
+    // Case over non-function types still works (degrades to pairwise unify).
+    check(
+        "fun classify : Int -> String\n\
+         classify n = case n {\n  0 -> \"zero\"\n  _ -> \"other\"\n}",
+    )
+    .unwrap();
+}
+
+#[test]
+fn if_else_widens_row_when_branches_return_callbacks() {
+    check(
+        "effect Foo {\n  fun foo : Unit -> Unit\n}\n\
+         effect Bar {\n  fun bar : Unit -> Unit\n}\n\
+         fun do_foo : Unit -> Unit needs {Foo}\n\
+         do_foo () = foo! ()\n\
+         fun do_bar : Unit -> Unit needs {Bar}\n\
+         do_bar () = bar! ()\n\
+         fun pick : Bool -> Unit -> Unit needs {Foo, Bar}\n\
+         pick flag = if flag then do_foo else do_bar",
+    )
+    .unwrap();
+}
+
+#[test]
+fn tuple_widens_shared_row_var_at_expected_type() {
+    check(
+        "effect Foo {\n  fun foo : Unit -> Unit\n}\n\
+         effect Bar {\n  fun bar : Unit -> Unit\n}\n\
+         fun do_foo : Unit -> Unit needs {Foo}\n\
+         do_foo () = foo! ()\n\
+         fun do_bar : Unit -> Unit needs {Bar}\n\
+         do_bar () = bar! ()\n\
+         fun run_pair : (Unit -> Unit needs {..e}, Unit -> Unit needs {..e}) -> Unit needs {..e}\n\
+         run_pair p = {\n  let (a, b) = p\n  a ()\n  b ()\n}\n\
+         fun caller : Unit -> Unit needs {Foo, Bar}\n\
+         caller () = run_pair (do_foo, do_bar)",
+    )
+    .unwrap();
+}
+
+#[test]
+fn function_with_row_claiming_unavailable_effect_still_rejected() {
+    // Row widening must not let a function "fabricate" effects it can't
+    // actually require: if take_callbacks claims `needs {..e}` and the
+    // caller provides no handler for an effect in the joined row, the
+    // caller must declare the effect on its own signature.
+    let err = check(
+        "effect Foo {\n  fun foo : Unit -> Unit\n}\n\
+         fun do_foo : Unit -> Unit needs {Foo}\n\
+         do_foo () = foo! ()\n\
+         fun take_callbacks : List (Unit -> Unit needs {..e}) -> Unit needs {..e}\n\
+         take_callbacks fs = case fs {\n  [] -> ()\n  f :: _ -> f ()\n}\n\
+         fun caller : Unit -> Unit\n\
+         caller () = take_callbacks [do_foo]",
+    )
+    .err()
+    .expect("caller without 'needs {Foo}' must be rejected");
+    assert!(
+        err.message.contains("Foo") || err.message.contains("needs"),
+        "expected effect declaration diagnostic, got: {}",
+        err.message
+    );
+}

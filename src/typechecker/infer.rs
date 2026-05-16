@@ -21,6 +21,51 @@ fn collect_app_spine<'a>(
     }
 }
 
+/// If `expr` is a desugared list literal (a right-nested `Cons` spine
+/// terminated by `Nil`), returns the element expressions in source order.
+/// Otherwise returns `None`. Surface `[a, b, c]` desugars to
+/// `Cons a (Cons b (Cons c Nil))` before typechecking; the empty list `[]`
+/// desugars directly to a bare `Nil` constructor (no `App` wrapper) so it
+/// never reaches the application chain. A hand-written `Cons x rest` where
+/// `rest` is not itself a literal spine returns `None` and is processed by
+/// the regular pairwise inference path.
+fn collect_list_literal_elements(expr: &Expr) -> Option<Vec<&Expr>> {
+    let mut elements = Vec::new();
+    let mut current = expr;
+    loop {
+        let ExprKind::App {
+            func: outer,
+            arg: tail,
+        } = &current.kind
+        else {
+            return None;
+        };
+        let ExprKind::App {
+            func: inner,
+            arg: elem,
+        } = &outer.kind
+        else {
+            return None;
+        };
+        let ExprKind::Constructor { name, .. } = &inner.kind else {
+            return None;
+        };
+        if name != "Cons" {
+            return None;
+        }
+        elements.push(elem.as_ref());
+        match &tail.kind {
+            ExprKind::Constructor { name: tail_name, .. } if tail_name == "Nil" => {
+                return Some(elements);
+            }
+            ExprKind::App { .. } => {
+                current = tail.as_ref();
+            }
+            _ => return None,
+        }
+    }
+}
+
 impl Checker {
     /// When a bare `Var` lookup fails, probe `scope_map.trait_methods` with
     /// the same tier-based shadowing rule the resolver uses. Locally defined
@@ -249,8 +294,12 @@ impl Checker {
                 self.unify_at(&cond_ty, &Type::bool(), cond.span)?;
                 let then_ty = self.infer_expr(then_branch)?;
                 let else_ty = self.infer_expr(else_branch)?;
-                self.unify_at(&then_ty, &else_ty, span)?;
-                Ok(then_ty)
+                // Join rather than pairwise unify so the two branches'
+                // effect rows (when both are function-valued) union into
+                // a single row variable instead of pinning to one side.
+                // For non-function types `join_branch_types` falls back to
+                // plain unification.
+                self.join_branch_types(&[then_ty, else_ty], span)
             }
 
             ExprKind::Block { stmts, .. } => self.infer_block(stmts),
@@ -265,7 +314,7 @@ impl Checker {
                 scrutinee, arms, ..
             } => {
                 let scrut_ty = self.infer_expr(scrutinee)?;
-                let result_ty = self.fresh_var();
+                let mut arm_tys: Vec<Type> = Vec::with_capacity(arms.len());
 
                 for arm in arms {
                     let arm = &arm.node;
@@ -277,9 +326,15 @@ impl Checker {
                     }
 
                     let body_ty = self.infer_expr(&arm.body)?;
-                    self.unify_at(&result_ty, &body_ty, arm.body.span)?;
+                    arm_tys.push(body_ty);
                     self.env = saved_env;
                 }
+
+                // Join arm body types: when arms return function values
+                // with heterogeneous effect rows, the result type's row
+                // is the union rather than being pinned to the first arm.
+                // For non-function bodies this degrades to pairwise unify.
+                let result_ty = self.join_branch_types(&arm_tys, span)?;
 
                 self.check_exhaustiveness(arms, &scrut_ty, span)?;
                 Ok(result_ty)
@@ -684,6 +739,16 @@ impl Checker {
         expr: &Expr,
         expected_result: Option<&Type>,
     ) -> Result<Type, Diagnostic> {
+        // Desugared list literals (`Cons e1 (Cons e2 ... Nil)`) need row
+        // widening across elements: a list of heterogeneous-effect functions
+        // should produce `List (T needs {union of element rows})`, not pin
+        // the row to the first element. Detect the spine here and route
+        // through a join-aware path; everything else falls through to the
+        // existing pairwise unification chain.
+        if let Some(elements) = collect_list_literal_elements(expr) {
+            return self.infer_list_literal_spine(expr, &elements, expected_result);
+        }
+
         #[derive(Clone)]
         struct DeferredLambda<'a> {
             arg_expr: &'a Expr,
@@ -774,6 +839,128 @@ impl Checker {
         Ok(current_ty)
     }
 
+    /// Infer a desugared list literal spine `Cons e1 (Cons e2 ... Nil)`
+    /// using the row-joining path. Element types are joined via
+    /// `join_branch_types`, which widens effect rows across heterogeneous
+    /// elements (the whole point of this code path). The resulting `List`
+    /// type is then unified against the expected result, if any.
+    ///
+    /// Records types for each `App` and constructor node in the spine so
+    /// LSP type-at-span / hover queries still find them, and threads the
+    /// joined element type back to each `Cons` instantiation so trait
+    /// constraints and type-arg unifications come out consistent.
+    ///
+    /// Absorbs effects declared on the joined element type, mirroring the
+    /// call-site half of HOF absorption that the pairwise Cons chain
+    /// performs via `apply_callback_argument_effects` at each element.
+    /// Without this, effects emitted by element-defining lambdas (which
+    /// propagate to the enclosing scope on lambda inference) would leak
+    /// into the enclosing function's body effect row.
+    fn infer_list_literal_spine(
+        &mut self,
+        expr: &Expr,
+        elements: &[&Expr],
+        expected_result: Option<&Type>,
+    ) -> Result<Type, Diagnostic> {
+        let mut elem_tys: Vec<Type> = Vec::with_capacity(elements.len());
+        for elem in elements {
+            elem_tys.push(self.infer_expr(elem)?);
+        }
+
+        let joined_elem = self.join_branch_types(&elem_tys, expr.span)?;
+
+        // Absorb effects declared on the joined element type from the
+        // ambient effect_row, matching what the pairwise Cons chain would
+        // do via `apply_callback_argument_effects` per element. Walks the
+        // joined type's `Type::Fun(_, ret, row)` chain and treats every
+        // row entry as a callback-declared effect.
+        let mut absorbed_entries: Vec<super::EffectEntry> = Vec::new();
+        fn collect_entries(checker: &Checker, ty: &Type, out: &mut Vec<super::EffectEntry>) {
+            if let Type::Fun(_, ret, row) = ty {
+                for entry in &row.effects {
+                    let applied = super::EffectEntry {
+                        name: entry.name.clone(),
+                        args: entry
+                            .args
+                            .iter()
+                            .map(|arg| checker.sub.apply(arg))
+                            .collect(),
+                    };
+                    if !out.iter().any(|seen| seen.same_instantiation(&applied)) {
+                        out.push(applied);
+                    }
+                }
+                collect_entries(checker, ret, out);
+            }
+        }
+        collect_entries(self, &self.sub.apply(&joined_elem), &mut absorbed_entries);
+        if !absorbed_entries.is_empty() {
+            for entry in &absorbed_entries {
+                self.call_site_absorbed.insert(entry.name.clone());
+            }
+            let normalized = self.sub.apply_effect_row(&self.effect_row);
+            self.effect_row = normalized.subtract_entries(&absorbed_entries);
+        }
+
+        let list_ty = Type::Con(
+            super::canonicalize_type_name("List").into(),
+            vec![joined_elem.clone()],
+        );
+        // Type of a partially-applied Cons after its first arg:
+        // `List joined -> List joined`. The result is always pure.
+        let cons_partial_ty = Type::Fun(
+            Box::new(list_ty.clone()),
+            Box::new(list_ty.clone()),
+            EffectRow::empty(),
+        );
+        // Type of a fully-instantiated Cons: `joined -> List joined -> List joined`.
+        let cons_full_ty = Type::Fun(
+            Box::new(joined_elem.clone()),
+            Box::new(cons_partial_ty.clone()),
+            EffectRow::empty(),
+        );
+
+        let mut current = expr;
+        loop {
+            let ExprKind::App {
+                func: outer,
+                arg: tail,
+            } = &current.kind
+            else {
+                break;
+            };
+            let ExprKind::App { func: inner, .. } = &outer.kind else {
+                break;
+            };
+            // Infer the Cons constructor for its LSP side effects (references,
+            // type recording on the constructor node), then constrain it to
+            // the joined Cons shape.
+            let cons_ty = self.infer_expr(inner)?;
+            self.unify_at(&cons_ty, &cons_full_ty, inner.span)?;
+            self.record_type(outer.id, &cons_partial_ty);
+            self.record_type(current.id, &list_ty);
+
+            match &tail.kind {
+                ExprKind::Constructor { .. } => {
+                    // Nil terminator: must have type `List joined`.
+                    let nil_ty = self.infer_expr(tail)?;
+                    self.unify_at(&nil_ty, &list_ty, tail.span)?;
+                    break;
+                }
+                ExprKind::App { .. } => {
+                    current = tail.as_ref();
+                }
+                _ => break,
+            }
+        }
+
+        if let Some(expected) = expected_result {
+            self.unify_at(&list_ty, expected, expr.span)?;
+        }
+
+        Ok(list_ty)
+    }
+
     pub(crate) fn infer_expr_against(
         &mut self,
         expr: &Expr,
@@ -817,8 +1004,111 @@ impl Checker {
                     self.infer_expr(arg)
                 }
             }
+            // For tuples and anonymous records passed to a function whose
+            // parameter type carries row variables shared across multiple
+            // positions, pre-widen those shared variables to the union of
+            // the actual element rows. Without this, pairwise unification
+            // pins the shared var to the first element's row and rejects
+            // the rest. Falls back to normal inference when the expected
+            // shape doesn't match.
+            ExprKind::Tuple { elements, .. } => {
+                if let Some(ty) =
+                    self.try_infer_tuple_against(elements, expected_param, arg.span)?
+                {
+                    self.record_type(arg.id, &ty);
+                    Ok(ty)
+                } else {
+                    self.infer_expr(arg)
+                }
+            }
+            ExprKind::AnonRecordCreate { fields, .. } => {
+                if let Some(ty) =
+                    self.try_infer_anon_record_against(fields, expected_param, arg.span)?
+                {
+                    self.record_type(arg.id, &ty);
+                    Ok(ty)
+                } else {
+                    self.infer_expr(arg)
+                }
+            }
             _ => self.infer_expr(arg),
         }
+    }
+
+    /// Tuple inference against an expected tuple type, with shared-row-var
+    /// pre-widening. Returns `None` when the expected isn't a tuple of
+    /// matching arity (caller falls back to plain `infer_expr`).
+    fn try_infer_tuple_against(
+        &mut self,
+        elements: &[Expr],
+        expected: &Type,
+        span: Span,
+    ) -> Result<Option<Type>, Diagnostic> {
+        let resolved = self.sub.apply(expected);
+        let Type::Con(name, expected_elem_tys) = &resolved else {
+            return Ok(None);
+        };
+        if super::bare_type_name(name) != "Tuple"
+            || expected_elem_tys.len() != elements.len()
+        {
+            return Ok(None);
+        }
+
+        let mut actual_tys: Vec<Type> = Vec::with_capacity(elements.len());
+        for elem in elements {
+            actual_tys.push(self.infer_expr(elem)?);
+        }
+        self.prewiden_shared_rows(&actual_tys, expected_elem_tys, span)?;
+        Ok(Some(Type::Con(
+            super::canonicalize_type_name("Tuple").into(),
+            actual_tys,
+        )))
+    }
+
+    /// Anonymous-record inference against an expected anonymous-record
+    /// type, with shared-row-var pre-widening. Returns `None` when the
+    /// expected isn't a matching `Type::Record` or fields don't line up
+    /// (caller falls back to plain `infer_expr`).
+    ///
+    /// Anonymous record types use sorted-by-name field order canonically;
+    /// element positions are taken from the expected type's order.
+    fn try_infer_anon_record_against(
+        &mut self,
+        fields: &[(String, Span, Expr)],
+        expected: &Type,
+        span: Span,
+    ) -> Result<Option<Type>, Diagnostic> {
+        let resolved = self.sub.apply(expected);
+        let Type::Record(expected_fields) = &resolved else {
+            return Ok(None);
+        };
+        if expected_fields.len() != fields.len() {
+            return Ok(None);
+        }
+
+        // Index actual fields by name for positional matching.
+        let field_map: std::collections::HashMap<&str, &Expr> = fields
+            .iter()
+            .map(|(name, _, expr)| (name.as_str(), expr))
+            .collect();
+
+        let mut actual_tys: Vec<Type> = Vec::with_capacity(expected_fields.len());
+        let mut expected_pos_tys: Vec<Type> = Vec::with_capacity(expected_fields.len());
+        for (fname, expected_ty) in expected_fields {
+            let Some(fexpr) = field_map.get(fname.as_str()) else {
+                return Ok(None);
+            };
+            actual_tys.push(self.infer_expr(fexpr)?);
+            expected_pos_tys.push(expected_ty.clone());
+        }
+        self.prewiden_shared_rows(&actual_tys, &expected_pos_tys, span)?;
+
+        let typed_fields: Vec<(String, Type)> = expected_fields
+            .iter()
+            .map(|(n, _)| n.clone())
+            .zip(actual_tys)
+            .collect();
+        Ok(Some(Type::Record(typed_fields)))
     }
 
     fn expect_function_type_for_app(

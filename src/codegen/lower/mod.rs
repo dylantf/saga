@@ -2066,6 +2066,59 @@ impl<'a> Lowerer<'a> {
             .and_then(|ty| self.cps_function_shape_from_type(&ty))
     }
 
+    /// If `expr` is a partial application of a CPS-shaped function (effects
+    /// or open row), returns the resulting closure's runtime CPS shape.
+    /// Used to bridge the gap between a value's static type — which may
+    /// have been narrowed to pure via row-variable substitution at the
+    /// application site — and its actual runtime convention, which is
+    /// fixed by the head function's compiled signature.
+    ///
+    /// Example: `wrap : (Unit -> Unit needs {..e}) -> Unit -> Unit needs {..e}`.
+    /// Applying `wrap pure_fn` resolves `..e` to closed empty so the result
+    /// type is `Unit -> Unit` (pure), but at runtime the partial-app emits
+    /// a closure with the CPS calling convention (`(user_args, _Evidence,
+    /// _ReturnK)`) because `wrap` itself was compiled that way.
+    ///
+    /// Returns `None` for non-App expressions, saturated calls, calls
+    /// whose head isn't a known CPS function, and calls whose head can't
+    /// be resolved to a `FunInfo` entry.
+    fn cps_shape_from_partial_app(&self, expr: &Expr) -> Option<CpsShape> {
+        fn collect_spine(e: &Expr) -> (&Expr, usize) {
+            match &e.kind {
+                ExprKind::App { func, .. } => {
+                    let (head, n) = collect_spine(func);
+                    (head, n + 1)
+                }
+                _ => (e, 0),
+            }
+        }
+        let (head, supplied) = collect_spine(expr);
+        if supplied == 0 {
+            return None;
+        }
+        let info = match &head.kind {
+            ExprKind::Var { name, .. } => self.resolved_fun_info(head.id, name)?,
+            ExprKind::QualifiedName { module, name, .. } => {
+                let qualified = format!("{}.{}", module, name);
+                self.resolved_fun_info(head.id, &qualified)?
+            }
+            _ => return None,
+        };
+        let is_cps = !info.effects.is_empty() || info.is_open_row;
+        if !is_cps {
+            return None;
+        }
+        // FunInfo.arity counts Evidence + ReturnK; user arity excludes them.
+        let head_user_arity = info.arity.saturating_sub(2);
+        if supplied >= head_user_arity {
+            return None;
+        }
+        Some(CpsShape {
+            static_effects: info.effects.clone(),
+            is_open_row: info.is_open_row,
+        })
+    }
+
     fn wrap_pure_function_value_as_cps_adapter(
         &mut self,
         expr: &Expr,
@@ -2099,6 +2152,48 @@ impl<'a> Lowerer<'a> {
             )),
         );
         CExpr::Let(fun_var, Box::new(pure_fun), Box::new(adapter))
+    }
+
+    /// Adapt a CPS-shaped runtime value to a pure-shape callable. The
+    /// inverse of `wrap_pure_function_value_as_cps_adapter`: needed when
+    /// the type system has narrowed a CPS function's row variable to
+    /// closed-empty (e.g. via let annotation or by saturating a callback
+    /// argument with a pure function), but the underlying value is the
+    /// partial application of a row-polymorphic function compiled with
+    /// the CPS calling convention.
+    ///
+    /// The adapter takes the pure shape's user args, invokes the CPS
+    /// value with an empty evidence tuple and an identity `_ReturnK`,
+    /// and returns the result. Empty evidence is safe because the static
+    /// narrowing means no handler effects are actually used by this
+    /// invocation; if the underlying function tries to look up evidence,
+    /// the type system would have rejected the program upstream.
+    fn wrap_cps_function_value_as_pure_adapter(
+        &mut self,
+        expr: &Expr,
+        expected_ty: &crate::typechecker::Type,
+    ) -> CExpr {
+        let (user_arity, _) = util::arity_and_effects_from_type(expected_ty);
+        let fun_var = self.fresh();
+        let identity_arg = self.fresh();
+        let mut params = Vec::with_capacity(user_arity);
+        let mut apply_args = Vec::with_capacity(user_arity + 2);
+        for _ in 0..user_arity {
+            let p = self.fresh();
+            apply_args.push(CExpr::Var(p.clone()));
+            params.push(p);
+        }
+        apply_args.push(CExpr::Tuple(vec![]));
+        let identity_k = CExpr::Fun(
+            vec![identity_arg.clone()],
+            Box::new(CExpr::Var(identity_arg)),
+        );
+        apply_args.push(identity_k);
+
+        let actual_fun = self.lower_expr_value(expr);
+        let call = CExpr::Apply(Box::new(CExpr::Var(fun_var.clone())), apply_args);
+        let adapter = CExpr::Fun(params, Box::new(call));
+        CExpr::Let(fun_var, Box::new(actual_fun), Box::new(adapter))
     }
 
     fn adapt_cps_function_value_to_expected_shape(
@@ -2159,7 +2254,16 @@ impl<'a> Lowerer<'a> {
             return ce;
         }
 
-        if let Some(actual_shape) = self.expr_cps_function_shape(expr) {
+        // Determine the actual runtime shape, prefering the resolved type
+        // but falling back to a partial-application analysis when the type
+        // system has narrowed the row variable (e.g. `wrap pure_fn` whose
+        // type is `Unit -> Unit` but whose runtime closure is CPS-shaped
+        // because `wrap` was compiled with `..e`).
+        let actual_shape = self
+            .expr_cps_function_shape(expr)
+            .or_else(|| self.cps_shape_from_partial_app(expr));
+
+        if let Some(actual_shape) = actual_shape {
             self.adapt_cps_function_value_to_expected_shape(expr, expected_ty, actual_shape)
         } else {
             self.wrap_pure_function_value_as_cps_adapter(expr, expected_ty)
@@ -2258,6 +2362,19 @@ impl<'a> Lowerer<'a> {
                     expected_ty,
                     shape,
                 );
+            }
+
+            // Expected is a pure function type, but the actual expression
+            // is a partial application of a CPS-shaped function. The
+            // static narrowing (row variable resolved to closed empty)
+            // doesn't change the runtime BEAM arity of the partial-app
+            // closure — `wrap pure_fn` is still a 3-arg closure even
+            // though its inferred type is `Unit -> Unit`. Wrap it so the
+            // call site sees the expected pure shape.
+            if matches!(expected_ty, crate::typechecker::Type::Fun(_, _, _))
+                && self.cps_shape_from_partial_app(expr).is_some()
+            {
+                return self.wrap_cps_function_value_as_pure_adapter(expr, expected_ty);
             }
 
             match &expr.kind {

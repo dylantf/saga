@@ -1,0 +1,70 @@
+import Std.IO (console, println)
+
+# Repro: partial application of a row-polymorphic wrap, placed in a list
+# whose element type is widened to include other concrete effects.
+#
+# The closure produced by `wrap "key" pure_fn` is built with the row var
+# solved to {} (its inner is pure) — so it's a narrow-arity BEAM closure.
+# The list literal then widens the element row to {Skip, Foo, Bar} to fit
+# `do_foo` and `do_bar`. When `choose` calls this widened-row position,
+# it uses the wider calling convention with CPS args. The narrow closure
+# blows up: "function called with 1 argument(s), but expects 3".
+#
+# Important: the bug only manifests when the wrap-partial-app element is
+# the one actually selected by choose. Put it FIRST so route True picks it.
+
+effect Foo {
+  fun foo : Unit -> Unit
+}
+
+effect Bar {
+  fun bar : Unit -> Unit
+}
+
+effect Skip {
+  fun skip : Unit -> a
+}
+
+fun wrap : String -> (Unit -> Unit needs {..e}) -> Unit -> Unit needs {..e}
+wrap _ inner () = inner ()
+
+fun route : Bool -> (Unit -> Unit needs {..e}) -> Unit -> Unit needs {Skip, ..e}
+route m h () =
+  if m then h ()
+  else skip! ()
+
+fun choose : List (Unit -> Unit needs {Skip, ..e}) -> Unit -> Unit needs {..e}
+choose rs () = case rs {
+  [] -> ()
+  r :: rest -> r () with {
+    skip () = choose rest ()
+  }
+}
+
+fun pure_fn : Unit -> Unit
+pure_fn () = ()
+
+fun do_foo : Unit -> Unit needs {Foo}
+do_foo () = foo! ()
+
+fun do_bar : Unit -> Unit needs {Bar}
+do_bar () = bar! ()
+
+main () = {
+  # Union row spans {Foo, Bar}. The wrap-partial-app's row solved to {}
+  # at construction; will the call go through correctly?
+  choose [
+    route True (wrap "key" pure_fn),
+    route True do_foo,
+    route True do_bar,
+  ] () with {
+    foo () = {
+      println "foo!"
+      resume ()
+    }
+    bar () = {
+      println "bar!"
+      resume ()
+    }
+  }
+} with console

@@ -2140,3 +2140,197 @@ result () = {
         "ok",
     );
 }
+
+// --- Row widening across multi-element forms (end-to-end) ---
+//
+// The driving use case: a list of heterogeneous-effect functions passed
+// to a dispatch combinator. Today this requires every element to declare
+// the union of effects the whole app might use; with the row-widening
+// fix, each element declares only what it uses and the row joins at the
+// list literal site. Verifies that the per-element CPS-shape adapters
+// (`wrap_pure_function_value_as_cps_adapter` and
+// `adapt_cps_function_value_to_expected_shape`) project evidence
+// correctly when a closed-row element is called via the wider open-row
+// element type the joined list produces.
+
+#[test]
+fn heterogeneous_effect_list_dispatch_runs_correctly() {
+    let src = r#"module Main
+
+effect Foo {
+  fun foo : Unit -> String
+}
+
+effect Bar {
+  fun bar : Unit -> String
+}
+
+fun pure_thing : Unit -> String
+pure_thing () = "pure"
+
+fun do_foo : Unit -> String needs {Foo}
+do_foo () = foo! ()
+
+fun do_bar : Unit -> String needs {Bar}
+do_bar () = bar! ()
+
+fun run_all : List (Unit -> String needs {..e}) -> List String needs {..e}
+run_all fs = case fs {
+  [] -> []
+  f :: rest -> f () :: run_all rest
+}
+
+pub fun result : Unit -> String
+result () = {
+  let results = run_all [pure_thing, do_foo, do_bar] with {
+    foo () = resume "foo-handled",
+    bar () = resume "bar-handled",
+  }
+  case results {
+    a :: b :: c :: _ -> a <> "/" <> b <> "/" <> c
+    _ -> "fewer than three results"
+  }
+}
+"#;
+    check_result_string(
+        "heterogeneous_effect_list_dispatch_runs_correctly",
+        src,
+        "pure/foo-handled/bar-handled",
+    );
+}
+
+#[test]
+fn narrowed_partial_app_of_cps_function_in_widened_list() {
+    // Regression: `wrap pure_fn` partially applies a row-polymorphic
+    // function. The type system narrows `..e` to closed empty, but the
+    // runtime closure has the CPS calling convention. Without the
+    // CPS->pure adapter at the binding site, calling the value via its
+    // narrowed pure type would crash with arity mismatch. Joined into
+    // a list alongside an effectful element, the codegen must emit
+    // adapters on both sides so the list element calling convention
+    // is uniform.
+    let src = r#"module Main
+
+effect Foo {
+  fun foo : Unit -> String
+}
+
+fun wrap : (Unit -> String needs {..e}) -> Unit -> String needs {..e}
+wrap inner () = inner ()
+
+fun pure_fn : Unit -> String
+pure_fn () = "pure"
+
+fun do_foo : Unit -> String needs {Foo}
+do_foo () = foo! ()
+
+fun first : List (Unit -> String needs {..e}) -> String needs {..e}
+first fs = case fs {
+  [] -> "empty"
+  f :: _ -> f ()
+}
+
+pub fun result : Unit -> String
+result () = {
+  let wrapped: Unit -> String = wrap pure_fn
+  first [wrapped, do_foo] with {
+    foo () = resume "foo-handled"
+  }
+}
+"#;
+    check_result_string(
+        "narrowed_partial_app_of_cps_function_in_widened_list",
+        src,
+        "pure",
+    );
+}
+
+#[test]
+fn narrowed_cps_partial_app_passed_to_open_row_param() {
+    // Like the previous test but the narrowed partial app is then passed
+    // as a callback argument to ANOTHER partial application of an
+    // open-row function. The outer adapter dispatch must recognize that
+    // the actual is a CPS partial-app (not a genuinely-pure function)
+    // and forward it unchanged rather than emitting a pure->CPS wrapper
+    // around an already-CPS closure.
+    let src = r#"module Main
+
+effect Foo {
+  fun foo : Unit -> String
+}
+
+effect Skip {
+  fun skip : Unit -> a
+}
+
+fun wrap : String -> (Unit -> String needs {..e}) -> Unit -> String needs {..e}
+wrap _ inner () = inner ()
+
+fun route : Bool -> (Unit -> String needs {..e}) -> Unit -> String needs {Skip, ..e}
+route m h () =
+  if m then h ()
+  else skip! ()
+
+fun choose : List (Unit -> String needs {Skip, ..e}) -> Unit -> String needs {..e}
+choose rs () = case rs {
+  [] -> "no match"
+  r :: rest -> r () with {
+    skip () = choose rest ()
+  }
+}
+
+fun pure_fn : Unit -> String
+pure_fn () = "pure"
+
+fun do_foo : Unit -> String needs {Foo}
+do_foo () = foo! ()
+
+pub fun result : Unit -> String
+result () = {
+  choose [
+    route True (wrap "key" pure_fn),
+    route True do_foo,
+  ] () with {
+    foo () = resume "foo-handled"
+  }
+}
+"#;
+    check_result_string(
+        "narrowed_cps_partial_app_passed_to_open_row_param",
+        src,
+        "pure",
+    );
+}
+
+#[test]
+fn pure_only_list_runs_without_adapter_wrapping() {
+    // Lists of only-pure elements should not gain spurious effect
+    // wrapping. Verifies that the join's all-closed branch returns a
+    // closed empty row and the elements are called as plain pure
+    // functions.
+    let src = r#"module Main
+
+fun a : Unit -> String
+a () = "a"
+
+fun b : Unit -> String
+b () = "b"
+
+fun c : Unit -> String
+c () = "c"
+
+fun first : List (Unit -> String) -> String
+first fs = case fs {
+  [] -> "empty"
+  f :: _ -> f ()
+}
+
+pub fun result : Unit -> String
+result () = first [a, b, c]
+"#;
+    check_result_string(
+        "pure_only_list_runs_without_adapter_wrapping",
+        src,
+        "a",
+    );
+}

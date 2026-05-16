@@ -1,0 +1,41 @@
+import Std.IO (console, println)
+
+# Repro: partial application of a row-polymorphic effectful wrap, placed
+# in a list alongside a function with concrete effects. Row widening on
+# the list type pins the list element row to {Foo}, but the partial-app
+# closure was compiled with the row solved to {} (its inner is pure), so
+# the runtime arity doesn't match what the caller expects.
+
+effect Foo {
+  fun foo : Unit -> Unit
+}
+
+# Row-polymorphic wrap.
+fun wrap : (Unit -> Unit needs {..e}) -> Unit -> Unit needs {..e}
+wrap inner () = inner ()
+
+fun pure_fn : Unit -> Unit
+pure_fn () = ()
+
+fun do_foo : Unit -> Unit needs {Foo}
+do_foo () = foo! ()
+
+fun take : List (Unit -> Unit needs {..e}) -> Unit -> Unit needs {..e}
+take fs () = case fs {
+  [] -> ()
+  f :: _ -> f ()
+}
+
+main () = {
+  # Partial application of wrap with a pure inner.
+  # Its row at construction time solves to {} (inner is pure).
+  # The list it's placed in widens the element row to {Foo} to fit do_foo.
+  # When take calls f (), the call site expects a function with the wider row.
+  let wrapped: Unit -> Unit = wrap pure_fn
+  take [wrapped, do_foo] () with {
+    foo () = {
+      println "foo!"
+      resume ()
+    }
+  }
+} with console

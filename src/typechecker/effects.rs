@@ -494,6 +494,239 @@ impl Checker {
         None
     }
 
+    // --- Effect row joining (N-ary union) ---
+    //
+    // Used at multi-element inference sites (list literals, case arms,
+    // if/else, tuples, records) so that heterogeneous-effect elements
+    // produce a row whose effect set is the union of all input rows.
+    // The single-shot unification mechanism in `unify_effect_rows` pins a
+    // row variable to the first concrete row it meets; without an
+    // explicit join, later elements with disjoint effects are rejected.
+
+    /// Join N effect rows. The result's effect list is the union of all
+    /// inputs (matched by canonical effect name; type args are unified
+    /// pairwise across same-named entries). The result's tail is closed
+    /// if every input is closed, otherwise a single fresh row variable
+    /// shared by every open input.
+    ///
+    /// Side effects:
+    /// - Unifies the type args of same-named entries across inputs.
+    /// - Binds each open input's tail to a row containing that input's
+    ///   missing entries plus the shared fresh tail. This ensures that
+    ///   later substitution-application on any input row yields the
+    ///   joined row.
+    pub(crate) fn join_effect_rows(
+        &mut self,
+        rows: &[&EffectRow],
+        span: Span,
+    ) -> Result<EffectRow, Diagnostic> {
+        if rows.is_empty() {
+            return Ok(EffectRow::empty());
+        }
+
+        // Apply substitutions so any already-bound tails are resolved.
+        let applied: Vec<EffectRow> = rows.iter().map(|r| self.sub.apply_effect_row(r)).collect();
+
+        // Build the union of entries.
+        //
+        // Unify type args of same-name entries across inputs while we walk;
+        // this MUST happen before binding tails so we never bind a tail to a
+        // row containing stale unification variables.
+        let mut union: Vec<EffectEntry> = Vec::new();
+        for row in &applied {
+            for entry in &row.effects {
+                if let Some(existing) = union.iter().find(|e| e.matches(entry)) {
+                    let existing_args = existing.args.clone();
+                    for (existing_arg, new_arg) in
+                        existing_args.iter().zip(entry.args.iter())
+                    {
+                        self.unify_at(existing_arg, new_arg, span)?;
+                    }
+                } else {
+                    union.push(entry.clone());
+                }
+            }
+        }
+
+        // Decide tail. If any input is open, the result is open and shares
+        // a single fresh tail var; otherwise the result is closed.
+        let any_open = applied.iter().any(|r| r.tail.is_some());
+        if !any_open {
+            return Ok(EffectRow {
+                effects: union,
+                tail: None,
+            });
+        }
+
+        let shared_tail = self.fresh_var();
+
+        // For each open input, bind its tail var to (extras-for-this-row,
+        // shared_tail). Extras are entries in the union whose effect name
+        // doesn't already appear in this row's known effects.
+        //
+        // Track which tail vars we've bound to avoid double-binding when
+        // two inputs happen to share the same tail variable.
+        let mut bound: HashSet<u32> = HashSet::new();
+        for row in &applied {
+            let Some(tail_id) = row.tail_var_id() else {
+                continue;
+            };
+            if !bound.insert(tail_id) {
+                continue;
+            }
+            let extras: Vec<EffectEntry> = union
+                .iter()
+                .filter(|u| !row.effects.iter().any(|re| re.matches(u)))
+                .cloned()
+                .collect();
+            self.sub
+                .bind_row(
+                    tail_id,
+                    EffectRow {
+                        effects: extras,
+                        tail: Some(Box::new(shared_tail.clone())),
+                    },
+                )
+                .map_err(|e| e.with_span(span))?;
+        }
+
+        Ok(EffectRow {
+            effects: union,
+            tail: Some(Box::new(shared_tail)),
+        })
+    }
+
+    /// Join N types into a single type that all inputs fit into.
+    ///
+    /// - When every input is a function type, joins element-wise: params
+    ///   are unified pairwise (no widening on the contravariant side),
+    ///   returns are joined recursively (handles nested function types),
+    ///   and rows are joined via `join_effect_rows` to produce the row
+    ///   union that this whole change is for.
+    /// - When the inputs are not all function types, falls back to
+    ///   pairwise unification against the first input. The join only
+    ///   matters where row variables sit, which is exclusively on
+    ///   function types.
+    ///
+    /// Empty input list returns a fresh type variable; single-element
+    /// input is returned unchanged.
+    pub(crate) fn join_branch_types(
+        &mut self,
+        tys: &[Type],
+        span: Span,
+    ) -> Result<Type, Diagnostic> {
+        match tys.len() {
+            0 => return Ok(self.fresh_var()),
+            1 => return Ok(tys[0].clone()),
+            _ => {}
+        }
+
+        let applied: Vec<Type> = tys.iter().map(|t| self.sub.apply(t)).collect();
+
+        let all_fun = applied.iter().all(|t| matches!(t, Type::Fun(_, _, _)));
+        if !all_fun {
+            // Pairwise unify against the first; the join semantics only
+            // differ from plain unification on function types' rows.
+            let result = applied[0].clone();
+            for t in &applied[1..] {
+                self.unify_at(&result, t, span)?;
+            }
+            return Ok(self.sub.apply(&result));
+        }
+
+        let mut params: Vec<Type> = Vec::with_capacity(applied.len());
+        let mut returns: Vec<Type> = Vec::with_capacity(applied.len());
+        let mut rows: Vec<EffectRow> = Vec::with_capacity(applied.len());
+        for t in &applied {
+            if let Type::Fun(p, r, row) = t {
+                params.push((**p).clone());
+                returns.push((**r).clone());
+                rows.push(row.clone());
+            }
+        }
+
+        let joined_param = params[0].clone();
+        for p in &params[1..] {
+            self.unify_at(&joined_param, p, span)?;
+        }
+
+        let joined_return = self.join_branch_types(&returns, span)?;
+
+        let row_refs: Vec<&EffectRow> = rows.iter().collect();
+        let joined_row = self.join_effect_rows(&row_refs, span)?;
+
+        Ok(Type::Fun(
+            Box::new(self.sub.apply(&joined_param)),
+            Box::new(joined_return),
+            joined_row,
+        ))
+    }
+
+    /// Pre-widen row variables that appear at multiple positions in an
+    /// expected positional/field-typed structure (tuple or anonymous
+    /// record) so that the actual element rows can union into the shared
+    /// variable rather than pinning it to the first.
+    ///
+    /// `actual_tys` and `expected_tys` are positional pairs (same length,
+    /// matched by index). The expected types live inside an outer
+    /// structure — e.g. tuple element types or anonymous-record field
+    /// types in canonical (sorted) order.
+    ///
+    /// For each row tail variable that appears in `Type::Fun(_, _, {.., tail})`
+    /// at two or more positions, this function joins the actual rows at
+    /// those positions and binds the variable to the result. Subsequent
+    /// element-wise unification then succeeds (the shared variable is no
+    /// longer free to be pinned by the first element).
+    ///
+    /// No-op when no shared variable exists, or when the actual at a
+    /// shared position isn't a function type — in the latter case the
+    /// caller's unification will produce its normal mismatch error.
+    pub(crate) fn prewiden_shared_rows(
+        &mut self,
+        actual_tys: &[Type],
+        expected_tys: &[Type],
+        span: Span,
+    ) -> Result<(), Diagnostic> {
+        // Collect tail-var IDs that appear at multiple expected positions.
+        let mut tail_positions: std::collections::HashMap<u32, Vec<usize>> =
+            std::collections::HashMap::new();
+        for (i, expected) in expected_tys.iter().enumerate() {
+            let resolved = self.sub.apply(expected);
+            let Type::Fun(_, _, row) = &resolved else {
+                continue;
+            };
+            let resolved_row = self.sub.apply_effect_row(row);
+            if let Some(id) = resolved_row.tail_var_id() {
+                tail_positions.entry(id).or_default().push(i);
+            }
+        }
+
+        for (tail_id, positions) in tail_positions {
+            if positions.len() < 2 {
+                continue;
+            }
+            let mut actual_rows: Vec<EffectRow> = Vec::with_capacity(positions.len());
+            let mut bail = false;
+            for pos in &positions {
+                let actual = self.sub.apply(&actual_tys[*pos]);
+                let Type::Fun(_, _, row) = actual else {
+                    bail = true;
+                    break;
+                };
+                actual_rows.push(self.sub.apply_effect_row(&row));
+            }
+            if bail {
+                continue;
+            }
+            let row_refs: Vec<&EffectRow> = actual_rows.iter().collect();
+            let joined = self.join_effect_rows(&row_refs, span)?;
+            self.sub
+                .bind_row(tail_id, joined)
+                .map_err(|e| e.with_span(span))?;
+        }
+        Ok(())
+    }
+
     /// Tier-based bare effect-op lookup. Locally defined effects shadow
     /// imported effects: if any local effect contributes the op name, only
     /// locals are considered. Within the chosen tier, exactly one candidate
