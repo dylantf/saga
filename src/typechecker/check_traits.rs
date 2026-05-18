@@ -3,6 +3,22 @@ use crate::token::Span;
 
 use super::{Checker, Diagnostic, ImplInfo, Scheme, Type};
 
+/// Traits whose first (self) parameter functionally determines the remaining
+/// trait parameters. Multiple impls sharing the same target type but with
+/// differing trait_type_args are rejected as coherence violations.
+///
+/// Compared by both bare and canonical name so the check fires regardless of
+/// how the trait was resolved at the impl site.
+const FUNCTIONAL_TRAITS: &[&str] = &["Generic", "Std.Generic.Generic"];
+
+fn is_functional_trait(name: &str) -> bool {
+    if FUNCTIONAL_TRAITS.contains(&name) {
+        return true;
+    }
+    let bare = name.rsplit('.').next().unwrap_or(name);
+    FUNCTIONAL_TRAITS.contains(&bare)
+}
+
 impl Checker {
     // --- Trait & impl helpers ---
 
@@ -339,10 +355,63 @@ impl Checker {
             }
         }
 
+        // Resolve target type and run overlap/coherence checks before the
+        // body type-check. Method bodies mutate the substitution map (they
+        // unify the trait's phantom type vars like `r` in `Generic a r` with
+        // the impl's return type), so the second impl's body would fail to
+        // unify before the overlap check has a chance to fire.
+        let resolved_target_type = self.resolved_impl_target_type_name(impl_id, target_type);
+        let dup_key = (
+            trait_name.to_string(),
+            trait_type_args.to_vec(),
+            resolved_target_type.clone(),
+        );
+        if self.trait_state.impls.contains_key(&dup_key) {
+            let args_str = if trait_type_args.is_empty() {
+                String::new()
+            } else {
+                format!(" {}", trait_type_args.join(" "))
+            };
+            return Err(Diagnostic::error_at(
+                span,
+                format!(
+                    "duplicate impl: {}{} is already implemented for {} (previously defined elsewhere)",
+                    trait_name, args_str, target_type
+                ),
+            ));
+        }
+        if is_functional_trait(trait_name) {
+            for ((existing_trait, existing_args, existing_target), existing_info) in
+                &self.trait_state.impls
+            {
+                if existing_trait == trait_name
+                    && existing_target == &resolved_target_type
+                    && existing_args != &trait_type_args.to_vec()
+                {
+                    let prev_loc = match existing_info.span {
+                        Some(s) => format!(" (previous impl at byte {})", s.start),
+                        None => String::new(),
+                    };
+                    return Err(Diagnostic::error_at(
+                        span,
+                        format!(
+                            "coherence violation: trait {} requires that the first parameter \
+                             functionally determines the rest, but `{}` already has an impl with \
+                             different trait arguments ({:?} vs {:?}){}",
+                            trait_name,
+                            target_type,
+                            existing_args,
+                            trait_type_args,
+                            prev_loc
+                        ),
+                    ));
+                }
+            }
+        }
+
         // Type-check each method body against the trait's expected signature.
         // Substitute the trait's type param with the concrete target type.
         // For parameterized impls (e.g. `impl Show for Box a`), use fresh vars for type params.
-        let resolved_target_type = self.resolved_impl_target_type_name(impl_id, target_type);
         let target = if type_params.is_empty() {
             Type::Con(resolved_target_type.clone(), vec![])
         } else {
@@ -386,13 +455,33 @@ impl Checker {
                 .unwrap(); // already validated above
 
             let trait_param_id = trait_method.trait_param_id;
-            let expected_params: Vec<Type> = trait_method
+            // Freshen the trait method's non-self forall vars so that
+            // unification in one impl's body doesn't leak into the next.
+            // E.g. for `trait Generic a r`, the `r` var is shared across
+            // impls in the trait's stored signature; without freshening,
+            // the first impl pins `r` globally and subsequent impls with
+            // a different `r` fail to unify.
+            let mut fresh_mapping: std::collections::HashMap<u32, Type> =
+                std::collections::HashMap::new();
+            for id in &trait_method.scheme.forall {
+                if Some(*id) == trait_param_id {
+                    continue;
+                }
+                fresh_mapping.insert(*id, self.fresh_var());
+            }
+            let freshened_params: Vec<Type> = trait_method
                 .param_types
+                .iter()
+                .map(|t| Self::replace_vars(t, &fresh_mapping))
+                .collect();
+            let freshened_return =
+                Self::replace_vars(&trait_method.return_type, &fresh_mapping);
+            let expected_params: Vec<Type> = freshened_params
                 .iter()
                 .map(|t| self.substitute_trait_param(trait_param_id, &target, t))
                 .collect();
             let expected_return =
-                self.substitute_trait_param(trait_param_id, &target, &trait_method.return_type);
+                self.substitute_trait_param(trait_param_id, &target, &freshened_return);
 
             let saved_env = self.env.clone();
             let body_scope = self.enter_scope();
@@ -516,27 +605,8 @@ impl Checker {
             }
         }
 
-        let key = (
-            trait_name.to_string(),
-            trait_type_args.to_vec(),
-            resolved_target_type,
-        );
-        if self.trait_state.impls.contains_key(&key) {
-            let args_str = if trait_type_args.is_empty() {
-                String::new()
-            } else {
-                format!(" {}", trait_type_args.join(" "))
-            };
-            return Err(Diagnostic::error_at(
-                span,
-                format!(
-                    "duplicate impl: {}{} is already implemented for {}",
-                    trait_name, args_str, target_type
-                ),
-            ));
-        }
         self.trait_state.impls.insert(
-            key,
+            dup_key,
             ImplInfo {
                 param_constraints,
                 trait_type_args: trait_type_args.to_vec(),

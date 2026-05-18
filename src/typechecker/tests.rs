@@ -4156,6 +4156,175 @@ impl Foo for String {
     );
 }
 
+#[test]
+fn duplicate_impl_for_parameterized_type_is_error() {
+    let result = check(
+        "trait MyShow a {
+  fun my_show : (x: a) -> String
+}
+impl MyShow for List a {
+  my_show _ = \"list1\"
+}
+impl MyShow for List a {
+  my_show _ = \"list2\"
+}",
+    );
+    assert!(result.is_err());
+    let err = result.err().unwrap();
+    assert!(
+        err.message.contains("duplicate impl") || err.message.contains("already implemented"),
+        "expected duplicate impl error, got: {}",
+        err.message
+    );
+}
+
+#[test]
+fn derive_plus_handwritten_impl_is_error() {
+    let result = check(
+        "record Foo { x: Int } deriving (Show)
+impl Show for Foo {
+  show _ = \"foo\"
+}",
+    );
+    assert!(result.is_err());
+    let err = result.err().unwrap();
+    assert!(
+        err.message.contains("duplicate impl") || err.message.contains("already implemented"),
+        "expected duplicate impl error from derive+handwritten collision, got: {}",
+        err.message
+    );
+}
+
+#[test]
+fn different_traits_same_type_no_collision() {
+    check(
+        "trait TA a { fun fa : (x: a) -> Int }
+trait TB a { fun fb : (x: a) -> Int }
+impl TA for String { fa _ = 1 }
+impl TB for String { fb _ = 2 }",
+    )
+    .unwrap();
+}
+
+// --- Coherence (functional trait) tests ---
+
+#[test]
+fn coherence_violation_same_first_param_different_rest_is_error() {
+    let result = check(
+        "trait Generic a r {
+  fun to : (x: a) -> r
+}
+type RepA = RepA
+type RepB = RepB
+record Foo { x: Int }
+impl Generic RepA for Foo {
+  to _ = RepA
+}
+impl Generic RepB for Foo {
+  to _ = RepB
+}",
+    );
+    assert!(result.is_err(), "expected coherence violation");
+    let err = result.err().unwrap();
+    assert!(
+        err.message.contains("coherence"),
+        "expected coherence violation message, got: {}",
+        err.message
+    );
+}
+
+#[test]
+fn coherence_identical_args_caught_by_overlap() {
+    let result = check(
+        "trait Generic a r {
+  fun to : (x: a) -> r
+}
+type RepA = RepA
+record Foo { x: Int }
+impl Generic RepA for Foo {
+  to _ = RepA
+}
+impl Generic RepA for Foo {
+  to _ = RepA
+}",
+    );
+    assert!(result.is_err(), "expected duplicate impl error");
+    let err = result.err().unwrap();
+    assert!(
+        err.message.contains("duplicate impl") || err.message.contains("already implemented"),
+        "expected duplicate impl error, got: {}",
+        err.message
+    );
+}
+
+#[test]
+fn coherence_different_first_params_no_violation() {
+    // The trait param `r` appears in both param and return position so the
+    // impl unification stays local to each impl; pre-existing limitation of
+    // phantom-r multi-param traits means we cannot exercise two impls where
+    // `r` is only return-position. The coherence rule itself targets
+    // (target_type, trait_type_args) and would reject mismatches; this test
+    // confirms differing first params (different target types) are accepted.
+    check(
+        // Same trait arg (RepA) but different targets — coherence is
+        // per-target, so both impls are allowed.  Multi-impl tests with
+        // *different* trait args trip a pre-existing limitation: the trait
+        // method's non-self type vars (the `r` in `Generic a r`) are shared
+        // across impl checks, so the second impl's body would fail to unify.
+        // That's orthogonal to the coherence rule under test here.
+        "trait Generic a r {
+  fun to : (x: a) -> r
+}
+type RepA = RepA
+record Foo { x: Int }
+record Bar { y: Int }
+impl Generic RepA for Foo {
+  to _ = RepA
+}
+impl Generic RepA for Bar {
+  to _ = RepA
+}",
+    )
+    .unwrap();
+}
+
+#[test]
+fn multi_param_trait_distinct_impls_freshen_vars() {
+    // Two impls of `Generic a r` with different first AND second params.
+    // Coherence allows this (different first params); the freshening fix
+    // ensures the trait's `r` var is fresh per impl so unification doesn't
+    // leak across impls.
+    check(
+        "trait Generic a r {
+  fun to : (x: a) -> r
+  fun from : (x: r) -> a
+}
+record Foo { x: Int }
+record Bar { y: Int }
+type RepFoo = RepFoo Int
+type RepBar = RepBar Int
+impl Generic RepFoo for Foo {
+  to f = RepFoo f.x
+  from r = case r { RepFoo n -> Foo { x: n } }
+}
+impl Generic RepBar for Bar {
+  to b = RepBar b.y
+  from r = case r { RepBar n -> Bar { y: n } }
+}",
+    )
+    .unwrap();
+}
+
+#[test]
+fn same_trait_different_types_no_collision() {
+    check(
+        "trait TA a { fun fa : (x: a) -> Int }
+impl TA for String { fa _ = 1 }
+impl TA for Int { fa _ = 2 }",
+    )
+    .unwrap();
+}
+
 // --- Type arity checking ---
 
 #[test]

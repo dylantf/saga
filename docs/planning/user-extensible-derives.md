@@ -183,23 +183,22 @@ depends on. **Budget: ~1 week.**
 These are useful improvements regardless of whether the rest of the plan
 ships.
 
-#### 1a. Overlap detection in `register_impl`
+#### 1a. Overlap detection in `register_impl` [DONE]
 
-Today, `TraitState.impls: HashMap<(trait_name, trait_type_args, target_type),
-ImplInfo>` silently overwrites duplicates. Add a check at insertion time and
-emit a diagnostic when two impls collide.
+Pre-existing as of commit 360f287. Phase 1 added: improved diagnostic
+wording, five new tests covering parameterized duplicates, derive +
+hand-written conflicts, and the negative cases (different traits / different
+types).
 
-**Files**: `src/typechecker/check_traits.rs` (`register_impl`),
-`src/typechecker/check_decl.rs` (callsite).
+#### 1b. Coherence rule for functionally-determined trait parameters [DONE]
 
-**Test**: add tests in `src/typechecker/tests.rs` covering:
-- Two `impl Show for Int` blocks → error.
-- `impl Show for List a` and `impl Show for List Int` → error (still
-  overlapping, even with one being more specific — we are not implementing
-  specificity rules).
-- Conflicting derive + hand-written impl → error.
+Implemented as a hardcoded set `FUNCTIONAL_TRAITS` in `check_traits.rs`
+containing `Generic` and its canonical `Std.Generic.Generic`. Coherence and
+duplicate checks now fire **before** method-body type-checking — the body
+typechecker mutates the substitution map, which previously masked
+duplicate/coherence errors with confusing type-mismatch diagnostics.
 
-#### 1b. Coherence rule for functionally-determined trait parameters
+#### 1c. Free type variables in impl `where` clauses [BLOCKED — see below]
 
 For traits where the first parameter should determine the others (notably
 `Generic a r`), enforce at registration time that no two impls share the same
@@ -216,33 +215,97 @@ that needs this for now.
 
 #### 1c. Free type variables in impl `where` clauses
 
-Today, `check_pending_constraints` errors on type variables in constraints
-that don't appear in the impl's `type_params`. We need to permit:
+**Blocker discovered during Phase 1**: the current `where`-clause grammar is
+`tvar: TraitName extras` (`src/parser/decl.rs:858`) — the leading `tvar` is a
+lowercase identifier interpreted as the trait's first (self) parameter. There
+is no grammar production for a bare `TraitName arg1 arg2 ...` constraint, and
+the leading position cannot be a concrete type. So the natural syntax
+`where {Generic Person r, ToJson r}` will not parse, and the closest
+expressible form `r: Generic Person` actually means `Generic r Person` — the
+opposite parameter order from what we need.
+
+**Resolution**: introduce a new constraint form in the where clause and treat
+the existing `tvar: Trait` form as sugar that desugars to it.
+
+New form (proposed grammar):
 
 ```saga
 impl ToJson for Person where {Generic Person r, ToJson r}
 ```
 
-where `r` is fresh and exists only in the constraint chain.
+Each where-clause entry is parsed as one of:
+- `tvar: Trait1 + Trait2 + ...` (existing form, unchanged).
+- `TraitName arg1 arg2 ...` (new form) — a bare trait application with type
+  expressions in any position, including fresh type variables.
 
-**Approach**: when constraint-solving encounters a free var in an impl's
-where clause, treat it as an existential to be solved by chaining: solve the
-`Generic Person r` constraint first (which pins `r` via the coherence rule
-from 1b), then propagate the binding to the `ToJson r` constraint.
+The two forms coexist. The existing form is sugar: `a: Show + Debug`
+desugars to `Show a, Debug a` (two new-form entries).
 
-This is the most subtle piece in Phase 1. Risk: solver loops or
-non-deterministic ordering. Mitigation: process where-clause constraints in
-source order, single pass per impl.
+**AST**: replace (or augment) `TraitBound { type_var, traits }` with a new
+`Constraint::TraitApp { trait_name, type_args: Vec<TypeExpr> }`. Old
+`TraitBound` entries lower to a sequence of `TraitApp`s during parsing or
+name-resolution.
 
-**Files**: `src/typechecker/check_decl.rs` (`check_pending_constraints`),
-`src/typechecker/check_traits.rs`.
+**Solver semantics for fresh vars**: a type variable appearing in a where
+clause but **not** in the impl's `type_params` is an implicit existential.
+Process where-clause constraints in source order. For each `TraitApp`:
+- If all type args are concrete (or already bound from earlier in the
+  chain), look up the impl normally.
+- If some args are fresh, look up the impl by the *bound* args; the
+  coherence rule from 1b ensures a unique answer for `FUNCTIONAL_TRAITS`,
+  which pins the fresh args. For non-functional traits where the fresh var
+  can't be uniquely determined, error.
 
-**Test**: synthesize a hand-written impl with free vars in the where clause,
-verify it typechecks and elaborates correctly.
+Cap iterations and bail with a clear "could not resolve constraint chain"
+error if the loop doesn't converge.
 
-**Phase 1 deliverable**: a trait system that catches duplicate impls, enforces
-single-instance-per-key for marked traits, and permits free vars in
-impl-level where clauses. All existing examples and tests still pass.
+**Files**: `src/parser/decl.rs`, `src/ast.rs`, `src/typechecker/check_traits.rs`,
+`src/typechecker/check_decl.rs`.
+
+**Test**: impl with fresh var in where clause that resolves cleanly → ok;
+fresh var that's ambiguous → error; no fresh vars (existing behavior) →
+unchanged.
+
+**Estimated scope**: 2-3 days. This is now its own sub-phase (1c) and should
+be tackled before Phase 2 starts.
+
+**Phase 1 deliverable**: trait system catches duplicate impls (done),
+enforces single-instance-per-key for marked traits (done), and permits free
+vars in impl-level where clauses via the new constraint form (pending).
+Existing examples and tests pass.
+
+---
+
+### Phase 1.5: Trait Method Var Freshening [PREREQUISITE FOR PHASE 2]
+
+**Goal**: Fix a pre-existing bug discovered during Phase 1b. **Budget: 1
+day.**
+
+When a trait has non-self type parameters (e.g. `trait Generic a r` —
+where `a` is self and `r` is extra), the trait method signatures are
+registered once with a single `Type::Var` for each extra param. The first
+`impl Generic RepA for Foo` unifies that shared var with `RepA`, leaving it
+fixed in the global state. Any subsequent `impl Generic RepB for Bar` then
+fails to unify `RepB` with the already-pinned `RepA`.
+
+Invisible today because no production code defines multiple impls of a
+multi-param trait. Phase 2 will hit this on the first compile after the
+second `deriving (Generic)` — every user record/ADT generates its own
+`Generic` impl with a different `Rep`.
+
+**Fix**: at the start of each impl's body check, instantiate fresh type
+variables for the trait's non-self type params and substitute them in the
+method signatures used to check that impl. The existing `instantiate()`
+machinery in `unify.rs` is the right hammer; the question is just where to
+apply it.
+
+**Files**: `src/typechecker/check_traits.rs` (impl body check entry),
+`src/typechecker/unify.rs` (probably reuse existing `instantiate`).
+
+**Test**: two impls of a multi-param trait with different extra-param types,
+both should typecheck. Add a regression test to `tests.rs`.
+
+This MUST land before Phase 2 starts.
 
 ---
 
