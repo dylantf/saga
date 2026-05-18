@@ -283,6 +283,7 @@ impl Checker {
         target_type: &str,
         type_params: &[String],
         where_clause: &[ast::TraitBound],
+        where_apps: &[ast::TraitApp],
         needs: &[ast::EffectRef],
         methods: &[ast::ImplMethod],
         span: Span,
@@ -440,6 +441,153 @@ impl Checker {
             }
             Type::Con(resolved_target_type.clone(), param_vars)
         };
+
+        // Validate new-form `where {Trait arg1 arg2 ...}` constraints.
+        // Process source-order; later constraints can reference fresh vars
+        // resolved by earlier ones. For functional traits, the bound first
+        // param determines the remaining params via the [Phase 1b] coherence
+        // rule; for non-functional traits, all args must be already bound.
+        let mut local_subst: std::collections::HashMap<String, String> =
+            std::collections::HashMap::new();
+        for app in where_apps {
+            let resolved_trait = self
+                .resolve_trait_name(&app.trait_name)
+                .unwrap_or_else(|| app.trait_name.clone());
+            let resolved_trait_info =
+                self.trait_state
+                    .traits
+                    .get(&resolved_trait)
+                    .cloned()
+                    .ok_or_else(|| {
+                        Diagnostic::error_at(
+                            app.span,
+                            format!("unknown trait '{}'", app.trait_name),
+                        )
+                    })?;
+            self.lsp
+                .type_references
+                .push((app.span, resolved_trait.clone()));
+            // Arity check.
+            if app.type_args.len() != resolved_trait_info.type_params.len() {
+                return Err(Diagnostic::error_at(
+                    app.span,
+                    format!(
+                        "trait {} expects {} type argument(s), but {} were provided",
+                        resolved_trait,
+                        resolved_trait_info.type_params.len(),
+                        app.type_args.len()
+                    ),
+                ));
+            }
+            // Classify each arg as concrete (resolved name) or fresh (unbound).
+            let mut resolved_names: Vec<Option<String>> = Vec::with_capacity(app.type_args.len());
+            let mut fresh_positions: Vec<(usize, String)> = Vec::new();
+            for (i, te) in app.type_args.iter().enumerate() {
+                match te {
+                    ast::TypeExpr::Named { id, name, .. } => {
+                        resolved_names.push(Some(self.resolved_type_name(*id, name)));
+                    }
+                    ast::TypeExpr::Var { name, .. } => {
+                        if let Some(resolved) = local_subst.get(name) {
+                            resolved_names.push(Some(resolved.clone()));
+                        } else if type_params.contains(name) {
+                            return Err(Diagnostic::error_at(
+                                app.span,
+                                format!(
+                                    "where-clause TraitApp arguments cannot reference impl type \
+                                     parameters yet (var '{}')",
+                                    name
+                                ),
+                            ));
+                        } else {
+                            resolved_names.push(None);
+                            fresh_positions.push((i, name.clone()));
+                        }
+                    }
+                    other => {
+                        return Err(Diagnostic::error_at(
+                            other.span(),
+                            "only named types and type variables are supported in trait-app \
+                             where-clauses"
+                                .to_string(),
+                        ));
+                    }
+                }
+            }
+
+            if fresh_positions.is_empty() {
+                // All args bound — do a direct impl lookup.
+                let self_name = resolved_names[0].clone().unwrap();
+                let extras: Vec<String> = resolved_names[1..]
+                    .iter()
+                    .map(|o| o.clone().unwrap())
+                    .collect();
+                let key = (resolved_trait.clone(), extras, self_name.clone());
+                if !self.trait_state.impls.contains_key(&key) {
+                    return Err(Diagnostic::error_at(
+                        app.span,
+                        format!("no impl of {} for {}", resolved_trait, self_name),
+                    ));
+                }
+            } else {
+                // Some args fresh. Must be a functional trait.
+                if !is_functional_trait(&resolved_trait) {
+                    return Err(Diagnostic::error_at(
+                        app.span,
+                        format!(
+                            "fresh type variable not determined by constraint: trait {} is not \
+                             a functional trait (only functional traits can determine extra \
+                             parameters from the first)",
+                            resolved_trait
+                        ),
+                    ));
+                }
+                // The self position (index 0) must be concrete for the
+                // functional rule to fire.
+                let self_name = match &resolved_names[0] {
+                    Some(s) => s.clone(),
+                    None => {
+                        return Err(Diagnostic::error_at(
+                            app.span,
+                            format!(
+                                "trait {}'s self parameter must be known to resolve fresh \
+                                 type variables",
+                                resolved_trait
+                            ),
+                        ));
+                    }
+                };
+                // Find a matching impl for (trait, _, self_name).
+                let matched = self
+                    .trait_state
+                    .impls
+                    .iter()
+                    .find(|((t, _, tgt), _)| t == &resolved_trait && tgt == &self_name);
+                let ((_, extras, _), _) = matched.ok_or_else(|| {
+                    Diagnostic::error_at(
+                        app.span,
+                        format!("no impl of {} for {}", resolved_trait, self_name),
+                    )
+                })?;
+                // Bind each fresh var to its corresponding resolved extra.
+                for (i, fresh_name) in fresh_positions {
+                    if i == 0 {
+                        // self position can't be fresh here (we errored above)
+                        continue;
+                    }
+                    let value = extras.get(i - 1).cloned().ok_or_else(|| {
+                        Diagnostic::error_at(
+                            app.span,
+                            format!(
+                                "internal: matched impl for {} on {} has unexpected arity",
+                                resolved_trait, self_name
+                            ),
+                        )
+                    })?;
+                    local_subst.insert(fresh_name, value);
+                }
+            }
+        }
 
         let declared_effects: std::collections::HashSet<String> = needs
             .iter()

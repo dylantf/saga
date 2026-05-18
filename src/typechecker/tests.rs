@@ -4315,6 +4315,124 @@ impl Generic RepBar for Bar {
     .unwrap();
 }
 
+// --- Phase 1c: TraitApp where-clause form ---
+
+#[test]
+fn where_app_old_form_sugar_still_works() {
+    // Old-form `where {a: Show}` should continue to typecheck unchanged.
+    check(
+        "trait Show2 a { fun show2 : (x: a) -> String }
+impl Show2 for Int { show2 _ = \"int\" }
+fun foo : (x: a) -> String where {a: Show2}
+foo x = show2 x",
+    )
+    .unwrap();
+}
+
+#[test]
+fn where_app_resolves_fresh_var_via_functional_trait() {
+    // `Generic Person r` with `r` fresh resolves to the unique impl of
+    // Generic for Person via coherence.
+    check(
+        "trait Generic a r {
+  fun to : (x: a) -> r
+}
+trait ToJson a {
+  fun to_json : (x: a) -> String
+}
+record Person { name: String }
+type RepPerson = RepPerson String
+impl Generic RepPerson for Person {
+  to p = RepPerson p.name
+}
+impl ToJson for RepPerson {
+  to_json r = case r { RepPerson s -> s }
+}
+impl ToJson for Person where {Generic Person r, ToJson r} {
+  to_json _ = \"x\"
+}",
+    )
+    .unwrap();
+}
+
+#[test]
+fn where_app_unknown_trait_errors() {
+    let result = check(
+        "record Person { name: String }
+impl Show for Person where {NotATrait Person r} {
+  show _ = \"x\"
+}",
+    );
+    assert!(result.is_err());
+    let err = result.err().unwrap();
+    assert!(
+        err.message.contains("unknown trait") || err.message.contains("NotATrait"),
+        "expected unknown-trait error, got: {}",
+        err.message
+    );
+}
+
+#[test]
+fn where_app_missing_impl_errors() {
+    let result = check(
+        "trait Generic a r {
+  fun to : (x: a) -> r
+}
+trait ToJson a {
+  fun to_json : (x: a) -> String
+}
+record Person { name: String }
+impl ToJson for Person where {Generic Person r, ToJson r} {
+  to_json _ = \"x\"
+}",
+    );
+    assert!(result.is_err(), "expected missing-impl error");
+    let err = result.err().unwrap();
+    assert!(
+        err.message.contains("no impl"),
+        "expected no-impl error, got: {}",
+        err.message
+    );
+}
+
+#[test]
+fn where_app_fresh_var_in_non_functional_trait_errors() {
+    let result = check(
+        "trait NotFn a b { fun nf : (x: a) -> b }
+record Person { name: String }
+impl Show for Person where {NotFn Person r} {
+  show _ = \"x\"
+}",
+    );
+    assert!(result.is_err(), "expected error for non-functional fresh var");
+    let err = result.err().unwrap();
+    assert!(
+        err.message.contains("fresh type variable not determined")
+            || err.message.contains("not a functional trait"),
+        "expected functional-trait error, got: {}",
+        err.message
+    );
+}
+
+#[test]
+fn where_app_mixed_old_and_new_forms() {
+    // Both `a: Show` (old) and `Generic Person r` (new) in one where clause.
+    check(
+        "trait Generic a r { fun to : (x: a) -> r }
+trait ToJson a { fun to_json : (x: a) -> String }
+record Person { name: String }
+type RepPerson = RepPerson String
+impl Generic RepPerson for Person {
+  to p = RepPerson p.name
+}
+impl ToJson for RepPerson { to_json r = case r { RepPerson s -> s } }
+impl Show for Person where {Generic Person r, ToJson r} {
+  show _ = \"p\"
+}",
+    )
+    .unwrap();
+}
+
 #[test]
 fn same_trait_different_types_no_collision() {
     check(

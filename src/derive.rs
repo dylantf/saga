@@ -138,6 +138,7 @@ fn derive_record_stringify(
         target_type: record_name.into(),
         type_params: type_params.to_vec(),
         where_clause,
+        where_apps: vec![],
         needs: vec![],
         methods: vec![Annotated::bare(ImplMethod {
             name: method_name.into(),
@@ -445,6 +446,7 @@ fn derive_stringify(
         target_type: type_name.into(),
         type_params: type_params.to_vec(),
         where_clause,
+        where_apps: vec![],
         needs: vec![],
         methods: vec![Annotated::bare(ImplMethod {
             name: method_name.into(),
@@ -647,6 +649,7 @@ fn derive_ord(
         target_type: type_name.into(),
         type_params: type_params.to_vec(),
         where_clause,
+        where_apps: vec![],
         needs: vec![],
         methods: vec![Annotated::bare(ImplMethod {
             name: "compare".into(),
@@ -782,6 +785,7 @@ fn derive_marker_trait(
         target_type: type_name.into(),
         type_params: type_params.to_vec(),
         where_clause,
+        where_apps: vec![],
         needs: vec![],
         methods: vec![],
         span,
@@ -915,6 +919,7 @@ fn derive_enum(type_name: &str, variants: &[Annotated<TypeConstructor>], span: S
         target_type: type_name.into(),
         type_params: vec![],
         where_clause: vec![],
+        where_apps: vec![],
         needs: vec![],
         methods: vec![
             Annotated::bare(ImplMethod {
