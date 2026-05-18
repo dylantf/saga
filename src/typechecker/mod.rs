@@ -839,6 +839,10 @@ pub struct TraitInfo {
     pub type_params: Vec<String>,
     pub supertraits: Vec<String>,
     pub methods: Vec<TraitMethodInfo>,
+    /// `true` if the trait's self/first parameter functionally determines
+    /// the remaining trait parameters. Set at registration time from a
+    /// hardcoded canonical-name list (see `check_traits::FUNCTIONAL_TRAITS`).
+    pub is_functional: bool,
 }
 
 #[derive(Debug, Clone)]

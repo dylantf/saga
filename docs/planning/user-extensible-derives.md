@@ -198,7 +198,7 @@ duplicate checks now fire **before** method-body type-checking — the body
 typechecker mutates the substitution map, which previously masked
 duplicate/coherence errors with confusing type-mismatch diagnostics.
 
-#### 1c. Free type variables in impl `where` clauses [BLOCKED — see below]
+#### 1c. Free type variables in impl `where` clauses [DONE — commit f5ad456]
 
 For traits where the first parameter should determine the others (notably
 `Generic a r`), enforce at registration time that no two impls share the same
@@ -276,7 +276,7 @@ Existing examples and tests pass.
 
 ---
 
-### Phase 1.5: Trait Method Var Freshening [PREREQUISITE FOR PHASE 2]
+### Phase 1.5: Trait Method Var Freshening [DONE — commit 8ccff2b]
 
 **Goal**: Fix a pre-existing bug discovered during Phase 1b. **Budget: 1
 day.**
@@ -306,6 +306,42 @@ apply it.
 both should typecheck. Add a regression test to `tests.rs`.
 
 This MUST land before Phase 2 starts.
+
+---
+
+### Phase 1 / 1.5 / 1c Outcomes (carry-forward for Phase 2)
+
+- **Body-inference gap.** The where-clause `TraitApp` form binds fresh
+  existentials at *constraint-solving* time, but those bindings don't
+  propagate into expression inference inside the impl body. The practical
+  effect: a delegating impl body like `to_json (to p)` needs a type
+  ascription — `to_json ((to p) : __Rep_Person)` — to pin `to`'s polymorphic
+  result. **Phase 2 must emit the ascription** when generating the
+  delegating impl in `derive.rs`. `__Rep_Person` is known at derive-expansion
+  time, so this is free.
+
+- **AST dual representation.** `TraitBound` (old form) and `TraitApp` (new
+  form) coexist as parallel parser outputs. Phase 2 will emit `TraitApp` for
+  its generated delegating impls. **Decision deferred**: whether to migrate
+  `TraitBound` → `TraitApp` wholesale (touches elaborator, LSP, formatter,
+  doc generator) or accept permanent dual representation. Recommend
+  deferring the migration past Phase 3; it's a clean-up, not a blocker.
+
+- **New form is impl-only.** `where_apps` is currently only populated on
+  `ImplDef`. Function signatures and handler bodies error if a `TraitApp` is
+  used in their where clause. Phase 2/3 don't need it elsewhere; reconsider
+  only if a downstream feature requires it.
+
+- **No iteration loop in the solver.** `TraitApp` constraints are processed
+  in source order with no fixed-point iteration. Each constraint may only
+  depend on bindings produced by earlier constraints in the same clause.
+  Phase 2's generated impls always have the shape `{Generic T r, ToJson r}`
+  — strictly left-to-right resolvable — so this is fine. If a future codec
+  ever needs reorderable constraints, add a worklist loop.
+
+- **Substrate fully unblocked.** Risk table item "solver loops or
+  non-deterministic ordering" is now retired. The fresh-var resolution is
+  deterministic and bounded.
 
 ---
 

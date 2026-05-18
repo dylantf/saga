@@ -19,6 +19,7 @@ impl Checker {
                 type_params: vec!["a".into()],
                 supertraits: vec![],
                 methods: vec![],
+                is_functional: false,
             },
         );
         for prim in &["Int", "Float"] {
@@ -39,6 +40,7 @@ impl Checker {
                 type_params: vec!["a".into()],
                 supertraits: vec![],
                 methods: vec![],
+                is_functional: false,
             },
         );
         for prim in &["Int", "Float", "String", "Bool", "Unit", "BitString"] {

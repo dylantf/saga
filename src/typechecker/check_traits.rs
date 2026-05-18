@@ -7,17 +7,14 @@ use super::{Checker, Diagnostic, ImplInfo, Scheme, Type};
 /// trait parameters. Multiple impls sharing the same target type but with
 /// differing trait_type_args are rejected as coherence violations.
 ///
-/// Compared by both bare and canonical name so the check fires regardless of
-/// how the trait was resolved at the impl site.
-const FUNCTIONAL_TRAITS: &[&str] = &["Generic", "Std.Generic.Generic"];
-
-fn is_functional_trait(name: &str) -> bool {
-    if FUNCTIONAL_TRAITS.contains(&name) {
-        return true;
-    }
-    let bare = name.rsplit('.').next().unwrap_or(name);
-    FUNCTIONAL_TRAITS.contains(&bare)
-}
+/// Entries are exact canonical names — both the bare form (used by
+/// module-less test sources, where the canonical name is just `Generic`)
+/// and the fully-qualified stdlib form. The flag is resolved once at trait
+/// registration into `TraitInfo.is_functional`, so use sites read the
+/// stored flag instead of re-matching against this list.
+///
+/// Phase 2 may replace this with an explicit per-trait attribute.
+pub(crate) const FUNCTIONAL_TRAITS: &[&str] = &["Generic", "Std.Generic.Generic"];
 
 impl Checker {
     // --- Trait & impl helpers ---
@@ -262,12 +259,14 @@ impl Checker {
             .iter()
             .map(|tr| self.resolved_trait_name_at(tr.id, &tr.name))
             .collect();
+        let is_functional = FUNCTIONAL_TRAITS.contains(&canonical_name.as_str());
         self.trait_state.traits.insert(
             canonical_name,
             super::TraitInfo {
                 type_params: type_params.to_vec(),
                 supertraits: resolved_supertraits,
                 methods: trait_method_sigs,
+                is_functional,
             },
         );
         Ok(())
@@ -381,7 +380,7 @@ impl Checker {
                 ),
             ));
         }
-        if is_functional_trait(trait_name) {
+        if trait_info.is_functional {
             for ((existing_trait, existing_args, existing_target), existing_info) in
                 &self.trait_state.impls
             {
@@ -531,7 +530,7 @@ impl Checker {
                 }
             } else {
                 // Some args fresh. Must be a functional trait.
-                if !is_functional_trait(&resolved_trait) {
+                if !resolved_trait_info.is_functional {
                     return Err(Diagnostic::error_at(
                         app.span,
                         format!(
