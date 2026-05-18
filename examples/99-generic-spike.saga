@@ -1,0 +1,94 @@
+# Phase 0 spike for user-extensible derives.
+# Validates that the existing trait dict-passing machinery composes
+# dictionaries for Rep-shaped types built from U1/Leaf/Labeled/And/Or.
+
+# --- Generic building blocks ---------------------------------------
+
+type U1 = U1
+type Leaf a = Leaf a
+type Labeled a = Labeled String a
+type And l r = And l r
+type Or l r = Or_Left l | Or_Right r
+
+# --- Generic trait (multi-param: a is the user type, r is its Rep) -
+
+trait Generic a r {
+  fun to : a -> r
+  fun from : r -> a
+}
+
+# --- A user record we want to make ToJson-able through Generic ----
+
+record Person { name: String, age: Int, email: String }
+
+# The parser only accepts simple upper-idents in `impl Trait X for Y`,
+# so we cannot write `impl Generic (And (Labeled (Leaf String)) ...) for Person`
+# directly. Wrap the Rep in a single-constructor ADT.
+# Three fields: right-leaning And tree
+#   And (Labeled (Leaf String)) (And (Labeled (Leaf Int)) (Labeled (Leaf String)))
+type PersonRep =
+  PersonRep (And (Labeled (Leaf String)) (And (Labeled (Leaf Int)) (Labeled (Leaf String))))
+
+impl Generic PersonRep for Person {
+  to p =
+    PersonRep (And
+      (Labeled "name" (Leaf p.name))
+      (And (Labeled "age" (Leaf p.age))
+           (Labeled "email" (Leaf p.email))))
+  from (PersonRep (And (Labeled _ (Leaf n))
+                       (And (Labeled _ (Leaf a))
+                            (Labeled _ (Leaf e))))) =
+    Person { name: n, age: a, email: e }
+}
+
+# --- ToJson trait + impls for each building block ------------------
+
+trait ToJson a {
+  fun to_json : a -> String
+}
+
+impl ToJson for U1 {
+  to_json _ = "null"
+}
+
+impl ToJson for String {
+  to_json s = "\"" <> s <> "\""
+}
+
+impl ToJson for Int {
+  to_json n = show n
+}
+
+impl ToJson for Leaf a where {a: ToJson} {
+  to_json (Leaf x) = to_json x
+}
+
+impl ToJson for Labeled a where {a: ToJson} {
+  to_json (Labeled name x) = "\"" <> name <> "\": " <> to_json x
+}
+
+impl ToJson for And l r where {l: ToJson, r: ToJson} {
+  to_json (And l r) = to_json l <> ", " <> to_json r
+}
+
+impl ToJson for Or l r where {l: ToJson, r: ToJson} {
+  to_json o = case o {
+    Or_Left l -> to_json l
+    Or_Right r -> to_json r
+  }
+}
+
+# Bridge: ToJson for PersonRep wraps its inner And-tree in braces.
+impl ToJson for PersonRep {
+  to_json (PersonRep inner) = "{" <> to_json inner <> "}"
+}
+
+# Delegating impl for Person — this is the shape Phase 3 will synthesize.
+impl ToJson for Person {
+  to_json p = to_json (to p : PersonRep)
+}
+
+main () = {
+  let alice = Person { name: "Alice", age: 30, email: "alice@example.com" }
+  dbg (to_json alice)
+}

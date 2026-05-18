@@ -106,10 +106,48 @@ its own. Each phase ends with a working, testable state.
 
 ---
 
-### Phase 0: Spike — Hand-Written Validation
+### Phase 0: Spike — Hand-Written Validation [COMPLETE]
 
-**Goal**: Confirm `dict_for_type` actually composes the way the dict-passing
-doc claims when fed `Rep`-shaped types. **Budget: 1-2 days.**
+**Status**: Done. See `examples/99-generic-spike.saga`. Spike succeeded for
+both 2-field and 3-field records; nested `And`/`Labeled`/`Leaf` dict
+composition works as predicted with zero compiler changes.
+
+**Findings to carry forward**:
+
+- **Parser limitation in impl trait args.** `src/parser/decl.rs:947-969`
+  accepts only bare `UpperIdent` or `Ident` in `impl Trait <args> for ...`,
+  not parenthesized parameterized type expressions. This means Phase 2b
+  cannot inline the `Rep` as `impl Generic (And (Labeled ...) ...) for Person`
+  — the synthesized `Rep` must be emitted as a named `TypeDef` and referenced
+  by name (`impl Generic __Rep_Person for Person`). The plan already calls
+  for a named TypeDef so this is consistent, but **Phase 2b must NOT** try
+  to emit inline rep types as a shortcut. Optionally, a small parser
+  extension to accept full `TypeExpr` in trait args would be a nice cleanup
+  but is not on the critical path.
+- **`type` defines an ADT, not an alias.** The generated `Rep` is a
+  one-constructor newtype wrapping the building-block tree. `to`/`from` must
+  box/unbox through that wrapping constructor. The spike used
+  `PersonRep (And ...)` and it worked cleanly.
+- **Outer framing decision deferred.** The spike put `{` and `}` in a
+  per-type `ToJson PersonRep` impl that wraps the inner comma-separated
+  output from `And`/`Labeled`. In production we need to decide whether the
+  library-defined `ToJson` for `Labeled`/`And` includes the outer braces, or
+  whether the routing-layer-synthesized `ToJson for Person` impl provides
+  them. This affects nested-record composition. **Decision to make during
+  Phase 3a, before writing the first real codec library.** Recommended
+  default: the building-block impls produce the outer braces (i.e. `Labeled`
+  or a dedicated `record-shaped` marker carries the framing). Otherwise
+  nested records produce `{"outer": "name": "Alice"}` with no inner braces.
+- **No type-annotation disambiguation needed.** Solver handled three nested
+  `Labeled (Leaf …)` dicts with no annotations beyond the `: PersonRep`
+  ascription on the `to` result. The `current_dict_params` fallback and
+  occurrence disambiguation were not exercised — evidence resolution covered
+  everything.
+- **Substrate risk retired.** "`dict_for_type` doesn't handle Rep shape" is
+  confirmed Low → effectively zero. Remove from active risk list.
+
+**Original goal**: Confirm `dict_for_type` actually composes the way the
+dict-passing doc claims when fed `Rep`-shaped types. **Budget: 1-2 days.**
 
 Before writing any compiler code, prototype the entire chain by hand in a
 single `.saga` file:
