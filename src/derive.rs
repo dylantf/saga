@@ -18,6 +18,27 @@ pub fn expand_derives(program: &mut Vec<Decl>) -> Vec<Diagnostic> {
     // `Generic T r`, otherwise the where-app's coherence lookup fires before
     // the impl is registered.
     let original = std::mem::take(program);
+
+    // Index trait defs by bare name for routed-derive method discovery.
+    let trait_defs: std::collections::HashMap<String, RoutedTraitInfo> = original
+        .iter()
+        .filter_map(|d| match d {
+            Decl::TraitDef {
+                name,
+                type_params,
+                methods,
+                ..
+            } => Some((
+                name.clone(),
+                RoutedTraitInfo {
+                    type_params: type_params.clone(),
+                    methods: methods.iter().map(|m| m.node.clone()).collect(),
+                },
+            )),
+            _ => None,
+        })
+        .collect();
+
     let mut rebuilt: Vec<Decl> = Vec::with_capacity(original.len());
     for decl in &original {
         let mut extra: Vec<Decl> = Vec::new();
@@ -42,6 +63,28 @@ pub fn expand_derives(program: &mut Vec<Decl>) -> Vec<Diagnostic> {
                     extra.push(impl_def);
                 }
 
+                // Auto-include Generic: if any non-hardcoded derive is requested
+                // and Generic isn't explicitly listed, synthesize it first.
+                let has_routed = deriving.iter().any(|t| {
+                    let bare = t.rsplit('.').next().unwrap_or(t);
+                    !is_hardcoded_derive(bare)
+                });
+                let has_generic = deriving.iter().any(|t| {
+                    let bare = t.rsplit('.').next().unwrap_or(t);
+                    bare == "Generic"
+                });
+                if has_routed && !has_generic {
+                    match derive_adt_generic(name, type_params, variants, *span) {
+                        Ok(decls) => extra.extend(decls),
+                        Err(Some(diag)) => errors.push(diag),
+                        Err(None) => errors.push(Diagnostic {
+                            severity: Severity::Error,
+                            message: format!("cannot auto-derive `Generic` for type `{name}`"),
+                            span: Some(*span),
+                        }),
+                    }
+                }
+
                 for trait_name in deriving {
                     let bare = trait_name.rsplit('.').next().unwrap_or(trait_name);
                     if bare == "Generic" {
@@ -55,6 +98,13 @@ pub fn expand_derives(program: &mut Vec<Decl>) -> Vec<Diagnostic> {
                                 ),
                                 span: Some(*span),
                             }),
+                        }
+                        continue;
+                    }
+                    if !is_hardcoded_derive(bare) {
+                        match derive_routed(trait_name, name, type_params, *span, &trait_defs) {
+                            Ok(decls) => extra.extend(decls),
+                            Err(diag) => errors.push(diag),
                         }
                         continue;
                     }
@@ -76,7 +126,35 @@ pub fn expand_derives(program: &mut Vec<Decl>) -> Vec<Diagnostic> {
                 span,
                 ..
             } => {
+                let has_routed = deriving.iter().any(|t| {
+                    let bare = t.rsplit('.').next().unwrap_or(t);
+                    !is_hardcoded_derive(bare)
+                });
+                let has_generic = deriving.iter().any(|t| {
+                    let bare = t.rsplit('.').next().unwrap_or(t);
+                    bare == "Generic"
+                });
+                if has_routed && !has_generic {
+                    match derive_record_generic(name, type_params, fields, *span) {
+                        Ok(decls) => extra.extend(decls),
+                        Err(Some(diag)) => errors.push(diag),
+                        Err(None) => errors.push(Diagnostic {
+                            severity: Severity::Error,
+                            message: format!("cannot auto-derive `Generic` for record `{name}`"),
+                            span: Some(*span),
+                        }),
+                    }
+                }
+
                 for trait_name in deriving {
+                    let bare = trait_name.rsplit('.').next().unwrap_or(trait_name);
+                    if !is_hardcoded_derive(bare) && bare != "Generic" {
+                        match derive_routed(trait_name, name, type_params, *span, &trait_defs) {
+                            Ok(decls) => extra.extend(decls),
+                            Err(diag) => errors.push(diag),
+                        }
+                        continue;
+                    }
                     match generate_record_derive(trait_name, name, type_params, fields, *span) {
                         Ok(decls) => extra.extend(decls),
                         Err(Some(diag)) => errors.push(diag),
@@ -95,6 +173,281 @@ pub fn expand_derives(program: &mut Vec<Decl>) -> Vec<Diagnostic> {
     }
     *program = rebuilt;
     errors
+}
+
+/// Minimal trait info captured at expand_derives time for routed-derive
+/// method/signature discovery. We only need the method names and signature
+/// shapes — direction detection and body generation work off these.
+struct RoutedTraitInfo {
+    type_params: Vec<String>,
+    methods: Vec<TraitMethod>,
+}
+
+fn is_hardcoded_derive(bare: &str) -> bool {
+    matches!(bare, "Show" | "Debug" | "Eq" | "Ord" | "Enum" | "Generic")
+}
+
+/// Synthesize the delegating impl for a user-defined derivable trait.
+/// Shape (per Phase 2d+2e carry-forward, recommendation b):
+///
+/// ```text
+/// impl <Trait> for <T> [where {a: <Trait>, ...}]
+///   where {Generic <T-applied> r, <Trait> r}
+/// {
+///   <method_name> __val = case to __val { Rep__<T> __inner -> <method_name> __inner }
+/// }
+/// ```
+///
+/// The `where_apps` form makes the dependency on `Generic` and the routed
+/// trait explicit (better diagnostics at registration). The per-tparam old-form
+/// `where_clause` entries are required so the impl-body inference can satisfy
+/// `<Trait> a` constraints that bubble up from the Rep__T building-block
+/// instances at use time.
+fn derive_routed(
+    trait_name: &str,
+    type_name: &str,
+    type_params: &[String],
+    span: Span,
+    trait_defs: &std::collections::HashMap<String, RoutedTraitInfo>,
+) -> Result<Vec<Decl>, Diagnostic> {
+    let bare = trait_name.rsplit('.').next().unwrap_or(trait_name);
+    let trait_info = trait_defs.get(bare).ok_or_else(|| Diagnostic {
+        severity: Severity::Error,
+        message: format!(
+            "cannot derive `{trait_name}`: trait `{bare}` is not in scope. \
+             Derivable traits must be defined in the same module as the deriving site."
+        ),
+        span: Some(span),
+    })?;
+
+    if trait_info.methods.len() != 1 {
+        return Err(Diagnostic {
+            severity: Severity::Error,
+            message: format!(
+                "cannot derive `{}` for `{}`: deriving for traits with multiple methods is not yet supported (trait `{}` has {} methods)",
+                bare,
+                type_name,
+                bare,
+                trait_info.methods.len()
+            ),
+            span: Some(span),
+        });
+    }
+    let method = &trait_info.methods[0];
+    if method.params.len() != 1 {
+        return Err(Diagnostic {
+            severity: Severity::Error,
+            message: format!(
+                "cannot derive `{}` for `{}`: only single-parameter methods can be routed (method `{}` has {} parameters)",
+                bare,
+                type_name,
+                method.name,
+                method.params.len()
+            ),
+            span: Some(span),
+        });
+    }
+    let self_var = trait_info
+        .type_params
+        .first()
+        .cloned()
+        .unwrap_or_default();
+    let param_has_self = type_expr_contains_var(&method.params[0].1, &self_var);
+    let return_has_self = type_expr_contains_var(&method.return_type, &self_var);
+
+    if !param_has_self && return_has_self {
+        return Err(Diagnostic {
+            severity: Severity::Error,
+            message: format!(
+                "cannot derive `{}` for `{}`: deriving for from-direction traits \
+                 (where the self type appears only in the return type) is not yet \
+                 supported (Phase 3.1)",
+                bare, type_name
+            ),
+            span: Some(span),
+        });
+    }
+    if !param_has_self {
+        return Err(Diagnostic {
+            severity: Severity::Error,
+            message: format!(
+                "cannot derive `{}` for `{}`: method `{}` does not consume a value of the self type",
+                bare, type_name, method.name
+            ),
+            span: Some(span),
+        });
+    }
+
+    let rep_name = format!("Rep__{type_name}");
+    let method_name = method.name.clone();
+    let zero_span = Span { start: 0, end: 0 };
+
+    // Per-tparam old-form bounds: `where {a: <Trait>, ...}`. Required so the
+    // bridge impl's body and the delegating impl's body can satisfy the
+    // `<Trait> a` constraints that bubble up from the Rep building-block
+    // impls (e.g. `Leaf a where {a: <Trait>}`).
+    let per_tparam_where: Vec<TraitBound> = type_params
+        .iter()
+        .map(|tp| TraitBound {
+            type_var: tp.clone(),
+            traits: vec![TraitRef {
+                id: NodeId::fresh(),
+                name: bare.into(),
+                type_args: vec![],
+                span: zero_span,
+            }],
+        })
+        .collect();
+
+    // --- Bridge impl: impl <Trait> for Rep__T { methodname (Rep__T inner) = methodname inner }
+    let inner_var = "__inner".to_string();
+    let bridge_body = Expr::synth(
+        span,
+        ExprKind::App {
+            func: Box::new(Expr::synth(
+                span,
+                ExprKind::Var {
+                    name: method_name.clone(),
+                },
+            )),
+            arg: Box::new(Expr::synth(
+                span,
+                ExprKind::Var {
+                    name: inner_var.clone(),
+                },
+            )),
+        },
+    );
+    let bridge_param = Pat::Constructor {
+        id: NodeId::fresh(),
+        name: rep_name.clone(),
+        args: vec![Pat::Var {
+            id: NodeId::fresh(),
+            name: inner_var,
+            span,
+        }],
+        span,
+    };
+    let bridge_impl = Decl::ImplDef {
+        id: NodeId::fresh(),
+        doc: vec![],
+        trait_name: bare.into(),
+        trait_name_span: zero_span,
+        trait_type_args: vec![],
+        target_type: rep_name.clone(),
+        target_type_span: zero_span,
+        type_params: type_params.to_vec(),
+        where_clause: per_tparam_where.clone(),
+        where_apps: vec![],
+        needs: vec![],
+        methods: vec![Annotated::bare(ImplMethod {
+            name: method_name.clone(),
+            name_span: zero_span,
+            params: vec![bridge_param],
+            body: bridge_body,
+        })],
+        span,
+        dangling_trivia: vec![],
+    };
+
+    // --- Delegating impl: impl <Trait> for T where {Generic T r, <Trait> r}
+    //     { methodname __val = methodname (to __val) }
+    let val_var = "__val".to_string();
+    let to_call = Expr::synth(
+        span,
+        ExprKind::App {
+            func: Box::new(Expr::synth(span, ExprKind::Var { name: "to".into() })),
+            arg: Box::new(Expr::synth(
+                span,
+                ExprKind::Var {
+                    name: val_var.clone(),
+                },
+            )),
+        },
+    );
+    let delegating_body = Expr::synth(
+        span,
+        ExprKind::App {
+            func: Box::new(Expr::synth(
+                span,
+                ExprKind::Var {
+                    name: method_name.clone(),
+                },
+            )),
+            arg: Box::new(to_call),
+        },
+    );
+    let fresh_r = "__r".to_string();
+    let target_applied = apply_type_params(type_name, type_params);
+    let where_apps = vec![
+        TraitApp {
+            id: NodeId::fresh(),
+            trait_name: "Generic".into(),
+            type_args: vec![
+                target_applied,
+                TypeExpr::Var {
+                    id: NodeId::fresh(),
+                    name: fresh_r.clone(),
+                    span: zero_span,
+                },
+            ],
+            span: zero_span,
+        },
+        TraitApp {
+            id: NodeId::fresh(),
+            trait_name: bare.into(),
+            type_args: vec![TypeExpr::Var {
+                id: NodeId::fresh(),
+                name: fresh_r,
+                span: zero_span,
+            }],
+            span: zero_span,
+        },
+    ];
+    let delegating_impl = Decl::ImplDef {
+        id: NodeId::fresh(),
+        doc: vec![],
+        trait_name: bare.into(),
+        trait_name_span: zero_span,
+        trait_type_args: vec![],
+        target_type: type_name.into(),
+        target_type_span: zero_span,
+        type_params: type_params.to_vec(),
+        where_clause: per_tparam_where,
+        where_apps,
+        needs: vec![],
+        methods: vec![Annotated::bare(ImplMethod {
+            name: method_name,
+            name_span: zero_span,
+            params: vec![Pat::Var {
+                id: NodeId::fresh(),
+                name: val_var,
+                span,
+            }],
+            body: delegating_body,
+        })],
+        span,
+        dangling_trivia: vec![],
+    };
+
+    Ok(vec![bridge_impl, delegating_impl])
+}
+
+fn type_expr_contains_var(te: &TypeExpr, name: &str) -> bool {
+    match te {
+        TypeExpr::Var { name: n, .. } => n == name,
+        TypeExpr::Named { .. } => false,
+        TypeExpr::App { func, arg, .. } => {
+            type_expr_contains_var(func, name) || type_expr_contains_var(arg, name)
+        }
+        TypeExpr::Arrow { from, to, .. } => {
+            type_expr_contains_var(from, name) || type_expr_contains_var(to, name)
+        }
+        TypeExpr::Record { fields, .. } => fields
+            .iter()
+            .any(|(_, t)| type_expr_contains_var(t, name)),
+        TypeExpr::Labeled { inner, .. } => type_expr_contains_var(inner, name),
+    }
 }
 
 /// Returns the decls to splice into the program, or:

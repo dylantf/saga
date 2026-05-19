@@ -6600,3 +6600,144 @@ fn derive_generic_adt_end_to_end_with_tojson() {
     )
     .unwrap();
 }
+
+// --- Phase 3: convention-based routing for user-defined derivable traits.
+
+/// Minimal inline ToJson library reused across Phase 3 tests.
+fn phase3_tojson_lib() -> &'static str {
+    "trait ToJson a { fun to_json : a -> String }\n\
+     impl ToJson for U1 { to_json _ = \"null\" }\n\
+     impl ToJson for Int { to_json n = show n }\n\
+     impl ToJson for String { to_json s = s }\n\
+     impl ToJson for Leaf a where {a: ToJson} {\n  to_json (Leaf x) = to_json x\n}\n\
+     impl ToJson for Labeled a where {a: ToJson} {\n  to_json (Labeled name x) = name <> \":\" <> to_json x\n}\n\
+     impl ToJson for And l r where {l: ToJson, r: ToJson} {\n  to_json (And l r) = to_json l <> \",\" <> to_json r\n}\n\
+     impl ToJson for Or l r where {l: ToJson, r: ToJson} {\n  to_json o = case o {\n  Or_Left l -> to_json l\n  Or_Right r -> to_json r\n}\n}\n"
+}
+
+#[test]
+fn phase3_routed_derive_record() {
+    // Headline: `deriving (Generic, ToJson)` on a record. The synthesized
+    // delegating impl plus bridge impl let `to_json p` round-trip through
+    // the building-block instances.
+    let src = format!(
+        "import Std.Generic (Generic, U1, Leaf, Labeled, And, Or)\n\
+         {lib}\
+         record Person {{ name: String, age: Int }}\n  deriving (Generic, ToJson)\n\
+         fun go : Person -> String\n\
+         go p = to_json p",
+        lib = phase3_tojson_lib()
+    );
+    check(&src).unwrap();
+}
+
+#[test]
+fn phase3_routed_derive_auto_includes_generic() {
+    // Only `deriving (ToJson)` listed — Generic is auto-included so the
+    // routed synthesizer can chain through `to`.
+    let src = format!(
+        "import Std.Generic (Generic, U1, Leaf, Labeled, And, Or)\n\
+         {lib}\
+         record Person {{ name: String, age: Int }}\n  deriving (ToJson)\n\
+         fun go : Person -> String\n\
+         go p = to_json p",
+        lib = phase3_tojson_lib()
+    );
+    check(&src).unwrap();
+}
+
+#[test]
+fn phase3_routed_derive_parameterized_record() {
+    let src = format!(
+        "import Std.Generic (Generic, U1, Leaf, Labeled, And, Or)\n\
+         {lib}\
+         record Box a {{ v: a }}\n  deriving (ToJson)\n\
+         fun go : Box Int -> String\n\
+         go b = to_json b",
+        lib = phase3_tojson_lib()
+    );
+    check(&src).unwrap();
+}
+
+#[test]
+fn phase3_routed_derive_adt() {
+    let src = format!(
+        "import Std.Generic (Generic, U1, Leaf, Labeled, And, Or)\n\
+         {lib}\
+         type Opt a = Some a | Nada\n  deriving (ToJson)\n\
+         fun go : Opt Int -> String\n\
+         go x = to_json x",
+        lib = phase3_tojson_lib()
+    );
+    check(&src).unwrap();
+}
+
+#[test]
+fn phase3_routed_derive_recursive_adt() {
+    let src = format!(
+        "import Std.Generic (Generic, U1, Leaf, Labeled, And, Or)\n\
+         {lib}\
+         type IntList = INil | ICons Int IntList\n  deriving (ToJson)\n\
+         fun go : IntList -> String\n\
+         go xs = to_json xs",
+        lib = phase3_tojson_lib()
+    );
+    check(&src).unwrap();
+}
+
+#[test]
+fn phase3_routed_derive_from_direction_diagnostic() {
+    // A method whose self type appears only in the return position is a
+    // from-direction trait (e.g. FromJson). Phase 3.1 will support these;
+    // for now we emit a clear diagnostic.
+    let src = "import Std.Generic (Generic, U1, Leaf, Labeled, And, Or)\n\
+               trait FromJson a { fun from_json : String -> a }\n\
+               record Person { name: String, age: Int }\n  deriving (FromJson)\n";
+    let err = check(src).err().expect("expected error");
+    assert!(
+        err.message.contains("Phase 3.1"),
+        "expected Phase 3.1 mention; got: {}",
+        err.message
+    );
+}
+
+#[test]
+fn phase3_routed_derive_multi_method_diagnostic() {
+    let src = "import Std.Generic (Generic, U1, Leaf, Labeled, And, Or)\n\
+               trait Codec a { fun to_str : a -> String\n  fun other : a -> Int }\n\
+               record Person { name: String, age: Int }\n  deriving (Codec)\n";
+    let err = check(src).err().expect("expected error");
+    assert!(
+        err.message.contains("multiple methods"),
+        "expected multi-method diagnostic; got: {}",
+        err.message
+    );
+}
+
+#[test]
+fn phase3_routed_derive_unknown_trait_diagnostic() {
+    // `Mystery` is not a trait in scope and not a hardcoded derive name.
+    let src = "import Std.Generic (Generic, U1, Leaf, Labeled, And, Or)\n\
+               record Person { name: String, age: Int }\n  deriving (Mystery)\n";
+    let err = check(src).err().expect("expected error");
+    assert!(
+        err.message.contains("not in scope") || err.message.contains("Mystery"),
+        "expected unknown-trait diagnostic; got: {}",
+        err.message
+    );
+}
+
+#[test]
+fn phase3_routed_derive_missing_field_instance_errors() {
+    // No `ToJson` instance for `Tag`. The synthesized delegating impl
+    // depends on the Rep building-block chain; this should surface as a
+    // constraint-resolution error rather than a panic or silent success.
+    let src = format!(
+        "import Std.Generic (Generic, U1, Leaf, Labeled, And, Or)\n\
+         {lib}\
+         type Tag = Tag\n\
+         record Foo {{ x: Int, t: Tag }}\n  deriving (ToJson)\n",
+        lib = phase3_tojson_lib()
+    );
+    let _err = check(&src).err().expect("expected error");
+}

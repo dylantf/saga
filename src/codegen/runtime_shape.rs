@@ -53,9 +53,8 @@ impl RuntimeFunctionShape {
             ResolvedCodegenKind::InlineVal => RuntimeFunctionShape::InlineVal,
             ResolvedCodegenKind::BeamFunction { effects, .. }
             | ResolvedCodegenKind::ExternalFunction { effects, .. } => {
-                let fallback = fallback_ty.map(|ty| {
-                    RuntimeFunctionShape::from_type(ty, |effects| canonicalize_effects(effects))
-                });
+                let fallback = fallback_ty
+                    .map(|ty| RuntimeFunctionShape::from_type(ty, &mut canonicalize_effects));
                 let fallback_shape = fallback.and_then(|shape| shape.cps_shape());
                 let mut static_effects = canonicalize_effects(effects.clone());
                 if static_effects.is_empty()

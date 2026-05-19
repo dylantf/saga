@@ -382,10 +382,9 @@ This MUST land before Phase 2 starts.
   decl order seen by downstream passes for *every* derive, not just
   Generic. No existing tests broke from this change.
 
-- **Parameterized records are deferred.** `record Box a { value: a }
-  deriving (Generic)` emits a clear diagnostic ("deriving (Generic) for
-  parameterized records is not yet supported") and skips the derive.
-  See TODO marker in `derive_record_generic`.
+- **Parameterized records, parameterized ADTs, and recursive types are
+  all DONE in Phase 2d+2e (commits d1d7889, fbdaebd).** See the
+  "Phase 2d+2e Outcomes" section below.
 
 - **ADT Generic derive is done in Phase 2c.** Dispatched in
   `expand_derives` directly (inline `if bare == "Generic"`) rather than
@@ -405,6 +404,103 @@ This MUST land before Phase 2 starts.
   Before Phase 2e lands, either widen `ImplInfo.trait_type_args` to
   carry full type info (preferred) or change the fallback to consult
   the impl's scheme directly. Pick during Phase 2e kickoff.
+
+### Phase 3 Outcomes (shipped — carry-forward for Phase 4 and library authors)
+
+- **Synthesizer emits TWO impls per routed derive**, not one. Required
+  because the where-app `<Trait> r` validation fires at impl-registration
+  time and needs a concrete `<Trait> Rep__T` impl to already exist before
+  the routed impl for `T` registers. The two impls are:
+  1. A **bridge** `impl <Trait> for Rep__T { method (Rep__T inner) =
+     method inner }` — unconditionally unwraps the Rep newtype.
+  2. A **delegating** `impl <Trait> for T where {Generic T r, <Trait> r}
+     { method x = method (to x) }`.
+
+- **Framing limitation (library-design concern, not compiler bug).** Because
+  the bridge unconditionally unwraps, the library author has no hook to
+  distinguish "I'm framing a record" from "I'm framing a sum variant
+  payload" — both flow through the same `And`/`Labeled`/`Or` chain. The
+  99f example produces unbraced JSON for this reason. **Fix is deferred
+  to Phase 5+** (new top-level building block like `Record fields` or
+  `Sum variants` that derives emit, giving library code a place to hook
+  framing). Don't redesign the synthesizer until a real library author
+  hits this and tells us what shape they actually need.
+
+- **Single-method, to-direction traits only.** Multi-method traits and
+  from-direction traits (FromJson, FromCsv, FromPgRow) emit clear
+  diagnostics referencing Phase 3.1. From-direction is the next planned
+  enhancement.
+
+- **Piece 4 (error rewriting) deferred.** Constraint failures inside
+  synthesized impls still produce default-shaped errors mentioning
+  `Labeled`/`And`/etc. Low-cost win whenever someone wants to do it; a
+  marker on synthetic `ImplDef`s (or a NodeId side-table) is the suggested
+  approach.
+
+- **Alternative synthesizer shape on file.** A single-impl version using
+  `case to x { Rep__T inner -> method inner }` works (the implementer had
+  it briefly). Drops the bridge and the where-app at the cost of
+  later-fired errors. ~30 line diff to switch. Don't switch unless the
+  bridge approach is causing real pain.
+
+---
+
+### Phase 2d+2e Outcomes (carry-forward for Phase 3)
+
+- **`ImplInfo.trait_type_args` is now `Vec<Type>`** (was `Vec<String>`).
+  Plus a new `target_type_param_ids: Vec<u32>`. The call-site coherence
+  fallback uses these to substitute the impl's stored type vars with
+  the call site's concrete args, materializing `Rep__Box Int` from a
+  `Box Int` call site.
+
+- **The parser now accepts parenthesized type applications in
+  where-app args** (commit fbdaebd). `where {Generic (Box a) r, ToJson
+  r}` parses cleanly. Phase 3's routing layer can emit this form
+  directly.
+
+- **Constraint solver now sorts within each batch.** Concrete-self
+  constraints process before Var-self ones in
+  `check_pending_constraints`. Without this, the chained
+  `Generic T r → ToJson r` resolution could error on the second
+  constraint before the first had pinned `r`. Pure ordering, no
+  semantic change. If Phase 3 needs more complex constraint graphs
+  (unlikely for routed derives), this is the place to revisit.
+
+- **Call-site coherence fallback is now load-bearing, not optional.**
+  It's the resolution path for functional traits (Generic) when the
+  self type is concrete-headed but the impl has type parameters.
+  Phase 3 should treat it as a first-class resolution mechanism, not
+  a recovery fallback.
+
+- **Body-inference gap workaround**: for routed `ToJson` impls on
+  parameterized types, **drop the type ascription** on `to`. The
+  call-site coherence fallback pins the Generic's second arg from the
+  impl's outer type param because the self-type `T a` is
+  concrete-headed. Phase 3's synthesizer should emit
+  `to_json m = to_json (to m)` without an ascription. If we ever need
+  ascriptions referring to impl-level params, the fix is documented:
+  seed `convert_user_type_expr`'s params vec with the impl's
+  `(name, tvar_id)` pairs when entering an impl-method body.
+
+- **Recursion really was free.** Removing the `type_expr_refs` bail-out
+  in `derive_record_generic` and `derive_adt_generic` was the entire
+  change. `dict_for_type` handles the cycle because the recursive
+  position bottoms out at a zero-arg `Type::Con` whose dict is a
+  top-level name reference.
+
+- **Two viable shapes for Phase 3's synthesized delegating impl**
+  (decision deferred to Phase 3 kickoff):
+  - (a) **No where-app**: `impl ToJson for T { to_json m = to_json (to
+    m) }`. Simplest. Relies entirely on call-site coherence fallback.
+  - (b) **Explicit where-app**: `impl ToJson for T where {Generic T r,
+    ToJson r} { to_json m = to_json (to m) }`. More explicit about
+    the dependency on Generic; better error messages when the trait
+    isn't functional. Now parseable thanks to fbdaebd.
+
+  Recommended: (b). Cost is one extra where-app per impl; benefit is
+  clearer errors when something goes wrong.
+
+---
 
 - **Phase 2d (recursion) is essentially free.** Feasibility spike
   confirmed (see `/tmp/recursion-spike.saga` notes): hand-written
