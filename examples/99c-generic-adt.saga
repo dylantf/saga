@@ -1,7 +1,8 @@
 # Phase 2c: deriving (Generic) for ADTs.
-# A multi-variant type with mixed arities (nullary, one field, two fields)
-# routed through a hand-written ToJson library over the Generic building
-# blocks. Phase 3 will synthesize the bridge + delegating impls.
+# A multi-variant type with mixed arities routed through a hand-written
+# ToJson library over the Generic building blocks. With Phase 5 framing,
+# the library distinguishes record fields (Labeled) from sum constructors
+# (Variant), and can hook outer Adt framing.
 
 type Shape =
   | Circle Float
@@ -42,9 +43,23 @@ impl ToJson for Or l r where {l: ToJson, r: ToJson} {
   }
 }
 
-# Bridge for the synthesized Rep newtype — wraps the variant payload in {}.
+impl ToJson for Variant a where {a: ToJson} {
+  to_json (Variant name payload) = "{\"" <> name <> "\": " <> to_json payload <> "}"
+}
+
+impl ToJson for Record a where {a: ToJson} {
+  to_json (Record _ inner) = "{" <> to_json inner <> "}"
+}
+
+# ADT framing is a passthrough here; the per-variant Variant wrap already
+# produces a JSON-shaped object.
+impl ToJson for Adt a where {a: ToJson} {
+  to_json (Adt _ inner) = to_json inner
+}
+
+# Bridge for the synthesized Rep newtype — just forwards.
 impl ToJson for Rep__Shape {
-  to_json (Rep__Shape inner) = "{" <> to_json inner <> "}"
+  to_json (Rep__Shape inner) = to_json inner
 }
 
 # Delegating impl — Phase 3 will synthesize this from `deriving (ToJson)`.

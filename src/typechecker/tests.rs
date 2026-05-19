@@ -6432,7 +6432,8 @@ fn derive_generic_end_to_end_with_tojson() {
          impl ToJson for Leaf a where {a: ToJson} {\n  to_json (Leaf x) = to_json x\n}\n\
          impl ToJson for Labeled a where {a: ToJson} {\n  to_json (Labeled name x) = name <> \":\" <> to_json x\n}\n\
          impl ToJson for And l r where {l: ToJson, r: ToJson} {\n  to_json (And l r) = to_json l <> \",\" <> to_json r\n}\n\
-         impl ToJson for Rep__Person {\n  to_json (Rep__Person inner) = \"{\" <> to_json inner <> \"}\"\n}\n\
+         impl ToJson for Record a where {a: ToJson} {\n  to_json (Record _ inner) = \"{\" <> to_json inner <> \"}\"\n}\n\
+         impl ToJson for Rep__Person {\n  to_json (Rep__Person inner) = to_json inner\n}\n\
          impl ToJson for Person where {Generic Person r, ToJson r} {\n  to_json p = to_json (to p : Rep__Person)\n}",
     )
     .unwrap();
@@ -6542,6 +6543,8 @@ fn derive_generic_parameterized_adt_end_to_end_with_tojson() {
          impl ToJson for Labeled a where {a: ToJson} {\n  to_json (Labeled name x) = name <> \":\" <> to_json x\n}\n\
          impl ToJson for And l r where {l: ToJson, r: ToJson} {\n  to_json (And l r) = to_json l <> \",\" <> to_json r\n}\n\
          impl ToJson for Or l r where {l: ToJson, r: ToJson} {\n  to_json o = case o {\n  Or_Left l -> to_json l\n  Or_Right r -> to_json r\n}\n}\n\
+         impl ToJson for Variant a where {a: ToJson} {\n  to_json (Variant name x) = name <> \":\" <> to_json x\n}\n\
+         impl ToJson for Adt a where {a: ToJson} {\n  to_json (Adt _ inner) = to_json inner\n}\n\
          impl ToJson for Rep__Opt a where {a: ToJson} {\n  to_json (Rep__Opt inner) = to_json inner\n}\n\
          impl ToJson for Opt a where {a: ToJson} {\n  to_json m = to_json (to m)\n}",
     )
@@ -6563,6 +6566,8 @@ fn where_app_accepts_parenthesized_type_application() {
          impl ToJson for Labeled a where {a: ToJson} {\n  to_json (Labeled name x) = name <> \":\" <> to_json x\n}\n\
          impl ToJson for And l r where {l: ToJson, r: ToJson} {\n  to_json (And l r) = to_json l <> \",\" <> to_json r\n}\n\
          impl ToJson for Or l r where {l: ToJson, r: ToJson} {\n  to_json o = case o {\n  Or_Left l -> to_json l\n  Or_Right r -> to_json r\n}\n}\n\
+         impl ToJson for Variant a where {a: ToJson} {\n  to_json (Variant name x) = name <> \":\" <> to_json x\n}\n\
+         impl ToJson for Adt a where {a: ToJson} {\n  to_json (Adt _ inner) = to_json inner\n}\n\
          impl ToJson for Rep__Opt a where {a: ToJson} {\n  to_json (Rep__Opt inner) = to_json inner\n}\n\
          impl ToJson for Opt a where {a: ToJson, Generic (Opt a) r, ToJson r} {\n  to_json m = to_json (to m)\n}",
     )
@@ -6595,6 +6600,8 @@ fn derive_generic_adt_end_to_end_with_tojson() {
          impl ToJson for Labeled a where {a: ToJson} {\n  to_json (Labeled name x) = name <> \":\" <> to_json x\n}\n\
          impl ToJson for And l r where {l: ToJson, r: ToJson} {\n  to_json (And l r) = to_json l <> \",\" <> to_json r\n}\n\
          impl ToJson for Or l r where {l: ToJson, r: ToJson} {\n  to_json o = case o {\n  Or_Left l -> to_json l\n  Or_Right r -> to_json r\n}\n}\n\
+         impl ToJson for Variant a where {a: ToJson} {\n  to_json (Variant name x) = name <> \":\" <> to_json x\n}\n\
+         impl ToJson for Adt a where {a: ToJson} {\n  to_json (Adt _ inner) = to_json inner\n}\n\
          impl ToJson for Rep__Shape {\n  to_json (Rep__Shape inner) = to_json inner\n}\n\
          impl ToJson for Shape where {Generic Shape r, ToJson r} {\n  to_json s = to_json (to s : Rep__Shape)\n}",
     )
@@ -6612,7 +6619,10 @@ fn phase3_tojson_lib() -> &'static str {
      impl ToJson for Leaf a where {a: ToJson} {\n  to_json (Leaf x) = to_json x\n}\n\
      impl ToJson for Labeled a where {a: ToJson} {\n  to_json (Labeled name x) = name <> \":\" <> to_json x\n}\n\
      impl ToJson for And l r where {l: ToJson, r: ToJson} {\n  to_json (And l r) = to_json l <> \",\" <> to_json r\n}\n\
-     impl ToJson for Or l r where {l: ToJson, r: ToJson} {\n  to_json o = case o {\n  Or_Left l -> to_json l\n  Or_Right r -> to_json r\n}\n}\n"
+     impl ToJson for Or l r where {l: ToJson, r: ToJson} {\n  to_json o = case o {\n  Or_Left l -> to_json l\n  Or_Right r -> to_json r\n}\n}\n\
+     impl ToJson for Variant a where {a: ToJson} {\n  to_json (Variant name x) = name <> \":\" <> to_json x\n}\n\
+     impl ToJson for Record a where {a: ToJson} {\n  to_json (Record _ inner) = to_json inner\n}\n\
+     impl ToJson for Adt a where {a: ToJson} {\n  to_json (Adt _ inner) = to_json inner\n}\n"
 }
 
 #[test]
@@ -6711,6 +6721,15 @@ fn phase3_fromjson_result_lib() -> &'static str {
          Ok l -> Ok (Or_Left l)\n\
          Err _ -> case from_json s { Ok r -> Ok (Or_Right r); Err e -> Err e }\n\
        }\n\
+     }\n\
+     impl FromJson for Variant a where {a: FromJson} {\n\
+       from_json s = case from_json s { Ok x -> Ok (Variant \"\" x); Err e -> Err e }\n\
+     }\n\
+     impl FromJson for Record a where {a: FromJson} {\n\
+       from_json s = case from_json s { Ok x -> Ok (Record \"\" x); Err e -> Err e }\n\
+     }\n\
+     impl FromJson for Adt a where {a: FromJson} {\n\
+       from_json s = case from_json s { Ok x -> Ok (Adt \"\" x); Err e -> Err e }\n\
      }\n"
 }
 
@@ -6746,6 +6765,15 @@ fn phase3_routed_derive_from_direction_maybe() {
                    Nothing -> Nothing\n\
                  }\n\
                }\n\
+               impl FromX for Variant a where {a: FromX} {\n\
+                 from_x n = case from_x n { Just x -> Just (Variant \"\" x); Nothing -> Nothing }\n\
+               }\n\
+               impl FromX for Record a where {a: FromX} {\n\
+                 from_x n = case from_x n { Just x -> Just (Record \"\" x); Nothing -> Nothing }\n\
+               }\n\
+               impl FromX for Adt a where {a: FromX} {\n\
+                 from_x n = case from_x n { Just x -> Just (Adt \"\" x); Nothing -> Nothing }\n\
+               }\n\
                record P { x: Int }\n  deriving (FromX)\n\
                fun go : Int -> Maybe P\n\
                go n = from_x n";
@@ -6763,6 +6791,9 @@ fn phase3_routed_derive_from_direction_bare() {
                impl FromX for And l r where {l: FromX, r: FromX} {\n\
                  from_x n = And (from_x n) (from_x n)\n\
                }\n\
+               impl FromX for Variant a where {a: FromX} { from_x n = Variant \"\" (from_x n) }\n\
+               impl FromX for Record a where {a: FromX} { from_x n = Record \"\" (from_x n) }\n\
+               impl FromX for Adt a where {a: FromX} { from_x n = Adt \"\" (from_x n) }\n\
                record P { x: Int }\n  deriving (FromX)\n\
                fun go : Int -> P\n\
                go n = from_x n";
@@ -6873,4 +6904,74 @@ fn phase3_routed_derive_missing_field_instance_errors() {
         lib = phase3_tojson_lib()
     );
     let _err = check(&src).err().expect("expected error");
+}
+
+// --- Phase 5: framing redesign (Record, Variant, Adt wrappers) -----------
+
+#[test]
+fn phase5_record_rep_uses_record_wrapper() {
+    // The synthesized Rep__Person must be addressable as `Record _`-shaped
+    // by library impls. A hand-written `ToJson for Record a` is sufficient
+    // to frame the output without per-type bridges doing it.
+    check(
+        "import Std.Generic (Generic, U1, Leaf, Labeled, And, Or, Record)\n\
+         record Person { name: String, age: Int }\n  deriving (Generic)\n\
+         trait ToJson a { fun to_json : a -> String }\n\
+         impl ToJson for U1 { to_json _ = \"null\" }\n\
+         impl ToJson for String { to_json s = s }\n\
+         impl ToJson for Int { to_json n = show n }\n\
+         impl ToJson for Leaf a where {a: ToJson} { to_json (Leaf x) = to_json x }\n\
+         impl ToJson for Labeled a where {a: ToJson} { to_json (Labeled n x) = n <> \":\" <> to_json x }\n\
+         impl ToJson for And l r where {l: ToJson, r: ToJson} { to_json (And l r) = to_json l <> \",\" <> to_json r }\n\
+         impl ToJson for Record a where {a: ToJson} { to_json (Record _ inner) = \"{\" <> to_json inner <> \"}\" }\n\
+         impl ToJson for Rep__Person { to_json (Rep__Person r) = to_json r }\n\
+         impl ToJson for Person where {Generic Person r, ToJson r} { to_json p = to_json (to p : Rep__Person) }",
+    )
+    .unwrap();
+}
+
+#[test]
+fn phase5_adt_rep_uses_adt_and_variant_wrappers() {
+    // The synthesized Rep__Shape wraps the Or-tree in `Adt "Shape"` and each
+    // constructor uses `Variant` (not `Labeled`), so library codecs can give
+    // distinct behaviour for record fields vs constructor names.
+    check(
+        "import Std.Generic (Generic, U1, Leaf, Labeled, And, Or, Variant, Adt)\n\
+         type Shape = Circle Float | Triangle\n  deriving (Generic)\n\
+         trait ToJson a { fun to_json : a -> String }\n\
+         impl ToJson for U1 { to_json _ = \"null\" }\n\
+         impl ToJson for Float { to_json n = show n }\n\
+         impl ToJson for Leaf a where {a: ToJson} { to_json (Leaf x) = to_json x }\n\
+         impl ToJson for Or l r where {l: ToJson, r: ToJson} { to_json o = case o { Or_Left l -> to_json l; Or_Right r -> to_json r } }\n\
+         impl ToJson for Variant a where {a: ToJson} { to_json (Variant n x) = \"{\\\"\" <> n <> \"\\\":\" <> to_json x <> \"}\" }\n\
+         impl ToJson for Adt a where {a: ToJson} { to_json (Adt _ inner) = to_json inner }\n\
+         impl ToJson for Rep__Shape { to_json (Rep__Shape r) = to_json r }\n\
+         impl ToJson for Shape where {Generic Shape r, ToJson r} { to_json s = to_json (to s : Rep__Shape) }",
+    )
+    .unwrap();
+}
+
+#[test]
+fn phase5_library_distinguishes_record_label_from_variant_name() {
+    // The headline test: the library produces different output for a
+    // record field's `Labeled` vs a constructor's `Variant`. Both are
+    // routed for the same trait, both have a string name, but the codec
+    // dispatch chooses different behavior based on the building-block
+    // identity.
+    let src = "import Std.Generic (Generic, U1, Leaf, Labeled, And, Or, Variant, Record, Adt)\n\
+               trait Tag a { fun tag : a -> String }\n\
+               impl Tag for U1 { tag _ = \"u1\" }\n\
+               impl Tag for Int { tag _ = \"int\" }\n\
+               impl Tag for Leaf a where {a: Tag} { tag (Leaf x) = tag x }\n\
+               impl Tag for Labeled a where {a: Tag} { tag (Labeled n x) = \"field<\" <> n <> \">:\" <> tag x }\n\
+               impl Tag for Variant a where {a: Tag} { tag (Variant n x) = \"ctor<\" <> n <> \">:\" <> tag x }\n\
+               impl Tag for And l r where {l: Tag, r: Tag} { tag (And l r) = tag l <> \",\" <> tag r }\n\
+               impl Tag for Or l r where {l: Tag, r: Tag} { tag o = case o { Or_Left l -> tag l; Or_Right r -> tag r } }\n\
+               impl Tag for Record a where {a: Tag} { tag (Record _ i) = \"R{\" <> tag i <> \"}\" }\n\
+               impl Tag for Adt a where {a: Tag} { tag (Adt _ i) = \"A{\" <> tag i <> \"}\" }\n\
+               record Pair { x: Int }\n  deriving (Generic, Tag)\n\
+               type Wrap = W Int\n  deriving (Generic, Tag)\n\
+               fun go : Pair -> Wrap -> String\n\
+               go p w = tag p <> \"|\" <> tag w";
+    check(src).unwrap();
 }

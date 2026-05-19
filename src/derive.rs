@@ -823,8 +823,10 @@ fn derive_record_generic(
     let rep_name = format!("Rep__{record_name}");
     let plain_fields: Vec<(String, TypeExpr)> = fields.iter().map(|a| a.node.clone()).collect();
 
-    // 1. Synthetic TypeDef: `type Rep__R <params> = Rep__R <inner>`
-    let inner_type = build_rep_type_inner(&plain_fields);
+    // 1. Synthetic TypeDef: `type Rep__R <params> = Rep__R (Record <inner>)`.
+    // The Record wrapper carries the runtime type name and gives library
+    // codecs a hook for outer record framing (e.g. JSON `{}`).
+    let inner_type = type_app(type_named("Record"), build_rep_type_inner(&plain_fields));
     let ctor_field_type = inner_type.clone();
     let rep_typedef = Decl::TypeDef {
         id: NodeId::fresh(),
@@ -854,7 +856,9 @@ fn derive_record_generic(
         },
     );
     let inner_expr = build_rep_to_expr(&plain_fields, &param_var, span);
-    let to_body = apply_ctor(&rep_name, inner_expr, span);
+    let record_wrapped =
+        apply2("Record", string_lit(record_name, span), inner_expr, span);
+    let to_body = apply_ctor(&rep_name, record_wrapped, span);
     let to_method = Annotated::bare(ImplMethod {
         name: "to".into(),
         name_span: Span { start: 0, end: 0 },
@@ -871,10 +875,22 @@ fn derive_record_generic(
         .map(|i| format!("__f{i}"))
         .collect();
     let inner_pat = build_rep_from_pattern(&field_var_names, span);
+    let record_pat = Pat::Constructor {
+        id: NodeId::fresh(),
+        name: "Record".into(),
+        args: vec![
+            Pat::Wildcard {
+                id: NodeId::fresh(),
+                span,
+            },
+            inner_pat,
+        ],
+        span,
+    };
     let from_param = Pat::Constructor {
         id: NodeId::fresh(),
         name: rep_name.clone(),
-        args: vec![inner_pat],
+        args: vec![record_pat],
         span,
     };
     let record_fields: Vec<(String, Span, Expr)> = plain_fields
@@ -979,8 +995,11 @@ fn derive_adt_generic(
 
     let rep_name = format!("Rep__{type_name}");
 
-    // 1. Inner Rep type = right-leaning Or of `Labeled <variant_shape_type>`.
-    let inner_type = build_adt_rep_inner_type(variants);
+    // 1. Inner Rep type = `Adt <Or-tree>` where the Or-tree is a right-leaning
+    // chain of `Variant <variant_shape_type>`. `Adt` carries the runtime type
+    // name; `Variant` replaces `Labeled` for constructor-name layers so library
+    // codecs can distinguish constructor names from record-field names.
+    let inner_type = type_app(type_named("Adt"), build_adt_rep_inner_type(variants));
     let rep_typedef = Decl::TypeDef {
         id: NodeId::fresh(),
         doc: vec![],
@@ -1024,9 +1043,10 @@ fn derive_adt_generic(
             };
             let shape_expr =
                 build_variant_shape_expr(&v.fields, &field_vars, span);
-            let labeled = apply2("Labeled", string_lit(&v.name, span), shape_expr, span);
-            let or_wrapped = or_wrap_expr(labeled, i, n, span);
-            let body = apply_ctor(&rep_name, or_wrapped, span);
+            let variant = apply2("Variant", string_lit(&v.name, span), shape_expr, span);
+            let or_wrapped = or_wrap_expr(variant, i, n, span);
+            let adt_wrapped = apply2("Adt", string_lit(type_name, span), or_wrapped, span);
+            let body = apply_ctor(&rep_name, adt_wrapped, span);
             Annotated::bare(CaseArm {
                 pattern,
                 guard: None,
@@ -1068,9 +1088,9 @@ fn derive_adt_generic(
             let v = &ann_v.node;
             let field_vars: Vec<String> = (0..v.fields.len()).map(|j| format!("__y{j}")).collect();
             let shape_pat = build_variant_shape_pat(&v.fields, &field_vars, span);
-            let labeled_pat = Pat::Constructor {
+            let variant_pat = Pat::Constructor {
                 id: NodeId::fresh(),
-                name: "Labeled".into(),
+                name: "Variant".into(),
                 args: vec![
                     Pat::Wildcard {
                         id: NodeId::fresh(),
@@ -1080,11 +1100,23 @@ fn derive_adt_generic(
                 ],
                 span,
             };
-            let or_wrapped_pat = or_wrap_pat(labeled_pat, i, n, span);
+            let or_wrapped_pat = or_wrap_pat(variant_pat, i, n, span);
+            let adt_pat = Pat::Constructor {
+                id: NodeId::fresh(),
+                name: "Adt".into(),
+                args: vec![
+                    Pat::Wildcard {
+                        id: NodeId::fresh(),
+                        span,
+                    },
+                    or_wrapped_pat,
+                ],
+                span,
+            };
             let outer_pat = Pat::Constructor {
                 id: NodeId::fresh(),
                 name: rep_name.clone(),
-                args: vec![or_wrapped_pat],
+                args: vec![adt_pat],
                 span,
             };
             let body = build_ctor_application(&v.name, &field_vars, span);
@@ -1144,11 +1176,11 @@ fn derive_adt_generic(
 /// Build the inner Rep type for an ADT: right-leaning `Or` chain wrapping
 /// `Labeled <variant_shape>` for each variant.
 fn build_adt_rep_inner_type(variants: &[Annotated<TypeConstructor>]) -> TypeExpr {
-    let labeled_shapes: Vec<TypeExpr> = variants
+    let variant_shapes: Vec<TypeExpr> = variants
         .iter()
-        .map(|v| type_app(type_named("Labeled"), build_variant_shape_type(&v.node.fields)))
+        .map(|v| type_app(type_named("Variant"), build_variant_shape_type(&v.node.fields)))
         .collect();
-    let mut iter = labeled_shapes.into_iter().rev();
+    let mut iter = variant_shapes.into_iter().rev();
     let mut acc = iter.next().unwrap();
     for prev in iter {
         acc = type_app(type_app(type_named("Or"), prev), acc);

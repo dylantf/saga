@@ -1,6 +1,7 @@
 # Phase 2b: the same scenario as 99-generic-spike.saga, but using
-# `deriving (Generic)` instead of hand-written impls. Output is
-# byte-identical to the original spike.
+# `deriving (Generic)` instead of hand-written impls. Phase 5 added the
+# Record/Variant/Adt framing wrappers — the library now has a place to
+# hook outer braces for records.
 
 record Person { name: String, age: Int, email: String }
   deriving (Generic)
@@ -42,10 +43,24 @@ impl ToJson for Or l r where {l: ToJson, r: ToJson} {
   }
 }
 
-# Bridge for the synthesized Rep newtype. Phase 3 will eliminate the need
-# for this hand-written bridge — for now we wrap the inner And-tree in {}.
+impl ToJson for Variant a where {a: ToJson} {
+  to_json (Variant name payload) = "{\"" <> name <> "\": " <> to_json payload <> "}"
+}
+
+# Record framing lives in the library now: proper outer braces with no
+# per-type bridge.
+impl ToJson for Record a where {a: ToJson} {
+  to_json (Record _ inner) = "{" <> to_json inner <> "}"
+}
+
+impl ToJson for Adt a where {a: ToJson} {
+  to_json (Adt _ inner) = to_json inner
+}
+
+# Bridge for the synthesized Rep newtype just forwards to the inner
+# Record-wrapped shape — no framing here.
 impl ToJson for Rep__Person {
-  to_json (Rep__Person inner) = "{" <> to_json inner <> "}"
+  to_json (Rep__Person inner) = to_json inner
 }
 
 # Delegating impl — Phase 3 will synthesize this from `deriving (ToJson)`.

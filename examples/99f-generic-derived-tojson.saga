@@ -1,12 +1,14 @@
-# Phase 3: convention-based routing for user-defined derivable traits.
+# Phase 3 + Phase 5: convention-based routing for user-defined derivable
+# traits, plus framing redesign.
 #
 # The user writes `deriving (ToJson)` and the compiler synthesizes a
 # delegating impl that routes through `Generic` (also auto-included).
 #
-# The "library" here is inline — `ToJson` plus instances for the building
-# blocks (U1/Leaf/Labeled/And/Or) and a few base types. No per-user-type
-# bridge impls; the synthesized delegating impl unwraps the Rep__T newtype
-# itself.
+# With Phase 5, the inline library has Record/Variant/Adt hooks for outer
+# framing. Compared to the pre-Phase-5 output (which was missing braces
+# entirely for records — `"name": "Alice", "age": 30`), records now
+# render as proper `{"name": "Alice", "age": 30}` and sum constructors
+# render as `{"Some": 7}` instead of bare payloads.
 
 trait ToJson a {
   fun to_json : a -> String
@@ -41,6 +43,18 @@ impl ToJson for Or l r where {l: ToJson, r: ToJson} {
     Or_Left l -> to_json l
     Or_Right r -> to_json r
   }
+}
+
+impl ToJson for Variant a where {a: ToJson} {
+  to_json (Variant name payload) = "{\"" <> name <> "\": " <> to_json payload <> "}"
+}
+
+impl ToJson for Record a where {a: ToJson} {
+  to_json (Record _ inner) = "{" <> to_json inner <> "}"
+}
+
+impl ToJson for Adt a where {a: ToJson} {
+  to_json (Adt _ inner) = to_json inner
 }
 
 # User code: just `deriving (ToJson)`. `Generic` is auto-included.

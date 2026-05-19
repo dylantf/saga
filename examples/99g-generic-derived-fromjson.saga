@@ -1,13 +1,14 @@
-# Phase 3.1: convention-based routing for from-direction derivable traits.
+# Phase 3.1 + Phase 5: convention-based routing for from-direction
+# derivable traits, with framing wrappers in place.
 #
 # Mirrors 99f, but in the opposite direction: the user writes
 # `deriving (FromJson)` on a type, and the compiler synthesizes a delegating
 # impl that threads the building-block result back through `Generic.from`.
 #
 # The library is inline: FromJson plus instances for U1/Leaf/Labeled/And/Or
-# and base types. The decoder bodies are intentionally trivial — the
-# interesting part is that the *compiler* wires the dispatch correctly. A
-# real-world library would actually parse JSON tokens here.
+# /Variant/Record/Adt and base types. The decoder bodies are intentionally
+# trivial — the interesting part is that the *compiler* wires the dispatch
+# correctly. A real-world library would actually parse JSON tokens here.
 
 trait FromJson a {
   fun from_json : String -> Result a String
@@ -59,6 +60,27 @@ impl FromJson for Or l r where {l: FromJson, r: FromJson} {
   }
 }
 
+impl FromJson for Variant a where {a: FromJson} {
+  from_json s = case from_json s {
+    Ok x -> Ok (Variant "" x)
+    Err e -> Err e
+  }
+}
+
+impl FromJson for Record a where {a: FromJson} {
+  from_json s = case from_json s {
+    Ok x -> Ok (Record "" x)
+    Err e -> Err e
+  }
+}
+
+impl FromJson for Adt a where {a: FromJson} {
+  from_json s = case from_json s {
+    Ok x -> Ok (Adt "" x)
+    Err e -> Err e
+  }
+}
+
 # Also a tiny ToJson library, just so the example can demonstrate a
 # round-trip end-to-end.
 
@@ -79,6 +101,15 @@ impl ToJson for Or l r where {l: ToJson, r: ToJson} {
     Or_Left l -> to_json l
     Or_Right r -> to_json r
   }
+}
+impl ToJson for Variant a where {a: ToJson} {
+  to_json (Variant _ payload) = to_json payload
+}
+impl ToJson for Record a where {a: ToJson} {
+  to_json (Record _ inner) = to_json inner
+}
+impl ToJson for Adt a where {a: ToJson} {
+  to_json (Adt _ inner) = to_json inner
 }
 
 # User code: a parameterized record + an ADT, deriving both directions.

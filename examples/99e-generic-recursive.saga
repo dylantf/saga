@@ -1,7 +1,8 @@
 # Phase 2d: deriving (Generic) for recursive ADTs.
 # A recursive field becomes a `Leaf <SelfType>` in the Rep tree, exactly
 # like any other field — the recursion lives in the runtime dictionary
-# call chain, not in the Rep type structure.
+# call chain, not in the Rep type structure. Phase 5 framing adds the
+# Adt/Variant wrappers; the library hooks into them for output shape.
 
 type IntList =
   | INil
@@ -39,9 +40,21 @@ impl ToJson for Or l r where {l: ToJson, r: ToJson} {
   }
 }
 
-# Bridge: wrap the variant payload in braces, like the monomorphic ADT case.
+impl ToJson for Variant a where {a: ToJson} {
+  to_json (Variant name payload) = "{\"" <> name <> "\": " <> to_json payload <> "}"
+}
+
+impl ToJson for Record a where {a: ToJson} {
+  to_json (Record _ inner) = "{" <> to_json inner <> "}"
+}
+
+impl ToJson for Adt a where {a: ToJson} {
+  to_json (Adt _ inner) = to_json inner
+}
+
+# Bridge: forward to the Adt-wrapped inner.
 impl ToJson for Rep__IntList {
-  to_json (Rep__IntList inner) = "{" <> to_json inner <> "}"
+  to_json (Rep__IntList inner) = to_json inner
 }
 
 impl ToJson for IntList {

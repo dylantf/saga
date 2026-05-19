@@ -460,6 +460,260 @@ zero compiler involvement. The three motivating libraries (ToJson/
 FromJson, ToCsv/FromCsv, ToPgRow/FromPgRow) are all now buildable as
 pure library code.
 
+---
+
+## Phase 5: Framing Redesign
+
+### Why
+
+The current building-block set (`U1`, `Leaf`, `Labeled`, `And`, `Or`) leaves
+library authors with no hook for distinguishing:
+
+- A `Labeled` wrapping a record field name vs. a `Labeled` wrapping a sum
+  constructor name. Both reach the same `impl ToJson for Labeled` instance.
+- An `And` joining record fields vs. an `And` joining variant payload
+  fields. Both reach the same `impl ToJson for And` instance.
+- The top-level shape of a record (which usually wants outer framing like
+  `{...}`) vs. the top-level shape of an ADT (which usually delegates to
+  per-variant handling).
+
+The bridge impl synthesized by `derive_routed` unconditionally unwraps
+`Rep__T` and forwards the inner tree to the library's instances, so there
+is no per-type hook either.
+
+This bit Phase 4 (deferred): a routed `Show` cannot reproduce the hardcoded
+`Person { name: "Alice", age: 30 }` framing because the type name lives at
+the `Rep__T` outer layer, which the bridge discards. JSON libraries hit the
+same problem: the natural output `{"name": "Alice", "age": 30}` requires
+outer braces, and the library currently has nowhere to put them without
+per-call-site wrapping.
+
+We're doing the framing redesign now, before real library authors lock in
+designs against the current shape and migration pain compounds.
+
+### New Building Blocks
+
+Three additions to `Std.Generic`:
+
+```saga
+type Variant a = Variant String a   -- sum constructor: name + payload
+type Record name a = Record name a  -- top-level wrapper for records
+type Adt name a = Adt name a        -- top-level wrapper for ADTs
+```
+
+(`name` is `String`; written as a separate parameter for clarity but it's
+a runtime string, not a type-level value.)
+
+### What Derives Emit
+
+**Records** (`record Person { name: String, age: Int }`):
+```
+type Rep__Person = Rep__Person (Record "Person" (And (Labeled "name" (Leaf String))
+                                                     (Labeled "age"  (Leaf Int))))
+```
+
+**ADTs** (`type Shape = Circle Float | Rect Float Float | Triangle`):
+```
+type Rep__Shape = Rep__Shape (Adt "Shape" (Or (Variant "Circle" (Leaf Float))
+                                              (Or (Variant "Rect" (And (Leaf Float) (Leaf Float)))
+                                                  (Variant "Triangle" U1))))
+```
+
+Notes:
+
+- **`Labeled` is now record-fields-only.** ADT constructor names move to
+  `Variant`. This removes the core ambiguity.
+- **Variant payload fields with labels** (Saga allows
+  `Circle { radius: Float }` style) use `Labeled` inside the variant's
+  payload, e.g. `Variant "Circle" (Labeled "radius" (Leaf Float))`. Library
+  authors who care about the distinction can dispatch on whether the
+  Labeled is inside a `Record` or a `Variant`.
+- **Single-field records** still skip `And`, producing
+  `Record "Person" (Labeled "name" (Leaf String))`.
+- **Zero-field records** produce `Record "Person" U1`.
+- **Single-variant ADTs** still skip `Or`, producing `Adt "Wrapper" (Variant "Wrap" ...)`.
+- **Recursive types** unchanged — recursive position remains `Leaf <Self>`.
+- **Parameterized types** unchanged — type parameters propagate the same
+  way they do today.
+
+### Library Author Impact
+
+The required building-block impl set grows from 5 to 8:
+
+```saga
+impl ToJson for U1
+impl ToJson for Leaf a       where {a: ToJson}
+impl ToJson for Labeled a    where {a: ToJson}    -- record fields
+impl ToJson for Variant a    where {a: ToJson}    -- sum constructors  (NEW)
+impl ToJson for And l r      where {l: ToJson, r: ToJson}
+impl ToJson for Or l r       where {l: ToJson, r: ToJson}
+impl ToJson for Record n a   where {a: ToJson}    -- record outer framing (NEW)
+impl ToJson for Adt n a      where {a: ToJson}    -- ADT outer framing (NEW)
+```
+
+Libraries that don't care about a particular hook write a passthrough:
+`impl ToJson for Adt n a where {a: ToJson} { to_json (Adt _ inner) = to_json inner }`.
+
+A JSON library that wants proper bracing:
+```saga
+impl ToJson for Record n a where {a: ToJson} {
+  to_json (Record _ inner) = "{" <> to_json inner <> "}"
+}
+impl ToJson for Variant a where {a: ToJson} {
+  to_json (Variant name payload) = "{\"" <> name <> "\": " <> to_json payload <> "}"
+}
+```
+
+### Compiler Impact
+
+- `src/stdlib/Generic.saga`: add the three new types.
+- `src/derive.rs`:
+  - `derive_record_generic`: wrap the And-of-Labeled tree in `Record name`
+    inside the `Rep__T` newtype.
+  - `derive_adt_generic`: wrap the Or tree in `Adt name`; emit `Variant`
+    instead of `Labeled` for the constructor-name layer.
+  - Update `to` and `from` body generation to construct/destructure the
+    new outer wrappers.
+  - The `derive_routed` bridge impl pattern is unchanged in structure —
+    still unwraps `Rep__T` and forwards. The library now sees `Record n a`
+    or `Adt n a` as the immediate inner type, which is the hook it needs.
+- No typechecker, elaborator, or codegen changes. Pure stdlib + derive
+  work.
+
+### Example & Test Migration
+
+Every existing Generic-related example and test needs updating:
+
+- `examples/99-generic-spike.saga` (Phase 0 hand-written) → update Rep
+  shape and `to`/`from` to use new wrappers.
+- `examples/99b-99e` (derived Generic, various shapes) → no change to user
+  code; outputs may differ slightly if any printed/asserted the Rep shape.
+- `examples/99f, 99g` (routed ToJson/FromJson) → the inline library code
+  needs `Record`, `Variant`, `Adt` impls. User code unchanged.
+- Tests asserting Rep shapes via pattern-match → update patterns.
+- Round-trip tests → should pass unchanged.
+
+### Risk
+
+- **The 3-new-types decision is a one-way door.** Once libraries ship
+  against this shape, changing it again is breaking. So get it right.
+- **`Record name a` and `Adt name a` are *parameterized over the name*.**
+  This is a runtime-value parameter, not a type parameter — it's a `String`
+  field on the constructor. Make sure the AST representation is clean
+  enough that library authors don't need to know how the name is encoded.
+- **Migration churn is bounded but real.** ~6 examples + ~10-15 tests.
+- **No deferral**: doing this before library authors build against the
+  current shape is the point.
+
+### Phase 5 Outcomes (to be filled in after implementation)
+
+TBD.
+
+---
+
+## Phase 6: Multi-Method Routed Derives
+
+### Why
+
+Phase 3 shipped routed derives for **single-method traits only**. Multi-method
+traits emit a clear diagnostic. The limit was a scoping decision, not a
+fundamental one — both Haskell (GHC.Generics) and Rust (built-in derives)
+handle multi-method derives without issue, by iterating over the trait's
+methods and synthesizing one body per method.
+
+Real-world cases where multi-method matters:
+
+- **Pretty + compact variants**: `trait ToJson { to_json : a -> String;
+  to_json_pretty : a -> String }`.
+- **Bidirectional codecs in one trait**: `trait JsonCodec { encode : a ->
+  String; decode : String -> Result a Error }`. Today Saga splits these
+  (`ToJson` + `FromJson`); a unified trait halves the import surface.
+- **Eq-style multi-method**: `==` + `/=` derive together in most languages.
+- **Multiple input formats**: `trait FromConfig { from_json; from_toml;
+  from_env }`.
+
+The two-trait workaround works but is friction. Multi-method support
+removes it.
+
+### What Changes
+
+Pure `src/derive.rs` work. No typechecker, elaborator, codegen, or stdlib
+changes. The synthesizer iterates over the trait's methods instead of
+stopping at one. For each method:
+
+1. Run direction detection (`classify_from_return` plus the existing
+   to-direction check). Each method is independently to- or from-direction;
+   a trait can mix both (e.g. the `JsonCodec` example above).
+2. Run the appropriate body builder (`build_to_body` or `build_from_body`).
+
+Both the bridge impl and the delegating impl carry one method definition
+per trait method, mirroring the trait's full signature.
+
+Example: for `trait JsonCodec { encode : a -> String; decode : String ->
+Result a Error }` and `record Person { ... } deriving (JsonCodec)`:
+
+```saga
+# Bridge
+impl JsonCodec for Rep__Person {
+  encode (Rep__Person inner) = encode inner
+  decode s = case decode s {
+    Ok inner -> Ok (Rep__Person inner)
+    Err e -> Err e
+  }
+}
+
+# Delegating
+impl JsonCodec for Person where {Generic Person r, JsonCodec r} {
+  encode p = encode (to p)
+  decode s = case decode s {
+    Ok rep -> Ok (from rep)
+    Err e -> Err e
+  }
+}
+```
+
+### Constraints To Preserve
+
+- Each method must individually pass direction detection. If any method has
+  an unsupported shape (return type isn't `a`/`Result a _`/`Maybe a`, or
+  user type appears on neither side, or appears on both sides), the whole
+  derive errors with a clear diagnostic naming the offending method.
+- The trait's method signatures are the source of truth for parameter
+  names, types, and return types. The synthesizer reads them from the
+  TraitDef.
+
+### Scope of Change
+
+- `derive_routed`: change the "single method only" early-return into an
+  iteration over methods.
+- `synth_to_direction` / `synth_from_direction`: probably merge into a
+  single `synth_routed` that iterates and dispatches per-method, OR keep
+  separate and call both in the iteration loop (preferred — less merge
+  conflict surface with Phase 3.1's work).
+- `build_from_body`: already parameterized by a `wrap` callback. Reuse
+  as-is per method.
+- Method-name and signature extraction from the TraitDef: should already
+  be available — Phase 3 already reads the trait's single method; the
+  generalization is "read all methods" instead of "read the first."
+
+Estimate: half a day.
+
+### Tests
+
+- A two-method to-direction trait (`trait ShowBoth { show; debug }`),
+  derived on a record. Both methods produce sensible output.
+- A two-method bidirectional codec (`trait JsonCodec { encode; decode }`),
+  derived on a record. Round-trip works.
+- A two-method from-direction trait, derived on an ADT.
+- A trait with a mixed method (`fun roundtrip : a -> a` — user type on
+  both sides) → diagnostic, no synthesis. Confirm the diagnostic names
+  the specific method.
+- All existing single-method tests still pass.
+
+### Phase 6 Outcomes (to be filled in after implementation)
+
+TBD.
+
 - **Piece 4 (error rewriting) deferred.** Constraint failures inside
   synthesized impls still produce default-shaped errors mentioning
   `Labeled`/`And`/etc. Low-cost win whenever someone wants to do it; a

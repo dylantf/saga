@@ -1,8 +1,7 @@
 # Phase 2e: deriving (Generic) for parameterized records and ADTs.
-# The generated Rep type carries the same type parameters as the user
-# type, and the synthesized impl is `impl Generic (T a) (Rep__T a)`. The
-# call-site coherence fallback substitutes the impl's tvar with the
-# call-site's concrete arg to materialize the Rep at use sites.
+# With Phase 5 framing, the library distinguishes record framing (Record)
+# from ADT framing (Adt), and record-field labels (Labeled) from sum
+# constructor names (Variant).
 
 record Box a { value: a }
   deriving (Generic)
@@ -49,13 +48,25 @@ impl ToJson for Or l r where {l: ToJson, r: ToJson} {
   }
 }
 
-# Bridges for the synthesized parameterized Rep types.
+impl ToJson for Variant a where {a: ToJson} {
+  to_json (Variant name payload) = "{\"" <> name <> "\": " <> to_json payload <> "}"
+}
+
+impl ToJson for Record a where {a: ToJson} {
+  to_json (Record _ inner) = "{" <> to_json inner <> "}"
+}
+
+impl ToJson for Adt a where {a: ToJson} {
+  to_json (Adt _ inner) = to_json inner
+}
+
+# Bridges for the synthesized parameterized Rep types — passthrough.
 impl ToJson for Rep__Box a where {a: ToJson} {
-  to_json (Rep__Box inner) = "{" <> to_json inner <> "}"
+  to_json (Rep__Box inner) = to_json inner
 }
 
 impl ToJson for Rep__Opt a where {a: ToJson} {
-  to_json (Rep__Opt inner) = "{" <> to_json inner <> "}"
+  to_json (Rep__Opt inner) = to_json inner
 }
 
 # Delegating impls. Phase 3 will synthesize these from `deriving (ToJson)`.
