@@ -396,6 +396,14 @@ This MUST land before Phase 2 starts.
   hid derive failures from test assertions. With the change, derive
   errors short-circuit the test before typechecking begins.
 
+- **Phase 2e prerequisite.** The call-site coherence fallback added in
+  2b uses `Type::Con(name, vec![])` when pinning the impl's stored
+  args (`ImplInfo.trait_type_args: Vec<String>`). For parameterized
+  Rep types like `Rep__Box a`, this representation is too narrow.
+  Before Phase 2e lands, either widen `ImplInfo.trait_type_args` to
+  carry full type info (preferred) or change the fallback to consult
+  the impl's scheme directly. Pick during Phase 2e kickoff.
+
 ---
 
 ### Phase 2: `Generic` Derive in the Compiler

@@ -1,0 +1,59 @@
+# Phase 2c: deriving (Generic) for ADTs.
+# A multi-variant type with mixed arities (nullary, one field, two fields)
+# routed through a hand-written ToJson library over the Generic building
+# blocks. Phase 3 will synthesize the bridge + delegating impls.
+
+type Shape =
+  | Circle Float
+  | Rect Float Float
+  | Triangle
+  deriving (Generic)
+
+# --- ToJson trait + impls for each building block (still hand-written) ---
+
+trait ToJson a {
+  fun to_json : a -> String
+}
+
+impl ToJson for U1 {
+  to_json _ = "null"
+}
+
+impl ToJson for Float {
+  to_json n = show n
+}
+
+impl ToJson for Leaf a where {a: ToJson} {
+  to_json (Leaf x) = to_json x
+}
+
+impl ToJson for Labeled a where {a: ToJson} {
+  to_json (Labeled name x) = "\"" <> name <> "\": " <> to_json x
+}
+
+impl ToJson for And l r where {l: ToJson, r: ToJson} {
+  to_json (And l r) = to_json l <> ", " <> to_json r
+}
+
+impl ToJson for Or l r where {l: ToJson, r: ToJson} {
+  to_json o = case o {
+    Or_Left l -> to_json l
+    Or_Right r -> to_json r
+  }
+}
+
+# Bridge for the synthesized Rep newtype — wraps the variant payload in {}.
+impl ToJson for Rep__Shape {
+  to_json (Rep__Shape inner) = "{" <> to_json inner <> "}"
+}
+
+# Delegating impl — Phase 3 will synthesize this from `deriving (ToJson)`.
+impl ToJson for Shape where {Generic Shape r, ToJson r} {
+  to_json s = to_json (to s : Rep__Shape)
+}
+
+main () = {
+  dbg (to_json (Circle 1.5))
+  dbg (to_json (Rect 2.0 3.0))
+  dbg (to_json Triangle)
+}

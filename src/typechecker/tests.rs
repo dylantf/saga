@@ -6419,3 +6419,118 @@ fn derive_generic_end_to_end_with_tojson() {
     )
     .unwrap();
 }
+
+// --- Phase 2c: deriving (Generic) for ADTs -------------------------------
+
+#[test]
+fn derive_generic_adt_enum_style() {
+    // All-nullary ADT — every variant wraps U1.
+    check(
+        "import Std.Generic (Generic, U1, Leaf, Labeled, And, Or)\n\
+         type Color = Red | Green | Blue\n  deriving (Generic)\n\
+         fun rt : Color -> Color\n\
+         rt c = from (to c : Rep__Color)",
+    )
+    .unwrap();
+}
+
+#[test]
+fn derive_generic_adt_single_variant() {
+    // Single-variant ADT — no Or wrapping at all.
+    check(
+        "import Std.Generic (Generic, U1, Leaf, Labeled, And, Or)\n\
+         type Wrapper = Wrap Int\n  deriving (Generic)\n\
+         fun rt : Wrapper -> Wrapper\n\
+         rt w = from (to w : Rep__Wrapper)",
+    )
+    .unwrap();
+}
+
+#[test]
+fn derive_generic_adt_maybe_like() {
+    // Mixed arity: one variant has a field, the other is nullary.
+    check(
+        "import Std.Generic (Generic, U1, Leaf, Labeled, And, Or)\n\
+         type IntOpt = Just Int | Nothing\n  deriving (Generic)\n\
+         fun rt : IntOpt -> IntOpt\n\
+         rt x = from (to x : Rep__IntOpt)",
+    )
+    .unwrap();
+}
+
+#[test]
+fn derive_generic_adt_three_variants_mixed() {
+    // 3-variant ADT exercising all three arities, including a multi-field
+    // variant (Rect Float Float -> And-tree).
+    check(
+        "import Std.Generic (Generic, U1, Leaf, Labeled, And, Or)\n\
+         type Shape = Circle Float | Rect Float Float | Triangle\n  deriving (Generic)\n\
+         fun rt : Shape -> Shape\n\
+         rt s = from (to s : Rep__Shape)",
+    )
+    .unwrap();
+}
+
+#[test]
+fn derive_generic_adt_three_multi_field_variants() {
+    // All variants multi-field: deepest And chain on every arm.
+    check(
+        "import Std.Generic (Generic, U1, Leaf, Labeled, And, Or)\n\
+         type Tri = A Int Int | B String String | C Int String\n  deriving (Generic)\n\
+         fun rt : Tri -> Tri\n\
+         rt t = from (to t : Rep__Tri)",
+    )
+    .unwrap();
+}
+
+#[test]
+fn derive_generic_adt_recursive_errors() {
+    // Direct self-reference should produce a clear diagnostic and no derive.
+    let result = check(
+        "import Std.Generic (Generic, U1, Leaf, Labeled, And, Or)\n\
+         type IntTree = TLeaf | TNode IntTree Int IntTree\n  deriving (Generic)",
+    );
+    assert!(result.is_err(), "expected recursive-type error");
+    let err = result.err().unwrap();
+    assert!(
+        err.message.contains("recursive"),
+        "expected recursive-type diagnostic, got: {}",
+        err.message
+    );
+}
+
+#[test]
+fn derive_generic_adt_parameterized_errors() {
+    // Type parameters on the ADT are deferred (Phase 2e).
+    let result = check(
+        "import Std.Generic (Generic, U1, Leaf, Labeled, And, Or)\n\
+         type Opt a = Some a | None\n  deriving (Generic)",
+    );
+    assert!(result.is_err(), "expected parameterized-type error");
+    let err = result.err().unwrap();
+    assert!(
+        err.message.contains("parameterized"),
+        "expected parameterized-type diagnostic, got: {}",
+        err.message
+    );
+}
+
+#[test]
+fn derive_generic_adt_end_to_end_with_tojson() {
+    // ADT analogue of the Phase 2b record smoke test: a hand-written ToJson
+    // over the building blocks routes through a derived Generic impl.
+    check(
+        "import Std.Generic (Generic, U1, Leaf, Labeled, And, Or)\n\
+         type Shape = Circle Float | Rect Float Float | Triangle\n  deriving (Generic)\n\
+         trait ToJson a { fun to_json : a -> String }\n\
+         impl ToJson for U1 { to_json _ = \"null\" }\n\
+         impl ToJson for Float { to_json n = show n }\n\
+         impl ToJson for Leaf a where {a: ToJson} {\n  to_json (Leaf x) = to_json x\n}\n\
+         impl ToJson for Labeled a where {a: ToJson} {\n  to_json (Labeled name x) = name <> \":\" <> to_json x\n}\n\
+         impl ToJson for And l r where {l: ToJson, r: ToJson} {\n  to_json (And l r) = to_json l <> \",\" <> to_json r\n}\n\
+         impl ToJson for Or l r where {l: ToJson, r: ToJson} {\n  to_json o = case o {\n  Or_Left l -> to_json l\n  Or_Right r -> to_json r\n}\n}\n\
+         impl ToJson for Rep__Shape {\n  to_json (Rep__Shape inner) = to_json inner\n}\n\
+         impl ToJson for Shape where {Generic Shape r, ToJson r} {\n  to_json s = to_json (to s : Rep__Shape)\n}",
+    )
+    .unwrap();
+}
