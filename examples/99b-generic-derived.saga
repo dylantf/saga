@@ -1,0 +1,59 @@
+# Phase 2b: the same scenario as 99-generic-spike.saga, but using
+# `deriving (Generic)` instead of hand-written impls. Output is
+# byte-identical to the original spike.
+
+record Person { name: String, age: Int, email: String }
+  deriving (Generic)
+
+# --- ToJson trait + impls for each building block (still hand-written) ---
+
+trait ToJson a {
+  fun to_json : a -> String
+}
+
+impl ToJson for U1 {
+  to_json _ = "null"
+}
+
+impl ToJson for String {
+  to_json s = "\"" <> s <> "\""
+}
+
+impl ToJson for Int {
+  to_json n = show n
+}
+
+impl ToJson for Leaf a where {a: ToJson} {
+  to_json (Leaf x) = to_json x
+}
+
+impl ToJson for Labeled a where {a: ToJson} {
+  to_json (Labeled name x) = "\"" <> name <> "\": " <> to_json x
+}
+
+impl ToJson for And l r where {l: ToJson, r: ToJson} {
+  to_json (And l r) = to_json l <> ", " <> to_json r
+}
+
+impl ToJson for Or l r where {l: ToJson, r: ToJson} {
+  to_json o = case o {
+    Or_Left l -> to_json l
+    Or_Right r -> to_json r
+  }
+}
+
+# Bridge for the synthesized Rep newtype. Phase 3 will eliminate the need
+# for this hand-written bridge — for now we wrap the inner And-tree in {}.
+impl ToJson for Rep__Person {
+  to_json (Rep__Person inner) = "{" <> to_json inner <> "}"
+}
+
+# Delegating impl — Phase 3 will synthesize this from `deriving (ToJson)`.
+impl ToJson for Person {
+  to_json p = to_json (to p : Rep__Person)
+}
+
+main () = {
+  let alice = Person { name: "Alice", age: 30, email: "alice@example.com" }
+  dbg (to_json alice)
+}

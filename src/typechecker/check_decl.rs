@@ -2355,7 +2355,7 @@ impl Checker {
                         let resolved_trait = self
                             .resolve_trait_name(&trait_name)
                             .unwrap_or_else(|| trait_name.clone());
-                        let impl_info = self
+                        let mut impl_info = self
                             .trait_state
                             .impls
                             .get(&(
@@ -2376,7 +2376,51 @@ impl Checker {
                                 } else {
                                     None
                                 }
-                            });
+                            })
+                            .cloned();
+
+                        // Functional-trait coherence fallback: if extras are
+                        // unresolved (and direct lookup missed), scan for the
+                        // unique impl with the matching self-type and pin the
+                        // extras to its stored args. The trait info table
+                        // marks Generic-like traits as functional.
+                        if impl_info.is_none()
+                            && resolved_trait_type_args.len() != trait_type_arg_types.len()
+                            && self
+                                .trait_state
+                                .traits
+                                .get(&resolved_trait)
+                                .map(|ti| ti.is_functional)
+                                .unwrap_or(false)
+                        {
+                            let bare =
+                                resolved_trait.rsplit('.').next().unwrap_or(&resolved_trait);
+                            let matches: Vec<(Vec<String>, super::ImplInfo)> = self
+                                .trait_state
+                                .impls
+                                .iter()
+                                .filter(|((tn, _, tt), _)| {
+                                    (tn == &resolved_trait || tn == bare) && tt == type_name
+                                })
+                                .map(|((_, args, _), info)| (args.clone(), info.clone()))
+                                .collect();
+                            if matches.len() == 1 {
+                                let (_, info) = &matches[0];
+                                let pinned: Vec<Type> = info
+                                    .trait_type_args
+                                    .iter()
+                                    .map(|n| Type::Con(n.clone(), vec![]))
+                                    .collect();
+                                for (var_ty, pinned_ty) in
+                                    trait_type_arg_types.iter().zip(pinned.iter())
+                                {
+                                    let _ = self.unify(var_ty, pinned_ty);
+                                }
+                                impl_info = Some(info.clone());
+                            }
+                        }
+
+                        let impl_info = impl_info.as_ref();
                         match impl_info {
                             None => {
                                 // Check if this might be caused by a user function

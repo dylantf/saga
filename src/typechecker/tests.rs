@@ -10,7 +10,10 @@ fn check(src: &str) -> Result<Checker, Diagnostic> {
     let tokens = lexer.lex().expect("lex error");
     let mut parser = Parser::new(tokens);
     let mut program = parser.parse_program().expect("parse error");
-    crate::derive::expand_derives(&mut program);
+    let derive_errors = crate::derive::expand_derives(&mut program);
+    if let Some(first) = derive_errors.into_iter().next() {
+        return Err(first);
+    }
     crate::desugar::desugar_program(&mut program);
     let mut checker = Checker::new();
     // Load prelude (which imports Std first, then stdlib modules)
@@ -6314,4 +6317,105 @@ fn function_with_row_claiming_unavailable_effect_still_rejected() {
         "expected effect declaration diagnostic, got: {}",
         err.message
     );
+}
+
+// --- Phase 2b: deriving (Generic) for records ----------------------------
+
+#[test]
+fn derive_generic_two_field_record_roundtrip() {
+    check(
+        "import Std.Generic (Generic, U1, Leaf, Labeled, And)\n\
+         record Person { name: String, age: Int }\n  deriving (Generic)\n\
+         fun rt : Person -> Person\n\
+         rt p = from (to p : Rep__Person)",
+    )
+    .unwrap();
+}
+
+#[test]
+fn derive_generic_single_field_record() {
+    // Single-field record: Rep is just `Labeled (Leaf T)`, no `And`.
+    check(
+        "import Std.Generic (Generic, U1, Leaf, Labeled, And)\n\
+         record Box { value: Int }\n  deriving (Generic)\n\
+         fun rt : Box -> Box\n\
+         rt b = from (to b : Rep__Box)",
+    )
+    .unwrap();
+}
+
+#[test]
+fn derive_generic_three_field_record() {
+    // Three fields produce a right-leaning And tree:
+    // And (Labeled (Leaf String)) (And (Labeled (Leaf Int)) (Labeled (Leaf String)))
+    check(
+        "import Std.Generic (Generic, U1, Leaf, Labeled, And)\n\
+         record Triple { a: String, b: Int, c: String }\n  deriving (Generic)\n\
+         fun rt : Triple -> Triple\n\
+         rt t = from (to t : Rep__Triple)",
+    )
+    .unwrap();
+}
+
+#[test]
+fn derive_generic_zero_field_record() {
+    // Empty record: Rep is U1.
+    check(
+        "import Std.Generic (Generic, U1, Leaf, Labeled, And)\n\
+         record Empty {}\n  deriving (Generic)\n\
+         fun rt : Empty -> Empty\n\
+         rt e = from (to e : Rep__Empty)",
+    )
+    .unwrap();
+}
+
+#[test]
+fn derive_generic_roundtrip_without_ascription() {
+    // The functional-trait coherence fallback in pending-constraint
+    // resolution should resolve `from (to p)` without an explicit
+    // ascription, because Generic Person <r> has a unique impl.
+    check(
+        "import Std.Generic (Generic, U1, Leaf, Labeled, And)\n\
+         record Person { name: String, age: Int }\n  deriving (Generic)\n\
+         fun rt : Person -> Person\n\
+         rt p = from (to p)",
+    )
+    .unwrap();
+}
+
+#[test]
+fn derive_generic_parameterized_record_errors() {
+    // Phase 2b explicitly defers parameterized records.
+    let result = check(
+        "import Std.Generic (Generic, U1, Leaf, Labeled, And)\n\
+         record Box a { value: a }\n  deriving (Generic)",
+    );
+    assert!(result.is_err(), "expected parameterized-record error");
+    let err = result.err().unwrap();
+    assert!(
+        err.message.contains("parameterized"),
+        "expected parameterized-record diagnostic, got: {}",
+        err.message
+    );
+}
+
+#[test]
+fn derive_generic_end_to_end_with_tojson() {
+    // The headline Phase 2b smoke test: a hand-written ToJson library
+    // built on the building blocks composes through a derived Generic
+    // impl. Same shape as examples/99b-generic-derived.saga.
+    check(
+        "import Std.Generic (Generic, U1, Leaf, Labeled, And, Or)\n\
+         record Person { name: String, age: Int }\n  deriving (Generic)\n\
+         trait ToJson a { fun to_json : a -> String }\n\
+         impl ToJson for U1 { to_json _ = \"null\" }\n\
+         impl ToJson for String { to_json s = s }\n\
+         impl ToJson for Int { to_json n = show n }\n\
+         impl ToJson for Leaf a where {a: ToJson} {\n  to_json (Leaf x) = to_json x\n}\n\
+         impl ToJson for Labeled a where {a: ToJson} {\n  to_json (Labeled name x) = name <> \":\" <> to_json x\n}\n\
+         impl ToJson for And l r where {l: ToJson, r: ToJson} {\n  to_json (And l r) = to_json l <> \",\" <> to_json r\n}\n\
+         impl ToJson for Rep__Person {\n  to_json (Rep__Person inner) = \"{\" <> to_json inner <> \"}\"\n}\n\
+         impl ToJson for Person where {Generic Person r, ToJson r} {\n  to_json p = to_json (to p : Rep__Person)\n}",
+    )
+    .unwrap();
 }

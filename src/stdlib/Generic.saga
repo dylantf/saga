@@ -1,0 +1,27 @@
+#@ Generic representation building blocks for user-extensible derives.
+#@ See docs/planning/user-extensible-derives.md.
+module Std.Generic
+
+#@ The unit shape — represents zero fields / a nullary constructor.
+pub type U1 = U1
+
+#@ A single field, holding a value of type `a`.
+pub type Leaf a = Leaf a
+
+#@ A named field: the runtime string is the field/constructor label.
+pub type Labeled a = Labeled String a
+
+#@ A product (two-or-more fields are right-leaning chains of And).
+pub type And l r = And l r
+
+#@ A sum (two-or-more variants are right-leaning chains of Or).
+pub type Or l r =
+  | Or_Left l
+  | Or_Right r
+
+#@ Isomorphism between a user type `a` and its structural representation `r`.
+#@ The first parameter functionally determines the second (coherence rule).
+pub trait Generic a r {
+  fun to : a -> r
+  fun from : r -> a
+}

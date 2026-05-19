@@ -345,6 +345,59 @@ This MUST land before Phase 2 starts.
 
 ---
 
+### Phase 2a / 2b Outcomes (carry-forward for Phases 2c/2d/2e and 3)
+
+- **`Std.Generic` IS auto-imported via the prelude.** The initial
+  concern was that Phase 1c tests defining `trait Generic a r` inline
+  would clash with an imported `Generic`. In practice the typechecker
+  treats the local trait def as a shadow (no duplicate-trait error
+  raised), so the Phase 1c tests pass unchanged. `deriving (Generic)`
+  works on user records with zero ceremony — no `import Std.Generic`
+  needed.
+
+- **Rep type naming is `Rep__<RecordName>`, NOT `__Rep_<RecordName>`.**
+  Names starting with `_` lex as lowercase `Ident`, which would break
+  user-written ascriptions like `(to p : Rep__Person)`. The leading
+  uppercase `R` makes the name an `UpperIdent` (type/constructor).
+  Update the Phase 3 routing layer to emit this name when generating
+  delegating impls.
+
+- **Functional-trait coherence now fires at call sites too.** Phase 1
+  added coherence resolution at *impl-registration time* for the
+  where-app form. Phase 2b extends it to `check_pending_constraints` in
+  `check_decl.rs`: when an unresolved trait extra has the right shape
+  (functional trait, concrete self, single matching impl), the extra
+  is pinned to the impl's stored args. This is what makes
+  `from (to value)` work without an ascription. The fallback is bounded
+  (single-match only — otherwise normal "no impl" diagnostic fires)
+  and contained to ~30 lines.
+
+- **Synthesized decls are now spliced after their parent decl, not
+  appended to the end of the program.** Earlier behavior appended all
+  derived impls/typedefs at the end, which broke registration order
+  for user-written where-app impls that referenced a derived `Generic`
+  (the where-app's coherence lookup fires at registration time, so the
+  derived impl must already exist). The new behavior preserves source
+  ordering and is more intuitive in general — but it does change the
+  decl order seen by downstream passes for *every* derive, not just
+  Generic. No existing tests broke from this change.
+
+- **Parameterized records are deferred.** `record Box a { value: a }
+  deriving (Generic)` emits a clear diagnostic ("deriving (Generic) for
+  parameterized records is not yet supported") and skips the derive.
+  See TODO marker in `derive_record_generic`.
+
+- **ADT Generic derive is deferred.** The ADT branch of
+  `generate_derive` does not handle `Generic`; it falls through to the
+  existing "cannot derive" path. Phase 2c picks this up.
+
+- **The `check()` test helper now surfaces derive diagnostics.**
+  Previously the return value of `expand_derives` was discarded, which
+  hid derive failures from test assertions. With the change, derive
+  errors short-circuit the test before typechecking begins.
+
+---
+
 ### Phase 2: `Generic` Derive in the Compiler
 
 **Goal**: Implement `deriving (Generic)` end-to-end for records and ADTs.

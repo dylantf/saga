@@ -11,9 +11,16 @@ use crate::typechecker::{Diagnostic, Severity};
 /// nodes after each `TypeDef` that has them. Returns diagnostics for
 /// unsupported derive requests.
 pub fn expand_derives(program: &mut Vec<Decl>) -> Vec<Diagnostic> {
-    let mut extra = Vec::new();
     let mut errors = Vec::new();
-    for decl in program.iter() {
+    // Build a fresh program, splicing each decl's derived siblings in directly
+    // after it. Generic-derived `Rep__T` typedefs and their impls must be
+    // visible before any later user impl whose where-app form mentions
+    // `Generic T r`, otherwise the where-app's coherence lookup fires before
+    // the impl is registered.
+    let original = std::mem::take(program);
+    let mut rebuilt: Vec<Decl> = Vec::with_capacity(original.len());
+    for decl in &original {
+        let mut extra: Vec<Decl> = Vec::new();
         match decl {
             Decl::TypeDef {
                 name,
@@ -56,8 +63,9 @@ pub fn expand_derives(program: &mut Vec<Decl>) -> Vec<Diagnostic> {
             } => {
                 for trait_name in deriving {
                     match generate_record_derive(trait_name, name, type_params, fields, *span) {
-                        Some(impl_def) => extra.push(impl_def),
-                        None => errors.push(Diagnostic {
+                        Ok(decls) => extra.extend(decls),
+                        Err(Some(diag)) => errors.push(diag),
+                        Err(None) => errors.push(Diagnostic {
                             severity: Severity::Error,
                             message: format!("cannot derive `{trait_name}` for record `{name}`"),
                             span: Some(*span),
@@ -67,31 +75,337 @@ pub fn expand_derives(program: &mut Vec<Decl>) -> Vec<Diagnostic> {
             }
             _ => {}
         }
+        rebuilt.push(decl.clone());
+        rebuilt.extend(extra);
     }
-    program.extend(extra);
+    *program = rebuilt;
     errors
 }
 
+/// Returns the decls to splice into the program, or:
+///   - `Err(None)` for "unsupported trait, use the default cannot-derive error"
+///   - `Err(Some(diag))` for a specific diagnostic
 fn generate_record_derive(
     trait_name: &str,
     record_name: &str,
     type_params: &[String],
     fields: &[Annotated<(String, TypeExpr)>],
     span: Span,
-) -> Option<Decl> {
+) -> Result<Vec<Decl>, Option<Diagnostic>> {
     let bare = trait_name.rsplit('.').next().unwrap_or(trait_name);
     match bare {
-        "Show" | "Debug" => Some(derive_record_stringify(
+        "Show" | "Debug" => Ok(vec![derive_record_stringify(
             bare,
             if bare == "Show" { "show" } else { "debug" },
             record_name,
             type_params,
             fields,
             span,
-        )),
-        "Eq" => Some(derive_marker_trait("Eq", record_name, type_params, span)),
-        _ => None,
+        )]),
+        "Eq" => Ok(vec![derive_marker_trait(
+            "Eq",
+            record_name,
+            type_params,
+            span,
+        )]),
+        "Generic" => derive_record_generic(record_name, type_params, fields, span),
+        _ => Err(None),
     }
+}
+
+/// Build `type __Rep_R = __Rep_R <inner-rep>` + `impl Generic __Rep_R for R { to, from }`.
+/// Only handles records with no type parameters (Phase 2b scope).
+/// TODO(Phase 2e): handle parameterized records.
+fn derive_record_generic(
+    record_name: &str,
+    type_params: &[String],
+    fields: &[Annotated<(String, TypeExpr)>],
+    span: Span,
+) -> Result<Vec<Decl>, Option<Diagnostic>> {
+    if !type_params.is_empty() {
+        return Err(Some(Diagnostic {
+            severity: Severity::Error,
+            message:
+                "deriving (Generic) for parameterized records is not yet supported"
+                    .to_string(),
+            span: Some(span),
+        }));
+    }
+
+    // Naming: use a leading uppercase letter so the lexer classifies the
+    // name as an UpperIdent (type/constructor). The planning doc proposed
+    // `__Rep_<R>` but a leading `_` lexes as lowercase, which would break
+    // user-written ascriptions like `(to p : __Rep_Person)`.
+    let rep_name = format!("Rep__{record_name}");
+    let plain_fields: Vec<(String, TypeExpr)> = fields.iter().map(|a| a.node.clone()).collect();
+
+    // 1. Synthetic TypeDef: `type __Rep_R = __Rep_R <inner>`
+    let inner_type = build_rep_type_inner(&plain_fields);
+    let ctor_field_type = inner_type.clone();
+    let rep_typedef = Decl::TypeDef {
+        id: NodeId::fresh(),
+        doc: vec![],
+        public: false,
+        opaque: false,
+        name: rep_name.clone(),
+        name_span: Span { start: 0, end: 0 },
+        type_params: vec![],
+        variants: vec![Annotated::bare(TypeConstructor {
+            id: NodeId::fresh(),
+            name: rep_name.clone(),
+            fields: vec![(None, ctor_field_type)],
+            span,
+        })],
+        deriving: vec![],
+        multiline: false,
+        span,
+    };
+
+    // 2. `to p = __Rep_R (And (Labeled "name" (Leaf p.name)) ...)`
+    let param_name = "__val".to_string();
+    let param_var = Expr::synth(
+        span,
+        ExprKind::Var {
+            name: param_name.clone(),
+        },
+    );
+    let inner_expr = build_rep_to_expr(&plain_fields, &param_var, span);
+    let to_body = apply_ctor(&rep_name, inner_expr, span);
+    let to_method = Annotated::bare(ImplMethod {
+        name: "to".into(),
+        name_span: Span { start: 0, end: 0 },
+        params: vec![Pat::Var {
+            id: NodeId::fresh(),
+            name: param_name,
+            span,
+        }],
+        body: to_body,
+    });
+
+    // 3. `from (__Rep_R (And (Labeled _ (Leaf n)) ...)) = R { name: n, ... }`
+    let field_var_names: Vec<String> = (0..plain_fields.len())
+        .map(|i| format!("__f{i}"))
+        .collect();
+    let inner_pat = build_rep_from_pattern(&field_var_names, span);
+    let from_param = Pat::Constructor {
+        id: NodeId::fresh(),
+        name: rep_name.clone(),
+        args: vec![inner_pat],
+        span,
+    };
+    let record_fields: Vec<(String, Span, Expr)> = plain_fields
+        .iter()
+        .zip(field_var_names.iter())
+        .map(|((fname, _), vname)| {
+            (
+                fname.clone(),
+                Span { start: 0, end: 0 },
+                Expr::synth(span, ExprKind::Var { name: vname.clone() }),
+            )
+        })
+        .collect();
+    let from_body = if plain_fields.is_empty() {
+        // Zero-field record: just construct the record with no fields.
+        Expr::synth(
+            span,
+            ExprKind::RecordCreate {
+                name: record_name.into(),
+                fields: vec![],
+            },
+        )
+    } else {
+        Expr::synth(
+            span,
+            ExprKind::RecordCreate {
+                name: record_name.into(),
+                fields: record_fields,
+            },
+        )
+    };
+    let from_method = Annotated::bare(ImplMethod {
+        name: "from".into(),
+        name_span: Span { start: 0, end: 0 },
+        params: vec![from_param],
+        body: from_body,
+    });
+
+    let impl_def = Decl::ImplDef {
+        trait_name_span: Span { start: 0, end: 0 },
+        target_type_span: Span { start: 0, end: 0 },
+        id: NodeId::fresh(),
+        doc: vec![],
+        trait_name: "Generic".into(),
+        trait_type_args: vec![TypeExpr::Named {
+            id: NodeId::fresh(),
+            name: rep_name.clone(),
+            span: Span { start: 0, end: 0 },
+        }],
+        target_type: record_name.into(),
+        type_params: vec![],
+        where_clause: vec![],
+        where_apps: vec![],
+        needs: vec![],
+        methods: vec![to_method, from_method],
+        span,
+        dangling_trivia: vec![],
+    };
+
+    Ok(vec![rep_typedef, impl_def])
+}
+
+fn type_named(name: &str) -> TypeExpr {
+    TypeExpr::Named {
+        id: NodeId::fresh(),
+        name: name.into(),
+        span: Span { start: 0, end: 0 },
+    }
+}
+
+fn type_app(func: TypeExpr, arg: TypeExpr) -> TypeExpr {
+    TypeExpr::App {
+        id: NodeId::fresh(),
+        func: Box::new(func),
+        arg: Box::new(arg),
+        span: Span { start: 0, end: 0 },
+    }
+}
+
+/// Build the inner Rep type (without the outer newtype wrapping). Right-leaning
+/// And chain for >=2 fields; Labeled (Leaf T) for 1 field; U1 for 0.
+fn build_rep_type_inner(fields: &[(String, TypeExpr)]) -> TypeExpr {
+    if fields.is_empty() {
+        return type_named("U1");
+    }
+    let mut iter = fields.iter().rev();
+    let (_, last_ty) = iter.next().unwrap();
+    let mut acc = field_rep_type(last_ty);
+    for (_, ty) in iter {
+        acc = type_app(type_app(type_named("And"), field_rep_type(ty)), acc);
+    }
+    acc
+}
+
+fn field_rep_type(ty: &TypeExpr) -> TypeExpr {
+    type_app(type_named("Labeled"), type_app(type_named("Leaf"), ty.clone()))
+}
+
+fn apply_ctor(name: &str, arg: Expr, span: Span) -> Expr {
+    Expr::synth(
+        span,
+        ExprKind::App {
+            func: Box::new(Expr::synth(
+                span,
+                ExprKind::Constructor { name: name.into() },
+            )),
+            arg: Box::new(arg),
+        },
+    )
+}
+
+fn apply2(func: &str, a: Expr, b: Expr, span: Span) -> Expr {
+    Expr::synth(
+        span,
+        ExprKind::App {
+            func: Box::new(Expr::synth(
+                span,
+                ExprKind::App {
+                    func: Box::new(Expr::synth(
+                        span,
+                        ExprKind::Constructor { name: func.into() },
+                    )),
+                    arg: Box::new(a),
+                },
+            )),
+            arg: Box::new(b),
+        },
+    )
+}
+
+fn string_lit(s: &str, span: Span) -> Expr {
+    Expr::synth(
+        span,
+        ExprKind::Lit {
+            value: Lit::String(s.into(), StringKind::Normal),
+        },
+    )
+}
+
+/// Build the `to` body's inner expression (everything inside the __Rep_R newtype wrap).
+fn build_rep_to_expr(fields: &[(String, TypeExpr)], record_var: &Expr, span: Span) -> Expr {
+    if fields.is_empty() {
+        return Expr::synth(span, ExprKind::Constructor { name: "U1".into() });
+    }
+    let labeled_for = |fname: &str| -> Expr {
+        // Labeled "fname" (Leaf record_var.fname)
+        let field_access = Expr::synth(
+            span,
+            ExprKind::FieldAccess {
+                expr: Box::new(record_var.clone()),
+                field: fname.into(),
+                record_name: None,
+            },
+        );
+        let leaf = apply_ctor("Leaf", field_access, span);
+        apply2("Labeled", string_lit(fname, span), leaf, span)
+    };
+
+    let mut iter = fields.iter().rev();
+    let (last_name, _) = iter.next().unwrap();
+    let mut acc = labeled_for(last_name);
+    for (fname, _) in iter {
+        acc = apply2("And", labeled_for(fname), acc, span);
+    }
+    acc
+}
+
+/// Build the inner pattern matched by `from`: matches the And/Labeled/Leaf tree
+/// and binds each field's value to the corresponding variable in `field_vars`.
+fn build_rep_from_pattern(field_vars: &[String], span: Span) -> Pat {
+    if field_vars.is_empty() {
+        return Pat::Constructor {
+            id: NodeId::fresh(),
+            name: "U1".into(),
+            args: vec![],
+            span,
+        };
+    }
+    let labeled_pat = |var: &str| -> Pat {
+        // Labeled _ (Leaf var)
+        Pat::Constructor {
+            id: NodeId::fresh(),
+            name: "Labeled".into(),
+            args: vec![
+                Pat::Wildcard {
+                    id: NodeId::fresh(),
+                    span,
+                },
+                Pat::Constructor {
+                    id: NodeId::fresh(),
+                    name: "Leaf".into(),
+                    args: vec![Pat::Var {
+                        id: NodeId::fresh(),
+                        name: var.into(),
+                        span,
+                    }],
+                    span,
+                },
+            ],
+            span,
+        }
+    };
+
+    let mut iter = field_vars.iter().rev();
+    let last = iter.next().unwrap();
+    let mut acc = labeled_pat(last);
+    for v in iter {
+        acc = Pat::Constructor {
+            id: NodeId::fresh(),
+            name: "And".into(),
+            args: vec![labeled_pat(v), acc],
+            span,
+        };
+    }
+    acc
 }
 
 /// Generate `impl Show/Debug for R { show/debug r = "R { field: " <> show/debug r.field <> ... <> "}" }`
