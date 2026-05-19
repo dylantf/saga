@@ -220,29 +220,11 @@ fn derive_routed(
         span: Some(span),
     })?;
 
-    if trait_info.methods.len() != 1 {
+    if trait_info.methods.is_empty() {
         return Err(Diagnostic {
             severity: Severity::Error,
             message: format!(
-                "cannot derive `{}` for `{}`: deriving for traits with multiple methods is not yet supported (trait `{}` has {} methods)",
-                bare,
-                type_name,
-                bare,
-                trait_info.methods.len()
-            ),
-            span: Some(span),
-        });
-    }
-    let method = &trait_info.methods[0];
-    if method.params.len() != 1 {
-        return Err(Diagnostic {
-            severity: Severity::Error,
-            message: format!(
-                "cannot derive `{}` for `{}`: only single-parameter methods can be routed (method `{}` has {} parameters)",
-                bare,
-                type_name,
-                method.name,
-                method.params.len()
+                "cannot derive `{bare}` for `{type_name}`: trait `{bare}` has no methods to route"
             ),
             span: Some(span),
         });
@@ -252,46 +234,25 @@ fn derive_routed(
         .first()
         .cloned()
         .unwrap_or_default();
-    let param_has_self = type_expr_contains_var(&method.params[0].1, &self_var);
-    let return_has_self = type_expr_contains_var(&method.return_type, &self_var);
 
-    if !param_has_self && return_has_self {
-        // From-direction: synthesize bridge + delegating impls whose method
-        // body threads the building-block result back through Generic's
-        // `from`. Supported return shapes: bare `a`, `Result a _`, `Maybe a`.
-        let Some(wrapper) = classify_from_return(&method.return_type, &self_var) else {
-            return Err(Diagnostic {
-                severity: Severity::Error,
-                message: format!(
-                    "cannot determine return-type shape for from-direction derive of `{}`; \
-                     expected `a`, `Result a _`, or `Maybe a`",
-                    bare
-                ),
-                span: Some(span),
-            });
-        };
-        return Ok(synth_from_direction(
-            bare,
-            type_name,
-            type_params,
-            method.name.clone(),
-            wrapper,
-            span,
-        ));
-    }
-    if !param_has_self {
-        return Err(Diagnostic {
-            severity: Severity::Error,
-            message: format!(
-                "cannot derive `{}` for `{}`: method `{}` does not consume a value of the self type",
-                bare, type_name, method.name
-            ),
-            span: Some(span),
-        });
+    // Classify each method's direction up-front so any bad method kills the
+    // whole derive before we synthesize anything partial.
+    let mut classified: Vec<(TraitMethod, MethodDirection)> =
+        Vec::with_capacity(trait_info.methods.len());
+    for method in &trait_info.methods {
+        match classify_method_direction(method, &self_var) {
+            Ok(dir) => classified.push((method.clone(), dir)),
+            Err(reason) => {
+                return Err(Diagnostic {
+                    severity: Severity::Error,
+                    message: format!("cannot derive `{bare}` for `{type_name}`: {reason}"),
+                    span: Some(span),
+                });
+            }
+        }
     }
 
     let rep_name = format!("Rep__{type_name}");
-    let method_name = method.name.clone();
     let zero_span = Span { start: 0, end: 0 };
 
     // Per-tparam old-form bounds: `where {a: <Trait>, ...}`. Required so the
@@ -311,35 +272,19 @@ fn derive_routed(
         })
         .collect();
 
-    // --- Bridge impl: impl <Trait> for Rep__T { methodname (Rep__T inner) = methodname inner }
-    let inner_var = "__inner".to_string();
-    let bridge_body = Expr::synth(
-        span,
-        ExprKind::App {
-            func: Box::new(Expr::synth(
-                span,
-                ExprKind::Var {
-                    name: method_name.clone(),
-                },
-            )),
-            arg: Box::new(Expr::synth(
-                span,
-                ExprKind::Var {
-                    name: inner_var.clone(),
-                },
-            )),
-        },
-    );
-    let bridge_param = Pat::Constructor {
-        id: NodeId::fresh(),
-        name: rep_name.clone(),
-        args: vec![Pat::Var {
-            id: NodeId::fresh(),
-            name: inner_var,
-            span,
-        }],
-        span,
-    };
+    // Per-method bodies for the bridge impl (target = Rep__T). Each method is
+    // synthesized independently; a single impl carries one ImplMethod entry
+    // per trait method.
+    let mut bridge_methods: Vec<Annotated<ImplMethod>> =
+        Vec::with_capacity(classified.len());
+    let mut delegating_methods: Vec<Annotated<ImplMethod>> =
+        Vec::with_capacity(classified.len());
+    for (method, dir) in &classified {
+        let (bridge_m, deleg_m) = synth_method_pair(method, *dir, &rep_name, span);
+        bridge_methods.push(Annotated::bare(bridge_m));
+        delegating_methods.push(Annotated::bare(deleg_m));
+    }
+
     let bridge_impl = Decl::ImplDef {
         id: NodeId::fresh(),
         doc: vec![],
@@ -352,43 +297,11 @@ fn derive_routed(
         where_clause: per_tparam_where.clone(),
         where_apps: vec![],
         needs: vec![],
-        methods: vec![Annotated::bare(ImplMethod {
-            name: method_name.clone(),
-            name_span: zero_span,
-            params: vec![bridge_param],
-            body: bridge_body,
-        })],
+        methods: bridge_methods,
         span,
         dangling_trivia: vec![],
     };
 
-    // --- Delegating impl: impl <Trait> for T where {Generic T r, <Trait> r}
-    //     { methodname __val = methodname (to __val) }
-    let val_var = "__val".to_string();
-    let to_call = Expr::synth(
-        span,
-        ExprKind::App {
-            func: Box::new(Expr::synth(span, ExprKind::Var { name: "to".into() })),
-            arg: Box::new(Expr::synth(
-                span,
-                ExprKind::Var {
-                    name: val_var.clone(),
-                },
-            )),
-        },
-    );
-    let delegating_body = Expr::synth(
-        span,
-        ExprKind::App {
-            func: Box::new(Expr::synth(
-                span,
-                ExprKind::Var {
-                    name: method_name.clone(),
-                },
-            )),
-            arg: Box::new(to_call),
-        },
-    );
     let fresh_r = "__r".to_string();
     let target_applied = apply_type_params(type_name, type_params);
     let where_apps = vec![
@@ -428,21 +341,183 @@ fn derive_routed(
         where_clause: per_tparam_where,
         where_apps,
         needs: vec![],
-        methods: vec![Annotated::bare(ImplMethod {
-            name: method_name,
-            name_span: zero_span,
-            params: vec![Pat::Var {
-                id: NodeId::fresh(),
-                name: val_var,
-                span,
-            }],
-            body: delegating_body,
-        })],
+        methods: delegating_methods,
         span,
         dangling_trivia: vec![],
     };
 
     Ok(vec![bridge_impl, delegating_impl])
+}
+
+/// Direction of a single routed-derive method. `From` carries the wrapper
+/// shape (bare `a`, `Result a _`, or `Maybe a`).
+#[derive(Clone, Copy)]
+enum MethodDirection {
+    To,
+    From(FromWrapper),
+}
+
+/// Validate a method's shape for routed deriving and decide which direction it
+/// runs. Returns a human-readable reason on failure for use in the surrounding
+/// diagnostic.
+fn classify_method_direction(method: &TraitMethod, self_var: &str) -> Result<MethodDirection, String> {
+    if method.params.len() != 1 {
+        return Err(format!(
+            "only single-parameter methods can be routed (method `{}` has {} parameters)",
+            method.name,
+            method.params.len()
+        ));
+    }
+    let param_has_self = type_expr_contains_var(&method.params[0].1, self_var);
+    let return_has_self = type_expr_contains_var(&method.return_type, self_var);
+    match (param_has_self, return_has_self) {
+        (true, false) => Ok(MethodDirection::To),
+        (false, true) => match classify_from_return(&method.return_type, self_var) {
+            Some(w) => Ok(MethodDirection::From(w)),
+            None => Err(format!(
+                "method `{}` has an unsupported return-type shape for from-direction routing; \
+                 expected `a`, `Result a _`, or `Maybe a`",
+                method.name
+            )),
+        },
+        (true, true) => Err(format!(
+            "method `{}` has the self type on both sides; \
+             routed deriving cannot infer a direction (consider splitting the trait)",
+            method.name
+        )),
+        (false, false) => Err(format!(
+            "method `{}` does not consume or produce a value of the self type",
+            method.name
+        )),
+    }
+}
+
+/// Build the bridge-impl ImplMethod and delegating-impl ImplMethod for a
+/// single trait method.
+fn synth_method_pair(
+    method: &TraitMethod,
+    dir: MethodDirection,
+    rep_name: &str,
+    span: Span,
+) -> (ImplMethod, ImplMethod) {
+    let zero_span = Span { start: 0, end: 0 };
+    let method_name = method.name.clone();
+    match dir {
+        MethodDirection::To => {
+            // Bridge:    method (Rep__T inner) = method inner
+            // Delegate:  method __val          = method (to __val)
+            let inner_var = "__inner".to_string();
+            let bridge_body = Expr::synth(
+                span,
+                ExprKind::App {
+                    func: Box::new(Expr::synth(
+                        span,
+                        ExprKind::Var {
+                            name: method_name.clone(),
+                        },
+                    )),
+                    arg: Box::new(Expr::synth(
+                        span,
+                        ExprKind::Var {
+                            name: inner_var.clone(),
+                        },
+                    )),
+                },
+            );
+            let bridge_param = Pat::Constructor {
+                id: NodeId::fresh(),
+                name: rep_name.to_string(),
+                args: vec![Pat::Var {
+                    id: NodeId::fresh(),
+                    name: inner_var,
+                    span,
+                }],
+                span,
+            };
+            let bridge = ImplMethod {
+                name: method_name.clone(),
+                name_span: zero_span,
+                params: vec![bridge_param],
+                body: bridge_body,
+            };
+
+            let val_var = "__val".to_string();
+            let to_call = Expr::synth(
+                span,
+                ExprKind::App {
+                    func: Box::new(Expr::synth(span, ExprKind::Var { name: "to".into() })),
+                    arg: Box::new(Expr::synth(
+                        span,
+                        ExprKind::Var {
+                            name: val_var.clone(),
+                        },
+                    )),
+                },
+            );
+            let deleg_body = Expr::synth(
+                span,
+                ExprKind::App {
+                    func: Box::new(Expr::synth(
+                        span,
+                        ExprKind::Var {
+                            name: method_name.clone(),
+                        },
+                    )),
+                    arg: Box::new(to_call),
+                },
+            );
+            let deleg = ImplMethod {
+                name: method_name,
+                name_span: zero_span,
+                params: vec![Pat::Var {
+                    id: NodeId::fresh(),
+                    name: val_var,
+                    span,
+                }],
+                body: deleg_body,
+            };
+            (bridge, deleg)
+        }
+        MethodDirection::From(wrapper) => {
+            let input_var = "__input".to_string();
+            let rep_name_owned = rep_name.to_string();
+            let bridge_wrap = |inner: Expr, s: Span| apply_ctor(&rep_name_owned, inner, s);
+            let bridge_body =
+                build_from_body(&method_name, &input_var, &bridge_wrap, wrapper, span);
+            let bridge = ImplMethod {
+                name: method_name.clone(),
+                name_span: zero_span,
+                params: vec![Pat::Var {
+                    id: NodeId::fresh(),
+                    name: input_var.clone(),
+                    span,
+                }],
+                body: bridge_body,
+            };
+
+            let deleg_wrap = |inner: Expr, s: Span| {
+                Expr::synth(
+                    s,
+                    ExprKind::App {
+                        func: Box::new(Expr::synth(s, ExprKind::Var { name: "from".into() })),
+                        arg: Box::new(inner),
+                    },
+                )
+            };
+            let deleg_body = build_from_body(&method_name, &input_var, &deleg_wrap, wrapper, span);
+            let deleg = ImplMethod {
+                name: method_name,
+                name_span: zero_span,
+                params: vec![Pat::Var {
+                    id: NodeId::fresh(),
+                    name: input_var,
+                    span,
+                }],
+                body: deleg_body,
+            };
+            (bridge, deleg)
+        }
+    }
 }
 
 /// Wrapper shape detected on a from-direction trait method's return type.
@@ -493,133 +568,6 @@ fn classify_from_return(te: &TypeExpr, self_var: &str) -> Option<FromWrapper> {
         }
         _ => None,
     }
-}
-
-/// Synthesize the bridge + delegating impls for a from-direction routed
-/// derive. Mirrors `derive_routed`'s to-direction tail but threads the result
-/// in the inverse direction (and through the chosen wrapper).
-fn synth_from_direction(
-    bare: &str,
-    type_name: &str,
-    type_params: &[String],
-    method_name: String,
-    wrapper: FromWrapper,
-    span: Span,
-) -> Vec<Decl> {
-    let rep_name = format!("Rep__{type_name}");
-    let zero_span = Span { start: 0, end: 0 };
-    let input_var = "__input".to_string();
-
-    let per_tparam_where: Vec<TraitBound> = type_params
-        .iter()
-        .map(|tp| TraitBound {
-            type_var: tp.clone(),
-            traits: vec![TraitRef {
-                id: NodeId::fresh(),
-                name: bare.into(),
-                type_args: vec![],
-                span: zero_span,
-            }],
-        })
-        .collect();
-
-    // --- Bridge impl: impl <Trait> for Rep__T
-    //     method s = <wrap inner with Rep__T ctor>
-    let bridge_wrap = |inner: Expr, s: Span| apply_ctor(&rep_name, inner, s);
-    let bridge_body = build_from_body(&method_name, &input_var, &bridge_wrap, wrapper, span);
-    let bridge_impl = Decl::ImplDef {
-        id: NodeId::fresh(),
-        doc: vec![],
-        trait_name: bare.into(),
-        trait_name_span: zero_span,
-        trait_type_args: vec![],
-        target_type: rep_name.clone(),
-        target_type_span: zero_span,
-        type_params: type_params.to_vec(),
-        where_clause: per_tparam_where.clone(),
-        where_apps: vec![],
-        needs: vec![],
-        methods: vec![Annotated::bare(ImplMethod {
-            name: method_name.clone(),
-            name_span: zero_span,
-            params: vec![Pat::Var {
-                id: NodeId::fresh(),
-                name: input_var.clone(),
-                span,
-            }],
-            body: bridge_body,
-        })],
-        span,
-        dangling_trivia: vec![],
-    };
-
-    // --- Delegating impl: impl <Trait> for T where {Generic T r, <Trait> r}
-    //     method s = <wrap rep with `from`>
-    let deleg_wrap = |inner: Expr, s: Span| {
-        Expr::synth(
-            s,
-            ExprKind::App {
-                func: Box::new(Expr::synth(s, ExprKind::Var { name: "from".into() })),
-                arg: Box::new(inner),
-            },
-        )
-    };
-    let delegating_body = build_from_body(&method_name, &input_var, &deleg_wrap, wrapper, span);
-
-    let fresh_r = "__r".to_string();
-    let target_applied = apply_type_params(type_name, type_params);
-    let where_apps = vec![
-        TraitApp {
-            id: NodeId::fresh(),
-            trait_name: "Generic".into(),
-            type_args: vec![
-                target_applied,
-                TypeExpr::Var {
-                    id: NodeId::fresh(),
-                    name: fresh_r.clone(),
-                    span: zero_span,
-                },
-            ],
-            span: zero_span,
-        },
-        TraitApp {
-            id: NodeId::fresh(),
-            trait_name: bare.into(),
-            type_args: vec![TypeExpr::Var {
-                id: NodeId::fresh(),
-                name: fresh_r,
-                span: zero_span,
-            }],
-            span: zero_span,
-        },
-    ];
-    let delegating_impl = Decl::ImplDef {
-        id: NodeId::fresh(),
-        doc: vec![],
-        trait_name: bare.into(),
-        trait_name_span: zero_span,
-        trait_type_args: vec![],
-        target_type: type_name.into(),
-        target_type_span: zero_span,
-        type_params: type_params.to_vec(),
-        where_clause: per_tparam_where,
-        where_apps,
-        needs: vec![],
-        methods: vec![Annotated::bare(ImplMethod {
-            name: method_name,
-            name_span: zero_span,
-            params: vec![Pat::Var {
-                id: NodeId::fresh(),
-                name: input_var,
-                span,
-            }],
-            body: delegating_body,
-        })],
-        span,
-        dangling_trivia: vec![],
-    };
-
-    vec![bridge_impl, delegating_impl]
 }
 
 /// Build the body of a from-direction method, given a `wrap` function that

@@ -6865,18 +6865,8 @@ fn phase3_routed_derive_to_and_from_roundtrip() {
     check(&src).unwrap();
 }
 
-#[test]
-fn phase3_routed_derive_multi_method_diagnostic() {
-    let src = "import Std.Generic (Generic, U1, Leaf, Labeled, And, Or)\n\
-               trait Codec a { fun to_str : a -> String\n  fun other : a -> Int }\n\
-               record Person { name: String, age: Int }\n  deriving (Codec)\n";
-    let err = check(src).err().expect("expected error");
-    assert!(
-        err.message.contains("multiple methods"),
-        "expected multi-method diagnostic; got: {}",
-        err.message
-    );
-}
+// Multi-method routed deriving is supported as of Phase 6 — see
+// `phase6_routed_derive_multi_method_to_direction` and friends below.
 
 #[test]
 fn phase3_routed_derive_unknown_trait_diagnostic() {
@@ -6904,6 +6894,115 @@ fn phase3_routed_derive_missing_field_instance_errors() {
         lib = phase3_tojson_lib()
     );
     let _err = check(&src).err().expect("expected error");
+}
+
+// --- Phase 6: multi-method routed deriving -------------------------------
+
+/// Building-block ShowBoth library — two to-direction methods (`show` /
+/// `debug_repr`) sharing the same trait. The implementations are stubbed but
+/// distinct so we can confirm direction detection runs per method.
+fn phase6_showboth_lib() -> &'static str {
+    "trait ShowBoth a {\n  fun show_b : a -> String\n  fun debug_b : a -> String\n}\n\
+     impl ShowBoth for U1 { show_b _ = \"u1\"\n  debug_b _ = \"U1\" }\n\
+     impl ShowBoth for Int { show_b n = show n\n  debug_b n = show n }\n\
+     impl ShowBoth for String { show_b s = s\n  debug_b s = s }\n\
+     impl ShowBoth for Leaf a where {a: ShowBoth} {\n  show_b (Leaf x) = show_b x\n  debug_b (Leaf x) = debug_b x\n}\n\
+     impl ShowBoth for Labeled a where {a: ShowBoth} {\n  show_b (Labeled n x) = n <> \":\" <> show_b x\n  debug_b (Labeled n x) = n <> \"=\" <> debug_b x\n}\n\
+     impl ShowBoth for And l r where {l: ShowBoth, r: ShowBoth} {\n  show_b (And l r) = show_b l <> \",\" <> show_b r\n  debug_b (And l r) = debug_b l <> \" & \" <> debug_b r\n}\n\
+     impl ShowBoth for Or l r where {l: ShowBoth, r: ShowBoth} {\n  show_b o = case o { Or_Left l -> show_b l; Or_Right r -> show_b r }\n  debug_b o = case o { Or_Left l -> debug_b l; Or_Right r -> debug_b r }\n}\n\
+     impl ShowBoth for Variant a where {a: ShowBoth} {\n  show_b (Variant n x) = n <> \":\" <> show_b x\n  debug_b (Variant n x) = n <> \"=\" <> debug_b x\n}\n\
+     impl ShowBoth for Record a where {a: ShowBoth} {\n  show_b (Record _ inner) = show_b inner\n  debug_b (Record _ inner) = debug_b inner\n}\n\
+     impl ShowBoth for Adt a where {a: ShowBoth} {\n  show_b (Adt _ inner) = show_b inner\n  debug_b (Adt _ inner) = debug_b inner\n}\n"
+}
+
+#[test]
+fn phase6_routed_derive_multi_method_to_direction() {
+    let src = format!(
+        "{lib}\
+         record Person {{ name: String, age: Int }}\n  deriving (ShowBoth)\n\
+         fun go : Person -> String\n\
+         go p = show_b p <> \"|\" <> debug_b p",
+        lib = phase6_showboth_lib()
+    );
+    check(&src).unwrap();
+}
+
+/// Two from-direction methods sharing a trait, derived on an ADT.
+fn phase6_from_pair_lib() -> &'static str {
+    "trait FromPair a {\n  fun from_str : String -> Result a String\n  fun from_int : Int -> Result a String\n}\n\
+     impl FromPair for U1 { from_str _ = Ok U1\n  from_int _ = Ok U1 }\n\
+     impl FromPair for Int { from_str _ = Ok 0\n  from_int n = Ok n }\n\
+     impl FromPair for String { from_str s = Ok s\n  from_int _ = Ok \"\" }\n\
+     impl FromPair for Leaf a where {a: FromPair} {\n  from_str s = case from_str s { Ok x -> Ok (Leaf x); Err e -> Err e }\n  from_int n = case from_int n { Ok x -> Ok (Leaf x); Err e -> Err e }\n}\n\
+     impl FromPair for Labeled a where {a: FromPair} {\n  from_str s = case from_str s { Ok x -> Ok (Labeled \"\" x); Err e -> Err e }\n  from_int n = case from_int n { Ok x -> Ok (Labeled \"\" x); Err e -> Err e }\n}\n\
+     impl FromPair for And l r where {l: FromPair, r: FromPair} {\n  from_str s = case from_str s { Ok l -> case from_str s { Ok r -> Ok (And l r); Err e -> Err e }; Err e -> Err e }\n  from_int n = case from_int n { Ok l -> case from_int n { Ok r -> Ok (And l r); Err e -> Err e }; Err e -> Err e }\n}\n\
+     impl FromPair for Or l r where {l: FromPair, r: FromPair} {\n  from_str s = case from_str s { Ok l -> Ok (Or_Left l); Err _ -> case from_str s { Ok r -> Ok (Or_Right r); Err e -> Err e } }\n  from_int n = case from_int n { Ok l -> Ok (Or_Left l); Err _ -> case from_int n { Ok r -> Ok (Or_Right r); Err e -> Err e } }\n}\n\
+     impl FromPair for Variant a where {a: FromPair} {\n  from_str s = case from_str s { Ok x -> Ok (Variant \"\" x); Err e -> Err e }\n  from_int n = case from_int n { Ok x -> Ok (Variant \"\" x); Err e -> Err e }\n}\n\
+     impl FromPair for Record a where {a: FromPair} {\n  from_str s = case from_str s { Ok x -> Ok (Record \"\" x); Err e -> Err e }\n  from_int n = case from_int n { Ok x -> Ok (Record \"\" x); Err e -> Err e }\n}\n\
+     impl FromPair for Adt a where {a: FromPair} {\n  from_str s = case from_str s { Ok x -> Ok (Adt \"\" x); Err e -> Err e }\n  from_int n = case from_int n { Ok x -> Ok (Adt \"\" x); Err e -> Err e }\n}\n"
+}
+
+#[test]
+fn phase6_routed_derive_multi_method_from_direction() {
+    let src = format!(
+        "{lib}\
+         type Opt a = Some a | Nada\n  deriving (FromPair)\n\
+         fun go : String -> Result (Opt Int) String\n\
+         go s = from_str s\n\
+         fun go2 : Int -> Result (Opt Int) String\n\
+         go2 n = from_int n",
+        lib = phase6_from_pair_lib()
+    );
+    check(&src).unwrap();
+}
+
+/// The headline mixed-direction case: a unified codec trait with both an
+/// encode (to-direction) and decode (from-direction) method in the same
+/// trait. Bridge + delegating impls each carry both methods.
+fn phase6_jsoncodec_lib() -> &'static str {
+    "trait JsonCodec a {\n  fun encode : a -> String\n  fun decode : String -> Result a String\n}\n\
+     impl JsonCodec for U1 { encode _ = \"null\"\n  decode _ = Ok U1 }\n\
+     impl JsonCodec for Int { encode n = show n\n  decode _ = Ok 0 }\n\
+     impl JsonCodec for String { encode s = s\n  decode s = Ok s }\n\
+     impl JsonCodec for Leaf a where {a: JsonCodec} {\n  encode (Leaf x) = encode x\n  decode s = case decode s { Ok x -> Ok (Leaf x); Err e -> Err e }\n}\n\
+     impl JsonCodec for Labeled a where {a: JsonCodec} {\n  encode (Labeled n x) = n <> \":\" <> encode x\n  decode s = case decode s { Ok x -> Ok (Labeled \"\" x); Err e -> Err e }\n}\n\
+     impl JsonCodec for And l r where {l: JsonCodec, r: JsonCodec} {\n  encode (And l r) = encode l <> \",\" <> encode r\n  decode s = case decode s { Ok l -> case decode s { Ok r -> Ok (And l r); Err e -> Err e }; Err e -> Err e }\n}\n\
+     impl JsonCodec for Or l r where {l: JsonCodec, r: JsonCodec} {\n  encode o = case o { Or_Left l -> encode l; Or_Right r -> encode r }\n  decode s = case decode s { Ok l -> Ok (Or_Left l); Err _ -> case decode s { Ok r -> Ok (Or_Right r); Err e -> Err e } }\n}\n\
+     impl JsonCodec for Variant a where {a: JsonCodec} {\n  encode (Variant n x) = n <> \":\" <> encode x\n  decode s = case decode s { Ok x -> Ok (Variant \"\" x); Err e -> Err e }\n}\n\
+     impl JsonCodec for Record a where {a: JsonCodec} {\n  encode (Record _ inner) = encode inner\n  decode s = case decode s { Ok x -> Ok (Record \"\" x); Err e -> Err e }\n}\n\
+     impl JsonCodec for Adt a where {a: JsonCodec} {\n  encode (Adt _ inner) = encode inner\n  decode s = case decode s { Ok x -> Ok (Adt \"\" x); Err e -> Err e }\n}\n"
+}
+
+#[test]
+fn phase6_routed_derive_mixed_direction_codec() {
+    let src = format!(
+        "{lib}\
+         record Box a {{ v: a }}\n  deriving (JsonCodec)\n\
+         fun encode_box : Box Int -> String\n\
+         encode_box b = encode b\n\
+         fun decode_box : String -> Result (Box Int) String\n\
+         decode_box s = decode s\n\
+         fun roundtrip : Box Int -> Result (Box Int) String\n\
+         roundtrip b = decode (encode b)",
+        lib = phase6_jsoncodec_lib()
+    );
+    check(&src).unwrap();
+}
+
+#[test]
+fn phase6_routed_derive_mixed_includes_bad_method() {
+    // A trait that mixes a valid to-direction method with a `roundtrip` whose
+    // self-type appears on both sides — direction detection should reject the
+    // derive and name the offending method.
+    let src = "import Std.Generic (Generic, U1, Leaf, Labeled, And, Or)\n\
+               trait Bad a {\n  fun show_it : a -> String\n  fun roundtrip : a -> a\n}\n\
+               record Person { name: String, age: Int }\n  deriving (Bad)\n";
+    let err = check(src).err().expect("expected error");
+    assert!(
+        err.message.contains("roundtrip") && err.message.contains("both sides"),
+        "expected diagnostic naming `roundtrip` with both-sides reason; got: {}",
+        err.message
+    );
 }
 
 // --- Phase 5: framing redesign (Record, Variant, Adt wrappers) -----------

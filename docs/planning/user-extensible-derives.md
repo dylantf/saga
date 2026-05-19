@@ -710,9 +710,43 @@ Estimate: half a day.
   the specific method.
 - All existing single-method tests still pass.
 
-### Phase 6 Outcomes (to be filled in after implementation)
+### Phase 6 Outcomes (shipped)
 
-TBD.
+- **Per-method classification.** `classify_method_direction` runs over
+  every `TraitMethod` in the trait's AST (read from `RoutedTraitInfo` —
+  the existing parser-level shape; no typechecker state needed).
+  Direction detection is identical to Phase 3/3.1 but reports a
+  method-specific reason on failure.
+- **`a -> a` is now rejected.** Phase 3's to-direction path accepted
+  methods where `self` appeared in both param and return (it fell into
+  the to-direction branch). Phase 6 splits direction detection into a
+  4-case match (true/false × true/false) and treats both-sides as an
+  error. No existing test exercised this, so no behavioral fallout in
+  the suite. Could in principle break a user trait that was abusing
+  the lenience; none of the in-tree libraries do.
+- **`synth_method_pair`** is the new per-method helper. It dispatches
+  on `MethodDirection` and returns `(bridge_method, delegating_method)`
+  for splicing into the two impls. Multi-method synthesis is just a
+  `for` loop over the trait's methods.
+- **Mixed-direction codec works first try.** The bridge + delegating
+  pattern composes cleanly when one method goes through `to` and
+  another threads back through `from`. No issues with constraint
+  resolution or dict composition.
+- **Diagnostic test added** verifies the multi-method derive fails
+  cleanly when one method has `a -> a` shape, naming the offending
+  method (`roundtrip`).
+- **All Phase 3/3.1 tests pass unchanged** except for the now-obsolete
+  `phase3_routed_derive_multi_method_diagnostic`, which was removed in
+  favor of the Phase 6 tests.
+- **Total cost:** ~200 lines net in `src/derive.rs`, no changes outside
+  it. Tests added: 4. Examples added: `99h-generic-derived-codec.saga`.
+
+What's left for real-world polish (out of scope for Phase 6):
+- Constraint-failure errors in synthesized impls still mention
+  `Labeled`/`And`/etc. instead of the user-facing field. Phase 3c
+  carry-over.
+- No attribute-based opt-in/opt-out at the trait level — every
+  multi-method trait that survives classification gets routed.
 
 - **Piece 4 (error rewriting) deferred.** Constraint failures inside
   synthesized impls still produce default-shaped errors mentioning

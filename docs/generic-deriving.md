@@ -254,16 +254,20 @@ chain breaks at registration.
 
 ### Direction Detection
 
-`classify_from_return` inspects the trait's single method:
-- User type in parameter list → to-direction (e.g. `to_json : a -> String`).
-- User type in return position → from-direction. Three supported wrappers:
+`classify_method_direction` runs **per trait method** (Phase 6 lifted the
+prior single-method restriction):
+- User type in parameter list only → to-direction (e.g. `to_json : a -> String`).
+- User type in return position only → from-direction. Three supported wrappers:
   - Bare `a` (`from_json : String -> a`)
   - `Result a _` (`from_json : String -> Result a JsonError`)
   - `Maybe a` (`from_json : String -> Maybe a`)
-- Anything else → diagnostic, no synthesis.
+- User type on both sides (`a -> a`) → diagnostic, no synthesis.
+- User type on neither side → diagnostic, no synthesis.
+- Multi-parameter methods → diagnostic, no synthesis.
 
-Multi-method traits and traits where the user type appears in neither side
-also emit diagnostics.
+If any method in the trait fails classification, the whole derive aborts
+with a diagnostic naming the offending method; partial synthesis is never
+emitted.
 
 ### Per-Tparam Where Bounds
 
@@ -434,8 +438,19 @@ branches of `expand_derives`.
 
 ### Multi-Method Traits
 
-Routed derives support single-method traits only. Multi-method traits emit
-a diagnostic. Generalization is mechanical but not yet implemented.
+As of Phase 6, multi-method traits are supported. Each trait method is
+classified independently — one trait can mix to-direction and
+from-direction methods (e.g. a unified `JsonCodec` with both `encode : a
+-> String` and `decode : String -> Result a Error`). The bridge impl and
+the delegating impl each carry one `ImplMethod` entry per trait method.
+
+If any single method fails direction detection — return-shape unsupported,
+self on both sides, self on neither side, or multi-parameter — the entire
+derive aborts with a diagnostic naming the offending method. Partial
+impls are never synthesized.
+
+See `examples/99h-generic-derived-codec.saga` for the headline mixed
+encode/decode case.
 
 ### `TraitBound` / `TraitApp` Dual Representation
 
@@ -459,8 +474,8 @@ real-world need has surfaced.
 - `src/stdlib/Generic.saga` — building blocks and `Generic` trait
 - `src/stdlib/prelude.saga` — auto-imports `Std.Generic`
 - `src/derive.rs` — `expand_derives`, `derive_record_generic`,
-  `derive_adt_generic`, `derive_routed`, `synth_to_direction`,
-  `synth_from_direction`, `build_from_body`, `classify_from_return`
+  `derive_adt_generic`, `derive_routed`, `classify_method_direction`,
+  `synth_method_pair`, `build_from_body`, `classify_from_return`
 - `src/typechecker/check_traits.rs` — `FUNCTIONAL_TRAITS`,
   `register_impl`, `is_functional_trait`
 - `src/typechecker/check_decl.rs` — `check_pending_constraints` (constraint
