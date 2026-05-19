@@ -6529,10 +6529,9 @@ fn derive_generic_adt_parameterized() {
 #[test]
 fn derive_generic_parameterized_adt_end_to_end_with_tojson() {
     // Headline Phase 2e smoke test: ToJson for a parameterized ADT routed
-    // through a derived Generic impl. The delegating impl doesn't use a
-    // where-app form because the parser doesn't accept parenthesized
-    // parameterized types in where-app args; instead the Generic constraint
-    // is pinned by the call-site coherence fallback for functional traits.
+    // through a derived Generic impl. The delegating impl relies on the
+    // call-site coherence fallback to pin the Generic Rep, with no
+    // where-app needed.
     check(
         "import Std.Generic (Generic, U1, Leaf, Labeled, And, Or)\n\
          type Opt a = Some a | None\n  deriving (Generic)\n\
@@ -6545,6 +6544,27 @@ fn derive_generic_parameterized_adt_end_to_end_with_tojson() {
          impl ToJson for Or l r where {l: ToJson, r: ToJson} {\n  to_json o = case o {\n  Or_Left l -> to_json l\n  Or_Right r -> to_json r\n}\n}\n\
          impl ToJson for Rep__Opt a where {a: ToJson} {\n  to_json (Rep__Opt inner) = to_json inner\n}\n\
          impl ToJson for Opt a where {a: ToJson} {\n  to_json m = to_json (to m)\n}",
+    )
+    .unwrap();
+}
+
+#[test]
+fn where_app_accepts_parenthesized_type_application() {
+    // The where-app form accepts `(Opt a)` as a parenthesized type
+    // application, not just bare identifiers. Coherence keys on the head
+    // (Opt), so this resolves cleanly through the derived Generic impl.
+    check(
+        "import Std.Generic (Generic, U1, Leaf, Labeled, And, Or)\n\
+         type Opt a = Some a | None\n  deriving (Generic)\n\
+         trait ToJson a { fun to_json : a -> String }\n\
+         impl ToJson for U1 { to_json _ = \"null\" }\n\
+         impl ToJson for Int { to_json n = show n }\n\
+         impl ToJson for Leaf a where {a: ToJson} {\n  to_json (Leaf x) = to_json x\n}\n\
+         impl ToJson for Labeled a where {a: ToJson} {\n  to_json (Labeled name x) = name <> \":\" <> to_json x\n}\n\
+         impl ToJson for And l r where {l: ToJson, r: ToJson} {\n  to_json (And l r) = to_json l <> \",\" <> to_json r\n}\n\
+         impl ToJson for Or l r where {l: ToJson, r: ToJson} {\n  to_json o = case o {\n  Or_Left l -> to_json l\n  Or_Right r -> to_json r\n}\n}\n\
+         impl ToJson for Rep__Opt a where {a: ToJson} {\n  to_json (Rep__Opt inner) = to_json inner\n}\n\
+         impl ToJson for Opt a where {a: ToJson, Generic (Opt a) r, ToJson r} {\n  to_json m = to_json (to m)\n}",
     )
     .unwrap();
 }

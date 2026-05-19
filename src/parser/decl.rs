@@ -876,33 +876,18 @@ impl Parser {
             }
             first = false;
             // New form: `TraitName arg1 arg2 ...` — leading uppercase identifier.
+            // Each arg is an atom: bare name, type var, or parenthesized
+            // type expression (e.g. `(Box a)` for parameterized targets).
             if let Token::UpperIdent(_) = self.peek() {
                 let start_span = self.tokens[self.pos].span;
                 let trait_name = self.parse_upper_name()?;
                 let mut type_args = Vec::new();
-                while matches!(self.peek(), Token::Ident(_) | Token::UpperIdent(_))
-                    && !matches!(self.peek(), Token::Comma | Token::RBrace)
+                while matches!(
+                    self.peek(),
+                    Token::Ident(_) | Token::UpperIdent(_) | Token::LParen
+                ) && !matches!(self.peek(), Token::Comma | Token::RBrace)
                 {
-                    match self.peek() {
-                        Token::UpperIdent(_) => {
-                            let name = self.parse_upper_name()?;
-                            let span = self.tokens[self.pos - 1].span;
-                            type_args.push(TypeExpr::Named {
-                                id: NodeId::fresh(),
-                                name,
-                                span,
-                            });
-                        }
-                        _ => {
-                            let name = self.expect_ident()?;
-                            let span = self.tokens[self.pos - 1].span;
-                            type_args.push(TypeExpr::Var {
-                                id: NodeId::fresh(),
-                                name,
-                                span,
-                            });
-                        }
-                    }
+                    type_args.push(self.parse_type_atom()?);
                 }
                 let end_span = self.tokens[self.pos.saturating_sub(1)].span;
                 apps.push(crate::ast::TraitApp {

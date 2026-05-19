@@ -497,12 +497,21 @@ impl Checker {
                 ));
             }
             // Classify each arg as concrete (resolved name) or fresh (unbound).
+            // For App heads (e.g. `(Opt a)`), use the constructor's head name
+            // as the concrete identifier — type-param positions in the App's
+            // args are not relevant to coherence lookup, which is keyed on
+            // the head only.
             let mut resolved_names: Vec<Option<String>> = Vec::with_capacity(app.type_args.len());
             let mut fresh_positions: Vec<(usize, String)> = Vec::new();
             for (i, te) in app.type_args.iter().enumerate() {
                 match te {
                     ast::TypeExpr::Named { id, name, .. } => {
                         resolved_names.push(Some(self.resolved_type_name(*id, name)));
+                    }
+                    ast::TypeExpr::App { .. } => {
+                        let head = te.head_name().unwrap_or("");
+                        resolved_names
+                            .push(Some(self.resolved_type_name(te.id(), head)));
                     }
                     ast::TypeExpr::Var { name, .. } => {
                         if let Some(resolved) = local_subst.get(name) {
@@ -524,8 +533,8 @@ impl Checker {
                     other => {
                         return Err(Diagnostic::error_at(
                             other.span(),
-                            "only named types and type variables are supported in trait-app \
-                             where-clauses"
+                            "only named types, type variables, and type applications are \
+                             supported in trait-app where-clauses"
                                 .to_string(),
                         ));
                     }
