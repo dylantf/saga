@@ -6685,20 +6685,153 @@ fn phase3_routed_derive_recursive_adt() {
     check(&src).unwrap();
 }
 
+// --- Phase 3.1: from-direction routed derives ---------------------
+
+/// Inline FromJson library with Result-wrapped returns. Dummy bodies — the
+/// tests only verify that derive expansion + typechecking succeed.
+fn phase3_fromjson_result_lib() -> &'static str {
+    "trait FromJson a { fun from_json : String -> Result a String }\n\
+     impl FromJson for U1 { from_json _ = Ok U1 }\n\
+     impl FromJson for Int { from_json _ = Ok 0 }\n\
+     impl FromJson for String { from_json s = Ok s }\n\
+     impl FromJson for Leaf a where {a: FromJson} {\n\
+       from_json s = case from_json s { Ok x -> Ok (Leaf x); Err e -> Err e }\n\
+     }\n\
+     impl FromJson for Labeled a where {a: FromJson} {\n\
+       from_json s = case from_json s { Ok x -> Ok (Labeled \"\" x); Err e -> Err e }\n\
+     }\n\
+     impl FromJson for And l r where {l: FromJson, r: FromJson} {\n\
+       from_json s = case from_json s {\n\
+         Ok l -> case from_json s { Ok r -> Ok (And l r); Err e -> Err e }\n\
+         Err e -> Err e\n\
+       }\n\
+     }\n\
+     impl FromJson for Or l r where {l: FromJson, r: FromJson} {\n\
+       from_json s = case from_json s {\n\
+         Ok l -> Ok (Or_Left l)\n\
+         Err _ -> case from_json s { Ok r -> Ok (Or_Right r); Err e -> Err e }\n\
+       }\n\
+     }\n"
+}
+
 #[test]
-fn phase3_routed_derive_from_direction_diagnostic() {
-    // A method whose self type appears only in the return position is a
-    // from-direction trait (e.g. FromJson). Phase 3.1 will support these;
-    // for now we emit a clear diagnostic.
-    let src = "import Std.Generic (Generic, U1, Leaf, Labeled, And, Or)\n\
-               trait FromJson a { fun from_json : String -> a }\n\
+fn phase3_routed_derive_from_direction_result() {
+    // Headline: deriving (Generic, FromJson) on a record with a
+    // `String -> Result a String` method.
+    let src = format!(
+        "{lib}\
+         record Person {{ name: String, age: Int }}\n  deriving (Generic, FromJson)\n\
+         fun go : String -> Result Person String\n\
+         go s = from_json s",
+        lib = phase3_fromjson_result_lib()
+    );
+    check(&src).unwrap();
+}
+
+#[test]
+fn phase3_routed_derive_from_direction_maybe() {
+    let src = "trait FromX a { fun from_x : Int -> Maybe a }\n\
+               impl FromX for U1 { from_x _ = Just U1 }\n\
+               impl FromX for Int { from_x _ = Just 0 }\n\
+               impl FromX for String { from_x _ = Just \"\" }\n\
+               impl FromX for Leaf a where {a: FromX} {\n\
+                 from_x n = case from_x n { Just x -> Just (Leaf x); Nothing -> Nothing }\n\
+               }\n\
+               impl FromX for Labeled a where {a: FromX} {\n\
+                 from_x n = case from_x n { Just x -> Just (Labeled \"\" x); Nothing -> Nothing }\n\
+               }\n\
+               impl FromX for And l r where {l: FromX, r: FromX} {\n\
+                 from_x n = case from_x n {\n\
+                   Just l -> case from_x n { Just r -> Just (And l r); Nothing -> Nothing }\n\
+                   Nothing -> Nothing\n\
+                 }\n\
+               }\n\
+               record P { x: Int }\n  deriving (FromX)\n\
+               fun go : Int -> Maybe P\n\
+               go n = from_x n";
+    check(src).unwrap();
+}
+
+#[test]
+fn phase3_routed_derive_from_direction_bare() {
+    let src = "trait FromX a { fun from_x : Int -> a }\n\
+               impl FromX for U1 { from_x _ = U1 }\n\
+               impl FromX for Int { from_x _ = 0 }\n\
+               impl FromX for String { from_x _ = \"\" }\n\
+               impl FromX for Leaf a where {a: FromX} { from_x n = Leaf (from_x n) }\n\
+               impl FromX for Labeled a where {a: FromX} { from_x n = Labeled \"\" (from_x n) }\n\
+               impl FromX for And l r where {l: FromX, r: FromX} {\n\
+                 from_x n = And (from_x n) (from_x n)\n\
+               }\n\
+               record P { x: Int }\n  deriving (FromX)\n\
+               fun go : Int -> P\n\
+               go n = from_x n";
+    check(src).unwrap();
+}
+
+#[test]
+fn phase3_routed_derive_from_direction_parameterized_record() {
+    let src = format!(
+        "{lib}\
+         record Box a {{ v: a }}\n  deriving (FromJson)\n\
+         fun go : String -> Result (Box Int) String\n\
+         go s = from_json s",
+        lib = phase3_fromjson_result_lib()
+    );
+    check(&src).unwrap();
+}
+
+#[test]
+fn phase3_routed_derive_from_direction_parameterized_adt() {
+    let src = format!(
+        "{lib}\
+         type Opt a = Some a | Nada\n  deriving (FromJson)\n\
+         fun go : String -> Result (Opt Int) String\n\
+         go s = from_json s",
+        lib = phase3_fromjson_result_lib()
+    );
+    check(&src).unwrap();
+}
+
+#[test]
+fn phase3_routed_derive_from_direction_recursive_adt() {
+    let src = format!(
+        "{lib}\
+         type IntList = INil | ICons Int IntList\n  deriving (FromJson)\n\
+         fun go : String -> Result IntList String\n\
+         go s = from_json s",
+        lib = phase3_fromjson_result_lib()
+    );
+    check(&src).unwrap();
+}
+
+#[test]
+fn phase3_routed_derive_from_direction_unsupported_wrapper() {
+    // A custom wrapper that isn't Result or Maybe → clear diagnostic.
+    let src = "type MyResult a = MyOk a | MyErr String\n\
+               trait FromJson a { fun from_json : String -> MyResult a }\n\
                record Person { name: String, age: Int }\n  deriving (FromJson)\n";
     let err = check(src).err().expect("expected error");
     assert!(
-        err.message.contains("Phase 3.1"),
-        "expected Phase 3.1 mention; got: {}",
+        err.message.contains("return-type shape") && err.message.contains("FromJson"),
+        "expected unsupported-wrapper diagnostic; got: {}",
         err.message
     );
+}
+
+#[test]
+fn phase3_routed_derive_to_and_from_roundtrip() {
+    // Compile both ToJson and FromJson derives for the same record. This
+    // exercises the full both-directions story.
+    let src = format!(
+        "{tj}{fj}\
+         record Person {{ name: String, age: Int }}\n  deriving (Generic, ToJson, FromJson)\n\
+         fun roundtrip : Person -> Result Person String\n\
+         roundtrip p = from_json (to_json p)",
+        tj = phase3_tojson_lib(),
+        fj = phase3_fromjson_result_lib()
+    );
+    check(&src).unwrap();
 }
 
 #[test]

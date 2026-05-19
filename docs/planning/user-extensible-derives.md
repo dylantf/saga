@@ -426,10 +426,39 @@ This MUST land before Phase 2 starts.
   framing). Don't redesign the synthesizer until a real library author
   hits this and tells us what shape they actually need.
 
-- **Single-method, to-direction traits only.** Multi-method traits and
-  from-direction traits (FromJson, FromCsv, FromPgRow) emit clear
-  diagnostics referencing Phase 3.1. From-direction is the next planned
-  enhancement.
+- **Single-method traits only.** Multi-method traits emit clear
+  diagnostics. From-direction traits (FromJson, FromCsv, FromPgRow) are
+  now supported as of Phase 3.1 — see below.
+
+### Phase 3.1 Outcomes (shipped)
+
+- **From-direction routing works** for traits whose method returns
+  `a`, `Result a _`, or `Maybe a`. Other wrapper shapes (custom
+  Result types, IO-wrapped, etc.) emit a clear diagnostic listing the
+  supported forms.
+- **Wrapper detection is purely AST-level** in `src/derive.rs` — no
+  typechecker changes needed. The trait method's return `TypeExpr` is
+  inspected directly via bare-name matching, so qualified `Result.Result`
+  and bare `Result` both resolve.
+- **Same two-impl bridge pattern** as to-direction (bridge for `Rep__T`
+  + delegating for `T`). Body shape differs per wrapper: bare = direct
+  wrap, `Result` = `Ok`/`Err` case-match, `Maybe` = `Just`/`Nothing`
+  case-match. Built via a single `build_from_body` helper parameterized
+  by a `wrap` callback (Rep wrap for bridge, `from` call for delegate).
+- **No surprises.** Constraint resolution, body inference, dict
+  composition all worked first try. The Phase 2-3 substrate fully covers
+  from-direction without further trait-system work.
+- **Roundtrip integration test** confirms `deriving (Generic, ToJson,
+  FromJson)` on a single type produces matching serialization and
+  deserialization that round-trip cleanly.
+
+### Codec story is now complete
+
+Library authors can ship single-method traits in either direction
+(to or from) with building-block instances, and users derive them with
+zero compiler involvement. The three motivating libraries (ToJson/
+FromJson, ToCsv/FromCsv, ToPgRow/FromPgRow) are all now buildable as
+pure library code.
 
 - **Piece 4 (error rewriting) deferred.** Constraint failures inside
   synthesized impls still produce default-shaped errors mentioning

@@ -256,16 +256,28 @@ fn derive_routed(
     let return_has_self = type_expr_contains_var(&method.return_type, &self_var);
 
     if !param_has_self && return_has_self {
-        return Err(Diagnostic {
-            severity: Severity::Error,
-            message: format!(
-                "cannot derive `{}` for `{}`: deriving for from-direction traits \
-                 (where the self type appears only in the return type) is not yet \
-                 supported (Phase 3.1)",
-                bare, type_name
-            ),
-            span: Some(span),
-        });
+        // From-direction: synthesize bridge + delegating impls whose method
+        // body threads the building-block result back through Generic's
+        // `from`. Supported return shapes: bare `a`, `Result a _`, `Maybe a`.
+        let Some(wrapper) = classify_from_return(&method.return_type, &self_var) else {
+            return Err(Diagnostic {
+                severity: Severity::Error,
+                message: format!(
+                    "cannot determine return-type shape for from-direction derive of `{}`; \
+                     expected `a`, `Result a _`, or `Maybe a`",
+                    bare
+                ),
+                span: Some(span),
+            });
+        };
+        return Ok(synth_from_direction(
+            bare,
+            type_name,
+            type_params,
+            method.name.clone(),
+            wrapper,
+            span,
+        ));
     }
     if !param_has_self {
         return Err(Diagnostic {
@@ -431,6 +443,318 @@ fn derive_routed(
     };
 
     Ok(vec![bridge_impl, delegating_impl])
+}
+
+/// Wrapper shape detected on a from-direction trait method's return type.
+#[derive(Clone, Copy)]
+enum FromWrapper {
+    Bare,
+    Result,
+    Maybe,
+}
+
+/// Classify a from-direction method's return type. Accepts `a` (bare),
+/// `Result a _`, or `Maybe a` where `a` is the trait's self type variable.
+fn classify_from_return(te: &TypeExpr, self_var: &str) -> Option<FromWrapper> {
+    fn is_self(te: &TypeExpr, self_var: &str) -> bool {
+        matches!(te, TypeExpr::Var { name, .. } if name == self_var)
+    }
+    if is_self(te, self_var) {
+        return Some(FromWrapper::Bare);
+    }
+    match te {
+        TypeExpr::App { func, arg, .. } => {
+            let bare_head = |t: &TypeExpr| -> Option<String> {
+                match t {
+                    TypeExpr::Named { name, .. } => {
+                        Some(name.rsplit('.').next().unwrap_or(name).to_string())
+                    }
+                    _ => None,
+                }
+            };
+            // Maybe a: App(Named("Maybe"), Var(self))
+            if let Some(h) = bare_head(func)
+                && h == "Maybe"
+                && is_self(arg, self_var)
+            {
+                return Some(FromWrapper::Maybe);
+            }
+            // Result a _: App(App(Named("Result"), Var(self)), _)
+            if let TypeExpr::App {
+                func: f2, arg: a2, ..
+            } = func.as_ref()
+                && let Some(h) = bare_head(f2)
+                && h == "Result"
+                && is_self(a2, self_var)
+            {
+                return Some(FromWrapper::Result);
+            }
+            None
+        }
+        _ => None,
+    }
+}
+
+/// Synthesize the bridge + delegating impls for a from-direction routed
+/// derive. Mirrors `derive_routed`'s to-direction tail but threads the result
+/// in the inverse direction (and through the chosen wrapper).
+fn synth_from_direction(
+    bare: &str,
+    type_name: &str,
+    type_params: &[String],
+    method_name: String,
+    wrapper: FromWrapper,
+    span: Span,
+) -> Vec<Decl> {
+    let rep_name = format!("Rep__{type_name}");
+    let zero_span = Span { start: 0, end: 0 };
+    let input_var = "__input".to_string();
+
+    let per_tparam_where: Vec<TraitBound> = type_params
+        .iter()
+        .map(|tp| TraitBound {
+            type_var: tp.clone(),
+            traits: vec![TraitRef {
+                id: NodeId::fresh(),
+                name: bare.into(),
+                type_args: vec![],
+                span: zero_span,
+            }],
+        })
+        .collect();
+
+    // --- Bridge impl: impl <Trait> for Rep__T
+    //     method s = <wrap inner with Rep__T ctor>
+    let bridge_wrap = |inner: Expr, s: Span| apply_ctor(&rep_name, inner, s);
+    let bridge_body = build_from_body(&method_name, &input_var, &bridge_wrap, wrapper, span);
+    let bridge_impl = Decl::ImplDef {
+        id: NodeId::fresh(),
+        doc: vec![],
+        trait_name: bare.into(),
+        trait_name_span: zero_span,
+        trait_type_args: vec![],
+        target_type: rep_name.clone(),
+        target_type_span: zero_span,
+        type_params: type_params.to_vec(),
+        where_clause: per_tparam_where.clone(),
+        where_apps: vec![],
+        needs: vec![],
+        methods: vec![Annotated::bare(ImplMethod {
+            name: method_name.clone(),
+            name_span: zero_span,
+            params: vec![Pat::Var {
+                id: NodeId::fresh(),
+                name: input_var.clone(),
+                span,
+            }],
+            body: bridge_body,
+        })],
+        span,
+        dangling_trivia: vec![],
+    };
+
+    // --- Delegating impl: impl <Trait> for T where {Generic T r, <Trait> r}
+    //     method s = <wrap rep with `from`>
+    let deleg_wrap = |inner: Expr, s: Span| {
+        Expr::synth(
+            s,
+            ExprKind::App {
+                func: Box::new(Expr::synth(s, ExprKind::Var { name: "from".into() })),
+                arg: Box::new(inner),
+            },
+        )
+    };
+    let delegating_body = build_from_body(&method_name, &input_var, &deleg_wrap, wrapper, span);
+
+    let fresh_r = "__r".to_string();
+    let target_applied = apply_type_params(type_name, type_params);
+    let where_apps = vec![
+        TraitApp {
+            id: NodeId::fresh(),
+            trait_name: "Generic".into(),
+            type_args: vec![
+                target_applied,
+                TypeExpr::Var {
+                    id: NodeId::fresh(),
+                    name: fresh_r.clone(),
+                    span: zero_span,
+                },
+            ],
+            span: zero_span,
+        },
+        TraitApp {
+            id: NodeId::fresh(),
+            trait_name: bare.into(),
+            type_args: vec![TypeExpr::Var {
+                id: NodeId::fresh(),
+                name: fresh_r,
+                span: zero_span,
+            }],
+            span: zero_span,
+        },
+    ];
+    let delegating_impl = Decl::ImplDef {
+        id: NodeId::fresh(),
+        doc: vec![],
+        trait_name: bare.into(),
+        trait_name_span: zero_span,
+        trait_type_args: vec![],
+        target_type: type_name.into(),
+        target_type_span: zero_span,
+        type_params: type_params.to_vec(),
+        where_clause: per_tparam_where,
+        where_apps,
+        needs: vec![],
+        methods: vec![Annotated::bare(ImplMethod {
+            name: method_name,
+            name_span: zero_span,
+            params: vec![Pat::Var {
+                id: NodeId::fresh(),
+                name: input_var,
+                span,
+            }],
+            body: delegating_body,
+        })],
+        span,
+        dangling_trivia: vec![],
+    };
+
+    vec![bridge_impl, delegating_impl]
+}
+
+/// Build the body of a from-direction method, given a `wrap` function that
+/// transforms the *inner* successful result (e.g. wrap with `Rep__T` or call
+/// `from`). For wrapped returns, the inner method call is destructured via
+/// a case-match over the wrapper's constructors.
+fn build_from_body(
+    method_name: &str,
+    input_var: &str,
+    wrap: &dyn Fn(Expr, Span) -> Expr,
+    wrapper: FromWrapper,
+    span: Span,
+) -> Expr {
+    let inner_call = Expr::synth(
+        span,
+        ExprKind::App {
+            func: Box::new(Expr::synth(
+                span,
+                ExprKind::Var {
+                    name: method_name.into(),
+                },
+            )),
+            arg: Box::new(Expr::synth(
+                span,
+                ExprKind::Var {
+                    name: input_var.into(),
+                },
+            )),
+        },
+    );
+    match wrapper {
+        FromWrapper::Bare => wrap(inner_call, span),
+        FromWrapper::Result => {
+            let inner = "__inner".to_string();
+            let err = "__err".to_string();
+            let ok_arm = Annotated::bare(CaseArm {
+                pattern: Pat::Constructor {
+                    id: NodeId::fresh(),
+                    name: "Ok".into(),
+                    args: vec![Pat::Var {
+                        id: NodeId::fresh(),
+                        name: inner.clone(),
+                        span,
+                    }],
+                    span,
+                },
+                guard: None,
+                body: apply_ctor(
+                    "Ok",
+                    wrap(
+                        Expr::synth(span, ExprKind::Var { name: inner }),
+                        span,
+                    ),
+                    span,
+                ),
+                span,
+            });
+            let err_arm = Annotated::bare(CaseArm {
+                pattern: Pat::Constructor {
+                    id: NodeId::fresh(),
+                    name: "Err".into(),
+                    args: vec![Pat::Var {
+                        id: NodeId::fresh(),
+                        name: err.clone(),
+                        span,
+                    }],
+                    span,
+                },
+                guard: None,
+                body: apply_ctor(
+                    "Err",
+                    Expr::synth(span, ExprKind::Var { name: err }),
+                    span,
+                ),
+                span,
+            });
+            Expr::synth(
+                span,
+                ExprKind::Case {
+                    scrutinee: Box::new(inner_call),
+                    arms: vec![ok_arm, err_arm],
+                    dangling_trivia: vec![],
+                },
+            )
+        }
+        FromWrapper::Maybe => {
+            let inner = "__inner".to_string();
+            let just_arm = Annotated::bare(CaseArm {
+                pattern: Pat::Constructor {
+                    id: NodeId::fresh(),
+                    name: "Just".into(),
+                    args: vec![Pat::Var {
+                        id: NodeId::fresh(),
+                        name: inner.clone(),
+                        span,
+                    }],
+                    span,
+                },
+                guard: None,
+                body: apply_ctor(
+                    "Just",
+                    wrap(
+                        Expr::synth(span, ExprKind::Var { name: inner }),
+                        span,
+                    ),
+                    span,
+                ),
+                span,
+            });
+            let nothing_arm = Annotated::bare(CaseArm {
+                pattern: Pat::Constructor {
+                    id: NodeId::fresh(),
+                    name: "Nothing".into(),
+                    args: vec![],
+                    span,
+                },
+                guard: None,
+                body: Expr::synth(
+                    span,
+                    ExprKind::Constructor {
+                        name: "Nothing".into(),
+                    },
+                ),
+                span,
+            });
+            Expr::synth(
+                span,
+                ExprKind::Case {
+                    scrutinee: Box::new(inner_call),
+                    arms: vec![just_arm, nothing_arm],
+                    dangling_trivia: vec![],
+                },
+            )
+        }
+    }
 }
 
 fn type_expr_contains_var(te: &TypeExpr, name: &str) -> bool {
