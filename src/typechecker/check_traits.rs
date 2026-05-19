@@ -278,7 +278,7 @@ impl Checker {
         &mut self,
         impl_id: ast::NodeId,
         trait_name: &str,
-        trait_type_args: &[String],
+        trait_type_args: &[ast::TypeExpr],
         target_type: &str,
         type_params: &[String],
         where_clause: &[ast::TraitBound],
@@ -287,6 +287,16 @@ impl Checker {
         methods: &[ast::ImplMethod],
         span: Span,
     ) -> Result<(), Diagnostic> {
+        // Head names for the impls HashMap key (used everywhere as a
+        // string-keyed coarse index — exact type identity isn't relevant).
+        let trait_type_arg_names: Vec<String> = trait_type_args
+            .iter()
+            .map(|te| {
+                let head = te.head_name().unwrap_or("");
+                self.resolved_type_name(te.id(), head)
+            })
+            .collect();
+        let trait_type_args_names = &trait_type_arg_names;
         // Resolve trait name to canonical form
         let trait_name = self.resolved_impl_trait_name(impl_id, trait_name);
         let trait_name = trait_name.as_str();
@@ -302,14 +312,14 @@ impl Checker {
 
         // Validate trait type arg arity: extra type params (all except the self param at index 0)
         let expected_extra = trait_info.type_params.len().saturating_sub(1);
-        if trait_type_args.len() != expected_extra {
+        if trait_type_arg_names.len() != expected_extra {
             return Err(Diagnostic::error_at(
                 span,
                 format!(
                     "trait {} expects {} type argument(s), but {} were provided",
                     trait_name,
                     expected_extra,
-                    trait_type_args.len()
+                    trait_type_arg_names.len()
                 ),
             ));
         }
@@ -363,14 +373,14 @@ impl Checker {
         let resolved_target_type = self.resolved_impl_target_type_name(impl_id, target_type);
         let dup_key = (
             trait_name.to_string(),
-            trait_type_args.to_vec(),
+            trait_type_args_names.clone(),
             resolved_target_type.clone(),
         );
         if self.trait_state.impls.contains_key(&dup_key) {
-            let args_str = if trait_type_args.is_empty() {
+            let args_str = if trait_type_arg_names.is_empty() {
                 String::new()
             } else {
-                format!(" {}", trait_type_args.join(" "))
+                format!(" {}", trait_type_arg_names.join(" "))
             };
             return Err(Diagnostic::error_at(
                 span,
@@ -386,7 +396,7 @@ impl Checker {
             {
                 if existing_trait == trait_name
                     && existing_target == &resolved_target_type
-                    && existing_args != &trait_type_args.to_vec()
+                    && existing_args != trait_type_args_names
                 {
                     let prev_loc = match existing_info.span {
                         Some(s) => format!(" (previous impl at byte {})", s.start),
@@ -401,7 +411,7 @@ impl Checker {
                             trait_name,
                             target_type,
                             existing_args,
-                            trait_type_args,
+                            trait_type_arg_names,
                             prev_loc
                         ),
                     ));
@@ -412,10 +422,18 @@ impl Checker {
         // Type-check each method body against the trait's expected signature.
         // Substitute the trait's type param with the concrete target type.
         // For parameterized impls (e.g. `impl Show for Box a`), use fresh vars for type params.
+        let mut target_type_param_ids: Vec<u32> = Vec::new();
         let target = if type_params.is_empty() {
             Type::Con(resolved_target_type.clone(), vec![])
         } else {
             let param_vars: Vec<Type> = type_params.iter().map(|_| self.fresh_var()).collect();
+            target_type_param_ids = param_vars
+                .iter()
+                .map(|t| match t {
+                    Type::Var(id) => *id,
+                    _ => unreachable!(),
+                })
+                .collect();
             // Register where clause bounds on the fresh type vars so method bodies
             // can use trait methods on those vars (e.g. `show x` where `x: a` and `a: Show`).
             for bound in where_clause {
@@ -752,11 +770,26 @@ impl Checker {
             }
         }
 
+        // Convert each TypeExpr trait_type_arg into a Type, reusing the
+        // impl's type-param fresh-var ids so that the stored extras share
+        // tvars with `target_type_param_ids`. Call sites substitute those
+        // tvars from the concrete args of the target type.
+        let mut conv_params: Vec<(String, u32)> = type_params
+            .iter()
+            .cloned()
+            .zip(target_type_param_ids.iter().copied())
+            .collect();
+        let trait_type_args_types: Vec<Type> = trait_type_args
+            .iter()
+            .map(|te| self.convert_type_expr(te, &mut conv_params))
+            .collect();
+
         self.trait_state.impls.insert(
             dup_key,
             ImplInfo {
                 param_constraints,
-                trait_type_args: trait_type_args.to_vec(),
+                trait_type_args: trait_type_args_types,
+                target_type_param_ids,
                 span: Some(span),
             },
         );

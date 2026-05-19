@@ -6384,19 +6384,37 @@ fn derive_generic_roundtrip_without_ascription() {
 }
 
 #[test]
-fn derive_generic_parameterized_record_errors() {
-    // Phase 2b explicitly defers parameterized records.
-    let result = check(
+fn derive_generic_parameterized_record_roundtrip_int() {
+    // Phase 2e: parameterized records now derive Generic.
+    check(
         "import Std.Generic (Generic, U1, Leaf, Labeled, And)\n\
-         record Box a { value: a }\n  deriving (Generic)",
-    );
-    assert!(result.is_err(), "expected parameterized-record error");
-    let err = result.err().unwrap();
-    assert!(
-        err.message.contains("parameterized"),
-        "expected parameterized-record diagnostic, got: {}",
-        err.message
-    );
+         record Box a { value: a }\n  deriving (Generic)\n\
+         fun rt : Box Int -> Box Int\n\
+         rt b = from (to b : Rep__Box Int)",
+    )
+    .unwrap();
+}
+
+#[test]
+fn derive_generic_parameterized_record_roundtrip_string() {
+    check(
+        "import Std.Generic (Generic, U1, Leaf, Labeled, And)\n\
+         record Box a { value: a }\n  deriving (Generic)\n\
+         fun rt : Box String -> Box String\n\
+         rt b = from (to b : Rep__Box String)",
+    )
+    .unwrap();
+}
+
+#[test]
+fn derive_generic_parameterized_record_two_params() {
+    check(
+        "import Std.Generic (Generic, U1, Leaf, Labeled, And)\n\
+         record Pair a b { fst: a, snd: b }\n  deriving (Generic)\n\
+         fun rt : Pair Int String -> Pair Int String\n\
+         rt p = from (to p : Rep__Pair Int String)",
+    )
+    .unwrap();
 }
 
 #[test]
@@ -6484,35 +6502,63 @@ fn derive_generic_adt_three_multi_field_variants() {
 }
 
 #[test]
-fn derive_generic_adt_recursive_errors() {
-    // Direct self-reference should produce a clear diagnostic and no derive.
-    let result = check(
+fn derive_generic_adt_recursive_monomorphic() {
+    // Phase 2d: recursive ADTs now derive Generic. The recursive field
+    // round-trips through the runtime dictionary, not the Rep type shape.
+    check(
         "import Std.Generic (Generic, U1, Leaf, Labeled, And, Or)\n\
-         type IntTree = TLeaf | TNode IntTree Int IntTree\n  deriving (Generic)",
-    );
-    assert!(result.is_err(), "expected recursive-type error");
-    let err = result.err().unwrap();
-    assert!(
-        err.message.contains("recursive"),
-        "expected recursive-type diagnostic, got: {}",
-        err.message
-    );
+         type IntList = INil | ICons Int IntList\n  deriving (Generic)\n\
+         fun rt : IntList -> IntList\n\
+         rt xs = from (to xs : Rep__IntList)",
+    )
+    .unwrap();
 }
 
 #[test]
-fn derive_generic_adt_parameterized_errors() {
-    // Type parameters on the ADT are deferred (Phase 2e).
-    let result = check(
+fn derive_generic_adt_parameterized() {
+    // Phase 2e: parameterized ADTs derive Generic.
+    check(
         "import Std.Generic (Generic, U1, Leaf, Labeled, And, Or)\n\
-         type Opt a = Some a | None\n  deriving (Generic)",
-    );
-    assert!(result.is_err(), "expected parameterized-type error");
-    let err = result.err().unwrap();
-    assert!(
-        err.message.contains("parameterized"),
-        "expected parameterized-type diagnostic, got: {}",
-        err.message
-    );
+         type Opt a = Some a | None\n  deriving (Generic)\n\
+         fun rt : Opt Int -> Opt Int\n\
+         rt x = from (to x : Rep__Opt Int)",
+    )
+    .unwrap();
+}
+
+#[test]
+fn derive_generic_parameterized_adt_end_to_end_with_tojson() {
+    // Headline Phase 2e smoke test: ToJson for a parameterized ADT routed
+    // through a derived Generic impl. The delegating impl doesn't use a
+    // where-app form because the parser doesn't accept parenthesized
+    // parameterized types in where-app args; instead the Generic constraint
+    // is pinned by the call-site coherence fallback for functional traits.
+    check(
+        "import Std.Generic (Generic, U1, Leaf, Labeled, And, Or)\n\
+         type Opt a = Some a | None\n  deriving (Generic)\n\
+         trait ToJson a { fun to_json : a -> String }\n\
+         impl ToJson for U1 { to_json _ = \"null\" }\n\
+         impl ToJson for Int { to_json n = show n }\n\
+         impl ToJson for Leaf a where {a: ToJson} {\n  to_json (Leaf x) = to_json x\n}\n\
+         impl ToJson for Labeled a where {a: ToJson} {\n  to_json (Labeled name x) = name <> \":\" <> to_json x\n}\n\
+         impl ToJson for And l r where {l: ToJson, r: ToJson} {\n  to_json (And l r) = to_json l <> \",\" <> to_json r\n}\n\
+         impl ToJson for Or l r where {l: ToJson, r: ToJson} {\n  to_json o = case o {\n  Or_Left l -> to_json l\n  Or_Right r -> to_json r\n}\n}\n\
+         impl ToJson for Rep__Opt a where {a: ToJson} {\n  to_json (Rep__Opt inner) = to_json inner\n}\n\
+         impl ToJson for Opt a where {a: ToJson} {\n  to_json m = to_json (to m)\n}",
+    )
+    .unwrap();
+}
+
+#[test]
+fn derive_generic_adt_parameterized_recursive() {
+    // Phase 2d + 2e combined: a parameterized recursive ADT.
+    check(
+        "import Std.Generic (Generic, U1, Leaf, Labeled, And, Or)\n\
+         type MyList a = MNil | MCons a (MyList a)\n  deriving (Generic)\n\
+         fun rt : MyList Int -> MyList Int\n\
+         rt xs = from (to xs : Rep__MyList Int)",
+    )
+    .unwrap();
 }
 
 #[test]

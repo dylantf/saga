@@ -1,0 +1,54 @@
+# Phase 2d: deriving (Generic) for recursive ADTs.
+# A recursive field becomes a `Leaf <SelfType>` in the Rep tree, exactly
+# like any other field — the recursion lives in the runtime dictionary
+# call chain, not in the Rep type structure.
+
+type IntList =
+  | INil
+  | ICons Int IntList
+  deriving (Generic)
+
+trait ToJson a {
+  fun to_json : a -> String
+}
+
+impl ToJson for U1 {
+  to_json _ = "null"
+}
+
+impl ToJson for Int {
+  to_json n = show n
+}
+
+impl ToJson for Leaf a where {a: ToJson} {
+  to_json (Leaf x) = to_json x
+}
+
+impl ToJson for Labeled a where {a: ToJson} {
+  to_json (Labeled name x) = "\"" <> name <> "\": " <> to_json x
+}
+
+impl ToJson for And l r where {l: ToJson, r: ToJson} {
+  to_json (And l r) = to_json l <> ", " <> to_json r
+}
+
+impl ToJson for Or l r where {l: ToJson, r: ToJson} {
+  to_json o = case o {
+    Or_Left l -> to_json l
+    Or_Right r -> to_json r
+  }
+}
+
+# Bridge: wrap the variant payload in braces, like the monomorphic ADT case.
+impl ToJson for Rep__IntList {
+  to_json (Rep__IntList inner) = "{" <> to_json inner <> "}"
+}
+
+impl ToJson for IntList {
+  to_json xs = to_json (to xs : Rep__IntList)
+}
+
+main () = {
+  let xs = ICons 1 (ICons 2 (ICons 3 INil))
+  dbg (to_json xs)
+}

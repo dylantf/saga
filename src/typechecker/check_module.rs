@@ -1614,12 +1614,18 @@ fn collect_codegen_info(
                     .unwrap_or_else(|| format!("{}.{}", module_name, trait_name));
                 let trait_type_arg_names: Vec<String> = trait_type_args
                     .iter()
-                    .map(|te| match te {
-                        crate::ast::TypeExpr::Var { name, .. } => name.clone(),
-                        _ => scope_map
-                            .resolve_type(te.simple_name())
-                            .map(|s| s.to_string())
-                            .unwrap_or_else(|| canonical_type_name(te.simple_name())),
+                    .map(|te| {
+                        // Use the head name of an App chain so parameterized
+                        // Rep types like `Rep__Box a` reduce to `Rep__Box`
+                        // for the dict-name key.
+                        let head = te.head_name().unwrap_or("");
+                        match te {
+                            crate::ast::TypeExpr::Var { name, .. } => name.clone(),
+                            _ => scope_map
+                                .resolve_type(head)
+                                .map(|s| s.to_string())
+                                .unwrap_or_else(|| canonical_type_name(head)),
+                        }
                     })
                     .collect();
                 let canonical_trait_type_args = canonical_trait_type_args(&trait_type_arg_names);

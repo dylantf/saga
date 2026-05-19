@@ -128,25 +128,17 @@ fn generate_record_derive(
     }
 }
 
-/// Build `type __Rep_R = __Rep_R <inner-rep>` + `impl Generic __Rep_R for R { to, from }`.
-/// Only handles records with no type parameters (Phase 2b scope).
-/// TODO(Phase 2e): handle parameterized records.
+/// Build `type Rep__R = Rep__R <inner-rep>` + `impl Generic R (Rep__R) { to, from }`.
+/// Handles parameterized and recursive records: the Rep type carries the same
+/// type parameters as the user record, and field types referencing the user
+/// type round-trip naturally through the runtime dictionary (no special
+/// recursion handling in the Rep shape).
 fn derive_record_generic(
     record_name: &str,
     type_params: &[String],
     fields: &[Annotated<(String, TypeExpr)>],
     span: Span,
 ) -> Result<Vec<Decl>, Option<Diagnostic>> {
-    if !type_params.is_empty() {
-        return Err(Some(Diagnostic {
-            severity: Severity::Error,
-            message:
-                "deriving (Generic) for parameterized records is not yet supported"
-                    .to_string(),
-            span: Some(span),
-        }));
-    }
-
     // Naming: use a leading uppercase letter so the lexer classifies the
     // name as an UpperIdent (type/constructor). The planning doc proposed
     // `__Rep_<R>` but a leading `_` lexes as lowercase, which would break
@@ -154,7 +146,7 @@ fn derive_record_generic(
     let rep_name = format!("Rep__{record_name}");
     let plain_fields: Vec<(String, TypeExpr)> = fields.iter().map(|a| a.node.clone()).collect();
 
-    // 1. Synthetic TypeDef: `type __Rep_R = __Rep_R <inner>`
+    // 1. Synthetic TypeDef: `type Rep__R <params> = Rep__R <inner>`
     let inner_type = build_rep_type_inner(&plain_fields);
     let ctor_field_type = inner_type.clone();
     let rep_typedef = Decl::TypeDef {
@@ -164,7 +156,7 @@ fn derive_record_generic(
         opaque: false,
         name: rep_name.clone(),
         name_span: Span { start: 0, end: 0 },
-        type_params: vec![],
+        type_params: type_params.to_vec(),
         variants: vec![Annotated::bare(TypeConstructor {
             id: NodeId::fresh(),
             name: rep_name.clone(),
@@ -244,19 +236,16 @@ fn derive_record_generic(
         body: from_body,
     });
 
+    let rep_with_params = apply_type_params(&rep_name, type_params);
     let impl_def = Decl::ImplDef {
         trait_name_span: Span { start: 0, end: 0 },
         target_type_span: Span { start: 0, end: 0 },
         id: NodeId::fresh(),
         doc: vec![],
         trait_name: "Generic".into(),
-        trait_type_args: vec![TypeExpr::Named {
-            id: NodeId::fresh(),
-            name: rep_name.clone(),
-            span: Span { start: 0, end: 0 },
-        }],
+        trait_type_args: vec![rep_with_params],
         target_type: record_name.into(),
-        type_params: vec![],
+        type_params: type_params.to_vec(),
         where_clause: vec![],
         where_apps: vec![],
         needs: vec![],
@@ -266,6 +255,29 @@ fn derive_record_generic(
     };
 
     Ok(vec![rep_typedef, impl_def])
+}
+
+/// Build a TypeExpr that applies `name` to each of `type_params` as a Var.
+/// e.g. (`Rep__Box`, `["a"]`) -> `App(Named(Rep__Box), Var(a))`.
+fn apply_type_params(name: &str, type_params: &[String]) -> TypeExpr {
+    let mut acc = TypeExpr::Named {
+        id: NodeId::fresh(),
+        name: name.into(),
+        span: Span { start: 0, end: 0 },
+    };
+    for tp in type_params {
+        acc = TypeExpr::App {
+            id: NodeId::fresh(),
+            func: Box::new(acc),
+            arg: Box::new(TypeExpr::Var {
+                id: NodeId::fresh(),
+                name: tp.clone(),
+                span: Span { start: 0, end: 0 },
+            }),
+            span: Span { start: 0, end: 0 },
+        };
+    }
+    acc
 }
 
 /// Build `type Rep__T = Rep__T <inner>` + `impl Generic Rep__T for T { to, from }`
@@ -280,33 +292,12 @@ fn derive_adt_generic(
     variants: &[Annotated<TypeConstructor>],
     span: Span,
 ) -> Result<Vec<Decl>, Option<Diagnostic>> {
-    if !type_params.is_empty() {
-        return Err(Some(Diagnostic {
-            severity: Severity::Error,
-            message: "deriving (Generic) for parameterized types is not yet supported"
-                .to_string(),
-            span: Some(span),
-        }));
-    }
     if variants.is_empty() {
         return Err(Some(Diagnostic {
             severity: Severity::Error,
             message: format!("cannot derive (Generic) for `{type_name}`: no variants"),
             span: Some(span),
         }));
-    }
-    for v in variants {
-        for (_, ty) in &v.node.fields {
-            if type_expr_refs(ty, type_name) {
-                return Err(Some(Diagnostic {
-                    severity: Severity::Error,
-                    message:
-                        "deriving (Generic) for recursive types is not yet supported"
-                            .to_string(),
-                    span: Some(span),
-                }));
-            }
-        }
     }
 
     let rep_name = format!("Rep__{type_name}");
@@ -320,7 +311,7 @@ fn derive_adt_generic(
         opaque: false,
         name: rep_name.clone(),
         name_span: Span { start: 0, end: 0 },
-        type_params: vec![],
+        type_params: type_params.to_vec(),
         variants: vec![Annotated::bare(TypeConstructor {
             id: NodeId::fresh(),
             name: rep_name.clone(),
@@ -452,19 +443,16 @@ fn derive_adt_generic(
         body: from_body,
     });
 
+    let rep_with_params = apply_type_params(&rep_name, type_params);
     let impl_def = Decl::ImplDef {
         trait_name_span: Span { start: 0, end: 0 },
         target_type_span: Span { start: 0, end: 0 },
         id: NodeId::fresh(),
         doc: vec![],
         trait_name: "Generic".into(),
-        trait_type_args: vec![TypeExpr::Named {
-            id: NodeId::fresh(),
-            name: rep_name.clone(),
-            span: Span { start: 0, end: 0 },
-        }],
+        trait_type_args: vec![rep_with_params],
         target_type: type_name.into(),
-        type_params: vec![],
+        type_params: type_params.to_vec(),
         where_clause: vec![],
         where_apps: vec![],
         needs: vec![],
@@ -474,26 +462,6 @@ fn derive_adt_generic(
     };
 
     Ok(vec![rep_typedef, impl_def])
-}
-
-/// Direct self-reference detector: scans a TypeExpr for any `Named { name }`
-/// matching `target`. Does not chase through other typedefs (indirect cycles
-/// fall through and will produce a normal type error at typecheck time).
-fn type_expr_refs(ty: &TypeExpr, target: &str) -> bool {
-    match ty {
-        TypeExpr::Named { name, .. } => name == target,
-        TypeExpr::App { func, arg, .. } => {
-            type_expr_refs(func, target) || type_expr_refs(arg, target)
-        }
-        TypeExpr::Arrow { from, to, .. } => {
-            type_expr_refs(from, target) || type_expr_refs(to, target)
-        }
-        TypeExpr::Record { fields, .. } => {
-            fields.iter().any(|(_, t)| type_expr_refs(t, target))
-        }
-        TypeExpr::Labeled { inner, .. } => type_expr_refs(inner, target),
-        TypeExpr::Var { .. } => false,
-    }
 }
 
 /// Build the inner Rep type for an ADT: right-leaning `Or` chain wrapping

@@ -943,6 +943,17 @@ impl TypeExpr {
             _ => panic!("simple_name called on compound TypeExpr"),
         }
     }
+
+    /// Extract the head name of a type expression: the constructor name at
+    /// the head of an `App` chain, or the bare name of a `Named`/`Var`.
+    /// Returns None for arrows, records, labeled.
+    pub fn head_name(&self) -> Option<&str> {
+        match self {
+            TypeExpr::Named { name, .. } | TypeExpr::Var { name, .. } => Some(name),
+            TypeExpr::App { func, .. } => func.head_name(),
+            _ => None,
+        }
+    }
 }
 
 /// PartialEq compares structure only, ignoring spans (same as Expr).

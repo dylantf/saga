@@ -708,7 +708,9 @@ impl<'a> Resolver<'a> {
             Decl::ImplDef {
                 id,
                 trait_name,
+                trait_type_args,
                 target_type,
+                type_params,
                 where_clause,
                 needs,
                 methods,
@@ -722,6 +724,14 @@ impl<'a> Resolver<'a> {
                 }
                 self.record_trait_ref(*id, trait_name);
                 self.record_type_ref(*id, target_type);
+                // Resolve types appearing in the impl's trait_type_args
+                // (e.g. `impl Generic (Box a) (Rep__Box a)` → resolve Rep__Box).
+                // TypeExpr::Var (lowercase ident) is treated as a type variable
+                // and skipped by resolve_type_expr; named heads get type_ref entries.
+                let _ = type_params;
+                for te in trait_type_args {
+                    self.resolve_type_expr(te);
+                }
                 self.resolve_where_clause(where_clause);
                 for effect_ref in needs {
                     self.record_effect_ref(effect_ref);

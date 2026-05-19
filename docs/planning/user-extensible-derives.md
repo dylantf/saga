@@ -387,9 +387,11 @@ This MUST land before Phase 2 starts.
   parameterized records is not yet supported") and skips the derive.
   See TODO marker in `derive_record_generic`.
 
-- **ADT Generic derive is deferred.** The ADT branch of
-  `generate_derive` does not handle `Generic`; it falls through to the
-  existing "cannot derive" path. Phase 2c picks this up.
+- **ADT Generic derive is done in Phase 2c.** Dispatched in
+  `expand_derives` directly (inline `if bare == "Generic"`) rather than
+  through `generate_derive`, because Generic needs to emit two decls
+  (TypeDef + ImplDef) and `generate_derive` returns `Option<Decl>`.
+  Mirrors the record path.
 
 - **The `check()` test helper now surfaces derive diagnostics.**
   Previously the return value of `expand_derives` was discarded, which
@@ -403,6 +405,24 @@ This MUST land before Phase 2 starts.
   Before Phase 2e lands, either widen `ImplInfo.trait_type_args` to
   carry full type info (preferred) or change the fallback to consult
   the impl's scheme directly. Pick during Phase 2e kickoff.
+
+- **Phase 2d (recursion) is essentially free.** Feasibility spike
+  confirmed (see `/tmp/recursion-spike.saga` notes): hand-written
+  recursive `Generic` + delegating `ToJson` works end-to-end with zero
+  compiler changes. Both suspected blockers were false alarms:
+  - The call-site coherence fallback never fires for monomorphic
+    recursive types — the second arg is pinned by the delegating
+    impl's ascription, so coherence doesn't have to guess.
+  - `dict_for_type` doesn't loop because the recursive position
+    bottoms out at a zero-arg `Type::Con`, whose dict is a top-level
+    name reference, not an inlined expansion. The runtime cycle
+    (dict's `to_json` body calling itself on subterms) is normal
+    function recursion that BEAM handles natively.
+
+  Work is ~2-4 hours: delete the `type_expr_refs`-based bail-out in
+  `derive_record_generic` and `derive_adt_generic`. The Rep-leaf
+  generation already produces the right shape for recursive fields.
+  **Bundle into Phase 2e** rather than running as a separate phase.
 
 ---
 

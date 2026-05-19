@@ -28,6 +28,7 @@ impl Checker {
                 ImplInfo {
                     param_constraints: vec![],
                     trait_type_args: vec![],
+                target_type_param_ids: vec![],
                     span: None,
                 },
             );
@@ -49,6 +50,7 @@ impl Checker {
                 ImplInfo {
                     param_constraints: vec![],
                     trait_type_args: vec![],
+                target_type_param_ids: vec![],
                     span: None,
                 },
             );
@@ -155,6 +157,7 @@ impl Checker {
             ImplInfo {
                 param_constraints: vec![],
                 trait_type_args: vec![],
+                target_type_param_ids: vec![],
                 span: None,
             },
         );
@@ -163,6 +166,7 @@ impl Checker {
             ImplInfo {
                 param_constraints: vec![],
                 trait_type_args: vec![],
+                target_type_param_ids: vec![],
                 span: None,
             },
         );
@@ -171,6 +175,7 @@ impl Checker {
             ImplInfo {
                 param_constraints: vec![],
                 trait_type_args: vec![],
+                target_type_param_ids: vec![],
                 span: None,
             },
         );
@@ -181,6 +186,7 @@ impl Checker {
             ImplInfo {
                 param_constraints: vec![("Eq".into(), 0)],
                 trait_type_args: vec![],
+                target_type_param_ids: vec![],
                 span: None,
             },
         );
@@ -191,6 +197,7 @@ impl Checker {
             ImplInfo {
                 param_constraints: vec![("Eq".into(), 0)],
                 trait_type_args: vec![],
+                target_type_param_ids: vec![],
                 span: None,
             },
         );
@@ -201,6 +208,7 @@ impl Checker {
             ImplInfo {
                 param_constraints: vec![("Eq".into(), 0), ("Eq".into(), 1)],
                 trait_type_args: vec![],
+                target_type_param_ids: vec![],
                 span: None,
             },
         );
@@ -211,6 +219,7 @@ impl Checker {
             ImplInfo {
                 param_constraints: vec![("Eq".into(), 0), ("Eq".into(), 1)],
                 trait_type_args: vec![],
+                target_type_param_ids: vec![],
                 span: None,
             },
         );
@@ -221,6 +230,7 @@ impl Checker {
             ImplInfo {
                 param_constraints: vec![("Eq".into(), 0)],
                 trait_type_args: vec![],
+                target_type_param_ids: vec![],
                 span: None,
             },
         );
