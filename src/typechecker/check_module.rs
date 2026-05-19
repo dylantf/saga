@@ -650,7 +650,9 @@ impl Checker {
                     format!("parse error in module '{}': {}", module_name, e.message),
                 )
             })?;
-        crate::derive::expand_derives(&mut program);
+        let imported =
+            crate::derive::collect_imported_decls(&program, self.modules.map.as_ref());
+        crate::derive::expand_derives(&mut program, &imported);
         crate::desugar::desugar_program(&mut program);
 
         // Cache the parsed program so the build step can skip re-parsing
@@ -680,7 +682,10 @@ impl Checker {
                 let mut prelude_program = crate::parser::Parser::new(prelude_tokens)
                     .parse_program()
                     .expect("prelude parse error");
-                crate::derive::expand_derives(&mut prelude_program);
+                crate::derive::expand_derives(
+                    &mut prelude_program,
+                    &crate::derive::ImportedDecls::empty(),
+                );
                 crate::desugar::desugar_program(&mut prelude_program);
                 snapshot
                     .check_program_inner(&mut prelude_program)

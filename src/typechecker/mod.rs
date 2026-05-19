@@ -1387,7 +1387,10 @@ impl Checker {
         let mut prelude_program = crate::parser::Parser::new(prelude_tokens)
             .parse_program()
             .expect("prelude parse");
-        crate::derive::expand_derives(&mut prelude_program);
+        crate::derive::expand_derives(
+            &mut prelude_program,
+            &crate::derive::ImportedDecls::empty(),
+        );
         crate::desugar::desugar_program(&mut prelude_program);
         checker
             .check_program_inner(&mut prelude_program)

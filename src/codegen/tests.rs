@@ -17,7 +17,7 @@ fn emit_full(src: &str) -> String {
 fn emit_full_with_source(src: &str, source_file: Option<&super::SourceFile>) -> String {
     let tokens = Lexer::new(src).lex().expect("lex error");
     let mut program = Parser::new(tokens).parse_program().expect("parse error");
-    derive::expand_derives(&mut program);
+    derive::expand_derives(&mut program, &derive::ImportedDecls::empty());
     desugar::desugar_program(&mut program);
 
     let mut checker = typechecker::Checker::with_prelude(None).expect("prelude error");

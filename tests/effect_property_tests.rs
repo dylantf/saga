@@ -245,7 +245,7 @@ fn make_checker(root: PathBuf) -> typechecker::Checker {
     let mut prelude_program = parser::Parser::new(prelude_tokens)
         .parse_program()
         .expect("prelude parse error");
-    saga::derive::expand_derives(&mut prelude_program);
+    saga::derive::expand_derives(&mut prelude_program, &saga::derive::ImportedDecls::empty());
     saga::desugar::desugar_program(&mut prelude_program);
     checker.prelude_imports = prelude_program
         .iter()

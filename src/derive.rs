@@ -6,11 +6,104 @@ use crate::ast::*;
 use crate::token::Span;
 use crate::token::StringKind;
 use crate::typechecker::{Diagnostic, Severity};
+use std::collections::HashMap;
+use std::path::Path;
+
+/// Decl summaries pulled from modules the current module imports. Used by
+/// `expand_derives` to resolve cross-module routed derives — without this,
+/// `deriving (Foo)` only works when `trait Foo` is declared in the same file.
+///
+/// Phase 6.5 populates `traits`; Phase 7 will extend with `types`/`records`
+/// for structural wrapper inspection.
+#[derive(Default, Clone)]
+pub struct ImportedDecls {
+    /// Bare trait name -> trait shape (type params + methods).
+    pub traits: HashMap<String, RoutedTraitInfo>,
+}
+
+impl ImportedDecls {
+    pub fn empty() -> Self {
+        Self::default()
+    }
+}
+
+/// Walk a program's `Decl::Import` statements and gather public trait
+/// declarations from each imported module. Stdlib (builtin) modules are
+/// loaded from their embedded sources; project modules are looked up via
+/// `module_map`. Parse errors and missing modules are silently skipped —
+/// the typechecker will surface those properly during the import pass.
+pub fn collect_imported_decls(
+    program: &[Decl],
+    module_map: Option<&crate::typechecker::ModuleMap>,
+) -> ImportedDecls {
+    let mut out = ImportedDecls::default();
+    for decl in program {
+        if let Decl::Import { module_path, .. } = decl {
+            let source =
+                if let Some(src) = crate::typechecker::builtin_module_source(module_path) {
+                    src.to_string()
+                } else if let Some(map) = module_map {
+                    let name = module_path.join(".");
+                    match map.get(&name).and_then(|p| std::fs::read_to_string(p).ok()) {
+                        Some(s) => s,
+                        None => continue,
+                    }
+                } else {
+                    continue;
+                };
+            let Ok(tokens) = crate::lexer::Lexer::new(&source).lex() else {
+                continue;
+            };
+            let Ok(prog) = crate::parser::Parser::new(tokens).parse_program() else {
+                continue;
+            };
+            for d in &prog {
+                if let Decl::TraitDef {
+                    name,
+                    type_params,
+                    methods,
+                    public,
+                    ..
+                } = d
+                    && *public
+                {
+                    // Local definitions in the current module win on name
+                    // collision; don't overwrite. (Caller still wins later
+                    // when merging local trait_defs over imported.)
+                    out.traits.entry(name.clone()).or_insert(RoutedTraitInfo {
+                        type_params: type_params.clone(),
+                        methods: methods.iter().map(|m| m.node.clone()).collect(),
+                    });
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Build an `ImportedDecls` by scanning a project root for `.saga` files.
+/// Convenience wrapper used by integration tests that don't have a checker
+/// handy. Real callers (cli, lsp) should use `collect_imported_decls` with
+/// the checker's module map.
+pub fn collect_from_project_root(
+    program: &[Decl],
+    root: &Path,
+) -> ImportedDecls {
+    let map = crate::typechecker::scan_source_dir(root).ok();
+    collect_imported_decls(program, map.as_ref())
+}
 
 /// Expand all `deriving` clauses in a program, appending synthetic `ImplDef`
 /// nodes after each `TypeDef` that has them. Returns diagnostics for
 /// unsupported derive requests.
-pub fn expand_derives(program: &mut Vec<Decl>) -> Vec<Diagnostic> {
+///
+/// `imported` carries trait/type summaries pulled from imported modules so
+/// routed derives (`deriving (Foo)` where `Foo` is imported) can resolve.
+/// Callers without import context can pass `&ImportedDecls::empty()`.
+pub fn expand_derives(
+    program: &mut Vec<Decl>,
+    imported: &ImportedDecls,
+) -> Vec<Diagnostic> {
     let mut errors = Vec::new();
     // Build a fresh program, splicing each decl's derived siblings in directly
     // after it. Generic-derived `Rep__T` typedefs and their impls must be
@@ -20,24 +113,26 @@ pub fn expand_derives(program: &mut Vec<Decl>) -> Vec<Diagnostic> {
     let original = std::mem::take(program);
 
     // Index trait defs by bare name for routed-derive method discovery.
-    let trait_defs: std::collections::HashMap<String, RoutedTraitInfo> = original
-        .iter()
-        .filter_map(|d| match d {
-            Decl::TraitDef {
-                name,
-                type_params,
-                methods,
-                ..
-            } => Some((
+    // Start from the imported set, then overlay local trait defs so a local
+    // trait shadowing an imported one wins.
+    let mut trait_defs: HashMap<String, RoutedTraitInfo> = imported.traits.clone();
+    for d in &original {
+        if let Decl::TraitDef {
+            name,
+            type_params,
+            methods,
+            ..
+        } = d
+        {
+            trait_defs.insert(
                 name.clone(),
                 RoutedTraitInfo {
                     type_params: type_params.clone(),
                     methods: methods.iter().map(|m| m.node.clone()).collect(),
                 },
-            )),
-            _ => None,
-        })
-        .collect();
+            );
+        }
+    }
 
     let mut rebuilt: Vec<Decl> = Vec::with_capacity(original.len());
     for decl in &original {
@@ -178,9 +273,10 @@ pub fn expand_derives(program: &mut Vec<Decl>) -> Vec<Diagnostic> {
 /// Minimal trait info captured at expand_derives time for routed-derive
 /// method/signature discovery. We only need the method names and signature
 /// shapes — direction detection and body generation work off these.
-struct RoutedTraitInfo {
-    type_params: Vec<String>,
-    methods: Vec<TraitMethod>,
+#[derive(Clone)]
+pub struct RoutedTraitInfo {
+    pub type_params: Vec<String>,
+    pub methods: Vec<TraitMethod>,
 }
 
 fn is_hardcoded_derive(bare: &str) -> bool {

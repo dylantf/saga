@@ -748,6 +748,292 @@ What's left for real-world polish (out of scope for Phase 6):
 - No attribute-based opt-in/opt-out at the trait level — every
   multi-method trait that survives classification gets routed.
 
+---
+
+## Phase 6.5: Cross-Module Routed Derives (PREREQUISITE for Phase 7)
+
+### Why
+
+Phases 3, 3.1, and 6 shipped routed derives that work, but **only when the
+trait, its building-block impls, the wrapper, and the user type all live in
+the same module**. Every Phase 3/3.1/6 example file (`99f`, `99g`, `99h`)
+defines its codec library inline alongside the user type.
+
+This was discovered during Phase 7 scoping: `expand_derives` runs pre-
+typecheck on the current module's parsed AST. Imports aren't resolved yet,
+so a user module that does:
+
+```saga
+import json_lib (ToJson)
+record Person { name: String, age: Int } deriving (ToJson)
+```
+
+cannot find the `ToJson` `TraitDef` at derive-expansion time. The
+synthesizer either fails or fabricates a wrong impl.
+
+The `Generic` case appears to work cross-module only because `Std.Generic`
+is auto-imported via prelude and the prelude is loaded into the parser's
+view before user-module expansion. Non-prelude routed traits don't get
+this treatment.
+
+This is the blocker between "feature mechanism validated in single-file
+demos" and "library authors can ship traits and users derive them across
+module boundaries" — which is the actual goal stated in the plan's opening
+paragraph.
+
+### Pre-implementation scoping (mandatory)
+
+Before any code lands:
+
+1. **Reproduce the bug.** Write a failing test with a library module and
+   a user module in separate files (or separate inline modules in one
+   test source). Confirm it fails today with a specific diagnostic.
+   This test is the Phase 6.5 acceptance criterion and stays as a
+   regression check.
+2. **Understand the prelude path.** `Std.Generic.Generic` resolves at
+   derive-expansion today. Figure out how. If existing prelude-import
+   machinery is generalizable, Phase 6.5 is "extend that machinery to
+   user imports" (small). If the prelude path is special-cased and
+   doesn't generalize, Phase 6.5 is "build pre-typecheck import
+   resolution for derives" (larger).
+
+The answer determines the implementation shape and the estimate.
+
+### Implementation outline
+
+Two viable approaches; pick based on the scoping outcome:
+
+**(a) Generalize the prelude resolution path.** If imports for non-prelude
+modules can be resolved into the same parsed-AST form prelude uses, just
+do that resolution before `expand_derives` runs. Thread an
+`&ImportedDecls` (or equivalent) into `expand_derives` and `derive_routed`.
+Trait lookup, wrapper lookup, and building-block lookups all consult this
+bundle.
+
+**(b) Pre-typecheck import pass.** If the typechecker's import resolution
+is too entangled with type registration to extract, build a lighter
+pre-typecheck pass that produces summaries (TraitDef, TypeDef, RecordDef
+shapes) without doing full type registration. `expand_derives` consumes
+these summaries.
+
+Either way, the change is:
+- `expand_derives` signature grows an `&ImportedDecls` parameter (or
+  whatever the resolved-imports bundle ends up being called).
+- `derive_routed`'s trait lookup falls through to imported decls if not
+  found locally.
+- Bootstrap care: when expanding derives for the prelude itself or
+  `Std.Generic`, the imported bundle is empty (or contains only what the
+  prelude has already loaded — depending on staging).
+
+### Tests
+
+- **Cross-module routed to-direction derive**: library defines
+  `trait ToJson` + building-block impls; user module imports and derives.
+  Compiles and runs.
+- **Cross-module routed from-direction derive**: same with `FromJson`.
+- **Cross-module wrapper type**: user derives against a trait whose method
+  returns a custom wrapper imported from another module. (This subsumes
+  the Phase 7 case once 7 lands.)
+- **Transitive import**: library A defines the trait, library B re-exports
+  it, user imports from B. Verify the resolution chains through.
+- **Existing single-file demos** (99 through 99h) continue working
+  unchanged.
+
+### Risks
+
+- **Compilation-order subtlety.** If the user imports a module that hasn't
+  been parsed yet, the resolved-imports bundle might be empty at expansion
+  time. The compiler probably already orders module parsing such that
+  imports are parsed first; verify before assuming.
+- **Bootstrap loops.** `Std.Generic` defines `Generic`; if some other
+  stdlib module derives `Generic`, we have a chicken-and-egg situation.
+  Mitigated because the standard library compiles in a known order and
+  `Generic`'s trait def is in `Std.Generic` itself.
+- **Diagnostic quality on missing imports.** A user who writes
+  `deriving (ToJson)` without importing `ToJson` should get a clear error
+  ("trait `ToJson` not in scope; did you forget to import it?") rather
+  than a synthesizer failure. Budget half a day for this.
+
+### Estimated scope
+
+~1-2 days if approach (a) works, ~3-5 days if approach (b) is needed.
+Scoping pass determines which.
+
+### Phase 6.5 Outcomes (to be filled in after implementation)
+
+TBD.
+
+---
+
+## Phase 7: Structural From-Direction Wrappers
+
+### Why
+
+Phase 3.1 supports three from-direction return shapes by literal name-match:
+`a`, `Result a _`, `Maybe a`. Anything else — `IO (Result a _)`,
+`DbResult a` (library-defined three-state result), `Validated e a` (error-
+accumulating validation), `Wrapped a = Yep (List a) | Nope` — emits a
+diagnostic and refuses the derive.
+
+The framing redesign (Phase 5) gave us a cleaner answer than the
+trait-level annotation or `Unwrap` typeclass approaches considered
+earlier: **the wrapper type's structural Rep is exactly the information
+needed to thread `from` through it.** A library author who wants a custom
+wrapper just derives `Generic` on their wrapper type, and the synthesizer
+inspects its variants (or fields, for product wrappers) to find positions
+of the user type `a` and apply `from` there.
+
+This subsumes the existing `Result`/`Maybe` cases. They become specific
+instances of "ADT whose Generic representation has one variant containing
+`a`," not hardcoded recognized names.
+
+### Core idea
+
+For a from-direction trait method `fun decode : Input -> W a` where `W` is
+some wrapper:
+
+1. Look up `W`'s `TypeDef` in the program (or imported modules) at
+   derive-expansion time. This is parser-level state — same access pattern
+   as the existing derive code.
+2. Walk `W`'s variants (or fields, for a record wrapper). Identify
+   positions where the trait's `a` parameter appears.
+3. Generate a case-match (for sum wrappers) or constructor pattern (for
+   record wrappers) that applies the appropriate callback at each
+   `a`-position and passes other positions through unchanged.
+
+The callback is the same one Phase 3.1 already plumbs through
+`build_from_body`:
+- Bridge impl: wrap with `Rep__T (...)`.
+- Delegating impl: apply `from`.
+
+### Algorithm
+
+Given trait method return type `W <type_args>` where `a` is the trait's
+self type variable:
+
+1. Resolve `W` to its `TypeDef`. If `W` is opaque (no in-tree TypeDef,
+   imported abstractly, or a primitive), emit a diagnostic:
+   `"cannot derive ... — wrapper type "W" is opaque (no Generic
+   representation available)"`. Note: not "must derive Generic" — the
+   synthesizer doesn't actually need a Generic impl to exist; it just
+   needs the TypeDef to be in scope and inspectable.
+
+2. **For sum wrappers** (`Decl::TypeDef` with variants):
+   - For each variant, find `a`-positions in its fields. An `a`-position
+     is a field whose type expression equals (after substitution against
+     `W`'s declared type params) the trait's self variable.
+   - Generate one case arm per variant. Bind each field to a fresh name.
+     For `a`-position fields, apply the callback (`wrap` or `from`).
+     For other fields, pass through unchanged.
+   - Variants with zero `a`-positions become passthrough arms.
+   - Variants with ≥1 `a`-positions get the callback applied at each
+     `a`-position field.
+
+3. **For product wrappers** (`Decl::RecordDef`):
+   - Same approach but with one constructor pattern instead of multiple
+     arms. Find `a`-positions in fields, apply callback there.
+
+4. **For bare `a`** (the user type appears directly as the return type,
+   not wrapped in anything):
+   - Existing handling unchanged. Apply callback directly.
+
+### Edge cases
+
+| Case | Behavior |
+|------|----------|
+| Multiple variants contain `a` (`Either a a`) | Apply callback at every `a`-position in every variant. Natural extension; no special-case. |
+| Single variant with multiple `a`-positions (`type Multi a = Both a a`) | Apply callback at each. Same idea. |
+| `a` appears nested (`Wrapped a = Yep (List a) \| Nope`) | **Reject in v1.** Emit diagnostic: `"cannot derive ... — wrapper "Wrapped" contains the user type at a non-leaf position; only direct \`a\` positions are supported"`. Recursing through `List`'s Generic to thread `from` is a possible future extension but introduces termination questions for self-referential containers. |
+| Recursive wrapper (`type Cofree a = Cofree a (Cofree a)`) | Falls under "a appears nested." Reject. |
+| No `a` anywhere in the return | Phase 3.1's `classify_method_direction` already rejects this — the method isn't from-direction at all. |
+| Wrapper has phantom params (`type W a b = W a` where `b` is unused) | Fine. Only `a`-positions in actual field shapes matter. |
+| Wrapper type appears in trait's type args (`from : Input -> W a Int`) | Resolve `W`'s declared type params against the call-site type args. `a` is whichever position lines up with the trait's self. |
+| Wrapper is a primitive (`from : Input -> Int`) | Falls under "no `a` anywhere." Rejected by classification. |
+| Wrapper is itself `a` (the trait's self variable) | This is the bare case; handle as today. |
+| Multi-param wrappers (`type DbResult a e = ...`) | Resolve which param position is the trait's self. Identify by name-match between the trait method's return-type arg and the trait's self variable. |
+
+### Implementation outline
+
+- Replace the hardcoded shape recognition in `classify_from_return`
+  (`src/derive.rs`) with a structural inspection step:
+  - Old: literal `Result` / `Maybe` / bare matching.
+  - New: produce a `FromShape` value carrying:
+    - The wrapper's `TypeDef` (or `None` for bare).
+    - A list of `(variant_or_field_path, a_positions)` describing where
+      to apply the callback.
+- `build_from_body` already takes a `wrap` callback. Generalize it to
+  consume a `FromShape` and emit the appropriate case-match or
+  constructor pattern, applying the callback at each marked `a`-position.
+- Diagnostics: when the wrapper is unsupported (opaque or has nested
+  `a`-positions), the error message names the wrapper type and the
+  specific reason. Better than today's catchall "unsupported wrapper."
+- The bridge and delegating impl synthesizers (`synth_method_pair`) are
+  unchanged in structure — they just pass different callbacks to the new
+  body builder.
+
+Estimated scope: ~150-250 lines of `src/derive.rs` work plus ~50 lines of
+tests. No typechecker, elaborator, codegen, or stdlib changes.
+
+### Migration / backwards compatibility
+
+The existing `Result` / `Maybe` / bare cases must produce identical
+output after the generalization. Verify via:
+- All Phase 3.1 tests pass unchanged.
+- Examples 99g (FromJson with Result) and 99h (JsonCodec with mixed
+  direction, including Result decode) produce byte-identical output.
+
+If `Result` and `Maybe` get `deriving (Generic)` in the stdlib (they
+likely should anyway, but aren't currently part of `Std.Generic`), the
+generalization can drop the bare/Result/Maybe special-case entirely and
+go through the structural path for everything. **Decision deferred to
+Phase 7 implementation**: cleaner to drop the special-cases or keep them
+as a fast path?
+
+### Tests
+
+- Custom three-variant wrapper (`DbResult a = DbOk a | DbErr DbError |
+  DbNoRows`) — from-direction derive works, round-trips.
+- Validation-style wrapper (`Validated e a = Valid a | Invalid (List
+  e)`) — from-direction derive works.
+- Record wrapper (`Boxed a = { value: a, meta: String }`) — from-direction
+  derive works.
+- Wrapper with phantom param — works, phantom ignored.
+- Multi-`a` wrapper (`Either a a`) — both arms get callback.
+- Nested `a` (`Wrapped a = Yep (List a) | Nope`) — diagnostic, names the
+  variant and reason.
+- Opaque wrapper (e.g. an imported type without TypeDef in scope) —
+  diagnostic, suggests the user export the TypeDef or use a supported
+  wrapper.
+- All existing Result/Maybe/bare tests pass unchanged.
+
+### Open decisions
+
+- **Drop hardcoded Result/Maybe special-cases?** If `Result` and `Maybe`
+  derive Generic in the stdlib, yes. Cleaner. If they don't, keeping the
+  special-case as a fast path is acceptable.
+- **Should the diagnostic for "nested `a`" suggest a workaround?** E.g.
+  "consider wrapping the inner type in `Leaf` manually." Probably not —
+  users hitting this need to redesign their wrapper, not patch around it.
+- **Mutual-recursion case** (`A` references `B`, `B` references `A`,
+  one of them is the wrapper): can rely on the same self-reference
+  handling Phase 2d uses (`Leaf` at recursive positions, runtime
+  dispatch). Verify in tests.
+
+### When to invest
+
+Lowest-priority polish item until a real library author files an issue.
+Triggers worth doing this for, in descending order:
+1. Postgres library wants `DbResult a` with three variants.
+2. Validation library wants error accumulation (`Validated e a`).
+3. Async/effect library wants `IO (Result a _)` or similar
+   effect-wrapped returns. Note: `IO` is opaque on BEAM, so this case
+   would need the "nested `a`" extension. Defer further until needed.
+4. Anyone files an issue saying their trait can't derive.
+
+### Phase 7 Outcomes (to be filled in after implementation)
+
+TBD.
+
 - **Piece 4 (error rewriting) deferred.** Constraint failures inside
   synthesized impls still produce default-shaped errors mentioning
   `Labeled`/`And`/etc. Low-cost win whenever someone wants to do it; a

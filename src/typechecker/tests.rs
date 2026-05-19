@@ -10,7 +10,8 @@ fn check(src: &str) -> Result<Checker, Diagnostic> {
     let tokens = lexer.lex().expect("lex error");
     let mut parser = Parser::new(tokens);
     let mut program = parser.parse_program().expect("parse error");
-    let derive_errors = crate::derive::expand_derives(&mut program);
+    let derive_errors =
+        crate::derive::expand_derives(&mut program, &crate::derive::ImportedDecls::empty());
     if let Some(first) = derive_errors.into_iter().next() {
         return Err(first);
     }
@@ -22,7 +23,10 @@ fn check(src: &str) -> Result<Checker, Diagnostic> {
     let mut prelude_program = Parser::new(prelude_tokens)
         .parse_program()
         .expect("prelude parse error");
-    crate::derive::expand_derives(&mut prelude_program);
+    crate::derive::expand_derives(
+        &mut prelude_program,
+        &crate::derive::ImportedDecls::empty(),
+    );
     crate::desugar::desugar_program(&mut prelude_program);
     checker
         .check_program_inner(&mut prelude_program)
@@ -75,7 +79,10 @@ fn check_with_project_files(files: &[(&str, &str)], main_src: &str) -> Result<Ch
         let mut prelude_program = Parser::new(prelude_tokens)
             .parse_program()
             .expect("prelude parse error");
-        crate::derive::expand_derives(&mut prelude_program);
+        crate::derive::expand_derives(
+            &mut prelude_program,
+            &crate::derive::ImportedDecls::empty(),
+        );
         crate::desugar::desugar_program(&mut prelude_program);
         checker
             .check_program_inner(&mut prelude_program)
@@ -85,7 +92,9 @@ fn check_with_project_files(files: &[(&str, &str)], main_src: &str) -> Result<Ch
         let tokens = lexer.lex().expect("lex error");
         let mut parser = Parser::new(tokens);
         let mut program = parser.parse_program().expect("parse error");
-        crate::derive::expand_derives(&mut program);
+        let imported =
+            crate::derive::collect_imported_decls(&program, checker.module_map());
+        crate::derive::expand_derives(&mut program, &imported);
         crate::desugar::desugar_program(&mut program);
         checker
             .check_program_inner(&mut program)

@@ -712,6 +712,7 @@ impl<'a> Resolver<'a> {
                 target_type,
                 type_params,
                 where_clause,
+                where_apps,
                 needs,
                 methods,
                 ..
@@ -733,6 +734,19 @@ impl<'a> Resolver<'a> {
                     self.resolve_type_expr(te);
                 }
                 self.resolve_where_clause(where_clause);
+                // Walk where-app args (bare TraitApp constraints) so their
+                // TypeExpr NodeIds get resolution entries. Without this, the
+                // coherence check at registration time sees uncanonicalized
+                // type names and can't match against impls registered under
+                // canonical (Module.Name) keys.
+                for app in where_apps {
+                    if let Some(resolved) = self.resolve_trait_name(&app.trait_name) {
+                        self.result.traits.insert(app.id, resolved);
+                    }
+                    for arg in &app.type_args {
+                        self.resolve_type_expr(arg);
+                    }
+                }
                 for effect_ref in needs {
                     self.record_effect_ref(effect_ref);
                 }
