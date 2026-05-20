@@ -907,34 +907,50 @@ fn derive_routed(
     Ok(vec![bridge_impl, delegating_impl])
 }
 
-/// Direction of a single routed-derive method. `From` carries a `FromShape`
-/// describing the wrapper structurally (variants + a-positions, or a record
-/// + a-positions, or bare `a`).
+/// Direction of a single routed-derive method. `To` carries a per-parameter
+/// flag vector identifying which params are `a`-typed (need `to`/Rep__T
+/// wrapping) vs. passthrough. `From` carries a `FromShape` describing the
+/// wrapper structurally.
 #[derive(Clone)]
 enum MethodDirection {
-    To,
+    To { a_params: Vec<bool> },
     From(FromShape),
 }
 
 /// Validate a method's shape for routed deriving and decide which direction it
 /// runs. Returns a human-readable reason on failure for use in the surrounding
 /// diagnostic.
+///
+/// To-direction supports any number of parameters: each parameter must either
+/// be exactly the trait's self variable (an `a`-param — wrapped via `to` /
+/// destructured from `Rep__T`) or contain no occurrence of the self variable
+/// at all (a passthrough param). Nested self (e.g. `List a`) is rejected.
 fn classify_method_direction(
     method: &TraitMethod,
     self_var: &str,
     scope: &DeriveScope<'_>,
 ) -> Result<MethodDirection, String> {
-    if method.params.len() != 1 {
-        return Err(format!(
-            "only single-parameter methods can be routed (method `{}` has {} parameters)",
-            method.name,
-            method.params.len()
-        ));
-    }
-    let param_has_self = type_expr_contains_var(&method.params[0].1, self_var);
     let return_has_self = type_expr_contains_var(&method.return_type, self_var);
-    match (param_has_self, return_has_self) {
-        (true, false) => Ok(MethodDirection::To),
+
+    let mut a_params: Vec<bool> = Vec::with_capacity(method.params.len());
+    let mut any_param_has_self = false;
+    for (_label, ty) in &method.params {
+        if is_self_var(ty, self_var) {
+            a_params.push(true);
+            any_param_has_self = true;
+        } else if type_expr_contains_var(ty, self_var) {
+            return Err(format!(
+                "method `{}` has a parameter with the trait's self type nested in a non-leaf \
+                 position; only direct `a` parameters are supported",
+                method.name
+            ));
+        } else {
+            a_params.push(false);
+        }
+    }
+
+    match (any_param_has_self, return_has_self) {
+        (true, false) => Ok(MethodDirection::To { a_params }),
         (false, true) => match classify_from_return(&method.return_type, self_var, scope) {
             Ok(shape) => Ok(MethodDirection::From(shape)),
             Err(reason) => Err(format!("method `{}`: {}", method.name, reason)),
@@ -962,94 +978,133 @@ fn synth_method_pair(
     let zero_span = Span { start: 0, end: 0 };
     let method_name = method.name.clone();
     match dir {
-        MethodDirection::To => {
-            // Bridge:    method (Rep__T inner) = method inner
-            // Delegate:  method __val          = method (to __val)
-            let inner_var = "__inner".to_string();
-            let bridge_body = Expr::synth(
-                span,
-                ExprKind::App {
-                    func: Box::new(Expr::synth(
-                        span,
-                        ExprKind::Var {
-                            name: method_name.clone(),
-                        },
-                    )),
-                    arg: Box::new(Expr::synth(
-                        span,
-                        ExprKind::Var {
+        MethodDirection::To { a_params } => {
+            // Bridge:    method (Rep__T i0) (Rep__T i1) p2 = method i0 i1 p2
+            // Delegate:  method p0 p1 p2                   = method (to p0) (to p1) p2
+            // For each param:
+            //   - a-param: bridge pattern destructures `Rep__T __i<k>`, body uses __i<k>
+            //              delegate pattern binds __p<k>, body wraps with `to __p<k>`
+            //   - passthrough: bridge & delegate both bind __p<k>, body forwards __p<k>
+            let n = a_params.len();
+            let mut bridge_params: Vec<Pat> = Vec::with_capacity(n);
+            let mut bridge_args: Vec<Expr> = Vec::with_capacity(n);
+            let mut deleg_params: Vec<Pat> = Vec::with_capacity(n);
+            let mut deleg_args: Vec<Expr> = Vec::with_capacity(n);
+            for (i, &is_a) in a_params.iter().enumerate() {
+                let param_var = format!("__p{i}");
+                if is_a {
+                    let inner_var = format!("__i{i}");
+                    bridge_params.push(Pat::Constructor {
+                        id: NodeId::fresh(),
+                        name: rep_name.to_string(),
+                        args: vec![Pat::Var {
+                            id: NodeId::fresh(),
                             name: inner_var.clone(),
+                            span,
+                        }],
+                        span,
+                    });
+                    bridge_args.push(Expr::synth(
+                        span,
+                        ExprKind::Var { name: inner_var },
+                    ));
+                    deleg_params.push(Pat::Var {
+                        id: NodeId::fresh(),
+                        name: param_var.clone(),
+                        span,
+                    });
+                    let to_call = Expr::synth(
+                        span,
+                        ExprKind::App {
+                            func: Box::new(Expr::synth(
+                                span,
+                                ExprKind::Var { name: "to".into() },
+                            )),
+                            arg: Box::new(Expr::synth(
+                                span,
+                                ExprKind::Var { name: param_var },
+                            )),
                         },
-                    )),
-                },
-            );
-            let bridge_param = Pat::Constructor {
-                id: NodeId::fresh(),
-                name: rep_name.to_string(),
-                args: vec![Pat::Var {
-                    id: NodeId::fresh(),
-                    name: inner_var,
+                    );
+                    deleg_args.push(to_call);
+                } else {
+                    bridge_params.push(Pat::Var {
+                        id: NodeId::fresh(),
+                        name: param_var.clone(),
+                        span,
+                    });
+                    bridge_args.push(Expr::synth(
+                        span,
+                        ExprKind::Var {
+                            name: param_var.clone(),
+                        },
+                    ));
+                    deleg_params.push(Pat::Var {
+                        id: NodeId::fresh(),
+                        name: param_var.clone(),
+                        span,
+                    });
+                    deleg_args.push(Expr::synth(span, ExprKind::Var { name: param_var }));
+                }
+            }
+            let method_name_for_call = method_name.clone();
+            let build_call = |args: Vec<Expr>| -> Expr {
+                let mut acc = Expr::synth(
                     span,
-                }],
-                span,
+                    ExprKind::Var {
+                        name: method_name_for_call.clone(),
+                    },
+                );
+                for arg in args {
+                    acc = Expr::synth(
+                        span,
+                        ExprKind::App {
+                            func: Box::new(acc),
+                            arg: Box::new(arg),
+                        },
+                    );
+                }
+                acc
             };
             let bridge = ImplMethod {
                 name: method_name.clone(),
                 name_span: zero_span,
-                params: vec![bridge_param],
-                body: bridge_body,
+                params: bridge_params,
+                body: build_call(bridge_args),
             };
-
-            let val_var = "__val".to_string();
-            let to_call = Expr::synth(
-                span,
-                ExprKind::App {
-                    func: Box::new(Expr::synth(span, ExprKind::Var { name: "to".into() })),
-                    arg: Box::new(Expr::synth(
-                        span,
-                        ExprKind::Var {
-                            name: val_var.clone(),
-                        },
-                    )),
-                },
-            );
-            let deleg_body = Expr::synth(
-                span,
-                ExprKind::App {
-                    func: Box::new(Expr::synth(
-                        span,
-                        ExprKind::Var {
-                            name: method_name.clone(),
-                        },
-                    )),
-                    arg: Box::new(to_call),
-                },
-            );
             let deleg = ImplMethod {
                 name: method_name,
                 name_span: zero_span,
-                params: vec![Pat::Var {
-                    id: NodeId::fresh(),
-                    name: val_var,
-                    span,
-                }],
-                body: deleg_body,
+                params: deleg_params,
+                body: build_call(deleg_args),
             };
             (bridge, deleg)
         }
         MethodDirection::From(shape) => {
-            let input_var = "__input".to_string();
+            // All params are passthrough in from-direction (the a appears only
+            // in the return). Bind each as `__p<i>` and forward all of them to
+            // the recursive method call inside the case scrutinee.
+            let input_vars: Vec<String> = (0..method.params.len())
+                .map(|i| format!("__p{i}"))
+                .collect();
+            let build_params = || -> Vec<Pat> {
+                input_vars
+                    .iter()
+                    .map(|n| Pat::Var {
+                        id: NodeId::fresh(),
+                        name: n.clone(),
+                        span,
+                    })
+                    .collect()
+            };
+
             let rep_name_owned = rep_name.to_string();
             let bridge_wrap = |inner: Expr, s: Span| apply_ctor(&rep_name_owned, inner, s);
-            let bridge_body = build_from_body(&method_name, &input_var, &bridge_wrap, shape, span);
+            let bridge_body = build_from_body(&method_name, &input_vars, &bridge_wrap, shape, span);
             let bridge = ImplMethod {
                 name: method_name.clone(),
                 name_span: zero_span,
-                params: vec![Pat::Var {
-                    id: NodeId::fresh(),
-                    name: input_var.clone(),
-                    span,
-                }],
+                params: build_params(),
                 body: bridge_body,
             };
 
@@ -1067,15 +1122,11 @@ fn synth_method_pair(
                     },
                 )
             };
-            let deleg_body = build_from_body(&method_name, &input_var, &deleg_wrap, shape, span);
+            let deleg_body = build_from_body(&method_name, &input_vars, &deleg_wrap, shape, span);
             let deleg = ImplMethod {
                 name: method_name,
                 name_span: zero_span,
-                params: vec![Pat::Var {
-                    id: NodeId::fresh(),
-                    name: input_var,
-                    span,
-                }],
+                params: build_params(),
                 body: deleg_body,
             };
             (bridge, deleg)
@@ -1363,28 +1414,28 @@ fn classify_record_wrapper(
 /// and reconstructs the wrapper applying `wrap` at each a-position.
 fn build_from_body(
     method_name: &str,
-    input_var: &str,
+    input_vars: &[String],
     wrap: &dyn Fn(Expr, Span) -> Expr,
     shape: &FromShape,
     span: Span,
 ) -> Expr {
-    let inner_call = Expr::synth(
+    // `method __p0 __p1 ...` — recursive call forwards every input through
+    // the dictionary to the next instance in the chain.
+    let mut inner_call = Expr::synth(
         span,
-        ExprKind::App {
-            func: Box::new(Expr::synth(
-                span,
-                ExprKind::Var {
-                    name: method_name.into(),
-                },
-            )),
-            arg: Box::new(Expr::synth(
-                span,
-                ExprKind::Var {
-                    name: input_var.into(),
-                },
-            )),
+        ExprKind::Var {
+            name: method_name.into(),
         },
     );
+    for iv in input_vars {
+        inner_call = Expr::synth(
+            span,
+            ExprKind::App {
+                func: Box::new(inner_call),
+                arg: Box::new(Expr::synth(span, ExprKind::Var { name: iv.clone() })),
+            },
+        );
+    }
     match shape {
         FromShape::Bare => wrap(inner_call, span),
         FromShape::Sum { variants, .. } => {

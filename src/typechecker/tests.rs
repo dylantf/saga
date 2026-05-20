@@ -7270,6 +7270,160 @@ fn phase6_routed_derive_mixed_includes_bad_method() {
     );
 }
 
+// --- Phase 6 follow-up: multi-parameter to-direction methods -------------
+
+/// Building-block Eq2-style library: an `eq2 : a -> a -> Bool` method
+/// exercising the two-a-param to-direction path.
+fn multi_param_eq_lib() -> &'static str {
+    "trait Eq2 a {\n  fun eq2 : a -> a -> Bool\n}\n\
+     impl Eq2 for U1 { eq2 _ _ = True }\n\
+     impl Eq2 for Int { eq2 a b = a == b }\n\
+     impl Eq2 for String { eq2 a b = a == b }\n\
+     impl Eq2 for Leaf a where {a: Eq2} {\n  eq2 (Leaf x) (Leaf y) = eq2 x y\n}\n\
+     impl Eq2 for Labeled a where {a: Eq2} {\n  eq2 (Labeled _ x) (Labeled _ y) = eq2 x y\n}\n\
+     impl Eq2 for And l r where {l: Eq2, r: Eq2} {\n  eq2 (And l1 r1) (And l2 r2) = if eq2 l1 l2 then eq2 r1 r2 else False\n}\n\
+     impl Eq2 for Or l r where {l: Eq2, r: Eq2} {\n  eq2 a b = case a {\n    Or_Left x -> case b { Or_Left y -> eq2 x y; Or_Right _ -> False }\n    Or_Right x -> case b { Or_Right y -> eq2 x y; Or_Left _ -> False }\n  }\n}\n\
+     impl Eq2 for Variant a where {a: Eq2} {\n  eq2 (Variant _ x) (Variant _ y) = eq2 x y\n}\n\
+     impl Eq2 for Record a where {a: Eq2} {\n  eq2 (Record _ x) (Record _ y) = eq2 x y\n}\n\
+     impl Eq2 for Adt a where {a: Eq2} {\n  eq2 (Adt _ x) (Adt _ y) = eq2 x y\n}\n"
+}
+
+#[test]
+fn phase6_routed_derive_multi_param_to_direction_record() {
+    let src = format!(
+        "{lib}\
+         record Person {{ name: String, age: Int }}\n  deriving (Eq2)\n\
+         fun go : Person -> Person -> Bool\n\
+         go a b = eq2 a b",
+        lib = multi_param_eq_lib()
+    );
+    check(&src).unwrap();
+}
+
+#[test]
+fn phase6_routed_derive_multi_param_to_direction_adt() {
+    let src = format!(
+        "{lib}\
+         type Shape = Circle Int | Square Int Int | Dot\n  deriving (Eq2)\n\
+         fun go : Shape -> Shape -> Bool\n\
+         go a b = eq2 a b",
+        lib = multi_param_eq_lib()
+    );
+    check(&src).unwrap();
+}
+
+#[test]
+fn phase6_routed_derive_multi_param_to_direction_parameterized() {
+    // Parameterized record exercises the where-app threading: each a-param
+    // is destructured/wrapped independently, and the impl's type param `a`
+    // requires its own Eq2 bound to flow through the Leaf instance.
+    let src = format!(
+        "{lib}\
+         record Box a {{ v: a }}\n  deriving (Eq2)\n\
+         fun go : Box Int -> Box Int -> Bool\n\
+         go a b = eq2 a b",
+        lib = multi_param_eq_lib()
+    );
+    check(&src).unwrap();
+}
+
+#[test]
+fn phase6_routed_derive_multi_param_with_non_a_param() {
+    // `encode : Config -> a -> String` — non-a first parameter, a-param
+    // second. The Config arg must pass through unchanged in both bridge and
+    // delegate; the a-param is the one that gets `to`-wrapped.
+    let src = "import Std.Generic (Generic, U1, Leaf, Labeled, And, Or, Variant, Record, Adt)\n\
+               type Config = LowercaseConfig | UppercaseConfig\n\
+               trait Encode a {\n  fun encode : Config -> a -> String\n}\n\
+               impl Encode for U1 { encode _ _ = \"u1\" }\n\
+               impl Encode for Int { encode _ n = show n }\n\
+               impl Encode for String { encode _ s = s }\n\
+               impl Encode for Leaf a where {a: Encode} { encode c (Leaf x) = encode c x }\n\
+               impl Encode for Labeled a where {a: Encode} { encode c (Labeled n x) = n <> \":\" <> encode c x }\n\
+               impl Encode for And l r where {l: Encode, r: Encode} { encode c (And l r) = encode c l <> \",\" <> encode c r }\n\
+               impl Encode for Or l r where {l: Encode, r: Encode} { encode c o = case o { Or_Left l -> encode c l; Or_Right r -> encode c r } }\n\
+               impl Encode for Variant a where {a: Encode} { encode c (Variant n x) = n <> \":\" <> encode c x }\n\
+               impl Encode for Record a where {a: Encode} { encode c (Record _ i) = encode c i }\n\
+               impl Encode for Adt a where {a: Encode} { encode c (Adt _ i) = encode c i }\n\
+               record Pt { x: Int, y: Int }\n  deriving (Encode)\n\
+               fun go : Config -> Pt -> String\n\
+               go c p = encode c p";
+    check(src).unwrap();
+}
+
+#[test]
+fn phase6_routed_derive_three_a_params() {
+    // Three a-params and a non-a return — fold3 : a -> a -> a -> String.
+    // All three get `to`-wrapped in the delegate and Rep__T-destructured in
+    // the bridge.
+    let src = "import Std.Generic (Generic, U1, Leaf, Labeled, And, Or, Variant, Record, Adt)\n\
+               trait Fold3 a {\n  fun fold3 : a -> a -> a -> String\n}\n\
+               impl Fold3 for U1 { fold3 _ _ _ = \"u1\" }\n\
+               impl Fold3 for Int { fold3 a b c = show a <> show b <> show c }\n\
+               impl Fold3 for String { fold3 a b c = a <> b <> c }\n\
+               impl Fold3 for Leaf a where {a: Fold3} { fold3 (Leaf x) (Leaf y) (Leaf z) = fold3 x y z }\n\
+               impl Fold3 for Labeled a where {a: Fold3} { fold3 (Labeled _ x) (Labeled _ y) (Labeled _ z) = fold3 x y z }\n\
+               impl Fold3 for And l r where {l: Fold3, r: Fold3} { fold3 (And l1 r1) (And l2 r2) (And l3 r3) = fold3 l1 l2 l3 <> fold3 r1 r2 r3 }\n\
+               impl Fold3 for Or l r where {l: Fold3, r: Fold3} { fold3 _ _ _ = \"or\" }\n\
+               impl Fold3 for Variant a where {a: Fold3} { fold3 (Variant _ x) (Variant _ y) (Variant _ z) = fold3 x y z }\n\
+               impl Fold3 for Record a where {a: Fold3} { fold3 (Record _ x) (Record _ y) (Record _ z) = fold3 x y z }\n\
+               impl Fold3 for Adt a where {a: Fold3} { fold3 (Adt _ x) (Adt _ y) (Adt _ z) = fold3 x y z }\n\
+               record Triple { a: Int, b: Int, c: Int }\n  deriving (Fold3)\n\
+               fun go : Triple -> Triple -> Triple -> String\n\
+               go x y z = fold3 x y z";
+    check(src).unwrap();
+}
+
+#[test]
+fn phase6_routed_derive_multi_param_from_direction() {
+    // `parse : Config -> String -> Result a String` — two input parameters,
+    // a appears only in the return. Both Config and String pass through
+    // unchanged to the recursive call; the wrap callback applies to the
+    // `Ok a` payload as usual.
+    let src = "import Std.Generic (Generic, U1, Leaf, Labeled, And, Or, Variant, Record, Adt)\n\
+               type Config = Strict | Lenient\n\
+               trait Parse a {\n  fun parse : Config -> String -> Result a String\n}\n\
+               impl Parse for U1 { parse _ _ = Ok U1 }\n\
+               impl Parse for Int { parse _ _ = Ok 0 }\n\
+               impl Parse for String { parse _ s = Ok s }\n\
+               impl Parse for Leaf a where {a: Parse} { parse c s = case parse c s { Ok x -> Ok (Leaf x); Err e -> Err e } }\n\
+               impl Parse for Labeled a where {a: Parse} { parse c s = case parse c s { Ok x -> Ok (Labeled \"\" x); Err e -> Err e } }\n\
+               impl Parse for And l r where {l: Parse, r: Parse} { parse c s = case parse c s { Ok l -> case parse c s { Ok r -> Ok (And l r); Err e -> Err e }; Err e -> Err e } }\n\
+               impl Parse for Or l r where {l: Parse, r: Parse} { parse c s = case parse c s { Ok l -> Ok (Or_Left l); Err _ -> case parse c s { Ok r -> Ok (Or_Right r); Err e -> Err e } } }\n\
+               impl Parse for Variant a where {a: Parse} { parse c s = case parse c s { Ok x -> Ok (Variant \"\" x); Err e -> Err e } }\n\
+               impl Parse for Record a where {a: Parse} { parse c s = case parse c s { Ok x -> Ok (Record \"\" x); Err e -> Err e } }\n\
+               impl Parse for Adt a where {a: Parse} { parse c s = case parse c s { Ok x -> Ok (Adt \"\" x); Err e -> Err e } }\n\
+               record Person { name: String, age: Int }\n  deriving (Parse)\n\
+               fun go : Config -> String -> Result Person String\n\
+               go c s = parse c s";
+    check(src).unwrap();
+}
+
+#[test]
+fn phase6_routed_derive_mixed_single_multi_method_trait() {
+    // A trait with a single-a method (`show_b : a -> String`), a multi-a
+    // method (`eq_b : a -> a -> Bool`), and a from-direction method
+    // (`from_b : String -> Result a String`). All should derive together.
+    let src = "import Std.Generic (Generic, U1, Leaf, Labeled, And, Or, Variant, Record, Adt)\n\
+               trait Mixed a {\n  fun show_b : a -> String\n  fun eq_b : a -> a -> Bool\n  fun from_b : String -> Result a String\n}\n\
+               impl Mixed for U1 { show_b _ = \"u1\"\n  eq_b _ _ = True\n  from_b _ = Ok U1 }\n\
+               impl Mixed for Int { show_b n = show n\n  eq_b a b = a == b\n  from_b _ = Ok 0 }\n\
+               impl Mixed for String { show_b s = s\n  eq_b a b = a == b\n  from_b s = Ok s }\n\
+               impl Mixed for Leaf a where {a: Mixed} { show_b (Leaf x) = show_b x\n  eq_b (Leaf x) (Leaf y) = eq_b x y\n  from_b s = case from_b s { Ok x -> Ok (Leaf x); Err e -> Err e } }\n\
+               impl Mixed for Labeled a where {a: Mixed} { show_b (Labeled n x) = n <> \":\" <> show_b x\n  eq_b (Labeled _ x) (Labeled _ y) = eq_b x y\n  from_b s = case from_b s { Ok x -> Ok (Labeled \"\" x); Err e -> Err e } }\n\
+               impl Mixed for And l r where {l: Mixed, r: Mixed} { show_b (And l r) = show_b l <> \",\" <> show_b r\n  eq_b (And l1 r1) (And l2 r2) = if eq_b l1 l2 then eq_b r1 r2 else False\n  from_b s = case from_b s { Ok l -> case from_b s { Ok r -> Ok (And l r); Err e -> Err e }; Err e -> Err e } }\n\
+               impl Mixed for Or l r where {l: Mixed, r: Mixed} { show_b o = case o { Or_Left l -> show_b l; Or_Right r -> show_b r }\n  eq_b _ _ = False\n  from_b s = case from_b s { Ok l -> Ok (Or_Left l); Err _ -> case from_b s { Ok r -> Ok (Or_Right r); Err e -> Err e } } }\n\
+               impl Mixed for Variant a where {a: Mixed} { show_b (Variant n x) = n <> \":\" <> show_b x\n  eq_b (Variant _ x) (Variant _ y) = eq_b x y\n  from_b s = case from_b s { Ok x -> Ok (Variant \"\" x); Err e -> Err e } }\n\
+               impl Mixed for Record a where {a: Mixed} { show_b (Record _ i) = show_b i\n  eq_b (Record _ x) (Record _ y) = eq_b x y\n  from_b s = case from_b s { Ok x -> Ok (Record \"\" x); Err e -> Err e } }\n\
+               impl Mixed for Adt a where {a: Mixed} { show_b (Adt _ i) = show_b i\n  eq_b (Adt _ x) (Adt _ y) = eq_b x y\n  from_b s = case from_b s { Ok x -> Ok (Adt \"\" x); Err e -> Err e } }\n\
+               record Person { name: String, age: Int }\n  deriving (Mixed)\n\
+               fun go : Person -> Person -> String\n\
+               go a b = show_b a <> \"|\" <> show_b b\n\
+               fun go2 : String -> Result Person String\n\
+               go2 s = from_b s";
+    check(src).unwrap();
+}
+
 // --- Phase 5: framing redesign (Record, Variant, Adt wrappers) -----------
 
 #[test]
