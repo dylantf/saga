@@ -1030,9 +1030,54 @@ Triggers worth doing this for, in descending order:
    would need the "nested `a`" extension. Defer further until needed.
 4. Anyone files an issue saying their trait can't derive.
 
-### Phase 7 Outcomes (to be filled in after implementation)
+### Phase 7 Outcomes (shipped)
 
-TBD.
+- **Structural wrapper inspection replaces hardcoded shape recognition.**
+  `classify_from_return` now walks the trait method's return type, looks
+  the wrapper up in the merged imported/local decls tables (Phase 6.5
+  output), and inspects variants/fields to find `a`-positions. Produces a
+  `FromShape` enum: `Bare | Sum { variants } | Record { fields }`.
+- **`build_from_body` is fully structural.** One arm per variant for sums;
+  one record pattern for records. Fields bound to `__f0`/`__f1`/…;
+  reconstruction is positional (sum) or named (record). The `wrap`
+  callback (Phase 3.1's existing extension point) is applied at every
+  `a`-position.
+- **Result/Maybe fast-path dropped entirely.** Possible thanks to Phase
+  6.5 making prelude imports visible at expansion time. Result and
+  Maybe go through the same structural path as user-defined wrappers.
+  Cleaner than the originally-planned "keep as fast path" option.
+- **All edge cases from the plan's matrix verified.** Three-state
+  wrapper, multi-param wrapper with phantom passthrough, record wrapper,
+  phantom-only param, multi-`a` wrapper, nested-`a` diagnostic, opaque
+  wrapper diagnostic, no-`a`-position diagnostic. Seven new tests in
+  `src/typechecker/tests.rs`.
+- **Example `99i-generic-derived-custom-wrapper.saga`** demonstrates a
+  user-defined three-state `DbResult` wrapper threaded end-to-end with
+  zero hardcoded shape recognition. Output: `DbOk Person { ... }` /
+  `DbOk Circle(42)`.
+- **No typechecker, elaborator, codegen, or stdlib changes.** Pure
+  pre-typecheck synthesis in `src/derive.rs`. Phase 6.5's where-app
+  resolver work was already sufficient.
+- **Line count: ~370 in derive.rs** (scoped 250-330). ~50 lines of drift
+  came from splitting `collect_imported_decls` into
+  `collect_imported_decls` + `collect_decls_from_imports` to handle
+  prelude-auto-include cleanly.
+- **Total test count after Phase 7: 854 lib + 96 codegen + 72 module-
+  codegen + 59 e2e + stdlib. All pass. Clippy clean.**
+
+### Feature complete
+
+With Phase 7 shipped, the user-extensible-derives feature delivers on the
+plan's original promise: library authors can publish a trait + custom
+wrapper types + building-block impls in their own module, and users in
+any other module add `deriving (Trait)` and it works. End-to-end, no
+compiler involvement, single-file demos no longer required.
+
+Remaining polish items (none are blockers):
+- Constraint-failure errors in synthesized impls still reference
+  building-block types rather than user-facing fields (Phase 3c
+  carry-over).
+- No attribute system for field renaming, skipping, or custom encoders.
 
 - **Piece 4 (error rewriting) deferred.** Constraint failures inside
   synthesized impls still produce default-shaped errors mentioning

@@ -10,8 +10,8 @@ fn check(src: &str) -> Result<Checker, Diagnostic> {
     let tokens = lexer.lex().expect("lex error");
     let mut parser = Parser::new(tokens);
     let mut program = parser.parse_program().expect("parse error");
-    let derive_errors =
-        crate::derive::expand_derives(&mut program, &crate::derive::ImportedDecls::empty());
+    let imported = crate::derive::collect_imported_decls(&program, None);
+    let derive_errors = crate::derive::expand_derives(&mut program, &imported);
     if let Some(first) = derive_errors.into_iter().next() {
         return Err(first);
     }
@@ -6847,14 +6847,17 @@ fn phase3_routed_derive_from_direction_recursive_adt() {
 
 #[test]
 fn phase3_routed_derive_from_direction_unsupported_wrapper() {
-    // A custom wrapper that isn't Result or Maybe → clear diagnostic.
-    let src = "type MyResult a = MyOk a | MyErr String\n\
-               trait FromJson a { fun from_json : String -> MyResult a }\n\
+    // Phase 7: structural wrappers (custom sums like MyResult) now succeed;
+    // the truly unsupported shape is one with `a` nested at a non-leaf
+    // position, e.g. `Yep (List a)`. That's what this test pins now.
+    let src = "type Wrapped a = Yep (List a) | Nope\n\
+               trait FromJson a { fun from_json : String -> Wrapped a }\n\
                record Person { name: String, age: Int }\n  deriving (FromJson)\n";
     let err = check(src).err().expect("expected error");
     assert!(
-        err.message.contains("return-type shape") && err.message.contains("FromJson"),
-        "expected unsupported-wrapper diagnostic; got: {}",
+        err.message.contains("nested in a non-leaf")
+            && err.message.contains("Wrapped"),
+        "expected nested-a diagnostic naming the wrapper; got: {}",
         err.message
     );
 }
@@ -7081,5 +7084,323 @@ fn phase5_library_distinguishes_record_label_from_variant_name() {
                type Wrap = W Int\n  deriving (Generic, Tag)\n\
                fun go : Pair -> Wrap -> String\n\
                go p w = tag p <> \"|\" <> tag w";
+    check(src).unwrap();
+}
+
+// --- Phase 7: structural from-direction wrappers -------------------
+
+#[test]
+fn phase7_custom_three_state_wrapper_succeeds() {
+    // Headline: a library-defined `DbResult a` with three variants —
+    // `DbOk a` (a-position), `DbErr DbError` (passthrough), `DbNoRows`
+    // (no fields) — is now a valid from-direction wrapper. The synthesizer
+    // walks DbResult's variants structurally instead of hardcoding the
+    // accepted shapes.
+    let src = "type DbError = NotConnected | Timeout\n\
+               type DbResult a = DbOk a | DbErr DbError | DbNoRows\n\
+               trait Decode a { fun decode : String -> DbResult a }\n\
+               impl Decode for U1     { decode _ = DbOk U1 }\n\
+               impl Decode for Int    { decode _ = DbOk 0 }\n\
+               impl Decode for String { decode s = DbOk s }\n\
+               impl Decode for Leaf a where {a: Decode} {\n\
+                 decode s = case decode s {\n\
+                   DbOk x -> DbOk (Leaf x)\n\
+                   DbErr e -> DbErr e\n\
+                   DbNoRows -> DbNoRows\n\
+                 }\n\
+               }\n\
+               impl Decode for Labeled a where {a: Decode} {\n\
+                 decode s = case decode s {\n\
+                   DbOk x -> DbOk (Labeled \"\" x)\n\
+                   DbErr e -> DbErr e\n\
+                   DbNoRows -> DbNoRows\n\
+                 }\n\
+               }\n\
+               impl Decode for And l r where {l: Decode, r: Decode} {\n\
+                 decode s = case decode s {\n\
+                   DbOk l -> case decode s {\n\
+                     DbOk r -> DbOk (And l r)\n\
+                     DbErr e -> DbErr e\n\
+                     DbNoRows -> DbNoRows\n\
+                   }\n\
+                   DbErr e -> DbErr e\n\
+                   DbNoRows -> DbNoRows\n\
+                 }\n\
+               }\n\
+               impl Decode for Or l r where {l: Decode, r: Decode} {\n\
+                 decode s = case decode s {\n\
+                   DbOk l -> DbOk (Or_Left l)\n\
+                   DbErr e -> DbErr e\n\
+                   DbNoRows -> DbNoRows\n\
+                 }\n\
+               }\n\
+               impl Decode for Variant a where {a: Decode} {\n\
+                 decode s = case decode s {\n\
+                   DbOk x -> DbOk (Variant \"\" x)\n\
+                   DbErr e -> DbErr e\n\
+                   DbNoRows -> DbNoRows\n\
+                 }\n\
+               }\n\
+               impl Decode for Record a where {a: Decode} {\n\
+                 decode s = case decode s {\n\
+                   DbOk x -> DbOk (Record \"\" x)\n\
+                   DbErr e -> DbErr e\n\
+                   DbNoRows -> DbNoRows\n\
+                 }\n\
+               }\n\
+               impl Decode for Adt a where {a: Decode} {\n\
+                 decode s = case decode s {\n\
+                   DbOk x -> DbOk (Adt \"\" x)\n\
+                   DbErr e -> DbErr e\n\
+                   DbNoRows -> DbNoRows\n\
+                 }\n\
+               }\n\
+               record Person { name: String, age: Int }\n  deriving (Decode)\n\
+               fun go : String -> DbResult Person\n\
+               go s = decode s\n";
+    check(src).unwrap();
+}
+
+#[test]
+fn phase7_validated_two_param_wrapper_succeeds() {
+    // `Validated e a = Valid a | Invalid (List e)`: only position 1 binds
+    // to the trait's self, so wrapper_self_params = {"a"}. Valid's field
+    // is `Var("a")` → a-position. Invalid's field is `List e` — contains
+    // `e` not `a`, so passthrough. Multi-param wrappers work via positional
+    // alignment.
+    let src = "type Validated e a = Valid a | Invalid (List e)\n\
+               trait FromCsv a { fun from_csv : String -> Validated String a }\n\
+               impl FromCsv for U1     { from_csv _ = Valid U1 }\n\
+               impl FromCsv for Int    { from_csv _ = Valid 0 }\n\
+               impl FromCsv for String { from_csv s = Valid s }\n\
+               impl FromCsv for Leaf a where {a: FromCsv} {\n\
+                 from_csv s = case from_csv s {\n\
+                   Valid x -> Valid (Leaf x)\n\
+                   Invalid es -> Invalid es\n\
+                 }\n\
+               }\n\
+               impl FromCsv for Labeled a where {a: FromCsv} {\n\
+                 from_csv s = case from_csv s {\n\
+                   Valid x -> Valid (Labeled \"\" x)\n\
+                   Invalid es -> Invalid es\n\
+                 }\n\
+               }\n\
+               impl FromCsv for And l r where {l: FromCsv, r: FromCsv} {\n\
+                 from_csv s = case from_csv s {\n\
+                   Valid l -> case from_csv s {\n\
+                     Valid r -> Valid (And l r)\n\
+                     Invalid es -> Invalid es\n\
+                   }\n\
+                   Invalid es -> Invalid es\n\
+                 }\n\
+               }\n\
+               impl FromCsv for Or l r where {l: FromCsv, r: FromCsv} {\n\
+                 from_csv s = case from_csv s {\n\
+                   Valid l -> Valid (Or_Left l)\n\
+                   Invalid es -> Invalid es\n\
+                 }\n\
+               }\n\
+               impl FromCsv for Variant a where {a: FromCsv} {\n\
+                 from_csv s = case from_csv s {\n\
+                   Valid x -> Valid (Variant \"\" x)\n\
+                   Invalid es -> Invalid es\n\
+                 }\n\
+               }\n\
+               impl FromCsv for Record a where {a: FromCsv} {\n\
+                 from_csv s = case from_csv s {\n\
+                   Valid x -> Valid (Record \"\" x)\n\
+                   Invalid es -> Invalid es\n\
+                 }\n\
+               }\n\
+               impl FromCsv for Adt a where {a: FromCsv} {\n\
+                 from_csv s = case from_csv s {\n\
+                   Valid x -> Valid (Adt \"\" x)\n\
+                   Invalid es -> Invalid es\n\
+                 }\n\
+               }\n\
+               record Row { id: Int, label: String }\n  deriving (FromCsv)\n\
+               fun go : String -> Validated String Row\n\
+               go s = from_csv s\n";
+    check(src).unwrap();
+}
+
+#[test]
+fn phase7_record_wrapper_succeeds() {
+    // `record Boxed a { value: a, meta: String }` — a product wrapper.
+    // Single `Boxed { value, meta } -> Boxed { value: wrap(value), meta }`
+    // case arm. Verifies the FromShape::Record path.
+    let src = "record Boxed a { value: a, meta: String }\n\
+               trait Decode a { fun decode : String -> Boxed a }\n\
+               impl Decode for U1     { decode _ = Boxed { value: U1, meta: \"\" } }\n\
+               impl Decode for Int    { decode _ = Boxed { value: 0, meta: \"\" } }\n\
+               impl Decode for String { decode s = Boxed { value: s, meta: \"\" } }\n\
+               impl Decode for Leaf a where {a: Decode} {\n\
+                 decode s = case decode s {\n\
+                   Boxed { value, meta } -> Boxed { value: Leaf value, meta: meta }\n\
+                 }\n\
+               }\n\
+               impl Decode for Labeled a where {a: Decode} {\n\
+                 decode s = case decode s {\n\
+                   Boxed { value, meta } -> Boxed { value: Labeled \"\" value, meta: meta }\n\
+                 }\n\
+               }\n\
+               impl Decode for And l r where {l: Decode, r: Decode} {\n\
+                 decode s = case decode s {\n\
+                   Boxed { value, meta } -> case decode s {\n\
+                     Boxed { value: v2, meta: _ } -> Boxed { value: And value v2, meta: meta }\n\
+                   }\n\
+                 }\n\
+               }\n\
+               impl Decode for Or l r where {l: Decode, r: Decode} {\n\
+                 decode s = case decode s {\n\
+                   Boxed { value, meta } -> Boxed { value: Or_Left value, meta: meta }\n\
+                 }\n\
+               }\n\
+               impl Decode for Variant a where {a: Decode} {\n\
+                 decode s = case decode s {\n\
+                   Boxed { value, meta } -> Boxed { value: Variant \"\" value, meta: meta }\n\
+                 }\n\
+               }\n\
+               impl Decode for Record a where {a: Decode} {\n\
+                 decode s = case decode s {\n\
+                   Boxed { value, meta } -> Boxed { value: Record \"\" value, meta: meta }\n\
+                 }\n\
+               }\n\
+               impl Decode for Adt a where {a: Decode} {\n\
+                 decode s = case decode s {\n\
+                   Boxed { value, meta } -> Boxed { value: Adt \"\" value, meta: meta }\n\
+                 }\n\
+               }\n\
+               record Person { name: String }\n  deriving (Decode)\n\
+               fun go : String -> Boxed Person\n\
+               go s = decode s\n";
+    check(src).unwrap();
+}
+
+#[test]
+fn phase7_phantom_param_wrapper_succeeds() {
+    // `type Tagged tag a = Tag a` — `tag` is phantom (declared but unused
+    // in the variant's fields). Only `a` should be the a-position. Phase 7
+    // doesn't care about phantom params; it just walks fields and matches
+    // their TypeExpr against the wrapper_self_params set.
+    let src = "type Tagged tag a = Tag a\n\
+               trait FromTag a { fun from_tag : String -> Tagged Int a }\n\
+               impl FromTag for U1     { from_tag _ = Tag U1 }\n\
+               impl FromTag for Int    { from_tag _ = Tag 0 }\n\
+               impl FromTag for String { from_tag s = Tag s }\n\
+               impl FromTag for Leaf a where {a: FromTag} {\n\
+                 from_tag s = case from_tag s { Tag x -> Tag (Leaf x) }\n\
+               }\n\
+               impl FromTag for Labeled a where {a: FromTag} {\n\
+                 from_tag s = case from_tag s { Tag x -> Tag (Labeled \"\" x) }\n\
+               }\n\
+               impl FromTag for And l r where {l: FromTag, r: FromTag} {\n\
+                 from_tag s = case from_tag s {\n\
+                   Tag l -> case from_tag s { Tag r -> Tag (And l r) }\n\
+                 }\n\
+               }\n\
+               impl FromTag for Or l r where {l: FromTag, r: FromTag} {\n\
+                 from_tag s = case from_tag s { Tag x -> Tag (Or_Left x) }\n\
+               }\n\
+               impl FromTag for Variant a where {a: FromTag} {\n\
+                 from_tag s = case from_tag s { Tag x -> Tag (Variant \"\" x) }\n\
+               }\n\
+               impl FromTag for Record a where {a: FromTag} {\n\
+                 from_tag s = case from_tag s { Tag x -> Tag (Record \"\" x) }\n\
+               }\n\
+               impl FromTag for Adt a where {a: FromTag} {\n\
+                 from_tag s = case from_tag s { Tag x -> Tag (Adt \"\" x) }\n\
+               }\n\
+               record Person { id: Int }\n  deriving (FromTag)\n";
+    check(src).unwrap();
+}
+
+#[test]
+fn phase7_opaque_wrapper_diagnostic() {
+    // Wrapper used in the trait method's return is not defined in the
+    // current module or imports — clear diagnostic, names the wrapper.
+    let src = "trait FromX a { fun from_x : String -> NotDefined a }\n\
+               record Person { name: String }\n  deriving (FromX)\n";
+    let err = check(src).err().expect("expected error");
+    assert!(
+        err.message.contains("NotDefined")
+            && err.message.contains("not defined"),
+        "expected opaque-wrapper diagnostic naming the wrapper; got: {}",
+        err.message
+    );
+}
+
+#[test]
+fn phase7_no_a_position_diagnostic() {
+    // Wrapper takes `a` but doesn't actually carry it in any field.
+    let src = "type Hide a = Hide String\n\
+               trait FromHide a { fun from_hide : String -> Hide a }\n\
+               record Person { name: String }\n  deriving (FromHide)\n";
+    let err = check(src).err().expect("expected error");
+    assert!(
+        err.message.contains("Hide") && err.message.contains("self type"),
+        "expected no-a-position diagnostic; got: {}",
+        err.message
+    );
+}
+
+#[test]
+fn phase7_either_multi_a_succeeds() {
+    // `Either a a` (degenerate but legal). Both wrapper-local params bind
+    // to self, so wrapper_self_params = {"l", "r"}. Both arms get `wrap`.
+    let src = "type Either l r = Left l | Right r\n\
+               trait FromE a { fun from_e : String -> Either a a }\n\
+               impl FromE for U1     { from_e _ = Left U1 }\n\
+               impl FromE for Int    { from_e _ = Left 0 }\n\
+               impl FromE for String { from_e s = Left s }\n\
+               impl FromE for Leaf a where {a: FromE} {\n\
+                 from_e s = case from_e s {\n\
+                   Left x -> Left (Leaf x)\n\
+                   Right x -> Right (Leaf x)\n\
+                 }\n\
+               }\n\
+               impl FromE for Labeled a where {a: FromE} {\n\
+                 from_e s = case from_e s {\n\
+                   Left x -> Left (Labeled \"\" x)\n\
+                   Right x -> Right (Labeled \"\" x)\n\
+                 }\n\
+               }\n\
+               impl FromE for And l r where {l: FromE, r: FromE} {\n\
+                 from_e s = case from_e s {\n\
+                   Left l -> case from_e s {\n\
+                     Left r -> Left (And l r)\n\
+                     Right r -> Right (And l r)\n\
+                   }\n\
+                   Right l -> case from_e s {\n\
+                     Left r -> Left (And l r)\n\
+                     Right r -> Right (And l r)\n\
+                   }\n\
+                 }\n\
+               }\n\
+               impl FromE for Or l r where {l: FromE, r: FromE} {\n\
+                 from_e s = case from_e s {\n\
+                   Left x -> Left (Or_Left x)\n\
+                   Right x -> Right (Or_Left x)\n\
+                 }\n\
+               }\n\
+               impl FromE for Variant a where {a: FromE} {\n\
+                 from_e s = case from_e s {\n\
+                   Left x -> Left (Variant \"\" x)\n\
+                   Right x -> Right (Variant \"\" x)\n\
+                 }\n\
+               }\n\
+               impl FromE for Record a where {a: FromE} {\n\
+                 from_e s = case from_e s {\n\
+                   Left x -> Left (Record \"\" x)\n\
+                   Right x -> Right (Record \"\" x)\n\
+                 }\n\
+               }\n\
+               impl FromE for Adt a where {a: FromE} {\n\
+                 from_e s = case from_e s {\n\
+                   Left x -> Left (Adt \"\" x)\n\
+                   Right x -> Right (Adt \"\" x)\n\
+                 }\n\
+               }\n\
+               record Person { name: String }\n  deriving (FromE)\n";
     check(src).unwrap();
 }

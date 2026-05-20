@@ -12,13 +12,29 @@ use std::path::Path;
 /// Decl summaries pulled from modules the current module imports. Used by
 /// `expand_derives` to resolve cross-module routed derives — without this,
 /// `deriving (Foo)` only works when `trait Foo` is declared in the same file.
-///
-/// Phase 6.5 populates `traits`; Phase 7 will extend with `types`/`records`
-/// for structural wrapper inspection.
 #[derive(Default, Clone)]
 pub struct ImportedDecls {
     /// Bare trait name -> trait shape (type params + methods).
     pub traits: HashMap<String, RoutedTraitInfo>,
+    /// Bare ADT name -> declared type params + variants. Used by Phase 7's
+    /// structural from-direction wrapper inspection to find a-positions in
+    /// the wrapper's variants.
+    pub types: HashMap<String, WrapperTypeInfo>,
+    /// Bare record name -> declared type params + fields. Same purpose as
+    /// `types` but for product wrappers like `Boxed a { value: a, meta: String }`.
+    pub records: HashMap<String, WrapperRecordInfo>,
+}
+
+#[derive(Clone)]
+pub struct WrapperTypeInfo {
+    pub type_params: Vec<String>,
+    pub variants: Vec<TypeConstructor>,
+}
+
+#[derive(Clone)]
+pub struct WrapperRecordInfo {
+    pub type_params: Vec<String>,
+    pub fields: Vec<(String, TypeExpr)>,
 }
 
 impl ImportedDecls {
@@ -27,30 +43,57 @@ impl ImportedDecls {
     }
 }
 
-/// Walk a program's `Decl::Import` statements and gather public trait
-/// declarations from each imported module. Stdlib (builtin) modules are
-/// loaded from their embedded sources; project modules are looked up via
+/// Walk a program's `Decl::Import` statements and gather public trait/type/
+/// record declarations from each imported module. Stdlib (builtin) modules
+/// are loaded from their embedded sources; project modules are looked up via
 /// `module_map`. Parse errors and missing modules are silently skipped —
 /// the typechecker will surface those properly during the import pass.
+///
+/// The prelude's own imports are always included because the prelude is
+/// auto-loaded into every module — types like `Result` and `Maybe` (defined
+/// in `Std.Result`/`Std.Maybe`) are reachable everywhere without an explicit
+/// import statement, so the derive layer should treat them as imported too.
 pub fn collect_imported_decls(
     program: &[Decl],
     module_map: Option<&crate::typechecker::ModuleMap>,
 ) -> ImportedDecls {
     let mut out = ImportedDecls::default();
+
+    // Pull in everything the prelude imports first. This makes `Result`,
+    // `Maybe`, and the Generic building blocks visible to expand_derives
+    // without each call site having to thread them explicitly.
+    const PRELUDE_SRC: &str = include_str!("stdlib/prelude.saga");
+    if let Ok(prelude_tokens) = crate::lexer::Lexer::new(PRELUDE_SRC).lex()
+        && let Ok(prelude_program) = crate::parser::Parser::new(prelude_tokens).parse_program()
+    {
+        collect_decls_from_imports(&prelude_program, module_map, &mut out);
+    }
+
+    // Then the user program's own imports — these can shadow prelude items
+    // via `entry().or_insert()` semantics (prelude-loaded items win on
+    // collision, but in practice the namespaces don't overlap).
+    collect_decls_from_imports(program, module_map, &mut out);
+    out
+}
+
+fn collect_decls_from_imports(
+    program: &[Decl],
+    module_map: Option<&crate::typechecker::ModuleMap>,
+    out: &mut ImportedDecls,
+) {
     for decl in program {
         if let Decl::Import { module_path, .. } = decl {
-            let source =
-                if let Some(src) = crate::typechecker::builtin_module_source(module_path) {
-                    src.to_string()
-                } else if let Some(map) = module_map {
-                    let name = module_path.join(".");
-                    match map.get(&name).and_then(|p| std::fs::read_to_string(p).ok()) {
-                        Some(s) => s,
-                        None => continue,
-                    }
-                } else {
-                    continue;
-                };
+            let source = if let Some(src) = crate::typechecker::builtin_module_source(module_path) {
+                src.to_string()
+            } else if let Some(map) = module_map {
+                let name = module_path.join(".");
+                match map.get(&name).and_then(|p| std::fs::read_to_string(p).ok()) {
+                    Some(s) => s,
+                    None => continue,
+                }
+            } else {
+                continue;
+            };
             let Ok(tokens) = crate::lexer::Lexer::new(&source).lex() else {
                 continue;
             };
@@ -58,37 +101,62 @@ pub fn collect_imported_decls(
                 continue;
             };
             for d in &prog {
-                if let Decl::TraitDef {
-                    name,
-                    type_params,
-                    methods,
-                    public,
-                    ..
-                } = d
-                    && *public
-                {
-                    // Local definitions in the current module win on name
-                    // collision; don't overwrite. (Caller still wins later
-                    // when merging local trait_defs over imported.)
-                    out.traits.entry(name.clone()).or_insert(RoutedTraitInfo {
-                        type_params: type_params.clone(),
-                        methods: methods.iter().map(|m| m.node.clone()).collect(),
-                    });
+                match d {
+                    Decl::TraitDef {
+                        name,
+                        type_params,
+                        methods,
+                        public: true,
+                        ..
+                    } => {
+                        // Local definitions in the current module win on
+                        // name collision; don't overwrite.
+                        out.traits.entry(name.clone()).or_insert(RoutedTraitInfo {
+                            type_params: type_params.clone(),
+                            methods: methods.iter().map(|m| m.node.clone()).collect(),
+                        });
+                    }
+                    Decl::TypeDef {
+                        name,
+                        type_params,
+                        variants,
+                        public: true,
+                        ..
+                    } => {
+                        out.types.entry(name.clone()).or_insert(WrapperTypeInfo {
+                            type_params: type_params.clone(),
+                            variants: variants.iter().map(|v| v.node.clone()).collect(),
+                        });
+                    }
+                    Decl::RecordDef {
+                        name,
+                        type_params,
+                        fields,
+                        public: true,
+                        ..
+                    } => {
+                        out.records
+                            .entry(name.clone())
+                            .or_insert(WrapperRecordInfo {
+                                type_params: type_params.clone(),
+                                fields: fields
+                                    .iter()
+                                    .map(|f| (f.node.0.clone(), f.node.1.clone()))
+                                    .collect(),
+                            });
+                    }
+                    _ => {}
                 }
             }
         }
     }
-    out
 }
 
 /// Build an `ImportedDecls` by scanning a project root for `.saga` files.
 /// Convenience wrapper used by integration tests that don't have a checker
 /// handy. Real callers (cli, lsp) should use `collect_imported_decls` with
 /// the checker's module map.
-pub fn collect_from_project_root(
-    program: &[Decl],
-    root: &Path,
-) -> ImportedDecls {
+pub fn collect_from_project_root(program: &[Decl], root: &Path) -> ImportedDecls {
     let map = crate::typechecker::scan_source_dir(root).ok();
     collect_imported_decls(program, map.as_ref())
 }
@@ -100,10 +168,7 @@ pub fn collect_from_project_root(
 /// `imported` carries trait/type summaries pulled from imported modules so
 /// routed derives (`deriving (Foo)` where `Foo` is imported) can resolve.
 /// Callers without import context can pass `&ImportedDecls::empty()`.
-pub fn expand_derives(
-    program: &mut Vec<Decl>,
-    imported: &ImportedDecls,
-) -> Vec<Diagnostic> {
+pub fn expand_derives(program: &mut Vec<Decl>, imported: &ImportedDecls) -> Vec<Diagnostic> {
     let mut errors = Vec::new();
     // Build a fresh program, splicing each decl's derived siblings in directly
     // after it. Generic-derived `Rep__T` typedefs and their impls must be
@@ -112,27 +177,67 @@ pub fn expand_derives(
     // the impl is registered.
     let original = std::mem::take(program);
 
-    // Index trait defs by bare name for routed-derive method discovery.
-    // Start from the imported set, then overlay local trait defs so a local
-    // trait shadowing an imported one wins.
+    // Index trait/type/record defs by bare name for routed-derive method
+    // discovery and Phase 7 structural wrapper inspection. Start from the
+    // imported set, then overlay local defs so a local decl shadowing an
+    // imported one wins.
     let mut trait_defs: HashMap<String, RoutedTraitInfo> = imported.traits.clone();
+    let mut type_defs: HashMap<String, WrapperTypeInfo> = imported.types.clone();
+    let mut record_defs: HashMap<String, WrapperRecordInfo> = imported.records.clone();
     for d in &original {
-        if let Decl::TraitDef {
-            name,
-            type_params,
-            methods,
-            ..
-        } = d
-        {
-            trait_defs.insert(
-                name.clone(),
-                RoutedTraitInfo {
-                    type_params: type_params.clone(),
-                    methods: methods.iter().map(|m| m.node.clone()).collect(),
-                },
-            );
+        match d {
+            Decl::TraitDef {
+                name,
+                type_params,
+                methods,
+                ..
+            } => {
+                trait_defs.insert(
+                    name.clone(),
+                    RoutedTraitInfo {
+                        type_params: type_params.clone(),
+                        methods: methods.iter().map(|m| m.node.clone()).collect(),
+                    },
+                );
+            }
+            Decl::TypeDef {
+                name,
+                type_params,
+                variants,
+                ..
+            } => {
+                type_defs.insert(
+                    name.clone(),
+                    WrapperTypeInfo {
+                        type_params: type_params.clone(),
+                        variants: variants.iter().map(|v| v.node.clone()).collect(),
+                    },
+                );
+            }
+            Decl::RecordDef {
+                name,
+                type_params,
+                fields,
+                ..
+            } => {
+                record_defs.insert(
+                    name.clone(),
+                    WrapperRecordInfo {
+                        type_params: type_params.clone(),
+                        fields: fields
+                            .iter()
+                            .map(|f| (f.node.0.clone(), f.node.1.clone()))
+                            .collect(),
+                    },
+                );
+            }
+            _ => {}
         }
     }
+    let wrappers = WrapperBundle {
+        types: &type_defs,
+        records: &record_defs,
+    };
 
     let mut rebuilt: Vec<Decl> = Vec::with_capacity(original.len());
     for decl in &original {
@@ -188,16 +293,21 @@ pub fn expand_derives(
                             Err(Some(diag)) => errors.push(diag),
                             Err(None) => errors.push(Diagnostic {
                                 severity: Severity::Error,
-                                message: format!(
-                                    "cannot derive `{trait_name}` for type `{name}`"
-                                ),
+                                message: format!("cannot derive `{trait_name}` for type `{name}`"),
                                 span: Some(*span),
                             }),
                         }
                         continue;
                     }
                     if !is_hardcoded_derive(bare) {
-                        match derive_routed(trait_name, name, type_params, *span, &trait_defs) {
+                        match derive_routed(
+                            trait_name,
+                            name,
+                            type_params,
+                            *span,
+                            &trait_defs,
+                            wrappers,
+                        ) {
                             Ok(decls) => extra.extend(decls),
                             Err(diag) => errors.push(diag),
                         }
@@ -244,7 +354,14 @@ pub fn expand_derives(
                 for trait_name in deriving {
                     let bare = trait_name.rsplit('.').next().unwrap_or(trait_name);
                     if !is_hardcoded_derive(bare) && bare != "Generic" {
-                        match derive_routed(trait_name, name, type_params, *span, &trait_defs) {
+                        match derive_routed(
+                            trait_name,
+                            name,
+                            type_params,
+                            *span,
+                            &trait_defs,
+                            wrappers,
+                        ) {
                             Ok(decls) => extra.extend(decls),
                             Err(diag) => errors.push(diag),
                         }
@@ -279,6 +396,14 @@ pub struct RoutedTraitInfo {
     pub methods: Vec<TraitMethod>,
 }
 
+/// Read-only view onto the merged wrapper TypeDef / RecordDef tables,
+/// passed down to from-direction classification + body emission.
+#[derive(Clone, Copy)]
+struct WrapperBundle<'a> {
+    types: &'a HashMap<String, WrapperTypeInfo>,
+    records: &'a HashMap<String, WrapperRecordInfo>,
+}
+
 fn is_hardcoded_derive(bare: &str) -> bool {
     matches!(bare, "Show" | "Debug" | "Eq" | "Ord" | "Enum" | "Generic")
 }
@@ -305,6 +430,7 @@ fn derive_routed(
     type_params: &[String],
     span: Span,
     trait_defs: &std::collections::HashMap<String, RoutedTraitInfo>,
+    wrappers: WrapperBundle<'_>,
 ) -> Result<Vec<Decl>, Diagnostic> {
     let bare = trait_name.rsplit('.').next().unwrap_or(trait_name);
     let trait_info = trait_defs.get(bare).ok_or_else(|| Diagnostic {
@@ -325,18 +451,14 @@ fn derive_routed(
             span: Some(span),
         });
     }
-    let self_var = trait_info
-        .type_params
-        .first()
-        .cloned()
-        .unwrap_or_default();
+    let self_var = trait_info.type_params.first().cloned().unwrap_or_default();
 
     // Classify each method's direction up-front so any bad method kills the
     // whole derive before we synthesize anything partial.
     let mut classified: Vec<(TraitMethod, MethodDirection)> =
         Vec::with_capacity(trait_info.methods.len());
     for method in &trait_info.methods {
-        match classify_method_direction(method, &self_var) {
+        match classify_method_direction(method, &self_var, wrappers) {
             Ok(dir) => classified.push((method.clone(), dir)),
             Err(reason) => {
                 return Err(Diagnostic {
@@ -371,12 +493,10 @@ fn derive_routed(
     // Per-method bodies for the bridge impl (target = Rep__T). Each method is
     // synthesized independently; a single impl carries one ImplMethod entry
     // per trait method.
-    let mut bridge_methods: Vec<Annotated<ImplMethod>> =
-        Vec::with_capacity(classified.len());
-    let mut delegating_methods: Vec<Annotated<ImplMethod>> =
-        Vec::with_capacity(classified.len());
+    let mut bridge_methods: Vec<Annotated<ImplMethod>> = Vec::with_capacity(classified.len());
+    let mut delegating_methods: Vec<Annotated<ImplMethod>> = Vec::with_capacity(classified.len());
     for (method, dir) in &classified {
-        let (bridge_m, deleg_m) = synth_method_pair(method, *dir, &rep_name, span);
+        let (bridge_m, deleg_m) = synth_method_pair(method, dir, &rep_name, span);
         bridge_methods.push(Annotated::bare(bridge_m));
         delegating_methods.push(Annotated::bare(deleg_m));
     }
@@ -445,18 +565,23 @@ fn derive_routed(
     Ok(vec![bridge_impl, delegating_impl])
 }
 
-/// Direction of a single routed-derive method. `From` carries the wrapper
-/// shape (bare `a`, `Result a _`, or `Maybe a`).
-#[derive(Clone, Copy)]
+/// Direction of a single routed-derive method. `From` carries a `FromShape`
+/// describing the wrapper structurally (variants + a-positions, or a record
+/// + a-positions, or bare `a`).
+#[derive(Clone)]
 enum MethodDirection {
     To,
-    From(FromWrapper),
+    From(FromShape),
 }
 
 /// Validate a method's shape for routed deriving and decide which direction it
 /// runs. Returns a human-readable reason on failure for use in the surrounding
 /// diagnostic.
-fn classify_method_direction(method: &TraitMethod, self_var: &str) -> Result<MethodDirection, String> {
+fn classify_method_direction(
+    method: &TraitMethod,
+    self_var: &str,
+    wrappers: WrapperBundle<'_>,
+) -> Result<MethodDirection, String> {
     if method.params.len() != 1 {
         return Err(format!(
             "only single-parameter methods can be routed (method `{}` has {} parameters)",
@@ -468,13 +593,9 @@ fn classify_method_direction(method: &TraitMethod, self_var: &str) -> Result<Met
     let return_has_self = type_expr_contains_var(&method.return_type, self_var);
     match (param_has_self, return_has_self) {
         (true, false) => Ok(MethodDirection::To),
-        (false, true) => match classify_from_return(&method.return_type, self_var) {
-            Some(w) => Ok(MethodDirection::From(w)),
-            None => Err(format!(
-                "method `{}` has an unsupported return-type shape for from-direction routing; \
-                 expected `a`, `Result a _`, or `Maybe a`",
-                method.name
-            )),
+        (false, true) => match classify_from_return(&method.return_type, self_var, wrappers) {
+            Ok(shape) => Ok(MethodDirection::From(shape)),
+            Err(reason) => Err(format!("method `{}`: {}", method.name, reason)),
         },
         (true, true) => Err(format!(
             "method `{}` has the self type on both sides; \
@@ -492,7 +613,7 @@ fn classify_method_direction(method: &TraitMethod, self_var: &str) -> Result<Met
 /// single trait method.
 fn synth_method_pair(
     method: &TraitMethod,
-    dir: MethodDirection,
+    dir: &MethodDirection,
     rep_name: &str,
     span: Span,
 ) -> (ImplMethod, ImplMethod) {
@@ -574,12 +695,11 @@ fn synth_method_pair(
             };
             (bridge, deleg)
         }
-        MethodDirection::From(wrapper) => {
+        MethodDirection::From(shape) => {
             let input_var = "__input".to_string();
             let rep_name_owned = rep_name.to_string();
             let bridge_wrap = |inner: Expr, s: Span| apply_ctor(&rep_name_owned, inner, s);
-            let bridge_body =
-                build_from_body(&method_name, &input_var, &bridge_wrap, wrapper, span);
+            let bridge_body = build_from_body(&method_name, &input_var, &bridge_wrap, shape, span);
             let bridge = ImplMethod {
                 name: method_name.clone(),
                 name_span: zero_span,
@@ -595,12 +715,17 @@ fn synth_method_pair(
                 Expr::synth(
                     s,
                     ExprKind::App {
-                        func: Box::new(Expr::synth(s, ExprKind::Var { name: "from".into() })),
+                        func: Box::new(Expr::synth(
+                            s,
+                            ExprKind::Var {
+                                name: "from".into(),
+                            },
+                        )),
                         arg: Box::new(inner),
                     },
                 )
             };
-            let deleg_body = build_from_body(&method_name, &input_var, &deleg_wrap, wrapper, span);
+            let deleg_body = build_from_body(&method_name, &input_var, &deleg_wrap, shape, span);
             let deleg = ImplMethod {
                 name: method_name,
                 name_span: zero_span,
@@ -616,65 +741,280 @@ fn synth_method_pair(
     }
 }
 
-/// Wrapper shape detected on a from-direction trait method's return type.
-#[derive(Clone, Copy)]
-enum FromWrapper {
+/// Structural description of a from-direction method's return wrapper. The
+/// general shape is: either bare `a`, or a sum/record wrapper where every
+/// `a` position has been located by walking the wrapper's variants/fields
+/// against the trait's self type variable. Per-variant a-position bits drive
+/// codegen — `build_from_body` reads this and threads `wrap` through each
+/// marked position while passing other positions through unchanged.
+#[derive(Clone)]
+enum FromShape {
     Bare,
-    Result,
-    Maybe,
+    Sum {
+        variants: Vec<VariantShape>,
+    },
+    Record {
+        wrapper_name: String,
+        fields: Vec<FieldShape>,
+    },
 }
 
-/// Classify a from-direction method's return type. Accepts `a` (bare),
-/// `Result a _`, or `Maybe a` where `a` is the trait's self type variable.
-fn classify_from_return(te: &TypeExpr, self_var: &str) -> Option<FromWrapper> {
-    fn is_self(te: &TypeExpr, self_var: &str) -> bool {
-        matches!(te, TypeExpr::Var { name, .. } if name == self_var)
+#[derive(Clone)]
+struct VariantShape {
+    ctor_name: String,
+    /// One entry per field; `true` = field's type equals the trait's self
+    /// variable (under wrapper-self-param substitution); apply `wrap` here.
+    field_a_positions: Vec<bool>,
+}
+
+#[derive(Clone)]
+struct FieldShape {
+    label: String,
+    is_a_position: bool,
+}
+
+/// Classify a from-direction method's return type by structural inspection.
+/// Walks the trait method's return TypeExpr to find the wrapper head and its
+/// type args, looks the wrapper up in the merged local+imported decl tables,
+/// then walks the wrapper's variants/fields to mark which positions carry the
+/// trait's self type variable. Returns `Err(reason)` for the various cases
+/// the synthesizer can't handle: opaque wrapper, no `a`-position anywhere,
+/// or nested `a` (e.g. `Yep (List a)` — would require recursing through the
+/// `List` Generic representation, deferred).
+fn classify_from_return(
+    te: &TypeExpr,
+    self_var: &str,
+    wrappers: WrapperBundle<'_>,
+) -> Result<FromShape, String> {
+    // Bare `a`: the trait's self type variable as the entire return.
+    if let TypeExpr::Var { name, .. } = te
+        && name == self_var
+    {
+        return Ok(FromShape::Bare);
     }
-    if is_self(te, self_var) {
-        return Some(FromWrapper::Bare);
+
+    // Otherwise expect a (possibly multi-arg) type application headed by a
+    // Named wrapper. Extract head name and the left-to-right args.
+    let (head, args) = extract_head_and_args(te).ok_or_else(|| {
+        "return type must be either the trait's self variable or a named wrapper applied \
+             to type arguments"
+            .to_string()
+    })?;
+
+    // Nested-`a` at the trait-return level: each call-site arg should either
+    // BE `self_var` or NOT contain it. `from : Input -> W (List a)` falls
+    // foul of this — `a` appears nested in `List a`, which we can't thread
+    // `from` through without recursing into List's representation.
+    for arg in &args {
+        if !is_self_var(arg, self_var) && type_expr_contains_var(arg, self_var) {
+            return Err(format!(
+                "return wrapper `{}` has the trait's self type nested in a non-leaf type \
+                 argument; only direct `a` arguments are supported",
+                head
+            ));
+        }
+    }
+
+    // Look up the wrapper. Sum (TypeDef) first, then record (RecordDef).
+    if let Some(td) = wrappers.types.get(&head) {
+        return classify_sum_wrapper(&head, td, &args, self_var);
+    }
+    if let Some(rd) = wrappers.records.get(&head) {
+        return classify_record_wrapper(&head, rd, &args, self_var);
+    }
+    Err(format!(
+        "wrapper type `{}` is not defined in the current module or any imported module; \
+         routed from-derives need the wrapper's TypeDef in scope so they can inspect its \
+         variants",
+        head
+    ))
+}
+
+/// Extract the bare head name and left-to-right type arguments from a
+/// possibly-applied TypeExpr. Returns None if the TypeExpr isn't a named
+/// type or a chain of applications headed by one.
+fn extract_head_and_args(te: &TypeExpr) -> Option<(String, Vec<TypeExpr>)> {
+    fn bare(name: &str) -> String {
+        name.rsplit('.').next().unwrap_or(name).to_string()
     }
     match te {
+        TypeExpr::Named { name, .. } => Some((bare(name), vec![])),
         TypeExpr::App { func, arg, .. } => {
-            let bare_head = |t: &TypeExpr| -> Option<String> {
-                match t {
-                    TypeExpr::Named { name, .. } => {
-                        Some(name.rsplit('.').next().unwrap_or(name).to_string())
-                    }
-                    _ => None,
-                }
-            };
-            // Maybe a: App(Named("Maybe"), Var(self))
-            if let Some(h) = bare_head(func)
-                && h == "Maybe"
-                && is_self(arg, self_var)
-            {
-                return Some(FromWrapper::Maybe);
-            }
-            // Result a _: App(App(Named("Result"), Var(self)), _)
-            if let TypeExpr::App {
-                func: f2, arg: a2, ..
-            } = func.as_ref()
-                && let Some(h) = bare_head(f2)
-                && h == "Result"
-                && is_self(a2, self_var)
-            {
-                return Some(FromWrapper::Result);
-            }
-            None
+            let (head, mut args) = extract_head_and_args(func)?;
+            args.push(arg.as_ref().clone());
+            Some((head, args))
         }
         _ => None,
     }
 }
 
-/// Build the body of a from-direction method, given a `wrap` function that
-/// transforms the *inner* successful result (e.g. wrap with `Rep__T` or call
-/// `from`). For wrapped returns, the inner method call is destructured via
-/// a case-match over the wrapper's constructors.
+fn is_self_var(te: &TypeExpr, self_var: &str) -> bool {
+    matches!(te, TypeExpr::Var { name, .. } if name == self_var)
+}
+
+/// Walk a sum wrapper's declared variants and identify a-positions. The
+/// wrapper's local type params that bind to the trait's self at the call
+/// site form `wrapper_self_params`; any variant field whose TypeExpr is
+/// exactly `Var(p)` for some `p` in that set is an a-position. A field that
+/// CONTAINS such a `p` but isn't directly that `Var` (e.g. `List a`,
+/// `Foo a Int`) is the nested-a case and we reject.
+fn classify_sum_wrapper(
+    name: &str,
+    td: &WrapperTypeInfo,
+    call_args: &[TypeExpr],
+    self_var: &str,
+) -> Result<FromShape, String> {
+    if call_args.len() != td.type_params.len() {
+        return Err(format!(
+            "wrapper `{}` declares {} type parameter(s) but is applied to {}",
+            name,
+            td.type_params.len(),
+            call_args.len()
+        ));
+    }
+    let wrapper_self_params: std::collections::HashSet<String> = td
+        .type_params
+        .iter()
+        .zip(call_args)
+        .filter_map(|(p, a)| {
+            if is_self_var(a, self_var) {
+                Some(p.clone())
+            } else {
+                None
+            }
+        })
+        .collect();
+    if wrapper_self_params.is_empty() {
+        return Err(format!(
+            "wrapper `{}` doesn't carry the trait's self type at any type-argument position",
+            name
+        ));
+    }
+
+    let mut variants = Vec::with_capacity(td.variants.len());
+    let mut any_a_position = false;
+    for variant in &td.variants {
+        let mut field_a_positions = Vec::with_capacity(variant.fields.len());
+        for (_label, fty) in &variant.fields {
+            let is_a = match fty {
+                TypeExpr::Var { name: vn, .. } => wrapper_self_params.contains(vn),
+                _ => false,
+            };
+            if !is_a {
+                // Reject if any wrapper-self-param appears nested in this field.
+                let nested = wrapper_self_params
+                    .iter()
+                    .any(|p| type_expr_contains_var(fty, p));
+                if nested {
+                    return Err(format!(
+                        "wrapper `{}` variant `{}` has the trait's self type nested in a \
+                         non-leaf field position; only direct `a` fields are supported",
+                        name, variant.name
+                    ));
+                }
+            }
+            if is_a {
+                any_a_position = true;
+            }
+            field_a_positions.push(is_a);
+        }
+        variants.push(VariantShape {
+            ctor_name: variant.name.clone(),
+            field_a_positions,
+        });
+    }
+    if !any_a_position {
+        return Err(format!(
+            "wrapper `{}` has no variant field carrying the trait's self type — nothing for \
+             `from` to thread through",
+            name
+        ));
+    }
+    Ok(FromShape::Sum { variants })
+}
+
+fn classify_record_wrapper(
+    name: &str,
+    rd: &WrapperRecordInfo,
+    call_args: &[TypeExpr],
+    self_var: &str,
+) -> Result<FromShape, String> {
+    if call_args.len() != rd.type_params.len() {
+        return Err(format!(
+            "wrapper `{}` declares {} type parameter(s) but is applied to {}",
+            name,
+            rd.type_params.len(),
+            call_args.len()
+        ));
+    }
+    let wrapper_self_params: std::collections::HashSet<String> = rd
+        .type_params
+        .iter()
+        .zip(call_args)
+        .filter_map(|(p, a)| {
+            if is_self_var(a, self_var) {
+                Some(p.clone())
+            } else {
+                None
+            }
+        })
+        .collect();
+    if wrapper_self_params.is_empty() {
+        return Err(format!(
+            "wrapper record `{}` doesn't carry the trait's self type at any type-argument \
+             position",
+            name
+        ));
+    }
+    let mut fields = Vec::with_capacity(rd.fields.len());
+    let mut any_a_position = false;
+    for (label, fty) in &rd.fields {
+        let is_a = match fty {
+            TypeExpr::Var { name: vn, .. } => wrapper_self_params.contains(vn),
+            _ => false,
+        };
+        if !is_a {
+            let nested = wrapper_self_params
+                .iter()
+                .any(|p| type_expr_contains_var(fty, p));
+            if nested {
+                return Err(format!(
+                    "wrapper record `{}` field `{}` has the trait's self type nested in a \
+                     non-leaf position; only direct `a` fields are supported",
+                    name, label
+                ));
+            }
+        }
+        if is_a {
+            any_a_position = true;
+        }
+        fields.push(FieldShape {
+            label: label.clone(),
+            is_a_position: is_a,
+        });
+    }
+    if !any_a_position {
+        return Err(format!(
+            "wrapper record `{}` has no field carrying the trait's self type — nothing for \
+             `from` to thread through",
+            name
+        ));
+    }
+    Ok(FromShape::Record {
+        wrapper_name: name.to_string(),
+        fields,
+    })
+}
+
+/// Build the body of a from-direction method. The body has the shape
+/// `case method input { <reconstruction arms> }` where each arm matches one
+/// wrapper variant (or destructures the single record), rebinds its fields,
+/// and reconstructs the wrapper applying `wrap` at each a-position.
 fn build_from_body(
     method_name: &str,
     input_var: &str,
     wrap: &dyn Fn(Expr, Span) -> Expr,
-    wrapper: FromWrapper,
+    shape: &FromShape,
     span: Span,
 ) -> Expr {
     let inner_call = Expr::synth(
@@ -694,110 +1034,136 @@ fn build_from_body(
             )),
         },
     );
-    match wrapper {
-        FromWrapper::Bare => wrap(inner_call, span),
-        FromWrapper::Result => {
-            let inner = "__inner".to_string();
-            let err = "__err".to_string();
-            let ok_arm = Annotated::bare(CaseArm {
-                pattern: Pat::Constructor {
-                    id: NodeId::fresh(),
-                    name: "Ok".into(),
-                    args: vec![Pat::Var {
-                        id: NodeId::fresh(),
-                        name: inner.clone(),
-                        span,
-                    }],
-                    span,
-                },
-                guard: None,
-                body: apply_ctor(
-                    "Ok",
-                    wrap(
-                        Expr::synth(span, ExprKind::Var { name: inner }),
-                        span,
-                    ),
-                    span,
-                ),
-                span,
-            });
-            let err_arm = Annotated::bare(CaseArm {
-                pattern: Pat::Constructor {
-                    id: NodeId::fresh(),
-                    name: "Err".into(),
-                    args: vec![Pat::Var {
-                        id: NodeId::fresh(),
-                        name: err.clone(),
-                        span,
-                    }],
-                    span,
-                },
-                guard: None,
-                body: apply_ctor(
-                    "Err",
-                    Expr::synth(span, ExprKind::Var { name: err }),
-                    span,
-                ),
-                span,
-            });
+    match shape {
+        FromShape::Bare => wrap(inner_call, span),
+        FromShape::Sum { variants, .. } => {
+            let arms: Vec<Annotated<CaseArm>> = variants
+                .iter()
+                .map(|v| Annotated::bare(build_variant_arm(v, wrap, span)))
+                .collect();
             Expr::synth(
                 span,
                 ExprKind::Case {
                     scrutinee: Box::new(inner_call),
-                    arms: vec![ok_arm, err_arm],
+                    arms,
                     dangling_trivia: vec![],
                 },
             )
         }
-        FromWrapper::Maybe => {
-            let inner = "__inner".to_string();
-            let just_arm = Annotated::bare(CaseArm {
-                pattern: Pat::Constructor {
-                    id: NodeId::fresh(),
-                    name: "Just".into(),
-                    args: vec![Pat::Var {
-                        id: NodeId::fresh(),
-                        name: inner.clone(),
-                        span,
-                    }],
-                    span,
-                },
-                guard: None,
-                body: apply_ctor(
-                    "Just",
-                    wrap(
-                        Expr::synth(span, ExprKind::Var { name: inner }),
-                        span,
-                    ),
-                    span,
-                ),
-                span,
-            });
-            let nothing_arm = Annotated::bare(CaseArm {
-                pattern: Pat::Constructor {
-                    id: NodeId::fresh(),
-                    name: "Nothing".into(),
-                    args: vec![],
-                    span,
-                },
-                guard: None,
-                body: Expr::synth(
-                    span,
-                    ExprKind::Constructor {
-                        name: "Nothing".into(),
-                    },
-                ),
-                span,
-            });
+        FromShape::Record {
+            wrapper_name,
+            fields,
+        } => {
+            let arm = build_record_arm(wrapper_name, fields, wrap, span);
             Expr::synth(
                 span,
                 ExprKind::Case {
                     scrutinee: Box::new(inner_call),
-                    arms: vec![just_arm, nothing_arm],
+                    arms: vec![Annotated::bare(arm)],
                     dangling_trivia: vec![],
                 },
             )
         }
+    }
+}
+
+/// One case arm reconstructing a single variant. Zero-field variants
+/// destructure-and-reconstruct trivially; multi-field variants bind each
+/// field to `__f<i>` and rebuild via positional constructor application,
+/// applying `wrap` at marked a-positions.
+fn build_variant_arm(v: &VariantShape, wrap: &dyn Fn(Expr, Span) -> Expr, span: Span) -> CaseArm {
+    let field_vars: Vec<String> = (0..v.field_a_positions.len())
+        .map(|i| format!("__f{i}"))
+        .collect();
+    let pat = Pat::Constructor {
+        id: NodeId::fresh(),
+        name: v.ctor_name.clone(),
+        args: field_vars
+            .iter()
+            .map(|n| Pat::Var {
+                id: NodeId::fresh(),
+                name: n.clone(),
+                span,
+            })
+            .collect(),
+        span,
+    };
+    let mut body = Expr::synth(
+        span,
+        ExprKind::Constructor {
+            name: v.ctor_name.clone(),
+        },
+    );
+    for (i, &is_a) in v.field_a_positions.iter().enumerate() {
+        let arg = Expr::synth(
+            span,
+            ExprKind::Var {
+                name: field_vars[i].clone(),
+            },
+        );
+        let arg = if is_a { wrap(arg, span) } else { arg };
+        body = Expr::synth(
+            span,
+            ExprKind::App {
+                func: Box::new(body),
+                arg: Box::new(arg),
+            },
+        );
+    }
+    CaseArm {
+        pattern: pat,
+        guard: None,
+        body,
+        span,
+    }
+}
+
+/// One case arm destructuring a record wrapper. Pattern is
+/// `Wrap { f1, f2, ... }`, body reconstructs via `Wrap { f1: wrap?(f1), ... }`.
+fn build_record_arm(
+    wrapper_name: &str,
+    fields: &[FieldShape],
+    wrap: &dyn Fn(Expr, Span) -> Expr,
+    span: Span,
+) -> CaseArm {
+    let zero_span = Span { start: 0, end: 0 };
+    let pat = Pat::Record {
+        id: NodeId::fresh(),
+        name: wrapper_name.to_string(),
+        fields: fields.iter().map(|f| (f.label.clone(), None)).collect(),
+        rest: false,
+        as_name: None,
+        span,
+    };
+    let body_fields: Vec<(String, Span, Expr)> = fields
+        .iter()
+        .map(|f| {
+            let var_expr = Expr::synth(
+                span,
+                ExprKind::Var {
+                    name: f.label.clone(),
+                },
+            );
+            let value = if f.is_a_position {
+                wrap(var_expr, span)
+            } else {
+                var_expr
+            };
+            (f.label.clone(), zero_span, value)
+        })
+        .collect();
+    let body = Expr::synth(
+        span,
+        ExprKind::RecordCreate {
+            name: wrapper_name.to_string(),
+            fields: body_fields,
+        },
+    );
+    CaseArm {
+        pattern: pat,
+        guard: None,
+        body,
+        span,
     }
 }
 
@@ -811,9 +1177,9 @@ fn type_expr_contains_var(te: &TypeExpr, name: &str) -> bool {
         TypeExpr::Arrow { from, to, .. } => {
             type_expr_contains_var(from, name) || type_expr_contains_var(to, name)
         }
-        TypeExpr::Record { fields, .. } => fields
-            .iter()
-            .any(|(_, t)| type_expr_contains_var(t, name)),
+        TypeExpr::Record { fields, .. } => {
+            fields.iter().any(|(_, t)| type_expr_contains_var(t, name))
+        }
         TypeExpr::Labeled { inner, .. } => type_expr_contains_var(inner, name),
     }
 }
@@ -900,8 +1266,7 @@ fn derive_record_generic(
         },
     );
     let inner_expr = build_rep_to_expr(&plain_fields, &param_var, span);
-    let record_wrapped =
-        apply2("Record", string_lit(record_name, span), inner_expr, span);
+    let record_wrapped = apply2("Record", string_lit(record_name, span), inner_expr, span);
     let to_body = apply_ctor(&rep_name, record_wrapped, span);
     let to_method = Annotated::bare(ImplMethod {
         name: "to".into(),
@@ -915,9 +1280,7 @@ fn derive_record_generic(
     });
 
     // 3. `from (__Rep_R (And (Labeled _ (Leaf n)) ...)) = R { name: n, ... }`
-    let field_var_names: Vec<String> = (0..plain_fields.len())
-        .map(|i| format!("__f{i}"))
-        .collect();
+    let field_var_names: Vec<String> = (0..plain_fields.len()).map(|i| format!("__f{i}")).collect();
     let inner_pat = build_rep_from_pattern(&field_var_names, span);
     let record_pat = Pat::Constructor {
         id: NodeId::fresh(),
@@ -944,7 +1307,12 @@ fn derive_record_generic(
             (
                 fname.clone(),
                 Span { start: 0, end: 0 },
-                Expr::synth(span, ExprKind::Var { name: vname.clone() }),
+                Expr::synth(
+                    span,
+                    ExprKind::Var {
+                        name: vname.clone(),
+                    },
+                ),
             )
         })
         .collect();
@@ -1085,8 +1453,7 @@ fn derive_adt_generic(
                     .collect(),
                 span,
             };
-            let shape_expr =
-                build_variant_shape_expr(&v.fields, &field_vars, span);
+            let shape_expr = build_variant_shape_expr(&v.fields, &field_vars, span);
             let variant = apply2("Variant", string_lit(&v.name, span), shape_expr, span);
             let or_wrapped = or_wrap_expr(variant, i, n, span);
             let adt_wrapped = apply2("Adt", string_lit(type_name, span), or_wrapped, span);
@@ -1222,7 +1589,12 @@ fn derive_adt_generic(
 fn build_adt_rep_inner_type(variants: &[Annotated<TypeConstructor>]) -> TypeExpr {
     let variant_shapes: Vec<TypeExpr> = variants
         .iter()
-        .map(|v| type_app(type_named("Variant"), build_variant_shape_type(&v.node.fields)))
+        .map(|v| {
+            type_app(
+                type_named("Variant"),
+                build_variant_shape_type(&v.node.fields),
+            )
+        })
         .collect();
     let mut iter = variant_shapes.into_iter().rev();
     let mut acc = iter.next().unwrap();
@@ -1242,7 +1614,10 @@ fn build_variant_shape_type(fields: &[(Option<String>, TypeExpr)]) -> TypeExpr {
     let mut acc = field_rep_type_adt(&fields[n - 1].0, &fields[n - 1].1);
     for i in (0..n - 1).rev() {
         acc = type_app(
-            type_app(type_named("And"), field_rep_type_adt(&fields[i].0, &fields[i].1)),
+            type_app(
+                type_named("And"),
+                field_rep_type_adt(&fields[i].0, &fields[i].1),
+            ),
             acc,
         );
     }
@@ -1438,7 +1813,10 @@ fn build_rep_type_inner(fields: &[(String, TypeExpr)]) -> TypeExpr {
 }
 
 fn field_rep_type(ty: &TypeExpr) -> TypeExpr {
-    type_app(type_named("Labeled"), type_app(type_named("Leaf"), ty.clone()))
+    type_app(
+        type_named("Labeled"),
+        type_app(type_named("Leaf"), ty.clone()),
+    )
 }
 
 fn apply_ctor(name: &str, arg: Expr, span: Span) -> Expr {
