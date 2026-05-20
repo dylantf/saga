@@ -13,7 +13,7 @@ use std::collections::HashMap;
 
 use crate::ast::{Lit, Pat};
 
-use super::{RecordInfo, Substitution, Type};
+use super::{RecordInfo, ResolutionResult, Substitution, Type};
 
 /// A simplified pattern for the matrix algorithm.
 /// We strip spans and normalize booleans to constructors.
@@ -40,6 +40,8 @@ pub(crate) struct ExhaustivenessCtx<'a> {
 /// constructors with correct arity and sub-pattern types.
 pub(crate) struct SimplifyCtx<'a> {
     pub records: &'a HashMap<String, RecordInfo>,
+    pub adt_variants: &'a HashMap<String, Vec<(String, usize)>>,
+    pub resolution: &'a ResolutionResult,
     pub sub: &'a Substitution,
 }
 
@@ -60,18 +62,26 @@ pub(crate) fn simplify_pat(pat: &Pat, ty: Option<&Type>, ctx: &SimplifyCtx) -> S
             ..
         } => {
             let name = if *b { "True" } else { "False" };
-            SPat::Constructor(name.into(), vec![])
+            let ctor = ty
+                .and_then(|t| match t {
+                    Type::Con(type_name, _) => ctx
+                        .adt_variants
+                        .get(type_name)
+                        .and_then(|variants| variants.iter().find(|(v, _)| v.ends_with(name)))
+                        .map(|(v, _)| v.clone()),
+                    _ => None,
+                })
+                .unwrap_or_else(|| name.to_string());
+            SPat::Constructor(ctor, vec![])
         }
         Pat::Lit {
             value: Lit::Unit, ..
         } => SPat::Wildcard,
         Pat::Lit { value, .. } => SPat::Literal(value.clone()),
-        Pat::Constructor { name, args, .. } => {
-            // Use bare constructor name (last segment) so qualified patterns
-            // like `Std.File.FileError` match adt_variants which use bare names.
-            let bare = name.rsplit('.').next().unwrap_or(name);
+        Pat::Constructor { id, name, args, .. } => {
+            let resolved = ctx.resolution.constructor(*id).unwrap_or(name);
             SPat::Constructor(
-                bare.to_string(),
+                resolved.to_string(),
                 args.iter().map(|p| simplify_pat(p, None, ctx)).collect(),
             )
         }

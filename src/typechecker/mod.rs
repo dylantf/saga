@@ -1197,8 +1197,7 @@ pub(crate) struct TraitState {
     /// user-facing trait + type, instead of mentioning building-block types from
     /// the synthesized body. See the [crate::ast::RoutedDeriveInfo] marker on
     /// `Decl::ImplDef` set by `derive_routed`.
-    pub routed_constraint_origins:
-        HashMap<crate::ast::NodeId, crate::ast::RoutedDeriveInfo>,
+    pub routed_constraint_origins: HashMap<crate::ast::NodeId, crate::ast::RoutedDeriveInfo>,
     /// Where clause bounds: var_id -> set of trait names assumed satisfied.
     pub where_bounds: HashMap<u32, HashSet<String>>,
     /// Reverse map from type var ID to original type parameter name (for polymorphic evidence).
@@ -1396,10 +1395,7 @@ impl Checker {
         let mut prelude_program = crate::parser::Parser::new(prelude_tokens)
             .parse_program()
             .expect("prelude parse");
-        crate::derive::expand_derives(
-            &mut prelude_program,
-            &crate::derive::ImportedDecls::empty(),
-        );
+        crate::derive::expand_derives(&mut prelude_program, &crate::derive::ImportedDecls::empty());
         crate::desugar::desugar_program(&mut prelude_program);
         checker
             .check_program_inner(&mut prelude_program)

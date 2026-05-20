@@ -461,10 +461,7 @@ impl<'a> Lowerer<'a> {
         ) {
             return None;
         }
-        let scheme = self.check_result.constructors.get(ctor_name).or_else(|| {
-            let bare = ctor_name.rsplit('.').next().unwrap_or(ctor_name);
-            self.check_result.constructors.get(bare)
-        })?;
+        let scheme = self.check_result.constructors.get(ctor_name)?;
         let mut param_tys = Vec::new();
         let mut current = &scheme.ty;
         while let crate::typechecker::Type::Fun(param, ret, _) = current {

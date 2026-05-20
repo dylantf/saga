@@ -408,11 +408,7 @@ impl Checker {
                             "coherence violation: trait {} requires that the first parameter \
                              functionally determines the rest, but `{}` already has an impl with \
                              different trait arguments ({:?} vs {:?}){}",
-                            trait_name,
-                            target_type,
-                            existing_args,
-                            trait_type_arg_names,
-                            prev_loc
+                            trait_name, target_type, existing_args, trait_type_arg_names, prev_loc
                         ),
                     ));
                 }
@@ -466,21 +462,19 @@ impl Checker {
         // rule; for non-functional traits, all args must be already bound.
         let mut local_subst: std::collections::HashMap<String, String> =
             std::collections::HashMap::new();
+        let mut where_app_param_constraints: Vec<(String, usize)> = Vec::new();
         for app in where_apps {
             let resolved_trait = self
                 .resolve_trait_name(&app.trait_name)
                 .unwrap_or_else(|| app.trait_name.clone());
-            let resolved_trait_info =
-                self.trait_state
-                    .traits
-                    .get(&resolved_trait)
-                    .cloned()
-                    .ok_or_else(|| {
-                        Diagnostic::error_at(
-                            app.span,
-                            format!("unknown trait '{}'", app.trait_name),
-                        )
-                    })?;
+            let resolved_trait_info = self
+                .trait_state
+                .traits
+                .get(&resolved_trait)
+                .cloned()
+                .ok_or_else(|| {
+                    Diagnostic::error_at(app.span, format!("unknown trait '{}'", app.trait_name))
+                })?;
             self.lsp
                 .type_references
                 .push((app.span, resolved_trait.clone()));
@@ -503,6 +497,7 @@ impl Checker {
             // the head only.
             let mut resolved_names: Vec<Option<String>> = Vec::with_capacity(app.type_args.len());
             let mut fresh_positions: Vec<(usize, String)> = Vec::new();
+            let mut impl_param_positions: Vec<(usize, String)> = Vec::new();
             for (i, te) in app.type_args.iter().enumerate() {
                 match te {
                     ast::TypeExpr::Named { id, name, .. } => {
@@ -510,21 +505,14 @@ impl Checker {
                     }
                     ast::TypeExpr::App { .. } => {
                         let head = te.head_name().unwrap_or("");
-                        resolved_names
-                            .push(Some(self.resolved_type_name(te.id(), head)));
+                        resolved_names.push(Some(self.resolved_type_name(te.id(), head)));
                     }
                     ast::TypeExpr::Var { name, .. } => {
                         if let Some(resolved) = local_subst.get(name) {
                             resolved_names.push(Some(resolved.clone()));
                         } else if type_params.contains(name) {
-                            return Err(Diagnostic::error_at(
-                                app.span,
-                                format!(
-                                    "where-clause TraitApp arguments cannot reference impl type \
-                                     parameters yet (var '{}')",
-                                    name
-                                ),
-                            ));
+                            resolved_names.push(Some(format!("$impl_param:{name}")));
+                            impl_param_positions.push((i, name.clone()));
                         } else {
                             resolved_names.push(None);
                             fresh_positions.push((i, name.clone()));
@@ -539,6 +527,41 @@ impl Checker {
                         ));
                     }
                 }
+            }
+
+            if !impl_param_positions.is_empty() {
+                if !fresh_positions.is_empty() {
+                    return Err(Diagnostic::error_at(
+                        app.span,
+                        "where-clause TraitApp constraints cannot mix impl type parameters with \
+                         fresh existential variables"
+                            .to_string(),
+                    ));
+                }
+                if app.type_args.len() != 1 {
+                    return Err(Diagnostic::error_at(
+                        app.span,
+                        "TraitApp constraints on impl type parameters currently support \
+                         single-parameter traits only"
+                            .to_string(),
+                    ));
+                }
+                let (_, param_name) = &impl_param_positions[0];
+                let Some(param_idx) = type_params.iter().position(|p| p == param_name) else {
+                    continue;
+                };
+                if let Some(var_id) = target_type_param_ids.get(param_idx) {
+                    self.trait_state
+                        .where_bound_var_names
+                        .insert(*var_id, param_name.clone());
+                    self.trait_state
+                        .where_bounds
+                        .entry(*var_id)
+                        .or_default()
+                        .insert(resolved_trait.clone());
+                }
+                where_app_param_constraints.push((resolved_trait.clone(), param_idx));
+                continue;
             }
 
             if fresh_positions.is_empty() {
@@ -648,8 +671,7 @@ impl Checker {
                 .iter()
                 .map(|t| Self::replace_vars(t, &fresh_mapping))
                 .collect();
-            let freshened_return =
-                Self::replace_vars(&trait_method.return_type, &fresh_mapping);
+            let freshened_return = Self::replace_vars(&trait_method.return_type, &fresh_mapping);
             let expected_params: Vec<Type> = freshened_params
                 .iter()
                 .map(|t| self.substitute_trait_param(trait_param_id, &target, t))
@@ -778,6 +800,7 @@ impl Checker {
                 }
             }
         }
+        param_constraints.extend(where_app_param_constraints);
 
         // Convert each TypeExpr trait_type_arg into a Type, reusing the
         // impl's type-param fresh-var ids so that the stored extras share

@@ -4,7 +4,7 @@ use crate::typechecker::Type;
 use std::collections::{BTreeSet, HashMap};
 
 /// Look up a constructor's mangled Erlang atom from the pre-computed table.
-/// Falls back to the bare name if not found.
+/// Constructor names should already be resolved to the exact atom-table key.
 ///
 /// When `origin_module` is set (e.g. lowering an imported handler body),
 /// the lookup tries the source module's qualified entry first, then falls
@@ -24,13 +24,6 @@ pub(super) fn mangle_ctor_atom(
         }
     }
     if let Some(atom) = constructor_atoms.get(name) {
-        return atom.clone();
-    }
-    // For qualified names not in the table, try the bare name
-    if let Some(bare) = name.rsplit('.').next()
-        && bare != name
-        && let Some(atom) = constructor_atoms.get(bare)
-    {
         return atom.clone();
     }
     name.to_string()

@@ -545,10 +545,7 @@ impl<'a> Lowerer<'a> {
                 // lambda args inherit a `lambda_effect_context` and get the
                 // proper CPS expansion (evidence + _ReturnK).
                 let field_tys: Vec<Option<crate::typechecker::Type>> = {
-                    let scheme = self.check_result.constructors.get(name).or_else(|| {
-                        let bare = name.rsplit('.').next().unwrap_or(name);
-                        self.check_result.constructors.get(bare)
-                    });
+                    let scheme = self.check_result.constructors.get(name);
                     if let Some(scheme) = scheme {
                         let mut tys = Vec::new();
                         let mut current = &scheme.ty;

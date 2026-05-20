@@ -2688,11 +2688,9 @@ record User { name: String, age: Int }
 
 main () = println (to_json (User { name: "Alice", age: 30 })) with {console}
 "#;
-    let out = with_temp_project_files(
-        &[("lib/JsonLib.saga", lib)],
-        main,
-        |checker, program| emit_from_program(program, "main", checker),
-    );
+    let out = with_temp_project_files(&[("lib/JsonLib.saga", lib)], main, |checker, program| {
+        emit_from_program(program, "main", checker)
+    });
     // The delegating impl threads through Generic's `to`; the synthesized
     // body shows up as a chain of dict-method calls in the lowered output.
     assert!(

@@ -105,7 +105,7 @@ impl ResolutionResult {
 #[derive(Default)]
 struct LocalModuleNames {
     top_level_values: HashSet<String>,
-    constructors: HashSet<String>,
+    constructors: HashMap<String, String>,
     types: HashMap<String, String>,
     traits: HashMap<String, String>,
     effects: HashMap<String, String>,
@@ -148,12 +148,13 @@ impl LocalModuleNames {
                 Decl::TypeDef { name, variants, .. } => {
                     out.types.insert(name.clone(), qualify(name));
                     for variant in variants {
-                        out.constructors.insert(variant.node.name.clone());
+                        out.constructors
+                            .insert(variant.node.name.clone(), qualify(&variant.node.name));
                     }
                 }
                 Decl::RecordDef { name, .. } => {
                     out.types.insert(name.clone(), qualify(name));
-                    out.constructors.insert(name.clone());
+                    out.constructors.insert(name.clone(), qualify(name));
                 }
                 Decl::EffectDef {
                     name, operations, ..
@@ -346,8 +347,8 @@ impl<'a> Resolver<'a> {
     }
 
     fn resolve_constructor_name(&self, name: &str) -> Option<String> {
-        if self.locals.constructors.contains(name) {
-            return Some(name.to_string());
+        if let Some(canonical) = self.locals.constructors.get(name) {
+            return Some(canonical.clone());
         }
         self.scope.resolve_constructor(name).map(|s| s.to_string())
     }

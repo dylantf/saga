@@ -1638,6 +1638,10 @@ impl Checker {
         let forall: Vec<u32> = param_vars.iter().map(|(_, id)| *id).collect();
 
         for variant in variants {
+            let canonical_ctor = match &self.current_module {
+                Some(module) => format!("{}.{}", module, variant.name),
+                None => variant.name.clone(),
+            };
             let ctor_ty = if variant.fields.is_empty() {
                 result_type.clone()
             } else {
@@ -1650,14 +1654,19 @@ impl Checker {
                 ty
             };
 
-            self.constructors.insert(
-                variant.name.clone(),
-                Scheme {
-                    forall: forall.clone(),
-                    constraints: vec![],
-                    ty: ctor_ty,
-                },
-            );
+            let scheme = Scheme {
+                forall: forall.clone(),
+                constraints: vec![],
+                ty: ctor_ty,
+            };
+            self.constructors
+                .insert(canonical_ctor.clone(), scheme.clone());
+            // Keep the source-bare entry for module export collection and
+            // pre-resolve local metadata; use-site lookup resolves to canonical.
+            self.constructors.insert(variant.name.clone(), scheme);
+            self.lsp
+                .constructor_def_ids
+                .insert(canonical_ctor.clone(), variant.id);
             self.lsp
                 .constructor_def_ids
                 .insert(variant.name.clone(), variant.id);
@@ -1668,7 +1677,13 @@ impl Checker {
             canonical_name.clone(),
             variants
                 .iter()
-                .map(|v| (v.name.clone(), v.fields.len()))
+                .map(|v| {
+                    let canonical_ctor = match &self.current_module {
+                        Some(module) => format!("{}.{}", module, v.name),
+                        None => v.name.clone(),
+                    };
+                    (canonical_ctor, v.fields.len())
+                })
                 .collect(),
         );
 
@@ -1724,14 +1739,17 @@ impl Checker {
         for (_, field_ty) in field_types.iter().rev() {
             ctor_ty = Type::arrow(field_ty.clone(), ctor_ty);
         }
-        self.constructors.insert(
-            name.into(),
-            Scheme {
-                forall: forall.clone(),
-                constraints: vec![],
-                ty: ctor_ty,
-            },
-        );
+        let scheme = Scheme {
+            forall: forall.clone(),
+            constraints: vec![],
+            ty: ctor_ty,
+        };
+        self.constructors
+            .insert(canonical_name.clone(), scheme.clone());
+        self.constructors.insert(name.into(), scheme);
+        self.lsp
+            .constructor_def_ids
+            .insert(canonical_name.clone(), def_id);
         self.lsp.constructor_def_ids.insert(name.into(), def_id);
 
         let num_fields = field_types.len();
@@ -1743,8 +1761,10 @@ impl Checker {
             },
         );
         // Register as a single-constructor ADT for exhaustiveness checking
-        self.adt_variants
-            .insert(canonical_name.clone(), vec![(name.into(), num_fields)]);
+        self.adt_variants.insert(
+            canonical_name.clone(),
+            vec![(canonical_name.clone(), num_fields)],
+        );
         self.type_arity.insert(canonical_name, type_params.len());
         Ok(())
     }
@@ -2352,14 +2372,11 @@ impl Checker {
         // before the pinning constraint runs produces spurious "ambiguous"
         // diagnostics.
         loop {
-            let mut constraints =
-                std::mem::take(&mut self.trait_state.pending_constraints);
+            let mut constraints = std::mem::take(&mut self.trait_state.pending_constraints);
             if constraints.is_empty() {
                 break;
             }
-            constraints.sort_by_key(|(_, _, ty, _, _)| {
-                matches!(self.sub.apply(ty), Type::Var(_))
-            });
+            constraints.sort_by_key(|(_, _, ty, _, _)| matches!(self.sub.apply(ty), Type::Var(_)));
             for (trait_name, trait_type_arg_types, ty, span, node_id) in constraints {
                 let resolved = self.sub.apply(&ty);
                 if matches!(resolved, Type::Error) {
@@ -2406,7 +2423,8 @@ impl Checker {
                     .collect();
                 match &resolved {
                     // Concrete type (includes primitives): check that an impl exists.
-                    // Try canonical form first, then resolve through scope_map.
+                    // Trait names must already be canonicalized by the resolver/checker
+                    // boundary; do not fall back to bare final segments here.
                     Type::Con(type_name, args) => {
                         let resolved_trait = self
                             .resolve_trait_name(&trait_name)
@@ -2419,20 +2437,6 @@ impl Checker {
                                 resolved_trait_type_args.clone(),
                                 type_name.clone(),
                             ))
-                            .or_else(|| {
-                                // Fallback: try bare trait name for builtin impls (Num, Eq, Show for Tuple, etc.)
-                                let bare =
-                                    resolved_trait.rsplit('.').next().unwrap_or(&resolved_trait);
-                                if bare != resolved_trait {
-                                    self.trait_state.impls.get(&(
-                                        bare.to_string(),
-                                        resolved_trait_type_args.clone(),
-                                        type_name.clone(),
-                                    ))
-                                } else {
-                                    None
-                                }
-                            })
                             .cloned();
 
                         // Functional-trait coherence fallback: if extras are
@@ -2449,15 +2453,11 @@ impl Checker {
                                 .map(|ti| ti.is_functional)
                                 .unwrap_or(false)
                         {
-                            let bare =
-                                resolved_trait.rsplit('.').next().unwrap_or(&resolved_trait);
                             let matches: Vec<super::ImplInfo> = self
                                 .trait_state
                                 .impls
                                 .iter()
-                                .filter(|((tn, _, tt), _)| {
-                                    (tn == &resolved_trait || tn == bare) && tt == type_name
-                                })
+                                .filter(|((tn, _, tt), _)| tn == &resolved_trait && tt == type_name)
                                 .map(|(_, info)| info.clone())
                                 .collect();
                             if matches.len() == 1 {

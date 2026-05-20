@@ -51,6 +51,7 @@ pub fn build_constructor_atoms(
     prelude_imports: &[Decl],
 ) -> ConstructorAtoms {
     let mut atoms = ConstructorAtoms::new();
+    let source_module = source_module_name(program, module_name);
 
     // Register BEAM overrides (these win over any module-prefixed version)
     for name in &[
@@ -67,15 +68,19 @@ pub fn build_constructor_atoms(
             Decl::TypeDef { variants, .. } => {
                 for variant in variants {
                     let ctor = &variant.node.name;
+                    let mangled = format!("{}_{}", module_name, ctor);
                     if !atoms.contains_key(ctor) {
-                        atoms.insert(ctor.clone(), format!("{}_{}", module_name, ctor));
+                        atoms.insert(ctor.clone(), mangled.clone());
                     }
+                    atoms.insert(format!("{}.{}", source_module, ctor), mangled);
                 }
             }
             Decl::RecordDef { name, .. } => {
+                let mangled = format!("{}_{}", module_name, name);
                 if !atoms.contains_key(name) {
-                    atoms.insert(name.clone(), format!("{}_{}", module_name, name));
+                    atoms.insert(name.clone(), mangled.clone());
                 }
+                atoms.insert(format!("{}.{}", source_module, name), mangled);
             }
             _ => {}
         }

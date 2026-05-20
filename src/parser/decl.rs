@@ -400,7 +400,9 @@ impl Parser {
         let (where_clause, where_apps) = self.parse_where_clause()?;
         if !where_apps.is_empty() {
             return Err(ParseError {
-                message: "bare trait-application where clauses are only allowed on `impl` declarations".to_string(),
+                message:
+                    "bare trait-application where clauses are only allowed on `impl` declarations"
+                        .to_string(),
                 span: where_apps[0].span,
             });
         }
@@ -595,7 +597,9 @@ impl Parser {
         let (where_clause, where_apps) = self.parse_where_clause()?;
         if !where_apps.is_empty() {
             return Err(ParseError {
-                message: "bare trait-application where clauses are only allowed on `impl` declarations".to_string(),
+                message:
+                    "bare trait-application where clauses are only allowed on `impl` declarations"
+                        .to_string(),
                 span: where_apps[0].span,
             });
         }

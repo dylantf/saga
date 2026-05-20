@@ -9,20 +9,20 @@ use crate::typechecker::{Diagnostic, Severity};
 use std::collections::HashMap;
 use std::path::Path;
 
-/// Decl summaries pulled from modules the current module imports. Used by
-/// `expand_derives` to resolve cross-module routed derives — without this,
-/// `deriving (Foo)` only works when `trait Foo` is declared in the same file.
+/// Pre-derive summaries for names visible from imports. This is intentionally
+/// structural, not semantic resolution: derive uses it to emit qualified syntax,
+/// then the normal resolver records authoritative NodeId-keyed meaning later.
 #[derive(Default, Clone)]
 pub struct ImportedDecls {
-    /// Bare trait name -> trait shape (type params + methods).
-    pub traits: HashMap<String, RoutedTraitInfo>,
-    /// Bare ADT name -> declared type params + variants. Used by Phase 7's
-    /// structural from-direction wrapper inspection to find a-positions in
-    /// the wrapper's variants.
-    pub types: HashMap<String, WrapperTypeInfo>,
-    /// Bare record name -> declared type params + fields. Same purpose as
-    /// `types` but for product wrappers like `Boxed a { value: a, meta: String }`.
-    pub records: HashMap<String, WrapperRecordInfo>,
+    pub traits: HashMap<String, Vec<SummaryEntry<RoutedTraitInfo>>>,
+    pub types: HashMap<String, Vec<SummaryEntry<WrapperTypeInfo>>>,
+    pub records: HashMap<String, Vec<SummaryEntry<WrapperRecordInfo>>>,
+}
+
+#[derive(Clone)]
+pub struct SummaryEntry<T> {
+    pub canonical: String,
+    pub info: T,
 }
 
 #[derive(Clone)]
@@ -43,16 +43,20 @@ impl ImportedDecls {
     }
 }
 
-/// Walk a program's `Decl::Import` statements and gather public trait/type/
-/// record declarations from each imported module. Stdlib (builtin) modules
-/// are loaded from their embedded sources; project modules are looked up via
-/// `module_map`. Parse errors and missing modules are silently skipped —
-/// the typechecker will surface those properly during the import pass.
+#[derive(Default, Clone)]
+struct ModuleSummary {
+    traits: HashMap<String, RoutedTraitInfo>,
+    types: HashMap<String, WrapperTypeInfo>,
+    records: HashMap<String, WrapperRecordInfo>,
+}
+
+/// Walk a program's imports and gather the structural summaries visible to
+/// derive expansion. Stdlib modules are loaded from embedded sources; project
+/// modules are looked up via `module_map`. Parse/missing-module errors are
+/// skipped here because the typechecker import pass reports them authoritatively.
 ///
-/// The prelude's own imports are always included because the prelude is
-/// auto-loaded into every module — types like `Result` and `Maybe` (defined
-/// in `Std.Result`/`Std.Maybe`) are reachable everywhere without an explicit
-/// import statement, so the derive layer should treat them as imported too.
+/// Prelude imports are included because the prelude is auto-loaded into every
+/// module, making `Result`, `Maybe`, and `Std.Generic` available at derive sites.
 pub fn collect_imported_decls(
     program: &[Decl],
     module_map: Option<&crate::typechecker::ModuleMap>,
@@ -66,28 +70,34 @@ pub fn collect_imported_decls(
     if let Ok(prelude_tokens) = crate::lexer::Lexer::new(PRELUDE_SRC).lex()
         && let Ok(prelude_program) = crate::parser::Parser::new(prelude_tokens).parse_program()
     {
-        collect_decls_from_imports(&prelude_program, module_map, &mut out);
+        collect_summaries_from_imports(&prelude_program, module_map, &mut out);
     }
 
-    // Then the user program's own imports — these can shadow prelude items
-    // via `entry().or_insert()` semantics (prelude-loaded items win on
-    // collision, but in practice the namespaces don't overlap).
-    collect_decls_from_imports(program, module_map, &mut out);
+    collect_summaries_from_imports(program, module_map, &mut out);
     out
 }
 
-fn collect_decls_from_imports(
+fn collect_summaries_from_imports(
     program: &[Decl],
     module_map: Option<&crate::typechecker::ModuleMap>,
     out: &mut ImportedDecls,
 ) {
     for decl in program {
-        if let Decl::Import { module_path, .. } = decl {
+        if let Decl::Import {
+            module_path,
+            alias,
+            exposing,
+            ..
+        } = decl
+        {
+            let module_name = module_path.join(".");
             let source = if let Some(src) = crate::typechecker::builtin_module_source(module_path) {
                 src.to_string()
             } else if let Some(map) = module_map {
-                let name = module_path.join(".");
-                match map.get(&name).and_then(|p| std::fs::read_to_string(p).ok()) {
+                match map
+                    .get(&module_name)
+                    .and_then(|p| std::fs::read_to_string(p).ok())
+                {
                     Some(s) => s,
                     None => continue,
                 }
@@ -100,56 +110,300 @@ fn collect_decls_from_imports(
             let Ok(prog) = crate::parser::Parser::new(tokens).parse_program() else {
                 continue;
             };
-            for d in &prog {
-                match d {
-                    Decl::TraitDef {
-                        name,
-                        type_params,
-                        methods,
-                        public: true,
-                        ..
-                    } => {
-                        // Local definitions in the current module win on
-                        // name collision; don't overwrite.
-                        out.traits.entry(name.clone()).or_insert(RoutedTraitInfo {
-                            type_params: type_params.clone(),
-                            methods: methods.iter().map(|m| m.node.clone()).collect(),
-                        });
-                    }
-                    Decl::TypeDef {
-                        name,
-                        type_params,
-                        variants,
-                        public: true,
-                        ..
-                    } => {
-                        out.types.entry(name.clone()).or_insert(WrapperTypeInfo {
-                            type_params: type_params.clone(),
-                            variants: variants.iter().map(|v| v.node.clone()).collect(),
-                        });
-                    }
-                    Decl::RecordDef {
-                        name,
-                        type_params,
-                        fields,
-                        public: true,
-                        ..
-                    } => {
-                        out.records
-                            .entry(name.clone())
-                            .or_insert(WrapperRecordInfo {
-                                type_params: type_params.clone(),
-                                fields: fields
-                                    .iter()
-                                    .map(|f| (f.node.0.clone(), f.node.1.clone()))
-                                    .collect(),
-                            });
-                    }
-                    _ => {}
-                }
-            }
+            let summary = module_summary(&prog);
+            merge_summary_import(
+                out,
+                &module_name,
+                alias.as_deref().unwrap_or(&module_name),
+                exposing.as_deref(),
+                &summary,
+            );
         }
     }
+}
+
+fn module_summary(program: &[Decl]) -> ModuleSummary {
+    let mut summary = ModuleSummary::default();
+    let module_name = program.iter().find_map(|d| {
+        if let Decl::ModuleDecl { path, .. } = d {
+            Some(path.join("."))
+        } else {
+            None
+        }
+    });
+    for d in program {
+        match d {
+            Decl::TypeDef {
+                name,
+                type_params,
+                variants,
+                public: true,
+                opaque: false,
+                ..
+            } => {
+                summary.types.insert(
+                    name.clone(),
+                    WrapperTypeInfo {
+                        type_params: type_params.clone(),
+                        variants: variants.iter().map(|v| v.node.clone()).collect(),
+                    },
+                );
+            }
+            Decl::RecordDef {
+                name,
+                type_params,
+                fields,
+                public: true,
+                ..
+            } => {
+                summary.records.insert(
+                    name.clone(),
+                    WrapperRecordInfo {
+                        type_params: type_params.clone(),
+                        fields: fields
+                            .iter()
+                            .map(|f| (f.node.0.clone(), f.node.1.clone()))
+                            .collect(),
+                    },
+                );
+            }
+            _ => {}
+        }
+    }
+    let local_type_names: std::collections::HashSet<String> = summary
+        .types
+        .keys()
+        .chain(summary.records.keys())
+        .cloned()
+        .collect();
+    for d in program {
+        if let Decl::TraitDef {
+            name,
+            type_params,
+            methods,
+            public: true,
+            ..
+        } = d
+        {
+            summary.traits.insert(
+                name.clone(),
+                RoutedTraitInfo {
+                    type_params: type_params.clone(),
+                    methods: methods
+                        .iter()
+                        .map(|m| {
+                            let mut method = m.node.clone();
+                            method.params = method
+                                .params
+                                .into_iter()
+                                .map(|(label, ty)| {
+                                    (
+                                        label,
+                                        qualify_summary_type_expr(
+                                            ty,
+                                            module_name.as_deref(),
+                                            &local_type_names,
+                                        ),
+                                    )
+                                })
+                                .collect();
+                            method.return_type = qualify_summary_type_expr(
+                                method.return_type,
+                                module_name.as_deref(),
+                                &local_type_names,
+                            );
+                            method
+                        })
+                        .collect(),
+                },
+            );
+        }
+    }
+    summary
+}
+
+fn qualify_summary_type_expr(
+    ty: TypeExpr,
+    module_name: Option<&str>,
+    local_type_names: &std::collections::HashSet<String>,
+) -> TypeExpr {
+    match ty {
+        TypeExpr::Named { id, name, span } => {
+            let name = if !name.contains('.') && local_type_names.contains(&name) {
+                module_name.map(|m| format!("{m}.{name}")).unwrap_or(name)
+            } else {
+                name
+            };
+            TypeExpr::Named { id, name, span }
+        }
+        TypeExpr::App {
+            id,
+            func,
+            arg,
+            span,
+        } => TypeExpr::App {
+            id,
+            func: Box::new(qualify_summary_type_expr(
+                *func,
+                module_name,
+                local_type_names,
+            )),
+            arg: Box::new(qualify_summary_type_expr(
+                *arg,
+                module_name,
+                local_type_names,
+            )),
+            span,
+        },
+        TypeExpr::Arrow {
+            id,
+            from,
+            to,
+            effects,
+            effect_row_var,
+            span,
+        } => TypeExpr::Arrow {
+            id,
+            from: Box::new(qualify_summary_type_expr(
+                *from,
+                module_name,
+                local_type_names,
+            )),
+            to: Box::new(qualify_summary_type_expr(
+                *to,
+                module_name,
+                local_type_names,
+            )),
+            effects,
+            effect_row_var,
+            span,
+        },
+        TypeExpr::Record {
+            id,
+            fields,
+            multiline,
+            span,
+        } => TypeExpr::Record {
+            id,
+            fields: fields
+                .into_iter()
+                .map(|(label, ty)| {
+                    (
+                        label,
+                        qualify_summary_type_expr(ty, module_name, local_type_names),
+                    )
+                })
+                .collect(),
+            multiline,
+            span,
+        },
+        TypeExpr::Labeled {
+            id,
+            label,
+            inner,
+            span,
+        } => TypeExpr::Labeled {
+            id,
+            label,
+            inner: Box::new(qualify_summary_type_expr(
+                *inner,
+                module_name,
+                local_type_names,
+            )),
+            span,
+        },
+        other => other,
+    }
+}
+
+fn merge_summary_import(
+    out: &mut ImportedDecls,
+    module_name: &str,
+    prefix: &str,
+    exposing: Option<&[ExposedItem]>,
+    summary: &ModuleSummary,
+) {
+    for (name, info) in &summary.traits {
+        register_summary_entry(
+            &mut out.traits,
+            &format!("{module_name}.{name}"),
+            module_name,
+            name,
+            info,
+        );
+        if prefix != module_name {
+            register_summary_entry(
+                &mut out.traits,
+                &format!("{prefix}.{name}"),
+                module_name,
+                name,
+                info,
+            );
+        }
+        if exposing.is_none() || exposing.is_some_and(|items| items.iter().any(|i| i == name)) {
+            register_summary_entry(&mut out.traits, name, module_name, name, info);
+        }
+    }
+    for (name, info) in &summary.types {
+        register_summary_entry(
+            &mut out.types,
+            &format!("{module_name}.{name}"),
+            module_name,
+            name,
+            info,
+        );
+        if prefix != module_name {
+            register_summary_entry(
+                &mut out.types,
+                &format!("{prefix}.{name}"),
+                module_name,
+                name,
+                info,
+            );
+        }
+        if exposing.is_none() || exposing.is_some_and(|items| items.iter().any(|i| i == name)) {
+            register_summary_entry(&mut out.types, name, module_name, name, info);
+        }
+    }
+    for (name, info) in &summary.records {
+        register_summary_entry(
+            &mut out.records,
+            &format!("{module_name}.{name}"),
+            module_name,
+            name,
+            info,
+        );
+        if prefix != module_name {
+            register_summary_entry(
+                &mut out.records,
+                &format!("{prefix}.{name}"),
+                module_name,
+                name,
+                info,
+            );
+        }
+        if exposing.is_none() || exposing.is_some_and(|items| items.iter().any(|i| i == name)) {
+            register_summary_entry(&mut out.records, name, module_name, name, info);
+        }
+    }
+}
+
+fn register_summary_entry<T: Clone>(
+    map: &mut HashMap<String, Vec<SummaryEntry<T>>>,
+    visible: &str,
+    module_name: &str,
+    name: &str,
+    info: &T,
+) {
+    let canonical = format!("{module_name}.{name}");
+    let entries = map.entry(visible.to_string()).or_default();
+    if entries.iter().any(|e| e.canonical == canonical) {
+        return;
+    }
+    entries.push(SummaryEntry {
+        canonical,
+        info: info.clone(),
+    });
 }
 
 /// Build an `ImportedDecls` by scanning a project root for `.saga` files.
@@ -177,13 +431,14 @@ pub fn expand_derives(program: &mut Vec<Decl>, imported: &ImportedDecls) -> Vec<
     // the impl is registered.
     let original = std::mem::take(program);
 
-    // Index trait/type/record defs by bare name for routed-derive method
-    // discovery and Phase 7 structural wrapper inspection. Start from the
-    // imported set, then overlay local defs so a local decl shadowing an
-    // imported one wins.
-    let mut trait_defs: HashMap<String, RoutedTraitInfo> = imported.traits.clone();
-    let mut type_defs: HashMap<String, WrapperTypeInfo> = imported.types.clone();
-    let mut record_defs: HashMap<String, WrapperRecordInfo> = imported.records.clone();
+    let current_module = original.iter().find_map(|d| {
+        if let Decl::ModuleDecl { path, .. } = d {
+            Some(path.join("."))
+        } else {
+            None
+        }
+    });
+    let mut scope = DeriveScope::new(imported, current_module.as_deref());
     for d in &original {
         match d {
             Decl::TraitDef {
@@ -192,7 +447,7 @@ pub fn expand_derives(program: &mut Vec<Decl>, imported: &ImportedDecls) -> Vec<
                 methods,
                 ..
             } => {
-                trait_defs.insert(
+                scope.add_local_trait(
                     name.clone(),
                     RoutedTraitInfo {
                         type_params: type_params.clone(),
@@ -206,7 +461,7 @@ pub fn expand_derives(program: &mut Vec<Decl>, imported: &ImportedDecls) -> Vec<
                 variants,
                 ..
             } => {
-                type_defs.insert(
+                scope.add_local_type(
                     name.clone(),
                     WrapperTypeInfo {
                         type_params: type_params.clone(),
@@ -220,7 +475,7 @@ pub fn expand_derives(program: &mut Vec<Decl>, imported: &ImportedDecls) -> Vec<
                 fields,
                 ..
             } => {
-                record_defs.insert(
+                scope.add_local_record(
                     name.clone(),
                     WrapperRecordInfo {
                         type_params: type_params.clone(),
@@ -234,10 +489,6 @@ pub fn expand_derives(program: &mut Vec<Decl>, imported: &ImportedDecls) -> Vec<
             _ => {}
         }
     }
-    let wrappers = WrapperBundle {
-        types: &type_defs,
-        records: &record_defs,
-    };
 
     let mut rebuilt: Vec<Decl> = Vec::with_capacity(original.len());
     for decl in &original {
@@ -300,14 +551,7 @@ pub fn expand_derives(program: &mut Vec<Decl>, imported: &ImportedDecls) -> Vec<
                         continue;
                     }
                     if !is_hardcoded_derive(bare) {
-                        match derive_routed(
-                            trait_name,
-                            name,
-                            type_params,
-                            *span,
-                            &trait_defs,
-                            wrappers,
-                        ) {
+                        match derive_routed(trait_name, name, type_params, *span, &scope) {
                             Ok(decls) => extra.extend(decls),
                             Err(diag) => errors.push(diag),
                         }
@@ -354,14 +598,7 @@ pub fn expand_derives(program: &mut Vec<Decl>, imported: &ImportedDecls) -> Vec<
                 for trait_name in deriving {
                     let bare = trait_name.rsplit('.').next().unwrap_or(trait_name);
                     if !is_hardcoded_derive(bare) && bare != "Generic" {
-                        match derive_routed(
-                            trait_name,
-                            name,
-                            type_params,
-                            *span,
-                            &trait_defs,
-                            wrappers,
-                        ) {
+                        match derive_routed(trait_name, name, type_params, *span, &scope) {
                             Ok(decls) => extra.extend(decls),
                             Err(diag) => errors.push(diag),
                         }
@@ -396,12 +633,100 @@ pub struct RoutedTraitInfo {
     pub methods: Vec<TraitMethod>,
 }
 
-/// Read-only view onto the merged wrapper TypeDef / RecordDef tables,
-/// passed down to from-direction classification + body emission.
-#[derive(Clone, Copy)]
-struct WrapperBundle<'a> {
-    types: &'a HashMap<String, WrapperTypeInfo>,
-    records: &'a HashMap<String, WrapperRecordInfo>,
+struct DeriveScope<'a> {
+    imported: &'a ImportedDecls,
+    current_module: Option<&'a str>,
+    local_traits: HashMap<String, SummaryEntry<RoutedTraitInfo>>,
+    local_types: HashMap<String, SummaryEntry<WrapperTypeInfo>>,
+    local_records: HashMap<String, SummaryEntry<WrapperRecordInfo>>,
+}
+
+impl<'a> DeriveScope<'a> {
+    fn new(imported: &'a ImportedDecls, current_module: Option<&'a str>) -> Self {
+        Self {
+            imported,
+            current_module,
+            local_traits: HashMap::new(),
+            local_types: HashMap::new(),
+            local_records: HashMap::new(),
+        }
+    }
+
+    fn add_local_trait(&mut self, name: String, info: RoutedTraitInfo) {
+        insert_local(&mut self.local_traits, self.current_module, name, info);
+    }
+
+    fn add_local_type(&mut self, name: String, info: WrapperTypeInfo) {
+        insert_local(&mut self.local_types, self.current_module, name, info);
+    }
+
+    fn add_local_record(&mut self, name: String, info: WrapperRecordInfo) {
+        insert_local(&mut self.local_records, self.current_module, name, info);
+    }
+
+    fn trait_entry(&self, name: &str) -> Result<Option<&SummaryEntry<RoutedTraitInfo>>, String> {
+        lookup_summary(name, &self.local_traits, &self.imported.traits, "trait")
+    }
+
+    fn type_entry(&self, name: &str) -> Result<Option<&SummaryEntry<WrapperTypeInfo>>, String> {
+        lookup_summary(
+            name,
+            &self.local_types,
+            &self.imported.types,
+            "wrapper type",
+        )
+    }
+
+    fn record_entry(&self, name: &str) -> Result<Option<&SummaryEntry<WrapperRecordInfo>>, String> {
+        lookup_summary(
+            name,
+            &self.local_records,
+            &self.imported.records,
+            "wrapper record",
+        )
+    }
+}
+
+fn insert_local<T: Clone>(
+    map: &mut HashMap<String, SummaryEntry<T>>,
+    current_module: Option<&str>,
+    name: String,
+    info: T,
+) {
+    let canonical = current_module
+        .map(|m| format!("{m}.{name}"))
+        .unwrap_or_else(|| name.clone());
+    let entry = SummaryEntry { canonical, info };
+    map.insert(name.clone(), entry.clone());
+    if let Some(module) = current_module {
+        map.insert(format!("{module}.{name}"), entry);
+    }
+}
+
+fn lookup_summary<'a, T>(
+    name: &str,
+    local: &'a HashMap<String, SummaryEntry<T>>,
+    imported: &'a HashMap<String, Vec<SummaryEntry<T>>>,
+    label: &str,
+) -> Result<Option<&'a SummaryEntry<T>>, String> {
+    if let Some(entry) = local.get(name) {
+        return Ok(Some(entry));
+    }
+    let Some(entries) = imported.get(name) else {
+        return Ok(None);
+    };
+    match entries.as_slice() {
+        [] => Ok(None),
+        [entry] => Ok(Some(entry)),
+        many => {
+            let mut candidates: Vec<String> = many.iter().map(|e| e.canonical.clone()).collect();
+            candidates.sort();
+            Err(format!(
+                "{label} `{name}` is ambiguous; candidates: {}",
+                candidates.join(", ")
+            ))
+        }
+    }
 }
 
 fn is_hardcoded_derive(bare: &str) -> bool {
@@ -429,24 +754,34 @@ fn derive_routed(
     type_name: &str,
     type_params: &[String],
     span: Span,
-    trait_defs: &std::collections::HashMap<String, RoutedTraitInfo>,
-    wrappers: WrapperBundle<'_>,
+    scope: &DeriveScope<'_>,
 ) -> Result<Vec<Decl>, Diagnostic> {
-    let bare = trait_name.rsplit('.').next().unwrap_or(trait_name);
-    let trait_info = trait_defs.get(bare).ok_or_else(|| Diagnostic {
-        severity: Severity::Error,
-        message: format!(
-            "cannot derive `{trait_name}`: trait `{bare}` is not in scope. \
-             Derivable traits must be defined in the same module as the deriving site."
-        ),
-        span: Some(span),
-    })?;
+    let trait_entry = match scope.trait_entry(trait_name) {
+        Ok(Some(entry)) => entry,
+        Ok(None) => {
+            return Err(Diagnostic {
+                severity: Severity::Error,
+                message: format!("cannot derive `{trait_name}`: trait is not in scope"),
+                span: Some(span),
+            });
+        }
+        Err(reason) => {
+            return Err(Diagnostic {
+                severity: Severity::Error,
+                message: format!("cannot derive `{trait_name}`: {reason}"),
+                span: Some(span),
+            });
+        }
+    };
+    let trait_info = &trait_entry.info;
+    let trait_syntax = trait_entry.canonical.clone();
+    let trait_display = trait_name.rsplit('.').next().unwrap_or(trait_name);
 
     if trait_info.methods.is_empty() {
         return Err(Diagnostic {
             severity: Severity::Error,
             message: format!(
-                "cannot derive `{bare}` for `{type_name}`: trait `{bare}` has no methods to route"
+                "cannot derive `{trait_display}` for `{type_name}`: trait `{trait_display}` has no methods to route"
             ),
             span: Some(span),
         });
@@ -458,12 +793,12 @@ fn derive_routed(
     let mut classified: Vec<(TraitMethod, MethodDirection)> =
         Vec::with_capacity(trait_info.methods.len());
     for method in &trait_info.methods {
-        match classify_method_direction(method, &self_var, wrappers) {
+        match classify_method_direction(method, &self_var, scope) {
             Ok(dir) => classified.push((method.clone(), dir)),
             Err(reason) => {
                 return Err(Diagnostic {
                     severity: Severity::Error,
-                    message: format!("cannot derive `{bare}` for `{type_name}`: {reason}"),
+                    message: format!("cannot derive `{trait_display}` for `{type_name}`: {reason}"),
                     span: Some(span),
                 });
             }
@@ -483,7 +818,7 @@ fn derive_routed(
             type_var: tp.clone(),
             traits: vec![TraitRef {
                 id: NodeId::fresh(),
-                name: bare.into(),
+                name: trait_syntax.clone(),
                 type_args: vec![],
                 span: zero_span,
             }],
@@ -502,14 +837,14 @@ fn derive_routed(
     }
 
     let routed_info = RoutedDeriveInfo {
-        trait_name: bare.to_string(),
+        trait_name: trait_display.to_string(),
         target_type: type_name.to_string(),
         deriving_span: span,
     };
     let bridge_impl = Decl::ImplDef {
         id: NodeId::fresh(),
         doc: vec![],
-        trait_name: bare.into(),
+        trait_name: trait_syntax.clone(),
         trait_name_span: zero_span,
         trait_type_args: vec![],
         target_type: rep_name.clone(),
@@ -529,7 +864,7 @@ fn derive_routed(
     let where_apps = vec![
         TraitApp {
             id: NodeId::fresh(),
-            trait_name: "Generic".into(),
+            trait_name: "Std.Generic.Generic".into(),
             type_args: vec![
                 target_applied,
                 TypeExpr::Var {
@@ -542,7 +877,7 @@ fn derive_routed(
         },
         TraitApp {
             id: NodeId::fresh(),
-            trait_name: bare.into(),
+            trait_name: trait_syntax.clone(),
             type_args: vec![TypeExpr::Var {
                 id: NodeId::fresh(),
                 name: fresh_r,
@@ -554,7 +889,7 @@ fn derive_routed(
     let delegating_impl = Decl::ImplDef {
         id: NodeId::fresh(),
         doc: vec![],
-        trait_name: bare.into(),
+        trait_name: trait_syntax,
         trait_name_span: zero_span,
         trait_type_args: vec![],
         target_type: type_name.into(),
@@ -587,7 +922,7 @@ enum MethodDirection {
 fn classify_method_direction(
     method: &TraitMethod,
     self_var: &str,
-    wrappers: WrapperBundle<'_>,
+    scope: &DeriveScope<'_>,
 ) -> Result<MethodDirection, String> {
     if method.params.len() != 1 {
         return Err(format!(
@@ -600,7 +935,7 @@ fn classify_method_direction(
     let return_has_self = type_expr_contains_var(&method.return_type, self_var);
     match (param_has_self, return_has_self) {
         (true, false) => Ok(MethodDirection::To),
-        (false, true) => match classify_from_return(&method.return_type, self_var, wrappers) {
+        (false, true) => match classify_from_return(&method.return_type, self_var, scope) {
             Ok(shape) => Ok(MethodDirection::From(shape)),
             Err(reason) => Err(format!("method `{}`: {}", method.name, reason)),
         },
@@ -791,7 +1126,7 @@ struct FieldShape {
 fn classify_from_return(
     te: &TypeExpr,
     self_var: &str,
-    wrappers: WrapperBundle<'_>,
+    scope: &DeriveScope<'_>,
 ) -> Result<FromShape, String> {
     // Bare `a`: the trait's self type variable as the entire return.
     if let TypeExpr::Var { name, .. } = te
@@ -823,11 +1158,19 @@ fn classify_from_return(
     }
 
     // Look up the wrapper. Sum (TypeDef) first, then record (RecordDef).
-    if let Some(td) = wrappers.types.get(&head) {
-        return classify_sum_wrapper(&head, td, &args, self_var);
+    match scope.type_entry(&head) {
+        Ok(Some(td)) => {
+            return classify_sum_wrapper(&head, &td.info, &args, self_var);
+        }
+        Ok(None) => {}
+        Err(reason) => return Err(reason),
     }
-    if let Some(rd) = wrappers.records.get(&head) {
-        return classify_record_wrapper(&head, rd, &args, self_var);
+    match scope.record_entry(&head) {
+        Ok(Some(rd)) => {
+            return classify_record_wrapper(&head, &rd.info, &args, self_var);
+        }
+        Ok(None) => {}
+        Err(reason) => return Err(reason),
     }
     Err(format!(
         "wrapper type `{}` is not defined in the current module or any imported module; \
@@ -841,11 +1184,8 @@ fn classify_from_return(
 /// possibly-applied TypeExpr. Returns None if the TypeExpr isn't a named
 /// type or a chain of applications headed by one.
 fn extract_head_and_args(te: &TypeExpr) -> Option<(String, Vec<TypeExpr>)> {
-    fn bare(name: &str) -> String {
-        name.rsplit('.').next().unwrap_or(name).to_string()
-    }
     match te {
-        TypeExpr::Named { name, .. } => Some((bare(name), vec![])),
+        TypeExpr::Named { name, .. } => Some((name.clone(), vec![])),
         TypeExpr::App { func, arg, .. } => {
             let (head, mut args) = extract_head_and_args(func)?;
             args.push(arg.as_ref().clone());
@@ -900,6 +1240,7 @@ fn classify_sum_wrapper(
 
     let mut variants = Vec::with_capacity(td.variants.len());
     let mut any_a_position = false;
+    let ctor_prefix = name.rsplit_once('.').map(|(module, _)| module.to_string());
     for variant in &td.variants {
         let mut field_a_positions = Vec::with_capacity(variant.fields.len());
         for (_label, fty) in &variant.fields {
@@ -926,7 +1267,10 @@ fn classify_sum_wrapper(
             field_a_positions.push(is_a);
         }
         variants.push(VariantShape {
-            ctor_name: variant.name.clone(),
+            ctor_name: ctor_prefix
+                .as_ref()
+                .map(|prefix| format!("{prefix}.{}", variant.name))
+                .unwrap_or_else(|| variant.name.clone()),
             field_a_positions,
         });
     }
@@ -1273,7 +1617,12 @@ fn derive_record_generic(
         },
     );
     let inner_expr = build_rep_to_expr(&plain_fields, &param_var, span);
-    let record_wrapped = apply2("Record", string_lit(record_name, span), inner_expr, span);
+    let record_wrapped = apply2(
+        &generic_name("Record"),
+        string_lit(record_name, span),
+        inner_expr,
+        span,
+    );
     let to_body = apply_ctor(&rep_name, record_wrapped, span);
     let to_method = Annotated::bare(ImplMethod {
         name: "to".into(),
@@ -1291,7 +1640,7 @@ fn derive_record_generic(
     let inner_pat = build_rep_from_pattern(&field_var_names, span);
     let record_pat = Pat::Constructor {
         id: NodeId::fresh(),
-        name: "Record".into(),
+        name: generic_name("Record"),
         args: vec![
             Pat::Wildcard {
                 id: NodeId::fresh(),
@@ -1462,9 +1811,19 @@ fn derive_adt_generic(
                 span,
             };
             let shape_expr = build_variant_shape_expr(&v.fields, &field_vars, span);
-            let variant = apply2("Variant", string_lit(&v.name, span), shape_expr, span);
+            let variant = apply2(
+                &generic_name("Variant"),
+                string_lit(&v.name, span),
+                shape_expr,
+                span,
+            );
             let or_wrapped = or_wrap_expr(variant, i, n, span);
-            let adt_wrapped = apply2("Adt", string_lit(type_name, span), or_wrapped, span);
+            let adt_wrapped = apply2(
+                &generic_name("Adt"),
+                string_lit(type_name, span),
+                or_wrapped,
+                span,
+            );
             let body = apply_ctor(&rep_name, adt_wrapped, span);
             Annotated::bare(CaseArm {
                 pattern,
@@ -1509,7 +1868,7 @@ fn derive_adt_generic(
             let shape_pat = build_variant_shape_pat(&v.fields, &field_vars, span);
             let variant_pat = Pat::Constructor {
                 id: NodeId::fresh(),
-                name: "Variant".into(),
+                name: generic_name("Variant"),
                 args: vec![
                     Pat::Wildcard {
                         id: NodeId::fresh(),
@@ -1522,7 +1881,7 @@ fn derive_adt_generic(
             let or_wrapped_pat = or_wrap_pat(variant_pat, i, n, span);
             let adt_pat = Pat::Constructor {
                 id: NodeId::fresh(),
-                name: "Adt".into(),
+                name: generic_name("Adt"),
                 args: vec![
                     Pat::Wildcard {
                         id: NodeId::fresh(),
@@ -1652,16 +2011,21 @@ fn build_variant_shape_expr(
     span: Span,
 ) -> Expr {
     if fields.is_empty() {
-        return Expr::synth(span, ExprKind::Constructor { name: "U1".into() });
+        return Expr::synth(
+            span,
+            ExprKind::Constructor {
+                name: generic_name("U1"),
+            },
+        );
     }
     let leaf_for = |label: &Option<String>, var: &str| -> Expr {
         let leaf = apply_ctor(
-            "Leaf",
+            &generic_name("Leaf"),
             Expr::synth(span, ExprKind::Var { name: var.into() }),
             span,
         );
         match label {
-            Some(lbl) => apply2("Labeled", string_lit(lbl, span), leaf, span),
+            Some(lbl) => apply2(&generic_name("Labeled"), string_lit(lbl, span), leaf, span),
             None => leaf,
         }
     };
@@ -1669,7 +2033,7 @@ fn build_variant_shape_expr(
     let mut acc = leaf_for(&fields[n - 1].0, &field_vars[n - 1]);
     for i in (0..n - 1).rev() {
         let cur = leaf_for(&fields[i].0, &field_vars[i]);
-        acc = apply2("And", cur, acc, span);
+        acc = apply2(&generic_name("And"), cur, acc, span);
     }
     acc
 }
@@ -1684,7 +2048,7 @@ fn build_variant_shape_pat(
     if fields.is_empty() {
         return Pat::Constructor {
             id: NodeId::fresh(),
-            name: "U1".into(),
+            name: generic_name("U1"),
             args: vec![],
             span,
         };
@@ -1692,7 +2056,7 @@ fn build_variant_shape_pat(
     let leaf_pat_for = |label: &Option<String>, var: &str| -> Pat {
         let leaf = Pat::Constructor {
             id: NodeId::fresh(),
-            name: "Leaf".into(),
+            name: generic_name("Leaf"),
             args: vec![Pat::Var {
                 id: NodeId::fresh(),
                 name: var.into(),
@@ -1703,7 +2067,7 @@ fn build_variant_shape_pat(
         match label {
             Some(_) => Pat::Constructor {
                 id: NodeId::fresh(),
-                name: "Labeled".into(),
+                name: generic_name("Labeled"),
                 args: vec![
                     Pat::Wildcard {
                         id: NodeId::fresh(),
@@ -1722,7 +2086,7 @@ fn build_variant_shape_pat(
         let cur = leaf_pat_for(&fields[i].0, &field_vars[i]);
         acc = Pat::Constructor {
             id: NodeId::fresh(),
-            name: "And".into(),
+            name: generic_name("And"),
             args: vec![cur, acc],
             span,
         };
@@ -1739,10 +2103,10 @@ fn or_wrap_expr(inner: Expr, index: usize, total: usize, span: Span) -> Expr {
     let mut e = if index == total - 1 {
         inner
     } else {
-        apply_ctor("Or_Left", inner, span)
+        apply_ctor(&generic_name("Or_Left"), inner, span)
     };
     for _ in 0..index {
-        e = apply_ctor("Or_Right", e, span);
+        e = apply_ctor(&generic_name("Or_Right"), e, span);
     }
     e
 }
@@ -1757,7 +2121,7 @@ fn or_wrap_pat(inner: Pat, index: usize, total: usize, span: Span) -> Pat {
     } else {
         Pat::Constructor {
             id: NodeId::fresh(),
-            name: "Or_Left".into(),
+            name: generic_name("Or_Left"),
             args: vec![inner],
             span,
         }
@@ -1765,7 +2129,7 @@ fn or_wrap_pat(inner: Pat, index: usize, total: usize, span: Span) -> Pat {
     for _ in 0..index {
         p = Pat::Constructor {
             id: NodeId::fresh(),
-            name: "Or_Right".into(),
+            name: generic_name("Or_Right"),
             args: vec![p],
             span,
         };
@@ -1792,9 +2156,13 @@ fn build_ctor_application(ctor: &str, field_vars: &[String], span: Span) -> Expr
 fn type_named(name: &str) -> TypeExpr {
     TypeExpr::Named {
         id: NodeId::fresh(),
-        name: name.into(),
+        name: generic_name(name),
         span: Span { start: 0, end: 0 },
     }
+}
+
+fn generic_name(name: &str) -> String {
+    format!("Std.Generic.{name}")
 }
 
 fn type_app(func: TypeExpr, arg: TypeExpr) -> TypeExpr {
@@ -1872,7 +2240,12 @@ fn string_lit(s: &str, span: Span) -> Expr {
 /// Build the `to` body's inner expression (everything inside the __Rep_R newtype wrap).
 fn build_rep_to_expr(fields: &[(String, TypeExpr)], record_var: &Expr, span: Span) -> Expr {
     if fields.is_empty() {
-        return Expr::synth(span, ExprKind::Constructor { name: "U1".into() });
+        return Expr::synth(
+            span,
+            ExprKind::Constructor {
+                name: generic_name("U1"),
+            },
+        );
     }
     let labeled_for = |fname: &str| -> Expr {
         // Labeled "fname" (Leaf record_var.fname)
@@ -1884,15 +2257,20 @@ fn build_rep_to_expr(fields: &[(String, TypeExpr)], record_var: &Expr, span: Spa
                 record_name: None,
             },
         );
-        let leaf = apply_ctor("Leaf", field_access, span);
-        apply2("Labeled", string_lit(fname, span), leaf, span)
+        let leaf = apply_ctor(&generic_name("Leaf"), field_access, span);
+        apply2(
+            &generic_name("Labeled"),
+            string_lit(fname, span),
+            leaf,
+            span,
+        )
     };
 
     let mut iter = fields.iter().rev();
     let (last_name, _) = iter.next().unwrap();
     let mut acc = labeled_for(last_name);
     for (fname, _) in iter {
-        acc = apply2("And", labeled_for(fname), acc, span);
+        acc = apply2(&generic_name("And"), labeled_for(fname), acc, span);
     }
     acc
 }
@@ -1903,7 +2281,7 @@ fn build_rep_from_pattern(field_vars: &[String], span: Span) -> Pat {
     if field_vars.is_empty() {
         return Pat::Constructor {
             id: NodeId::fresh(),
-            name: "U1".into(),
+            name: generic_name("U1"),
             args: vec![],
             span,
         };
@@ -1912,7 +2290,7 @@ fn build_rep_from_pattern(field_vars: &[String], span: Span) -> Pat {
         // Labeled _ (Leaf var)
         Pat::Constructor {
             id: NodeId::fresh(),
-            name: "Labeled".into(),
+            name: generic_name("Labeled"),
             args: vec![
                 Pat::Wildcard {
                     id: NodeId::fresh(),
@@ -1920,7 +2298,7 @@ fn build_rep_from_pattern(field_vars: &[String], span: Span) -> Pat {
                 },
                 Pat::Constructor {
                     id: NodeId::fresh(),
-                    name: "Leaf".into(),
+                    name: generic_name("Leaf"),
                     args: vec![Pat::Var {
                         id: NodeId::fresh(),
                         name: var.into(),
@@ -1939,7 +2317,7 @@ fn build_rep_from_pattern(field_vars: &[String], span: Span) -> Pat {
     for v in iter {
         acc = Pat::Constructor {
             id: NodeId::fresh(),
-            name: "And".into(),
+            name: generic_name("And"),
             args: vec![labeled_pat(v), acc],
             span,
         };

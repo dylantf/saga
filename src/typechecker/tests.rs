@@ -23,10 +23,7 @@ fn check(src: &str) -> Result<Checker, Diagnostic> {
     let mut prelude_program = Parser::new(prelude_tokens)
         .parse_program()
         .expect("prelude parse error");
-    crate::derive::expand_derives(
-        &mut prelude_program,
-        &crate::derive::ImportedDecls::empty(),
-    );
+    crate::derive::expand_derives(&mut prelude_program, &crate::derive::ImportedDecls::empty());
     crate::desugar::desugar_program(&mut prelude_program);
     checker
         .check_program_inner(&mut prelude_program)
@@ -79,10 +76,7 @@ fn check_with_project_files(files: &[(&str, &str)], main_src: &str) -> Result<Ch
         let mut prelude_program = Parser::new(prelude_tokens)
             .parse_program()
             .expect("prelude parse error");
-        crate::derive::expand_derives(
-            &mut prelude_program,
-            &crate::derive::ImportedDecls::empty(),
-        );
+        crate::derive::expand_derives(&mut prelude_program, &crate::derive::ImportedDecls::empty());
         crate::desugar::desugar_program(&mut prelude_program);
         checker
             .check_program_inner(&mut prelude_program)
@@ -92,9 +86,11 @@ fn check_with_project_files(files: &[(&str, &str)], main_src: &str) -> Result<Ch
         let tokens = lexer.lex().expect("lex error");
         let mut parser = Parser::new(tokens);
         let mut program = parser.parse_program().expect("parse error");
-        let imported =
-            crate::derive::collect_imported_decls(&program, checker.module_map());
-        crate::derive::expand_derives(&mut program, &imported);
+        let imported = crate::derive::collect_imported_decls(&program, checker.module_map());
+        let derive_errors = crate::derive::expand_derives(&mut program, &imported);
+        if let Some(first) = derive_errors.into_iter().next() {
+            return Err(first);
+        }
         crate::desugar::desugar_program(&mut program);
         checker
             .check_program_inner(&mut program)
@@ -4416,7 +4412,10 @@ impl Show for Person where {NotFn Person r} {
   show _ = \"x\"
 }",
     );
-    assert!(result.is_err(), "expected error for non-functional fresh var");
+    assert!(
+        result.is_err(),
+        "expected error for non-functional fresh var"
+    );
     let err = result.err().unwrap();
     assert!(
         err.message.contains("fresh type variable not determined")
@@ -6634,6 +6633,180 @@ fn phase3_tojson_lib() -> &'static str {
      impl ToJson for Adt a where {a: ToJson} {\n  to_json (Adt _ inner) = to_json inner\n}\n"
 }
 
+fn module_tojson_lib() -> &'static str {
+    "module JsonLib\n\
+     pub trait ToJson a { fun to_json : a -> String }\n\
+     pub fun helper : Unit -> Unit\n\
+     helper () = ()\n\
+     impl ToJson for U1 { to_json _ = \"null\" }\n\
+     impl ToJson for Int { to_json n = show n }\n\
+     impl ToJson for String { to_json s = s }\n\
+     impl ToJson for Leaf a where {a: ToJson} { to_json (Leaf x) = to_json x }\n\
+     impl ToJson for Labeled a where {a: ToJson} { to_json (Labeled name x) = name <> \":\" <> to_json x }\n\
+     impl ToJson for And l r where {l: ToJson, r: ToJson} { to_json (And l r) = to_json l <> \",\" <> to_json r }\n\
+     impl ToJson for Or l r where {l: ToJson, r: ToJson} { to_json o = case o { Or_Left l -> to_json l; Or_Right r -> to_json r } }\n\
+     impl ToJson for Variant a where {a: ToJson} { to_json (Variant name x) = name <> \":\" <> to_json x }\n\
+     impl ToJson for Record a where {a: ToJson} { to_json (Record _ inner) = to_json inner }\n\
+     impl ToJson for Adt a where {a: ToJson} { to_json (Adt _ inner) = to_json inner }\n"
+}
+
+#[test]
+fn routed_derive_respects_selective_import_visibility() {
+    let err = check_with_project_files(
+        &[("src/JsonLib.saga", module_tojson_lib())],
+        "import JsonLib (helper)\n\
+         record Person { name: String, age: Int }\n  deriving (ToJson)\n",
+    )
+    .err()
+    .expect("expected derive error");
+    assert!(
+        err.message.contains("trait is not in scope"),
+        "expected ToJson to be hidden by selective import; got: {}",
+        err.message
+    );
+}
+
+#[test]
+fn routed_derive_resolves_selective_import_canonically() {
+    let checker = check_with_project_files(
+        &[("src/JsonLib.saga", module_tojson_lib())],
+        "import JsonLib (ToJson)\n\
+         record Person { name: String, age: Int }\n  deriving (ToJson)\n\
+         fun go : Person -> String\n\
+         go p = to_json p\n",
+    )
+    .unwrap();
+    let result = checker.to_result();
+    assert!(
+        result
+            .resolution
+            .impl_traits
+            .values()
+            .any(|name| name == "JsonLib.ToJson"),
+        "expected synthetic impl trait to resolve canonically; got {:?}",
+        result.resolution.impl_traits
+    );
+    assert!(
+        result
+            .resolution
+            .traits
+            .values()
+            .any(|name| name == "Std.Generic.Generic"),
+        "expected synthetic where-app Generic to resolve canonically; got {:?}",
+        result.resolution.traits
+    );
+}
+
+#[test]
+fn routed_derive_supports_aliased_import() {
+    check_with_project_files(
+        &[("src/JsonLib.saga", module_tojson_lib())],
+        "import JsonLib as J\n\
+         record Person { name: String, age: Int }\n  deriving (J.ToJson)\n\
+         fun go : Person -> String\n\
+         go p = to_json p\n",
+    )
+    .unwrap();
+}
+
+#[test]
+fn routed_derive_reports_ambiguous_imported_bare_trait() {
+    let lib_a = "module A\npub trait ToJson a { fun to_json : a -> String }\n";
+    let lib_b = "module B\npub trait ToJson a { fun to_json : a -> String }\n";
+    let err = check_with_project_files(
+        &[("src/A.saga", lib_a), ("src/B.saga", lib_b)],
+        "import A\n\
+         import B\n\
+         record Person { name: String }\n  deriving (ToJson)\n",
+    )
+    .err()
+    .expect("expected ambiguous derive error");
+    assert!(
+        err.message.contains("ambiguous")
+            && err.message.contains("A.ToJson")
+            && err.message.contains("B.ToJson"),
+        "expected ambiguous ToJson diagnostic; got: {}",
+        err.message
+    );
+}
+
+#[test]
+fn routed_derive_local_trait_shadows_imported_summary() {
+    check_with_project_files(
+        &[("src/JsonLib.saga", module_tojson_lib())],
+        &format!(
+            "import JsonLib\n\
+             {lib}\
+             record Person {{ name: String, age: Int }}\n  deriving (ToJson)\n\
+             fun go : Person -> String\n\
+             go p = to_json p\n",
+            lib = phase3_tojson_lib()
+        ),
+    )
+    .unwrap();
+}
+
+#[test]
+fn routed_from_derive_reports_ambiguous_imported_wrapper() {
+    let lib_a = "module A\npub type Wrapped a = WrappedA a\n";
+    let lib_b = "module B\npub type Wrapped a = WrappedB a\n";
+    let err = check_with_project_files(
+        &[("src/A.saga", lib_a), ("src/B.saga", lib_b)],
+        "import A\n\
+         import B\n\
+         trait Decode a { fun decode : String -> Wrapped a }\n\
+         record Person { name: String }\n  deriving (Decode)\n",
+    )
+    .err()
+    .expect("expected ambiguous wrapper error");
+    assert!(
+        err.message.contains("ambiguous")
+            && err.message.contains("A.Wrapped")
+            && err.message.contains("B.Wrapped"),
+        "expected ambiguous Wrapped diagnostic; got: {}",
+        err.message
+    );
+}
+
+#[test]
+fn routed_from_derive_inspects_imported_wrapper_by_canonical_shape() {
+    let db_lib = "module DbLib\n\
+        pub type DbError = Timeout\n\
+        pub type DbResult a = DbOk a | DbErr DbError | DbNoRows\n\
+        pub trait Decode a { fun decode : String -> DbResult a }\n\
+        impl Decode for U1 { decode _ = DbOk U1 }\n\
+        impl Decode for Int { decode _ = DbOk 0 }\n\
+        impl Decode for String { decode s = DbOk s }\n\
+        impl Decode for Leaf a where {a: Decode} { decode s = case decode s { DbOk x -> DbOk (Leaf x); DbErr e -> DbErr e; DbNoRows -> DbNoRows } }\n\
+        impl Decode for Labeled a where {a: Decode} { decode s = case decode s { DbOk x -> DbOk (Labeled \"\" x); DbErr e -> DbErr e; DbNoRows -> DbNoRows } }\n\
+        impl Decode for And l r where {l: Decode, r: Decode} { decode s = case decode s { DbOk l -> case decode s { DbOk r -> DbOk (And l r); DbErr e -> DbErr e; DbNoRows -> DbNoRows }; DbErr e -> DbErr e; DbNoRows -> DbNoRows } }\n\
+        impl Decode for Or l r where {l: Decode, r: Decode} { decode s = case decode s { DbOk l -> DbOk (Or_Left l); DbErr e -> DbErr e; DbNoRows -> DbNoRows } }\n\
+        impl Decode for Variant a where {a: Decode} { decode s = case decode s { DbOk x -> DbOk (Variant \"\" x); DbErr e -> DbErr e; DbNoRows -> DbNoRows } }\n\
+        impl Decode for Record a where {a: Decode} { decode s = case decode s { DbOk x -> DbOk (Record \"\" x); DbErr e -> DbErr e; DbNoRows -> DbNoRows } }\n\
+        impl Decode for Adt a where {a: Decode} { decode s = case decode s { DbOk x -> DbOk (Adt \"\" x); DbErr e -> DbErr e; DbNoRows -> DbNoRows } }\n";
+    check_with_project_files(
+        &[("src/DbLib.saga", db_lib)],
+        "import DbLib (Decode)\n\
+         record Person { name: String, age: Int }\n  deriving (Decode)\n",
+    )
+    .unwrap();
+}
+
+#[test]
+fn where_app_accepts_impl_type_parameter_as_old_bound_sugar() {
+    check(
+        "trait Pretty a { fun pretty : a -> String }\n\
+         impl Pretty for Int { pretty n = show n }\n\
+         record Box a { value: a }\n\
+         impl Pretty for Box a where {Pretty a} {\n\
+           pretty b = pretty b.value\n\
+         }\n\
+         fun go : Box Int -> String\n\
+         go b = pretty b",
+    )
+    .unwrap();
+}
+
 #[test]
 fn phase3_routed_derive_record() {
     // Headline: `deriving (Generic, ToJson)` on a record. The synthesized
@@ -6855,8 +7028,7 @@ fn phase3_routed_derive_from_direction_unsupported_wrapper() {
                record Person { name: String, age: Int }\n  deriving (FromJson)\n";
     let err = check(src).err().expect("expected error");
     assert!(
-        err.message.contains("nested in a non-leaf")
-            && err.message.contains("Wrapped"),
+        err.message.contains("nested in a non-leaf") && err.message.contains("Wrapped"),
         "expected nested-a diagnostic naming the wrapper; got: {}",
         err.message
     );
@@ -7404,8 +7576,7 @@ fn phase7_opaque_wrapper_diagnostic() {
                record Person { name: String }\n  deriving (FromX)\n";
     let err = check(src).err().expect("expected error");
     assert!(
-        err.message.contains("NotDefined")
-            && err.message.contains("not defined"),
+        err.message.contains("NotDefined") && err.message.contains("not defined"),
         "expected opaque-wrapper diagnostic naming the wrapper; got: {}",
         err.message
     );

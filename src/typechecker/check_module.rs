@@ -650,8 +650,7 @@ impl Checker {
                     format!("parse error in module '{}': {}", module_name, e.message),
                 )
             })?;
-        let imported =
-            crate::derive::collect_imported_decls(&program, self.modules.map.as_ref());
+        let imported = crate::derive::collect_imported_decls(&program, self.modules.map.as_ref());
         crate::derive::expand_derives(&mut program, &imported);
         crate::desugar::desugar_program(&mut program);
 
@@ -937,17 +936,20 @@ impl Checker {
                         let mut variants = Vec::new();
                         for ctor in ctors {
                             if let Some(&scheme) = binding_map.get(ctor.as_str()) {
+                                let canonical_ctor = format!("{}.{}", module_name, ctor);
                                 if let Some(&did) = exports.def_ids.get(ctor.as_str()) {
                                     self.lsp
                                         .constructor_def_ids
-                                        .entry(ctor.clone())
+                                        .entry(canonical_ctor.clone())
                                         .or_insert(did);
                                 }
-                                variants.push((ctor.clone(), ctor_arity(&scheme.ty)));
+                                variants.push((canonical_ctor, ctor_arity(&scheme.ty)));
                             }
                         }
                         if !variants.is_empty() {
-                            self.adt_variants.insert(name.to_string(), variants);
+                            self.adt_variants
+                                .entry(name.to_string())
+                                .or_insert(variants);
                         }
                     }
                     if ctor_to_type.contains_key(name.as_str())
@@ -1143,9 +1145,9 @@ impl Checker {
                 if let Some(&scheme) = binding_map.get(ctor.as_str()) {
                     self.constructors.insert(canonical.clone(), scheme.clone());
                     if let Some(&did) = def_ids.get(ctor.as_str()) {
-                        self.lsp.constructor_def_ids.insert(canonical, did);
+                        self.lsp.constructor_def_ids.insert(canonical.clone(), did);
                     }
-                    variants.push((ctor.clone(), ctor_arity(&scheme.ty)));
+                    variants.push((canonical, ctor_arity(&scheme.ty)));
                 }
             }
             if !self.adt_variants.contains_key(type_name) && !variants.is_empty() {
