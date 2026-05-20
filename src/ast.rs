@@ -57,6 +57,21 @@ pub struct ImplMethod {
     pub body: Expr,
 }
 
+/// Marker attached to `Decl::ImplDef` instances synthesized by `derive_routed`.
+/// Lets the typechecker rewrite constraint-failure diagnostics to point at the
+/// user's `deriving (...)` clause and name the user-facing trait + type, rather
+/// than mentioning building-block types from the synthesized impl's body.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RoutedDeriveInfo {
+    /// Trait the user requested (bare name).
+    pub trait_name: String,
+    /// User-facing target type the derive was attached to.
+    pub target_type: String,
+    /// Span of the original type/record declaration carrying the `deriving`
+    /// clause. Used as the diagnostic's anchor.
+    pub deriving_span: Span,
+}
+
 /// Strip trivia annotations, returning plain declarations.
 /// Transfers `Trivia::DocComment` items into each decl's `doc` field.
 pub fn strip_annotations(annotated: AnnotatedProgram) -> Program {
@@ -309,6 +324,13 @@ pub enum Decl {
         where_apps: Vec<TraitApp>,
         needs: Vec<EffectRef>,
         methods: Vec<Annotated<ImplMethod>>,
+        /// `Some` when this impl was synthesized by `derive_routed` (either the
+        /// bridge or the delegating impl for a routed derive). Used by the
+        /// typechecker to rewrite constraint-failure diagnostics so they point
+        /// at the user's `deriving (...)` clause and name the user's type and
+        /// trait, instead of mentioning building-block types like `Labeled`
+        /// or `And` from the synthesized impl body.
+        routed_derive_info: Option<RoutedDeriveInfo>,
         /// Comments before the closing `}` with no following sibling
         dangling_trivia: Vec<Trivia>,
         span: Span,

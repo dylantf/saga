@@ -6897,7 +6897,8 @@ fn phase3_routed_derive_unknown_trait_diagnostic() {
 fn phase3_routed_derive_missing_field_instance_errors() {
     // No `ToJson` instance for `Tag`. The synthesized delegating impl
     // depends on the Rep building-block chain; this should surface as a
-    // constraint-resolution error rather than a panic or silent success.
+    // constraint-resolution error rewritten to point at the user's
+    // deriving clause and name the user-facing trait + type.
     let src = format!(
         "import Std.Generic (Generic, U1, Leaf, Labeled, And, Or)\n\
          {lib}\
@@ -6905,7 +6906,87 @@ fn phase3_routed_derive_missing_field_instance_errors() {
          record Foo {{ x: Int, t: Tag }}\n  deriving (ToJson)\n",
         lib = phase3_tojson_lib()
     );
-    let _err = check(&src).err().expect("expected error");
+    let err = check(&src).err().expect("expected error");
+    let msg = &err.message;
+    assert!(
+        msg.contains("cannot derive `ToJson` for `Foo`"),
+        "expected user-facing trait+type in error; got: {msg}"
+    );
+    assert!(
+        msg.contains("Tag"),
+        "expected the missing-instance type `Tag` to be mentioned; got: {msg}"
+    );
+    assert!(
+        !msg.contains("Labeled") && !msg.contains("Leaf") && !msg.contains("And"),
+        "rewritten error should not mention building-block types; got: {msg}"
+    );
+}
+
+#[test]
+fn routed_derive_missing_field_instance_from_direction() {
+    // From-direction analogue: missing FromJson on a field type Tag should
+    // surface the rewritten error pointing at the user's deriving clause.
+    let src = format!(
+        "import Std.Generic (Generic, U1, Leaf, Labeled, And, Or)\n\
+         {lib}\
+         type Tag = Tag\n\
+         record Foo {{ x: Int, t: Tag }}\n  deriving (FromJson)\n",
+        lib = phase3_fromjson_result_lib()
+    );
+    let err = check(&src).err().expect("expected error");
+    let msg = &err.message;
+    assert!(
+        msg.contains("cannot derive `FromJson` for `Foo`"),
+        "expected user-facing trait+type in error; got: {msg}"
+    );
+    assert!(msg.contains("Tag"), "expected `Tag` mentioned; got: {msg}");
+}
+
+#[test]
+fn routed_derive_missing_variant_payload_instance_errors() {
+    // ADT containing a variant payload of a type without ToJson should
+    // also produce the rewritten diagnostic.
+    let src = format!(
+        "import Std.Generic (Generic, U1, Leaf, Labeled, And, Or)\n\
+         {lib}\
+         type Tag = Tag\n\
+         type Shape = Circle Int | Tagged Tag\n  deriving (ToJson)\n",
+        lib = phase3_tojson_lib()
+    );
+    let err = check(&src).err().expect("expected error");
+    let msg = &err.message;
+    assert!(
+        msg.contains("cannot derive `ToJson` for `Shape`"),
+        "expected user-facing trait+type in error; got: {msg}"
+    );
+    assert!(msg.contains("Tag"), "expected `Tag` mentioned; got: {msg}");
+}
+
+#[test]
+fn handwritten_impl_failure_uses_default_diagnostic() {
+    // A user-written `impl ToJson for Foo` body that calls `to_json` on a
+    // field of a type without an impl must still produce the *default*
+    // diagnostic shape — the rewrite is only meant for synthesized routed
+    // impls. Verifies the marker isn't accidentally applied to hand-written
+    // code.
+    let src = format!(
+        "import Std.Generic (Generic, U1, Leaf, Labeled, And, Or)\n\
+         {lib}\
+         type Tag = Tag\n\
+         record Foo {{ t: Tag }}\n\
+         impl ToJson for Foo {{ to_json f = to_json f.t }}\n",
+        lib = phase3_tojson_lib()
+    );
+    let err = check(&src).err().expect("expected error");
+    let msg = &err.message;
+    assert!(
+        msg.starts_with("no impl of ToJson for Tag"),
+        "expected default 'no impl' diagnostic shape; got: {msg}"
+    );
+    assert!(
+        !msg.contains("cannot derive"),
+        "rewrite must not fire for hand-written impls; got: {msg}"
+    );
 }
 
 // --- Phase 6: multi-method routed deriving -------------------------------

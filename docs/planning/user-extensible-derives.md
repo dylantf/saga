@@ -1079,11 +1079,18 @@ Remaining polish items (none are blockers):
   carry-over).
 - No attribute system for field renaming, skipping, or custom encoders.
 
-- **Piece 4 (error rewriting) deferred.** Constraint failures inside
-  synthesized impls still produce default-shaped errors mentioning
-  `Labeled`/`And`/etc. Low-cost win whenever someone wants to do it; a
-  marker on synthetic `ImplDef`s (or a NodeId side-table) is the suggested
-  approach.
+- **Piece 4 (error rewriting) — SHIPPED.** `Decl::ImplDef` now carries a
+  `routed_derive_info: Option<RoutedDeriveInfo>` marker (set on the bridge
+  and delegating impls by `derive_routed`). `register_all_impls` snapshots
+  `pending_constraints.len()` around each routed impl's body check and
+  records the originating `RoutedDeriveInfo` in a NodeId-keyed side-table
+  on `TraitState`. `check_pending_constraints` looks up the originating
+  marker for each constraint and rewrites all failure-site diagnostics to
+  the form: `cannot derive `Trait` for `Type`: missing required instance
+  (<default-msg>). Make sure all field types implement `Trait`, or also
+  derive `Trait` on them.` Hand-written impls fall through to the default
+  diagnostic shape (the marker is `None`). Spans point at the user's
+  `deriving (...)` clause, not the synthesized impl body.
 
 - **Alternative synthesizer shape on file.** A single-impl version using
   `case to x { Rep__T inner -> method inner }` works (the implementer had

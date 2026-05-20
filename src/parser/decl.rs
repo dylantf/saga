@@ -1083,6 +1083,7 @@ impl Parser {
             where_apps,
             needs,
             methods,
+            routed_derive_info: None,
             dangling_trivia,
             span: start.to(end),
         })

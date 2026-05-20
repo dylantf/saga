@@ -257,10 +257,11 @@ chain breaks at registration.
 `classify_method_direction` runs **per trait method** (Phase 6 lifted the
 prior single-method restriction):
 - User type in parameter list only → to-direction (e.g. `to_json : a -> String`).
-- User type in return position only → from-direction. Three supported wrappers:
-  - Bare `a` (`from_json : String -> a`)
-  - `Result a _` (`from_json : String -> Result a JsonError`)
-  - `Maybe a` (`from_json : String -> Maybe a`)
+- User type in return position only → from-direction. The return shape is
+  inspected structurally (Phase 7) — any wrapper whose `TypeDef` is in
+  scope is supported, including user-defined wrappers like
+  `DbResult a = DbOk a | DbErr DbError | DbNoRows`. See "Structural
+  Wrapper Inspection" below.
 - User type on both sides (`a -> a`) → diagnostic, no synthesis.
 - User type on neither side → diagnostic, no synthesis.
 - Multi-parameter methods → diagnostic, no synthesis.
@@ -268,6 +269,66 @@ prior single-method restriction):
 If any method in the trait fails classification, the whole derive aborts
 with a diagnostic naming the offending method; partial synthesis is never
 emitted.
+
+### Structural Wrapper Inspection (Phase 7)
+
+`classify_from_return` doesn't recognize wrappers by name. Instead, it:
+
+1. Extracts the return type's head and type args via
+   `extract_head_and_args`.
+2. Looks the head up in the merged imported/local decls bundle (see
+   "Cross-Module Lookup" below).
+3. Walks the wrapper's variants (sum) or fields (record) to find positions
+   of the trait's self type variable.
+4. Produces a `FromShape` enum: `Bare | Sum { variants } | Record { fields }`.
+   Each variant/field carries `field_a_positions: Vec<bool>` marking
+   which payload slots are direct `a` occurrences.
+
+`build_from_body` consumes the `FromShape` and emits the appropriate
+case-match. For sum wrappers, one arm per variant with positional field
+binders; for record wrappers, one constructor pattern with named binders.
+The `wrap` callback (bridge: `Rep__T (...)`; delegating: `from`) is
+applied at every `a`-position.
+
+`Result` and `Maybe` have no special-case — they go through the same
+structural path as any user wrapper, courtesy of Phase 6.5's prelude
+visibility. Dropping the special-cases was the cleaner option once
+cross-module lookup landed.
+
+**Rejected cases** (with diagnostics):
+- Opaque wrapper (TypeDef not in scope): `cannot derive ... — wrapper
+  type "W" is opaque (no Generic representation available)`.
+- Wrapper with no `a`-position (e.g. `Hide a = Hide String`): `no
+  user-type position found in wrapper "W"`.
+- Nested `a` (e.g. `Wrapped a = Yep (List a) | Nope`): `user type
+  appears at non-leaf position in variant "Yep"`. Recursing through
+  `List`'s Generic is possible future work but introduces termination
+  questions for self-referential containers.
+
+### Cross-Module Lookup (Phase 6.5)
+
+Routed-derive trait lookup, wrapper lookup, and building-block lookups
+all consult an `ImportedDecls` bundle threaded into `expand_derives`:
+
+```rust
+pub struct ImportedDecls {
+    pub traits: HashMap<String, TraitInfo>,
+    pub types:  HashMap<String, WrapperTypeInfo>,
+    pub records: HashMap<String, WrapperRecordInfo>,
+}
+```
+
+`collect_imported_decls` walks the prelude's imports first (so `Result`,
+`Maybe`, and `Std.Generic` building blocks are visible everywhere
+without explicit imports), then the user program's imports. Local
+`TypeDef`/`RecordDef`/`TraitDef` overlays the imported bundle.
+
+This is what makes a multi-module workflow actually work: a library
+module exporting `trait ToJson` + building-block impls, a user module
+that `import ToJsonLib; record Person {...} deriving (ToJson)`. Before
+Phase 6.5, the synthesizer couldn't see imported `TraitDef`s and the
+derive failed silently. Now the lookup is uniform — local and imported
+decls are merged before expansion.
 
 ### Per-Tparam Where Bounds
 
@@ -452,6 +513,33 @@ impls are never synthesized.
 See `examples/99h-generic-derived-codec.saga` for the headline mixed
 encode/decode case.
 
+### Error Message Rewriting for Routed-Derive Constraint Failures (Phase 3c)
+
+Constraint failures inside synthesized routed-derive impls would
+otherwise surface as `no impl of ToJson for Labeled` (or `And`, etc.) —
+useless to users who never wrote those types. Phase 3c added a
+diagnostic-rewrite path:
+
+- `Decl::ImplDef` carries an optional `routed_derive_info:
+  Option<RoutedDeriveInfo>` field. Populated by `derive_routed` on both
+  the bridge and delegating impls; `None` for everything else.
+- `TraitState.routed_constraint_origins: HashMap<NodeId,
+  RoutedDeriveInfo>` indexes constraints by the impl-body NodeIds that
+  generated them. Populated by `register_all_impls` via a length-
+  snapshot of `pending_constraints` taken around each routed impl's
+  body check.
+- `check_pending_constraints` uses a `rewrite_diag` closure: when a
+  failing constraint's NodeId hits the table, the default `no impl of
+  X for Y` (and ambiguity / function-type / record-type variants) is
+  swapped for `cannot derive \`<Trait>\` for \`<Target>\`: missing
+  required instance (<failed_constraint>). Make sure all field types
+  implement \`<Trait>\`, or also derive \`<Trait>\` on them.`
+
+The rewritten diagnostic is anchored at the `deriving` span carried on
+`RoutedDeriveInfo`, not at the synthesized impl's location — so the
+error points at user code. Hand-written impls without the marker keep
+the default diagnostics.
+
 ### `TraitBound` / `TraitApp` Dual Representation
 
 The old `a: Trait` form (`TraitBound`) and new `TraitName arg1 arg2 ...`
@@ -459,13 +547,21 @@ form (`TraitApp`) coexist as parallel AST representations. Migrating
 `TraitBound` → `TraitApp` wholesale would touch elaborator, LSP, formatter,
 and doc generator. Deferred as cleanup, not a blocker.
 
-### Custom Wrapper Types for From-Direction
+### Custom Wrapper Types for From-Direction (Resolved in Phase 7)
 
-`derive_routed`'s from-direction support recognizes `a`, `Result a _`, and
-`Maybe a` as return-type wrappers. Custom wrappers (e.g. a library's
-`type MyResult a = ...`) emit a diagnostic. Could be generalized by
-parameterizing the wrapper detection over constructor-name pairs, but no
-real-world need has surfaced.
+Earlier versions of `classify_from_return` hardcoded recognition for
+`a`/`Result a _`/`Maybe a`. Phase 7 replaced this with structural
+inspection: any wrapper type whose `TypeDef` is in scope can serve as a
+from-direction return shape. `Result` and `Maybe` no longer need special-
+case treatment — they're inspected the same way as user-defined wrappers.
+See "Structural Wrapper Inspection" under "The Routing Layer" above.
+
+The only return shapes still rejected are: opaque wrappers (no TypeDef
+visible), wrappers with no `a`-position, and wrappers where `a` appears
+at a non-leaf position (e.g. `Wrapped a = Yep (List a) | Nope`). The
+last case could in principle be supported by recursing through `List`'s
+Generic, but the implementation question of termination on self-
+referential containers makes it deferred work, not blocked work.
 
 ---
 
@@ -475,16 +571,19 @@ real-world need has surfaced.
 - `src/stdlib/prelude.saga` — auto-imports `Std.Generic`
 - `src/derive.rs` — `expand_derives`, `derive_record_generic`,
   `derive_adt_generic`, `derive_routed`, `classify_method_direction`,
-  `synth_method_pair`, `build_from_body`, `classify_from_return`
+  `synth_method_pair`, `build_from_body`, `classify_from_return`,
+  `collect_imported_decls`, `collect_decls_from_imports`,
+  `extract_head_and_args`
+- `src/ast.rs` — `Decl::ImplDef.where_apps`, `Decl::ImplDef.routed_derive_info`,
+  `TraitApp`, `RoutedDeriveInfo`
 - `src/typechecker/check_traits.rs` — `FUNCTIONAL_TRAITS`,
   `register_impl`, `is_functional_trait`
 - `src/typechecker/check_decl.rs` — `check_pending_constraints` (constraint
   ordering, call-site coherence fallback)
 - `src/typechecker/mod.rs` — `ImplInfo` (with `trait_type_args: Vec<Type>`
-  and `target_type_param_ids: Vec<u32>`)
+  and `target_type_param_ids: Vec<u32>`), `TraitState.routed_constraint_origins`
 - `src/parser/decl.rs` — `parse_where_clause`, parenthesized type
   applications in where-app args
-- `src/ast.rs` — `Decl::ImplDef.where_apps: Vec<TraitApp>`, `TraitApp`
 - `docs/trait-dict-passing.md` — companion doc on how dictionaries are
   constructed and passed at runtime
 - `docs/planning/user-extensible-derives.md` — the implementation history,
@@ -500,4 +599,9 @@ real-world need has surfaced.
 - `examples/99e-generic-recursive.saga` — recursive ADT
 - `examples/99f-generic-derived-tojson.saga` — routed to-direction (ToJson)
 - `examples/99g-generic-derived-fromjson.saga` — routed from-direction
-  (FromJson), full round-trip
+  (FromJson) with Result wrapper, full round-trip
+- `examples/99h-generic-derived-codec.saga` — multi-method mixed-direction
+  trait (`JsonCodec` with `encode` + `decode`)
+- `examples/99i-generic-derived-custom-wrapper.saga` — user-defined
+  three-state wrapper (`DbResult a`) threaded through structural
+  from-direction synthesis (Phase 7)

@@ -501,6 +501,11 @@ fn derive_routed(
         delegating_methods.push(Annotated::bare(deleg_m));
     }
 
+    let routed_info = RoutedDeriveInfo {
+        trait_name: bare.to_string(),
+        target_type: type_name.to_string(),
+        deriving_span: span,
+    };
     let bridge_impl = Decl::ImplDef {
         id: NodeId::fresh(),
         doc: vec![],
@@ -514,6 +519,7 @@ fn derive_routed(
         where_apps: vec![],
         needs: vec![],
         methods: bridge_methods,
+        routed_derive_info: Some(routed_info.clone()),
         span,
         dangling_trivia: vec![],
     };
@@ -558,6 +564,7 @@ fn derive_routed(
         where_apps,
         needs: vec![],
         methods: delegating_methods,
+        routed_derive_info: Some(routed_info),
         span,
         dangling_trivia: vec![],
     };
@@ -1355,6 +1362,7 @@ fn derive_record_generic(
         where_apps: vec![],
         needs: vec![],
         methods: vec![to_method, from_method],
+        routed_derive_info: None,
         span,
         dangling_trivia: vec![],
     };
@@ -1577,6 +1585,7 @@ fn derive_adt_generic(
         where_apps: vec![],
         needs: vec![],
         methods: vec![to_method, from_method],
+        routed_derive_info: None,
         span,
         dangling_trivia: vec![],
     };
@@ -1994,6 +2003,7 @@ fn derive_record_stringify(
             }],
             body,
         })],
+        routed_derive_info: None,
         span,
         dangling_trivia: vec![],
     }
@@ -2304,6 +2314,7 @@ fn derive_stringify(
             }],
             body,
         })],
+        routed_derive_info: None,
         span,
         dangling_trivia: vec![],
     }
@@ -2514,6 +2525,7 @@ fn derive_ord(
             ],
             body,
         })],
+        routed_derive_info: None,
         span,
         dangling_trivia: vec![],
     }
@@ -2634,6 +2646,7 @@ fn derive_marker_trait(
         where_apps: vec![],
         needs: vec![],
         methods: vec![],
+        routed_derive_info: None,
         span,
         dangling_trivia: vec![],
     }
@@ -2789,6 +2802,7 @@ fn derive_enum(type_name: &str, variants: &[Annotated<TypeConstructor>], span: S
                 body: from_enum_body,
             }),
         ],
+        routed_derive_info: None,
         span,
         dangling_trivia: vec![],
     }

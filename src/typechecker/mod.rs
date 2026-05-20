@@ -1190,6 +1190,15 @@ pub(crate) struct TraitState {
     /// Pending trait constraints to check: (trait_name, trait_type_arg_types, self_type, span, node_id).
     /// trait_type_arg_types is empty for single-param traits.
     pub pending_constraints: Vec<(String, Vec<Type>, Type, Span, crate::ast::NodeId)>,
+    /// Constraint NodeIds that originated inside a synthesized routed-derive impl.
+    /// Populated in `register_impl` by snapshotting constraints added during the
+    /// impl's body check. Used by `check_pending_constraints` to rewrite failure
+    /// diagnostics so they point at the user's deriving clause and name the
+    /// user-facing trait + type, instead of mentioning building-block types from
+    /// the synthesized body. See the [crate::ast::RoutedDeriveInfo] marker on
+    /// `Decl::ImplDef` set by `derive_routed`.
+    pub routed_constraint_origins:
+        HashMap<crate::ast::NodeId, crate::ast::RoutedDeriveInfo>,
     /// Where clause bounds: var_id -> set of trait names assumed satisfied.
     pub where_bounds: HashMap<u32, HashSet<String>>,
     /// Reverse map from type var ID to original type parameter name (for polymorphic evidence).

@@ -819,6 +819,7 @@ impl Checker {
                 where_apps,
                 needs,
                 methods,
+                routed_derive_info,
                 span,
                 ..
             } = decl
@@ -834,7 +835,13 @@ impl Checker {
                     self.record_effect_ref(eff);
                 }
                 let plain_methods: Vec<_> = methods.iter().map(|a| a.node.clone()).collect();
-                if let Err(e) = self.register_impl(
+                // Snapshot pending-constraint length before this impl's body
+                // is checked. Anything added during the call belongs to this
+                // impl; if it's a synthesized routed-derive impl, tag those
+                // new constraints with the marker so failure diagnostics can
+                // point back at the user's deriving clause.
+                let before = self.trait_state.pending_constraints.len();
+                let result = self.register_impl(
                     *id,
                     trait_name,
                     trait_type_args,
@@ -845,7 +852,22 @@ impl Checker {
                     needs,
                     &plain_methods,
                     *span,
-                ) {
+                );
+                if let Some(info) = routed_derive_info {
+                    let added: Vec<crate::ast::NodeId> = self
+                        .trait_state
+                        .pending_constraints
+                        .iter()
+                        .skip(before)
+                        .map(|(_, _, _, _, nid)| *nid)
+                        .collect();
+                    for nid in added {
+                        self.trait_state
+                            .routed_constraint_origins
+                            .insert(nid, info.clone());
+                    }
+                }
+                if let Err(e) = result {
                     errors.push(e);
                 }
             }
@@ -2343,6 +2365,34 @@ impl Checker {
                 if matches!(resolved, Type::Error) {
                     continue;
                 }
+                // If this constraint originated inside a synthesized routed-
+                // derive impl, the eventual failure should be rewritten to
+                // point at the user's deriving clause and name the user-facing
+                // trait + target type instead of building-block types from the
+                // synthesized body.
+                let routed_origin = self
+                    .trait_state
+                    .routed_constraint_origins
+                    .get(&node_id)
+                    .cloned();
+                let rewrite_diag = |default_msg: String, default_span: Span| -> Diagnostic {
+                    match &routed_origin {
+                        Some(info) => Diagnostic::error_at(
+                            info.deriving_span,
+                            format!(
+                                "cannot derive `{}` for `{}`: missing required instance ({}). \
+                                 Make sure all field types implement `{}`, or also derive \
+                                 `{}` on them.",
+                                info.trait_name,
+                                info.target_type,
+                                default_msg,
+                                info.trait_name,
+                                info.trait_name,
+                            ),
+                        ),
+                        None => Diagnostic::error_at(default_span, default_msg),
+                    }
+                };
                 // Resolve trait type args to concrete type names for impl lookup
                 let resolved_trait_type_args: Vec<String> = trait_type_arg_types
                     .iter()
@@ -2475,12 +2525,12 @@ impl Checker {
                                 }
                                 let display_trait =
                                     resolved_trait.rsplit('.').next().unwrap_or(&resolved_trait);
-                                return Err(Diagnostic::error_at(
-                                    span,
+                                return Err(rewrite_diag(
                                     format!(
                                         "no impl of {} for {}{}",
                                         display_trait, type_name, hint
                                     ),
+                                    span,
                                 ));
                             }
                             Some(info) => {
@@ -2533,12 +2583,12 @@ impl Checker {
                             .is_some_and(|b| b.contains(&trait_name));
                         if !covered {
                             let display = trait_name.rsplit('.').next().unwrap_or(&trait_name);
-                            return Err(Diagnostic::error_at(
-                                span,
+                            return Err(rewrite_diag(
                                 format!(
                                     "ambiguous type variable requires {}. Add a type annotation to pin the unconstrained type variable",
                                     display
                                 ),
+                                span,
                             ));
                         }
                         // Record evidence for polymorphic passthrough
@@ -2553,16 +2603,16 @@ impl Checker {
                     }
                     Type::Fun(_, _, _) => {
                         let display = trait_name.rsplit('.').next().unwrap_or(&trait_name);
-                        return Err(Diagnostic::error_at(
-                            span,
+                        return Err(rewrite_diag(
                             format!("no impl of {} for function type", display),
+                            span,
                         ));
                     }
                     Type::Record(_) => {
                         let display = trait_name.rsplit('.').next().unwrap_or(&trait_name);
-                        return Err(Diagnostic::error_at(
-                            span,
+                        return Err(rewrite_diag(
                             format!("no impl of {} for anonymous record type", display),
+                            span,
                         ));
                     }
                     // Error/Never type: skip trait checking
