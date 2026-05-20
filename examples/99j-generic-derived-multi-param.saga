@@ -59,8 +59,7 @@ impl Eq2 for Adt a where {a: Eq2} {
 }
 
 # Multi-param to-direction derive on a record.
-record Person { name: String, age: Int }
-  deriving (Eq2)
+record Person { name: String, age: Int } deriving (Eq2)
 
 # Same on an ADT.
 type Shape =

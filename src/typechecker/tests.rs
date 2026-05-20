@@ -7810,3 +7810,166 @@ fn phase7_either_multi_a_succeeds() {
                record Person { name: String }\n  deriving (FromE)\n";
     check(src).unwrap();
 }
+
+#[test]
+fn trait_default_body_fires_when_method_omitted() {
+    let src = "trait Greet a {\n\
+                 fun greet_with : String -> a -> String\n\
+                 fun greet : a -> String\n\
+                 greet x = greet_with \"hello\" x\n\
+               }\n\
+               record Person { name: String }\n\
+               impl Greet for Person {\n\
+                 greet_with prefix p = prefix\n\
+               }\n\
+               let p = Person { name: \"alice\" }\n\
+               let msg = greet p\n";
+    check(src).unwrap();
+}
+
+#[test]
+fn trait_default_body_explicit_override_wins() {
+    let src = "trait Greet a {\n\
+                 fun greet_with : String -> a -> String\n\
+                 fun greet : a -> String\n\
+                 greet x = greet_with \"hello\" x\n\
+               }\n\
+               record Person { name: String }\n\
+               impl Greet for Person {\n\
+                 greet_with prefix p = prefix\n\
+                 greet p = \"override\"\n\
+               }\n\
+               let p = Person { name: \"alice\" }\n\
+               let msg = greet p\n";
+    check(src).unwrap();
+}
+
+#[test]
+fn trait_default_body_missing_required_method_still_errors() {
+    let src = "trait Greet a {\n\
+                 fun greet_with : String -> a -> String\n\
+                 fun greet : a -> String\n\
+                 greet x = greet_with \"hello\" x\n\
+               }\n\
+               record Person { name: String }\n\
+               impl Greet for Person {\n\
+               }\n";
+    let err = match check(src) {
+        Err(e) => e,
+        Ok(_) => panic!("expected error, but check succeeded"),
+    };
+    assert!(
+        err.message.contains("missing method 'greet_with'"),
+        "unexpected error: {}",
+        err.message
+    );
+}
+
+#[test]
+fn trait_with_multiple_defaults() {
+    let src = "trait MultiDef a {\n\
+                 fun root : a -> Int\n\
+                 fun double : a -> Int\n\
+                 double x = root x + root x\n\
+                 fun triple : a -> Int\n\
+                 triple x = root x + double x\n\
+               }\n\
+               record N { v: Int }\n\
+               impl MultiDef for N {\n\
+                 root n = 1\n\
+               }\n\
+               let v = triple (N { v: 0 })\n";
+    check(src).unwrap();
+}
+
+#[test]
+fn trait_default_body_with_routed_derive() {
+    // Headline Option B: a trait with a routed required method + a defaulted
+    // convenience wrapper. The synthesizer skips the defaulted method; impl-
+    // checking inherits it. Calling either method should typecheck.
+    let src = "trait Greet a {\n\
+                 fun greet_with : String -> a -> String\n\
+                 fun greet : a -> String\n\
+                 greet x = greet_with \"hi\" x\n\
+               }\n\
+               impl Greet for U1 {\n\
+                 greet_with prefix _ = prefix\n\
+               }\n\
+               impl Greet for Leaf a where {a: Greet} {\n\
+                 greet_with prefix (Leaf x) = greet_with prefix x\n\
+               }\n\
+               impl Greet for Labeled a where {a: Greet} {\n\
+                 greet_with prefix (Labeled name x) = greet_with prefix x\n\
+               }\n\
+               impl Greet for Variant a where {a: Greet} {\n\
+                 greet_with prefix (Variant name x) = greet_with prefix x\n\
+               }\n\
+               impl Greet for Record a where {a: Greet} {\n\
+                 greet_with prefix (Record name x) = greet_with prefix x\n\
+               }\n\
+               impl Greet for Adt a where {a: Greet} {\n\
+                 greet_with prefix (Adt name x) = greet_with prefix x\n\
+               }\n\
+               impl Greet for And l r where {l: Greet, r: Greet} {\n\
+                 greet_with prefix (And l r) = greet_with prefix l\n\
+               }\n\
+               impl Greet for Or l r where {l: Greet, r: Greet} {\n\
+                 greet_with prefix v = prefix\n\
+               }\n\
+               impl Greet for String { greet_with prefix s = prefix }\n\
+               record Person { name: String }\n\
+                 deriving (Greet)\n\
+               let p = Person { name: \"alice\" }\n\
+               let a = greet_with \"hi\" p\n\
+               let b = greet p\n";
+    check(src).unwrap();
+}
+
+#[test]
+fn trait_default_body_parameterized_impl() {
+    let src = "trait Wrap a {\n\
+                 fun unwrap : a -> Int\n\
+                 fun describe : a -> Int\n\
+                 describe x = unwrap x + 1\n\
+               }\n\
+               record Box a { value: a }\n\
+               impl Wrap for Box a where {a: Wrap} {\n\
+                 unwrap (Box { value: v }) = unwrap v\n\
+               }\n\
+               impl Wrap for Int { unwrap n = n }\n\
+               let n = describe (Box { value: Box { value: 5 } })\n";
+    check(src).unwrap();
+}
+
+#[test]
+fn trait_default_body_cross_module() {
+    let lib = "module DefLib\n\
+               pub trait Greet a {\n\
+               fun greet_with : String -> a -> String\n\
+               fun greet : a -> String\n\
+               greet x = greet_with \"hi\" x\n\
+               }\n";
+    let main = "import DefLib (Greet)\n\
+                record Person { name: String }\n\
+                impl Greet for Person {\n\
+                  greet_with prefix p = prefix\n\
+                }\n\
+                let msg = greet (Person { name: \"alice\" })\n";
+    check_with_project_files(&[("lib/DefLib.saga", lib)], main).unwrap();
+}
+
+#[test]
+fn trait_default_body_with_where_constraint() {
+    // The defaulted method's signature carries an extra constraint that the
+    // default body must rely on (here implicitly through trait dispatch).
+    let src = "trait Pretty a where {a: Show} {\n\
+                 fun pretty_with : String -> a -> String\n\
+                 fun pretty : a -> String\n\
+                 pretty x = pretty_with \"-> \" x\n\
+               }\n\
+               impl Pretty for Int {\n\
+                 pretty_with p n = p <> show n\n\
+               }\n\
+               let s = pretty 42\n";
+    check(src).unwrap();
+}

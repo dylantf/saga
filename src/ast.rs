@@ -1299,4 +1299,17 @@ pub struct TraitMethod {
     pub params: Vec<(String, TypeExpr)>,
     pub return_type: TypeExpr,
     pub span: Span,
+    /// Optional default body. When present, impls that omit this method
+    /// inherit it via clone-with-fresh-NodeIds in `register_impl`.
+    pub default_body: Option<TraitDefaultBody>,
+}
+
+/// Default body for a trait method. Syntactically the same shape as an
+/// `ImplMethod`'s `params`/`body` pair. Cloned into impls that don't provide
+/// the method explicitly.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TraitDefaultBody {
+    pub params: Vec<Pat>,
+    pub body: Expr,
+    pub name_span: Span,
 }

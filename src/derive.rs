@@ -621,7 +621,60 @@ pub fn expand_derives(program: &mut Vec<Decl>, imported: &ImportedDecls) -> Vec<
         rebuilt.extend(extra);
     }
     *program = rebuilt;
+
+    // Inheritance pass: walk every impl and inject default-body methods for
+    // any trait method the impl omits. After this, downstream passes
+    // (name resolution, typechecking, elaboration, codegen) see a complete
+    // impl regardless of how many methods the user wrote out.
+    //
+    // Note: the local-trait scope above (and `imported`) cover both
+    // user-written impls and the bridge/delegating impls just synthesized by
+    // `derive_routed` — the latter intentionally skip defaulted methods so
+    // this pass fills them in.
+    inherit_trait_defaults(program, &scope);
+
     errors
+}
+
+/// Walk impl decls and clone any missing default bodies from the impl's trait
+/// into the impl, with fresh NodeIds. The trait may be local or imported;
+/// `scope` already merges both.
+fn inherit_trait_defaults(program: &mut [Decl], scope: &DeriveScope<'_>) {
+    for decl in program.iter_mut() {
+        let Decl::ImplDef {
+            trait_name,
+            methods,
+            ..
+        } = decl
+        else {
+            continue;
+        };
+        let Ok(Some(entry)) = scope.trait_entry(trait_name) else {
+            continue;
+        };
+        let provided: std::collections::HashSet<String> =
+            methods.iter().map(|m| m.node.name.clone()).collect();
+        for tm in &entry.info.methods {
+            if provided.contains(&tm.name) {
+                continue;
+            }
+            let Some(default) = &tm.default_body else {
+                continue;
+            };
+            let mut params = default.params.clone();
+            let mut body = default.body.clone();
+            for p in &mut params {
+                crate::desugar::freshen_pat_ids(p);
+            }
+            crate::desugar::freshen_expr_ids(&mut body);
+            methods.push(Annotated::bare(ImplMethod {
+                name: tm.name.clone(),
+                name_span: default.name_span,
+                params,
+                body,
+            }));
+        }
+    }
 }
 
 /// Minimal trait info captured at expand_derives time for routed-derive
@@ -789,10 +842,17 @@ fn derive_routed(
     let self_var = trait_info.type_params.first().cloned().unwrap_or_default();
 
     // Classify each method's direction up-front so any bad method kills the
-    // whole derive before we synthesize anything partial.
+    // whole derive before we synthesize anything partial. Methods that carry
+    // a default body in the trait declaration are skipped here — impl-checking
+    // will splice in the cloned default, which lets library authors mark a
+    // method as "convenience wrapper over the routed one" without forcing the
+    // synthesizer to invent a body for it.
     let mut classified: Vec<(TraitMethod, MethodDirection)> =
         Vec::with_capacity(trait_info.methods.len());
     for method in &trait_info.methods {
+        if method.default_body.is_some() {
+            continue;
+        }
         match classify_method_direction(method, &self_var, scope) {
             Ok(dir) => classified.push((method.clone(), dir)),
             Err(reason) => {
@@ -803,6 +863,16 @@ fn derive_routed(
                 });
             }
         }
+    }
+    if classified.is_empty() {
+        return Err(Diagnostic {
+            severity: Severity::Error,
+            message: format!(
+                "cannot derive `{trait_display}` for `{type_name}`: every method in trait \
+                 `{trait_display}` has a default body, so there is nothing to synthesize"
+            ),
+            span: Some(span),
+        });
     }
 
     let rep_name = format!("Rep__{type_name}");

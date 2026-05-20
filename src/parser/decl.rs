@@ -821,7 +821,31 @@ impl Parser {
             self.expect(Token::Colon)?;
             let (params, return_type, _effects, _effect_row_var) =
                 self.parse_annotated_signature(SignatureSite::TraitMethod, &method_name)?;
-            let method_end = self.tokens[self.pos - 1].span;
+            let mut method_end = self.tokens[self.pos - 1].span;
+
+            // Optional default body: `methodname <pat>... = <expr>` immediately
+            // following the signature. Cloned into impls that don't provide
+            // this method explicitly (see register_impl).
+            let default_body = if let Token::Ident(next) = self.peek()
+                && next == &method_name
+            {
+                let name_span = self.tokens[self.pos].span;
+                self.advance(); // consume the method name
+                let mut params: Vec<crate::ast::Pat> = Vec::new();
+                while !matches!(self.peek(), Token::Eq | Token::Eof) {
+                    params.push(self.parse_pattern()?);
+                }
+                self.expect(Token::Eq)?;
+                let body = self.parse_expr(0)?;
+                method_end = self.tokens[self.pos - 1].span;
+                Some(crate::ast::TraitDefaultBody {
+                    params,
+                    body,
+                    name_span,
+                })
+            } else {
+                None
+            };
 
             let trailing_comment = self.take_trailing_comment(self.pos - 1);
             methods.push(Annotated {
@@ -831,6 +855,7 @@ impl Parser {
                     params,
                     return_type,
                     span: method_start.to(method_end),
+                    default_body,
                 },
                 leading_trivia: self.take_leading_trivia(start_pos),
                 trailing_comment,

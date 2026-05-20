@@ -324,7 +324,10 @@ impl Checker {
             ));
         }
 
-        // Check all required methods are provided
+        // Check all required methods are provided. Default bodies are
+        // injected as real ImplMethods by `derive::inherit_trait_defaults`
+        // pre-typecheck, so by this point an impl missing a method genuinely
+        // has no implementation (explicit or inherited).
         let provided: Vec<&str> = methods.iter().map(|m| m.name.as_str()).collect();
         for required in &trait_info.methods {
             if !provided.contains(&required.name.as_str()) {

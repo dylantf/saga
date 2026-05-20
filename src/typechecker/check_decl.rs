@@ -342,7 +342,16 @@ impl Checker {
                     ));
                 }
 
-                let scheme = self.generalize(&ty);
+                // Unify with the pre-bound fresh var (see pre_bind_functions)
+                // so any forward references from impl method bodies pin to
+                // the same type variable as the val's inferred RHS.
+                if let Some(prebound) = self.env.get(name).cloned()
+                    && let Type::Var(_) = prebound.ty
+                {
+                    self.unify_at(&prebound.ty, &ty, *span)?;
+                }
+                let resolved_ty = self.sub.apply(&ty);
+                let scheme = self.generalize(&resolved_ty);
                 self.env.insert_with_def(name.clone(), scheme, *id);
                 self.lsp.node_spans.insert(*id, *name_span);
                 Ok(())
@@ -750,7 +759,11 @@ impl Checker {
         Ok((annotations, annotation_constraints))
     }
 
-    /// Pass 5: Pre-bind all function names with fresh vars (enables mutual recursion).
+    /// Pass 5: Pre-bind all function and val names with fresh vars.
+    /// For functions, this enables mutual recursion. For vals, this lets
+    /// trait/impl method bodies (checked in Pass 6) reference top-level vals
+    /// declared anywhere in the module — without pre-binding, vals are only
+    /// processed in the main pass, after impls are typechecked.
     fn pre_bind_functions(
         &mut self,
         program: &[Decl],
@@ -758,6 +771,30 @@ impl Checker {
     ) -> HashMap<String, Type> {
         let mut fun_vars: HashMap<String, Type> = HashMap::new();
         for decl in program {
+            if let Decl::Val {
+                id,
+                name,
+                name_span,
+                ..
+            } = decl
+            {
+                if self.env.get(name).is_some() {
+                    continue;
+                }
+                let var = self.fresh_var();
+                fun_vars.insert(name.clone(), var.clone());
+                self.env.insert_with_def(
+                    name.clone(),
+                    Scheme {
+                        forall: vec![],
+                        constraints: vec![],
+                        ty: var,
+                    },
+                    *id,
+                );
+                self.lsp.node_spans.insert(*id, *name_span);
+                continue;
+            }
             if let Decl::FunBinding {
                 id,
                 name,

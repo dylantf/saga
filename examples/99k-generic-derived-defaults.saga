@@ -1,0 +1,88 @@
+# Default method bodies for traits, with routed-derive Option B.
+#
+# `ToJson` declares two methods:
+#  - `to_json_with`: the routed one. Library code provides building-block
+#    impls for it.
+#  - `to_json`: a convenience wrapper. The trait gives it a default body
+#    that forwards to `to_json_with` with a default Options value.
+#
+# When a user writes `deriving (ToJson)`, the synthesizer in derive.rs
+# only generates bodies for `to_json_with` — it skips methods that carry
+# a default body in the trait. Impl-checking clones the default into both
+# the bridge and the delegating impl, so a single `to_json p` call on a
+# user record still produces correct output via the routed dispatch.
+
+record Options { compact: Bool }
+
+val default_options = Options { compact: True }
+
+trait ToJson a {
+  fun to_json_with : Options -> a -> String
+  fun to_json : a -> String
+  to_json x = to_json_with default_options x
+}
+
+# Building-block impls. Only `to_json_with` is required of each — `to_json`
+# is inherited from the default body of the trait.
+
+impl ToJson for U1 {
+  to_json_with _ _ = "null"
+}
+
+impl ToJson for Int {
+  to_json_with _ n = show n
+}
+
+impl ToJson for String {
+  to_json_with _ s = "\"" <> s <> "\""
+}
+
+impl ToJson for Leaf a where {a: ToJson} {
+  to_json_with o (Leaf x) = to_json_with o x
+}
+
+impl ToJson for Labeled a where {a: ToJson} {
+  to_json_with o (Labeled name x) = "\"" <> name <> "\": " <> to_json_with o x
+}
+
+impl ToJson for And l r where {l: ToJson, r: ToJson} {
+  to_json_with o (And l r) = to_json_with o l <> ", " <> to_json_with o r
+}
+
+impl ToJson for Or l r where {l: ToJson, r: ToJson} {
+  to_json_with o v = case v {
+    Or_Left l -> to_json_with o l
+    Or_Right r -> to_json_with o r
+  }
+}
+
+impl ToJson for Variant a where {a: ToJson} {
+  to_json_with o (Variant name payload) = "{\"" <> name <> "\": " <> to_json_with o payload <> "}"
+}
+
+impl ToJson for Record a where {a: ToJson} {
+  to_json_with o (Record _ inner) = "{" <> to_json_with o inner <> "}"
+}
+
+impl ToJson for Adt a where {a: ToJson} {
+  to_json_with o (Adt _ inner) = to_json_with o inner
+}
+
+# User code: derive ToJson and call only the defaulted `to_json` wrapper.
+# Correctness here proves the default body was inherited by the routed
+# impls and dispatches back through `to_json_with` end-to-end.
+
+record Person { name: String, age: Int }
+  deriving (ToJson)
+
+type Shape =
+  | Circle Int
+  | Square Int
+  deriving (ToJson)
+
+main () = {
+  let p = Person { name: "alice", age: 30 }
+  dbg (to_json p)
+  dbg (to_json (Circle 7))
+  dbg (to_json (Square 4))
+}

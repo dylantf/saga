@@ -669,7 +669,7 @@ fn expand_or_patterns(arms: &mut Vec<Annotated<CaseArm>>) {
 /// without this, resolve's `references` map (`usage_id -> def_id`) would
 /// have entries overwritten across arms, making earlier arms' pattern bindings
 /// appear unused.
-fn freshen_expr_ids(expr: &mut Expr) {
+pub fn freshen_expr_ids(expr: &mut Expr) {
     expr.id = NodeId::fresh();
     match &mut expr.kind {
         ExprKind::Lit { .. }
@@ -873,7 +873,7 @@ fn freshen_stmt_ids(stmt: &mut Stmt) {
     }
 }
 
-fn freshen_pat_ids(pat: &mut Pat) {
+pub fn freshen_pat_ids(pat: &mut Pat) {
     match pat {
         Pat::Wildcard { id, .. } | Pat::Lit { id, .. } | Pat::Var { id, .. } => {
             *id = NodeId::fresh();
