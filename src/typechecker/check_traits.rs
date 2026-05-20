@@ -3,6 +3,19 @@ use crate::token::Span;
 
 use super::{Checker, Diagnostic, ImplInfo, Scheme, Type};
 
+/// Traits whose first (self) parameter functionally determines the remaining
+/// trait parameters. Multiple impls sharing the same target type but with
+/// differing trait_type_args are rejected as coherence violations.
+///
+/// Entries are exact canonical names — both the bare form (used by
+/// module-less test sources, where the canonical name is just `Generic`)
+/// and the fully-qualified stdlib form. The flag is resolved once at trait
+/// registration into `TraitInfo.is_functional`, so use sites read the
+/// stored flag instead of re-matching against this list.
+///
+/// Phase 2 may replace this with an explicit per-trait attribute.
+pub(crate) const FUNCTIONAL_TRAITS: &[&str] = &["Generic", "Std.Generic.Generic"];
+
 impl Checker {
     // --- Trait & impl helpers ---
 
@@ -246,12 +259,14 @@ impl Checker {
             .iter()
             .map(|tr| self.resolved_trait_name_at(tr.id, &tr.name))
             .collect();
+        let is_functional = FUNCTIONAL_TRAITS.contains(&canonical_name.as_str());
         self.trait_state.traits.insert(
             canonical_name,
             super::TraitInfo {
                 type_params: type_params.to_vec(),
                 supertraits: resolved_supertraits,
                 methods: trait_method_sigs,
+                is_functional,
             },
         );
         Ok(())
@@ -263,14 +278,25 @@ impl Checker {
         &mut self,
         impl_id: ast::NodeId,
         trait_name: &str,
-        trait_type_args: &[String],
+        trait_type_args: &[ast::TypeExpr],
         target_type: &str,
         type_params: &[String],
         where_clause: &[ast::TraitBound],
+        where_apps: &[ast::TraitApp],
         needs: &[ast::EffectRef],
         methods: &[ast::ImplMethod],
         span: Span,
     ) -> Result<(), Diagnostic> {
+        // Head names for the impls HashMap key (used everywhere as a
+        // string-keyed coarse index — exact type identity isn't relevant).
+        let trait_type_arg_names: Vec<String> = trait_type_args
+            .iter()
+            .map(|te| {
+                let head = te.head_name().unwrap_or("");
+                self.resolved_type_name(te.id(), head)
+            })
+            .collect();
+        let trait_type_args_names = &trait_type_arg_names;
         // Resolve trait name to canonical form
         let trait_name = self.resolved_impl_trait_name(impl_id, trait_name);
         let trait_name = trait_name.as_str();
@@ -286,14 +312,14 @@ impl Checker {
 
         // Validate trait type arg arity: extra type params (all except the self param at index 0)
         let expected_extra = trait_info.type_params.len().saturating_sub(1);
-        if trait_type_args.len() != expected_extra {
+        if trait_type_arg_names.len() != expected_extra {
             return Err(Diagnostic::error_at(
                 span,
                 format!(
                     "trait {} expects {} type argument(s), but {} were provided",
                     trait_name,
                     expected_extra,
-                    trait_type_args.len()
+                    trait_type_arg_names.len()
                 ),
             ));
         }
@@ -339,14 +365,75 @@ impl Checker {
             }
         }
 
+        // Resolve target type and run overlap/coherence checks before the
+        // body type-check. Method bodies mutate the substitution map (they
+        // unify the trait's phantom type vars like `r` in `Generic a r` with
+        // the impl's return type), so the second impl's body would fail to
+        // unify before the overlap check has a chance to fire.
+        let resolved_target_type = self.resolved_impl_target_type_name(impl_id, target_type);
+        let dup_key = (
+            trait_name.to_string(),
+            trait_type_args_names.clone(),
+            resolved_target_type.clone(),
+        );
+        if self.trait_state.impls.contains_key(&dup_key) {
+            let args_str = if trait_type_arg_names.is_empty() {
+                String::new()
+            } else {
+                format!(" {}", trait_type_arg_names.join(" "))
+            };
+            return Err(Diagnostic::error_at(
+                span,
+                format!(
+                    "duplicate impl: {}{} is already implemented for {} (previously defined elsewhere)",
+                    trait_name, args_str, target_type
+                ),
+            ));
+        }
+        if trait_info.is_functional {
+            for ((existing_trait, existing_args, existing_target), existing_info) in
+                &self.trait_state.impls
+            {
+                if existing_trait == trait_name
+                    && existing_target == &resolved_target_type
+                    && existing_args != trait_type_args_names
+                {
+                    let prev_loc = match existing_info.span {
+                        Some(s) => format!(" (previous impl at byte {})", s.start),
+                        None => String::new(),
+                    };
+                    return Err(Diagnostic::error_at(
+                        span,
+                        format!(
+                            "coherence violation: trait {} requires that the first parameter \
+                             functionally determines the rest, but `{}` already has an impl with \
+                             different trait arguments ({:?} vs {:?}){}",
+                            trait_name,
+                            target_type,
+                            existing_args,
+                            trait_type_arg_names,
+                            prev_loc
+                        ),
+                    ));
+                }
+            }
+        }
+
         // Type-check each method body against the trait's expected signature.
         // Substitute the trait's type param with the concrete target type.
         // For parameterized impls (e.g. `impl Show for Box a`), use fresh vars for type params.
-        let resolved_target_type = self.resolved_impl_target_type_name(impl_id, target_type);
+        let mut target_type_param_ids: Vec<u32> = Vec::new();
         let target = if type_params.is_empty() {
             Type::Con(resolved_target_type.clone(), vec![])
         } else {
             let param_vars: Vec<Type> = type_params.iter().map(|_| self.fresh_var()).collect();
+            target_type_param_ids = param_vars
+                .iter()
+                .map(|t| match t {
+                    Type::Var(id) => *id,
+                    _ => unreachable!(),
+                })
+                .collect();
             // Register where clause bounds on the fresh type vars so method bodies
             // can use trait methods on those vars (e.g. `show x` where `x: a` and `a: Show`).
             for bound in where_clause {
@@ -372,6 +459,162 @@ impl Checker {
             Type::Con(resolved_target_type.clone(), param_vars)
         };
 
+        // Validate new-form `where {Trait arg1 arg2 ...}` constraints.
+        // Process source-order; later constraints can reference fresh vars
+        // resolved by earlier ones. For functional traits, the bound first
+        // param determines the remaining params via the [Phase 1b] coherence
+        // rule; for non-functional traits, all args must be already bound.
+        let mut local_subst: std::collections::HashMap<String, String> =
+            std::collections::HashMap::new();
+        for app in where_apps {
+            let resolved_trait = self
+                .resolve_trait_name(&app.trait_name)
+                .unwrap_or_else(|| app.trait_name.clone());
+            let resolved_trait_info =
+                self.trait_state
+                    .traits
+                    .get(&resolved_trait)
+                    .cloned()
+                    .ok_or_else(|| {
+                        Diagnostic::error_at(
+                            app.span,
+                            format!("unknown trait '{}'", app.trait_name),
+                        )
+                    })?;
+            self.lsp
+                .type_references
+                .push((app.span, resolved_trait.clone()));
+            // Arity check.
+            if app.type_args.len() != resolved_trait_info.type_params.len() {
+                return Err(Diagnostic::error_at(
+                    app.span,
+                    format!(
+                        "trait {} expects {} type argument(s), but {} were provided",
+                        resolved_trait,
+                        resolved_trait_info.type_params.len(),
+                        app.type_args.len()
+                    ),
+                ));
+            }
+            // Classify each arg as concrete (resolved name) or fresh (unbound).
+            // For App heads (e.g. `(Opt a)`), use the constructor's head name
+            // as the concrete identifier — type-param positions in the App's
+            // args are not relevant to coherence lookup, which is keyed on
+            // the head only.
+            let mut resolved_names: Vec<Option<String>> = Vec::with_capacity(app.type_args.len());
+            let mut fresh_positions: Vec<(usize, String)> = Vec::new();
+            for (i, te) in app.type_args.iter().enumerate() {
+                match te {
+                    ast::TypeExpr::Named { id, name, .. } => {
+                        resolved_names.push(Some(self.resolved_type_name(*id, name)));
+                    }
+                    ast::TypeExpr::App { .. } => {
+                        let head = te.head_name().unwrap_or("");
+                        resolved_names
+                            .push(Some(self.resolved_type_name(te.id(), head)));
+                    }
+                    ast::TypeExpr::Var { name, .. } => {
+                        if let Some(resolved) = local_subst.get(name) {
+                            resolved_names.push(Some(resolved.clone()));
+                        } else if type_params.contains(name) {
+                            return Err(Diagnostic::error_at(
+                                app.span,
+                                format!(
+                                    "where-clause TraitApp arguments cannot reference impl type \
+                                     parameters yet (var '{}')",
+                                    name
+                                ),
+                            ));
+                        } else {
+                            resolved_names.push(None);
+                            fresh_positions.push((i, name.clone()));
+                        }
+                    }
+                    other => {
+                        return Err(Diagnostic::error_at(
+                            other.span(),
+                            "only named types, type variables, and type applications are \
+                             supported in trait-app where-clauses"
+                                .to_string(),
+                        ));
+                    }
+                }
+            }
+
+            if fresh_positions.is_empty() {
+                // All args bound — do a direct impl lookup.
+                let self_name = resolved_names[0].clone().unwrap();
+                let extras: Vec<String> = resolved_names[1..]
+                    .iter()
+                    .map(|o| o.clone().unwrap())
+                    .collect();
+                let key = (resolved_trait.clone(), extras, self_name.clone());
+                if !self.trait_state.impls.contains_key(&key) {
+                    return Err(Diagnostic::error_at(
+                        app.span,
+                        format!("no impl of {} for {}", resolved_trait, self_name),
+                    ));
+                }
+            } else {
+                // Some args fresh. Must be a functional trait.
+                if !resolved_trait_info.is_functional {
+                    return Err(Diagnostic::error_at(
+                        app.span,
+                        format!(
+                            "fresh type variable not determined by constraint: trait {} is not \
+                             a functional trait (only functional traits can determine extra \
+                             parameters from the first)",
+                            resolved_trait
+                        ),
+                    ));
+                }
+                // The self position (index 0) must be concrete for the
+                // functional rule to fire.
+                let self_name = match &resolved_names[0] {
+                    Some(s) => s.clone(),
+                    None => {
+                        return Err(Diagnostic::error_at(
+                            app.span,
+                            format!(
+                                "trait {}'s self parameter must be known to resolve fresh \
+                                 type variables",
+                                resolved_trait
+                            ),
+                        ));
+                    }
+                };
+                // Find a matching impl for (trait, _, self_name).
+                let matched = self
+                    .trait_state
+                    .impls
+                    .iter()
+                    .find(|((t, _, tgt), _)| t == &resolved_trait && tgt == &self_name);
+                let ((_, extras, _), _) = matched.ok_or_else(|| {
+                    Diagnostic::error_at(
+                        app.span,
+                        format!("no impl of {} for {}", resolved_trait, self_name),
+                    )
+                })?;
+                // Bind each fresh var to its corresponding resolved extra.
+                for (i, fresh_name) in fresh_positions {
+                    if i == 0 {
+                        // self position can't be fresh here (we errored above)
+                        continue;
+                    }
+                    let value = extras.get(i - 1).cloned().ok_or_else(|| {
+                        Diagnostic::error_at(
+                            app.span,
+                            format!(
+                                "internal: matched impl for {} on {} has unexpected arity",
+                                resolved_trait, self_name
+                            ),
+                        )
+                    })?;
+                    local_subst.insert(fresh_name, value);
+                }
+            }
+        }
+
         let declared_effects: std::collections::HashSet<String> = needs
             .iter()
             .map(|e| self.resolved_effect_name(e.id, &e.name))
@@ -386,13 +629,33 @@ impl Checker {
                 .unwrap(); // already validated above
 
             let trait_param_id = trait_method.trait_param_id;
-            let expected_params: Vec<Type> = trait_method
+            // Freshen the trait method's non-self forall vars so that
+            // unification in one impl's body doesn't leak into the next.
+            // E.g. for `trait Generic a r`, the `r` var is shared across
+            // impls in the trait's stored signature; without freshening,
+            // the first impl pins `r` globally and subsequent impls with
+            // a different `r` fail to unify.
+            let mut fresh_mapping: std::collections::HashMap<u32, Type> =
+                std::collections::HashMap::new();
+            for id in &trait_method.scheme.forall {
+                if Some(*id) == trait_param_id {
+                    continue;
+                }
+                fresh_mapping.insert(*id, self.fresh_var());
+            }
+            let freshened_params: Vec<Type> = trait_method
                 .param_types
+                .iter()
+                .map(|t| Self::replace_vars(t, &fresh_mapping))
+                .collect();
+            let freshened_return =
+                Self::replace_vars(&trait_method.return_type, &fresh_mapping);
+            let expected_params: Vec<Type> = freshened_params
                 .iter()
                 .map(|t| self.substitute_trait_param(trait_param_id, &target, t))
                 .collect();
             let expected_return =
-                self.substitute_trait_param(trait_param_id, &target, &trait_method.return_type);
+                self.substitute_trait_param(trait_param_id, &target, &freshened_return);
 
             let saved_env = self.env.clone();
             let body_scope = self.enter_scope();
@@ -516,30 +779,26 @@ impl Checker {
             }
         }
 
-        let key = (
-            trait_name.to_string(),
-            trait_type_args.to_vec(),
-            resolved_target_type,
-        );
-        if self.trait_state.impls.contains_key(&key) {
-            let args_str = if trait_type_args.is_empty() {
-                String::new()
-            } else {
-                format!(" {}", trait_type_args.join(" "))
-            };
-            return Err(Diagnostic::error_at(
-                span,
-                format!(
-                    "duplicate impl: {}{} is already implemented for {}",
-                    trait_name, args_str, target_type
-                ),
-            ));
-        }
+        // Convert each TypeExpr trait_type_arg into a Type, reusing the
+        // impl's type-param fresh-var ids so that the stored extras share
+        // tvars with `target_type_param_ids`. Call sites substitute those
+        // tvars from the concrete args of the target type.
+        let mut conv_params: Vec<(String, u32)> = type_params
+            .iter()
+            .cloned()
+            .zip(target_type_param_ids.iter().copied())
+            .collect();
+        let trait_type_args_types: Vec<Type> = trait_type_args
+            .iter()
+            .map(|te| self.convert_type_expr(te, &mut conv_params))
+            .collect();
+
         self.trait_state.impls.insert(
-            key,
+            dup_key,
             ImplInfo {
                 param_constraints,
-                trait_type_args: trait_type_args.to_vec(),
+                trait_type_args: trait_type_args_types,
+                target_type_param_ids,
                 span: Some(span),
             },
         );

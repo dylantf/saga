@@ -839,6 +839,10 @@ pub struct TraitInfo {
     pub type_params: Vec<String>,
     pub supertraits: Vec<String>,
     pub methods: Vec<TraitMethodInfo>,
+    /// `true` if the trait's self/first parameter functionally determines
+    /// the remaining trait parameters. Set at registration time from a
+    /// hardcoded canonical-name list (see `check_traits::FUNCTIONAL_TRAITS`).
+    pub is_functional: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -846,9 +850,17 @@ pub struct ImplInfo {
     /// Constraints on type parameters: (trait_name, param_index)
     /// e.g. Show for List requires Show on param 0 (the element type)
     pub param_constraints: Vec<(String, usize)>,
-    /// Extra type arguments applied to the trait (e.g. ["NOK"] in `impl ConvertTo NOK for USD`).
+    /// Extra type arguments applied to the trait, as full Types.
+    /// For parameterized impls (e.g. `impl Generic (Box a) (Rep__Box a)`),
+    /// these reference the impl's target type-parameter Type::Vars listed
+    /// in `target_type_param_ids`, so the call-site can substitute the
+    /// concrete args of the target to materialize the extras.
     /// Empty for single-param traits.
-    pub trait_type_args: Vec<String>,
+    pub trait_type_args: Vec<Type>,
+    /// Fresh type variable ids assigned to the impl's `type_params` at
+    /// registration time, in declaration order. Empty for monomorphic impls.
+    /// Used to substitute call-site target args back into `trait_type_args`.
+    pub target_type_param_ids: Vec<u32>,
     pub span: Option<Span>,
 }
 
@@ -1375,7 +1387,10 @@ impl Checker {
         let mut prelude_program = crate::parser::Parser::new(prelude_tokens)
             .parse_program()
             .expect("prelude parse");
-        crate::derive::expand_derives(&mut prelude_program);
+        crate::derive::expand_derives(
+            &mut prelude_program,
+            &crate::derive::ImportedDecls::empty(),
+        );
         crate::desugar::desugar_program(&mut prelude_program);
         checker
             .check_program_inner(&mut prelude_program)

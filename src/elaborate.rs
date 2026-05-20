@@ -101,10 +101,15 @@ impl Elaborator {
         self.resolution.type_ref(id).unwrap_or(source).to_string()
     }
 
-    /// Resolve trait type args via the resolution map.
+    /// Resolve trait type args via the resolution map. For App heads (e.g.
+    /// `Rep__Box a`), uses the head name — only the head identifies the impl
+    /// for dict-name purposes.
     fn resolved_trait_type_args(&self, args: &[crate::ast::TypeExpr]) -> Vec<String> {
         args.iter()
-            .map(|te| self.resolved_type_name(te.id(), te.simple_name()))
+            .map(|te| {
+                let head = te.head_name().unwrap_or("");
+                self.resolved_type_name(te.id(), head)
+            })
             .collect()
     }
 

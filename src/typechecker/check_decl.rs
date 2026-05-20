@@ -816,6 +816,7 @@ impl Checker {
                 target_type_span,
                 type_params,
                 where_clause,
+                where_apps,
                 needs,
                 methods,
                 span,
@@ -833,17 +834,14 @@ impl Checker {
                     self.record_effect_ref(eff);
                 }
                 let plain_methods: Vec<_> = methods.iter().map(|a| a.node.clone()).collect();
-                let resolved_trait_type_args: Vec<String> = trait_type_args
-                    .iter()
-                    .map(|te| self.resolved_type_name(te.id(), te.simple_name()))
-                    .collect();
                 if let Err(e) = self.register_impl(
                     *id,
                     trait_name,
-                    &resolved_trait_type_args,
+                    trait_type_args,
                     target_type,
                     type_params,
                     where_clause,
+                    where_apps,
                     needs,
                     &plain_methods,
                     *span,
@@ -2324,12 +2322,22 @@ impl Checker {
             }
         }
 
-        // Process constraints in a loop since conditional impls may push new ones
+        // Process constraints in a loop since conditional impls may push new ones.
+        // Within each batch, sort so that constraints whose self-type already
+        // resolves to a concrete Type::Con are processed first. Constraints
+        // whose self is still a Var depend on prior constraints to pin them
+        // (e.g. `ToJson r` waits on `Generic T r`), and erroring on them
+        // before the pinning constraint runs produces spurious "ambiguous"
+        // diagnostics.
         loop {
-            let constraints = std::mem::take(&mut self.trait_state.pending_constraints);
+            let mut constraints =
+                std::mem::take(&mut self.trait_state.pending_constraints);
             if constraints.is_empty() {
                 break;
             }
+            constraints.sort_by_key(|(_, _, ty, _, _)| {
+                matches!(self.sub.apply(ty), Type::Var(_))
+            });
             for (trait_name, trait_type_arg_types, ty, span, node_id) in constraints {
                 let resolved = self.sub.apply(&ty);
                 if matches!(resolved, Type::Error) {
@@ -2353,7 +2361,7 @@ impl Checker {
                         let resolved_trait = self
                             .resolve_trait_name(&trait_name)
                             .unwrap_or_else(|| trait_name.clone());
-                        let impl_info = self
+                        let mut impl_info = self
                             .trait_state
                             .impls
                             .get(&(
@@ -2374,7 +2382,63 @@ impl Checker {
                                 } else {
                                     None
                                 }
-                            });
+                            })
+                            .cloned();
+
+                        // Functional-trait coherence fallback: if extras are
+                        // unresolved (and direct lookup missed), scan for the
+                        // unique impl with the matching self-type and pin the
+                        // extras to its stored args. The trait info table
+                        // marks Generic-like traits as functional.
+                        if impl_info.is_none()
+                            && resolved_trait_type_args.len() != trait_type_arg_types.len()
+                            && self
+                                .trait_state
+                                .traits
+                                .get(&resolved_trait)
+                                .map(|ti| ti.is_functional)
+                                .unwrap_or(false)
+                        {
+                            let bare =
+                                resolved_trait.rsplit('.').next().unwrap_or(&resolved_trait);
+                            let matches: Vec<super::ImplInfo> = self
+                                .trait_state
+                                .impls
+                                .iter()
+                                .filter(|((tn, _, tt), _)| {
+                                    (tn == &resolved_trait || tn == bare) && tt == type_name
+                                })
+                                .map(|(_, info)| info.clone())
+                                .collect();
+                            if matches.len() == 1 {
+                                let info = &matches[0];
+                                // Substitute the impl's type-param vars with
+                                // the call-site target's concrete arg types,
+                                // so a parameterized impl like
+                                // `impl Generic (Box a) (Rep__Box a)` produces
+                                // `Rep__Box Int` when the call site is `Box Int`.
+                                let mut sub: std::collections::HashMap<u32, Type> = info
+                                    .target_type_param_ids
+                                    .iter()
+                                    .zip(args.iter())
+                                    .map(|(id, t)| (*id, t.clone()))
+                                    .collect();
+                                let pinned: Vec<Type> = info
+                                    .trait_type_args
+                                    .iter()
+                                    .map(|t| super::Checker::replace_vars(t, &sub))
+                                    .collect();
+                                let _ = &mut sub;
+                                for (var_ty, pinned_ty) in
+                                    trait_type_arg_types.iter().zip(pinned.iter())
+                                {
+                                    let _ = self.unify(var_ty, pinned_ty);
+                                }
+                                impl_info = Some(info.clone());
+                            }
+                        }
+
+                        let impl_info = impl_info.as_ref();
                         match impl_info {
                             None => {
                                 // Check if this might be caused by a user function

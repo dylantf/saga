@@ -303,6 +303,10 @@ pub enum Decl {
         target_type_span: Span,
         type_params: Vec<String>,
         where_clause: Vec<TraitBound>,
+        /// Bare trait-application constraints, e.g. `Generic Person r` in
+        /// `impl ToJson for Person where {Generic Person r, ToJson r}`.
+        /// See [TraitApp] for semantics.
+        where_apps: Vec<TraitApp>,
         needs: Vec<EffectRef>,
         methods: Vec<Annotated<ImplMethod>>,
         /// Comments before the closing `}` with no following sibling
@@ -939,6 +943,17 @@ impl TypeExpr {
             _ => panic!("simple_name called on compound TypeExpr"),
         }
     }
+
+    /// Extract the head name of a type expression: the constructor name at
+    /// the head of an `App` chain, or the bare name of a `Named`/`Var`.
+    /// Returns None for arrows, records, labeled.
+    pub fn head_name(&self) -> Option<&str> {
+        match self {
+            TypeExpr::Named { name, .. } | TypeExpr::Var { name, .. } => Some(name),
+            TypeExpr::App { func, .. } => func.head_name(),
+            _ => None,
+        }
+    }
 }
 
 /// PartialEq compares structure only, ignoring spans (same as Expr).
@@ -1131,6 +1146,20 @@ pub struct TraitBound {
     pub type_var: String,
     /// The required traits, e.g. `Show`, `ConvertTo b`
     pub traits: Vec<TraitRef>,
+}
+
+/// Bare trait-application constraint: `Generic Person r` in a `where` clause.
+/// Unlike `TraitBound`, the self/first parameter is just `type_args[0]`, so
+/// any position may hold a concrete type or a fresh existential type variable
+/// (one not in the surrounding `type_params`). The solver resolves the fresh
+/// vars using the coherence rule of [Phase 1b]: for functional traits like
+/// `Generic`, the bound first parameter determines the rest.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TraitApp {
+    pub id: NodeId,
+    pub trait_name: String,
+    pub type_args: Vec<TypeExpr>,
+    pub span: Span,
 }
 
 /// A reference to a trait in a where clause or similar context.

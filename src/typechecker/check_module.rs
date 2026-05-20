@@ -548,6 +548,7 @@ pub const BUILTIN_MODULES: &[(&str, &str)] = &[
     ("Std.Vec", include_str!("../stdlib/Vec.saga")),
     ("Std.Array", include_str!("../stdlib/Array.saga")),
     ("Std.Env", include_str!("../stdlib/Env.saga")),
+    ("Std.Generic", include_str!("../stdlib/Generic.saga")),
 ];
 
 pub fn builtin_module_source(module_path: &[String]) -> Option<&'static str> {
@@ -649,7 +650,9 @@ impl Checker {
                     format!("parse error in module '{}': {}", module_name, e.message),
                 )
             })?;
-        crate::derive::expand_derives(&mut program);
+        let imported =
+            crate::derive::collect_imported_decls(&program, self.modules.map.as_ref());
+        crate::derive::expand_derives(&mut program, &imported);
         crate::desugar::desugar_program(&mut program);
 
         // Cache the parsed program so the build step can skip re-parsing
@@ -679,7 +682,10 @@ impl Checker {
                 let mut prelude_program = crate::parser::Parser::new(prelude_tokens)
                     .parse_program()
                     .expect("prelude parse error");
-                crate::derive::expand_derives(&mut prelude_program);
+                crate::derive::expand_derives(
+                    &mut prelude_program,
+                    &crate::derive::ImportedDecls::empty(),
+                );
                 crate::desugar::desugar_program(&mut prelude_program);
                 snapshot
                     .check_program_inner(&mut prelude_program)
@@ -1613,12 +1619,18 @@ fn collect_codegen_info(
                     .unwrap_or_else(|| format!("{}.{}", module_name, trait_name));
                 let trait_type_arg_names: Vec<String> = trait_type_args
                     .iter()
-                    .map(|te| match te {
-                        crate::ast::TypeExpr::Var { name, .. } => name.clone(),
-                        _ => scope_map
-                            .resolve_type(te.simple_name())
-                            .map(|s| s.to_string())
-                            .unwrap_or_else(|| canonical_type_name(te.simple_name())),
+                    .map(|te| {
+                        // Use the head name of an App chain so parameterized
+                        // Rep types like `Rep__Box a` reduce to `Rep__Box`
+                        // for the dict-name key.
+                        let head = te.head_name().unwrap_or("");
+                        match te {
+                            crate::ast::TypeExpr::Var { name, .. } => name.clone(),
+                            _ => scope_map
+                                .resolve_type(head)
+                                .map(|s| s.to_string())
+                                .unwrap_or_else(|| canonical_type_name(head)),
+                        }
                     })
                     .collect();
                 let canonical_trait_type_args = canonical_trait_type_args(&trait_type_arg_names);

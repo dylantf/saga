@@ -2,4 +2,4 @@
 name = "module-test"
 
 [bin]
-main = "Main.saga"
+main = "lib/Main.saga"
