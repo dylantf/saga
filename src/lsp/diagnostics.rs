@@ -91,7 +91,8 @@ pub fn check(checker: typechecker::Checker, text: &str) -> CheckSnapshot {
         }
     };
 
-    let derive_errors = derive::expand_derives(&mut program);
+    let imported = derive::collect_imported_decls(&program, checker.module_map());
+    let derive_errors = derive::expand_derives(&mut program, &imported);
     desugar::desugar_program(&mut program);
 
     // If this file declares a builtin stdlib module, evict its cached state

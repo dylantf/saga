@@ -16,6 +16,57 @@ print_it __dict_Show_a x = element(1, __dict_Show_a)(x)
 
 Three compiler phases cooperate: the **typechecker** records evidence about which trait constraints apply at each call site, the **elaborator** transforms the AST to thread dictionary arguments, and the **lowerer** emits Core Erlang tuple operations.
 
+A fourth, earlier concern — **default method bodies** — is independent of dict passing but worth describing alongside it since it sits in the same trait pipeline. See [Default Method Bodies](#default-method-bodies) below.
+
+---
+
+## Default Method Bodies
+
+Source: `src/derive.rs::inherit_trait_defaults`, `src/parser/decl.rs::parse_trait_def`
+
+Trait declarations may attach a default body to any method:
+
+```saga
+trait ToJson a {
+  fun to_json_with : Options -> a -> String
+  fun to_json : a -> String
+  to_json x = to_json_with default_options x   # default body
+}
+```
+
+When an impl omits a method that has a default, the default fires; when the impl provides the method explicitly, the explicit body wins. Defaults are independent per method — a trait can mix defaulted and non-defaulted methods freely.
+
+### Parse Representation
+
+`TraitMethod.default_body: Option<TraitDefaultBody>` mirrors `ImplMethod`'s `(params, body)` shape (`src/ast.rs`). The parser ([src/parser/decl.rs:824-846](../src/parser/decl.rs#L824-L846)) peeks for an `Ident` matching the just-declared method name immediately after the signature; if it sees one, it parses `<pats>... = <expr>` and attaches the result.
+
+### The Inheritance Pass
+
+Defaults are a pre-typecheck AST transformation. After `expand_derives` runs, `inherit_trait_defaults` walks every `Decl::ImplDef`:
+
+1. Look the trait up in the same `DeriveScope` used by routed derives (merges local + imported `TraitDef`s).
+2. For each trait method the impl doesn't provide that has a `default_body`, clone the default into the impl as a synthetic `ImplMethod`.
+3. Deep-clone the body with **fresh `NodeId`s** via `crate::desugar::freshen_expr_ids` / `freshen_pat_ids` so resolver/evidence/LSP state keyed on NodeId doesn't collide across impls.
+
+After this pass every impl carries one `ImplMethod` per trait method. Every later phase — name resolution, typechecking, elaboration, codegen — sees a complete impl and needs no knowledge of defaults. In particular, dict construction in `elaborate.rs` works unchanged: the dict tuple has one slot per trait method, populated from the impl's now-complete `methods` list.
+
+Method calls inside a cloned default body resolve through the trait dispatch path described in the rest of this document. A default like `to_json x = to_json_with default_options x` cloned into `impl ToJson for Person` produces a regular call to `to_json_with` on a `Person`-typed argument, which the typechecker resolves to `Person`'s `to_json_with` impl method like any other trait call.
+
+### Interaction with Routed Derives
+
+`derive_routed` ([src/derive.rs:793-825](../src/derive.rs#L793-L825)) skips defaulted methods when synthesizing the bridge and delegating impls — there's no need to invent a body when the inheritance pass will fill one in. For a trait whose every method has a default body, the derive errors (nothing to synthesize). Otherwise the bridge and delegating impls carry only the routed (non-defaulted) methods; the inheritance pass clones the defaults into both.
+
+This is the headline interaction: library authors mark "this method is the routed one; that method is a convenience wrapper" purely by giving the wrapper a default body. The derive synthesizer doesn't need to know which is which.
+
+### Pre-Binding for Default Body References
+
+Default bodies (and explicit impl method bodies) are checked in Pass 6 (`register_all_impls`), which runs before the main pass that processes top-level `Decl::Val` bindings. `pre_bind_functions` ([src/typechecker/check_decl.rs:754-803](../src/typechecker/check_decl.rs#L754-L803)) now pre-binds both `Decl::FunBinding` and `Decl::Val` names with fresh vars, so a default body like `to_json x = to_json_with default_options x` can reference a top-level `val default_options = ...` defined anywhere in the module. When the main pass eventually checks the val's RHS, it unifies the inferred type against the pre-bound var.
+
+### Known Limits
+
+- **No mutual-recursion detection.** Default `a` calls `b`, default `b` calls `a`, impl provides neither → runtime stack overflow. Documented in the inheritance pass; not caught by the compiler.
+- **No trait-def-time validation.** A type-incorrect default body errors at the first impl that inherits it, not at the trait declaration. Error-locality only — incorrect defaults still always error deterministically.
+
 ---
 
 ## Phase 1: Typechecker — Evidence Recording
@@ -196,11 +247,11 @@ Resolved by the lowerer based on the resolution map:
 
 ## Naming Conventions
 
-| Context          | Pattern                                        | Example                                          |
-| ---------------- | ---------------------------------------------- | ------------------------------------------------ |
-| Dict constructor | `__dict_{CanonicalTrait}_{module}_{CanonicalType}` | `__dict_Std_Base_Show_std_int_Std_Int_Int`   |
-| Dict parameter   | `__dict_{BareTrait}_{typevar}`                 | `__dict_Debug_k`                                 |
-| Core Erlang var  | `___dict_{BareTrait}_{typevar}`                | `___dict_Debug_k` (triple underscore)             |
+| Context          | Pattern                                            | Example                                    |
+| ---------------- | -------------------------------------------------- | ------------------------------------------ |
+| Dict constructor | `__dict_{CanonicalTrait}_{module}_{CanonicalType}` | `__dict_Std_Base_Show_std_int_Std_Int_Int` |
+| Dict parameter   | `__dict_{BareTrait}_{typevar}`                     | `__dict_Debug_k`                           |
+| Core Erlang var  | `___dict_{BareTrait}_{typevar}`                    | `___dict_Debug_k` (triple underscore)      |
 
 The triple underscore in Core Erlang comes from `core_var()` prefixing names that start with lowercase.
 

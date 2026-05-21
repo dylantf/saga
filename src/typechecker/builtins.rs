@@ -19,6 +19,7 @@ impl Checker {
                 type_params: vec!["a".into()],
                 supertraits: vec![],
                 methods: vec![],
+                is_functional: false,
             },
         );
         for prim in &["Int", "Float"] {
@@ -27,6 +28,7 @@ impl Checker {
                 ImplInfo {
                     param_constraints: vec![],
                     trait_type_args: vec![],
+                    target_type_param_ids: vec![],
                     span: None,
                 },
             );
@@ -39,6 +41,7 @@ impl Checker {
                 type_params: vec!["a".into()],
                 supertraits: vec![],
                 methods: vec![],
+                is_functional: false,
             },
         );
         for prim in &["Int", "Float", "String", "Bool", "Unit", "BitString"] {
@@ -47,6 +50,7 @@ impl Checker {
                 ImplInfo {
                     param_constraints: vec![],
                     trait_type_args: vec![],
+                    target_type_param_ids: vec![],
                     span: None,
                 },
             );
@@ -149,18 +153,20 @@ impl Checker {
 
         // Show, Debug, and Eq for Tuple (any arity -- all params must satisfy the trait)
         self.trait_state.impls.insert(
-            ("Show".into(), vec![], Self::ct("Tuple")),
+            ("Std.Base.Show".into(), vec![], Self::ct("Tuple")),
             ImplInfo {
                 param_constraints: vec![],
                 trait_type_args: vec![],
+                target_type_param_ids: vec![],
                 span: None,
             },
         );
         self.trait_state.impls.insert(
-            ("Debug".into(), vec![], Self::ct("Tuple")),
+            ("Std.Base.Debug".into(), vec![], Self::ct("Tuple")),
             ImplInfo {
                 param_constraints: vec![],
                 trait_type_args: vec![],
+                target_type_param_ids: vec![],
                 span: None,
             },
         );
@@ -169,6 +175,7 @@ impl Checker {
             ImplInfo {
                 param_constraints: vec![],
                 trait_type_args: vec![],
+                target_type_param_ids: vec![],
                 span: None,
             },
         );
@@ -179,6 +186,7 @@ impl Checker {
             ImplInfo {
                 param_constraints: vec![("Eq".into(), 0)],
                 trait_type_args: vec![],
+                target_type_param_ids: vec![],
                 span: None,
             },
         );
@@ -189,6 +197,7 @@ impl Checker {
             ImplInfo {
                 param_constraints: vec![("Eq".into(), 0)],
                 trait_type_args: vec![],
+                target_type_param_ids: vec![],
                 span: None,
             },
         );
@@ -199,6 +208,7 @@ impl Checker {
             ImplInfo {
                 param_constraints: vec![("Eq".into(), 0), ("Eq".into(), 1)],
                 trait_type_args: vec![],
+                target_type_param_ids: vec![],
                 span: None,
             },
         );
@@ -209,6 +219,7 @@ impl Checker {
             ImplInfo {
                 param_constraints: vec![("Eq".into(), 0), ("Eq".into(), 1)],
                 trait_type_args: vec![],
+                target_type_param_ids: vec![],
                 span: None,
             },
         );
@@ -219,6 +230,7 @@ impl Checker {
             ImplInfo {
                 param_constraints: vec![("Eq".into(), 0)],
                 trait_type_args: vec![],
+                target_type_param_ids: vec![],
                 span: None,
             },
         );

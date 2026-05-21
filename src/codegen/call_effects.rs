@@ -432,7 +432,7 @@ impl<'a> Populator<'a> {
             return None;
         };
         let resolved = self.inputs.check_result.type_at_span.get(span)?;
-        let mut effects: Vec<String> = crate::typechecker::effects_from_type(&resolved)
+        let mut effects: Vec<String> = crate::typechecker::effects_from_type(resolved)
             .into_iter()
             .collect();
         effects.sort();
@@ -925,9 +925,7 @@ impl<'a> Populator<'a> {
         if user_arity == 0 || supplied < user_arity {
             return pure();
         }
-        let kind = if !has_ops {
-            CallEffectKind::RowForwarded { static_ops: ops }
-        } else if is_open_row {
+        let kind = if !has_ops || is_open_row {
             CallEffectKind::RowForwarded { static_ops: ops }
         } else {
             CallEffectKind::StaticOps { ops }

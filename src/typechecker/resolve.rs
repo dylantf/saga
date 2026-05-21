@@ -105,7 +105,7 @@ impl ResolutionResult {
 #[derive(Default)]
 struct LocalModuleNames {
     top_level_values: HashSet<String>,
-    constructors: HashSet<String>,
+    constructors: HashMap<String, String>,
     types: HashMap<String, String>,
     traits: HashMap<String, String>,
     effects: HashMap<String, String>,
@@ -148,12 +148,13 @@ impl LocalModuleNames {
                 Decl::TypeDef { name, variants, .. } => {
                     out.types.insert(name.clone(), qualify(name));
                     for variant in variants {
-                        out.constructors.insert(variant.node.name.clone());
+                        out.constructors
+                            .insert(variant.node.name.clone(), qualify(&variant.node.name));
                     }
                 }
                 Decl::RecordDef { name, .. } => {
                     out.types.insert(name.clone(), qualify(name));
-                    out.constructors.insert(name.clone());
+                    out.constructors.insert(name.clone(), qualify(name));
                 }
                 Decl::EffectDef {
                     name, operations, ..
@@ -346,8 +347,8 @@ impl<'a> Resolver<'a> {
     }
 
     fn resolve_constructor_name(&self, name: &str) -> Option<String> {
-        if self.locals.constructors.contains(name) {
-            return Some(name.to_string());
+        if let Some(canonical) = self.locals.constructors.get(name) {
+            return Some(canonical.clone());
         }
         self.scope.resolve_constructor(name).map(|s| s.to_string())
     }
@@ -708,8 +709,11 @@ impl<'a> Resolver<'a> {
             Decl::ImplDef {
                 id,
                 trait_name,
+                trait_type_args,
                 target_type,
+                type_params,
                 where_clause,
+                where_apps,
                 needs,
                 methods,
                 ..
@@ -722,7 +726,28 @@ impl<'a> Resolver<'a> {
                 }
                 self.record_trait_ref(*id, trait_name);
                 self.record_type_ref(*id, target_type);
+                // Resolve types appearing in the impl's trait_type_args
+                // (e.g. `impl Generic (Box a) (Rep__Box a)` → resolve Rep__Box).
+                // TypeExpr::Var (lowercase ident) is treated as a type variable
+                // and skipped by resolve_type_expr; named heads get type_ref entries.
+                let _ = type_params;
+                for te in trait_type_args {
+                    self.resolve_type_expr(te);
+                }
                 self.resolve_where_clause(where_clause);
+                // Walk where-app args (bare TraitApp constraints) so their
+                // TypeExpr NodeIds get resolution entries. Without this, the
+                // coherence check at registration time sees uncanonicalized
+                // type names and can't match against impls registered under
+                // canonical (Module.Name) keys.
+                for app in where_apps {
+                    if let Some(resolved) = self.resolve_trait_name(&app.trait_name) {
+                        self.result.traits.insert(app.id, resolved);
+                    }
+                    for arg in &app.type_args {
+                        self.resolve_type_expr(arg);
+                    }
+                }
                 for effect_ref in needs {
                     self.record_effect_ref(effect_ref);
                 }

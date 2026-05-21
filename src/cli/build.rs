@@ -262,7 +262,8 @@ pub fn parse_and_typecheck_inner(
             std::process::exit(1);
         }
     };
-    let derive_errors = derive::expand_derives(&mut program);
+    let imported = derive::collect_imported_decls(&program, checker.module_map());
+    let derive_errors = derive::expand_derives(&mut program, &imported);
     desugar::desugar_program(&mut program);
     for d in &derive_errors {
         print_tc_diagnostic(source, source_path, d);
@@ -949,7 +950,8 @@ pub fn build_project_ext(
             },
         );
         if !from_cache {
-            let derive_errors = derive::expand_derives(&mut program);
+            let imported = derive::collect_imported_decls(&program, result.module_map());
+            let derive_errors = derive::expand_derives(&mut program, &imported);
             desugar::desugar_program(&mut program);
 
             for d in &derive_errors {

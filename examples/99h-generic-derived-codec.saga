@@ -1,0 +1,131 @@
+# Phase 6: multi-method routed deriving.
+#
+# A single `JsonCodec` trait carries both directions — `encode` (to) and
+# `decode` (from) — and the routed-derive synthesizer builds bridge +
+# delegating impls whose ImplMethod list contains one entry per trait
+# method. Direction detection runs independently on each method, so the
+# `encode` body threads through `Generic.to` while the `decode` body
+# threads its `Result`-wrapped output back through `Generic.from`.
+#
+# Compared to the pre-Phase-6 layout (separate ToJson + FromJson traits,
+# two derives per type) the user-visible surface halves.
+
+trait JsonCodec a {
+  fun encode : a -> String
+  fun decode : String -> Result a String
+}
+
+# Building-block instances. `encode` produces a comma-separated tree;
+# `decode` is intentionally trivial — a real library would parse the
+# string.
+
+impl JsonCodec for U1 {
+  encode _ = "null"
+  decode _ = Ok U1
+}
+
+impl JsonCodec for Int {
+  encode n = show n
+  decode _ = Ok 42
+}
+
+impl JsonCodec for String {
+  encode s = "\"" <> s <> "\""
+  decode s = Ok s
+}
+
+impl JsonCodec for Leaf a where {a: JsonCodec} {
+  encode (Leaf x) = encode x
+  decode s = case decode s {
+    Ok x -> Ok (Leaf x)
+    Err e -> Err e
+  }
+}
+
+impl JsonCodec for Labeled a where {a: JsonCodec} {
+  encode (Labeled name x) = "\"" <> name <> "\": " <> encode x
+  decode s = case decode s {
+    Ok x -> Ok (Labeled "" x)
+    Err e -> Err e
+  }
+}
+
+impl JsonCodec for And l r where {l: JsonCodec, r: JsonCodec} {
+  encode (And l r) = encode l <> ", " <> encode r
+  decode s = case decode s {
+    Ok l -> case decode s {
+      Ok r -> Ok (And l r)
+      Err e -> Err e
+    }
+    Err e -> Err e
+  }
+}
+
+impl JsonCodec for Or l r where {l: JsonCodec, r: JsonCodec} {
+  encode o = case o {
+    Or_Left l -> encode l
+    Or_Right r -> encode r
+  }
+  decode s = case decode s {
+    Ok l -> Ok (Or_Left l)
+    Err _ -> case decode s {
+      Ok r -> Ok (Or_Right r)
+      Err e -> Err e
+    }
+  }
+}
+
+impl JsonCodec for Variant a where {a: JsonCodec} {
+  encode (Variant name payload) = "{\"" <> name <> "\": " <> encode payload <> "}"
+  decode s = case decode s {
+    Ok x -> Ok (Variant "" x)
+    Err e -> Err e
+  }
+}
+
+impl JsonCodec for Record a where {a: JsonCodec} {
+  encode (Record _ inner) = "{" <> encode inner <> "}"
+  decode s = case decode s {
+    Ok x -> Ok (Record "" x)
+    Err e -> Err e
+  }
+}
+
+impl JsonCodec for Adt a where {a: JsonCodec} {
+  encode (Adt _ inner) = encode inner
+  decode s = case decode s {
+    Ok x -> Ok (Adt "" x)
+    Err e -> Err e
+  }
+}
+
+# User code: a parameterized record + an ADT, deriving a single trait
+# that carries both directions.
+
+record Box a { v: a }
+  deriving (Debug, JsonCodec)
+
+type Opt a =
+  | Some a
+  | Nada
+  deriving (Debug, JsonCodec)
+
+fun show_decoded_box : Result (Box Int) String -> String
+show_decoded_box r = case r {
+  Ok b -> "Ok " <> debug b
+  Err e -> "Err " <> e
+}
+
+fun show_decoded_opt : Result (Opt Int) String -> String
+show_decoded_opt r = case r {
+  Ok o -> "Ok " <> debug o
+  Err e -> "Err " <> e
+}
+
+main () = {
+  let b = Box { v: 7 }
+  dbg (encode b)
+  dbg (show_decoded_box (decode "ignored"))
+  dbg (encode (Some 1))
+  dbg (show_decoded_opt (decode "ignored"))
+}

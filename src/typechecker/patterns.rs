@@ -309,6 +309,8 @@ impl Checker {
     pub(crate) fn simplify_ctx(&self) -> super::exhaustiveness::SimplifyCtx<'_> {
         super::exhaustiveness::SimplifyCtx {
             records: &self.records,
+            adt_variants: &self.adt_variants,
+            resolution: &self.resolution,
             sub: &self.sub,
         }
     }
@@ -523,17 +525,20 @@ impl Checker {
                 _ => {}
             }
 
-            // Find which constructor the binding pattern matches.
-            // Constructor names may be canonical (e.g. "Std.Result.Ok") after the
-            // resolve pass, but adt_variants stores bare names ("Ok"). Use bare form.
+            // Find which constructor the binding pattern matches. The resolver
+            // records canonical constructor identities, and adt_variants uses
+            // the same canonical identities.
             let matched = match pat {
-                Pat::Constructor { name, .. } => {
-                    Some(name.rsplit('.').next().unwrap_or(name.as_str()))
+                Pat::Constructor { id, name, .. } => {
+                    Some(self.resolution.constructor(*id).unwrap_or(name.as_str()))
                 }
                 Pat::Lit {
                     value: Lit::Bool(b),
                     ..
-                } => Some(if *b { "True" } else { "False" }),
+                } => all_variants
+                    .iter()
+                    .find(|(v, _)| v.ends_with(if *b { "True" } else { "False" }))
+                    .map(|(v, _)| v.as_str()),
                 _ => None,
             };
 

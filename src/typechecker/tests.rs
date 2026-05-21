@@ -10,7 +10,11 @@ fn check(src: &str) -> Result<Checker, Diagnostic> {
     let tokens = lexer.lex().expect("lex error");
     let mut parser = Parser::new(tokens);
     let mut program = parser.parse_program().expect("parse error");
-    crate::derive::expand_derives(&mut program);
+    let imported = crate::derive::collect_imported_decls(&program, None);
+    let derive_errors = crate::derive::expand_derives(&mut program, &imported);
+    if let Some(first) = derive_errors.into_iter().next() {
+        return Err(first);
+    }
     crate::desugar::desugar_program(&mut program);
     let mut checker = Checker::new();
     // Load prelude (which imports Std first, then stdlib modules)
@@ -19,7 +23,7 @@ fn check(src: &str) -> Result<Checker, Diagnostic> {
     let mut prelude_program = Parser::new(prelude_tokens)
         .parse_program()
         .expect("prelude parse error");
-    crate::derive::expand_derives(&mut prelude_program);
+    crate::derive::expand_derives(&mut prelude_program, &crate::derive::ImportedDecls::empty());
     crate::desugar::desugar_program(&mut prelude_program);
     checker
         .check_program_inner(&mut prelude_program)
@@ -72,7 +76,7 @@ fn check_with_project_files(files: &[(&str, &str)], main_src: &str) -> Result<Ch
         let mut prelude_program = Parser::new(prelude_tokens)
             .parse_program()
             .expect("prelude parse error");
-        crate::derive::expand_derives(&mut prelude_program);
+        crate::derive::expand_derives(&mut prelude_program, &crate::derive::ImportedDecls::empty());
         crate::desugar::desugar_program(&mut prelude_program);
         checker
             .check_program_inner(&mut prelude_program)
@@ -82,7 +86,11 @@ fn check_with_project_files(files: &[(&str, &str)], main_src: &str) -> Result<Ch
         let tokens = lexer.lex().expect("lex error");
         let mut parser = Parser::new(tokens);
         let mut program = parser.parse_program().expect("parse error");
-        crate::derive::expand_derives(&mut program);
+        let imported = crate::derive::collect_imported_decls(&program, checker.module_map());
+        let derive_errors = crate::derive::expand_derives(&mut program, &imported);
+        if let Some(first) = derive_errors.into_iter().next() {
+            return Err(first);
+        }
         crate::desugar::desugar_program(&mut program);
         checker
             .check_program_inner(&mut program)
@@ -4156,6 +4164,296 @@ impl Foo for String {
     );
 }
 
+#[test]
+fn duplicate_impl_for_parameterized_type_is_error() {
+    let result = check(
+        "trait MyShow a {
+  fun my_show : (x: a) -> String
+}
+impl MyShow for List a {
+  my_show _ = \"list1\"
+}
+impl MyShow for List a {
+  my_show _ = \"list2\"
+}",
+    );
+    assert!(result.is_err());
+    let err = result.err().unwrap();
+    assert!(
+        err.message.contains("duplicate impl") || err.message.contains("already implemented"),
+        "expected duplicate impl error, got: {}",
+        err.message
+    );
+}
+
+#[test]
+fn derive_plus_handwritten_impl_is_error() {
+    let result = check(
+        "record Foo { x: Int } deriving (Show)
+impl Show for Foo {
+  show _ = \"foo\"
+}",
+    );
+    assert!(result.is_err());
+    let err = result.err().unwrap();
+    assert!(
+        err.message.contains("duplicate impl") || err.message.contains("already implemented"),
+        "expected duplicate impl error from derive+handwritten collision, got: {}",
+        err.message
+    );
+}
+
+#[test]
+fn different_traits_same_type_no_collision() {
+    check(
+        "trait TA a { fun fa : (x: a) -> Int }
+trait TB a { fun fb : (x: a) -> Int }
+impl TA for String { fa _ = 1 }
+impl TB for String { fb _ = 2 }",
+    )
+    .unwrap();
+}
+
+// --- Coherence (functional trait) tests ---
+
+#[test]
+fn coherence_violation_same_first_param_different_rest_is_error() {
+    let result = check(
+        "trait Generic a r {
+  fun to : (x: a) -> r
+}
+type RepA = RepA
+type RepB = RepB
+record Foo { x: Int }
+impl Generic RepA for Foo {
+  to _ = RepA
+}
+impl Generic RepB for Foo {
+  to _ = RepB
+}",
+    );
+    assert!(result.is_err(), "expected coherence violation");
+    let err = result.err().unwrap();
+    assert!(
+        err.message.contains("coherence"),
+        "expected coherence violation message, got: {}",
+        err.message
+    );
+}
+
+#[test]
+fn coherence_identical_args_caught_by_overlap() {
+    let result = check(
+        "trait Generic a r {
+  fun to : (x: a) -> r
+}
+type RepA = RepA
+record Foo { x: Int }
+impl Generic RepA for Foo {
+  to _ = RepA
+}
+impl Generic RepA for Foo {
+  to _ = RepA
+}",
+    );
+    assert!(result.is_err(), "expected duplicate impl error");
+    let err = result.err().unwrap();
+    assert!(
+        err.message.contains("duplicate impl") || err.message.contains("already implemented"),
+        "expected duplicate impl error, got: {}",
+        err.message
+    );
+}
+
+#[test]
+fn coherence_different_first_params_no_violation() {
+    // The trait param `r` appears in both param and return position so the
+    // impl unification stays local to each impl; pre-existing limitation of
+    // phantom-r multi-param traits means we cannot exercise two impls where
+    // `r` is only return-position. The coherence rule itself targets
+    // (target_type, trait_type_args) and would reject mismatches; this test
+    // confirms differing first params (different target types) are accepted.
+    check(
+        // Same trait arg (RepA) but different targets — coherence is
+        // per-target, so both impls are allowed.  Multi-impl tests with
+        // *different* trait args trip a pre-existing limitation: the trait
+        // method's non-self type vars (the `r` in `Generic a r`) are shared
+        // across impl checks, so the second impl's body would fail to unify.
+        // That's orthogonal to the coherence rule under test here.
+        "trait Generic a r {
+  fun to : (x: a) -> r
+}
+type RepA = RepA
+record Foo { x: Int }
+record Bar { y: Int }
+impl Generic RepA for Foo {
+  to _ = RepA
+}
+impl Generic RepA for Bar {
+  to _ = RepA
+}",
+    )
+    .unwrap();
+}
+
+#[test]
+fn multi_param_trait_distinct_impls_freshen_vars() {
+    // Two impls of `Generic a r` with different first AND second params.
+    // Coherence allows this (different first params); the freshening fix
+    // ensures the trait's `r` var is fresh per impl so unification doesn't
+    // leak across impls.
+    check(
+        "trait Generic a r {
+  fun to : (x: a) -> r
+  fun from : (x: r) -> a
+}
+record Foo { x: Int }
+record Bar { y: Int }
+type RepFoo = RepFoo Int
+type RepBar = RepBar Int
+impl Generic RepFoo for Foo {
+  to f = RepFoo f.x
+  from r = case r { RepFoo n -> Foo { x: n } }
+}
+impl Generic RepBar for Bar {
+  to b = RepBar b.y
+  from r = case r { RepBar n -> Bar { y: n } }
+}",
+    )
+    .unwrap();
+}
+
+// --- Phase 1c: TraitApp where-clause form ---
+
+#[test]
+fn where_app_old_form_sugar_still_works() {
+    // Old-form `where {a: Show}` should continue to typecheck unchanged.
+    check(
+        "trait Show2 a { fun show2 : (x: a) -> String }
+impl Show2 for Int { show2 _ = \"int\" }
+fun foo : (x: a) -> String where {a: Show2}
+foo x = show2 x",
+    )
+    .unwrap();
+}
+
+#[test]
+fn where_app_resolves_fresh_var_via_functional_trait() {
+    // `Generic Person r` with `r` fresh resolves to the unique impl of
+    // Generic for Person via coherence.
+    check(
+        "trait Generic a r {
+  fun to : (x: a) -> r
+}
+trait ToJson a {
+  fun to_json : (x: a) -> String
+}
+record Person { name: String }
+type RepPerson = RepPerson String
+impl Generic RepPerson for Person {
+  to p = RepPerson p.name
+}
+impl ToJson for RepPerson {
+  to_json r = case r { RepPerson s -> s }
+}
+impl ToJson for Person where {Generic Person r, ToJson r} {
+  to_json _ = \"x\"
+}",
+    )
+    .unwrap();
+}
+
+#[test]
+fn where_app_unknown_trait_errors() {
+    let result = check(
+        "record Person { name: String }
+impl Show for Person where {NotATrait Person r} {
+  show _ = \"x\"
+}",
+    );
+    assert!(result.is_err());
+    let err = result.err().unwrap();
+    assert!(
+        err.message.contains("unknown trait") || err.message.contains("NotATrait"),
+        "expected unknown-trait error, got: {}",
+        err.message
+    );
+}
+
+#[test]
+fn where_app_missing_impl_errors() {
+    let result = check(
+        "trait Generic a r {
+  fun to : (x: a) -> r
+}
+trait ToJson a {
+  fun to_json : (x: a) -> String
+}
+record Person { name: String }
+impl ToJson for Person where {Generic Person r, ToJson r} {
+  to_json _ = \"x\"
+}",
+    );
+    assert!(result.is_err(), "expected missing-impl error");
+    let err = result.err().unwrap();
+    assert!(
+        err.message.contains("no impl"),
+        "expected no-impl error, got: {}",
+        err.message
+    );
+}
+
+#[test]
+fn where_app_fresh_var_in_non_functional_trait_errors() {
+    let result = check(
+        "trait NotFn a b { fun nf : (x: a) -> b }
+record Person { name: String }
+impl Show for Person where {NotFn Person r} {
+  show _ = \"x\"
+}",
+    );
+    assert!(
+        result.is_err(),
+        "expected error for non-functional fresh var"
+    );
+    let err = result.err().unwrap();
+    assert!(
+        err.message.contains("fresh type variable not determined")
+            || err.message.contains("not a functional trait"),
+        "expected functional-trait error, got: {}",
+        err.message
+    );
+}
+
+#[test]
+fn where_app_mixed_old_and_new_forms() {
+    // Both `a: Show` (old) and `Generic Person r` (new) in one where clause.
+    check(
+        "trait Generic a r { fun to : (x: a) -> r }
+trait ToJson a { fun to_json : (x: a) -> String }
+record Person { name: String }
+type RepPerson = RepPerson String
+impl Generic RepPerson for Person {
+  to p = RepPerson p.name
+}
+impl ToJson for RepPerson { to_json r = case r { RepPerson s -> s } }
+impl Show for Person where {Generic Person r, ToJson r} {
+  show _ = \"p\"
+}",
+    )
+    .unwrap();
+}
+
+#[test]
+fn same_trait_different_types_no_collision() {
+    check(
+        "trait TA a { fun fa : (x: a) -> Int }
+impl TA for String { fa _ = 1 }
+impl TA for Int { fa _ = 2 }",
+    )
+    .unwrap();
+}
+
 // --- Type arity checking ---
 
 #[test]
@@ -6027,4 +6325,1651 @@ fn function_with_row_claiming_unavailable_effect_still_rejected() {
         "expected effect declaration diagnostic, got: {}",
         err.message
     );
+}
+
+// --- Phase 2b: deriving (Generic) for records ----------------------------
+
+#[test]
+fn derive_generic_two_field_record_roundtrip() {
+    check(
+        "import Std.Generic (Generic, U1, Leaf, Labeled, And)\n\
+         record Person { name: String, age: Int }\n  deriving (Generic)\n\
+         fun rt : Person -> Person\n\
+         rt p = from (to p : Rep__Person)",
+    )
+    .unwrap();
+}
+
+#[test]
+fn derive_generic_single_field_record() {
+    // Single-field record: Rep is just `Labeled (Leaf T)`, no `And`.
+    check(
+        "import Std.Generic (Generic, U1, Leaf, Labeled, And)\n\
+         record Box { value: Int }\n  deriving (Generic)\n\
+         fun rt : Box -> Box\n\
+         rt b = from (to b : Rep__Box)",
+    )
+    .unwrap();
+}
+
+#[test]
+fn derive_generic_three_field_record() {
+    // Three fields produce a right-leaning And tree:
+    // And (Labeled (Leaf String)) (And (Labeled (Leaf Int)) (Labeled (Leaf String)))
+    check(
+        "import Std.Generic (Generic, U1, Leaf, Labeled, And)\n\
+         record Triple { a: String, b: Int, c: String }\n  deriving (Generic)\n\
+         fun rt : Triple -> Triple\n\
+         rt t = from (to t : Rep__Triple)",
+    )
+    .unwrap();
+}
+
+#[test]
+fn derive_generic_zero_field_record() {
+    // Empty record: Rep is U1.
+    check(
+        "import Std.Generic (Generic, U1, Leaf, Labeled, And)\n\
+         record Empty {}\n  deriving (Generic)\n\
+         fun rt : Empty -> Empty\n\
+         rt e = from (to e : Rep__Empty)",
+    )
+    .unwrap();
+}
+
+#[test]
+fn derive_generic_roundtrip_without_ascription() {
+    // The functional-trait coherence fallback in pending-constraint
+    // resolution should resolve `from (to p)` without an explicit
+    // ascription, because Generic Person <r> has a unique impl.
+    check(
+        "import Std.Generic (Generic, U1, Leaf, Labeled, And)\n\
+         record Person { name: String, age: Int }\n  deriving (Generic)\n\
+         fun rt : Person -> Person\n\
+         rt p = from (to p)",
+    )
+    .unwrap();
+}
+
+#[test]
+fn derive_generic_parameterized_record_roundtrip_int() {
+    // Phase 2e: parameterized records now derive Generic.
+    check(
+        "import Std.Generic (Generic, U1, Leaf, Labeled, And)\n\
+         record Box a { value: a }\n  deriving (Generic)\n\
+         fun rt : Box Int -> Box Int\n\
+         rt b = from (to b : Rep__Box Int)",
+    )
+    .unwrap();
+}
+
+#[test]
+fn derive_generic_parameterized_record_roundtrip_string() {
+    check(
+        "import Std.Generic (Generic, U1, Leaf, Labeled, And)\n\
+         record Box a { value: a }\n  deriving (Generic)\n\
+         fun rt : Box String -> Box String\n\
+         rt b = from (to b : Rep__Box String)",
+    )
+    .unwrap();
+}
+
+#[test]
+fn derive_generic_parameterized_record_two_params() {
+    check(
+        "import Std.Generic (Generic, U1, Leaf, Labeled, And)\n\
+         record Pair a b { fst: a, snd: b }\n  deriving (Generic)\n\
+         fun rt : Pair Int String -> Pair Int String\n\
+         rt p = from (to p : Rep__Pair Int String)",
+    )
+    .unwrap();
+}
+
+#[test]
+fn derive_generic_end_to_end_with_tojson() {
+    // The headline Phase 2b smoke test: a hand-written ToJson library
+    // built on the building blocks composes through a derived Generic
+    // impl. Same shape as examples/99b-generic-derived.saga.
+    check(
+        "import Std.Generic (Generic, U1, Leaf, Labeled, And, Or)\n\
+         record Person { name: String, age: Int }\n  deriving (Generic)\n\
+         trait ToJson a { fun to_json : a -> String }\n\
+         impl ToJson for U1 { to_json _ = \"null\" }\n\
+         impl ToJson for String { to_json s = s }\n\
+         impl ToJson for Int { to_json n = show n }\n\
+         impl ToJson for Leaf a where {a: ToJson} {\n  to_json (Leaf x) = to_json x\n}\n\
+         impl ToJson for Labeled a where {a: ToJson} {\n  to_json (Labeled name x) = name <> \":\" <> to_json x\n}\n\
+         impl ToJson for And l r where {l: ToJson, r: ToJson} {\n  to_json (And l r) = to_json l <> \",\" <> to_json r\n}\n\
+         impl ToJson for Record a where {a: ToJson} {\n  to_json (Record _ inner) = \"{\" <> to_json inner <> \"}\"\n}\n\
+         impl ToJson for Rep__Person {\n  to_json (Rep__Person inner) = to_json inner\n}\n\
+         impl ToJson for Person where {Generic Person r, ToJson r} {\n  to_json p = to_json (to p : Rep__Person)\n}",
+    )
+    .unwrap();
+}
+
+// --- Phase 2c: deriving (Generic) for ADTs -------------------------------
+
+#[test]
+fn derive_generic_adt_enum_style() {
+    // All-nullary ADT — every variant wraps U1.
+    check(
+        "import Std.Generic (Generic, U1, Leaf, Labeled, And, Or)\n\
+         type Color = Red | Green | Blue\n  deriving (Generic)\n\
+         fun rt : Color -> Color\n\
+         rt c = from (to c : Rep__Color)",
+    )
+    .unwrap();
+}
+
+#[test]
+fn derive_generic_adt_single_variant() {
+    // Single-variant ADT — no Or wrapping at all.
+    check(
+        "import Std.Generic (Generic, U1, Leaf, Labeled, And, Or)\n\
+         type Wrapper = Wrap Int\n  deriving (Generic)\n\
+         fun rt : Wrapper -> Wrapper\n\
+         rt w = from (to w : Rep__Wrapper)",
+    )
+    .unwrap();
+}
+
+#[test]
+fn derive_generic_adt_maybe_like() {
+    // Mixed arity: one variant has a field, the other is nullary.
+    check(
+        "import Std.Generic (Generic, U1, Leaf, Labeled, And, Or)\n\
+         type IntOpt = Just Int | Nothing\n  deriving (Generic)\n\
+         fun rt : IntOpt -> IntOpt\n\
+         rt x = from (to x : Rep__IntOpt)",
+    )
+    .unwrap();
+}
+
+#[test]
+fn derive_generic_adt_three_variants_mixed() {
+    // 3-variant ADT exercising all three arities, including a multi-field
+    // variant (Rect Float Float -> And-tree).
+    check(
+        "import Std.Generic (Generic, U1, Leaf, Labeled, And, Or)\n\
+         type Shape = Circle Float | Rect Float Float | Triangle\n  deriving (Generic)\n\
+         fun rt : Shape -> Shape\n\
+         rt s = from (to s : Rep__Shape)",
+    )
+    .unwrap();
+}
+
+#[test]
+fn derive_generic_adt_three_multi_field_variants() {
+    // All variants multi-field: deepest And chain on every arm.
+    check(
+        "import Std.Generic (Generic, U1, Leaf, Labeled, And, Or)\n\
+         type Tri = A Int Int | B String String | C Int String\n  deriving (Generic)\n\
+         fun rt : Tri -> Tri\n\
+         rt t = from (to t : Rep__Tri)",
+    )
+    .unwrap();
+}
+
+#[test]
+fn derive_generic_adt_recursive_monomorphic() {
+    // Phase 2d: recursive ADTs now derive Generic. The recursive field
+    // round-trips through the runtime dictionary, not the Rep type shape.
+    check(
+        "import Std.Generic (Generic, U1, Leaf, Labeled, And, Or)\n\
+         type IntList = INil | ICons Int IntList\n  deriving (Generic)\n\
+         fun rt : IntList -> IntList\n\
+         rt xs = from (to xs : Rep__IntList)",
+    )
+    .unwrap();
+}
+
+#[test]
+fn derive_generic_adt_parameterized() {
+    // Phase 2e: parameterized ADTs derive Generic.
+    check(
+        "import Std.Generic (Generic, U1, Leaf, Labeled, And, Or)\n\
+         type Opt a = Some a | None\n  deriving (Generic)\n\
+         fun rt : Opt Int -> Opt Int\n\
+         rt x = from (to x : Rep__Opt Int)",
+    )
+    .unwrap();
+}
+
+#[test]
+fn derive_generic_parameterized_adt_end_to_end_with_tojson() {
+    // Headline Phase 2e smoke test: ToJson for a parameterized ADT routed
+    // through a derived Generic impl. The delegating impl relies on the
+    // call-site coherence fallback to pin the Generic Rep, with no
+    // where-app needed.
+    check(
+        "import Std.Generic (Generic, U1, Leaf, Labeled, And, Or)\n\
+         type Opt a = Some a | None\n  deriving (Generic)\n\
+         trait ToJson a { fun to_json : a -> String }\n\
+         impl ToJson for U1 { to_json _ = \"null\" }\n\
+         impl ToJson for Int { to_json n = show n }\n\
+         impl ToJson for Leaf a where {a: ToJson} {\n  to_json (Leaf x) = to_json x\n}\n\
+         impl ToJson for Labeled a where {a: ToJson} {\n  to_json (Labeled name x) = name <> \":\" <> to_json x\n}\n\
+         impl ToJson for And l r where {l: ToJson, r: ToJson} {\n  to_json (And l r) = to_json l <> \",\" <> to_json r\n}\n\
+         impl ToJson for Or l r where {l: ToJson, r: ToJson} {\n  to_json o = case o {\n  Or_Left l -> to_json l\n  Or_Right r -> to_json r\n}\n}\n\
+         impl ToJson for Variant a where {a: ToJson} {\n  to_json (Variant name x) = name <> \":\" <> to_json x\n}\n\
+         impl ToJson for Adt a where {a: ToJson} {\n  to_json (Adt _ inner) = to_json inner\n}\n\
+         impl ToJson for Rep__Opt a where {a: ToJson} {\n  to_json (Rep__Opt inner) = to_json inner\n}\n\
+         impl ToJson for Opt a where {a: ToJson} {\n  to_json m = to_json (to m)\n}",
+    )
+    .unwrap();
+}
+
+#[test]
+fn where_app_accepts_parenthesized_type_application() {
+    // The where-app form accepts `(Opt a)` as a parenthesized type
+    // application, not just bare identifiers. Coherence keys on the head
+    // (Opt), so this resolves cleanly through the derived Generic impl.
+    check(
+        "import Std.Generic (Generic, U1, Leaf, Labeled, And, Or)\n\
+         type Opt a = Some a | None\n  deriving (Generic)\n\
+         trait ToJson a { fun to_json : a -> String }\n\
+         impl ToJson for U1 { to_json _ = \"null\" }\n\
+         impl ToJson for Int { to_json n = show n }\n\
+         impl ToJson for Leaf a where {a: ToJson} {\n  to_json (Leaf x) = to_json x\n}\n\
+         impl ToJson for Labeled a where {a: ToJson} {\n  to_json (Labeled name x) = name <> \":\" <> to_json x\n}\n\
+         impl ToJson for And l r where {l: ToJson, r: ToJson} {\n  to_json (And l r) = to_json l <> \",\" <> to_json r\n}\n\
+         impl ToJson for Or l r where {l: ToJson, r: ToJson} {\n  to_json o = case o {\n  Or_Left l -> to_json l\n  Or_Right r -> to_json r\n}\n}\n\
+         impl ToJson for Variant a where {a: ToJson} {\n  to_json (Variant name x) = name <> \":\" <> to_json x\n}\n\
+         impl ToJson for Adt a where {a: ToJson} {\n  to_json (Adt _ inner) = to_json inner\n}\n\
+         impl ToJson for Rep__Opt a where {a: ToJson} {\n  to_json (Rep__Opt inner) = to_json inner\n}\n\
+         impl ToJson for Opt a where {a: ToJson, Generic (Opt a) r, ToJson r} {\n  to_json m = to_json (to m)\n}",
+    )
+    .unwrap();
+}
+
+#[test]
+fn derive_generic_adt_parameterized_recursive() {
+    // Phase 2d + 2e combined: a parameterized recursive ADT.
+    check(
+        "import Std.Generic (Generic, U1, Leaf, Labeled, And, Or)\n\
+         type MyList a = MNil | MCons a (MyList a)\n  deriving (Generic)\n\
+         fun rt : MyList Int -> MyList Int\n\
+         rt xs = from (to xs : Rep__MyList Int)",
+    )
+    .unwrap();
+}
+
+#[test]
+fn derive_generic_adt_end_to_end_with_tojson() {
+    // ADT analogue of the Phase 2b record smoke test: a hand-written ToJson
+    // over the building blocks routes through a derived Generic impl.
+    check(
+        "import Std.Generic (Generic, U1, Leaf, Labeled, And, Or)\n\
+         type Shape = Circle Float | Rect Float Float | Triangle\n  deriving (Generic)\n\
+         trait ToJson a { fun to_json : a -> String }\n\
+         impl ToJson for U1 { to_json _ = \"null\" }\n\
+         impl ToJson for Float { to_json n = show n }\n\
+         impl ToJson for Leaf a where {a: ToJson} {\n  to_json (Leaf x) = to_json x\n}\n\
+         impl ToJson for Labeled a where {a: ToJson} {\n  to_json (Labeled name x) = name <> \":\" <> to_json x\n}\n\
+         impl ToJson for And l r where {l: ToJson, r: ToJson} {\n  to_json (And l r) = to_json l <> \",\" <> to_json r\n}\n\
+         impl ToJson for Or l r where {l: ToJson, r: ToJson} {\n  to_json o = case o {\n  Or_Left l -> to_json l\n  Or_Right r -> to_json r\n}\n}\n\
+         impl ToJson for Variant a where {a: ToJson} {\n  to_json (Variant name x) = name <> \":\" <> to_json x\n}\n\
+         impl ToJson for Adt a where {a: ToJson} {\n  to_json (Adt _ inner) = to_json inner\n}\n\
+         impl ToJson for Rep__Shape {\n  to_json (Rep__Shape inner) = to_json inner\n}\n\
+         impl ToJson for Shape where {Generic Shape r, ToJson r} {\n  to_json s = to_json (to s : Rep__Shape)\n}",
+    )
+    .unwrap();
+}
+
+// --- Phase 3: convention-based routing for user-defined derivable traits.
+
+/// Minimal inline ToJson library reused across Phase 3 tests.
+fn phase3_tojson_lib() -> &'static str {
+    "trait ToJson a { fun to_json : a -> String }\n\
+     impl ToJson for U1 { to_json _ = \"null\" }\n\
+     impl ToJson for Int { to_json n = show n }\n\
+     impl ToJson for String { to_json s = s }\n\
+     impl ToJson for Leaf a where {a: ToJson} {\n  to_json (Leaf x) = to_json x\n}\n\
+     impl ToJson for Labeled a where {a: ToJson} {\n  to_json (Labeled name x) = name <> \":\" <> to_json x\n}\n\
+     impl ToJson for And l r where {l: ToJson, r: ToJson} {\n  to_json (And l r) = to_json l <> \",\" <> to_json r\n}\n\
+     impl ToJson for Or l r where {l: ToJson, r: ToJson} {\n  to_json o = case o {\n  Or_Left l -> to_json l\n  Or_Right r -> to_json r\n}\n}\n\
+     impl ToJson for Variant a where {a: ToJson} {\n  to_json (Variant name x) = name <> \":\" <> to_json x\n}\n\
+     impl ToJson for Record a where {a: ToJson} {\n  to_json (Record _ inner) = to_json inner\n}\n\
+     impl ToJson for Adt a where {a: ToJson} {\n  to_json (Adt _ inner) = to_json inner\n}\n"
+}
+
+fn module_tojson_lib() -> &'static str {
+    "module JsonLib\n\
+     pub trait ToJson a { fun to_json : a -> String }\n\
+     pub fun helper : Unit -> Unit\n\
+     helper () = ()\n\
+     impl ToJson for U1 { to_json _ = \"null\" }\n\
+     impl ToJson for Int { to_json n = show n }\n\
+     impl ToJson for String { to_json s = s }\n\
+     impl ToJson for Leaf a where {a: ToJson} { to_json (Leaf x) = to_json x }\n\
+     impl ToJson for Labeled a where {a: ToJson} { to_json (Labeled name x) = name <> \":\" <> to_json x }\n\
+     impl ToJson for And l r where {l: ToJson, r: ToJson} { to_json (And l r) = to_json l <> \",\" <> to_json r }\n\
+     impl ToJson for Or l r where {l: ToJson, r: ToJson} { to_json o = case o { Or_Left l -> to_json l; Or_Right r -> to_json r } }\n\
+     impl ToJson for Variant a where {a: ToJson} { to_json (Variant name x) = name <> \":\" <> to_json x }\n\
+     impl ToJson for Record a where {a: ToJson} { to_json (Record _ inner) = to_json inner }\n\
+     impl ToJson for Adt a where {a: ToJson} { to_json (Adt _ inner) = to_json inner }\n"
+}
+
+#[test]
+fn routed_derive_respects_selective_import_visibility() {
+    let err = check_with_project_files(
+        &[("src/JsonLib.saga", module_tojson_lib())],
+        "import JsonLib (helper)\n\
+         record Person { name: String, age: Int }\n  deriving (ToJson)\n",
+    )
+    .err()
+    .expect("expected derive error");
+    assert!(
+        err.message.contains("trait is not in scope"),
+        "expected ToJson to be hidden by selective import; got: {}",
+        err.message
+    );
+}
+
+#[test]
+fn routed_derive_resolves_selective_import_canonically() {
+    let checker = check_with_project_files(
+        &[("src/JsonLib.saga", module_tojson_lib())],
+        "import JsonLib (ToJson)\n\
+         record Person { name: String, age: Int }\n  deriving (ToJson)\n\
+         fun go : Person -> String\n\
+         go p = to_json p\n",
+    )
+    .unwrap();
+    let result = checker.to_result();
+    assert!(
+        result
+            .resolution
+            .impl_traits
+            .values()
+            .any(|name| name == "JsonLib.ToJson"),
+        "expected synthetic impl trait to resolve canonically; got {:?}",
+        result.resolution.impl_traits
+    );
+    assert!(
+        result
+            .resolution
+            .traits
+            .values()
+            .any(|name| name == "Std.Generic.Generic"),
+        "expected synthetic where-app Generic to resolve canonically; got {:?}",
+        result.resolution.traits
+    );
+}
+
+#[test]
+fn routed_derive_supports_aliased_import() {
+    check_with_project_files(
+        &[("src/JsonLib.saga", module_tojson_lib())],
+        "import JsonLib as J\n\
+         record Person { name: String, age: Int }\n  deriving (J.ToJson)\n\
+         fun go : Person -> String\n\
+         go p = to_json p\n",
+    )
+    .unwrap();
+}
+
+#[test]
+fn routed_derive_reports_ambiguous_imported_bare_trait() {
+    let lib_a = "module A\npub trait ToJson a { fun to_json : a -> String }\n";
+    let lib_b = "module B\npub trait ToJson a { fun to_json : a -> String }\n";
+    let err = check_with_project_files(
+        &[("src/A.saga", lib_a), ("src/B.saga", lib_b)],
+        "import A\n\
+         import B\n\
+         record Person { name: String }\n  deriving (ToJson)\n",
+    )
+    .err()
+    .expect("expected ambiguous derive error");
+    assert!(
+        err.message.contains("ambiguous")
+            && err.message.contains("A.ToJson")
+            && err.message.contains("B.ToJson"),
+        "expected ambiguous ToJson diagnostic; got: {}",
+        err.message
+    );
+}
+
+#[test]
+fn routed_derive_local_trait_shadows_imported_summary() {
+    check_with_project_files(
+        &[("src/JsonLib.saga", module_tojson_lib())],
+        &format!(
+            "import JsonLib\n\
+             {lib}\
+             record Person {{ name: String, age: Int }}\n  deriving (ToJson)\n\
+             fun go : Person -> String\n\
+             go p = to_json p\n",
+            lib = phase3_tojson_lib()
+        ),
+    )
+    .unwrap();
+}
+
+#[test]
+fn routed_from_derive_reports_ambiguous_imported_wrapper() {
+    let lib_a = "module A\npub type Wrapped a = WrappedA a\n";
+    let lib_b = "module B\npub type Wrapped a = WrappedB a\n";
+    let err = check_with_project_files(
+        &[("src/A.saga", lib_a), ("src/B.saga", lib_b)],
+        "import A\n\
+         import B\n\
+         trait Decode a { fun decode : String -> Wrapped a }\n\
+         record Person { name: String }\n  deriving (Decode)\n",
+    )
+    .err()
+    .expect("expected ambiguous wrapper error");
+    assert!(
+        err.message.contains("ambiguous")
+            && err.message.contains("A.Wrapped")
+            && err.message.contains("B.Wrapped"),
+        "expected ambiguous Wrapped diagnostic; got: {}",
+        err.message
+    );
+}
+
+#[test]
+fn routed_from_derive_inspects_imported_wrapper_by_canonical_shape() {
+    let db_lib = "module DbLib\n\
+        pub type DbError = Timeout\n\
+        pub type DbResult a = DbOk a | DbErr DbError | DbNoRows\n\
+        pub trait Decode a { fun decode : String -> DbResult a }\n\
+        impl Decode for U1 { decode _ = DbOk U1 }\n\
+        impl Decode for Int { decode _ = DbOk 0 }\n\
+        impl Decode for String { decode s = DbOk s }\n\
+        impl Decode for Leaf a where {a: Decode} { decode s = case decode s { DbOk x -> DbOk (Leaf x); DbErr e -> DbErr e; DbNoRows -> DbNoRows } }\n\
+        impl Decode for Labeled a where {a: Decode} { decode s = case decode s { DbOk x -> DbOk (Labeled \"\" x); DbErr e -> DbErr e; DbNoRows -> DbNoRows } }\n\
+        impl Decode for And l r where {l: Decode, r: Decode} { decode s = case decode s { DbOk l -> case decode s { DbOk r -> DbOk (And l r); DbErr e -> DbErr e; DbNoRows -> DbNoRows }; DbErr e -> DbErr e; DbNoRows -> DbNoRows } }\n\
+        impl Decode for Or l r where {l: Decode, r: Decode} { decode s = case decode s { DbOk l -> DbOk (Or_Left l); DbErr e -> DbErr e; DbNoRows -> DbNoRows } }\n\
+        impl Decode for Variant a where {a: Decode} { decode s = case decode s { DbOk x -> DbOk (Variant \"\" x); DbErr e -> DbErr e; DbNoRows -> DbNoRows } }\n\
+        impl Decode for Record a where {a: Decode} { decode s = case decode s { DbOk x -> DbOk (Record \"\" x); DbErr e -> DbErr e; DbNoRows -> DbNoRows } }\n\
+        impl Decode for Adt a where {a: Decode} { decode s = case decode s { DbOk x -> DbOk (Adt \"\" x); DbErr e -> DbErr e; DbNoRows -> DbNoRows } }\n";
+    check_with_project_files(
+        &[("src/DbLib.saga", db_lib)],
+        "import DbLib (Decode)\n\
+         record Person { name: String, age: Int }\n  deriving (Decode)\n",
+    )
+    .unwrap();
+}
+
+#[test]
+fn where_app_accepts_impl_type_parameter_as_old_bound_sugar() {
+    check(
+        "trait Pretty a { fun pretty : a -> String }\n\
+         impl Pretty for Int { pretty n = show n }\n\
+         record Box a { value: a }\n\
+         impl Pretty for Box a where {Pretty a} {\n\
+           pretty b = pretty b.value\n\
+         }\n\
+         fun go : Box Int -> String\n\
+         go b = pretty b",
+    )
+    .unwrap();
+}
+
+#[test]
+fn phase3_routed_derive_record() {
+    // Headline: `deriving (Generic, ToJson)` on a record. The synthesized
+    // delegating impl plus bridge impl let `to_json p` round-trip through
+    // the building-block instances.
+    let src = format!(
+        "import Std.Generic (Generic, U1, Leaf, Labeled, And, Or)\n\
+         {lib}\
+         record Person {{ name: String, age: Int }}\n  deriving (Generic, ToJson)\n\
+         fun go : Person -> String\n\
+         go p = to_json p",
+        lib = phase3_tojson_lib()
+    );
+    check(&src).unwrap();
+}
+
+#[test]
+fn phase3_routed_derive_auto_includes_generic() {
+    // Only `deriving (ToJson)` listed — Generic is auto-included so the
+    // routed synthesizer can chain through `to`.
+    let src = format!(
+        "import Std.Generic (Generic, U1, Leaf, Labeled, And, Or)\n\
+         {lib}\
+         record Person {{ name: String, age: Int }}\n  deriving (ToJson)\n\
+         fun go : Person -> String\n\
+         go p = to_json p",
+        lib = phase3_tojson_lib()
+    );
+    check(&src).unwrap();
+}
+
+#[test]
+fn phase3_routed_derive_parameterized_record() {
+    let src = format!(
+        "import Std.Generic (Generic, U1, Leaf, Labeled, And, Or)\n\
+         {lib}\
+         record Box a {{ v: a }}\n  deriving (ToJson)\n\
+         fun go : Box Int -> String\n\
+         go b = to_json b",
+        lib = phase3_tojson_lib()
+    );
+    check(&src).unwrap();
+}
+
+#[test]
+fn phase3_routed_derive_adt() {
+    let src = format!(
+        "import Std.Generic (Generic, U1, Leaf, Labeled, And, Or)\n\
+         {lib}\
+         type Opt a = Some a | Nada\n  deriving (ToJson)\n\
+         fun go : Opt Int -> String\n\
+         go x = to_json x",
+        lib = phase3_tojson_lib()
+    );
+    check(&src).unwrap();
+}
+
+#[test]
+fn phase3_routed_derive_recursive_adt() {
+    let src = format!(
+        "import Std.Generic (Generic, U1, Leaf, Labeled, And, Or)\n\
+         {lib}\
+         type IntList = INil | ICons Int IntList\n  deriving (ToJson)\n\
+         fun go : IntList -> String\n\
+         go xs = to_json xs",
+        lib = phase3_tojson_lib()
+    );
+    check(&src).unwrap();
+}
+
+// --- Phase 3.1: from-direction routed derives ---------------------
+
+/// Inline FromJson library with Result-wrapped returns. Dummy bodies — the
+/// tests only verify that derive expansion + typechecking succeed.
+fn phase3_fromjson_result_lib() -> &'static str {
+    "trait FromJson a { fun from_json : String -> Result a String }\n\
+     impl FromJson for U1 { from_json _ = Ok U1 }\n\
+     impl FromJson for Int { from_json _ = Ok 0 }\n\
+     impl FromJson for String { from_json s = Ok s }\n\
+     impl FromJson for Leaf a where {a: FromJson} {\n\
+       from_json s = case from_json s { Ok x -> Ok (Leaf x); Err e -> Err e }\n\
+     }\n\
+     impl FromJson for Labeled a where {a: FromJson} {\n\
+       from_json s = case from_json s { Ok x -> Ok (Labeled \"\" x); Err e -> Err e }\n\
+     }\n\
+     impl FromJson for And l r where {l: FromJson, r: FromJson} {\n\
+       from_json s = case from_json s {\n\
+         Ok l -> case from_json s { Ok r -> Ok (And l r); Err e -> Err e }\n\
+         Err e -> Err e\n\
+       }\n\
+     }\n\
+     impl FromJson for Or l r where {l: FromJson, r: FromJson} {\n\
+       from_json s = case from_json s {\n\
+         Ok l -> Ok (Or_Left l)\n\
+         Err _ -> case from_json s { Ok r -> Ok (Or_Right r); Err e -> Err e }\n\
+       }\n\
+     }\n\
+     impl FromJson for Variant a where {a: FromJson} {\n\
+       from_json s = case from_json s { Ok x -> Ok (Variant \"\" x); Err e -> Err e }\n\
+     }\n\
+     impl FromJson for Record a where {a: FromJson} {\n\
+       from_json s = case from_json s { Ok x -> Ok (Record \"\" x); Err e -> Err e }\n\
+     }\n\
+     impl FromJson for Adt a where {a: FromJson} {\n\
+       from_json s = case from_json s { Ok x -> Ok (Adt \"\" x); Err e -> Err e }\n\
+     }\n"
+}
+
+#[test]
+fn phase3_routed_derive_from_direction_result() {
+    // Headline: deriving (Generic, FromJson) on a record with a
+    // `String -> Result a String` method.
+    let src = format!(
+        "{lib}\
+         record Person {{ name: String, age: Int }}\n  deriving (Generic, FromJson)\n\
+         fun go : String -> Result Person String\n\
+         go s = from_json s",
+        lib = phase3_fromjson_result_lib()
+    );
+    check(&src).unwrap();
+}
+
+#[test]
+fn phase3_routed_derive_from_direction_maybe() {
+    let src = "trait FromX a { fun from_x : Int -> Maybe a }\n\
+               impl FromX for U1 { from_x _ = Just U1 }\n\
+               impl FromX for Int { from_x _ = Just 0 }\n\
+               impl FromX for String { from_x _ = Just \"\" }\n\
+               impl FromX for Leaf a where {a: FromX} {\n\
+                 from_x n = case from_x n { Just x -> Just (Leaf x); Nothing -> Nothing }\n\
+               }\n\
+               impl FromX for Labeled a where {a: FromX} {\n\
+                 from_x n = case from_x n { Just x -> Just (Labeled \"\" x); Nothing -> Nothing }\n\
+               }\n\
+               impl FromX for And l r where {l: FromX, r: FromX} {\n\
+                 from_x n = case from_x n {\n\
+                   Just l -> case from_x n { Just r -> Just (And l r); Nothing -> Nothing }\n\
+                   Nothing -> Nothing\n\
+                 }\n\
+               }\n\
+               impl FromX for Variant a where {a: FromX} {\n\
+                 from_x n = case from_x n { Just x -> Just (Variant \"\" x); Nothing -> Nothing }\n\
+               }\n\
+               impl FromX for Record a where {a: FromX} {\n\
+                 from_x n = case from_x n { Just x -> Just (Record \"\" x); Nothing -> Nothing }\n\
+               }\n\
+               impl FromX for Adt a where {a: FromX} {\n\
+                 from_x n = case from_x n { Just x -> Just (Adt \"\" x); Nothing -> Nothing }\n\
+               }\n\
+               record P { x: Int }\n  deriving (FromX)\n\
+               fun go : Int -> Maybe P\n\
+               go n = from_x n";
+    check(src).unwrap();
+}
+
+#[test]
+fn phase3_routed_derive_from_direction_bare() {
+    let src = "trait FromX a { fun from_x : Int -> a }\n\
+               impl FromX for U1 { from_x _ = U1 }\n\
+               impl FromX for Int { from_x _ = 0 }\n\
+               impl FromX for String { from_x _ = \"\" }\n\
+               impl FromX for Leaf a where {a: FromX} { from_x n = Leaf (from_x n) }\n\
+               impl FromX for Labeled a where {a: FromX} { from_x n = Labeled \"\" (from_x n) }\n\
+               impl FromX for And l r where {l: FromX, r: FromX} {\n\
+                 from_x n = And (from_x n) (from_x n)\n\
+               }\n\
+               impl FromX for Variant a where {a: FromX} { from_x n = Variant \"\" (from_x n) }\n\
+               impl FromX for Record a where {a: FromX} { from_x n = Record \"\" (from_x n) }\n\
+               impl FromX for Adt a where {a: FromX} { from_x n = Adt \"\" (from_x n) }\n\
+               record P { x: Int }\n  deriving (FromX)\n\
+               fun go : Int -> P\n\
+               go n = from_x n";
+    check(src).unwrap();
+}
+
+#[test]
+fn phase3_routed_derive_from_direction_parameterized_record() {
+    let src = format!(
+        "{lib}\
+         record Box a {{ v: a }}\n  deriving (FromJson)\n\
+         fun go : String -> Result (Box Int) String\n\
+         go s = from_json s",
+        lib = phase3_fromjson_result_lib()
+    );
+    check(&src).unwrap();
+}
+
+#[test]
+fn phase3_routed_derive_from_direction_parameterized_adt() {
+    let src = format!(
+        "{lib}\
+         type Opt a = Some a | Nada\n  deriving (FromJson)\n\
+         fun go : String -> Result (Opt Int) String\n\
+         go s = from_json s",
+        lib = phase3_fromjson_result_lib()
+    );
+    check(&src).unwrap();
+}
+
+#[test]
+fn phase3_routed_derive_from_direction_recursive_adt() {
+    let src = format!(
+        "{lib}\
+         type IntList = INil | ICons Int IntList\n  deriving (FromJson)\n\
+         fun go : String -> Result IntList String\n\
+         go s = from_json s",
+        lib = phase3_fromjson_result_lib()
+    );
+    check(&src).unwrap();
+}
+
+#[test]
+fn phase3_routed_derive_from_direction_unsupported_wrapper() {
+    // Phase 7: structural wrappers (custom sums like MyResult) now succeed;
+    // the truly unsupported shape is one with `a` nested at a non-leaf
+    // position, e.g. `Yep (List a)`. That's what this test pins now.
+    let src = "type Wrapped a = Yep (List a) | Nope\n\
+               trait FromJson a { fun from_json : String -> Wrapped a }\n\
+               record Person { name: String, age: Int }\n  deriving (FromJson)\n";
+    let err = check(src).err().expect("expected error");
+    assert!(
+        err.message.contains("nested in a non-leaf") && err.message.contains("Wrapped"),
+        "expected nested-a diagnostic naming the wrapper; got: {}",
+        err.message
+    );
+}
+
+#[test]
+fn phase3_routed_derive_to_and_from_roundtrip() {
+    // Compile both ToJson and FromJson derives for the same record. This
+    // exercises the full both-directions story.
+    let src = format!(
+        "{tj}{fj}\
+         record Person {{ name: String, age: Int }}\n  deriving (Generic, ToJson, FromJson)\n\
+         fun roundtrip : Person -> Result Person String\n\
+         roundtrip p = from_json (to_json p)",
+        tj = phase3_tojson_lib(),
+        fj = phase3_fromjson_result_lib()
+    );
+    check(&src).unwrap();
+}
+
+// Multi-method routed deriving is supported as of Phase 6 — see
+// `phase6_routed_derive_multi_method_to_direction` and friends below.
+
+#[test]
+fn phase3_routed_derive_unknown_trait_diagnostic() {
+    // `Mystery` is not a trait in scope and not a hardcoded derive name.
+    let src = "import Std.Generic (Generic, U1, Leaf, Labeled, And, Or)\n\
+               record Person { name: String, age: Int }\n  deriving (Mystery)\n";
+    let err = check(src).err().expect("expected error");
+    assert!(
+        err.message.contains("not in scope") || err.message.contains("Mystery"),
+        "expected unknown-trait diagnostic; got: {}",
+        err.message
+    );
+}
+
+#[test]
+fn phase3_routed_derive_missing_field_instance_errors() {
+    // No `ToJson` instance for `Tag`. The synthesized delegating impl
+    // depends on the Rep building-block chain; this should surface as a
+    // constraint-resolution error rewritten to point at the user's
+    // deriving clause and name the user-facing trait + type.
+    let src = format!(
+        "import Std.Generic (Generic, U1, Leaf, Labeled, And, Or)\n\
+         {lib}\
+         type Tag = Tag\n\
+         record Foo {{ x: Int, t: Tag }}\n  deriving (ToJson)\n",
+        lib = phase3_tojson_lib()
+    );
+    let err = check(&src).err().expect("expected error");
+    let msg = &err.message;
+    assert!(
+        msg.contains("cannot derive `ToJson` for `Foo`"),
+        "expected user-facing trait+type in error; got: {msg}"
+    );
+    assert!(
+        msg.contains("Tag"),
+        "expected the missing-instance type `Tag` to be mentioned; got: {msg}"
+    );
+    assert!(
+        !msg.contains("Labeled") && !msg.contains("Leaf") && !msg.contains("And"),
+        "rewritten error should not mention building-block types; got: {msg}"
+    );
+}
+
+#[test]
+fn routed_derive_missing_field_instance_from_direction() {
+    // From-direction analogue: missing FromJson on a field type Tag should
+    // surface the rewritten error pointing at the user's deriving clause.
+    let src = format!(
+        "import Std.Generic (Generic, U1, Leaf, Labeled, And, Or)\n\
+         {lib}\
+         type Tag = Tag\n\
+         record Foo {{ x: Int, t: Tag }}\n  deriving (FromJson)\n",
+        lib = phase3_fromjson_result_lib()
+    );
+    let err = check(&src).err().expect("expected error");
+    let msg = &err.message;
+    assert!(
+        msg.contains("cannot derive `FromJson` for `Foo`"),
+        "expected user-facing trait+type in error; got: {msg}"
+    );
+    assert!(msg.contains("Tag"), "expected `Tag` mentioned; got: {msg}");
+}
+
+#[test]
+fn routed_derive_missing_variant_payload_instance_errors() {
+    // ADT containing a variant payload of a type without ToJson should
+    // also produce the rewritten diagnostic.
+    let src = format!(
+        "import Std.Generic (Generic, U1, Leaf, Labeled, And, Or)\n\
+         {lib}\
+         type Tag = Tag\n\
+         type Shape = Circle Int | Tagged Tag\n  deriving (ToJson)\n",
+        lib = phase3_tojson_lib()
+    );
+    let err = check(&src).err().expect("expected error");
+    let msg = &err.message;
+    assert!(
+        msg.contains("cannot derive `ToJson` for `Shape`"),
+        "expected user-facing trait+type in error; got: {msg}"
+    );
+    assert!(msg.contains("Tag"), "expected `Tag` mentioned; got: {msg}");
+}
+
+#[test]
+fn handwritten_impl_failure_uses_default_diagnostic() {
+    // A user-written `impl ToJson for Foo` body that calls `to_json` on a
+    // field of a type without an impl must still produce the *default*
+    // diagnostic shape — the rewrite is only meant for synthesized routed
+    // impls. Verifies the marker isn't accidentally applied to hand-written
+    // code.
+    let src = format!(
+        "import Std.Generic (Generic, U1, Leaf, Labeled, And, Or)\n\
+         {lib}\
+         type Tag = Tag\n\
+         record Foo {{ t: Tag }}\n\
+         impl ToJson for Foo {{ to_json f = to_json f.t }}\n",
+        lib = phase3_tojson_lib()
+    );
+    let err = check(&src).err().expect("expected error");
+    let msg = &err.message;
+    assert!(
+        msg.starts_with("no impl of ToJson for Tag"),
+        "expected default 'no impl' diagnostic shape; got: {msg}"
+    );
+    assert!(
+        !msg.contains("cannot derive"),
+        "rewrite must not fire for hand-written impls; got: {msg}"
+    );
+}
+
+// --- Phase 6: multi-method routed deriving -------------------------------
+
+/// Building-block ShowBoth library — two to-direction methods (`show` /
+/// `debug_repr`) sharing the same trait. The implementations are stubbed but
+/// distinct so we can confirm direction detection runs per method.
+fn phase6_showboth_lib() -> &'static str {
+    "trait ShowBoth a {\n  fun show_b : a -> String\n  fun debug_b : a -> String\n}\n\
+     impl ShowBoth for U1 { show_b _ = \"u1\"\n  debug_b _ = \"U1\" }\n\
+     impl ShowBoth for Int { show_b n = show n\n  debug_b n = show n }\n\
+     impl ShowBoth for String { show_b s = s\n  debug_b s = s }\n\
+     impl ShowBoth for Leaf a where {a: ShowBoth} {\n  show_b (Leaf x) = show_b x\n  debug_b (Leaf x) = debug_b x\n}\n\
+     impl ShowBoth for Labeled a where {a: ShowBoth} {\n  show_b (Labeled n x) = n <> \":\" <> show_b x\n  debug_b (Labeled n x) = n <> \"=\" <> debug_b x\n}\n\
+     impl ShowBoth for And l r where {l: ShowBoth, r: ShowBoth} {\n  show_b (And l r) = show_b l <> \",\" <> show_b r\n  debug_b (And l r) = debug_b l <> \" & \" <> debug_b r\n}\n\
+     impl ShowBoth for Or l r where {l: ShowBoth, r: ShowBoth} {\n  show_b o = case o { Or_Left l -> show_b l; Or_Right r -> show_b r }\n  debug_b o = case o { Or_Left l -> debug_b l; Or_Right r -> debug_b r }\n}\n\
+     impl ShowBoth for Variant a where {a: ShowBoth} {\n  show_b (Variant n x) = n <> \":\" <> show_b x\n  debug_b (Variant n x) = n <> \"=\" <> debug_b x\n}\n\
+     impl ShowBoth for Record a where {a: ShowBoth} {\n  show_b (Record _ inner) = show_b inner\n  debug_b (Record _ inner) = debug_b inner\n}\n\
+     impl ShowBoth for Adt a where {a: ShowBoth} {\n  show_b (Adt _ inner) = show_b inner\n  debug_b (Adt _ inner) = debug_b inner\n}\n"
+}
+
+#[test]
+fn phase6_routed_derive_multi_method_to_direction() {
+    let src = format!(
+        "{lib}\
+         record Person {{ name: String, age: Int }}\n  deriving (ShowBoth)\n\
+         fun go : Person -> String\n\
+         go p = show_b p <> \"|\" <> debug_b p",
+        lib = phase6_showboth_lib()
+    );
+    check(&src).unwrap();
+}
+
+/// Two from-direction methods sharing a trait, derived on an ADT.
+fn phase6_from_pair_lib() -> &'static str {
+    "trait FromPair a {\n  fun from_str : String -> Result a String\n  fun from_int : Int -> Result a String\n}\n\
+     impl FromPair for U1 { from_str _ = Ok U1\n  from_int _ = Ok U1 }\n\
+     impl FromPair for Int { from_str _ = Ok 0\n  from_int n = Ok n }\n\
+     impl FromPair for String { from_str s = Ok s\n  from_int _ = Ok \"\" }\n\
+     impl FromPair for Leaf a where {a: FromPair} {\n  from_str s = case from_str s { Ok x -> Ok (Leaf x); Err e -> Err e }\n  from_int n = case from_int n { Ok x -> Ok (Leaf x); Err e -> Err e }\n}\n\
+     impl FromPair for Labeled a where {a: FromPair} {\n  from_str s = case from_str s { Ok x -> Ok (Labeled \"\" x); Err e -> Err e }\n  from_int n = case from_int n { Ok x -> Ok (Labeled \"\" x); Err e -> Err e }\n}\n\
+     impl FromPair for And l r where {l: FromPair, r: FromPair} {\n  from_str s = case from_str s { Ok l -> case from_str s { Ok r -> Ok (And l r); Err e -> Err e }; Err e -> Err e }\n  from_int n = case from_int n { Ok l -> case from_int n { Ok r -> Ok (And l r); Err e -> Err e }; Err e -> Err e }\n}\n\
+     impl FromPair for Or l r where {l: FromPair, r: FromPair} {\n  from_str s = case from_str s { Ok l -> Ok (Or_Left l); Err _ -> case from_str s { Ok r -> Ok (Or_Right r); Err e -> Err e } }\n  from_int n = case from_int n { Ok l -> Ok (Or_Left l); Err _ -> case from_int n { Ok r -> Ok (Or_Right r); Err e -> Err e } }\n}\n\
+     impl FromPair for Variant a where {a: FromPair} {\n  from_str s = case from_str s { Ok x -> Ok (Variant \"\" x); Err e -> Err e }\n  from_int n = case from_int n { Ok x -> Ok (Variant \"\" x); Err e -> Err e }\n}\n\
+     impl FromPair for Record a where {a: FromPair} {\n  from_str s = case from_str s { Ok x -> Ok (Record \"\" x); Err e -> Err e }\n  from_int n = case from_int n { Ok x -> Ok (Record \"\" x); Err e -> Err e }\n}\n\
+     impl FromPair for Adt a where {a: FromPair} {\n  from_str s = case from_str s { Ok x -> Ok (Adt \"\" x); Err e -> Err e }\n  from_int n = case from_int n { Ok x -> Ok (Adt \"\" x); Err e -> Err e }\n}\n"
+}
+
+#[test]
+fn phase6_routed_derive_multi_method_from_direction() {
+    let src = format!(
+        "{lib}\
+         type Opt a = Some a | Nada\n  deriving (FromPair)\n\
+         fun go : String -> Result (Opt Int) String\n\
+         go s = from_str s\n\
+         fun go2 : Int -> Result (Opt Int) String\n\
+         go2 n = from_int n",
+        lib = phase6_from_pair_lib()
+    );
+    check(&src).unwrap();
+}
+
+/// The headline mixed-direction case: a unified codec trait with both an
+/// encode (to-direction) and decode (from-direction) method in the same
+/// trait. Bridge + delegating impls each carry both methods.
+fn phase6_jsoncodec_lib() -> &'static str {
+    "trait JsonCodec a {\n  fun encode : a -> String\n  fun decode : String -> Result a String\n}\n\
+     impl JsonCodec for U1 { encode _ = \"null\"\n  decode _ = Ok U1 }\n\
+     impl JsonCodec for Int { encode n = show n\n  decode _ = Ok 0 }\n\
+     impl JsonCodec for String { encode s = s\n  decode s = Ok s }\n\
+     impl JsonCodec for Leaf a where {a: JsonCodec} {\n  encode (Leaf x) = encode x\n  decode s = case decode s { Ok x -> Ok (Leaf x); Err e -> Err e }\n}\n\
+     impl JsonCodec for Labeled a where {a: JsonCodec} {\n  encode (Labeled n x) = n <> \":\" <> encode x\n  decode s = case decode s { Ok x -> Ok (Labeled \"\" x); Err e -> Err e }\n}\n\
+     impl JsonCodec for And l r where {l: JsonCodec, r: JsonCodec} {\n  encode (And l r) = encode l <> \",\" <> encode r\n  decode s = case decode s { Ok l -> case decode s { Ok r -> Ok (And l r); Err e -> Err e }; Err e -> Err e }\n}\n\
+     impl JsonCodec for Or l r where {l: JsonCodec, r: JsonCodec} {\n  encode o = case o { Or_Left l -> encode l; Or_Right r -> encode r }\n  decode s = case decode s { Ok l -> Ok (Or_Left l); Err _ -> case decode s { Ok r -> Ok (Or_Right r); Err e -> Err e } }\n}\n\
+     impl JsonCodec for Variant a where {a: JsonCodec} {\n  encode (Variant n x) = n <> \":\" <> encode x\n  decode s = case decode s { Ok x -> Ok (Variant \"\" x); Err e -> Err e }\n}\n\
+     impl JsonCodec for Record a where {a: JsonCodec} {\n  encode (Record _ inner) = encode inner\n  decode s = case decode s { Ok x -> Ok (Record \"\" x); Err e -> Err e }\n}\n\
+     impl JsonCodec for Adt a where {a: JsonCodec} {\n  encode (Adt _ inner) = encode inner\n  decode s = case decode s { Ok x -> Ok (Adt \"\" x); Err e -> Err e }\n}\n"
+}
+
+#[test]
+fn phase6_routed_derive_mixed_direction_codec() {
+    let src = format!(
+        "{lib}\
+         record Box a {{ v: a }}\n  deriving (JsonCodec)\n\
+         fun encode_box : Box Int -> String\n\
+         encode_box b = encode b\n\
+         fun decode_box : String -> Result (Box Int) String\n\
+         decode_box s = decode s\n\
+         fun roundtrip : Box Int -> Result (Box Int) String\n\
+         roundtrip b = decode (encode b)",
+        lib = phase6_jsoncodec_lib()
+    );
+    check(&src).unwrap();
+}
+
+#[test]
+fn phase6_routed_derive_mixed_includes_bad_method() {
+    // A trait that mixes a valid to-direction method with a `roundtrip` whose
+    // self-type appears on both sides — direction detection should reject the
+    // derive and name the offending method.
+    let src = "import Std.Generic (Generic, U1, Leaf, Labeled, And, Or)\n\
+               trait Bad a {\n  fun show_it : a -> String\n  fun roundtrip : a -> a\n}\n\
+               record Person { name: String, age: Int }\n  deriving (Bad)\n";
+    let err = check(src).err().expect("expected error");
+    assert!(
+        err.message.contains("roundtrip") && err.message.contains("both sides"),
+        "expected diagnostic naming `roundtrip` with both-sides reason; got: {}",
+        err.message
+    );
+}
+
+// --- Phase 6 follow-up: multi-parameter to-direction methods -------------
+
+/// Building-block Eq2-style library: an `eq2 : a -> a -> Bool` method
+/// exercising the two-a-param to-direction path.
+fn multi_param_eq_lib() -> &'static str {
+    "trait Eq2 a {\n  fun eq2 : a -> a -> Bool\n}\n\
+     impl Eq2 for U1 { eq2 _ _ = True }\n\
+     impl Eq2 for Int { eq2 a b = a == b }\n\
+     impl Eq2 for String { eq2 a b = a == b }\n\
+     impl Eq2 for Leaf a where {a: Eq2} {\n  eq2 (Leaf x) (Leaf y) = eq2 x y\n}\n\
+     impl Eq2 for Labeled a where {a: Eq2} {\n  eq2 (Labeled _ x) (Labeled _ y) = eq2 x y\n}\n\
+     impl Eq2 for And l r where {l: Eq2, r: Eq2} {\n  eq2 (And l1 r1) (And l2 r2) = if eq2 l1 l2 then eq2 r1 r2 else False\n}\n\
+     impl Eq2 for Or l r where {l: Eq2, r: Eq2} {\n  eq2 a b = case a {\n    Or_Left x -> case b { Or_Left y -> eq2 x y; Or_Right _ -> False }\n    Or_Right x -> case b { Or_Right y -> eq2 x y; Or_Left _ -> False }\n  }\n}\n\
+     impl Eq2 for Variant a where {a: Eq2} {\n  eq2 (Variant _ x) (Variant _ y) = eq2 x y\n}\n\
+     impl Eq2 for Record a where {a: Eq2} {\n  eq2 (Record _ x) (Record _ y) = eq2 x y\n}\n\
+     impl Eq2 for Adt a where {a: Eq2} {\n  eq2 (Adt _ x) (Adt _ y) = eq2 x y\n}\n"
+}
+
+#[test]
+fn phase6_routed_derive_multi_param_to_direction_record() {
+    let src = format!(
+        "{lib}\
+         record Person {{ name: String, age: Int }}\n  deriving (Eq2)\n\
+         fun go : Person -> Person -> Bool\n\
+         go a b = eq2 a b",
+        lib = multi_param_eq_lib()
+    );
+    check(&src).unwrap();
+}
+
+#[test]
+fn phase6_routed_derive_multi_param_to_direction_adt() {
+    let src = format!(
+        "{lib}\
+         type Shape = Circle Int | Square Int Int | Dot\n  deriving (Eq2)\n\
+         fun go : Shape -> Shape -> Bool\n\
+         go a b = eq2 a b",
+        lib = multi_param_eq_lib()
+    );
+    check(&src).unwrap();
+}
+
+#[test]
+fn phase6_routed_derive_multi_param_to_direction_parameterized() {
+    // Parameterized record exercises the where-app threading: each a-param
+    // is destructured/wrapped independently, and the impl's type param `a`
+    // requires its own Eq2 bound to flow through the Leaf instance.
+    let src = format!(
+        "{lib}\
+         record Box a {{ v: a }}\n  deriving (Eq2)\n\
+         fun go : Box Int -> Box Int -> Bool\n\
+         go a b = eq2 a b",
+        lib = multi_param_eq_lib()
+    );
+    check(&src).unwrap();
+}
+
+#[test]
+fn phase6_routed_derive_multi_param_with_non_a_param() {
+    // `encode : Config -> a -> String` — non-a first parameter, a-param
+    // second. The Config arg must pass through unchanged in both bridge and
+    // delegate; the a-param is the one that gets `to`-wrapped.
+    let src = "import Std.Generic (Generic, U1, Leaf, Labeled, And, Or, Variant, Record, Adt)\n\
+               type Config = LowercaseConfig | UppercaseConfig\n\
+               trait Encode a {\n  fun encode : Config -> a -> String\n}\n\
+               impl Encode for U1 { encode _ _ = \"u1\" }\n\
+               impl Encode for Int { encode _ n = show n }\n\
+               impl Encode for String { encode _ s = s }\n\
+               impl Encode for Leaf a where {a: Encode} { encode c (Leaf x) = encode c x }\n\
+               impl Encode for Labeled a where {a: Encode} { encode c (Labeled n x) = n <> \":\" <> encode c x }\n\
+               impl Encode for And l r where {l: Encode, r: Encode} { encode c (And l r) = encode c l <> \",\" <> encode c r }\n\
+               impl Encode for Or l r where {l: Encode, r: Encode} { encode c o = case o { Or_Left l -> encode c l; Or_Right r -> encode c r } }\n\
+               impl Encode for Variant a where {a: Encode} { encode c (Variant n x) = n <> \":\" <> encode c x }\n\
+               impl Encode for Record a where {a: Encode} { encode c (Record _ i) = encode c i }\n\
+               impl Encode for Adt a where {a: Encode} { encode c (Adt _ i) = encode c i }\n\
+               record Pt { x: Int, y: Int }\n  deriving (Encode)\n\
+               fun go : Config -> Pt -> String\n\
+               go c p = encode c p";
+    check(src).unwrap();
+}
+
+#[test]
+fn phase6_routed_derive_three_a_params() {
+    // Three a-params and a non-a return — fold3 : a -> a -> a -> String.
+    // All three get `to`-wrapped in the delegate and Rep__T-destructured in
+    // the bridge.
+    let src = "import Std.Generic (Generic, U1, Leaf, Labeled, And, Or, Variant, Record, Adt)\n\
+               trait Fold3 a {\n  fun fold3 : a -> a -> a -> String\n}\n\
+               impl Fold3 for U1 { fold3 _ _ _ = \"u1\" }\n\
+               impl Fold3 for Int { fold3 a b c = show a <> show b <> show c }\n\
+               impl Fold3 for String { fold3 a b c = a <> b <> c }\n\
+               impl Fold3 for Leaf a where {a: Fold3} { fold3 (Leaf x) (Leaf y) (Leaf z) = fold3 x y z }\n\
+               impl Fold3 for Labeled a where {a: Fold3} { fold3 (Labeled _ x) (Labeled _ y) (Labeled _ z) = fold3 x y z }\n\
+               impl Fold3 for And l r where {l: Fold3, r: Fold3} { fold3 (And l1 r1) (And l2 r2) (And l3 r3) = fold3 l1 l2 l3 <> fold3 r1 r2 r3 }\n\
+               impl Fold3 for Or l r where {l: Fold3, r: Fold3} { fold3 _ _ _ = \"or\" }\n\
+               impl Fold3 for Variant a where {a: Fold3} { fold3 (Variant _ x) (Variant _ y) (Variant _ z) = fold3 x y z }\n\
+               impl Fold3 for Record a where {a: Fold3} { fold3 (Record _ x) (Record _ y) (Record _ z) = fold3 x y z }\n\
+               impl Fold3 for Adt a where {a: Fold3} { fold3 (Adt _ x) (Adt _ y) (Adt _ z) = fold3 x y z }\n\
+               record Triple { a: Int, b: Int, c: Int }\n  deriving (Fold3)\n\
+               fun go : Triple -> Triple -> Triple -> String\n\
+               go x y z = fold3 x y z";
+    check(src).unwrap();
+}
+
+#[test]
+fn phase6_routed_derive_multi_param_from_direction() {
+    // `parse : Config -> String -> Result a String` — two input parameters,
+    // a appears only in the return. Both Config and String pass through
+    // unchanged to the recursive call; the wrap callback applies to the
+    // `Ok a` payload as usual.
+    let src = "import Std.Generic (Generic, U1, Leaf, Labeled, And, Or, Variant, Record, Adt)\n\
+               type Config = Strict | Lenient\n\
+               trait Parse a {\n  fun parse : Config -> String -> Result a String\n}\n\
+               impl Parse for U1 { parse _ _ = Ok U1 }\n\
+               impl Parse for Int { parse _ _ = Ok 0 }\n\
+               impl Parse for String { parse _ s = Ok s }\n\
+               impl Parse for Leaf a where {a: Parse} { parse c s = case parse c s { Ok x -> Ok (Leaf x); Err e -> Err e } }\n\
+               impl Parse for Labeled a where {a: Parse} { parse c s = case parse c s { Ok x -> Ok (Labeled \"\" x); Err e -> Err e } }\n\
+               impl Parse for And l r where {l: Parse, r: Parse} { parse c s = case parse c s { Ok l -> case parse c s { Ok r -> Ok (And l r); Err e -> Err e }; Err e -> Err e } }\n\
+               impl Parse for Or l r where {l: Parse, r: Parse} { parse c s = case parse c s { Ok l -> Ok (Or_Left l); Err _ -> case parse c s { Ok r -> Ok (Or_Right r); Err e -> Err e } } }\n\
+               impl Parse for Variant a where {a: Parse} { parse c s = case parse c s { Ok x -> Ok (Variant \"\" x); Err e -> Err e } }\n\
+               impl Parse for Record a where {a: Parse} { parse c s = case parse c s { Ok x -> Ok (Record \"\" x); Err e -> Err e } }\n\
+               impl Parse for Adt a where {a: Parse} { parse c s = case parse c s { Ok x -> Ok (Adt \"\" x); Err e -> Err e } }\n\
+               record Person { name: String, age: Int }\n  deriving (Parse)\n\
+               fun go : Config -> String -> Result Person String\n\
+               go c s = parse c s";
+    check(src).unwrap();
+}
+
+#[test]
+fn phase6_routed_derive_mixed_single_multi_method_trait() {
+    // A trait with a single-a method (`show_b : a -> String`), a multi-a
+    // method (`eq_b : a -> a -> Bool`), and a from-direction method
+    // (`from_b : String -> Result a String`). All should derive together.
+    let src = "import Std.Generic (Generic, U1, Leaf, Labeled, And, Or, Variant, Record, Adt)\n\
+               trait Mixed a {\n  fun show_b : a -> String\n  fun eq_b : a -> a -> Bool\n  fun from_b : String -> Result a String\n}\n\
+               impl Mixed for U1 { show_b _ = \"u1\"\n  eq_b _ _ = True\n  from_b _ = Ok U1 }\n\
+               impl Mixed for Int { show_b n = show n\n  eq_b a b = a == b\n  from_b _ = Ok 0 }\n\
+               impl Mixed for String { show_b s = s\n  eq_b a b = a == b\n  from_b s = Ok s }\n\
+               impl Mixed for Leaf a where {a: Mixed} { show_b (Leaf x) = show_b x\n  eq_b (Leaf x) (Leaf y) = eq_b x y\n  from_b s = case from_b s { Ok x -> Ok (Leaf x); Err e -> Err e } }\n\
+               impl Mixed for Labeled a where {a: Mixed} { show_b (Labeled n x) = n <> \":\" <> show_b x\n  eq_b (Labeled _ x) (Labeled _ y) = eq_b x y\n  from_b s = case from_b s { Ok x -> Ok (Labeled \"\" x); Err e -> Err e } }\n\
+               impl Mixed for And l r where {l: Mixed, r: Mixed} { show_b (And l r) = show_b l <> \",\" <> show_b r\n  eq_b (And l1 r1) (And l2 r2) = if eq_b l1 l2 then eq_b r1 r2 else False\n  from_b s = case from_b s { Ok l -> case from_b s { Ok r -> Ok (And l r); Err e -> Err e }; Err e -> Err e } }\n\
+               impl Mixed for Or l r where {l: Mixed, r: Mixed} { show_b o = case o { Or_Left l -> show_b l; Or_Right r -> show_b r }\n  eq_b _ _ = False\n  from_b s = case from_b s { Ok l -> Ok (Or_Left l); Err _ -> case from_b s { Ok r -> Ok (Or_Right r); Err e -> Err e } } }\n\
+               impl Mixed for Variant a where {a: Mixed} { show_b (Variant n x) = n <> \":\" <> show_b x\n  eq_b (Variant _ x) (Variant _ y) = eq_b x y\n  from_b s = case from_b s { Ok x -> Ok (Variant \"\" x); Err e -> Err e } }\n\
+               impl Mixed for Record a where {a: Mixed} { show_b (Record _ i) = show_b i\n  eq_b (Record _ x) (Record _ y) = eq_b x y\n  from_b s = case from_b s { Ok x -> Ok (Record \"\" x); Err e -> Err e } }\n\
+               impl Mixed for Adt a where {a: Mixed} { show_b (Adt _ i) = show_b i\n  eq_b (Adt _ x) (Adt _ y) = eq_b x y\n  from_b s = case from_b s { Ok x -> Ok (Adt \"\" x); Err e -> Err e } }\n\
+               record Person { name: String, age: Int }\n  deriving (Mixed)\n\
+               fun go : Person -> Person -> String\n\
+               go a b = show_b a <> \"|\" <> show_b b\n\
+               fun go2 : String -> Result Person String\n\
+               go2 s = from_b s";
+    check(src).unwrap();
+}
+
+// --- Phase 5: framing redesign (Record, Variant, Adt wrappers) -----------
+
+#[test]
+fn phase5_record_rep_uses_record_wrapper() {
+    // The synthesized Rep__Person must be addressable as `Record _`-shaped
+    // by library impls. A hand-written `ToJson for Record a` is sufficient
+    // to frame the output without per-type bridges doing it.
+    check(
+        "import Std.Generic (Generic, U1, Leaf, Labeled, And, Or, Record)\n\
+         record Person { name: String, age: Int }\n  deriving (Generic)\n\
+         trait ToJson a { fun to_json : a -> String }\n\
+         impl ToJson for U1 { to_json _ = \"null\" }\n\
+         impl ToJson for String { to_json s = s }\n\
+         impl ToJson for Int { to_json n = show n }\n\
+         impl ToJson for Leaf a where {a: ToJson} { to_json (Leaf x) = to_json x }\n\
+         impl ToJson for Labeled a where {a: ToJson} { to_json (Labeled n x) = n <> \":\" <> to_json x }\n\
+         impl ToJson for And l r where {l: ToJson, r: ToJson} { to_json (And l r) = to_json l <> \",\" <> to_json r }\n\
+         impl ToJson for Record a where {a: ToJson} { to_json (Record _ inner) = \"{\" <> to_json inner <> \"}\" }\n\
+         impl ToJson for Rep__Person { to_json (Rep__Person r) = to_json r }\n\
+         impl ToJson for Person where {Generic Person r, ToJson r} { to_json p = to_json (to p : Rep__Person) }",
+    )
+    .unwrap();
+}
+
+#[test]
+fn phase5_adt_rep_uses_adt_and_variant_wrappers() {
+    // The synthesized Rep__Shape wraps the Or-tree in `Adt "Shape"` and each
+    // constructor uses `Variant` (not `Labeled`), so library codecs can give
+    // distinct behaviour for record fields vs constructor names.
+    check(
+        "import Std.Generic (Generic, U1, Leaf, Labeled, And, Or, Variant, Adt)\n\
+         type Shape = Circle Float | Triangle\n  deriving (Generic)\n\
+         trait ToJson a { fun to_json : a -> String }\n\
+         impl ToJson for U1 { to_json _ = \"null\" }\n\
+         impl ToJson for Float { to_json n = show n }\n\
+         impl ToJson for Leaf a where {a: ToJson} { to_json (Leaf x) = to_json x }\n\
+         impl ToJson for Or l r where {l: ToJson, r: ToJson} { to_json o = case o { Or_Left l -> to_json l; Or_Right r -> to_json r } }\n\
+         impl ToJson for Variant a where {a: ToJson} { to_json (Variant n x) = \"{\\\"\" <> n <> \"\\\":\" <> to_json x <> \"}\" }\n\
+         impl ToJson for Adt a where {a: ToJson} { to_json (Adt _ inner) = to_json inner }\n\
+         impl ToJson for Rep__Shape { to_json (Rep__Shape r) = to_json r }\n\
+         impl ToJson for Shape where {Generic Shape r, ToJson r} { to_json s = to_json (to s : Rep__Shape) }",
+    )
+    .unwrap();
+}
+
+#[test]
+fn phase5_library_distinguishes_record_label_from_variant_name() {
+    // The headline test: the library produces different output for a
+    // record field's `Labeled` vs a constructor's `Variant`. Both are
+    // routed for the same trait, both have a string name, but the codec
+    // dispatch chooses different behavior based on the building-block
+    // identity.
+    let src = "import Std.Generic (Generic, U1, Leaf, Labeled, And, Or, Variant, Record, Adt)\n\
+               trait Tag a { fun tag : a -> String }\n\
+               impl Tag for U1 { tag _ = \"u1\" }\n\
+               impl Tag for Int { tag _ = \"int\" }\n\
+               impl Tag for Leaf a where {a: Tag} { tag (Leaf x) = tag x }\n\
+               impl Tag for Labeled a where {a: Tag} { tag (Labeled n x) = \"field<\" <> n <> \">:\" <> tag x }\n\
+               impl Tag for Variant a where {a: Tag} { tag (Variant n x) = \"ctor<\" <> n <> \">:\" <> tag x }\n\
+               impl Tag for And l r where {l: Tag, r: Tag} { tag (And l r) = tag l <> \",\" <> tag r }\n\
+               impl Tag for Or l r where {l: Tag, r: Tag} { tag o = case o { Or_Left l -> tag l; Or_Right r -> tag r } }\n\
+               impl Tag for Record a where {a: Tag} { tag (Record _ i) = \"R{\" <> tag i <> \"}\" }\n\
+               impl Tag for Adt a where {a: Tag} { tag (Adt _ i) = \"A{\" <> tag i <> \"}\" }\n\
+               record Pair { x: Int }\n  deriving (Generic, Tag)\n\
+               type Wrap = W Int\n  deriving (Generic, Tag)\n\
+               fun go : Pair -> Wrap -> String\n\
+               go p w = tag p <> \"|\" <> tag w";
+    check(src).unwrap();
+}
+
+// --- Phase 7: structural from-direction wrappers -------------------
+
+#[test]
+fn phase7_custom_three_state_wrapper_succeeds() {
+    // Headline: a library-defined `DbResult a` with three variants —
+    // `DbOk a` (a-position), `DbErr DbError` (passthrough), `DbNoRows`
+    // (no fields) — is now a valid from-direction wrapper. The synthesizer
+    // walks DbResult's variants structurally instead of hardcoding the
+    // accepted shapes.
+    let src = "type DbError = NotConnected | Timeout\n\
+               type DbResult a = DbOk a | DbErr DbError | DbNoRows\n\
+               trait Decode a { fun decode : String -> DbResult a }\n\
+               impl Decode for U1     { decode _ = DbOk U1 }\n\
+               impl Decode for Int    { decode _ = DbOk 0 }\n\
+               impl Decode for String { decode s = DbOk s }\n\
+               impl Decode for Leaf a where {a: Decode} {\n\
+                 decode s = case decode s {\n\
+                   DbOk x -> DbOk (Leaf x)\n\
+                   DbErr e -> DbErr e\n\
+                   DbNoRows -> DbNoRows\n\
+                 }\n\
+               }\n\
+               impl Decode for Labeled a where {a: Decode} {\n\
+                 decode s = case decode s {\n\
+                   DbOk x -> DbOk (Labeled \"\" x)\n\
+                   DbErr e -> DbErr e\n\
+                   DbNoRows -> DbNoRows\n\
+                 }\n\
+               }\n\
+               impl Decode for And l r where {l: Decode, r: Decode} {\n\
+                 decode s = case decode s {\n\
+                   DbOk l -> case decode s {\n\
+                     DbOk r -> DbOk (And l r)\n\
+                     DbErr e -> DbErr e\n\
+                     DbNoRows -> DbNoRows\n\
+                   }\n\
+                   DbErr e -> DbErr e\n\
+                   DbNoRows -> DbNoRows\n\
+                 }\n\
+               }\n\
+               impl Decode for Or l r where {l: Decode, r: Decode} {\n\
+                 decode s = case decode s {\n\
+                   DbOk l -> DbOk (Or_Left l)\n\
+                   DbErr e -> DbErr e\n\
+                   DbNoRows -> DbNoRows\n\
+                 }\n\
+               }\n\
+               impl Decode for Variant a where {a: Decode} {\n\
+                 decode s = case decode s {\n\
+                   DbOk x -> DbOk (Variant \"\" x)\n\
+                   DbErr e -> DbErr e\n\
+                   DbNoRows -> DbNoRows\n\
+                 }\n\
+               }\n\
+               impl Decode for Record a where {a: Decode} {\n\
+                 decode s = case decode s {\n\
+                   DbOk x -> DbOk (Record \"\" x)\n\
+                   DbErr e -> DbErr e\n\
+                   DbNoRows -> DbNoRows\n\
+                 }\n\
+               }\n\
+               impl Decode for Adt a where {a: Decode} {\n\
+                 decode s = case decode s {\n\
+                   DbOk x -> DbOk (Adt \"\" x)\n\
+                   DbErr e -> DbErr e\n\
+                   DbNoRows -> DbNoRows\n\
+                 }\n\
+               }\n\
+               record Person { name: String, age: Int }\n  deriving (Decode)\n\
+               fun go : String -> DbResult Person\n\
+               go s = decode s\n";
+    check(src).unwrap();
+}
+
+#[test]
+fn phase7_validated_two_param_wrapper_succeeds() {
+    // `Validated e a = Valid a | Invalid (List e)`: only position 1 binds
+    // to the trait's self, so wrapper_self_params = {"a"}. Valid's field
+    // is `Var("a")` → a-position. Invalid's field is `List e` — contains
+    // `e` not `a`, so passthrough. Multi-param wrappers work via positional
+    // alignment.
+    let src = "type Validated e a = Valid a | Invalid (List e)\n\
+               trait FromCsv a { fun from_csv : String -> Validated String a }\n\
+               impl FromCsv for U1     { from_csv _ = Valid U1 }\n\
+               impl FromCsv for Int    { from_csv _ = Valid 0 }\n\
+               impl FromCsv for String { from_csv s = Valid s }\n\
+               impl FromCsv for Leaf a where {a: FromCsv} {\n\
+                 from_csv s = case from_csv s {\n\
+                   Valid x -> Valid (Leaf x)\n\
+                   Invalid es -> Invalid es\n\
+                 }\n\
+               }\n\
+               impl FromCsv for Labeled a where {a: FromCsv} {\n\
+                 from_csv s = case from_csv s {\n\
+                   Valid x -> Valid (Labeled \"\" x)\n\
+                   Invalid es -> Invalid es\n\
+                 }\n\
+               }\n\
+               impl FromCsv for And l r where {l: FromCsv, r: FromCsv} {\n\
+                 from_csv s = case from_csv s {\n\
+                   Valid l -> case from_csv s {\n\
+                     Valid r -> Valid (And l r)\n\
+                     Invalid es -> Invalid es\n\
+                   }\n\
+                   Invalid es -> Invalid es\n\
+                 }\n\
+               }\n\
+               impl FromCsv for Or l r where {l: FromCsv, r: FromCsv} {\n\
+                 from_csv s = case from_csv s {\n\
+                   Valid l -> Valid (Or_Left l)\n\
+                   Invalid es -> Invalid es\n\
+                 }\n\
+               }\n\
+               impl FromCsv for Variant a where {a: FromCsv} {\n\
+                 from_csv s = case from_csv s {\n\
+                   Valid x -> Valid (Variant \"\" x)\n\
+                   Invalid es -> Invalid es\n\
+                 }\n\
+               }\n\
+               impl FromCsv for Record a where {a: FromCsv} {\n\
+                 from_csv s = case from_csv s {\n\
+                   Valid x -> Valid (Record \"\" x)\n\
+                   Invalid es -> Invalid es\n\
+                 }\n\
+               }\n\
+               impl FromCsv for Adt a where {a: FromCsv} {\n\
+                 from_csv s = case from_csv s {\n\
+                   Valid x -> Valid (Adt \"\" x)\n\
+                   Invalid es -> Invalid es\n\
+                 }\n\
+               }\n\
+               record Row { id: Int, label: String }\n  deriving (FromCsv)\n\
+               fun go : String -> Validated String Row\n\
+               go s = from_csv s\n";
+    check(src).unwrap();
+}
+
+#[test]
+fn phase7_record_wrapper_succeeds() {
+    // `record Boxed a { value: a, meta: String }` — a product wrapper.
+    // Single `Boxed { value, meta } -> Boxed { value: wrap(value), meta }`
+    // case arm. Verifies the FromShape::Record path.
+    let src = "record Boxed a { value: a, meta: String }\n\
+               trait Decode a { fun decode : String -> Boxed a }\n\
+               impl Decode for U1     { decode _ = Boxed { value: U1, meta: \"\" } }\n\
+               impl Decode for Int    { decode _ = Boxed { value: 0, meta: \"\" } }\n\
+               impl Decode for String { decode s = Boxed { value: s, meta: \"\" } }\n\
+               impl Decode for Leaf a where {a: Decode} {\n\
+                 decode s = case decode s {\n\
+                   Boxed { value, meta } -> Boxed { value: Leaf value, meta: meta }\n\
+                 }\n\
+               }\n\
+               impl Decode for Labeled a where {a: Decode} {\n\
+                 decode s = case decode s {\n\
+                   Boxed { value, meta } -> Boxed { value: Labeled \"\" value, meta: meta }\n\
+                 }\n\
+               }\n\
+               impl Decode for And l r where {l: Decode, r: Decode} {\n\
+                 decode s = case decode s {\n\
+                   Boxed { value, meta } -> case decode s {\n\
+                     Boxed { value: v2, meta: _ } -> Boxed { value: And value v2, meta: meta }\n\
+                   }\n\
+                 }\n\
+               }\n\
+               impl Decode for Or l r where {l: Decode, r: Decode} {\n\
+                 decode s = case decode s {\n\
+                   Boxed { value, meta } -> Boxed { value: Or_Left value, meta: meta }\n\
+                 }\n\
+               }\n\
+               impl Decode for Variant a where {a: Decode} {\n\
+                 decode s = case decode s {\n\
+                   Boxed { value, meta } -> Boxed { value: Variant \"\" value, meta: meta }\n\
+                 }\n\
+               }\n\
+               impl Decode for Record a where {a: Decode} {\n\
+                 decode s = case decode s {\n\
+                   Boxed { value, meta } -> Boxed { value: Record \"\" value, meta: meta }\n\
+                 }\n\
+               }\n\
+               impl Decode for Adt a where {a: Decode} {\n\
+                 decode s = case decode s {\n\
+                   Boxed { value, meta } -> Boxed { value: Adt \"\" value, meta: meta }\n\
+                 }\n\
+               }\n\
+               record Person { name: String }\n  deriving (Decode)\n\
+               fun go : String -> Boxed Person\n\
+               go s = decode s\n";
+    check(src).unwrap();
+}
+
+#[test]
+fn phase7_phantom_param_wrapper_succeeds() {
+    // `type Tagged tag a = Tag a` — `tag` is phantom (declared but unused
+    // in the variant's fields). Only `a` should be the a-position. Phase 7
+    // doesn't care about phantom params; it just walks fields and matches
+    // their TypeExpr against the wrapper_self_params set.
+    let src = "type Tagged tag a = Tag a\n\
+               trait FromTag a { fun from_tag : String -> Tagged Int a }\n\
+               impl FromTag for U1     { from_tag _ = Tag U1 }\n\
+               impl FromTag for Int    { from_tag _ = Tag 0 }\n\
+               impl FromTag for String { from_tag s = Tag s }\n\
+               impl FromTag for Leaf a where {a: FromTag} {\n\
+                 from_tag s = case from_tag s { Tag x -> Tag (Leaf x) }\n\
+               }\n\
+               impl FromTag for Labeled a where {a: FromTag} {\n\
+                 from_tag s = case from_tag s { Tag x -> Tag (Labeled \"\" x) }\n\
+               }\n\
+               impl FromTag for And l r where {l: FromTag, r: FromTag} {\n\
+                 from_tag s = case from_tag s {\n\
+                   Tag l -> case from_tag s { Tag r -> Tag (And l r) }\n\
+                 }\n\
+               }\n\
+               impl FromTag for Or l r where {l: FromTag, r: FromTag} {\n\
+                 from_tag s = case from_tag s { Tag x -> Tag (Or_Left x) }\n\
+               }\n\
+               impl FromTag for Variant a where {a: FromTag} {\n\
+                 from_tag s = case from_tag s { Tag x -> Tag (Variant \"\" x) }\n\
+               }\n\
+               impl FromTag for Record a where {a: FromTag} {\n\
+                 from_tag s = case from_tag s { Tag x -> Tag (Record \"\" x) }\n\
+               }\n\
+               impl FromTag for Adt a where {a: FromTag} {\n\
+                 from_tag s = case from_tag s { Tag x -> Tag (Adt \"\" x) }\n\
+               }\n\
+               record Person { id: Int }\n  deriving (FromTag)\n";
+    check(src).unwrap();
+}
+
+#[test]
+fn phase7_opaque_wrapper_diagnostic() {
+    // Wrapper used in the trait method's return is not defined in the
+    // current module or imports — clear diagnostic, names the wrapper.
+    let src = "trait FromX a { fun from_x : String -> NotDefined a }\n\
+               record Person { name: String }\n  deriving (FromX)\n";
+    let err = check(src).err().expect("expected error");
+    assert!(
+        err.message.contains("NotDefined") && err.message.contains("not defined"),
+        "expected opaque-wrapper diagnostic naming the wrapper; got: {}",
+        err.message
+    );
+}
+
+#[test]
+fn phase7_no_a_position_diagnostic() {
+    // Wrapper takes `a` but doesn't actually carry it in any field.
+    let src = "type Hide a = Hide String\n\
+               trait FromHide a { fun from_hide : String -> Hide a }\n\
+               record Person { name: String }\n  deriving (FromHide)\n";
+    let err = check(src).err().expect("expected error");
+    assert!(
+        err.message.contains("Hide") && err.message.contains("self type"),
+        "expected no-a-position diagnostic; got: {}",
+        err.message
+    );
+}
+
+#[test]
+fn phase7_either_multi_a_succeeds() {
+    // `Either a a` (degenerate but legal). Both wrapper-local params bind
+    // to self, so wrapper_self_params = {"l", "r"}. Both arms get `wrap`.
+    let src = "type Either l r = Left l | Right r\n\
+               trait FromE a { fun from_e : String -> Either a a }\n\
+               impl FromE for U1     { from_e _ = Left U1 }\n\
+               impl FromE for Int    { from_e _ = Left 0 }\n\
+               impl FromE for String { from_e s = Left s }\n\
+               impl FromE for Leaf a where {a: FromE} {\n\
+                 from_e s = case from_e s {\n\
+                   Left x -> Left (Leaf x)\n\
+                   Right x -> Right (Leaf x)\n\
+                 }\n\
+               }\n\
+               impl FromE for Labeled a where {a: FromE} {\n\
+                 from_e s = case from_e s {\n\
+                   Left x -> Left (Labeled \"\" x)\n\
+                   Right x -> Right (Labeled \"\" x)\n\
+                 }\n\
+               }\n\
+               impl FromE for And l r where {l: FromE, r: FromE} {\n\
+                 from_e s = case from_e s {\n\
+                   Left l -> case from_e s {\n\
+                     Left r -> Left (And l r)\n\
+                     Right r -> Right (And l r)\n\
+                   }\n\
+                   Right l -> case from_e s {\n\
+                     Left r -> Left (And l r)\n\
+                     Right r -> Right (And l r)\n\
+                   }\n\
+                 }\n\
+               }\n\
+               impl FromE for Or l r where {l: FromE, r: FromE} {\n\
+                 from_e s = case from_e s {\n\
+                   Left x -> Left (Or_Left x)\n\
+                   Right x -> Right (Or_Left x)\n\
+                 }\n\
+               }\n\
+               impl FromE for Variant a where {a: FromE} {\n\
+                 from_e s = case from_e s {\n\
+                   Left x -> Left (Variant \"\" x)\n\
+                   Right x -> Right (Variant \"\" x)\n\
+                 }\n\
+               }\n\
+               impl FromE for Record a where {a: FromE} {\n\
+                 from_e s = case from_e s {\n\
+                   Left x -> Left (Record \"\" x)\n\
+                   Right x -> Right (Record \"\" x)\n\
+                 }\n\
+               }\n\
+               impl FromE for Adt a where {a: FromE} {\n\
+                 from_e s = case from_e s {\n\
+                   Left x -> Left (Adt \"\" x)\n\
+                   Right x -> Right (Adt \"\" x)\n\
+                 }\n\
+               }\n\
+               record Person { name: String }\n  deriving (FromE)\n";
+    check(src).unwrap();
+}
+
+#[test]
+fn trait_default_body_fires_when_method_omitted() {
+    let src = "trait Greet a {\n\
+                 fun greet_with : String -> a -> String\n\
+                 fun greet : a -> String\n\
+                 greet x = greet_with \"hello\" x\n\
+               }\n\
+               record Person { name: String }\n\
+               impl Greet for Person {\n\
+                 greet_with prefix p = prefix\n\
+               }\n\
+               let p = Person { name: \"alice\" }\n\
+               let msg = greet p\n";
+    check(src).unwrap();
+}
+
+#[test]
+fn trait_default_body_explicit_override_wins() {
+    let src = "trait Greet a {\n\
+                 fun greet_with : String -> a -> String\n\
+                 fun greet : a -> String\n\
+                 greet x = greet_with \"hello\" x\n\
+               }\n\
+               record Person { name: String }\n\
+               impl Greet for Person {\n\
+                 greet_with prefix p = prefix\n\
+                 greet p = \"override\"\n\
+               }\n\
+               let p = Person { name: \"alice\" }\n\
+               let msg = greet p\n";
+    check(src).unwrap();
+}
+
+#[test]
+fn trait_default_body_missing_required_method_still_errors() {
+    let src = "trait Greet a {\n\
+                 fun greet_with : String -> a -> String\n\
+                 fun greet : a -> String\n\
+                 greet x = greet_with \"hello\" x\n\
+               }\n\
+               record Person { name: String }\n\
+               impl Greet for Person {\n\
+               }\n";
+    let err = match check(src) {
+        Err(e) => e,
+        Ok(_) => panic!("expected error, but check succeeded"),
+    };
+    assert!(
+        err.message.contains("missing method 'greet_with'"),
+        "unexpected error: {}",
+        err.message
+    );
+}
+
+#[test]
+fn trait_with_multiple_defaults() {
+    let src = "trait MultiDef a {\n\
+                 fun root : a -> Int\n\
+                 fun double : a -> Int\n\
+                 double x = root x + root x\n\
+                 fun triple : a -> Int\n\
+                 triple x = root x + double x\n\
+               }\n\
+               record N { v: Int }\n\
+               impl MultiDef for N {\n\
+                 root n = 1\n\
+               }\n\
+               let v = triple (N { v: 0 })\n";
+    check(src).unwrap();
+}
+
+#[test]
+fn trait_default_body_with_routed_derive() {
+    // Headline Option B: a trait with a routed required method + a defaulted
+    // convenience wrapper. The synthesizer skips the defaulted method; impl-
+    // checking inherits it. Calling either method should typecheck.
+    let src = "trait Greet a {\n\
+                 fun greet_with : String -> a -> String\n\
+                 fun greet : a -> String\n\
+                 greet x = greet_with \"hi\" x\n\
+               }\n\
+               impl Greet for U1 {\n\
+                 greet_with prefix _ = prefix\n\
+               }\n\
+               impl Greet for Leaf a where {a: Greet} {\n\
+                 greet_with prefix (Leaf x) = greet_with prefix x\n\
+               }\n\
+               impl Greet for Labeled a where {a: Greet} {\n\
+                 greet_with prefix (Labeled name x) = greet_with prefix x\n\
+               }\n\
+               impl Greet for Variant a where {a: Greet} {\n\
+                 greet_with prefix (Variant name x) = greet_with prefix x\n\
+               }\n\
+               impl Greet for Record a where {a: Greet} {\n\
+                 greet_with prefix (Record name x) = greet_with prefix x\n\
+               }\n\
+               impl Greet for Adt a where {a: Greet} {\n\
+                 greet_with prefix (Adt name x) = greet_with prefix x\n\
+               }\n\
+               impl Greet for And l r where {l: Greet, r: Greet} {\n\
+                 greet_with prefix (And l r) = greet_with prefix l\n\
+               }\n\
+               impl Greet for Or l r where {l: Greet, r: Greet} {\n\
+                 greet_with prefix v = prefix\n\
+               }\n\
+               impl Greet for String { greet_with prefix s = prefix }\n\
+               record Person { name: String }\n\
+                 deriving (Greet)\n\
+               let p = Person { name: \"alice\" }\n\
+               let a = greet_with \"hi\" p\n\
+               let b = greet p\n";
+    check(src).unwrap();
+}
+
+#[test]
+fn trait_default_body_parameterized_impl() {
+    let src = "trait Wrap a {\n\
+                 fun unwrap : a -> Int\n\
+                 fun describe : a -> Int\n\
+                 describe x = unwrap x + 1\n\
+               }\n\
+               record Box a { value: a }\n\
+               impl Wrap for Box a where {a: Wrap} {\n\
+                 unwrap (Box { value: v }) = unwrap v\n\
+               }\n\
+               impl Wrap for Int { unwrap n = n }\n\
+               let n = describe (Box { value: Box { value: 5 } })\n";
+    check(src).unwrap();
+}
+
+#[test]
+fn trait_default_body_cross_module() {
+    let lib = "module DefLib\n\
+               pub trait Greet a {\n\
+               fun greet_with : String -> a -> String\n\
+               fun greet : a -> String\n\
+               greet x = greet_with \"hi\" x\n\
+               }\n";
+    let main = "import DefLib (Greet)\n\
+                record Person { name: String }\n\
+                impl Greet for Person {\n\
+                  greet_with prefix p = prefix\n\
+                }\n\
+                let msg = greet (Person { name: \"alice\" })\n";
+    check_with_project_files(&[("lib/DefLib.saga", lib)], main).unwrap();
+}
+
+#[test]
+fn trait_default_body_with_where_constraint() {
+    // The defaulted method's signature carries an extra constraint that the
+    // default body must rely on (here implicitly through trait dispatch).
+    let src = "trait Pretty a where {a: Show} {\n\
+                 fun pretty_with : String -> a -> String\n\
+                 fun pretty : a -> String\n\
+                 pretty x = pretty_with \"-> \" x\n\
+               }\n\
+               impl Pretty for Int {\n\
+                 pretty_with p n = p <> show n\n\
+               }\n\
+               let s = pretty 42\n";
+    check(src).unwrap();
 }

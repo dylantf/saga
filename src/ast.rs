@@ -57,6 +57,21 @@ pub struct ImplMethod {
     pub body: Expr,
 }
 
+/// Marker attached to `Decl::ImplDef` instances synthesized by `derive_routed`.
+/// Lets the typechecker rewrite constraint-failure diagnostics to point at the
+/// user's `deriving (...)` clause and name the user-facing trait + type, rather
+/// than mentioning building-block types from the synthesized impl's body.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RoutedDeriveInfo {
+    /// Trait the user requested (bare name).
+    pub trait_name: String,
+    /// User-facing target type the derive was attached to.
+    pub target_type: String,
+    /// Span of the original type/record declaration carrying the `deriving`
+    /// clause. Used as the diagnostic's anchor.
+    pub deriving_span: Span,
+}
+
 /// Strip trivia annotations, returning plain declarations.
 /// Transfers `Trivia::DocComment` items into each decl's `doc` field.
 pub fn strip_annotations(annotated: AnnotatedProgram) -> Program {
@@ -303,8 +318,19 @@ pub enum Decl {
         target_type_span: Span,
         type_params: Vec<String>,
         where_clause: Vec<TraitBound>,
+        /// Bare trait-application constraints, e.g. `Generic Person r` in
+        /// `impl ToJson for Person where {Generic Person r, ToJson r}`.
+        /// See [TraitApp] for semantics.
+        where_apps: Vec<TraitApp>,
         needs: Vec<EffectRef>,
         methods: Vec<Annotated<ImplMethod>>,
+        /// `Some` when this impl was synthesized by `derive_routed` (either the
+        /// bridge or the delegating impl for a routed derive). Used by the
+        /// typechecker to rewrite constraint-failure diagnostics so they point
+        /// at the user's `deriving (...)` clause and name the user's type and
+        /// trait, instead of mentioning building-block types like `Labeled`
+        /// or `And` from the synthesized impl body.
+        routed_derive_info: Option<RoutedDeriveInfo>,
         /// Comments before the closing `}` with no following sibling
         dangling_trivia: Vec<Trivia>,
         span: Span,
@@ -939,6 +965,17 @@ impl TypeExpr {
             _ => panic!("simple_name called on compound TypeExpr"),
         }
     }
+
+    /// Extract the head name of a type expression: the constructor name at
+    /// the head of an `App` chain, or the bare name of a `Named`/`Var`.
+    /// Returns None for arrows, records, labeled.
+    pub fn head_name(&self) -> Option<&str> {
+        match self {
+            TypeExpr::Named { name, .. } | TypeExpr::Var { name, .. } => Some(name),
+            TypeExpr::App { func, .. } => func.head_name(),
+            _ => None,
+        }
+    }
 }
 
 /// PartialEq compares structure only, ignoring spans (same as Expr).
@@ -1133,6 +1170,20 @@ pub struct TraitBound {
     pub traits: Vec<TraitRef>,
 }
 
+/// Bare trait-application constraint: `Generic Person r` in a `where` clause.
+/// Unlike `TraitBound`, the self/first parameter is just `type_args[0]`, so
+/// any position may hold a concrete type or a fresh existential type variable
+/// (one not in the surrounding `type_params`). The solver resolves the fresh
+/// vars using the coherence rule of [Phase 1b]: for functional traits like
+/// `Generic`, the bound first parameter determines the rest.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TraitApp {
+    pub id: NodeId,
+    pub trait_name: String,
+    pub type_args: Vec<TypeExpr>,
+    pub span: Span,
+}
+
 /// A reference to a trait in a where clause or similar context.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TraitRef {
@@ -1248,4 +1299,17 @@ pub struct TraitMethod {
     pub params: Vec<(String, TypeExpr)>,
     pub return_type: TypeExpr,
     pub span: Span,
+    /// Optional default body. When present, impls that omit this method
+    /// inherit it via clone-with-fresh-NodeIds in `register_impl`.
+    pub default_body: Option<TraitDefaultBody>,
+}
+
+/// Default body for a trait method. Syntactically the same shape as an
+/// `ImplMethod`'s `params`/`body` pair. Cloned into impls that don't provide
+/// the method explicitly.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TraitDefaultBody {
+    pub params: Vec<Pat>,
+    pub body: Expr,
+    pub name_span: Span,
 }

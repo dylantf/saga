@@ -101,10 +101,15 @@ impl Elaborator {
         self.resolution.type_ref(id).unwrap_or(source).to_string()
     }
 
-    /// Resolve trait type args via the resolution map.
+    /// Resolve trait type args via the resolution map. For App heads (e.g.
+    /// `Rep__Box a`), uses the head name — only the head identifies the impl
+    /// for dict-name purposes.
     fn resolved_trait_type_args(&self, args: &[crate::ast::TypeExpr]) -> Vec<String> {
         args.iter()
-            .map(|te| self.resolved_type_name(te.id(), te.simple_name()))
+            .map(|te| {
+                let head = te.head_name().unwrap_or("");
+                self.resolved_type_name(te.id(), head)
+            })
             .collect()
     }
 
@@ -1488,12 +1493,9 @@ impl Elaborator {
     /// method-name lookup can return the wrong trait when the same bare
     /// name appears in multiple imported traits.
     ///
-    /// Falls back to the legacy name-keyed + evidence path for nodes the
-    /// resolver didn't decorate (e.g. synthesized AST during derive
-    /// expansion).
     fn resolve_trait_method(
         &self,
-        name: &str,
+        _name: &str,
         node_id: crate::ast::NodeId,
     ) -> Option<(String, usize)> {
         if let Some(resolved) = self.resolution.trait_method(node_id)
@@ -1501,14 +1503,6 @@ impl Elaborator {
             && let Some(idx) = info.methods.iter().position(|m| m.name == resolved.method)
         {
             return Some((resolved.trait_name.clone(), idx));
-        }
-        let evidence_list = self.evidence_by_node.get(&node_id)?;
-        for ev in evidence_list {
-            if let Some((trait_name, method_index)) = self.trait_methods.get(name)
-                && *trait_name == ev.trait_name
-            {
-                return Some((trait_name.clone(), *method_index));
-            }
         }
         None
     }

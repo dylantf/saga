@@ -342,7 +342,16 @@ impl Checker {
                     ));
                 }
 
-                let scheme = self.generalize(&ty);
+                // Unify with the pre-bound fresh var (see pre_bind_functions)
+                // so any forward references from impl method bodies pin to
+                // the same type variable as the val's inferred RHS.
+                if let Some(prebound) = self.env.get(name).cloned()
+                    && let Type::Var(_) = prebound.ty
+                {
+                    self.unify_at(&prebound.ty, &ty, *span)?;
+                }
+                let resolved_ty = self.sub.apply(&ty);
+                let scheme = self.generalize(&resolved_ty);
                 self.env.insert_with_def(name.clone(), scheme, *id);
                 self.lsp.node_spans.insert(*id, *name_span);
                 Ok(())
@@ -750,7 +759,11 @@ impl Checker {
         Ok((annotations, annotation_constraints))
     }
 
-    /// Pass 5: Pre-bind all function names with fresh vars (enables mutual recursion).
+    /// Pass 5: Pre-bind all function and val names with fresh vars.
+    /// For functions, this enables mutual recursion. For vals, this lets
+    /// trait/impl method bodies (checked in Pass 6) reference top-level vals
+    /// declared anywhere in the module — without pre-binding, vals are only
+    /// processed in the main pass, after impls are typechecked.
     fn pre_bind_functions(
         &mut self,
         program: &[Decl],
@@ -758,6 +771,30 @@ impl Checker {
     ) -> HashMap<String, Type> {
         let mut fun_vars: HashMap<String, Type> = HashMap::new();
         for decl in program {
+            if let Decl::Val {
+                id,
+                name,
+                name_span,
+                ..
+            } = decl
+            {
+                if self.env.get(name).is_some() {
+                    continue;
+                }
+                let var = self.fresh_var();
+                fun_vars.insert(name.clone(), var.clone());
+                self.env.insert_with_def(
+                    name.clone(),
+                    Scheme {
+                        forall: vec![],
+                        constraints: vec![],
+                        ty: var,
+                    },
+                    *id,
+                );
+                self.lsp.node_spans.insert(*id, *name_span);
+                continue;
+            }
             if let Decl::FunBinding {
                 id,
                 name,
@@ -816,8 +853,10 @@ impl Checker {
                 target_type_span,
                 type_params,
                 where_clause,
+                where_apps,
                 needs,
                 methods,
+                routed_derive_info,
                 span,
                 ..
             } = decl
@@ -833,21 +872,39 @@ impl Checker {
                     self.record_effect_ref(eff);
                 }
                 let plain_methods: Vec<_> = methods.iter().map(|a| a.node.clone()).collect();
-                let resolved_trait_type_args: Vec<String> = trait_type_args
-                    .iter()
-                    .map(|te| self.resolved_type_name(te.id(), te.simple_name()))
-                    .collect();
-                if let Err(e) = self.register_impl(
+                // Snapshot pending-constraint length before this impl's body
+                // is checked. Anything added during the call belongs to this
+                // impl; if it's a synthesized routed-derive impl, tag those
+                // new constraints with the marker so failure diagnostics can
+                // point back at the user's deriving clause.
+                let before = self.trait_state.pending_constraints.len();
+                let result = self.register_impl(
                     *id,
                     trait_name,
-                    &resolved_trait_type_args,
+                    trait_type_args,
                     target_type,
                     type_params,
                     where_clause,
+                    where_apps,
                     needs,
                     &plain_methods,
                     *span,
-                ) {
+                );
+                if let Some(info) = routed_derive_info {
+                    let added: Vec<crate::ast::NodeId> = self
+                        .trait_state
+                        .pending_constraints
+                        .iter()
+                        .skip(before)
+                        .map(|(_, _, _, _, nid)| *nid)
+                        .collect();
+                    for nid in added {
+                        self.trait_state
+                            .routed_constraint_origins
+                            .insert(nid, info.clone());
+                    }
+                }
+                if let Err(e) = result {
                     errors.push(e);
                 }
             }
@@ -1618,6 +1675,10 @@ impl Checker {
         let forall: Vec<u32> = param_vars.iter().map(|(_, id)| *id).collect();
 
         for variant in variants {
+            let canonical_ctor = match &self.current_module {
+                Some(module) => format!("{}.{}", module, variant.name),
+                None => variant.name.clone(),
+            };
             let ctor_ty = if variant.fields.is_empty() {
                 result_type.clone()
             } else {
@@ -1630,14 +1691,19 @@ impl Checker {
                 ty
             };
 
-            self.constructors.insert(
-                variant.name.clone(),
-                Scheme {
-                    forall: forall.clone(),
-                    constraints: vec![],
-                    ty: ctor_ty,
-                },
-            );
+            let scheme = Scheme {
+                forall: forall.clone(),
+                constraints: vec![],
+                ty: ctor_ty,
+            };
+            self.constructors
+                .insert(canonical_ctor.clone(), scheme.clone());
+            // Keep the source-bare entry for module export collection and
+            // pre-resolve local metadata; use-site lookup resolves to canonical.
+            self.constructors.insert(variant.name.clone(), scheme);
+            self.lsp
+                .constructor_def_ids
+                .insert(canonical_ctor.clone(), variant.id);
             self.lsp
                 .constructor_def_ids
                 .insert(variant.name.clone(), variant.id);
@@ -1648,7 +1714,13 @@ impl Checker {
             canonical_name.clone(),
             variants
                 .iter()
-                .map(|v| (v.name.clone(), v.fields.len()))
+                .map(|v| {
+                    let canonical_ctor = match &self.current_module {
+                        Some(module) => format!("{}.{}", module, v.name),
+                        None => v.name.clone(),
+                    };
+                    (canonical_ctor, v.fields.len())
+                })
                 .collect(),
         );
 
@@ -1704,14 +1776,17 @@ impl Checker {
         for (_, field_ty) in field_types.iter().rev() {
             ctor_ty = Type::arrow(field_ty.clone(), ctor_ty);
         }
-        self.constructors.insert(
-            name.into(),
-            Scheme {
-                forall: forall.clone(),
-                constraints: vec![],
-                ty: ctor_ty,
-            },
-        );
+        let scheme = Scheme {
+            forall: forall.clone(),
+            constraints: vec![],
+            ty: ctor_ty,
+        };
+        self.constructors
+            .insert(canonical_name.clone(), scheme.clone());
+        self.constructors.insert(name.into(), scheme);
+        self.lsp
+            .constructor_def_ids
+            .insert(canonical_name.clone(), def_id);
         self.lsp.constructor_def_ids.insert(name.into(), def_id);
 
         let num_fields = field_types.len();
@@ -1723,8 +1798,10 @@ impl Checker {
             },
         );
         // Register as a single-constructor ADT for exhaustiveness checking
-        self.adt_variants
-            .insert(canonical_name.clone(), vec![(name.into(), num_fields)]);
+        self.adt_variants.insert(
+            canonical_name.clone(),
+            vec![(canonical_name.clone(), num_fields)],
+        );
         self.type_arity.insert(canonical_name, type_params.len());
         Ok(())
     }
@@ -2324,17 +2401,52 @@ impl Checker {
             }
         }
 
-        // Process constraints in a loop since conditional impls may push new ones
+        // Process constraints in a loop since conditional impls may push new ones.
+        // Within each batch, sort so that constraints whose self-type already
+        // resolves to a concrete Type::Con are processed first. Constraints
+        // whose self is still a Var depend on prior constraints to pin them
+        // (e.g. `ToJson r` waits on `Generic T r`), and erroring on them
+        // before the pinning constraint runs produces spurious "ambiguous"
+        // diagnostics.
         loop {
-            let constraints = std::mem::take(&mut self.trait_state.pending_constraints);
+            let mut constraints = std::mem::take(&mut self.trait_state.pending_constraints);
             if constraints.is_empty() {
                 break;
             }
+            constraints.sort_by_key(|(_, _, ty, _, _)| matches!(self.sub.apply(ty), Type::Var(_)));
             for (trait_name, trait_type_arg_types, ty, span, node_id) in constraints {
                 let resolved = self.sub.apply(&ty);
                 if matches!(resolved, Type::Error) {
                     continue;
                 }
+                // If this constraint originated inside a synthesized routed-
+                // derive impl, the eventual failure should be rewritten to
+                // point at the user's deriving clause and name the user-facing
+                // trait + target type instead of building-block types from the
+                // synthesized body.
+                let routed_origin = self
+                    .trait_state
+                    .routed_constraint_origins
+                    .get(&node_id)
+                    .cloned();
+                let rewrite_diag = |default_msg: String, default_span: Span| -> Diagnostic {
+                    match &routed_origin {
+                        Some(info) => Diagnostic::error_at(
+                            info.deriving_span,
+                            format!(
+                                "cannot derive `{}` for `{}`: missing required instance ({}). \
+                                 Make sure all field types implement `{}`, or also derive \
+                                 `{}` on them.",
+                                info.trait_name,
+                                info.target_type,
+                                default_msg,
+                                info.trait_name,
+                                info.trait_name,
+                            ),
+                        ),
+                        None => Diagnostic::error_at(default_span, default_msg),
+                    }
+                };
                 // Resolve trait type args to concrete type names for impl lookup
                 let resolved_trait_type_args: Vec<String> = trait_type_arg_types
                     .iter()
@@ -2348,12 +2460,13 @@ impl Checker {
                     .collect();
                 match &resolved {
                     // Concrete type (includes primitives): check that an impl exists.
-                    // Try canonical form first, then resolve through scope_map.
+                    // Trait names must already be canonicalized by the resolver/checker
+                    // boundary; do not fall back to bare final segments here.
                     Type::Con(type_name, args) => {
                         let resolved_trait = self
                             .resolve_trait_name(&trait_name)
                             .unwrap_or_else(|| trait_name.clone());
-                        let impl_info = self
+                        let mut impl_info = self
                             .trait_state
                             .impls
                             .get(&(
@@ -2361,20 +2474,58 @@ impl Checker {
                                 resolved_trait_type_args.clone(),
                                 type_name.clone(),
                             ))
-                            .or_else(|| {
-                                // Fallback: try bare trait name for builtin impls (Num, Eq, Show for Tuple, etc.)
-                                let bare =
-                                    resolved_trait.rsplit('.').next().unwrap_or(&resolved_trait);
-                                if bare != resolved_trait {
-                                    self.trait_state.impls.get(&(
-                                        bare.to_string(),
-                                        resolved_trait_type_args.clone(),
-                                        type_name.clone(),
-                                    ))
-                                } else {
-                                    None
+                            .cloned();
+
+                        // Functional-trait coherence fallback: if extras are
+                        // unresolved (and direct lookup missed), scan for the
+                        // unique impl with the matching self-type and pin the
+                        // extras to its stored args. The trait info table
+                        // marks Generic-like traits as functional.
+                        if impl_info.is_none()
+                            && resolved_trait_type_args.len() != trait_type_arg_types.len()
+                            && self
+                                .trait_state
+                                .traits
+                                .get(&resolved_trait)
+                                .map(|ti| ti.is_functional)
+                                .unwrap_or(false)
+                        {
+                            let matches: Vec<super::ImplInfo> = self
+                                .trait_state
+                                .impls
+                                .iter()
+                                .filter(|((tn, _, tt), _)| tn == &resolved_trait && tt == type_name)
+                                .map(|(_, info)| info.clone())
+                                .collect();
+                            if matches.len() == 1 {
+                                let info = &matches[0];
+                                // Substitute the impl's type-param vars with
+                                // the call-site target's concrete arg types,
+                                // so a parameterized impl like
+                                // `impl Generic (Box a) (Rep__Box a)` produces
+                                // `Rep__Box Int` when the call site is `Box Int`.
+                                let mut sub: std::collections::HashMap<u32, Type> = info
+                                    .target_type_param_ids
+                                    .iter()
+                                    .zip(args.iter())
+                                    .map(|(id, t)| (*id, t.clone()))
+                                    .collect();
+                                let pinned: Vec<Type> = info
+                                    .trait_type_args
+                                    .iter()
+                                    .map(|t| super::Checker::replace_vars(t, &sub))
+                                    .collect();
+                                let _ = &mut sub;
+                                for (var_ty, pinned_ty) in
+                                    trait_type_arg_types.iter().zip(pinned.iter())
+                                {
+                                    let _ = self.unify(var_ty, pinned_ty);
                                 }
-                            });
+                                impl_info = Some(info.clone());
+                            }
+                        }
+
+                        let impl_info = impl_info.as_ref();
                         match impl_info {
                             None => {
                                 // Check if this might be caused by a user function
@@ -2411,12 +2562,12 @@ impl Checker {
                                 }
                                 let display_trait =
                                     resolved_trait.rsplit('.').next().unwrap_or(&resolved_trait);
-                                return Err(Diagnostic::error_at(
-                                    span,
+                                return Err(rewrite_diag(
                                     format!(
                                         "no impl of {} for {}{}",
                                         display_trait, type_name, hint
                                     ),
+                                    span,
                                 ));
                             }
                             Some(info) => {
@@ -2469,12 +2620,12 @@ impl Checker {
                             .is_some_and(|b| b.contains(&trait_name));
                         if !covered {
                             let display = trait_name.rsplit('.').next().unwrap_or(&trait_name);
-                            return Err(Diagnostic::error_at(
-                                span,
+                            return Err(rewrite_diag(
                                 format!(
                                     "ambiguous type variable requires {}. Add a type annotation to pin the unconstrained type variable",
                                     display
                                 ),
+                                span,
                             ));
                         }
                         // Record evidence for polymorphic passthrough
@@ -2489,16 +2640,16 @@ impl Checker {
                     }
                     Type::Fun(_, _, _) => {
                         let display = trait_name.rsplit('.').next().unwrap_or(&trait_name);
-                        return Err(Diagnostic::error_at(
-                            span,
+                        return Err(rewrite_diag(
                             format!("no impl of {} for function type", display),
+                            span,
                         ));
                     }
                     Type::Record(_) => {
                         let display = trait_name.rsplit('.').next().unwrap_or(&trait_name);
-                        return Err(Diagnostic::error_at(
-                            span,
+                        return Err(rewrite_diag(
                             format!("no impl of {} for anonymous record type", display),
+                            span,
                         ));
                     }
                     // Error/Never type: skip trait checking

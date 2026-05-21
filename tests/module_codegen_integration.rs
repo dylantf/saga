@@ -114,6 +114,13 @@ fn typecheck_source(source: &str, checker: &mut typechecker::Checker) -> Vec<sag
     let mut program = parser::Parser::new(tokens)
         .parse_program()
         .expect("parse error");
+    let imported = saga::derive::collect_imported_decls(&program, checker.module_map());
+    let derive_errors = saga::derive::expand_derives(&mut program, &imported);
+    assert!(
+        derive_errors.is_empty(),
+        "derive errors: {:?}",
+        derive_errors
+    );
     saga::desugar::desugar_program(&mut program);
     // Set current_module from the module declaration, matching the real pipeline
     if let Some(module_name) = program.iter().find_map(|d| {
@@ -152,7 +159,7 @@ fn make_project_checker_for_root(root: PathBuf) -> typechecker::Checker {
     let mut prelude_program = parser::Parser::new(prelude_tokens)
         .parse_program()
         .expect("prelude parse error");
-    saga::derive::expand_derives(&mut prelude_program);
+    saga::derive::expand_derives(&mut prelude_program, &saga::derive::ImportedDecls::empty());
     saga::desugar::desugar_program(&mut prelude_program);
     checker.prelude_imports = prelude_program
         .iter()
@@ -2635,4 +2642,60 @@ main () = Lib.greet "world"
         out.contains("call 'lib':'greet'") || out.contains("'lib', 'greet'"),
         "expected canonical 'lib':'greet' reference in output:\n{out}"
     );
+}
+
+/// Phase 6.5: a routed-derivable trait (here `ToJson`) shipped in a library
+/// module can be derived on a user record in another module. Before Phase
+/// 6.5, expand_derives only saw trait defs in the current program and
+/// emitted "trait `X` is not in scope". This test pins the cross-module
+/// path end-to-end: parse + derive-expand + typecheck + codegen + erlc.
+#[test]
+fn cross_module_routed_derive_compiles_and_lowers() {
+    let lib = r#"module JsonLib
+
+pub trait ToJson a {
+  fun to_json : a -> String
+}
+
+impl ToJson for U1            { to_json _ = "null" }
+impl ToJson for Int           { to_json n = show n }
+impl ToJson for String        { to_json s = "\"" <> s <> "\"" }
+impl ToJson for Leaf a    where {a: ToJson} { to_json (Leaf x) = to_json x }
+impl ToJson for Labeled a where {a: ToJson} {
+  to_json (Labeled name x) = "\"" <> name <> "\":" <> to_json x
+}
+impl ToJson for And l r   where {l: ToJson, r: ToJson} {
+  to_json (And l r) = to_json l <> "," <> to_json r
+}
+impl ToJson for Or l r    where {l: ToJson, r: ToJson} {
+  to_json o = case o {
+    Or_Left l -> to_json l
+    Or_Right r -> to_json r
+  }
+}
+impl ToJson for Variant a where {a: ToJson} { to_json (Variant _ p) = to_json p }
+impl ToJson for Record a  where {a: ToJson} {
+  to_json (Record _ inner) = "{" <> to_json inner <> "}"
+}
+impl ToJson for Adt a     where {a: ToJson} { to_json (Adt _ inner) = to_json inner }
+"#;
+
+    let main = r#"module Main
+import JsonLib (ToJson)
+
+record User { name: String, age: Int }
+  deriving (ToJson)
+
+main () = println (to_json (User { name: "Alice", age: 30 })) with {console}
+"#;
+    let out = with_temp_project_files(&[("lib/JsonLib.saga", lib)], main, |checker, program| {
+        emit_from_program(program, "main", checker)
+    });
+    // The delegating impl threads through Generic's `to`; the synthesized
+    // body shows up as a chain of dict-method calls in the lowered output.
+    assert!(
+        out.contains("'main':'main'") || out.contains("module 'main'"),
+        "expected Main module in lowered output:\n{out}"
+    );
+    assert_erlc_compiles(&out, "main");
 }

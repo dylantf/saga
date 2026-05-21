@@ -1,0 +1,84 @@
+# Phase 6 follow-up: multi-parameter to-direction methods can be routed.
+#
+# An Eq2-style trait with `eq2 : a -> a -> Bool` derives end-to-end. Both
+# parameters are a-typed, so the synthesized bridge impl destructures
+# `Rep__T` from each, and the delegating impl wraps each parameter with
+# `to`. This mirrors how `Eq` / `Ord` / `Distance` style traits work.
+
+trait Eq2 a {
+  fun eq2 : a -> a -> Bool
+}
+
+impl Eq2 for U1 {
+  eq2 _ _ = True
+}
+
+impl Eq2 for Int {
+  eq2 a b = a == b
+}
+
+impl Eq2 for String {
+  eq2 a b = a == b
+}
+
+impl Eq2 for Leaf a where {a: Eq2} {
+  eq2 (Leaf x) (Leaf y) = eq2 x y
+}
+
+impl Eq2 for Labeled a where {a: Eq2} {
+  eq2 (Labeled _ x) (Labeled _ y) = eq2 x y
+}
+
+impl Eq2 for And l r where {l: Eq2, r: Eq2} {
+  eq2 (And l1 r1) (And l2 r2) = if eq2 l1 l2 then eq2 r1 r2 else False
+}
+
+impl Eq2 for Or l r where {l: Eq2, r: Eq2} {
+  eq2 a b = case a {
+    Or_Left x -> case b {
+      Or_Left y -> eq2 x y
+      Or_Right _ -> False
+    }
+    Or_Right x -> case b {
+      Or_Right y -> eq2 x y
+      Or_Left _ -> False
+    }
+  }
+}
+
+impl Eq2 for Variant a where {a: Eq2} {
+  eq2 (Variant _ x) (Variant _ y) = eq2 x y
+}
+
+impl Eq2 for Record a where {a: Eq2} {
+  eq2 (Record _ x) (Record _ y) = eq2 x y
+}
+
+impl Eq2 for Adt a where {a: Eq2} {
+  eq2 (Adt _ x) (Adt _ y) = eq2 x y
+}
+
+# Multi-param to-direction derive on a record.
+record Person { name: String, age: Int } deriving (Eq2)
+
+# Same on an ADT.
+type Shape =
+  | Circle Int
+  | Square Int Int
+  | Dot
+  deriving (Eq2)
+
+main () = {
+  let alice = Person { name: "Alice", age: 30 }
+  let alice2 = Person { name: "Alice", age: 30 }
+  let bob = Person { name: "Bob", age: 25 }
+  dbg (eq2 alice alice2)
+  dbg (eq2 alice bob)
+
+  dbg (eq2 (Circle 3) (Circle 3))
+  dbg (eq2 (Circle 3) (Circle 4))
+  dbg (eq2 (Square 1 2) (Square 1 2))
+  dbg (eq2 (Square 1 2) (Square 2 1))
+  dbg (eq2 Dot Dot)
+  dbg (eq2 (Circle 1) (Square 1 1))
+}

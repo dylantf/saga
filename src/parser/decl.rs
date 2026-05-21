@@ -397,7 +397,15 @@ impl Parser {
             self.parse_annotated_signature(SignatureSite::TopLevel, &name)?;
 
         // Parse optional `where {a: Show + Eq, b: Ord}`
-        let where_clause = self.parse_where_clause()?;
+        let (where_clause, where_apps) = self.parse_where_clause()?;
+        if !where_apps.is_empty() {
+            return Err(ParseError {
+                message:
+                    "bare trait-application where clauses are only allowed on `impl` declarations"
+                        .to_string(),
+                span: where_apps[0].span,
+            });
+        }
 
         let end = self.tokens[self.pos - 1].span;
         Ok(Decl::FunSignature {
@@ -586,7 +594,15 @@ impl Parser {
             self.expect(Token::RBrace)?;
         }
 
-        let where_clause = self.parse_where_clause()?;
+        let (where_clause, where_apps) = self.parse_where_clause()?;
+        if !where_apps.is_empty() {
+            return Err(ParseError {
+                message:
+                    "bare trait-application where clauses are only allowed on `impl` declarations"
+                        .to_string(),
+                span: where_apps[0].span,
+            });
+        }
 
         self.expect(Token::LBrace)?;
 
@@ -805,7 +821,31 @@ impl Parser {
             self.expect(Token::Colon)?;
             let (params, return_type, _effects, _effect_row_var) =
                 self.parse_annotated_signature(SignatureSite::TraitMethod, &method_name)?;
-            let method_end = self.tokens[self.pos - 1].span;
+            let mut method_end = self.tokens[self.pos - 1].span;
+
+            // Optional default body: `methodname <pat>... = <expr>` immediately
+            // following the signature. Cloned into impls that don't provide
+            // this method explicitly (see register_impl).
+            let default_body = if let Token::Ident(next) = self.peek()
+                && next == &method_name
+            {
+                let name_span = self.tokens[self.pos].span;
+                self.advance(); // consume the method name
+                let mut params: Vec<crate::ast::Pat> = Vec::new();
+                while !matches!(self.peek(), Token::Eq | Token::Eof) {
+                    params.push(self.parse_pattern()?);
+                }
+                self.expect(Token::Eq)?;
+                let body = self.parse_expr(0)?;
+                method_end = self.tokens[self.pos - 1].span;
+                Some(crate::ast::TraitDefaultBody {
+                    params,
+                    body,
+                    name_span,
+                })
+            } else {
+                None
+            };
 
             let trailing_comment = self.take_trailing_comment(self.pos - 1);
             methods.push(Annotated {
@@ -815,6 +855,7 @@ impl Parser {
                     params,
                     return_type,
                     span: method_start.to(method_end),
+                    default_body,
                 },
                 leading_trivia: self.take_leading_trivia(start_pos),
                 trailing_comment,
@@ -840,20 +881,51 @@ impl Parser {
         })
     }
 
-    /// Parse `where {a: Show + Eq, b: Ord}` clause, returns empty vec if no `where` keyword
-    fn parse_where_clause(&mut self) -> Result<Vec<crate::ast::TraitBound>, ParseError> {
+    /// Parse `where {a: Show + Eq, b: Ord}` clause and/or new-form
+    /// `where {Generic Person r}` entries. Returns the two lists separately:
+    /// existing-form `TraitBound`s and new-form `TraitApp`s. Empty vecs if no
+    /// `where` keyword.
+    fn parse_where_clause(
+        &mut self,
+    ) -> Result<(Vec<crate::ast::TraitBound>, Vec<crate::ast::TraitApp>), ParseError> {
         if *self.peek() != Token::Where {
-            return Ok(Vec::new());
+            return Ok((Vec::new(), Vec::new()));
         }
         self.advance();
         self.expect(Token::LBrace)?;
         let mut bounds = Vec::new();
+        let mut apps: Vec<crate::ast::TraitApp> = Vec::new();
+        let mut first = true;
         while *self.peek() != Token::RBrace {
-            if !bounds.is_empty() {
+            if !first {
                 self.expect(Token::Comma)?;
                 if *self.peek() == Token::RBrace {
                     break;
                 }
+            }
+            first = false;
+            // New form: `TraitName arg1 arg2 ...` — leading uppercase identifier.
+            // Each arg is an atom: bare name, type var, or parenthesized
+            // type expression (e.g. `(Box a)` for parameterized targets).
+            if let Token::UpperIdent(_) = self.peek() {
+                let start_span = self.tokens[self.pos].span;
+                let trait_name = self.parse_upper_name()?;
+                let mut type_args = Vec::new();
+                while matches!(
+                    self.peek(),
+                    Token::Ident(_) | Token::UpperIdent(_) | Token::LParen
+                ) && !matches!(self.peek(), Token::Comma | Token::RBrace)
+                {
+                    type_args.push(self.parse_type_atom()?);
+                }
+                let end_span = self.tokens[self.pos.saturating_sub(1)].span;
+                apps.push(crate::ast::TraitApp {
+                    id: NodeId::fresh(),
+                    trait_name,
+                    type_args,
+                    span: start_span.to(end_span),
+                });
+                continue;
             }
             let type_var = self.expect_ident()?;
             self.expect(Token::Colon)?;
@@ -931,7 +1003,7 @@ impl Parser {
             bounds.push(crate::ast::TraitBound { type_var, traits });
         }
         self.expect(Token::RBrace)?;
-        Ok(bounds)
+        Ok((bounds, apps))
     }
 
     fn parse_impl_def(&mut self) -> Result<Decl, ParseError> {
@@ -978,7 +1050,7 @@ impl Parser {
             type_params.push(self.expect_ident()?);
         }
 
-        let where_clause = self.parse_where_clause()?;
+        let (where_clause, where_apps) = self.parse_where_clause()?;
 
         let mut needs = Vec::new();
         if matches!(self.peek(), Token::Needs) {
@@ -1037,8 +1109,10 @@ impl Parser {
             target_type_span,
             type_params,
             where_clause,
+            where_apps,
             needs,
             methods,
+            routed_derive_info: None,
             dangling_trivia,
             span: start.to(end),
         })

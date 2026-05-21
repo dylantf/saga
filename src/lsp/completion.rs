@@ -85,10 +85,11 @@ fn resolve_record_fields(
 
     // 2. Check per-span types (local let bindings, pattern bindings, params).
     for (span, ty) in &result.type_at_span {
-        if span.end <= source.len() && &source[span.start..span.end] == receiver {
-            if let Some(fields) = extract_record_fields(result, ty) {
-                return Some(fields);
-            }
+        if span.end <= source.len()
+            && &source[span.start..span.end] == receiver
+            && let Some(fields) = extract_record_fields(result, ty)
+        {
+            return Some(fields);
         }
     }
 
@@ -97,10 +98,9 @@ fn resolve_record_fields(
         if let Some(span) = result.node_spans.get(node_id)
             && span.end <= source.len()
             && &source[span.start..span.end] == receiver
+            && let Some(fields) = extract_record_fields(result, ty)
         {
-            if let Some(fields) = extract_record_fields(result, ty) {
-                return Some(fields);
-            }
+            return Some(fields);
         }
     }
 
