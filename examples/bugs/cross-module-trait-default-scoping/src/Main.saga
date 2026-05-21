@@ -1,0 +1,45 @@
+# Repro: a trait's default-method body references an identifier defined
+# alongside the trait in `Lib`. When a *downstream* module writes an
+# `impl` for that trait and the impl's body calls the defaulted method
+# on another type, the default body is re-resolved against the
+# downstream module's scope — where the referenced identifier
+# (`default_cfg` here) does not exist.
+#
+# Expected behavior: `act (Pair { a: 1, b: 2 })` prints
+# "default:(default:1,default:2)" — the default body in Lib uses Lib's
+# `default_cfg` everywhere it appears.
+#
+# Actual behavior:
+#   Type error at src/Main.saga:N:N: undefined variable: default_cfg
+# (Error location is misleading — it can point at a comment line. The
+# true cause is the bare `act p.a` / `act p.b` calls inside the impl
+# body below, which re-instantiate the default body against Main.)
+#
+# Same trait shape as saga/examples/99k-generic-derived-defaults.saga,
+# which compiles fine because the trait, the val, and the call site
+# are all in one module.
+#
+# Note: invoking the defaulted method from `main ()` directly
+# (`act 7`) works in isolation. The bug needs the call site to be
+# inside a downstream-module `impl` body for the same trait.
+#
+# Workaround: split the convenience wrapper out of the trait into a
+# free function next to it —
+#   pub fun act : a -> String where {a: Act}
+#   act x = act_with default_cfg x
+# Free-function bodies resolve identifiers against their defining
+# module, so cross-module call sites work.
+module Main
+
+import Std.IO (console)
+import Lib as L (Act)
+
+record Pair { a: Int, b: Int }
+
+impl L.Act for Pair {
+  act_with c p = c.tag <> ":(" <> act p.a <> "," <> act p.b <> ")"
+}
+
+main () = {
+  println (act (Pair { a: 1, b: 2 }))
+} with console

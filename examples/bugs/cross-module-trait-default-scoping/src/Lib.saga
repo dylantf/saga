@@ -1,0 +1,24 @@
+module Lib
+
+#@ A trait with a two-method shape. `act_with` takes a config value;
+#@ `act` is a convenience wrapper with a default body that forwards
+#@ through a module-local `default_cfg`.
+#@
+#@ The same pattern compiles fine in a single-file program (see
+#@ saga/examples/99k-generic-derived-defaults.saga), but here `default_cfg`
+#@ is defined in `Lib` and `act` is called from `Main`. The compiler
+#@ reports `undefined variable: default_cfg` against Main's source.
+
+pub record Cfg { tag: String }
+
+pub val default_cfg = Cfg { tag: "default" }
+
+pub trait Act a {
+  fun act_with : Cfg -> a -> String
+  fun act : a -> String
+  act x = act_with default_cfg x
+}
+
+impl Act for Int {
+  act_with c n = c.tag <> ":" <> show n
+}

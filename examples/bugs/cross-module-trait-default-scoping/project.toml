@@ -1,0 +1,12 @@
+[project]
+name = "cross-module-trait-default-scoping"
+
+[bin]
+main = "src/Main.saga"
+
+# [library]
+# module = "CrossModuleTraitDefaultScoping"
+# expose = []
+
+# [deps]
+# some-lib = { path = "../some-lib" }

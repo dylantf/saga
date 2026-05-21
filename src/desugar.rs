@@ -963,6 +963,307 @@ fn freshen_handler_body_ids(body: &mut HandlerBody) {
     }
 }
 
+/// Overwrite every span in `expr` (and its children) with `target`.
+///
+/// Used when an AST subtree is cloned across module boundaries — e.g. a
+/// trait's default-method body is cloned into a downstream impl. The
+/// original spans point at byte offsets in the trait's source file, but
+/// diagnostics are rendered against the downstream module's source, which
+/// would put underlines on unrelated bytes (often inside comments). After
+/// retargeting, errors will at least point at the impl site in the correct
+/// file.
+pub fn retarget_expr_spans(expr: &mut Expr, target: Span) {
+    expr.span = target;
+    match &mut expr.kind {
+        ExprKind::Lit { .. }
+        | ExprKind::Var { .. }
+        | ExprKind::Constructor { .. }
+        | ExprKind::QualifiedName { .. }
+        | ExprKind::DictMethodAccess { .. }
+        | ExprKind::DictRef { .. } => {}
+
+        ExprKind::App { func, arg } => {
+            retarget_expr_spans(func, target);
+            retarget_expr_spans(arg, target);
+        }
+        ExprKind::BinOp { left, right, .. } => {
+            retarget_expr_spans(left, target);
+            retarget_expr_spans(right, target);
+        }
+        ExprKind::UnaryMinus { expr: inner } => retarget_expr_spans(inner, target),
+        ExprKind::If {
+            cond,
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            retarget_expr_spans(cond, target);
+            retarget_expr_spans(then_branch, target);
+            retarget_expr_spans(else_branch, target);
+        }
+        ExprKind::Case {
+            scrutinee, arms, ..
+        } => {
+            retarget_expr_spans(scrutinee, target);
+            for ann_arm in arms {
+                retarget_pat_spans(&mut ann_arm.node.pattern, target);
+                if let Some(g) = &mut ann_arm.node.guard {
+                    retarget_expr_spans(g, target);
+                }
+                retarget_expr_spans(&mut ann_arm.node.body, target);
+            }
+        }
+        ExprKind::Block { stmts, .. } => {
+            for ann_stmt in stmts {
+                retarget_stmt_spans(&mut ann_stmt.node, target);
+            }
+        }
+        ExprKind::Lambda { params, body } => {
+            for p in params {
+                retarget_pat_spans(p, target);
+            }
+            retarget_expr_spans(body, target);
+        }
+        ExprKind::FieldAccess { expr: inner, .. } => retarget_expr_spans(inner, target),
+        ExprKind::RecordCreate { fields, .. } | ExprKind::AnonRecordCreate { fields, .. } => {
+            for (_, _, val) in fields {
+                retarget_expr_spans(val, target);
+            }
+        }
+        ExprKind::RecordUpdate { record, fields, .. } => {
+            retarget_expr_spans(record, target);
+            for (_, _, val) in fields {
+                retarget_expr_spans(val, target);
+            }
+        }
+        ExprKind::EffectCall { args, .. } => {
+            for arg in args {
+                retarget_expr_spans(arg, target);
+            }
+        }
+        ExprKind::With {
+            expr: inner,
+            handler,
+        } => {
+            retarget_expr_spans(inner, target);
+            retarget_handler_spans(handler, target);
+        }
+        ExprKind::Resume { value } => retarget_expr_spans(value, target),
+        ExprKind::HandlerExpr { body } => {
+            retarget_handler_body_spans(body, target);
+        }
+        ExprKind::Tuple { elements } => {
+            for e in elements {
+                retarget_expr_spans(e, target);
+            }
+        }
+        ExprKind::Do {
+            bindings,
+            success,
+            else_arms,
+            ..
+        } => {
+            for (p, e) in bindings {
+                retarget_pat_spans(p, target);
+                retarget_expr_spans(e, target);
+            }
+            retarget_expr_spans(success, target);
+            for ann_arm in else_arms {
+                retarget_pat_spans(&mut ann_arm.node.pattern, target);
+                if let Some(g) = &mut ann_arm.node.guard {
+                    retarget_expr_spans(g, target);
+                }
+                retarget_expr_spans(&mut ann_arm.node.body, target);
+            }
+        }
+        ExprKind::Receive {
+            arms, after_clause, ..
+        } => {
+            for ann_arm in arms {
+                retarget_pat_spans(&mut ann_arm.node.pattern, target);
+                if let Some(g) = &mut ann_arm.node.guard {
+                    retarget_expr_spans(g, target);
+                }
+                retarget_expr_spans(&mut ann_arm.node.body, target);
+            }
+            if let Some((timeout, body)) = after_clause {
+                retarget_expr_spans(timeout, target);
+                retarget_expr_spans(body, target);
+            }
+        }
+        ExprKind::Ascription { expr: inner, .. } => retarget_expr_spans(inner, target),
+        ExprKind::BitString { segments } => {
+            for seg in segments {
+                retarget_expr_spans(&mut seg.value, target);
+                if let Some(size) = &mut seg.size {
+                    retarget_expr_spans(size, target);
+                }
+            }
+        }
+        ExprKind::Pipe { segments, .. } | ExprKind::BinOpChain { segments, .. } => {
+            for seg in segments {
+                retarget_expr_spans(&mut seg.node, target);
+            }
+        }
+        ExprKind::PipeBack { segments } | ExprKind::ComposeForward { segments } => {
+            for seg in segments {
+                retarget_expr_spans(&mut seg.node, target);
+            }
+        }
+        ExprKind::Cons { head, tail } => {
+            retarget_expr_spans(head, target);
+            retarget_expr_spans(tail, target);
+        }
+        ExprKind::ListLit { elements } => {
+            for e in elements {
+                retarget_expr_spans(e, target);
+            }
+        }
+        ExprKind::StringInterp { parts, .. } => {
+            for part in parts {
+                if let StringPart::Expr(e) = part {
+                    retarget_expr_spans(e, target);
+                }
+            }
+        }
+        ExprKind::ListComprehension { body, qualifiers } => {
+            retarget_expr_spans(body, target);
+            for q in qualifiers {
+                match q {
+                    ComprehensionQualifier::Generator(p, e) => {
+                        retarget_pat_spans(p, target);
+                        retarget_expr_spans(e, target);
+                    }
+                    ComprehensionQualifier::Let(p, e) => {
+                        retarget_pat_spans(p, target);
+                        retarget_expr_spans(e, target);
+                    }
+                    ComprehensionQualifier::Guard(e) => retarget_expr_spans(e, target),
+                }
+            }
+        }
+        ExprKind::ForeignCall { args, .. } => {
+            for arg in args {
+                retarget_expr_spans(arg, target);
+            }
+        }
+    }
+}
+
+fn retarget_stmt_spans(stmt: &mut Stmt, target: Span) {
+    match stmt {
+        Stmt::Let { pattern, value, .. } => {
+            retarget_pat_spans(pattern, target);
+            retarget_expr_spans(value, target);
+        }
+        Stmt::LetFun {
+            params,
+            guard,
+            body,
+            ..
+        } => {
+            for p in params {
+                retarget_pat_spans(p, target);
+            }
+            if let Some(g) = guard {
+                retarget_expr_spans(g, target);
+            }
+            retarget_expr_spans(body, target);
+        }
+        Stmt::Expr(e) => retarget_expr_spans(e, target),
+    }
+}
+
+pub fn retarget_pat_spans(pat: &mut Pat, target: Span) {
+    match pat {
+        Pat::Wildcard { span, .. } | Pat::Lit { span, .. } | Pat::Var { span, .. } => {
+            *span = target;
+        }
+        Pat::Constructor { span, args, .. } => {
+            *span = target;
+            for a in args {
+                retarget_pat_spans(a, target);
+            }
+        }
+        Pat::Record { span, fields, .. } | Pat::AnonRecord { span, fields, .. } => {
+            *span = target;
+            for (_, alias) in fields {
+                if let Some(p) = alias {
+                    retarget_pat_spans(p, target);
+                }
+            }
+        }
+        Pat::Tuple { span, elements, .. } => {
+            *span = target;
+            for e in elements {
+                retarget_pat_spans(e, target);
+            }
+        }
+        Pat::StringPrefix { span, rest, .. } => {
+            *span = target;
+            retarget_pat_spans(rest, target);
+        }
+        Pat::BitStringPat { span, segments, .. } => {
+            *span = target;
+            for seg in segments {
+                retarget_pat_spans(&mut seg.value, target);
+            }
+        }
+        Pat::ListPat { span, elements, .. } => {
+            *span = target;
+            for e in elements {
+                retarget_pat_spans(e, target);
+            }
+        }
+        Pat::ConsPat { span, head, tail, .. } => {
+            *span = target;
+            retarget_pat_spans(head, target);
+            retarget_pat_spans(tail, target);
+        }
+        Pat::Or { span, patterns, .. } => {
+            *span = target;
+            for p in patterns {
+                retarget_pat_spans(p, target);
+            }
+        }
+    }
+}
+
+fn retarget_handler_spans(handler: &mut Handler, target: Span) {
+    match handler {
+        Handler::Named(_) => {}
+        Handler::Inline { items, .. } => {
+            for item in items {
+                match &mut item.node {
+                    HandlerItem::Named(_) => {}
+                    HandlerItem::Arm(arm) | HandlerItem::Return(arm) => {
+                        retarget_handler_arm_spans(arm, target);
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn retarget_handler_arm_spans(arm: &mut HandlerArm, target: Span) {
+    for p in &mut arm.params {
+        retarget_pat_spans(p, target);
+    }
+    retarget_expr_spans(&mut arm.body, target);
+    if let Some(fb) = &mut arm.finally_block {
+        retarget_expr_spans(fb, target);
+    }
+}
+
+fn retarget_handler_body_spans(body: &mut HandlerBody, target: Span) {
+    for arm in &mut body.arms {
+        retarget_handler_arm_spans(&mut arm.node, target);
+    }
+    if let Some(rc) = &mut body.return_clause {
+        retarget_handler_arm_spans(rc, target);
+    }
+}
+
 fn desugar_pat(pat: &mut Pat) {
     // Recurse first (bottom-up)
     match pat {

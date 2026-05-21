@@ -644,12 +644,14 @@ fn inherit_trait_defaults(program: &mut [Decl], scope: &DeriveScope<'_>) {
     for decl in program.iter_mut() {
         let Decl::ImplDef {
             trait_name,
+            trait_name_span,
             methods,
             ..
         } = decl
         else {
             continue;
         };
+        let impl_site = *trait_name_span;
         let Ok(Some(entry)) = scope.trait_entry(trait_name) else {
             continue;
         };
@@ -666,11 +668,13 @@ fn inherit_trait_defaults(program: &mut [Decl], scope: &DeriveScope<'_>) {
             let mut body = default.body.clone();
             for p in &mut params {
                 crate::desugar::freshen_pat_ids(p);
+                crate::desugar::retarget_pat_spans(p, impl_site);
             }
             crate::desugar::freshen_expr_ids(&mut body);
+            crate::desugar::retarget_expr_spans(&mut body, impl_site);
             methods.push(Annotated::bare(ImplMethod {
                 name: tm.name.clone(),
-                name_span: default.name_span,
+                name_span: impl_site,
                 params,
                 body,
             }));
