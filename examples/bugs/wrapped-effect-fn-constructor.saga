@@ -1,0 +1,49 @@
+# Disabled (renamed off the .saga extension so saga run/test doesn't pick it up).
+# Fixed: see tests/module_codegen_integration.rs
+# `cross_module_nested_effectful_calls_in_ctor_arg_abort_correctly` for the
+# regression test that covers this shape.
+#
+# To reproduce historically (before the fix), rename to .saga and:
+#   saga run examples/bugs/wrapped-effect-fn-constructor.saga
+#
+# Expected: prints `got Err`.
+# Pre-fix actual: printed `got Ok` (the abort value got wrapped in
+# `Just` and then in `Ok` by the to_result return clause, producing
+# `Ok (Just (Err Boom))` instead of `Err Boom`).
+#
+# Root cause was in lower_ctor: an effectful arg was lowered with an identity
+# continuation, so the abort value bubbled back synchronously as the call's
+# return and got wrapped by the constructor + outer return clause instead of
+# bypassing them. Fix: lower_ctor_with_k CPS-chains effectful args, mirroring
+# lower_record_create_with_k.
+
+import Std.Fail (Fail)
+
+type E = Boom deriving (Debug)
+
+handler to_result for Fail a {
+  fail e = Err e
+  return v = Ok v
+}
+
+# An inner decoder-like function that raises Fail.
+fun inner : Int -> String needs {Fail E}
+inner _ = fail! Boom
+
+# Wrapper that ignores the value but calls the inner function inside a
+# constructor — mirrors `Just (decoder j)` in SagaJson.Decode.nullable.
+fun wrap : (Int -> String needs {Fail E, ..e}) -> Int -> Maybe String
+  needs {Fail E, ..e}
+wrap f x = Just (f x)
+
+fun run_it : (Int -> Maybe String needs {Fail E}) -> Int -> Result (Maybe String) E
+run_it dec n = dec n with to_result
+
+fun main : Unit -> Unit
+main () = {
+  let r = run_it (wrap inner) 1
+  case r {
+    Ok _ -> print! "got Ok\n"
+    Err _ -> print! "got Err\n"
+  }
+} with console

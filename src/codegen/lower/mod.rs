@@ -1036,6 +1036,13 @@ impl<'a> Lowerer<'a> {
             ExprKind::RecordCreate { fields, .. } | ExprKind::AnonRecordCreate { fields } => {
                 fields.iter().any(|(_, _, e)| self.branch_is_effectful(e))
             }
+            ExprKind::App { .. } => {
+                if let Some((_, args)) = super::lower::util::collect_ctor_call(expr) {
+                    args.iter().any(|a| self.branch_is_effectful(a))
+                } else {
+                    false
+                }
+            }
             _ => false,
         }
     }

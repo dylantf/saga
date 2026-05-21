@@ -582,6 +582,106 @@ impl<'a> Lowerer<'a> {
         }
     }
 
+    /// Lower a saturated constructor call and apply `k_var` to the constructed
+    /// value. Effectful args are CPS-chained so an aborting handler skips the
+    /// constructor wrapping (and `k_var`) instead of leaking its abort tuple
+    /// into a constructor slot.
+    ///
+    /// Mirrors [`lower_record_create_with_k`] for ADT constructors.
+    pub(super) fn lower_ctor_with_k(
+        &mut self,
+        name: &str,
+        args: Vec<&Expr>,
+        k_var: &str,
+    ) -> CExpr {
+        let bare = name.rsplit('.').next().unwrap_or(name);
+        let is_cons = name == "Cons" && args.len() == 2;
+        let is_bare_atom = args.is_empty()
+            && (matches!(bare, "Nil" | "True" | "False")
+                || super::beam_interop::exit_reason_bare_atom(bare).is_some());
+
+        // For bare-atom/empty-arg ctors there's nothing to CPS-chain; defer.
+        if is_bare_atom {
+            let ce = self.lower_ctor(name, args);
+            return self.lower_value_to_k_with_ce(ce, k_var);
+        }
+
+        let field_tys: Vec<Option<crate::typechecker::Type>> = if is_cons {
+            vec![None, None]
+        } else {
+            let scheme = self.check_result.constructors.get(name);
+            if let Some(scheme) = scheme {
+                let mut tys = Vec::new();
+                let mut current = &scheme.ty;
+                while let crate::typechecker::Type::Fun(param, ret, _) = current {
+                    tys.push(Some((**param).clone()));
+                    current = ret;
+                }
+                tys
+            } else {
+                vec![None; args.len()]
+            }
+        };
+
+        let mut arg_vars: Vec<String> = Vec::with_capacity(args.len());
+        let mut effectful_idxs: Vec<usize> = Vec::new();
+        let mut pure_bindings: Vec<(String, CExpr)> = Vec::new();
+        for (i, arg) in args.iter().enumerate() {
+            let v = self.fresh();
+            arg_vars.push(v.clone());
+            if self.expr_is_effectful_call(arg) || self.has_nested_effectful_expr(arg) {
+                effectful_idxs.push(i);
+            } else {
+                let val = match field_tys.get(i).and_then(|t| t.as_ref()) {
+                    Some(ty) => self.lower_expr_value_with_expected_type(arg, Some(ty)),
+                    None => self.lower_expr_value(arg),
+                };
+                pure_bindings.push((v, val));
+            }
+        }
+
+        let built = if is_cons {
+            CExpr::Cons(
+                Box::new(CExpr::Var(arg_vars[0].clone())),
+                Box::new(CExpr::Var(arg_vars[1].clone())),
+            )
+        } else {
+            let atom =
+                mangle_ctor_atom(name, &self.constructor_atoms, self.handler_origin_module());
+            let mut elems = vec![CExpr::Lit(CLit::Atom(atom))];
+            elems.extend(arg_vars.iter().map(|v| CExpr::Var(v.clone())));
+            CExpr::Tuple(elems)
+        };
+        let mut body = CExpr::Apply(Box::new(CExpr::Var(k_var.to_string())), vec![built]);
+
+        for &i in effectful_idxs.iter().rev() {
+            let v = arg_vars[i].clone();
+            let e = args[i];
+            let inner_k = CExpr::Fun(vec![v], Box::new(body));
+            let inner_k_var = self.fresh();
+            let inner_body = if self.expr_is_effectful_call(e) {
+                self.lower_expr_with_call_return_k(e, Some(CExpr::Var(inner_k_var.clone())))
+            } else {
+                self.lower_expr_with_k_inner(e, &inner_k_var)
+            };
+            body = CExpr::Let(inner_k_var, Box::new(inner_k), Box::new(inner_body));
+        }
+
+        self.wrap_let_bindings(pure_bindings, body)
+    }
+
+    fn lower_value_to_k_with_ce(&mut self, ce: CExpr, k_var: &str) -> CExpr {
+        let v = self.fresh();
+        CExpr::Let(
+            v.clone(),
+            Box::new(ce),
+            Box::new(CExpr::Apply(
+                Box::new(CExpr::Var(k_var.to_string())),
+                vec![CExpr::Var(v)],
+            )),
+        )
+    }
+
     pub(super) fn lower_binop(
         &mut self,
         op: &BinOp,
@@ -1097,7 +1197,16 @@ impl<'a> Lowerer<'a> {
             ExprKind::AnonRecordCreate { fields } => {
                 self.lower_record_create_with_k(None, expr.id, fields, k_var)
             }
-            _ => self.lower_value_to_k(expr, k_var),
+            _ => {
+                if let Some((ctor_name, args)) = super::util::collect_ctor_call(expr)
+                    && args.iter().any(|a| {
+                        self.expr_is_effectful_call(a) || self.has_nested_effectful_expr(a)
+                    })
+                {
+                    return self.lower_ctor_with_k(ctor_name, args, k_var);
+                }
+                self.lower_value_to_k(expr, k_var)
+            }
         }
     }
 
