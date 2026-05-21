@@ -3347,3 +3347,60 @@ main () = println (to_json (User { name: "Alice", age: 30 })) with {console}
     );
     assert_erlc_compiles(&out, "main");
 }
+
+#[test]
+fn cross_module_trait_default_body_resolves_in_trait_module() {
+    // Regression: when a trait's default-method body references an
+    // identifier defined alongside the trait (here `default_cfg`), and a
+    // downstream module writes an `impl` for that trait whose body
+    // re-invokes the defaulted method, the default body was being cloned
+    // into the downstream impl with its identifiers re-resolved against
+    // the downstream module's scope -- producing "undefined variable:
+    // default_cfg" because Main has no such binding.
+    //
+    // `inherit_trait_defaults` now rewrites free `Var`s in the cloned
+    // body to `QualifiedName`s pointing at the trait's defining module,
+    // so cross-module impls behave like single-module ones.
+    let lib = r#"module Lib
+
+pub record Cfg { tag: String }
+
+pub val default_cfg = Cfg { tag: "default" }
+
+pub trait Act a {
+  fun act_with : Cfg -> a -> String
+  fun act : a -> String
+  act x = act_with default_cfg x
+}
+
+impl Act for Int {
+  act_with c n = c.tag <> ":" <> show n
+}
+"#;
+
+    let main = r#"module Main
+import Lib as L (Act)
+
+record Pair { a: Int, b: Int }
+
+impl L.Act for Pair {
+  act_with c p = c.tag <> ":(" <> act p.a <> "," <> act p.b <> ")"
+}
+
+main () = act (Pair { a: 1, b: 2 })
+"#;
+
+    let out = with_temp_project_files(
+        &[("lib/Lib.saga", lib)],
+        main,
+        |checker, program| emit_from_program(program, "main", checker),
+    );
+    // The cloned default body should call back through `Lib.default_cfg`
+    // rather than failing to resolve. Confirm the lowered module compiles
+    // and that the default body's reference made it into Main's output.
+    assert!(
+        out.contains("'lib':'default_cfg'"),
+        "expected reference to lib:default_cfg in Main's lowered output:\n{out}"
+    );
+    assert_erlc_compiles(&out, "main");
+}

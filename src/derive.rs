@@ -176,6 +176,18 @@ fn module_summary(program: &[Decl]) -> ModuleSummary {
         .chain(summary.records.keys())
         .cloned()
         .collect();
+    let defining_module_values: std::collections::HashSet<String> = program
+        .iter()
+        .filter_map(|d| match d {
+            Decl::Val {
+                name, public: true, ..
+            }
+            | Decl::FunSignature {
+                name, public: true, ..
+            } => Some(name.clone()),
+            _ => None,
+        })
+        .collect();
     for d in program {
         if let Decl::TraitDef {
             name,
@@ -215,6 +227,8 @@ fn module_summary(program: &[Decl]) -> ModuleSummary {
                             method
                         })
                         .collect(),
+                    defining_module: module_name.clone(),
+                    defining_module_values: defining_module_values.clone(),
                 },
             );
         }
@@ -440,6 +454,14 @@ pub fn expand_derives(program: &mut Vec<Decl>, imported: &ImportedDecls) -> Vec<
         }
     });
     let mut scope = DeriveScope::new(imported, current_module.as_deref());
+    let local_defining_values: std::collections::HashSet<String> = original
+        .iter()
+        .filter_map(|d| match d {
+            Decl::Val { name, .. } => Some(name.clone()),
+            Decl::FunSignature { name, .. } => Some(name.clone()),
+            _ => None,
+        })
+        .collect();
     for d in &original {
         match d {
             Decl::TraitDef {
@@ -453,6 +475,8 @@ pub fn expand_derives(program: &mut Vec<Decl>, imported: &ImportedDecls) -> Vec<
                     RoutedTraitInfo {
                         type_params: type_params.clone(),
                         methods: methods.iter().map(|m| m.node.clone()).collect(),
+                        defining_module: current_module.clone(),
+                        defining_module_values: local_defining_values.clone(),
                     },
                 );
             }
@@ -641,6 +665,7 @@ pub fn expand_derives(program: &mut Vec<Decl>, imported: &ImportedDecls) -> Vec<
 /// into the impl, with fresh NodeIds. The trait may be local or imported;
 /// `scope` already merges both.
 fn inherit_trait_defaults(program: &mut [Decl], scope: &DeriveScope<'_>) {
+    let current_module = scope.current_module.map(|s| s.to_string());
     for decl in program.iter_mut() {
         let Decl::ImplDef {
             trait_name,
@@ -657,6 +682,18 @@ fn inherit_trait_defaults(program: &mut [Decl], scope: &DeriveScope<'_>) {
         };
         let provided: std::collections::HashSet<String> =
             methods.iter().map(|m| m.node.name.clone()).collect();
+        // Trait methods shadow the qualification rewrite below: a free
+        // reference to one of the trait's own methods inside a default body
+        // must stay bare so trait dispatch can dispatch it through the impl.
+        let trait_method_names: std::collections::HashSet<String> =
+            entry.info.methods.iter().map(|m| m.name.clone()).collect();
+        // Only qualify when the trait is defined in a different module than
+        // the impl. Same-module impls already resolve module-local names.
+        let qualify_module: Option<&str> = entry
+            .info
+            .defining_module
+            .as_deref()
+            .filter(|m| current_module.as_deref() != Some(*m));
         for tm in &entry.info.methods {
             if provided.contains(&tm.name) {
                 continue;
@@ -672,12 +709,364 @@ fn inherit_trait_defaults(program: &mut [Decl], scope: &DeriveScope<'_>) {
             }
             crate::desugar::freshen_expr_ids(&mut body);
             crate::desugar::retarget_expr_spans(&mut body, impl_site);
+            if let Some(module) = qualify_module {
+                let mut bound: std::collections::HashSet<String> =
+                    std::collections::HashSet::new();
+                for p in &params {
+                    collect_pat_bindings(p, &mut bound);
+                }
+                qualify_free_vars(
+                    &mut body,
+                    module,
+                    &entry.info.defining_module_values,
+                    &trait_method_names,
+                    &mut bound,
+                );
+            }
             methods.push(Annotated::bare(ImplMethod {
                 name: tm.name.clone(),
                 name_span: impl_site,
                 params,
                 body,
             }));
+        }
+    }
+}
+
+/// Rewrite free `Var` references inside `expr` that name a top-level value
+/// in the trait's defining module to `QualifiedName { module, name }`. Used
+/// when a trait's default-method body is cloned into a downstream-module
+/// impl: free identifiers need to keep resolving against the trait's
+/// module, not the downstream module.
+fn qualify_free_vars(
+    expr: &mut Expr,
+    module: &str,
+    module_values: &std::collections::HashSet<String>,
+    trait_methods: &std::collections::HashSet<String>,
+    bound: &mut std::collections::HashSet<String>,
+) {
+    match &mut expr.kind {
+        ExprKind::Var { name } => {
+            if !bound.contains(name)
+                && !trait_methods.contains(name)
+                && module_values.contains(name)
+            {
+                expr.kind = ExprKind::QualifiedName {
+                    module: module.to_string(),
+                    name: name.clone(),
+                    canonical_module: Some(module.to_string()),
+                };
+            }
+        }
+        ExprKind::Lit { .. }
+        | ExprKind::Constructor { .. }
+        | ExprKind::QualifiedName { .. }
+        | ExprKind::DictMethodAccess { .. }
+        | ExprKind::DictRef { .. } => {}
+        ExprKind::App { func, arg } => {
+            qualify_free_vars(func, module, module_values, trait_methods, bound);
+            qualify_free_vars(arg, module, module_values, trait_methods, bound);
+        }
+        ExprKind::BinOp { left, right, .. } => {
+            qualify_free_vars(left, module, module_values, trait_methods, bound);
+            qualify_free_vars(right, module, module_values, trait_methods, bound);
+        }
+        ExprKind::UnaryMinus { expr: inner } => {
+            qualify_free_vars(inner, module, module_values, trait_methods, bound);
+        }
+        ExprKind::If {
+            cond,
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            qualify_free_vars(cond, module, module_values, trait_methods, bound);
+            qualify_free_vars(then_branch, module, module_values, trait_methods, bound);
+            qualify_free_vars(else_branch, module, module_values, trait_methods, bound);
+        }
+        ExprKind::Case {
+            scrutinee, arms, ..
+        } => {
+            qualify_free_vars(scrutinee, module, module_values, trait_methods, bound);
+            for ann_arm in arms {
+                let mut arm_bound = bound.clone();
+                collect_pat_bindings(&ann_arm.node.pattern, &mut arm_bound);
+                if let Some(g) = &mut ann_arm.node.guard {
+                    qualify_free_vars(g, module, module_values, trait_methods, &mut arm_bound);
+                }
+                qualify_free_vars(
+                    &mut ann_arm.node.body,
+                    module,
+                    module_values,
+                    trait_methods,
+                    &mut arm_bound,
+                );
+            }
+        }
+        ExprKind::Block { stmts, .. } => {
+            let saved = bound.clone();
+            for ann_stmt in stmts {
+                qualify_stmt_free_vars(
+                    &mut ann_stmt.node,
+                    module,
+                    module_values,
+                    trait_methods,
+                    bound,
+                );
+            }
+            *bound = saved;
+        }
+        ExprKind::Lambda { params, body } => {
+            let saved = bound.clone();
+            for p in params.iter() {
+                collect_pat_bindings(p, bound);
+            }
+            qualify_free_vars(body, module, module_values, trait_methods, bound);
+            *bound = saved;
+        }
+        ExprKind::FieldAccess { expr: inner, .. } => {
+            qualify_free_vars(inner, module, module_values, trait_methods, bound);
+        }
+        ExprKind::RecordCreate { fields, .. } | ExprKind::AnonRecordCreate { fields, .. } => {
+            for (_, _, val) in fields {
+                qualify_free_vars(val, module, module_values, trait_methods, bound);
+            }
+        }
+        ExprKind::RecordUpdate { record, fields, .. } => {
+            qualify_free_vars(record, module, module_values, trait_methods, bound);
+            for (_, _, val) in fields {
+                qualify_free_vars(val, module, module_values, trait_methods, bound);
+            }
+        }
+        ExprKind::EffectCall { args, .. } => {
+            for arg in args {
+                qualify_free_vars(arg, module, module_values, trait_methods, bound);
+            }
+        }
+        ExprKind::With {
+            expr: inner,
+            handler: _,
+        } => {
+            qualify_free_vars(inner, module, module_values, trait_methods, bound);
+        }
+        ExprKind::Resume { value } => {
+            qualify_free_vars(value, module, module_values, trait_methods, bound);
+        }
+        ExprKind::HandlerExpr { .. } => {}
+        ExprKind::Tuple { elements } => {
+            for e in elements {
+                qualify_free_vars(e, module, module_values, trait_methods, bound);
+            }
+        }
+        ExprKind::Do {
+            bindings,
+            success,
+            else_arms,
+            ..
+        } => {
+            let saved = bound.clone();
+            for (p, e) in bindings {
+                qualify_free_vars(e, module, module_values, trait_methods, bound);
+                collect_pat_bindings(p, bound);
+            }
+            qualify_free_vars(success, module, module_values, trait_methods, bound);
+            for ann_arm in else_arms {
+                let mut arm_bound = saved.clone();
+                collect_pat_bindings(&ann_arm.node.pattern, &mut arm_bound);
+                if let Some(g) = &mut ann_arm.node.guard {
+                    qualify_free_vars(g, module, module_values, trait_methods, &mut arm_bound);
+                }
+                qualify_free_vars(
+                    &mut ann_arm.node.body,
+                    module,
+                    module_values,
+                    trait_methods,
+                    &mut arm_bound,
+                );
+            }
+            *bound = saved;
+        }
+        ExprKind::Receive {
+            arms, after_clause, ..
+        } => {
+            for ann_arm in arms {
+                let mut arm_bound = bound.clone();
+                collect_pat_bindings(&ann_arm.node.pattern, &mut arm_bound);
+                if let Some(g) = &mut ann_arm.node.guard {
+                    qualify_free_vars(g, module, module_values, trait_methods, &mut arm_bound);
+                }
+                qualify_free_vars(
+                    &mut ann_arm.node.body,
+                    module,
+                    module_values,
+                    trait_methods,
+                    &mut arm_bound,
+                );
+            }
+            if let Some((timeout, body)) = after_clause {
+                qualify_free_vars(timeout, module, module_values, trait_methods, bound);
+                qualify_free_vars(body, module, module_values, trait_methods, bound);
+            }
+        }
+        ExprKind::Ascription { expr: inner, .. } => {
+            qualify_free_vars(inner, module, module_values, trait_methods, bound);
+        }
+        ExprKind::BitString { segments } => {
+            for seg in segments {
+                qualify_free_vars(&mut seg.value, module, module_values, trait_methods, bound);
+                if let Some(size) = &mut seg.size {
+                    qualify_free_vars(size, module, module_values, trait_methods, bound);
+                }
+            }
+        }
+        ExprKind::Pipe { segments, .. } | ExprKind::BinOpChain { segments, .. } => {
+            for seg in segments {
+                qualify_free_vars(&mut seg.node, module, module_values, trait_methods, bound);
+            }
+        }
+        ExprKind::PipeBack { segments } | ExprKind::ComposeForward { segments } => {
+            for seg in segments {
+                qualify_free_vars(&mut seg.node, module, module_values, trait_methods, bound);
+            }
+        }
+        ExprKind::Cons { head, tail } => {
+            qualify_free_vars(head, module, module_values, trait_methods, bound);
+            qualify_free_vars(tail, module, module_values, trait_methods, bound);
+        }
+        ExprKind::ListLit { elements } => {
+            for e in elements {
+                qualify_free_vars(e, module, module_values, trait_methods, bound);
+            }
+        }
+        ExprKind::StringInterp { parts, .. } => {
+            for part in parts {
+                if let StringPart::Expr(e) = part {
+                    qualify_free_vars(e, module, module_values, trait_methods, bound);
+                }
+            }
+        }
+        ExprKind::ListComprehension { body, qualifiers } => {
+            let saved = bound.clone();
+            for q in qualifiers {
+                match q {
+                    ComprehensionQualifier::Generator(p, e) => {
+                        qualify_free_vars(e, module, module_values, trait_methods, bound);
+                        collect_pat_bindings(p, bound);
+                    }
+                    ComprehensionQualifier::Let(p, e) => {
+                        qualify_free_vars(e, module, module_values, trait_methods, bound);
+                        collect_pat_bindings(p, bound);
+                    }
+                    ComprehensionQualifier::Guard(e) => {
+                        qualify_free_vars(e, module, module_values, trait_methods, bound);
+                    }
+                }
+            }
+            qualify_free_vars(body, module, module_values, trait_methods, bound);
+            *bound = saved;
+        }
+        ExprKind::ForeignCall { args, .. } => {
+            for arg in args {
+                qualify_free_vars(arg, module, module_values, trait_methods, bound);
+            }
+        }
+    }
+}
+
+fn qualify_stmt_free_vars(
+    stmt: &mut Stmt,
+    module: &str,
+    module_values: &std::collections::HashSet<String>,
+    trait_methods: &std::collections::HashSet<String>,
+    bound: &mut std::collections::HashSet<String>,
+) {
+    match stmt {
+        Stmt::Let { pattern, value, .. } => {
+            qualify_free_vars(value, module, module_values, trait_methods, bound);
+            collect_pat_bindings(pattern, bound);
+        }
+        Stmt::LetFun {
+            name,
+            params,
+            guard,
+            body,
+            ..
+        } => {
+            bound.insert(name.clone());
+            let saved = bound.clone();
+            for p in params.iter() {
+                collect_pat_bindings(p, bound);
+            }
+            if let Some(g) = guard {
+                qualify_free_vars(g, module, module_values, trait_methods, bound);
+            }
+            qualify_free_vars(body, module, module_values, trait_methods, bound);
+            *bound = saved;
+        }
+        Stmt::Expr(e) => qualify_free_vars(e, module, module_values, trait_methods, bound),
+    }
+}
+
+fn collect_pat_bindings(pat: &Pat, out: &mut std::collections::HashSet<String>) {
+    match pat {
+        Pat::Wildcard { .. } | Pat::Lit { .. } => {}
+        Pat::Var { name, .. } => {
+            out.insert(name.clone());
+        }
+        Pat::Constructor { args, .. } => {
+            for a in args {
+                collect_pat_bindings(a, out);
+            }
+        }
+        Pat::Record {
+            fields, as_name, ..
+        } => {
+            for (field_name, alias) in fields {
+                match alias {
+                    Some(p) => collect_pat_bindings(p, out),
+                    None => {
+                        out.insert(field_name.clone());
+                    }
+                }
+            }
+            if let Some(name) = as_name {
+                out.insert(name.clone());
+            }
+        }
+        Pat::AnonRecord { fields, .. } => {
+            for (field_name, alias) in fields {
+                match alias {
+                    Some(p) => collect_pat_bindings(p, out),
+                    None => {
+                        out.insert(field_name.clone());
+                    }
+                }
+            }
+        }
+        Pat::Tuple { elements, .. } => {
+            for e in elements {
+                collect_pat_bindings(e, out);
+            }
+        }
+        Pat::StringPrefix { rest, .. } => collect_pat_bindings(rest, out),
+        Pat::BitStringPat { segments, .. } => {
+            for seg in segments {
+                collect_pat_bindings(&seg.value, out);
+            }
+        }
+        Pat::ListPat { elements, .. } => {
+            for e in elements {
+                collect_pat_bindings(e, out);
+            }
+        }
+        Pat::ConsPat { head, tail, .. } => {
+            collect_pat_bindings(head, out);
+            collect_pat_bindings(tail, out);
+        }
+        Pat::Or { patterns, .. } => {
+            for p in patterns {
+                collect_pat_bindings(p, out);
+            }
         }
     }
 }
@@ -689,6 +1078,18 @@ fn inherit_trait_defaults(program: &mut [Decl], scope: &DeriveScope<'_>) {
 pub struct RoutedTraitInfo {
     pub type_params: Vec<String>,
     pub methods: Vec<TraitMethod>,
+    /// Module that defines this trait, e.g. "Lib" or "Std.Generic". Used to
+    /// retarget free identifiers in cloned default-method bodies so they
+    /// resolve against the trait's defining module rather than the
+    /// downstream impl-site module.
+    pub defining_module: Option<String>,
+    /// Names of top-level `val`/`fun` bindings exported from
+    /// `defining_module`. A free identifier inside a cloned default body
+    /// that matches one of these names is rewritten to a `QualifiedName`
+    /// referencing the trait's module, so cross-module impls don't see
+    /// "undefined variable" errors for identifiers defined alongside the
+    /// trait.
+    pub defining_module_values: std::collections::HashSet<String>,
 }
 
 struct DeriveScope<'a> {
