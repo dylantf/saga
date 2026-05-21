@@ -252,7 +252,8 @@ the bottom of
 `_tail`, `_with_call_return_k`, `_with_installed_return_k`,
 `_terminal_effectful_*_with_return_k`, `_to_k`,
 `lower_handler_owned_expr`) would touch the same code paths. Doing
-both together is the natural unit of work.
+both together is the natural unit of work. Evidence passing has
+already landed, so the CPS schema this would build on is stable.
 
 Reasons to defer:
 
