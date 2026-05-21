@@ -1727,6 +1727,176 @@ run_ok () = {
     );
 }
 
+/// Regression: an effectful call used as the condition of an `if`. The
+/// lowering must CPS-chain the cond so an aborting handler bypasses the
+/// case-on-cond (which would otherwise crash with "no matching clause"
+/// when the abort tuple matches neither `true` nor `false`).
+#[test]
+fn cross_module_nested_effectful_calls_in_if_cond_abort_correctly() {
+    let lib_src = std::fs::read_to_string(fixtures_root().join("EffectChain.saga")).unwrap();
+    let main_src = "
+module Main
+import Std.Fail (Fail)
+import EffectChain (Box, Failure)
+
+handler local_to_result for Fail a {
+  fail e = Err e
+  return v = Ok v
+}
+
+fun nonzero : Box -> Bool needs {Fail Failure}
+nonzero b = EffectChain.unbox_int b != 0
+
+fun classify : Box -> String needs {Fail Failure}
+classify b = if nonzero b then \"nonzero\" else \"zero\"
+
+pub fun run_fail : Unit -> String
+run_fail () = {
+  let r = classify (EffectChain.Box (EffectChain.IS \"oops\")) with local_to_result
+  case r {
+    Ok _ -> \"ok-bug\"
+    Err _ -> \"err-good\"
+  }
+}
+
+pub fun run_ok : Unit -> String
+run_ok () = {
+  let r = classify (EffectChain.Box (EffectChain.II 3)) with local_to_result
+  case r {
+    Ok _ -> \"ok-good\"
+    Err _ -> \"err-bug\"
+  }
+}
+";
+    let mut checker = make_project_checker();
+    let main_program = typecheck_source(main_src, &mut checker);
+
+    let lib_core = emit_project_module(&lib_src, "effectchain", &checker);
+    let main_core = emit_from_program(&main_program, "main", &checker);
+
+    let dir = assert_erlc_compiles(&lib_core, "effectchain");
+    let main_core_path = dir.join("main.core");
+    std::fs::write(&main_core_path, &main_core).unwrap();
+    let erlc = std::process::Command::new("erlc")
+        .arg("-o")
+        .arg(&dir)
+        .arg(&main_core_path)
+        .output()
+        .expect("failed to run erlc");
+    assert!(
+        erlc.status.success(),
+        "erlc failed on main:\n{main_core}\nstderr: {}",
+        String::from_utf8_lossy(&erlc.stderr)
+    );
+
+    compile_evidence_bridge_into(&dir);
+
+    let run = std::process::Command::new("erl")
+        .arg("-noshell")
+        .arg("-pa")
+        .arg(&dir)
+        .arg("-eval")
+        .arg("io:format(\"~s|~s~n\", [main:run_fail(unit), main:run_ok(unit)]), init:stop().")
+        .output()
+        .expect("failed to run erl");
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(
+        run.status.success(),
+        "erl failed:\nstderr: {}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&run.stdout);
+    assert!(
+        stdout.contains("err-good|ok-good"),
+        "expected 'err-good|ok-good', got: {stdout}"
+    );
+}
+
+/// Regression: an effectful call used as the scrutinee of a `case`. The
+/// lowering must CPS-chain the scrutinee so an aborting handler skips
+/// arm matching (which would otherwise either crash on a no-match or
+/// silently fall through to the wildcard arm with the abort tuple).
+#[test]
+fn cross_module_nested_effectful_calls_in_case_scrutinee_abort_correctly() {
+    let lib_src = std::fs::read_to_string(fixtures_root().join("EffectChain.saga")).unwrap();
+    let main_src = "
+module Main
+import Std.Fail (Fail)
+import EffectChain (Box, Failure)
+
+handler local_to_result for Fail a {
+  fail e = Err e
+  return v = Ok v
+}
+
+fun describe : Box -> String needs {Fail Failure}
+describe b = case EffectChain.unbox_int b {
+  0 -> \"zero\"
+  _ -> \"nonzero\"
+}
+
+pub fun run_fail : Unit -> String
+run_fail () = {
+  let r = describe (EffectChain.Box (EffectChain.IS \"oops\")) with local_to_result
+  case r {
+    Ok _ -> \"ok-bug\"
+    Err _ -> \"err-good\"
+  }
+}
+
+pub fun run_ok : Unit -> String
+run_ok () = {
+  let r = describe (EffectChain.Box (EffectChain.II 5)) with local_to_result
+  case r {
+    Ok _ -> \"ok-good\"
+    Err _ -> \"err-bug\"
+  }
+}
+";
+    let mut checker = make_project_checker();
+    let main_program = typecheck_source(main_src, &mut checker);
+
+    let lib_core = emit_project_module(&lib_src, "effectchain", &checker);
+    let main_core = emit_from_program(&main_program, "main", &checker);
+
+    let dir = assert_erlc_compiles(&lib_core, "effectchain");
+    let main_core_path = dir.join("main.core");
+    std::fs::write(&main_core_path, &main_core).unwrap();
+    let erlc = std::process::Command::new("erlc")
+        .arg("-o")
+        .arg(&dir)
+        .arg(&main_core_path)
+        .output()
+        .expect("failed to run erlc");
+    assert!(
+        erlc.status.success(),
+        "erlc failed on main:\n{main_core}\nstderr: {}",
+        String::from_utf8_lossy(&erlc.stderr)
+    );
+
+    compile_evidence_bridge_into(&dir);
+
+    let run = std::process::Command::new("erl")
+        .arg("-noshell")
+        .arg("-pa")
+        .arg(&dir)
+        .arg("-eval")
+        .arg("io:format(\"~s|~s~n\", [main:run_fail(unit), main:run_ok(unit)]), init:stop().")
+        .output()
+        .expect("failed to run erl");
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(
+        run.status.success(),
+        "erl failed:\nstderr: {}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&run.stdout);
+    assert!(
+        stdout.contains("err-good|ok-good"),
+        "expected 'err-good|ok-good', got: {stdout}"
+    );
+}
+
 /// Regression: passing a bare cross-module effectful function reference
 /// (`EffectChain.unbox_int`) as an argument to a higher-order cross-module
 /// function. The bare reference is a *value*, not a call — the lowerer's

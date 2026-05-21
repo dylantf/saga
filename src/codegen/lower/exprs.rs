@@ -16,6 +16,22 @@ use super::util::{
 };
 use super::{EvidenceCtx, FunInfo, LowerMode, Lowerer};
 
+/// One "hole" in a composite expression being assembled by
+/// [`Lowerer::lower_with_cps_slots`]. The slot kind controls whether the
+/// value comes from a pre-lowered CExpr or from CPS-chained lowering of a
+/// source expression that may be effectful.
+pub(super) enum CpsSlot<'e> {
+    /// Already-lowered value. Bound to a plain `let`. Use for values
+    /// computed by the caller (e.g. `element(idx, rec_var)`).
+    Pure(CExpr),
+    /// Source expression to lower. CPS-chained if effectful; otherwise
+    /// lowered as a value with the optional expected type.
+    Expr {
+        expr: &'e Expr,
+        expected: Option<Type>,
+    },
+}
+
 /// Returns true if `expr` is a valid Core Erlang guard expression:
 /// comparisons, arithmetic, boolean ops, unary minus, and literals/variables.
 /// Any function application (user-defined or unknown BIF) returns false.
@@ -582,6 +598,68 @@ impl<'a> Lowerer<'a> {
         }
     }
 
+    /// Bind a possibly-effectful expression to `var_name` for use in `body`.
+    /// If the expression is effectful, this CPS-chains it so that an aborting
+    /// handler bypasses `body` entirely; otherwise emits a plain `let`.
+    ///
+    /// This is the load-bearing primitive for routing potentially-effectful
+    /// sub-expressions through composite forms (constructor args, tuple
+    /// elements, binop operands, case scrutinees, etc.).
+    pub(super) fn lower_bind_expr_with_cps(
+        &mut self,
+        expr: &Expr,
+        var_name: String,
+        expected: Option<Type>,
+        body: CExpr,
+    ) -> CExpr {
+        if self.expr_is_effectful_call(expr) || self.has_nested_effectful_expr(expr) {
+            let inner_k = CExpr::Fun(vec![var_name], Box::new(body));
+            let inner_k_var = self.fresh();
+            let inner_body = if self.expr_is_effectful_call(expr) {
+                self.lower_expr_with_call_return_k(expr, Some(CExpr::Var(inner_k_var.clone())))
+            } else {
+                self.lower_expr_with_k_inner(expr, &inner_k_var)
+            };
+            CExpr::Let(inner_k_var, Box::new(inner_k), Box::new(inner_body))
+        } else {
+            let ce = match expected {
+                Some(ty) => self.lower_expr_value_with_expected_type(expr, Some(&ty)),
+                None => self.lower_expr_value(expr),
+            };
+            CExpr::Let(var_name, Box::new(ce), Box::new(body))
+        }
+    }
+
+    /// Assemble a composite expression from `slots`, then apply `k_var` to
+    /// the result. Effectful slots are CPS-chained so an aborting handler
+    /// bypasses both the assembly and the outer continuation.
+    ///
+    /// `build` receives one fresh variable name per slot, in order, and
+    /// returns the CExpr that combines them into the final value.
+    /// Evaluation order is left-to-right (slot 0 evaluates first).
+    pub(super) fn lower_with_cps_slots<F>(
+        &mut self,
+        slots: Vec<CpsSlot<'_>>,
+        k_var: &str,
+        build: F,
+    ) -> CExpr
+    where
+        F: FnOnce(&mut Self, &[String]) -> CExpr,
+    {
+        let vars: Vec<String> = (0..slots.len()).map(|_| self.fresh()).collect();
+        let built = build(self, &vars);
+        let mut body = CExpr::Apply(Box::new(CExpr::Var(k_var.to_string())), vec![built]);
+        for (slot, var) in slots.into_iter().zip(vars.iter()).rev() {
+            body = match slot {
+                CpsSlot::Pure(ce) => CExpr::Let(var.clone(), Box::new(ce), Box::new(body)),
+                CpsSlot::Expr { expr, expected } => {
+                    self.lower_bind_expr_with_cps(expr, var.clone(), expected, body)
+                }
+            };
+        }
+        body
+    }
+
     /// Lower a saturated constructor call and apply `k_var` to the constructed
     /// value. Effectful args are CPS-chained so an aborting handler skips the
     /// constructor wrapping (and `k_var`) instead of leaking its abort tuple
@@ -608,102 +686,62 @@ impl<'a> Lowerer<'a> {
 
         let field_tys: Vec<Option<crate::typechecker::Type>> = if is_cons {
             vec![None, None]
-        } else {
-            let scheme = self.check_result.constructors.get(name);
-            if let Some(scheme) = scheme {
-                let mut tys = Vec::new();
-                let mut current = &scheme.ty;
-                while let crate::typechecker::Type::Fun(param, ret, _) = current {
-                    tys.push(Some((**param).clone()));
-                    current = ret;
-                }
-                tys
-            } else {
-                vec![None; args.len()]
+        } else if let Some(scheme) = self.check_result.constructors.get(name) {
+            let mut tys = Vec::new();
+            let mut current = &scheme.ty;
+            while let crate::typechecker::Type::Fun(param, ret, _) = current {
+                tys.push(Some((**param).clone()));
+                current = ret;
             }
+            tys
+        } else {
+            vec![None; args.len()]
         };
 
-        let mut arg_vars: Vec<String> = Vec::with_capacity(args.len());
-        let mut effectful_idxs: Vec<usize> = Vec::new();
-        let mut pure_bindings: Vec<(String, CExpr)> = Vec::new();
-        for (i, arg) in args.iter().enumerate() {
-            let v = self.fresh();
-            arg_vars.push(v.clone());
-            if self.expr_is_effectful_call(arg) || self.has_nested_effectful_expr(arg) {
-                effectful_idxs.push(i);
+        let slots: Vec<CpsSlot<'_>> = args
+            .iter()
+            .enumerate()
+            .map(|(i, &arg)| CpsSlot::Expr {
+                expr: arg,
+                expected: field_tys.get(i).and_then(|t| t.clone()),
+            })
+            .collect();
+
+        let is_cons_local = is_cons;
+        let name_owned = name.to_string();
+        self.lower_with_cps_slots(slots, k_var, |this, vars| {
+            if is_cons_local {
+                CExpr::Cons(
+                    Box::new(CExpr::Var(vars[0].clone())),
+                    Box::new(CExpr::Var(vars[1].clone())),
+                )
             } else {
-                let val = match field_tys.get(i).and_then(|t| t.as_ref()) {
-                    Some(ty) => self.lower_expr_value_with_expected_type(arg, Some(ty)),
-                    None => self.lower_expr_value(arg),
-                };
-                pure_bindings.push((v, val));
+                let atom = mangle_ctor_atom(
+                    &name_owned,
+                    &this.constructor_atoms,
+                    this.handler_origin_module(),
+                );
+                let mut elems = vec![CExpr::Lit(CLit::Atom(atom))];
+                elems.extend(vars.iter().map(|v| CExpr::Var(v.clone())));
+                CExpr::Tuple(elems)
             }
-        }
-
-        let built = if is_cons {
-            CExpr::Cons(
-                Box::new(CExpr::Var(arg_vars[0].clone())),
-                Box::new(CExpr::Var(arg_vars[1].clone())),
-            )
-        } else {
-            let atom =
-                mangle_ctor_atom(name, &self.constructor_atoms, self.handler_origin_module());
-            let mut elems = vec![CExpr::Lit(CLit::Atom(atom))];
-            elems.extend(arg_vars.iter().map(|v| CExpr::Var(v.clone())));
-            CExpr::Tuple(elems)
-        };
-        let mut body = CExpr::Apply(Box::new(CExpr::Var(k_var.to_string())), vec![built]);
-
-        for &i in effectful_idxs.iter().rev() {
-            let v = arg_vars[i].clone();
-            let e = args[i];
-            let inner_k = CExpr::Fun(vec![v], Box::new(body));
-            let inner_k_var = self.fresh();
-            let inner_body = if self.expr_is_effectful_call(e) {
-                self.lower_expr_with_call_return_k(e, Some(CExpr::Var(inner_k_var.clone())))
-            } else {
-                self.lower_expr_with_k_inner(e, &inner_k_var)
-            };
-            body = CExpr::Let(inner_k_var, Box::new(inner_k), Box::new(inner_body));
-        }
-
-        self.wrap_let_bindings(pure_bindings, body)
+        })
     }
 
     /// Tuple-literal variant of [`Self::lower_ctor_with_k`]: CPS-chain
     /// effectful elements so an aborting handler bypasses the tuple build
     /// and the outer continuation.
     pub(super) fn lower_tuple_with_k(&mut self, elems: &[Expr], k_var: &str) -> CExpr {
-        let mut elem_vars: Vec<String> = Vec::with_capacity(elems.len());
-        let mut effectful_idxs: Vec<usize> = Vec::new();
-        let mut pure_bindings: Vec<(String, CExpr)> = Vec::new();
-        for (i, e) in elems.iter().enumerate() {
-            let v = self.fresh();
-            elem_vars.push(v.clone());
-            if self.expr_is_effectful_call(e) || self.has_nested_effectful_expr(e) {
-                effectful_idxs.push(i);
-            } else {
-                pure_bindings.push((v, self.lower_expr_value(e)));
-            }
-        }
-
-        let tuple = CExpr::Tuple(elem_vars.iter().map(|v| CExpr::Var(v.clone())).collect());
-        let mut body = CExpr::Apply(Box::new(CExpr::Var(k_var.to_string())), vec![tuple]);
-
-        for &i in effectful_idxs.iter().rev() {
-            let v = elem_vars[i].clone();
-            let e = &elems[i];
-            let inner_k = CExpr::Fun(vec![v], Box::new(body));
-            let inner_k_var = self.fresh();
-            let inner_body = if self.expr_is_effectful_call(e) {
-                self.lower_expr_with_call_return_k(e, Some(CExpr::Var(inner_k_var.clone())))
-            } else {
-                self.lower_expr_with_k_inner(e, &inner_k_var)
-            };
-            body = CExpr::Let(inner_k_var, Box::new(inner_k), Box::new(inner_body));
-        }
-
-        self.wrap_let_bindings(pure_bindings, body)
+        let slots: Vec<CpsSlot<'_>> = elems
+            .iter()
+            .map(|e| CpsSlot::Expr {
+                expr: e,
+                expected: None,
+            })
+            .collect();
+        self.lower_with_cps_slots(slots, k_var, |_, vars| {
+            CExpr::Tuple(vars.iter().map(|v| CExpr::Var(v.clone())).collect())
+        })
     }
 
     /// BinOp variant of [`Self::lower_ctor_with_k`]: CPS-chain effectful
@@ -719,55 +757,26 @@ impl<'a> Lowerer<'a> {
         k_var: &str,
     ) -> CExpr {
         if matches!(op, BinOp::And | BinOp::Or) {
-            // Desugar `a && b` / `a || b` into a case-with-k so each branch
-            // threads the outer continuation directly. Right side is the
-            // only place a nested effect could live.
+            // Short-circuit semantics: case on left, k threaded into branches.
             return self.lower_short_circuit_with_k(left, right, matches!(op, BinOp::And), k_var);
         }
 
-        let left_eff = self.expr_is_effectful_call(left) || self.has_nested_effectful_expr(left);
-        let right_eff = self.expr_is_effectful_call(right) || self.has_nested_effectful_expr(right);
-
-        let left_var = self.fresh();
-        let right_var = self.fresh();
-        let call = self.annotate(binop_call(op, &left_var, &right_var), span);
-        let mut body = CExpr::Apply(Box::new(CExpr::Var(k_var.to_string())), vec![call]);
-
-        // Bind right inside left's continuation so left aborts skip both
-        // the binop call and the outer K.
-        if right_eff {
-            let inner_k = CExpr::Fun(vec![right_var.clone()], Box::new(body));
-            let inner_k_var = self.fresh();
-            let inner_body = if self.expr_is_effectful_call(right) {
-                self.lower_expr_with_call_return_k(right, Some(CExpr::Var(inner_k_var.clone())))
-            } else {
-                self.lower_expr_with_k_inner(right, &inner_k_var)
-            };
-            body = CExpr::Let(inner_k_var, Box::new(inner_k), Box::new(inner_body));
-        } else {
-            body = CExpr::Let(
-                right_var.clone(),
-                Box::new(self.lower_expr_value(right)),
-                Box::new(body),
-            );
-        }
-        if left_eff {
-            let inner_k = CExpr::Fun(vec![left_var.clone()], Box::new(body));
-            let inner_k_var = self.fresh();
-            let inner_body = if self.expr_is_effectful_call(left) {
-                self.lower_expr_with_call_return_k(left, Some(CExpr::Var(inner_k_var.clone())))
-            } else {
-                self.lower_expr_with_k_inner(left, &inner_k_var)
-            };
-            body = CExpr::Let(inner_k_var, Box::new(inner_k), Box::new(inner_body));
-        } else {
-            body = CExpr::Let(
-                left_var.clone(),
-                Box::new(self.lower_expr_value(left)),
-                Box::new(body),
-            );
-        }
-        body
+        let op_owned = op.clone();
+        let span_owned: Option<crate::token::Span> = span.cloned();
+        self.lower_with_cps_slots(
+            vec![
+                CpsSlot::Expr {
+                    expr: left,
+                    expected: None,
+                },
+                CpsSlot::Expr {
+                    expr: right,
+                    expected: None,
+                },
+            ],
+            k_var,
+            |this, vars| this.annotate(binop_call(&op_owned, &vars[0], &vars[1]), span_owned.as_ref()),
+        )
     }
 
     fn lower_short_circuit_with_k(
@@ -779,17 +788,13 @@ impl<'a> Lowerer<'a> {
     ) -> CExpr {
         let left_var = self.fresh();
         let short_val = CExpr::Lit(CLit::Atom(if and { "false" } else { "true" }.to_string()));
-        let short_arm = CExpr::Apply(
-            Box::new(CExpr::Var(k_var.to_string())),
-            vec![short_val],
-        );
+        let short_arm = CExpr::Apply(Box::new(CExpr::Var(k_var.to_string())), vec![short_val]);
         let right_arm = self.lower_branch_with_k(right, k_var);
         let (true_arm, false_arm) = if and {
             (right_arm, short_arm)
         } else {
             (short_arm, right_arm)
         };
-        let left_eff = self.expr_is_effectful_call(left) || self.has_nested_effectful_expr(left);
         let case_expr = CExpr::Case(
             Box::new(CExpr::Var(left_var.clone())),
             vec![
@@ -805,22 +810,7 @@ impl<'a> Lowerer<'a> {
                 },
             ],
         );
-        if left_eff {
-            let inner_k = CExpr::Fun(vec![left_var], Box::new(case_expr));
-            let inner_k_var = self.fresh();
-            let inner_body = if self.expr_is_effectful_call(left) {
-                self.lower_expr_with_call_return_k(left, Some(CExpr::Var(inner_k_var.clone())))
-            } else {
-                self.lower_expr_with_k_inner(left, &inner_k_var)
-            };
-            CExpr::Let(inner_k_var, Box::new(inner_k), Box::new(inner_body))
-        } else {
-            CExpr::Let(
-                left_var,
-                Box::new(self.lower_expr_value(left)),
-                Box::new(case_expr),
-            )
-        }
+        self.lower_bind_expr_with_cps(left, left_var, None, case_expr)
     }
 
     /// Field-access variant: `(eff_expr).field`. CPS-chains the record
@@ -832,21 +822,20 @@ impl<'a> Lowerer<'a> {
         field_idx: i64,
         k_var: &str,
     ) -> CExpr {
-        let v = self.fresh();
-        let element_call = cerl_call(
-            "erlang",
-            "element",
-            vec![CExpr::Lit(CLit::Int(field_idx)), CExpr::Var(v.clone())],
-        );
-        let inner = CExpr::Apply(Box::new(CExpr::Var(k_var.to_string())), vec![element_call]);
-        let inner_k = CExpr::Fun(vec![v], Box::new(inner));
-        let inner_k_var = self.fresh();
-        let body = if self.expr_is_effectful_call(record_expr) {
-            self.lower_expr_with_call_return_k(record_expr, Some(CExpr::Var(inner_k_var.clone())))
-        } else {
-            self.lower_expr_with_k_inner(record_expr, &inner_k_var)
-        };
-        CExpr::Let(inner_k_var, Box::new(inner_k), Box::new(body))
+        self.lower_with_cps_slots(
+            vec![CpsSlot::Expr {
+                expr: record_expr,
+                expected: None,
+            }],
+            k_var,
+            |_, vars| {
+                cerl_call(
+                    "erlang",
+                    "element",
+                    vec![CExpr::Lit(CLit::Int(field_idx)), CExpr::Var(vars[0].clone())],
+                )
+            },
+        )
     }
 
     /// Record-update variant of [`Self::lower_record_create_with_k`]: CPS-chain
@@ -864,81 +853,40 @@ impl<'a> Lowerer<'a> {
             fields.iter().map(|(n, _, e)| (n.as_str(), e)).collect();
 
         let rec_var = self.fresh();
-        let tag_var = self.fresh();
 
-        // Decide effectfulness per updated field. Untouched fields are
-        // pure (just `element(idx+2, rec)`).
-        let mut field_vars: Vec<String> = Vec::with_capacity(field_order.len());
-        let mut effectful_updates: Vec<(usize, &Expr)> = Vec::new();
-        let mut pure_bindings: Vec<(String, CExpr)> = Vec::new();
-        for (pos, field_name) in field_order.iter().enumerate() {
-            let v = self.fresh();
-            field_vars.push(v.clone());
-            if let Some(new_expr) = field_map.get(field_name.as_str()) {
-                if self.expr_is_effectful_call(new_expr)
-                    || self.has_nested_effectful_expr(new_expr)
-                {
-                    effectful_updates.push((pos, *new_expr));
-                } else {
-                    pure_bindings.push((v, self.lower_expr_value(new_expr)));
-                }
-            } else {
-                let idx = (pos + 2) as i64;
-                let elem = cerl_call(
-                    "erlang",
-                    "element",
-                    vec![CExpr::Lit(CLit::Int(idx)), CExpr::Var(rec_var.clone())],
-                );
-                pure_bindings.push((v, elem));
-            }
-        }
-
-        let mut elems = vec![CExpr::Var(tag_var.clone())];
-        elems.extend(field_vars.iter().map(|v| CExpr::Var(v.clone())));
-        let tuple = CExpr::Tuple(elems);
-        let mut body = CExpr::Apply(Box::new(CExpr::Var(k_var.to_string())), vec![tuple]);
-
-        for (pos, e) in effectful_updates.iter().rev() {
-            let v = field_vars[*pos].clone();
-            let inner_k = CExpr::Fun(vec![v], Box::new(body));
-            let inner_k_var = self.fresh();
-            let inner_body = if self.expr_is_effectful_call(e) {
-                self.lower_expr_with_call_return_k(e, Some(CExpr::Var(inner_k_var.clone())))
-            } else {
-                self.lower_expr_with_k_inner(e, &inner_k_var)
-            };
-            body = CExpr::Let(inner_k_var, Box::new(inner_k), Box::new(inner_body));
-        }
-        body = self.wrap_let_bindings(pure_bindings, body);
-
-        // Pull tag out of the base record before threading any updates.
-        let tag_ce = cerl_call(
+        // Slot layout: [tag, field_0, field_1, ...]. Tag and untouched
+        // fields are Pure slots reading from the base record via
+        // `element/2` (rec_var is bound by the outer `lower_bind_expr_with_cps`
+        // wrap, so it's in scope when these CExprs are evaluated).
+        // Updated fields are Expr slots that get CPS-chained if effectful.
+        let mut slots: Vec<CpsSlot<'_>> = Vec::with_capacity(field_order.len() + 1);
+        slots.push(CpsSlot::Pure(cerl_call(
             "erlang",
             "element",
             vec![CExpr::Lit(CLit::Int(1)), CExpr::Var(rec_var.clone())],
-        );
-        body = CExpr::Let(tag_var, Box::new(tag_ce), Box::new(body));
-
-        // Base record might itself be effectful.
-        if self.expr_is_effectful_call(record_expr) || self.has_nested_effectful_expr(record_expr) {
-            let inner_k = CExpr::Fun(vec![rec_var], Box::new(body));
-            let inner_k_var = self.fresh();
-            let inner_body = if self.expr_is_effectful_call(record_expr) {
-                self.lower_expr_with_call_return_k(
-                    record_expr,
-                    Some(CExpr::Var(inner_k_var.clone())),
-                )
-            } else {
-                self.lower_expr_with_k_inner(record_expr, &inner_k_var)
-            };
-            CExpr::Let(inner_k_var, Box::new(inner_k), Box::new(inner_body))
-        } else {
-            CExpr::Let(
-                rec_var,
-                Box::new(self.lower_expr_value(record_expr)),
-                Box::new(body),
-            )
+        )));
+        for (pos, name) in field_order.iter().enumerate() {
+            slots.push(match field_map.get(name.as_str()) {
+                Some(new_expr) => CpsSlot::Expr {
+                    expr: new_expr,
+                    expected: None,
+                },
+                None => {
+                    let idx = (pos + 2) as i64;
+                    CpsSlot::Pure(cerl_call(
+                        "erlang",
+                        "element",
+                        vec![CExpr::Lit(CLit::Int(idx)), CExpr::Var(rec_var.clone())],
+                    ))
+                }
+            });
         }
+
+        let inner = self.lower_with_cps_slots(slots, k_var, |_, vars| {
+            CExpr::Tuple(vars.iter().map(|v| CExpr::Var(v.clone())).collect())
+        });
+
+        self.lower_bind_expr_with_cps(record_expr, rec_var, None, inner)
     }
 
     fn lower_value_to_k_with_ce(&mut self, ce: CExpr, k_var: &str) -> CExpr {
@@ -1401,34 +1349,29 @@ impl<'a> Lowerer<'a> {
                 ..
             } => {
                 let cond_var = self.fresh();
-                let cond_ce = self.lower_expr_value(cond);
                 let then_ce = self.lower_branch_with_k(then_branch, k_var);
                 let else_ce = self.lower_branch_with_k(else_branch, k_var);
-                CExpr::Let(
-                    cond_var.clone(),
-                    Box::new(cond_ce),
-                    Box::new(CExpr::Case(
-                        Box::new(CExpr::Var(cond_var)),
-                        vec![
-                            CArm {
-                                pat: CPat::Lit(CLit::Atom("true".to_string())),
-                                guard: None,
-                                body: then_ce,
-                            },
-                            CArm {
-                                pat: CPat::Lit(CLit::Atom("false".to_string())),
-                                guard: None,
-                                body: else_ce,
-                            },
-                        ],
-                    )),
-                )
+                let case = CExpr::Case(
+                    Box::new(CExpr::Var(cond_var.clone())),
+                    vec![
+                        CArm {
+                            pat: CPat::Lit(CLit::Atom("true".to_string())),
+                            guard: None,
+                            body: then_ce,
+                        },
+                        CArm {
+                            pat: CPat::Lit(CLit::Atom("false".to_string())),
+                            guard: None,
+                            body: else_ce,
+                        },
+                    ],
+                );
+                self.lower_bind_expr_with_cps(cond, cond_var, None, case)
             }
             ExprKind::Case {
                 scrutinee, arms, ..
             } => {
                 let scrut_var = self.fresh();
-                let scrut_ce = self.lower_expr_value(scrutinee);
                 let arms: Vec<_> = arms.iter().map(|a| a.node.clone()).collect();
                 let arms_ce: Vec<CArm> = arms
                     .iter()
@@ -1447,11 +1390,8 @@ impl<'a> Lowerer<'a> {
                         }
                     })
                     .collect();
-                CExpr::Let(
-                    scrut_var.clone(),
-                    Box::new(scrut_ce),
-                    Box::new(CExpr::Case(Box::new(CExpr::Var(scrut_var)), arms_ce)),
-                )
+                let case = CExpr::Case(Box::new(CExpr::Var(scrut_var.clone())), arms_ce);
+                self.lower_bind_expr_with_cps(scrutinee, scrut_var, None, case)
             }
             ExprKind::Block { stmts, .. } => {
                 let stmts: Vec<_> = stmts.iter().map(|a| a.node.clone()).collect();
@@ -1579,43 +1519,22 @@ impl<'a> Lowerer<'a> {
             }
         };
 
-        let mut field_vars: Vec<String> = Vec::with_capacity(order.len());
-        let mut effectful_idxs: Vec<usize> = Vec::new();
-        let mut pure_bindings: Vec<(String, CExpr)> = Vec::new();
-        for (i, field_name) in order.iter().enumerate() {
-            let v = self.fresh();
-            field_vars.push(v.clone());
-            let e = field_map
-                .get(field_name.as_str())
-                .expect("field missing in record-create");
-            if self.expr_is_effectful_call(e) || self.has_nested_effectful_expr(e) {
-                effectful_idxs.push(i);
-            } else {
-                pure_bindings.push((v, self.lower_expr_value(e)));
-            }
-        }
+        let slots: Vec<CpsSlot<'_>> = order
+            .iter()
+            .map(|field_name| CpsSlot::Expr {
+                expr: field_map
+                    .get(field_name.as_str())
+                    .copied()
+                    .expect("field missing in record-create"),
+                expected: None,
+            })
+            .collect();
 
-        let mut elems = vec![CExpr::Lit(CLit::Atom(tag))];
-        elems.extend(field_vars.iter().map(|v| CExpr::Var(v.clone())));
-        let tuple = CExpr::Tuple(elems);
-        let mut body = CExpr::Apply(Box::new(CExpr::Var(k_var.to_string())), vec![tuple]);
-
-        for &i in effectful_idxs.iter().rev() {
-            let v = field_vars[i].clone();
-            let e = field_map
-                .get(order[i].as_str())
-                .expect("field missing in record-create");
-            let inner_k = CExpr::Fun(vec![v.clone()], Box::new(body));
-            let inner_k_var = self.fresh();
-            let inner_body = if self.expr_is_effectful_call(e) {
-                self.lower_expr_with_call_return_k(e, Some(CExpr::Var(inner_k_var.clone())))
-            } else {
-                self.lower_expr_with_k_inner(e, &inner_k_var)
-            };
-            body = CExpr::Let(inner_k_var, Box::new(inner_k), Box::new(inner_body));
-        }
-
-        self.wrap_let_bindings(pure_bindings, body)
+        self.lower_with_cps_slots(slots, k_var, |_, vars| {
+            let mut elems = vec![CExpr::Lit(CLit::Atom(tag))];
+            elems.extend(vars.iter().map(|v| CExpr::Var(v.clone())));
+            CExpr::Tuple(elems)
+        })
     }
 
     /// Lower a branch expression with an outer continuation K.

@@ -1021,13 +1021,21 @@ impl<'a> Lowerer<'a> {
     fn has_nested_effectful_expr(&self, expr: &Expr) -> bool {
         match &expr.kind {
             ExprKind::If {
+                cond,
                 then_branch,
                 else_branch,
                 ..
-            } => self.branch_is_effectful(then_branch) || self.branch_is_effectful(else_branch),
-            ExprKind::Case { arms, .. } => arms
-                .iter()
-                .any(|arm| self.branch_is_effectful(&arm.node.body)),
+            } => {
+                self.branch_is_effectful(cond)
+                    || self.branch_is_effectful(then_branch)
+                    || self.branch_is_effectful(else_branch)
+            }
+            ExprKind::Case {
+                scrutinee, arms, ..
+            } => {
+                self.branch_is_effectful(scrutinee)
+                    || arms.iter().any(|arm| self.branch_is_effectful(&arm.node.body))
+            }
             ExprKind::Block { stmts, .. } => stmts.iter().any(|s| match &s.node {
                 Stmt::Expr(e) => self.branch_is_effectful(e),
                 Stmt::Let { value, .. } => self.branch_is_effectful(value),
