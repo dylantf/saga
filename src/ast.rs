@@ -167,6 +167,25 @@ pub struct Annotation {
 /// Capital names are treated as types and hoist their constructors automatically.
 pub type ExposedItem = String;
 
+/// The shape of an import's exposing clause.
+/// `import Foo (..)` exposes every public export; `import Foo (a, B)` exposes
+/// just the listed items.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Exposing {
+    All { span: Span },
+    Items(Vec<ExposedItem>),
+}
+
+impl Exposing {
+    /// Returns true if this clause exposes the given name. For `All`, always true.
+    pub fn exposes(&self, name: &str) -> bool {
+        match self {
+            Exposing::All { .. } => true,
+            Exposing::Items(items) => items.iter().any(|i| i == name),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum Decl {
     /// `pub fun add : (a: Int) -> (b: Int) -> Int needs {Log} where {a: Show, Eq}`
@@ -341,7 +360,7 @@ pub enum Decl {
         id: NodeId,
         module_path: Vec<String>,
         alias: Option<String>,
-        exposing: Option<Vec<ExposedItem>>,
+        exposing: Option<Exposing>,
         span: Span,
     },
 

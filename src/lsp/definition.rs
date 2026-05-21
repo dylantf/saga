@@ -250,7 +250,7 @@ fn find_cross_module(
 
             // Check if this import could expose the name
             let exposes_name = match exposing {
-                Some(items) => items.iter().any(|item| item == name),
+                Some(e) => e.exposes(name),
                 None => false, // No exposing list means qualified-only import
             };
 

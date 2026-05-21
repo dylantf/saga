@@ -12,22 +12,28 @@ use crate::docs;
 pub fn format_import(
     path: &[String],
     alias: &Option<String>,
-    exposing: &Option<Vec<ExposedItem>>,
+    exposing: &Option<Exposing>,
 ) -> Doc {
     let mut d = Doc::text(format!("import {}", path.join(".")));
     if let Some(a) = alias {
         d = d.append(Doc::text(format!(" as {}", a)));
     }
-    if let Some(items) = exposing {
-        let item_docs: Vec<Doc> = items.iter().map(|i| Doc::text(i.as_str())).collect();
-        let items_joined = Doc::join(docs![Doc::text(","), Doc::line()], item_docs);
-        d = Doc::group(docs![
-            d,
-            Doc::text(" ("),
-            Doc::nest(2, docs![Doc::softline(), items_joined]),
-            Doc::softline(),
-            Doc::text(")")
-        ]);
+    match exposing {
+        None => {}
+        Some(Exposing::All { .. }) => {
+            d = d.append(Doc::text(" (..)"));
+        }
+        Some(Exposing::Items(items)) => {
+            let item_docs: Vec<Doc> = items.iter().map(|i| Doc::text(i.as_str())).collect();
+            let items_joined = Doc::join(docs![Doc::text(","), Doc::line()], item_docs);
+            d = Doc::group(docs![
+                d,
+                Doc::text(" ("),
+                Doc::nest(2, docs![Doc::softline(), items_joined]),
+                Doc::softline(),
+                Doc::text(")")
+            ]);
+        }
     }
     d
 }

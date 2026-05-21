@@ -1179,7 +1179,7 @@ fn register_import_aliases(
             let is_exposed = |name: &str| -> bool {
                 match exposing {
                     None => false,
-                    Some(names) => names.iter().any(|n| n == name),
+                    Some(e) => e.exposes(name),
                 }
             };
 

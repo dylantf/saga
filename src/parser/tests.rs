@@ -3136,3 +3136,58 @@ fn receive_with_guard() {
         _ => panic!("expected Receive, got {:?}", expr),
     }
 }
+
+// --- Import declarations ---
+
+fn parse_program_error(source: &str) -> ParseError {
+    let tokens = Lexer::new(source).lex().unwrap();
+    Parser::new(tokens).parse_program().unwrap_err()
+}
+
+#[test]
+fn import_with_explicit_items() {
+    let prog = parse("import Foo (bar, Baz)");
+    match &prog[0] {
+        Decl::Import { module_path, alias, exposing, .. } => {
+            assert_eq!(module_path, &vec!["Foo".to_string()]);
+            assert_eq!(alias, &None);
+            match exposing {
+                Some(Exposing::Items(items)) => {
+                    assert_eq!(items, &vec!["bar".to_string(), "Baz".to_string()]);
+                }
+                other => panic!("expected Items, got {:?}", other),
+            }
+        }
+        other => panic!("expected Decl::Import, got {:?}", other),
+    }
+}
+
+#[test]
+fn import_exposing_all_dotdot() {
+    let prog = parse("import Foo (..)");
+    match &prog[0] {
+        Decl::Import { exposing, .. } => {
+            assert!(matches!(exposing, Some(Exposing::All { .. })));
+        }
+        other => panic!("expected Decl::Import, got {:?}", other),
+    }
+}
+
+#[test]
+fn import_with_alias_and_dotdot() {
+    let prog = parse("import Foo.Bar as F (..)");
+    match &prog[0] {
+        Decl::Import { module_path, alias, exposing, .. } => {
+            assert_eq!(module_path, &vec!["Foo".to_string(), "Bar".to_string()]);
+            assert_eq!(alias.as_deref(), Some("F"));
+            assert!(matches!(exposing, Some(Exposing::All { .. })));
+        }
+        other => panic!("expected Decl::Import, got {:?}", other),
+    }
+}
+
+#[test]
+fn import_dotdot_mixed_with_names_is_error() {
+    let err = parse_program_error("import Foo (.., bar)");
+    assert!(err.message.contains(".."), "expected message mentioning `..`, got: {}", err.message);
+}

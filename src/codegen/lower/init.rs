@@ -463,12 +463,12 @@ impl<'a> Lowerer<'a> {
         &mut self,
         module_name: &str,
         prefix: &str,
-        exposing: Option<&[String]>,
+        exposing: Option<&crate::ast::Exposing>,
         info: &crate::typechecker::ModuleCodegenInfo,
     ) {
         let is_exposed = |name: &str| match exposing {
             None => false,
-            Some(names) => names.iter().any(|n| n == name),
+            Some(e) => e.exposes(name),
         };
         let exported_names: std::collections::HashSet<&str> =
             info.exports.iter().map(|(n, _)| n.as_str()).collect();
@@ -740,7 +740,7 @@ impl<'a> Lowerer<'a> {
         };
         let info = module_semantics.codegen_info;
         self.register_imported_effect_defs(info);
-        self.register_imported_exports(&module_name, &prefix, exposing.as_deref(), info);
+        self.register_imported_exports(&module_name, &prefix, exposing.as_ref(), info);
         self.register_imported_records_and_dicts(&module_name, info);
         self.register_imported_handler_defs(&module_name, module_semantics.elaborated);
     }

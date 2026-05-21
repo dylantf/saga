@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 
 use tower_lsp::lsp_types::*;
 
-use saga::ast::Decl;
+use saga::ast::{Decl, Exposing};
 use saga::typechecker::{CheckResult, ModuleExports};
 
 use crate::line_index::LineIndex;
@@ -310,7 +310,7 @@ struct ExistingImport {
     /// The alias, if any
     _alias: Option<String>,
     /// Names in the exposing list (None = no exposing clause)
-    exposing: Option<Vec<String>>,
+    exposing: Option<saga::ast::Exposing>,
     /// Span end offset (for finding insertion position)
     span_end: usize,
 }
@@ -448,16 +448,22 @@ fn collect_missing_import_actions(
                         if !suggested.insert(key) {
                             continue;
                         }
-                        if let Some(ref exposed) = existing.exposing {
-                            if !exposed.contains(&name) {
-                                add_to_exposing_action(
+                        match &existing.exposing {
+                            Some(Exposing::All { .. }) => {
+                                // Already exposes everything — nothing to suggest.
+                            }
+                            Some(Exposing::Items(exposed)) => {
+                                if !exposed.contains(&name) {
+                                    add_to_exposing_action(
+                                        existing, &name, source, line_index, uri, actions,
+                                    );
+                                }
+                            }
+                            None => {
+                                add_expose_to_existing_action(
                                     existing, &name, source, line_index, uri, actions,
                                 );
                             }
-                        } else {
-                            add_expose_to_existing_action(
-                                existing, &name, source, line_index, uri, actions,
-                            );
                         }
                         if let Some(span) = diag.span {
                             let prefix = module_name.rsplit('.').next().unwrap_or(module_name);

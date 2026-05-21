@@ -457,7 +457,7 @@ impl Checker {
                 ..
             } = decl
             {
-                self.typecheck_import(module_path, alias.as_deref(), exposing.as_deref(), *span)
+                self.typecheck_import(module_path, alias.as_deref(), exposing.as_ref(), *span)
                     .map_err(|e| vec![e])?;
             }
         }

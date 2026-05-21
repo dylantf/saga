@@ -1493,36 +1493,51 @@ impl Parser {
             None
         };
 
-        // Optional: (name1, Name2, ...) - unqualified imports
+        // Optional: (name1, Name2, ...) or (..) - unqualified imports
         // Capital names are inferred as types and hoist their constructors automatically.
         let exposing = if matches!(self.peek(), Token::LParen) {
+            let lparen_span = self.tokens[self.pos].span;
             self.advance(); // consume '('
-            let mut items = Vec::new();
-            while !matches!(self.peek(), Token::RParen | Token::Eof) {
-                let name = match self.peek().clone() {
-                    Token::Ident(n) => {
-                        self.advance();
-                        n
-                    }
-                    Token::UpperIdent(n) => {
-                        self.advance();
-                        n
-                    }
-                    tok => {
-                        return Err(ParseError {
-                            message: format!("expected identifier in import list, got {:?}", tok),
-                            span: self.tokens[self.pos].span,
-                        });
-                    }
-                };
-                items.push(name);
-                if matches!(self.peek(), Token::Comma) {
-                    self.advance();
+            if matches!(self.peek(), Token::DotDot) {
+                let dotdot_span = self.tokens[self.pos].span;
+                self.advance(); // consume '..'
+                if !matches!(self.peek(), Token::RParen) {
+                    return Err(ParseError {
+                        message: "`(..)` must be the entire exposing list — no other items allowed".to_string(),
+                        span: self.tokens[self.pos].span,
+                    });
                 }
+                self.expect(Token::RParen)?;
+                Some(crate::ast::Exposing::All {
+                    span: lparen_span.to(dotdot_span),
+                })
+            } else {
+                let mut items = Vec::new();
+                while !matches!(self.peek(), Token::RParen | Token::Eof) {
+                    let name = match self.peek().clone() {
+                        Token::Ident(n) => {
+                            self.advance();
+                            n
+                        }
+                        Token::UpperIdent(n) => {
+                            self.advance();
+                            n
+                        }
+                        tok => {
+                            return Err(ParseError {
+                                message: format!("expected identifier in import list, got {:?}", tok),
+                                span: self.tokens[self.pos].span,
+                            });
+                        }
+                    };
+                    items.push(name);
+                    if matches!(self.peek(), Token::Comma) {
+                        self.advance();
+                    }
+                }
+                self.expect(Token::RParen)?;
+                Some(crate::ast::Exposing::Items(items))
             }
-            let end = self.tokens[self.pos].span;
-            self.expect(Token::RParen)?;
-            Some((items, end))
         } else {
             None
         };
@@ -1532,7 +1547,7 @@ impl Parser {
             id: NodeId::fresh(),
             module_path,
             alias,
-            exposing: exposing.map(|(items, _)| items),
+            exposing,
             span: start.to(end),
         })
     }

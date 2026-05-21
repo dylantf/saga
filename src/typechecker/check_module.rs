@@ -566,7 +566,7 @@ impl Checker {
         &mut self,
         module_path: &[String],
         alias: Option<&str>,
-        exposing: Option<&[crate::ast::ExposedItem]>,
+        exposing: Option<&crate::ast::Exposing>,
         span: Span,
     ) -> Result<(), Diagnostic> {
         let module_name = module_path.join(".");
@@ -574,7 +574,20 @@ impl Checker {
             .map(|a| a.to_string())
             .unwrap_or_else(|| module_path.last().unwrap().to_string());
         let exports = self.load_module(module_path, span)?;
-        self.inject_exports(&exports, &module_name, &prefix, exposing, span)
+        // Expand `(..)` to an explicit list of every public export so the rest
+        // of the import pipeline can treat all-exposing imports as if they had
+        // listed every name. This makes `(..)` equivalent by construction.
+        let expanded: Option<Vec<crate::ast::ExposedItem>> = match exposing {
+            Some(crate::ast::Exposing::All { .. }) => Some(synthesize_all_exposed(&exports)),
+            _ => None,
+        };
+        let exposing_items: Option<&[crate::ast::ExposedItem]> = match (exposing, &expanded) {
+            (None, _) => None,
+            (Some(crate::ast::Exposing::Items(items)), _) => Some(items.as_slice()),
+            (Some(crate::ast::Exposing::All { .. }), Some(items)) => Some(items.as_slice()),
+            (Some(crate::ast::Exposing::All { .. }), None) => unreachable!(),
+        };
+        self.inject_exports(&exports, &module_name, &prefix, exposing_items, span)
     }
 
     /// Parse, typecheck, and cache a module without injecting it into the
@@ -1178,6 +1191,43 @@ impl Checker {
 ///
 /// Separated from `inject_exports` so name resolution can eventually run as
 /// an independent pass before typechecking.
+/// Synthesize the explicit `ExposedItem` list equivalent to `(..)` for the
+/// given module's exports. Includes every public value binding, type and
+/// record name (with their constructors flowing through the existing types
+/// branch in `resolve_import`), trait, effect, and handler.
+fn synthesize_all_exposed(exports: &ModuleExports) -> Vec<crate::ast::ExposedItem> {
+    let mut items: Vec<String> = Vec::new();
+    let mut seen: HashSet<String> = HashSet::new();
+    let push = |name: &str, items: &mut Vec<String>, seen: &mut HashSet<String>| {
+        if seen.insert(name.to_string()) {
+            items.push(name.to_string());
+        }
+    };
+
+    // Bindings (values + bare constructors that live in the values namespace)
+    for (name, _) in &exports.bindings {
+        push(name, &mut items, &mut seen);
+    }
+    // Types — the items-branch in resolve_import auto-walks the constructors
+    // for each exposed type name, so adding the type name alone is enough.
+    for name in exports.type_constructors.keys() {
+        push(name, &mut items, &mut seen);
+    }
+    for name in exports.record_defs.keys() {
+        push(name, &mut items, &mut seen);
+    }
+    for name in exports.traits.keys() {
+        push(name, &mut items, &mut seen);
+    }
+    for name in exports.effects.keys() {
+        push(name, &mut items, &mut seen);
+    }
+    for name in exports.handlers.keys() {
+        push(name, &mut items, &mut seen);
+    }
+    items
+}
+
 pub(super) fn resolve_import(
     exports: &ModuleExports,
     module_name: &str,

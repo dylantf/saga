@@ -115,7 +115,7 @@ fn collect_summaries_from_imports(
                 out,
                 &module_name,
                 alias.as_deref().unwrap_or(&module_name),
-                exposing.as_deref(),
+                exposing.as_ref(),
                 &summary,
             );
         }
@@ -320,9 +320,10 @@ fn merge_summary_import(
     out: &mut ImportedDecls,
     module_name: &str,
     prefix: &str,
-    exposing: Option<&[ExposedItem]>,
+    exposing: Option<&crate::ast::Exposing>,
     summary: &ModuleSummary,
 ) {
+    let exposes = |name: &str| exposing.is_none() || exposing.is_some_and(|e| e.exposes(name));
     for (name, info) in &summary.traits {
         register_summary_entry(
             &mut out.traits,
@@ -340,7 +341,7 @@ fn merge_summary_import(
                 info,
             );
         }
-        if exposing.is_none() || exposing.is_some_and(|items| items.iter().any(|i| i == name)) {
+        if exposes(name) {
             register_summary_entry(&mut out.traits, name, module_name, name, info);
         }
     }
@@ -361,7 +362,7 @@ fn merge_summary_import(
                 info,
             );
         }
-        if exposing.is_none() || exposing.is_some_and(|items| items.iter().any(|i| i == name)) {
+        if exposes(name) {
             register_summary_entry(&mut out.types, name, module_name, name, info);
         }
     }
@@ -382,7 +383,7 @@ fn merge_summary_import(
                 info,
             );
         }
-        if exposing.is_none() || exposing.is_some_and(|items| items.iter().any(|i| i == name)) {
+        if exposes(name) {
             register_summary_entry(&mut out.records, name, module_name, name, info);
         }
     }

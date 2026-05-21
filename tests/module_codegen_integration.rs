@@ -854,6 +854,57 @@ main () = add 1 (double 10)
     );
 }
 
+#[test]
+fn two_module_exposing_all_compiles() {
+    // `import Math (..)` should expose every public export from Math
+    // as bare names — equivalent to `import Math (add, double)`.
+    let math_src = std::fs::read_to_string(fixtures_root().join("Math.saga")).unwrap();
+    let main_src = "
+module Main
+import Math (..)
+
+main () = add 1 (double 10)
+";
+
+    let mut checker = make_project_checker();
+    let main_program = typecheck_source(main_src, &mut checker);
+
+    let math_core = emit_project_module(&math_src, "math", &checker);
+    let main_core = emit_from_program(&main_program, "main", &checker);
+
+    let dir = assert_erlc_compiles(&math_core, "math");
+    let main_core_path = dir.join("main.core");
+    std::fs::write(&main_core_path, &main_core).unwrap();
+    let output = std::process::Command::new("erlc")
+        .arg("-o")
+        .arg(&dir)
+        .arg(&main_core_path)
+        .output()
+        .expect("failed to run erlc");
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(
+        output.status.success(),
+        "erlc failed on main:\n{main_core}\nstderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn exposing_all_brings_constructors_into_scope() {
+    // `import Shapes (..)` should expose the `Shape` type, its constructors
+    // (`Circle`, `Rect`), and the `area` function as bare names.
+    let main_src = "
+module Main
+import Shapes (..)
+
+main () = area (Circle 5.0)
+";
+    let mut checker = make_project_checker();
+    let program = typecheck_source(main_src, &mut checker);
+    let out = emit_from_program(&program, "main", &checker);
+    assert_contains(&out, "call 'shapes':'area'");
+}
+
 // ---- Imported record field orders ----
 
 #[test]
