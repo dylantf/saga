@@ -546,6 +546,7 @@ pub const BUILTIN_MODULES: &[(&str, &str)] = &[
     ("Std.Ref", include_str!("../stdlib/Ref.saga")),
     ("Std.AtomicRef", include_str!("../stdlib/AtomicRef.saga")),
     ("Std.Vec", include_str!("../stdlib/Vec.saga")),
+    ("Std.Stream", include_str!("../stdlib/Stream.saga")),
     ("Std.Array", include_str!("../stdlib/Array.saga")),
     ("Std.Env", include_str!("../stdlib/Env.saga")),
     ("Std.Generic", include_str!("../stdlib/Generic.saga")),
