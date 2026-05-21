@@ -1021,13 +1021,21 @@ impl<'a> Lowerer<'a> {
     fn has_nested_effectful_expr(&self, expr: &Expr) -> bool {
         match &expr.kind {
             ExprKind::If {
+                cond,
                 then_branch,
                 else_branch,
                 ..
-            } => self.branch_is_effectful(then_branch) || self.branch_is_effectful(else_branch),
-            ExprKind::Case { arms, .. } => arms
-                .iter()
-                .any(|arm| self.branch_is_effectful(&arm.node.body)),
+            } => {
+                self.branch_is_effectful(cond)
+                    || self.branch_is_effectful(then_branch)
+                    || self.branch_is_effectful(else_branch)
+            }
+            ExprKind::Case {
+                scrutinee, arms, ..
+            } => {
+                self.branch_is_effectful(scrutinee)
+                    || arms.iter().any(|arm| self.branch_is_effectful(&arm.node.body))
+            }
             ExprKind::Block { stmts, .. } => stmts.iter().any(|s| match &s.node {
                 Stmt::Expr(e) => self.branch_is_effectful(e),
                 Stmt::Let { value, .. } => self.branch_is_effectful(value),
@@ -1035,6 +1043,24 @@ impl<'a> Lowerer<'a> {
             }),
             ExprKind::RecordCreate { fields, .. } | ExprKind::AnonRecordCreate { fields } => {
                 fields.iter().any(|(_, _, e)| self.branch_is_effectful(e))
+            }
+            ExprKind::App { .. } => {
+                if let Some((_, args)) = super::lower::util::collect_ctor_call(expr) {
+                    args.iter().any(|a| self.branch_is_effectful(a))
+                } else {
+                    false
+                }
+            }
+            ExprKind::Tuple { elements, .. } => {
+                elements.iter().any(|e| self.branch_is_effectful(e))
+            }
+            ExprKind::BinOp { left, right, .. } => {
+                self.branch_is_effectful(left) || self.branch_is_effectful(right)
+            }
+            ExprKind::FieldAccess { expr, .. } => self.branch_is_effectful(expr),
+            ExprKind::RecordUpdate { record, fields, .. } => {
+                self.branch_is_effectful(record)
+                    || fields.iter().any(|(_, _, e)| self.branch_is_effectful(e))
             }
             _ => false,
         }
