@@ -1,50 +1,9 @@
-import Std.Stream (Stream, Gen)
-import Std.Stream as Stream
-
-fun naturals_from : Int -> Unit needs {Gen Int}
-naturals_from n = {
-  yield! n
-  naturals_from (n + 1)
+pub trait ToJson a {
+  fun to_json_with : a -> b -> c
+  fun to_json : a -> b
+  to_json x = to_json_with default_options x
 }
 
 main () = {
-  let nats = Stream.from_gen (fun () -> naturals_from 0)
-
-  # The original demo
-  nats
-  |> Stream.map (fun x -> x * x)
-  |> Stream.filter (fun x -> x % 2 == 0)
-  |> Stream.take 5
-  |> Stream.to_list
-  |> dbg
-  # [0, 4, 16, 36, 64]
-
-
-  # A few more things now that we have a library
-  Stream.range 1 6
-  |> Stream.to_list
-  |> dbg
-  # [1, 2, 3, 4, 5]
-
-
-  Stream.iterate (fun x -> x * 2) 1
-  |> Stream.take 8
-  |> Stream.to_list
-  |> dbg
-  # [1, 2, 4, 8, 16, 32, 64, 128]
-
-
-  let zipped =
-    Stream.zip (Stream.range_from 1) (Stream.from_list ["a", "b", "c"])
-  zipped
-  |> Stream.to_list
-  |> dbg
-  # [(1, "a"), (2, "b"), (3, "c")]
-
-
-  Stream.range 1 11
-  |> Stream.fold (fun acc x -> acc + x) 0
-  |> dbg
-  # 55
-
+  dbg "hello world"
 }

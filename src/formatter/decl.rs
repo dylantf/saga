@@ -405,10 +405,19 @@ pub fn format_trait_def(
     let body = format_annotated_body(
         methods,
         |method| {
-            docs![
+            let sig = docs![
                 Doc::text(format!("fun {} : ", method.name)),
                 format_fun_type(&method.params, &method.return_type, &[], &None)
-            ]
+            ];
+            if let Some(default) = &method.default_body {
+                docs![
+                    sig,
+                    Doc::hardline(),
+                    format_fun_binding(&method.name, &default.params, &None, &default.body)
+                ]
+            } else {
+                sig
+            }
         },
         dangling,
     );

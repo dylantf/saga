@@ -765,6 +765,13 @@ fn normalize_trait_method(m: &mut TraitMethod) {
         normalize_type_expr(te);
     }
     normalize_type_expr(&mut m.return_type);
+    if let Some(default) = m.default_body.as_mut() {
+        default.name_span = S;
+        for p in default.params.iter_mut() {
+            normalize_pat(p);
+        }
+        normalize_expr(&mut default.body);
+    }
 }
 
 fn normalize_impl_method(m: &mut ImplMethod) {
@@ -1518,6 +1525,17 @@ fn trait_method_arrow_param_gets_parens() {
     assert!(
         result.contains("(b -> c) -> a b -> a c"),
         "arrow param should be parenthesized: {}",
+        result
+    );
+}
+
+#[test]
+fn trait_default_method_body_preserved() {
+    let src = "trait ToJson a {\n  fun to_json_with : a -> b -> c\n  fun to_json : a -> b\n  to_json x = to_json_with default_options x\n}";
+    let result = fmt80(src);
+    assert!(
+        result.contains("to_json x = to_json_with default_options x"),
+        "default body should be preserved: {}",
         result
     );
 }
