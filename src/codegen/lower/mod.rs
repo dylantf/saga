@@ -1043,6 +1043,17 @@ impl<'a> Lowerer<'a> {
                     false
                 }
             }
+            ExprKind::Tuple { elements, .. } => {
+                elements.iter().any(|e| self.branch_is_effectful(e))
+            }
+            ExprKind::BinOp { left, right, .. } => {
+                self.branch_is_effectful(left) || self.branch_is_effectful(right)
+            }
+            ExprKind::FieldAccess { expr, .. } => self.branch_is_effectful(expr),
+            ExprKind::RecordUpdate { record, fields, .. } => {
+                self.branch_is_effectful(record)
+                    || fields.iter().any(|(_, _, e)| self.branch_is_effectful(e))
+            }
             _ => false,
         }
     }
