@@ -204,7 +204,11 @@ pub fn type_definition_summary(
                 let code = format!(
                     "trait {} {}{} {{\n{}\n}}",
                     name,
-                    type_params.join(" "),
+                    type_params
+                        .iter()
+                        .map(|p| p.to_string())
+                        .collect::<Vec<_>>()
+                        .join(" "),
                     supers,
                     method_strs.join("\n")
                 );
@@ -390,11 +394,12 @@ fn format_labeled_param(label: &str, ty_str: &str) -> String {
 }
 
 /// Format type parameters: `""` or `" a b"`.
-fn format_type_params(params: &[String]) -> String {
+fn format_type_params(params: &[saga::ast::TypeParam]) -> String {
     if params.is_empty() {
         String::new()
     } else {
-        format!(" {}", params.join(" "))
+        let parts: Vec<String> = params.iter().map(|p| p.to_string()).collect();
+        format!(" {}", parts.join(" "))
     }
 }
 
@@ -435,6 +440,7 @@ pub(crate) fn format_type_expr(ty: &TypeExpr) -> String {
     match ty {
         TypeExpr::Named { name, .. } => name.clone(),
         TypeExpr::Var { name, .. } => name.clone(),
+        TypeExpr::Atom { name, .. } => format!("'{}", name),
         TypeExpr::App { func, arg, .. } => {
             format!("{} {}", format_type_expr(func), format_type_expr(arg))
         }

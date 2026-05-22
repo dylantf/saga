@@ -521,6 +521,13 @@ impl Checker {
                 Type::Record(typed_fields)
             }
             crate::ast::TypeExpr::Labeled { inner, .. } => self.convert_type_expr(inner, params),
+            // Atom literals are kind-`Atom`; Chunk 1 represents them as a
+            // distinct nullary Type::Con with a synthetic name so the
+            // typechecker can carry them through without crashing. Real kind
+            // checking is added in a later chunk.
+            crate::ast::TypeExpr::Atom { name, .. } => {
+                Type::Con(format!("$atom:{}", name), Vec::new())
+            }
         }
     }
 

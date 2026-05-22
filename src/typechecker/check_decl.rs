@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use crate::ast::{self, Decl, ExprKind, Lit};
+use crate::ast::{self, Decl, ExprKind, Lit, TypeParam};
 
 use super::result::CheckResult;
 use super::{
@@ -1646,7 +1646,7 @@ impl Checker {
     pub(crate) fn register_type_def(
         &mut self,
         name: &str,
-        type_params: &[String],
+        type_params: &[TypeParam],
         variants: &[&ast::TypeConstructor],
     ) -> Result<(), Diagnostic> {
         // Create fresh type variables for the type parameters
@@ -1655,7 +1655,7 @@ impl Checker {
             .map(|p| {
                 let var = self.next_var;
                 self.next_var += 1;
-                (p.clone(), var)
+                (p.name.clone(), var)
             })
             .collect();
 
@@ -1732,7 +1732,7 @@ impl Checker {
     pub(crate) fn register_record_def(
         &mut self,
         name: &str,
-        type_params: &[String],
+        type_params: &[TypeParam],
         fields: &[&(String, ast::TypeExpr)],
         def_id: crate::ast::NodeId,
     ) -> Result<(), Diagnostic> {
@@ -1742,7 +1742,7 @@ impl Checker {
             .map(|p| {
                 let var = self.next_var;
                 self.next_var += 1;
-                (p.clone(), var)
+                (p.name.clone(), var)
             })
             .collect();
 
@@ -1809,7 +1809,7 @@ impl Checker {
     /// Phase 1: Register effect name and type params (stub with empty ops).
     /// Called first for ALL effects so that forward references between effects
     /// (e.g. Process referencing Actor) resolve during op signature processing.
-    pub(crate) fn register_effect_stub(&mut self, name: &str, effect_type_params: &[String]) {
+    pub(crate) fn register_effect_stub(&mut self, name: &str, effect_type_params: &[TypeParam]) {
         let mut type_param_ids = Vec::new();
         for _tp in effect_type_params {
             let var = self.fresh_var();
@@ -1845,7 +1845,7 @@ impl Checker {
     pub(crate) fn register_effect_ops(
         &mut self,
         name: &str,
-        effect_type_params: &[String],
+        effect_type_params: &[TypeParam],
         operations: &[&ast::EffectOp],
     ) -> Result<(), Diagnostic> {
         let key = if let Some(module) = &self.current_module {
@@ -1863,7 +1863,7 @@ impl Checker {
         let shared_params: Vec<(String, u32)> = effect_type_params
             .iter()
             .zip(type_param_ids.iter())
-            .map(|(tp, &id)| (tp.clone(), id))
+            .map(|(tp, &id)| (tp.name.clone(), id))
             .collect();
 
         let mut ops = Vec::new();

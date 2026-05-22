@@ -811,6 +811,11 @@ impl Parser {
         let span = self.tokens[self.pos].span;
 
         match self.advance() {
+            Token::AtomLit(_) => Err(ParseError {
+                message: "atom literals like `'Foo` are only valid in type expressions"
+                    .to_string(),
+                span,
+            }),
             Token::True => Ok(Expr {
                 id: self.next_id(),
                 span,

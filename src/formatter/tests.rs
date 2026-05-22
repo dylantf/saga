@@ -631,7 +631,9 @@ fn normalize_stmt(s: &mut Stmt) {
 
 fn normalize_type_expr(te: &mut TypeExpr) {
     match te {
-        TypeExpr::Named { span, .. } | TypeExpr::Var { span, .. } => *span = S,
+        TypeExpr::Named { span, .. }
+        | TypeExpr::Var { span, .. }
+        | TypeExpr::Atom { span, .. } => *span = S,
         TypeExpr::App {
             func, arg, span, ..
         } => {

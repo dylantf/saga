@@ -345,7 +345,7 @@ impl Elaborator {
                     let var_to_idx: HashMap<&str, usize> = type_params
                         .iter()
                         .enumerate()
-                        .map(|(i, name)| (name.as_str(), i))
+                        .map(|(i, tp)| (tp.name.as_str(), i))
                         .collect();
                     let mut params: Vec<(String, usize)> = Vec::new();
                     for bound in where_clause {

@@ -1698,7 +1698,7 @@ fn collect_codegen_info(
                 let var_to_idx: std::collections::HashMap<&str, usize> = type_params
                     .iter()
                     .enumerate()
-                    .map(|(i, name)| (name.as_str(), i))
+                    .map(|(i, tp)| (tp.name.as_str(), i))
                     .collect();
                 let param_constraints: Vec<(String, usize)> = where_clause
                     .iter()

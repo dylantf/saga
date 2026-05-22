@@ -11,6 +11,10 @@ pub enum Token {
     Ident(String),
     UpperIdent(String),
 
+    /// `'Foo` or `'foo` — type-level atom literal. Payload is the identifier
+    /// portion without the leading apostrophe.
+    AtomLit(String),
+
     // Keywords
     True,
     False,

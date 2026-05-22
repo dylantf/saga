@@ -871,6 +871,35 @@ impl Lexer {
                     let spanned = self.emit(Token::At, start, trivia, newline_flag);
                     tokens.push(spanned);
                 }
+                // `'Ident` or `'ident` -> atom literal (type-level).
+                // Must be at token start (otherwise `'` would have been consumed
+                // by `read_identifier` as a trailing apostrophe).
+                Some('\'') => {
+                    self.advance(); // consume `'`
+                    match self.peek() {
+                        Some(ch) if ch.is_alphabetic() || ch == '_' => {
+                            let mut s = String::new();
+                            while let Some(c) = self.peek() {
+                                if c.is_alphanumeric() || c == '_' {
+                                    s.push(c);
+                                    self.advance();
+                                } else {
+                                    break;
+                                }
+                            }
+                            let spanned =
+                                self.emit(Token::AtomLit(s), start, trivia, newline_flag);
+                            tokens.push(spanned);
+                        }
+                        _ => {
+                            return Err(LexError {
+                                message: "expected identifier after `'` for atom literal"
+                                    .to_string(),
+                                pos: start,
+                            });
+                        }
+                    }
+                }
                 Some(ch) if ch.is_alphabetic() || ch == '_' => {
                     let mut tok = self.read_identifier();
                     // ident! (no space) -> EffectCall, but not ident!=

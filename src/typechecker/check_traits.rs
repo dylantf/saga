@@ -1,4 +1,4 @@
-use crate::ast;
+use crate::ast::{self, TypeParam};
 use crate::token::Span;
 
 use super::{Checker, Diagnostic, ImplInfo, Scheme, Type};
@@ -117,7 +117,7 @@ impl Checker {
     pub(crate) fn register_trait_def(
         &mut self,
         name: &str,
-        type_params: &[String],
+        type_params: &[TypeParam],
         supertraits: &[ast::TraitRef],
         methods: &[&ast::TraitMethod],
     ) -> Result<(), Diagnostic> {
@@ -127,7 +127,7 @@ impl Checker {
             None => name.to_string(),
         };
 
-        let self_param = type_params.first().map(|s| s.as_str()).unwrap_or("a");
+        let self_param = type_params.first().map(|tp| tp.name.as_str()).unwrap_or("a");
         let mut method_sigs = Vec::new();
 
         for method in methods {
@@ -170,14 +170,15 @@ impl Checker {
 
             // Ensure all trait type params have var IDs, even if they don't
             // appear in this method's signature (phantom type params).
-            for tp_name in type_params {
+            for tp in type_params {
+                let tp_name = tp.name.as_str();
                 if !params_list.iter().any(|(n, _)| n == tp_name) {
                     let fresh = self.fresh_var();
                     let id = match fresh {
                         Type::Var(id) => id,
                         _ => unreachable!(),
                     };
-                    params_list.push((tp_name.clone(), id));
+                    params_list.push((tp.name.clone(), id));
                     forall.push(id);
                 }
             }
@@ -189,7 +190,8 @@ impl Checker {
                 .map(|(_, id)| *id);
             let extra_types: Vec<Type> = type_params[1..]
                 .iter()
-                .filter_map(|tp_name| {
+                .filter_map(|tp| {
+                    let tp_name = tp.name.as_str();
                     params_list
                         .iter()
                         .find(|(n, _)| n == tp_name)
@@ -263,7 +265,7 @@ impl Checker {
         self.trait_state.traits.insert(
             canonical_name,
             super::TraitInfo {
-                type_params: type_params.to_vec(),
+                type_params: type_params.iter().map(|tp| tp.name.clone()).collect(),
                 supertraits: resolved_supertraits,
                 methods: trait_method_sigs,
                 is_functional,
@@ -280,7 +282,7 @@ impl Checker {
         trait_name: &str,
         trait_type_args: &[ast::TypeExpr],
         target_type: &str,
-        type_params: &[String],
+        type_params: &[TypeParam],
         where_clause: &[ast::TraitBound],
         where_apps: &[ast::TraitApp],
         needs: &[ast::EffectRef],
@@ -513,7 +515,7 @@ impl Checker {
                     ast::TypeExpr::Var { name, .. } => {
                         if let Some(resolved) = local_subst.get(name) {
                             resolved_names.push(Some(resolved.clone()));
-                        } else if type_params.contains(name) {
+                        } else if type_params.iter().any(|tp| &tp.name == name) {
                             resolved_names.push(Some(format!("$impl_param:{name}")));
                             impl_param_positions.push((i, name.clone()));
                         } else {
@@ -811,7 +813,7 @@ impl Checker {
         // tvars from the concrete args of the target type.
         let mut conv_params: Vec<(String, u32)> = type_params
             .iter()
-            .cloned()
+            .map(|tp| tp.name.clone())
             .zip(target_type_param_ids.iter().copied())
             .collect();
         let trait_type_args_types: Vec<Type> = trait_type_args

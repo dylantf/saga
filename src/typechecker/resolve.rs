@@ -485,6 +485,7 @@ impl<'a> Resolver<'a> {
         match texpr {
             TypeExpr::Named { id, name, .. } => self.record_type_ref(*id, name),
             TypeExpr::Var { .. } => {}
+            TypeExpr::Atom { .. } => {}
             TypeExpr::App { func, arg, .. } => {
                 self.resolve_type_expr(func);
                 self.resolve_type_expr(arg);

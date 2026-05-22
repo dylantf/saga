@@ -590,3 +590,48 @@ fn multiline_interp_unterminated() {
         "unterminated multiline interpolated string"
     );
 }
+
+// --- Atom literals (type-level) ---
+
+#[test]
+fn atom_literal_uppercase() {
+    assert_eq!(toks("'Admin"), vec![AtomLit("Admin".into()), Eof]);
+}
+
+#[test]
+fn atom_literal_lowercase() {
+    assert_eq!(toks("'admin"), vec![AtomLit("admin".into()), Eof]);
+}
+
+#[test]
+fn atom_literal_with_underscore() {
+    assert_eq!(toks("'first_name"), vec![AtomLit("first_name".into()), Eof]);
+}
+
+#[test]
+fn atom_literal_in_type_expr() {
+    // 'foo followed by other tokens
+    let ts = toks("Id 'user");
+    assert_eq!(
+        ts,
+        vec![UpperIdent("Id".into()), AtomLit("user".into()), Eof]
+    );
+}
+
+#[test]
+fn atom_literal_apostrophe_then_digit_is_error() {
+    let result = Lexer::new("'9").lex();
+    assert!(result.is_err());
+    assert!(
+        result
+            .unwrap_err()
+            .message
+            .contains("expected identifier after `'`")
+    );
+}
+
+#[test]
+fn atom_literal_lone_apostrophe_is_error() {
+    let result = Lexer::new("'").lex();
+    assert!(result.is_err());
+}
