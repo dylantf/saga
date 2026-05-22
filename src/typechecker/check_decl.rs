@@ -1649,13 +1649,17 @@ impl Checker {
         type_params: &[TypeParam],
         variants: &[&ast::TypeConstructor],
     ) -> Result<(), Diagnostic> {
-        // Create fresh type variables for the type parameters
+        // Create fresh type variables for the type parameters, honoring
+        // declared kinds (e.g. `(n : Atom)`).
         let mut param_vars: Vec<(String, u32)> = type_params
             .iter()
             .map(|p| {
-                let var = self.next_var;
-                self.next_var += 1;
-                (p.name.clone(), var)
+                let var = self.fresh_var_of_kind(p.kind);
+                let id = match var {
+                    Type::Var(id) => id,
+                    _ => unreachable!(),
+                };
+                (p.name.clone(), id)
             })
             .collect();
 
@@ -1666,6 +1670,13 @@ impl Checker {
             Some(module) => format!("{}.{}", module, name),
             None => name.to_string(),
         };
+
+        // Record declared kinds for this constructor so `convert_type_expr`
+        // can enforce them at application sites.
+        self.type_param_kinds.insert(
+            canonical_name.clone(),
+            type_params.iter().map(|p| p.kind).collect(),
+        );
 
         let result_type = Type::Con(
             canonical_name.clone(),
@@ -1740,9 +1751,12 @@ impl Checker {
         let mut param_vars: Vec<(String, u32)> = type_params
             .iter()
             .map(|p| {
-                let var = self.next_var;
-                self.next_var += 1;
-                (p.name.clone(), var)
+                let var = self.fresh_var_of_kind(p.kind);
+                let id = match var {
+                    Type::Var(id) => id,
+                    _ => unreachable!(),
+                };
+                (p.name.clone(), id)
             })
             .collect();
 
@@ -1802,7 +1816,10 @@ impl Checker {
             canonical_name.clone(),
             vec![(canonical_name.clone(), num_fields)],
         );
-        self.type_arity.insert(canonical_name, type_params.len());
+        self.type_arity
+            .insert(canonical_name.clone(), type_params.len());
+        self.type_param_kinds
+            .insert(canonical_name, type_params.iter().map(|p| p.kind).collect());
         Ok(())
     }
 
@@ -1811,8 +1828,8 @@ impl Checker {
     /// (e.g. Process referencing Actor) resolve during op signature processing.
     pub(crate) fn register_effect_stub(&mut self, name: &str, effect_type_params: &[TypeParam]) {
         let mut type_param_ids = Vec::new();
-        for _tp in effect_type_params {
-            let var = self.fresh_var();
+        for tp in effect_type_params {
+            let var = self.fresh_var_of_kind(tp.kind);
             let id = match &var {
                 Type::Var(id) => *id,
                 _ => unreachable!(),
@@ -2649,6 +2666,13 @@ impl Checker {
                         let display = trait_name.rsplit('.').next().unwrap_or(&trait_name);
                         return Err(rewrite_diag(
                             format!("no impl of {} for anonymous record type", display),
+                            span,
+                        ));
+                    }
+                    Type::Atom(name) => {
+                        let display = trait_name.rsplit('.').next().unwrap_or(&trait_name);
+                        return Err(rewrite_diag(
+                            format!("no impl of {} for atom type '{}", display, name),
                             span,
                         ));
                     }

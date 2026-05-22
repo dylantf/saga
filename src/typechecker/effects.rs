@@ -303,6 +303,7 @@ impl Checker {
                             collect_vars(ty, vars);
                         }
                     }
+                    Type::Atom(_) => {}
                     Type::Error => {}
                 }
             }
@@ -380,6 +381,7 @@ impl Checker {
                         collect_vars2(ty, vars);
                     }
                 }
+                Type::Atom(_) => {}
                 Type::Error => {}
             }
         }

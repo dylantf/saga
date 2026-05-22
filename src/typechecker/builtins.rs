@@ -16,7 +16,7 @@ impl Checker {
         self.trait_state.traits.insert(
             "Num".into(),
             TraitInfo {
-                type_params: vec!["a".into()],
+                type_params: vec![("a".into(), crate::ast::Kind::Star)],
                 supertraits: vec![],
                 methods: vec![],
                 is_functional: false,
@@ -38,7 +38,7 @@ impl Checker {
         self.trait_state.traits.insert(
             "Eq".into(),
             TraitInfo {
-                type_params: vec!["a".into()],
+                type_params: vec![("a".into(), crate::ast::Kind::Star)],
                 supertraits: vec![],
                 methods: vec![],
                 is_functional: false,

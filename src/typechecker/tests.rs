@@ -7973,3 +7973,107 @@ fn trait_default_body_with_where_constraint() {
                let s = pretty 42\n";
     check(src).unwrap();
 }
+
+// --- Type-level atoms (Chunk 2: typechecker wiring) ---
+
+#[test]
+fn atom_id_with_same_atom_kind() {
+    let src = "type Id (k : Atom) = MkId Int\n\
+               let u : Id 'user = MkId 1\n\
+               let p : Id 'post = MkId 2\n";
+    check(src).unwrap();
+}
+
+#[test]
+fn atom_distinct_literals_fail_to_unify() {
+    let src = "type Id (k : Atom) = MkId Int\n\
+               let x : Id 'admin = MkId 1\n\
+               let y : Id 'editor = x\n";
+    let err = check(src).err().expect("expected atom-mismatch error");
+    let msg = err.message.to_lowercase();
+    assert!(
+        msg.contains("admin") || msg.contains("editor") || msg.contains("mismatch"),
+        "expected message naming the atoms or a mismatch: got {}",
+        err.message
+    );
+}
+
+#[test]
+fn atom_star_in_atom_position_fails() {
+    let src = "type Id (k : Atom) = MkId Int\n\
+               let bad : Id Int = MkId 1\n";
+    let err = check(src).err().expect("expected kind-mismatch error");
+    assert!(
+        err.message.to_lowercase().contains("kind"),
+        "expected kind-mismatch diagnostic, got: {}",
+        err.message
+    );
+}
+
+#[test]
+fn atom_in_star_position_fails() {
+    let src = "type Bad2 = Maybe 'foo\n";
+    let err = check(src).err().expect("expected kind-mismatch error");
+    assert!(
+        err.message.to_lowercase().contains("kind"),
+        "expected kind-mismatch diagnostic, got: {}",
+        err.message
+    );
+}
+
+#[test]
+fn atom_var_kind_conflict_in_signature() {
+    // `k` first appears in `Id k` (Atom-kinded slot), then in `List k`
+    // (Star-kinded slot). The second use must error with a kind mismatch.
+    let src = "type Id (k : Atom) = MkId Int\n\
+               fun bad : Id k -> List k -> Int\n\
+               bad _ _ = 0\n";
+    let err = check(src).err().expect("expected kind mismatch");
+    let msg = err.message.to_lowercase();
+    assert!(
+        msg.contains("kind"),
+        "expected kind diagnostic, got: {}",
+        err.message
+    );
+}
+
+#[test]
+fn atom_same_kind_function_with_matching_atoms() {
+    let src = "type Id (k : Atom) = MkId Int\n\
+               fun same_kind : Id k -> Id k -> Bool\n\
+               same_kind a b = True\n\
+               let a : Id 'user = MkId 1\n\
+               let b : Id 'user = MkId 2\n\
+               let r = same_kind a b\n";
+    check(src).unwrap();
+}
+
+#[test]
+fn atom_same_kind_function_with_mismatched_atoms() {
+    let src = "type Id (k : Atom) = MkId Int\n\
+               fun same_kind : Id k -> Id k -> Bool\n\
+               same_kind a b = True\n\
+               let a : Id 'user = MkId 1\n\
+               let b : Id 'post = MkId 2\n\
+               let r = same_kind a b\n";
+    check(src).err().expect("expected atom-mismatch error");
+}
+
+#[test]
+fn atom_trait_param_kind_is_tracked() {
+    // A trait declared with an Atom-kinded parameter should register that kind
+    // on the TraitInfo, so we can use the trait in a constraint without a kind
+    // mismatch when the bounded var is also Atom-kinded.
+    let src = "trait MyAtomTrait (n : Atom) {\n\
+                 fun whatever : Int -> Bool\n\
+               }\n";
+    let checker = check(src).unwrap();
+    let info = checker
+        .trait_state
+        .traits
+        .get("MyAtomTrait")
+        .expect("MyAtomTrait registered");
+    assert_eq!(info.type_params.len(), 1);
+    assert_eq!(info.type_params[0].0, "n");
+    assert_eq!(info.type_params[0].1, crate::ast::Kind::Atom);
+}

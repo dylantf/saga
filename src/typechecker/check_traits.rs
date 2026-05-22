@@ -84,6 +84,7 @@ impl Checker {
                     })
                     .collect(),
             ),
+            Type::Atom(name) => Type::Atom(name.clone()),
             Type::Error => Type::Error,
         }
     }
@@ -131,7 +132,20 @@ impl Checker {
         let mut method_sigs = Vec::new();
 
         for method in methods {
-            let mut params_list: Vec<(String, u32)> = vec![];
+            // Pre-seed type parameters with their declared kinds so that
+            // method-signature conversion mints fresh vars of the right kind
+            // when they're first referenced.
+            let mut params_list: Vec<(String, u32)> = type_params
+                .iter()
+                .map(|tp| {
+                    let var = self.fresh_var_of_kind(tp.kind);
+                    let id = match var {
+                        Type::Var(id) => id,
+                        _ => unreachable!(),
+                    };
+                    (tp.name.clone(), id)
+                })
+                .collect();
             let param_types: Vec<Type> = method
                 .params
                 .iter()
@@ -168,17 +182,26 @@ impl Checker {
             let mut forall = Vec::new();
             super::collect_free_vars(&fun_ty, &mut forall);
 
-            // Ensure all trait type params have var IDs, even if they don't
-            // appear in this method's signature (phantom type params).
+            // Ensure all trait type params appear in `forall`. Pre-seeded
+            // params (above) already have var IDs in `params_list`; phantom
+            // params not free in `fun_ty` are added here so the constraint
+            // can reference them.
             for tp in type_params {
                 let tp_name = tp.name.as_str();
-                if !params_list.iter().any(|(n, _)| n == tp_name) {
-                    let fresh = self.fresh_var();
-                    let id = match fresh {
-                        Type::Var(id) => id,
-                        _ => unreachable!(),
-                    };
-                    params_list.push((tp.name.clone(), id));
+                let id = params_list
+                    .iter()
+                    .find(|(n, _)| n == tp_name)
+                    .map(|(_, id)| *id)
+                    .unwrap_or_else(|| {
+                        let fresh = self.fresh_var_of_kind(tp.kind);
+                        let id = match fresh {
+                            Type::Var(id) => id,
+                            _ => unreachable!(),
+                        };
+                        params_list.push((tp.name.clone(), id));
+                        id
+                    });
+                if !forall.contains(&id) {
                     forall.push(id);
                 }
             }
@@ -265,7 +288,10 @@ impl Checker {
         self.trait_state.traits.insert(
             canonical_name,
             super::TraitInfo {
-                type_params: type_params.iter().map(|tp| tp.name.clone()).collect(),
+                type_params: type_params
+                    .iter()
+                    .map(|tp| (tp.name.clone(), tp.kind))
+                    .collect(),
                 supertraits: resolved_supertraits,
                 methods: trait_method_sigs,
                 is_functional,
@@ -427,7 +453,10 @@ impl Checker {
         let target = if type_params.is_empty() {
             Type::Con(resolved_target_type.clone(), vec![])
         } else {
-            let param_vars: Vec<Type> = type_params.iter().map(|_| self.fresh_var()).collect();
+            let param_vars: Vec<Type> = type_params
+                .iter()
+                .map(|tp| self.fresh_var_of_kind(tp.kind))
+                .collect();
             target_type_param_ids = param_vars
                 .iter()
                 .map(|t| match t {
@@ -669,7 +698,8 @@ impl Checker {
                 if Some(*id) == trait_param_id {
                     continue;
                 }
-                fresh_mapping.insert(*id, self.fresh_var());
+                let kind = self.var_kind(*id);
+                fresh_mapping.insert(*id, self.fresh_var_of_kind(kind));
             }
             let freshened_params: Vec<Type> = trait_method
                 .param_types
