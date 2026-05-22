@@ -512,7 +512,7 @@ This phase is not on the critical path for evidence passing.
 - **NodeId stability through normalize.** The pre-pass keys on `NodeId`.
   If the normalize phase ([src/codegen/normalize.rs](../../../src/codegen/normalize.rs))
   mints fresh IDs for App nodes that started as source App nodes, the
-  map breaks. The pipeline doc ([../../pipeline.md:87](../../pipeline.md))
+  map breaks. The compiler overview ([../../compiler-overview.md:87](../../compiler-overview.md))
   claims source identity is preserved through elaboration; verify the
   same holds for normalize before Phase 4a lands. If not, run the pass
   after normalize, or teach normalize to preserve App IDs.

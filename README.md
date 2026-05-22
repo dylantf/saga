@@ -51,7 +51,7 @@ cargo clippy                                   # Lint
 
 ### Compiler internals
 
-- [Compiler Pipeline](docs/pipeline.md)
+- [Compiler Overview](docs/compiler-overview.md) -- start here
 - [Typechecking](docs/typechecking.md) -- per-module pass structure and inference flow
 - [Name Resolution](docs/name-resolution.md)
 - [Effect Implementation](docs/effect-implementation.md) -- effect rows, handler checking, CPS

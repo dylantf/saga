@@ -6,6 +6,26 @@ This file provides guidance to Claude Code when working with code in this reposi
 
 A functional programming language (ML/Elm-inspired) with algebraic effects and handlers, compiling to Core Erlang (BEAM). Implemented in Rust.
 
+## Where to start (read before working)
+
+Pick the row that matches the task. Read `docs/compiler-overview.md` first for any compiler work — it's the phase map everything else hangs off of.
+
+| Task | Read first |
+| --- | --- |
+| Any compiler change (Rust side) | `docs/compiler-overview.md` |
+| Typechecker / inference / traits | `docs/compiler-overview.md` → `docs/typechecking.md` |
+| Name resolution, scoping, NodeIds | `docs/compiler-overview.md` → `docs/name-resolution.md` |
+| Effects, handlers, CPS | `docs/compiler-overview.md` → `docs/effect-implementation.md` |
+| Trait elaboration / dictionary passing | `docs/compiler-overview.md` → `docs/trait-dict-passing.md` |
+| Codegen / Core Erlang lowering | `docs/compiler-overview.md` (lowering section) |
+| Writing non-trivial Saga code | `~/projects/saga-website/public/llms-full.txt` (full language guide, ~70k tokens) |
+| Quick Saga syntax lookup | `~/projects/saga-website/public/syntax-reference.md` |
+| Idiomatic Saga examples | `./examples/` |
+| Stdlib changes | browse `src/stdlib/*.saga`; `prelude.saga` is auto-loaded |
+| Project status / what's planned | `docs/roadmap.md` |
+
+When in doubt about a topic that might have a doc, `ls docs/` first — there are more docs than this table lists.
+
 ## Build & Test Commands
 
 ```bash
@@ -47,11 +67,7 @@ Key phases:
 5. **Lower**: Converts to Core Erlang IR with CPS transform for effect handlers. BEAM-native effects (e.g. Actor, Supervisor) skip CPS transformation and directly call foreign code, wrapped in Effect syntax
 6. **Emit**: Pretty-prints Core Erlang, invokes `erlc`, runs via `erl -noshell`
 
-Typechecker-specific documentation:
-
-- `docs/typechecking.md` - per-module pass structure, inference flow, and final validation passes
-- `docs/name-resolution.md` - canonicalization and `ScopeMap`
-- `docs/effect-implementation.md` - effect rows, handler checking, and CPS boundary
+For deeper docs on each phase, see the "Where to start" table at the top of this file.
 
 ### Source Layout
 
@@ -110,5 +126,3 @@ Typechecker tests use `check(src)` which loads the prelude then checks the sourc
 
 - Never use `3.14` as a float literal in tests (clippy warning); use `std::f64::consts::PI` or simple values like `1.5`
 - Run `cargo clippy` when finishing tasks
-- Language docs live in `docs/`; `docs/roadmap.md` is the source of truth for project status
-- For typechecker work, start with `docs/typechecking.md` and then drill into `docs/name-resolution.md` or `docs/effect-implementation.md` as needed
