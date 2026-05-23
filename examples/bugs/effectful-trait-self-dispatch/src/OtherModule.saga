@@ -1,0 +1,64 @@
+#@ Trait + building-block impls live here. `Main` imports the trait,
+#@ derives it on its own types, and invokes `decode` — same shape as
+#@ saga_json's `SagaJson.Decode.FromJson` ↔ user-code split.
+module OtherModule
+
+import Std.Fail (Fail)
+
+pub type DecodeErr = DecodeErr String deriving (Debug)
+
+pub trait Decode a {
+  fun decode : Bool -> Int -> a needs {Fail DecodeErr}
+}
+
+impl Decode for Int needs {Fail DecodeErr} {
+  decode _ n = if n < 0 then fail! (DecodeErr "neg") else n
+}
+
+# Building-block impls so `deriving (Decode)` resolves on user records / ADTs.
+impl Decode for Leaf a where {a: Decode} needs {Fail DecodeErr} {
+  decode b n = Leaf (decode b n)
+}
+
+impl Decode for Labeled (n : Symbol) a where {n: KnownSymbol, a: Decode} needs {Fail DecodeErr} {
+  decode b n_in = Labeled (decode b n_in)
+}
+
+impl Decode for Record a where {a: Decode} needs {Fail DecodeErr} {
+  decode b n = Record "" (decode b n)
+}
+
+impl Decode for And l r where {l: Decode, r: Decode} needs {Fail DecodeErr} {
+  decode b n = And (decode b n) (decode b n)
+}
+
+impl Decode for Or l r where {l: Decode, r: Decode} needs {Fail DecodeErr} {
+  decode b n = Or_Left (decode b n) with {
+    fail _ = Or_Right (decode b n)
+  }
+}
+
+impl Decode for U1 needs {Fail DecodeErr} {
+  decode _ _ = U1
+}
+
+impl Decode for Variant (n : Symbol) a where {n: KnownSymbol, a: Decode} needs {Fail DecodeErr} {
+  decode b n_in = {
+    # Force a tag-mismatch failure when the expected symbol doesn't match
+    # the input. With `n_in == 1`, only the variant whose symbol is "A"
+    # accepts; any other variant fails — exercising the Or fallback path.
+    let name = symbol_name (Proxy : Proxy n)
+    if (n_in == 1 && name == "A") || (n_in == 2 && name == "B")
+      then Variant (decode b n_in)
+      else fail! (DecodeErr $"tag mismatch: variant={name}, input={debug n_in}")
+  }
+}
+
+impl Decode for Adt a where {a: Decode} needs {Fail DecodeErr} {
+  decode b n = Adt "" (decode b n)
+}
+
+pub handler to_result for Fail a {
+  fail e = Err e
+  return v = Ok v
+}

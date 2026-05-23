@@ -1,120 +1,70 @@
-#@ Bug repro: trait method declared with `needs {Fail DecodeErr}` loses the
-#@ Fail effect when called recursively via trait dispatch from inside
-#@ another impl.
+#@ Cross-module variant of the effectful-trait-self-dispatch bug.
 #@
-#@ Surfaced while implementing FromJson in saga_json (Phase 6). The
-#@ encoder side (ToJson) worked because `to_json_with` has no effect row.
-#@ The decoder side breaks the moment one impl recursively calls the
-#@ same trait method on a sub-component, because the recursive trait
-#@ dispatch doesn't thread the Fail handler.
+#@ Trait + building-block impls live in `OtherModule`. This module derives
+#@ the trait on user types and exercises them.
 #@
-#@ Symptoms:
-#@   1. Runtime PANIC: "function called with 1 argument(s), but expects 3"
-#@      — the impl's compiled function carries a handler arg, but the
-#@      recursive call site doesn't pass one.
-#@   2. (In larger programs) compile warnings: "expression does not use
-#@      effects {Std.Fail.Fail}; handler is unnecessary" appear on
-#@      `with { fail _ = ... }` handlers wrapped around recursive trait
-#@      method calls.
+#@ Failing pattern: a building-block impl body wraps a recursive trait
+#@ method call in `with { fail ... = ... }`. Cross-module dispatch through
+#@ the handler body drops the Fail handler arg (or a dict), so the call
+#@ site has fewer args than the compiled impl expects:
 #@
-#@ Expected: `run_wrap (-1)` returns `DecodeErr (DecodeErr "neg")`, `run_wrap 0`
-#@ returns `Ok (Wrap 0)`.
-#@ Actual: PANIC at runtime when invoking the recursive impl.
+#@   Runtime error: function called with 2 argument(s), but expects 4
+#@   Stack trace:
+#@     othermodule:__dict_OtherModule_Decode_othermodule_Std_Generic_Or
+#@
+#@ The `Or` impl in OtherModule.saga uses:
+#@     decode b n = Or_Left (decode b n) with {
+#@       fail _ = Or_Right (decode b n)   # <-- this call PANICs
+#@     }
+#@
+#@ saga_json's Phase 6 FromJson hits the same pattern in two places:
+#@   - `FromJson for Or l r` (tag-fallback): PANIC site for derived ADTs
+#@     when the matching variant isn't the leftmost one.
+#@   - `FromJsonFields for Labeled` (path-prefixing on field decode error):
+#@     PANIC site for any derived record. The handler does
+#@     `Labeled (from_json_with opts v) with { fail e = fail! (prefix_path key e) }`.
+#@
+#@ Single-module versions of the same code work — only cross-module breaks.
+#@ Same-trait recursion *without* a handler around the call works fine
+#@ (see `Wrap` / `Boxed` / `Pair` cases below).
 module Main
 
-import Std.Fail (Fail)
 import Std.IO (console)
+import OtherModule (Decode, DecodeErr, to_result)
 
-pub type DecodeErr = DecodeErr String deriving (Debug)
-
-# Trait method declares an effect row.
-pub trait Decode a {
-  fun decode : Int -> a needs {Fail DecodeErr}
-}
-
-# Base impl — direct fail, no recursion. This one works.
-impl Decode for Int needs {Fail DecodeErr} {
-  decode n = if n < 0 then fail! (DecodeErr "neg") else n
-}
-
-# Recursive impl — calls `decode` (trait method) on the inner value.
-# This is the failing pattern. The inner `decode n` is a trait method
-# call that itself has Fail in its signature, but the compiler doesn't
-# track that effect through the dispatch — leading to a missing handler
-# arg at runtime.
-pub type Wrap a = Wrap a deriving (Debug)
-
-impl Decode for Wrap a where {a: Decode} needs {Fail DecodeErr} {
-  decode n = Wrap (decode n)
-}
-
-# Building-block impls needed so `deriving (Decode)` on a user type
-# resolves. A user record like `Boxed` has Rep `Record (Labeled 'n (Leaf Int))`.
-impl Decode for Leaf a where {a: Decode} needs {Fail DecodeErr} {
-  decode n = Leaf (decode n)
-}
-
-impl Decode for Labeled (n : Symbol) a where {n: KnownSymbol, a: Decode} needs {Fail DecodeErr} {
-  decode n_in = Labeled (decode n_in)
-}
-
-impl Decode for Record a where {a: Decode} needs {Fail DecodeErr} {
-  decode n = Record "" (decode n)
-}
-
-# User type with `deriving (Decode)`. The compiler synthesizes the
-# bridge impl that calls `decode` on the Rep and routes through `from`.
-# Expected: the synthesized impl inherits the trait method's effect row
-# and works like the hand-written `Wrap` impl above.
-# Actual: compile error "uses effects {Std.Fail.Fail} but has no 'needs'
-# declaration" — the synthesized impl head is missing `needs {Fail DecodeErr}`.
-record Boxed {
-  inner: Int,
-} deriving (Debug, Decode)
-
-handler to_result for Fail a {
-  fail e = Err e
-  return v = Ok v
-}
-
-pub fun run_int : Int -> Result Int DecodeErr
-run_int n = decode n with to_result
-
-pub fun run_wrap : Int -> Result (Wrap Int) DecodeErr
-run_wrap n = decode n with to_result
+# User types that derive Decode.
+record Boxed { inner: Int } deriving (Debug, Decode)
+record Pair  { x: Int, y: Int } deriving (Debug, Decode)
+type Choice = A | B deriving (Debug, Decode)
 
 pub fun run_boxed : Int -> Result Boxed DecodeErr
-run_boxed n = decode n with to_result
+run_boxed n = decode True n with to_result
+
+pub fun run_pair : Int -> Result Pair DecodeErr
+run_pair n = decode True n with to_result
+
+pub fun run_choice : Int -> Result Choice DecodeErr
+run_choice n = decode True n with to_result
 
 main () = {
-  # Base case (direct impl) — works.
-  case run_int (-1) {
-    Ok n -> println $"int neg: Ok {debug n}"
-    Err e -> println $"int neg: Err {debug e}"
-  }
-  case run_int 0 {
-    Ok n -> println $"int ok:  Ok {debug n}"
-    Err e -> println $"int ok:  Err {debug e}"
-  }
-
-  # Recursive case — PANICs at runtime.
-  case run_wrap (-1) {
-    Ok w -> println $"wrap neg: Ok {debug w}"
-    Err e -> println $"wrap neg: Err {debug e}"
-  }
-  case run_wrap 0 {
-    Ok w -> println $"wrap ok:  Ok {debug w}"
-    Err e -> println $"wrap ok:  Err {debug e}"
-  }
-
-  # Derived case — the trait method's effect row should propagate to the
-  # synthesized impl.
-  case run_boxed (-1) {
-    Ok b -> println $"boxed neg: Ok {debug b}"
-    Err e -> println $"boxed neg: Err {debug e}"
-  }
   case run_boxed 0 {
-    Ok b -> println $"boxed ok:  Ok {debug b}"
-    Err e -> println $"boxed ok:  Err {debug e}"
+    Ok b -> println $"boxed ok: Ok {debug b}"
+    Err e -> println $"boxed ok: Err {debug e}"
+  }
+  case run_pair 0 {
+    Ok p -> println $"pair ok:  Ok {debug p}"
+    Err e -> println $"pair ok:  Err {debug e}"
+  }
+  # Input 1 → A (Or_Left wins, no fallback).
+  case run_choice 1 {
+    Ok c -> println $"choice A: Ok {debug c}"
+    Err e -> println $"choice A: Err {debug e}"
+  }
+  # Input 2 → B. Or_Left (A) fails on tag mismatch; handler fires and
+  # calls `decode` on the right side. PANIC expected if cross-module +
+  # handler-body trait dispatch is broken.
+  case run_choice 2 {
+    Ok c -> println $"choice B: Ok {debug c}"
+    Err e -> println $"choice B: Err {debug e}"
   }
 } with console

@@ -209,6 +209,14 @@ pub struct Lowerer<'a> {
     /// inside that handler body should lower against the source module, not the
     /// current module being emitted.
     current_handler_source_module: Option<String>,
+    /// The with's outer return continuation, threaded into abort-handler arm
+    /// bodies so their terminal value flows through the host's CPS chain
+    /// (e.g. an effectful impl method's `_ReturnK`) instead of escaping via
+    /// the Erlang return stack. Set by `lower_with_inherited_return_k` for
+    /// the duration of handler-closure construction; `None` when the host
+    /// context has no continuation to thread (e.g. a top-level non-effectful
+    /// `run_x` function, where direct Erlang return is correct).
+    current_handler_inherited_k: Option<CExpr>,
     /// Pre-resolved constructor name -> mangled Erlang atom.
     /// e.g. "NotFound" -> "std_file_NotFound", "Ok" -> "ok".
     /// Built by resolve::build_constructor_atoms before lowering.
@@ -283,6 +291,7 @@ impl<'a> Lowerer<'a> {
             current_handler_k: None,
             current_handler_finally: None,
             current_handler_source_module: None,
+            current_handler_inherited_k: None,
             inline_vals: HashMap::new(),
             handler_canonical: HashMap::new(),
             effect_canonical: HashMap::new(),

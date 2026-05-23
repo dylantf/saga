@@ -97,9 +97,19 @@ impl<'a> Lowerer<'a> {
     }
 
     fn lower_handler_owned_expr(&mut self, expr: &Expr) -> CExpr {
-        // Handler-local computations produce the handled result itself, so they
-        // must not inherit an enclosing function/handler return continuation.
-        self.lower_expr_value(expr)
+        // For abort handler arm bodies inside an effectful host context
+        // (e.g. an impl method that has its own `_ReturnK`), the abort
+        // value must flow through the with's outer K — not just return
+        // raw up the Erlang stack, which would bypass the host's CPS
+        // chain. `current_handler_inherited_k` carries the with's outer
+        // K when applicable. For non-effectful hosts (None) we fall back
+        // to plain value-mode lowering: the abort value just becomes the
+        // closure's Erlang return value.
+        if let Some(k) = self.current_handler_inherited_k.clone() {
+            self.lower_expr_with_installed_return_k(expr, Some(k))
+        } else {
+            self.lower_expr_value(expr)
+        }
     }
 
     fn lower_handled_expr_with_return_k(&mut self, expr: &Expr, return_k: Option<CExpr>) -> CExpr {
@@ -157,7 +167,12 @@ impl<'a> Lowerer<'a> {
     fn build_return_lambda(&mut self, ret: &HandlerArm, source_module: Option<&str>) -> CExpr {
         let saved_source_module = self.current_handler_source_module.clone();
         self.current_handler_source_module = source_module.map(str::to_string);
+        // Return-lambda body flows through the lambda's caller (which itself
+        // applies inherited_K to the lambda result). Threading inherited_K
+        // into the body would double-apply it.
+        let saved_inherited = self.current_handler_inherited_k.take();
         let ret_body = self.lower_handler_owned_expr(&ret.body);
+        self.current_handler_inherited_k = saved_inherited;
         let (param, body) = if ret.params.is_empty() {
             (self.fresh(), ret_body)
         } else {
@@ -673,7 +688,7 @@ impl<'a> Lowerer<'a> {
             (None, Some(item)) => self.named_return_lambda(item),
             (None, None) => None,
         };
-        let result = self.lower_handled_inner_expr(expr, return_k_lambda, inherited_return_k);
+        let result = self.lower_handled_inner_expr(expr, return_k_lambda, inherited_return_k.clone());
 
         // Handler arm bodies must see the *outer* evidence, not the new one
         // we just installed for the body of `with`. A re-perform of the same
@@ -692,6 +707,11 @@ impl<'a> Lowerer<'a> {
         // restoring `current_evidence` to `saved_evidence` for arm-body
         // lowering above — `evidence_op_lookup` reads the outer layout, so
         // op calls inside arms naturally hit the outer handler entry.
+        //
+        // Thread the with's outer K into abort-handler-arm bodies so their
+        // terminal value flows through the host context's CPS chain.
+        let saved_handler_inherited_k =
+            std::mem::replace(&mut self.current_handler_inherited_k, inherited_return_k.clone());
         let mut handler_bindings: Vec<(String, CExpr)> = Vec::new();
         for (_eff, op, var_name, plan) in &op_vars {
             let binding = match plan {
@@ -725,6 +745,7 @@ impl<'a> Lowerer<'a> {
             };
             handler_bindings.push((var_name.clone(), binding));
         }
+        self.current_handler_inherited_k = saved_handler_inherited_k;
 
         self.no_resume_ops = saved_no_resume_ops;
         self.direct_ops = saved_direct_ops;
@@ -938,6 +959,17 @@ impl<'a> Lowerer<'a> {
         // enclosing function-level return continuation.
         let prev_handler_k = self.current_handler_k.replace(k_var);
 
+        // Resume handlers reach the rest of the computation via their own
+        // K parameter (the resume continuation), so threading inherited_K
+        // into their body would double-apply. Only abort arms (no resume)
+        // should pick up inherited_K — that's where the body's terminal
+        // value needs an explicit path to the host's outer K.
+        let saved_inherited = if has_resume {
+            self.current_handler_inherited_k.take()
+        } else {
+            None
+        };
+
         // Set current_handler_finally so Resume lowering wraps K calls in try/catch.
         let saved_finally = self.current_handler_finally.take();
         let saved_source_module = self.current_handler_source_module.clone();
@@ -983,6 +1015,9 @@ impl<'a> Lowerer<'a> {
 
         self.current_handler_source_module = saved_source_module;
         self.current_handler_k = prev_handler_k;
+        if has_resume {
+            self.current_handler_inherited_k = saved_inherited;
+        }
         CExpr::Fun(fun_params, Box::new(body_ce))
     }
 
