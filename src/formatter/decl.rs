@@ -557,13 +557,13 @@ pub fn format_impl_def(decl: &Decl) -> Doc {
     }
     parts.push(Doc::text(header));
 
-    if !needs.is_empty() {
-        parts.push(Doc::text(" "));
-        parts.push(format_needs(needs, &None));
-    }
     if !where_clause.is_empty() {
         parts.push(Doc::text(" "));
         parts.push(format_where_clause(where_clause));
+    }
+    if !needs.is_empty() {
+        parts.push(Doc::text(" "));
+        parts.push(format_needs(needs, &None));
     }
 
     parts.push(Doc::text(" {"));
