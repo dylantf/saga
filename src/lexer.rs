@@ -871,7 +871,7 @@ impl Lexer {
                     let spanned = self.emit(Token::At, start, trivia, newline_flag);
                     tokens.push(spanned);
                 }
-                // `'Ident` or `'ident` -> atom literal (type-level).
+                // `'Ident` or `'ident` -> symbol literal (type-level).
                 // Must be at token start (otherwise `'` would have been consumed
                 // by `read_identifier` as a trailing apostrophe).
                 Some('\'') => {
@@ -888,12 +888,12 @@ impl Lexer {
                                 }
                             }
                             let spanned =
-                                self.emit(Token::AtomLit(s), start, trivia, newline_flag);
+                                self.emit(Token::SymbolLit(s), start, trivia, newline_flag);
                             tokens.push(spanned);
                         }
                         _ => {
                             return Err(LexError {
-                                message: "expected identifier after `'` for atom literal"
+                                message: "expected identifier after `'` for symbol literal"
                                     .to_string(),
                                 pos: start,
                             });

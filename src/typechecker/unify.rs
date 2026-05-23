@@ -9,7 +9,7 @@ use super::{Checker, Diagnostic, EffectRow, Scheme, Severity, Type};
 fn kind_name(k: Kind) -> &'static str {
     match k {
         Kind::Star => "Star",
-        Kind::Atom => "Atom",
+        Kind::Symbol => "Symbol",
     }
 }
 
@@ -48,7 +48,7 @@ pub(super) fn rename_vars(ty: &Type, names: &HashMap<u32, String>) -> Type {
                 .map(|(fname, ty)| (fname.clone(), rename_vars(ty, names)))
                 .collect(),
         ),
-        Type::Atom(name) => Type::Atom(name.clone()),
+        Type::Symbol(name) => Type::Symbol(name.clone()),
         Type::Error => Type::Error,
     }
 }
@@ -83,7 +83,7 @@ pub(crate) fn collect_free_vars(ty: &Type, out: &mut Vec<u32>) {
                 collect_free_vars(ty, out);
             }
         }
-        Type::Atom(_) => {}
+        Type::Symbol(_) => {}
         Type::Error => {}
     }
 }
@@ -101,8 +101,8 @@ impl Checker {
             // Error type unifies with anything (suppresses cascading errors)
             (Type::Error, _) | (_, Type::Error) => Ok(()),
 
-            // Atom-vs-atom: succeed iff names match (a == b case handled above).
-            (Type::Atom(n1), Type::Atom(n2)) => Err(Diagnostic::error(format!(
+            // Symbol-vs-symbol: succeed iff names match (a == b case handled above).
+            (Type::Symbol(n1), Type::Symbol(n2)) => Err(Diagnostic::error(format!(
                 "type mismatch: expected '{}, got '{}",
                 n1, n2
             ))),
@@ -145,8 +145,8 @@ impl Checker {
                 self.sub.bind(*id, &a)
             }
 
-            // Atom vs non-var/non-atom: kind mismatch.
-            (Type::Atom(_), _) | (_, Type::Atom(_)) => Err(Diagnostic::error(format!(
+            // Symbol vs non-var/non-symbol: kind mismatch.
+            (Type::Symbol(_), _) | (_, Type::Symbol(_)) => Err(Diagnostic::error(format!(
                 "kind mismatch: expected kind {}, found kind {}",
                 kind_name(self.kind_of(&a)),
                 kind_name(self.kind_of(&b)),
@@ -373,7 +373,7 @@ impl Checker {
                     .map(|(fname, ty)| (fname.clone(), Self::replace_vars(ty, mapping)))
                     .collect(),
             ),
-            Type::Atom(name) => Type::Atom(name.clone()),
+            Type::Symbol(name) => Type::Symbol(name.clone()),
             Type::Error => Type::Error,
         }
     }
@@ -447,7 +447,7 @@ impl Checker {
 
     /// Like `convert_type_expr` but enforces that the resulting type has
     /// kind `expected_kind`. Used to detect kind mismatches such as
-    /// `Maybe 'foo` or `Id Int` (when `Id` expects an Atom-kinded arg).
+    /// `Maybe 'foo` or `Id Int` (when `Id` expects a Symbol-kinded arg).
     pub(crate) fn convert_type_expr_kinded(
         &mut self,
         texpr: &crate::ast::TypeExpr,
@@ -668,20 +668,20 @@ impl Checker {
             crate::ast::TypeExpr::Labeled { inner, .. } => {
                 self.convert_type_expr_kinded(inner, params, expected_kind)
             }
-            // Atom literals inhabit kind `Atom`.
-            crate::ast::TypeExpr::Atom { name, span, .. } => {
-                if expected_kind != Kind::Atom {
+            // Symbol literals inhabit kind `Symbol`.
+            crate::ast::TypeExpr::Symbol { name, span, .. } => {
+                if expected_kind != Kind::Symbol {
                     self.collected_diagnostics.push(Diagnostic::error_at(
                         *span,
                         format!(
-                            "kind mismatch: atom literal '{} has kind Atom but kind {} was expected here",
+                            "kind mismatch: symbol literal '{} has kind Symbol but kind {} was expected here",
                             name,
                             kind_name(expected_kind),
                         ),
                     ));
                     return Type::Error;
                 }
-                Type::Atom(name.clone())
+                Type::Symbol(name.clone())
             }
         }
     }

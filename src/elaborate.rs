@@ -678,8 +678,8 @@ impl Elaborator {
                 // (a user function named `compare` won't be mistaken for Ord.compare).
 
                 if let Some((trait_name, method_index)) = self.resolve_trait_method(name, node_id) {
-                    if let Some(atom_lambda) = self.try_atom_intrinsic_lambda(node_id, span) {
-                        return atom_lambda;
+                    if let Some(symbol_lambda) = self.try_symbol_intrinsic_lambda(node_id, span) {
+                        return symbol_lambda;
                     }
                     if let Some(dict_expr) = self.resolve_dict(&trait_name, node_id, span) {
                         return Expr::synth(
@@ -734,14 +734,14 @@ impl Elaborator {
                     if let Some((trait_name, method_index)) =
                         self.resolve_trait_method(name, func.id)
                     {
-                        if let Some(atom_lambda) =
-                            self.try_atom_intrinsic_lambda(func.id, func.span)
+                        if let Some(symbol_lambda) =
+                            self.try_symbol_intrinsic_lambda(func.id, func.span)
                         {
                             let elab_arg = self.elaborate_expr(arg);
                             return Expr::synth(
                                 span,
                                 ExprKind::App {
-                                    func: Box::new(atom_lambda),
+                                    func: Box::new(symbol_lambda),
                                     arg: Box::new(elab_arg),
                                 },
                             );
@@ -1449,7 +1449,7 @@ impl Elaborator {
             // Elaboration-only variants (shouldn't appear in input)
             ExprKind::DictMethodAccess { .. }
             | ExprKind::DictRef { .. }
-            | ExprKind::AtomIntrinsic { .. } => expr.clone(),
+            | ExprKind::SymbolIntrinsic { .. } => expr.clone(),
 
             ExprKind::Pipe { .. }
             | ExprKind::BinOpChain { .. }
@@ -1620,27 +1620,27 @@ impl Elaborator {
         ))
     }
 
-    /// If a `KnownAtom` evidence record at `node_id` carries a concrete atom
-    /// name, return a lambda `fun _proxy -> AtomIntrinsic { atom }`. The
+    /// If a `KnownSymbol` evidence record at `node_id` carries a concrete symbol
+    /// name, return a lambda `fun _proxy -> SymbolIntrinsic { symbol }`. The
     /// lambda ignores its Proxy argument (Proxy is a phantom). This shape
     /// preserves the trait-method calling convention so both bare references
-    /// (`atom_name`) and direct applications (`atom_name p`) work uniformly.
-    fn try_atom_intrinsic_lambda(
+    /// (`symbol_name`) and direct applications (`symbol_name p`) work uniformly.
+    fn try_symbol_intrinsic_lambda(
         &self,
         node_id: crate::ast::NodeId,
         span: Span,
     ) -> Option<Expr> {
         let evidence_list = self.evidence_by_node.get(&node_id)?;
-        let atom = evidence_list.iter().find_map(|ev| {
-            if (ev.trait_name == "Std.Base.KnownAtom" || ev.trait_name == "KnownAtom")
-                && let Some(name) = &ev.resolved_atom
+        let symbol = evidence_list.iter().find_map(|ev| {
+            if (ev.trait_name == "Std.Base.KnownSymbol" || ev.trait_name == "KnownSymbol")
+                && let Some(name) = &ev.resolved_symbol
             {
                 Some(name.clone())
             } else {
                 None
             }
         })?;
-        let body = Expr::synth(span, ExprKind::AtomIntrinsic { atom });
+        let body = Expr::synth(span, ExprKind::SymbolIntrinsic { symbol });
         Some(Expr::synth(
             span,
             ExprKind::Lambda {

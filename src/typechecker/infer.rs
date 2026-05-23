@@ -618,7 +618,7 @@ impl Checker {
             ExprKind::DictMethodAccess { .. }
             | ExprKind::DictRef { .. }
             | ExprKind::ForeignCall { .. }
-            | ExprKind::AtomIntrinsic { .. } => {
+            | ExprKind::SymbolIntrinsic { .. } => {
                 unreachable!("elaboration-only construct in typechecker")
             }
 
@@ -1626,7 +1626,7 @@ impl Checker {
                         resolved_type: None,
                         type_var_name: None,
                         trait_type_args: _trait_type_args.clone(),
-                        resolved_atom: None,
+                        resolved_symbol: None,
                     });
                     return false;
                 }

@@ -93,7 +93,7 @@ impl<'a> Lowerer<'a> {
             }
             ast::TypeExpr::Named { .. }
             | ast::TypeExpr::Var { .. }
-            | ast::TypeExpr::Atom { .. } => BTreeSet::new(),
+            | ast::TypeExpr::Symbol { .. } => BTreeSet::new(),
         }
     }
 
@@ -795,7 +795,7 @@ impl<'a> Lowerer<'a> {
             }
             ast::TypeExpr::Named { .. }
             | ast::TypeExpr::Var { .. }
-            | ast::TypeExpr::Atom { .. } => {}
+            | ast::TypeExpr::Symbol { .. } => {}
         }
     }
 

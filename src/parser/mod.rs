@@ -192,7 +192,7 @@ impl Parser {
             self.peek(),
             Token::UpperIdent(_)
                 | Token::Ident(_)
-                | Token::AtomLit(_)
+                | Token::SymbolLit(_)
                 | Token::LParen
                 | Token::LBrace
         )
@@ -203,7 +203,7 @@ impl Parser {
     pub(super) fn can_start_type_atom_no_brace(&self) -> bool {
         matches!(
             self.peek(),
-            Token::UpperIdent(_) | Token::Ident(_) | Token::AtomLit(_) | Token::LParen
+            Token::UpperIdent(_) | Token::Ident(_) | Token::SymbolLit(_) | Token::LParen
         )
     }
 

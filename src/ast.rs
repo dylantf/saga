@@ -5,13 +5,13 @@ use crate::token::{Span, StringKind};
 
 pub type Program = Vec<Decl>;
 
-/// Kind of a type-level entity. `Star` is the kind of ordinary types; `Atom`
-/// is the kind of type-level atom literals like `'Foo`. Only `Atom` is
+/// Kind of a type-level entity. `Star` is the kind of ordinary types; `Symbol`
+/// is the kind of type-level symbol literals like `'Foo`. Only `Symbol` is
 /// user-writable today; `Star` is the implicit default.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Kind {
     Star,
-    Atom,
+    Symbol,
 }
 
 /// A type parameter declared on a type, record, trait, or effect declaration.
@@ -85,7 +85,7 @@ impl std::fmt::Display for TypeParam {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self.kind {
             Kind::Star => f.write_str(&self.name),
-            Kind::Atom => write!(f, "({} : Atom)", self.name),
+            Kind::Symbol => write!(f, "({} : Symbol)", self.name),
         }
     }
 }
@@ -719,10 +719,10 @@ pub enum ExprKind {
         func: String,
         args: Vec<Expr>,
     },
-    /// Produced by elaboration for the universal `KnownAtom` impl: evaluates
-    /// to the source name of the concrete atom captured at the call site as
+    /// Produced by elaboration for the universal `KnownSymbol` impl: evaluates
+    /// to the source name of the concrete symbol captured at the call site as
     /// a String. Codegen for this node is implemented in chunk 4.
-    AtomIntrinsic { atom: String },
+    SymbolIntrinsic { symbol: String },
 }
 
 impl Expr {
@@ -814,7 +814,7 @@ impl Expr {
             | ExprKind::Constructor { .. }
             | ExprKind::QualifiedName { .. }
             | ExprKind::DictRef { .. }
-            | ExprKind::AtomIntrinsic { .. } => false,
+            | ExprKind::SymbolIntrinsic { .. } => false,
         }
     }
 }
@@ -1042,8 +1042,8 @@ pub enum TypeExpr {
         span: Span,
     },
 
-    /// Type-level atom literal: `'Foo`. Inhabits kind `Atom`.
-    Atom {
+    /// Type-level symbol literal: `'Foo`. Inhabits kind `Symbol`.
+    Symbol {
         id: NodeId,
         name: String,
         span: Span,
@@ -1059,7 +1059,7 @@ impl TypeExpr {
             | TypeExpr::Arrow { span, .. }
             | TypeExpr::Record { span, .. }
             | TypeExpr::Labeled { span, .. }
-            | TypeExpr::Atom { span, .. } => *span,
+            | TypeExpr::Symbol { span, .. } => *span,
         }
     }
 
@@ -1071,7 +1071,7 @@ impl TypeExpr {
             | TypeExpr::Arrow { id, .. }
             | TypeExpr::Record { id, .. }
             | TypeExpr::Labeled { id, .. }
-            | TypeExpr::Atom { id, .. } => *id,
+            | TypeExpr::Symbol { id, .. } => *id,
         }
     }
 
@@ -1137,7 +1137,7 @@ impl PartialEq for TypeExpr {
                     ..
                 },
             ) => l1 == l2 && i1 == i2,
-            (TypeExpr::Atom { name: a, .. }, TypeExpr::Atom { name: b, .. }) => a == b,
+            (TypeExpr::Symbol { name: a, .. }, TypeExpr::Symbol { name: b, .. }) => a == b,
             _ => false,
         }
     }

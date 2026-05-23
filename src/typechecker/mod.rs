@@ -173,9 +173,9 @@ pub enum Type {
     /// Anonymous record type: `{ street: String, city: String }`
     /// Fields are sorted by name for canonical comparison.
     Record(Vec<(std::string::String, Type)>),
-    /// Type-level atom literal: `'Foo` at the source level. Inhabits kind `Atom`.
-    /// Two `Atom(a)` and `Atom(b)` are equal iff `a == b`.
-    Atom(std::string::String),
+    /// Type-level symbol literal: `'Foo` at the source level. Inhabits kind `Symbol`.
+    /// Two `Symbol(a)` and `Symbol(b)` are equal iff `a == b`.
+    Symbol(std::string::String),
     /// Error recovery type: unifies with everything, suppresses cascading errors.
     Error,
 }
@@ -359,7 +359,7 @@ impl std::fmt::Display for Type {
                 }
                 write!(f, " }}")
             }
-            Type::Atom(name) => write!(f, "'{}", name),
+            Type::Symbol(name) => write!(f, "'{}", name),
             Type::Error => write!(f, "<error>"),
         }
     }
@@ -404,7 +404,7 @@ impl Substitution {
                     .map(|(name, ty)| (name.clone(), self.apply(ty)))
                     .collect(),
             ),
-            Type::Atom(_) => ty.clone(),
+            Type::Symbol(_) => ty.clone(),
             Type::Error => Type::Error,
         }
     }
@@ -513,7 +513,7 @@ impl Substitution {
             }
             Type::Con(_, args) => args.iter().any(|a| self.occurs(id, a)),
             Type::Record(fields) => fields.iter().any(|(_, ty)| self.occurs(id, ty)),
-            Type::Atom(_) => false,
+            Type::Symbol(_) => false,
             Type::Error => false,
         }
     }
@@ -693,7 +693,7 @@ fn free_vars_in_type(ty: &Type, bound: &[u32], out: &mut Vec<u32>) {
                 free_vars_in_type(ty, bound, out);
             }
         }
-        Type::Atom(_) => {}
+        Type::Symbol(_) => {}
         Type::Error => {}
     }
 }
@@ -843,7 +843,7 @@ pub struct TraitMethodInfo {
 pub struct TraitInfo {
     /// Type parameters: first is self, rest are extras.
     /// e.g. `trait ConvertTo a b` -> [("a", Star), ("b", Star)].
-    /// Atom-kinded params are declared as `(n : Atom)` in source.
+    /// Symbol-kinded params are declared as `(n : Symbol)` in source.
     pub type_params: Vec<(String, Kind)>,
     pub supertraits: Vec<String>,
     pub methods: Vec<TraitMethodInfo>,
@@ -889,11 +889,11 @@ pub struct TraitEvidence {
     /// e.g. for `ConvertTo NOK`, this holds [Type::Con("NOK", [])].
     /// Empty for single-param traits.
     pub trait_type_args: Vec<Type>,
-    /// For `KnownAtom 'foo` constraints resolved against a concrete atom
-    /// literal: the atom's source name (e.g. `"foo"`). The elaborator uses
-    /// this to emit an atom-flavored intrinsic instead of a normal dict
+    /// For `KnownSymbol 'foo` constraints resolved against a concrete symbol
+    /// literal: the symbol's source name (e.g. `"foo"`). The elaborator uses
+    /// this to emit a symbol-flavored intrinsic instead of a normal dict
     /// lookup. `None` for all other trait evidence.
-    pub resolved_atom: Option<String>,
+    pub resolved_symbol: Option<String>,
 }
 
 /// Warnings deferred until after inference, when substitutions are complete.
@@ -970,7 +970,7 @@ pub struct Checker {
     pub(crate) type_param_kinds: HashMap<String, Vec<Kind>>,
     /// Per type-variable id -> declared kind. Absent entries default to
     /// `Kind::Star`. Populated when a fresh variable is minted for an
-    /// `Atom`-kinded type parameter (type, trait, impl, effect).
+    /// `Symbol`-kinded type parameter (type, trait, impl, effect).
     pub(crate) var_kinds: HashMap<u32, Kind>,
     /// Name resolution map: user-visible names -> canonical names.
     pub(crate) scope_map: ScopeMap,
@@ -1696,7 +1696,7 @@ impl Checker {
     }
 
     /// Allocate a fresh type variable of the given kind. Star-kinded vars
-    /// are the default and not recorded; Atom-kinded vars are tracked in
+    /// are the default and not recorded; Symbol-kinded vars are tracked in
     /// `var_kinds` so unification can enforce kind correctness.
     pub(crate) fn fresh_var_of_kind(&mut self, kind: Kind) -> Type {
         let id = self.next_var;
@@ -1714,10 +1714,10 @@ impl Checker {
     }
 
     /// Best-effort kind of a type. For `Var`, look up `var_kinds`. For
-    /// `Atom`, kind is `Atom`. Everything else is `Star` (for now).
+    /// `Symbol`, kind is `Symbol`. Everything else is `Star` (for now).
     pub(crate) fn kind_of(&self, ty: &Type) -> Kind {
         match ty {
-            Type::Atom(_) => Kind::Atom,
+            Type::Symbol(_) => Kind::Symbol,
             Type::Var(id) => self.var_kind(*id),
             _ => Kind::Star,
         }

@@ -84,7 +84,7 @@ impl Checker {
                     })
                     .collect(),
             ),
-            Type::Atom(name) => Type::Atom(name.clone()),
+            Type::Symbol(name) => Type::Symbol(name.clone()),
             Type::Error => Type::Error,
         }
     }

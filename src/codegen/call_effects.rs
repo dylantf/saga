@@ -637,7 +637,7 @@ impl<'a> Populator<'a> {
             | ExprKind::Constructor { .. }
             | ExprKind::QualifiedName { .. }
             | ExprKind::DictRef { .. }
-            | ExprKind::AtomIntrinsic { .. } => {}
+            | ExprKind::SymbolIntrinsic { .. } => {}
             // Surface syntax — should be desugared by now, but be permissive.
             ExprKind::Pipe { .. }
             | ExprKind::BinOpChain { .. }

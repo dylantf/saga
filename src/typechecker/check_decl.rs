@@ -1426,17 +1426,17 @@ impl Checker {
                                     }
                             });
                     if in_where {
-                        let is_known_atom = self
+                        let is_known_symbol = self
                             .resolve_trait_name(&trait_name)
-                            .map(|t| t == "Std.Base.KnownAtom")
+                            .map(|t| t == "Std.Base.KnownSymbol")
                             .unwrap_or(false)
-                            || trait_name == "KnownAtom";
-                        if is_known_atom
-                            && self.var_kind(id) == crate::ast::Kind::Atom
+                            || trait_name == "KnownSymbol";
+                        if is_known_symbol
+                            && self.var_kind(id) == crate::ast::Kind::Symbol
                         {
                             return Err(Diagnostic::error_at(
                                 span,
-                                "polymorphic atom reflection not yet supported (chunk 4)"
+                                "polymorphic symbol reflection not yet supported (chunk 4)"
                                     .to_string(),
                             ));
                         }
@@ -1447,7 +1447,7 @@ impl Checker {
                             resolved_type: None,
                             type_var_name: var_name,
                             trait_type_args: trait_type_arg_types.clone(),
-                                    resolved_atom: None,
+                                    resolved_symbol: None,
                         });
                         continue;
                     }
@@ -1483,7 +1483,7 @@ impl Checker {
                                 resolved_type: None,
                                 type_var_name: var_name,
                                 trait_type_args: trait_type_arg_types.clone(),
-                                    resolved_atom: None,
+                                    resolved_symbol: None,
                             });
                             continue;
                         }
@@ -1507,7 +1507,7 @@ impl Checker {
                         resolved_type: None,
                         type_var_name: var_name,
                         trait_type_args: trait_type_arg_types.clone(),
-                                    resolved_atom: None,
+                                    resolved_symbol: None,
                     });
                     scheme_constraints.push((trait_name, id, span));
                 }
@@ -1667,7 +1667,7 @@ impl Checker {
         variants: &[&ast::TypeConstructor],
     ) -> Result<(), Diagnostic> {
         // Create fresh type variables for the type parameters, honoring
-        // declared kinds (e.g. `(n : Atom)`).
+        // declared kinds (e.g. `(n : Symbol)`).
         let mut param_vars: Vec<(String, u32)> = type_params
             .iter()
             .map(|p| {
@@ -2618,7 +2618,7 @@ impl Checker {
                                     resolved_type: Some((type_name.clone(), args.clone())),
                                     type_var_name: None,
                                     trait_type_args: resolved_extra_types,
-                                    resolved_atom: None,
+                                    resolved_symbol: None,
                                 });
                                 // Push conditional constraints for type parameters
                                 if type_name == super::canonicalize_type_name("Tuple") {
@@ -2650,16 +2650,16 @@ impl Checker {
                     }
                     // Still a type variable: check where clause bounds
                     Type::Var(id) => {
-                        let resolved_trait_known_atom = self
+                        let resolved_trait_known_symbol = self
                             .resolve_trait_name(&trait_name)
-                            .map(|t| t == "Std.Base.KnownAtom")
+                            .map(|t| t == "Std.Base.KnownSymbol")
                             .unwrap_or(false)
-                            || trait_name == "KnownAtom";
-                        if resolved_trait_known_atom
-                            && self.var_kind(*id) == crate::ast::Kind::Atom
+                            || trait_name == "KnownSymbol";
+                        if resolved_trait_known_symbol
+                            && self.var_kind(*id) == crate::ast::Kind::Symbol
                         {
                             return Err(rewrite_diag(
-                                "polymorphic atom reflection not yet supported (chunk 4)"
+                                "polymorphic symbol reflection not yet supported (chunk 4)"
                                     .to_string(),
                                 span,
                             ));
@@ -2685,7 +2685,7 @@ impl Checker {
                             resolved_type: None,
                             type_var_name: var_name,
                             trait_type_args: trait_type_arg_types.clone(),
-                                    resolved_atom: None,
+                                    resolved_symbol: None,
                         });
                     }
                     Type::Fun(_, _, _) => {
@@ -2702,12 +2702,12 @@ impl Checker {
                             span,
                         ));
                     }
-                    Type::Atom(name) => {
+                    Type::Symbol(name) => {
                         let resolved_trait = self
                             .resolve_trait_name(&trait_name)
                             .unwrap_or_else(|| trait_name.clone());
-                        if resolved_trait == "Std.Base.KnownAtom"
-                            || trait_name == "KnownAtom"
+                        if resolved_trait == "Std.Base.KnownSymbol"
+                            || trait_name == "KnownSymbol"
                         {
                             self.evidence.push(super::TraitEvidence {
                                 node_id,
@@ -2715,13 +2715,13 @@ impl Checker {
                                 resolved_type: None,
                                 type_var_name: None,
                                 trait_type_args: vec![],
-                                resolved_atom: Some(name.clone()),
+                                resolved_symbol: Some(name.clone()),
                             });
                         } else {
                             let display =
                                 trait_name.rsplit('.').next().unwrap_or(&trait_name);
                             return Err(rewrite_diag(
-                                format!("no impl of {} for atom type '{}", display, name),
+                                format!("no impl of {} for symbol type '{}", display, name),
                                 span,
                             ));
                         }

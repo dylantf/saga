@@ -485,7 +485,7 @@ impl<'a> Resolver<'a> {
         match texpr {
             TypeExpr::Named { id, name, .. } => self.record_type_ref(*id, name),
             TypeExpr::Var { .. } => {}
-            TypeExpr::Atom { .. } => {}
+            TypeExpr::Symbol { .. } => {}
             TypeExpr::App { func, arg, .. } => {
                 self.resolve_type_expr(func);
                 self.resolve_type_expr(arg);
@@ -928,7 +928,7 @@ impl<'a> Resolver<'a> {
             ExprKind::DictMethodAccess { dict, .. } => self.resolve_expr(dict),
             ExprKind::DictRef { .. }
             | ExprKind::ForeignCall { .. }
-            | ExprKind::AtomIntrinsic { .. } => {}
+            | ExprKind::SymbolIntrinsic { .. } => {}
         }
     }
 
@@ -1258,7 +1258,7 @@ fn walk_expr(expr: &Expr, out: &mut HashMap<String, crate::token::Span>) {
         | ExprKind::Var { .. }
         | ExprKind::Constructor { .. }
         | ExprKind::DictRef { .. }
-        | ExprKind::AtomIntrinsic { .. } => {}
+        | ExprKind::SymbolIntrinsic { .. } => {}
     }
 }
 

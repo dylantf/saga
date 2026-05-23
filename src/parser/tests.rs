@@ -3192,67 +3192,67 @@ fn import_dotdot_mixed_with_names_is_error() {
     assert!(err.message.contains(".."), "expected message mentioning `..`, got: {}", err.message);
 }
 
-// --- Atom literals and kind-annotated type parameters ---
+// --- Symbol literals and kind-annotated type parameters ---
 
 #[test]
-fn type_decl_with_atom_kinded_param() {
-    let program = parse("type Variant (n : Atom) a = Variant a");
+fn type_decl_with_symbol_kinded_param() {
+    let program = parse("type Variant (n : Symbol) a = Variant a");
     let Decl::TypeDef { type_params, .. } = &program[0] else {
         panic!("expected TypeDef");
     };
     assert_eq!(type_params.len(), 2);
     assert_eq!(type_params[0].name, "n");
-    assert_eq!(type_params[0].kind, Kind::Atom);
+    assert_eq!(type_params[0].kind, Kind::Symbol);
     assert_eq!(type_params[1].name, "a");
     assert_eq!(type_params[1].kind, Kind::Star);
 }
 
 #[test]
-fn type_decl_proxy_atom_only() {
-    let program = parse("type Proxy (n : Atom) = Proxy");
+fn type_decl_proxy_symbol_only() {
+    let program = parse("type Proxy (n : Symbol) = Proxy");
     let Decl::TypeDef { type_params, .. } = &program[0] else {
         panic!("expected TypeDef");
     };
     assert_eq!(type_params.len(), 1);
-    assert_eq!(type_params[0].kind, Kind::Atom);
+    assert_eq!(type_params[0].kind, Kind::Symbol);
 }
 
 #[test]
-fn trait_decl_with_atom_kinded_param() {
+fn trait_decl_with_symbol_kinded_param() {
     let program = parse(
-        "trait KnownAtom (n : Atom) {\n  fun atom_name : Proxy n -> String\n}",
+        "trait KnownSymbol (n : Symbol) {\n  fun symbol_name : Proxy n -> String\n}",
     );
     let Decl::TraitDef { type_params, .. } = &program[0] else {
         panic!("expected TraitDef");
     };
     assert_eq!(type_params.len(), 1);
     assert_eq!(type_params[0].name, "n");
-    assert_eq!(type_params[0].kind, Kind::Atom);
+    assert_eq!(type_params[0].kind, Kind::Symbol);
 }
 
 #[test]
-fn atom_literal_in_type_position() {
+fn symbol_literal_in_type_position() {
     let program = parse("type UserId = Id 'user");
     let Decl::TypeDef { variants, .. } = &program[0] else {
         panic!("expected TypeDef");
     };
-    // UserId has a single variant `Id 'user` — the second field is an atom.
+    // UserId has a single variant `Id 'user` — the second field is a symbol.
     let ctor = &variants[0].node;
     assert_eq!(ctor.name, "Id");
     assert_eq!(ctor.fields.len(), 1);
     let (_, fty) = &ctor.fields[0];
     assert!(
-        matches!(fty, TypeExpr::Atom { name, .. } if name == "user"),
-        "expected atom literal, got {:?}",
+        matches!(fty, TypeExpr::Symbol { name, .. } if name == "user"),
+        "expected symbol literal, got {:?}",
         fty
     );
 }
 
 #[test]
-fn atom_literal_in_expr_position_errors() {
+fn symbol_literal_in_expr_position_errors() {
     let err = parse_program_error("let x = 'Foo");
     assert!(
-        err.message.contains("atom literals"),
+        err.message.contains("symbol literals"),
         "got: {}",
         err.message
     );
@@ -3269,16 +3269,16 @@ fn unknown_kind_errors() {
 }
 
 #[test]
-fn atom_decl_formatter_roundtrip() {
+fn symbol_decl_formatter_roundtrip() {
     use crate::formatter::format;
 
-    let src = "type Variant (n : Atom) a = Variant a\n";
+    let src = "type Variant (n : Symbol) a = Variant a\n";
     let tokens = crate::lexer::Lexer::new(src).lex().unwrap();
     let parsed = Parser::new(tokens).parse_program_annotated().unwrap();
     let formatted = format(&parsed, 80);
 
     assert!(
-        formatted.contains("(n : Atom)"),
+        formatted.contains("(n : Symbol)"),
         "formatted output missing kind annotation: {}",
         formatted
     );

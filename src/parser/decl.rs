@@ -1280,7 +1280,7 @@ impl Parser {
 
     /// Parse a single type-parameter declaration: either a bare identifier
     /// (`a`, defaults to `Kind::Star`) or a kind-annotated identifier
-    /// `(name : Atom)`. Used by `type`, `record`, `effect`, `trait`, and
+    /// `(name : Symbol)`. Used by `type`, `record`, `effect`, `trait`, and
     /// `impl` declarations.
     fn parse_type_param(&mut self) -> Result<TypeParam, ParseError> {
         if matches!(self.peek(), Token::LParen) {
@@ -1288,14 +1288,14 @@ impl Parser {
             self.advance(); // consume '('
             let name = self.expect_ident()?;
             self.expect(Token::Colon)?;
-            // Kind RHS is currently restricted to the bare identifier `Atom`.
+            // Kind RHS is currently restricted to the bare identifier `Symbol`.
             let kind_name_span = self.tokens[self.pos].span;
             let kind_name = self.expect_upper_ident()?;
             let kind = match kind_name.as_str() {
-                "Atom" => Kind::Atom,
+                "Symbol" => Kind::Symbol,
                 other => {
                     return Err(ParseError {
-                        message: format!("unknown kind `{}`; expected `Atom`", other),
+                        message: format!("unknown kind `{}`; expected `Symbol`", other),
                         span: kind_name_span,
                     });
                 }
@@ -1405,7 +1405,7 @@ impl Parser {
                 name: s,
                 span: start,
             }),
-            Token::AtomLit(name) => Ok(TypeExpr::Atom {
+            Token::SymbolLit(name) => Ok(TypeExpr::Symbol {
                 id: NodeId::fresh(),
                 name,
                 span: start,

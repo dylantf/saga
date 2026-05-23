@@ -29,7 +29,7 @@ pub struct ModuleExports {
     /// Type name -> declared parameter count (for arity checking across modules).
     pub type_arity: HashMap<String, usize>,
     /// Type name -> declared kinds of each type parameter (for kind checking
-    /// across modules, e.g. atom-kinded params on stdlib `Proxy`).
+    /// across modules, e.g. symbol-kinded params on stdlib `Proxy`).
     pub type_param_kinds: HashMap<String, Vec<crate::ast::Kind>>,
     /// Names of effectful functions (for cross-module is_known_local checks).
     pub effectful_funs: HashSet<String>,
@@ -198,7 +198,7 @@ impl ModuleExports {
             }
         }
 
-        // Collect declared param kinds (e.g. `Proxy (n : Atom)`) so the
+        // Collect declared param kinds (e.g. `Proxy (n : Symbol)`) so the
         // importer can enforce kind-correct uses at type-application sites.
         let mut type_param_kinds: HashMap<String, Vec<crate::ast::Kind>> = HashMap::new();
         for name in type_constructors.keys() {
@@ -775,7 +775,7 @@ impl Checker {
         }
 
         // Inherit kind annotations for type-variable IDs introduced by the
-        // module (e.g. atom-kinded `n` from `type Proxy (n : Atom) = ...`),
+        // module (e.g. symbol-kinded `n` from `type Proxy (n : Symbol) = ...`),
         // so subsequent instantiations of imported schemes preserve kinds.
         for (id, kind) in &mod_checker.var_kinds {
             self.var_kinds.entry(*id).or_insert(*kind);

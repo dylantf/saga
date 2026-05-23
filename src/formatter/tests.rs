@@ -308,7 +308,7 @@ fn normalize_expr_kind(ek: &mut ExprKind) {
         ExprKind::Lit { .. }
         | ExprKind::Var { .. }
         | ExprKind::Constructor { .. }
-        | ExprKind::AtomIntrinsic { .. } => {}
+        | ExprKind::SymbolIntrinsic { .. } => {}
         ExprKind::App { func, arg } => {
             normalize_expr(func);
             normalize_expr(arg);
@@ -636,7 +636,7 @@ fn normalize_type_expr(te: &mut TypeExpr) {
     match te {
         TypeExpr::Named { span, .. }
         | TypeExpr::Var { span, .. }
-        | TypeExpr::Atom { span, .. } => *span = S,
+        | TypeExpr::Symbol { span, .. } => *span = S,
         TypeExpr::App {
             func, arg, span, ..
         } => {

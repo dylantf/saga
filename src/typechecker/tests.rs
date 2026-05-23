@@ -7974,33 +7974,33 @@ fn trait_default_body_with_where_constraint() {
     check(src).unwrap();
 }
 
-// --- Type-level atoms (Chunk 2: typechecker wiring) ---
+// --- Type-level symbols (Chunk 2: typechecker wiring) ---
 
 #[test]
-fn atom_id_with_same_atom_kind() {
-    let src = "type Id (k : Atom) = MkId Int\n\
+fn symbol_id_with_same_symbol_kind() {
+    let src = "type Id (k : Symbol) = MkId Int\n\
                let u : Id 'user = MkId 1\n\
                let p : Id 'post = MkId 2\n";
     check(src).unwrap();
 }
 
 #[test]
-fn atom_distinct_literals_fail_to_unify() {
-    let src = "type Id (k : Atom) = MkId Int\n\
+fn symbol_distinct_literals_fail_to_unify() {
+    let src = "type Id (k : Symbol) = MkId Int\n\
                let x : Id 'admin = MkId 1\n\
                let y : Id 'editor = x\n";
-    let err = check(src).err().expect("expected atom-mismatch error");
+    let err = check(src).err().expect("expected symbol-mismatch error");
     let msg = err.message.to_lowercase();
     assert!(
         msg.contains("admin") || msg.contains("editor") || msg.contains("mismatch"),
-        "expected message naming the atoms or a mismatch: got {}",
+        "expected message naming the symbols or a mismatch: got {}",
         err.message
     );
 }
 
 #[test]
-fn atom_star_in_atom_position_fails() {
-    let src = "type Id (k : Atom) = MkId Int\n\
+fn symbol_star_in_symbol_position_fails() {
+    let src = "type Id (k : Symbol) = MkId Int\n\
                let bad : Id Int = MkId 1\n";
     let err = check(src).err().expect("expected kind-mismatch error");
     assert!(
@@ -8011,7 +8011,7 @@ fn atom_star_in_atom_position_fails() {
 }
 
 #[test]
-fn atom_in_star_position_fails() {
+fn symbol_in_star_position_fails() {
     let src = "type Bad2 = Maybe 'foo\n";
     let err = check(src).err().expect("expected kind-mismatch error");
     assert!(
@@ -8022,10 +8022,10 @@ fn atom_in_star_position_fails() {
 }
 
 #[test]
-fn atom_var_kind_conflict_in_signature() {
-    // `k` first appears in `Id k` (Atom-kinded slot), then in `List k`
+fn symbol_var_kind_conflict_in_signature() {
+    // `k` first appears in `Id k` (Symbol-kinded slot), then in `List k`
     // (Star-kinded slot). The second use must error with a kind mismatch.
-    let src = "type Id (k : Atom) = MkId Int\n\
+    let src = "type Id (k : Symbol) = MkId Int\n\
                fun bad : Id k -> List k -> Int\n\
                bad _ _ = 0\n";
     let err = check(src).err().expect("expected kind mismatch");
@@ -8038,8 +8038,8 @@ fn atom_var_kind_conflict_in_signature() {
 }
 
 #[test]
-fn atom_same_kind_function_with_matching_atoms() {
-    let src = "type Id (k : Atom) = MkId Int\n\
+fn symbol_same_kind_function_with_matching_symbols() {
+    let src = "type Id (k : Symbol) = MkId Int\n\
                fun same_kind : Id k -> Id k -> Bool\n\
                same_kind a b = True\n\
                let a : Id 'user = MkId 1\n\
@@ -8049,81 +8049,81 @@ fn atom_same_kind_function_with_matching_atoms() {
 }
 
 #[test]
-fn atom_same_kind_function_with_mismatched_atoms() {
-    let src = "type Id (k : Atom) = MkId Int\n\
+fn symbol_same_kind_function_with_mismatched_symbols() {
+    let src = "type Id (k : Symbol) = MkId Int\n\
                fun same_kind : Id k -> Id k -> Bool\n\
                same_kind a b = True\n\
                let a : Id 'user = MkId 1\n\
                let b : Id 'post = MkId 2\n\
                let r = same_kind a b\n";
-    check(src).err().expect("expected atom-mismatch error");
+    check(src).err().expect("expected symbol-mismatch error");
 }
 
 #[test]
-fn atom_trait_param_kind_is_tracked() {
-    // A trait declared with an Atom-kinded parameter should register that kind
+fn symbol_trait_param_kind_is_tracked() {
+    // A trait declared with a Symbol-kinded parameter should register that kind
     // on the TraitInfo, so we can use the trait in a constraint without a kind
-    // mismatch when the bounded var is also Atom-kinded.
-    let src = "trait MyAtomTrait (n : Atom) {\n\
+    // mismatch when the bounded var is also Symbol-kinded.
+    let src = "trait MySymbolTrait (n : Symbol) {\n\
                  fun whatever : Int -> Bool\n\
                }\n";
     let checker = check(src).unwrap();
     let info = checker
         .trait_state
         .traits
-        .get("MyAtomTrait")
-        .expect("MyAtomTrait registered");
+        .get("MySymbolTrait")
+        .expect("MySymbolTrait registered");
     assert_eq!(info.type_params.len(), 1);
     assert_eq!(info.type_params[0].0, "n");
-    assert_eq!(info.type_params[0].1, crate::ast::Kind::Atom);
+    assert_eq!(info.type_params[0].1, crate::ast::Kind::Symbol);
 }
 
-// --- KnownAtom / Proxy (Chunk 3) ---
+// --- KnownSymbol / Proxy (Chunk 3) ---
 
 #[test]
-fn known_atom_proxy_in_prelude() {
-    // Proxy and KnownAtom should be auto-imported via the prelude.
+fn known_symbol_proxy_in_prelude() {
+    // Proxy and KnownSymbol should be auto-imported via the prelude.
     let src = "let _p : Proxy 'admin = Proxy\n";
     check(src).unwrap();
 }
 
 #[test]
-fn known_atom_resolves_concrete_atom_records_evidence() {
-    let src = "let s = atom_name (Proxy : Proxy 'admin)\n";
+fn known_symbol_resolves_concrete_symbol_records_evidence() {
+    let src = "let s = symbol_name (Proxy : Proxy 'admin)\n";
     let checker = check(src).unwrap();
-    let atom_ev = checker
+    let sym_ev = checker
         .evidence
         .iter()
-        .find(|ev| ev.resolved_atom.as_deref() == Some("admin"))
-        .expect("expected KnownAtom evidence with resolved_atom='admin'");
+        .find(|ev| ev.resolved_symbol.as_deref() == Some("admin"))
+        .expect("expected KnownSymbol evidence with resolved_symbol='admin'");
     assert!(
-        atom_ev.trait_name == "Std.Base.KnownAtom" || atom_ev.trait_name == "KnownAtom",
-        "expected KnownAtom trait, got {}",
-        atom_ev.trait_name
+        sym_ev.trait_name == "Std.Base.KnownSymbol" || sym_ev.trait_name == "KnownSymbol",
+        "expected KnownSymbol trait, got {}",
+        sym_ev.trait_name
     );
 }
 
 #[test]
-fn known_atom_two_call_sites_have_distinct_evidence() {
-    let src = "let a = atom_name (Proxy : Proxy 'admin)\n\
-               let b = atom_name (Proxy : Proxy 'editor)\n";
+fn known_symbol_two_call_sites_have_distinct_evidence() {
+    let src = "let a = symbol_name (Proxy : Proxy 'admin)\n\
+               let b = symbol_name (Proxy : Proxy 'editor)\n";
     let checker = check(src).unwrap();
     let mut names: Vec<String> = checker
         .evidence
         .iter()
-        .filter_map(|ev| ev.resolved_atom.clone())
+        .filter_map(|ev| ev.resolved_symbol.clone())
         .collect();
     names.sort();
     assert_eq!(names, vec!["admin".to_string(), "editor".to_string()]);
 }
 
 #[test]
-fn known_atom_concrete_call_elaborates_to_atom_intrinsic() {
+fn known_symbol_concrete_call_elaborates_to_symbol_intrinsic() {
     use crate::ast::{Decl, ExprKind, Stmt};
     let src = "fun get_a : Unit -> String\n\
-               get_a () = atom_name (Proxy : Proxy 'admin)\n\
+               get_a () = symbol_name (Proxy : Proxy 'admin)\n\
                fun get_b : Unit -> String\n\
-               get_b () = atom_name (Proxy : Proxy 'editor)\n";
+               get_b () = symbol_name (Proxy : Proxy 'editor)\n";
     let mut lexer = crate::lexer::Lexer::new(src);
     let tokens = lexer.lex().expect("lex");
     let mut program = crate::parser::Parser::new(tokens)
@@ -8144,10 +8144,10 @@ fn known_atom_concrete_call_elaborates_to_atom_intrinsic() {
     checker.check_program_inner(&mut program).unwrap();
     let result = checker.to_result();
     let elaborated = crate::elaborate::elaborate(&program, &result);
-    // Walk the elaborated AST and look for an AtomIntrinsic { atom: "admin" }.
+    // Walk the elaborated AST and look for a SymbolIntrinsic { symbol: "admin" }.
     fn find_intrinsic(e: &crate::ast::Expr) -> Option<String> {
         match &e.kind {
-            ExprKind::AtomIntrinsic { atom } => Some(atom.clone()),
+            ExprKind::SymbolIntrinsic { symbol } => Some(symbol.clone()),
             ExprKind::App { func, arg } => find_intrinsic(func).or_else(|| find_intrinsic(arg)),
             ExprKind::Lambda { body, .. } => find_intrinsic(body),
             ExprKind::Block { stmts, .. } => stmts.iter().find_map(|s| match &s.node {
@@ -8170,38 +8170,38 @@ fn known_atom_concrete_call_elaborates_to_atom_intrinsic() {
 }
 
 #[test]
-fn known_atom_polymorphic_signature_typechecks() {
-    // Signature alone should typecheck — no atom_name call in the body.
-    let src = "fun describe : Proxy n -> Int where {n : KnownAtom}\n\
+fn known_symbol_polymorphic_signature_typechecks() {
+    // Signature alone should typecheck — no symbol_name call in the body.
+    let src = "fun describe : Proxy n -> Int where {n : KnownSymbol}\n\
                describe _ = 0\n";
     check(src).unwrap();
 }
 
 #[test]
-fn known_atom_polymorphic_call_rejected_for_now() {
-    let src = "fun describe : Proxy n -> String where {n : KnownAtom}\n\
-               describe p = atom_name p\n";
+fn known_symbol_polymorphic_call_rejected_for_now() {
+    let src = "fun describe : Proxy n -> String where {n : KnownSymbol}\n\
+               describe p = symbol_name p\n";
     let err = check(src).err().expect("expected polymorphic-deferral error");
     let msg = err.message.to_lowercase();
     assert!(
-        msg.contains("polymorphic atom reflection"),
-        "expected polymorphic-atom-reflection diagnostic, got: {}",
+        msg.contains("polymorphic symbol reflection"),
+        "expected polymorphic-symbol-reflection diagnostic, got: {}",
         err.message
     );
 }
 
 #[test]
-fn known_atom_proxy_ascription_with_atom_kind() {
+fn known_symbol_proxy_ascription_with_symbol_kind() {
     // Sanity check: the ascription path interacts correctly with the
-    // atom-kinded parameter of Proxy.
+    // symbol-kinded parameter of Proxy.
     let src = "let p : Proxy 'foo = Proxy\n";
     check(src).unwrap();
 }
 
 #[test]
-fn known_atom_atom_name_with_star_proxy_fails_kind_check() {
-    // Int has kind Star; Proxy expects Atom.
-    let src = "let bad = atom_name (Proxy : Proxy Int)\n";
+fn known_symbol_symbol_name_with_star_proxy_fails_kind_check() {
+    // Int has kind Star; Proxy expects Symbol.
+    let src = "let bad = symbol_name (Proxy : Proxy Int)\n";
     let err = check(src).err().expect("expected kind-mismatch error");
     let msg = err.message.to_lowercase();
     assert!(

@@ -386,7 +386,7 @@ impl<'a> Lowerer<'a> {
                     .map(|(name, ty)| (name.clone(), Self::substitute_type_vars(ty, subst)))
                     .collect(),
             ),
-            Type::Atom(name) => Type::Atom(name.clone()),
+            Type::Symbol(name) => Type::Symbol(name.clone()),
             Type::Error => Type::Error,
         }
     }
@@ -3814,8 +3814,8 @@ impl<'a> Lowerer<'a> {
 
             ExprKind::BitString { segments } => self.lower_bitstring_expr(segments),
 
-            ExprKind::AtomIntrinsic { atom: _ } => {
-                todo!("atom intrinsic codegen — chunk 4")
+            ExprKind::SymbolIntrinsic { symbol: _ } => {
+                todo!("symbol intrinsic codegen — chunk 4")
             }
 
             // StringInterpolation should be desugared before reaching the lowerer,
