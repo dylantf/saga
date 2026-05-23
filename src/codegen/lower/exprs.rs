@@ -10,9 +10,9 @@ use std::collections::HashMap;
 
 use super::pats;
 use super::util::{
-    arity_and_effects_from_type, binop_call, cerl_call, collect_effect_call_expr,
-    collect_fun_call, core_var, lower_string_to_binary, mangle_ctor_atom,
-    param_absorbed_effects_from_type, param_types_from_type, pat_binding_var,
+    arity_and_effects_from_type, binop_call, cerl_call, collect_effect_call_expr, collect_fun_call,
+    core_var, lower_string_to_binary, mangle_ctor_atom, param_absorbed_effects_from_type,
+    param_types_from_type, pat_binding_var,
 };
 use super::{EvidenceCtx, FunInfo, LowerMode, Lowerer};
 
@@ -666,12 +666,7 @@ impl<'a> Lowerer<'a> {
     /// into a constructor slot.
     ///
     /// Mirrors [`lower_record_create_with_k`] for ADT constructors.
-    pub(super) fn lower_ctor_with_k(
-        &mut self,
-        name: &str,
-        args: Vec<&Expr>,
-        k_var: &str,
-    ) -> CExpr {
+    pub(super) fn lower_ctor_with_k(&mut self, name: &str, args: Vec<&Expr>, k_var: &str) -> CExpr {
         let bare = name.rsplit('.').next().unwrap_or(name);
         let is_cons = name == "Cons" && args.len() == 2;
         let is_bare_atom = args.is_empty()
@@ -775,7 +770,12 @@ impl<'a> Lowerer<'a> {
                 },
             ],
             k_var,
-            |this, vars| this.annotate(binop_call(&op_owned, &vars[0], &vars[1]), span_owned.as_ref()),
+            |this, vars| {
+                this.annotate(
+                    binop_call(&op_owned, &vars[0], &vars[1]),
+                    span_owned.as_ref(),
+                )
+            },
         )
     }
 
@@ -832,7 +832,10 @@ impl<'a> Lowerer<'a> {
                 cerl_call(
                     "erlang",
                     "element",
-                    vec![CExpr::Lit(CLit::Int(field_idx)), CExpr::Var(vars[0].clone())],
+                    vec![
+                        CExpr::Lit(CLit::Int(field_idx)),
+                        CExpr::Var(vars[0].clone()),
+                    ],
                 )
             },
         )

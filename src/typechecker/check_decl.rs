@@ -549,6 +549,13 @@ impl Checker {
                         {
                             for tr in &bound.traits {
                                 let resolved_trait = self.resolved_trait_name_at(tr.id, &tr.name);
+                                self.validate_trait_bound_kind(
+                                    &resolved_trait,
+                                    &bound.type_var,
+                                    var_id,
+                                    tr.span,
+                                )
+                                .map_err(|e| vec![e])?;
                                 let extra_types: Vec<Type> = tr
                                     .type_args
                                     .iter()
@@ -724,6 +731,13 @@ impl Checker {
                                 .insert(var_id, bound.type_var.clone());
                             for tr in &bound.traits {
                                 let resolved_trait = self.resolved_trait_name_at(tr.id, &tr.name);
+                                self.validate_trait_bound_kind(
+                                    &resolved_trait,
+                                    &bound.type_var,
+                                    var_id,
+                                    tr.span,
+                                )
+                                .map_err(|e| vec![e])?;
                                 let extra_types: Vec<Type> = tr
                                     .type_args
                                     .iter()
@@ -1454,7 +1468,7 @@ impl Checker {
                             resolved_type: None,
                             type_var_name: var_name,
                             trait_type_args: trait_type_arg_types.clone(),
-                                    resolved_symbol: None,
+                            resolved_symbol: None,
                         });
                         continue;
                     }
@@ -1490,7 +1504,7 @@ impl Checker {
                                 resolved_type: None,
                                 type_var_name: var_name,
                                 trait_type_args: trait_type_arg_types.clone(),
-                                    resolved_symbol: None,
+                                resolved_symbol: None,
                             });
                             continue;
                         }
@@ -1514,7 +1528,7 @@ impl Checker {
                         resolved_type: None,
                         type_var_name: var_name,
                         trait_type_args: trait_type_arg_types.clone(),
-                                    resolved_symbol: None,
+                        resolved_symbol: None,
                     });
                     scheme_constraints.push((trait_name, id, span));
                 }
@@ -2032,6 +2046,14 @@ impl Checker {
                     .insert(*var_id, bound.type_var.clone());
                 for tr in &bound.traits {
                     let resolved_req = self.resolved_trait_name_at(tr.id, &tr.name);
+                    if let Err(diag) = self.validate_trait_bound_kind(
+                        &resolved_req,
+                        &bound.type_var,
+                        *var_id,
+                        tr.span,
+                    ) {
+                        self.collected_diagnostics.push(diag);
+                    }
                     self.lsp
                         .type_references
                         .push((tr.span, resolved_req.clone()));
@@ -2678,7 +2700,7 @@ impl Checker {
                             resolved_type: None,
                             type_var_name: var_name,
                             trait_type_args: trait_type_arg_types.clone(),
-                                    resolved_symbol: None,
+                            resolved_symbol: None,
                         });
                     }
                     Type::Fun(_, _, _) => {
@@ -2699,9 +2721,7 @@ impl Checker {
                         let resolved_trait = self
                             .resolve_trait_name(&trait_name)
                             .unwrap_or_else(|| trait_name.clone());
-                        if resolved_trait == "Std.Base.KnownSymbol"
-                            || trait_name == "KnownSymbol"
-                        {
+                        if resolved_trait == super::KNOWN_SYMBOL_TRAIT {
                             self.evidence.push(super::TraitEvidence {
                                 node_id,
                                 trait_name: resolved_trait,
@@ -2711,8 +2731,7 @@ impl Checker {
                                 resolved_symbol: Some(name.clone()),
                             });
                         } else {
-                            let display =
-                                trait_name.rsplit('.').next().unwrap_or(&trait_name);
+                            let display = trait_name.rsplit('.').next().unwrap_or(&trait_name);
                             return Err(rewrite_diag(
                                 format!("no impl of {} for symbol type '{}", display, name),
                                 span,

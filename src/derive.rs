@@ -710,8 +710,7 @@ fn inherit_trait_defaults(program: &mut [Decl], scope: &DeriveScope<'_>) {
             crate::desugar::freshen_expr_ids(&mut body);
             crate::desugar::retarget_expr_spans(&mut body, impl_site);
             if let Some(module) = qualify_module {
-                let mut bound: std::collections::HashSet<String> =
-                    std::collections::HashSet::new();
+                let mut bound: std::collections::HashSet<String> = std::collections::HashSet::new();
                 for p in &params {
                     collect_pat_bindings(p, &mut bound);
                 }
@@ -1485,10 +1484,7 @@ fn synth_method_pair(
                         }],
                         span,
                     });
-                    bridge_args.push(Expr::synth(
-                        span,
-                        ExprKind::Var { name: inner_var },
-                    ));
+                    bridge_args.push(Expr::synth(span, ExprKind::Var { name: inner_var }));
                     deleg_params.push(Pat::Var {
                         id: NodeId::fresh(),
                         name: param_var.clone(),
@@ -1497,14 +1493,8 @@ fn synth_method_pair(
                     let to_call = Expr::synth(
                         span,
                         ExprKind::App {
-                            func: Box::new(Expr::synth(
-                                span,
-                                ExprKind::Var { name: "to".into() },
-                            )),
-                            arg: Box::new(Expr::synth(
-                                span,
-                                ExprKind::Var { name: param_var },
-                            )),
+                            func: Box::new(Expr::synth(span, ExprKind::Var { name: "to".into() })),
+                            arg: Box::new(Expr::synth(span, ExprKind::Var { name: param_var })),
                         },
                     );
                     deleg_args.push(to_call);

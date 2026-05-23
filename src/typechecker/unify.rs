@@ -6,7 +6,7 @@ use crate::ast::Kind;
 
 use super::{Checker, Diagnostic, EffectRow, Scheme, Severity, Type};
 
-fn kind_name(k: Kind) -> &'static str {
+pub(crate) fn kind_name(k: Kind) -> &'static str {
     match k {
         Kind::Star => "Star",
         Kind::Symbol => "Symbol",

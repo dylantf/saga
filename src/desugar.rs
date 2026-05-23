@@ -1218,7 +1218,9 @@ pub fn retarget_pat_spans(pat: &mut Pat, target: Span) {
                 retarget_pat_spans(e, target);
             }
         }
-        Pat::ConsPat { span, head, tail, .. } => {
+        Pat::ConsPat {
+            span, head, tail, ..
+        } => {
             *span = target;
             retarget_pat_spans(head, target);
             retarget_pat_spans(tail, target);

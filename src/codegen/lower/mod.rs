@@ -1035,7 +1035,9 @@ impl<'a> Lowerer<'a> {
                 scrutinee, arms, ..
             } => {
                 self.branch_is_effectful(scrutinee)
-                    || arms.iter().any(|arm| self.branch_is_effectful(&arm.node.body))
+                    || arms
+                        .iter()
+                        .any(|arm| self.branch_is_effectful(&arm.node.body))
             }
             ExprKind::Block { stmts, .. } => stmts.iter().any(|s| match &s.node {
                 Stmt::Expr(e) => self.branch_is_effectful(e),

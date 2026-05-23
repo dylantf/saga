@@ -1550,7 +1550,8 @@ impl Parser {
                 self.advance(); // consume '..'
                 if !matches!(self.peek(), Token::RParen) {
                     return Err(ParseError {
-                        message: "`(..)` must be the entire exposing list — no other items allowed".to_string(),
+                        message: "`(..)` must be the entire exposing list — no other items allowed"
+                            .to_string(),
                         span: self.tokens[self.pos].span,
                     });
                 }
@@ -1572,7 +1573,10 @@ impl Parser {
                         }
                         tok => {
                             return Err(ParseError {
-                                message: format!("expected identifier in import list, got {:?}", tok),
+                                message: format!(
+                                    "expected identifier in import list, got {:?}",
+                                    tok
+                                ),
                                 span: self.tokens[self.pos].span,
                             });
                         }

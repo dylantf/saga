@@ -10,11 +10,7 @@ use crate::ast::*;
 use crate::docs;
 use std::fmt::Write;
 
-pub fn format_import(
-    path: &[String],
-    alias: &Option<String>,
-    exposing: &Option<Exposing>,
-) -> Doc {
+pub fn format_import(path: &[String], alias: &Option<String>, exposing: &Option<Exposing>) -> Doc {
     let mut d = Doc::text(format!("import {}", path.join(".")));
     if let Some(a) = alias {
         d = d.append(Doc::text(format!(" as {}", a)));
@@ -391,7 +387,10 @@ pub fn format_trait_def(
     }
     parts.push(Doc::text(header));
 
-    let self_param = type_params.first().map(|tp| tp.name.as_str()).unwrap_or("a");
+    let self_param = type_params
+        .first()
+        .map(|tp| tp.name.as_str())
+        .unwrap_or("a");
     if !supertraits.is_empty() {
         let st_names: Vec<&str> = supertraits.iter().map(|tr| tr.name.as_str()).collect();
         parts.push(Doc::text(format!(

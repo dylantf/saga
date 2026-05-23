@@ -1,6 +1,7 @@
 use crate::ast::{self, TypeParam};
 use crate::token::Span;
 
+use super::unify::kind_name;
 use super::{Checker, Diagnostic, ImplInfo, Scheme, Type};
 
 /// Traits whose first (self) parameter functionally determines the remaining
@@ -18,6 +19,35 @@ pub(crate) const FUNCTIONAL_TRAITS: &[&str] = &["Generic", "Std.Generic.Generic"
 
 impl Checker {
     // --- Trait & impl helpers ---
+
+    pub(crate) fn validate_trait_bound_kind(
+        &self,
+        trait_name: &str,
+        type_var_name: &str,
+        var_id: u32,
+        span: Span,
+    ) -> Result<(), Diagnostic> {
+        let Some(trait_info) = self.trait_state.traits.get(trait_name) else {
+            return Ok(());
+        };
+        let Some((_, expected_kind)) = trait_info.type_params.first() else {
+            return Ok(());
+        };
+        let actual_kind = self.var_kind(var_id);
+        if actual_kind == *expected_kind {
+            return Ok(());
+        }
+        Err(Diagnostic::error_at(
+            span,
+            format!(
+                "kind mismatch: type variable `{}` has kind {} but trait {} expects kind {}",
+                type_var_name,
+                kind_name(actual_kind),
+                trait_name.rsplit('.').next().unwrap_or(trait_name),
+                kind_name(*expected_kind),
+            ),
+        ))
+    }
 
     /// Replace occurrences of the trait's type param variable with a concrete type.
     /// Used when checking impl bodies: if the trait says `(x: a) -> String`
@@ -128,7 +158,10 @@ impl Checker {
             None => name.to_string(),
         };
 
-        let self_param = type_params.first().map(|tp| tp.name.as_str()).unwrap_or("a");
+        let self_param = type_params
+            .first()
+            .map(|tp| tp.name.as_str())
+            .unwrap_or("a");
         let mut method_sigs = Vec::new();
 
         for method in methods {
@@ -475,6 +508,12 @@ impl Checker {
                         .insert(*var_id, bound.type_var.clone());
                     for tr in &bound.traits {
                         let resolved_req = self.resolved_trait_name_at(tr.id, &tr.name);
+                        self.validate_trait_bound_kind(
+                            &resolved_req,
+                            &bound.type_var,
+                            *var_id,
+                            tr.span,
+                        )?;
                         self.lsp
                             .type_references
                             .push((tr.span, resolved_req.clone()));
@@ -834,6 +873,14 @@ impl Checker {
                 Some(idx) => {
                     for tr in &bound.traits {
                         let resolved_req = self.resolved_trait_name_at(tr.id, &tr.name);
+                        if let Some(var_id) = target_type_param_ids.get(idx) {
+                            self.validate_trait_bound_kind(
+                                &resolved_req,
+                                &bound.type_var,
+                                *var_id,
+                                tr.span,
+                            )?;
+                        }
                         param_constraints.push((resolved_req, idx));
                     }
                 }

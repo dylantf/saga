@@ -3391,11 +3391,9 @@ impl L.Act for Pair {
 main () = act (Pair { a: 1, b: 2 })
 "#;
 
-    let out = with_temp_project_files(
-        &[("lib/Lib.saga", lib)],
-        main,
-        |checker, program| emit_from_program(program, "main", checker),
-    );
+    let out = with_temp_project_files(&[("lib/Lib.saga", lib)], main, |checker, program| {
+        emit_from_program(program, "main", checker)
+    });
     // The cloned default body should call back through `Lib.default_cfg`
     // rather than failing to resolve. Confirm the lowered module compiles
     // and that the default body's reference made it into Main's output.

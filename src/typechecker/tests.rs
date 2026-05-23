@@ -8097,7 +8097,7 @@ fn known_symbol_resolves_concrete_symbol_records_evidence() {
         .find(|ev| ev.resolved_symbol.as_deref() == Some("admin"))
         .expect("expected KnownSymbol evidence with resolved_symbol='admin'");
     assert!(
-        sym_ev.trait_name == "Std.Base.KnownSymbol" || sym_ev.trait_name == "KnownSymbol",
+        sym_ev.trait_name == KNOWN_SYMBOL_TRAIT,
         "expected KnownSymbol trait, got {}",
         sym_ev.trait_name
     );
@@ -8229,16 +8229,18 @@ fn known_symbol_polymorphic_elaborates_with_dict_param() {
     let (params, body) = elaborated
         .iter()
         .find_map(|d| match d {
-            Decl::FunBinding { name, params, body, .. } if name == "describe" => {
-                Some((params.clone(), body.clone()))
-            }
+            Decl::FunBinding {
+                name, params, body, ..
+            } if name == "describe" => Some((params.clone(), body.clone())),
             _ => None,
         })
         .expect("describe FunBinding");
-    let has_dict_param = params.iter().any(|p| matches!(
-        p,
-        Pat::Var { name, .. } if name == "__dict_KnownSymbol_n"
-    ));
+    let has_dict_param = params.iter().any(|p| {
+        matches!(
+            p,
+            Pat::Var { name, .. } if name == "__dict_KnownSymbol_n"
+        )
+    });
     assert!(
         has_dict_param,
         "expected __dict_KnownSymbol_n in describe params, got {:?}",
@@ -8281,6 +8283,35 @@ fn known_symbol_symbol_name_with_star_proxy_fails_kind_check() {
     assert!(
         msg.contains("kind"),
         "expected kind diagnostic, got: {}",
+        err.message
+    );
+}
+
+#[test]
+fn known_symbol_bound_on_star_var_fails_kind_check() {
+    let src = "fun bad : List n -> Int where {n : KnownSymbol}\n\
+               bad _ = 0\n";
+    let err = check(src).err().expect("expected kind-mismatch error");
+    let msg = err.message.to_lowercase();
+    assert!(
+        msg.contains("kind") && msg.contains("knownsymbol"),
+        "expected KnownSymbol kind diagnostic, got: {}",
+        err.message
+    );
+}
+
+#[test]
+fn local_trait_named_known_symbol_does_not_get_builtin_magic() {
+    let src = "trait KnownSymbol (n : Symbol) {\n\
+                 fun fake : Proxy n -> String\n\
+               }\n\
+               let x = fake (Proxy : Proxy 'foo)\n";
+    let err = check(src)
+        .err()
+        .expect("expected local KnownSymbol trait to require an impl");
+    assert!(
+        err.message.contains("no impl") || err.message.contains("required"),
+        "expected missing impl diagnostic, got: {}",
         err.message
     );
 }

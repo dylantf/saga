@@ -605,7 +605,10 @@ fn symbol_literal_lowercase() {
 
 #[test]
 fn symbol_literal_with_underscore() {
-    assert_eq!(toks("'first_name"), vec![SymbolLit("first_name".into()), Eof]);
+    assert_eq!(
+        toks("'first_name"),
+        vec![SymbolLit("first_name".into()), Eof]
+    );
 }
 
 #[test]

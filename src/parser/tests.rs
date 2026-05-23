@@ -3148,7 +3148,12 @@ fn parse_program_error(source: &str) -> ParseError {
 fn import_with_explicit_items() {
     let prog = parse("import Foo (bar, Baz)");
     match &prog[0] {
-        Decl::Import { module_path, alias, exposing, .. } => {
+        Decl::Import {
+            module_path,
+            alias,
+            exposing,
+            ..
+        } => {
             assert_eq!(module_path, &vec!["Foo".to_string()]);
             assert_eq!(alias, &None);
             match exposing {
@@ -3177,7 +3182,12 @@ fn import_exposing_all_dotdot() {
 fn import_with_alias_and_dotdot() {
     let prog = parse("import Foo.Bar as F (..)");
     match &prog[0] {
-        Decl::Import { module_path, alias, exposing, .. } => {
+        Decl::Import {
+            module_path,
+            alias,
+            exposing,
+            ..
+        } => {
             assert_eq!(module_path, &vec!["Foo".to_string(), "Bar".to_string()]);
             assert_eq!(alias.as_deref(), Some("F"));
             assert!(matches!(exposing, Some(Exposing::All { .. })));
@@ -3189,7 +3199,11 @@ fn import_with_alias_and_dotdot() {
 #[test]
 fn import_dotdot_mixed_with_names_is_error() {
     let err = parse_program_error("import Foo (.., bar)");
-    assert!(err.message.contains(".."), "expected message mentioning `..`, got: {}", err.message);
+    assert!(
+        err.message.contains(".."),
+        "expected message mentioning `..`, got: {}",
+        err.message
+    );
 }
 
 // --- Symbol literals and kind-annotated type parameters ---
@@ -3219,9 +3233,8 @@ fn type_decl_proxy_symbol_only() {
 
 #[test]
 fn trait_decl_with_symbol_kinded_param() {
-    let program = parse(
-        "trait KnownSymbol (n : Symbol) {\n  fun symbol_name : Proxy n -> String\n}",
-    );
+    let program =
+        parse("trait KnownSymbol (n : Symbol) {\n  fun symbol_name : Proxy n -> String\n}");
     let Decl::TraitDef { type_params, .. } = &program[0] else {
         panic!("expected TraitDef");
     };

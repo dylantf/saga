@@ -11,10 +11,7 @@ use std::collections::{HashMap, HashSet};
 
 use crate::ast::*;
 use crate::token::{Span, StringKind};
-use crate::typechecker::{CheckResult, TraitEvidence, TraitInfo, Type};
-
-/// Well-known canonical trait names used for special-cased codegen.
-const KNOWN_SYMBOL: &str = "Std.Base.KnownSymbol";
+use crate::typechecker::{CheckResult, KNOWN_SYMBOL_TRAIT, TraitEvidence, TraitInfo, Type};
 
 /// Only invoke the symbol-intrinsic lambda fast-path for the `KnownSymbol`
 /// trait's own `symbol_name` method. Without this guard, a `to_json` call
@@ -22,7 +19,7 @@ const KNOWN_SYMBOL: &str = "Std.Base.KnownSymbol";
 /// `impl ToJson for Labeled n a where {n : KnownSymbol}` impl) would be
 /// rewritten to a symbol-name lookup, silently dropping the real dispatch.
 fn is_known_symbol_trait(trait_name: &str) -> bool {
-    trait_name == KNOWN_SYMBOL || trait_name == "KnownSymbol"
+    trait_name == KNOWN_SYMBOL_TRAIT
 }
 
 const SHOW: &str = "Std.Base.Show";
@@ -1643,14 +1640,10 @@ impl Elaborator {
     /// Proxy argument (Proxy is a phantom). This shape preserves the trait-
     /// method calling convention so both bare references (`symbol_name`) and
     /// direct applications (`symbol_name p`) work uniformly.
-    fn try_symbol_intrinsic_lambda(
-        &self,
-        node_id: crate::ast::NodeId,
-        span: Span,
-    ) -> Option<Expr> {
+    fn try_symbol_intrinsic_lambda(&self, node_id: crate::ast::NodeId, span: Span) -> Option<Expr> {
         let evidence_list = self.evidence_by_node.get(&node_id)?;
         let body = evidence_list.iter().find_map(|ev| {
-            if ev.trait_name != "Std.Base.KnownSymbol" && ev.trait_name != "KnownSymbol" {
+            if ev.trait_name != KNOWN_SYMBOL_TRAIT {
                 return None;
             }
             if let Some(name) = &ev.resolved_symbol {
@@ -1661,11 +1654,7 @@ impl Elaborator {
                     },
                 ))
             } else if let Some(var_name) = &ev.type_var_name {
-                let bare = ev
-                    .trait_name
-                    .rsplit('.')
-                    .next()
-                    .unwrap_or(&ev.trait_name);
+                let bare = ev.trait_name.rsplit('.').next().unwrap_or(&ev.trait_name);
                 let param_name = format!("__dict_{}_{}", bare, var_name);
                 Some(Expr::synth(span, ExprKind::Var { name: param_name }))
             } else {
