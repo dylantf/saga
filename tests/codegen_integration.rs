@@ -2690,3 +2690,19 @@ main () = {
 "#;
     assert_runs_and_stdout_contains(src, &["42"]);
 }
+
+#[test]
+fn symbol_intrinsic_lowers_to_binary_string_literal() {
+    // `symbol_name (Proxy : Proxy 'Foo)` should monomorphize through the
+    // KnownSymbol evidence and emit a Core Erlang binary containing "Foo".
+    let src = r#"
+main () = symbol_name (Proxy : Proxy 'Foo)
+"#;
+    let out = emit_elaborated(src);
+    // Binary literal bytes for "Foo" -> 'F' = 70, 'o' = 111.
+    assert!(
+        out.contains("#<70>") && out.contains("#<111>"),
+        "expected binary bytes for 'Foo' in output:\n{out}"
+    );
+    assert_runs_and_stdout_contains(src, &["Foo"]);
+}
