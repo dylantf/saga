@@ -1908,44 +1908,7 @@ fn build_from_body(
         );
     }
     match shape {
-        FromShape::Bare => {
-            // Bind the (potentially effectful) recursive call to a temp
-            // before applying `wrap`. The lowerer's CPS framework chains
-            // effectful args through constructor applications but not
-            // through pure function calls; in the delegating impl `wrap`
-            // is a pure trait-method call (e.g. `from`), so emitting
-            // `wrap(inner_call)` directly would skip CPS threading on
-            // `inner_call`. A single-arm `case` over `inner_call` routes
-            // evaluation through the case-with-effectful-scrutinee path,
-            // which properly threads handlers. We use `case` rather than
-            // `let` to avoid let-generalization wrapping the result in a
-            // dict-abstracted lambda.
-            let result_name = "__from_result".to_string();
-            let result_var = Expr::synth(
-                span,
-                ExprKind::Var {
-                    name: result_name.clone(),
-                },
-            );
-            let wrapped = wrap(result_var, span);
-            Expr::synth(
-                span,
-                ExprKind::Case {
-                    scrutinee: Box::new(inner_call),
-                    arms: vec![Annotated::bare(CaseArm {
-                        pattern: Pat::Var {
-                            id: NodeId::fresh(),
-                            name: result_name,
-                            span,
-                        },
-                        guard: None,
-                        body: wrapped,
-                        span,
-                    })],
-                    dangling_trivia: vec![],
-                },
-            )
-        }
+        FromShape::Bare => wrap(inner_call, span),
         FromShape::Sum { variants, .. } => {
             let arms: Vec<Annotated<CaseArm>> = variants
                 .iter()

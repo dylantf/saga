@@ -1047,11 +1047,22 @@ impl<'a> Lowerer<'a> {
             ExprKind::RecordCreate { fields, .. } | ExprKind::AnonRecordCreate { fields } => {
                 fields.iter().any(|(_, _, e)| self.branch_is_effectful(e))
             }
-            ExprKind::App { .. } => {
+            ExprKind::App { func, arg } => {
                 if let Some((_, args)) = super::lower::util::collect_ctor_call(expr) {
                     args.iter().any(|a| self.branch_is_effectful(a))
-                } else {
+                } else if self.expr_is_effectful_call(expr) {
+                    // Outer call is itself effectful — it's not "nested",
+                    // and callers should route through
+                    // `expr_is_effectful_call` /
+                    // `lower_expr_with_call_return_k`, not through the
+                    // build-k-from-rest CPS path.
                     false
+                } else {
+                    // Non-ctor pure outer with potentially effectful
+                    // subexprs — e.g. `from (decode x)` from a routed-
+                    // derive delegating impl. Report nested effects so the
+                    // caller chains them through CPS.
+                    self.branch_is_effectful(func) || self.branch_is_effectful(arg)
                 }
             }
             ExprKind::Tuple { elements, .. } => {

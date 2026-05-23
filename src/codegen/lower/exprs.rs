@@ -1477,6 +1477,46 @@ impl<'a> Lowerer<'a> {
                 {
                     return self.lower_ctor_with_k(ctor_name, args, k_var);
                 }
+                // Non-constructor App whose outer call is pure but whose
+                // args contain effectful sub-calls — e.g. `from (decode x)`
+                // where `from` is pure and `decode x` is effectful. Without
+                // this branch the inner effectful call would get lowered as
+                // a plain value (no handler-arg threading), since the
+                // value-mode path never receives a return continuation to
+                // wrap around it. CPS-chain each argument via slot bindings
+                // so effectful args run in CPS with handlers, and the
+                // pure outer call assembles them through `k_var`.
+                if matches!(expr.kind, ExprKind::App { .. })
+                    && !self.expr_is_effectful_call(expr)
+                {
+                    let mut current: &Expr = expr;
+                    let mut args_rev: Vec<&Expr> = Vec::new();
+                    while let ExprKind::App { func, arg, .. } = &current.kind {
+                        args_rev.push(arg);
+                        current = func;
+                    }
+                    args_rev.reverse();
+                    let callee = current;
+                    let any_eff = args_rev.iter().any(|a| {
+                        self.expr_is_effectful_call(a) || self.has_nested_effectful_expr(a)
+                    });
+                    if any_eff {
+                        let slots: Vec<CpsSlot<'_>> = args_rev
+                            .iter()
+                            .map(|a| CpsSlot::Expr {
+                                expr: a,
+                                expected: None,
+                            })
+                            .collect();
+                        return self.lower_with_cps_slots(slots, k_var, move |this, arg_vars| {
+                            let callee_ce = this.lower_expr(callee);
+                            CExpr::Apply(
+                                Box::new(callee_ce),
+                                arg_vars.iter().map(|v| CExpr::Var(v.clone())).collect(),
+                            )
+                        });
+                    }
+                }
                 self.lower_value_to_k(expr, k_var)
             }
         }
