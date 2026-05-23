@@ -382,6 +382,7 @@ impl Checker {
         where_apps: &[ast::TraitApp],
         needs: &[ast::EffectRef],
         methods: &[ast::ImplMethod],
+        is_routed_derive: bool,
         span: Span,
     ) -> Result<(), Diagnostic> {
         // Head names for the impls HashMap key (used everywhere as a
@@ -759,10 +760,27 @@ impl Checker {
             }
         }
 
-        let declared_effects: std::collections::HashSet<String> = needs
+        let mut declared_effects: std::collections::HashSet<String> = needs
             .iter()
             .map(|e| self.resolved_effect_name(e.id, &e.name))
             .collect();
+        // Routed-derive impls are synthesized with `needs: vec![]`. Their
+        // effect rows come from the trait method signatures — which were
+        // canonicalized at trait-registration time in the trait's defining
+        // module — rather than from source-level EffectRefs we'd have to
+        // re-resolve in the consuming module (which may not even have those
+        // effects in scope). See docs/name-resolution.md: "instances, rows,
+        // and lowering metadata can still be computed later" from already-
+        // resolved trait data.
+        if is_routed_derive {
+            for tm in &trait_info.methods {
+                if methods.iter().any(|m| m.name == tm.name) {
+                    for eff in &tm.effect_sig.effects {
+                        declared_effects.insert(eff.clone());
+                    }
+                }
+            }
+        }
 
         // Expose the impl's own type-param names (with their fresh var IDs) to
         // any nested `convert_type_expr` call inside the method bodies, so an

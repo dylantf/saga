@@ -48,6 +48,30 @@ impl Decode for Wrap a where {a: Decode} needs {Fail DecodeErr} {
   decode n = Wrap (decode n)
 }
 
+# Building-block impls needed so `deriving (Decode)` on a user type
+# resolves. A user record like `Boxed` has Rep `Record (Labeled 'n (Leaf Int))`.
+impl Decode for Leaf a where {a: Decode} needs {Fail DecodeErr} {
+  decode n = Leaf (decode n)
+}
+
+impl Decode for Labeled (n : Symbol) a where {n: KnownSymbol, a: Decode} needs {Fail DecodeErr} {
+  decode n_in = Labeled (decode n_in)
+}
+
+impl Decode for Record a where {a: Decode} needs {Fail DecodeErr} {
+  decode n = Record "" (decode n)
+}
+
+# User type with `deriving (Decode)`. The compiler synthesizes the
+# bridge impl that calls `decode` on the Rep and routes through `from`.
+# Expected: the synthesized impl inherits the trait method's effect row
+# and works like the hand-written `Wrap` impl above.
+# Actual: compile error "uses effects {Std.Fail.Fail} but has no 'needs'
+# declaration" — the synthesized impl head is missing `needs {Fail DecodeErr}`.
+record Boxed {
+  inner: Int,
+} deriving (Debug, Decode)
+
 handler to_result for Fail a {
   fail e = Err e
   return v = Ok v
@@ -58,6 +82,9 @@ run_int n = decode n with to_result
 
 pub fun run_wrap : Int -> Result (Wrap Int) DecodeErr
 run_wrap n = decode n with to_result
+
+pub fun run_boxed : Int -> Result Boxed DecodeErr
+run_boxed n = decode n with to_result
 
 main () = {
   # Base case (direct impl) — works.
@@ -78,5 +105,16 @@ main () = {
   case run_wrap 0 {
     Ok w -> println $"wrap ok:  Ok {debug w}"
     Err e -> println $"wrap ok:  Err {debug e}"
+  }
+
+  # Derived case — the trait method's effect row should propagate to the
+  # synthesized impl.
+  case run_boxed (-1) {
+    Ok b -> println $"boxed neg: Ok {debug b}"
+    Err e -> println $"boxed neg: Err {debug e}"
+  }
+  case run_boxed 0 {
+    Ok b -> println $"boxed ok:  Ok {debug b}"
+    Err e -> println $"boxed ok:  Err {debug e}"
   }
 } with console

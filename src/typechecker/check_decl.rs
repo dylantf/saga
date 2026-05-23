@@ -975,6 +975,7 @@ impl Checker {
                     where_apps,
                     needs,
                     &plain_methods,
+                    routed_derive_info.is_some(),
                     *span,
                 );
                 if let Some(info) = routed_derive_info {

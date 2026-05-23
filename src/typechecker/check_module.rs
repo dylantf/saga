@@ -839,6 +839,7 @@ impl Checker {
             &exports,
             &mod_checker.effects,
             &mod_checker.scope_map,
+            &mod_checker.trait_state.traits,
         );
         self.modules
             .codegen_info
@@ -1556,6 +1557,7 @@ fn collect_codegen_info(
     exports: &ModuleExports,
     effects_map: &std::collections::HashMap<String, EffectDefInfo>,
     scope_map: &super::ScopeMap,
+    traits_map: &std::collections::HashMap<String, super::TraitInfo>,
 ) -> ModuleCodegenInfo {
     use crate::ast::Decl;
     fn is_runtime_unit_param(ty: &crate::ast::TypeExpr) -> bool {
@@ -1740,6 +1742,8 @@ fn collect_codegen_info(
                 type_params,
                 where_clause,
                 needs,
+                methods,
+                routed_derive_info,
                 ..
             } => {
                 // Resolve trait name to canonical form via scope_map
@@ -1802,6 +1806,18 @@ fn collect_codegen_info(
                             .unwrap_or_else(|| e.name.clone())
                     })
                     .collect();
+                // Routed-derive impls are synthesized with `needs: vec![]`.
+                // Source the impl's effect set from the trait method
+                // signatures' canonical effect_sigs instead.
+                if routed_derive_info.is_some()
+                    && let Some(info) = traits_map.get(&canonical_trait)
+                {
+                    for trait_method in &info.methods {
+                        if methods.iter().any(|m| m.node.name == trait_method.name) {
+                            impl_effects.extend(trait_method.effect_sig.effects.iter().cloned());
+                        }
+                    }
+                }
                 impl_effects.sort();
                 impl_effects.dedup();
                 trait_impl_dicts.push(TraitImplDict {

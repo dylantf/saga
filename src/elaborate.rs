@@ -425,6 +425,7 @@ impl Elaborator {
                     where_clause,
                     methods,
                     needs,
+                    routed_derive_info,
                     span,
                     ..
                 } => {
@@ -494,6 +495,19 @@ impl Elaborator {
                                 .unwrap_or_else(|| e.name.clone())
                         })
                         .collect();
+                    // Routed-derive impls are synthesized with `needs: vec![]`.
+                    // Source the impl's effect set from the trait method
+                    // signatures' canonical effect_sigs instead — same
+                    // rationale as in register_impl.
+                    if routed_derive_info.is_some()
+                        && let Some(ref info) = trait_info
+                    {
+                        for trait_method in &info.methods {
+                            if methods.iter().any(|m| m.node.name == trait_method.name) {
+                                impl_effects.extend(trait_method.effect_sig.effects.iter().cloned());
+                            }
+                        }
+                    }
                     impl_effects.sort();
                     impl_effects.dedup();
                     output.push(Decl::DictConstructor {
