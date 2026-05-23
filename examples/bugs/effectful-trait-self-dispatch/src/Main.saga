@@ -1,70 +1,42 @@
-#@ Cross-module variant of the effectful-trait-self-dispatch bug.
+#@ Bug repro: cross-trait dispatch from inside a handler body that closes
+#@ over a let-bound `symbol_name` panics at runtime.
 #@
-#@ Trait + building-block impls live in `OtherModule`. This module derives
-#@ the trait on user types and exercises them.
+#@ Pattern (in OtherModule.saga):
 #@
-#@ Failing pattern: a building-block impl body wraps a recursive trait
-#@ method call in `with { fail ... = ... }`. Cross-module dispatch through
-#@ the handler body drops the Fail handler arg (or a dict), so the call
-#@ site has fewer args than the compiled impl expects:
-#@
-#@   Runtime error: function called with 2 argument(s), but expects 4
-#@   Stack trace:
-#@     othermodule:__dict_OtherModule_Decode_othermodule_Std_Generic_Or
-#@
-#@ The `Or` impl in OtherModule.saga uses:
-#@     decode b n = Or_Left (decode b n) with {
-#@       fail _ = Or_Right (decode b n)   # <-- this call PANICs
+#@   impl DecodeF for Labeled (n : Symbol) a where {n: KnownSymbol, a: Decode} ... {
+#@     decode_f n_in = {
+#@       let key = symbol_name (Proxy : Proxy n)
+#@       Labeled (decode n_in) with {           # <-- decode is a Decode-trait method
+#@         fail e = fail! (prefix_err key e)    # <-- handler closes over `key`
+#@       }
 #@     }
+#@   }
 #@
-#@ saga_json's Phase 6 FromJson hits the same pattern in two places:
-#@   - `FromJson for Or l r` (tag-fallback): PANIC site for derived ADTs
-#@     when the matching variant isn't the leftmost one.
-#@   - `FromJsonFields for Labeled` (path-prefixing on field decode error):
-#@     PANIC site for any derived record. The handler does
-#@     `Labeled (from_json_with opts v) with { fail e = fail! (prefix_path key e) }`.
+#@ Runtime error: function called with 2 argument(s), but expects 4
+#@ Stack trace:
+#@   othermodule:__dict_OtherModule_DecodeF_othermodule_Std_Generic_Labeled
+#@   othermodule:__dict_OtherModule_DecodeF_othermodule_Std_Generic_Labeled
 #@
-#@ Single-module versions of the same code work — only cross-module breaks.
-#@ Same-trait recursion *without* a handler around the call works fine
-#@ (see `Wrap` / `Boxed` / `Pair` cases below).
+#@ Inlining a literal where `key` is used (so the handler body closes
+#@ over no let-bindings) makes the same impl work — the let capture is
+#@ the trigger.
+#@
+#@ saga_json's `FromJsonFields for Labeled` impl has exactly this shape
+#@ (the let binding is used to prefix the field name onto the decoder
+#@ error path), so every derived record decode PANICs.
 module Main
 
 import Std.IO (console)
-import OtherModule (Decode, DecodeErr, to_result)
+import OtherModule (Decode, DecodeErr, Opts, to_result)
 
-# User types that derive Decode.
-record Boxed { inner: Int } deriving (Debug, Decode)
-record Pair  { x: Int, y: Int } deriving (Debug, Decode)
-type Choice = A | B deriving (Debug, Decode)
-
-pub fun run_boxed : Int -> Result Boxed DecodeErr
-run_boxed n = decode True n with to_result
+record Pair { x: Int, y: Int } deriving (Debug, Decode)
 
 pub fun run_pair : Int -> Result Pair DecodeErr
-run_pair n = decode True n with to_result
-
-pub fun run_choice : Int -> Result Choice DecodeErr
-run_choice n = decode True n with to_result
+run_pair n = decode (Opts { tag: "t" }) n with to_result
 
 main () = {
-  case run_boxed 0 {
-    Ok b -> println $"boxed ok: Ok {debug b}"
-    Err e -> println $"boxed ok: Err {debug e}"
-  }
   case run_pair 0 {
-    Ok p -> println $"pair ok:  Ok {debug p}"
-    Err e -> println $"pair ok:  Err {debug e}"
-  }
-  # Input 1 → A (Or_Left wins, no fallback).
-  case run_choice 1 {
-    Ok c -> println $"choice A: Ok {debug c}"
-    Err e -> println $"choice A: Err {debug e}"
-  }
-  # Input 2 → B. Or_Left (A) fails on tag mismatch; handler fires and
-  # calls `decode` on the right side. PANIC expected if cross-module +
-  # handler-body trait dispatch is broken.
-  case run_choice 2 {
-    Ok c -> println $"choice B: Ok {debug c}"
-    Err e -> println $"choice B: Err {debug e}"
+    Ok p -> println $"pair ok: Ok {debug p}"
+    Err e -> println $"pair ok: Err {debug e}"
   }
 } with console

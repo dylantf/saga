@@ -254,8 +254,14 @@ impl<'a> Lowerer<'a> {
         return_k: Option<CExpr>,
     ) -> CExpr {
         if return_k.is_some() {
-            if matches!(expr.kind, ExprKind::With { .. }) {
-                return self.lower_expr(expr);
+            // Block-terminal `with` must thread the host return_k into the
+            // handler's outer-K context. Routing through `lower_expr` would
+            // call `lower_with` with no inherited K — silently discarding
+            // the host's continuation, so any abort handler body lowers
+            // without the host's CPS chain to thread into. Forward the
+            // return_k explicitly.
+            if let ExprKind::With { expr: inner, handler, .. } = &expr.kind {
+                return self.lower_with_inherited_return_k(inner, handler, return_k);
             }
             return self.lower_terminal_effectful_expr_with_return_k(expr, return_k);
         }
