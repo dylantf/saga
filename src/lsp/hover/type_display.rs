@@ -136,6 +136,21 @@ pub fn type_definition_summary(
                 lines.push("}".to_string());
                 return Some(with_doc(doc, &lines.join("\n")));
             }
+            Decl::TypeAlias {
+                name: def_name,
+                doc,
+                type_params,
+                body,
+                ..
+            } if def_name == name => {
+                let code = format!(
+                    "type alias {}{} = {}",
+                    name,
+                    format_type_params(type_params),
+                    format_type_expr(body),
+                );
+                return Some(with_doc(doc, &code));
+            }
             Decl::RecordDef {
                 name: def_name,
                 doc,
@@ -333,6 +348,7 @@ pub fn doc_for_name(program: &[Decl], name: &str, result: &CheckResult) -> Optio
         let doc = match decl {
             Decl::FunSignature { name: n, doc, .. } if n == name => doc,
             Decl::TypeDef { name: n, doc, .. } if n == name => doc,
+            Decl::TypeAlias { name: n, doc, .. } if n == name => doc,
             Decl::RecordDef { name: n, doc, .. } if n == name => doc,
             Decl::EffectDef { name: n, doc, .. } if n == name => doc,
             Decl::HandlerDef { name: n, doc, .. } if n == name => doc,

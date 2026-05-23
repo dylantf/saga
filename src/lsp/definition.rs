@@ -85,6 +85,12 @@ fn find_in_decl(decl: &Decl, name: &str) -> Option<Span> {
             None
         }
 
+        Decl::TypeAlias {
+            name: alias_name,
+            name_span,
+            ..
+        } if alias_name == name => Some(*name_span),
+
         Decl::RecordDef {
             name: rec_name,
             name_span,

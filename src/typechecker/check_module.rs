@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 
 use super::{
     Checker, Diagnostic, EffectDefInfo, HandlerInfo, ImplInfo, RecordInfo, Scheme, ScopeMap,
-    TraitInfo, Type,
+    TraitInfo, Type, TypeAliasInfo,
 };
 use crate::token::Span;
 
@@ -31,6 +31,10 @@ pub struct ModuleExports {
     /// Type name -> declared kinds of each type parameter (for kind checking
     /// across modules, e.g. symbol-kinded params on stdlib `Proxy`).
     pub type_param_kinds: HashMap<String, Vec<crate::ast::Kind>>,
+    /// Public type aliases — exported by bare name. Bodies use the alias's
+    /// own positional var IDs as placeholders; the importer re-keys them
+    /// against fresh IDs at registration time.
+    pub type_aliases: HashMap<String, TypeAliasInfo>,
     /// Names of effectful functions (for cross-module is_known_local checks).
     pub effectful_funs: HashSet<String>,
     /// Definition-site NodeIds for exported bindings (for cross-module find-references).
@@ -198,10 +202,39 @@ impl ModuleExports {
             }
         }
 
+        // Collect type aliases declared `pub`. The body is keyed under the
+        // alias's bare name (importer canonicalizes during merge).
+        let mut type_aliases_out: HashMap<String, TypeAliasInfo> = HashMap::new();
+        for decl in program {
+            if let crate::ast::Decl::TypeAlias {
+                public: true, name, ..
+            } = decl
+            {
+                let canonical = if module_prefix.is_empty() {
+                    name.clone()
+                } else {
+                    format!("{}.{}", module_prefix, name)
+                };
+                if let Some(info) = checker.type_aliases.get(&canonical) {
+                    type_aliases_out.insert(name.clone(), info.clone());
+                    // Also pick up arity/kinds so importer arity/kind-checks
+                    // work. The kinds map is filled below from
+                    // `type_constructors.keys()` only, which doesn't include
+                    // aliases — surface them here too.
+                    if let Some(&arity) = checker.type_arity.get(&canonical) {
+                        type_arity.insert(name.clone(), arity);
+                    }
+                }
+            }
+        }
+
         // Collect declared param kinds (e.g. `Proxy (n : Symbol)`) so the
         // importer can enforce kind-correct uses at type-application sites.
         let mut type_param_kinds: HashMap<String, Vec<crate::ast::Kind>> = HashMap::new();
-        for name in type_constructors.keys() {
+        for name in type_constructors
+            .keys()
+            .chain(type_aliases_out.keys())
+        {
             let canonical = if module_prefix.is_empty() {
                 name.clone()
             } else {
@@ -294,6 +327,7 @@ impl ModuleExports {
             handlers,
             type_arity,
             type_param_kinds,
+            type_aliases: type_aliases_out,
             effectful_funs,
             def_ids,
             doc_comments,
@@ -1046,6 +1080,7 @@ impl Checker {
             handlers,
             type_arity,
             type_param_kinds,
+            type_aliases,
             effectful_funs,
             def_ids,
             doc_comments,
@@ -1145,6 +1180,16 @@ impl Checker {
             self.type_param_kinds
                 .entry(canonical)
                 .or_insert_with(|| kinds.clone());
+        }
+
+        // Type aliases: register under canonical (module-qualified) name.
+        // Body uses the source module's var IDs; that's fine because those
+        // ids are only used as positional placeholders during substitution.
+        for (name, info) in type_aliases {
+            let canonical = format!("{}.{}", module_name, name);
+            self.type_aliases
+                .entry(canonical)
+                .or_insert_with(|| info.clone());
         }
 
         // Function effects (for cross-module `with` validation and effect propagation).
@@ -1822,6 +1867,11 @@ pub(super) fn public_names_for_tc(
                         names.insert(v.node.name.clone());
                     }
                 }
+            }
+            Decl::TypeAlias {
+                public: true, name, ..
+            } => {
+                names.insert(name.clone());
             }
             Decl::RecordDef {
                 public: true, name, ..

@@ -340,6 +340,20 @@ pub enum Decl {
         span: Span,
     },
 
+    /// `type alias UserId = Int`
+    /// `type alias Bag a = List a`
+    /// `type alias TaggedId (k : Symbol) = Id k`
+    TypeAlias {
+        id: NodeId,
+        doc: Vec<String>,
+        public: bool,
+        name: String,
+        name_span: Span,
+        type_params: Vec<TypeParam>,
+        body: TypeExpr,
+        span: Span,
+    },
+
     /// `record User { name: String, age: Int }`
     /// `record Box a { value: a }`
     RecordDef {

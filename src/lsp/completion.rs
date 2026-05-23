@@ -645,6 +645,7 @@ pub fn collect_completions(
     for decl in program {
         let type_name = match decl {
             Decl::TypeDef { name, .. } => Some(name.as_str()),
+            Decl::TypeAlias { name, .. } => Some(name.as_str()),
             Decl::RecordDef { name, .. } => Some(name.as_str()),
             _ => None,
         };

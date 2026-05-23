@@ -84,7 +84,9 @@ impl Checker {
         // Local types shadow imported types (use `insert`, not `or_insert`).
         for decl in program.iter() {
             let type_name = match decl {
-                Decl::TypeDef { name, .. } | Decl::RecordDef { name, .. } => Some(name),
+                Decl::TypeDef { name, .. }
+                | Decl::RecordDef { name, .. }
+                | Decl::TypeAlias { name, .. } => Some(name),
                 _ => None,
             };
             if let Some(name) = type_name {
@@ -427,6 +429,51 @@ impl Checker {
                         .map_err(|e| vec![e])?;
                 }
                 _ => {}
+            }
+        }
+        // Sub-pass 1a': register type aliases — first pre-register their
+        // arity and parameter kinds (so cross-alias references can
+        // type-check), then cycle-check, then convert their bodies in
+        // declaration order. `try_unfold_alias` chases transitively so
+        // forward references between aliases resolve at use-sites.
+        let aliases: Vec<&Decl> = program
+            .iter()
+            .filter(|d| matches!(d, Decl::TypeAlias { .. }))
+            .collect();
+        if !aliases.is_empty() {
+            // Pre-register arity + kinds.
+            for decl in &aliases {
+                if let Decl::TypeAlias {
+                    name, type_params, ..
+                } = decl
+                {
+                    let canonical_name = match &self.current_module {
+                        Some(module) => format!("{}.{}", module, name),
+                        None => name.to_string(),
+                    };
+                    self.type_arity
+                        .insert(canonical_name.clone(), type_params.len());
+                    self.type_param_kinds.insert(
+                        canonical_name,
+                        type_params.iter().map(|p| p.kind).collect(),
+                    );
+                }
+            }
+            // Cycle check across the set of aliases in this module.
+            self.detect_alias_cycles(&aliases)?;
+            // Convert bodies.
+            for decl in &aliases {
+                if let Decl::TypeAlias {
+                    name,
+                    type_params,
+                    body,
+                    span,
+                    ..
+                } = decl
+                {
+                    self.register_type_alias(name, type_params, body, *span)
+                        .map_err(|e| vec![e])?;
+                }
             }
         }
         // Sub-pass 1b: fill in effect op signatures (all effect names now known)
@@ -1768,6 +1815,214 @@ impl Checker {
 
         self.type_arity.insert(canonical_name, type_params.len());
 
+        Ok(())
+    }
+
+    pub(crate) fn register_type_alias(
+        &mut self,
+        name: &str,
+        type_params: &[TypeParam],
+        body: &ast::TypeExpr,
+        span: Span,
+    ) -> Result<(), Diagnostic> {
+        let mut param_vars: Vec<(String, u32)> = type_params
+            .iter()
+            .map(|p| {
+                let var = self.fresh_var_of_kind(p.kind);
+                let id = match var {
+                    Type::Var(id) => id,
+                    _ => unreachable!(),
+                };
+                (p.name.clone(), id)
+            })
+            .collect();
+
+        let canonical_name = match &self.current_module {
+            Some(module) => format!("{}.{}", module, name),
+            None => name.to_string(),
+        };
+
+        // Convert the body; further nested aliases unfold via try_unfold_alias.
+        // Any new entries added to `param_vars` beyond the declared params
+        // are free type variables in the alias body — reject them, since
+        // Saga doesn't implicitly quantify type alias bodies.
+        let declared_count = param_vars.len();
+        let body_ty = self.convert_type_expr_kinded(body, &mut param_vars, super::Kind::Star);
+        // The kinded entry point bypasses convert_type_expr's wrapper, so
+        // run the partial-alias check explicitly so invalid alias bodies
+        // (`type alias Bad = Bag` where `Bag` has arity 1) fail at the
+        // declaration, not at a downstream use site.
+        self.check_no_partial_alias(&body_ty, body.span());
+        if param_vars.len() > declared_count {
+            let extras: Vec<String> = param_vars[declared_count..]
+                .iter()
+                .map(|(n, _)| format!("`{}`", n))
+                .collect();
+            return Err(Diagnostic::error_at(
+                body.span(),
+                format!(
+                    "type alias `{}` body references undeclared type variable{}: {}. \
+                     Add {} to the alias's parameter list.",
+                    name,
+                    if extras.len() == 1 { "" } else { "s" },
+                    extras.join(", "),
+                    if extras.len() == 1 { "it" } else { "them" },
+                ),
+            ));
+        }
+
+        let info = super::TypeAliasInfo {
+            param_vars: param_vars.iter().map(|(_, id)| *id).collect(),
+            param_kinds: type_params.iter().map(|p| p.kind).collect(),
+            body: body_ty,
+            span,
+        };
+        self.type_aliases.insert(canonical_name, info);
+        Ok(())
+    }
+
+    /// Detect cycles among type aliases declared in this module. A cycle is
+    /// any alias whose body transitively references itself. Cross-module
+    /// alias chains can't cycle because they're acyclic at module level
+    /// (modules don't have mutual imports).
+    pub(crate) fn detect_alias_cycles(
+        &self,
+        aliases: &[&Decl],
+    ) -> std::result::Result<(), Vec<Diagnostic>> {
+        use std::collections::HashSet;
+        // Collect alias names declared in this module (bare + canonical).
+        let mut local_aliases: HashMap<String, String> = HashMap::new();
+        for decl in aliases {
+            if let Decl::TypeAlias { name, .. } = decl {
+                let canonical = match &self.current_module {
+                    Some(module) => format!("{}.{}", module, name),
+                    None => name.clone(),
+                };
+                local_aliases.insert(name.clone(), canonical);
+            }
+        }
+
+        fn collect_alias_refs(
+            texpr: &ast::TypeExpr,
+            local: &HashMap<String, String>,
+            scope: &super::ScopeMap,
+            out: &mut HashSet<String>,
+        ) {
+            match texpr {
+                ast::TypeExpr::Named { name, .. } => {
+                    if let Some(canonical) = local.get(name) {
+                        out.insert(canonical.clone());
+                    } else if let Some(canonical) = scope.resolve_type(name)
+                        && local.values().any(|v| v == canonical)
+                    {
+                        out.insert(canonical.to_string());
+                    }
+                }
+                ast::TypeExpr::Var { .. } | ast::TypeExpr::Symbol { .. } => {}
+                ast::TypeExpr::App { func, arg, .. } => {
+                    collect_alias_refs(func, local, scope, out);
+                    collect_alias_refs(arg, local, scope, out);
+                }
+                ast::TypeExpr::Arrow { from, to, .. } => {
+                    collect_alias_refs(from, local, scope, out);
+                    collect_alias_refs(to, local, scope, out);
+                }
+                ast::TypeExpr::Record { fields, .. } => {
+                    for (_, t) in fields {
+                        collect_alias_refs(t, local, scope, out);
+                    }
+                }
+                ast::TypeExpr::Labeled { inner, .. } => {
+                    collect_alias_refs(inner, local, scope, out);
+                }
+            }
+        }
+
+        let mut graph: HashMap<String, HashSet<String>> = HashMap::new();
+        let mut spans: HashMap<String, Span> = HashMap::new();
+        for decl in aliases {
+            if let Decl::TypeAlias {
+                name, body, span, ..
+            } = decl
+            {
+                let canonical = local_aliases[name].clone();
+                let mut refs = HashSet::new();
+                collect_alias_refs(body, &local_aliases, &self.scope_map, &mut refs);
+                graph.insert(canonical.clone(), refs);
+                spans.insert(canonical, *span);
+            }
+        }
+
+        // DFS for cycles.
+        #[derive(PartialEq, Eq, Clone, Copy)]
+        enum Color {
+            White,
+            Gray,
+            Black,
+        }
+        let mut color: HashMap<String, Color> =
+            graph.keys().map(|k| (k.clone(), Color::White)).collect();
+        let mut cycle: Option<Vec<String>> = None;
+
+        fn visit(
+            node: &str,
+            graph: &HashMap<String, HashSet<String>>,
+            color: &mut HashMap<String, Color>,
+            stack: &mut Vec<String>,
+            cycle: &mut Option<Vec<String>>,
+        ) {
+            if cycle.is_some() {
+                return;
+            }
+            color.insert(node.to_string(), Color::Gray);
+            stack.push(node.to_string());
+            if let Some(edges) = graph.get(node) {
+                for dep in edges {
+                    match color.get(dep).copied().unwrap_or(Color::Black) {
+                        Color::White => visit(dep, graph, color, stack, cycle),
+                        Color::Gray => {
+                            // Found a cycle: from `dep` in stack to current.
+                            let start = stack.iter().position(|n| n == dep).unwrap_or(0);
+                            let mut path: Vec<String> = stack[start..].to_vec();
+                            path.push(dep.clone());
+                            *cycle = Some(path);
+                            return;
+                        }
+                        Color::Black => {}
+                    }
+                    if cycle.is_some() {
+                        return;
+                    }
+                }
+            }
+            stack.pop();
+            color.insert(node.to_string(), Color::Black);
+        }
+
+        let nodes: Vec<String> = graph.keys().cloned().collect();
+        for node in nodes {
+            if color.get(&node).copied().unwrap_or(Color::Black) == Color::White {
+                let mut stack = Vec::new();
+                visit(&node, &graph, &mut color, &mut stack, &mut cycle);
+                if cycle.is_some() {
+                    break;
+                }
+            }
+        }
+
+        if let Some(path) = cycle {
+            let display: Vec<String> = path.iter().map(|c| super::bare_type_name(c).to_string()).collect();
+            let head = display.first().cloned().unwrap_or_default();
+            let span = spans.get(&path[0]).copied().unwrap_or(Span { start: 0, end: 0 });
+            return Err(vec![Diagnostic::error_at(
+                span,
+                format!(
+                    "type alias `{}` is recursive: {}",
+                    head,
+                    display.join(" -> "),
+                ),
+            )]);
+        }
         Ok(())
     }
 

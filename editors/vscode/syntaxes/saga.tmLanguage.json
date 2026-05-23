@@ -104,7 +104,7 @@
         },
         {
           "name": "keyword.declaration.saga",
-          "match": "\\b(let|val|fun|pub|type|record|effect|handler|trait|impl|module|import|needs|where|resume)\\b"
+          "match": "\\b(let|val|fun|pub|type|alias|opaque|record|effect|handler|trait|impl|module|import|needs|where|resume)\\b"
         },
         {
           "name": "keyword.other.saga",

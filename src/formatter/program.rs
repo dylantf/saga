@@ -235,6 +235,7 @@ fn format_decl(decl: &Decl) -> Doc {
             docs![preamble, format_binding(lhs, value)]
         }
         Decl::TypeDef { .. } => format_type_def(decl),
+        Decl::TypeAlias { .. } => format_type_alias(decl),
         Decl::RecordDef { .. } => format_record_def(decl),
         Decl::EffectDef {
             doc,

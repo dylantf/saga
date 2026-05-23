@@ -152,6 +152,9 @@ impl LocalModuleNames {
                             .insert(variant.node.name.clone(), qualify(&variant.node.name));
                     }
                 }
+                Decl::TypeAlias { name, .. } => {
+                    out.types.insert(name.clone(), qualify(name));
+                }
                 Decl::RecordDef { name, .. } => {
                     out.types.insert(name.clone(), qualify(name));
                     out.constructors.insert(name.clone(), qualify(name));
@@ -672,6 +675,9 @@ impl<'a> Resolver<'a> {
                     }
                 }
             }
+            Decl::TypeAlias { body, .. } => {
+                self.resolve_type_expr(body);
+            }
             Decl::RecordDef { fields, .. } => {
                 for field in fields {
                     self.resolve_type_expr(&field.node.1);
@@ -1095,6 +1101,7 @@ fn walk_decl(decl: &Decl, out: &mut HashMap<String, crate::token::Span>) {
         // that can hold ExprKind::QualifiedName.
         Decl::FunSignature { .. }
         | Decl::TypeDef { .. }
+        | Decl::TypeAlias { .. }
         | Decl::RecordDef { .. }
         | Decl::EffectDef { .. }
         | Decl::TraitDef { .. }
