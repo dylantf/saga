@@ -386,6 +386,7 @@ impl<'a> Lowerer<'a> {
                     .map(|(name, ty)| (name.clone(), Self::substitute_type_vars(ty, subst)))
                     .collect(),
             ),
+            Type::Symbol(name) => Type::Symbol(name.clone()),
             Type::Error => Type::Error,
         }
     }
@@ -1034,7 +1035,9 @@ impl<'a> Lowerer<'a> {
                 scrutinee, arms, ..
             } => {
                 self.branch_is_effectful(scrutinee)
-                    || arms.iter().any(|arm| self.branch_is_effectful(&arm.node.body))
+                    || arms
+                        .iter()
+                        .any(|arm| self.branch_is_effectful(&arm.node.body))
             }
             ExprKind::Block { stmts, .. } => stmts.iter().any(|s| match &s.node {
                 Stmt::Expr(e) => self.branch_is_effectful(e),
@@ -3812,6 +3815,8 @@ impl<'a> Lowerer<'a> {
             ExprKind::HandlerExpr { body } => self.lower_handler_expr_to_tuple(body),
 
             ExprKind::BitString { segments } => self.lower_bitstring_expr(segments),
+
+            ExprKind::SymbolIntrinsic { symbol } => lower_string_to_binary(symbol),
 
             // StringInterpolation should be desugared before reaching the lowerer,
             // but keep a fallback just in case.

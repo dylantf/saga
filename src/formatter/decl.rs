@@ -8,12 +8,9 @@ use super::pat::format_pat_atom;
 use super::type_expr::*;
 use crate::ast::*;
 use crate::docs;
+use std::fmt::Write;
 
-pub fn format_import(
-    path: &[String],
-    alias: &Option<String>,
-    exposing: &Option<Exposing>,
-) -> Doc {
+pub fn format_import(path: &[String], alias: &Option<String>, exposing: &Option<Exposing>) -> Doc {
     let mut d = Doc::text(format!("import {}", path.join(".")));
     if let Some(a) = alias {
         d = d.append(Doc::text(format!(" as {}", a)));
@@ -153,7 +150,7 @@ pub fn format_type_def(decl: &Decl) -> Doc {
     header.push_str(name);
     for tp in type_params {
         header.push(' ');
-        header.push_str(tp);
+        write!(header, "{}", tp).unwrap();
     }
 
     parts.push(Doc::text(header));
@@ -273,7 +270,7 @@ pub fn format_record_def(decl: &Decl) -> Doc {
     header.push_str(name);
     for tp in type_params {
         header.push(' ');
-        header.push_str(tp);
+        write!(header, "{}", tp).unwrap();
     }
     parts.push(Doc::text(header));
 
@@ -330,7 +327,7 @@ pub fn format_effect_def(
     doc: &[String],
     public: bool,
     name: &str,
-    type_params: &[String],
+    type_params: &[TypeParam],
     operations: &[Annotated<EffectOp>],
     dangling: &[Trivia],
 ) -> Doc {
@@ -345,7 +342,7 @@ pub fn format_effect_def(
     header.push_str(name);
     for tp in type_params {
         header.push(' ');
-        header.push_str(tp);
+        write!(header, "{}", tp).unwrap();
     }
     header.push_str(" {");
     parts.push(Doc::text(header));
@@ -370,7 +367,7 @@ pub fn format_trait_def(
     doc: &[String],
     public: bool,
     name: &str,
-    type_params: &[String],
+    type_params: &[TypeParam],
     supertraits: &[TraitRef],
     methods: &[Annotated<TraitMethod>],
     dangling: &[Trivia],
@@ -386,11 +383,14 @@ pub fn format_trait_def(
     header.push_str(name);
     for tp in type_params {
         header.push(' ');
-        header.push_str(tp);
+        write!(header, "{}", tp).unwrap();
     }
     parts.push(Doc::text(header));
 
-    let self_param = type_params.first().map(|s| s.as_str()).unwrap_or("a");
+    let self_param = type_params
+        .first()
+        .map(|tp| tp.name.as_str())
+        .unwrap_or("a");
     if !supertraits.is_empty() {
         let st_names: Vec<&str> = supertraits.iter().map(|tr| tr.name.as_str()).collect();
         parts.push(Doc::text(format!(
@@ -516,7 +516,7 @@ pub fn format_impl_def(decl: &Decl) -> Doc {
     };
     for tp in type_params {
         header.push(' ');
-        header.push_str(tp);
+        write!(header, "{}", tp).unwrap();
     }
     parts.push(Doc::text(header));
 

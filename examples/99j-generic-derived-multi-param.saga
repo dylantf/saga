@@ -25,8 +25,8 @@ impl Eq2 for Leaf a where {a: Eq2} {
   eq2 (Leaf x) (Leaf y) = eq2 x y
 }
 
-impl Eq2 for Labeled a where {a: Eq2} {
-  eq2 (Labeled _ x) (Labeled _ y) = eq2 x y
+impl Eq2 for Labeled (n : Symbol) a where {a: Eq2} {
+  eq2 (Labeled x) (Labeled y) = eq2 x y
 }
 
 impl Eq2 for And l r where {l: Eq2, r: Eq2} {
@@ -46,8 +46,8 @@ impl Eq2 for Or l r where {l: Eq2, r: Eq2} {
   }
 }
 
-impl Eq2 for Variant a where {a: Eq2} {
-  eq2 (Variant _ x) (Variant _ y) = eq2 x y
+impl Eq2 for Variant (n : Symbol) a where {a: Eq2} {
+  eq2 (Variant x) (Variant y) = eq2 x y
 }
 
 impl Eq2 for Record a where {a: Eq2} {

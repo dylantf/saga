@@ -6438,7 +6438,7 @@ fn derive_generic_end_to_end_with_tojson() {
          impl ToJson for String { to_json s = s }\n\
          impl ToJson for Int { to_json n = show n }\n\
          impl ToJson for Leaf a where {a: ToJson} {\n  to_json (Leaf x) = to_json x\n}\n\
-         impl ToJson for Labeled a where {a: ToJson} {\n  to_json (Labeled name x) = name <> \":\" <> to_json x\n}\n\
+         impl ToJson for Labeled (n : Symbol) a where {n: KnownSymbol, a: ToJson} {\n  to_json (Labeled x) = symbol_name (Proxy : Proxy n) <> \":\" <> to_json x\n}\n\
          impl ToJson for And l r where {l: ToJson, r: ToJson} {\n  to_json (And l r) = to_json l <> \",\" <> to_json r\n}\n\
          impl ToJson for Record a where {a: ToJson} {\n  to_json (Record _ inner) = \"{\" <> to_json inner <> \"}\"\n}\n\
          impl ToJson for Rep__Person {\n  to_json (Rep__Person inner) = to_json inner\n}\n\
@@ -6548,10 +6548,10 @@ fn derive_generic_parameterized_adt_end_to_end_with_tojson() {
          impl ToJson for U1 { to_json _ = \"null\" }\n\
          impl ToJson for Int { to_json n = show n }\n\
          impl ToJson for Leaf a where {a: ToJson} {\n  to_json (Leaf x) = to_json x\n}\n\
-         impl ToJson for Labeled a where {a: ToJson} {\n  to_json (Labeled name x) = name <> \":\" <> to_json x\n}\n\
+         impl ToJson for Labeled (n : Symbol) a where {n: KnownSymbol, a: ToJson} {\n  to_json (Labeled x) = symbol_name (Proxy : Proxy n) <> \":\" <> to_json x\n}\n\
          impl ToJson for And l r where {l: ToJson, r: ToJson} {\n  to_json (And l r) = to_json l <> \",\" <> to_json r\n}\n\
          impl ToJson for Or l r where {l: ToJson, r: ToJson} {\n  to_json o = case o {\n  Or_Left l -> to_json l\n  Or_Right r -> to_json r\n}\n}\n\
-         impl ToJson for Variant a where {a: ToJson} {\n  to_json (Variant name x) = name <> \":\" <> to_json x\n}\n\
+         impl ToJson for Variant (n : Symbol) a where {n: KnownSymbol, a: ToJson} {\n  to_json (Variant x) = symbol_name (Proxy : Proxy n) <> \":\" <> to_json x\n}\n\
          impl ToJson for Adt a where {a: ToJson} {\n  to_json (Adt _ inner) = to_json inner\n}\n\
          impl ToJson for Rep__Opt a where {a: ToJson} {\n  to_json (Rep__Opt inner) = to_json inner\n}\n\
          impl ToJson for Opt a where {a: ToJson} {\n  to_json m = to_json (to m)\n}",
@@ -6571,10 +6571,10 @@ fn where_app_accepts_parenthesized_type_application() {
          impl ToJson for U1 { to_json _ = \"null\" }\n\
          impl ToJson for Int { to_json n = show n }\n\
          impl ToJson for Leaf a where {a: ToJson} {\n  to_json (Leaf x) = to_json x\n}\n\
-         impl ToJson for Labeled a where {a: ToJson} {\n  to_json (Labeled name x) = name <> \":\" <> to_json x\n}\n\
+         impl ToJson for Labeled (n : Symbol) a where {n: KnownSymbol, a: ToJson} {\n  to_json (Labeled x) = symbol_name (Proxy : Proxy n) <> \":\" <> to_json x\n}\n\
          impl ToJson for And l r where {l: ToJson, r: ToJson} {\n  to_json (And l r) = to_json l <> \",\" <> to_json r\n}\n\
          impl ToJson for Or l r where {l: ToJson, r: ToJson} {\n  to_json o = case o {\n  Or_Left l -> to_json l\n  Or_Right r -> to_json r\n}\n}\n\
-         impl ToJson for Variant a where {a: ToJson} {\n  to_json (Variant name x) = name <> \":\" <> to_json x\n}\n\
+         impl ToJson for Variant (n : Symbol) a where {n: KnownSymbol, a: ToJson} {\n  to_json (Variant x) = symbol_name (Proxy : Proxy n) <> \":\" <> to_json x\n}\n\
          impl ToJson for Adt a where {a: ToJson} {\n  to_json (Adt _ inner) = to_json inner\n}\n\
          impl ToJson for Rep__Opt a where {a: ToJson} {\n  to_json (Rep__Opt inner) = to_json inner\n}\n\
          impl ToJson for Opt a where {a: ToJson, Generic (Opt a) r, ToJson r} {\n  to_json m = to_json (to m)\n}",
@@ -6605,10 +6605,10 @@ fn derive_generic_adt_end_to_end_with_tojson() {
          impl ToJson for U1 { to_json _ = \"null\" }\n\
          impl ToJson for Float { to_json n = show n }\n\
          impl ToJson for Leaf a where {a: ToJson} {\n  to_json (Leaf x) = to_json x\n}\n\
-         impl ToJson for Labeled a where {a: ToJson} {\n  to_json (Labeled name x) = name <> \":\" <> to_json x\n}\n\
+         impl ToJson for Labeled (n : Symbol) a where {n: KnownSymbol, a: ToJson} {\n  to_json (Labeled x) = symbol_name (Proxy : Proxy n) <> \":\" <> to_json x\n}\n\
          impl ToJson for And l r where {l: ToJson, r: ToJson} {\n  to_json (And l r) = to_json l <> \",\" <> to_json r\n}\n\
          impl ToJson for Or l r where {l: ToJson, r: ToJson} {\n  to_json o = case o {\n  Or_Left l -> to_json l\n  Or_Right r -> to_json r\n}\n}\n\
-         impl ToJson for Variant a where {a: ToJson} {\n  to_json (Variant name x) = name <> \":\" <> to_json x\n}\n\
+         impl ToJson for Variant (n : Symbol) a where {n: KnownSymbol, a: ToJson} {\n  to_json (Variant x) = symbol_name (Proxy : Proxy n) <> \":\" <> to_json x\n}\n\
          impl ToJson for Adt a where {a: ToJson} {\n  to_json (Adt _ inner) = to_json inner\n}\n\
          impl ToJson for Rep__Shape {\n  to_json (Rep__Shape inner) = to_json inner\n}\n\
          impl ToJson for Shape where {Generic Shape r, ToJson r} {\n  to_json s = to_json (to s : Rep__Shape)\n}",
@@ -6625,10 +6625,10 @@ fn phase3_tojson_lib() -> &'static str {
      impl ToJson for Int { to_json n = show n }\n\
      impl ToJson for String { to_json s = s }\n\
      impl ToJson for Leaf a where {a: ToJson} {\n  to_json (Leaf x) = to_json x\n}\n\
-     impl ToJson for Labeled a where {a: ToJson} {\n  to_json (Labeled name x) = name <> \":\" <> to_json x\n}\n\
+     impl ToJson for Labeled (n : Symbol) a where {n: KnownSymbol, a: ToJson} {\n  to_json (Labeled x) = symbol_name (Proxy : Proxy n) <> \":\" <> to_json x\n}\n\
      impl ToJson for And l r where {l: ToJson, r: ToJson} {\n  to_json (And l r) = to_json l <> \",\" <> to_json r\n}\n\
      impl ToJson for Or l r where {l: ToJson, r: ToJson} {\n  to_json o = case o {\n  Or_Left l -> to_json l\n  Or_Right r -> to_json r\n}\n}\n\
-     impl ToJson for Variant a where {a: ToJson} {\n  to_json (Variant name x) = name <> \":\" <> to_json x\n}\n\
+     impl ToJson for Variant (n : Symbol) a where {n: KnownSymbol, a: ToJson} {\n  to_json (Variant x) = symbol_name (Proxy : Proxy n) <> \":\" <> to_json x\n}\n\
      impl ToJson for Record a where {a: ToJson} {\n  to_json (Record _ inner) = to_json inner\n}\n\
      impl ToJson for Adt a where {a: ToJson} {\n  to_json (Adt _ inner) = to_json inner\n}\n"
 }
@@ -6642,10 +6642,10 @@ fn module_tojson_lib() -> &'static str {
      impl ToJson for Int { to_json n = show n }\n\
      impl ToJson for String { to_json s = s }\n\
      impl ToJson for Leaf a where {a: ToJson} { to_json (Leaf x) = to_json x }\n\
-     impl ToJson for Labeled a where {a: ToJson} { to_json (Labeled name x) = name <> \":\" <> to_json x }\n\
+     impl ToJson for Labeled (n : Symbol) a where {n: KnownSymbol, a: ToJson} { to_json (Labeled x) = symbol_name (Proxy : Proxy n) <> \":\" <> to_json x }\n\
      impl ToJson for And l r where {l: ToJson, r: ToJson} { to_json (And l r) = to_json l <> \",\" <> to_json r }\n\
      impl ToJson for Or l r where {l: ToJson, r: ToJson} { to_json o = case o { Or_Left l -> to_json l; Or_Right r -> to_json r } }\n\
-     impl ToJson for Variant a where {a: ToJson} { to_json (Variant name x) = name <> \":\" <> to_json x }\n\
+     impl ToJson for Variant (n : Symbol) a where {n: KnownSymbol, a: ToJson} { to_json (Variant x) = symbol_name (Proxy : Proxy n) <> \":\" <> to_json x }\n\
      impl ToJson for Record a where {a: ToJson} { to_json (Record _ inner) = to_json inner }\n\
      impl ToJson for Adt a where {a: ToJson} { to_json (Adt _ inner) = to_json inner }\n"
 }
@@ -6778,10 +6778,10 @@ fn routed_from_derive_inspects_imported_wrapper_by_canonical_shape() {
         impl Decode for Int { decode _ = DbOk 0 }\n\
         impl Decode for String { decode s = DbOk s }\n\
         impl Decode for Leaf a where {a: Decode} { decode s = case decode s { DbOk x -> DbOk (Leaf x); DbErr e -> DbErr e; DbNoRows -> DbNoRows } }\n\
-        impl Decode for Labeled a where {a: Decode} { decode s = case decode s { DbOk x -> DbOk (Labeled \"\" x); DbErr e -> DbErr e; DbNoRows -> DbNoRows } }\n\
+        impl Decode for Labeled (n : Symbol) a where {a: Decode} { decode s = case decode s { DbOk x -> DbOk (Labeled x); DbErr e -> DbErr e; DbNoRows -> DbNoRows } }\n\
         impl Decode for And l r where {l: Decode, r: Decode} { decode s = case decode s { DbOk l -> case decode s { DbOk r -> DbOk (And l r); DbErr e -> DbErr e; DbNoRows -> DbNoRows }; DbErr e -> DbErr e; DbNoRows -> DbNoRows } }\n\
         impl Decode for Or l r where {l: Decode, r: Decode} { decode s = case decode s { DbOk l -> DbOk (Or_Left l); DbErr e -> DbErr e; DbNoRows -> DbNoRows } }\n\
-        impl Decode for Variant a where {a: Decode} { decode s = case decode s { DbOk x -> DbOk (Variant \"\" x); DbErr e -> DbErr e; DbNoRows -> DbNoRows } }\n\
+        impl Decode for Variant (n : Symbol) a where {a: Decode} { decode s = case decode s { DbOk x -> DbOk (Variant x); DbErr e -> DbErr e; DbNoRows -> DbNoRows } }\n\
         impl Decode for Record a where {a: Decode} { decode s = case decode s { DbOk x -> DbOk (Record \"\" x); DbErr e -> DbErr e; DbNoRows -> DbNoRows } }\n\
         impl Decode for Adt a where {a: Decode} { decode s = case decode s { DbOk x -> DbOk (Adt \"\" x); DbErr e -> DbErr e; DbNoRows -> DbNoRows } }\n";
     check_with_project_files(
@@ -6889,8 +6889,8 @@ fn phase3_fromjson_result_lib() -> &'static str {
      impl FromJson for Leaf a where {a: FromJson} {\n\
        from_json s = case from_json s { Ok x -> Ok (Leaf x); Err e -> Err e }\n\
      }\n\
-     impl FromJson for Labeled a where {a: FromJson} {\n\
-       from_json s = case from_json s { Ok x -> Ok (Labeled \"\" x); Err e -> Err e }\n\
+     impl FromJson for Labeled (sym : Symbol) a where {a: FromJson} {\n\
+       from_json s = case from_json s { Ok x -> Ok (Labeled x); Err e -> Err e }\n\
      }\n\
      impl FromJson for And l r where {l: FromJson, r: FromJson} {\n\
        from_json s = case from_json s {\n\
@@ -6904,8 +6904,8 @@ fn phase3_fromjson_result_lib() -> &'static str {
          Err _ -> case from_json s { Ok r -> Ok (Or_Right r); Err e -> Err e }\n\
        }\n\
      }\n\
-     impl FromJson for Variant a where {a: FromJson} {\n\
-       from_json s = case from_json s { Ok x -> Ok (Variant \"\" x); Err e -> Err e }\n\
+     impl FromJson for Variant (sym : Symbol) a where {a: FromJson} {\n\
+       from_json s = case from_json s { Ok x -> Ok (Variant x); Err e -> Err e }\n\
      }\n\
      impl FromJson for Record a where {a: FromJson} {\n\
        from_json s = case from_json s { Ok x -> Ok (Record \"\" x); Err e -> Err e }\n\
@@ -6938,8 +6938,8 @@ fn phase3_routed_derive_from_direction_maybe() {
                impl FromX for Leaf a where {a: FromX} {\n\
                  from_x n = case from_x n { Just x -> Just (Leaf x); Nothing -> Nothing }\n\
                }\n\
-               impl FromX for Labeled a where {a: FromX} {\n\
-                 from_x n = case from_x n { Just x -> Just (Labeled \"\" x); Nothing -> Nothing }\n\
+               impl FromX for Labeled (sym : Symbol) a where {a: FromX} {\n\
+                 from_x n = case from_x n { Just x -> Just (Labeled x); Nothing -> Nothing }\n\
                }\n\
                impl FromX for And l r where {l: FromX, r: FromX} {\n\
                  from_x n = case from_x n {\n\
@@ -6947,8 +6947,8 @@ fn phase3_routed_derive_from_direction_maybe() {
                    Nothing -> Nothing\n\
                  }\n\
                }\n\
-               impl FromX for Variant a where {a: FromX} {\n\
-                 from_x n = case from_x n { Just x -> Just (Variant \"\" x); Nothing -> Nothing }\n\
+               impl FromX for Variant (sym : Symbol) a where {a: FromX} {\n\
+                 from_x n = case from_x n { Just x -> Just (Variant x); Nothing -> Nothing }\n\
                }\n\
                impl FromX for Record a where {a: FromX} {\n\
                  from_x n = case from_x n { Just x -> Just (Record \"\" x); Nothing -> Nothing }\n\
@@ -6969,11 +6969,11 @@ fn phase3_routed_derive_from_direction_bare() {
                impl FromX for Int { from_x _ = 0 }\n\
                impl FromX for String { from_x _ = \"\" }\n\
                impl FromX for Leaf a where {a: FromX} { from_x n = Leaf (from_x n) }\n\
-               impl FromX for Labeled a where {a: FromX} { from_x n = Labeled \"\" (from_x n) }\n\
+               impl FromX for Labeled (sym : Symbol) a where {a: FromX} { from_x n = Labeled (from_x n) }\n\
                impl FromX for And l r where {l: FromX, r: FromX} {\n\
                  from_x n = And (from_x n) (from_x n)\n\
                }\n\
-               impl FromX for Variant a where {a: FromX} { from_x n = Variant \"\" (from_x n) }\n\
+               impl FromX for Variant (sym : Symbol) a where {a: FromX} { from_x n = Variant (from_x n) }\n\
                impl FromX for Record a where {a: FromX} { from_x n = Record \"\" (from_x n) }\n\
                impl FromX for Adt a where {a: FromX} { from_x n = Adt \"\" (from_x n) }\n\
                record P { x: Int }\n  deriving (FromX)\n\
@@ -7172,10 +7172,10 @@ fn phase6_showboth_lib() -> &'static str {
      impl ShowBoth for Int { show_b n = show n\n  debug_b n = show n }\n\
      impl ShowBoth for String { show_b s = s\n  debug_b s = s }\n\
      impl ShowBoth for Leaf a where {a: ShowBoth} {\n  show_b (Leaf x) = show_b x\n  debug_b (Leaf x) = debug_b x\n}\n\
-     impl ShowBoth for Labeled a where {a: ShowBoth} {\n  show_b (Labeled n x) = n <> \":\" <> show_b x\n  debug_b (Labeled n x) = n <> \"=\" <> debug_b x\n}\n\
+     impl ShowBoth for Labeled (n : Symbol) a where {n: KnownSymbol, a: ShowBoth} {\n  show_b (Labeled x) = symbol_name (Proxy : Proxy n) <> \":\" <> show_b x\n  debug_b (Labeled x) = symbol_name (Proxy : Proxy n) <> \"=\" <> debug_b x\n}\n\
      impl ShowBoth for And l r where {l: ShowBoth, r: ShowBoth} {\n  show_b (And l r) = show_b l <> \",\" <> show_b r\n  debug_b (And l r) = debug_b l <> \" & \" <> debug_b r\n}\n\
      impl ShowBoth for Or l r where {l: ShowBoth, r: ShowBoth} {\n  show_b o = case o { Or_Left l -> show_b l; Or_Right r -> show_b r }\n  debug_b o = case o { Or_Left l -> debug_b l; Or_Right r -> debug_b r }\n}\n\
-     impl ShowBoth for Variant a where {a: ShowBoth} {\n  show_b (Variant n x) = n <> \":\" <> show_b x\n  debug_b (Variant n x) = n <> \"=\" <> debug_b x\n}\n\
+     impl ShowBoth for Variant (n : Symbol) a where {n: KnownSymbol, a: ShowBoth} {\n  show_b (Variant x) = symbol_name (Proxy : Proxy n) <> \":\" <> show_b x\n  debug_b (Variant x) = symbol_name (Proxy : Proxy n) <> \"=\" <> debug_b x\n}\n\
      impl ShowBoth for Record a where {a: ShowBoth} {\n  show_b (Record _ inner) = show_b inner\n  debug_b (Record _ inner) = debug_b inner\n}\n\
      impl ShowBoth for Adt a where {a: ShowBoth} {\n  show_b (Adt _ inner) = show_b inner\n  debug_b (Adt _ inner) = debug_b inner\n}\n"
 }
@@ -7199,10 +7199,10 @@ fn phase6_from_pair_lib() -> &'static str {
      impl FromPair for Int { from_str _ = Ok 0\n  from_int n = Ok n }\n\
      impl FromPair for String { from_str s = Ok s\n  from_int _ = Ok \"\" }\n\
      impl FromPair for Leaf a where {a: FromPair} {\n  from_str s = case from_str s { Ok x -> Ok (Leaf x); Err e -> Err e }\n  from_int n = case from_int n { Ok x -> Ok (Leaf x); Err e -> Err e }\n}\n\
-     impl FromPair for Labeled a where {a: FromPair} {\n  from_str s = case from_str s { Ok x -> Ok (Labeled \"\" x); Err e -> Err e }\n  from_int n = case from_int n { Ok x -> Ok (Labeled \"\" x); Err e -> Err e }\n}\n\
+     impl FromPair for Labeled (sym : Symbol) a where {a: FromPair} {\n  from_str s = case from_str s { Ok x -> Ok (Labeled x); Err e -> Err e }\n  from_int n = case from_int n { Ok x -> Ok (Labeled x); Err e -> Err e }\n}\n\
      impl FromPair for And l r where {l: FromPair, r: FromPair} {\n  from_str s = case from_str s { Ok l -> case from_str s { Ok r -> Ok (And l r); Err e -> Err e }; Err e -> Err e }\n  from_int n = case from_int n { Ok l -> case from_int n { Ok r -> Ok (And l r); Err e -> Err e }; Err e -> Err e }\n}\n\
      impl FromPair for Or l r where {l: FromPair, r: FromPair} {\n  from_str s = case from_str s { Ok l -> Ok (Or_Left l); Err _ -> case from_str s { Ok r -> Ok (Or_Right r); Err e -> Err e } }\n  from_int n = case from_int n { Ok l -> Ok (Or_Left l); Err _ -> case from_int n { Ok r -> Ok (Or_Right r); Err e -> Err e } }\n}\n\
-     impl FromPair for Variant a where {a: FromPair} {\n  from_str s = case from_str s { Ok x -> Ok (Variant \"\" x); Err e -> Err e }\n  from_int n = case from_int n { Ok x -> Ok (Variant \"\" x); Err e -> Err e }\n}\n\
+     impl FromPair for Variant (sym : Symbol) a where {a: FromPair} {\n  from_str s = case from_str s { Ok x -> Ok (Variant x); Err e -> Err e }\n  from_int n = case from_int n { Ok x -> Ok (Variant x); Err e -> Err e }\n}\n\
      impl FromPair for Record a where {a: FromPair} {\n  from_str s = case from_str s { Ok x -> Ok (Record \"\" x); Err e -> Err e }\n  from_int n = case from_int n { Ok x -> Ok (Record \"\" x); Err e -> Err e }\n}\n\
      impl FromPair for Adt a where {a: FromPair} {\n  from_str s = case from_str s { Ok x -> Ok (Adt \"\" x); Err e -> Err e }\n  from_int n = case from_int n { Ok x -> Ok (Adt \"\" x); Err e -> Err e }\n}\n"
 }
@@ -7230,10 +7230,10 @@ fn phase6_jsoncodec_lib() -> &'static str {
      impl JsonCodec for Int { encode n = show n\n  decode _ = Ok 0 }\n\
      impl JsonCodec for String { encode s = s\n  decode s = Ok s }\n\
      impl JsonCodec for Leaf a where {a: JsonCodec} {\n  encode (Leaf x) = encode x\n  decode s = case decode s { Ok x -> Ok (Leaf x); Err e -> Err e }\n}\n\
-     impl JsonCodec for Labeled a where {a: JsonCodec} {\n  encode (Labeled n x) = n <> \":\" <> encode x\n  decode s = case decode s { Ok x -> Ok (Labeled \"\" x); Err e -> Err e }\n}\n\
+     impl JsonCodec for Labeled (n : Symbol) a where {n: KnownSymbol, a: JsonCodec} {\n  encode (Labeled x) = symbol_name (Proxy : Proxy n) <> \":\" <> encode x\n  decode s = case decode s { Ok x -> Ok (Labeled x); Err e -> Err e }\n}\n\
      impl JsonCodec for And l r where {l: JsonCodec, r: JsonCodec} {\n  encode (And l r) = encode l <> \",\" <> encode r\n  decode s = case decode s { Ok l -> case decode s { Ok r -> Ok (And l r); Err e -> Err e }; Err e -> Err e }\n}\n\
      impl JsonCodec for Or l r where {l: JsonCodec, r: JsonCodec} {\n  encode o = case o { Or_Left l -> encode l; Or_Right r -> encode r }\n  decode s = case decode s { Ok l -> Ok (Or_Left l); Err _ -> case decode s { Ok r -> Ok (Or_Right r); Err e -> Err e } }\n}\n\
-     impl JsonCodec for Variant a where {a: JsonCodec} {\n  encode (Variant n x) = n <> \":\" <> encode x\n  decode s = case decode s { Ok x -> Ok (Variant \"\" x); Err e -> Err e }\n}\n\
+     impl JsonCodec for Variant (n : Symbol) a where {n: KnownSymbol, a: JsonCodec} {\n  encode (Variant x) = symbol_name (Proxy : Proxy n) <> \":\" <> encode x\n  decode s = case decode s { Ok x -> Ok (Variant x); Err e -> Err e }\n}\n\
      impl JsonCodec for Record a where {a: JsonCodec} {\n  encode (Record _ inner) = encode inner\n  decode s = case decode s { Ok x -> Ok (Record \"\" x); Err e -> Err e }\n}\n\
      impl JsonCodec for Adt a where {a: JsonCodec} {\n  encode (Adt _ inner) = encode inner\n  decode s = case decode s { Ok x -> Ok (Adt \"\" x); Err e -> Err e }\n}\n"
 }
@@ -7280,10 +7280,10 @@ fn multi_param_eq_lib() -> &'static str {
      impl Eq2 for Int { eq2 a b = a == b }\n\
      impl Eq2 for String { eq2 a b = a == b }\n\
      impl Eq2 for Leaf a where {a: Eq2} {\n  eq2 (Leaf x) (Leaf y) = eq2 x y\n}\n\
-     impl Eq2 for Labeled a where {a: Eq2} {\n  eq2 (Labeled _ x) (Labeled _ y) = eq2 x y\n}\n\
+     impl Eq2 for Labeled (n : Symbol) a where {a: Eq2} {\n  eq2 (Labeled x) (Labeled y) = eq2 x y\n}\n\
      impl Eq2 for And l r where {l: Eq2, r: Eq2} {\n  eq2 (And l1 r1) (And l2 r2) = if eq2 l1 l2 then eq2 r1 r2 else False\n}\n\
      impl Eq2 for Or l r where {l: Eq2, r: Eq2} {\n  eq2 a b = case a {\n    Or_Left x -> case b { Or_Left y -> eq2 x y; Or_Right _ -> False }\n    Or_Right x -> case b { Or_Right y -> eq2 x y; Or_Left _ -> False }\n  }\n}\n\
-     impl Eq2 for Variant a where {a: Eq2} {\n  eq2 (Variant _ x) (Variant _ y) = eq2 x y\n}\n\
+     impl Eq2 for Variant (n : Symbol) a where {a: Eq2} {\n  eq2 (Variant x) (Variant y) = eq2 x y\n}\n\
      impl Eq2 for Record a where {a: Eq2} {\n  eq2 (Record _ x) (Record _ y) = eq2 x y\n}\n\
      impl Eq2 for Adt a where {a: Eq2} {\n  eq2 (Adt _ x) (Adt _ y) = eq2 x y\n}\n"
 }
@@ -7339,10 +7339,10 @@ fn phase6_routed_derive_multi_param_with_non_a_param() {
                impl Encode for Int { encode _ n = show n }\n\
                impl Encode for String { encode _ s = s }\n\
                impl Encode for Leaf a where {a: Encode} { encode c (Leaf x) = encode c x }\n\
-               impl Encode for Labeled a where {a: Encode} { encode c (Labeled n x) = n <> \":\" <> encode c x }\n\
+               impl Encode for Labeled (n : Symbol) a where {n: KnownSymbol, a: Encode} { encode c (Labeled x) = symbol_name (Proxy : Proxy n) <> \":\" <> encode c x }\n\
                impl Encode for And l r where {l: Encode, r: Encode} { encode c (And l r) = encode c l <> \",\" <> encode c r }\n\
                impl Encode for Or l r where {l: Encode, r: Encode} { encode c o = case o { Or_Left l -> encode c l; Or_Right r -> encode c r } }\n\
-               impl Encode for Variant a where {a: Encode} { encode c (Variant n x) = n <> \":\" <> encode c x }\n\
+               impl Encode for Variant (n : Symbol) a where {n: KnownSymbol, a: Encode} { encode c (Variant x) = symbol_name (Proxy : Proxy n) <> \":\" <> encode c x }\n\
                impl Encode for Record a where {a: Encode} { encode c (Record _ i) = encode c i }\n\
                impl Encode for Adt a where {a: Encode} { encode c (Adt _ i) = encode c i }\n\
                record Pt { x: Int, y: Int }\n  deriving (Encode)\n\
@@ -7362,10 +7362,10 @@ fn phase6_routed_derive_three_a_params() {
                impl Fold3 for Int { fold3 a b c = show a <> show b <> show c }\n\
                impl Fold3 for String { fold3 a b c = a <> b <> c }\n\
                impl Fold3 for Leaf a where {a: Fold3} { fold3 (Leaf x) (Leaf y) (Leaf z) = fold3 x y z }\n\
-               impl Fold3 for Labeled a where {a: Fold3} { fold3 (Labeled _ x) (Labeled _ y) (Labeled _ z) = fold3 x y z }\n\
+               impl Fold3 for Labeled (n : Symbol) a where {a: Fold3} { fold3 (Labeled x) (Labeled y) (Labeled z) = fold3 x y z }\n\
                impl Fold3 for And l r where {l: Fold3, r: Fold3} { fold3 (And l1 r1) (And l2 r2) (And l3 r3) = fold3 l1 l2 l3 <> fold3 r1 r2 r3 }\n\
                impl Fold3 for Or l r where {l: Fold3, r: Fold3} { fold3 _ _ _ = \"or\" }\n\
-               impl Fold3 for Variant a where {a: Fold3} { fold3 (Variant _ x) (Variant _ y) (Variant _ z) = fold3 x y z }\n\
+               impl Fold3 for Variant (n : Symbol) a where {a: Fold3} { fold3 (Variant x) (Variant y) (Variant z) = fold3 x y z }\n\
                impl Fold3 for Record a where {a: Fold3} { fold3 (Record _ x) (Record _ y) (Record _ z) = fold3 x y z }\n\
                impl Fold3 for Adt a where {a: Fold3} { fold3 (Adt _ x) (Adt _ y) (Adt _ z) = fold3 x y z }\n\
                record Triple { a: Int, b: Int, c: Int }\n  deriving (Fold3)\n\
@@ -7387,10 +7387,10 @@ fn phase6_routed_derive_multi_param_from_direction() {
                impl Parse for Int { parse _ _ = Ok 0 }\n\
                impl Parse for String { parse _ s = Ok s }\n\
                impl Parse for Leaf a where {a: Parse} { parse c s = case parse c s { Ok x -> Ok (Leaf x); Err e -> Err e } }\n\
-               impl Parse for Labeled a where {a: Parse} { parse c s = case parse c s { Ok x -> Ok (Labeled \"\" x); Err e -> Err e } }\n\
+               impl Parse for Labeled (n : Symbol) a where {a: Parse} { parse c s = case parse c s { Ok x -> Ok (Labeled x); Err e -> Err e } }\n\
                impl Parse for And l r where {l: Parse, r: Parse} { parse c s = case parse c s { Ok l -> case parse c s { Ok r -> Ok (And l r); Err e -> Err e }; Err e -> Err e } }\n\
                impl Parse for Or l r where {l: Parse, r: Parse} { parse c s = case parse c s { Ok l -> Ok (Or_Left l); Err _ -> case parse c s { Ok r -> Ok (Or_Right r); Err e -> Err e } } }\n\
-               impl Parse for Variant a where {a: Parse} { parse c s = case parse c s { Ok x -> Ok (Variant \"\" x); Err e -> Err e } }\n\
+               impl Parse for Variant (n : Symbol) a where {a: Parse} { parse c s = case parse c s { Ok x -> Ok (Variant x); Err e -> Err e } }\n\
                impl Parse for Record a where {a: Parse} { parse c s = case parse c s { Ok x -> Ok (Record \"\" x); Err e -> Err e } }\n\
                impl Parse for Adt a where {a: Parse} { parse c s = case parse c s { Ok x -> Ok (Adt \"\" x); Err e -> Err e } }\n\
                record Person { name: String, age: Int }\n  deriving (Parse)\n\
@@ -7410,10 +7410,10 @@ fn phase6_routed_derive_mixed_single_multi_method_trait() {
                impl Mixed for Int { show_b n = show n\n  eq_b a b = a == b\n  from_b _ = Ok 0 }\n\
                impl Mixed for String { show_b s = s\n  eq_b a b = a == b\n  from_b s = Ok s }\n\
                impl Mixed for Leaf a where {a: Mixed} { show_b (Leaf x) = show_b x\n  eq_b (Leaf x) (Leaf y) = eq_b x y\n  from_b s = case from_b s { Ok x -> Ok (Leaf x); Err e -> Err e } }\n\
-               impl Mixed for Labeled a where {a: Mixed} { show_b (Labeled n x) = n <> \":\" <> show_b x\n  eq_b (Labeled _ x) (Labeled _ y) = eq_b x y\n  from_b s = case from_b s { Ok x -> Ok (Labeled \"\" x); Err e -> Err e } }\n\
+               impl Mixed for Labeled (n : Symbol) a where {n: KnownSymbol, a: Mixed} { show_b (Labeled x) = symbol_name (Proxy : Proxy n) <> \":\" <> show_b x\n  eq_b (Labeled x) (Labeled y) = eq_b x y\n  from_b s = case from_b s { Ok x -> Ok (Labeled x); Err e -> Err e } }\n\
                impl Mixed for And l r where {l: Mixed, r: Mixed} { show_b (And l r) = show_b l <> \",\" <> show_b r\n  eq_b (And l1 r1) (And l2 r2) = if eq_b l1 l2 then eq_b r1 r2 else False\n  from_b s = case from_b s { Ok l -> case from_b s { Ok r -> Ok (And l r); Err e -> Err e }; Err e -> Err e } }\n\
                impl Mixed for Or l r where {l: Mixed, r: Mixed} { show_b o = case o { Or_Left l -> show_b l; Or_Right r -> show_b r }\n  eq_b _ _ = False\n  from_b s = case from_b s { Ok l -> Ok (Or_Left l); Err _ -> case from_b s { Ok r -> Ok (Or_Right r); Err e -> Err e } } }\n\
-               impl Mixed for Variant a where {a: Mixed} { show_b (Variant n x) = n <> \":\" <> show_b x\n  eq_b (Variant _ x) (Variant _ y) = eq_b x y\n  from_b s = case from_b s { Ok x -> Ok (Variant \"\" x); Err e -> Err e } }\n\
+               impl Mixed for Variant (n : Symbol) a where {n: KnownSymbol, a: Mixed} { show_b (Variant x) = symbol_name (Proxy : Proxy n) <> \":\" <> show_b x\n  eq_b (Variant x) (Variant y) = eq_b x y\n  from_b s = case from_b s { Ok x -> Ok (Variant x); Err e -> Err e } }\n\
                impl Mixed for Record a where {a: Mixed} { show_b (Record _ i) = show_b i\n  eq_b (Record _ x) (Record _ y) = eq_b x y\n  from_b s = case from_b s { Ok x -> Ok (Record \"\" x); Err e -> Err e } }\n\
                impl Mixed for Adt a where {a: Mixed} { show_b (Adt _ i) = show_b i\n  eq_b (Adt _ x) (Adt _ y) = eq_b x y\n  from_b s = case from_b s { Ok x -> Ok (Adt \"\" x); Err e -> Err e } }\n\
                record Person { name: String, age: Int }\n  deriving (Mixed)\n\
@@ -7439,7 +7439,7 @@ fn phase5_record_rep_uses_record_wrapper() {
          impl ToJson for String { to_json s = s }\n\
          impl ToJson for Int { to_json n = show n }\n\
          impl ToJson for Leaf a where {a: ToJson} { to_json (Leaf x) = to_json x }\n\
-         impl ToJson for Labeled a where {a: ToJson} { to_json (Labeled n x) = n <> \":\" <> to_json x }\n\
+         impl ToJson for Labeled (n : Symbol) a where {n: KnownSymbol, a: ToJson} { to_json (Labeled x) = symbol_name (Proxy : Proxy n) <> \":\" <> to_json x }\n\
          impl ToJson for And l r where {l: ToJson, r: ToJson} { to_json (And l r) = to_json l <> \",\" <> to_json r }\n\
          impl ToJson for Record a where {a: ToJson} { to_json (Record _ inner) = \"{\" <> to_json inner <> \"}\" }\n\
          impl ToJson for Rep__Person { to_json (Rep__Person r) = to_json r }\n\
@@ -7461,7 +7461,7 @@ fn phase5_adt_rep_uses_adt_and_variant_wrappers() {
          impl ToJson for Float { to_json n = show n }\n\
          impl ToJson for Leaf a where {a: ToJson} { to_json (Leaf x) = to_json x }\n\
          impl ToJson for Or l r where {l: ToJson, r: ToJson} { to_json o = case o { Or_Left l -> to_json l; Or_Right r -> to_json r } }\n\
-         impl ToJson for Variant a where {a: ToJson} { to_json (Variant n x) = \"{\\\"\" <> n <> \"\\\":\" <> to_json x <> \"}\" }\n\
+         impl ToJson for Variant (n : Symbol) a where {n: KnownSymbol, a: ToJson} { to_json (Variant x) = \"{\\\"\" <> symbol_name (Proxy : Proxy n) <> \"\\\":\" <> to_json x <> \"}\" }\n\
          impl ToJson for Adt a where {a: ToJson} { to_json (Adt _ inner) = to_json inner }\n\
          impl ToJson for Rep__Shape { to_json (Rep__Shape r) = to_json r }\n\
          impl ToJson for Shape where {Generic Shape r, ToJson r} { to_json s = to_json (to s : Rep__Shape) }",
@@ -7481,8 +7481,8 @@ fn phase5_library_distinguishes_record_label_from_variant_name() {
                impl Tag for U1 { tag _ = \"u1\" }\n\
                impl Tag for Int { tag _ = \"int\" }\n\
                impl Tag for Leaf a where {a: Tag} { tag (Leaf x) = tag x }\n\
-               impl Tag for Labeled a where {a: Tag} { tag (Labeled n x) = \"field<\" <> n <> \">:\" <> tag x }\n\
-               impl Tag for Variant a where {a: Tag} { tag (Variant n x) = \"ctor<\" <> n <> \">:\" <> tag x }\n\
+               impl Tag for Labeled (n : Symbol) a where {n: KnownSymbol, a: Tag} { tag (Labeled x) = \"field<\" <> symbol_name (Proxy : Proxy n) <> \">:\" <> tag x }\n\
+               impl Tag for Variant (n : Symbol) a where {n: KnownSymbol, a: Tag} { tag (Variant x) = \"ctor<\" <> symbol_name (Proxy : Proxy n) <> \">:\" <> tag x }\n\
                impl Tag for And l r where {l: Tag, r: Tag} { tag (And l r) = tag l <> \",\" <> tag r }\n\
                impl Tag for Or l r where {l: Tag, r: Tag} { tag o = case o { Or_Left l -> tag l; Or_Right r -> tag r } }\n\
                impl Tag for Record a where {a: Tag} { tag (Record _ i) = \"R{\" <> tag i <> \"}\" }\n\
@@ -7516,9 +7516,9 @@ fn phase7_custom_three_state_wrapper_succeeds() {
                    DbNoRows -> DbNoRows\n\
                  }\n\
                }\n\
-               impl Decode for Labeled a where {a: Decode} {\n\
+               impl Decode for Labeled (sym : Symbol) a where {a: Decode} {\n\
                  decode s = case decode s {\n\
-                   DbOk x -> DbOk (Labeled \"\" x)\n\
+                   DbOk x -> DbOk (Labeled x)\n\
                    DbErr e -> DbErr e\n\
                    DbNoRows -> DbNoRows\n\
                  }\n\
@@ -7541,9 +7541,9 @@ fn phase7_custom_three_state_wrapper_succeeds() {
                    DbNoRows -> DbNoRows\n\
                  }\n\
                }\n\
-               impl Decode for Variant a where {a: Decode} {\n\
+               impl Decode for Variant (sym : Symbol) a where {a: Decode} {\n\
                  decode s = case decode s {\n\
-                   DbOk x -> DbOk (Variant \"\" x)\n\
+                   DbOk x -> DbOk (Variant x)\n\
                    DbErr e -> DbErr e\n\
                    DbNoRows -> DbNoRows\n\
                  }\n\
@@ -7586,9 +7586,9 @@ fn phase7_validated_two_param_wrapper_succeeds() {
                    Invalid es -> Invalid es\n\
                  }\n\
                }\n\
-               impl FromCsv for Labeled a where {a: FromCsv} {\n\
+               impl FromCsv for Labeled (sym : Symbol) a where {a: FromCsv} {\n\
                  from_csv s = case from_csv s {\n\
-                   Valid x -> Valid (Labeled \"\" x)\n\
+                   Valid x -> Valid (Labeled x)\n\
                    Invalid es -> Invalid es\n\
                  }\n\
                }\n\
@@ -7607,9 +7607,9 @@ fn phase7_validated_two_param_wrapper_succeeds() {
                    Invalid es -> Invalid es\n\
                  }\n\
                }\n\
-               impl FromCsv for Variant a where {a: FromCsv} {\n\
+               impl FromCsv for Variant (sym : Symbol) a where {a: FromCsv} {\n\
                  from_csv s = case from_csv s {\n\
-                   Valid x -> Valid (Variant \"\" x)\n\
+                   Valid x -> Valid (Variant x)\n\
                    Invalid es -> Invalid es\n\
                  }\n\
                }\n\
@@ -7646,9 +7646,9 @@ fn phase7_record_wrapper_succeeds() {
                    Boxed { value, meta } -> Boxed { value: Leaf value, meta: meta }\n\
                  }\n\
                }\n\
-               impl Decode for Labeled a where {a: Decode} {\n\
+               impl Decode for Labeled (sym : Symbol) a where {a: Decode} {\n\
                  decode s = case decode s {\n\
-                   Boxed { value, meta } -> Boxed { value: Labeled \"\" value, meta: meta }\n\
+                   Boxed { value, meta } -> Boxed { value: Labeled value, meta: meta }\n\
                  }\n\
                }\n\
                impl Decode for And l r where {l: Decode, r: Decode} {\n\
@@ -7663,9 +7663,9 @@ fn phase7_record_wrapper_succeeds() {
                    Boxed { value, meta } -> Boxed { value: Or_Left value, meta: meta }\n\
                  }\n\
                }\n\
-               impl Decode for Variant a where {a: Decode} {\n\
+               impl Decode for Variant (sym : Symbol) a where {a: Decode} {\n\
                  decode s = case decode s {\n\
-                   Boxed { value, meta } -> Boxed { value: Variant \"\" value, meta: meta }\n\
+                   Boxed { value, meta } -> Boxed { value: Variant value, meta: meta }\n\
                  }\n\
                }\n\
                impl Decode for Record a where {a: Decode} {\n\
@@ -7698,8 +7698,8 @@ fn phase7_phantom_param_wrapper_succeeds() {
                impl FromTag for Leaf a where {a: FromTag} {\n\
                  from_tag s = case from_tag s { Tag x -> Tag (Leaf x) }\n\
                }\n\
-               impl FromTag for Labeled a where {a: FromTag} {\n\
-                 from_tag s = case from_tag s { Tag x -> Tag (Labeled \"\" x) }\n\
+               impl FromTag for Labeled (sym : Symbol) a where {a: FromTag} {\n\
+                 from_tag s = case from_tag s { Tag x -> Tag (Labeled x) }\n\
                }\n\
                impl FromTag for And l r where {l: FromTag, r: FromTag} {\n\
                  from_tag s = case from_tag s {\n\
@@ -7709,8 +7709,8 @@ fn phase7_phantom_param_wrapper_succeeds() {
                impl FromTag for Or l r where {l: FromTag, r: FromTag} {\n\
                  from_tag s = case from_tag s { Tag x -> Tag (Or_Left x) }\n\
                }\n\
-               impl FromTag for Variant a where {a: FromTag} {\n\
-                 from_tag s = case from_tag s { Tag x -> Tag (Variant \"\" x) }\n\
+               impl FromTag for Variant (sym : Symbol) a where {a: FromTag} {\n\
+                 from_tag s = case from_tag s { Tag x -> Tag (Variant x) }\n\
                }\n\
                impl FromTag for Record a where {a: FromTag} {\n\
                  from_tag s = case from_tag s { Tag x -> Tag (Record \"\" x) }\n\
@@ -7765,10 +7765,10 @@ fn phase7_either_multi_a_succeeds() {
                    Right x -> Right (Leaf x)\n\
                  }\n\
                }\n\
-               impl FromE for Labeled a where {a: FromE} {\n\
+               impl FromE for Labeled (sym : Symbol) a where {a: FromE} {\n\
                  from_e s = case from_e s {\n\
-                   Left x -> Left (Labeled \"\" x)\n\
-                   Right x -> Right (Labeled \"\" x)\n\
+                   Left x -> Left (Labeled x)\n\
+                   Right x -> Right (Labeled x)\n\
                  }\n\
                }\n\
                impl FromE for And l r where {l: FromE, r: FromE} {\n\
@@ -7789,10 +7789,10 @@ fn phase7_either_multi_a_succeeds() {
                    Right x -> Right (Or_Left x)\n\
                  }\n\
                }\n\
-               impl FromE for Variant a where {a: FromE} {\n\
+               impl FromE for Variant (sym : Symbol) a where {a: FromE} {\n\
                  from_e s = case from_e s {\n\
-                   Left x -> Left (Variant \"\" x)\n\
-                   Right x -> Right (Variant \"\" x)\n\
+                   Left x -> Left (Variant x)\n\
+                   Right x -> Right (Variant x)\n\
                  }\n\
                }\n\
                impl FromE for Record a where {a: FromE} {\n\
@@ -7898,11 +7898,11 @@ fn trait_default_body_with_routed_derive() {
                impl Greet for Leaf a where {a: Greet} {\n\
                  greet_with prefix (Leaf x) = greet_with prefix x\n\
                }\n\
-               impl Greet for Labeled a where {a: Greet} {\n\
-                 greet_with prefix (Labeled name x) = greet_with prefix x\n\
+               impl Greet for Labeled (sym : Symbol) a where {a: Greet} {\n\
+                 greet_with prefix (Labeled x) = greet_with prefix x\n\
                }\n\
-               impl Greet for Variant a where {a: Greet} {\n\
-                 greet_with prefix (Variant name x) = greet_with prefix x\n\
+               impl Greet for Variant (sym : Symbol) a where {a: Greet} {\n\
+                 greet_with prefix (Variant x) = greet_with prefix x\n\
                }\n\
                impl Greet for Record a where {a: Greet} {\n\
                  greet_with prefix (Record name x) = greet_with prefix x\n\
@@ -7971,5 +7971,359 @@ fn trait_default_body_with_where_constraint() {
                  pretty_with p n = p <> show n\n\
                }\n\
                let s = pretty 42\n";
+    check(src).unwrap();
+}
+
+// --- Type-level symbols (Chunk 2: typechecker wiring) ---
+
+#[test]
+fn symbol_id_with_same_symbol_kind() {
+    let src = "type Id (k : Symbol) = MkId Int\n\
+               let u : Id 'user = MkId 1\n\
+               let p : Id 'post = MkId 2\n";
+    check(src).unwrap();
+}
+
+#[test]
+fn symbol_distinct_literals_fail_to_unify() {
+    let src = "type Id (k : Symbol) = MkId Int\n\
+               let x : Id 'admin = MkId 1\n\
+               let y : Id 'editor = x\n";
+    let err = check(src).err().expect("expected symbol-mismatch error");
+    let msg = err.message.to_lowercase();
+    assert!(
+        msg.contains("admin") || msg.contains("editor") || msg.contains("mismatch"),
+        "expected message naming the symbols or a mismatch: got {}",
+        err.message
+    );
+}
+
+#[test]
+fn symbol_star_in_symbol_position_fails() {
+    let src = "type Id (k : Symbol) = MkId Int\n\
+               let bad : Id Int = MkId 1\n";
+    let err = check(src).err().expect("expected kind-mismatch error");
+    assert!(
+        err.message.to_lowercase().contains("kind"),
+        "expected kind-mismatch diagnostic, got: {}",
+        err.message
+    );
+}
+
+#[test]
+fn symbol_in_star_position_fails() {
+    let src = "type Bad2 = Maybe 'foo\n";
+    let err = check(src).err().expect("expected kind-mismatch error");
+    assert!(
+        err.message.to_lowercase().contains("kind"),
+        "expected kind-mismatch diagnostic, got: {}",
+        err.message
+    );
+}
+
+#[test]
+fn symbol_var_kind_conflict_in_signature() {
+    // `k` first appears in `Id k` (Symbol-kinded slot), then in `List k`
+    // (Star-kinded slot). The second use must error with a kind mismatch.
+    let src = "type Id (k : Symbol) = MkId Int\n\
+               fun bad : Id k -> List k -> Int\n\
+               bad _ _ = 0\n";
+    let err = check(src).err().expect("expected kind mismatch");
+    let msg = err.message.to_lowercase();
+    assert!(
+        msg.contains("kind"),
+        "expected kind diagnostic, got: {}",
+        err.message
+    );
+}
+
+#[test]
+fn symbol_same_kind_function_with_matching_symbols() {
+    let src = "type Id (k : Symbol) = MkId Int\n\
+               fun same_kind : Id k -> Id k -> Bool\n\
+               same_kind a b = True\n\
+               let a : Id 'user = MkId 1\n\
+               let b : Id 'user = MkId 2\n\
+               let r = same_kind a b\n";
+    check(src).unwrap();
+}
+
+#[test]
+fn symbol_same_kind_function_with_mismatched_symbols() {
+    let src = "type Id (k : Symbol) = MkId Int\n\
+               fun same_kind : Id k -> Id k -> Bool\n\
+               same_kind a b = True\n\
+               let a : Id 'user = MkId 1\n\
+               let b : Id 'post = MkId 2\n\
+               let r = same_kind a b\n";
+    check(src).err().expect("expected symbol-mismatch error");
+}
+
+#[test]
+fn symbol_trait_param_kind_is_tracked() {
+    // A trait declared with a Symbol-kinded parameter should register that kind
+    // on the TraitInfo, so we can use the trait in a constraint without a kind
+    // mismatch when the bounded var is also Symbol-kinded.
+    let src = "trait MySymbolTrait (n : Symbol) {\n\
+                 fun whatever : Int -> Bool\n\
+               }\n";
+    let checker = check(src).unwrap();
+    let info = checker
+        .trait_state
+        .traits
+        .get("MySymbolTrait")
+        .expect("MySymbolTrait registered");
+    assert_eq!(info.type_params.len(), 1);
+    assert_eq!(info.type_params[0].0, "n");
+    assert_eq!(info.type_params[0].1, crate::ast::Kind::Symbol);
+}
+
+// --- KnownSymbol / Proxy (Chunk 3) ---
+
+#[test]
+fn known_symbol_proxy_in_prelude() {
+    // Proxy and KnownSymbol should be auto-imported via the prelude.
+    let src = "let _p : Proxy 'admin = Proxy\n";
+    check(src).unwrap();
+}
+
+#[test]
+fn known_symbol_resolves_concrete_symbol_records_evidence() {
+    let src = "let s = symbol_name (Proxy : Proxy 'admin)\n";
+    let checker = check(src).unwrap();
+    let sym_ev = checker
+        .evidence
+        .iter()
+        .find(|ev| ev.resolved_symbol.as_deref() == Some("admin"))
+        .expect("expected KnownSymbol evidence with resolved_symbol='admin'");
+    assert!(
+        sym_ev.trait_name == KNOWN_SYMBOL_TRAIT,
+        "expected KnownSymbol trait, got {}",
+        sym_ev.trait_name
+    );
+}
+
+#[test]
+fn known_symbol_two_call_sites_have_distinct_evidence() {
+    let src = "let a = symbol_name (Proxy : Proxy 'admin)\n\
+               let b = symbol_name (Proxy : Proxy 'editor)\n";
+    let checker = check(src).unwrap();
+    let mut names: Vec<String> = checker
+        .evidence
+        .iter()
+        .filter_map(|ev| ev.resolved_symbol.clone())
+        .collect();
+    names.sort();
+    assert_eq!(names, vec!["admin".to_string(), "editor".to_string()]);
+}
+
+#[test]
+fn known_symbol_concrete_call_elaborates_to_symbol_intrinsic() {
+    use crate::ast::{Decl, ExprKind, Stmt};
+    let src = "fun get_a : Unit -> String\n\
+               get_a () = symbol_name (Proxy : Proxy 'admin)\n\
+               fun get_b : Unit -> String\n\
+               get_b () = symbol_name (Proxy : Proxy 'editor)\n";
+    let mut lexer = crate::lexer::Lexer::new(src);
+    let tokens = lexer.lex().expect("lex");
+    let mut program = crate::parser::Parser::new(tokens)
+        .parse_program()
+        .expect("parse");
+    let imported = crate::derive::collect_imported_decls(&program, None);
+    let _ = crate::derive::expand_derives(&mut program, &imported);
+    crate::desugar::desugar_program(&mut program);
+    let mut checker = Checker::new();
+    let prelude_src = include_str!("../stdlib/prelude.saga");
+    let prelude_tokens = crate::lexer::Lexer::new(prelude_src).lex().unwrap();
+    let mut prelude_program = crate::parser::Parser::new(prelude_tokens)
+        .parse_program()
+        .unwrap();
+    crate::derive::expand_derives(&mut prelude_program, &crate::derive::ImportedDecls::empty());
+    crate::desugar::desugar_program(&mut prelude_program);
+    checker.check_program_inner(&mut prelude_program).unwrap();
+    checker.check_program_inner(&mut program).unwrap();
+    let result = checker.to_result();
+    let elaborated = crate::elaborate::elaborate(&program, &result);
+    // Walk the elaborated AST and look for a SymbolIntrinsic { symbol: "admin" }.
+    fn find_intrinsic(e: &crate::ast::Expr) -> Option<String> {
+        match &e.kind {
+            ExprKind::SymbolIntrinsic { symbol } => Some(symbol.clone()),
+            ExprKind::App { func, arg } => find_intrinsic(func).or_else(|| find_intrinsic(arg)),
+            ExprKind::Lambda { body, .. } => find_intrinsic(body),
+            ExprKind::Block { stmts, .. } => stmts.iter().find_map(|s| match &s.node {
+                Stmt::Let { value, .. } => find_intrinsic(value),
+                Stmt::Expr(e) => find_intrinsic(e),
+                Stmt::LetFun { body, .. } => find_intrinsic(body),
+            }),
+            _ => None,
+        }
+    }
+    let mut found: Vec<String> = elaborated
+        .iter()
+        .filter_map(|d| match d {
+            Decl::FunBinding { body, .. } => find_intrinsic(body),
+            _ => None,
+        })
+        .collect();
+    found.sort();
+    assert_eq!(found, vec!["admin".to_string(), "editor".to_string()]);
+}
+
+#[test]
+fn known_symbol_polymorphic_signature_typechecks() {
+    // Signature alone should typecheck — no symbol_name call in the body.
+    let src = "fun describe : Proxy n -> Int where {n : KnownSymbol}\n\
+               describe _ = 0\n";
+    check(src).unwrap();
+}
+
+#[test]
+fn known_symbol_polymorphic_call_typechecks() {
+    // The body invokes symbol_name on a polymorphic Proxy n; the constraint
+    // is forwarded through the where-bound and resolved via a dict param.
+    let src = "fun describe : Proxy n -> String where {n : KnownSymbol}\n\
+               describe p = symbol_name p\n";
+    check(src).unwrap();
+}
+
+#[test]
+fn known_symbol_polymorphic_forwarding_typechecks() {
+    // A polymorphic function calling another polymorphic function with the
+    // same KnownSymbol bound should typecheck (dict forwards through).
+    let src = "fun describe : Proxy n -> String where {n : KnownSymbol}\n\
+               describe p = symbol_name p\n\
+               fun forward : Proxy n -> String where {n : KnownSymbol}\n\
+               forward p = describe p\n";
+    check(src).unwrap();
+}
+
+#[test]
+fn known_symbol_polymorphic_elaborates_with_dict_param() {
+    // The elaborated describe function carries a __dict_KnownSymbol_n
+    // parameter; the body references that dict (via the symbol_name lambda
+    // wrapper).
+    use crate::ast::{Decl, ExprKind, Pat, Stmt};
+    let src = "fun describe : Proxy n -> String where {n : KnownSymbol}\n\
+               describe p = symbol_name p\n";
+    let mut lexer = crate::lexer::Lexer::new(src);
+    let tokens = lexer.lex().expect("lex");
+    let mut program = crate::parser::Parser::new(tokens)
+        .parse_program()
+        .expect("parse");
+    let imported = crate::derive::collect_imported_decls(&program, None);
+    let _ = crate::derive::expand_derives(&mut program, &imported);
+    crate::desugar::desugar_program(&mut program);
+    let mut checker = Checker::new();
+    let prelude_src = include_str!("../stdlib/prelude.saga");
+    let prelude_tokens = crate::lexer::Lexer::new(prelude_src).lex().unwrap();
+    let mut prelude_program = crate::parser::Parser::new(prelude_tokens)
+        .parse_program()
+        .unwrap();
+    crate::derive::expand_derives(&mut prelude_program, &crate::derive::ImportedDecls::empty());
+    crate::desugar::desugar_program(&mut prelude_program);
+    checker.check_program_inner(&mut prelude_program).unwrap();
+    checker.check_program_inner(&mut program).unwrap();
+    let result = checker.to_result();
+    let elaborated = crate::elaborate::elaborate(&program, &result);
+
+    let (params, body) = elaborated
+        .iter()
+        .find_map(|d| match d {
+            Decl::FunBinding {
+                name, params, body, ..
+            } if name == "describe" => Some((params.clone(), body.clone())),
+            _ => None,
+        })
+        .expect("describe FunBinding");
+    let has_dict_param = params.iter().any(|p| {
+        matches!(
+            p,
+            Pat::Var { name, .. } if name == "__dict_KnownSymbol_n"
+        )
+    });
+    assert!(
+        has_dict_param,
+        "expected __dict_KnownSymbol_n in describe params, got {:?}",
+        params
+    );
+
+    fn references_dict(e: &crate::ast::Expr) -> bool {
+        match &e.kind {
+            ExprKind::Var { name } => name == "__dict_KnownSymbol_n",
+            ExprKind::App { func, arg } => references_dict(func) || references_dict(arg),
+            ExprKind::Lambda { body, .. } => references_dict(body),
+            ExprKind::Block { stmts, .. } => stmts.iter().any(|s| match &s.node {
+                Stmt::Let { value, .. } => references_dict(value),
+                Stmt::Expr(e) => references_dict(e),
+                Stmt::LetFun { body, .. } => references_dict(body),
+            }),
+            _ => false,
+        }
+    }
+    assert!(
+        references_dict(&body),
+        "expected describe body to reference __dict_KnownSymbol_n"
+    );
+}
+
+#[test]
+fn known_symbol_proxy_ascription_with_symbol_kind() {
+    // Sanity check: the ascription path interacts correctly with the
+    // symbol-kinded parameter of Proxy.
+    let src = "let p : Proxy 'foo = Proxy\n";
+    check(src).unwrap();
+}
+
+#[test]
+fn known_symbol_symbol_name_with_star_proxy_fails_kind_check() {
+    // Int has kind Star; Proxy expects Symbol.
+    let src = "let bad = symbol_name (Proxy : Proxy Int)\n";
+    let err = check(src).err().expect("expected kind-mismatch error");
+    let msg = err.message.to_lowercase();
+    assert!(
+        msg.contains("kind"),
+        "expected kind diagnostic, got: {}",
+        err.message
+    );
+}
+
+#[test]
+fn known_symbol_bound_on_star_var_fails_kind_check() {
+    let src = "fun bad : List n -> Int where {n : KnownSymbol}\n\
+               bad _ = 0\n";
+    let err = check(src).err().expect("expected kind-mismatch error");
+    let msg = err.message.to_lowercase();
+    assert!(
+        msg.contains("kind") && msg.contains("knownsymbol"),
+        "expected KnownSymbol kind diagnostic, got: {}",
+        err.message
+    );
+}
+
+#[test]
+fn local_trait_named_known_symbol_does_not_get_builtin_magic() {
+    let src = "trait KnownSymbol (n : Symbol) {\n\
+                 fun fake : Proxy n -> String\n\
+               }\n\
+               let x = fake (Proxy : Proxy 'foo)\n";
+    let err = check(src)
+        .err()
+        .expect("expected local KnownSymbol trait to require an impl");
+    assert!(
+        err.message.contains("no impl") || err.message.contains("required"),
+        "expected missing impl diagnostic, got: {}",
+        err.message
+    );
+}
+
+#[test]
+fn symbol_handler_body_ascription_uses_handled_effect_type_var() {
+    let src = "effect Read (n : Symbol) {\n\
+                 fun read : Unit -> Proxy n\n\
+               }\n\
+               handler show_read for Read n where {n: KnownSymbol} {\n\
+                 read () = resume (Proxy : Proxy n)\n\
+                 return _ = symbol_name (Proxy : Proxy n)\n\
+               }\n";
     check(src).unwrap();
 }

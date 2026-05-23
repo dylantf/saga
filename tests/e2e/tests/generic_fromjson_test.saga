@@ -1,0 +1,116 @@
+module GenericFromjsonTest
+
+import Std.Test (Testing, describe, test, assert_eq)
+
+# Phase B bug repro: before the Generic migration, decoding a sum-type
+# variant always returned the first variant (the one `Or_Left` happened to
+# point at), because the synthesized `from` pattern wildcarded the variant
+# name and the library's `FromJson for Or` impl had to dispatch by
+# position. Decoding "Editor" into Role = Admin | Editor | Viewer always
+# returned Admin.
+#
+# After Phase B, Variant carries its constructor name as a type-level
+# Symbol. The library's `FromJson for Variant` impl recovers the name via
+# `KnownSymbol`, compares it against the input tag, and fails when they
+# mismatch — making Or's "try left, fall back to right" actually pick the
+# right variant.
+#
+# The trivial decoder below treats its input string as the variant tag.
+# A real library would parse JSON tokens; the point is that each variant
+# decodes to itself, not always to the first one.
+
+trait FromJson a {
+  fun from_json : String -> Result a String
+}
+
+impl FromJson for U1 {
+  from_json _ = Ok U1
+}
+
+impl FromJson for Leaf a where {a: FromJson} {
+  from_json s = case from_json s {
+    Ok x -> Ok (Leaf x)
+    Err e -> Err e
+  }
+}
+
+impl FromJson for And l r where {l: FromJson, r: FromJson} {
+  from_json s = case from_json s {
+    Ok l -> case from_json s {
+      Ok r -> Ok (And l r)
+      Err e -> Err e
+    }
+    Err e -> Err e
+  }
+}
+
+impl FromJson for Or l r where {l: FromJson, r: FromJson} {
+  from_json s = case from_json s {
+    Ok l -> Ok (Or_Left l)
+    Err _ -> case from_json s {
+      Ok r -> Ok (Or_Right r)
+      Err e -> Err e
+    }
+  }
+}
+
+impl FromJson for Labeled (n : Symbol) a where {a: FromJson} {
+  from_json s = case from_json s {
+    Ok x -> Ok (Labeled x)
+    Err e -> Err e
+  }
+}
+
+# The key impl: dispatch on the type-level constructor name. Compare the
+# input tag against the expected name and fail when they mismatch.
+impl FromJson for Variant (n : Symbol) a where {n: KnownSymbol, a: FromJson} {
+  from_json s =
+    if s == symbol_name (Proxy : Proxy n) then
+      case from_json s {
+        Ok x -> Ok (Variant x)
+        Err e -> Err e
+      }
+    else
+      Err ("variant tag mismatch: expected " <> symbol_name (Proxy : Proxy n))
+}
+
+impl FromJson for Record a where {a: FromJson} {
+  from_json s = case from_json s {
+    Ok x -> Ok (Record "" x)
+    Err e -> Err e
+  }
+}
+
+impl FromJson for Adt a where {a: FromJson} {
+  from_json s = case from_json s {
+    Ok x -> Ok (Adt "" x)
+    Err e -> Err e
+  }
+}
+
+type Role = Admin | Editor | Viewer
+  deriving (Show, Debug, Eq, FromJson)
+
+pub fun tests : Unit -> Unit needs {Testing}
+tests () = {
+  describe "Generic deriving: sum-type from-direction correctness" (fun () -> {
+    test "decodes the first variant (Admin) correctly" (fun () -> {
+      assert_eq (from_json "Admin" : Result Role String) (Ok Admin)
+    })
+
+    test "decodes the middle variant (Editor) — pre-Phase-B this returned Admin" (fun () -> {
+      assert_eq (from_json "Editor" : Result Role String) (Ok Editor)
+    })
+
+    test "decodes the last variant (Viewer) — pre-Phase-B this returned Admin" (fun () -> {
+      assert_eq (from_json "Viewer" : Result Role String) (Ok Viewer)
+    })
+
+    test "rejects an unknown variant tag" (fun () -> {
+      case (from_json "Nonexistent" : Result Role String) {
+        Ok _ -> assert_eq "unexpected Ok" "expected Err"
+        Err _ -> assert_eq True True
+      }
+    })
+  })
+}

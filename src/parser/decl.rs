@@ -195,7 +195,7 @@ impl Parser {
         let name = self.expect_upper_ident()?;
         let mut type_params = Vec::new();
         while !matches!(self.peek(), Token::LBrace | Token::Eof) {
-            type_params.push(self.expect_ident()?);
+            type_params.push(self.parse_type_param()?);
         }
         self.expect(Token::LBrace)?;
 
@@ -262,9 +262,9 @@ impl Parser {
         let name_span = self.tokens[self.pos].span;
         let name = self.expect_upper_ident()?;
         let mut type_params = Vec::new();
-        // Type params are lowercase identifiers before `=`
-        while matches!(self.peek(), Token::Ident(_)) {
-            type_params.push(self.expect_ident()?);
+        // Type params are lowercase identifiers (optionally `(name : Kind)`) before `=`
+        while matches!(self.peek(), Token::Ident(_) | Token::LParen) {
+            type_params.push(self.parse_type_param()?);
         }
         self.expect(Token::Eq)?;
 
@@ -515,8 +515,8 @@ impl Parser {
         let name_span = self.tokens[self.pos].span;
         let name = self.expect_upper_ident()?;
         let mut type_params = Vec::new();
-        while matches!(self.peek(), Token::Ident(_)) {
-            type_params.push(self.expect_ident()?);
+        while matches!(self.peek(), Token::Ident(_) | Token::LParen) {
+            type_params.push(self.parse_type_param()?);
         }
         self.expect(Token::LBrace)?;
 
@@ -763,9 +763,11 @@ impl Parser {
         let name = self.expect_upper_ident()?;
         // Parse type parameters: first is self, rest are extras
         // e.g. `trait ConvertTo a b` -> type_params = ["a", "b"]
-        let mut type_params = vec![self.expect_ident()?];
-        while matches!(self.peek(), Token::Ident(_)) && !matches!(self.peek(), Token::Where) {
-            type_params.push(self.expect_ident()?);
+        let mut type_params = vec![self.parse_type_param()?];
+        while matches!(self.peek(), Token::Ident(_) | Token::LParen)
+            && !matches!(self.peek(), Token::Where)
+        {
+            type_params.push(self.parse_type_param()?);
         }
 
         let mut supertraits = Vec::new();
@@ -1046,8 +1048,8 @@ impl Parser {
 
         // Parse optional type params: `impl Show for Box a b`
         let mut type_params = Vec::new();
-        while matches!(self.peek(), Token::Ident(_)) {
-            type_params.push(self.expect_ident()?);
+        while matches!(self.peek(), Token::Ident(_) | Token::LParen) {
+            type_params.push(self.parse_type_param()?);
         }
 
         let (where_clause, where_apps) = self.parse_where_clause()?;
@@ -1276,6 +1278,46 @@ impl Parser {
             && matches!(self.tokens[base + 1].token, Token::Colon)
     }
 
+    /// Parse a single type-parameter declaration: either a bare identifier
+    /// (`a`, defaults to `Kind::Star`) or a kind-annotated identifier
+    /// `(name : Symbol)`. Used by `type`, `record`, `effect`, `trait`, and
+    /// `impl` declarations.
+    fn parse_type_param(&mut self) -> Result<TypeParam, ParseError> {
+        if matches!(self.peek(), Token::LParen) {
+            let start = self.tokens[self.pos].span;
+            self.advance(); // consume '('
+            let name = self.expect_ident()?;
+            self.expect(Token::Colon)?;
+            // Kind RHS is currently restricted to the bare identifier `Symbol`.
+            let kind_name_span = self.tokens[self.pos].span;
+            let kind_name = self.expect_upper_ident()?;
+            let kind = match kind_name.as_str() {
+                "Symbol" => Kind::Symbol,
+                other => {
+                    return Err(ParseError {
+                        message: format!("unknown kind `{}`; expected `Symbol`", other),
+                        span: kind_name_span,
+                    });
+                }
+            };
+            let end = self.tokens[self.pos].span;
+            self.expect(Token::RParen)?;
+            Ok(TypeParam {
+                name,
+                kind,
+                span: start.to(end),
+            })
+        } else {
+            let span = self.tokens[self.pos].span;
+            let name = self.expect_ident()?;
+            Ok(TypeParam {
+                name,
+                kind: Kind::Star,
+                span,
+            })
+        }
+    }
+
     // --- Type expressions ---
 
     pub(super) fn parse_type_expr(&mut self) -> Result<TypeExpr, ParseError> {
@@ -1361,6 +1403,11 @@ impl Parser {
             Token::Ident(s) => Ok(TypeExpr::Var {
                 id: NodeId::fresh(),
                 name: s,
+                span: start,
+            }),
+            Token::SymbolLit(name) => Ok(TypeExpr::Symbol {
+                id: NodeId::fresh(),
+                name,
                 span: start,
             }),
             Token::LParen => {
@@ -1503,7 +1550,8 @@ impl Parser {
                 self.advance(); // consume '..'
                 if !matches!(self.peek(), Token::RParen) {
                     return Err(ParseError {
-                        message: "`(..)` must be the entire exposing list — no other items allowed".to_string(),
+                        message: "`(..)` must be the entire exposing list — no other items allowed"
+                            .to_string(),
                         span: self.tokens[self.pos].span,
                     });
                 }
@@ -1525,7 +1573,10 @@ impl Parser {
                         }
                         tok => {
                             return Err(ParseError {
-                                message: format!("expected identifier in import list, got {:?}", tok),
+                                message: format!(
+                                    "expected identifier in import list, got {:?}",
+                                    tok
+                                ),
                                 span: self.tokens[self.pos].span,
                             });
                         }

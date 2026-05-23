@@ -324,7 +324,8 @@ fn desugar_expr(expr: &mut Expr) {
         | ExprKind::QualifiedName { .. }
         | ExprKind::DictMethodAccess { .. }
         | ExprKind::DictRef { .. }
-        | ExprKind::ForeignCall { .. } => {}
+        | ExprKind::ForeignCall { .. }
+        | ExprKind::SymbolIntrinsic { .. } => {}
     }
 
     // Now transform the current node if it's a sugar form
@@ -677,7 +678,8 @@ pub fn freshen_expr_ids(expr: &mut Expr) {
         | ExprKind::Constructor { .. }
         | ExprKind::QualifiedName { .. }
         | ExprKind::DictMethodAccess { .. }
-        | ExprKind::DictRef { .. } => {}
+        | ExprKind::DictRef { .. }
+        | ExprKind::SymbolIntrinsic { .. } => {}
 
         ExprKind::App { func, arg } => {
             freshen_expr_ids(func);
@@ -980,7 +982,8 @@ pub fn retarget_expr_spans(expr: &mut Expr, target: Span) {
         | ExprKind::Constructor { .. }
         | ExprKind::QualifiedName { .. }
         | ExprKind::DictMethodAccess { .. }
-        | ExprKind::DictRef { .. } => {}
+        | ExprKind::DictRef { .. }
+        | ExprKind::SymbolIntrinsic { .. } => {}
 
         ExprKind::App { func, arg } => {
             retarget_expr_spans(func, target);
@@ -1215,7 +1218,9 @@ pub fn retarget_pat_spans(pat: &mut Pat, target: Span) {
                 retarget_pat_spans(e, target);
             }
         }
-        Pat::ConsPat { span, head, tail, .. } => {
+        Pat::ConsPat {
+            span, head, tail, ..
+        } => {
             *span = target;
             retarget_pat_spans(head, target);
             retarget_pat_spans(tail, target);

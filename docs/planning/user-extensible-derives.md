@@ -1,5 +1,13 @@
 # User-Extensible Derives via Generic
 
+> **Note (Phase B, 2026-05):** the building blocks `Variant` and `Labeled`
+> now carry their constructor/field name as a **type-level** `Symbol`
+> parameter, not a value-level `String`. The snippets below show the
+> Phase-5 shape (`Variant String a` / `Labeled String a`); the current
+> shapes are `Variant (n : Symbol) a` and `Labeled (n : Symbol) a`.
+> See `docs/generic-deriving.md` and `docs/planning/type-symbols.md` for
+> the current design.
+
 ## Goal
 
 Let library authors define new derivable traits (e.g. `ToJson`, `FromJson`,

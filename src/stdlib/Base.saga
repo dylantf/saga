@@ -64,6 +64,17 @@ impl Ord for String {
   compare x y = if x < y then Lt else if x > y then Gt else Eq
 }
 
+#@ Phantom type carrying a type-level symbol. Used to make `KnownSymbol`
+#@ dispatch unambiguous at the call site (the symbol appears in the
+#@ Proxy's type parameter).
+pub type Proxy (n : Symbol) = Proxy
+
+#@ Reflect a type-level symbol to its source name as a String.
+#@ Implemented universally by the compiler for every concrete symbol literal.
+pub trait KnownSymbol (n : Symbol) {
+  fun symbol_name : Proxy n -> String
+}
+
 #@ Applies a function to a value, discards the result, and returns the value unchanged.
 #@ Useful for debugging without disrupting an expression: `x |> tap dbg |> process`
 pub fun tap : (a -> b) -> a -> a

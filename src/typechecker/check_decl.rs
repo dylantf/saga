@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use crate::ast::{self, Decl, ExprKind, Lit};
+use crate::ast::{self, Decl, ExprKind, Lit, TypeParam};
 
 use super::result::CheckResult;
 use super::{
@@ -549,6 +549,13 @@ impl Checker {
                         {
                             for tr in &bound.traits {
                                 let resolved_trait = self.resolved_trait_name_at(tr.id, &tr.name);
+                                self.validate_trait_bound_kind(
+                                    &resolved_trait,
+                                    &bound.type_var,
+                                    var_id,
+                                    tr.span,
+                                )
+                                .map_err(|e| vec![e])?;
                                 let extra_types: Vec<Type> = tr
                                     .type_args
                                     .iter()
@@ -609,11 +616,7 @@ impl Checker {
                     let mut seen_effects: HashMap<String, Vec<Type>> = HashMap::new();
                     let mut effect_refs = Vec::new();
                     for e in effects {
-                        let args: Vec<Type> = e
-                            .type_args
-                            .iter()
-                            .map(|te| self.convert_user_type_expr(te, &mut params_list))
-                            .collect();
+                        let args: Vec<Type> = self.convert_effect_ref_args(e, &mut params_list);
                         let current_display = self.prettify_type(&Type::Con(
                             e.name.rsplit('.').next().unwrap_or(&e.name).to_string(),
                             args.clone(),
@@ -689,11 +692,8 @@ impl Checker {
                     for eff in effects {
                         self.record_effect_ref(eff);
                         if !eff.type_args.is_empty() {
-                            let concrete_types: Vec<Type> = eff
-                                .type_args
-                                .iter()
-                                .map(|ta| self.convert_user_type_expr(ta, &mut params_list))
-                                .collect();
+                            let concrete_types: Vec<Type> =
+                                self.convert_effect_ref_args(eff, &mut params_list);
                             // Use canonical effect name so lookups against
                             // canonical-only self.effects succeed later.
                             let canonical = self.resolved_effect_name(eff.id, &eff.name);
@@ -724,6 +724,13 @@ impl Checker {
                                 .insert(var_id, bound.type_var.clone());
                             for tr in &bound.traits {
                                 let resolved_trait = self.resolved_trait_name_at(tr.id, &tr.name);
+                                self.validate_trait_bound_kind(
+                                    &resolved_trait,
+                                    &bound.type_var,
+                                    var_id,
+                                    tr.span,
+                                )
+                                .map_err(|e| vec![e])?;
                                 let extra_types: Vec<Type> = tr
                                     .type_args
                                     .iter()
@@ -753,6 +760,14 @@ impl Checker {
                 self.lsp
                     .fun_definitions
                     .push((*id, name.clone(), *name_span, *public));
+
+                // Stash the signature's named type vars so `check_fun_clauses`
+                // can put them in scope for inline ascriptions inside the body.
+                // Mirrors the impl-side fix in `register_impl`.
+                if !params_list.is_empty() {
+                    self.fun_type_param_vars
+                        .insert(name.clone(), params_list.clone());
+                }
             }
         }
 
@@ -984,6 +999,18 @@ impl Checker {
         // Snapshot pending constraints so we can partition new ones after body checking
         let constraints_before = self.trait_state.pending_constraints.len();
         let mut returned_handler_info: Option<super::HandlerInfo> = None;
+
+        // Expose the function signature's named type params to nested
+        // `convert_type_expr` calls inside the body, so an inline ascription
+        // like `(Proxy : Proxy n)` in `fun f : Proxy n -> ... where {n : KnownSymbol}`
+        // resolves `n` to the signature's `n` instead of minting a fresh var.
+        // Without this, the body silently picks the wrong dict at runtime.
+        let saved_outer_named = std::mem::take(&mut self.outer_named_type_vars);
+        if let Some(params) = self.fun_type_param_vars.get(name).cloned() {
+            for (pname, pid) in params {
+                self.outer_named_type_vars.insert(pname, pid);
+            }
+        }
 
         // Save and clear effect tracking and field candidate tracking for this function body
         let body_scope = self.enter_scope();
@@ -1355,6 +1382,7 @@ impl Checker {
             where_constraints,
         )?;
         self.env.insert(name.into(), scheme);
+        self.outer_named_type_vars = saved_outer_named;
         Ok(())
     }
 
@@ -1433,6 +1461,7 @@ impl Checker {
                             resolved_type: None,
                             type_var_name: var_name,
                             trait_type_args: trait_type_arg_types.clone(),
+                            resolved_symbol: None,
                         });
                         continue;
                     }
@@ -1468,6 +1497,7 @@ impl Checker {
                                 resolved_type: None,
                                 type_var_name: var_name,
                                 trait_type_args: trait_type_arg_types.clone(),
+                                resolved_symbol: None,
                             });
                             continue;
                         }
@@ -1491,6 +1521,7 @@ impl Checker {
                         resolved_type: None,
                         type_var_name: var_name,
                         trait_type_args: trait_type_arg_types.clone(),
+                        resolved_symbol: None,
                     });
                     scheme_constraints.push((trait_name, id, span));
                 }
@@ -1646,16 +1677,20 @@ impl Checker {
     pub(crate) fn register_type_def(
         &mut self,
         name: &str,
-        type_params: &[String],
+        type_params: &[TypeParam],
         variants: &[&ast::TypeConstructor],
     ) -> Result<(), Diagnostic> {
-        // Create fresh type variables for the type parameters
+        // Create fresh type variables for the type parameters, honoring
+        // declared kinds (e.g. `(n : Symbol)`).
         let mut param_vars: Vec<(String, u32)> = type_params
             .iter()
             .map(|p| {
-                let var = self.next_var;
-                self.next_var += 1;
-                (p.clone(), var)
+                let var = self.fresh_var_of_kind(p.kind);
+                let id = match var {
+                    Type::Var(id) => id,
+                    _ => unreachable!(),
+                };
+                (p.name.clone(), id)
             })
             .collect();
 
@@ -1666,6 +1701,13 @@ impl Checker {
             Some(module) => format!("{}.{}", module, name),
             None => name.to_string(),
         };
+
+        // Record declared kinds for this constructor so `convert_type_expr`
+        // can enforce them at application sites.
+        self.type_param_kinds.insert(
+            canonical_name.clone(),
+            type_params.iter().map(|p| p.kind).collect(),
+        );
 
         let result_type = Type::Con(
             canonical_name.clone(),
@@ -1732,7 +1774,7 @@ impl Checker {
     pub(crate) fn register_record_def(
         &mut self,
         name: &str,
-        type_params: &[String],
+        type_params: &[TypeParam],
         fields: &[&(String, ast::TypeExpr)],
         def_id: crate::ast::NodeId,
     ) -> Result<(), Diagnostic> {
@@ -1740,9 +1782,12 @@ impl Checker {
         let mut param_vars: Vec<(String, u32)> = type_params
             .iter()
             .map(|p| {
-                let var = self.next_var;
-                self.next_var += 1;
-                (p.clone(), var)
+                let var = self.fresh_var_of_kind(p.kind);
+                let id = match var {
+                    Type::Var(id) => id,
+                    _ => unreachable!(),
+                };
+                (p.name.clone(), id)
             })
             .collect();
 
@@ -1802,17 +1847,20 @@ impl Checker {
             canonical_name.clone(),
             vec![(canonical_name.clone(), num_fields)],
         );
-        self.type_arity.insert(canonical_name, type_params.len());
+        self.type_arity
+            .insert(canonical_name.clone(), type_params.len());
+        self.type_param_kinds
+            .insert(canonical_name, type_params.iter().map(|p| p.kind).collect());
         Ok(())
     }
 
     /// Phase 1: Register effect name and type params (stub with empty ops).
     /// Called first for ALL effects so that forward references between effects
     /// (e.g. Process referencing Actor) resolve during op signature processing.
-    pub(crate) fn register_effect_stub(&mut self, name: &str, effect_type_params: &[String]) {
+    pub(crate) fn register_effect_stub(&mut self, name: &str, effect_type_params: &[TypeParam]) {
         let mut type_param_ids = Vec::new();
-        for _tp in effect_type_params {
-            let var = self.fresh_var();
+        for tp in effect_type_params {
+            let var = self.fresh_var_of_kind(tp.kind);
             let id = match &var {
                 Type::Var(id) => *id,
                 _ => unreachable!(),
@@ -1825,7 +1873,7 @@ impl Checker {
             name.into()
         };
         self.effects.insert(
-            key,
+            key.clone(),
             EffectDefInfo {
                 type_params: type_param_ids,
                 ops: vec![],
@@ -1833,9 +1881,15 @@ impl Checker {
                 source_module: self.current_module.clone(),
             },
         );
+        self.type_param_kinds
+            .insert(key, effect_type_params.iter().map(|p| p.kind).collect());
         self.type_arity
             .insert(name.into(), effect_type_params.len());
         if let Some(module) = &self.current_module {
+            self.type_param_kinds.insert(
+                format!("{}.{}", module, name),
+                effect_type_params.iter().map(|p| p.kind).collect(),
+            );
             self.type_arity
                 .insert(format!("{}.{}", module, name), effect_type_params.len());
         }
@@ -1845,7 +1899,7 @@ impl Checker {
     pub(crate) fn register_effect_ops(
         &mut self,
         name: &str,
-        effect_type_params: &[String],
+        effect_type_params: &[TypeParam],
         operations: &[&ast::EffectOp],
     ) -> Result<(), Diagnostic> {
         let key = if let Some(module) = &self.current_module {
@@ -1863,7 +1917,7 @@ impl Checker {
         let shared_params: Vec<(String, u32)> = effect_type_params
             .iter()
             .zip(type_param_ids.iter())
-            .map(|(tp, &id)| (tp.clone(), id))
+            .map(|(tp, &id)| (tp.name.clone(), id))
             .collect();
 
         let mut ops = Vec::new();
@@ -1887,11 +1941,7 @@ impl Checker {
                     .effects
                     .iter()
                     .map(|e| {
-                        let args = e
-                            .type_args
-                            .iter()
-                            .map(|te| self.convert_user_type_expr(te, &mut params_list))
-                            .collect();
+                        let args = self.convert_effect_ref_args(e, &mut params_list);
                         let resolved_name = self.resolved_effect_name(e.id, &e.name);
                         EffectEntry::unnamed(resolved_name, args)
                     })
@@ -1969,8 +2019,13 @@ impl Checker {
                 let info = info.clone();
                 for (i, &param_id) in info.type_params.iter().enumerate() {
                     if let Some(type_arg_expr) = effect_ref.type_args.get(i) {
-                        let concrete_ty =
-                            self.convert_user_type_expr(type_arg_expr, &mut type_var_params);
+                        let expected_kind = self.var_kind(param_id);
+                        let concrete_ty = self.convert_type_expr_kinded(
+                            type_arg_expr,
+                            &mut type_var_params,
+                            expected_kind,
+                        );
+                        let concrete_ty = self.canonicalize_handler_effect_types(concrete_ty);
                         handler_type_mapping.insert(param_id, concrete_ty);
                     }
                 }
@@ -1991,6 +2046,14 @@ impl Checker {
                     .insert(*var_id, bound.type_var.clone());
                 for tr in &bound.traits {
                     let resolved_req = self.resolved_trait_name_at(tr.id, &tr.name);
+                    if let Err(diag) = self.validate_trait_bound_kind(
+                        &resolved_req,
+                        &bound.type_var,
+                        *var_id,
+                        tr.span,
+                    ) {
+                        self.collected_diagnostics.push(diag);
+                    }
                     self.lsp
                         .type_references
                         .push((tr.span, resolved_req.clone()));
@@ -2009,6 +2072,11 @@ impl Checker {
                     ),
                 ));
             }
+        }
+
+        let saved_outer_named = self.outer_named_type_vars.clone();
+        for (name, var_id) in &type_var_params {
+            self.outer_named_type_vars.insert(name.clone(), *var_id);
         }
 
         // Fresh type variable for the handler's answer type.
@@ -2352,11 +2420,7 @@ impl Checker {
         let handler_effect_types: Vec<Type> = effect_names
             .iter()
             .map(|e| {
-                let type_args: Vec<Type> = e
-                    .type_args
-                    .iter()
-                    .map(|ta| self.convert_user_type_expr(ta, &mut vec![]))
-                    .collect();
+                let type_args: Vec<Type> = self.convert_effect_ref_args(e, &mut vec![]);
                 Type::Con(self.canonical_effect_name(&e.name), type_args)
             })
             .collect();
@@ -2375,6 +2439,7 @@ impl Checker {
             },
             *def_id,
         );
+        self.outer_named_type_vars = saved_outer_named;
         self.lsp.node_spans.insert(*def_id, *name_span);
 
         Ok(())
@@ -2584,6 +2649,7 @@ impl Checker {
                                     resolved_type: Some((type_name.clone(), args.clone())),
                                     type_var_name: None,
                                     trait_type_args: resolved_extra_types,
+                                    resolved_symbol: None,
                                 });
                                 // Push conditional constraints for type parameters
                                 if type_name == super::canonicalize_type_name("Tuple") {
@@ -2636,6 +2702,7 @@ impl Checker {
                             resolved_type: None,
                             type_var_name: var_name,
                             trait_type_args: trait_type_arg_types.clone(),
+                            resolved_symbol: None,
                         });
                     }
                     Type::Fun(_, _, _) => {
@@ -2651,6 +2718,27 @@ impl Checker {
                             format!("no impl of {} for anonymous record type", display),
                             span,
                         ));
+                    }
+                    Type::Symbol(name) => {
+                        let resolved_trait = self
+                            .resolve_trait_name(&trait_name)
+                            .unwrap_or_else(|| trait_name.clone());
+                        if resolved_trait == super::KNOWN_SYMBOL_TRAIT {
+                            self.evidence.push(super::TraitEvidence {
+                                node_id,
+                                trait_name: resolved_trait,
+                                resolved_type: None,
+                                type_var_name: None,
+                                trait_type_args: vec![],
+                                resolved_symbol: Some(name.clone()),
+                            });
+                        } else {
+                            let display = trait_name.rsplit('.').next().unwrap_or(&trait_name);
+                            return Err(rewrite_diag(
+                                format!("no impl of {} for symbol type '{}", display, name),
+                                span,
+                            ));
+                        }
                     }
                     // Error/Never type: skip trait checking
                     Type::Error => {}

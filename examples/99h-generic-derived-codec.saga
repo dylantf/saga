@@ -42,10 +42,11 @@ impl JsonCodec for Leaf a where {a: JsonCodec} {
   }
 }
 
-impl JsonCodec for Labeled a where {a: JsonCodec} {
-  encode (Labeled name x) = "\"" <> name <> "\": " <> encode x
+impl JsonCodec for Labeled (n : Symbol) a where {n: KnownSymbol, a: JsonCodec} {
+  encode (Labeled x) =
+    "\"" <> symbol_name (Proxy : Proxy n) <> "\": " <> encode x
   decode s = case decode s {
-    Ok x -> Ok (Labeled "" x)
+    Ok x -> Ok (Labeled x)
     Err e -> Err e
   }
 }
@@ -75,10 +76,11 @@ impl JsonCodec for Or l r where {l: JsonCodec, r: JsonCodec} {
   }
 }
 
-impl JsonCodec for Variant a where {a: JsonCodec} {
-  encode (Variant name payload) = "{\"" <> name <> "\": " <> encode payload <> "}"
+impl JsonCodec for Variant (n : Symbol) a where {n: KnownSymbol, a: JsonCodec} {
+  encode (Variant payload) =
+    "{\"" <> symbol_name (Proxy : Proxy n) <> "\": " <> encode payload <> "}"
   decode s = case decode s {
-    Ok x -> Ok (Variant "" x)
+    Ok x -> Ok (Variant x)
     Err e -> Err e
   }
 }

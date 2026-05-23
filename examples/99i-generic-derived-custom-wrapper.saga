@@ -45,9 +45,9 @@ impl Decode for Leaf a where {a: Decode} {
   }
 }
 
-impl Decode for Labeled a where {a: Decode} {
+impl Decode for Labeled (n : Symbol) a where {n: KnownSymbol, a: Decode} {
   decode s = case decode s {
-    DbOk x -> DbOk (Labeled "" x)
+    DbOk x -> DbOk (Labeled x)
     DbErr e -> DbErr e
     DbNoRows -> DbNoRows
   }
@@ -73,9 +73,9 @@ impl Decode for Or l r where {l: Decode, r: Decode} {
   }
 }
 
-impl Decode for Variant a where {a: Decode} {
+impl Decode for Variant (n : Symbol) a where {n: KnownSymbol, a: Decode} {
   decode s = case decode s {
-    DbOk x -> DbOk (Variant "" x)
+    DbOk x -> DbOk (Variant x)
     DbErr e -> DbErr e
     DbNoRows -> DbNoRows
   }

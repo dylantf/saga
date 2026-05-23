@@ -43,6 +43,8 @@ fn emit_elaborated_inner(src: &str, include_std_modules: bool) -> String {
         .parse_program()
         .expect("parse error");
     desugar::desugar_program(&mut program);
+    let imported = saga::derive::collect_imported_decls(&program, None);
+    let _ = saga::derive::expand_derives(&mut program, &imported);
     let mut checker = bootstrap();
     let result = checker.check_program(&mut program);
     assert!(
@@ -2690,3 +2692,103 @@ main () = {
 "#;
     assert_runs_and_stdout_contains(src, &["42"]);
 }
+
+#[test]
+fn symbol_intrinsic_lowers_to_binary_string_literal() {
+    // `symbol_name (Proxy : Proxy 'Foo)` should monomorphize through the
+    // KnownSymbol evidence and emit a Core Erlang binary containing "Foo".
+    let src = r#"
+main () = symbol_name (Proxy : Proxy 'Foo)
+"#;
+    let out = emit_elaborated(src);
+    // Binary literal bytes for "Foo" -> 'F' = 70, 'o' = 111.
+    assert!(
+        out.contains("#<70>") && out.contains("#<111>"),
+        "expected binary bytes for 'Foo' in output:\n{out}"
+    );
+    assert_runs_and_stdout_contains(src, &["Foo"]);
+}
+
+#[test]
+fn known_symbol_polymorphic_dict_passing_e2e() {
+    // A single polymorphic describe function multiplexes across three call
+    // sites via dict passing: each call sees its own symbol string.
+    let src = r#"
+fun describe : Proxy n -> String where {n : KnownSymbol}
+describe p = symbol_name p
+
+main () = (
+  describe (Proxy : Proxy 'admin),
+  describe (Proxy : Proxy 'editor),
+  describe (Proxy : Proxy 'viewer)
+)
+"#;
+    assert_runs_and_stdout_contains(src, &["admin", "editor", "viewer"]);
+}
+
+#[test]
+fn known_symbol_polymorphic_forwarding_e2e() {
+    // Polymorphic-to-polymorphic forwarding: forward calls describe, both
+    // with `where {n : KnownSymbol}`. The dict threads through both layers.
+    let src = r#"
+fun describe : Proxy n -> String where {n : KnownSymbol}
+describe p = symbol_name p
+
+fun forward : Proxy n -> String where {n : KnownSymbol}
+forward p = describe p
+
+main () = (
+  forward (Proxy : Proxy 'forwarded),
+  forward (Proxy : Proxy 'again)
+)
+"#;
+    assert_runs_and_stdout_contains(src, &["forwarded", "again"]);
+}
+
+#[test]
+fn known_symbol_direct_ascription_uses_enclosing_type_var_e2e() {
+    let src = r#"
+fun probe : Proxy n -> Proxy m -> (String, String) where {n : KnownSymbol, m : KnownSymbol}
+probe _ q = (symbol_name (Proxy : Proxy n), symbol_name q)
+
+main () = probe (Proxy : Proxy 'left) (Proxy : Proxy 'right)
+"#;
+    assert_runs_and_stdout_contains(src, &["left", "right"]);
+}
+
+#[test]
+fn known_symbol_let_ascription_uses_enclosing_type_var_e2e() {
+    let src = r#"
+fun probe : Proxy n -> Proxy m -> (String, String) where {n : KnownSymbol, m : KnownSymbol}
+probe _ q = {
+  let p : Proxy n = Proxy
+  (symbol_name p, symbol_name q)
+}
+
+main () = probe (Proxy : Proxy 'let_left) (Proxy : Proxy 'let_right)
+"#;
+    assert_runs_and_stdout_contains(src, &["let_left", "let_right"]);
+}
+
+#[test]
+fn symbol_non_proxy_let_ascription_uses_enclosing_type_var_e2e() {
+    let src = r#"
+type Id (k : Symbol) = Id Int
+
+fun tag_id : Id n -> String where {n : KnownSymbol}
+tag_id _ = symbol_name (Proxy : Proxy n)
+
+fun probe : Proxy n -> Proxy m -> (String, String) where {n : KnownSymbol, m : KnownSymbol}
+probe _ q = {
+  let x : Id n = Id 1
+  (tag_id x, symbol_name q)
+}
+
+main () = probe (Proxy : Proxy 'id_left) (Proxy : Proxy 'id_right)
+"#;
+    assert_runs_and_stdout_contains(src, &["id_left", "id_right"]);
+}
+
+// Phase B sum-type FromJson bug repro lives in
+// `tests/e2e/tests/generic_fromjson_test.saga` — it needs `<>`
+// (Semigroup) and Std.Test, neither of which this harness links against.

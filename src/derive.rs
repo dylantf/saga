@@ -27,13 +27,13 @@ pub struct SummaryEntry<T> {
 
 #[derive(Clone)]
 pub struct WrapperTypeInfo {
-    pub type_params: Vec<String>,
+    pub type_params: Vec<TypeParam>,
     pub variants: Vec<TypeConstructor>,
 }
 
 #[derive(Clone)]
 pub struct WrapperRecordInfo {
-    pub type_params: Vec<String>,
+    pub type_params: Vec<TypeParam>,
     pub fields: Vec<(String, TypeExpr)>,
 }
 
@@ -710,8 +710,7 @@ fn inherit_trait_defaults(program: &mut [Decl], scope: &DeriveScope<'_>) {
             crate::desugar::freshen_expr_ids(&mut body);
             crate::desugar::retarget_expr_spans(&mut body, impl_site);
             if let Some(module) = qualify_module {
-                let mut bound: std::collections::HashSet<String> =
-                    std::collections::HashSet::new();
+                let mut bound: std::collections::HashSet<String> = std::collections::HashSet::new();
                 for p in &params {
                     collect_pat_bindings(p, &mut bound);
                 }
@@ -762,7 +761,8 @@ fn qualify_free_vars(
         | ExprKind::Constructor { .. }
         | ExprKind::QualifiedName { .. }
         | ExprKind::DictMethodAccess { .. }
-        | ExprKind::DictRef { .. } => {}
+        | ExprKind::DictRef { .. }
+        | ExprKind::SymbolIntrinsic { .. } => {}
         ExprKind::App { func, arg } => {
             qualify_free_vars(func, module, module_values, trait_methods, bound);
             qualify_free_vars(arg, module, module_values, trait_methods, bound);
@@ -1076,7 +1076,7 @@ fn collect_pat_bindings(pat: &Pat, out: &mut std::collections::HashSet<String>) 
 /// shapes — direction detection and body generation work off these.
 #[derive(Clone)]
 pub struct RoutedTraitInfo {
-    pub type_params: Vec<String>,
+    pub type_params: Vec<TypeParam>,
     pub methods: Vec<TraitMethod>,
     /// Module that defines this trait, e.g. "Lib" or "Std.Generic". Used to
     /// retarget free identifiers in cloned default-method bodies so they
@@ -1211,7 +1211,7 @@ fn is_hardcoded_derive(bare: &str) -> bool {
 fn derive_routed(
     trait_name: &str,
     type_name: &str,
-    type_params: &[String],
+    type_params: &[TypeParam],
     span: Span,
     scope: &DeriveScope<'_>,
 ) -> Result<Vec<Decl>, Diagnostic> {
@@ -1245,7 +1245,11 @@ fn derive_routed(
             span: Some(span),
         });
     }
-    let self_var = trait_info.type_params.first().cloned().unwrap_or_default();
+    let self_var: String = trait_info
+        .type_params
+        .first()
+        .map(|tp| tp.name.clone())
+        .unwrap_or_default();
 
     // Classify each method's direction up-front so any bad method kills the
     // whole derive before we synthesize anything partial. Methods that carry
@@ -1291,7 +1295,7 @@ fn derive_routed(
     let per_tparam_where: Vec<TraitBound> = type_params
         .iter()
         .map(|tp| TraitBound {
-            type_var: tp.clone(),
+            type_var: tp.name.clone(),
             traits: vec![TraitRef {
                 id: NodeId::fresh(),
                 name: trait_syntax.clone(),
@@ -1480,10 +1484,7 @@ fn synth_method_pair(
                         }],
                         span,
                     });
-                    bridge_args.push(Expr::synth(
-                        span,
-                        ExprKind::Var { name: inner_var },
-                    ));
+                    bridge_args.push(Expr::synth(span, ExprKind::Var { name: inner_var }));
                     deleg_params.push(Pat::Var {
                         id: NodeId::fresh(),
                         name: param_var.clone(),
@@ -1492,14 +1493,8 @@ fn synth_method_pair(
                     let to_call = Expr::synth(
                         span,
                         ExprKind::App {
-                            func: Box::new(Expr::synth(
-                                span,
-                                ExprKind::Var { name: "to".into() },
-                            )),
-                            arg: Box::new(Expr::synth(
-                                span,
-                                ExprKind::Var { name: param_var },
-                            )),
+                            func: Box::new(Expr::synth(span, ExprKind::Var { name: "to".into() })),
+                            arg: Box::new(Expr::synth(span, ExprKind::Var { name: param_var })),
                         },
                     );
                     deleg_args.push(to_call);
@@ -1752,7 +1747,7 @@ fn classify_sum_wrapper(
         .zip(call_args)
         .filter_map(|(p, a)| {
             if is_self_var(a, self_var) {
-                Some(p.clone())
+                Some(p.name.clone())
             } else {
                 None
             }
@@ -1831,7 +1826,7 @@ fn classify_record_wrapper(
         .zip(call_args)
         .filter_map(|(p, a)| {
             if is_self_var(a, self_var) {
-                Some(p.clone())
+                Some(p.name.clone())
             } else {
                 None
             }
@@ -2048,7 +2043,7 @@ fn build_record_arm(
 fn type_expr_contains_var(te: &TypeExpr, name: &str) -> bool {
     match te {
         TypeExpr::Var { name: n, .. } => n == name,
-        TypeExpr::Named { .. } => false,
+        TypeExpr::Named { .. } | TypeExpr::Symbol { .. } => false,
         TypeExpr::App { func, arg, .. } => {
             type_expr_contains_var(func, name) || type_expr_contains_var(arg, name)
         }
@@ -2068,7 +2063,7 @@ fn type_expr_contains_var(te: &TypeExpr, name: &str) -> bool {
 fn generate_record_derive(
     trait_name: &str,
     record_name: &str,
-    type_params: &[String],
+    type_params: &[TypeParam],
     fields: &[Annotated<(String, TypeExpr)>],
     span: Span,
 ) -> Result<Vec<Decl>, Option<Diagnostic>> {
@@ -2100,7 +2095,7 @@ fn generate_record_derive(
 /// recursion handling in the Rep shape).
 fn derive_record_generic(
     record_name: &str,
-    type_params: &[String],
+    type_params: &[TypeParam],
     fields: &[Annotated<(String, TypeExpr)>],
     span: Span,
 ) -> Result<Vec<Decl>, Option<Diagnostic>> {
@@ -2248,7 +2243,7 @@ fn derive_record_generic(
 
 /// Build a TypeExpr that applies `name` to each of `type_params` as a Var.
 /// e.g. (`Rep__Box`, `["a"]`) -> `App(Named(Rep__Box), Var(a))`.
-fn apply_type_params(name: &str, type_params: &[String]) -> TypeExpr {
+fn apply_type_params(name: &str, type_params: &[TypeParam]) -> TypeExpr {
     let mut acc = TypeExpr::Named {
         id: NodeId::fresh(),
         name: name.into(),
@@ -2260,7 +2255,7 @@ fn apply_type_params(name: &str, type_params: &[String]) -> TypeExpr {
             func: Box::new(acc),
             arg: Box::new(TypeExpr::Var {
                 id: NodeId::fresh(),
-                name: tp.clone(),
+                name: tp.name.clone(),
                 span: Span { start: 0, end: 0 },
             }),
             span: Span { start: 0, end: 0 },
@@ -2277,7 +2272,7 @@ fn apply_type_params(name: &str, type_params: &[String]) -> TypeExpr {
 /// is rare and deferred to Phase 2d alongside true recursive support.
 fn derive_adt_generic(
     type_name: &str,
-    type_params: &[String],
+    type_params: &[TypeParam],
     variants: &[Annotated<TypeConstructor>],
     span: Span,
 ) -> Result<Vec<Decl>, Option<Diagnostic>> {
@@ -2338,12 +2333,8 @@ fn derive_adt_generic(
                 span,
             };
             let shape_expr = build_variant_shape_expr(&v.fields, &field_vars, span);
-            let variant = apply2(
-                &generic_name("Variant"),
-                string_lit(&v.name, span),
-                shape_expr,
-                span,
-            );
+            // Variant <shape> — constructor name lives in the type.
+            let variant = apply_ctor(&generic_name("Variant"), shape_expr, span);
             let or_wrapped = or_wrap_expr(variant, i, n, span);
             let adt_wrapped = apply2(
                 &generic_name("Adt"),
@@ -2396,13 +2387,7 @@ fn derive_adt_generic(
             let variant_pat = Pat::Constructor {
                 id: NodeId::fresh(),
                 name: generic_name("Variant"),
-                args: vec![
-                    Pat::Wildcard {
-                        id: NodeId::fresh(),
-                        span,
-                    },
-                    shape_pat,
-                ],
+                args: vec![shape_pat],
                 span,
             };
             let or_wrapped_pat = or_wrap_pat(variant_pat, i, n, span);
@@ -2485,8 +2470,9 @@ fn build_adt_rep_inner_type(variants: &[Annotated<TypeConstructor>]) -> TypeExpr
     let variant_shapes: Vec<TypeExpr> = variants
         .iter()
         .map(|v| {
+            // Variant 'CtorName <shape> — constructor name lives in the type.
             type_app(
-                type_named("Variant"),
+                type_app(type_named("Variant"), type_symbol(&v.node.name)),
                 build_variant_shape_type(&v.node.fields),
             )
         })
@@ -2519,14 +2505,13 @@ fn build_variant_shape_type(fields: &[(Option<String>, TypeExpr)]) -> TypeExpr {
     acc
 }
 
-/// For a single ADT constructor field: `Labeled (Leaf T)` if labeled, else
-/// `Leaf T`.
+/// For a single ADT constructor field: `Labeled 'lbl (Leaf T)` if labeled,
+/// else `Leaf T`.
 fn field_rep_type_adt(label: &Option<String>, ty: &TypeExpr) -> TypeExpr {
     let leaf = type_app(type_named("Leaf"), ty.clone());
-    if label.is_some() {
-        type_app(type_named("Labeled"), leaf)
-    } else {
-        leaf
+    match label {
+        Some(lbl) => type_app(type_app(type_named("Labeled"), type_symbol(lbl)), leaf),
+        None => leaf,
     }
 }
 
@@ -2552,7 +2537,8 @@ fn build_variant_shape_expr(
             span,
         );
         match label {
-            Some(lbl) => apply2(&generic_name("Labeled"), string_lit(lbl, span), leaf, span),
+            // Labeled (Leaf var) — name lives in the type now.
+            Some(_) => apply_ctor(&generic_name("Labeled"), leaf, span),
             None => leaf,
         }
     };
@@ -2592,16 +2578,11 @@ fn build_variant_shape_pat(
             span,
         };
         match label {
+            // Labeled (Leaf var) — name lives in the type now.
             Some(_) => Pat::Constructor {
                 id: NodeId::fresh(),
                 name: generic_name("Labeled"),
-                args: vec![
-                    Pat::Wildcard {
-                        id: NodeId::fresh(),
-                        span,
-                    },
-                    leaf,
-                ],
+                args: vec![leaf],
                 span,
             },
             None => leaf,
@@ -2701,24 +2682,38 @@ fn type_app(func: TypeExpr, arg: TypeExpr) -> TypeExpr {
     }
 }
 
+/// Build a type-level symbol literal `TypeExpr::Symbol`. Used by the Generic
+/// synthesizer to put constructor/field names at the type level rather than
+/// carrying them as value-level strings.
+fn type_symbol(name: &str) -> TypeExpr {
+    TypeExpr::Symbol {
+        id: NodeId::fresh(),
+        name: name.to_string(),
+        span: Span { start: 0, end: 0 },
+    }
+}
+
 /// Build the inner Rep type (without the outer newtype wrapping). Right-leaning
-/// And chain for >=2 fields; Labeled (Leaf T) for 1 field; U1 for 0.
+/// And chain for >=2 fields; `Labeled 'name (Leaf T)` for 1 field; U1 for 0.
 fn build_rep_type_inner(fields: &[(String, TypeExpr)]) -> TypeExpr {
     if fields.is_empty() {
         return type_named("U1");
     }
     let mut iter = fields.iter().rev();
-    let (_, last_ty) = iter.next().unwrap();
-    let mut acc = field_rep_type(last_ty);
-    for (_, ty) in iter {
-        acc = type_app(type_app(type_named("And"), field_rep_type(ty)), acc);
+    let (last_name, last_ty) = iter.next().unwrap();
+    let mut acc = field_rep_type(last_name, last_ty);
+    for (fname, ty) in iter {
+        acc = type_app(type_app(type_named("And"), field_rep_type(fname, ty)), acc);
     }
     acc
 }
 
-fn field_rep_type(ty: &TypeExpr) -> TypeExpr {
+/// Record field rep type: `Labeled 'fieldname (Leaf T)`. The field name is
+/// carried as a type-level symbol; library codecs recover the string via
+/// `KnownSymbol`.
+fn field_rep_type(name: &str, ty: &TypeExpr) -> TypeExpr {
     type_app(
-        type_named("Labeled"),
+        type_app(type_named("Labeled"), type_symbol(name)),
         type_app(type_named("Leaf"), ty.clone()),
     )
 }
@@ -2775,7 +2770,7 @@ fn build_rep_to_expr(fields: &[(String, TypeExpr)], record_var: &Expr, span: Spa
         );
     }
     let labeled_for = |fname: &str| -> Expr {
-        // Labeled "fname" (Leaf record_var.fname)
+        // Labeled (Leaf record_var.fname) — name lives in the type now.
         let field_access = Expr::synth(
             span,
             ExprKind::FieldAccess {
@@ -2785,12 +2780,7 @@ fn build_rep_to_expr(fields: &[(String, TypeExpr)], record_var: &Expr, span: Spa
             },
         );
         let leaf = apply_ctor(&generic_name("Leaf"), field_access, span);
-        apply2(
-            &generic_name("Labeled"),
-            string_lit(fname, span),
-            leaf,
-            span,
-        )
+        apply_ctor(&generic_name("Labeled"), leaf, span)
     };
 
     let mut iter = fields.iter().rev();
@@ -2814,26 +2804,20 @@ fn build_rep_from_pattern(field_vars: &[String], span: Span) -> Pat {
         };
     }
     let labeled_pat = |var: &str| -> Pat {
-        // Labeled _ (Leaf var)
+        // Labeled (Leaf var) — name is at the type level, no wildcard needed.
         Pat::Constructor {
             id: NodeId::fresh(),
             name: generic_name("Labeled"),
-            args: vec![
-                Pat::Wildcard {
+            args: vec![Pat::Constructor {
+                id: NodeId::fresh(),
+                name: generic_name("Leaf"),
+                args: vec![Pat::Var {
                     id: NodeId::fresh(),
+                    name: var.into(),
                     span,
-                },
-                Pat::Constructor {
-                    id: NodeId::fresh(),
-                    name: generic_name("Leaf"),
-                    args: vec![Pat::Var {
-                        id: NodeId::fresh(),
-                        name: var.into(),
-                        span,
-                    }],
-                    span,
-                },
-            ],
+                }],
+                span,
+            }],
             span,
         }
     };
@@ -2857,7 +2841,7 @@ fn derive_record_stringify(
     trait_name: &str,
     method_name: &str,
     record_name: &str,
-    type_params: &[String],
+    type_params: &[TypeParam],
     fields: &[Annotated<(String, TypeExpr)>],
     span: Span,
 ) -> Decl {
@@ -2876,7 +2860,7 @@ fn derive_record_stringify(
     let where_clause: Vec<TraitBound> = type_params
         .iter()
         .map(|tp| TraitBound {
-            type_var: tp.clone(),
+            type_var: tp.name.clone(),
             traits: vec![TraitRef {
                 id: NodeId::fresh(),
                 name: trait_name.into(),
@@ -3010,7 +2994,7 @@ fn build_record_debug_expr(
 fn generate_derive(
     trait_name: &str,
     type_name: &str,
-    type_params: &[String],
+    type_params: &[TypeParam],
     variants: &[Annotated<TypeConstructor>],
     span: Span,
 ) -> Option<Decl> {
@@ -3048,7 +3032,7 @@ fn derive_stringify(
     trait_name: &str,
     method_name: &str,
     type_name: &str,
-    type_params: &[String],
+    type_params: &[TypeParam],
     variants: &[Annotated<TypeConstructor>],
     span: Span,
 ) -> Decl {
@@ -3187,7 +3171,7 @@ fn derive_stringify(
     let where_clause: Vec<TraitBound> = type_params
         .iter()
         .map(|tp| TraitBound {
-            type_var: tp.clone(),
+            type_var: tp.name.clone(),
             traits: vec![TraitRef {
                 id: NodeId::fresh(),
                 name: trait_name.into(),
@@ -3229,7 +3213,7 @@ fn derive_stringify(
 /// constructor indexing and left-to-right field comparison.
 fn derive_ord(
     type_name: &str,
-    type_params: &[String],
+    type_params: &[TypeParam],
     variants: &[Annotated<TypeConstructor>],
     span: Span,
 ) -> Decl {
@@ -3391,7 +3375,7 @@ fn derive_ord(
     let where_clause: Vec<TraitBound> = type_params
         .iter()
         .map(|tp| TraitBound {
-            type_var: tp.clone(),
+            type_var: tp.name.clone(),
             traits: vec![TraitRef {
                 id: NodeId::fresh(),
                 name: "Ord".into(),
@@ -3522,13 +3506,13 @@ fn build_field_compare(a_vars: &[String], b_vars: &[String], span: Span) -> Expr
 fn derive_marker_trait(
     trait_name: &str,
     type_name: &str,
-    type_params: &[String],
+    type_params: &[TypeParam],
     span: Span,
 ) -> Decl {
     let where_clause: Vec<TraitBound> = type_params
         .iter()
         .map(|tp| TraitBound {
-            type_var: tp.clone(),
+            type_var: tp.name.clone(),
             traits: vec![TraitRef {
                 id: NodeId::fresh(),
                 name: trait_name.into(),

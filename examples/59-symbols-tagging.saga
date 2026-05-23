@@ -1,0 +1,17 @@
+# Type-level symbols: nominal tagging + reflection via KnownSymbol.
+
+type Id (k : Symbol) = Id Int
+
+fun same_kind : Id k -> Id k -> Bool
+same_kind _ _ = True
+
+main () = {
+  let u : Id 'user = Id 1
+  let v : Id 'user = Id 2
+  # `same_kind u (Id 3 : Id 'post)` would be a kind/symbol mismatch.
+  println (show (same_kind u v))
+
+  # KnownSymbol reflection:
+  println (symbol_name (Proxy : Proxy 'admin))
+  println (symbol_name (Proxy : Proxy 'editor))
+} with console

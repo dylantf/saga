@@ -1,6 +1,7 @@
-use crate::ast;
+use crate::ast::{self, TypeParam};
 use crate::token::Span;
 
+use super::unify::kind_name;
 use super::{Checker, Diagnostic, ImplInfo, Scheme, Type};
 
 /// Traits whose first (self) parameter functionally determines the remaining
@@ -18,6 +19,35 @@ pub(crate) const FUNCTIONAL_TRAITS: &[&str] = &["Generic", "Std.Generic.Generic"
 
 impl Checker {
     // --- Trait & impl helpers ---
+
+    pub(crate) fn validate_trait_bound_kind(
+        &self,
+        trait_name: &str,
+        type_var_name: &str,
+        var_id: u32,
+        span: Span,
+    ) -> Result<(), Diagnostic> {
+        let Some(trait_info) = self.trait_state.traits.get(trait_name) else {
+            return Ok(());
+        };
+        let Some((_, expected_kind)) = trait_info.type_params.first() else {
+            return Ok(());
+        };
+        let actual_kind = self.var_kind(var_id);
+        if actual_kind == *expected_kind {
+            return Ok(());
+        }
+        Err(Diagnostic::error_at(
+            span,
+            format!(
+                "kind mismatch: type variable `{}` has kind {} but trait {} expects kind {}",
+                type_var_name,
+                kind_name(actual_kind),
+                trait_name.rsplit('.').next().unwrap_or(trait_name),
+                kind_name(*expected_kind),
+            ),
+        ))
+    }
 
     /// Replace occurrences of the trait's type param variable with a concrete type.
     /// Used when checking impl bodies: if the trait says `(x: a) -> String`
@@ -84,6 +114,7 @@ impl Checker {
                     })
                     .collect(),
             ),
+            Type::Symbol(name) => Type::Symbol(name.clone()),
             Type::Error => Type::Error,
         }
     }
@@ -117,7 +148,7 @@ impl Checker {
     pub(crate) fn register_trait_def(
         &mut self,
         name: &str,
-        type_params: &[String],
+        type_params: &[TypeParam],
         supertraits: &[ast::TraitRef],
         methods: &[&ast::TraitMethod],
     ) -> Result<(), Diagnostic> {
@@ -127,11 +158,27 @@ impl Checker {
             None => name.to_string(),
         };
 
-        let self_param = type_params.first().map(|s| s.as_str()).unwrap_or("a");
+        let self_param = type_params
+            .first()
+            .map(|tp| tp.name.as_str())
+            .unwrap_or("a");
         let mut method_sigs = Vec::new();
 
         for method in methods {
-            let mut params_list: Vec<(String, u32)> = vec![];
+            // Pre-seed type parameters with their declared kinds so that
+            // method-signature conversion mints fresh vars of the right kind
+            // when they're first referenced.
+            let mut params_list: Vec<(String, u32)> = type_params
+                .iter()
+                .map(|tp| {
+                    let var = self.fresh_var_of_kind(tp.kind);
+                    let id = match var {
+                        Type::Var(id) => id,
+                        _ => unreachable!(),
+                    };
+                    (tp.name.clone(), id)
+                })
+                .collect();
             let param_types: Vec<Type> = method
                 .params
                 .iter()
@@ -168,16 +215,26 @@ impl Checker {
             let mut forall = Vec::new();
             super::collect_free_vars(&fun_ty, &mut forall);
 
-            // Ensure all trait type params have var IDs, even if they don't
-            // appear in this method's signature (phantom type params).
-            for tp_name in type_params {
-                if !params_list.iter().any(|(n, _)| n == tp_name) {
-                    let fresh = self.fresh_var();
-                    let id = match fresh {
-                        Type::Var(id) => id,
-                        _ => unreachable!(),
-                    };
-                    params_list.push((tp_name.clone(), id));
+            // Ensure all trait type params appear in `forall`. Pre-seeded
+            // params (above) already have var IDs in `params_list`; phantom
+            // params not free in `fun_ty` are added here so the constraint
+            // can reference them.
+            for tp in type_params {
+                let tp_name = tp.name.as_str();
+                let id = params_list
+                    .iter()
+                    .find(|(n, _)| n == tp_name)
+                    .map(|(_, id)| *id)
+                    .unwrap_or_else(|| {
+                        let fresh = self.fresh_var_of_kind(tp.kind);
+                        let id = match fresh {
+                            Type::Var(id) => id,
+                            _ => unreachable!(),
+                        };
+                        params_list.push((tp.name.clone(), id));
+                        id
+                    });
+                if !forall.contains(&id) {
                     forall.push(id);
                 }
             }
@@ -189,7 +246,8 @@ impl Checker {
                 .map(|(_, id)| *id);
             let extra_types: Vec<Type> = type_params[1..]
                 .iter()
-                .filter_map(|tp_name| {
+                .filter_map(|tp| {
+                    let tp_name = tp.name.as_str();
                     params_list
                         .iter()
                         .find(|(n, _)| n == tp_name)
@@ -263,7 +321,10 @@ impl Checker {
         self.trait_state.traits.insert(
             canonical_name,
             super::TraitInfo {
-                type_params: type_params.to_vec(),
+                type_params: type_params
+                    .iter()
+                    .map(|tp| (tp.name.clone(), tp.kind))
+                    .collect(),
                 supertraits: resolved_supertraits,
                 methods: trait_method_sigs,
                 is_functional,
@@ -280,7 +341,7 @@ impl Checker {
         trait_name: &str,
         trait_type_args: &[ast::TypeExpr],
         target_type: &str,
-        type_params: &[String],
+        type_params: &[TypeParam],
         where_clause: &[ast::TraitBound],
         where_apps: &[ast::TraitApp],
         needs: &[ast::EffectRef],
@@ -425,7 +486,10 @@ impl Checker {
         let target = if type_params.is_empty() {
             Type::Con(resolved_target_type.clone(), vec![])
         } else {
-            let param_vars: Vec<Type> = type_params.iter().map(|_| self.fresh_var()).collect();
+            let param_vars: Vec<Type> = type_params
+                .iter()
+                .map(|tp| self.fresh_var_of_kind(tp.kind))
+                .collect();
             target_type_param_ids = param_vars
                 .iter()
                 .map(|t| match t {
@@ -444,6 +508,12 @@ impl Checker {
                         .insert(*var_id, bound.type_var.clone());
                     for tr in &bound.traits {
                         let resolved_req = self.resolved_trait_name_at(tr.id, &tr.name);
+                        self.validate_trait_bound_kind(
+                            &resolved_req,
+                            &bound.type_var,
+                            *var_id,
+                            tr.span,
+                        )?;
                         self.lsp
                             .type_references
                             .push((tr.span, resolved_req.clone()));
@@ -513,7 +583,7 @@ impl Checker {
                     ast::TypeExpr::Var { name, .. } => {
                         if let Some(resolved) = local_subst.get(name) {
                             resolved_names.push(Some(resolved.clone()));
-                        } else if type_params.contains(name) {
+                        } else if type_params.iter().any(|tp| &tp.name == name) {
                             resolved_names.push(Some(format!("$impl_param:{name}")));
                             impl_param_positions.push((i, name.clone()));
                         } else {
@@ -646,6 +716,17 @@ impl Checker {
             .map(|e| self.resolved_effect_name(e.id, &e.name))
             .collect();
 
+        // Expose the impl's own type-param names (with their fresh var IDs) to
+        // any nested `convert_type_expr` call inside the method bodies, so an
+        // inline ascription like `(Proxy : Proxy n)` resolves `n` to the
+        // impl's `n` rather than a fresh, unconstrained var. This is what
+        // lets `impl ToJson for Labeled n a where {n : KnownSymbol}` reflect
+        // the symbol at runtime.
+        let saved_outer = std::mem::take(&mut self.outer_named_type_vars);
+        for (tp, var_id) in type_params.iter().zip(target_type_param_ids.iter()) {
+            self.outer_named_type_vars.insert(tp.name.clone(), *var_id);
+        }
+
         for m in methods {
             let (method_name, params, body) = (&m.name, &m.params, &m.body);
             let trait_method = trait_info
@@ -667,7 +748,8 @@ impl Checker {
                 if Some(*id) == trait_param_id {
                     continue;
                 }
-                fresh_mapping.insert(*id, self.fresh_var());
+                let kind = self.var_kind(*id);
+                fresh_mapping.insert(*id, self.fresh_var_of_kind(kind));
             }
             let freshened_params: Vec<Type> = trait_method
                 .param_types
@@ -781,6 +863,8 @@ impl Checker {
             self.env = saved_env;
         }
 
+        self.outer_named_type_vars = saved_outer;
+
         // Build param_constraints from where clause
         let mut param_constraints = Vec::new();
         for bound in where_clause {
@@ -789,6 +873,14 @@ impl Checker {
                 Some(idx) => {
                     for tr in &bound.traits {
                         let resolved_req = self.resolved_trait_name_at(tr.id, &tr.name);
+                        if let Some(var_id) = target_type_param_ids.get(idx) {
+                            self.validate_trait_bound_kind(
+                                &resolved_req,
+                                &bound.type_var,
+                                *var_id,
+                                tr.span,
+                            )?;
+                        }
                         param_constraints.push((resolved_req, idx));
                     }
                 }
@@ -811,7 +903,7 @@ impl Checker {
         // tvars from the concrete args of the target type.
         let mut conv_params: Vec<(String, u32)> = type_params
             .iter()
-            .cloned()
+            .map(|tp| tp.name.clone())
             .zip(target_type_param_ids.iter().copied())
             .collect();
         let trait_type_args_types: Vec<Type> = trait_type_args

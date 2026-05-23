@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 
-use crate::ast;
+use crate::ast::{self, Kind};
 use crate::token::Span;
 
 use super::{Checker, Diagnostic, EffectEntry, EffectOpSig, EffectRow, Severity, Type};
@@ -89,16 +89,40 @@ impl Checker {
                 .iter()
                 .map(|e| {
                     let resolved_name = self.canonical_effect_name(&e.name);
-                    let args = e
-                        .type_args
-                        .iter()
-                        .map(|te| self.convert_user_type_expr(te, &mut vec![]))
-                        .collect();
+                    let args = self.convert_effect_ref_args(e, &mut vec![]);
                     EffectEntry::unnamed(resolved_name, args)
                 })
                 .collect(),
             tail: None,
         }
+    }
+
+    pub(crate) fn convert_effect_ref_args(
+        &mut self,
+        effect_ref: &ast::EffectRef,
+        params: &mut Vec<(String, u32)>,
+    ) -> Vec<Type> {
+        let resolved_name = self.resolved_effect_name(effect_ref.id, &effect_ref.name);
+        let kinds: Vec<Kind> = self
+            .effects
+            .get(&resolved_name)
+            .map(|info| {
+                info.type_params
+                    .iter()
+                    .map(|id| self.var_kind(*id))
+                    .collect()
+            })
+            .unwrap_or_default();
+        effect_ref
+            .type_args
+            .iter()
+            .enumerate()
+            .map(|(i, te)| {
+                let kind = kinds.get(i).copied().unwrap_or(Kind::Star);
+                let ty = self.convert_type_expr_kinded(te, params, kind);
+                self.canonicalize_handler_effect_types(ty)
+            })
+            .collect()
     }
 
     /// Resolve an effect name to its canonical form (e.g. "Log" -> "Std.Log.Log").
@@ -303,6 +327,7 @@ impl Checker {
                             collect_vars(ty, vars);
                         }
                     }
+                    Type::Symbol(_) => {}
                     Type::Error => {}
                 }
             }
@@ -380,6 +405,7 @@ impl Checker {
                         collect_vars2(ty, vars);
                     }
                 }
+                Type::Symbol(_) => {}
                 Type::Error => {}
             }
         }

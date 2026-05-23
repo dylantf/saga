@@ -5,6 +5,91 @@ use crate::token::{Span, StringKind};
 
 pub type Program = Vec<Decl>;
 
+/// Kind of a type-level entity. `Star` is the kind of ordinary types; `Symbol`
+/// is the kind of type-level symbol literals like `'Foo`. Only `Symbol` is
+/// user-writable today; `Star` is the implicit default.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Kind {
+    Star,
+    Symbol,
+}
+
+/// A type parameter declared on a type, record, trait, or effect declaration.
+/// Carries the parameter name plus its declared kind. Parameters without an
+/// explicit `(name : Kind)` annotation default to `Kind::Star`.
+#[derive(Debug, Clone)]
+pub struct TypeParam {
+    pub name: String,
+    pub kind: Kind,
+    pub span: Span,
+}
+
+impl TypeParam {
+    /// Construct a `Star`-kinded type parameter. Most call sites that
+    /// historically built `Vec<String>` should use this.
+    pub fn star(name: impl Into<String>, span: Span) -> Self {
+        TypeParam {
+            name: name.into(),
+            kind: Kind::Star,
+            span,
+        }
+    }
+
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+}
+
+impl Default for TypeParam {
+    fn default() -> Self {
+        TypeParam {
+            name: String::new(),
+            kind: Kind::Star,
+            span: Span { start: 0, end: 0 },
+        }
+    }
+}
+
+impl AsRef<str> for TypeParam {
+    fn as_ref(&self) -> &str {
+        &self.name
+    }
+}
+
+impl PartialEq for TypeParam {
+    /// Equality on name + kind; spans are formatting metadata.
+    fn eq(&self, other: &Self) -> bool {
+        self.name == other.name && self.kind == other.kind
+    }
+}
+
+impl PartialEq<str> for TypeParam {
+    fn eq(&self, other: &str) -> bool {
+        self.name == other
+    }
+}
+
+impl PartialEq<&str> for TypeParam {
+    fn eq(&self, other: &&str) -> bool {
+        self.name == *other
+    }
+}
+
+impl PartialEq<String> for TypeParam {
+    fn eq(&self, other: &String) -> bool {
+        &self.name == other
+    }
+}
+
+impl std::fmt::Display for TypeParam {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.kind {
+            Kind::Star => f.write_str(&self.name),
+            Kind::Symbol => write!(f, "({} : Symbol)", self.name),
+        }
+    }
+}
+
 /// An AST node wrapped with leading trivia and an optional trailing comment.
 /// PartialEq compares the inner node only (trivia is formatting metadata).
 #[derive(Debug, Clone)]
@@ -247,7 +332,7 @@ pub enum Decl {
         opaque: bool,
         name: String,
         name_span: Span,
-        type_params: Vec<String>,
+        type_params: Vec<TypeParam>,
         variants: Vec<Annotated<TypeConstructor>>,
         deriving: Vec<String>,
         /// True if any `|` was on a new line - preserve multi-line layout.
@@ -263,7 +348,7 @@ pub enum Decl {
         public: bool,
         name: String,
         name_span: Span,
-        type_params: Vec<String>,
+        type_params: Vec<TypeParam>,
         fields: Vec<Annotated<(String, TypeExpr)>>,
         deriving: Vec<String>,
         /// True if any field was on a new line — preserve multi-line layout.
@@ -281,7 +366,7 @@ pub enum Decl {
         public: bool,
         name: String,
         name_span: Span,
-        type_params: Vec<String>,
+        type_params: Vec<TypeParam>,
         operations: Vec<Annotated<EffectOp>>,
         /// Comments before the closing `}` with no following sibling
         dangling_trivia: Vec<Trivia>,
@@ -315,7 +400,7 @@ pub enum Decl {
         name_span: Span,
         /// Type parameters: first is the self type, rest are extras.
         /// e.g. `trait ConvertTo a b` -> ["a", "b"]
-        type_params: Vec<String>,
+        type_params: Vec<TypeParam>,
         supertraits: Vec<TraitRef>,
         methods: Vec<Annotated<TraitMethod>>,
         /// Comments before the closing `}` with no following sibling
@@ -335,7 +420,7 @@ pub enum Decl {
         trait_type_args: Vec<TypeExpr>,
         target_type: String,
         target_type_span: Span,
-        type_params: Vec<String>,
+        type_params: Vec<TypeParam>,
         where_clause: Vec<TraitBound>,
         /// Bare trait-application constraints, e.g. `Generic Person r` in
         /// `impl ToJson for Person where {Generic Person r, ToJson r}`.
@@ -634,6 +719,10 @@ pub enum ExprKind {
         func: String,
         args: Vec<Expr>,
     },
+    /// Produced by elaboration for the universal `KnownSymbol` impl: evaluates
+    /// to the source name of the concrete symbol captured at the call site as
+    /// a String. Codegen for this node is implemented in chunk 4.
+    SymbolIntrinsic { symbol: String },
 }
 
 impl Expr {
@@ -724,7 +813,8 @@ impl Expr {
             | ExprKind::Var { .. }
             | ExprKind::Constructor { .. }
             | ExprKind::QualifiedName { .. }
-            | ExprKind::DictRef { .. } => false,
+            | ExprKind::DictRef { .. }
+            | ExprKind::SymbolIntrinsic { .. } => false,
         }
     }
 }
@@ -951,6 +1041,13 @@ pub enum TypeExpr {
         inner: Box<TypeExpr>,
         span: Span,
     },
+
+    /// Type-level symbol literal: `'Foo`. Inhabits kind `Symbol`.
+    Symbol {
+        id: NodeId,
+        name: String,
+        span: Span,
+    },
 }
 
 impl TypeExpr {
@@ -961,7 +1058,8 @@ impl TypeExpr {
             | TypeExpr::App { span, .. }
             | TypeExpr::Arrow { span, .. }
             | TypeExpr::Record { span, .. }
-            | TypeExpr::Labeled { span, .. } => *span,
+            | TypeExpr::Labeled { span, .. }
+            | TypeExpr::Symbol { span, .. } => *span,
         }
     }
 
@@ -972,7 +1070,8 @@ impl TypeExpr {
             | TypeExpr::App { id, .. }
             | TypeExpr::Arrow { id, .. }
             | TypeExpr::Record { id, .. }
-            | TypeExpr::Labeled { id, .. } => *id,
+            | TypeExpr::Labeled { id, .. }
+            | TypeExpr::Symbol { id, .. } => *id,
         }
     }
 
@@ -1038,6 +1137,7 @@ impl PartialEq for TypeExpr {
                     ..
                 },
             ) => l1 == l2 && i1 == i2,
+            (TypeExpr::Symbol { name: a, .. }, TypeExpr::Symbol { name: b, .. }) => a == b,
             _ => false,
         }
     }
