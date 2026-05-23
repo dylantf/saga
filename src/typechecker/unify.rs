@@ -497,8 +497,13 @@ impl Checker {
                 Type::Con(resolved, vec![])
             }
             crate::ast::TypeExpr::Var { name, .. } => {
-                if let Some((_, id)) = params.iter().find(|(n, _)| n == name) {
-                    let actual = self.var_kind(*id);
+                let existing_id = params
+                    .iter()
+                    .find(|(n, _)| n == name)
+                    .map(|(_, id)| *id)
+                    .or_else(|| self.outer_named_type_vars.get(name).copied());
+                if let Some(id) = existing_id {
+                    let actual = self.var_kind(id);
                     if actual != expected_kind {
                         self.collected_diagnostics.push(Diagnostic::error_at(
                             texpr.span(),
@@ -511,7 +516,13 @@ impl Checker {
                         ));
                         return Type::Error;
                     }
-                    Type::Var(*id)
+                    // Only seed `params` if the binding came from the outer
+                    // scope — keeps the local list consistent for callers
+                    // that scan it after conversion.
+                    if !params.iter().any(|(n, _)| n == name) {
+                        params.push((name.clone(), id));
+                    }
+                    Type::Var(id)
                 } else {
                     // New type variable -- create fresh, with the expected kind,
                     // and remember for reuse.

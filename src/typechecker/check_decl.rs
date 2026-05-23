@@ -753,6 +753,14 @@ impl Checker {
                 self.lsp
                     .fun_definitions
                     .push((*id, name.clone(), *name_span, *public));
+
+                // Stash the signature's named type vars so `check_fun_clauses`
+                // can put them in scope for inline ascriptions inside the body.
+                // Mirrors the impl-side fix in `register_impl`.
+                if !params_list.is_empty() {
+                    self.fun_type_param_vars
+                        .insert(name.clone(), params_list.clone());
+                }
             }
         }
 
@@ -984,6 +992,18 @@ impl Checker {
         // Snapshot pending constraints so we can partition new ones after body checking
         let constraints_before = self.trait_state.pending_constraints.len();
         let mut returned_handler_info: Option<super::HandlerInfo> = None;
+
+        // Expose the function signature's named type params to nested
+        // `convert_type_expr` calls inside the body, so an inline ascription
+        // like `(Proxy : Proxy n)` in `fun f : Proxy n -> ... where {n : KnownSymbol}`
+        // resolves `n` to the signature's `n` instead of minting a fresh var.
+        // Without this, the body silently picks the wrong dict at runtime.
+        let saved_outer_named = std::mem::take(&mut self.outer_named_type_vars);
+        if let Some(params) = self.fun_type_param_vars.get(name).cloned() {
+            for (pname, pid) in params {
+                self.outer_named_type_vars.insert(pname, pid);
+            }
+        }
 
         // Save and clear effect tracking and field candidate tracking for this function body
         let body_scope = self.enter_scope();
@@ -1355,6 +1375,7 @@ impl Checker {
             where_constraints,
         )?;
         self.env.insert(name.into(), scheme);
+        self.outer_named_type_vars = saved_outer_named;
         Ok(())
     }
 

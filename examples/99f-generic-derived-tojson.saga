@@ -30,8 +30,9 @@ impl ToJson for Leaf a where {a: ToJson} {
   to_json (Leaf x) = to_json x
 }
 
-impl ToJson for Labeled a where {a: ToJson} {
-  to_json (Labeled name x) = "\"" <> name <> "\": " <> to_json x
+impl ToJson for Labeled (n : Symbol) a where {n: KnownSymbol, a: ToJson} {
+  to_json (Labeled x) =
+    "\"" <> symbol_name (Proxy : Proxy n) <> "\": " <> to_json x
 }
 
 impl ToJson for And l r where {l: ToJson, r: ToJson} {
@@ -45,8 +46,9 @@ impl ToJson for Or l r where {l: ToJson, r: ToJson} {
   }
 }
 
-impl ToJson for Variant a where {a: ToJson} {
-  to_json (Variant name payload) = "{\"" <> name <> "\": " <> to_json payload <> "}"
+impl ToJson for Variant (n : Symbol) a where {n: KnownSymbol, a: ToJson} {
+  to_json (Variant payload) =
+    "{\"" <> symbol_name (Proxy : Proxy n) <> "\": " <> to_json payload <> "}"
 }
 
 impl ToJson for Record a where {a: ToJson} {

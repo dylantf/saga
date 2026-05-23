@@ -43,6 +43,8 @@ fn emit_elaborated_inner(src: &str, include_std_modules: bool) -> String {
         .parse_program()
         .expect("parse error");
     desugar::desugar_program(&mut program);
+    let imported = saga::derive::collect_imported_decls(&program, None);
+    let _ = saga::derive::expand_derives(&mut program, &imported);
     let mut checker = bootstrap();
     let result = checker.check_program(&mut program);
     assert!(
@@ -2742,3 +2744,7 @@ main () = (
 "#;
     assert_runs_and_stdout_contains(src, &["forwarded", "again"]);
 }
+
+// Phase B sum-type FromJson bug repro lives in
+// `tests/e2e/tests/generic_fromjson_test.saga` — it needs `<>`
+// (Semigroup) and Std.Test, neither of which this harness links against.

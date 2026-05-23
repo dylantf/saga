@@ -14,6 +14,17 @@ use crate::token::{Span, StringKind};
 use crate::typechecker::{CheckResult, TraitEvidence, TraitInfo, Type};
 
 /// Well-known canonical trait names used for special-cased codegen.
+const KNOWN_SYMBOL: &str = "Std.Base.KnownSymbol";
+
+/// Only invoke the symbol-intrinsic lambda fast-path for the `KnownSymbol`
+/// trait's own `symbol_name` method. Without this guard, a `to_json` call
+/// whose node also carries KnownSymbol evidence (from a parameterized
+/// `impl ToJson for Labeled n a where {n : KnownSymbol}` impl) would be
+/// rewritten to a symbol-name lookup, silently dropping the real dispatch.
+fn is_known_symbol_trait(trait_name: &str) -> bool {
+    trait_name == KNOWN_SYMBOL || trait_name == "KnownSymbol"
+}
+
 const SHOW: &str = "Std.Base.Show";
 const DEBUG: &str = "Std.Base.Debug";
 const ORD: &str = "Std.Base.Ord";
@@ -678,7 +689,9 @@ impl Elaborator {
                 // (a user function named `compare` won't be mistaken for Ord.compare).
 
                 if let Some((trait_name, method_index)) = self.resolve_trait_method(name, node_id) {
-                    if let Some(symbol_lambda) = self.try_symbol_intrinsic_lambda(node_id, span) {
+                    if is_known_symbol_trait(&trait_name)
+                        && let Some(symbol_lambda) = self.try_symbol_intrinsic_lambda(node_id, span)
+                    {
                         return symbol_lambda;
                     }
                     if let Some(dict_expr) = self.resolve_dict(&trait_name, node_id, span) {
@@ -734,8 +747,9 @@ impl Elaborator {
                     if let Some((trait_name, method_index)) =
                         self.resolve_trait_method(name, func.id)
                     {
-                        if let Some(symbol_lambda) =
-                            self.try_symbol_intrinsic_lambda(func.id, func.span)
+                        if is_known_symbol_trait(&trait_name)
+                            && let Some(symbol_lambda) =
+                                self.try_symbol_intrinsic_lambda(func.id, func.span)
                         {
                             let elab_arg = self.elaborate_expr(arg);
                             return Expr::synth(
@@ -1863,6 +1877,19 @@ impl Elaborator {
                 self.current_dict_params
                     .get(trait_name)
                     .map(|name| Expr::synth(span, ExprKind::Var { name: name.clone() }))
+            }
+            Type::Symbol(name) => {
+                // KnownSymbol's "dict" is the symbol's source name as a String.
+                // SymbolIntrinsic lowers to a binary literal at codegen. This
+                // branch fires when a parameterized impl (e.g.
+                // `impl ToJson for Variant n a where {n: KnownSymbol, ...}`)
+                // recursively constructs a sub-dict for the symbol parameter.
+                Some(Expr::synth(
+                    span,
+                    ExprKind::SymbolIntrinsic {
+                        symbol: name.clone(),
+                    },
+                ))
             }
             _ => None,
         }

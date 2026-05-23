@@ -2343,12 +2343,8 @@ fn derive_adt_generic(
                 span,
             };
             let shape_expr = build_variant_shape_expr(&v.fields, &field_vars, span);
-            let variant = apply2(
-                &generic_name("Variant"),
-                string_lit(&v.name, span),
-                shape_expr,
-                span,
-            );
+            // Variant <shape> — constructor name lives in the type.
+            let variant = apply_ctor(&generic_name("Variant"), shape_expr, span);
             let or_wrapped = or_wrap_expr(variant, i, n, span);
             let adt_wrapped = apply2(
                 &generic_name("Adt"),
@@ -2401,13 +2397,7 @@ fn derive_adt_generic(
             let variant_pat = Pat::Constructor {
                 id: NodeId::fresh(),
                 name: generic_name("Variant"),
-                args: vec![
-                    Pat::Wildcard {
-                        id: NodeId::fresh(),
-                        span,
-                    },
-                    shape_pat,
-                ],
+                args: vec![shape_pat],
                 span,
             };
             let or_wrapped_pat = or_wrap_pat(variant_pat, i, n, span);
@@ -2490,8 +2480,9 @@ fn build_adt_rep_inner_type(variants: &[Annotated<TypeConstructor>]) -> TypeExpr
     let variant_shapes: Vec<TypeExpr> = variants
         .iter()
         .map(|v| {
+            // Variant 'CtorName <shape> — constructor name lives in the type.
             type_app(
-                type_named("Variant"),
+                type_app(type_named("Variant"), type_symbol(&v.node.name)),
                 build_variant_shape_type(&v.node.fields),
             )
         })
@@ -2524,14 +2515,13 @@ fn build_variant_shape_type(fields: &[(Option<String>, TypeExpr)]) -> TypeExpr {
     acc
 }
 
-/// For a single ADT constructor field: `Labeled (Leaf T)` if labeled, else
-/// `Leaf T`.
+/// For a single ADT constructor field: `Labeled 'lbl (Leaf T)` if labeled,
+/// else `Leaf T`.
 fn field_rep_type_adt(label: &Option<String>, ty: &TypeExpr) -> TypeExpr {
     let leaf = type_app(type_named("Leaf"), ty.clone());
-    if label.is_some() {
-        type_app(type_named("Labeled"), leaf)
-    } else {
-        leaf
+    match label {
+        Some(lbl) => type_app(type_app(type_named("Labeled"), type_symbol(lbl)), leaf),
+        None => leaf,
     }
 }
 
@@ -2557,7 +2547,8 @@ fn build_variant_shape_expr(
             span,
         );
         match label {
-            Some(lbl) => apply2(&generic_name("Labeled"), string_lit(lbl, span), leaf, span),
+            // Labeled (Leaf var) — name lives in the type now.
+            Some(_) => apply_ctor(&generic_name("Labeled"), leaf, span),
             None => leaf,
         }
     };
@@ -2597,16 +2588,11 @@ fn build_variant_shape_pat(
             span,
         };
         match label {
+            // Labeled (Leaf var) — name lives in the type now.
             Some(_) => Pat::Constructor {
                 id: NodeId::fresh(),
                 name: generic_name("Labeled"),
-                args: vec![
-                    Pat::Wildcard {
-                        id: NodeId::fresh(),
-                        span,
-                    },
-                    leaf,
-                ],
+                args: vec![leaf],
                 span,
             },
             None => leaf,
@@ -2706,24 +2692,38 @@ fn type_app(func: TypeExpr, arg: TypeExpr) -> TypeExpr {
     }
 }
 
+/// Build a type-level symbol literal `TypeExpr::Symbol`. Used by the Generic
+/// synthesizer to put constructor/field names at the type level rather than
+/// carrying them as value-level strings.
+fn type_symbol(name: &str) -> TypeExpr {
+    TypeExpr::Symbol {
+        id: NodeId::fresh(),
+        name: name.to_string(),
+        span: Span { start: 0, end: 0 },
+    }
+}
+
 /// Build the inner Rep type (without the outer newtype wrapping). Right-leaning
-/// And chain for >=2 fields; Labeled (Leaf T) for 1 field; U1 for 0.
+/// And chain for >=2 fields; `Labeled 'name (Leaf T)` for 1 field; U1 for 0.
 fn build_rep_type_inner(fields: &[(String, TypeExpr)]) -> TypeExpr {
     if fields.is_empty() {
         return type_named("U1");
     }
     let mut iter = fields.iter().rev();
-    let (_, last_ty) = iter.next().unwrap();
-    let mut acc = field_rep_type(last_ty);
-    for (_, ty) in iter {
-        acc = type_app(type_app(type_named("And"), field_rep_type(ty)), acc);
+    let (last_name, last_ty) = iter.next().unwrap();
+    let mut acc = field_rep_type(last_name, last_ty);
+    for (fname, ty) in iter {
+        acc = type_app(type_app(type_named("And"), field_rep_type(fname, ty)), acc);
     }
     acc
 }
 
-fn field_rep_type(ty: &TypeExpr) -> TypeExpr {
+/// Record field rep type: `Labeled 'fieldname (Leaf T)`. The field name is
+/// carried as a type-level symbol; library codecs recover the string via
+/// `KnownSymbol`.
+fn field_rep_type(name: &str, ty: &TypeExpr) -> TypeExpr {
     type_app(
-        type_named("Labeled"),
+        type_app(type_named("Labeled"), type_symbol(name)),
         type_app(type_named("Leaf"), ty.clone()),
     )
 }
@@ -2780,7 +2780,7 @@ fn build_rep_to_expr(fields: &[(String, TypeExpr)], record_var: &Expr, span: Spa
         );
     }
     let labeled_for = |fname: &str| -> Expr {
-        // Labeled "fname" (Leaf record_var.fname)
+        // Labeled (Leaf record_var.fname) — name lives in the type now.
         let field_access = Expr::synth(
             span,
             ExprKind::FieldAccess {
@@ -2790,12 +2790,7 @@ fn build_rep_to_expr(fields: &[(String, TypeExpr)], record_var: &Expr, span: Spa
             },
         );
         let leaf = apply_ctor(&generic_name("Leaf"), field_access, span);
-        apply2(
-            &generic_name("Labeled"),
-            string_lit(fname, span),
-            leaf,
-            span,
-        )
+        apply_ctor(&generic_name("Labeled"), leaf, span)
     };
 
     let mut iter = fields.iter().rev();
@@ -2819,26 +2814,20 @@ fn build_rep_from_pattern(field_vars: &[String], span: Span) -> Pat {
         };
     }
     let labeled_pat = |var: &str| -> Pat {
-        // Labeled _ (Leaf var)
+        // Labeled (Leaf var) — name is at the type level, no wildcard needed.
         Pat::Constructor {
             id: NodeId::fresh(),
             name: generic_name("Labeled"),
-            args: vec![
-                Pat::Wildcard {
+            args: vec![Pat::Constructor {
+                id: NodeId::fresh(),
+                name: generic_name("Leaf"),
+                args: vec![Pat::Var {
                     id: NodeId::fresh(),
+                    name: var.into(),
                     span,
-                },
-                Pat::Constructor {
-                    id: NodeId::fresh(),
-                    name: generic_name("Leaf"),
-                    args: vec![Pat::Var {
-                        id: NodeId::fresh(),
-                        name: var.into(),
-                        span,
-                    }],
-                    span,
-                },
-            ],
+                }],
+                span,
+            }],
             span,
         }
     };

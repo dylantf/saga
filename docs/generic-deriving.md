@@ -10,15 +10,15 @@ those traits on their own types without compiler changes.
 record Person { name: String, age: Int } deriving (Generic, ToJson)
 
 # After derive expansion (conceptual)
-type Rep__Person = Rep__Person (Record (And (Labeled (Leaf String))
-                                            (Labeled (Leaf Int))))
+type Rep__Person = Rep__Person (Record (And (Labeled 'name (Leaf String))
+                                            (Labeled 'age  (Leaf Int))))
 
 impl Generic Person (Rep__Person) {
   to p = Rep__Person (Record "Person"
-                       (And (Labeled "name" (Leaf p.name))
-                            (Labeled "age"  (Leaf p.age))))
-  from (Rep__Person (Record _ (And (Labeled _ (Leaf n))
-                                   (Labeled _ (Leaf a))))) = { name: n, age: a }
+                       (And (Labeled (Leaf p.name))
+                            (Labeled (Leaf p.age))))
+  from (Rep__Person (Record _ (And (Labeled (Leaf n))
+                                   (Labeled (Leaf a))))) = { name: n, age: a }
 }
 
 # Bridge: routes <Trait> Rep__Person through the inner tree
@@ -47,14 +47,14 @@ on.
 Source: `src/stdlib/Generic.saga`
 
 ```saga
-type U1                = U1
-type Leaf a            = Leaf a
-type Labeled a         = Labeled String a
-type And l r           = And l r
-type Or l r            = Or_Left l | Or_Right r
-type Variant a         = Variant String a
-type Record a          = Record String a
-type Adt a             = Adt String a
+type U1                       = U1
+type Leaf a                   = Leaf a
+type Labeled (n : Symbol) a   = Labeled a
+type And l r                  = And l r
+type Or l r                   = Or_Left l | Or_Right r
+type Variant (n : Symbol) a   = Variant a
+type Record a                 = Record String a
+type Adt a                    = Adt String a
 
 trait Generic a r {
   fun to   : a -> r
@@ -66,15 +66,20 @@ These are the structural pieces every Rep is built from:
 
 - **`U1`** — empty contribution. Used for zero-field constructors.
 - **`Leaf a`** — a primitive or user-typed value. The recursion bottoms out here.
-- **`Labeled a`** — a record-field name carried as a runtime string, paired
-  with its inner shape. (Record-fields only — sum constructor names use
-  `Variant`.)
+- **`Labeled (n : Symbol) a`** — a record-field name carried as a type-level
+  symbol (kind `Symbol`), paired with its inner shape. Library impls
+  recover the field name via `symbol_name (Proxy : Proxy n)` under a
+  `where {n : KnownSymbol}` bound. (Record-fields only — sum constructor
+  names use `Variant`.)
 - **`And l r`** — a product. Records and multi-field constructors fold into
   right-leaning And chains.
 - **`Or l r`** — a sum. ADTs with 2+ variants fold into right-leaning Or chains.
-- **`Variant a`** — a sum constructor name carried as a runtime string with
-  its payload shape. Distinct from `Labeled` so library codecs can give
-  different behaviour to record fields and constructor names.
+- **`Variant (n : Symbol) a`** — a sum constructor name carried as a
+  type-level symbol with its payload shape. Distinct from `Labeled` so
+  library codecs can give different behaviour to record fields and
+  constructor names. The name lives in the type so from-direction codecs
+  can compare it against an input tag and fail when they mismatch — see
+  "From-direction sum-type correctness" below.
 - **`Record a`** — top-level framing wrapper for records: carries the runtime
   type name and the inner And/Labeled tree. Gives library code a hook for
   outer framing (e.g. JSON `{}`).
@@ -107,8 +112,9 @@ A library that wants proper JSON-shaped output writes:
 impl ToJson for Record a where {a: ToJson} {
   to_json (Record _ inner) = "{" <> to_json inner <> "}"
 }
-impl ToJson for Variant a where {a: ToJson} {
-  to_json (Variant name payload) = "{\"" <> name <> "\": " <> to_json payload <> "}"
+impl ToJson for Variant (n : Symbol) a where {n: KnownSymbol, a: ToJson} {
+  to_json (Variant payload) =
+    "{\"" <> symbol_name (Proxy : Proxy n) <> "\": " <> to_json payload <> "}"
 }
 impl ToJson for Adt a where {a: ToJson} {
   to_json (Adt _ inner) = to_json inner    -- passthrough
@@ -118,6 +124,47 @@ impl ToJson for Adt a where {a: ToJson} {
 Libraries that don't care about a given hook write a passthrough — the
 required impl set grew from 5 to 8, but most of the new impls are
 one-liners.
+
+### From-direction sum-type correctness
+
+`Variant` and `Labeled` carry their names at the **type level** (kind
+`Symbol`) rather than as value-level `String` fields. This is what makes
+from-direction sum-type decoders work correctly.
+
+Pre-symbol, the synthesized `from` for an ADT looked like
+
+```saga
+from (Rep__Role (Adt _ (Or_Left  (Variant _ _)))) = Admin
+from (Rep__Role (Adt _ (Or_Right (Or_Left  (Variant _ _))))) = Editor
+from (Rep__Role (Adt _ (Or_Right (Or_Right (Variant _ _))))) = Viewer
+```
+
+The variant name was wildcarded, so the library's `FromJson for Or` had
+to "try left, fall back to right" by position — and the wrong branch
+silently succeeded. Decoding `{"Editor": null}` into
+`Role = Admin | Editor | Viewer` always returned `Admin`, regardless of
+the JSON tag.
+
+With names at the type level, the library's from-direction impl can
+recover the expected name via `KnownSymbol` and reject the wrong tag:
+
+```saga
+impl FromJson for Variant (n : Symbol) a where {n: KnownSymbol, a: FromJson} {
+  from_json s =
+    if s == symbol_name (Proxy : Proxy n) then
+      case from_json s {
+        Ok x -> Ok (Variant x)
+        Err e -> Err e
+      }
+    else
+      Err "variant tag mismatch"
+}
+```
+
+Now `Or`'s "try left, fall back to right" actually picks the right
+variant: the wrong branch fails on the tag mismatch, the right one
+succeeds. See `sum_type_fromjson_picks_correct_variant_by_tag` in
+`tests/codegen_integration.rs` for the e2e test.
 
 ---
 
@@ -172,21 +219,21 @@ wrapping serves two purposes:
 | Field count | Inner shape (wrapped in `Record "TypeName"`) |
 |-------------|-------------|
 | 0           | `U1` |
-| 1           | `Labeled "f" (Leaf T)` |
-| 2+          | Right-leaning And of `Labeled "f" (Leaf T)` per field |
+| 1           | `Labeled 'f (Leaf T)` |
+| 2+          | Right-leaning And of `Labeled 'f (Leaf T)` per field |
 
 So `record Person { name: String, age: Int }` produces
-`Rep__Person (Record "Person" (And (Labeled "name" (Leaf String))
-                                   (Labeled "age" (Leaf Int))))`.
+`Rep__Person (Record "Person" (And (Labeled 'name (Leaf String))
+                                   (Labeled 'age (Leaf Int))))`.
 
-**ADTs**: each variant is wrapped in `Variant "VariantName" <variant_shape>`,
+**ADTs**: each variant is wrapped in `Variant 'VariantName <variant_shape>`,
 the variants combine in a right-leaning Or chain, and the whole Or-tree is
 wrapped in `Adt "TypeName" (...)`.
 
 | Variant arity | Variant shape |
 |---------------|---------------|
 | 0             | `U1` |
-| 1             | `Leaf T` or `Labeled "label" (Leaf T)` if the field is labeled |
+| 1             | `Leaf T` or `Labeled 'label (Leaf T)` if the field is labeled |
 | 2+            | Right-leaning And, same as records |
 
 | Variant count | Outer shape (wrapped in `Adt "TypeName"`) |
@@ -195,12 +242,12 @@ wrapped in `Adt "TypeName" (...)`.
 | 2+            | Right-leaning Or chain of `Variant` shapes |
 
 So `type Shape = Circle Float | Triangle` produces
-`Rep__Shape (Adt "Shape" (Or (Variant "Circle" (Leaf Float))
-                             (Variant "Triangle" U1)))`.
+`Rep__Shape (Adt "Shape" (Or (Variant 'Circle (Leaf Float))
+                             (Variant 'Triangle U1)))`.
 
 **`Labeled` inside `Variant`**: a labeled constructor field like
 `Circle { radius: Float }` still uses `Labeled` for the field name —
-`Variant "Circle" (Labeled "radius" (Leaf Float))`. Library authors who
+`Variant 'Circle (Labeled 'radius (Leaf Float))`. Library authors who
 care can dispatch on whether the `Labeled` is inside a `Record` (record
 field) or a `Variant` (labeled constructor field).
 

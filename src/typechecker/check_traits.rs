@@ -677,6 +677,17 @@ impl Checker {
             .map(|e| self.resolved_effect_name(e.id, &e.name))
             .collect();
 
+        // Expose the impl's own type-param names (with their fresh var IDs) to
+        // any nested `convert_type_expr` call inside the method bodies, so an
+        // inline ascription like `(Proxy : Proxy n)` resolves `n` to the
+        // impl's `n` rather than a fresh, unconstrained var. This is what
+        // lets `impl ToJson for Labeled n a where {n : KnownSymbol}` reflect
+        // the symbol at runtime.
+        let saved_outer = std::mem::take(&mut self.outer_named_type_vars);
+        for (tp, var_id) in type_params.iter().zip(target_type_param_ids.iter()) {
+            self.outer_named_type_vars.insert(tp.name.clone(), *var_id);
+        }
+
         for m in methods {
             let (method_name, params, body) = (&m.name, &m.params, &m.body);
             let trait_method = trait_info
@@ -812,6 +823,8 @@ impl Checker {
 
             self.env = saved_env;
         }
+
+        self.outer_named_type_vars = saved_outer;
 
         // Build param_constraints from where clause
         let mut param_constraints = Vec::new();

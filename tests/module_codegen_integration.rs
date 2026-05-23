@@ -3309,8 +3309,9 @@ impl ToJson for U1            { to_json _ = "null" }
 impl ToJson for Int           { to_json n = show n }
 impl ToJson for String        { to_json s = "\"" <> s <> "\"" }
 impl ToJson for Leaf a    where {a: ToJson} { to_json (Leaf x) = to_json x }
-impl ToJson for Labeled a where {a: ToJson} {
-  to_json (Labeled name x) = "\"" <> name <> "\":" <> to_json x
+impl ToJson for Labeled (n : Symbol) a where {n: KnownSymbol, a: ToJson} {
+  to_json (Labeled x) =
+    "\"" <> symbol_name (Proxy : Proxy n) <> "\":" <> to_json x
 }
 impl ToJson for And l r   where {l: ToJson, r: ToJson} {
   to_json (And l r) = to_json l <> "," <> to_json r
@@ -3321,7 +3322,7 @@ impl ToJson for Or l r    where {l: ToJson, r: ToJson} {
     Or_Right r -> to_json r
   }
 }
-impl ToJson for Variant a where {a: ToJson} { to_json (Variant _ p) = to_json p }
+impl ToJson for Variant (n : Symbol) a where {a: ToJson} { to_json (Variant p) = to_json p }
 impl ToJson for Record a  where {a: ToJson} {
   to_json (Record _ inner) = "{" <> to_json inner <> "}"
 }

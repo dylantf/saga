@@ -8,8 +8,9 @@ pub type U1 = U1
 #@ A single field, holding a value of type `a`.
 pub type Leaf a = Leaf a
 
-#@ A named field: the runtime string is the field/constructor label.
-pub type Labeled a = Labeled String a
+#@ A named field. The name lives at the type level as a `Symbol`-kinded
+#@ parameter — library impls recover the string via `KnownSymbol`.
+pub type Labeled (n : Symbol) a = Labeled a
 
 #@ A product (two-or-more fields are right-leaning chains of And).
 pub type And l r = And l r
@@ -19,9 +20,11 @@ pub type Or l r =
   | Or_Left l
   | Or_Right r
 
-#@ A sum constructor: runtime variant name paired with its payload shape.
-#@ Distinguishes constructor labels from record-field labels (Labeled).
-pub type Variant a = Variant String a
+#@ A sum constructor. The constructor name lives at the type level as a
+#@ `Symbol`-kinded parameter — library impls recover the string via
+#@ `KnownSymbol`. Distinguishes constructor labels from record-field
+#@ labels (Labeled).
+pub type Variant (n : Symbol) a = Variant a
 
 #@ Top-level framing wrapper for records: runtime type name + inner shape.
 #@ Gives library codecs a hook for outer framing (e.g. JSON object braces).

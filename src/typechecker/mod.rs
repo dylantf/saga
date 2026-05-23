@@ -972,6 +972,24 @@ pub struct Checker {
     /// `Kind::Star`. Populated when a fresh variable is minted for an
     /// `Symbol`-kinded type parameter (type, trait, impl, effect).
     pub(crate) var_kinds: HashMap<u32, Kind>,
+    /// Names of type parameters in scope for the binder currently being
+    /// checked (e.g. an impl whose body is mid-check). Populated by
+    /// `register_impl` before walking each method body and cleared after.
+    /// `convert_type_expr` consults this on a `TypeExpr::Var` miss so that
+    /// inline type ascriptions like `(Proxy : Proxy n)` inside a method body
+    /// resolve `n` to the impl's `n` rather than creating a fresh,
+    /// unconstrained var. Without this, polymorphic `KnownSymbol n` impl
+    /// bodies can't reflect the symbol — the Generic migration's library
+    /// impls (`impl ToJson for Variant n a`) depend on it.
+    pub(crate) outer_named_type_vars: HashMap<String, u32>,
+    /// Per top-level `fun`: the (name, var_id) mapping for the type params
+    /// introduced by its signature annotation. Recorded by
+    /// `collect_annotations` so `check_fun_clauses` can seed
+    /// `outer_named_type_vars` before checking the body — same fix as for
+    /// impls, applied to functions. Without this, an ascription like
+    /// `(Proxy : Proxy n)` inside a body whose signature also has `n`
+    /// would mint a fresh, unrelated var.
+    pub(crate) fun_type_param_vars: HashMap<String, Vec<(String, u32)>>,
     /// Name resolution map: user-visible names -> canonical names.
     pub(crate) scope_map: ScopeMap,
     /// Authoritative source-level resolution result for the current program.
@@ -1361,6 +1379,8 @@ impl Checker {
             type_arity: HashMap::new(),
             type_param_kinds: HashMap::new(),
             var_kinds: HashMap::new(),
+            outer_named_type_vars: HashMap::new(),
+            fun_type_param_vars: HashMap::new(),
             scope_map: ScopeMap::default(),
             resolution: ResolutionResult::default(),
             evidence: Vec::new(),
