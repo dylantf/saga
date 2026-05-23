@@ -8315,3 +8315,15 @@ fn local_trait_named_known_symbol_does_not_get_builtin_magic() {
         err.message
     );
 }
+
+#[test]
+fn symbol_handler_body_ascription_uses_handled_effect_type_var() {
+    let src = "effect Read (n : Symbol) {\n\
+                 fun read : Unit -> Proxy n\n\
+               }\n\
+               handler show_read for Read n where {n: KnownSymbol} {\n\
+                 read () = resume (Proxy : Proxy n)\n\
+                 return _ = symbol_name (Proxy : Proxy n)\n\
+               }\n";
+    check(src).unwrap();
+}

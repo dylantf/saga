@@ -616,11 +616,7 @@ impl Checker {
                     let mut seen_effects: HashMap<String, Vec<Type>> = HashMap::new();
                     let mut effect_refs = Vec::new();
                     for e in effects {
-                        let args: Vec<Type> = e
-                            .type_args
-                            .iter()
-                            .map(|te| self.convert_user_type_expr(te, &mut params_list))
-                            .collect();
+                        let args: Vec<Type> = self.convert_effect_ref_args(e, &mut params_list);
                         let current_display = self.prettify_type(&Type::Con(
                             e.name.rsplit('.').next().unwrap_or(&e.name).to_string(),
                             args.clone(),
@@ -696,11 +692,8 @@ impl Checker {
                     for eff in effects {
                         self.record_effect_ref(eff);
                         if !eff.type_args.is_empty() {
-                            let concrete_types: Vec<Type> = eff
-                                .type_args
-                                .iter()
-                                .map(|ta| self.convert_user_type_expr(ta, &mut params_list))
-                                .collect();
+                            let concrete_types: Vec<Type> =
+                                self.convert_effect_ref_args(eff, &mut params_list);
                             // Use canonical effect name so lookups against
                             // canonical-only self.effects succeed later.
                             let canonical = self.resolved_effect_name(eff.id, &eff.name);
@@ -1880,7 +1873,7 @@ impl Checker {
             name.into()
         };
         self.effects.insert(
-            key,
+            key.clone(),
             EffectDefInfo {
                 type_params: type_param_ids,
                 ops: vec![],
@@ -1888,9 +1881,15 @@ impl Checker {
                 source_module: self.current_module.clone(),
             },
         );
+        self.type_param_kinds
+            .insert(key, effect_type_params.iter().map(|p| p.kind).collect());
         self.type_arity
             .insert(name.into(), effect_type_params.len());
         if let Some(module) = &self.current_module {
+            self.type_param_kinds.insert(
+                format!("{}.{}", module, name),
+                effect_type_params.iter().map(|p| p.kind).collect(),
+            );
             self.type_arity
                 .insert(format!("{}.{}", module, name), effect_type_params.len());
         }
@@ -1942,11 +1941,7 @@ impl Checker {
                     .effects
                     .iter()
                     .map(|e| {
-                        let args = e
-                            .type_args
-                            .iter()
-                            .map(|te| self.convert_user_type_expr(te, &mut params_list))
-                            .collect();
+                        let args = self.convert_effect_ref_args(e, &mut params_list);
                         let resolved_name = self.resolved_effect_name(e.id, &e.name);
                         EffectEntry::unnamed(resolved_name, args)
                     })
@@ -2024,8 +2019,13 @@ impl Checker {
                 let info = info.clone();
                 for (i, &param_id) in info.type_params.iter().enumerate() {
                     if let Some(type_arg_expr) = effect_ref.type_args.get(i) {
-                        let concrete_ty =
-                            self.convert_user_type_expr(type_arg_expr, &mut type_var_params);
+                        let expected_kind = self.var_kind(param_id);
+                        let concrete_ty = self.convert_type_expr_kinded(
+                            type_arg_expr,
+                            &mut type_var_params,
+                            expected_kind,
+                        );
+                        let concrete_ty = self.canonicalize_handler_effect_types(concrete_ty);
                         handler_type_mapping.insert(param_id, concrete_ty);
                     }
                 }
@@ -2072,6 +2072,11 @@ impl Checker {
                     ),
                 ));
             }
+        }
+
+        let saved_outer_named = self.outer_named_type_vars.clone();
+        for (name, var_id) in &type_var_params {
+            self.outer_named_type_vars.insert(name.clone(), *var_id);
         }
 
         // Fresh type variable for the handler's answer type.
@@ -2415,11 +2420,7 @@ impl Checker {
         let handler_effect_types: Vec<Type> = effect_names
             .iter()
             .map(|e| {
-                let type_args: Vec<Type> = e
-                    .type_args
-                    .iter()
-                    .map(|ta| self.convert_user_type_expr(ta, &mut vec![]))
-                    .collect();
+                let type_args: Vec<Type> = self.convert_effect_ref_args(e, &mut vec![]);
                 Type::Con(self.canonical_effect_name(&e.name), type_args)
             })
             .collect();
@@ -2438,6 +2439,7 @@ impl Checker {
             },
             *def_id,
         );
+        self.outer_named_type_vars = saved_outer_named;
         self.lsp.node_spans.insert(*def_id, *name_span);
 
         Ok(())

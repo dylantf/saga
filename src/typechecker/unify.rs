@@ -613,11 +613,7 @@ impl Checker {
                                 },
                                 self.resolved_effect_name(e.id, &e.name),
                             ));
-                            let args = e
-                                .type_args
-                                .iter()
-                                .map(|te| self.convert_type_expr(te, params))
-                                .collect();
+                            let args = self.convert_effect_ref_args(e, params);
                             let name = self.resolved_effect_name(e.id, &e.name);
                             if !self.effects.contains_key(&name) {
                                 self.collected_diagnostics.push(Diagnostic::error_at(

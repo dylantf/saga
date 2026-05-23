@@ -2745,6 +2745,50 @@ main () = (
     assert_runs_and_stdout_contains(src, &["forwarded", "again"]);
 }
 
+#[test]
+fn known_symbol_direct_ascription_uses_enclosing_type_var_e2e() {
+    let src = r#"
+fun probe : Proxy n -> Proxy m -> (String, String) where {n : KnownSymbol, m : KnownSymbol}
+probe _ q = (symbol_name (Proxy : Proxy n), symbol_name q)
+
+main () = probe (Proxy : Proxy 'left) (Proxy : Proxy 'right)
+"#;
+    assert_runs_and_stdout_contains(src, &["left", "right"]);
+}
+
+#[test]
+fn known_symbol_let_ascription_uses_enclosing_type_var_e2e() {
+    let src = r#"
+fun probe : Proxy n -> Proxy m -> (String, String) where {n : KnownSymbol, m : KnownSymbol}
+probe _ q = {
+  let p : Proxy n = Proxy
+  (symbol_name p, symbol_name q)
+}
+
+main () = probe (Proxy : Proxy 'let_left) (Proxy : Proxy 'let_right)
+"#;
+    assert_runs_and_stdout_contains(src, &["let_left", "let_right"]);
+}
+
+#[test]
+fn symbol_non_proxy_let_ascription_uses_enclosing_type_var_e2e() {
+    let src = r#"
+type Id (k : Symbol) = Id Int
+
+fun tag_id : Id n -> String where {n : KnownSymbol}
+tag_id _ = symbol_name (Proxy : Proxy n)
+
+fun probe : Proxy n -> Proxy m -> (String, String) where {n : KnownSymbol, m : KnownSymbol}
+probe _ q = {
+  let x : Id n = Id 1
+  (tag_id x, symbol_name q)
+}
+
+main () = probe (Proxy : Proxy 'id_left) (Proxy : Proxy 'id_right)
+"#;
+    assert_runs_and_stdout_contains(src, &["id_left", "id_right"]);
+}
+
 // Phase B sum-type FromJson bug repro lives in
 // `tests/e2e/tests/generic_fromjson_test.saga` — it needs `<>`
 // (Semigroup) and Std.Test, neither of which this harness links against.
