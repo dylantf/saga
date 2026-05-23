@@ -405,12 +405,17 @@ impl Normalizer {
             }
 
             // Elaboration-only nodes
-            ExprKind::DictMethodAccess { dict, method_index } => {
+            ExprKind::DictMethodAccess {
+                dict,
+                trait_name,
+                method_index,
+            } => {
                 let new_dict = self.normalize_and_lift(dict, lifted);
                 Expr::rebuild_like(
                     expr,
                     ExprKind::DictMethodAccess {
                         dict: Box::new(new_dict),
+                        trait_name: trait_name.clone(),
                         method_index: *method_index,
                     },
                 )

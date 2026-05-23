@@ -2,7 +2,7 @@ use crate::ast::{self, TypeParam};
 use crate::token::Span;
 
 use super::unify::kind_name;
-use super::{Checker, Diagnostic, ImplInfo, Scheme, Type};
+use super::{Checker, Diagnostic, ImplInfo, Scheme, TraitMethodEffectSig, Type};
 
 /// Traits whose first (self) parameter functionally determines the remaining
 /// trait parameters. Multiple impls sharing the same target type but with
@@ -16,6 +16,28 @@ use super::{Checker, Diagnostic, ImplInfo, Scheme, Type};
 ///
 /// Phase 2 may replace this with an explicit per-trait attribute.
 pub(crate) const FUNCTIONAL_TRAITS: &[&str] = &["Generic", "Std.Generic.Generic"];
+
+fn trait_method_effect_sig(ty: &Type) -> TraitMethodEffectSig {
+    let mut user_arity = 0;
+    let mut effects = std::collections::BTreeSet::new();
+    let mut is_open_row = false;
+    let mut current = ty;
+    while let Type::Fun(_, ret, row) = current {
+        user_arity += 1;
+        for entry in &row.effects {
+            effects.insert(entry.name.clone());
+        }
+        if row.tail.is_some() {
+            is_open_row = true;
+        }
+        current = ret;
+    }
+    TraitMethodEffectSig {
+        effects: effects.into_iter().collect(),
+        is_open_row,
+        user_arity,
+    }
+}
 
 impl Checker {
     // --- Trait & impl helpers ---
@@ -192,10 +214,20 @@ impl Checker {
                 .find(|(pname, _)| pname == self_param)
                 .map(|(_, id)| *id);
 
+            let effect_row = self.build_effect_row_from_refs(
+                &method.effects,
+                &method.effect_row_var,
+                &mut params_list,
+            )?;
+            for eff in &method.effects {
+                self.record_effect_ref(eff);
+            }
+
             method_sigs.push((
                 method.name.clone(),
                 param_types,
                 return_type,
+                effect_row,
                 trait_param_id,
                 params_list,
             ));
@@ -206,12 +238,14 @@ impl Checker {
         // For phantom type params (not mentioned in the method signature), we create
         // fresh vars and add them to forall so the constraint flows through instantiation.
         let mut trait_method_sigs = Vec::new();
-        for (method_name, param_types, return_type, trait_param_id, mut params_list) in method_sigs
+        for (method_name, param_types, return_type, effect_row, trait_param_id, mut params_list) in
+            method_sigs
         {
-            let mut fun_ty = return_type.clone();
-            for pt in param_types.iter().rev() {
-                fun_ty = Type::arrow(pt.clone(), fun_ty);
-            }
+            let fun_ty = self.function_type_with_innermost_effects(
+                &param_types,
+                return_type.clone(),
+                effect_row,
+            );
             let mut forall = Vec::new();
             super::collect_free_vars(&fun_ty, &mut forall);
 
@@ -259,6 +293,7 @@ impl Checker {
                 None => vec![],
             };
 
+            let effect_sig = trait_method_effect_sig(&fun_ty);
             let scheme = Scheme {
                 forall,
                 constraints,
@@ -280,6 +315,7 @@ impl Checker {
                 return_type,
                 trait_param_id,
                 scheme,
+                effect_sig,
             });
         }
 

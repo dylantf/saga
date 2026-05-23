@@ -1142,6 +1142,19 @@ impl<'a> Lowerer<'a> {
             })
             .collect();
 
+        let trait_method_effects_by_key: HashMap<
+            (String, usize),
+            crate::typechecker::TraitMethodEffectSig,
+        > = check_result
+            .traits
+            .iter()
+            .flat_map(|(trait_name, info)| {
+                info.methods.iter().enumerate().map(move |(idx, method)| {
+                    ((trait_name.clone(), idx), method.effect_sig.clone())
+                })
+            })
+            .collect();
+
         Populator::new(super::call_effects::PopulatorInputs {
             resolved: &self.resolved,
             check_result,
@@ -1151,6 +1164,7 @@ impl<'a> Lowerer<'a> {
             effect_canonical: &self.effect_canonical,
             let_effect_bindings: &self.ctx.let_effect_bindings,
             impl_effects_by_dict: &self.impl_effects_by_dict,
+            trait_method_effects_by_key: &trait_method_effects_by_key,
         })
         .populate(program)
     }
@@ -1473,7 +1487,14 @@ impl<'a> Lowerer<'a> {
         // Group FunBindings by name, preserving declaration order, and simultaneously
         // populate top_level_funs. Handler params are added to the arity for effectful funs.
         let mut clause_groups: Vec<(String, usize, Vec<Clause>, crate::token::Span)> = Vec::new();
-        type DictCtor<'b> = (&'b str, &'b [String], &'b [Expr], &'b [String]);
+        type DictCtor<'b> = (
+            &'b str,
+            &'b [String],
+            &'b [Expr],
+            &'b [Vec<String>],
+            &'b [bool],
+            &'b [String],
+        );
         let mut dict_constructors: Vec<DictCtor<'_>> = Vec::new();
         let mut val_bindings: Vec<(&str, bool, &Expr)> = Vec::new(); // (name, is_inline, value)
 
@@ -1577,6 +1598,8 @@ impl<'a> Lowerer<'a> {
                     name,
                     dict_params,
                     methods,
+                    method_effects,
+                    method_open_rows,
                     impl_effects,
                     ..
                 } => {
@@ -1587,7 +1610,14 @@ impl<'a> Lowerer<'a> {
                             ..Default::default()
                         },
                     );
-                    dict_constructors.push((name, dict_params, methods, impl_effects));
+                    dict_constructors.push((
+                        name,
+                        dict_params,
+                        methods,
+                        method_effects,
+                        method_open_rows,
+                        impl_effects,
+                    ));
                 }
                 Decl::Val {
                     name,
@@ -1609,7 +1639,7 @@ impl<'a> Lowerer<'a> {
         // Used by both the call-effects pre-pass (to classify
         // `DictMethodAccess` call sites) and dict-constructor emission below.
         self.impl_effects_by_dict.clear();
-        for (name, _, _, impl_effects) in &dict_constructors {
+        for (name, _, _, _, _, impl_effects) in &dict_constructors {
             self.impl_effects_by_dict
                 .insert((*name).to_string(), impl_effects.to_vec());
         }
@@ -1908,7 +1938,9 @@ impl<'a> Lowerer<'a> {
         }
 
         // Emit dictionary constructor functions
-        for (name, dict_params, methods, impl_effects) in dict_constructors {
+        for (name, dict_params, methods, method_effects, method_open_rows, impl_effects) in
+            dict_constructors
+        {
             let arity = dict_params.len();
             let params: Vec<String> = dict_params.iter().map(|p| core_var(p)).collect();
             // Methods inherit the impl's `needs` clause as their effect row.
@@ -1919,11 +1951,19 @@ impl<'a> Lowerer<'a> {
             let impl_effects: Vec<String> = impl_effects.to_vec();
             let method_exprs: Vec<CExpr> = methods
                 .iter()
-                .map(|m| {
-                    if !impl_effects.is_empty() {
+                .enumerate()
+                .map(|(idx, m)| {
+                    let mut static_effects = impl_effects.clone();
+                    if let Some(effects) = method_effects.get(idx) {
+                        static_effects.extend(effects.iter().cloned());
+                    }
+                    static_effects.sort();
+                    static_effects.dedup();
+                    let is_open_row = method_open_rows.get(idx).copied().unwrap_or(false);
+                    if !static_effects.is_empty() || is_open_row {
                         self.lambda_effect_context = Some(CpsShape {
-                            static_effects: impl_effects.clone(),
-                            is_open_row: false,
+                            static_effects,
+                            is_open_row,
                         });
                     }
                     let ce = self.lower_expr(m);
@@ -2853,18 +2893,23 @@ impl<'a> Lowerer<'a> {
         args: &[&Expr],
         return_k: Option<CExpr>,
     ) -> Option<CExpr> {
-        let absorbed: Vec<String> = match self.call_effects.get(&app_id).map(|i| &i.kind) {
-            Some(super::call_effects::CallEffectKind::StaticOps { ops })
-            | Some(super::call_effects::CallEffectKind::RowForwarded { static_ops: ops })
-                if !ops.is_empty() =>
-            {
-                let mut effs: Vec<String> = ops.iter().map(|k| k.effect.clone()).collect();
-                effs.sort();
-                effs.dedup();
-                effs
-            }
-            _ => return None,
-        };
+        let (absorbed, is_row_forward): (Vec<String>, bool) =
+            match self.call_effects.get(&app_id).map(|i| &i.kind) {
+                Some(super::call_effects::CallEffectKind::StaticOps { ops }) if !ops.is_empty() => {
+                    let mut effs: Vec<String> = ops.iter().map(|k| k.effect.clone()).collect();
+                    effs.sort();
+                    effs.dedup();
+                    (effs, false)
+                }
+                Some(super::call_effects::CallEffectKind::RowForwarded { static_ops }) => {
+                    let mut effs: Vec<String> =
+                        static_ops.iter().map(|k| k.effect.clone()).collect();
+                    effs.sort();
+                    effs.dedup();
+                    (effs, true)
+                }
+                _ => return None,
+            };
 
         let dict_var = self.fresh();
         let dict_ce = self.lower_expr_value(dict);
@@ -2899,7 +2944,7 @@ impl<'a> Lowerer<'a> {
 
             let mut call_args: Vec<CExpr> =
                 arg_vars.iter().map(|v| CExpr::Var(v.clone())).collect();
-            let (ev_var, ev_ce) = self.build_call_evidence(&absorbed);
+            let (ev_var, ev_ce) = self.build_call_evidence_with(&absorbed, is_row_forward);
             call_args.push(CExpr::Var(ev_var.clone()));
             let (rk_var, rk_ce) = self.effectful_call_return_k_binding(return_k);
             call_args.push(CExpr::Var(rk_var.clone()));
@@ -2920,7 +2965,7 @@ impl<'a> Lowerer<'a> {
         }
 
         let (mut arg_vars, mut bindings) = self.lower_call_args(args, None);
-        let (ev_var, ev_ce) = self.build_call_evidence(&absorbed);
+        let (ev_var, ev_ce) = self.build_call_evidence_with(&absorbed, is_row_forward);
         bindings.push((ev_var.clone(), ev_ce));
         arg_vars.push(ev_var);
         let (rk_var, rk_ce) = self.effectful_call_return_k_binding(return_k);

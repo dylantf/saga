@@ -865,7 +865,7 @@ impl Parser {
             let method_name = self.expect_ident()?;
 
             self.expect(Token::Colon)?;
-            let (params, return_type, _effects, _effect_row_var) =
+            let (params, return_type, effects, effect_row_var) =
                 self.parse_annotated_signature(SignatureSite::TraitMethod, &method_name)?;
             let mut method_end = self.tokens[self.pos - 1].span;
 
@@ -900,6 +900,8 @@ impl Parser {
                     name: method_name,
                     params,
                     return_type,
+                    effects,
+                    effect_row_var,
                     span: method_start.to(method_end),
                     default_body,
                 },

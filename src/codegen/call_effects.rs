@@ -28,7 +28,7 @@ use crate::codegen::CodegenContext;
 use crate::codegen::lower::util;
 use crate::codegen::resolve::{ResolutionMap, ResolvedCodegenKind};
 use crate::codegen::runtime_shape::{CpsShape, RuntimeFunctionShape};
-use crate::typechecker::CheckResult;
+use crate::typechecker::{CheckResult, TraitMethodEffectSig};
 
 /// Per-call metadata. Keyed by the `NodeId` of an `App` node.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -140,6 +140,9 @@ pub struct PopulatorInputs<'a> {
     /// expression to find the underlying `DictRef { name }`, then look up
     /// effects here.
     pub impl_effects_by_dict: &'a HashMap<String, Vec<String>>,
+    /// (canonical trait name, method index) -> trait-declared effect signature.
+    /// This is the contract for polymorphic/where-bound dictionary dispatch.
+    pub trait_method_effects_by_key: &'a HashMap<(String, usize), TraitMethodEffectSig>,
 }
 
 /// Pre-pass walker. Constructed with the data sources it needs and consumed by
@@ -725,9 +728,11 @@ impl<'a> Populator<'a> {
             ExprKind::QualifiedName { name, .. } => {
                 self.classify_named_call(head.id, name, arg_count)
             }
-            ExprKind::DictMethodAccess { dict, .. } => {
-                self.classify_dict_method_call(dict, arg_count)
-            }
+            ExprKind::DictMethodAccess {
+                dict,
+                trait_name,
+                method_index,
+            } => self.classify_dict_method_call(dict, trait_name, *method_index, arg_count),
             ExprKind::Lambda { .. } => self.classify_lambda_call(head.id, arg_count),
             // Other head shapes have no callee identity that resolves to an
             // effect row, so they classify as Pure. Add a branch here when a
@@ -761,21 +766,40 @@ impl<'a> Populator<'a> {
 
     /// Classify a call whose head is a `DictMethodAccess` node.
     ///
-    /// Effect resolution: walk the dict expression to find the underlying
-    /// `DictRef { name }`, peeling `App` chains for parameterized impls
-    /// (e.g. `__dict_Show_List __dict_Show_String`). Look up the impl's
-    /// declared effects in `impl_effects_by_dict`. The lookup is uniform
-    /// across all methods of the impl since impl-level `needs` applies to
-    /// every method body.
+    /// Effect resolution starts from the trait method's declared effect
+    /// signature. For concrete dicts, walk the dict expression to find the
+    /// underlying `DictRef { name }`, peeling `App` chains for parameterized
+    /// impls (e.g. `__dict_Show_List __dict_Show_String`), then union in the
+    /// impl's declared effects from `impl_effects_by_dict`.
     ///
     /// Where-bounded dispatch (dict from a function parameter) ends in a
-    /// `Var` rather than `DictRef` and is classified as `RowForwarded`
-    /// with no static ops — the actual handler closures live in the dict
-    /// tuple's slots and are invoked through the caller's ambient evidence.
-    fn classify_dict_method_call(&self, dict: &Expr, supplied: usize) -> CallEffectInfo {
+    /// `Var` rather than `DictRef`, so only the trait method signature is
+    /// available. Impl-specific extra effects are intentionally not assumed
+    /// for polymorphic dispatch.
+    fn classify_dict_method_call(
+        &self,
+        dict: &Expr,
+        trait_name: &str,
+        method_index: usize,
+        supplied: usize,
+    ) -> CallEffectInfo {
         if supplied == 0 {
             return CallEffectInfo::pure();
         }
+        let method_sig = self
+            .inputs
+            .trait_method_effects_by_key
+            .get(&(trait_name.to_string(), method_index));
+        if let Some(sig) = method_sig
+            && supplied < sig.user_arity
+        {
+            return CallEffectInfo::pure();
+        }
+        let mut effects = method_sig
+            .map(|sig| sig.effects.clone())
+            .unwrap_or_default();
+        let is_open_row = method_sig.is_some_and(|sig| sig.is_open_row);
+
         // Peel `App` chain inside the dict expression.
         let mut current = dict;
         while let ExprKind::App { func, .. } = &current.kind {
@@ -783,32 +807,44 @@ impl<'a> Populator<'a> {
         }
         match &current.kind {
             ExprKind::DictRef { name, .. } => {
-                let Some(effects) = self.inputs.impl_effects_by_dict.get(name) else {
+                if let Some(impl_effects) = self.inputs.impl_effects_by_dict.get(name) {
+                    effects.extend(impl_effects.iter().cloned());
+                    effects.sort();
+                    effects.dedup();
+                }
+                let ops = self.collect_op_keys(&effects);
+                if ops.is_empty() && !is_open_row {
                     return CallEffectInfo::pure();
+                }
+                let kind = if is_open_row {
+                    CallEffectKind::RowForwarded { static_ops: ops }
+                } else {
+                    CallEffectKind::StaticOps { ops }
                 };
-                if effects.is_empty() {
-                    return CallEffectInfo::pure();
-                }
-                let ops = self.collect_op_keys(effects);
-                if ops.is_empty() {
-                    return CallEffectInfo::pure();
-                }
                 CallEffectInfo {
-                    kind: CallEffectKind::StaticOps { ops },
+                    kind,
                     user_arity: supplied,
                     needs_return_k: true,
                 }
             }
             ExprKind::Var { .. } => {
                 // Where-bounded dispatch (dict from a function parameter):
-                // the impl is unknown at this site, so we cannot tell whether
-                // it adds effects. Conservatively classify as pure — matches
-                // the trait method's declared signature, which is what the
-                // typechecker uses at the call site too. This means
-                // where-bounded effectful trait methods are not yet
-                // supported; landing them needs a separate channel that
-                // tracks the caller's view of the dict-param's impl effects.
-                CallEffectInfo::pure()
+                // the concrete impl is unknown, so only the trait method's
+                // declared effects are available at this call site.
+                let ops = self.collect_op_keys(&effects);
+                if ops.is_empty() && !is_open_row {
+                    return CallEffectInfo::pure();
+                }
+                let kind = if is_open_row {
+                    CallEffectKind::RowForwarded { static_ops: ops }
+                } else {
+                    CallEffectKind::StaticOps { ops }
+                };
+                CallEffectInfo {
+                    kind,
+                    user_arity: supplied,
+                    needs_return_k: true,
+                }
             }
             _ => CallEffectInfo::pure(),
         }

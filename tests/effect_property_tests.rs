@@ -632,6 +632,60 @@ result () = {
 }
 
 #[test]
+fn where_bound_trait_method_effect_threads_evidence() {
+    // A where-bound dict elaborates to `DictMethodAccess(Var __dict_..., ...)`.
+    // The call-effects pre-pass must use the trait method's declared `needs`
+    // contract because no concrete impl dict is available at that site.
+    let src = r#"module Main
+
+import Std.Fail (Fail)
+
+type DecodeErr = DecodeErr String
+
+trait Decode a {
+  fun decode : Int -> a needs {Fail DecodeErr}
+}
+
+impl Decode for Int needs {Fail DecodeErr} {
+  decode n = if n < 0 then fail! (DecodeErr "neg") else n
+}
+
+type Wrap a = Wrap a
+
+impl Decode for Wrap a where {a: Decode} needs {Fail DecodeErr} {
+  decode n = Wrap (decode n)
+}
+
+handler to_result for Fail a {
+  fail e = Err e
+  return v = Ok v
+}
+
+fun describe_int : Result Int DecodeErr -> String
+describe_int (Ok n) = "int-ok:" <> show n
+describe_int (Err (DecodeErr e)) = "int-err:" <> e
+
+fun describe_wrap : Result (Wrap Int) DecodeErr -> String
+describe_wrap (Ok (Wrap n)) = "wrap-ok:" <> show n
+describe_wrap (Err (DecodeErr e)) = "wrap-err:" <> e
+
+pub fun result : Unit -> String
+result () = {
+  let int_neg = decode (-1) with to_result
+  let int_ok = decode 0 with to_result
+  let wrap_neg = decode (-1) with to_result
+  let wrap_ok = decode 0 with to_result
+  describe_int int_neg <> ";" <> describe_int int_ok <> ";" <> describe_wrap wrap_neg <> ";" <> describe_wrap wrap_ok
+}
+"#;
+    check_result_string(
+        "where_bound_trait_method_effect_threads_evidence",
+        src,
+        "int-err:neg;int-ok:0;wrap-err:neg;wrap-ok:0",
+    );
+}
+
+#[test]
 fn op_called_in_a_loop_resumes_each_time() {
     let src = r#"module Main
 

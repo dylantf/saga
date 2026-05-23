@@ -44,6 +44,92 @@ type Annotations = (
 );
 
 impl Checker {
+    pub(crate) fn build_effect_row_from_refs(
+        &mut self,
+        effects: &[ast::EffectRef],
+        effect_row_var: &Option<(String, Span)>,
+        params_list: &mut Vec<(String, u32)>,
+    ) -> Result<EffectRow, Diagnostic> {
+        if effects.is_empty() && effect_row_var.is_none() {
+            return Ok(EffectRow::closed(vec![]));
+        }
+
+        let mut seen_effects: HashMap<String, Vec<Type>> = HashMap::new();
+        let mut effect_refs = Vec::new();
+        for e in effects {
+            let args: Vec<Type> = self.convert_effect_ref_args(e, params_list);
+            let current_display = self.prettify_type(&Type::Con(
+                e.name.rsplit('.').next().unwrap_or(&e.name).to_string(),
+                args.clone(),
+            ));
+            let name = self.resolved_effect_name(e.id, &e.name);
+            if !self.effects.contains_key(&name) {
+                self.collected_diagnostics.push(Diagnostic::error_at(
+                    e.span,
+                    format!("undefined effect: {}", e.name),
+                ));
+            }
+            if let Some(prev_args) = seen_effects.get(&name) {
+                if prev_args != &args {
+                    let previous_display = self.prettify_type(&Type::Con(
+                        e.name.rsplit('.').next().unwrap_or(&e.name).to_string(),
+                        prev_args.clone(),
+                    ));
+                    return Err(Diagnostic::error_at(
+                        e.span,
+                        format!(
+                            "conflicting effect requirements in `needs`: `{}` and `{}` both refer to `{}`, but with different type arguments",
+                            previous_display,
+                            current_display,
+                            e.name.rsplit('.').next().unwrap_or(&e.name),
+                        ),
+                    ));
+                }
+                continue;
+            }
+            seen_effects.insert(name.clone(), args.clone());
+            effect_refs.push(EffectEntry::unnamed(name, args));
+        }
+        let tail = effect_row_var.as_ref().map(|(rv_name, _)| {
+            let id = if let Some((_, id)) = params_list.iter().find(|(n, _)| n == rv_name) {
+                *id
+            } else {
+                let id = self.next_var;
+                self.next_var += 1;
+                params_list.push((rv_name.clone(), id));
+                id
+            };
+            Box::new(Type::Var(id))
+        });
+        Ok(EffectRow {
+            effects: effect_refs,
+            tail,
+        })
+    }
+
+    pub(crate) fn function_type_with_innermost_effects(
+        &self,
+        param_types: &[Type],
+        return_type: Type,
+        effect_row: EffectRow,
+    ) -> Type {
+        let mut fun_ty = return_type;
+        let mut first_arrow = true;
+        for param_ty in param_types.iter().rev() {
+            if first_arrow {
+                fun_ty = Type::Fun(
+                    Box::new(param_ty.clone()),
+                    Box::new(fun_ty),
+                    effect_row.clone(),
+                );
+            } else {
+                fun_ty = Type::arrow(param_ty.clone(), fun_ty);
+            }
+            first_arrow = false;
+        }
+        fun_ty
+    }
+
     // --- Top-level declarations ---
 
     /// Typecheck a program and return the public result.
@@ -453,10 +539,8 @@ impl Checker {
                     };
                     self.type_arity
                         .insert(canonical_name.clone(), type_params.len());
-                    self.type_param_kinds.insert(
-                        canonical_name,
-                        type_params.iter().map(|p| p.kind).collect(),
-                    );
+                    self.type_param_kinds
+                        .insert(canonical_name, type_params.iter().map(|p| p.kind).collect());
                 }
             }
             // Cycle check across the set of aliases in this module.
@@ -656,78 +740,19 @@ impl Checker {
             } = decl
             {
                 let mut params_list: Vec<(String, u32)> = vec![];
-                let mut fun_ty = self.convert_user_type_expr(return_type, &mut params_list);
-
-                // Build effect row from the function's `needs` clause.
-                let fun_effect_row = if !effects.is_empty() || effect_row_var.is_some() {
-                    let mut seen_effects: HashMap<String, Vec<Type>> = HashMap::new();
-                    let mut effect_refs = Vec::new();
-                    for e in effects {
-                        let args: Vec<Type> = self.convert_effect_ref_args(e, &mut params_list);
-                        let current_display = self.prettify_type(&Type::Con(
-                            e.name.rsplit('.').next().unwrap_or(&e.name).to_string(),
-                            args.clone(),
-                        ));
-                        let name = self.resolved_effect_name(e.id, &e.name);
-                        if !self.effects.contains_key(&name) {
-                            self.collected_diagnostics.push(Diagnostic::error_at(
-                                e.span,
-                                format!("undefined effect: {}", e.name),
-                            ));
-                        }
-                        if let Some(prev_args) = seen_effects.get(&name) {
-                            if prev_args != &args {
-                                let previous_display = self.prettify_type(&Type::Con(
-                                    e.name.rsplit('.').next().unwrap_or(&e.name).to_string(),
-                                    prev_args.clone(),
-                                ));
-                                return Err(vec![Diagnostic::error_at(
-                                    e.span,
-                                    format!(
-                                        "conflicting effect requirements in `needs`: `{}` and `{}` both refer to `{}`, but with different type arguments",
-                                        previous_display,
-                                        current_display,
-                                        e.name.rsplit('.').next().unwrap_or(&e.name),
-                                    ),
-                                )]);
-                            }
-                            continue;
-                        }
-                        seen_effects.insert(name.clone(), args.clone());
-                        effect_refs.push(EffectEntry::unnamed(name, args));
-                    }
-                    let tail = effect_row_var.as_ref().map(|(rv_name, _)| {
-                        let id =
-                            if let Some((_, id)) = params_list.iter().find(|(n, _)| n == rv_name) {
-                                *id
-                            } else {
-                                let id = self.next_var;
-                                self.next_var += 1;
-                                params_list.push((rv_name.clone(), id));
-                                id
-                            };
-                        Box::new(Type::Var(id))
-                    });
-                    EffectRow {
-                        effects: effect_refs,
-                        tail,
-                    }
-                } else {
-                    EffectRow::closed(vec![])
-                };
-
-                // Place effect row on the innermost arrow.
-                let mut first_arrow = true;
-                for (_, texpr) in params.iter().rev() {
-                    let param_ty = self.convert_user_type_expr(texpr, &mut params_list);
-                    if first_arrow {
-                        fun_ty =
-                            Type::Fun(Box::new(param_ty), Box::new(fun_ty), fun_effect_row.clone());
-                    } else {
-                        fun_ty = Type::arrow(param_ty, fun_ty);
-                    }
-                    first_arrow = false;
-                }
+                let return_ty = self.convert_user_type_expr(return_type, &mut params_list);
+                let fun_effect_row = self
+                    .build_effect_row_from_refs(effects, effect_row_var, &mut params_list)
+                    .map_err(|e| vec![e])?;
+                let param_types: Vec<Type> = params
+                    .iter()
+                    .map(|(_, texpr)| self.convert_user_type_expr(texpr, &mut params_list))
+                    .collect();
+                let fun_ty = self.function_type_with_innermost_effects(
+                    &param_types,
+                    return_ty,
+                    fun_effect_row,
+                );
                 annotations.insert(name.clone(), (fun_ty.clone(), *span));
 
                 // Always register in known_funs (even pure functions) so the
@@ -2011,9 +2036,15 @@ impl Checker {
         }
 
         if let Some(path) = cycle {
-            let display: Vec<String> = path.iter().map(|c| super::bare_type_name(c).to_string()).collect();
+            let display: Vec<String> = path
+                .iter()
+                .map(|c| super::bare_type_name(c).to_string())
+                .collect();
             let head = display.first().cloned().unwrap_or_default();
-            let span = spans.get(&path[0]).copied().unwrap_or(Span { start: 0, end: 0 });
+            let span = spans
+                .get(&path[0])
+                .copied()
+                .unwrap_or(Span { start: 0, end: 0 });
             return Err(vec![Diagnostic::error_at(
                 span,
                 format!(

@@ -439,7 +439,12 @@ pub fn format_trait_def(
         |method| {
             let sig = docs![
                 Doc::text(format!("fun {} : ", method.name)),
-                format_fun_type(&method.params, &method.return_type, &[], &None)
+                format_fun_type(
+                    &method.params,
+                    &method.return_type,
+                    &method.effects,
+                    &method.effect_row_var,
+                )
             ];
             if let Some(default) = &method.default_body {
                 docs![

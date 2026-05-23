@@ -5595,6 +5595,45 @@ fn no_unnecessary_handler_warning_when_used() {
 }
 
 #[test]
+fn trait_method_needs_survives_in_scheme() {
+    let checker = check(
+        "effect Fail e {\n  fun fail : e -> a\n}\n\
+         trait Decode a {\n  fun decode : Int -> a needs {Fail String}\n}\n\
+         impl Decode for Int needs {Fail String} {\n  decode n = if n < 0 then fail! \"neg\" else n\n}",
+    )
+    .unwrap();
+    let trait_info = checker.trait_state.traits.get("Decode").unwrap();
+    let method = &trait_info.methods[0];
+    let resolved = checker.sub.apply(&method.scheme.ty);
+    let effects = super::effects_from_type(&resolved);
+    assert!(effects.contains("Fail"), "effects were {:?}", effects);
+    assert_eq!(method.effect_sig.effects, vec!["Fail".to_string()]);
+    assert!(!method.effect_sig.is_open_row);
+    assert_eq!(method.effect_sig.user_arity, 1);
+}
+
+#[test]
+fn no_unnecessary_handler_warning_for_where_bound_effectful_trait_method() {
+    let checker = check(
+        "effect Fail e {\n  fun fail : e -> a\n}\n\
+         trait Decode a {\n  fun decode : Int -> a needs {Fail String}\n}\n\
+         impl Decode for Int needs {Fail String} {\n  decode n = if n < 0 then fail! \"neg\" else n\n}\n\
+         type Wrap a = Wrap a\n\
+         impl Decode for Wrap a where {a: Decode} needs {Fail String} {\n  decode n = Wrap (decode n)\n}\n\
+         handler to_result for Fail a {\n  fail e = Err e\n  return v = Ok v\n}\n\
+         fun run_wrap : Int -> Result (Wrap Int) String\n\
+         run_wrap n = decode n with to_result",
+    )
+    .unwrap();
+    let warnings: Vec<_> = checker
+        .collected_diagnostics
+        .iter()
+        .filter(|d| d.message.contains("unnecessary"))
+        .collect();
+    assert!(warnings.is_empty(), "unexpected warning: {:?}", warnings);
+}
+
+#[test]
 fn no_unnecessary_handler_warning_for_indirect_named_handler_dependencies() {
     let checker = check(
         "effect Worker {\n  fun work : Unit -> Unit\n}\n\
@@ -8414,7 +8453,9 @@ fn alias_over_application_is_rejected() {
     let src = "type alias UserId = Int\n\
                fun bad : UserId Int -> Int\n\
                bad _ = 0\n";
-    let err = check(src).err().expect("expected over-application diagnostic");
+    let err = check(src)
+        .err()
+        .expect("expected over-application diagnostic");
     assert!(
         err.message.to_lowercase().contains("argument"),
         "expected over-application diagnostic, got: {}",
@@ -8482,7 +8523,9 @@ fn alias_to_opaque_type_does_not_leak_constructors() {
 #[test]
 fn alias_body_with_undeclared_type_var_is_rejected() {
     let src = "type alias Foo = Maybe b\n";
-    let err = check(src).err().expect("expected undeclared-var diagnostic");
+    let err = check(src)
+        .err()
+        .expect("expected undeclared-var diagnostic");
     let msg = err.message.to_lowercase();
     assert!(
         msg.contains("undeclared") && msg.contains("`b`"),

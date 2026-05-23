@@ -481,6 +481,10 @@ pub enum Decl {
         dict_params: Vec<String>,
         /// Method implementations as lambda expressions, ordered by trait method declaration order
         methods: Vec<Expr>,
+        /// Per-method trait-declared effects, ordered with `methods`.
+        method_effects: Vec<Vec<String>>,
+        /// Per-method flag for open trait-declared effect rows.
+        method_open_rows: Vec<bool>,
         /// Sorted, canonical effect names from the impl's `needs` clause.
         /// Applies uniformly to every method dispatched through this dict —
         /// codegen uses it to compile each method body as effectful (params
@@ -723,6 +727,7 @@ pub enum ExprKind {
     /// Lowered to `erlang:element(method_index+1, dict)`.
     DictMethodAccess {
         dict: Box<Expr>,
+        trait_name: String,
         method_index: usize,
     },
     /// Reference to a dictionary value (a variable holding a dict, or a dict constructor name).
@@ -1431,6 +1436,8 @@ pub struct TraitMethod {
     pub name: String,
     pub params: Vec<(String, TypeExpr)>,
     pub return_type: TypeExpr,
+    pub effects: Vec<EffectRef>,
+    pub effect_row_var: Option<(String, Span)>,
     pub span: Span,
     /// Optional default body. When present, impls that omit this method
     /// inherit it via clone-with-fresh-NodeIds in `register_impl`.

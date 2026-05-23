@@ -711,6 +711,9 @@ impl<'a> Resolver<'a> {
                         self.resolve_type_expr(texpr);
                     }
                     self.resolve_type_expr(&method.node.return_type);
+                    for effect_ref in &method.node.effects {
+                        self.record_effect_ref(effect_ref);
+                    }
                 }
             }
             Decl::ImplDef {

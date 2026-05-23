@@ -456,6 +456,8 @@ impl Elaborator {
 
                     // Order methods by trait declaration order
                     let mut ordered_methods = Vec::new();
+                    let mut method_effects = Vec::new();
+                    let mut method_open_rows = Vec::new();
                     if let Some(ref info) = trait_info {
                         for trait_method in &info.methods {
                             if let Some(ann) = methods
@@ -471,6 +473,8 @@ impl Elaborator {
                                         body: Box::new(elab_body),
                                     },
                                 ));
+                                method_effects.push(trait_method.effect_sig.effects.clone());
+                                method_open_rows.push(trait_method.effect_sig.is_open_row);
                             }
                         }
                     }
@@ -497,6 +501,8 @@ impl Elaborator {
                         name: dict_name,
                         dict_params,
                         methods: ordered_methods,
+                        method_effects,
+                        method_open_rows,
                         impl_effects,
                         span: *span,
                     });
@@ -696,6 +702,7 @@ impl Elaborator {
                             span,
                             ExprKind::DictMethodAccess {
                                 dict: Box::new(dict_expr),
+                                trait_name: trait_name.clone(),
                                 method_index,
                             },
                         );
@@ -764,6 +771,7 @@ impl Elaborator {
                                 func.span,
                                 ExprKind::DictMethodAccess {
                                     dict: Box::new(dict_expr),
+                                    trait_name: trait_name.clone(),
                                     method_index,
                                 },
                             );
@@ -836,6 +844,7 @@ impl Elaborator {
                             func.span,
                             ExprKind::DictMethodAccess {
                                 dict: Box::new(dict_expr),
+                                trait_name: trait_name.clone(),
                                 method_index,
                             },
                         );
@@ -1554,6 +1563,7 @@ impl Elaborator {
             span,
             ExprKind::DictMethodAccess {
                 dict: Box::new(dict_expr),
+                trait_name: ORD.to_string(),
                 method_index: 0,
             },
         );
@@ -1610,6 +1620,7 @@ impl Elaborator {
             span,
             ExprKind::DictMethodAccess {
                 dict: Box::new(dict_expr),
+                trait_name: SEMIGROUP.to_string(),
                 method_index: 0,
             },
         );
@@ -1772,6 +1783,7 @@ impl Elaborator {
             span,
             ExprKind::DictMethodAccess {
                 dict: Box::new(dict),
+                trait_name: trait_name.to_string(),
                 method_index: 0,
             },
         ))

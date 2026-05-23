@@ -845,6 +845,13 @@ pub struct HandlerInfo {
 }
 
 #[derive(Debug, Clone)]
+pub struct TraitMethodEffectSig {
+    pub effects: Vec<String>,
+    pub is_open_row: bool,
+    pub user_arity: usize,
+}
+
+#[derive(Debug, Clone)]
 pub struct TraitMethodInfo {
     pub name: String,
     pub param_types: Vec<Type>,
@@ -857,6 +864,7 @@ pub struct TraitMethodInfo {
     /// authoritative scheme: trait methods live in their owning `TraitInfo`,
     /// not in a flat per-name table.
     pub scheme: Scheme,
+    pub effect_sig: TraitMethodEffectSig,
 }
 
 #[derive(Debug, Clone)]

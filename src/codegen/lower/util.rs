@@ -170,7 +170,9 @@ pub(super) fn collect_dict_method_call(expr: &Expr) -> Option<(&Expr, usize, Vec
                 args.push(arg);
                 current = func;
             }
-            ExprKind::DictMethodAccess { dict, method_index } => {
+            ExprKind::DictMethodAccess {
+                dict, method_index, ..
+            } => {
                 args.reverse();
                 return Some((dict.as_ref(), *method_index, args));
             }

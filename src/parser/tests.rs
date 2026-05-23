@@ -2323,6 +2323,20 @@ fn trait_def_simple() {
 }
 
 #[test]
+fn trait_method_signature_needs() {
+    let decls = parse("trait Decode a {\n  fun decode : Int -> a needs {Fail String}\n}");
+    match &decls[0] {
+        Decl::TraitDef { methods, .. } => {
+            let method = &methods[0].node;
+            assert_eq!(method.name, "decode");
+            assert_eq!(effect_names(&method.effects), vec!["Fail"]);
+            assert!(method.effect_row_var.is_none());
+        }
+        other => panic!("expected trait def, got {:?}", other),
+    }
+}
+
+#[test]
 fn trait_def_with_supertraits() {
     let decls =
         parse("trait Ord a where {a: Eq} {\n  fun compare : (x: a) -> (y: a) -> Ordering\n}");
@@ -3308,7 +3322,13 @@ fn symbol_decl_formatter_roundtrip() {
 fn type_alias_simple_parses() {
     let program = parse("type alias UserId = Int");
     assert_eq!(program.len(), 1);
-    let Decl::TypeAlias { name, type_params, public, .. } = &program[0] else {
+    let Decl::TypeAlias {
+        name,
+        type_params,
+        public,
+        ..
+    } = &program[0]
+    else {
         panic!("expected TypeAlias, got {:?}", program[0]);
     };
     assert_eq!(name, "UserId");
@@ -3341,7 +3361,9 @@ fn type_alias_with_deriving_is_rejected() {
     // The grammar reserves `deriving` for type/record decls only — alias
     // bodies are single TypeExprs, so a trailing `deriving (...)` either
     // gets swallowed into the body or produces a parse error.
-    let tokens = Lexer::new("type alias Foo = Int deriving (Show)").lex().unwrap();
+    let tokens = Lexer::new("type alias Foo = Int deriving (Show)")
+        .lex()
+        .unwrap();
     let result = Parser::new(tokens).parse_program();
     assert!(
         result.is_err(),

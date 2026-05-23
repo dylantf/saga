@@ -1,0 +1,12 @@
+[project]
+name = "effectful-trait-self-dispatch"
+
+[bin]
+main = "src/Main.saga"
+
+# [library]
+# module = "EffectfulTraitSelfDispatch"
+# expose = []
+
+# [deps]
+# some-lib = { path = "../some-lib" }
