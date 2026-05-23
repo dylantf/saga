@@ -305,7 +305,10 @@ fn normalize_expr(e: &mut Expr) {
 
 fn normalize_expr_kind(ek: &mut ExprKind) {
     match ek {
-        ExprKind::Lit { .. } | ExprKind::Var { .. } | ExprKind::Constructor { .. } => {}
+        ExprKind::Lit { .. }
+        | ExprKind::Var { .. }
+        | ExprKind::Constructor { .. }
+        | ExprKind::AtomIntrinsic { .. } => {}
         ExprKind::App { func, arg } => {
             normalize_expr(func);
             normalize_expr(arg);

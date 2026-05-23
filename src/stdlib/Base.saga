@@ -64,6 +64,17 @@ impl Ord for String {
   compare x y = if x < y then Lt else if x > y then Gt else Eq
 }
 
+#@ Phantom type carrying a type-level atom. Used to make `KnownAtom`
+#@ dispatch unambiguous at the call site (the atom appears in the
+#@ Proxy's type parameter).
+pub type Proxy (n : Atom) = Proxy
+
+#@ Reflect a type-level atom to its source name as a String.
+#@ Implemented universally by the compiler for every concrete atom literal.
+pub trait KnownAtom (n : Atom) {
+  fun atom_name : Proxy n -> String
+}
+
 #@ Applies a function to a value, discards the result, and returns the value unchanged.
 #@ Useful for debugging without disrupting an expression: `x |> tap dbg |> process`
 pub fun tap : (a -> b) -> a -> a

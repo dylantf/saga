@@ -762,7 +762,8 @@ fn qualify_free_vars(
         | ExprKind::Constructor { .. }
         | ExprKind::QualifiedName { .. }
         | ExprKind::DictMethodAccess { .. }
-        | ExprKind::DictRef { .. } => {}
+        | ExprKind::DictRef { .. }
+        | ExprKind::AtomIntrinsic { .. } => {}
         ExprKind::App { func, arg } => {
             qualify_free_vars(func, module, module_values, trait_methods, bound);
             qualify_free_vars(arg, module, module_values, trait_methods, bound);

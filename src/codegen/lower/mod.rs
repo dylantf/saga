@@ -3814,6 +3814,10 @@ impl<'a> Lowerer<'a> {
 
             ExprKind::BitString { segments } => self.lower_bitstring_expr(segments),
 
+            ExprKind::AtomIntrinsic { atom: _ } => {
+                todo!("atom intrinsic codegen — chunk 4")
+            }
+
             // StringInterpolation should be desugared before reaching the lowerer,
             // but keep a fallback just in case.
             #[allow(unreachable_patterns)]

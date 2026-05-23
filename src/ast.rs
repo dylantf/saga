@@ -719,6 +719,10 @@ pub enum ExprKind {
         func: String,
         args: Vec<Expr>,
     },
+    /// Produced by elaboration for the universal `KnownAtom` impl: evaluates
+    /// to the source name of the concrete atom captured at the call site as
+    /// a String. Codegen for this node is implemented in chunk 4.
+    AtomIntrinsic { atom: String },
 }
 
 impl Expr {
@@ -809,7 +813,8 @@ impl Expr {
             | ExprKind::Var { .. }
             | ExprKind::Constructor { .. }
             | ExprKind::QualifiedName { .. }
-            | ExprKind::DictRef { .. } => false,
+            | ExprKind::DictRef { .. }
+            | ExprKind::AtomIntrinsic { .. } => false,
         }
     }
 }

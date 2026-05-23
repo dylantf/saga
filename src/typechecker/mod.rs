@@ -889,6 +889,11 @@ pub struct TraitEvidence {
     /// e.g. for `ConvertTo NOK`, this holds [Type::Con("NOK", [])].
     /// Empty for single-param traits.
     pub trait_type_args: Vec<Type>,
+    /// For `KnownAtom 'foo` constraints resolved against a concrete atom
+    /// literal: the atom's source name (e.g. `"foo"`). The elaborator uses
+    /// this to emit an atom-flavored intrinsic instead of a normal dict
+    /// lookup. `None` for all other trait evidence.
+    pub resolved_atom: Option<String>,
 }
 
 /// Warnings deferred until after inference, when substitutions are complete.

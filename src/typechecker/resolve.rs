@@ -926,7 +926,9 @@ impl<'a> Resolver<'a> {
                 unreachable!("surface syntax should be desugared before resolution")
             }
             ExprKind::DictMethodAccess { dict, .. } => self.resolve_expr(dict),
-            ExprKind::DictRef { .. } | ExprKind::ForeignCall { .. } => {}
+            ExprKind::DictRef { .. }
+            | ExprKind::ForeignCall { .. }
+            | ExprKind::AtomIntrinsic { .. } => {}
         }
     }
 
@@ -1255,7 +1257,8 @@ fn walk_expr(expr: &Expr, out: &mut HashMap<String, crate::token::Span>) {
         ExprKind::Lit { .. }
         | ExprKind::Var { .. }
         | ExprKind::Constructor { .. }
-        | ExprKind::DictRef { .. } => {}
+        | ExprKind::DictRef { .. }
+        | ExprKind::AtomIntrinsic { .. } => {}
     }
 }
 

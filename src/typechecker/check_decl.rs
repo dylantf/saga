@@ -1426,6 +1426,20 @@ impl Checker {
                                     }
                             });
                     if in_where {
+                        let is_known_atom = self
+                            .resolve_trait_name(&trait_name)
+                            .map(|t| t == "Std.Base.KnownAtom")
+                            .unwrap_or(false)
+                            || trait_name == "KnownAtom";
+                        if is_known_atom
+                            && self.var_kind(id) == crate::ast::Kind::Atom
+                        {
+                            return Err(Diagnostic::error_at(
+                                span,
+                                "polymorphic atom reflection not yet supported (chunk 4)"
+                                    .to_string(),
+                            ));
+                        }
                         let var_name = self.resolve_where_var_name(&trait_name, id);
                         self.evidence.push(super::TraitEvidence {
                             node_id,
@@ -1433,6 +1447,7 @@ impl Checker {
                             resolved_type: None,
                             type_var_name: var_name,
                             trait_type_args: trait_type_arg_types.clone(),
+                                    resolved_atom: None,
                         });
                         continue;
                     }
@@ -1468,6 +1483,7 @@ impl Checker {
                                 resolved_type: None,
                                 type_var_name: var_name,
                                 trait_type_args: trait_type_arg_types.clone(),
+                                    resolved_atom: None,
                             });
                             continue;
                         }
@@ -1491,6 +1507,7 @@ impl Checker {
                         resolved_type: None,
                         type_var_name: var_name,
                         trait_type_args: trait_type_arg_types.clone(),
+                                    resolved_atom: None,
                     });
                     scheme_constraints.push((trait_name, id, span));
                 }
@@ -2601,6 +2618,7 @@ impl Checker {
                                     resolved_type: Some((type_name.clone(), args.clone())),
                                     type_var_name: None,
                                     trait_type_args: resolved_extra_types,
+                                    resolved_atom: None,
                                 });
                                 // Push conditional constraints for type parameters
                                 if type_name == super::canonicalize_type_name("Tuple") {
@@ -2632,6 +2650,20 @@ impl Checker {
                     }
                     // Still a type variable: check where clause bounds
                     Type::Var(id) => {
+                        let resolved_trait_known_atom = self
+                            .resolve_trait_name(&trait_name)
+                            .map(|t| t == "Std.Base.KnownAtom")
+                            .unwrap_or(false)
+                            || trait_name == "KnownAtom";
+                        if resolved_trait_known_atom
+                            && self.var_kind(*id) == crate::ast::Kind::Atom
+                        {
+                            return Err(rewrite_diag(
+                                "polymorphic atom reflection not yet supported (chunk 4)"
+                                    .to_string(),
+                                span,
+                            ));
+                        }
                         let covered = resolved_bounds
                             .get(id)
                             .is_some_and(|b| b.contains(&trait_name));
@@ -2653,6 +2685,7 @@ impl Checker {
                             resolved_type: None,
                             type_var_name: var_name,
                             trait_type_args: trait_type_arg_types.clone(),
+                                    resolved_atom: None,
                         });
                     }
                     Type::Fun(_, _, _) => {
@@ -2670,11 +2703,28 @@ impl Checker {
                         ));
                     }
                     Type::Atom(name) => {
-                        let display = trait_name.rsplit('.').next().unwrap_or(&trait_name);
-                        return Err(rewrite_diag(
-                            format!("no impl of {} for atom type '{}", display, name),
-                            span,
-                        ));
+                        let resolved_trait = self
+                            .resolve_trait_name(&trait_name)
+                            .unwrap_or_else(|| trait_name.clone());
+                        if resolved_trait == "Std.Base.KnownAtom"
+                            || trait_name == "KnownAtom"
+                        {
+                            self.evidence.push(super::TraitEvidence {
+                                node_id,
+                                trait_name: resolved_trait,
+                                resolved_type: None,
+                                type_var_name: None,
+                                trait_type_args: vec![],
+                                resolved_atom: Some(name.clone()),
+                            });
+                        } else {
+                            let display =
+                                trait_name.rsplit('.').next().unwrap_or(&trait_name);
+                            return Err(rewrite_diag(
+                                format!("no impl of {} for atom type '{}", display, name),
+                                span,
+                            ));
+                        }
                     }
                     // Error/Never type: skip trait checking
                     Type::Error => {}
