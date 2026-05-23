@@ -243,6 +243,38 @@ pub fn format_type_def(decl: &Decl) -> Doc {
     docs_from_vec(parts)
 }
 
+pub fn format_type_alias(decl: &Decl) -> Doc {
+    let Decl::TypeAlias {
+        doc,
+        public,
+        name,
+        type_params,
+        body,
+        ..
+    } = decl
+    else {
+        unreachable!()
+    };
+
+    let mut parts = Vec::new();
+    format_doc_preamble(doc, &mut parts);
+
+    let mut header = String::new();
+    if *public {
+        header.push_str("pub ");
+    }
+    header.push_str("type alias ");
+    header.push_str(name);
+    for tp in type_params {
+        header.push(' ');
+        write!(header, "{}", tp).unwrap();
+    }
+    header.push_str(" = ");
+    parts.push(Doc::text(header));
+    parts.push(format_type_expr(body));
+    docs_from_vec(parts)
+}
+
 pub fn format_record_def(decl: &Decl) -> Doc {
     let Decl::RecordDef {
         doc,

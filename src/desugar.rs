@@ -116,6 +116,7 @@ fn desugar_decl(decl: &mut Decl) {
         // Declarations without expression bodies
         Decl::FunSignature { .. }
         | Decl::TypeDef { .. }
+        | Decl::TypeAlias { .. }
         | Decl::RecordDef { .. }
         | Decl::EffectDef { .. }
         | Decl::TraitDef { .. }

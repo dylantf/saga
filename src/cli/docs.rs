@@ -131,6 +131,7 @@ fn render_module(module_name: &str, decls: &[Decl]) -> String {
     for decl in decls {
         match decl {
             Decl::TypeDef { public: true, .. } => types.push(decl),
+            Decl::TypeAlias { public: true, .. } => types.push(decl),
             Decl::RecordDef { public: true, .. } => types.push(decl),
             Decl::FunSignature { public: true, .. } => functions.push(decl),
             Decl::EffectDef { public: true, .. } => effects.push(decl),
@@ -290,6 +291,23 @@ fn render_type_decl(out: &mut String, decl: &Decl) {
                 }
             }
             writeln!(out).unwrap();
+            writeln!(out, "```\n").unwrap();
+            render_doc(out, doc);
+        }
+        Decl::TypeAlias {
+            name,
+            doc,
+            type_params,
+            body,
+            ..
+        } => {
+            writeln!(out, "### {}\n", name).unwrap();
+            writeln!(out, "```saga").unwrap();
+            write!(out, "type alias {}", name).unwrap();
+            for p in type_params {
+                write!(out, " {}", p).unwrap();
+            }
+            writeln!(out, " = {}", format_type_expr(body)).unwrap();
             writeln!(out, "```\n").unwrap();
             render_doc(out, doc);
         }

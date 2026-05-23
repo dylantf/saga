@@ -277,6 +277,21 @@ fn find_in_decl(decl: &Decl, offset: usize) -> Found {
             }
             contains_ident(name_span, offset).then(|| (name.clone(), *name_span, None))
         }
+        Decl::TypeAlias {
+            name,
+            name_span,
+            body,
+            span,
+            ..
+        } => {
+            if !contains(span, offset) {
+                return None;
+            }
+            if let Some(r) = find_in_type_expr(body, offset) {
+                return Some(r);
+            }
+            contains_ident(name_span, offset).then(|| (name.clone(), *name_span, None))
+        }
         Decl::EffectDef {
             name,
             name_span,

@@ -8327,3 +8327,210 @@ fn symbol_handler_body_ascription_uses_handled_effect_type_var() {
                }\n";
     check(src).unwrap();
 }
+
+// --- Type aliases ---
+
+#[test]
+fn alias_primitive_is_interchangeable_with_underlying() {
+    let src = "type alias UserId = Int\n\
+               fun f : UserId -> Int\n\
+               f x = x + 1\n\
+               let y = f 5\n";
+    check(src).expect("basic primitive alias should typecheck");
+}
+
+#[test]
+fn alias_parameterized_is_interchangeable_with_underlying() {
+    let src = "type alias Bag a = List a\n\
+               fun first : Bag Int -> Maybe Int\n\
+               first xs = case xs {\n\
+                 [] -> Nothing\n\
+                 x :: _ -> Just x\n\
+               }\n";
+    check(src).expect("parameterized alias should typecheck");
+}
+
+#[test]
+fn alias_symbol_lifted_through_unfolding() {
+    let src = "type Id (k : Symbol) = Id Int\n\
+               type alias UserId = Id 'user\n\
+               let u : UserId = Id 1\n";
+    check(src).expect("symbol-tagged alias should typecheck");
+}
+
+#[test]
+fn alias_pattern_match_through_to_underlying_constructors() {
+    let src = "type alias Outcome a = Result a String\n\
+               fun handle : Outcome Int -> Int\n\
+               handle r = case r {\n\
+                 Ok n -> n\n\
+                 Err _ -> 0\n\
+               }\n";
+    check(src).expect("alias should unfold for pattern matching");
+}
+
+#[test]
+fn alias_cycle_self_reference_is_rejected() {
+    let src = "type alias T = List T\n";
+    let err = check(src).err().expect("expected cycle diagnostic");
+    let msg = err.message.to_lowercase();
+    assert!(
+        msg.contains("recursive") && msg.contains("t"),
+        "expected recursive-alias diagnostic, got: {}",
+        err.message
+    );
+}
+
+#[test]
+fn alias_mutual_cycle_is_rejected() {
+    let src = "type alias A = B\n\
+               type alias B = A\n";
+    let err = check(src).err().expect("expected cycle diagnostic");
+    assert!(
+        err.message.to_lowercase().contains("recursive"),
+        "expected recursive-alias diagnostic, got: {}",
+        err.message
+    );
+}
+
+#[test]
+fn alias_partial_application_is_rejected() {
+    // Bag requires 1 arg; using it without an arg should fail.
+    let src = "type alias Bag a = List a\n\
+               fun bad : Bag -> Int\n\
+               bad _ = 0\n";
+    let err = check(src).err().expect("expected partial alias diagnostic");
+    let msg = err.message.to_lowercase();
+    assert!(
+        msg.contains("alias") && msg.contains("bag"),
+        "expected partial-alias diagnostic, got: {}",
+        err.message
+    );
+}
+
+#[test]
+fn alias_over_application_is_rejected() {
+    // UserId has arity 0; applying any arg should fail.
+    let src = "type alias UserId = Int\n\
+               fun bad : UserId Int -> Int\n\
+               bad _ = 0\n";
+    let err = check(src).err().expect("expected over-application diagnostic");
+    assert!(
+        err.message.to_lowercase().contains("argument"),
+        "expected over-application diagnostic, got: {}",
+        err.message
+    );
+}
+
+#[test]
+fn alias_impl_target_is_rejected() {
+    let src = "type alias UserId = Int\n\
+               trait Tagged a { fun tag : a -> Int }\n\
+               impl Tagged for UserId { tag x = x }\n";
+    let err = check(src).err().expect("expected impl-on-alias diagnostic");
+    let msg = err.message.to_lowercase();
+    assert!(
+        msg.contains("alias") && msg.contains("userid"),
+        "expected impl-on-alias diagnostic, got: {}",
+        err.message
+    );
+}
+
+#[test]
+fn alias_with_kind_annotated_param_works() {
+    let src = "type Id (k : Symbol) = Id Int\n\
+               type alias Tagged (k : Symbol) = Id k\n\
+               type alias UserId = Tagged 'user\n\
+               let u : UserId = Id 1\n";
+    check(src).expect("kind-annotated alias param should work");
+}
+
+#[test]
+fn alias_cross_module_round_trips() {
+    let lib = "module Lib\n\
+               pub type alias UserId = Int\n";
+    let main = "import Lib\n\
+                fun consume : Lib.UserId -> Int\n\
+                consume x = x + 1\n\
+                let y = consume 7\n";
+    check_with_project_files(&[("lib/Lib.saga", lib)], main)
+        .expect("cross-module alias should resolve");
+}
+
+#[test]
+fn alias_to_opaque_type_does_not_leak_constructors() {
+    // Even though Lib exports a `pub type alias` over the opaque type,
+    // the importer still cannot construct the opaque type because
+    // constructor visibility is independent of type-name visibility.
+    let lib = "module Lib\n\
+               opaque type Secret = Hidden Int\n\
+               pub type alias Token = Secret\n";
+    let main = "import Lib\n\
+                fun build : Int -> Lib.Token\n\
+                build n = Hidden n\n";
+    let err = check_with_project_files(&[("lib/Lib.saga", lib)], main)
+        .err()
+        .expect("constructor must not leak through alias");
+    let msg = err.message.to_lowercase();
+    assert!(
+        msg.contains("hidden") || msg.contains("unknown") || msg.contains("constructor"),
+        "expected unknown-constructor diagnostic, got: {}",
+        err.message
+    );
+}
+
+#[test]
+fn alias_body_with_undeclared_type_var_is_rejected() {
+    let src = "type alias Foo = Maybe b\n";
+    let err = check(src).err().expect("expected undeclared-var diagnostic");
+    let msg = err.message.to_lowercase();
+    assert!(
+        msg.contains("undeclared") && msg.contains("`b`"),
+        "expected undeclared-var diagnostic, got: {}",
+        err.message
+    );
+}
+
+#[test]
+fn alias_body_with_declared_type_var_is_accepted() {
+    let src = "type alias Foo b = Maybe b\n\
+               fun get : Foo Int -> Int\n\
+               get _ = 0\n";
+    check(src).expect("declared var in alias body should typecheck");
+}
+
+#[test]
+fn alias_body_partial_use_is_rejected_at_declaration() {
+    // Bag has arity 1; `Bag` without an arg in another alias body should
+    // fail at the alias declaration, not be deferred to use sites.
+    let src = "type alias Bag a = List a\n\
+               type alias Bad = Bag\n";
+    let err = check(src).err().expect("expected partial-alias diagnostic");
+    let msg = err.message.to_lowercase();
+    assert!(
+        msg.contains("alias") && msg.contains("bag"),
+        "expected partial-alias diagnostic at the declaration, got: {}",
+        err.message
+    );
+}
+
+#[test]
+fn cross_module_alias_kind_mismatch_is_rejected() {
+    // Tagged expects a Symbol-kinded param. An importer passing Int (Star)
+    // must fail — requires that alias param kinds are exported.
+    let lib = "module Lib\n\
+               type Id (k : Symbol) = Id Int\n\
+               pub type alias Tagged (k : Symbol) = Id k\n";
+    let main = "import Lib\n\
+                fun bad : Lib.Tagged Int -> Int\n\
+                bad _ = 0\n";
+    let err = check_with_project_files(&[("lib/Lib.saga", lib)], main)
+        .err()
+        .expect("expected kind-mismatch diagnostic at importer");
+    let msg = err.message.to_lowercase();
+    assert!(
+        msg.contains("kind"),
+        "expected kind diagnostic, got: {}",
+        err.message
+    );
+}

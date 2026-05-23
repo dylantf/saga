@@ -3301,3 +3301,62 @@ fn symbol_decl_formatter_roundtrip() {
     let format2 = format(&parsed2, 80);
     assert_eq!(formatted, format2, "format is not idempotent");
 }
+
+// --- Type aliases ---
+
+#[test]
+fn type_alias_simple_parses() {
+    let program = parse("type alias UserId = Int");
+    assert_eq!(program.len(), 1);
+    let Decl::TypeAlias { name, type_params, public, .. } = &program[0] else {
+        panic!("expected TypeAlias, got {:?}", program[0]);
+    };
+    assert_eq!(name, "UserId");
+    assert!(type_params.is_empty());
+    assert!(!public);
+}
+
+#[test]
+fn type_alias_pub_parses() {
+    let program = parse("pub type alias UserId = Int");
+    let Decl::TypeAlias { public, .. } = &program[0] else {
+        panic!("expected TypeAlias");
+    };
+    assert!(public);
+}
+
+#[test]
+fn type_alias_with_kind_annotated_param_parses() {
+    let program = parse("type alias Tagged (k : Symbol) = Id k");
+    let Decl::TypeAlias { type_params, .. } = &program[0] else {
+        panic!("expected TypeAlias");
+    };
+    assert_eq!(type_params.len(), 1);
+    assert_eq!(type_params[0].name, "k");
+    assert_eq!(type_params[0].kind, crate::ast::Kind::Symbol);
+}
+
+#[test]
+fn type_alias_with_deriving_is_rejected() {
+    // The grammar reserves `deriving` for type/record decls only — alias
+    // bodies are single TypeExprs, so a trailing `deriving (...)` either
+    // gets swallowed into the body or produces a parse error.
+    let tokens = Lexer::new("type alias Foo = Int deriving (Show)").lex().unwrap();
+    let result = Parser::new(tokens).parse_program();
+    assert!(
+        result.is_err(),
+        "expected parse error for `deriving` on alias, got: {:?}",
+        result
+    );
+}
+
+#[test]
+fn opaque_type_alias_is_rejected() {
+    let tokens = Lexer::new("opaque type alias Foo = Int").lex().unwrap();
+    let result = Parser::new(tokens).parse_program();
+    assert!(
+        result.is_err(),
+        "expected parse error for `opaque type alias`, got: {:?}",
+        result
+    );
+}

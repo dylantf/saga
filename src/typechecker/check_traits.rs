@@ -435,6 +435,18 @@ impl Checker {
         // the impl's return type), so the second impl's body would fail to
         // unify before the overlap check has a chance to fire.
         let resolved_target_type = self.resolved_impl_target_type_name(impl_id, target_type);
+        // Reject impls whose target is a type alias — aliases are structural,
+        // so an impl on the alias would be ambiguous with an impl on the
+        // underlying type. Tell the user to impl on the unfolded form.
+        if self.type_aliases.contains_key(&resolved_target_type) {
+            return Err(Diagnostic::error_at(
+                span,
+                format!(
+                    "cannot impl trait for type alias `{}` — impl for the underlying type instead",
+                    target_type
+                ),
+            ));
+        }
         let dup_key = (
             trait_name.to_string(),
             trait_type_args_names.clone(),

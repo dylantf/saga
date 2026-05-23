@@ -259,6 +259,22 @@ impl Parser {
     fn parse_type_def(&mut self, public: bool, opaque: bool) -> Result<Decl, ParseError> {
         let start = self.tokens[self.pos].span;
         self.advance(); // consume 'type'
+
+        // `type alias Name [params] = TypeExpr` — contextual keyword `alias`
+        // after `type`. Not allowed with `opaque`.
+        if let Token::Ident(ident) = self.peek()
+            && ident == "alias"
+        {
+            if opaque {
+                return Err(ParseError {
+                    message: "'opaque' cannot be used with 'type alias'".to_string(),
+                    span: self.tokens[self.pos].span,
+                });
+            }
+            self.advance(); // consume 'alias'
+            return self.parse_type_alias(public, start);
+        }
+
         let name_span = self.tokens[self.pos].span;
         let name = self.expect_upper_ident()?;
         let mut type_params = Vec::new();
@@ -334,6 +350,34 @@ impl Parser {
             variants,
             deriving,
             multiline,
+            span: start.to(end),
+        })
+    }
+
+    // Parses: type alias <Name> [params...] = <TypeExpr>
+    // The `type alias` prefix has already been consumed by parse_type_def.
+    fn parse_type_alias(
+        &mut self,
+        public: bool,
+        start: crate::token::Span,
+    ) -> Result<Decl, ParseError> {
+        let name_span = self.tokens[self.pos].span;
+        let name = self.expect_upper_ident()?;
+        let mut type_params = Vec::new();
+        while matches!(self.peek(), Token::Ident(_) | Token::LParen) {
+            type_params.push(self.parse_type_param()?);
+        }
+        self.expect(Token::Eq)?;
+        let body = self.parse_type_expr()?;
+        let end = body.span();
+        Ok(Decl::TypeAlias {
+            id: NodeId::fresh(),
+            doc: vec![],
+            public,
+            name,
+            name_span,
+            type_params,
+            body,
             span: start.to(end),
         })
     }

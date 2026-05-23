@@ -697,6 +697,7 @@ mod tests {
             }
             Decl::FunSignature { .. }
             | Decl::TypeDef { .. }
+            | Decl::TypeAlias { .. }
             | Decl::RecordDef { .. }
             | Decl::EffectDef { .. }
             | Decl::TraitDef { .. }

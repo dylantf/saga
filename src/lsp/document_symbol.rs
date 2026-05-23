@@ -78,6 +78,19 @@ pub fn collect_symbols(program: &[Decl], li: &LineIndex, source: &str) -> Vec<Sy
                     container_name: None,
                 });
             }
+            Decl::TypeAlias { name, span, .. } => {
+                symbols.push(SymbolInformation {
+                    name: name.clone(),
+                    kind: SymbolKind::TYPE_PARAMETER,
+                    location: Location {
+                        uri: Url::parse("file:///").unwrap(),
+                        range: span_to_range(span, li, source),
+                    },
+                    tags: None,
+                    deprecated: None,
+                    container_name: None,
+                });
+            }
             Decl::RecordDef { name, span, .. } => {
                 symbols.push(SymbolInformation {
                     name: name.clone(),

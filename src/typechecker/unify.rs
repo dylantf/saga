@@ -6,6 +6,48 @@ use crate::ast::Kind;
 
 use super::{Checker, Diagnostic, EffectRow, Scheme, Severity, Type};
 
+/// Substitute every `Type::Var(id)` whose id is a key in `subst` with the
+/// corresponding type, recursively. Used to instantiate a type alias body
+/// at a use site.
+pub(crate) fn substitute_vars(ty: &Type, subst: &HashMap<u32, Type>) -> Type {
+    match ty {
+        Type::Var(id) => subst.get(id).cloned().unwrap_or_else(|| ty.clone()),
+        Type::Fun(a, b, row) => Type::Fun(
+            Box::new(substitute_vars(a, subst)),
+            Box::new(substitute_vars(b, subst)),
+            EffectRow {
+                effects: row
+                    .effects
+                    .iter()
+                    .map(|entry| super::EffectEntry {
+                        name: entry.name.clone(),
+                        args: entry
+                            .args
+                            .iter()
+                            .map(|t| substitute_vars(t, subst))
+                            .collect(),
+                    })
+                    .collect(),
+                tail: row
+                    .tail
+                    .as_ref()
+                    .map(|t| Box::new(substitute_vars(t, subst))),
+            },
+        ),
+        Type::Con(name, args) => Type::Con(
+            name.clone(),
+            args.iter().map(|a| substitute_vars(a, subst)).collect(),
+        ),
+        Type::Record(fields) => Type::Record(
+            fields
+                .iter()
+                .map(|(n, t)| (n.clone(), substitute_vars(t, subst)))
+                .collect(),
+        ),
+        Type::Symbol(_) | Type::Error => ty.clone(),
+    }
+}
+
 pub(crate) fn kind_name(k: Kind) -> &'static str {
     match k {
         Kind::Star => "Star",
@@ -442,7 +484,124 @@ impl Checker {
         texpr: &crate::ast::TypeExpr,
         params: &mut Vec<(String, u32)>,
     ) -> Type {
-        self.convert_type_expr_kinded(texpr, params, Kind::Star)
+        let ty = self.convert_type_expr_kinded(texpr, params, Kind::Star);
+        // After conversion, walk the type to catch any partial alias uses
+        // that escaped to the top of nested positions (e.g. `Option Bag`
+        // where `Bag` is a 1-arity alias used without an arg).
+        self.check_no_partial_alias(&ty, texpr.span());
+        ty
+    }
+
+    /// Walk `ty` and emit a diagnostic for any `Type::Con(alias_name, args)`
+    /// where `args.len() != arity` — that means an alias was used without
+    /// being fully applied. Only walks Star-shaped positions; doesn't touch
+    /// already-substituted alias bodies (which contain no alias references).
+    pub(crate) fn check_no_partial_alias(&mut self, ty: &Type, span: Span) {
+        match ty {
+            Type::Con(name, args) => {
+                if let Some(info) = self.type_aliases.get(name) {
+                    let expected = info.param_vars.len();
+                    if args.len() != expected {
+                        self.collected_diagnostics.push(Diagnostic::error_at(
+                            span,
+                            format!(
+                                "type alias `{}` expects {} type argument{} but was given {}",
+                                super::bare_type_name(name),
+                                expected,
+                                if expected == 1 { "" } else { "s" },
+                                args.len(),
+                            ),
+                        ));
+                    }
+                }
+                for a in args {
+                    self.check_no_partial_alias(a, span);
+                }
+            }
+            Type::Fun(a, b, row) => {
+                self.check_no_partial_alias(a, span);
+                self.check_no_partial_alias(b, span);
+                for entry in &row.effects {
+                    for a in &entry.args {
+                        self.check_no_partial_alias(a, span);
+                    }
+                }
+            }
+            Type::Record(fields) => {
+                for (_, t) in fields {
+                    self.check_no_partial_alias(t, span);
+                }
+            }
+            Type::Var(_) | Type::Symbol(_) | Type::Error => {}
+        }
+    }
+
+    /// If `name` is a registered type alias and `args.len() == arity`,
+    /// substitute the alias body with the given args and return the
+    /// instantiated type, recursively unfolding any nested aliases. Cycles
+    /// must be rejected at registration time so this is guaranteed to
+    /// terminate. Returns `None` if `name` isn't an alias or the arity
+    /// doesn't match (partial application is caught by
+    /// `check_no_partial_alias` at the top-level).
+    pub(crate) fn try_unfold_alias(&self, name: &str, args: &[Type]) -> Option<Type> {
+        let info = self.type_aliases.get(name)?;
+        if args.len() != info.param_vars.len() {
+            return None;
+        }
+        let subst: HashMap<u32, Type> = info
+            .param_vars
+            .iter()
+            .zip(args.iter())
+            .map(|(id, ty)| (*id, ty.clone()))
+            .collect();
+        let substituted = substitute_vars(&info.body, &subst);
+        Some(self.unfold_aliases_in_type(substituted))
+    }
+
+    /// Walk `ty` and replace every `Type::Con(alias_name, args)` (where
+    /// arity matches) with its instantiated body. Used to chase aliases
+    /// transitively after substituting one alias's body — handles cases
+    /// where an alias's body referred to another alias that wasn't yet
+    /// registered when the body was originally converted.
+    pub(crate) fn unfold_aliases_in_type(&self, ty: Type) -> Type {
+        match ty {
+            Type::Con(name, args) => {
+                let args: Vec<Type> = args
+                    .into_iter()
+                    .map(|a| self.unfold_aliases_in_type(a))
+                    .collect();
+                if let Some(unfolded) = self.try_unfold_alias(&name, &args) {
+                    return unfolded;
+                }
+                Type::Con(name, args)
+            }
+            Type::Fun(a, b, row) => Type::Fun(
+                Box::new(self.unfold_aliases_in_type(*a)),
+                Box::new(self.unfold_aliases_in_type(*b)),
+                EffectRow {
+                    effects: row
+                        .effects
+                        .into_iter()
+                        .map(|entry| super::EffectEntry {
+                            name: entry.name,
+                            args: entry
+                                .args
+                                .into_iter()
+                                .map(|t| self.unfold_aliases_in_type(t))
+                                .collect(),
+                        })
+                        .collect(),
+                    tail: row.tail.map(|t| Box::new(self.unfold_aliases_in_type(*t))),
+                },
+            ),
+            Type::Record(fields) => Type::Record(
+                fields
+                    .into_iter()
+                    .map(|(n, t)| (n, self.unfold_aliases_in_type(t)))
+                    .collect(),
+            ),
+            other => other,
+        }
     }
 
     /// Like `convert_type_expr` but enforces that the resulting type has
@@ -493,6 +652,13 @@ impl Checker {
                         ),
                     ));
                     return Type::Error;
+                }
+                // If this references a zero-arity alias, unfold it immediately.
+                // For positive-arity aliases used here without args we leave
+                // a Type::Con(alias_name, []) so the enclosing App can grow
+                // it; partial uses are caught by the top-level walker.
+                if let Some(unfolded) = self.try_unfold_alias(&resolved, &[]) {
+                    return unfolded;
                 }
                 Type::Con(resolved, vec![])
             }
@@ -571,6 +737,10 @@ impl Checker {
                                 ),
                                 span: None,
                             });
+                        }
+                        // If this is a type alias and now fully applied, unfold.
+                        if let Some(unfolded) = self.try_unfold_alias(&name, &args) {
+                            return unfolded;
                         }
                         Type::Con(name, args)
                     }

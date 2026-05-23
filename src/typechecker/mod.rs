@@ -183,6 +183,23 @@ pub enum Type {
     Error,
 }
 
+/// Information stored about a registered `type alias`. The body is the
+/// fully-converted `Type` produced from the alias's RHS using the alias's
+/// parameter variables as positional placeholders. At each use site,
+/// `convert_type_expr` substitutes the parameter variables with the
+/// provided argument types and yields a fresh `Type` with the alias erased.
+#[derive(Debug, Clone)]
+pub struct TypeAliasInfo {
+    /// Positional parameter variable IDs (matching the order of `type_params`).
+    pub param_vars: Vec<u32>,
+    /// Positional parameter kinds (mirrors `type_param_kinds` for this alias).
+    pub param_kinds: Vec<Kind>,
+    /// Pre-converted RHS, expressed in terms of `param_vars`.
+    pub body: Type,
+    /// Source span of the alias declaration.
+    pub span: crate::token::Span,
+}
+
 /// Maps bare builtin type names to their canonical (module-qualified) forms.
 /// This is the single source of truth for which module each builtin type belongs to.
 pub const BUILTIN_TYPE_CANONICAL: &[(&str, &str)] = &[
@@ -971,6 +988,9 @@ pub struct Checker {
     /// `convert_type_expr` to know the expected kind of each argument slot
     /// in a type application. Absent entries default to all-Star.
     pub(crate) type_param_kinds: HashMap<String, Vec<Kind>>,
+    /// Type aliases (canonical name -> info). Unfolded structurally during
+    /// `convert_type_expr` so the rest of the typechecker never sees aliases.
+    pub(crate) type_aliases: HashMap<String, TypeAliasInfo>,
     /// Per type-variable id -> declared kind. Absent entries default to
     /// `Kind::Star`. Populated when a fresh variable is minted for an
     /// `Symbol`-kinded type parameter (type, trait, impl, effect).
@@ -1381,6 +1401,7 @@ impl Checker {
             adt_variants: HashMap::new(),
             type_arity: HashMap::new(),
             type_param_kinds: HashMap::new(),
+            type_aliases: HashMap::new(),
             var_kinds: HashMap::new(),
             outer_named_type_vars: HashMap::new(),
             fun_type_param_vars: HashMap::new(),

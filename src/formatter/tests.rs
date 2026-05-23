@@ -166,6 +166,18 @@ fn normalize_decl(d: &mut Decl) {
                 normalize_annotated(v, normalize_type_constructor);
             }
         }
+        Decl::TypeAlias {
+            id,
+            name_span,
+            body,
+            span,
+            ..
+        } => {
+            *id = NID;
+            *name_span = S;
+            *span = S;
+            normalize_type_expr(body);
+        }
         Decl::RecordDef {
             id,
             name_span,
@@ -1089,6 +1101,46 @@ fn type_def_multiline_preserved() {
         result
     );
     assert!(result.contains("  | Empty\n"), "result: {}", result);
+}
+
+#[test]
+fn type_alias_simple_round_trip() {
+    assert_eq!(
+        fmt80("type alias UserId = Int"),
+        "type alias UserId = Int\n"
+    );
+}
+
+#[test]
+fn type_alias_parameterized_round_trip() {
+    assert_eq!(
+        fmt80("type alias Bag a = List a"),
+        "type alias Bag a = List a\n"
+    );
+}
+
+#[test]
+fn type_alias_symbol_round_trip() {
+    assert_eq!(
+        fmt80("type alias UserId = Id 'user"),
+        "type alias UserId = Id 'user\n"
+    );
+}
+
+#[test]
+fn type_alias_kind_annotated_param_round_trip() {
+    assert_eq!(
+        fmt80("type alias Tagged (k : Symbol) = Id k"),
+        "type alias Tagged (k : Symbol) = Id k\n"
+    );
+}
+
+#[test]
+fn type_alias_pub_round_trip() {
+    assert_eq!(
+        fmt80("pub type alias ApiResult a = Result a String"),
+        "pub type alias ApiResult a = Result a String\n"
+    );
 }
 
 // --- Lists ---
