@@ -2706,3 +2706,39 @@ main () = symbol_name (Proxy : Proxy 'Foo)
     );
     assert_runs_and_stdout_contains(src, &["Foo"]);
 }
+
+#[test]
+fn known_symbol_polymorphic_dict_passing_e2e() {
+    // A single polymorphic describe function multiplexes across three call
+    // sites via dict passing: each call sees its own symbol string.
+    let src = r#"
+fun describe : Proxy n -> String where {n : KnownSymbol}
+describe p = symbol_name p
+
+main () = (
+  describe (Proxy : Proxy 'admin),
+  describe (Proxy : Proxy 'editor),
+  describe (Proxy : Proxy 'viewer)
+)
+"#;
+    assert_runs_and_stdout_contains(src, &["admin", "editor", "viewer"]);
+}
+
+#[test]
+fn known_symbol_polymorphic_forwarding_e2e() {
+    // Polymorphic-to-polymorphic forwarding: forward calls describe, both
+    // with `where {n : KnownSymbol}`. The dict threads through both layers.
+    let src = r#"
+fun describe : Proxy n -> String where {n : KnownSymbol}
+describe p = symbol_name p
+
+fun forward : Proxy n -> String where {n : KnownSymbol}
+forward p = describe p
+
+main () = (
+  forward (Proxy : Proxy 'forwarded),
+  forward (Proxy : Proxy 'again)
+)
+"#;
+    assert_runs_and_stdout_contains(src, &["forwarded", "again"]);
+}

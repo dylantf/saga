@@ -1426,20 +1426,6 @@ impl Checker {
                                     }
                             });
                     if in_where {
-                        let is_known_symbol = self
-                            .resolve_trait_name(&trait_name)
-                            .map(|t| t == "Std.Base.KnownSymbol")
-                            .unwrap_or(false)
-                            || trait_name == "KnownSymbol";
-                        if is_known_symbol
-                            && self.var_kind(id) == crate::ast::Kind::Symbol
-                        {
-                            return Err(Diagnostic::error_at(
-                                span,
-                                "polymorphic symbol reflection not yet supported (chunk 4)"
-                                    .to_string(),
-                            ));
-                        }
                         let var_name = self.resolve_where_var_name(&trait_name, id);
                         self.evidence.push(super::TraitEvidence {
                             node_id,
@@ -2650,20 +2636,6 @@ impl Checker {
                     }
                     // Still a type variable: check where clause bounds
                     Type::Var(id) => {
-                        let resolved_trait_known_symbol = self
-                            .resolve_trait_name(&trait_name)
-                            .map(|t| t == "Std.Base.KnownSymbol")
-                            .unwrap_or(false)
-                            || trait_name == "KnownSymbol";
-                        if resolved_trait_known_symbol
-                            && self.var_kind(*id) == crate::ast::Kind::Symbol
-                        {
-                            return Err(rewrite_diag(
-                                "polymorphic symbol reflection not yet supported (chunk 4)"
-                                    .to_string(),
-                                span,
-                            ));
-                        }
                         let covered = resolved_bounds
                             .get(id)
                             .is_some_and(|b| b.contains(&trait_name));

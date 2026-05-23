@@ -8178,15 +8178,89 @@ fn known_symbol_polymorphic_signature_typechecks() {
 }
 
 #[test]
-fn known_symbol_polymorphic_call_rejected_for_now() {
+fn known_symbol_polymorphic_call_typechecks() {
+    // The body invokes symbol_name on a polymorphic Proxy n; the constraint
+    // is forwarded through the where-bound and resolved via a dict param.
     let src = "fun describe : Proxy n -> String where {n : KnownSymbol}\n\
                describe p = symbol_name p\n";
-    let err = check(src).err().expect("expected polymorphic-deferral error");
-    let msg = err.message.to_lowercase();
+    check(src).unwrap();
+}
+
+#[test]
+fn known_symbol_polymorphic_forwarding_typechecks() {
+    // A polymorphic function calling another polymorphic function with the
+    // same KnownSymbol bound should typecheck (dict forwards through).
+    let src = "fun describe : Proxy n -> String where {n : KnownSymbol}\n\
+               describe p = symbol_name p\n\
+               fun forward : Proxy n -> String where {n : KnownSymbol}\n\
+               forward p = describe p\n";
+    check(src).unwrap();
+}
+
+#[test]
+fn known_symbol_polymorphic_elaborates_with_dict_param() {
+    // The elaborated describe function carries a __dict_KnownSymbol_n
+    // parameter; the body references that dict (via the symbol_name lambda
+    // wrapper).
+    use crate::ast::{Decl, ExprKind, Pat, Stmt};
+    let src = "fun describe : Proxy n -> String where {n : KnownSymbol}\n\
+               describe p = symbol_name p\n";
+    let mut lexer = crate::lexer::Lexer::new(src);
+    let tokens = lexer.lex().expect("lex");
+    let mut program = crate::parser::Parser::new(tokens)
+        .parse_program()
+        .expect("parse");
+    let imported = crate::derive::collect_imported_decls(&program, None);
+    let _ = crate::derive::expand_derives(&mut program, &imported);
+    crate::desugar::desugar_program(&mut program);
+    let mut checker = Checker::new();
+    let prelude_src = include_str!("../stdlib/prelude.saga");
+    let prelude_tokens = crate::lexer::Lexer::new(prelude_src).lex().unwrap();
+    let mut prelude_program = crate::parser::Parser::new(prelude_tokens)
+        .parse_program()
+        .unwrap();
+    crate::derive::expand_derives(&mut prelude_program, &crate::derive::ImportedDecls::empty());
+    crate::desugar::desugar_program(&mut prelude_program);
+    checker.check_program_inner(&mut prelude_program).unwrap();
+    checker.check_program_inner(&mut program).unwrap();
+    let result = checker.to_result();
+    let elaborated = crate::elaborate::elaborate(&program, &result);
+
+    let (params, body) = elaborated
+        .iter()
+        .find_map(|d| match d {
+            Decl::FunBinding { name, params, body, .. } if name == "describe" => {
+                Some((params.clone(), body.clone()))
+            }
+            _ => None,
+        })
+        .expect("describe FunBinding");
+    let has_dict_param = params.iter().any(|p| matches!(
+        p,
+        Pat::Var { name, .. } if name == "__dict_KnownSymbol_n"
+    ));
     assert!(
-        msg.contains("polymorphic symbol reflection"),
-        "expected polymorphic-symbol-reflection diagnostic, got: {}",
-        err.message
+        has_dict_param,
+        "expected __dict_KnownSymbol_n in describe params, got {:?}",
+        params
+    );
+
+    fn references_dict(e: &crate::ast::Expr) -> bool {
+        match &e.kind {
+            ExprKind::Var { name } => name == "__dict_KnownSymbol_n",
+            ExprKind::App { func, arg } => references_dict(func) || references_dict(arg),
+            ExprKind::Lambda { body, .. } => references_dict(body),
+            ExprKind::Block { stmts, .. } => stmts.iter().any(|s| match &s.node {
+                Stmt::Let { value, .. } => references_dict(value),
+                Stmt::Expr(e) => references_dict(e),
+                Stmt::LetFun { body, .. } => references_dict(body),
+            }),
+            _ => false,
+        }
+    }
+    assert!(
+        references_dict(&body),
+        "expected describe body to reference __dict_KnownSymbol_n"
     );
 }
 

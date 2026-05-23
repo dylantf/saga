@@ -1621,26 +1621,43 @@ impl Elaborator {
     }
 
     /// If a `KnownSymbol` evidence record at `node_id` carries a concrete symbol
-    /// name, return a lambda `fun _proxy -> SymbolIntrinsic { symbol }`. The
-    /// lambda ignores its Proxy argument (Proxy is a phantom). This shape
-    /// preserves the trait-method calling convention so both bare references
-    /// (`symbol_name`) and direct applications (`symbol_name p`) work uniformly.
+    /// name, return a lambda `fun _proxy -> SymbolIntrinsic { symbol }`. For
+    /// the polymorphic case (where-bound `n : KnownSymbol`), return a lambda
+    /// `fun _proxy -> __dict_KnownSymbol_n` referring to the in-scope dict
+    /// parameter (which is itself the symbol's string at runtime — the
+    /// KnownSymbol dict is carried as a bare String). The lambda ignores its
+    /// Proxy argument (Proxy is a phantom). This shape preserves the trait-
+    /// method calling convention so both bare references (`symbol_name`) and
+    /// direct applications (`symbol_name p`) work uniformly.
     fn try_symbol_intrinsic_lambda(
         &self,
         node_id: crate::ast::NodeId,
         span: Span,
     ) -> Option<Expr> {
         let evidence_list = self.evidence_by_node.get(&node_id)?;
-        let symbol = evidence_list.iter().find_map(|ev| {
-            if (ev.trait_name == "Std.Base.KnownSymbol" || ev.trait_name == "KnownSymbol")
-                && let Some(name) = &ev.resolved_symbol
-            {
-                Some(name.clone())
+        let body = evidence_list.iter().find_map(|ev| {
+            if ev.trait_name != "Std.Base.KnownSymbol" && ev.trait_name != "KnownSymbol" {
+                return None;
+            }
+            if let Some(name) = &ev.resolved_symbol {
+                Some(Expr::synth(
+                    span,
+                    ExprKind::SymbolIntrinsic {
+                        symbol: name.clone(),
+                    },
+                ))
+            } else if let Some(var_name) = &ev.type_var_name {
+                let bare = ev
+                    .trait_name
+                    .rsplit('.')
+                    .next()
+                    .unwrap_or(&ev.trait_name);
+                let param_name = format!("__dict_{}_{}", bare, var_name);
+                Some(Expr::synth(span, ExprKind::Var { name: param_name }))
             } else {
                 None
             }
         })?;
-        let body = Expr::synth(span, ExprKind::SymbolIntrinsic { symbol });
         Some(Expr::synth(
             span,
             ExprKind::Lambda {
@@ -1684,6 +1701,17 @@ impl Elaborator {
                     if count < occurrence {
                         count += 1;
                         continue;
+                    }
+                    // KnownSymbol with concrete symbol: dict is a bare String
+                    // carrying the symbol's source name. SymbolIntrinsic lowers
+                    // to the binary literal at codegen.
+                    if let Some(sym) = &ev.resolved_symbol {
+                        return Some(Expr::synth(
+                            span,
+                            ExprKind::SymbolIntrinsic {
+                                symbol: sym.clone(),
+                            },
+                        ));
                     }
                     return match &ev.resolved_type {
                         Some((type_name, args)) => {
