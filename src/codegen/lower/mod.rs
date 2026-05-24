@@ -2230,6 +2230,36 @@ impl<'a> Lowerer<'a> {
         })
     }
 
+    /// If `expr` is a `DictMethodAccess` for a trait method that carries
+    /// effects, return its runtime CPS shape. Synthesized `DictMethodAccess`
+    /// nodes have fresh `NodeId`s with no recorded type, so the type-based
+    /// shape lookup misses them. Source the effects from the trait method's
+    /// effect signature directly. Without this, a trait method passed as a
+    /// first-class value (e.g. `run decode n`) falls through to the pure
+    /// adapter and the resulting wrapper drops `_Evidence`/`_ReturnK` when
+    /// calling the underlying CPS-shaped method.
+    fn cps_shape_from_dict_method_access(&self, expr: &Expr) -> Option<CpsShape> {
+        let ExprKind::DictMethodAccess {
+            trait_name,
+            method_index,
+            ..
+        } = &expr.kind
+        else {
+            return None;
+        };
+        let info = self.check_result.traits.get(trait_name)?;
+        let method = info.methods.get(*method_index)?;
+        let effects = self.canonicalize_effects(method.effect_sig.effects.clone());
+        let is_open_row = method.effect_sig.is_open_row;
+        if effects.is_empty() && !is_open_row {
+            return None;
+        }
+        Some(CpsShape {
+            static_effects: effects,
+            is_open_row,
+        })
+    }
+
     fn wrap_pure_function_value_as_cps_adapter(
         &mut self,
         expr: &Expr,
@@ -2376,7 +2406,8 @@ impl<'a> Lowerer<'a> {
         // because `wrap` was compiled with `..e`).
         let actual_shape = self
             .expr_cps_function_shape(expr)
-            .or_else(|| self.cps_shape_from_partial_app(expr));
+            .or_else(|| self.cps_shape_from_partial_app(expr))
+            .or_else(|| self.cps_shape_from_dict_method_access(expr));
 
         if let Some(actual_shape) = actual_shape {
             self.adapt_cps_function_value_to_expected_shape(expr, expected_ty, actual_shape)

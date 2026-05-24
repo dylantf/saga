@@ -1,0 +1,25 @@
+#@ Library module: trait + default-body convenience method.
+#@ Mirrors the SagaJson.Decode ↔ SagaJson default_options split.
+module OtherModule
+
+import Std.Fail (Fail)
+import Defaults (Opts)
+
+pub type DecodeErr = DecodeErr String deriving (Debug)
+
+pub trait Decode a {
+  fun decode_with : Opts -> Int -> a needs {Fail DecodeErr}
+  fun decode : Int -> a needs {Fail DecodeErr}
+  # Trait default body references a fully-qualified value in a *different*
+  # module. Same pattern as `from_json j = from_json_with SagaJson.default_options j`.
+  decode n = decode_with Defaults.default_opts n
+}
+
+impl Decode for Int needs {Fail DecodeErr} {
+  decode_with _ n = if n < 0 then fail! (DecodeErr "neg") else n
+}
+
+pub handler to_result for Fail a {
+  fail e = Err e
+  return v = Ok v
+}

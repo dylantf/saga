@@ -1,0 +1,19 @@
+#@ Holds shared values referenced from a trait default body in OtherModule.
+#@ Mirrors saga_json's `SagaJson.default_options` ↔ `SagaJson.Decode.FromJson`
+#@ split, where the default body of a trait in module `M.Decode` references
+#@ a value in `M`.
+module Defaults
+
+import Std.Fail (Fail)
+
+pub record Opts { tag: String }
+
+pub val default_opts = Opts { tag: "default" }
+
+# Mirrors saga_json's `J.run : (Json -> a needs {Fail Error}) -> Json -> Result a Error`.
+# Takes a decoder function and applies it to an input under a handler.
+pub fun run : (Int -> a needs {Fail e}) -> Int -> Result a e
+run decoder n = decoder n with {
+  fail e = Err e
+  return v = Ok v
+}

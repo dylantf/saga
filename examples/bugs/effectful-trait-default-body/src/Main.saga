@@ -1,0 +1,47 @@
+#@ Bug repro: a trait's default-body convenience method (`decode`),
+#@ which delegates to the `*_with` method declared in the same trait,
+#@ panics at runtime when invoked from a different module.
+#@
+#@ Both methods declare `needs {Fail DecodeErr}`. Calling `decode_with`
+#@ directly from another module works. Calling `decode` (which has a
+#@ default body in the trait declaration) panics with:
+#@
+#@   Runtime error: function called with 1 argument(s), but expects 3
+#@
+#@ Same-arg-mismatch-vs-handler-thread shape as the previously-fixed
+#@ effectful-trait-self-dispatch bug, but the trigger here is the
+#@ trait default body rather than recursive trait dispatch.
+module Main
+
+import Std.IO (console)
+import OtherModule (Decode, DecodeErr, to_result)
+import Defaults (Opts, run)
+
+# Works:
+pub fun via_with : Int -> Result Int DecodeErr
+via_with n = decode_with (Opts { tag: "t" }) n with to_result
+
+# PANICs at runtime:
+pub fun via_default : Int -> Result Int DecodeErr
+via_default n = decode n with to_result
+
+# Pass the trait default method as a first-class value to a cross-module
+# `run` function. Mirrors saga_json's `J.run from_json j` pattern in
+# `deserialize`. THIS is the actual saga_json failure mode.
+pub fun via_run : Int -> Result Int DecodeErr
+via_run n = run decode n
+
+main () = {
+  case via_with 0 {
+    Ok n -> println $"with ok:    Ok {debug n}"
+    Err e -> println $"with ok:    Err {debug e}"
+  }
+  case via_default 0 {
+    Ok n -> println $"default ok: Ok {debug n}"
+    Err e -> println $"default ok: Err {debug e}"
+  }
+  case via_run 0 {
+    Ok n -> println $"run ok:     Ok {debug n}"
+    Err e -> println $"run ok:     Err {debug e}"
+  }
+} with console

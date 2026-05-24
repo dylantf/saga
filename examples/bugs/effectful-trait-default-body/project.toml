@@ -1,0 +1,12 @@
+[project]
+name = "effectful-trait-default-body"
+
+[bin]
+main = "src/Main.saga"
+
+# [library]
+# module = "EffectfulTraitDefaultBody"
+# expose = []
+
+# [deps]
+# some-lib = { path = "../some-lib" }
