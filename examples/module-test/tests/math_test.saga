@@ -3,7 +3,6 @@ module MathTest
 import Std.Test (Testing, describe, test, skip, assert_eq)
 import MathLib (add, double)
 
-
 pub fun tests : Unit -> Unit needs {Testing}
 tests () = {
   describe "MathLib" (fun () -> {
@@ -30,9 +29,5 @@ tests () = {
 
   test "a simple assertion" (fun () -> {
     assert_eq True True
-  })
-
-  skip "a failing test" (fun () -> {
-    assert_eq True False
   })
 }

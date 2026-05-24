@@ -484,10 +484,18 @@ impl Checker {
                 ),
             ));
         }
+        // For tuple targets, key the impl by arity so `(a, b)` and `(a, b, c)`
+        // coexist as distinct concrete impls. The real Type::Con name stays
+        // bare ("Std.Base.Tuple") so impl body type-checking and call-site
+        // unification still work — only the lookup key carries arity.
+        let target_key = super::arity_keyed_target_name(
+            &resolved_target_type,
+            type_params.len(),
+        );
         let dup_key = (
             trait_name.to_string(),
             trait_type_args_names.clone(),
-            resolved_target_type.clone(),
+            target_key.clone(),
         );
         if self.trait_state.impls.contains_key(&dup_key) {
             let args_str = if trait_type_arg_names.is_empty() {
@@ -508,7 +516,7 @@ impl Checker {
                 &self.trait_state.impls
             {
                 if existing_trait == trait_name
-                    && existing_target == &resolved_target_type
+                    && existing_target == &target_key
                     && existing_args != trait_type_args_names
                 {
                     let prev_loc = match existing_info.span {

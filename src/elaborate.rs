@@ -83,6 +83,11 @@ struct Elaborator {
     /// Finalized per-node type information for resolving record names in
     /// FieldAccess/RecordUpdate.
     type_at_node: HashMap<crate::ast::NodeId, Type>,
+    /// var_id -> source name for where-clause-bound type vars. Used by
+    /// `dict_for_type`'s `Type::Var` branch to translate a polymorphic
+    /// var-id back to the source name so it can find the matching where-
+    /// clause dict in `current_dict_params_by_var` (which is keyed by name).
+    where_bound_var_names: HashMap<u32, String>,
 }
 
 impl Elaborator {
@@ -235,6 +240,7 @@ impl Elaborator {
             scope_map_effects: result.scope_map.effects.clone(),
             resolution: result.resolution.clone(),
             type_at_node: result.type_at_node.clone(),
+            where_bound_var_names: result.where_bound_var_names.clone(),
         }
     }
 
@@ -332,6 +338,13 @@ impl Elaborator {
                     let canonical_trait = self.resolved_impl_trait_name(*id, trait_name);
                     let canonical_trait_type_args = self.resolved_trait_type_args(trait_type_args);
                     let canonical_target_type = self.resolved_impl_target_type(*id, target_type);
+                    // Tuples are arity-distinguished: `(a, b)` and `(a, b, c)`
+                    // both canonicalize to "Std.Base.Tuple", so suffix arity to
+                    // keep their dict names and lookup keys distinct.
+                    let canonical_target_type = crate::typechecker::arity_keyed_target_name(
+                        &canonical_target_type,
+                        type_params.len(),
+                    );
                     let dict_name = crate::typechecker::make_dict_name(
                         &canonical_trait,
                         &canonical_trait_type_args,
@@ -432,6 +445,10 @@ impl Elaborator {
                     let canonical_trait = self.resolved_impl_trait_name(*id, trait_name);
                     let canonical_trait_type_args = self.resolved_trait_type_args(trait_type_args);
                     let canonical_target_type = self.resolved_impl_target_type(*id, target_type);
+                    let canonical_target_type = crate::typechecker::arity_keyed_target_name(
+                        &canonical_target_type,
+                        type_params.len(),
+                    );
                     let dict_name = self
                         .dict_names
                         .get(&(
@@ -1828,10 +1845,15 @@ impl Elaborator {
                 ))
             }
             Type::Con(name, args) => {
+                // Tuple impls are arity-keyed (`Std.Base.Tuple.2`), so for
+                // tuple lookup we synthesize that name from the args. Non-
+                // tuple names pass through `arity_keyed_target_name` unchanged.
+                let keyed_name =
+                    crate::typechecker::arity_keyed_target_name(name, args.len());
                 let key = (
                     trait_name.to_string(),
                     trait_type_args.to_vec(),
-                    name.clone(),
+                    keyed_name,
                 );
                 let dict_name = self.dict_names.get(&key)?;
                 let mut dict_expr: Expr = Expr::synth(
@@ -1874,12 +1896,35 @@ impl Elaborator {
                 Some(dict_expr)
             }
             Type::Var(id) => {
-                // Polymorphic type var: look up the current function's dict param
-                // for this trait + var combination.
+                // Polymorphic type var: look up the current scope's dict param
+                // for this trait + var combination. Two key conventions live
+                // in `current_dict_params_by_var`:
+                //   - inferred constraints store keys as `"v{id}"`
+                //   - explicit where-clause bounds store keys as the source
+                //     name (e.g. `"a"`)
+                // Try both. For the source-name path we translate the var id
+                // through `where_bound_var_names` (recorded by the typechecker
+                // at impl/fn registration). Without this translation, two
+                // distinct vars bound to the same trait (e.g. tuple impl
+                // `where {a: ToJson, b: ToJson, c: ToJson}`) would all fall
+                // through to the single-trait fallback and resolve to the
+                // last-inserted dict.
                 let var_key = format!("v{}", id);
                 if let Some(param_name) = self
                     .current_dict_params_by_var
                     .get(&(trait_name.into(), var_key))
+                {
+                    return Some(Expr::synth(
+                        span,
+                        ExprKind::Var {
+                            name: param_name.clone(),
+                        },
+                    ));
+                }
+                if let Some(src_name) = self.where_bound_var_names.get(id)
+                    && let Some(param_name) = self
+                        .current_dict_params_by_var
+                        .get(&(trait_name.into(), src_name.clone()))
                 {
                     return Some(Expr::synth(
                         span,

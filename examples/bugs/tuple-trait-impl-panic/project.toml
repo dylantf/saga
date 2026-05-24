@@ -1,0 +1,12 @@
+[project]
+name = "tuple-trait-impl-panic"
+
+[bin]
+main = "src/Main.saga"
+
+# [library]
+# module = "TupleTraitImplPanic"
+# expose = []
+
+# [deps]
+# some-lib = { path = "../some-lib" }

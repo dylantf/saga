@@ -135,10 +135,13 @@ impl ModuleExports {
                     trait_name,
                     trait_type_args,
                     target_type,
+                    type_params,
                     ..
                 } => {
                     let resolved_trait = checker.resolved_impl_trait_name(*id, trait_name);
                     let resolved_target = checker.resolved_impl_target_type_name(*id, target_type);
+                    let resolved_target =
+                        super::arity_keyed_target_name(&resolved_target, type_params.len());
                     let resolved_trait_type_args: Vec<String> = trait_type_args
                         .iter()
                         .map(|te| checker.resolved_type_name(te.id(), te.simple_name()))
@@ -1769,6 +1772,10 @@ fn collect_codegen_info(
                     .collect();
                 let canonical_trait_type_args = canonical_trait_type_args(&trait_type_arg_names);
                 let canonical_target_type = canonical_type_name(target_type);
+                let canonical_target_type = super::arity_keyed_target_name(
+                    &canonical_target_type,
+                    type_params.len(),
+                );
                 let dict_name = super::make_dict_name(
                     &canonical_trait,
                     &canonical_trait_type_args,

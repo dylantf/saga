@@ -1089,11 +1089,51 @@ impl Parser {
         }
 
         self.expect(Token::For)?;
-        let target_type = self.parse_upper_name()?;
-        let target_type_span = self.tokens[self.pos - 1].span;
+
+        // Tuple target: `impl Show for (a, b) where {...}` — lower to
+        // target_type="Tuple" with one type_param per element. Each element
+        // must be a bare lowercase ident (type variable); richer forms like
+        // `(Maybe a, b)` are not supported in this first pass.
+        let (target_type, target_type_span, mut type_params) =
+            if matches!(self.peek(), Token::LParen) {
+                let start = self.tokens[self.pos].span;
+                let lparen_pos = self.pos;
+                self.advance(); // consume '('
+                // Empty tuple `()` in impl target is not meaningful — Unit has
+                // its own canonical name; reject it.
+                if matches!(self.peek(), Token::RParen) {
+                    return Err(ParseError {
+                        message: "empty tuple `()` is not a valid impl target; use `Unit` instead"
+                            .to_string(),
+                        span: self.tokens[lparen_pos].span,
+                    });
+                }
+                let mut params: Vec<crate::ast::TypeParam> = Vec::new();
+                params.push(self.parse_type_param()?);
+                while matches!(self.peek(), Token::Comma) {
+                    self.advance();
+                    if matches!(self.peek(), Token::RParen) {
+                        break; // trailing comma
+                    }
+                    params.push(self.parse_type_param()?);
+                }
+                let end = self.tokens[self.pos].span;
+                self.expect(Token::RParen)?;
+                if params.len() < 2 {
+                    return Err(ParseError {
+                        message: "tuple impl target needs at least two type parameters"
+                            .to_string(),
+                        span: start.to(end),
+                    });
+                }
+                ("Tuple".to_string(), start.to(end), params)
+            } else {
+                let name = self.parse_upper_name()?;
+                let span = self.tokens[self.pos - 1].span;
+                (name, span, Vec::new())
+            };
 
         // Parse optional type params: `impl Show for Box a b`
-        let mut type_params = Vec::new();
         while matches!(self.peek(), Token::Ident(_) | Token::LParen) {
             type_params.push(self.parse_type_param()?);
         }

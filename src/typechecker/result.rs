@@ -35,6 +35,12 @@ pub struct CheckResult {
     pub constructors: HashMap<String, Scheme>,
     /// Trait evidence for elaboration (dictionary passing).
     pub evidence: Vec<TraitEvidence>,
+    /// Var id -> source name for where-clause bound type variables.
+    /// The elaborator uses this in `dict_for_type` to map a `Type::Var(id)`
+    /// encountered while recursively building a sub-dict back to the source
+    /// param name (`"a"`, `"b"`, ...) so it can look up the right where-clause
+    /// dict in `current_dict_params_by_var`.
+    pub where_bound_var_names: HashMap<u32, String>,
     /// All diagnostics (errors and warnings) from typechecking.
     pub diagnostics: Vec<Diagnostic>,
     /// Module system output (codegen info, parsed programs, module map).
@@ -306,6 +312,24 @@ impl Checker {
             sub: self.sub.clone(),
             constructors: self.constructors.clone(),
             evidence: self.evidence.clone(),
+            where_bound_var_names: {
+                // The map is keyed by ORIGINAL (pre-substitution) var IDs.
+                // Unification may have chained those vars to other IDs, and
+                // post-typecheck consumers (like the elaborator's
+                // `dict_for_type`) see the post-substitution IDs. Expand the
+                // map so both the original ID and the resolved ID point at
+                // the same source name.
+                let mut expanded = self.trait_state.where_bound_var_names.clone();
+                for (&bound_id, name) in &self.trait_state.where_bound_var_names {
+                    if let super::Type::Var(resolved_id) =
+                        self.sub.apply(&super::Type::Var(bound_id))
+                        && resolved_id != bound_id
+                    {
+                        expanded.entry(resolved_id).or_insert_with(|| name.clone());
+                    }
+                }
+                expanded
+            },
             diagnostics,
             modules: self.modules.clone(),
             traits: self.trait_state.traits.clone(),

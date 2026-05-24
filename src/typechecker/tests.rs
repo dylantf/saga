@@ -8609,3 +8609,101 @@ fn cross_module_alias_kind_mismatch_is_rejected() {
         err.message
     );
 }
+
+#[test]
+fn impl_for_tuple_pair_typechecks() {
+    check(
+        "trait ToJson a {\n\
+           fun to_json : a -> String\n\
+         }\n\
+         impl ToJson for Int {\n\
+           to_json n = show n\n\
+         }\n\
+         impl ToJson for (a, b) where {a: ToJson, b: ToJson} {\n\
+           to_json p = {\n\
+             let (x, y) = p\n\
+             to_json x <> to_json y\n\
+           }\n\
+         }\n\
+         fun use_it : Unit -> String\n\
+         use_it () = to_json (1, 2)\n",
+    )
+    .unwrap();
+}
+
+#[test]
+fn impl_for_tuple_pair_and_triple_coexist() {
+    check(
+        "trait ToJson a {\n\
+           fun to_json : a -> String\n\
+         }\n\
+         impl ToJson for Int {\n\
+           to_json n = show n\n\
+         }\n\
+         impl ToJson for (a, b) where {a: ToJson, b: ToJson} {\n\
+           to_json p = {\n\
+             let (x, y) = p\n\
+             to_json x <> to_json y\n\
+           }\n\
+         }\n\
+         impl ToJson for (a, b, c) where {a: ToJson, b: ToJson, c: ToJson} {\n\
+           to_json t = {\n\
+             let (x, y, z) = t\n\
+             to_json x <> to_json y <> to_json z\n\
+           }\n\
+         }\n",
+    )
+    .unwrap();
+}
+
+#[test]
+fn impl_for_tuple_same_arity_is_duplicate() {
+    let err = check(
+        "trait ToJson a {\n\
+           fun to_json : a -> String\n\
+         }\n\
+         impl ToJson for (a, b) where {a: ToJson, b: ToJson} {\n\
+           to_json p = \"first\"\n\
+         }\n\
+         impl ToJson for (a, b) where {a: ToJson, b: ToJson} {\n\
+           to_json p = \"second\"\n\
+         }\n",
+    )
+    .err()
+    .expect("expected duplicate impl diagnostic");
+    assert!(
+        err.message.contains("duplicate impl"),
+        "expected duplicate-impl diagnostic, got: {}",
+        err.message
+    );
+}
+
+#[test]
+fn impl_for_tuple_missing_element_constraint_is_error() {
+    // Constraint resolution on `to_json (1, "hi")` requires impls for both
+    // Int and String; without `impl ToJson for String` we should error.
+    let err = check(
+        "trait ToJson a {\n\
+           fun to_json : a -> String\n\
+         }\n\
+         impl ToJson for Int {\n\
+           to_json n = show n\n\
+         }\n\
+         impl ToJson for (a, b) where {a: ToJson, b: ToJson} {\n\
+           to_json p = {\n\
+             let (x, y) = p\n\
+             to_json x <> to_json y\n\
+           }\n\
+         }\n\
+         fun use_it : Unit -> String\n\
+         use_it () = to_json (1, \"hi\")\n",
+    )
+    .err()
+    .expect("expected no-impl diagnostic for String");
+    assert!(
+        err.message.contains("no impl of ToJson")
+            && err.message.contains("String"),
+        "expected missing-impl-of-ToJson-for-String, got: {}",
+        err.message
+    );
+}

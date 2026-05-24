@@ -253,6 +253,18 @@ pub fn mangle_type_name(canonical: &str) -> String {
     canonical.replace('.', "_")
 }
 
+/// Tuples are variable-arity: `(a, b)` and `(a, b, c)` are distinct concrete
+/// types but share the canonical name `"Std.Base.Tuple"`. For impl keying and
+/// dict naming we need to distinguish them, so suffix the canonical name with
+/// the arity for tuple targets. Non-tuple names pass through unchanged.
+pub fn arity_keyed_target_name(canonical: &str, arity: usize) -> String {
+    if canonical == canonicalize_type_name("Tuple") {
+        format!("{}.{}", canonical, arity)
+    } else {
+        canonical.to_string()
+    }
+}
+
 /// Build a dict constructor name from canonical trait name, type args, erlang module, and target type.
 /// Both `elaborate.rs` and `check_module.rs` must produce identical names for the same impl.
 pub fn make_dict_name(

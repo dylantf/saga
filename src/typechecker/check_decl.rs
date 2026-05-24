@@ -2877,15 +2877,32 @@ impl Checker {
                         let resolved_trait = self
                             .resolve_trait_name(&trait_name)
                             .unwrap_or_else(|| trait_name.clone());
+                        // For tuple types, look up the arity-specific impl
+                        // first (user-written `impl T for (a, b)`), then fall
+                        // back to the arity-agnostic bare key used by the
+                        // built-in Show/Debug/Eq tuple impls.
+                        let arity_keyed_name =
+                            super::arity_keyed_target_name(type_name, args.len());
                         let mut impl_info = self
                             .trait_state
                             .impls
                             .get(&(
                                 resolved_trait.clone(),
                                 resolved_trait_type_args.clone(),
-                                type_name.clone(),
+                                arity_keyed_name.clone(),
                             ))
                             .cloned();
+                        if impl_info.is_none() && arity_keyed_name != *type_name {
+                            impl_info = self
+                                .trait_state
+                                .impls
+                                .get(&(
+                                    resolved_trait.clone(),
+                                    resolved_trait_type_args.clone(),
+                                    type_name.clone(),
+                                ))
+                                .cloned();
+                        }
 
                         // Functional-trait coherence fallback: if extras are
                         // unresolved (and direct lookup missed), scan for the
@@ -3101,12 +3118,30 @@ impl Checker {
         for ((trait_name, _trait_type_args, target_type), impl_info) in &self.trait_state.impls {
             if let Some(trait_info) = self.trait_state.traits.get(trait_name) {
                 for supertrait in &trait_info.supertraits {
-                    // Supertraits are always single-param (no type args)
-                    if !self.trait_state.impls.contains_key(&(
-                        supertrait.clone(),
-                        vec![],
-                        target_type.clone(),
-                    )) {
+                    // Supertraits are always single-param (no type args).
+                    // For arity-keyed tuple targets, the supertrait impl may
+                    // be either the same arity-keyed form (user-written) or
+                    // the bare canonical tuple key (built-in Show/Debug/Eq);
+                    // either satisfies the supertrait obligation.
+                    let bare_tuple_fallback: Option<(String, Vec<String>, String)> = {
+                        let tuple_canon = super::canonicalize_type_name("Tuple");
+                        if let Some(prefix) = target_type.strip_suffix(|c: char| c.is_ascii_digit())
+                            && let Some(prefix) = prefix.strip_suffix('.')
+                            && prefix == tuple_canon
+                        {
+                            Some((supertrait.clone(), vec![], prefix.to_string()))
+                        } else {
+                            None
+                        }
+                    };
+                    let primary_key =
+                        (supertrait.clone(), vec![], target_type.clone());
+                    if !self.trait_state.impls.contains_key(&primary_key)
+                        && !bare_tuple_fallback
+                            .as_ref()
+                            .map(|k| self.trait_state.impls.contains_key(k))
+                            .unwrap_or(false)
+                    {
                         let msg = format!(
                             "impl {} for {} requires impl {} for {} (supertrait)",
                             trait_name, target_type, supertrait, target_type
