@@ -1,0 +1,45 @@
+import Std.Generic
+
+trait MyJson a {
+  fun encode : a -> String
+}
+
+impl MyJson for U1 {
+  encode _ = "U1"
+}
+
+impl MyJson for Leaf a where {a: MyJson} {
+  encode (Leaf x) = encode x
+}
+
+impl MyJson for Or l r where {l: MyJson, r: MyJson} {
+  encode v = case v {
+    Or_Left x -> encode x
+    Or_Right x -> encode x
+  }
+}
+
+impl MyJson for Variant (n : Symbol) a where {n: KnownSymbol, a: MyJson} {
+  encode (Variant p) = {
+    let name = symbol_name (Proxy : Proxy n)
+    "{" <> name <> ":" <> encode p <> "}"
+  }
+}
+
+impl MyJson for Adt a where {a: MyJson} {
+  encode (Adt _ inner) = encode inner
+}
+
+fun via_generic : a -> String where {a: Generic r, r: MyJson}
+via_generic x = encode (to x)
+
+type Role =
+  | Admin
+  | Editor
+  | Viewer
+  deriving (Debug, MyJson)
+
+main () = {
+  dbg (encode Admin) # direct
+  dbg (via_generic Admin) # through Generic-bound helper
+}

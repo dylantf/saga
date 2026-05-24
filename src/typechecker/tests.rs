@@ -4364,6 +4364,38 @@ impl ToJson for Person where {Generic Person r, ToJson r} {
 }
 
 #[test]
+fn free_function_with_existential_where_clause_typechecks() {
+    // `fun via_generic : a -> String where {a: Generic r, r: ToJson}`
+    // introduces `r` as an existential — it's not free in `a -> String`.
+    // The constraint on `r` must survive instantiation at call sites so the
+    // FUNCTIONAL_TRAITS coherence rule can pin `r` from the concrete `a`,
+    // and the elaborator can thread both dictionaries. Regression for the
+    // bug where the existential constraint was dropped from the scheme,
+    // causing the user argument to land in the second dict slot.
+    check(
+        "trait Generic a r {
+  fun to : (x: a) -> r
+}
+trait ToJson a {
+  fun to_json : (x: a) -> String
+}
+record Person { name: String }
+type RepPerson = RepPerson String
+impl Generic RepPerson for Person {
+  to p = RepPerson p.name
+}
+impl ToJson for RepPerson {
+  to_json r = case r { RepPerson s -> s }
+}
+fun via_generic : (x: a) -> String where {a: Generic r, r: ToJson}
+via_generic x = to_json (to x)
+fun caller : (p: Person) -> String
+caller p = via_generic p",
+    )
+    .unwrap();
+}
+
+#[test]
 fn where_app_unknown_trait_errors() {
     let result = check(
         "record Person { name: String }

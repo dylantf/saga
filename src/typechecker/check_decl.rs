@@ -1576,6 +1576,26 @@ impl Checker {
                         }
                     }
 
+                    // A Var-self constraint on a var that isn't part of this
+                    // function's polymorphism (not in fun_ty, not bound by a
+                    // where clause, not matched by phantom-constraint pairing)
+                    // must come from instantiating a callee whose scheme carries
+                    // a where-clause existential. The companion concrete-self
+                    // constraint in the same batch will pin this var via the
+                    // FUNCTIONAL_TRAITS coherence rule, but only at module-end
+                    // `check_pending_constraints` time. Defer it there instead
+                    // of erroring (including under has_annotation) or
+                    // pretending it constrains a local tvar.
+                    if !type_vars.contains(&id) {
+                        self.trait_state.pending_constraints.push((
+                            trait_name,
+                            trait_type_arg_types,
+                            resolved.clone(),
+                            span,
+                            node_id,
+                        ));
+                        continue;
+                    }
                     if has_annotation {
                         return Err(Diagnostic::error_at(
                             span,
@@ -1613,22 +1633,61 @@ impl Checker {
         self.env.remove(name);
         let mut scheme = self.generalize(&fun_ty);
 
+        // Collect var IDs introduced by where-clause constraints (both the self
+        // var and any vars appearing inside extras). Where clauses may
+        // introduce existentials — vars that aren't free in `fun_ty` but are
+        // pinned at call sites via the FUNCTIONAL_TRAITS coherence rule (e.g.
+        // `where {a: Generic r, r: MyJson}` introduces `r`). These must be
+        // quantified in the scheme so instantiation freshens them in lockstep
+        // with visible vars and the companion constraint survives.
+        let mut where_var_ids: std::collections::HashSet<u32> =
+            std::collections::HashSet::new();
+        for (_, var_id, extra_types) in where_constraints {
+            if let Type::Var(id) = self.sub.apply(&Type::Var(*var_id)) {
+                where_var_ids.insert(id);
+            }
+            for extra in extra_types {
+                let mut vs = Vec::new();
+                super::collect_free_vars(&self.sub.apply(extra), &mut vs);
+                where_var_ids.extend(vs);
+            }
+        }
+
         for (trait_name, var_id, extra_types) in where_constraints {
             let resolved_id = match self.sub.apply(&Type::Var(*var_id)) {
                 Type::Var(id) => id,
                 _ => continue,
             };
-            if scheme.forall.contains(&resolved_id) {
-                let resolved_extras: Vec<Type> =
-                    extra_types.iter().map(|ty| self.sub.apply(ty)).collect();
-                scheme
-                    .constraints
-                    .push((trait_name.clone(), resolved_id, resolved_extras));
+            let resolved_extras: Vec<Type> =
+                extra_types.iter().map(|ty| self.sub.apply(ty)).collect();
+            // Extend forall with the constraint's self var and any free vars in
+            // its extras if they aren't already quantified. This admits
+            // existentials into the scheme without disturbing visible
+            // generalization.
+            if !scheme.forall.contains(&resolved_id) {
+                scheme.forall.push(resolved_id);
             }
+            for extra in &resolved_extras {
+                let mut vs = Vec::new();
+                super::collect_free_vars(extra, &mut vs);
+                for v in vs {
+                    if !scheme.forall.contains(&v) {
+                        scheme.forall.push(v);
+                    }
+                }
+            }
+            scheme
+                .constraints
+                .push((trait_name.clone(), resolved_id, resolved_extras));
         }
 
         for (trait_name, var_id, span) in scheme_constraints {
-            if !type_vars.contains(&var_id) {
+            // An inferred constraint var is "covered" if it appears in the
+            // visible function type OR if it's a where-clause existential that
+            // will be pinned at the call site.
+            let covered =
+                type_vars.contains(&var_id) || where_var_ids.contains(&var_id);
+            if !covered {
                 let display = trait_name.rsplit('.').next().unwrap_or(&trait_name);
                 return Err(Diagnostic::error_at(
                     span,
