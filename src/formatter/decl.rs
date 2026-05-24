@@ -541,19 +541,32 @@ pub fn format_impl_def(decl: &Decl) -> Doc {
 
     let trait_type_arg_names: Vec<&str> =
         trait_type_args.iter().map(|te| te.simple_name()).collect();
+    // Tuple impls (`impl Trait for (a, b, ...)`) are parsed into
+    // target_type="Tuple" with one type_param per element. Render them with
+    // the original parenthesized syntax. Bare "Tuple" with no params can't be
+    // produced by the parser, so type_params.len() >= 2 is the discriminator.
+    let is_tuple_target = target_type == "Tuple" && type_params.len() >= 2;
+    let target_rendered = if is_tuple_target {
+        let params: Vec<String> = type_params.iter().map(|tp| tp.to_string()).collect();
+        format!("({})", params.join(", "))
+    } else {
+        target_type.clone()
+    };
     let mut header = if trait_type_args.is_empty() {
-        format!("impl {} for {}", trait_name, target_type)
+        format!("impl {} for {}", trait_name, target_rendered)
     } else {
         format!(
             "impl {} {} for {}",
             trait_name,
             trait_type_arg_names.join(" "),
-            target_type
+            target_rendered
         )
     };
-    for tp in type_params {
-        header.push(' ');
-        write!(header, "{}", tp).unwrap();
+    if !is_tuple_target {
+        for tp in type_params {
+            header.push(' ');
+            write!(header, "{}", tp).unwrap();
+        }
     }
     parts.push(Doc::text(header));
 
