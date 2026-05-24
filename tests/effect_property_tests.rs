@@ -1957,18 +1957,6 @@ result () = {
     );
 }
 
-// FIXME: open-row higher-order across modules — `apply_twice` calls its
-// callback twice in stmt position; the second call's continuation produces
-// Unit where the surrounding handler's `<>` chain expects String. Likely
-// the same root cause as `effectful_var_binding_deferred_call`: mid-block
-// effectful calls don't thread the continuation correctly.
-//
-// Phase 3 acceptance: this exercises `RowForwarded` end-to-end across module
-// boundaries — the very case decision 6 (closed-row vs open-row projection)
-// must handle. The Phase 2 pre-pass now classifies the call as
-// `RowForwarded`; Phase 3 needs the call-site emission (Phase 3d) to
-// forward the caller's full evidence rather than try to project.
-#[ignore = "open-row HOF callback called twice mid-block miscompiles (pre-existing)"]
 #[test]
 fn cross_module_open_row_higher_order() {
     // The lib takes a callback whose effects forward through ..e. The
