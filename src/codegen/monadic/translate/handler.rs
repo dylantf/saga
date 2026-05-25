@@ -10,11 +10,7 @@ use crate::token::Span;
 
 impl<'a> Translator<'a> {
     /// Translate the handler expression in `with body handler`.
-    pub(crate) fn translate_handler(
-        &mut self,
-        h: &Handler,
-        site_span: Span,
-    ) -> MHandler {
+    pub(crate) fn translate_handler(&mut self, h: &Handler, site_span: Span) -> MHandler {
         match h {
             Handler::Named(named) => self.handler_for_named(&named.name, named.id, site_span),
             Handler::Inline { items, .. } => self.handler_from_inline_items(items, site_span),
@@ -126,7 +122,9 @@ impl<'a> Translator<'a> {
             .iter()
             .map(|a| self.translate_handler_arm(a))
             .collect();
-        let return_clause = return_clause.as_ref().map(|a| self.translate_handler_arm(a));
+        let return_clause = return_clause
+            .as_ref()
+            .map(|a| self.translate_handler_arm(a));
 
         MHandler::Static {
             effects,
@@ -164,7 +162,10 @@ impl<'a> Translator<'a> {
             op,
             params: arm.params.clone(),
             body: Box::new(self.translate_expr(&arm.body)),
-            finally_block: arm.finally_block.as_ref().map(|b| Box::new(self.translate_expr(b))),
+            finally_block: arm
+                .finally_block
+                .as_ref()
+                .map(|b| Box::new(self.translate_expr(b))),
             span: arm.span,
         }
     }

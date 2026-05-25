@@ -5,9 +5,7 @@
 
 use super::{Translator, fresh_node_id, wrap_binds};
 use crate::ast::{self, Annotated, Expr, ExprKind, HandlerBody, Lit, NodeId, Pat, Stmt};
-use crate::codegen::monadic::ir::{
-    Atom, EffectOpRef, MArm, MBitSegment, MExpr, MHandler, MVar,
-};
+use crate::codegen::monadic::ir::{Atom, EffectOpRef, MArm, MBitSegment, MExpr, MHandler, MVar};
 
 impl<'a> Translator<'a> {
     /// Translate an expression in tail position (its own computation context).
@@ -67,7 +65,10 @@ impl<'a> Translator<'a> {
                 scrutinee, arms, ..
             } => {
                 let scrutinee = self.expect_atom(scrutinee);
-                let arms = arms.iter().map(|a| self.translate_case_arm(&a.node)).collect();
+                let arms = arms
+                    .iter()
+                    .map(|a| self.translate_case_arm(&a.node))
+                    .collect();
                 MExpr::Case {
                     scrutinee,
                     arms,
@@ -157,7 +158,10 @@ impl<'a> Translator<'a> {
             ExprKind::Receive {
                 arms, after_clause, ..
             } => MExpr::Receive {
-                arms: arms.iter().map(|a| self.translate_case_arm(&a.node)).collect(),
+                arms: arms
+                    .iter()
+                    .map(|a| self.translate_case_arm(&a.node))
+                    .collect(),
                 after: after_clause
                     .as_ref()
                     .map(|(t, b)| (self.expect_atom(t), Box::new(self.translate_expr(b)))),
@@ -344,7 +348,11 @@ impl<'a> Translator<'a> {
     /// Translate a post-ANF block — a flat let-sequence ending in a tail
     /// expression — into nested `Bind`s. Tracks `let h = handler ...` aliases
     /// in the local scope so subsequent `with h` can resolve statically.
-    fn translate_block(&mut self, stmts: &[Annotated<Stmt>], block_span: crate::token::Span) -> MExpr {
+    fn translate_block(
+        &mut self,
+        stmts: &[Annotated<Stmt>],
+        block_span: crate::token::Span,
+    ) -> MExpr {
         // Save+restore scope so handler aliases don't leak across blocks.
         let saved = self.local_static_handlers.clone();
 
@@ -362,9 +370,7 @@ impl<'a> Translator<'a> {
         for (idx, ann) in stmts.iter().enumerate() {
             let is_last = idx + 1 == n;
             match &ann.node {
-                Stmt::Let {
-                    pattern, value, ..
-                } => {
+                Stmt::Let { pattern, value, .. } => {
                     // Record handler-alias info before translating the body.
                     if let Pat::Var { name, .. } = pattern {
                         self.record_handler_alias(name, value);
