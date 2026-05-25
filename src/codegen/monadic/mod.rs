@@ -9,3 +9,4 @@
 //! (strict no-imports, NodeId discipline, "fields with a named consumer").
 
 pub mod ir;
+pub mod translate;
