@@ -573,9 +573,7 @@ mod tests {
         })
     }
     fn var(name: &str) -> Expr {
-        ev(ExprKind::Var {
-            name: name.into(),
-        })
+        ev(ExprKind::Var { name: name.into() })
     }
     fn resume(v: Expr) -> Expr {
         ev(ExprKind::Resume { value: Box::new(v) })

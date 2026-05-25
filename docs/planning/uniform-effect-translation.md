@@ -9,7 +9,7 @@ Tick boxes as steps land. Each box → one focused agent session.
 ### Strategic phase 1 — slow uniform path correct end-to-end
 
 - [x] **1.** `src/codegen/handler_analysis.rs` — see stage 8.5
-- [ ] **2.** `src/codegen/anf.rs` + `FreshNames` — see stage 9
+- [x] **2.** `src/codegen/anf.rs` + `FreshNames` — see stage 9
 - [ ] **3.** `src/codegen/monadic/ir.rs` — see [monadic-ir-spec.md](./uniform-effect-translation/monadic-ir-spec.md)
 - [ ] **4.** `src/codegen/monadic/translate.rs` — see stage 10
 - [ ] **5.** `src/codegen/monadic/print.rs` — debug pretty-printer
@@ -62,7 +62,7 @@ Sibling planning docs (older, partially superseded by this one):
 [effectful-call-detection.md](./effectful-call-detection.md),
 [composite-cps-chaining.md](./composite-cps-chaining.md). They cover the same
 runtime evidence layout but predate the uniform-translation decision; treat
-their guidance on *whether* to CPS-transform a given site as obsolete.
+their guidance on _whether_ to CPS-transform a given site as obsolete.
 
 ---
 
@@ -291,7 +291,7 @@ are confirmed, a single mechanical commit performs the migration.
 **Sibling planning docs** ([evidence-passing.md](./evidence-passing.md),
 [effectful-call-detection.md](./effectful-call-detection.md),
 [composite-cps-chaining.md](./composite-cps-chaining.md)) — review and
-update or delete. Their guidance on *whether* to CPS-transform is obsolete
+update or delete. Their guidance on _whether_ to CPS-transform is obsolete
 under uniform translation; their notes on runtime evidence layout may
 still be relevant and can be folded into
 [docs/effect-implementation.md](../effect-implementation.md).
@@ -602,6 +602,7 @@ identity` into `ResolutionResult`. AST stays source-shaped.
   visually distinguishable in emitted `.core` files during benchmark toggle.
   Promote to a shared module (e.g. `src/codegen/monadic/fresh.rs`) if effect optimization
   or `lower_monadic/` need their own fresh names.
+
 - **`Expr::rebuild_like` vs. `Expr::synth` is load-bearing.** `ResolutionMap`
   is keyed by source `NodeId`s. ANF must use `rebuild_like` when a source
   expression is just relocated (lifted in place); use `synth` only for
@@ -776,16 +777,16 @@ Strategic phases:
 
 Within strategic phase 1, the module order is:
 
-| # | Module                                      | Why this order                                                              | Rough effort |
-| - | ------------------------------------------- | --------------------------------------------------------------------------- | ------------ |
-| 1 | `src/codegen/handler_analysis.rs`           | Small, no dependencies; output is needed by effect optimization later       | ~0.5 day     |
-| 2 | `src/codegen/anf.rs` + `FreshNames`         | Foundation for translation; mechanical; depends on nothing else new         | ~1 day       |
-| 3 | `src/codegen/monadic/ir.rs`                 | Type defs only; paste from [monadic-ir-spec.md](./uniform-effect-translation/monadic-ir-spec.md) | ~few hours   |
-| 4 | `src/codegen/monadic/translate.rs`          | Mechanical given ANF + ir.rs                                                | ~2 days      |
-| 5 | `src/codegen/monadic/print.rs`              | Debug pretty-printer; useful before lower_monadic so we can inspect IR      | ~0.5 day     |
-| 6 | `src/codegen/monadic/effect_opt/` as identity | Stub `fn run(m, _h) -> m`; unblocks lowerer testing                       | ~hour        |
-| 7 | `src/codegen/lower_monadic/`                | The bulk; every MExpr variant + handler emission + BEAM-native effects     | ~5–8 days    |
-| 8 | Wire toggle in `src/codegen/mod.rs`         | Two entry points; comment-toggle pattern                                    | ~hour        |
+| #   | Module                                        | Why this order                                                                                   | Rough effort |
+| --- | --------------------------------------------- | ------------------------------------------------------------------------------------------------ | ------------ |
+| 1   | `src/codegen/handler_analysis.rs`             | Small, no dependencies; output is needed by effect optimization later                            | ~0.5 day     |
+| 2   | `src/codegen/anf.rs` + `FreshNames`           | Foundation for translation; mechanical; depends on nothing else new                              | ~1 day       |
+| 3   | `src/codegen/monadic/ir.rs`                   | Type defs only; paste from [monadic-ir-spec.md](./uniform-effect-translation/monadic-ir-spec.md) | ~few hours   |
+| 4   | `src/codegen/monadic/translate.rs`            | Mechanical given ANF + ir.rs                                                                     | ~2 days      |
+| 5   | `src/codegen/monadic/print.rs`                | Debug pretty-printer; useful before lower_monadic so we can inspect IR                           | ~0.5 day     |
+| 6   | `src/codegen/monadic/effect_opt/` as identity | Stub `fn run(m, _h) -> m`; unblocks lowerer testing                                              | ~hour        |
+| 7   | `src/codegen/lower_monadic/`                  | The bulk; every MExpr variant + handler emission + BEAM-native effects                           | ~5–8 days    |
+| 8   | Wire toggle in `src/codegen/mod.rs`           | Two entry points; comment-toggle pattern                                                         | ~hour        |
 
 After step 8, the new path is functional end-to-end through the slow
 uniform path. This is **strategic phase 1 complete** — uniform translation
@@ -793,11 +794,11 @@ correct against the test suite, modulo perf.
 
 Within strategic phase 2, the effect_opt fill-in order is:
 
-| # | Rewrite                | Why this order                                                                                   |
-| - | ---------------------- | ------------------------------------------------------------------------------------------------ |
-| 9 | bind-collapse          | Most pure-code-regression wins; simplest rule; smallest code; unblocks differential testing      |
-| 10 | Bind→Let promotion    | Recovers the remaining "pure call in effectful chain" perf gap; medium complexity                |
-| 11 | tail-resumptive direct-call | Correctness-sensitive (gated by `TailResumptive` flag + static handler resolution); biggest perf win on hot tail-resumptive ops |
+| #   | Rewrite                     | Why this order                                                                                                                  |
+| --- | --------------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
+| 9   | bind-collapse               | Most pure-code-regression wins; simplest rule; smallest code; unblocks differential testing                                     |
+| 10  | Bind→Let promotion          | Recovers the remaining "pure call in effectful chain" perf gap; medium complexity                                               |
+| 11  | tail-resumptive direct-call | Correctness-sensitive (gated by `TailResumptive` flag + static handler resolution); biggest perf win on hot tail-resumptive ops |
 
 Each rewrite ships as its own increment with its own differential-test
 pass. Pass 3's no-op identity is the baseline; each rewrite is a strict
