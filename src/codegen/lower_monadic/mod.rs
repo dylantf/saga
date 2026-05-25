@@ -33,8 +33,11 @@
 mod decls;
 mod effects;
 mod exprs;
+mod exprs_edge;
 mod pats;
 mod util;
+
+use std::collections::HashMap;
 
 use crate::codegen::CodegenContext;
 use crate::codegen::cerl::CModule;
@@ -90,6 +93,15 @@ pub struct Lowerer<'ctx> {
     /// positional per arm; this counter is used for transient internals like
     /// return-clause param fallbacks).
     helper_counter: u32,
+    /// Declared field order for every known record type. Keyed by record name
+    /// (both bare `Foo` and fully-qualified `ModuleName.Foo`) so a lookup
+    /// using either form succeeds. Populated at construction from each
+    /// module's [`ModuleCodegenInfo::record_fields`].
+    ///
+    /// `FieldAccess` and `RecordUpdate` need this to translate `record.field`
+    /// into a positional `element/2` access — there is no field-name
+    /// metadata at runtime, only positions in the underlying tuple.
+    pub(super) record_fields: HashMap<String, Vec<String>>,
 }
 
 impl<'ctx> Lowerer<'ctx> {
@@ -100,6 +112,16 @@ impl<'ctx> Lowerer<'ctx> {
         handler_info: &'ctx HandlerAnalysis,
         effect_info: &'ctx EffectInfo<'ctx>,
     ) -> Self {
+        let mut record_fields: HashMap<String, Vec<String>> = HashMap::new();
+        for (mod_name, m) in &module_ctx.modules {
+            for (rec_name, fields) in &m.codegen_info.record_fields {
+                let qualified = format!("{}.{}", mod_name, rec_name);
+                record_fields.insert(qualified, fields.clone());
+                record_fields
+                    .entry(rec_name.clone())
+                    .or_insert_with(|| fields.clone());
+            }
+        }
         Self {
             resolution,
             ctors,
@@ -113,6 +135,7 @@ impl<'ctx> Lowerer<'ctx> {
             arm_k_counter: 0,
             ret_k_counter: 0,
             helper_counter: 0,
+            record_fields,
         }
     }
 

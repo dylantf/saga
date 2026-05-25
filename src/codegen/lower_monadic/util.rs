@@ -7,8 +7,10 @@
 
 use std::collections::HashMap;
 
-use crate::ast::Lit;
-use crate::codegen::cerl::{CBinSeg, CExpr, CLit};
+use crate::ast::{BitSegSpec, Lit};
+use crate::codegen::cerl::{
+    BinSegFlags, BinSegSize, BinSegType, CBinSeg, CExpr, CLit, Endianness,
+};
 
 /// Map a Saga identifier to a Core Erlang variable name.
 ///
@@ -75,7 +77,7 @@ pub(super) fn lower_string_to_binary(s: &str) -> CExpr {
 }
 
 /// Process Saga escape sequences in a raw multiline-string source.
-fn process_string_escapes(s: &str) -> String {
+pub(super) fn process_string_escapes(s: &str) -> String {
     let mut out = String::new();
     let mut chars = s.chars();
     while let Some(ch) = chars.next() {
@@ -102,6 +104,56 @@ fn process_string_escapes(s: &str) -> String {
         }
     }
     out
+}
+
+/// Shared segment metadata resolution for bitstring expressions.
+/// Given a set of specifiers, returns (type, default_size, unit).
+///
+/// Copied verbatim from `src/codegen/lower/util.rs::resolve_bit_segment_meta`
+/// per the agent-guide's no-imports rule.
+pub(super) fn resolve_bit_segment_meta(specs: &[BitSegSpec]) -> (BinSegType, i64, u8) {
+    let has = |s: &BitSegSpec| specs.contains(s);
+    if has(&BitSegSpec::Float) {
+        (BinSegType::Float, 64, 1)
+    } else if has(&BitSegSpec::Binary) {
+        (BinSegType::Binary, 8, 8)
+    } else if has(&BitSegSpec::Utf8) {
+        (BinSegType::Utf8, 0, 0)
+    } else {
+        (BinSegType::Integer, 8, 1)
+    }
+}
+
+/// Build flags from specifiers.
+pub(super) fn resolve_bit_segment_flags(specs: &[BitSegSpec]) -> BinSegFlags {
+    let has = |s: &BitSegSpec| specs.contains(s);
+    BinSegFlags {
+        signed: has(&BitSegSpec::Signed),
+        endianness: if has(&BitSegSpec::Little) {
+            Endianness::Little
+        } else if has(&BitSegSpec::Native) {
+            Endianness::Native
+        } else {
+            Endianness::Big
+        },
+    }
+}
+
+/// Build the size expression for a segment, given the lowered size (if any)
+/// and the resolved metadata.
+pub(super) fn resolve_bit_segment_size(
+    size: Option<CExpr>,
+    type_name: &BinSegType,
+    default_size: i64,
+) -> BinSegSize {
+    if matches!(type_name, BinSegType::Utf8) {
+        BinSegSize::Utf8
+    } else {
+        match size {
+            Some(s) => BinSegSize::Expr(s),
+            None => BinSegSize::Expr(CExpr::Lit(CLit::Int(default_size))),
+        }
+    }
 }
 
 /// Resolve a constructor name to its mangled Erlang atom via the

@@ -10,7 +10,7 @@ use crate::ast::{self, Lit, NodeId, Pat};
 use crate::codegen::cerl::CExpr;
 use crate::codegen::handler_analysis::HandlerAnalysis;
 use crate::codegen::monadic::ir::{
-    Atom, EffectInfo, MDecl, MDictConstructor, MExpr, MFunBinding, MVal,
+    Atom, EffectInfo, MArm, MBitSegment, MDecl, MDictConstructor, MExpr, MFunBinding, MVal,
 };
 use crate::token::Span;
 
@@ -838,7 +838,7 @@ fn case_with_two_arms_lowers_to_cel_case() {
     let e = MExpr::Case {
         scrutinee: atom_var("x"),
         arms: vec![
-            crate::codegen::monadic::ir::MArm {
+            MArm {
                 pattern: Pat::Lit {
                     id: dummy_node(),
                     value: Lit::Int("1".into(), 1),
@@ -851,7 +851,7 @@ fn case_with_two_arms_lowers_to_cel_case() {
                 }),
                 span: span(),
             },
-            crate::codegen::monadic::ir::MArm {
+            MArm {
                 pattern: Pat::Lit {
                     id: dummy_node(),
                     value: Lit::Int("2".into(), 2),
@@ -2066,5 +2066,439 @@ fn resume_in_bind_position_threads_bind_k() {
             assert!(matches!(&args[0], CExpr::Lit(CLit::Atom(a)) if a == "unit"));
         }
         other => panic!("expected Resume Apply, got {other:?}"),
+    }
+}
+
+// ----------------------------------------------------------------------
+// Sub-step 7g — remaining MExpr variants
+// ----------------------------------------------------------------------
+
+fn atom_int(n: i64) -> Atom {
+    atom_lit(Lit::Int(n.to_string(), n))
+}
+
+/// Build a lowerer with a pre-seeded `record_fields` cache; lets tests
+/// drive `FieldAccess`/`RecordUpdate` without standing up a full
+/// `CodegenContext` of modules.
+fn lower_with_records<F, R>(
+    fields_by_record: &[(&str, Vec<&str>)],
+    op: F,
+) -> R
+where
+    F: FnOnce(&mut Lowerer<'_>) -> R,
+{
+    let resolution = ResolutionMap::new();
+    let ctors = ConstructorAtoms::new();
+    let ctx = CodegenContext::default();
+    let handler_info = HandlerAnalysis::default();
+    let storage = EffectInfoStorage::empty();
+    let effect_info = storage.view();
+    let mut lowerer = Lowerer::new(&resolution, &ctors, &ctx, &handler_info, &effect_info);
+    for (rec, fields) in fields_by_record {
+        lowerer.record_fields.insert(
+            rec.to_string(),
+            fields.iter().map(|f| f.to_string()).collect(),
+        );
+    }
+    op(&mut lowerer)
+}
+
+#[test]
+fn field_access_emits_element_call_wrapped_in_return_k() {
+    // record Foo { a, b, c }; lowering of .b → element(3, R) wrapped in K.
+    let expr = MExpr::FieldAccess {
+        record: atom_var("r"),
+        field: "b".to_string(),
+        record_name: Some("Foo".to_string()),
+        source: dummy_node(),
+    };
+    let ce = lower_with_records(&[("Foo", vec!["a", "b", "c"])], |l| l.lower_expr(&expr));
+    match ce {
+        CExpr::Apply(callee, args) => {
+            assert!(matches!(callee.as_ref(), CExpr::Var(n) if n == "_ReturnK"));
+            assert_eq!(args.len(), 1);
+            match &args[0] {
+                CExpr::Call(m, f, call_args) => {
+                    assert_eq!(m, "erlang");
+                    assert_eq!(f, "element");
+                    assert!(matches!(&call_args[0], CExpr::Lit(CLit::Int(3))));
+                    assert!(matches!(&call_args[1], CExpr::Var(n) if n == "R"));
+                }
+                other => panic!("expected element call, got {other:?}"),
+            }
+        }
+        other => panic!("expected Apply, got {other:?}"),
+    }
+}
+
+#[test]
+fn record_update_rebuilds_tuple_with_tag_preserved() {
+    // record Pair { x, y }; update {r | y = 9}.
+    // Expected: apply _ReturnK(let _H0 = R in {element(1,_H0), element(2,_H0), 9})
+    let expr = MExpr::RecordUpdate {
+        record: atom_var("r"),
+        fields: vec![("y".to_string(), atom_int(9))],
+        record_name: Some("Pair".to_string()),
+        source: dummy_node(),
+    };
+    let ce = lower_with_records(&[("Pair", vec!["x", "y"])], |l| l.lower_expr(&expr));
+    let arg = match ce {
+        CExpr::Apply(callee, args) => {
+            assert!(matches!(callee.as_ref(), CExpr::Var(n) if n == "_ReturnK"));
+            args.into_iter().next().expect("apply arg")
+        }
+        other => panic!("expected Apply, got {other:?}"),
+    };
+    let (let_name, let_val, let_body) = match arg {
+        CExpr::Let(n, v, b) => (n, v, b),
+        other => panic!("expected Let, got {other:?}"),
+    };
+    assert_eq!(let_name, "_H0");
+    assert!(matches!(let_val.as_ref(), CExpr::Var(n) if n == "R"));
+    let elems = match *let_body {
+        CExpr::Tuple(e) => e,
+        other => panic!("expected Tuple body, got {other:?}"),
+    };
+    // tag, x (untouched), y (updated)
+    assert_eq!(elems.len(), 3);
+    match &elems[0] {
+        CExpr::Call(_, f, args) => {
+            assert_eq!(f, "element");
+            assert!(matches!(&args[0], CExpr::Lit(CLit::Int(1))));
+        }
+        other => panic!("expected tag element call, got {other:?}"),
+    }
+    match &elems[1] {
+        CExpr::Call(_, f, args) => {
+            assert_eq!(f, "element");
+            assert!(matches!(&args[0], CExpr::Lit(CLit::Int(2))));
+        }
+        other => panic!("expected x element call, got {other:?}"),
+    }
+    assert!(matches!(&elems[2], CExpr::Lit(CLit::Int(9))));
+}
+
+#[test]
+fn dict_method_access_emits_element_call_one_based() {
+    let expr = MExpr::DictMethodAccess {
+        dict: atom_var("d"),
+        trait_name: "Show".to_string(),
+        method_index: 2,
+        source: dummy_node(),
+    };
+    let ce = lower_expr_default(&expr);
+    match ce {
+        CExpr::Apply(_, args) => match &args[0] {
+            CExpr::Call(m, f, ca) => {
+                assert_eq!(m, "erlang");
+                assert_eq!(f, "element");
+                // method_index 2 → element 3 (skips name tag at idx 1)
+                assert!(matches!(&ca[0], CExpr::Lit(CLit::Int(3))));
+                assert!(matches!(&ca[1], CExpr::Var(n) if n == "D"));
+            }
+            other => panic!("expected element call, got {other:?}"),
+        },
+        other => panic!("expected Apply, got {other:?}"),
+    }
+}
+
+#[test]
+fn foreign_call_lowers_to_module_call_wrapped_in_k() {
+    // ForeignCall("lists", "reverse", [x])
+    let expr = MExpr::ForeignCall {
+        module: "lists".to_string(),
+        func: "reverse".to_string(),
+        args: vec![atom_var("x")],
+        source: dummy_node(),
+    };
+    let ce = lower_expr_default(&expr);
+    match ce {
+        CExpr::Apply(callee, args) => {
+            assert!(matches!(callee.as_ref(), CExpr::Var(n) if n == "_ReturnK"));
+            match &args[0] {
+                CExpr::Call(m, f, ca) => {
+                    assert_eq!(m, "lists");
+                    assert_eq!(f, "reverse");
+                    assert_eq!(ca.len(), 1);
+                    assert!(matches!(&ca[0], CExpr::Var(n) if n == "X"));
+                }
+                other => panic!("expected Call, got {other:?}"),
+            }
+        }
+        other => panic!("expected Apply, got {other:?}"),
+    }
+}
+
+#[test]
+fn foreign_call_no_args_emits_zero_arg_call() {
+    let expr = MExpr::ForeignCall {
+        module: "erlang".to_string(),
+        func: "self".to_string(),
+        args: vec![],
+        source: dummy_node(),
+    };
+    let ce = lower_expr_default(&expr);
+    let arg = match ce {
+        CExpr::Apply(_, mut args) => args.remove(0),
+        other => panic!("expected Apply, got {other:?}"),
+    };
+    match arg {
+        CExpr::Call(m, f, ca) => {
+            assert_eq!(m, "erlang");
+            assert_eq!(f, "self");
+            assert!(ca.is_empty());
+        }
+        other => panic!("expected Call, got {other:?}"),
+    }
+}
+
+#[test]
+fn binop_add_emits_erlang_plus_wrapped_in_k() {
+    let expr = MExpr::BinOp {
+        op: ast::BinOp::Add,
+        left: atom_int(1),
+        right: atom_int(2),
+        source: dummy_node(),
+    };
+    let ce = lower_expr_default(&expr);
+    match ce {
+        CExpr::Apply(_, args) => match &args[0] {
+            CExpr::Call(m, f, ca) => {
+                assert_eq!(m, "erlang");
+                assert_eq!(f, "+");
+                assert_eq!(ca.len(), 2);
+                assert!(matches!(&ca[0], CExpr::Lit(CLit::Int(1))));
+                assert!(matches!(&ca[1], CExpr::Lit(CLit::Int(2))));
+            }
+            other => panic!("expected Call, got {other:?}"),
+        },
+        other => panic!("expected Apply, got {other:?}"),
+    }
+}
+
+#[test]
+fn unary_minus_emits_zero_minus_value() {
+    let expr = MExpr::UnaryMinus {
+        value: atom_int(7),
+        source: dummy_node(),
+    };
+    let ce = lower_expr_default(&expr);
+    match ce {
+        CExpr::Apply(_, args) => match &args[0] {
+            CExpr::Call(m, f, ca) => {
+                assert_eq!(m, "erlang");
+                assert_eq!(f, "-");
+                assert!(matches!(&ca[0], CExpr::Lit(CLit::Int(0))));
+                assert!(matches!(&ca[1], CExpr::Lit(CLit::Int(7))));
+            }
+            other => panic!("expected Call, got {other:?}"),
+        },
+        other => panic!("expected Apply, got {other:?}"),
+    }
+}
+
+#[test]
+fn bitstring_string_literal_segment_expands_to_byte_run() {
+    let expr = MExpr::BitString {
+        segments: vec![MBitSegment {
+            value: atom_lit(Lit::String("hi".to_string(), crate::token::StringKind::Normal)),
+            size: None,
+            specs: vec![],
+            span: span(),
+        }],
+        source: dummy_node(),
+    };
+    let ce = lower_expr_default(&expr);
+    match ce {
+        CExpr::Apply(_, args) => match &args[0] {
+            CExpr::Binary(segs) => {
+                assert_eq!(segs.len(), 2);
+                assert!(matches!(segs[0], CBinSeg::Byte(b'h')));
+                assert!(matches!(segs[1], CBinSeg::Byte(b'i')));
+            }
+            other => panic!("expected Binary, got {other:?}"),
+        },
+        other => panic!("expected Apply, got {other:?}"),
+    }
+}
+
+#[test]
+fn bitstring_integer_segment_with_size_emits_sized_segment() {
+    let expr = MExpr::BitString {
+        segments: vec![MBitSegment {
+            value: atom_int(255),
+            size: Some(atom_int(16)),
+            specs: vec![],
+            span: span(),
+        }],
+        source: dummy_node(),
+    };
+    let ce = lower_expr_default(&expr);
+    match ce {
+        CExpr::Apply(_, args) => match &args[0] {
+            CExpr::Binary(segs) => {
+                assert_eq!(segs.len(), 1);
+                match &segs[0] {
+                    CBinSeg::Segment { value, size, .. } => {
+                        assert!(matches!(value, CExpr::Lit(CLit::Int(255))));
+                        match size {
+                            crate::codegen::cerl::BinSegSize::Expr(CExpr::Lit(CLit::Int(16))) => {}
+                            other => panic!("expected explicit size 16, got {other:?}"),
+                        }
+                    }
+                    other => panic!("expected Segment, got {other:?}"),
+                }
+            }
+            other => panic!("expected Binary, got {other:?}"),
+        },
+        other => panic!("expected Apply, got {other:?}"),
+    }
+}
+
+#[test]
+fn receive_without_after_defaults_to_infinity_and_true() {
+    // receive { x -> x }
+    let expr = MExpr::Receive {
+        arms: vec![MArm {
+            pattern: Pat::Var {
+                id: dummy_node(),
+                name: "x".to_string(),
+                span: span(),
+            },
+            guard: None,
+            body: MExpr::Pure(atom_var("x")),
+            span: span(),
+        }],
+        after: None,
+        source: dummy_node(),
+    };
+    let ce = lower_expr_default(&expr);
+    match ce {
+        CExpr::Receive(arms, timeout, body) => {
+            assert_eq!(arms.len(), 1);
+            assert!(matches!(timeout.as_ref(), CExpr::Lit(CLit::Atom(a)) if a == "infinity"));
+            assert!(matches!(body.as_ref(), CExpr::Lit(CLit::Atom(a)) if a == "true"));
+            // arm body shares the enclosing K
+            match &arms[0].body {
+                CExpr::Apply(c, _) => {
+                    assert!(matches!(c.as_ref(), CExpr::Var(n) if n == "_ReturnK"));
+                }
+                other => panic!("expected arm body Apply, got {other:?}"),
+            }
+        }
+        other => panic!("expected Receive, got {other:?}"),
+    }
+}
+
+#[test]
+fn receive_with_after_lowers_timeout_atom_and_body_under_outer_k() {
+    let expr = MExpr::Receive {
+        arms: vec![MArm {
+            pattern: Pat::Wildcard {
+                id: dummy_node(),
+                span: span(),
+            },
+            guard: None,
+            body: MExpr::Pure(atom_int(1)),
+            span: span(),
+        }],
+        after: Some((atom_int(5000), Box::new(MExpr::Pure(atom_int(0))))),
+        source: dummy_node(),
+    };
+    let ce = lower_expr_default(&expr);
+    match ce {
+        CExpr::Receive(arms, timeout, body) => {
+            assert_eq!(arms.len(), 1);
+            assert!(matches!(timeout.as_ref(), CExpr::Lit(CLit::Int(5000))));
+            // after-body lowers under the outer K too
+            match body.as_ref() {
+                CExpr::Apply(c, args) => {
+                    assert!(matches!(c.as_ref(), CExpr::Var(n) if n == "_ReturnK"));
+                    assert!(matches!(args[0], CExpr::Lit(CLit::Int(0))));
+                }
+                other => panic!("expected after-body Apply, got {other:?}"),
+            }
+        }
+        other => panic!("expected Receive, got {other:?}"),
+    }
+}
+
+#[test]
+fn case_arm_guard_lowers_to_pure_binop() {
+    // case x of y when y > 0 -> y end
+    let expr = MExpr::Case {
+        scrutinee: atom_var("x"),
+        arms: vec![MArm {
+            pattern: Pat::Var {
+                id: dummy_node(),
+                name: "y".to_string(),
+                span: span(),
+            },
+            guard: Some(MExpr::BinOp {
+                op: ast::BinOp::Gt,
+                left: atom_var("y"),
+                right: atom_int(0),
+                source: dummy_node(),
+            }),
+            body: MExpr::Pure(atom_var("y")),
+            span: span(),
+        }],
+        source: dummy_node(),
+    };
+    let ce = lower_expr_default(&expr);
+    let arms = match ce {
+        CExpr::Case(_, arms) => arms,
+        other => panic!("expected Case, got {other:?}"),
+    };
+    let guard = arms[0]
+        .guard
+        .as_ref()
+        .expect("guard should be lowered, not None");
+    match guard {
+        CExpr::Call(m, f, args) => {
+            assert_eq!(m, "erlang");
+            assert_eq!(f, ">");
+            assert!(matches!(&args[0], CExpr::Var(n) if n == "Y"));
+            assert!(matches!(&args[1], CExpr::Lit(CLit::Int(0))));
+        }
+        other => panic!("expected guard Call, got {other:?}"),
+    }
+}
+
+#[test]
+fn binop_under_bind_threads_inner_k() {
+    // Bind { x = BinOp(+, 1, 2), body = Pure(Var x) }
+    // expected: let _K0 = fun(X) -> apply _ReturnK(X) in apply _K0(erlang:'+'(1, 2))
+    let expr = MExpr::Bind {
+        var: mvar("x"),
+        value: Box::new(MExpr::BinOp {
+            op: ast::BinOp::Add,
+            left: atom_int(1),
+            right: atom_int(2),
+            source: dummy_node(),
+        }),
+        body: Box::new(MExpr::Pure(atom_var("x"))),
+    };
+    let ce = lower_expr_default(&expr);
+    let body = match ce {
+        CExpr::Let(name, _, b) => {
+            assert_eq!(name, "_K0");
+            b
+        }
+        other => panic!("expected Let, got {other:?}"),
+    };
+    match *body {
+        CExpr::Apply(callee, args) => {
+            assert!(matches!(callee.as_ref(), CExpr::Var(n) if n == "_K0"));
+            assert_eq!(args.len(), 1);
+            match &args[0] {
+                CExpr::Call(m, f, _) => {
+                    assert_eq!(m, "erlang");
+                    assert_eq!(f, "+");
+                }
+                other => panic!("expected erlang:'+' call, got {other:?}"),
+            }
+        }
+        other => panic!("expected Apply, got {other:?}"),
     }
 }

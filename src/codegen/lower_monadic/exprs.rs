@@ -10,6 +10,7 @@ use crate::codegen::monadic::ir::{Atom, MArm, MExpr, MVar};
 use crate::codegen::resolve::{ResolvedCodegenKind, ResolvedSymbol};
 
 use super::Lowerer;
+use super::exprs_edge::binop_atoms;
 use super::pats::{lower_param_names, lower_pat};
 use super::util::{core_var, lower_lit_atom, lower_string_to_binary, mangle_ctor_atom};
 
@@ -55,19 +56,30 @@ impl<'ctx> Lowerer<'ctx> {
             MExpr::Yield { op, args, .. } => self.lower_yield(op, args),
             MExpr::With { handler, body, .. } => self.lower_with(handler, body),
             MExpr::Resume { value, .. } => self.lower_resume(value),
-            MExpr::FieldAccess { .. }
-            | MExpr::RecordUpdate { .. }
-            | MExpr::DictMethodAccess { .. }
-            | MExpr::ForeignCall { .. }
-            | MExpr::BinOp { .. }
-            | MExpr::UnaryMinus { .. }
-            | MExpr::BitString { .. }
-            | MExpr::Receive { .. } => {
-                panic!(
-                    "lower_expr: variant lowering deferred to sub-step 7g: {:?}",
-                    std::mem::discriminant(expr)
-                )
-            }
+            MExpr::FieldAccess {
+                record,
+                field,
+                record_name,
+                ..
+            } => self.lower_field_access(record, field, record_name.as_deref()),
+            MExpr::RecordUpdate {
+                record,
+                fields,
+                record_name,
+                ..
+            } => self.lower_record_update(record, fields, record_name.as_deref()),
+            MExpr::DictMethodAccess {
+                dict, method_index, ..
+            } => self.lower_dict_method_access(dict, *method_index),
+            MExpr::ForeignCall {
+                module, func, args, ..
+            } => self.lower_foreign_call(module, func, args),
+            MExpr::BinOp {
+                op, left, right, ..
+            } => self.lower_binop(op, left, right),
+            MExpr::UnaryMinus { value, .. } => self.lower_unary_minus(value),
+            MExpr::BitString { segments, .. } => self.lower_bitstring(segments),
+            MExpr::Receive { arms, after, .. } => self.lower_receive(arms, after.as_ref()),
         }
     }
 
@@ -116,7 +128,7 @@ impl<'ctx> Lowerer<'ctx> {
     }
 
     /// Apply the in-scope return continuation to a single value.
-    fn apply_current_k(&self, value: CExpr) -> CExpr {
+    pub(super) fn apply_current_k(&self, value: CExpr) -> CExpr {
         CExpr::Apply(
             Box::new(CExpr::Var(self.current_return_k.clone())),
             vec![value],
@@ -183,39 +195,66 @@ impl<'ctx> Lowerer<'ctx> {
     /// — branches share the enclosing continuation, exactly what makes
     /// `case` a tail form rather than a value form.
     ///
-    /// 7c does not thread arm guards (`MArm.guard`). Arms with a guard
-    /// panic with a deferred message.
-    ///
-    /// TODO (open design question for whoever picks this up): guards must
-    /// be pure to lower into a Core Erlang `case` guard expression.
-    /// Confirm with the typechecker what "pure guard" means in Saga
-    /// — pure-only is cheap (translate the guard MExpr through a pure-
-    /// subset lowerer that yields a `CExpr`, place in `CArm.guard`),
-    /// but if the language permits effectful guards then the arm needs
-    /// a lift+let rewrite (evaluate the guard before the case, bind to
-    /// a var, then guard on the var). Don't implement before resolving.
+    /// Guard semantics, confirmed via typechecker (`infer.rs::check_guard`):
+    /// effect calls are forbidden in guards, so a guard MExpr is structurally
+    /// pure (no `Yield`, no `Bind`, no `With`, no `Resume`). Pure guards lower
+    /// into a `CExpr` placed directly in `CArm.guard`; see
+    /// [`lower_guard`](Self::lower_guard) for the supported shape.
     fn lower_case(&mut self, scrutinee: &Atom, arms: &[MArm]) -> CExpr {
         let scrut_ce = self.lower_atom(scrutinee);
-        let carms: Vec<CArm> = arms
-            .iter()
-            .map(|arm| {
-                if arm.guard.is_some() {
-                    panic!(
-                        "lower_case: arm guards deferred — needs typechecker semantics \
-                         confirmation (pure-only vs. lift+let for effectful guards) before \
-                         lowering"
-                    )
-                }
-                let pat = lower_pat(&arm.pattern, self.ctors);
-                let body = self.lower_expr(&arm.body);
-                CArm {
-                    pat,
-                    guard: None,
-                    body,
-                }
-            })
-            .collect();
+        let carms: Vec<CArm> = arms.iter().map(|arm| self.lower_arm(arm)).collect();
         CExpr::Case(Box::new(scrut_ce), carms)
+    }
+
+    /// Lower a single MArm into a `CArm`. Shared between `Case` and `Receive`.
+    pub(super) fn lower_arm(&mut self, arm: &MArm) -> CArm {
+        let pat = lower_pat(&arm.pattern, self.ctors);
+        let guard = arm.guard.as_ref().map(|g| self.lower_guard(g));
+        let body = self.lower_expr(&arm.body);
+        CArm { pat, guard, body }
+    }
+
+    /// Lower a guard MExpr into a `CExpr` suitable for a Core Erlang
+    /// `case`/`receive` arm guard position.
+    ///
+    /// Guards are statically guaranteed pure by the typechecker — see
+    /// `src/typechecker/infer.rs::check_guard`, which forbids effect calls.
+    /// The MExpr we receive is therefore structurally a subset: `Pure(atom)`,
+    /// `BinOp` of atoms, `UnaryMinus` of atom, or `ForeignCall` of a
+    /// guard-safe BIF over atoms. Other shapes (Case, If, App, FieldAccess,
+    /// RecordUpdate, DictMethodAccess, BitString) are syntactically illegal
+    /// in Core Erlang guards anyway — we panic with a clear message rather
+    /// than emit invalid CEL.
+    fn lower_guard(&mut self, guard: &MExpr) -> CExpr {
+        match guard {
+            MExpr::Pure(atom) => self.lower_atom(atom),
+            MExpr::BinOp {
+                op, left, right, ..
+            } => {
+                let l = self.lower_atom(left);
+                let r = self.lower_atom(right);
+                binop_atoms(op, l, r)
+            }
+            MExpr::UnaryMinus { value, .. } => {
+                let v = self.lower_atom(value);
+                CExpr::Call(
+                    "erlang".to_string(),
+                    "-".to_string(),
+                    vec![CExpr::Lit(CLit::Int(0)), v],
+                )
+            }
+            MExpr::ForeignCall {
+                module, func, args, ..
+            } => CExpr::Call(
+                module.clone(),
+                func.clone(),
+                args.iter().map(|a| self.lower_atom(a)).collect(),
+            ),
+            other => panic!(
+                "lower_guard: guard MExpr variant not legal in Core Erlang guard position: {:?}",
+                std::mem::discriminant(other)
+            ),
+        }
     }
 
     /// Lower `If { cond, then, else }` to a Core Erlang `case` over the
@@ -483,7 +522,6 @@ impl<'ctx> Lowerer<'ctx> {
         }
     }
 }
-
 /// Emit a function value (as an Erlang term) for a known module/function/arity.
 ///
 /// Arity-0 functions reduce to a direct call returning the value; higher
