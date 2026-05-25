@@ -177,7 +177,12 @@ fn atomic_lit_tail_to_pure() {
 
 #[test]
 fn atomic_constructor_zero_args() {
-    let c = Expr::synth(sp(), ExprKind::Constructor { name: "None".into() });
+    let c = Expr::synth(
+        sp(),
+        ExprKind::Constructor {
+            name: "None".into(),
+        },
+    );
     let id = c.id;
     let body = fun_body(run_decl(fun_binding("f", c)));
     match body {
@@ -443,12 +448,7 @@ fn binop_atomic_operands() {
 #[test]
 fn resume_atomic_arg() {
     let v = lit_int(7);
-    let r = Expr::synth(
-        sp(),
-        ExprKind::Resume {
-            value: Box::new(v),
-        },
-    );
+    let r = Expr::synth(sp(), ExprKind::Resume { value: Box::new(v) });
     let r_id = r.id;
     let body = fun_body(run_decl(fun_binding("f", r)));
     match body {
@@ -590,12 +590,7 @@ fn alias_chase_let_h_is_static() {
         arms: vec![Annotated::bare(arm)],
         return_clause: None,
     };
-    let handler_expr = Expr::synth(
-        sp(),
-        ExprKind::HandlerExpr {
-            body: handler_body,
-        },
-    );
+    let handler_expr = Expr::synth(sp(), ExprKind::HandlerExpr { body: handler_body });
     let let_stmt = Annotated::bare(Stmt::Let {
         pattern: Pat::Var {
             id: NodeId::fresh(),
@@ -650,7 +645,10 @@ fn structural_node_ids_preserved() {
     let body = fun_body(run_decl(fun_binding("g", inner)));
     if let MExpr::App { source, head, .. } = body {
         assert_eq!(source, outer_id);
-        if let Atom::Var { source: head_src, .. } = head {
+        if let Atom::Var {
+            source: head_src, ..
+        } = head
+        {
             // Head's atom carries its own original NodeId (the Var's id).
             assert_ne!(head_src, outer_id);
         }

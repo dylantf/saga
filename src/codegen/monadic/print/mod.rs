@@ -183,13 +183,7 @@ fn write_tail(out: &mut String, indent: usize, e: &MExpr) {
             arms,
             source,
         } => {
-            writeln!(
-                out,
-                "{p}case {} [#{}] of",
-                atom_str(scrutinee),
-                source.0
-            )
-            .unwrap();
+            writeln!(out, "{p}case {} [#{}] of", atom_str(scrutinee), source.0).unwrap();
             for arm in arms {
                 write_arm(out, indent + 2, arm);
             }
@@ -302,21 +296,13 @@ fn write_tail(out: &mut String, indent: usize, e: &MExpr) {
             source.0
         )
         .unwrap(),
-        MExpr::UnaryMinus { value, source } => writeln!(
-            out,
-            "{p}UnaryMinus({}) [#{}]",
-            atom_str(value),
-            source.0
-        )
-        .unwrap(),
+        MExpr::UnaryMinus { value, source } => {
+            writeln!(out, "{p}UnaryMinus({}) [#{}]", atom_str(value), source.0).unwrap()
+        }
         MExpr::BitString { segments, source } => writeln!(
             out,
             "{p}BitString([{}]) [#{}]",
-            segments
-                .iter()
-                .map(seg_str)
-                .collect::<Vec<_>>()
-                .join(", "),
+            segments.iter().map(seg_str).collect::<Vec<_>>().join(", "),
             source.0
         )
         .unwrap(),
@@ -452,11 +438,7 @@ fn expr_compact(e: &MExpr) -> String {
         }
         MExpr::BitString { segments, source } => format!(
             "BitString([{}]) [#{}]",
-            segments
-                .iter()
-                .map(seg_str)
-                .collect::<Vec<_>>()
-                .join(", "),
+            segments.iter().map(seg_str).collect::<Vec<_>>().join(", "),
             source.0
         ),
         MExpr::Receive { source, .. } => format!("<Receive [#{}]>", source.0),
@@ -505,11 +487,9 @@ fn atom_str(a: &Atom) -> String {
         Atom::Record { name, fields, .. } => {
             format!("Record({}, {{{}}})", name, fields_str(fields))
         }
-        Atom::Lambda { params, body, .. } => format!(
-            "Lambda([{}], {})",
-            params_str(params),
-            expr_compact(body)
-        ),
+        Atom::Lambda { params, body, .. } => {
+            format!("Lambda([{}], {})", params_str(params), expr_compact(body))
+        }
         Atom::DictRef { name, .. } => format!("DictRef({})", name),
         Atom::QualifiedRef { module, name, .. } => {
             format!("QualifiedRef({}.{})", module, name)
@@ -766,18 +746,13 @@ fn pat_str(p: &Pat) -> String {
             elements.iter().map(pat_str).collect::<Vec<_>>().join(", ")
         ),
         Pat::ConsPat { head, tail, .. } => format!("{} :: {}", pat_str(head), pat_str(tail)),
-        Pat::Or { patterns, .. } => patterns
-            .iter()
-            .map(pat_str)
-            .collect::<Vec<_>>()
-            .join(" | "),
+        Pat::Or { patterns, .. } => patterns.iter().map(pat_str).collect::<Vec<_>>().join(" | "),
     }
 }
 
 // -------------------------------------------------------------------------
 // Tests
 // -------------------------------------------------------------------------
-
 
 #[cfg(test)]
 mod tests;
