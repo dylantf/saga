@@ -52,14 +52,10 @@ impl<'ctx> Lowerer<'ctx> {
                 ..
             } => self.lower_if(cond, then_branch, else_branch),
             MExpr::App { head, args, .. } => self.lower_app(head, args),
-            MExpr::Yield { .. } => {
-                panic!("lower_expr: Yield lowering deferred to sub-step 7d")
-            }
-            MExpr::With { .. } => {
-                panic!("lower_expr: With lowering deferred to sub-step 7d")
-            }
+            MExpr::Yield { op, args, .. } => self.lower_yield(op, args),
+            MExpr::With { handler, body, .. } => self.lower_with(handler, body),
             MExpr::Resume { .. } => {
-                panic!("lower_expr: Resume lowering deferred to sub-step 7d")
+                panic!("lower_expr: Resume lowering deferred to sub-step 7e")
             }
             MExpr::FieldAccess { .. }
             | MExpr::RecordUpdate { .. }
@@ -242,7 +238,7 @@ impl<'ctx> Lowerer<'ctx> {
     fn lower_app(&mut self, head: &Atom, args: &[Atom]) -> CExpr {
         let head_ce = self.lower_atom(head);
         let mut call_args: Vec<CExpr> = args.iter().map(|a| self.lower_atom(a)).collect();
-        call_args.push(CExpr::Var(EVIDENCE_VAR.to_string()));
+        call_args.push(CExpr::Var(self.current_evidence.clone()));
         call_args.push(CExpr::Var(self.current_return_k.clone()));
         CExpr::Apply(Box::new(head_ce), call_args)
     }
@@ -386,9 +382,13 @@ impl<'ctx> Lowerer<'ctx> {
         param_vars.push(RETURN_K_VAR.to_string());
         let saved_k = std::mem::replace(&mut self.current_return_k, RETURN_K_VAR.to_string());
         let saved_counter = std::mem::replace(&mut self.k_counter, 0);
+        let saved_ev = std::mem::replace(&mut self.current_evidence, EVIDENCE_VAR.to_string());
+        let saved_ev_counter = std::mem::replace(&mut self.ev_counter, 0);
         let body_ce = self.lower_expr(body);
         self.current_return_k = saved_k;
         self.k_counter = saved_counter;
+        self.current_evidence = saved_ev;
+        self.ev_counter = saved_ev_counter;
         CExpr::Fun(param_vars, Box::new(body_ce))
     }
 

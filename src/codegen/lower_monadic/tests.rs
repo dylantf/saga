@@ -977,27 +977,439 @@ fn lambda_atom_body_lowers_with_real_expr() {
 }
 
 #[test]
-#[should_panic(expected = "Yield lowering deferred")]
-fn yield_panics_with_deferred_message() {
-    use crate::codegen::monadic::ir::EffectOpRef;
-    let e = MExpr::Yield {
-        op: EffectOpRef {
-            effect: "Log".to_string(),
-            op: "info".to_string(),
-            op_index: 1,
-        },
-        args: vec![],
-        source: dummy_node(),
-    };
-    let _ = lower_expr_default(&e);
-}
-
-#[test]
-#[should_panic(expected = "Resume lowering deferred")]
+#[should_panic(expected = "Resume lowering deferred to sub-step 7e")]
 fn resume_panics_with_deferred_message() {
     let e = MExpr::Resume {
         value: atom_lit(Lit::Unit),
         source: dummy_node(),
     };
     let _ = lower_expr_default(&e);
+}
+
+// ----------------------------------------------------------------------
+// Effect machinery lowering (sub-step 7d)
+// ----------------------------------------------------------------------
+
+use crate::codegen::monadic::ir::{EffectOpRef, MHandler, MHandlerArm};
+
+fn op_ref(effect: &str, op: &str, op_index: u32) -> EffectOpRef {
+    EffectOpRef {
+        effect: effect.to_string(),
+        op: op.to_string(),
+        op_index,
+    }
+}
+
+fn handler_arm(effect: &str, op: &str, op_index: u32, n_params: usize) -> MHandlerArm {
+    MHandlerArm {
+        id: dummy_node(),
+        op: op_ref(effect, op, op_index),
+        params: (0..n_params)
+            .map(|i| Pat::Var {
+                id: dummy_node(),
+                name: format!("p{i}"),
+                span: span(),
+            })
+            .collect(),
+        body: Box::new(pure_unit()),
+        finally_block: None,
+        span: span(),
+    }
+}
+
+/// Walk an emitted Yield CExpr and assert its shape:
+///   apply (call erlang:element(<idx>, call std_evidence_bridge:find_evidence(EV_VAR, 'Effect'))) (args..., K_VAR)
+fn assert_yield_shape<'a>(
+    ce: &'a CExpr,
+    expected_effect: &str,
+    expected_op_index: i64,
+    expected_ev_var: &str,
+    expected_k_var: &str,
+) -> &'a [CExpr] {
+    let (callee, args) = match ce {
+        CExpr::Apply(c, a) => (c.as_ref(), a.as_slice()),
+        other => panic!("expected Apply for Yield, got {other:?}"),
+    };
+    // Last arg is the K var
+    let k = args.last().expect("Yield apply must have at least K");
+    match k {
+        CExpr::Var(n) => assert_eq!(n, expected_k_var, "K var"),
+        other => panic!("expected K Var, got {other:?}"),
+    }
+    // Callee: call erlang:element(idx, <find_call>)
+    match callee {
+        CExpr::Call(m, f, eargs) => {
+            assert_eq!(m, "erlang");
+            assert_eq!(f, "element");
+            assert_eq!(eargs.len(), 2);
+            match &eargs[0] {
+                CExpr::Lit(CLit::Int(i)) => assert_eq!(*i, expected_op_index),
+                other => panic!("expected op index Int, got {other:?}"),
+            }
+            match &eargs[1] {
+                CExpr::Call(m2, f2, fargs) => {
+                    assert_eq!(m2, "std_evidence_bridge");
+                    assert_eq!(f2, "find_evidence");
+                    assert_eq!(fargs.len(), 2);
+                    match &fargs[0] {
+                        CExpr::Var(n) => assert_eq!(n, expected_ev_var, "evidence var"),
+                        other => panic!("expected ev Var, got {other:?}"),
+                    }
+                    match &fargs[1] {
+                        CExpr::Lit(CLit::Atom(a)) => assert_eq!(a, expected_effect),
+                        other => panic!("expected effect atom, got {other:?}"),
+                    }
+                }
+                other => panic!("expected find_evidence Call, got {other:?}"),
+            }
+        }
+        other => panic!("expected erlang:element callee, got {other:?}"),
+    }
+    &args[..args.len() - 1]
+}
+
+#[test]
+fn yield_single_var_arg_lowers_to_find_evidence_apply() {
+    let e = MExpr::Yield {
+        op: op_ref("Std.IO.Stdio", "print", 1),
+        args: vec![atom_var("msg")],
+        source: dummy_node(),
+    };
+    let ce = lower_expr_default(&e);
+    let user_args = assert_yield_shape(&ce, "Std.IO.Stdio", 1, "_Evidence", "_ReturnK");
+    assert_eq!(user_args.len(), 1);
+    assert!(matches!(&user_args[0], CExpr::Var(n) if n == "Msg"));
+}
+
+#[test]
+fn yield_multiple_atomic_args_pass_all_through() {
+    let e = MExpr::Yield {
+        op: op_ref("Std.State.State", "set", 2),
+        args: vec![
+            atom_lit(Lit::Int("7".into(), 7)),
+            atom_var("k"),
+            atom_lit(Lit::Bool(true)),
+        ],
+        source: dummy_node(),
+    };
+    let ce = lower_expr_default(&e);
+    let user_args = assert_yield_shape(&ce, "Std.State.State", 2, "_Evidence", "_ReturnK");
+    assert_eq!(user_args.len(), 3);
+    assert!(matches!(&user_args[0], CExpr::Lit(CLit::Int(7))));
+    assert!(matches!(&user_args[1], CExpr::Var(n) if n == "K"));
+    assert!(matches!(&user_args[2], CExpr::Lit(CLit::Atom(a)) if a == "true"));
+}
+
+#[test]
+fn yield_in_bind_position_threads_bind_k_as_op_continuation() {
+    // Bind { x = Yield(Log.info ()), body = Pure(Var x) }
+    // Expected: outer let _K0 = fun(X) -> apply _ReturnK(X) in
+    //           apply (... find_evidence ...) (_K0)
+    let e = MExpr::Bind {
+        var: mvar("x"),
+        value: Box::new(MExpr::Yield {
+            op: op_ref("Log", "info", 1),
+            args: vec![],
+            source: dummy_node(),
+        }),
+        body: Box::new(MExpr::Pure(atom_var("x"))),
+    };
+    let ce = lower_expr_default(&e);
+    let (k_name, value_ce) = match ce {
+        CExpr::Let(name, _k_fun, value) => (name, value),
+        other => panic!("expected Let, got {other:?}"),
+    };
+    assert_eq!(k_name, "_K0");
+    // value_ce: Yield apply with _K0 as the K var
+    let user_args = assert_yield_shape(&value_ce, "Log", 1, "_Evidence", "_K0");
+    assert!(user_args.is_empty());
+}
+
+#[test]
+fn with_static_emits_insert_canonical_with_stub_op_tuple() {
+    let handler = MHandler::Static {
+        effects: vec!["Log".to_string()],
+        arms: vec![handler_arm("Log", "info", 1, 1)],
+        return_clause: None,
+        source: dummy_node(),
+    };
+    let e = MExpr::With {
+        handler,
+        body: Box::new(pure_unit()),
+        source: dummy_node(),
+    };
+    let ce = lower_expr_default(&e);
+    let (name, value, body) = match ce {
+        CExpr::Let(n, v, b) => (n, v, b),
+        other => panic!("expected outer Let, got {other:?}"),
+    };
+    assert_eq!(name, "_Ev0");
+    match value.as_ref() {
+        CExpr::Call(m, f, args) => {
+            assert_eq!(m, "std_evidence_bridge");
+            assert_eq!(f, "insert_canonical");
+            assert_eq!(args.len(), 2);
+            assert!(matches!(&args[0], CExpr::Var(n) if n == "_Evidence"));
+            // entry: {'Log', {Fun(...)}}
+            match &args[1] {
+                CExpr::Tuple(t) => {
+                    assert_eq!(t.len(), 2);
+                    assert!(matches!(&t[0], CExpr::Lit(CLit::Atom(a)) if a == "Log"));
+                    match &t[1] {
+                        CExpr::Tuple(ops) => {
+                            assert_eq!(ops.len(), 1);
+                            // stub closure: fun(_StubArg0, _StubK) -> apply _StubK('unit')
+                            match &ops[0] {
+                                CExpr::Fun(ps, fbody) => {
+                                    assert_eq!(ps, &vec!["_StubArg0".to_string(), "_StubK".into()]);
+                                    match fbody.as_ref() {
+                                        CExpr::Apply(c, args) => {
+                                            assert!(matches!(c.as_ref(), CExpr::Var(n) if n == "_StubK"));
+                                            assert_eq!(args.len(), 1);
+                                            assert!(matches!(&args[0], CExpr::Lit(CLit::Atom(a)) if a == "unit"));
+                                        }
+                                        other => panic!("expected stub apply, got {other:?}"),
+                                    }
+                                }
+                                other => panic!("expected stub Fun, got {other:?}"),
+                            }
+                        }
+                        other => panic!("expected OpTuple, got {other:?}"),
+                    }
+                }
+                other => panic!("expected entry Tuple, got {other:?}"),
+            }
+        }
+        other => panic!("expected insert_canonical Call, got {other:?}"),
+    }
+    // body: apply _ReturnK('unit')
+    match body.as_ref() {
+        CExpr::Apply(c, _) => {
+            assert!(matches!(c.as_ref(), CExpr::Var(n) if n == "_ReturnK"));
+        }
+        other => panic!("expected body Apply, got {other:?}"),
+    }
+}
+
+#[test]
+fn with_dynamic_uses_op_tuple_atom_directly() {
+    // Dynamic op_tuple is itself an Atom — here a Var referencing a runtime closure-tuple.
+    let handler = MHandler::Dynamic {
+        effects: vec!["Std.Fail.Fail".to_string()],
+        op_tuple: atom_var("h"),
+        return_lambda: None,
+        source: dummy_node(),
+    };
+    let e = MExpr::With {
+        handler,
+        body: Box::new(pure_unit()),
+        source: dummy_node(),
+    };
+    let ce = lower_expr_default(&e);
+    let (name, value, _body) = match ce {
+        CExpr::Let(n, v, b) => (n, v, b),
+        other => panic!("expected Let, got {other:?}"),
+    };
+    assert_eq!(name, "_Ev0");
+    match value.as_ref() {
+        CExpr::Call(_, f, args) => {
+            assert_eq!(f, "insert_canonical");
+            match &args[1] {
+                CExpr::Tuple(t) => {
+                    assert!(matches!(&t[0], CExpr::Lit(CLit::Atom(a)) if a == "Std.Fail.Fail"));
+                    // op_tuple is the atom directly — lowered Atom::Var → CExpr::Var("H")
+                    assert!(matches!(&t[1], CExpr::Var(n) if n == "H"));
+                }
+                other => panic!("expected entry Tuple, got {other:?}"),
+            }
+        }
+        other => panic!("expected Call, got {other:?}"),
+    }
+}
+
+#[test]
+#[should_panic(expected = "Dynamic handler must carry exactly one effect")]
+fn with_dynamic_multi_effect_panics() {
+    let handler = MHandler::Dynamic {
+        effects: vec!["A".to_string(), "B".to_string()],
+        op_tuple: atom_var("h"),
+        return_lambda: None,
+        source: dummy_node(),
+    };
+    let e = MExpr::With {
+        handler,
+        body: Box::new(pure_unit()),
+        source: dummy_node(),
+    };
+    let _ = lower_expr_default(&e);
+}
+
+#[test]
+fn with_body_sees_extended_evidence_var() {
+    // body is an App — verifies that the App threads _Ev0 (not _Evidence) as the evidence arg
+    let handler = MHandler::Static {
+        effects: vec!["Log".to_string()],
+        arms: vec![handler_arm("Log", "info", 1, 0)],
+        return_clause: None,
+        source: dummy_node(),
+    };
+    let body = MExpr::App {
+        head: atom_var("f"),
+        args: vec![],
+        source: dummy_node(),
+    };
+    let e = MExpr::With {
+        handler,
+        body: Box::new(body),
+        source: dummy_node(),
+    };
+    let ce = lower_expr_default(&e);
+    let body_ce = match ce {
+        CExpr::Let(_, _, b) => b,
+        other => panic!("expected Let, got {other:?}"),
+    };
+    match body_ce.as_ref() {
+        CExpr::Apply(callee, args) => {
+            assert!(matches!(callee.as_ref(), CExpr::Var(n) if n == "F"));
+            // apply F(_Ev0, _ReturnK)
+            assert_eq!(args.len(), 2);
+            assert!(matches!(&args[0], CExpr::Var(n) if n == "_Ev0"));
+            assert!(matches!(&args[1], CExpr::Var(n) if n == "_ReturnK"));
+        }
+        other => panic!("expected Apply body, got {other:?}"),
+    }
+}
+
+#[test]
+fn yield_inside_with_uses_extended_evidence() {
+    // with H (Yield Log.info()) — Yield's find_evidence should reference _Ev0.
+    let handler = MHandler::Static {
+        effects: vec!["Log".to_string()],
+        arms: vec![handler_arm("Log", "info", 1, 0)],
+        return_clause: None,
+        source: dummy_node(),
+    };
+    let e = MExpr::With {
+        handler,
+        body: Box::new(MExpr::Yield {
+            op: op_ref("Log", "info", 1),
+            args: vec![],
+            source: dummy_node(),
+        }),
+        source: dummy_node(),
+    };
+    let ce = lower_expr_default(&e);
+    let inner = match ce {
+        CExpr::Let(_, _, b) => b,
+        other => panic!("expected Let, got {other:?}"),
+    };
+    let _ = assert_yield_shape(&inner, "Log", 1, "_Ev0", "_ReturnK");
+}
+
+#[test]
+fn multi_effect_static_emits_one_insert_per_effect() {
+    let handler = MHandler::Static {
+        effects: vec!["A".to_string(), "B".to_string()],
+        arms: vec![
+            handler_arm("A", "op_a", 1, 0),
+            handler_arm("B", "op_b", 1, 0),
+        ],
+        return_clause: None,
+        source: dummy_node(),
+    };
+    let e = MExpr::With {
+        handler,
+        body: Box::new(pure_unit()),
+        source: dummy_node(),
+    };
+    let ce = lower_expr_default(&e);
+    // outer Let _Ev0 = insert(_Evidence, {'A', ...}) in
+    //   Let _Ev1 = insert(_Ev0, {'B', ...}) in body
+    let (n0, v0, inner) = match ce {
+        CExpr::Let(n, v, b) => (n, v, b),
+        other => panic!("expected outer Let, got {other:?}"),
+    };
+    assert_eq!(n0, "_Ev0");
+    match v0.as_ref() {
+        CExpr::Call(_, f, args) => {
+            assert_eq!(f, "insert_canonical");
+            assert!(matches!(&args[0], CExpr::Var(n) if n == "_Evidence"));
+            match &args[1] {
+                CExpr::Tuple(t) => {
+                    assert!(matches!(&t[0], CExpr::Lit(CLit::Atom(a)) if a == "A"));
+                }
+                other => panic!("expected entry tuple, got {other:?}"),
+            }
+        }
+        other => panic!("expected Call, got {other:?}"),
+    }
+    let (n1, v1, _body) = match inner.as_ref() {
+        CExpr::Let(n, v, b) => (n.clone(), v.clone(), b.clone()),
+        other => panic!("expected inner Let, got {other:?}"),
+    };
+    assert_eq!(n1, "_Ev1");
+    match v1.as_ref() {
+        CExpr::Call(_, f, args) => {
+            assert_eq!(f, "insert_canonical");
+            assert!(matches!(&args[0], CExpr::Var(n) if n == "_Ev0"));
+            match &args[1] {
+                CExpr::Tuple(t) => {
+                    assert!(matches!(&t[0], CExpr::Lit(CLit::Atom(a)) if a == "B"));
+                }
+                other => panic!("expected entry tuple, got {other:?}"),
+            }
+        }
+        other => panic!("expected Call, got {other:?}"),
+    }
+}
+
+#[test]
+fn nested_with_chains_two_inserts_with_inner_seeing_both() {
+    // with H1 (with H2 (Yield E2.op()))
+    let h1 = MHandler::Static {
+        effects: vec!["E1".to_string()],
+        arms: vec![handler_arm("E1", "op", 1, 0)],
+        return_clause: None,
+        source: dummy_node(),
+    };
+    let h2 = MHandler::Static {
+        effects: vec!["E2".to_string()],
+        arms: vec![handler_arm("E2", "op", 1, 0)],
+        return_clause: None,
+        source: dummy_node(),
+    };
+    let inner_with = MExpr::With {
+        handler: h2,
+        body: Box::new(MExpr::Yield {
+            op: op_ref("E2", "op", 1),
+            args: vec![],
+            source: dummy_node(),
+        }),
+        source: dummy_node(),
+    };
+    let outer_with = MExpr::With {
+        handler: h1,
+        body: Box::new(inner_with),
+        source: dummy_node(),
+    };
+    let ce = lower_expr_default(&outer_with);
+    // outer: Let _Ev0 = insert(_Evidence, ...) in <inner>
+    let (n0, _v0, inner) = match ce {
+        CExpr::Let(n, v, b) => (n, v, b),
+        other => panic!("expected outer Let, got {other:?}"),
+    };
+    assert_eq!(n0, "_Ev0");
+    // inner: Let _Ev1 = insert(_Ev0, ...) in <yield-using-_Ev1>
+    let (n1, v1, yield_body) = match inner.as_ref() {
+        CExpr::Let(n, v, b) => (n.clone(), v.clone(), b.clone()),
+        other => panic!("expected inner Let, got {other:?}"),
+    };
+    assert_eq!(n1, "_Ev1");
+    match v1.as_ref() {
+        CExpr::Call(_, _, args) => {
+            assert!(matches!(&args[0], CExpr::Var(n) if n == "_Ev0"));
+        }
+        _ => panic!(),
+    }
+    let _ = assert_yield_shape(&yield_body, "E2", 1, "_Ev1", "_ReturnK");
 }
