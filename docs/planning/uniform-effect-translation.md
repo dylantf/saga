@@ -19,7 +19,7 @@ Tick boxes as steps land. Each box → one focused agent session.
   - [x] **7b.** Atom → CExpr
   - [x] **7c.** MExpr structural variants (Pure, Bind, Let, Case, If, App) + DictConstructor tuple synthesis
   - [x] **7d.** Effect machinery (Yield via evidence lookup, With site via insert_canonical)
-  - [ ] **7e.** Handler emission (MHandler::Static arms + return clause; MHandler::Dynamic passthrough)
+  - [x] **7e.** Handler emission (MHandler::Static arms + return clause; MHandler::Dynamic passthrough)
   - [ ] **7f.** BEAM-native effect bodies (Actor, Process, Timer, Ref, Monitor, Link, …)
   - [ ] **7g.** Edge cases (records, bitstrings, receive, dict-method-access, foreign calls, `@external` wrappers, `public` flag resolution)
 - [ ] **8.** Toggle wiring in `src/codegen/mod.rs` — both entry points

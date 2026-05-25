@@ -54,9 +54,7 @@ impl<'ctx> Lowerer<'ctx> {
             MExpr::App { head, args, .. } => self.lower_app(head, args),
             MExpr::Yield { op, args, .. } => self.lower_yield(op, args),
             MExpr::With { handler, body, .. } => self.lower_with(handler, body),
-            MExpr::Resume { .. } => {
-                panic!("lower_expr: Resume lowering deferred to sub-step 7e")
-            }
+            MExpr::Resume { value, .. } => self.lower_resume(value),
             MExpr::FieldAccess { .. }
             | MExpr::RecordUpdate { .. }
             | MExpr::DictMethodAccess { .. }
@@ -91,6 +89,24 @@ impl<'ctx> Lowerer<'ctx> {
                 std::mem::discriminant(other)
             ),
         }
+    }
+
+    /// `Resume(atom)` → `apply <current_K>(<atom>)`.
+    ///
+    /// Under uniform K-threading, `Resume` and `Pure` emit identical CEL
+    /// inside a handler arm: in an arm body, `current_return_k` is the arm's
+    /// captured `_K_arm{n}` (the continuation of the perform site), so both
+    /// `Resume(v)` and `Pure(v)` at the arm's tail call that K with `v`.
+    ///
+    /// The distinction matters semantically (Resume = "continue at the perform
+    /// site"; Pure = "this arm's result value, skipping the perform-site
+    /// continuation"), but the slow uniform path collapses them by
+    /// construction. Effect optimization (step 11) is where the two diverge:
+    /// `TailResumptive` rewrites can fold `Resume(v)` into a direct call,
+    /// while `Pure(v)` in arm tail position remains an abort-style return.
+    fn lower_resume(&mut self, value: &Atom) -> CExpr {
+        let v = self.lower_atom(value);
+        self.apply_current_k(v)
     }
 
     /// `Pure(atom)` → `apply <current_K>(<atom>)`.
@@ -384,11 +400,17 @@ impl<'ctx> Lowerer<'ctx> {
         let saved_counter = std::mem::replace(&mut self.k_counter, 0);
         let saved_ev = std::mem::replace(&mut self.current_evidence, EVIDENCE_VAR.to_string());
         let saved_ev_counter = std::mem::replace(&mut self.ev_counter, 0);
+        let saved_arm_k = std::mem::replace(&mut self.arm_k_counter, 0);
+        let saved_ret_k = std::mem::replace(&mut self.ret_k_counter, 0);
+        let saved_helper = std::mem::replace(&mut self.helper_counter, 0);
         let body_ce = self.lower_expr(body);
         self.current_return_k = saved_k;
         self.k_counter = saved_counter;
         self.current_evidence = saved_ev;
         self.ev_counter = saved_ev_counter;
+        self.arm_k_counter = saved_arm_k;
+        self.ret_k_counter = saved_ret_k;
+        self.helper_counter = saved_helper;
         CExpr::Fun(param_vars, Box::new(body_ce))
     }
 

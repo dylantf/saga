@@ -80,6 +80,16 @@ pub struct Lowerer<'ctx> {
     /// Monotonic counter for fresh evidence-var names. Reset at each function
     /// entry to keep emitted Core Erlang stable across decls.
     ev_counter: u32,
+    /// Monotonic counter for fresh handler-arm continuation names (`_K_arm{n}`).
+    /// Distinct from `k_counter` so Bind-K names stay stable as tests already
+    /// pin them (`_K0`, `_K1`, ...) independently of any handler arms in scope.
+    arm_k_counter: u32,
+    /// Monotonic counter for fresh return-clause continuation names (`_K_ret{n}`).
+    ret_k_counter: u32,
+    /// Monotonic counter for fresh helper var names (`_HArg{n}` style is
+    /// positional per arm; this counter is used for transient internals like
+    /// return-clause param fallbacks).
+    helper_counter: u32,
 }
 
 impl<'ctx> Lowerer<'ctx> {
@@ -100,7 +110,35 @@ impl<'ctx> Lowerer<'ctx> {
             k_counter: 0,
             current_evidence: exprs::EVIDENCE_VAR.to_string(),
             ev_counter: 0,
+            arm_k_counter: 0,
+            ret_k_counter: 0,
+            helper_counter: 0,
         }
+    }
+
+    /// Mint a fresh handler-arm K name (`_K_arm{n}`). Distinct from Bind-K
+    /// to keep emitted Core Erlang stable across changes to handler arms.
+    pub(super) fn fresh_k_arm_name(&mut self) -> String {
+        let n = self.arm_k_counter;
+        self.arm_k_counter += 1;
+        format!("_K_arm{}", n)
+    }
+
+    /// Mint a fresh return-clause K name (`_K_ret{n}`). Bound to the
+    /// synthesized return-lambda; the handled body's tail-K is this var,
+    /// so values flow `body → return-clause → outer K` automatically.
+    pub(super) fn fresh_k_ret_name(&mut self) -> String {
+        let n = self.ret_k_counter;
+        self.ret_k_counter += 1;
+        format!("_K_ret{}", n)
+    }
+
+    /// Mint a fresh helper name (`_H{n}`). Used for transient internals
+    /// (e.g. return-clause param fallbacks).
+    pub(super) fn fresh_helper_name(&mut self) -> String {
+        let n = self.helper_counter;
+        self.helper_counter += 1;
+        format!("_H{}", n)
     }
 
     /// Mint a fresh Core Erlang variable name for a `With`-extended evidence
@@ -137,6 +175,9 @@ impl<'ctx> Lowerer<'ctx> {
         self.k_counter = 0;
         self.current_evidence = exprs::EVIDENCE_VAR.to_string();
         self.ev_counter = 0;
+        self.arm_k_counter = 0;
+        self.ret_k_counter = 0;
+        self.helper_counter = 0;
     }
 
     /// Lower an entire `MProgram` to a Core Erlang `CModule`.
