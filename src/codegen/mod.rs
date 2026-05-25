@@ -1,3 +1,4 @@
+pub mod anf;
 pub mod call_effects;
 pub mod cerl;
 pub mod handler_analysis;
