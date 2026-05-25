@@ -8,7 +8,7 @@ Tick boxes as steps land. Each box → one focused agent session.
 
 ### Strategic phase 1 — slow uniform path correct end-to-end
 
-- [ ] **1.** `src/codegen/handler_analysis.rs` — see stage 8.5
+- [x] **1.** `src/codegen/handler_analysis.rs` — see stage 8.5
 - [ ] **2.** `src/codegen/anf.rs` + `FreshNames` — see stage 9
 - [ ] **3.** `src/codegen/monadic/ir.rs` — see [monadic-ir-spec.md](./uniform-effect-translation/monadic-ir-spec.md)
 - [ ] **4.** `src/codegen/monadic/translate.rs` — see stage 10
