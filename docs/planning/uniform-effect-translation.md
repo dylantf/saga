@@ -13,7 +13,7 @@ Tick boxes as steps land. Each box → one focused agent session.
 - [x] **3.** `src/codegen/monadic/ir.rs` — see [monadic-ir-spec.md](./uniform-effect-translation/monadic-ir-spec.md)
 - [x] **4.** `src/codegen/monadic/translate.rs` — see stage 10
 - [x] **5.** `src/codegen/monadic/print.rs` — debug pretty-printer
-- [ ] **6.** `src/codegen/monadic/effect_opt/` as identity — see stage 11
+- [x] **6.** `src/codegen/monadic/effect_opt/` as identity — see stage 11
 - [ ] **7.** `src/codegen/lower_monadic/` — see stage 12 (sub-tasks 7a–7g; see "Implementation phases")
 - [ ] **8.** Toggle wiring in `src/codegen/mod.rs` — both entry points
 

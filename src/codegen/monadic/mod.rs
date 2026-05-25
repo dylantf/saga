@@ -8,6 +8,7 @@
 //! full type spec and `agent-guide.md` for the cross-cutting invariants
 //! (strict no-imports, NodeId discipline, "fields with a named consumer").
 
+pub mod effect_opt;
 pub mod ir;
 pub mod print;
 pub mod translate;
