@@ -20,8 +20,10 @@ Tick boxes as steps land. Each box → one focused agent session.
   - [x] **7c.** MExpr structural variants (Pure, Bind, Let, Case, If, App) + DictConstructor tuple synthesis
   - [x] **7d.** Effect machinery (Yield via evidence lookup, With site via insert_canonical)
   - [x] **7e.** Handler emission (MHandler::Static arms + return clause; MHandler::Dynamic passthrough)
-  - [ ] **7f.** BEAM-native effect bodies (Actor, Process, Timer, Ref, Monitor, Link, …)
-  - [ ] **7g.** Edge cases (records, bitstrings, receive, dict-method-access, foreign calls, `@external` wrappers, `public` flag resolution)
+  - [x] **7f.** ~~BEAM-native effect bodies~~ — **dropped.** Slow path uses uniform find_evidence; module-init bootstrap installs default native handlers (folded into 7g). Direct-native fast-path deferred to phase 2+ as an optimizer rewrite.
+  - **7g.** Edge cases (split into two parts):
+    - [x] **7g.A.** Expression-level edge cases: records, bitstrings, receive, dict-method-access, foreign calls, BinOp/UnaryMinus, arm guards
+    - [ ] **7g.B.** Patterns, decls, bootstrap: Pat::Or + surface-syntax patterns, `@external` wrappers, module-init bootstrap for BEAM-native default handlers, `public` flag resolution
 - [ ] **8.** Toggle wiring in `src/codegen/mod.rs` — both entry points
 
 **Milestone:** new path passes the full test suite under the toggle.
