@@ -1,8 +1,46 @@
 # Uniform Effect Translation
 
-Status: **research / planning**. Not started.
+Status: **planning complete; implementation not started.**
+
+## Status
+
+Tick boxes as steps land. Each box → one focused agent session.
+
+### Strategic phase 1 — slow uniform path correct end-to-end
+
+- [ ] **1.** `src/codegen/handler_analysis.rs` — see stage 8.5
+- [ ] **2.** `src/codegen/anf.rs` + `FreshNames` — see stage 9
+- [ ] **3.** `src/codegen/monadic/ir.rs` — see [monadic-ir-spec.md](./uniform-effect-translation/monadic-ir-spec.md)
+- [ ] **4.** `src/codegen/monadic/translate.rs` — see stage 10
+- [ ] **5.** `src/codegen/monadic/print.rs` — debug pretty-printer
+- [ ] **6.** `src/codegen/monadic/effect_opt/` as identity — see stage 11
+- [ ] **7.** `src/codegen/lower_monadic/` — see stage 12 (sub-tasks 7a–7g; see "Implementation phases")
+- [ ] **8.** Toggle wiring in `src/codegen/mod.rs` — both entry points
+
+**Milestone:** new path passes the full test suite under the toggle.
+
+### Strategic phase 2 — effect optimization rewrites
+
+- [ ] **9.** `effect_opt::bind_collapse` — see [effect-optimization-spec.md §1](./uniform-effect-translation/effect-optimization-spec.md)
+- [ ] **10.** `effect_opt::bind_to_let` — see [effect-optimization-spec.md §2](./uniform-effect-translation/effect-optimization-spec.md)
+- [ ] **11.** `effect_opt::direct_call` — see [effect-optimization-spec.md §3](./uniform-effect-translation/effect-optimization-spec.md)
+
+**Milestone:** new path performance matches or exceeds old path on the
+test suite; sanity invariant (zero `Yield`/`Pure`/continuation allocations
+in pure-or-tail-resumptive functions) holds.
+
+### Cleanup (single mechanical commit)
+
+- [ ] Delete old path; rename `lower_monadic/` → `lower/`. See
+      [Cleanup](#cleanup) section for the full checklist.
 
 ## Required reading before working on this
+
+**Agents implementing any step: start with
+[agent-guide.md](./uniform-effect-translation/agent-guide.md).** It
+distills cross-cutting invariants (no-imports rules, NodeId discipline,
+fresh-name convention, phase invariants, anti-patterns) that bite when
+forgotten.
 
 For anyone (human or agent) implementing any stage of this rewrite:
 
@@ -92,7 +130,34 @@ invoked from exactly two functions in
 - `compile_module_from_result` (used by `build_project`)
 - `emit_module_with_context` (used by final emit)
 
-Each has both paths inline; you comment out one block to flip between them.
+Each function has both paths inline; you comment out one block to flip
+between them. Both entry points need toggles.
+
+**`compile_module_from_result`** (per-module compile, called during
+`build_project` to populate `CompiledModule` for cross-module use):
+
+```rust
+let elaborated = elaborate::elaborate_module(program, mod_result, module_name);
+
+// === OLD PATH ===
+let normalized = normalize::normalize_effects(&elaborated);
+let resolution = resolve::resolve_names(module_name, &normalized, ...);
+let stored = normalized;
+
+// === NEW PATH ===
+// Skip normalize entirely — anf runs at emit time.
+// let resolution = resolve::resolve_names(module_name, &elaborated, ...);
+// let stored = elaborated;
+
+Some(CompiledModule {
+    elaborated: stored,
+    resolution,
+    ...
+    call_effects: CallEffectMap::new(),   // unused by new path; populated by old lowerer only
+})
+```
+
+**`emit_module_with_context`** (final emit):
 
 ```rust
 // === OLD PATH ===
@@ -101,15 +166,26 @@ let resolution_map = resolve::resolve_names(...);
 let cmod = lower::Lowerer::new(...).lower_module(module_name, &program);
 
 // === NEW PATH ===
-// let resolution_map = resolve::resolve_names(...);     // moved earlier
+// let resolution_map = resolve::resolve_names(...);                // on raw elaborated
+// let effect_info = build_effect_info(check_result, ...);          // narrowed view
 // let handler_info = handler_analysis::analyze(program);
-// let anf = anf::normalize(program);
-// let monadic = monadic::translate(&anf, &resolution_map);
-// let optimized = monadic::optimize(&monadic, &handler_info);
+// let anf = anf::normalize(program.clone());
+// let monadic = monadic::translate(&anf, &resolution_map, &effect_info);
+// let optimized = monadic::effect_opt::run(monadic, &handler_info, &effect_info);
 // let cmod = lower_monadic::Lowerer::new(...).lower_module(module_name, &optimized);
 
 cerl::print_module(&cmod)
 ```
+
+**`CompiledModule` storage (Option A, committed):** new path stores the
+**raw elaborated AST** in `CompiledModule.elaborated` (no normalize pass).
+ANF + translation + optimization run fresh inside `emit_module_with_context`
+per module. The lowerer only reads `codegen_info`, `resolution`, and
+`front_resolution` from other modules' `CompiledModule` — never expression
+bodies — so no `MProgram` needs to be cached cross-module. This keeps
+`CompiledModule` shape unchanged (no new fields), at the cost of
+recomputing ANF/translate/optimize on each emit. If profiling later shows
+this matters, caching `MProgram` per module is a follow-up; not now.
 
 ### Why this works
 
@@ -123,9 +199,10 @@ cerl::print_module(&cmod)
 - **No type coupling.** `lower::Lowerer` and `lower_monadic::Lowerer` are
   independent types sharing no trait. Both produce `CModule`; the toggle
   decides which is instantiated. `cerl::print_module` is shared.
-- **`CompiledModule` needs no new fields.** The new path produces its
-  monadic IR on the fly inside the entry point; only `lower_monadic` consumes
-  it, called immediately.
+- **`CompiledModule` needs no new fields.** New path stores raw
+  elaborated AST (skipping normalize); ANF, translation, and optimization
+  run fresh inside `emit_module_with_context`. No cross-module `MProgram`
+  caching needed — see "Migration strategy" entry points for details.
 - **Shared infrastructure stays shared:**
   [resolve.rs](../../src/codegen/resolve.rs) (runs in both paths),
   [lower/evidence.rs](../../src/codegen/lower/evidence.rs) (runtime evidence
@@ -756,12 +833,21 @@ means the optimizer didn't fire — that's the debug signal.
 
 ## Correctness gate
 
-effect optimization's bind-collapse is unsound across a genuinely multishot resumption. So:
+The **direct-call rewrite** (and only the direct-call rewrite) is unsound
+across a genuinely multishot resumption. Bind-collapse is pure
+capture-avoiding substitution — sound unconditionally as monad
+left-identity. Bind→Let promotion only changes lowering shape, not
+semantics — also sound unconditionally given its purity predicate.
 
-- `one_shot` is a **correctness gate**, not a hint.
+So:
+
+- `one_shot` / `tail_resumptive` are a **correctness gate** for direct-call,
+  not a hint.
 - Default to "not provably one-shot ⇒ assume multishot ⇒ keep full machinery."
 - A false "one-shot" verdict is a miscompile. A false "multishot" verdict is
   just slow. Stay conservative.
+- Bind-collapse and Bind→Let promotion fire unconditionally given their
+  local predicates; they do not consult handler-analysis flags.
 
 `resume` is already a distinct keyword / AST node, so the syntactic checks
 are local tree walks (tail-call-detection difficulty):

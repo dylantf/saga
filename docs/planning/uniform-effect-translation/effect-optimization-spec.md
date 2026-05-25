@@ -128,8 +128,14 @@ No firing. `value` is `Yield`, not `Pure`.
 
 ### Soundness
 
-Monad left-identity `bind(η a, k) ≡ k a`. Sound unconditionally.
-Independent of handler-analysis flags.
+Monad left-identity `bind(η a, k) ≡ k a`. **Sound unconditionally** —
+independent of handler-analysis flags, independent of multishot
+considerations. The rewrite is pure capture-avoiding substitution; it
+does not reify continuations, does not interact with `resume`, and is
+unaffected by how many times any surrounding continuation might be
+called. The only multishot-sensitive rewrite in this stage is direct-call
+(§3); bind-collapse and Bind→Let promotion (§2) fire unconditionally
+given their own local predicates.
 
 ---
 
@@ -225,10 +231,10 @@ plain Erlang `let` at lower time. `op → pure → op` chains compose correctly.
 A `Yield { op, args, source }` resolves statically to a handler arm iff:
 
 - The innermost enclosing `With { handler, body, … }` (along the lexical
-  path to this `Yield`) servicing `op`'s effect has `handler` as a literal
-  `MHandler` node (not a value bound to a variable, not flowing through a
-  function parameter, not selected by `case`).
-- The matching arm in that handler is a literal `MHandlerArm` for `op`.
+  path to this `Yield`) servicing `op`'s effect has `handler` as
+  `MHandler::Static { arms, … }` — **not** `MHandler::Dynamic`.
+- The matching arm in that `Static` handler is a literal `MHandlerArm`
+  for `op`.
 
 Concretely: effect optimization carries `handler_stack: Vec<&MHandler>`
 while walking. On entering `With { handler, body, … }`, push; on leaving,
@@ -236,8 +242,12 @@ pop. **Reset on entering `Lambda` body** (a lambda may be invoked outside
 the current handler scope) — save and restore the stack.
 
 When a `Yield { op, … }` is encountered, scan the stack from top to find
-the matching effect. If found and the arm is literal, the resolution is
-static. Otherwise skip — the `Yield` survives unchanged.
+the matching effect. If found and the matched entry is
+`MHandler::Static`, the resolution is static. If the matched entry is
+`MHandler::Dynamic`, **skip** — `Yield` survives unchanged, falls
+through to the lowerer's standard evidence-lookup path. (A dynamic
+handler for the effect shadows any outer static handler for the same
+effect — innermost-wins, per the runtime evidence layout.)
 
 ### Rule
 
@@ -317,11 +327,14 @@ the inlined body sits in the same lexical position as the original
 ### Soundness conditions
 
 - Arm tagged `TailResumptive`. **Never fire on `OneShot` or `Multishot`.**
-- Handler statically resolvable. On failure, skip — `Yield` stays; the
-  lowerer emits the slow evidence-lookup-plus-apply path.
-- No intervening dynamic `With` for the same effect between the `Yield` and
-  the resolved arm. (Handler-stack walk picks the innermost statically-known
-  handler for the effect; if a dynamic `With` shadows it, give up.)
+  This is the multishot-sensitive rewrite (the one the planning doc's
+  "correctness gate" section scopes to).
+- Handler resolved as `MHandler::Static`. On `MHandler::Dynamic`, skip
+  — `Yield` stays; the lowerer emits the slow evidence-lookup-plus-apply
+  path.
+- No intervening `MHandler::Dynamic` for the same effect between the
+  `Yield` and the resolved static arm. (Handler-stack walk picks the
+  innermost matching entry; if a `Dynamic` shadows the `Static`, give up.)
 - Capture-avoidance during parameter and resume substitution.
 
 ### Conservativeness rule
@@ -386,7 +399,7 @@ iterations at `O(size(MProgram))` as a paranoid invariant.
 The trivial implementation is correct:
 
 ```rust
-pub fn run(m: MProgram, _h: &HandlerAnalysis) -> MProgram {
+pub fn run(m: MProgram, _h: &HandlerAnalysis, _e: &EffectInfo) -> MProgram {
     m
 }
 ```

@@ -257,22 +257,52 @@ pub struct MBitSegment {
 
 ### `MHandler` / `MHandlerArm`
 
-Parallel structs to AST `Handler` / `HandlerArm`. Not a generic
-`Handler<E>` parameterization — local, single-file, no AST diff required.
+Two variants — **static** and **dynamic** — preserving the distinction
+that effect optimization's direct-call rewrite depends on. Static handlers
+have arms known at compile time (literal handler expressions, static name
+references, static aliases). Dynamic handlers carry a runtime
+closure-tuple value (conditional bindings, factory function results).
 
 ```rust
 #[derive(Debug, Clone, PartialEq)]
-pub struct MHandler {
-    pub effects: Vec<String>,     // effects this handler discharges
-    pub arms: Vec<MHandlerArm>,
-    pub return_clause: Option<MHandlerArm>,
-    pub source: NodeId,           // original handler NodeId
+pub enum MHandler {
+    /// Arms known at compile time. Direct-call rewrite eligible if the
+    /// matching arm is `TailResumptive`.
+    ///
+    /// Built from:
+    ///   - inline `handler for E { ... }` expressions
+    ///   - static name references (`with console_log`)
+    ///   - static aliases (`let h = console_log; with h`) resolved via
+    ///     ResolutionMap at translation time
+    Static {
+        effects: Vec<String>,            // effects this handler discharges
+        arms: Vec<MHandlerArm>,
+        return_clause: Option<MHandlerArm>,
+        source: NodeId,
+    },
+
+    /// Arms are a runtime closure-tuple value. Direct-call rewrite must
+    /// NOT fire here — the optimizer skips this variant entirely. The
+    /// lowerer wraps via `insert_canonical` at the with-site as today.
+    ///
+    /// Built from:
+    ///   - conditional bindings (`let h = if dev then a else b`)
+    ///   - factory results (`let h = make_handler()`)
+    ///   - any `with <expr>` where `<expr>` is not a literal handler /
+    ///     static name reference / resolvable alias
+    Dynamic {
+        effects: Vec<String>,            // effects discharged (typically one;
+                                         // see invariant below)
+        op_tuple: Atom,                  // closure tuple at runtime
+        return_lambda: Option<Atom>,
+        source: NodeId,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct MHandlerArm {
-    pub id: NodeId,               // original arm NodeId — HandlerAnalysis key
-    pub op: EffectOpRef,          // pre-resolved
+    pub id: NodeId,                // original arm NodeId — HandlerAnalysis key
+    pub op: EffectOpRef,           // pre-resolved
     pub params: Vec<Pat>,
     pub body: MExpr,
     pub finally_block: Option<MExpr>,
@@ -280,10 +310,19 @@ pub struct MHandlerArm {
 }
 ```
 
-The AST's `Handler::Named(NamedHandlerRef)` form is resolved to its arms at
-translation time — `MHandler` doesn't need that variant. Inline-vs-named
-distinction is irrelevant post-translation; we always have a flat list of
-arms.
+**Invariant on `Dynamic.effects`:** today's compiler produces dynamic
+handler bindings per single effect (a `let h = ...` of handler-value type
+binds one effect's op-tuple). The field is `Vec<String>` to mirror
+`Static.effects` and admit future generalization, but a translator that
+emits `Dynamic` with `effects.len() != 1` is a bug unless that invariant
+is explicitly relaxed first. The lowerer may assert single-effect when
+emitting `Dynamic` with-sites.
+
+**Why `Static` keeps inline-vs-named distinction collapsed:** the AST's
+`Handler::Named(NamedHandlerRef)` form is resolved to its arms at
+translation time. Inline-vs-named distinction is irrelevant
+post-translation; both produce a flat `Static { arms, ... }` carrying the
+arm bodies as `MExpr`.
 
 ### `MDecl` / `MProgram`
 
@@ -353,10 +392,48 @@ Variants in `ast::ExprKind` deliberately absent from `MExpr`:
 | `Constructor { name }` (nullary) | Becomes `Atom::Ctor { args: vec![], … }`. |
 | `Var`, `Lit`, `QualifiedName`, `DictRef`, `SymbolIntrinsic`, atomic `Tuple` / `RecordCreate` / `AnonRecordCreate`, bare `Lambda` | Reified as `Atom` variants under `MExpr::Pure(atom)`. |
 | `Ascription { expr, type_expr }` | Type ascription is erased post-typecheck. Translator strips it. |
-| `HandlerExpr { body }` | Either folded into enclosing `With { handler: MHandler }`, or lifted to a named handler decl. No standalone IR variant needed. |
+| `HandlerExpr { body }` | Either folded into the enclosing `With { handler: MHandler::Static }`, or its op-tuple is materialized as a `Dynamic` handler value. No standalone IR variant. |
 | Constructor used as a value (partial application) | Eta-expanded into `Atom::Lambda` carrying `Pure(Ctor(...))` body. |
+| `Do { bindings, success, else_arms }` | **Not yet desugared upstream.** Backend still sees `ExprKind::Do`. The new path handles it during ANF + translation: each binding becomes a `Bind`/`Let`, the success arm sequences inline, and the `else_arms` become a `Case` on the bound value for non-success patterns. The old path is unaffected (its desugaring remains as-is); moving `Do` to `desugar.rs` is a future cleanup outside this rewrite's scope. |
 
 ---
+
+## `EffectInfo` (narrowed view)
+
+Backend `ResolutionMap` does **not** resolve `EffectCall` or handler-arm
+nodes (it leaves them dynamic for the old path — see
+[src/codegen/resolve.rs:763](../../../src/codegen/resolve.rs#L763)). The
+canonical effect/op info lives in the frontend's `ResolutionResult`. The
+new path's translation and optimization stages consume a narrowed
+read-only view rather than the whole `CheckResult`:
+
+```rust
+pub struct EffectInfo<'a> {
+    /// EffectCall NodeId → resolved effect/op name (the typechecker did this).
+    pub effect_calls: &'a HashMap<NodeId, typechecker::ResolvedEffectOp>,
+
+    /// Handler-arm NodeId → which effect/op the arm handles.
+    pub handler_arms: &'a HashMap<NodeId, typechecker::ResolvedEffectOp>,
+
+    /// Function name → set of effect names the function performs.
+    /// Used by Bind→Let promotion to look up callee effect rows.
+    pub fun_effects: &'a HashMap<String, HashSet<String>>,
+
+    /// Let-binding name → effects the bound value carries (for partial-app
+    /// effectful values held in let-bindings).
+    pub let_effect_bindings: &'a HashMap<String, Vec<String>>,
+
+    /// Per-NodeId resolved type. Used to read effect rows on expressions
+    /// (row-polymorphic call effects after zonking).
+    pub type_at_node: &'a HashMap<NodeId, Type>,
+}
+```
+
+Reuse frontend types (`ResolvedEffectOp` lives at
+[src/typechecker/resolve.rs:28](../../../src/typechecker/resolve.rs#L28))
+rather than wrapping them. The view is a read-only borrow bundle; built
+once at the entry point from `CheckResult` + per-module `ResolutionResult`
+and threaded through.
 
 ## Stage entry-function signatures
 
@@ -374,12 +451,14 @@ pub fn normalize(p: ast::Program) -> ast::Program;
 pub fn translate(
     p: &ast::Program,
     r: &codegen::resolve::ResolutionMap,
+    e: &EffectInfo,
 ) -> MProgram;
 
 // src/codegen/monadic/effect_opt/mod.rs
 pub fn run(
     m: MProgram,
     h: &HandlerAnalysis,
+    e: &EffectInfo,
 ) -> MProgram;
 
 // src/codegen/lower_monadic/mod.rs
@@ -389,6 +468,7 @@ impl<'ctx> Lowerer<'ctx> {
         ctors: &'ctx ConstructorAtoms,
         module_ctx: &'ctx ModuleCodegenContext,
         handler_info: &'ctx HandlerAnalysis,
+        effect_info: &'ctx EffectInfo<'ctx>,
     ) -> Self;
 
     pub fn lower_module(
