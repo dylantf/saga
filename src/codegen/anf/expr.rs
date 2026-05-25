@@ -112,7 +112,11 @@ impl Anf {
                     // Preserve the original `App`'s NodeId on the outermost
                     // node (the source-visible call site). Synthesize fresh
                     // IDs for any intermediate Apps from our re-spine.
-                    let app_id = if i + 1 == total_args { id } else { NodeId::fresh() };
+                    let app_id = if i + 1 == total_args {
+                        id
+                    } else {
+                        NodeId::fresh()
+                    };
                     acc = Expr {
                         id: app_id,
                         span: acc_span,

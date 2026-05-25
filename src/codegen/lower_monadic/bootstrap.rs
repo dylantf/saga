@@ -209,8 +209,11 @@ const NATIVE_EFFECTS: &[NativeEffect] = &[
 pub(super) fn build_initial_evidence_fundef() -> CFunDef {
     let mut entries: Vec<CExpr> = Vec::with_capacity(NATIVE_EFFECTS.len());
     for effect in NATIVE_EFFECTS {
-        let op_closures: Vec<CExpr> =
-            effect.ops.iter().map(|op| build_op_closure(effect.tag, op)).collect();
+        let op_closures: Vec<CExpr> = effect
+            .ops
+            .iter()
+            .map(|op| build_op_closure(effect.tag, op))
+            .collect();
         let op_tuple = CExpr::Tuple(op_closures);
         let entry = CExpr::Tuple(vec![
             CExpr::Lit(CLit::Atom(effect.tag.to_string())),

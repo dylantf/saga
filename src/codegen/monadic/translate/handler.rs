@@ -118,8 +118,10 @@ impl<'a> Translator<'a> {
             };
         }
 
-        let canonical_effects: Vec<String> =
-            effects.iter().map(|e| self.canonical_effect_name(e)).collect();
+        let canonical_effects: Vec<String> = effects
+            .iter()
+            .map(|e| self.canonical_effect_name(e))
+            .collect();
         let arms = arms_src
             .iter()
             .map(|a| self.translate_handler_arm(a, &canonical_effects))
@@ -144,8 +146,10 @@ impl<'a> Translator<'a> {
         // lowerer's With-site evidence tags match the canonical names used
         // by `Yield`'s `find_evidence` lookups (the typechecker's resolution
         // is authoritative on canonical naming).
-        let canonical_effects: Vec<String> =
-            effects.iter().map(|e| self.canonical_effect_name(e)).collect();
+        let canonical_effects: Vec<String> = effects
+            .iter()
+            .map(|e| self.canonical_effect_name(e))
+            .collect();
         let arms = body
             .arms
             .iter()
@@ -188,11 +192,7 @@ impl<'a> Translator<'a> {
     /// which happens for arms whose NodeIds come from an imported module
     /// (their `handler_arms` resolution lives in that module's
     /// `CheckResult`, not the entry-point's narrowed view).
-    fn resolve_handler_arm_op(
-        &self,
-        arm: &HandlerArm,
-        handler_effects: &[String],
-    ) -> EffectOpRef {
+    fn resolve_handler_arm_op(&self, arm: &HandlerArm, handler_effects: &[String]) -> EffectOpRef {
         if let Some(resolved) = self.effect_info.handler_arms.get(&arm.id) {
             let op_index = self.op_index(&resolved.effect, &resolved.op);
             return EffectOpRef {

@@ -15,9 +15,7 @@ use crate::codegen::cerl::{CArm, CBinSeg, CExpr, CLit};
 use crate::codegen::monadic::ir::{Atom, MArm, MBitSegment, MExpr};
 
 use super::Lowerer;
-use super::util::{
-    resolve_bit_segment_flags, resolve_bit_segment_meta, resolve_bit_segment_size,
-};
+use super::util::{resolve_bit_segment_flags, resolve_bit_segment_meta, resolve_bit_segment_size};
 
 impl<'ctx> Lowerer<'ctx> {
     /// Lower `FieldAccess { record, field, record_name, .. }`.
@@ -50,15 +48,12 @@ impl<'ctx> Lowerer<'ctx> {
                     record_name
                 )
             });
-        let idx = order
-            .iter()
-            .position(|f| f == field)
-            .unwrap_or_else(|| {
-                panic!(
-                    "lower_field_access: field '{}' not in declared order for record {:?}",
-                    field, record_name
-                )
-            }) as i64
+        let idx = order.iter().position(|f| f == field).unwrap_or_else(|| {
+            panic!(
+                "lower_field_access: field '{}' not in declared order for record {:?}",
+                field, record_name
+            )
+        }) as i64
             + 2;
         let rec = self.lower_atom(record);
         let access = CExpr::Call(
@@ -137,11 +132,7 @@ impl<'ctx> Lowerer<'ctx> {
     /// but the old lowerer uses `method_index + 1`. The IR field is the AST
     /// field passed through verbatim by the translator, so we match the old
     /// behavior to avoid changing dict-call semantics here.
-    pub(super) fn lower_dict_method_access(
-        &mut self,
-        dict: &Atom,
-        method_index: usize,
-    ) -> CExpr {
+    pub(super) fn lower_dict_method_access(&mut self, dict: &Atom, method_index: usize) -> CExpr {
         let d = self.lower_atom(dict);
         let elem = CExpr::Call(
             "erlang".to_string(),
@@ -157,12 +148,7 @@ impl<'ctx> Lowerer<'ctx> {
     /// / `_ReturnK` threading — foreign calls are raw BIFs. The result flows
     /// through the ambient `current_return_k` so the caller's continuation
     /// receives the BIF's return value.
-    pub(super) fn lower_foreign_call(
-        &mut self,
-        module: &str,
-        func: &str,
-        args: &[Atom],
-    ) -> CExpr {
+    pub(super) fn lower_foreign_call(&mut self, module: &str, func: &str, args: &[Atom]) -> CExpr {
         let call_args: Vec<CExpr> = args.iter().map(|a| self.lower_atom(a)).collect();
         let call = CExpr::Call(module.to_string(), func.to_string(), call_args);
         self.apply_current_k(call)
@@ -178,12 +164,7 @@ impl<'ctx> Lowerer<'ctx> {
     /// evaluation matches Saga's source semantics. We lower these to the
     /// `erlang:'and'`/`erlang:'or'` BIFs rather than short-circuit `case`
     /// rewrites; the old lowerer's short-circuit shape is unnecessary here.
-    pub(super) fn lower_binop(
-        &mut self,
-        op: &AstBinOp,
-        left: &Atom,
-        right: &Atom,
-    ) -> CExpr {
+    pub(super) fn lower_binop(&mut self, op: &AstBinOp, left: &Atom, right: &Atom) -> CExpr {
         let l = self.lower_atom(left);
         let r = self.lower_atom(right);
         self.apply_current_k(binop_atoms(op, l, r))

@@ -8,9 +8,7 @@
 use std::collections::HashMap;
 
 use crate::ast::{BitSegSpec, Lit};
-use crate::codegen::cerl::{
-    BinSegFlags, BinSegSize, BinSegType, CBinSeg, CExpr, CLit, Endianness,
-};
+use crate::codegen::cerl::{BinSegFlags, BinSegSize, BinSegType, CBinSeg, CExpr, CLit, Endianness};
 
 /// Map a Saga identifier to a Core Erlang variable name.
 ///

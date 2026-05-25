@@ -43,6 +43,14 @@ enum Command {
         /// The .saga source file
         file: String,
     },
+    /// Dump an intermediate IR stage for a single .saga file (new-path debugging)
+    Inspect {
+        /// The .saga source file
+        file: String,
+        /// Stage to dump: elaborated | anf | monadic | monadic-opt | core
+        #[arg(long)]
+        stage: String,
+    },
     /// Run tests
     Test {
         /// Filter pattern (file path or substring match)
@@ -123,6 +131,9 @@ fn main() {
         }
         Command::Emit { file } => {
             cli::commands::cmd_emit(&file);
+        }
+        Command::Inspect { file, stage } => {
+            cli::commands::cmd_inspect(&file, &stage);
         }
         Command::Test { filter, verbose } => {
             cli::set_verbose(verbose);

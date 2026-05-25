@@ -106,12 +106,7 @@ impl<'ctx> Lowerer<'ctx> {
         // Build the case scrutinee: a tuple of the arg-var refs. Single-arg
         // functions could in principle skip the wrapping tuple; emitting it
         // uniformly keeps the lowering symmetric and matches the old path.
-        let scrut = CExpr::Tuple(
-            arg_names
-                .iter()
-                .map(|v| CExpr::Var(v.clone()))
-                .collect(),
-        );
+        let scrut = CExpr::Tuple(arg_names.iter().map(|v| CExpr::Var(v.clone())).collect());
 
         // Lower each clause body under a fresh K state (each clause is its
         // own tail context but they share the function-entry `_ReturnK`).
@@ -265,15 +260,18 @@ pub(super) fn dict_constructor_arity(dc: &MDictConstructor) -> usize {
 /// `src/codegen/lower/init.rs::extract_external` per the agent-guide's
 /// "no imports from frozen files" rule.
 fn extract_external(annotations: &[Annotation]) -> Option<(String, String)> {
-    annotations.iter().find(|a| a.name == "external").and_then(|a| {
-        if a.args.len() >= 3
-            && let (Lit::String(module, _), Lit::String(func, _)) = (&a.args[1], &a.args[2])
-        {
-            Some((module.clone(), func.clone()))
-        } else {
-            None
-        }
-    })
+    annotations
+        .iter()
+        .find(|a| a.name == "external")
+        .and_then(|a| {
+            if a.args.len() >= 3
+                && let (Lit::String(module, _), Lit::String(func, _)) = (&a.args[1], &a.args[2])
+            {
+                Some((module.clone(), func.clone()))
+            } else {
+                None
+            }
+        })
 }
 
 /// Lower an `@external` `FunSignature` decl into a wrapper `CFunDef`.
@@ -327,10 +325,7 @@ pub(super) fn lower_external_wrapper(decl: &Decl) -> Option<(CFunDef, usize, boo
     let total_arity = param_vars.len();
 
     let call = CExpr::Call(erl_module, erl_func, call_args);
-    let body = CExpr::Apply(
-        Box::new(CExpr::Var(RETURN_K_VAR.to_string())),
-        vec![call],
-    );
+    let body = CExpr::Apply(Box::new(CExpr::Var(RETURN_K_VAR.to_string())), vec![call]);
 
     Some((
         CFunDef {
@@ -391,10 +386,7 @@ fn build_print_wrapper(name: String, stderr: bool) -> CFunDef {
 
     let mut fmt_args: Vec<CExpr> = vec![
         CExpr::Lit(crate::codegen::cerl::CLit::Str("~ts".to_string())),
-        CExpr::Cons(
-            Box::new(CExpr::Var(s_param.clone())),
-            Box::new(CExpr::Nil),
-        ),
+        CExpr::Cons(Box::new(CExpr::Var(s_param.clone())), Box::new(CExpr::Nil)),
     ];
     if stderr {
         fmt_args.insert(
@@ -473,10 +465,7 @@ fn build_dbg_wrapper(name: String) -> CFunDef {
                 "standard_error".to_string(),
             )),
             CExpr::Lit(crate::codegen::cerl::CLit::Str("~ts~n".to_string())),
-            CExpr::Cons(
-                Box::new(CExpr::Var(str_var.clone())),
-                Box::new(CExpr::Nil),
-            ),
+            CExpr::Cons(Box::new(CExpr::Var(str_var.clone())), Box::new(CExpr::Nil)),
         ],
     );
     let apply_k = CExpr::Apply(
@@ -538,10 +527,7 @@ fn build_catch_panic_wrapper(name: String) -> CFunDef {
     let msg_var = "Msg".to_string();
     let result_var = "_Result".to_string();
 
-    let id_k = CExpr::Fun(
-        vec![id_k_param.clone()],
-        Box::new(CExpr::Var(id_k_param)),
-    );
+    let id_k = CExpr::Fun(vec![id_k_param.clone()], Box::new(CExpr::Var(id_k_param)));
 
     let applied = CExpr::Apply(
         Box::new(CExpr::Var(f_param.clone())),
@@ -614,11 +600,7 @@ fn build_catch_panic_wrapper(name: String) -> CFunDef {
         name,
         arity: 3,
         body: CExpr::Fun(
-            vec![
-                f_param,
-                EVIDENCE_VAR.to_string(),
-                RETURN_K_VAR.to_string(),
-            ],
+            vec![f_param, EVIDENCE_VAR.to_string(), RETURN_K_VAR.to_string()],
             Box::new(body),
         ),
     }

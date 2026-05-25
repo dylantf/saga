@@ -26,6 +26,35 @@ detailed *what* and *why* live in the planning + spec docs; this is the
 
 ## Cross-cutting invariants
 
+### Behavioral parity with the old lowerer
+
+**The new path's job is to make selective-CPS into uniform-CPS.** That is
+the *only* architectural change. Everything else — trait dispatch,
+record/anon-record encoding, atom mangling, fun-reference shapes,
+evidence-tuple ordering, BIF wrapping, constructor representations — must
+match the old lowerer bit-for-bit. The old lowerer at
+[src/codegen/lower/](../../../src/codegen/lower/) is the **behavioral
+reference**. Read it; mirror its decisions.
+
+When in doubt, the question "what would the old lowerer emit here?" has
+exactly one correct answer, and the new path should emit the same shape.
+Local design choices that "seem cleaner" but produce different CEL
+output are bugs. They will surface as e2e failures and we will revert
+them.
+
+The only legitimate places to deviate:
+- Calling convention: uniform `(args..., _Evidence, _ReturnK)` everywhere
+  vs. old path's selective threading.
+- Continuation reification: `Bind` reifies at every sequencing point,
+  vs. old path's per-call decisions.
+- Effect optimization: explicit pass over the IR vs. inline in lowering.
+
+Anywhere else: match the old lowerer. If you're tempted to diverge
+because the old code is ugly or the convention seems arbitrary, **flag
+the divergence as an open question and consult before shipping it**.
+The "convention seems arbitrary" reading is almost always wrong — the
+convention exists because some test depends on it.
+
 ### Strict no-imports from frozen files
 
 The new path **must not** import from these:

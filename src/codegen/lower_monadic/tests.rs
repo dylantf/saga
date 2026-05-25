@@ -206,7 +206,9 @@ fn val_emits_arity_zero_constant() {
         CExpr::Apply(callee, args) => {
             assert!(matches!(callee.as_ref(), CExpr::Var(n) if n == "_ReturnK"));
             assert_eq!(args.len(), 1);
-            assert!(matches!(&args[0], CExpr::Lit(crate::codegen::cerl::CLit::Atom(a)) if a == "unit"));
+            assert!(
+                matches!(&args[0], CExpr::Lit(crate::codegen::cerl::CLit::Atom(a)) if a == "unit")
+            );
         }
         other => panic!("expected apply _ReturnK('unit'), got {other:?}"),
     }
@@ -362,11 +364,8 @@ fn passthrough_recorddef_populates_local_record_fields() {
     );
 
     // lower_field_access must resolve declared order without panicking.
-    let access = lowerer.lower_field_access(
-        &atom_var("rec"),
-        "body",
-        Some("Std.Test.TestCaseData"),
-    );
+    let access =
+        lowerer.lower_field_access(&atom_var("rec"), "body", Some("Std.Test.TestCaseData"));
     // The access path wraps the element/2 call in apply _ReturnK(...).
     match access {
         CExpr::Apply(callee, args) => {
@@ -1607,9 +1606,7 @@ fn extract_op_tuple_at(
                 assert!(matches!(&args[0], CExpr::Var(n) if n == expected_ev_var));
                 match &args[1] {
                     CExpr::Tuple(t) => {
-                        assert!(
-                            matches!(&t[0], CExpr::Lit(CLit::Atom(a)) if a == expected_effect)
-                        );
+                        assert!(matches!(&t[0], CExpr::Lit(CLit::Atom(a)) if a == expected_effect));
                         match &t[1] {
                             CExpr::Tuple(ops) => ops.clone(),
                             other => panic!("expected OpTuple, got {other:?}"),
@@ -1694,17 +1691,15 @@ fn resume_and_pure_emit_identical_cel_at_arm_tail() {
             source: dummy_node(),
         },
     );
-    let mk = |arm| {
-        MExpr::With {
-            handler: MHandler::Static {
-                effects: vec!["E".to_string()],
-                arms: vec![arm],
-                return_clause: None,
-                source: dummy_node(),
-            },
-            body: Box::new(pure_unit()),
+    let mk = |arm| MExpr::With {
+        handler: MHandler::Static {
+            effects: vec!["E".to_string()],
+            arms: vec![arm],
+            return_clause: None,
             source: dummy_node(),
-        }
+        },
+        body: Box::new(pure_unit()),
+        source: dummy_node(),
     };
     let pce = lower_expr_default(&mk(p_arm));
     let rce = lower_expr_default(&mk(r_arm));
@@ -2104,13 +2099,7 @@ fn resume_inside_lambda_in_arm_body_uses_lambda_k_not_arm_k() {
         }),
         source: dummy_node(),
     };
-    let arm = handler_arm_with_body(
-        "E",
-        "op",
-        1,
-        vec![],
-        MExpr::Pure(lambda_atom),
-    );
+    let arm = handler_arm_with_body("E", "op", 1, vec![], MExpr::Pure(lambda_atom));
     let handler = MHandler::Static {
         effects: vec!["E".to_string()],
         arms: vec![arm],
@@ -2236,10 +2225,7 @@ fn atom_int(n: i64) -> Atom {
 /// Build a lowerer with a pre-seeded `record_fields` cache; lets tests
 /// drive `FieldAccess`/`RecordUpdate` without standing up a full
 /// `CodegenContext` of modules.
-fn lower_with_records<F, R>(
-    fields_by_record: &[(&str, Vec<&str>)],
-    op: F,
-) -> R
+fn lower_with_records<F, R>(fields_by_record: &[(&str, Vec<&str>)], op: F) -> R
 where
     F: FnOnce(&mut Lowerer<'_>) -> R,
 {
@@ -2457,7 +2443,10 @@ fn unary_minus_emits_zero_minus_value() {
 fn bitstring_string_literal_segment_expands_to_byte_run() {
     let expr = MExpr::BitString {
         segments: vec![MBitSegment {
-            value: atom_lit(Lit::String("hi".to_string(), crate::token::StringKind::Normal)),
+            value: atom_lit(Lit::String(
+                "hi".to_string(),
+                crate::token::StringKind::Normal,
+            )),
             size: None,
             specs: vec![],
             span: span(),
@@ -2686,10 +2675,8 @@ fn pat_record_uses_declared_field_order() {
         span: span(),
     };
     let cpat = lower_pat_in_case(pat, |l| {
-        l.record_fields.insert(
-            "Pt".to_string(),
-            vec!["x".to_string(), "y".to_string()],
-        );
+        l.record_fields
+            .insert("Pt".to_string(), vec!["x".to_string(), "y".to_string()]);
     });
     let elems = match cpat {
         CPat::Tuple(es) => es,
@@ -2712,10 +2699,8 @@ fn pat_record_with_as_name_aliases_tuple() {
         span: span(),
     };
     let cpat = lower_pat_in_case(pat, |l| {
-        l.record_fields.insert(
-            "Pt".to_string(),
-            vec!["x".to_string(), "y".to_string()],
-        );
+        l.record_fields
+            .insert("Pt".to_string(), vec!["x".to_string(), "y".to_string()]);
     });
     match cpat {
         CPat::Alias(var, inner) => {
@@ -3023,10 +3008,7 @@ fn private_external_signature_not_exported() {
     };
     let cmod = lower(&vec![MDecl::Passthrough(decl)], "m");
     assert_eq!(cmod.funs.len(), 1, "private external still emits fundef");
-    assert!(
-        cmod.exports.is_empty(),
-        "but is not exported"
-    );
+    assert!(cmod.exports.is_empty(), "but is not exported");
 }
 
 // --- Bootstrap ---------------------------------------------------------
@@ -3091,7 +3073,9 @@ fn bootstrap_evidence_vector_has_canonical_effect_entries() {
     };
     assert_eq!(entries.len(), super::bootstrap::native_effect_count());
     // Each entry: {EffectAtom, OpTuple}
-    for (entry, &expected_tag) in entries.iter().zip(super::bootstrap::native_effect_tags().iter())
+    for (entry, &expected_tag) in entries
+        .iter()
+        .zip(super::bootstrap::native_effect_tags().iter())
     {
         match entry {
             CExpr::Tuple(pair) => {
@@ -3100,7 +3084,9 @@ fn bootstrap_evidence_vector_has_canonical_effect_entries() {
                     CExpr::Lit(CLit::Atom(a)) => assert_eq!(a, expected_tag),
                     other => panic!("expected EffectAtom tag, got {other:?}"),
                 }
-                let op_count = super::bootstrap::ops_for_effect(expected_tag).unwrap().len();
+                let op_count = super::bootstrap::ops_for_effect(expected_tag)
+                    .unwrap()
+                    .len();
                 match &pair[1] {
                     CExpr::Tuple(ops) => assert_eq!(ops.len(), op_count),
                     other => panic!("expected OpTuple, got {other:?}"),
@@ -3231,7 +3217,9 @@ fn bootstrap_unimplemented_op_emits_exit_stub() {
                     CExpr::Tuple(t) => t,
                     _ => panic!(),
                 };
-                assert!(matches!(&tag[0], CExpr::Lit(CLit::Atom(a)) if a == "not_implemented_native_op"));
+                assert!(
+                    matches!(&tag[0], CExpr::Lit(CLit::Atom(a)) if a == "not_implemented_native_op")
+                );
                 assert!(matches!(&tag[1], CExpr::Lit(CLit::Atom(a)) if a == "Process"));
                 assert!(matches!(&tag[2], CExpr::Lit(CLit::Atom(a)) if a == "spawn"));
             }

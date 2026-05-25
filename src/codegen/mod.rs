@@ -216,7 +216,7 @@ pub struct EffectOpsTable {
 /// Build the canonical effect-name → ops list from `CheckResult.effects`.
 /// Both the bare effect name and the fully-qualified `Module.Name` form
 /// are inserted so callers can look up by either spelling.
-fn build_effect_ops_table(check_result: &CheckResult) -> EffectOpsTable {
+pub fn build_effect_ops_table(check_result: &CheckResult) -> EffectOpsTable {
     let mut map: HashMap<String, Vec<String>> = HashMap::new();
     for (name, info) in &check_result.effects {
         let mut ops: Vec<String> = info.ops.iter().map(|op| op.name.clone()).collect();

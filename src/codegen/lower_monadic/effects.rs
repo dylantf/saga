@@ -164,8 +164,7 @@ impl<'ctx> Lowerer<'ctx> {
                 canonical_effects.push(arm.op.effect.clone());
             }
         }
-        let mut entry_bindings: Vec<(String, CExpr)> =
-            Vec::with_capacity(canonical_effects.len());
+        let mut entry_bindings: Vec<(String, CExpr)> = Vec::with_capacity(canonical_effects.len());
         let mut acc_evidence_var = outer_evidence.clone();
         for eff in &canonical_effects {
             let effect_arms: Vec<&MHandlerArm> =
@@ -559,11 +558,7 @@ impl<'ctx> Lowerer<'ctx> {
     /// Apply the destructure plan from [`plan_arm_params`]: wrap `body` with
     /// a `case <_HArg{i}> of <pat> -> body` for each non-Var/Wildcard arm
     /// param. Outer wraps are emitted last so inner patterns bind first.
-    fn wrap_arm_param_destructures(
-        &self,
-        mut body: CExpr,
-        wraps: Vec<(String, Pat)>,
-    ) -> CExpr {
+    fn wrap_arm_param_destructures(&self, mut body: CExpr, wraps: Vec<(String, Pat)>) -> CExpr {
         for (arg_name, pat) in wraps.into_iter().rev() {
             let cpat = self.lower_pat(&pat);
             body = CExpr::Case(
