@@ -309,7 +309,33 @@ pub fn emit_module_via_new_path(
 
     let handler_info = handler_analysis::analyze(program);
     let anf_program = anf::normalize(program.clone());
-    let monadic_prog = monadic::translate::translate(&anf_program, &resolution_map, &effect_info);
+    // Collect imported handler bodies so `with <imported_handler>` translates
+    // to `Static` (arms inlined) instead of falling back to `Dynamic` with an
+    // empty effect list — the lowerer's Dynamic path requires a concrete
+    // effect tag for `insert_canonical`.
+    //
+    // Imported `elaborated` programs are NOT ANF-normalized (each module was
+    // ANF'd at its own emit time but the result isn't persisted), so we
+    // re-ANF each before extracting handler bodies — the translator expects
+    // every reachable expression (including inlined handler arm bodies) to
+    // satisfy the ANF atomicity invariant.
+    let mut imported_handler_decls: HashMap<String, ast::HandlerBody> = HashMap::new();
+    for compiled in ctx.modules.values() {
+        let anf_imported = anf::normalize(compiled.elaborated.clone());
+        for decl in &anf_imported {
+            if let ast::Decl::HandlerDef { name, body, .. } = decl {
+                imported_handler_decls
+                    .entry(name.clone())
+                    .or_insert_with(|| body.clone());
+            }
+        }
+    }
+    let monadic_prog = monadic::translate::translate_with_imports(
+        &anf_program,
+        &resolution_map,
+        &effect_info,
+        &imported_handler_decls,
+    );
     let optimized = monadic::effect_opt::run(monadic_prog, &handler_info, &effect_info);
 
     let is_main = entry_export.is_some();

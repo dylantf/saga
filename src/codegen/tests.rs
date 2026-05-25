@@ -1339,3 +1339,64 @@ fn new_path_smoke_hello_world() {
         );
     }
 }
+
+/// Smoke test the new path on a program that has both a `main` fn and a
+/// `val` whose body is a non-trivial pure computation (not just `Pure(atom)`
+/// post-translation). Regression for the val identity-K wrapper fix —
+/// `lower_val` must thread `lower_expr` through with a synthesized
+/// `_ReturnK = fun(X) -> X` so `Bind` / `If` / etc. inside the body lower
+/// cleanly.
+#[test]
+#[ignore]
+fn new_path_smoke_val_with_computation() {
+    let src = "\
+val answer = 1 + 2
+main () = ()
+";
+    let (elaborated, result) = check_program(src);
+    let ctx = super::CodegenContext {
+        modules: std::collections::HashMap::new(),
+        let_effect_bindings: result.let_effect_bindings.clone(),
+        prelude_imports: result.prelude_imports.clone(),
+    };
+    let core = super::emit_module_via_new_path(
+        "_script",
+        &elaborated,
+        &ctx,
+        &result,
+        Some("main"),
+    );
+    assert!(
+        core.contains("module '_script'"),
+        "Core Erlang module header missing:\n{core}"
+    );
+    assert!(
+        core.contains("'answer'/0"),
+        "val 'answer' must be emitted as a /0 function:\n{core}"
+    );
+
+    if std::process::Command::new("erlc")
+        .arg("--help")
+        .output()
+        .is_ok()
+    {
+        let tmp = std::env::temp_dir().join("saga-new-path-smoke-val");
+        std::fs::create_dir_all(&tmp).unwrap();
+        let core_path = tmp.join("_script.core");
+        std::fs::write(&core_path, &core).unwrap();
+        let out = std::process::Command::new("erlc")
+            .arg("+from_core")
+            .arg("-o")
+            .arg(&tmp)
+            .arg(&core_path)
+            .output()
+            .expect("erlc spawn");
+        assert!(
+            out.status.success(),
+            "erlc rejected new-path val output:\nstdout: {}\nstderr: {}\ncore: {}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr),
+            core
+        );
+    }
+}

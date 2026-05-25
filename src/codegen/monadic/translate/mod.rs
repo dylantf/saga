@@ -30,7 +30,29 @@ use crate::codegen::resolve::ResolutionMap;
 /// backend resolution map. `e` is the narrowed effect-info view. Tests
 /// construct `EffectInfo` manually with only the fields they need.
 pub fn translate(p: &ast::Program, r: &ResolutionMap, e: &EffectInfo<'_>) -> MProgram {
+    translate_with_imports(p, r, e, &HashMap::new())
+}
+
+/// Like [`translate`], but also takes a map of imported handler bodies keyed
+/// by the bare handler name (the spelling user code refers to via `with X`).
+/// Imported handlers are merged into the translator's `handler_decls` so
+/// `with <imported_handler>` resolves to `Static` (with arms inlined),
+/// instead of falling back to the `Dynamic` path with no effect info.
+///
+/// Local declarations in `p` take precedence on key collisions: if a handler
+/// of the same bare name is defined in the current module, that wins.
+pub fn translate_with_imports(
+    p: &ast::Program,
+    r: &ResolutionMap,
+    e: &EffectInfo<'_>,
+    imported_handler_decls: &HashMap<String, HandlerBody>,
+) -> MProgram {
     let mut tr = Translator::new(p, r, e);
+    for (name, body) in imported_handler_decls {
+        tr.handler_decls
+            .entry(name.clone())
+            .or_insert_with(|| body.clone());
+    }
     p.iter().map(|d| tr.translate_decl(d)).collect()
 }
 
