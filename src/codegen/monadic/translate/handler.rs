@@ -118,16 +118,18 @@ impl<'a> Translator<'a> {
             };
         }
 
+        let canonical_effects: Vec<String> =
+            effects.iter().map(|e| self.canonical_effect_name(e)).collect();
         let arms = arms_src
             .iter()
-            .map(|a| self.translate_handler_arm(a))
+            .map(|a| self.translate_handler_arm(a, &canonical_effects))
             .collect();
         let return_clause = return_clause
             .as_ref()
-            .map(|a| self.translate_handler_arm(a));
+            .map(|a| self.translate_handler_arm(a, &canonical_effects));
 
         MHandler::Static {
-            effects,
+            effects: canonical_effects,
             arms,
             return_clause,
             source: site_span_to_node_id(site_span, NodeId::fresh()),
@@ -136,27 +138,37 @@ impl<'a> Translator<'a> {
 
     /// Build a Static handler from a known `HandlerBody`.
     fn static_from_body(&mut self, body: &HandlerBody, source: NodeId) -> MHandler {
+        let mut effects: Vec<String> = Vec::new();
+        merge_body_effects(body, &mut effects);
+        // Canonicalize the handler's declared effects via `effect_ops` so the
+        // lowerer's With-site evidence tags match the canonical names used
+        // by `Yield`'s `find_evidence` lookups (the typechecker's resolution
+        // is authoritative on canonical naming).
+        let canonical_effects: Vec<String> =
+            effects.iter().map(|e| self.canonical_effect_name(e)).collect();
         let arms = body
             .arms
             .iter()
-            .map(|a| self.translate_handler_arm(&a.node))
+            .map(|a| self.translate_handler_arm(&a.node, &canonical_effects))
             .collect();
         let return_clause = body
             .return_clause
             .as_ref()
-            .map(|a| self.translate_handler_arm(a));
-        let mut effects: Vec<String> = Vec::new();
-        merge_body_effects(body, &mut effects);
+            .map(|a| self.translate_handler_arm(a, &canonical_effects));
         MHandler::Static {
-            effects,
+            effects: canonical_effects,
             arms,
             return_clause,
             source,
         }
     }
 
-    fn translate_handler_arm(&mut self, arm: &HandlerArm) -> MHandlerArm {
-        let op = self.resolve_handler_arm_op(arm);
+    fn translate_handler_arm(
+        &mut self,
+        arm: &HandlerArm,
+        handler_effects: &[String],
+    ) -> MHandlerArm {
+        let op = self.resolve_handler_arm_op(arm, handler_effects);
         MHandlerArm {
             id: arm.id,
             op,
@@ -171,10 +183,16 @@ impl<'a> Translator<'a> {
     }
 
     /// Pre-resolve a handler arm's op via `EffectInfo.handler_arms` (the
-    /// typechecker's authoritative map). Falls back to the source spelling
-    /// if the arm isn't in the map (e.g. when tests build EffectInfo
-    /// without it).
-    fn resolve_handler_arm_op(&self, arm: &HandlerArm) -> EffectOpRef {
+    /// typechecker's authoritative map). Falls back to the surrounding
+    /// handler's `for <Effect>` clause when the arm isn't in the map —
+    /// which happens for arms whose NodeIds come from an imported module
+    /// (their `handler_arms` resolution lives in that module's
+    /// `CheckResult`, not the entry-point's narrowed view).
+    fn resolve_handler_arm_op(
+        &self,
+        arm: &HandlerArm,
+        handler_effects: &[String],
+    ) -> EffectOpRef {
         if let Some(resolved) = self.effect_info.handler_arms.get(&arm.id) {
             let op_index = self.op_index(&resolved.effect, &resolved.op);
             return EffectOpRef {
@@ -183,13 +201,48 @@ impl<'a> Translator<'a> {
                 op_index,
             };
         }
-        let effect = arm.qualifier.clone().unwrap_or_default();
+        // Fallback: find which of the handler's `for <Effect>` declarations
+        // owns this op by checking `effect_ops`. If only one effect is in
+        // scope, it must be the one; otherwise look for an op-name match.
+        let bare_qualifier = arm.qualifier.clone().unwrap_or_default();
+        let effect = if !bare_qualifier.is_empty() {
+            self.canonical_effect_name(&bare_qualifier)
+        } else {
+            handler_effects
+                .iter()
+                .find(|e| {
+                    self.effect_ops
+                        .get(*e)
+                        .is_some_and(|ops| ops.iter().any(|n| n == &arm.op_name))
+                })
+                .cloned()
+                .unwrap_or_default()
+        };
         let op_index = self.op_index(&effect, &arm.op_name);
         EffectOpRef {
             effect,
             op: arm.op_name.clone(),
             op_index,
         }
+    }
+
+    /// Map a bare effect name (e.g. `Stdio`) to its canonical form (e.g.
+    /// `Std.IO.Stdio`) by scanning `effect_ops` for a dotted key whose
+    /// last segment matches. Returns the input unchanged if no canonical
+    /// alias is found (already-canonical names pass through).
+    fn canonical_effect_name(&self, bare: &str) -> String {
+        if bare.contains('.') {
+            return bare.to_string();
+        }
+        for key in self.effect_ops.keys() {
+            if key.contains('.')
+                && let Some(last) = key.rsplit('.').next()
+                && last == bare
+            {
+                return key.clone();
+            }
+        }
+        bare.to_string()
     }
 }
 

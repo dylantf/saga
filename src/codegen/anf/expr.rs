@@ -29,26 +29,100 @@ impl Anf {
             },
 
             ExprKind::App { func, arg } => {
-                // Preserve the curried-App spine: `f x y z` is `App(App(App(f, x), y), z)`,
-                // a single saturated call. Atomizing `func` would lift each inner
-                // `App` to a synthetic let — turning the saturated call into a
-                // chain of partial applications that the lowerer then emits with
-                // the wrong argument count under the uniform `(args..., _Evidence,
-                // _ReturnK)` convention. Recursing via `normalize_into` keeps the
-                // spine of `App` nodes intact while still atomizing each ARG. The
-                // outer `atomize_into` (called on this whole App by its parent
-                // context) will lift the saturated call once, as a unit.
-                let func = if matches!(func.kind, ExprKind::App { .. }) {
-                    Box::new(self.normalize_into(*func, bindings))
-                } else {
-                    Box::new(self.atomize_into(*func, bindings))
-                };
-                let arg = self.atomize_into(*arg, bindings);
-                Expr {
-                    id,
-                    span,
-                    kind: ExprKind::App { func, arg: Box::new(arg) },
+                // Saturated effect-call: the parser models `Stdio.print! arg0
+                // arg1` as `App(App(EffectCall(print, qualifier, []), arg0),
+                // arg1)`. The `EffectCall` itself isn't atomic, so the
+                // ordinary `atomize_into` path on `func` would lift it to a
+                // synthetic let-binding, splitting the call from its args. We
+                // want the arguments to live **inside** the `EffectCall`'s
+                // own `args` list so the downstream translator emits a single
+                // `MExpr::Yield` with all args. Walk the spine, atomize each
+                // arg, and rewrite as a flat `EffectCall(name, qualifier,
+                // [atomized_args])`. The original `EffectCall` NodeId is
+                // preserved so resolution lookups continue to hit.
+                let mut current_func: Expr = *func;
+                let mut current_arg: Expr = *arg;
+                let mut args_rev: Vec<Expr> = vec![current_arg];
+                while let ExprKind::App {
+                    func: next_func,
+                    arg: next_arg,
+                } = current_func.kind
+                {
+                    current_func = *next_func;
+                    current_arg = *next_arg;
+                    args_rev.push(current_arg);
                 }
+                if let ExprKind::EffectCall {
+                    name: eff_name,
+                    qualifier,
+                    args: existing_args,
+                } = current_func.kind
+                {
+                    debug_assert!(
+                        existing_args.is_empty(),
+                        "parser emits EffectCall with empty args; args ride on enclosing Apps"
+                    );
+                    let collected_args: Vec<Expr> = args_rev
+                        .into_iter()
+                        .rev()
+                        .map(|a| self.atomize_into(a, bindings))
+                        .collect();
+                    return Expr {
+                        id: current_func.id,
+                        span: current_func.span,
+                        kind: ExprKind::EffectCall {
+                            name: eff_name,
+                            qualifier,
+                            args: collected_args,
+                        },
+                    };
+                }
+
+                // Not an effect call — preserve the curried-App spine so a
+                // saturated `f x y z` lowers as one call. Atomizing `func`
+                // would lift each inner `App` to a synthetic let — turning
+                // the saturated call into a chain of partial applications
+                // that the lowerer then emits with the wrong argument count
+                // under the uniform `(args..., _Evidence, _ReturnK)`
+                // convention. Recursing via `normalize_into` keeps the spine
+                // of `App` nodes intact while still atomizing each ARG. The
+                // outer `atomize_into` (called on this whole App by its
+                // parent context) will lift the saturated call once, as a
+                // unit. Rebuild the spine here from the walk above.
+                let mut rebuilt: Expr = Expr {
+                    id: current_func.id,
+                    span: current_func.span,
+                    kind: current_func.kind,
+                };
+                rebuilt = if matches!(rebuilt.kind, ExprKind::App { .. }) {
+                    self.normalize_into(rebuilt, bindings)
+                } else {
+                    self.atomize_into(rebuilt, bindings)
+                };
+                let args_in_order: Vec<Expr> = args_rev
+                    .into_iter()
+                    .rev()
+                    .map(|a| self.atomize_into(a, bindings))
+                    .collect();
+                let mut acc = rebuilt;
+                let total_args = args_in_order.len();
+                let mut acc_span = acc.span;
+                for (i, arg) in args_in_order.into_iter().enumerate() {
+                    acc_span = acc_span.to(arg.span);
+                    // Preserve the original `App`'s NodeId on the outermost
+                    // node (the source-visible call site). Synthesize fresh
+                    // IDs for any intermediate Apps from our re-spine.
+                    let app_id = if i + 1 == total_args { id } else { NodeId::fresh() };
+                    acc = Expr {
+                        id: app_id,
+                        span: acc_span,
+                        kind: ExprKind::App {
+                            func: Box::new(acc),
+                            arg: Box::new(arg),
+                        },
+                    };
+                }
+                acc
             }
             ExprKind::BinOp { op, left, right } => {
                 let left = self.atomize_into(*left, bindings);
