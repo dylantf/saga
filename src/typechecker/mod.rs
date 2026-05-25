@@ -15,7 +15,7 @@ mod records;
 mod resolve;
 mod result;
 mod unify;
-pub(crate) use resolve::{ResolutionResult, ResolvedValue};
+pub(crate) use resolve::{ResolutionResult, ResolvedEffectOp, ResolvedValue};
 pub use result::{CheckResult, LetDictInfo};
 
 #[cfg(test)]

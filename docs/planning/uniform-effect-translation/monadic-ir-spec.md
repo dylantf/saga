@@ -301,14 +301,22 @@ pub enum MHandler {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct MHandlerArm {
-    pub id: NodeId,                // original arm NodeId — HandlerAnalysis key
-    pub op: EffectOpRef,           // pre-resolved
+    pub id: NodeId,                       // original arm NodeId — HandlerAnalysis key
+    pub op: EffectOpRef,                  // pre-resolved
     pub params: Vec<Pat>,
-    pub body: MExpr,
-    pub finally_block: Option<MExpr>,
+    pub body: Box<MExpr>,                 // boxed: breaks size cycle (see below)
+    pub finally_block: Option<Box<MExpr>>,
     pub span: Span,
 }
 ```
+
+**Box rationale on `body` / `finally_block`:** `MExpr::With { handler:
+MHandler }` → `MHandler::Static { return_clause: Option<MHandlerArm> }`
+→ `MHandlerArm { body: MExpr }` is a non-`Vec` size cycle. The
+`Static::arms: Vec<MHandlerArm>` field provides heap indirection, but
+`return_clause: Option<MHandlerArm>` is inline, so `body` and
+`finally_block` need to be boxed. One box per arm is cheaper than
+boxing every `With.handler`.
 
 **Invariant on `Dynamic.effects`:** today's compiler produces dynamic
 handler bindings per single effect (a `let h = ...` of handler-value type
