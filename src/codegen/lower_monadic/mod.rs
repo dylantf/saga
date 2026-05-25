@@ -176,8 +176,7 @@ impl<'ctx> Lowerer<'ctx> {
             .unwrap_or_else(|| module_name.to_string());
         for decl in program {
             if let MDecl::Passthrough(crate::ast::Decl::RecordDef { name, fields, .. }) = decl {
-                let field_names: Vec<String> =
-                    fields.iter().map(|a| a.node.0.clone()).collect();
+                let field_names: Vec<String> = fields.iter().map(|a| a.node.0.clone()).collect();
                 let qualified = format!("{}.{}", source_module, name);
                 self.record_fields
                     .entry(qualified)
@@ -305,11 +304,8 @@ impl<'ctx> Lowerer<'ctx> {
         // Public-name set for FunBinding / DictConstructor visibility.
         // When the module isn't registered in `module_ctx` (test contexts),
         // `pub_names` is `None`: callers default to exporting everything.
-        let pub_names: Option<std::collections::HashSet<String>> = self
-            .module_ctx
-            .modules
-            .get(module_name)
-            .map(|m| {
+        let pub_names: Option<std::collections::HashSet<String>> =
+            self.module_ctx.modules.get(module_name).map(|m| {
                 m.codegen_info
                     .exports
                     .iter()
@@ -317,9 +313,8 @@ impl<'ctx> Lowerer<'ctx> {
                     .collect()
             });
 
-        let is_public = |name: &str| -> bool {
-            pub_names.as_ref().is_none_or(|s| s.contains(name))
-        };
+        let is_public =
+            |name: &str| -> bool { pub_names.as_ref().is_none_or(|s| s.contains(name)) };
 
         // Group adjacent `MDecl::FunBinding` entries with the same name: each
         // run is one Saga function defined by multiple clauses (`fn 0 x = …`
@@ -336,12 +331,12 @@ impl<'ctx> Lowerer<'ctx> {
                     let mut group: Vec<&crate::codegen::monadic::ir::MFunBinding> = vec![fb];
                     let mut j = i + 1;
                     while j < program.len() {
-                        if let MDecl::FunBinding(next) = &program[j] {
-                            if next.name == fb.name {
-                                group.push(next);
-                                j += 1;
-                                continue;
-                            }
+                        if let MDecl::FunBinding(next) = &program[j]
+                            && next.name == fb.name
+                        {
+                            group.push(next);
+                            j += 1;
+                            continue;
                         }
                         break;
                     }
@@ -373,9 +368,7 @@ impl<'ctx> Lowerer<'ctx> {
                     continue;
                 }
                 MDecl::Passthrough(decl) => {
-                    if let Some((wrapper, arity, public)) =
-                        decls::lower_external_wrapper(decl)
-                    {
+                    if let Some((wrapper, arity, public)) = decls::lower_external_wrapper(decl) {
                         if public {
                             exports.push((wrapper.name.clone(), arity));
                         }

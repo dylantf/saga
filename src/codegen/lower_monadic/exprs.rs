@@ -83,7 +83,7 @@ impl<'ctx> Lowerer<'ctx> {
         }
     }
 
-/// `Resume(atom)` → `apply <current_K>(<atom>)`.
+    /// `Resume(atom)` → `apply <current_K>(<atom>)`.
     ///
     /// Under uniform K-threading, `Resume` and `Pure` emit identical CEL
     /// inside a handler arm: in an arm body, `current_return_k` is the arm's
@@ -292,10 +292,10 @@ impl<'ctx> Lowerer<'ctx> {
         // takes the remaining user/dict args plus the uniform `_Evidence` /
         // `_ReturnK` pair. Under uniform CPS you can't just `Apply` with
         // too few args — `erlc` rejects it as an arity mismatch.
-        if let Some(expected) = self.head_atom_expected_user_args(head) {
-            if args.len() < expected {
-                return self.eta_expand_partial_app(head, args, expected);
-            }
+        if let Some(expected) = self.head_atom_expected_user_args(head)
+            && args.len() < expected
+        {
+            return self.eta_expand_partial_app(head, args, expected);
         }
 
         let head_ce = self.lower_atom(head);
@@ -333,12 +333,7 @@ impl<'ctx> Lowerer<'ctx> {
     /// uniform `_Evidence` / `_ReturnK` pair, then forwards everything to
     /// `head` at full arity. The resulting lambda value is yielded through
     /// the ambient return continuation.
-    fn eta_expand_partial_app(
-        &mut self,
-        head: &Atom,
-        args: &[Atom],
-        expected: usize,
-    ) -> CExpr {
+    fn eta_expand_partial_app(&mut self, head: &Atom, args: &[Atom], expected: usize) -> CExpr {
         let missing = expected - args.len();
         let lowered_supplied: Vec<CExpr> = args.iter().map(|a| self.lower_atom(a)).collect();
         let eta_names: Vec<String> = (0..missing).map(|i| format!("_Eta{}", i)).collect();
@@ -386,11 +381,7 @@ impl<'ctx> Lowerer<'ctx> {
             super::util::lower_string_to_binary(""),
             CExpr::Lit(CLit::Int(0)),
         ]);
-        let err_call = CExpr::Call(
-            "erlang".to_string(),
-            "error".to_string(),
-            vec![err_term],
-        );
+        let err_call = CExpr::Call("erlang".to_string(), "error".to_string(), vec![err_term]);
         CExpr::Let(msg_var, Box::new(msg), Box::new(err_call))
     }
 

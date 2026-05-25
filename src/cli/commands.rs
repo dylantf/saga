@@ -297,6 +297,126 @@ pub fn cmd_emit(file: &str) {
     print!("{}", core_src);
 }
 
+/// Dump an intermediate IR stage for a single `.saga` file.
+///
+/// Bypasses the codegen toggle for `anf` / `monadic` / `monadic-opt`: those
+/// always run the new path (uniform-effect-translation), regardless of the
+/// active `emit_module_with_context` block. `elaborated` and `core` go through
+/// shared code and therefore observe the toggle.
+pub fn cmd_inspect(file: &str, stage: &str) {
+    use saga::codegen::monadic;
+
+    let source = fs::read_to_string(file).unwrap_or_else(|e| {
+        eprintln!("Error reading {}: {}", file, e);
+        std::process::exit(1);
+    });
+    let mut checker = make_checker(None);
+    let (program, _) = parse_and_typecheck(&source, file, &mut checker);
+    let result = checker.to_result();
+
+    let elaborated = elaborate::elaborate(&program, &result);
+
+    match stage {
+        "elaborated" => {
+            println!("{:#?}", elaborated);
+        }
+        "anf" => {
+            let anf_program = codegen::anf::normalize(elaborated);
+            println!("{:#?}", anf_program);
+        }
+        "monadic" | "monadic-opt" => {
+            let anf_program = codegen::anf::normalize(elaborated.clone());
+
+            // Build a minimal CodegenContext (std modules + this user module)
+            // so resolve/effect-info match what the new path sees in production.
+            let module_name =
+                declared_module_name(&program).unwrap_or_else(|| "_script".to_string());
+            let mut compiled_modules = compile_std_modules(&result);
+            compiled_modules.insert(
+                module_name.clone(),
+                codegen::CompiledModule {
+                    codegen_info: Default::default(),
+                    elaborated: elaborated.clone(),
+                    resolution: codegen::resolve::ResolutionMap::new(),
+                    front_resolution: result.resolution.clone(),
+                    call_effects: codegen::call_effects::CallEffectMap::new(),
+                },
+            );
+            let ctx = codegen::CodegenContext {
+                modules: compiled_modules,
+                let_effect_bindings: result.let_effect_bindings.clone(),
+                prelude_imports: result.prelude_imports.clone(),
+            };
+
+            let codegen_info = ctx.codegen_info();
+            let front_resolution = result
+                .module_check_results()
+                .get(&module_name)
+                .map(|m| &m.resolution)
+                .unwrap_or(&result.resolution);
+            let mut resolution_map = codegen::resolve::resolve_names(
+                &module_name,
+                &elaborated,
+                &codegen_info,
+                &ctx.prelude_imports,
+                front_resolution,
+            );
+            for compiled in ctx.modules.values() {
+                resolution_map.extend(compiled.resolution.iter().map(|(k, v)| (*k, v.clone())));
+            }
+
+            let ops_storage = codegen::build_effect_ops_table(&result);
+            let mod_check_ref = result
+                .module_check_results()
+                .get(&module_name)
+                .unwrap_or(&result);
+            let effect_info = codegen::build_effect_info(&result, mod_check_ref, &ops_storage);
+
+            // Collect imported handler bodies (matches new-path emit behavior).
+            let mut imported_handler_decls: std::collections::HashMap<
+                String,
+                saga::ast::HandlerBody,
+            > = std::collections::HashMap::new();
+            for compiled in ctx.modules.values() {
+                let anf_imported = codegen::anf::normalize(compiled.elaborated.clone());
+                for decl in &anf_imported {
+                    if let saga::ast::Decl::HandlerDef { name, body, .. } = decl {
+                        imported_handler_decls
+                            .entry(name.clone())
+                            .or_insert_with(|| body.clone());
+                    }
+                }
+            }
+
+            let monadic_prog = monadic::translate::translate_with_imports(
+                &anf_program,
+                &resolution_map,
+                &effect_info,
+                &imported_handler_decls,
+            );
+
+            let to_print = if stage == "monadic-opt" {
+                let handler_info = codegen::handler_analysis::analyze(&elaborated);
+                monadic::effect_opt::run(monadic_prog, &handler_info, &effect_info)
+            } else {
+                monadic_prog
+            };
+
+            println!("{}", monadic::print::print_program(&to_print));
+        }
+        "core" => {
+            cmd_emit(file);
+        }
+        other => {
+            eprintln!(
+                "Unknown stage: '{}'. Expected one of: elaborated, anf, monadic, monadic-opt, core",
+                other
+            );
+            std::process::exit(1);
+        }
+    }
+}
+
 pub fn cmd_fmt(file: &str, write_mode: bool, debug_mode: bool, cli_width: Option<usize>) {
     // CLI --width overrides project.toml [formatter] width
     let width = cli_width.unwrap_or_else(|| {

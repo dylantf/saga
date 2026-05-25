@@ -17,8 +17,8 @@ use crate::codegen::cerl::{CBinSeg, CExpr, CLit, CPat};
 
 use super::Lowerer;
 use super::util::{
-    core_var, lower_lit, mangle_ctor_atom, process_string_escapes,
-    resolve_bit_segment_flags, resolve_bit_segment_meta, resolve_bit_segment_size,
+    core_var, lower_lit, mangle_ctor_atom, process_string_escapes, resolve_bit_segment_flags,
+    resolve_bit_segment_meta, resolve_bit_segment_size,
 };
 
 /// Map a function's parameter patterns to Core Erlang variable names.
@@ -109,8 +109,10 @@ impl<'ctx> Lowerer<'ctx> {
                 let tag = mangle_ctor_atom(name, self.ctors);
                 let mut elems = vec![CPat::Lit(CLit::Atom(tag))];
                 if let Some(order) = self.record_fields.get(name.as_str()) {
-                    let field_map: HashMap<&str, Option<&Pat>> =
-                        fields.iter().map(|(n, p)| (n.as_str(), p.as_ref())).collect();
+                    let field_map: HashMap<&str, Option<&Pat>> = fields
+                        .iter()
+                        .map(|(n, p)| (n.as_str(), p.as_ref()))
+                        .collect();
                     for field_name in order {
                         match field_map.get(field_name.as_str()) {
                             Some(Some(p)) => elems.push(self.lower_pat(p)),
@@ -144,8 +146,10 @@ impl<'ctx> Lowerer<'ctx> {
                 let mut sorted_names: Vec<&str> = field_names.clone();
                 sorted_names.sort();
                 let mut elems = vec![CPat::Lit(CLit::Atom(tag))];
-                let field_map: HashMap<&str, Option<&Pat>> =
-                    fields.iter().map(|(n, p)| (n.as_str(), p.as_ref())).collect();
+                let field_map: HashMap<&str, Option<&Pat>> = fields
+                    .iter()
+                    .map(|(n, p)| (n.as_str(), p.as_ref()))
+                    .collect();
                 for field_name in &sorted_names {
                     match field_map.get(field_name) {
                         Some(Some(p)) => elems.push(self.lower_pat(p)),
@@ -157,8 +161,11 @@ impl<'ctx> Lowerer<'ctx> {
             }
             Pat::StringPrefix { prefix, rest, .. } => {
                 // `"abc" <> rest` → `<<$a, $b, $c, Rest/binary>>`.
-                let mut segs: Vec<CBinSeg<CPat>> =
-                    prefix.as_bytes().iter().map(|&b| CBinSeg::Byte(b)).collect();
+                let mut segs: Vec<CBinSeg<CPat>> = prefix
+                    .as_bytes()
+                    .iter()
+                    .map(|&b| CBinSeg::Byte(b))
+                    .collect();
                 let tail = self.lower_pat(rest);
                 segs.push(CBinSeg::BinaryAll(tail));
                 CPat::Binary(segs)
