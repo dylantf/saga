@@ -976,15 +976,8 @@ fn lambda_atom_body_lowers_with_real_expr() {
     }
 }
 
-#[test]
-#[should_panic(expected = "Resume lowering deferred to sub-step 7e")]
-fn resume_panics_with_deferred_message() {
-    let e = MExpr::Resume {
-        value: atom_lit(Lit::Unit),
-        source: dummy_node(),
-    };
-    let _ = lower_expr_default(&e);
-}
+// `Resume` lowering is covered by the 7e tests below (Resume == Pure under
+// uniform K-threading; tested via the arm-body shape).
 
 // ----------------------------------------------------------------------
 // Effect machinery lowering (sub-step 7d)
@@ -1126,7 +1119,9 @@ fn yield_in_bind_position_threads_bind_k_as_op_continuation() {
 }
 
 #[test]
-fn with_static_emits_insert_canonical_with_stub_op_tuple() {
+fn with_static_single_arm_emits_real_arm_closure() {
+    // Arm: handler Log { info p0 -> Pure(unit) }
+    // Closure shape: fun(P0, _K_arm0) -> apply _K_arm0('unit')
     let handler = MHandler::Static {
         effects: vec!["Log".to_string()],
         arms: vec![handler_arm("Log", "info", 1, 1)],
@@ -1144,45 +1139,43 @@ fn with_static_emits_insert_canonical_with_stub_op_tuple() {
         other => panic!("expected outer Let, got {other:?}"),
     };
     assert_eq!(name, "_Ev0");
-    match value.as_ref() {
+    let entry = match value.as_ref() {
         CExpr::Call(m, f, args) => {
             assert_eq!(m, "std_evidence_bridge");
             assert_eq!(f, "insert_canonical");
-            assert_eq!(args.len(), 2);
             assert!(matches!(&args[0], CExpr::Var(n) if n == "_Evidence"));
-            // entry: {'Log', {Fun(...)}}
-            match &args[1] {
-                CExpr::Tuple(t) => {
-                    assert_eq!(t.len(), 2);
-                    assert!(matches!(&t[0], CExpr::Lit(CLit::Atom(a)) if a == "Log"));
-                    match &t[1] {
-                        CExpr::Tuple(ops) => {
-                            assert_eq!(ops.len(), 1);
-                            // stub closure: fun(_StubArg0, _StubK) -> apply _StubK('unit')
-                            match &ops[0] {
-                                CExpr::Fun(ps, fbody) => {
-                                    assert_eq!(ps, &vec!["_StubArg0".to_string(), "_StubK".into()]);
-                                    match fbody.as_ref() {
-                                        CExpr::Apply(c, args) => {
-                                            assert!(matches!(c.as_ref(), CExpr::Var(n) if n == "_StubK"));
-                                            assert_eq!(args.len(), 1);
-                                            assert!(matches!(&args[0], CExpr::Lit(CLit::Atom(a)) if a == "unit"));
-                                        }
-                                        other => panic!("expected stub apply, got {other:?}"),
-                                    }
-                                }
-                                other => panic!("expected stub Fun, got {other:?}"),
-                            }
-                        }
-                        other => panic!("expected OpTuple, got {other:?}"),
-                    }
-                }
-                other => panic!("expected entry Tuple, got {other:?}"),
-            }
+            &args[1]
         }
         other => panic!("expected insert_canonical Call, got {other:?}"),
+    };
+    let op_tuple = match entry {
+        CExpr::Tuple(t) => {
+            assert!(matches!(&t[0], CExpr::Lit(CLit::Atom(a)) if a == "Log"));
+            &t[1]
+        }
+        other => panic!("expected entry tuple, got {other:?}"),
+    };
+    let ops = match op_tuple {
+        CExpr::Tuple(o) => o,
+        other => panic!("expected OpTuple, got {other:?}"),
+    };
+    assert_eq!(ops.len(), 1);
+    match &ops[0] {
+        CExpr::Fun(ps, fbody) => {
+            assert_eq!(ps, &vec!["P0".to_string(), "_K_arm0".to_string()]);
+            // Body: apply _K_arm0('unit')
+            match fbody.as_ref() {
+                CExpr::Apply(callee, args) => {
+                    assert!(matches!(callee.as_ref(), CExpr::Var(n) if n == "_K_arm0"));
+                    assert_eq!(args.len(), 1);
+                    assert!(matches!(&args[0], CExpr::Lit(CLit::Atom(a)) if a == "unit"));
+                }
+                other => panic!("expected arm body Apply, got {other:?}"),
+            }
+        }
+        other => panic!("expected arm Fun, got {other:?}"),
     }
-    // body: apply _ReturnK('unit')
+    // body: apply _ReturnK('unit') — no return clause, so body K is outer K.
     match body.as_ref() {
         CExpr::Apply(c, _) => {
             assert!(matches!(c.as_ref(), CExpr::Var(n) if n == "_ReturnK"));
@@ -1412,4 +1405,666 @@ fn nested_with_chains_two_inserts_with_inner_seeing_both() {
         _ => panic!(),
     }
     let _ = assert_yield_shape(&yield_body, "E2", 1, "_Ev1", "_ReturnK");
+}
+
+// ----------------------------------------------------------------------
+// Handler emission (sub-step 7e)
+// ----------------------------------------------------------------------
+
+fn handler_arm_with_body(
+    effect: &str,
+    op: &str,
+    op_index: u32,
+    params: Vec<Pat>,
+    body: MExpr,
+) -> MHandlerArm {
+    MHandlerArm {
+        id: dummy_node(),
+        op: op_ref(effect, op, op_index),
+        params,
+        body: Box::new(body),
+        finally_block: None,
+        span: span(),
+    }
+}
+
+/// Walk an outer `with` lowering and extract its OpTuple closures for the
+/// effect at `effect_idx` (first effect = index 0).
+fn extract_op_tuple_at(
+    ce: &CExpr,
+    effect_idx: usize,
+    expected_ev_var: &str,
+    expected_effect: &str,
+) -> Vec<CExpr> {
+    let mut cur = ce;
+    for _ in 0..effect_idx {
+        cur = match cur {
+            CExpr::Let(_, _, b) => b.as_ref(),
+            other => panic!("expected nested Let chain, got {other:?}"),
+        };
+    }
+    match cur {
+        CExpr::Let(_, value, _) => match value.as_ref() {
+            CExpr::Call(m, f, args) => {
+                assert_eq!(m, "std_evidence_bridge");
+                assert_eq!(f, "insert_canonical");
+                assert!(matches!(&args[0], CExpr::Var(n) if n == expected_ev_var));
+                match &args[1] {
+                    CExpr::Tuple(t) => {
+                        assert!(
+                            matches!(&t[0], CExpr::Lit(CLit::Atom(a)) if a == expected_effect)
+                        );
+                        match &t[1] {
+                            CExpr::Tuple(ops) => ops.clone(),
+                            other => panic!("expected OpTuple, got {other:?}"),
+                        }
+                    }
+                    other => panic!("expected entry Tuple, got {other:?}"),
+                }
+            }
+            other => panic!("expected Call value, got {other:?}"),
+        },
+        other => panic!("expected Let, got {other:?}"),
+    }
+}
+
+#[test]
+fn arm_body_uses_arm_k_as_return_k() {
+    // arm: { p0 -> resume p0 } — Pure should apply _K_arm0(P0).
+    let arm = handler_arm_with_body(
+        "E",
+        "op",
+        1,
+        vec![Pat::Var {
+            id: dummy_node(),
+            name: "p0".to_string(),
+            span: span(),
+        }],
+        MExpr::Pure(atom_var("p0")),
+    );
+    let handler = MHandler::Static {
+        effects: vec!["E".to_string()],
+        arms: vec![arm],
+        return_clause: None,
+        source: dummy_node(),
+    };
+    let e = MExpr::With {
+        handler,
+        body: Box::new(pure_unit()),
+        source: dummy_node(),
+    };
+    let ce = lower_expr_default(&e);
+    let ops = extract_op_tuple_at(&ce, 0, "_Evidence", "E");
+    match &ops[0] {
+        CExpr::Fun(ps, body) => {
+            assert_eq!(ps, &vec!["P0".to_string(), "_K_arm0".to_string()]);
+            match body.as_ref() {
+                CExpr::Apply(c, args) => {
+                    assert!(matches!(c.as_ref(), CExpr::Var(n) if n == "_K_arm0"));
+                    assert!(matches!(&args[0], CExpr::Var(n) if n == "P0"));
+                }
+                other => panic!("expected Apply body, got {other:?}"),
+            }
+        }
+        other => panic!("expected arm Fun, got {other:?}"),
+    }
+}
+
+#[test]
+fn resume_and_pure_emit_identical_cel_at_arm_tail() {
+    // The uniform translation collapses Resume and Pure to the same shape.
+    let p_arm = handler_arm_with_body(
+        "E",
+        "op",
+        1,
+        vec![Pat::Var {
+            id: dummy_node(),
+            name: "p0".to_string(),
+            span: span(),
+        }],
+        MExpr::Pure(atom_var("p0")),
+    );
+    let r_arm = handler_arm_with_body(
+        "E",
+        "op",
+        1,
+        vec![Pat::Var {
+            id: dummy_node(),
+            name: "p0".to_string(),
+            span: span(),
+        }],
+        MExpr::Resume {
+            value: atom_var("p0"),
+            source: dummy_node(),
+        },
+    );
+    let mk = |arm| {
+        MExpr::With {
+            handler: MHandler::Static {
+                effects: vec!["E".to_string()],
+                arms: vec![arm],
+                return_clause: None,
+                source: dummy_node(),
+            },
+            body: Box::new(pure_unit()),
+            source: dummy_node(),
+        }
+    };
+    let pce = lower_expr_default(&mk(p_arm));
+    let rce = lower_expr_default(&mk(r_arm));
+    assert_eq!(
+        format!("{:?}", pce),
+        format!("{:?}", rce),
+        "Resume(v) and Pure(v) must lower identically in arm tail position"
+    );
+}
+
+#[test]
+fn multi_arm_per_op_emits_single_closure_with_case() {
+    // Two arms on the same op (op_index 1). Single closure: fun(_HArg0, _K_arm0) -> case ...
+    let arms = vec![
+        handler_arm_with_body(
+            "E",
+            "op",
+            1,
+            vec![Pat::Constructor {
+                id: dummy_node(),
+                name: "True".to_string(),
+                args: vec![],
+                span: span(),
+            }],
+            MExpr::Pure(atom_lit(Lit::Int("1".into(), 1))),
+        ),
+        handler_arm_with_body(
+            "E",
+            "op",
+            1,
+            vec![Pat::Constructor {
+                id: dummy_node(),
+                name: "False".to_string(),
+                args: vec![],
+                span: span(),
+            }],
+            MExpr::Pure(atom_lit(Lit::Int("2".into(), 2))),
+        ),
+    ];
+    let handler = MHandler::Static {
+        effects: vec!["E".to_string()],
+        arms,
+        return_clause: None,
+        source: dummy_node(),
+    };
+    let e = MExpr::With {
+        handler,
+        body: Box::new(pure_unit()),
+        source: dummy_node(),
+    };
+    let ce = lower_expr_default(&e);
+    let ops = extract_op_tuple_at(&ce, 0, "_Evidence", "E");
+    assert_eq!(ops.len(), 1, "multi-arm-per-op collapses to one closure");
+    match &ops[0] {
+        CExpr::Fun(ps, body) => {
+            assert_eq!(ps, &vec!["_HArg0".to_string(), "_K_arm0".to_string()]);
+            match body.as_ref() {
+                CExpr::Case(scrut, case_arms) => {
+                    assert!(matches!(scrut.as_ref(), CExpr::Var(n) if n == "_HArg0"));
+                    assert_eq!(case_arms.len(), 2);
+                    // Both arms use the same _K_arm0.
+                    for arm in case_arms {
+                        match &arm.body {
+                            CExpr::Apply(c, _) => {
+                                assert!(matches!(c.as_ref(), CExpr::Var(n) if n == "_K_arm0"));
+                            }
+                            other => panic!("expected Apply arm body, got {other:?}"),
+                        }
+                    }
+                }
+                other => panic!("expected Case body, got {other:?}"),
+            }
+        }
+        other => panic!("expected arm Fun, got {other:?}"),
+    }
+}
+
+#[test]
+fn multi_op_static_handler_orders_closures_by_op_index() {
+    // Two ops on the same effect; arms supplied out of order to verify sort.
+    let arms = vec![
+        handler_arm("E", "b_op", 2, 0),
+        handler_arm("E", "a_op", 1, 0),
+    ];
+    let handler = MHandler::Static {
+        effects: vec!["E".to_string()],
+        arms,
+        return_clause: None,
+        source: dummy_node(),
+    };
+    let e = MExpr::With {
+        handler,
+        body: Box::new(pure_unit()),
+        source: dummy_node(),
+    };
+    let ce = lower_expr_default(&e);
+    let ops = extract_op_tuple_at(&ce, 0, "_Evidence", "E");
+    assert_eq!(ops.len(), 2);
+    // Both are zero-arg arms, so closures only have the K_arm param.
+    for (i, op) in ops.iter().enumerate() {
+        let arm_k = format!("_K_arm{}", i);
+        match op {
+            CExpr::Fun(ps, _) => {
+                assert_eq!(ps, &vec![arm_k]);
+            }
+            other => panic!("expected Fun, got {other:?}"),
+        }
+    }
+}
+
+#[test]
+#[should_panic(expected = "missing arm for op_index 1")]
+fn missing_arm_for_op_index_panics() {
+    // Arm with op_index 2 but no op_index 1 — gap, must panic.
+    let arms = vec![handler_arm("E", "op_b", 2, 0)];
+    let handler = MHandler::Static {
+        effects: vec!["E".to_string()],
+        arms,
+        return_clause: None,
+        source: dummy_node(),
+    };
+    let e = MExpr::With {
+        handler,
+        body: Box::new(pure_unit()),
+        source: dummy_node(),
+    };
+    let _ = lower_expr_default(&e);
+}
+
+#[test]
+fn multi_effect_static_emits_one_op_tuple_per_effect() {
+    let arms = vec![
+        handler_arm("A", "op_a", 1, 0),
+        handler_arm("B", "op_b", 1, 0),
+    ];
+    let handler = MHandler::Static {
+        effects: vec!["A".to_string(), "B".to_string()],
+        arms,
+        return_clause: None,
+        source: dummy_node(),
+    };
+    let e = MExpr::With {
+        handler,
+        body: Box::new(pure_unit()),
+        source: dummy_node(),
+    };
+    let ce = lower_expr_default(&e);
+    let a_ops = extract_op_tuple_at(&ce, 0, "_Evidence", "A");
+    let b_ops = extract_op_tuple_at(&ce, 1, "_Ev0", "B");
+    assert_eq!(a_ops.len(), 1);
+    assert_eq!(b_ops.len(), 1);
+}
+
+#[test]
+fn return_clause_wraps_body_k() {
+    // Handler: arm + return v -> Pure(v). Body's K must be _K_ret0,
+    // bound to a closure whose body applies _ReturnK to its param.
+    let ret = handler_arm_with_body(
+        "E",
+        "op",
+        1,
+        vec![Pat::Var {
+            id: dummy_node(),
+            name: "v".to_string(),
+            span: span(),
+        }],
+        MExpr::Pure(atom_var("v")),
+    );
+    let handler = MHandler::Static {
+        effects: vec!["E".to_string()],
+        arms: vec![handler_arm("E", "op", 1, 0)],
+        return_clause: Some(ret),
+        source: dummy_node(),
+    };
+    let e = MExpr::With {
+        handler,
+        body: Box::new(MExpr::Pure(atom_lit(Lit::Int("42".into(), 42)))),
+        source: dummy_node(),
+    };
+    let ce = lower_expr_default(&e);
+    // outermost: let _K_ret0 = fun(V) -> apply _ReturnK(V) in ...
+    let (ret_name, ret_value, after_ret) = match ce {
+        CExpr::Let(n, v, b) => (n, v, b),
+        other => panic!("expected outer Let, got {other:?}"),
+    };
+    assert_eq!(ret_name, "_K_ret0");
+    match ret_value.as_ref() {
+        CExpr::Fun(ps, fbody) => {
+            assert_eq!(ps, &vec!["V".to_string()]);
+            match fbody.as_ref() {
+                CExpr::Apply(c, args) => {
+                    assert!(matches!(c.as_ref(), CExpr::Var(n) if n == "_ReturnK"));
+                    assert!(matches!(&args[0], CExpr::Var(n) if n == "V"));
+                }
+                other => panic!("expected V→_ReturnK body, got {other:?}"),
+            }
+        }
+        other => panic!("expected return-K Fun, got {other:?}"),
+    }
+    // Next: let _Ev0 = insert_canonical(...) in <body using _K_ret0>
+    let (ev_name, _, body) = match after_ret.as_ref() {
+        CExpr::Let(n, v, b) => (n.clone(), v.clone(), b.clone()),
+        other => panic!("expected evidence Let, got {other:?}"),
+    };
+    assert_eq!(ev_name, "_Ev0");
+    // body lowers Pure(42) → apply _K_ret0(42).
+    match body.as_ref() {
+        CExpr::Apply(c, args) => {
+            assert!(matches!(c.as_ref(), CExpr::Var(n) if n == "_K_ret0"));
+            assert!(matches!(&args[0], CExpr::Lit(CLit::Int(42))));
+        }
+        other => panic!("expected apply _K_ret0, got {other:?}"),
+    }
+}
+
+#[test]
+fn no_return_clause_passes_outer_k_through() {
+    let handler = MHandler::Static {
+        effects: vec!["E".to_string()],
+        arms: vec![handler_arm("E", "op", 1, 0)],
+        return_clause: None,
+        source: dummy_node(),
+    };
+    let e = MExpr::With {
+        handler,
+        body: Box::new(MExpr::Pure(atom_lit(Lit::Int("7".into(), 7)))),
+        source: dummy_node(),
+    };
+    let ce = lower_expr_default(&e);
+    // No _K_ret wrapper; outermost is the insert_canonical Let.
+    let (name, _, body) = match ce {
+        CExpr::Let(n, v, b) => (n, v, b),
+        other => panic!("expected Let, got {other:?}"),
+    };
+    assert_eq!(name, "_Ev0");
+    match body.as_ref() {
+        CExpr::Apply(c, _) => {
+            assert!(matches!(c.as_ref(), CExpr::Var(n) if n == "_ReturnK"));
+        }
+        other => panic!("expected body Apply, got {other:?}"),
+    }
+}
+
+#[test]
+fn nested_with_composes_return_clauses_inner_first() {
+    // ((expr with R1) with R2) — body's K = innermost _K_ret. Innermost
+    // _K_ret closes over the next-outer's _K_ret, which closes over _ReturnK.
+    let r1 = handler_arm_with_body(
+        "E1",
+        "op",
+        1,
+        vec![Pat::Var {
+            id: dummy_node(),
+            name: "v".to_string(),
+            span: span(),
+        }],
+        MExpr::Pure(atom_var("v")),
+    );
+    let r2 = handler_arm_with_body(
+        "E2",
+        "op",
+        1,
+        vec![Pat::Var {
+            id: dummy_node(),
+            name: "v".to_string(),
+            span: span(),
+        }],
+        MExpr::Pure(atom_var("v")),
+    );
+    let inner = MExpr::With {
+        handler: MHandler::Static {
+            effects: vec!["E1".to_string()],
+            arms: vec![handler_arm("E1", "op", 1, 0)],
+            return_clause: Some(r1),
+            source: dummy_node(),
+        },
+        body: Box::new(MExpr::Pure(atom_lit(Lit::Int("1".into(), 1)))),
+        source: dummy_node(),
+    };
+    let outer = MExpr::With {
+        handler: MHandler::Static {
+            effects: vec!["E2".to_string()],
+            arms: vec![handler_arm("E2", "op", 1, 0)],
+            return_clause: Some(r2),
+            source: dummy_node(),
+        },
+        body: Box::new(inner),
+        source: dummy_node(),
+    };
+    let ce = lower_expr_default(&outer);
+    // Outermost: let _K_ret0 = fun(V) -> apply _ReturnK(V)
+    let (outer_ret_name, _, after_outer_ret) = match ce {
+        CExpr::Let(n, v, b) => (n, v, b),
+        other => panic!("expected outer Let, got {other:?}"),
+    };
+    assert_eq!(outer_ret_name, "_K_ret0");
+    // Next: let _Ev0 = insert(_Evidence, ...)
+    let (_, _, after_outer_ev) = match after_outer_ret.as_ref() {
+        CExpr::Let(n, v, b) => (n.clone(), v.clone(), b.clone()),
+        other => panic!("expected outer ev Let, got {other:?}"),
+    };
+    // Then the inner with: let _K_ret1 = fun(V) -> apply _K_ret0(V)
+    let (inner_ret_name, inner_ret_value, after_inner_ret) = match after_outer_ev.as_ref() {
+        CExpr::Let(n, v, b) => (n.clone(), v.clone(), b.clone()),
+        other => panic!("expected inner ret Let, got {other:?}"),
+    };
+    assert_eq!(inner_ret_name, "_K_ret1");
+    match inner_ret_value.as_ref() {
+        CExpr::Fun(_, fbody) => match fbody.as_ref() {
+            CExpr::Apply(c, _) => {
+                assert!(
+                    matches!(c.as_ref(), CExpr::Var(n) if n == "_K_ret0"),
+                    "inner return-K must forward to outer return-K, not _ReturnK"
+                );
+            }
+            other => panic!("expected Apply inside inner ret, got {other:?}"),
+        },
+        other => panic!("expected inner Fun, got {other:?}"),
+    }
+    // Innermost: let _Ev1 = insert(_Ev0, ...) in apply _K_ret1(1)
+    let (_, _, inner_body) = match after_inner_ret.as_ref() {
+        CExpr::Let(n, v, b) => (n.clone(), v.clone(), b.clone()),
+        other => panic!("expected inner ev Let, got {other:?}"),
+    };
+    match inner_body.as_ref() {
+        CExpr::Apply(c, _) => {
+            assert!(matches!(c.as_ref(), CExpr::Var(n) if n == "_K_ret1"));
+        }
+        other => panic!("expected body Apply, got {other:?}"),
+    }
+}
+
+#[test]
+fn dynamic_return_lambda_composes_via_wrapper() {
+    // Dynamic handler with return_lambda = h_ret (atom Var). Wrapper:
+    //   _K_ret0 = fun(_H0) -> apply H_Ret(_H0, _Evidence, _ReturnK)
+    let handler = MHandler::Dynamic {
+        effects: vec!["E".to_string()],
+        op_tuple: atom_var("h"),
+        return_lambda: Some(atom_var("h_ret")),
+        source: dummy_node(),
+    };
+    let e = MExpr::With {
+        handler,
+        body: Box::new(MExpr::Pure(atom_lit(Lit::Int("9".into(), 9)))),
+        source: dummy_node(),
+    };
+    let ce = lower_expr_default(&e);
+    let (ret_name, ret_value, after_ret) = match ce {
+        CExpr::Let(n, v, b) => (n, v, b),
+        other => panic!("expected outer Let, got {other:?}"),
+    };
+    assert_eq!(ret_name, "_K_ret0");
+    match ret_value.as_ref() {
+        CExpr::Fun(ps, fbody) => {
+            assert_eq!(ps.len(), 1);
+            match fbody.as_ref() {
+                CExpr::Apply(callee, args) => {
+                    assert!(matches!(callee.as_ref(), CExpr::Var(n) if n == "H_ret"));
+                    assert_eq!(args.len(), 3);
+                    // arg0 is the value param; arg1 = outer evidence; arg2 = outer K.
+                    assert!(matches!(&args[1], CExpr::Var(n) if n == "_Evidence"));
+                    assert!(matches!(&args[2], CExpr::Var(n) if n == "_ReturnK"));
+                }
+                other => panic!("expected wrapper Apply, got {other:?}"),
+            }
+        }
+        other => panic!("expected wrapper Fun, got {other:?}"),
+    }
+    // Body uses _K_ret0.
+    let (_, _, body) = match after_ret.as_ref() {
+        CExpr::Let(n, v, b) => (n.clone(), v.clone(), b.clone()),
+        other => panic!("expected ev Let, got {other:?}"),
+    };
+    match body.as_ref() {
+        CExpr::Apply(c, _) => {
+            assert!(matches!(c.as_ref(), CExpr::Var(n) if n == "_K_ret0"));
+        }
+        other => panic!("expected Apply body, got {other:?}"),
+    }
+}
+
+#[test]
+fn resume_inside_lambda_in_arm_body_uses_lambda_k_not_arm_k() {
+    // Arm body: Pure(lambda{ () -> Resume(unit) }). The inner lambda's
+    // Resume must apply the lambda's own _ReturnK, not the arm's _K_arm0
+    // — verifying that lambda lowering saves/restores `current_return_k`.
+    let lambda_atom = Atom::Lambda {
+        params: vec![Pat::Var {
+            id: dummy_node(),
+            name: "u".to_string(),
+            span: span(),
+        }],
+        body: Box::new(MExpr::Resume {
+            value: atom_lit(Lit::Unit),
+            source: dummy_node(),
+        }),
+        source: dummy_node(),
+    };
+    let arm = handler_arm_with_body(
+        "E",
+        "op",
+        1,
+        vec![],
+        MExpr::Pure(lambda_atom),
+    );
+    let handler = MHandler::Static {
+        effects: vec!["E".to_string()],
+        arms: vec![arm],
+        return_clause: None,
+        source: dummy_node(),
+    };
+    let e = MExpr::With {
+        handler,
+        body: Box::new(pure_unit()),
+        source: dummy_node(),
+    };
+    let ce = lower_expr_default(&e);
+    let ops = extract_op_tuple_at(&ce, 0, "_Evidence", "E");
+    // Outer: fun(_K_arm0) -> apply _K_arm0(<lambda>).
+    let arm_body = match &ops[0] {
+        CExpr::Fun(ps, body) => {
+            assert_eq!(ps, &vec!["_K_arm0".to_string()]);
+            body.as_ref()
+        }
+        other => panic!("expected arm Fun, got {other:?}"),
+    };
+    // arm body: apply _K_arm0(<inner lambda>)
+    let inner_lambda = match arm_body {
+        CExpr::Apply(c, args) => {
+            assert!(matches!(c.as_ref(), CExpr::Var(n) if n == "_K_arm0"));
+            &args[0]
+        }
+        other => panic!("expected arm body apply, got {other:?}"),
+    };
+    // Lambda signature: (U, _Evidence, _ReturnK) and body `apply _ReturnK('unit')`.
+    match inner_lambda {
+        CExpr::Fun(ps, lbody) => {
+            assert_eq!(
+                ps,
+                &vec![
+                    "U".to_string(),
+                    "_Evidence".to_string(),
+                    "_ReturnK".to_string()
+                ]
+            );
+            match lbody.as_ref() {
+                CExpr::Apply(c, _) => {
+                    assert!(
+                        matches!(c.as_ref(), CExpr::Var(n) if n == "_ReturnK"),
+                        "Resume inside lambda must use lambda's own _ReturnK"
+                    );
+                }
+                other => panic!("expected lambda body Apply, got {other:?}"),
+            }
+        }
+        other => panic!("expected lambda Fun, got {other:?}"),
+    }
+}
+
+#[test]
+fn resume_in_bind_position_threads_bind_k() {
+    // Arm body: Bind { x = Resume(unit), body = Pure(Var x) }.
+    // Resume is in non-tail position; the Bind wraps it. Resume should
+    // apply the Bind's continuation (which itself eventually calls _K_arm0).
+    let arm_body = MExpr::Bind {
+        var: mvar("x"),
+        value: Box::new(MExpr::Resume {
+            value: atom_lit(Lit::Unit),
+            source: dummy_node(),
+        }),
+        body: Box::new(MExpr::Pure(atom_var("x"))),
+    };
+    let arm = handler_arm_with_body("E", "op", 1, vec![], arm_body);
+    let handler = MHandler::Static {
+        effects: vec!["E".to_string()],
+        arms: vec![arm],
+        return_clause: None,
+        source: dummy_node(),
+    };
+    let e = MExpr::With {
+        handler,
+        body: Box::new(pure_unit()),
+        source: dummy_node(),
+    };
+    let ce = lower_expr_default(&e);
+    let ops = extract_op_tuple_at(&ce, 0, "_Evidence", "E");
+    // Arm body shape: let _K0 = fun(X) -> apply _K_arm0(X) in apply _K0('unit')
+    let inner = match &ops[0] {
+        CExpr::Fun(ps, body) => {
+            assert_eq!(ps, &vec!["_K_arm0".to_string()]);
+            body.as_ref()
+        }
+        other => panic!("expected arm Fun, got {other:?}"),
+    };
+    let (k_name, k_fun, k_body) = match inner {
+        CExpr::Let(n, v, b) => (n.clone(), v.clone(), b.clone()),
+        other => panic!("expected arm body Let, got {other:?}"),
+    };
+    assert_eq!(k_name, "_K0");
+    // The continuation closure: fun(X) -> apply _K_arm0(X).
+    match k_fun.as_ref() {
+        CExpr::Fun(_, fbody) => match fbody.as_ref() {
+            CExpr::Apply(c, _) => {
+                assert!(matches!(c.as_ref(), CExpr::Var(n) if n == "_K_arm0"));
+            }
+            other => panic!("expected K body Apply, got {other:?}"),
+        },
+        other => panic!("expected K Fun, got {other:?}"),
+    }
+    // Resume call: apply _K0('unit').
+    match k_body.as_ref() {
+        CExpr::Apply(c, args) => {
+            assert!(matches!(c.as_ref(), CExpr::Var(n) if n == "_K0"));
+            assert!(matches!(&args[0], CExpr::Lit(CLit::Atom(a)) if a == "unit"));
+        }
+        other => panic!("expected Resume Apply, got {other:?}"),
+    }
 }
