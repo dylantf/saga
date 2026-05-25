@@ -17,7 +17,7 @@ Tick boxes as steps land. Each box → one focused agent session.
 - [ ] **7.** `src/codegen/lower_monadic/` — see stage 12 (sub-tasks 7a–7g; see "Implementation phases")
   - [x] **7a.** Function/decl scaffolding (stubbed bodies)
   - [x] **7b.** Atom → CExpr
-  - [ ] **7c.** MExpr structural variants (Pure, Bind, Let, Case, If, App) + DictConstructor tuple synthesis
+  - [x] **7c.** MExpr structural variants (Pure, Bind, Let, Case, If, App) + DictConstructor tuple synthesis
   - [ ] **7d.** Effect machinery (Yield via evidence lookup, With site via insert_canonical)
   - [ ] **7e.** Handler emission (MHandler::Static arms + return clause; MHandler::Dynamic passthrough)
   - [ ] **7f.** BEAM-native effect bodies (Actor, Process, Timer, Ref, Monitor, Link, …)

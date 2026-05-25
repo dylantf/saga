@@ -5,12 +5,12 @@
 //! stubbed; they arrive in sub-step 7c.
 
 use crate::ast::{NodeId, Pat};
-use crate::codegen::cerl::{CExpr, CLit};
-use crate::codegen::monadic::ir::{Atom, MExpr, MVar};
+use crate::codegen::cerl::{CArm, CExpr, CLit, CPat};
+use crate::codegen::monadic::ir::{Atom, MArm, MExpr, MVar};
 use crate::codegen::resolve::{ResolvedCodegenKind, ResolvedSymbol};
 
 use super::Lowerer;
-use super::pats::lower_param_names;
+use super::pats::{lower_param_names, lower_pat};
 use super::util::{core_var, lower_lit_atom, lower_string_to_binary, mangle_ctor_atom};
 
 // Name of the function-entry return-continuation variable. Every emitted
@@ -22,25 +22,229 @@ pub(super) const RETURN_K_VAR: &str = "_ReturnK";
 pub(super) const EVIDENCE_VAR: &str = "_Evidence";
 
 impl<'ctx> Lowerer<'ctx> {
-    /// Lower an MExpr in function-body (tail) position.
+    // ---------------------------------------------------------------
+    // MExpr lowering (sub-step 7c)
+    // ---------------------------------------------------------------
+
+    /// Lower an `MExpr` in tail position relative to the surrounding function/
+    /// lambda's return continuation.
     ///
-    /// STUB (7a): every body lowers to `apply _ReturnK('unit')`.
-    /// Sub-step 7c replaces this with real MExpr lowering.
-    pub(super) fn lower_body_stub(&mut self, _body: &MExpr) -> CExpr {
+    /// The ambient continuation is read from `self.current_return_k`. Every
+    /// computation either passes its result to that K (`Pure`, `App`,
+    /// arms of `Case`/`If`) or rebinds K to a fresh continuation that
+    /// performs the rest of the work (`Bind`).
+    ///
+    /// 7c scope: `Pure`, `Bind`, `Let`, `Case`, `If`, `App`. Everything
+    /// else panics with a deferred-step message; effect machinery (`Yield`,
+    /// `With`, `Resume`) lands in 7d; foreign / builtin ops in 7g.
+    pub(super) fn lower_expr(&mut self, expr: &MExpr) -> CExpr {
+        match expr {
+            MExpr::Pure(atom) => self.lower_pure(atom),
+            MExpr::Bind { var, value, body } => self.lower_bind(var, value, body),
+            MExpr::Let { var, value, body } => self.lower_let(var, value, body),
+            MExpr::Case {
+                scrutinee, arms, ..
+            } => self.lower_case(scrutinee, arms),
+            MExpr::If {
+                cond,
+                then_branch,
+                else_branch,
+                ..
+            } => self.lower_if(cond, then_branch, else_branch),
+            MExpr::App { head, args, .. } => self.lower_app(head, args),
+            MExpr::Yield { .. } => {
+                panic!("lower_expr: Yield lowering deferred to sub-step 7d")
+            }
+            MExpr::With { .. } => {
+                panic!("lower_expr: With lowering deferred to sub-step 7d")
+            }
+            MExpr::Resume { .. } => {
+                panic!("lower_expr: Resume lowering deferred to sub-step 7d")
+            }
+            MExpr::FieldAccess { .. }
+            | MExpr::RecordUpdate { .. }
+            | MExpr::DictMethodAccess { .. }
+            | MExpr::ForeignCall { .. }
+            | MExpr::BinOp { .. }
+            | MExpr::UnaryMinus { .. }
+            | MExpr::BitString { .. }
+            | MExpr::Receive { .. } => {
+                panic!(
+                    "lower_expr: variant lowering deferred to sub-step 7g: {:?}",
+                    std::mem::discriminant(expr)
+                )
+            }
+        }
+    }
+
+    /// Lower the body of an `MDecl::Val`.
+    ///
+    /// Vals are arity-0 constants with no `_ReturnK` in scope. The expected
+    /// shape after translation is `Pure(atom)` — the atom is the constant
+    /// value. We lower it in place, with no continuation application.
+    ///
+    /// Anything other than `Pure(atom)` is an invariant violation (the
+    /// translator should never have produced a sequencing/binding shape for
+    /// a const-binding body). We panic with a clear message rather than
+    /// invent semantics.
+    pub(super) fn lower_val_body(&mut self, value: &MExpr) -> CExpr {
+        match value {
+            MExpr::Pure(atom) => self.lower_atom(atom),
+            other => panic!(
+                "lower_val_body: val body must be Pure(atom) in 7c; got {:?}",
+                std::mem::discriminant(other)
+            ),
+        }
+    }
+
+    /// `Pure(atom)` → `apply <current_K>(<atom>)`.
+    fn lower_pure(&mut self, atom: &Atom) -> CExpr {
+        let value = self.lower_atom(atom);
+        self.apply_current_k(value)
+    }
+
+    /// Apply the in-scope return continuation to a single value.
+    fn apply_current_k(&self, value: CExpr) -> CExpr {
         CExpr::Apply(
-            Box::new(CExpr::Var(RETURN_K_VAR.to_string())),
-            vec![CExpr::Lit(CLit::Atom("unit".to_string()))],
+            Box::new(CExpr::Var(self.current_return_k.clone())),
+            vec![value],
         )
     }
 
-    /// Lower the body of an `MDecl::Val` in 7a.
+    /// Lower `Bind { var, value, body }`:
     ///
-    /// Vals are arity-0 — there is no `_ReturnK` in scope — so the stub
-    /// returns the constant value directly. STUB (7a): every val body is
-    /// `'unit'`. Sub-step 7c replaces this with real MExpr-to-value
-    /// lowering (literal atoms / tuples / etc. emitted in place).
-    pub(super) fn lower_val_body_stub(&mut self, _value: &MExpr) -> CExpr {
-        CExpr::Lit(CLit::Atom("unit".to_string()))
+    /// ```text
+    /// let _K{n} = fun (Var) -> <body under outer K>
+    /// in <value under _K{n}>
+    /// ```
+    ///
+    /// The body is lowered first so it sees the *current* K. We then mint a
+    /// fresh K name, build the continuation closure, swap it in as the
+    /// ambient K, and lower the bound `value` under it. The result is a
+    /// plain Core Erlang `let` binding the continuation — straightforward
+    /// CPS reification.
+    fn lower_bind(&mut self, var: &MVar, value: &MExpr, body: &MExpr) -> CExpr {
+        let body_ce = self.lower_expr(body);
+        let bound_var = core_var(&var.name);
+        let k_name = self.fresh_k_name();
+        let k_fun = CExpr::Fun(vec![bound_var], Box::new(body_ce));
+        let value_ce = self.with_return_k(k_name.clone(), |this| this.lower_expr(value));
+        CExpr::Let(k_name, Box::new(k_fun), Box::new(value_ce))
+    }
+
+    /// Lower `Let { var, value, body }` — a pure (non-yielding) binder
+    /// produced by effect optimization's Bind→Let promotion rewrite.
+    ///
+    /// 7c restriction: `value` must be `Pure(atom)`. The translator never
+    /// emits `Let`, so this restriction is reachable only via hand-built
+    /// IR (tests). It is sound at this stage.
+    ///
+    /// **Deadline: step 10.** The effect-optimization spec's §2 purity
+    /// predicate (see `effect-optimization-spec.md`) classifies a much
+    /// richer subset as pure — pure `App`, `Case` with all-pure arms, `If`
+    /// with both-pure branches, nested `Let`, etc. By the time step 10
+    /// (Bind→Let promotion) lands, `Let.value` will routinely be one of
+    /// those shapes, and this restriction breaks. The right shape then is
+    /// a separate `lower_pure_expr(&self, &MExpr) -> CExpr` defined only
+    /// on the pure subset — it returns a direct CExpr value with no
+    /// `_ReturnK` threading. `lower_let` becomes
+    /// `CExpr::Let(var, lower_pure_expr(value), lower_expr(body))`. That
+    /// function is structurally different from `lower_expr` (no K
+    /// threading), so it deserves to live separately rather than being
+    /// merged in. Don't build it speculatively here — wait for step 10's
+    /// optimizer output to drive the cases.
+    fn lower_let(&mut self, var: &MVar, value: &MExpr, body: &MExpr) -> CExpr {
+        let value_ce = match value {
+            MExpr::Pure(atom) => self.lower_atom(atom),
+            other => panic!(
+                "lower_let: Let value must be Pure(atom) until step 10's Bind→Let promotion lands \
+                 and brings a `lower_pure_expr` for the broader pure subset; got {:?}",
+                std::mem::discriminant(other)
+            ),
+        };
+        let body_ce = self.lower_expr(body);
+        CExpr::Let(core_var(&var.name), Box::new(value_ce), Box::new(body_ce))
+    }
+
+    /// Lower `Case { scrutinee, arms }`. By ANF the scrutinee is atomic, so
+    /// we lower it inline. Each arm body lowers under the *same* ambient K
+    /// — branches share the enclosing continuation, exactly what makes
+    /// `case` a tail form rather than a value form.
+    ///
+    /// 7c does not thread arm guards (`MArm.guard`). Arms with a guard
+    /// panic with a deferred message.
+    ///
+    /// TODO (open design question for whoever picks this up): guards must
+    /// be pure to lower into a Core Erlang `case` guard expression.
+    /// Confirm with the typechecker what "pure guard" means in Saga
+    /// — pure-only is cheap (translate the guard MExpr through a pure-
+    /// subset lowerer that yields a `CExpr`, place in `CArm.guard`),
+    /// but if the language permits effectful guards then the arm needs
+    /// a lift+let rewrite (evaluate the guard before the case, bind to
+    /// a var, then guard on the var). Don't implement before resolving.
+    fn lower_case(&mut self, scrutinee: &Atom, arms: &[MArm]) -> CExpr {
+        let scrut_ce = self.lower_atom(scrutinee);
+        let carms: Vec<CArm> = arms
+            .iter()
+            .map(|arm| {
+                if arm.guard.is_some() {
+                    panic!(
+                        "lower_case: arm guards deferred — needs typechecker semantics \
+                         confirmation (pure-only vs. lift+let for effectful guards) before \
+                         lowering"
+                    )
+                }
+                let pat = lower_pat(&arm.pattern, self.ctors);
+                let body = self.lower_expr(&arm.body);
+                CArm {
+                    pat,
+                    guard: None,
+                    body,
+                }
+            })
+            .collect();
+        CExpr::Case(Box::new(scrut_ce), carms)
+    }
+
+    /// Lower `If { cond, then, else }` to a Core Erlang `case` over the
+    /// boolean condition. Both arms lower under the same ambient K — same
+    /// shape rule as `Case` arms.
+    fn lower_if(&mut self, cond: &Atom, then_branch: &MExpr, else_branch: &MExpr) -> CExpr {
+        let cond_ce = self.lower_atom(cond);
+        let then_ce = self.lower_expr(then_branch);
+        let else_ce = self.lower_expr(else_branch);
+        CExpr::Case(
+            Box::new(cond_ce),
+            vec![
+                CArm {
+                    pat: CPat::Lit(CLit::Atom("true".to_string())),
+                    guard: None,
+                    body: then_ce,
+                },
+                CArm {
+                    pat: CPat::Lit(CLit::Atom("false".to_string())),
+                    guard: None,
+                    body: else_ce,
+                },
+            ],
+        )
+    }
+
+    /// Lower `App { head, args }` under uniform calling convention.
+    ///
+    /// Every callable receives `(user_args..., _Evidence, _ReturnK)`. The
+    /// head and every arg are atomic by ANF; we lower them in place and
+    /// emit a saturated `apply`. The evidence comes from the enclosing
+    /// scope (`_Evidence` is the current function's evidence param,
+    /// available by name). The return continuation is the ambient K name
+    /// — `_ReturnK` at function entry, or a `_K{n}` if we are inside a
+    /// `Bind`'s value position.
+    fn lower_app(&mut self, head: &Atom, args: &[Atom]) -> CExpr {
+        let head_ce = self.lower_atom(head);
+        let mut call_args: Vec<CExpr> = args.iter().map(|a| self.lower_atom(a)).collect();
+        call_args.push(CExpr::Var(EVIDENCE_VAR.to_string()));
+        call_args.push(CExpr::Var(self.current_return_k.clone()));
+        CExpr::Apply(Box::new(head_ce), call_args)
     }
 
     // ---------------------------------------------------------------
@@ -171,12 +375,20 @@ impl<'ctx> Lowerer<'ctx> {
     /// `lower_body_stub`); sub-step 7c replaces the body with real MExpr
     /// lowering.
     ///
-    /// STUB (7b): lambda body lowers via stub from 7a. 7c replaces.
+    /// Lambda body lowers under a fresh K context: the lambda's `_ReturnK`
+    /// param shadows whatever the outer scope's ambient K was. We save the
+    /// outer state, reset to the entry-fn defaults (current K = `_ReturnK`,
+    /// fresh K counter starts back at zero so nested lambdas get stable
+    /// names), lower the body, then restore.
     fn lower_lambda_atom(&mut self, params: &[Pat], body: &MExpr) -> CExpr {
         let mut param_vars = lower_param_names(params);
         param_vars.push(EVIDENCE_VAR.to_string());
         param_vars.push(RETURN_K_VAR.to_string());
-        let body_ce = self.lower_body_stub(body);
+        let saved_k = std::mem::replace(&mut self.current_return_k, RETURN_K_VAR.to_string());
+        let saved_counter = std::mem::replace(&mut self.k_counter, 0);
+        let body_ce = self.lower_expr(body);
+        self.current_return_k = saved_k;
+        self.k_counter = saved_counter;
         CExpr::Fun(param_vars, Box::new(body_ce))
     }
 

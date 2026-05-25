@@ -14,7 +14,7 @@
 
 use crate::ast::Pat;
 use crate::codegen::cerl::{CExpr, CFunDef};
-use crate::codegen::monadic::ir::{MDictConstructor, MFunBinding, MVal};
+use crate::codegen::monadic::ir::{Atom, MDictConstructor, MExpr, MFunBinding, MVal};
 
 use super::Lowerer;
 use super::pats::lower_param_names;
@@ -33,7 +33,8 @@ impl<'ctx> Lowerer<'ctx> {
         params.push(EVIDENCE_VAR.to_string());
         params.push(RETURN_K_VAR.to_string());
         let arity = params.len();
-        let body = self.lower_body_stub(&fb.body);
+        self.reset_k_state();
+        let body = self.lower_expr(&fb.body);
         CFunDef {
             name: fb.name.clone(),
             arity,
@@ -52,7 +53,8 @@ impl<'ctx> Lowerer<'ctx> {
     /// **functions**; a val isn't a function in the calling-convention
     /// sense, just a top-level constant exposed as `mod:name/0`.
     pub(super) fn lower_val(&mut self, v: &MVal) -> CFunDef {
-        let body = self.lower_val_body_stub(&v.value);
+        self.reset_k_state();
+        let body = self.lower_val_body(&v.value);
         CFunDef {
             name: v.name.clone(),
             arity: 0,
@@ -66,6 +68,22 @@ impl<'ctx> Lowerer<'ctx> {
     /// stubbed in 7a; sub-step 7c will replace it with the actual tuple
     /// synthesis (`{method_0, method_1, ...}`) matching the old lowerer's
     /// shape.
+    /// Lower an `MDecl::DictConstructor` to a `CFunDef`.
+    ///
+    /// Signature: `(dict_params..., _Evidence, _ReturnK)`. The body is a
+    /// tuple of the dict's methods — each method is statically known to be
+    /// `Pure(Atom::Lambda { .. })` per [`MDictConstructor`]'s IR spec, so
+    /// we extract the lambda atom from each and lower it via `lower_atom`
+    /// (yielding a `CExpr::Fun` with the uniform calling convention). The
+    /// resulting tuple is returned through `_ReturnK`, matching every
+    /// other uniform-shape callable.
+    ///
+    /// **Open question.** The dict ctor is called like a normal fn at the
+    /// callsite (`apply __dict_Show_Int(_Evidence, _K)`); returning through
+    /// `_ReturnK` is the same convention as any other fn. If a future use
+    /// site invokes the ctor specially (module-init context with no K in
+    /// scope), the uniform shape will need to drop — flagging now so the
+    /// integration step (7d/8) can catch it.
     pub(super) fn lower_dict_constructor(&mut self, dc: &MDictConstructor) -> CFunDef {
         let mut params: Vec<String> = dc
             .dict_params
@@ -75,25 +93,28 @@ impl<'ctx> Lowerer<'ctx> {
         params.push(EVIDENCE_VAR.to_string());
         params.push(RETURN_K_VAR.to_string());
         let arity = params.len();
-        // STUB body: see exprs.rs. Real tuple synthesis lands in 7c.
-        let body = if let Some(first) = dc.methods.first() {
-            self.lower_body_stub(first)
-        } else {
-            self.lower_stub_unit()
-        };
+        self.reset_k_state();
+
+        let method_ces: Vec<CExpr> = dc
+            .methods
+            .iter()
+            .map(|m| match m {
+                MExpr::Pure(atom @ Atom::Lambda { .. }) => self.lower_atom(atom),
+                other => panic!(
+                    "lower_dict_constructor: expected Pure(Atom::Lambda) per IR spec, got {:?}",
+                    std::mem::discriminant(other)
+                ),
+            })
+            .collect();
+
+        let tuple = CExpr::Tuple(method_ces);
+        let body = CExpr::Apply(Box::new(CExpr::Var(RETURN_K_VAR.to_string())), vec![tuple]);
+
         CFunDef {
             name: dc.name.clone(),
             arity,
             body: CExpr::Fun(params, Box::new(body)),
         }
-    }
-
-    fn lower_stub_unit(&mut self) -> CExpr {
-        use crate::codegen::cerl::CLit;
-        CExpr::Apply(
-            Box::new(CExpr::Var(RETURN_K_VAR.to_string())),
-            vec![CExpr::Lit(CLit::Atom("unit".to_string()))],
-        )
     }
 }
 
