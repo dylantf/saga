@@ -481,7 +481,7 @@ impl<'ctx> Lowerer<'ctx> {
     pub fn new(
         resolution: &'ctx ResolutionMap,
         ctors: &'ctx ConstructorAtoms,
-        module_ctx: &'ctx ModuleCodegenContext,
+        module_ctx: &'ctx codegen::CodegenContext,
         handler_info: &'ctx HandlerAnalysis,
         effect_info: &'ctx EffectInfo<'ctx>,
     ) -> Self;
