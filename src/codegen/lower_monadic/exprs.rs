@@ -271,11 +271,127 @@ impl<'ctx> Lowerer<'ctx> {
     /// — `_ReturnK` at function entry, or a `_K{n}` if we are inside a
     /// `Bind`'s value position.
     fn lower_app(&mut self, head: &Atom, args: &[Atom]) -> CExpr {
+        // Compiler special forms `panic msg` / `todo msg`: emit a structured
+        // error term via `erlang:error` directly, matching the old lowerer's
+        // behavior ([lower/mod.rs:3261-3273]). These aren't real functions —
+        // `panic` and `todo` have no callable binding anywhere — so the
+        // standard `apply <head>(args…, _Evidence, _ReturnK)` shape produces
+        // an unbound-variable error at link time. The head atom is an
+        // unresolved `Var` ("panic"/"todo") with no entry in `ResolutionMap`.
+        if let Atom::Var { name, source } = head
+            && self.resolution.get(source).is_none()
+            && args.len() == 1
+            && (name.name == "panic" || name.name == "todo")
+        {
+            return self.lower_panic_or_todo(&name.name, &args[0]);
+        }
+
+        // Partial application: if the head resolves to a known-arity callable
+        // and the call site supplies fewer user/dict args than expected,
+        // eta-expand into a closure that captures the supplied args and
+        // takes the remaining user/dict args plus the uniform `_Evidence` /
+        // `_ReturnK` pair. Under uniform CPS you can't just `Apply` with
+        // too few args — `erlc` rejects it as an arity mismatch.
+        if let Some(expected) = self.head_atom_expected_user_args(head) {
+            if args.len() < expected {
+                return self.eta_expand_partial_app(head, args, expected);
+            }
+        }
+
         let head_ce = self.lower_atom(head);
         let mut call_args: Vec<CExpr> = args.iter().map(|a| self.lower_atom(a)).collect();
         call_args.push(CExpr::Var(self.current_evidence.clone()));
         call_args.push(CExpr::Var(self.current_return_k.clone()));
         CExpr::Apply(Box::new(head_ce), call_args)
+    }
+
+    /// Number of user/dict args the head atom's callable expects (i.e. the
+    /// uniform arity minus the trailing `_Evidence` + `_ReturnK` slots),
+    /// when statically known. Returns `None` for opaque heads (local
+    /// `Var` binders, `DictRef` to a runtime tuple, etc.) — those skip
+    /// partial-app detection and fall through to the saturated path.
+    fn head_atom_expected_user_args(&self, head: &Atom) -> Option<usize> {
+        let node = match head {
+            Atom::Var { source, .. } => *source,
+            Atom::QualifiedRef { source, .. } => *source,
+            _ => return None,
+        };
+        let resolved = self.resolution.get(&node)?;
+        let (arity, effects): (usize, &[String]) = match &resolved.kind {
+            ResolvedCodegenKind::BeamFunction { arity, effects, .. }
+            | ResolvedCodegenKind::ExternalFunction { arity, effects, .. } => (*arity, effects),
+            ResolvedCodegenKind::Intrinsic { arity, .. } => (*arity, &[]),
+            ResolvedCodegenKind::InlineVal => return None,
+        };
+        let uniform = uniform_value_arity(arity, effects);
+        // Vals (uniform == 0) aren't callables; skip them.
+        uniform.checked_sub(2).filter(|&n| n > 0)
+    }
+
+    /// Eta-expand a partial application `head(args…)` into a lambda that
+    /// closes over `args` and takes the remaining user/dict params plus the
+    /// uniform `_Evidence` / `_ReturnK` pair, then forwards everything to
+    /// `head` at full arity. The resulting lambda value is yielded through
+    /// the ambient return continuation.
+    fn eta_expand_partial_app(
+        &mut self,
+        head: &Atom,
+        args: &[Atom],
+        expected: usize,
+    ) -> CExpr {
+        let missing = expected - args.len();
+        let lowered_supplied: Vec<CExpr> = args.iter().map(|a| self.lower_atom(a)).collect();
+        let eta_names: Vec<String> = (0..missing).map(|i| format!("_Eta{}", i)).collect();
+        let inner_ev = "_Evidence".to_string();
+        let inner_k = "_ReturnK".to_string();
+        let head_ce = self.lower_atom(head);
+
+        let mut full_args: Vec<CExpr> = lowered_supplied;
+        full_args.extend(eta_names.iter().map(|n| CExpr::Var(n.clone())));
+        full_args.push(CExpr::Var(inner_ev.clone()));
+        full_args.push(CExpr::Var(inner_k.clone()));
+
+        let mut lambda_params = eta_names;
+        lambda_params.push(inner_ev);
+        lambda_params.push(inner_k);
+
+        let inner_apply = CExpr::Apply(Box::new(head_ce), full_args);
+        let lambda = CExpr::Fun(lambda_params, Box::new(inner_apply));
+        // Yield the lambda value through the current K.
+        CExpr::Apply(
+            Box::new(CExpr::Var(self.current_return_k.clone())),
+            vec![lambda],
+        )
+    }
+
+    /// Emit `call 'erlang':'error'({saga_error, <kind>, Msg, …})` for the
+    /// `panic` / `todo` compiler special forms. The old lowerer carries
+    /// source-info (module, function, file, line) here; the new path
+    /// doesn't yet thread that, so we use empty placeholders — the kind
+    /// atom + message string are enough to identify the failure at runtime.
+    fn lower_panic_or_todo(&mut self, name: &str, msg_atom: &Atom) -> CExpr {
+        let kind_atom = if name == "todo" { "todo" } else { "panic" };
+        let msg = if name == "todo" {
+            super::util::lower_string_to_binary("not implemented")
+        } else {
+            self.lower_atom(msg_atom)
+        };
+        let msg_var = self.fresh_helper_name();
+        let err_term = CExpr::Tuple(vec![
+            CExpr::Lit(CLit::Atom("saga_error".to_string())),
+            CExpr::Lit(CLit::Atom(kind_atom.to_string())),
+            CExpr::Var(msg_var.clone()),
+            super::util::lower_string_to_binary(""),
+            super::util::lower_string_to_binary(""),
+            super::util::lower_string_to_binary(""),
+            CExpr::Lit(CLit::Int(0)),
+        ]);
+        let err_call = CExpr::Call(
+            "erlang".to_string(),
+            "error".to_string(),
+            vec![err_term],
+        );
+        CExpr::Let(msg_var, Box::new(msg), Box::new(err_call))
     }
 
     // ---------------------------------------------------------------
@@ -289,7 +405,7 @@ impl<'ctx> Lowerer<'ctx> {
     /// no "lift to let" path because those positions are themselves atomic.
     pub(super) fn lower_atom(&mut self, atom: &Atom) -> CExpr {
         match atom {
-            Atom::Var { name, .. } => self.lower_var_atom(name),
+            Atom::Var { name, source } => self.lower_var_atom(name, *source),
             Atom::Lit { value, .. } => lower_lit_atom(value),
             Atom::Ctor { name, args, .. } => self.lower_ctor_atom(name, args),
             Atom::Tuple { elements, .. } => {
@@ -310,13 +426,22 @@ impl<'ctx> Lowerer<'ctx> {
 
     /// Lower an `Atom::Var` reference.
     ///
-    /// `MVar.id` is ignored at the reference site: the translator mints a
-    /// fresh `id` per `Var` *use*, so it cannot identify a binding scope.
-    /// Source-named variables lower to `core_var(name)` — the same shape
-    /// 7a's `lower_param_names` produces for function params. Sub-step 7c
-    /// is responsible for keeping translator-introduced binders (`Bind` /
-    /// `Let`) from colliding with these.
-    fn lower_var_atom(&mut self, mvar: &MVar) -> CExpr {
+    /// A bare (unqualified) `Var` in the source AST can refer to either:
+    ///   1. A local binding (function param, let binding, lambda param,
+    ///      case binding, etc.) — lowered to `core_var(name)`.
+    ///   2. A top-level function or imported symbol — must be lowered as
+    ///      a function value (`FunRef` / `make_fun`), not a bare Erlang
+    ///      variable, or `erlc` rejects with "unbound variable".
+    ///
+    /// The resolution map is authoritative: if `MVar.source` (the original
+    /// AST NodeId of the reference) has a `ResolvedSymbol` entry, this is
+    /// case 2 — dispatch through [`lower_resolved_value_ref`] exactly like
+    /// the old lowerer's `ExprKind::Var` branch ([lower/mod.rs:3334-3351]).
+    /// Otherwise fall back to a bare var.
+    fn lower_var_atom(&mut self, mvar: &MVar, source: NodeId) -> CExpr {
+        if let Some(resolved) = self.resolution.get(&source).cloned() {
+            return self.lower_resolved_value_ref(resolved);
+        }
         CExpr::Var(core_var(&mvar.name))
     }
 
@@ -443,6 +568,22 @@ impl<'ctx> Lowerer<'ctx> {
     /// `Show for List a where {a: Show}`).
     fn lower_dict_ref_atom(&mut self, name: &str, source: NodeId) -> CExpr {
         if let Some(resolved) = self.resolution.get(&source).cloned() {
+            // Dict constructors return their tuple directly — see
+            // [`lower_dict_constructor`]. The resolution's arity equals the
+            // where-clause sub-dict count and is the actual exported
+            // function arity (zero for monomorphic impls). For arity-0
+            // monomorphic dicts, `fun_value_of` emits a direct
+            // `call mod:dict/0()` which yields the tuple value — exactly
+            // what a value-position reference needs.
+            if let ResolvedCodegenKind::BeamFunction {
+                erlang_mod: Some(erlang_mod),
+                name,
+                arity,
+                ..
+            } = resolved.kind
+            {
+                return fun_value_of(erlang_mod, name, arity);
+            }
             return self.lower_resolved_value_ref(resolved);
         }
         CExpr::Var(core_var(name))
@@ -470,10 +611,18 @@ impl<'ctx> Lowerer<'ctx> {
     ///   - `InlineVal` — old-path-only perf optimization; the new path
     ///     gets equivalent perf from effect-optimization (bind-collapse +
     ///     Bind→Let). Hard panic if encountered (see arm body).
-    ///   - `Intrinsic` becomes a `FunRef`.
-    ///   - BEAM / External functions become `call mod:fun([])` for arity 0
-    ///     and `erlang:make_fun/3` for higher arities — matching the old
-    ///     lowerer's value-as-funref convention.
+    ///   - `Intrinsic` becomes a `FunRef` at its declared arity. Intrinsics
+    ///     are direct BIFs / compiler primitives with no Saga wrapper, so the
+    ///     uniform-shape +2 expansion does NOT apply to them.
+    ///   - `BeamFunction` / `ExternalFunction` references point at a Saga
+    ///     function (or its `@external` wrapper) compiled under the uniform
+    ///     calling convention: `(user_args..., _Evidence, _ReturnK)`. The
+    ///     resolved `arity` is the **source** arity (user-visible parameter
+    ///     count) — we add `+2` for evidence + return-K so callers using the
+    ///     resulting fun value invoke it with the right number of arguments.
+    ///     Arity-0 entries (vals, niladic constants) stay arity-0: those are
+    ///     not wrapped in the uniform shape; calling them just yields the
+    ///     constant value.
     fn lower_resolved_value_ref(&mut self, resolved: ResolvedSymbol) -> CExpr {
         match resolved.kind {
             ResolvedCodegenKind::InlineVal => {
@@ -485,21 +634,96 @@ impl<'ctx> Lowerer<'ctx> {
                     resolved.canonical_name
                 )
             }
-            ResolvedCodegenKind::Intrinsic { arity, .. } => CExpr::FunRef(resolved.name, arity),
+            ResolvedCodegenKind::Intrinsic { arity, .. } => {
+                // `@builtin` decls are wrapped at their defining module under
+                // the uniform calling convention by
+                // `lower_builtin_wrapper` (in `decls.rs`). Reference the
+                // wrapper at its uniform arity: `make_fun(erlang_mod, name,
+                // arity + 2)`. The intrinsic name itself doubles as the
+                // wrapper's function name.
+                //
+                // For intrinsics without a wrapper yet, this still emits a
+                // cross-module `make_fun` reference — which will fail at
+                // link time. That mirrors the existing behavior (the old
+                // `FunRef(name, arity)` failed the same way) and surfaces
+                // missing wrappers loudly.
+                if let Some(src_mod) = &resolved.source_module {
+                    let erlang_mod: String = src_mod.to_lowercase().replace('.', "_");
+                    // Intrinsics have no effect annotation; treat them as
+                    // pure for the uniform-arity calculation.
+                    fun_value_of(erlang_mod, resolved.name, uniform_value_arity(arity, &[]))
+                } else {
+                    CExpr::FunRef(resolved.name, arity)
+                }
+            }
             ResolvedCodegenKind::ExternalFunction {
                 erlang_mod,
                 name,
                 arity,
+                effects,
                 ..
-            } => fun_value_of(erlang_mod, name, arity),
+            } => {
+                let uniform = uniform_value_arity(arity, &effects);
+                // Same-module refs use FunRef — `erlang:make_fun/3` requires
+                // the target to be exported, but local @external wrappers
+                // for private decls aren't exported. The old lowerer's
+                // [`lower_local_fun_ref`] makes the same choice.
+                if erlang_mod == self.current_erlang_module {
+                    CExpr::FunRef(name, uniform)
+                } else {
+                    fun_value_of(erlang_mod, name, uniform)
+                }
+            }
             ResolvedCodegenKind::BeamFunction {
                 erlang_mod: Some(erlang_mod),
                 name,
                 arity,
+                effects,
                 ..
-            } => fun_value_of(erlang_mod, name, arity),
-            ResolvedCodegenKind::BeamFunction { name, arity, .. } => CExpr::FunRef(name, arity),
+            } => {
+                let uniform = uniform_value_arity(arity, &effects);
+                if erlang_mod == self.current_erlang_module {
+                    CExpr::FunRef(name, uniform)
+                } else {
+                    fun_value_of(erlang_mod, name, uniform)
+                }
+            }
+            ResolvedCodegenKind::BeamFunction {
+                name,
+                arity,
+                effects,
+                ..
+            } => CExpr::FunRef(name, uniform_value_arity(arity, &effects)),
         }
+    }
+}
+
+/// Map a resolved BEAM/external function reference's arity to the
+/// uniform-shape arity at which it is callable.
+///
+/// The resolver's `arity` field already includes dict-passing params (and,
+/// for effectful functions registered by the old-path's
+/// `build_imported_fun_scoped`, the `_Evidence` + `_ReturnK` slots — i.e.
+/// `+2` is already baked in). For pure functions, the resolver's arity is
+/// the source + dict count only; we add `+2` here to reach the uniform
+/// shape every Saga-defined callable is emitted under.
+///
+/// Arity-0 with no effects denotes a top-level val (a constant), which is
+/// the only kind of Saga-emitted callable that stays at arity 0. Dict
+/// constructors with no where-clause params also resolve as `arity == 0`,
+/// but they go through [`lower_dict_ref_atom`] — that path adds `+2`
+/// directly without consulting this helper.
+fn uniform_value_arity(arity: usize, effects: &[String]) -> usize {
+    if !effects.is_empty() {
+        // Old-path resolution already added `+2` for effectful imports.
+        arity
+    } else if arity == 0 {
+        // Val constant — stays arity-0.
+        0
+    } else {
+        // Pure function — resolution carries source + dict count only;
+        // add `+2` for uniform `(_Evidence, _ReturnK)`.
+        arity + 2
     }
 }
 /// Emit a function value (as an Erlang term) for a known module/function/arity.

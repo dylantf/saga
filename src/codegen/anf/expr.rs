@@ -29,15 +29,25 @@ impl Anf {
             },
 
             ExprKind::App { func, arg } => {
-                let func = self.atomize_into(*func, bindings);
+                // Preserve the curried-App spine: `f x y z` is `App(App(App(f, x), y), z)`,
+                // a single saturated call. Atomizing `func` would lift each inner
+                // `App` to a synthetic let — turning the saturated call into a
+                // chain of partial applications that the lowerer then emits with
+                // the wrong argument count under the uniform `(args..., _Evidence,
+                // _ReturnK)` convention. Recursing via `normalize_into` keeps the
+                // spine of `App` nodes intact while still atomizing each ARG. The
+                // outer `atomize_into` (called on this whole App by its parent
+                // context) will lift the saturated call once, as a unit.
+                let func = if matches!(func.kind, ExprKind::App { .. }) {
+                    Box::new(self.normalize_into(*func, bindings))
+                } else {
+                    Box::new(self.atomize_into(*func, bindings))
+                };
                 let arg = self.atomize_into(*arg, bindings);
                 Expr {
                     id,
                     span,
-                    kind: ExprKind::App {
-                        func: Box::new(func),
-                        arg: Box::new(arg),
-                    },
+                    kind: ExprKind::App { func, arg: Box::new(arg) },
                 }
             }
             ExprKind::BinOp { op, left, right } => {

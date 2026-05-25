@@ -236,6 +236,51 @@ pub(super) fn call_initial_evidence() -> CExpr {
     )
 }
 
+/// Build the synthetic `main/1` entry-point wrapper.
+///
+/// The BEAM runner spawned by `exec_erl` invokes `Module:main/1` with the
+/// atom `'unit'`. The user's `main () = …` is exported as `main/3` under
+/// the uniform calling convention (1 user param + `_Evidence` +
+/// `_ReturnK`), so the runner can't call it directly. This wrapper bridges
+/// the two by materialising the initial evidence vector and supplying an
+/// identity return continuation:
+///
+/// ```text
+/// 'main'/1 = fun (_Arg) ->
+///   let <_Ev> = apply '__saga_initial_evidence'/0() in
+///   let <_K>  = fun (_V) -> _V in
+///   apply 'main'/3('unit', _Ev, _K)
+/// ```
+///
+/// The wrapper deliberately ignores its incoming `_Arg` and passes
+/// `'unit'` to the user's `main` — `main`'s `()` pattern matches the
+/// atom `'unit'`.
+pub(super) fn build_main_entry_wrapper() -> CFunDef {
+    let arg_param = "_Arg".to_string();
+    let ev_var = "_Ev".to_string();
+    let k_var = "_K".to_string();
+    let v_param = "_V".to_string();
+
+    let evidence_call = call_initial_evidence();
+    let identity_k = CExpr::Fun(vec![v_param.clone()], Box::new(CExpr::Var(v_param)));
+    let apply_main = CExpr::Apply(
+        Box::new(CExpr::FunRef("main".to_string(), 3)),
+        vec![
+            CExpr::Lit(CLit::Atom("unit".to_string())),
+            CExpr::Var(ev_var.clone()),
+            CExpr::Var(k_var.clone()),
+        ],
+    );
+    let let_k = CExpr::Let(k_var, Box::new(identity_k), Box::new(apply_main));
+    let let_ev = CExpr::Let(ev_var, Box::new(evidence_call), Box::new(let_k));
+
+    CFunDef {
+        name: "main".to_string(),
+        arity: 1,
+        body: CExpr::Fun(vec![arg_param], Box::new(let_ev)),
+    }
+}
+
 /// Build a single op closure for an `OpTuple` slot.
 ///
 /// Shape: `fun(Arg0, …, ArgN, K) -> apply K(<body>)` where `<body>` is

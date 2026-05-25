@@ -1,1 +1,4 @@
-main () = println "hello world" with console
+# main () = dbg "Hello world"
+
+# Effectful version
+main () = println "Hello world" with console
