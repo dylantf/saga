@@ -39,19 +39,30 @@ impl<'ctx> Lowerer<'ctx> {
         field: &str,
         record_name: Option<&str>,
     ) -> CExpr {
-        let order = record_name
-            .and_then(|n| self.record_fields.get(n))
-            .unwrap_or_else(|| {
-                panic!(
-                    "lower_field_access: cannot resolve record field order (record_name={:?}); \
-                     RecordInfo threading from CheckResult is the follow-up — see exprs_edge.rs flag",
-                    record_name
-                )
-            });
+        // Anonymous records (`{ a: …, b: … }`) use a synthetic tag of the
+        // form `__anon_<sorted_field_names_joined_by_underscore>` — the tag
+        // itself encodes the field order, sorted alphabetically (see
+        // `ast::anon_record_tag`). Derive the order from the tag when no
+        // explicit `record_fields` entry exists, instead of panicking.
+        let anon_order: Option<Vec<String>> = record_name.and_then(|n| {
+            n.strip_prefix("__anon_").map(|rest| {
+                rest.split('_').map(|s| s.to_string()).collect::<Vec<_>>()
+            })
+        });
+        let order_owned: Option<Vec<String>> = record_name
+            .and_then(|n| self.record_fields.get(n).cloned())
+            .or(anon_order);
+        let order = order_owned.unwrap_or_else(|| {
+            panic!(
+                "lower_field_access: cannot resolve record field order (record_name={:?}); \
+                 RecordInfo threading from CheckResult is the follow-up — see exprs_edge.rs flag",
+                record_name
+            )
+        });
         let idx = order.iter().position(|f| f == field).unwrap_or_else(|| {
             panic!(
-                "lower_field_access: field '{}' not in declared order for record {:?}",
-                field, record_name
+                "lower_field_access: field '{}' not in declared order for record {:?} (order={:?})",
+                field, record_name, order
             )
         }) as i64
             + 2;
@@ -78,9 +89,18 @@ impl<'ctx> Lowerer<'ctx> {
         fields: &[(String, Atom)],
         record_name: Option<&str>,
     ) -> CExpr {
+        // See `lower_field_access`: anon record tags encode their sorted
+        // field order in the tag itself (`__anon_<f0>_<f1>_…`). Use that
+        // when no `record_fields` entry exists.
+        let anon_order: Option<Vec<String>> = record_name.and_then(|n| {
+            n.strip_prefix("__anon_").map(|rest| {
+                rest.split('_').map(|s| s.to_string()).collect::<Vec<_>>()
+            })
+        });
         let order = record_name
             .and_then(|n| self.record_fields.get(n))
             .cloned()
+            .or(anon_order)
             .unwrap_or_else(|| {
                 panic!(
                     "lower_record_update: cannot resolve record field order (record_name={:?}); \

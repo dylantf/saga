@@ -32,6 +32,7 @@ fn app(f: Expr, a: Expr) -> Expr {
 fn run(e: Expr) -> Expr {
     let mut a = Anf {
         fresh: FreshNames::new(),
+        dict_ctor_node_ids: Default::default(),
     };
     a.anf_expr(e)
 }
@@ -477,7 +478,7 @@ fn normalize_decl_program_runs() {
         body: app(var("f"), app(var("g"), var("x"))),
         span: sp(),
     };
-    let out = normalize(vec![decl]);
+    let out = normalize(vec![decl], None);
     assert_eq!(out.len(), 1);
     match &out[0] {
         Decl::FunBinding { body, .. } => {

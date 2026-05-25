@@ -20,7 +20,9 @@ mod expr;
 #[cfg(test)]
 mod tests;
 
-use crate::ast::{self, Annotated, Decl, Expr, HandlerArm, HandlerBody};
+use crate::ast::{self, Annotated, Decl, Expr, HandlerArm, HandlerBody, NodeId};
+use crate::codegen::resolve::{ResolutionMap, ResolvedCodegenKind};
+use std::collections::HashSet;
 
 /// Fresh-name generator for ANF-introduced bindings.
 ///
@@ -44,15 +46,43 @@ impl FreshNames {
 }
 
 /// Entry point. ANF-normalize every declaration in the program.
-pub fn normalize(p: ast::Program) -> ast::Program {
+///
+/// `resolution` is consulted to flag dict-constructor references as
+/// non-atomic: under uniform CPS dict ctors are callables whose value
+/// form is a fun reference, not a materialized tuple. Marking them
+/// non-atomic lifts each reference into a `let v = DictRef in …` —
+/// the translator then emits the let's value as a zero-arg `App`
+/// (CPS-calling the ctor) so `v` is bound to the materialized tuple.
+/// `None` skips the rewrite (tests that bypass resolution).
+pub fn normalize(p: ast::Program, resolution: Option<&ResolutionMap>) -> ast::Program {
+    let dict_ctor_node_ids = resolution
+        .map(collect_dict_ctor_node_ids)
+        .unwrap_or_default();
     let mut anf = Anf {
         fresh: FreshNames::new(),
+        dict_ctor_node_ids,
     };
     p.into_iter().map(|d| anf.norm_decl(d)).collect()
 }
 
+fn collect_dict_ctor_node_ids(resolution: &ResolutionMap) -> HashSet<NodeId> {
+    resolution
+        .iter()
+        .filter_map(|(nid, sym)| {
+            let is_dict_ctor = sym.name.starts_with("__dict_")
+                && matches!(
+                    sym.kind,
+                    ResolvedCodegenKind::BeamFunction { .. }
+                        | ResolvedCodegenKind::ExternalFunction { .. }
+                );
+            is_dict_ctor.then_some(*nid)
+        })
+        .collect()
+}
+
 pub(super) struct Anf {
     pub(super) fresh: FreshNames,
+    pub(super) dict_ctor_node_ids: HashSet<NodeId>,
 }
 
 impl Anf {

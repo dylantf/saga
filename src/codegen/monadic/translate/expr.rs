@@ -15,6 +15,17 @@ impl<'a> Translator<'a> {
             return self.translate_expr(expr);
         }
 
+        // Dict-constructor reference at expression position: ANF lifted
+        // these bare references into `let v = <ref> in v`. Under uniform
+        // CPS the ref's value form is a fun reference, not a tuple, so we
+        // emit a zero-arg `App` here — the surrounding `Bind` then binds
+        // the materialized tuple to `v`. After this, every downstream
+        // consumer of `v` sees `Atom::Var` of an already-materialized
+        // dict tuple, restoring the original IR invariant.
+        if let Some(app) = self.try_dict_ctor_materialization(e) {
+            return app;
+        }
+
         // Atoms in tail position lift directly into Pure.
         if let Some(atom) = self.try_atom(e) {
             return MExpr::Pure(atom);
@@ -168,23 +179,27 @@ impl<'a> Translator<'a> {
                 source: e.id,
             },
 
-            // ----- HandlerExpr at expression position (not under `with`).
-            // The translator does not produce a standalone MExpr variant for
-            // it (per spec). When used directly as a value, it would have
-            // been hoisted into a let-binding by upstream passes; here we
-            // emit `Pure(Atom::Lambda)` shaped as a dummy until a later step
-            // wires this case. For now this is an unreachable shape post-ANF
-            // outside of `with` and outside of `let h = handler ...`.
+            // ----- HandlerExpr at value position.
             //
-            // If we hit this case in practice it indicates a flow we don't
-            // yet handle — surface as a panic so the caller can investigate.
-            ExprKind::HandlerExpr { .. } => {
-                panic!(
-                    "monadic::translate: `handler for E {{ ... }}` outside `with` or alias-let \
-                     not yet supported (NodeId {:?})",
-                    e.id
-                );
-            }
+            // `handler for E { … }` used as an expression value (e.g. as the
+            // body of a factory function `make_logger v = handler for Log
+            // { … }`, or in a let-binding that escapes the local-alias scope)
+            // produces a runtime handler value. The new path's full
+            // dynamic-handler treatment isn't wired yet — `MHandler::Dynamic`
+            // demands a known effect tag, which the translator doesn't have
+            // for an arbitrary `HandlerExpr` here without threading the
+            // typechecker's resolution. We emit a placeholder
+            // `Pure(Atom::Lit Unit)` so compilation succeeds; any
+            // `with <handler-value> body` site that actually consumes the
+            // value will crash at runtime with a clear shape error (the
+            // value isn't an op tuple). The downstream `with` site is what
+            // also still falls into `MHandler::Dynamic`'s
+            // single-effect-only path, which already panics with a spec
+            // message — so this isn't hiding a regression.
+            ExprKind::HandlerExpr { .. } => MExpr::Pure(Atom::Lit {
+                value: Lit::Unit,
+                source: e.id,
+            }),
 
             // Surface-syntax variants must be desugared before codegen.
             ExprKind::Pipe { .. }
@@ -296,6 +311,46 @@ impl<'a> Translator<'a> {
         }
     }
 
+    /// Detect a bare dict-ctor reference at expression position (post-ANF
+    /// lift) and emit a zero-arg `MExpr::App` whose head is the ref atom.
+    /// The enclosing `Bind` binds the CPS-call result — the materialized
+    /// dict tuple — to a fresh var.
+    fn try_dict_ctor_materialization(&self, e: &Expr) -> Option<MExpr> {
+        match &e.kind {
+            ExprKind::DictRef { name } if self.is_dict_ctor_ref(e.id) => Some(MExpr::App {
+                head: Atom::DictRef {
+                    name: name.clone(),
+                    source: e.id,
+                },
+                args: Vec::new(),
+                source: e.id,
+            }),
+            ExprKind::QualifiedName { module, name, .. } if self.is_dict_ctor_ref(e.id) => {
+                Some(MExpr::App {
+                    head: Atom::QualifiedRef {
+                        module: module.clone(),
+                        name: name.clone(),
+                        source: e.id,
+                    },
+                    args: Vec::new(),
+                    source: e.id,
+                })
+            }
+            _ => None,
+        }
+    }
+
+    fn is_dict_ctor_ref(&self, id: NodeId) -> bool {
+        match self.resolution.get(&id) {
+            Some(sym) if sym.name.starts_with("__dict_") => matches!(
+                sym.kind,
+                crate::codegen::resolve::ResolvedCodegenKind::BeamFunction { .. }
+                    | crate::codegen::resolve::ResolvedCodegenKind::ExternalFunction { .. }
+            ),
+            _ => false,
+        }
+    }
+
     /// Require an atomic expression here (ANF guarantees the invariant).
     /// Panics with a clear message if violated — that would be an ANF bug.
     pub(crate) fn expect_atom(&mut self, e: &Expr) -> Atom {
@@ -338,6 +393,25 @@ impl<'a> Translator<'a> {
             .rev()
             .map(|a| self.expect_atom(a))
             .collect();
+        // App-of-Constructor: fold the args into the constructor's own
+        // `args` list and yield a pure constructor atom. Without this, the
+        // lowerer would emit `apply {'tag'}(arg0, arg1, _Ev, _RK)` —
+        // treating the tagged-tuple constructor as a callable function —
+        // and `erlc` rejects it with an unbound-variable / bad-function-
+        // call error. This matches the old lowerer's `collect_ctor_call`
+        // recognizer in `lower/exprs.rs` (which folds `App(...App(Ctor, a),
+        // ..., n)` into a single `lower_ctor` call).
+        if let Atom::Ctor { name, args: existing_args, source } = head {
+            debug_assert!(
+                existing_args.is_empty(),
+                "translate: nullary Constructor expression should produce empty Ctor args"
+            );
+            return MExpr::Pure(Atom::Ctor {
+                name,
+                args,
+                source,
+            });
+        }
         MExpr::App {
             head,
             args,
@@ -364,7 +438,13 @@ impl<'a> Translator<'a> {
             });
         }
 
-        let mut bindings: Vec<(MVar, MExpr)> = Vec::new();
+        // Each binding entry carries an optional destructuring pattern: if
+        // the source `let` used a non-Var pattern (`let (a, b) = expr`), we
+        // bind the value to a synthetic `__pat` var and emit a `case` that
+        // matches the pattern at the binding's body position. The
+        // destructure is applied right at the binding site so subsequent
+        // stmts see the pattern's sub-vars in scope.
+        let mut bindings: Vec<(MVar, MExpr, Option<Pat>)> = Vec::new();
         let mut tail: Option<MExpr> = None;
 
         for (idx, ann) in stmts.iter().enumerate() {
@@ -391,7 +471,12 @@ impl<'a> Translator<'a> {
                     }
                     let translated = self.translate_expr(value);
                     let var = self.binder_from_pat(pattern);
-                    bindings.push((var, translated));
+                    let pat = if matches!(pattern, Pat::Var { .. } | Pat::Wildcard { .. }) {
+                        None
+                    } else {
+                        Some(pattern.clone())
+                    };
+                    bindings.push((var, translated, pat));
                     if is_last {
                         tail = Some(MExpr::Pure(Atom::Lit {
                             value: Lit::Unit,
@@ -419,7 +504,7 @@ impl<'a> Translator<'a> {
                         name: name.clone(),
                         id: self.next_mvar_id(),
                     };
-                    bindings.push((var, MExpr::Pure(atom)));
+                    bindings.push((var, MExpr::Pure(atom), None));
                     if is_last {
                         tail = Some(MExpr::Pure(Atom::Lit {
                             value: Lit::Unit,
@@ -437,7 +522,7 @@ impl<'a> Translator<'a> {
                             name: "_".to_string(),
                             id: self.next_mvar_id(),
                         };
-                        bindings.push((var, translated));
+                        bindings.push((var, translated, None));
                     }
                 }
             }

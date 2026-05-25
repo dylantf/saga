@@ -42,6 +42,8 @@ cargo run --bin saga -- run file.saga       # Compile and run a .saga file on BE
 cargo run --bin saga -- build file.saga     # Compile without running
 cargo run --bin saga -- check file.saga     # Type check only
 cargo run --bin saga -- emit file.saga      # Print Core Erlang to stdout
+cargo run --bin saga -- inspect file.saga --stage <stage>  # Dump IR for new-path debugging
+                                            # stage: elaborated | anf | monadic | monadic-opt | core
 cargo run --bin saga -- test              # Run project test suite (tests/*.saga)
 cargo run --bin saga -- install           # Fetch and compile Hex/git dependencies
 cargo run --bin saga -- docs              # Generate markdown docs for the current project's exposed modules

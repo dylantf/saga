@@ -173,45 +173,22 @@ impl<'ctx> Lowerer<'ctx> {
         }
     }
 
-    /// Lower an `MDecl::DictConstructor` to a `CFunDef`.
+    /// Lower an `MDecl::DictConstructor` to a `CFunDef` under the uniform
+    /// calling convention.
     ///
-    /// Signature: `(dict_params..., _Evidence, _ReturnK)`. The body is
-    /// stubbed in 7a; sub-step 7c will replace it with the actual tuple
-    /// synthesis (`{method_0, method_1, ...}`) matching the old lowerer's
-    /// shape.
-    /// Lower an `MDecl::DictConstructor` to a `CFunDef`.
-    ///
-    /// Signature: `(dict_params..., _Evidence, _ReturnK)`. The body is a
-    /// tuple of the dict's methods — each method is statically known to be
-    /// `Pure(Atom::Lambda { .. })` per [`MDictConstructor`]'s IR spec, so
-    /// we extract the lambda atom from each and lower it via `lower_atom`
-    /// (yielding a `CExpr::Fun` with the uniform calling convention). The
-    /// resulting tuple is returned through `_ReturnK`, matching every
-    /// other uniform-shape callable.
-    ///
-    /// **Calling convention (note).** Unlike functions, dict constructors
-    /// are NOT emitted under the uniform `(args…, _Evidence, _ReturnK)`
-    /// convention. A dict is a pure value (a tuple of method closures);
-    /// the constructor's role is to materialise that tuple given any
-    /// sub-dict params required by the impl's `where` clause. Threading
-    /// evidence and return-K through it would force every use site to
-    /// pay CPS overhead just to read a constant. So:
-    ///
-    ///   - Arity = `dict_params.len()` (where-clause sub-dict count). Zero
-    ///     for monomorphic impls.
-    ///   - Body returns the dict tuple **directly** (no `apply _ReturnK`).
-    ///
-    /// Callers that have a dict-ref as a value get the tuple by calling
-    /// `mod:__dict_…/0` (arity-0 case) or `mod:__dict_…(_SubDict0, …)`
-    /// (arity-N case). The uniform calling convention applies to the
-    /// **methods inside** the tuple — each method closure is a
-    /// `fun(args…, _Evidence, _ReturnK) -> …`.
+    /// Signature: `(dict_params..., _Evidence, _ReturnK)`. The body
+    /// synthesises the dict tuple `{method_0, method_1, ...}` (each method
+    /// statically `Pure(Atom::Lambda { .. })` per [`MDictConstructor`]'s
+    /// IR spec) and feeds it through `_ReturnK`, exactly like every other
+    /// callable in the new path.
     pub(super) fn lower_dict_constructor(&mut self, dc: &MDictConstructor) -> CFunDef {
-        let params: Vec<String> = dc
+        let mut params: Vec<String> = dc
             .dict_params
             .iter()
             .map(|p| super::util::core_var(p))
             .collect();
+        params.push(EVIDENCE_VAR.to_string());
+        params.push(RETURN_K_VAR.to_string());
         let arity = params.len();
         self.reset_k_state();
 
@@ -228,11 +205,12 @@ impl<'ctx> Lowerer<'ctx> {
             .collect();
 
         let tuple = CExpr::Tuple(method_ces);
+        let body = CExpr::Apply(Box::new(CExpr::Var(RETURN_K_VAR.to_string())), vec![tuple]);
 
         CFunDef {
             name: dc.name.clone(),
             arity,
-            body: CExpr::Fun(params, Box::new(tuple)),
+            body: CExpr::Fun(params, Box::new(body)),
         }
     }
 }
@@ -249,9 +227,9 @@ pub(super) fn val_arity() -> usize {
 }
 
 pub(super) fn dict_constructor_arity(dc: &MDictConstructor) -> usize {
-    // No `+2` — dict constructors are non-CPS builders for a constant
-    // tuple value; see [`Lowerer::lower_dict_constructor`].
-    dc.dict_params.len()
+    // Uniform calling convention: dict ctors expose the same
+    // `(args…, _Evidence, _ReturnK)` shape as every other callable.
+    dc.dict_params.len() + 2
 }
 
 /// Extract the `(erl_module, erl_func)` pair from an

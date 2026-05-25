@@ -251,16 +251,45 @@ impl<'a> Translator<'a> {
 }
 
 /// Wrap a sequence of `Bind`s around a tail expression. Each entry is a
-/// (var, value) pair, applied from last to first (closest binder is at the
-/// front of `bindings` when iterated; we reverse internally so the first
-/// pushed binding is the outermost). Callers push in source order.
-pub(crate) fn wrap_binds(bindings: Vec<(MVar, MExpr)>, tail: MExpr) -> MExpr {
+/// `(var, value, optional destructure_pat)` triple, applied from last to
+/// first (closest binder is at the front of `bindings` when iterated; we
+/// reverse internally so the first pushed binding is the outermost).
+/// Callers push in source order.
+///
+/// When `destructure_pat` is `Some(p)`, the bound `var` is the synthetic
+/// `__pat` binder and the original source pattern needs to match against
+/// it. We wrap the body in a `Case` arm so the pattern's sub-vars come
+/// into scope for everything after this `Bind`. The `Case` has a single
+/// arm — the typechecker has already proven exhaustiveness for
+/// irrefutable let-patterns; any non-matching value would have been
+/// rejected upstream.
+pub(crate) fn wrap_binds(
+    bindings: Vec<(MVar, MExpr, Option<crate::ast::Pat>)>,
+    tail: MExpr,
+) -> MExpr {
     let mut acc = tail;
-    for (var, value) in bindings.into_iter().rev() {
+    for (var, value, destructure_pat) in bindings.into_iter().rev() {
+        let body = if let Some(pat) = destructure_pat {
+            MExpr::Case {
+                scrutinee: crate::codegen::monadic::ir::Atom::Var {
+                    name: var.clone(),
+                    source: crate::ast::NodeId::fresh(),
+                },
+                arms: vec![crate::codegen::monadic::ir::MArm {
+                    pattern: pat,
+                    guard: None,
+                    body: acc,
+                    span: crate::token::Span { start: 0, end: 0 },
+                }],
+                source: crate::ast::NodeId::fresh(),
+            }
+        } else {
+            acc
+        };
         acc = MExpr::Bind {
             var,
             value: Box::new(value),
-            body: Box::new(acc),
+            body: Box::new(body),
         };
     }
     acc

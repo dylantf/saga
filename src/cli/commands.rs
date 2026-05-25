@@ -321,11 +321,10 @@ pub fn cmd_inspect(file: &str, stage: &str) {
             println!("{:#?}", elaborated);
         }
         "anf" => {
-            let anf_program = codegen::anf::normalize(elaborated);
+            let anf_program = codegen::anf::normalize(elaborated, None);
             println!("{:#?}", anf_program);
         }
         "monadic" | "monadic-opt" => {
-            let anf_program = codegen::anf::normalize(elaborated.clone());
 
             // Build a minimal CodegenContext (std modules + this user module)
             // so resolve/effect-info match what the new path sees in production.
@@ -365,6 +364,8 @@ pub fn cmd_inspect(file: &str, stage: &str) {
                 resolution_map.extend(compiled.resolution.iter().map(|(k, v)| (*k, v.clone())));
             }
 
+            let anf_program = codegen::anf::normalize(elaborated.clone(), Some(&resolution_map));
+
             let ops_storage = codegen::build_effect_ops_table(&result);
             let mod_check_ref = result
                 .module_check_results()
@@ -378,7 +379,7 @@ pub fn cmd_inspect(file: &str, stage: &str) {
                 saga::ast::HandlerBody,
             > = std::collections::HashMap::new();
             for compiled in ctx.modules.values() {
-                let anf_imported = codegen::anf::normalize(compiled.elaborated.clone());
+                let anf_imported = codegen::anf::normalize(compiled.elaborated.clone(), Some(&compiled.resolution));
                 for decl in &anf_imported {
                     if let saga::ast::Decl::HandlerDef { name, body, .. } = decl {
                         imported_handler_decls

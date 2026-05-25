@@ -182,8 +182,35 @@ impl<'ctx> Lowerer<'ctx> {
     /// [`lower_guard`](Self::lower_guard) for the supported shape.
     fn lower_case(&mut self, scrutinee: &Atom, arms: &[MArm]) -> CExpr {
         let scrut_ce = self.lower_atom(scrutinee);
-        let carms: Vec<CArm> = arms.iter().map(|arm| self.lower_arm(arm)).collect();
+        let mut carms: Vec<CArm> = arms.iter().map(|arm| self.lower_arm(arm)).collect();
+        // erlc's `bs_start_match3` consistency check requires a wildcard
+        // fallthrough on bitstring case-expressions even when the typechecker
+        // already proved exhaustiveness. The old lowerer adds one
+        // unconditionally when no Var/Wildcard arm is present (see
+        // [`lower/exprs.rs:359-368`]); the new path mirrors that.
+        let has_total_catchall = arms.iter().any(|arm| {
+            arm.guard.is_none() && matches!(&arm.pattern, Pat::Wildcard { .. } | Pat::Var { .. })
+        });
+        if !has_total_catchall {
+            carms.push(CArm {
+                pat: CPat::Wildcard,
+                guard: None,
+                body: self.case_clause_error(),
+            });
+        }
         CExpr::Case(Box::new(scrut_ce), carms)
+    }
+
+    /// Emit a Core Erlang expression that crashes with a `case_clause` error,
+    /// used as the body of the synthetic wildcard fallthrough arm. The
+    /// typechecker's exhaustiveness check makes this unreachable at runtime;
+    /// the arm exists only to satisfy `erlc`'s bitstring-match invariant.
+    fn case_clause_error(&self) -> CExpr {
+        CExpr::Call(
+            "erlang".to_string(),
+            "error".to_string(),
+            vec![CExpr::Lit(CLit::Atom("case_clause".to_string()))],
+        )
     }
 
     /// Lower a single MArm into a `CArm`. Shared between `Case` and `Receive`.
@@ -230,6 +257,18 @@ impl<'ctx> Lowerer<'ctx> {
                 func.clone(),
                 args.iter().map(|a| self.lower_atom(a)).collect(),
             ),
+            // ANF atomizes sub-expressions in guards too (e.g. `n % 15 == 0`
+            // becomes `let v0 = n % 15 in v0 == 0`), and the translator
+            // emits a `Bind` for that let. Core Erlang permits `let` in
+            // guard position as long as both the bound value and the body
+            // are themselves guard expressions, so we recurse into both
+            // sides under `lower_guard` and rebuild as a `CExpr::Let`.
+            // `Let` (post-Bind→Let promotion) gets the same treatment.
+            MExpr::Bind { var, value, body } | MExpr::Let { var, value, body } => {
+                let val_ce = self.lower_guard(value);
+                let body_ce = self.lower_guard(body);
+                CExpr::Let(core_var(&var.name), Box::new(val_ce), Box::new(body_ce))
+            }
             other => panic!(
                 "lower_guard: guard MExpr variant not legal in Core Erlang guard position: {:?}",
                 std::mem::discriminant(other)
@@ -323,7 +362,7 @@ impl<'ctx> Lowerer<'ctx> {
             ResolvedCodegenKind::Intrinsic { arity, .. } => (*arity, &[]),
             ResolvedCodegenKind::InlineVal => return None,
         };
-        let uniform = uniform_value_arity(arity, effects);
+        let uniform = uniform_value_arity(arity, effects, &resolved.name);
         // Vals (uniform == 0) aren't callables; skip them.
         uniform.checked_sub(2).filter(|&n| n > 0)
     }
@@ -433,6 +472,18 @@ impl<'ctx> Lowerer<'ctx> {
         if let Some(resolved) = self.resolution.get(&source).cloned() {
             return self.lower_resolved_value_ref(resolved);
         }
+        // Handler-as-value references (`let logger = if dev then console_log
+        // else silent_log`) need a real op-tuple value. The new path doesn't
+        // yet synthesize one for arbitrary handler names — emit a placeholder
+        // `'unit'` atom so `erlc` accepts the module. Any subsequent `with
+        // logger body` site then takes the empty-effects Dynamic branch
+        // (warning + body-only), making this a clean runtime failure rather
+        // than a compile-time block. TODO: synthesize the proper op-tuple
+        // (see `lower_handler_def_to_tuple` in the old lowerer for the
+        // shape).
+        if self.handler_names.contains(&mvar.name) {
+            return CExpr::Lit(CLit::Atom("unit".to_string()));
+        }
         CExpr::Var(core_var(&mvar.name))
     }
 
@@ -528,7 +579,18 @@ impl<'ctx> Lowerer<'ctx> {
     /// fresh K counter starts back at zero so nested lambdas get stable
     /// names), lower the body, then restore.
     fn lower_lambda_atom(&mut self, params: &[Pat], body: &MExpr) -> CExpr {
-        let mut param_vars = lower_param_names(params);
+        // Non-Var patterns in lambda params (e.g. `fun (Currency a) -> show a`)
+        // need a case-on-tuple-of-args destructure inside the body — same
+        // shape as multi-clause fun bindings. `lower_param_names` collapses
+        // every non-Var pattern to a fresh `_Arg{i}`, so without this wrap
+        // the body's references to the pattern's sub-vars (`a` here) would
+        // be unbound at runtime.
+        let has_non_var_pat = params.iter().any(|p| !matches!(p, Pat::Var { .. }));
+        let mut param_vars: Vec<String> = if has_non_var_pat {
+            (0..params.len()).map(|i| format!("_Arg{}", i)).collect()
+        } else {
+            lower_param_names(params)
+        };
         param_vars.push(EVIDENCE_VAR.to_string());
         param_vars.push(RETURN_K_VAR.to_string());
         let saved_k = std::mem::replace(&mut self.current_return_k, RETURN_K_VAR.to_string());
@@ -538,7 +600,25 @@ impl<'ctx> Lowerer<'ctx> {
         let saved_arm_k = std::mem::replace(&mut self.arm_k_counter, 0);
         let saved_ret_k = std::mem::replace(&mut self.ret_k_counter, 0);
         let saved_helper = std::mem::replace(&mut self.helper_counter, 0);
-        let body_ce = self.lower_expr(body);
+        let body_ce_inner = self.lower_expr(body);
+        let body_ce = if has_non_var_pat {
+            let scrut = CExpr::Tuple(
+                (0..params.len())
+                    .map(|i| CExpr::Var(format!("_Arg{}", i)))
+                    .collect(),
+            );
+            let pat = CPat::Tuple(params.iter().map(|p| self.lower_pat(p)).collect());
+            CExpr::Case(
+                Box::new(scrut),
+                vec![CArm {
+                    pat,
+                    guard: None,
+                    body: body_ce_inner,
+                }],
+            )
+        } else {
+            body_ce_inner
+        };
         self.current_return_k = saved_k;
         self.k_counter = saved_counter;
         self.current_evidence = saved_ev;
@@ -559,22 +639,9 @@ impl<'ctx> Lowerer<'ctx> {
     /// `Show for List a where {a: Show}`).
     fn lower_dict_ref_atom(&mut self, name: &str, source: NodeId) -> CExpr {
         if let Some(resolved) = self.resolution.get(&source).cloned() {
-            // Dict constructors return their tuple directly — see
-            // [`lower_dict_constructor`]. The resolution's arity equals the
-            // where-clause sub-dict count and is the actual exported
-            // function arity (zero for monomorphic impls). For arity-0
-            // monomorphic dicts, `fun_value_of` emits a direct
-            // `call mod:dict/0()` which yields the tuple value — exactly
-            // what a value-position reference needs.
-            if let ResolvedCodegenKind::BeamFunction {
-                erlang_mod: Some(erlang_mod),
-                name,
-                arity,
-                ..
-            } = resolved.kind
-            {
-                return fun_value_of(erlang_mod, name, arity);
-            }
+            // Dict constructors are uniform-shape callables like everything
+            // else; `lower_resolved_value_ref` adds the `+2` for
+            // `_Evidence`/`_ReturnK` via `uniform_value_arity`.
             return self.lower_resolved_value_ref(resolved);
         }
         CExpr::Var(core_var(name))
@@ -642,7 +709,8 @@ impl<'ctx> Lowerer<'ctx> {
                     let erlang_mod: String = src_mod.to_lowercase().replace('.', "_");
                     // Intrinsics have no effect annotation; treat them as
                     // pure for the uniform-arity calculation.
-                    fun_value_of(erlang_mod, resolved.name, uniform_value_arity(arity, &[]))
+                    let uniform = uniform_value_arity(arity, &[], &resolved.name);
+                    fun_value_of(erlang_mod, resolved.name, uniform)
                 } else {
                     CExpr::FunRef(resolved.name, arity)
                 }
@@ -654,7 +722,7 @@ impl<'ctx> Lowerer<'ctx> {
                 effects,
                 ..
             } => {
-                let uniform = uniform_value_arity(arity, &effects);
+                let uniform = uniform_value_arity(arity, &effects, &name);
                 // Same-module refs use FunRef — `erlang:make_fun/3` requires
                 // the target to be exported, but local @external wrappers
                 // for private decls aren't exported. The old lowerer's
@@ -672,7 +740,7 @@ impl<'ctx> Lowerer<'ctx> {
                 effects,
                 ..
             } => {
-                let uniform = uniform_value_arity(arity, &effects);
+                let uniform = uniform_value_arity(arity, &effects, &name);
                 if erlang_mod == self.current_erlang_module {
                     CExpr::FunRef(name, uniform)
                 } else {
@@ -684,7 +752,7 @@ impl<'ctx> Lowerer<'ctx> {
                 arity,
                 effects,
                 ..
-            } => CExpr::FunRef(name, uniform_value_arity(arity, &effects)),
+            } => CExpr::FunRef(name.clone(), uniform_value_arity(arity, &effects, &name)),
         }
     }
 }
@@ -701,14 +769,16 @@ impl<'ctx> Lowerer<'ctx> {
 ///
 /// Arity-0 with no effects denotes a top-level val (a constant), which is
 /// the only kind of Saga-emitted callable that stays at arity 0. Dict
-/// constructors with no where-clause params also resolve as `arity == 0`,
-/// but they go through [`lower_dict_ref_atom`] — that path adds `+2`
-/// directly without consulting this helper.
-fn uniform_value_arity(arity: usize, effects: &[String]) -> usize {
+/// constructors with no where-clause params also resolve with `arity == 0`
+/// but emit at arity 2 (uniform `(_Evidence, _ReturnK)`); we detect them
+/// by the `__dict_` name prefix used everywhere in elaboration and force
+/// the `+2` regardless.
+fn uniform_value_arity(arity: usize, effects: &[String], name: &str) -> usize {
+    let is_dict_ctor = name.starts_with("__dict_");
     if !effects.is_empty() {
         // Old-path resolution already added `+2` for effectful imports.
         arity
-    } else if arity == 0 {
+    } else if arity == 0 && !is_dict_ctor {
         // Val constant — stays arity-0.
         0
     } else {
