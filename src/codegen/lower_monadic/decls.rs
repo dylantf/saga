@@ -44,17 +44,40 @@ impl<'ctx> Lowerer<'ctx> {
 
     /// Lower an `MDecl::Val` to a `CFunDef`.
     ///
-    /// Vals are pure constants — Saga's language design routes effectful
-    /// computations through ordinary functions. The codegen convention
-    /// matches the old lowerer: an arity-0 Erlang function whose body is
-    /// the constant value. No `_Evidence` / `_ReturnK` threading.
+    /// Vals are pure, arity-0 constants — Saga's language design routes
+    /// effectful computations through ordinary functions, so a val's body
+    /// never performs effects. The export shape matches the old lowerer:
+    /// `mod:name/0`, with no `_Evidence` / `_ReturnK` threading at the
+    /// calling convention.
     ///
-    /// The uniform "every fn takes evidence + return-K" rule applies to
-    /// **functions**; a val isn't a function in the calling-convention
-    /// sense, just a top-level constant exposed as `mod:name/0`.
+    /// However, after ANF + monadic translation, the body's `MExpr` shape
+    /// is not restricted to `Pure(atom)` — it may contain `Bind` / `Let` /
+    /// `If` / `Case` / `BinOp` etc. (a `val x = 1 + 2`, for instance).
+    /// `lower_expr` ends every tail with `apply <current_return_k>(value)`,
+    /// so we bind `_ReturnK` locally to the identity function inside the
+    /// arity-0 wrapper — the final `apply` then beta-reduces (in spirit;
+    /// the Erlang compiler does the actual inlining) to just the value.
+    ///
+    /// `_Evidence` is similarly bound to a dummy atom so any stray
+    /// reference (defensive — pure bodies should not produce one) doesn't
+    /// surface as an unbound-var error in `erlc`.
     pub(super) fn lower_val(&mut self, v: &MVal) -> CFunDef {
         self.reset_k_state();
-        let body = self.lower_val_body(&v.value);
+        let body_inner = self.lower_expr(&v.value);
+        // let <_Evidence> = 'unit', <_ReturnK> = fun (_X) -> _X in <body_inner>
+        let id_param = "_X".to_string();
+        let id_k = CExpr::Fun(vec![id_param.clone()], Box::new(CExpr::Var(id_param)));
+        let evidence_dummy = CExpr::Lit(crate::codegen::cerl::CLit::Atom("unit".to_string()));
+        let body_with_k = CExpr::Let(
+            RETURN_K_VAR.to_string(),
+            Box::new(id_k),
+            Box::new(body_inner),
+        );
+        let body = CExpr::Let(
+            EVIDENCE_VAR.to_string(),
+            Box::new(evidence_dummy),
+            Box::new(body_with_k),
+        );
         CFunDef {
             name: v.name.clone(),
             arity: 0,

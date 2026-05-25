@@ -146,6 +146,42 @@ impl<'ctx> Lowerer<'ctx> {
         }
     }
 
+    /// Scan the program's passthrough decls for `RecordDef` entries and
+    /// insert their declared field order into `record_fields` under both
+    /// fully-qualified (`Module.Foo`) and bare (`Foo`) keys. Idempotent:
+    /// existing entries (from imported modules) are not overwritten.
+    ///
+    /// The qualified key uses the **source** (canonical, dotted) module name
+    /// from the program's `ModuleDecl` — not the Erlang-mangled module name
+    /// passed to `lower_module`. The translator stamps record-name strings
+    /// (e.g. on `FieldAccess::record_name`) in the canonical form, so that's
+    /// what the lookup must match. Falls back to the supplied `module_name`
+    /// when no `ModuleDecl` is present (script / test contexts).
+    fn absorb_local_record_defs(&mut self, module_name: &str, program: &MProgram) {
+        let source_module = program
+            .iter()
+            .find_map(|d| match d {
+                MDecl::Passthrough(crate::ast::Decl::ModuleDecl { path, .. }) => {
+                    Some(path.join("."))
+                }
+                _ => None,
+            })
+            .unwrap_or_else(|| module_name.to_string());
+        for decl in program {
+            if let MDecl::Passthrough(crate::ast::Decl::RecordDef { name, fields, .. }) = decl {
+                let field_names: Vec<String> =
+                    fields.iter().map(|a| a.node.0.clone()).collect();
+                let qualified = format!("{}.{}", source_module, name);
+                self.record_fields
+                    .entry(qualified)
+                    .or_insert_with(|| field_names.clone());
+                self.record_fields
+                    .entry(name.clone())
+                    .or_insert(field_names);
+            }
+        }
+    }
+
     /// Enable emission of the bootstrap evidence builder
     /// (`__saga_initial_evidence/0`) on the next call to [`lower_module`].
     /// Intended for the entry-point module; step 8's toggle hook flips
@@ -245,6 +281,13 @@ impl<'ctx> Lowerer<'ctx> {
     /// convention to the raw BIF. See [`lower_external_wrapper`] in
     /// `decls.rs`.
     pub fn lower_module(&mut self, module_name: &str, program: &MProgram) -> CModule {
+        // Populate `record_fields` from the currently-compiling module's own
+        // `RecordDef` decls. The construction-time pass only sees IMPORTED
+        // modules via `module_ctx.modules`; the current module isn't stored
+        // there yet, so its records would be missing without this scan.
+        // Mirrors the old lowerer's behavior in `lower/init.rs`.
+        self.absorb_local_record_defs(module_name, program);
+
         let mut exports = Vec::new();
         let mut funs = Vec::new();
 

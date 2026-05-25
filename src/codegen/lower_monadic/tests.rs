@@ -186,12 +186,94 @@ fn val_emits_arity_zero_constant() {
         other => panic!("expected CExpr::Fun, got {other:?}"),
     };
     assert!(params.is_empty(), "vals take no params");
-    match body {
-        CExpr::Lit(crate::codegen::cerl::CLit::Atom(a)) => assert_eq!(a, "unit"),
-        other => panic!("expected val stub body 'unit', got {other:?}"),
+    // Body shape: let <_Evidence> = 'unit' in let <_ReturnK> = fun (_X) -> _X
+    // in apply _ReturnK('unit').
+    let inner_k_let = match body {
+        CExpr::Let(name, _val, inner) => {
+            assert_eq!(name, "_Evidence");
+            inner.as_ref()
+        }
+        other => panic!("expected outer Let(_Evidence, ..), got {other:?}"),
+    };
+    let body_inner = match inner_k_let {
+        CExpr::Let(name, _val, inner) => {
+            assert_eq!(name, "_ReturnK");
+            inner.as_ref()
+        }
+        other => panic!("expected inner Let(_ReturnK, ..), got {other:?}"),
+    };
+    match body_inner {
+        CExpr::Apply(callee, args) => {
+            assert!(matches!(callee.as_ref(), CExpr::Var(n) if n == "_ReturnK"));
+            assert_eq!(args.len(), 1);
+            assert!(matches!(&args[0], CExpr::Lit(crate::codegen::cerl::CLit::Atom(a)) if a == "unit"));
+        }
+        other => panic!("expected apply _ReturnK('unit'), got {other:?}"),
     }
     // public val → exported at /0
     assert_eq!(cmod.exports, vec![("pi".to_string(), 0)]);
+}
+
+#[test]
+fn val_with_bind_sequenced_body_lowers_without_panic() {
+    // Simulates `val x = 1 + 2` post-translation: a Bind that sequences a
+    // pure computation. The body shape is non-trivial but pure — must lower
+    // through lower_expr cleanly under the val's identity-K wrapper.
+    let bind = MExpr::Bind {
+        var: MVar {
+            name: "tmp".to_string(),
+            id: 0,
+        },
+        value: Box::new(MExpr::Pure(atom_lit(Lit::Int("1".into(), 1)))),
+        body: Box::new(MExpr::Pure(atom_lit(Lit::Int("2".into(), 2)))),
+    };
+    let v = MVal {
+        id: dummy_node(),
+        public: true,
+        name: "sum".to_string(),
+        value: bind,
+        span: span(),
+    };
+    let cmod = lower(&vec![MDecl::Val(v)], "vals");
+    assert_eq!(cmod.funs.len(), 1);
+    let f = &cmod.funs[0];
+    assert_eq!(f.arity, 0);
+    // Outer wrappers present: arity-0 Fun, then let _Evidence, then let _ReturnK.
+    match &f.body {
+        CExpr::Fun(params, inner) => {
+            assert!(params.is_empty());
+            match inner.as_ref() {
+                CExpr::Let(n, _, _) => assert_eq!(n, "_Evidence"),
+                other => panic!("expected Let(_Evidence, ..), got {other:?}"),
+            }
+        }
+        other => panic!("expected Fun, got {other:?}"),
+    }
+}
+
+#[test]
+fn val_with_if_body_lowers_without_panic() {
+    // Simulates `val x = if true then 1 else 2`: structural If, pure.
+    let if_expr = MExpr::If {
+        cond: Atom::Lit {
+            value: Lit::Bool(true),
+            source: dummy_node(),
+        },
+        then_branch: Box::new(MExpr::Pure(atom_lit(Lit::Int("1".into(), 1)))),
+        else_branch: Box::new(MExpr::Pure(atom_lit(Lit::Int("2".into(), 2)))),
+        source: dummy_node(),
+    };
+    let v = MVal {
+        id: dummy_node(),
+        public: true,
+        name: "choice".to_string(),
+        value: if_expr,
+        span: span(),
+    };
+    let cmod = lower(&vec![MDecl::Val(v)], "vals");
+    assert_eq!(cmod.funs.len(), 1);
+    assert_eq!(cmod.funs[0].arity, 0);
+    // Smoke: no panic, arity-0 preserved.
 }
 
 #[test]
@@ -231,6 +313,77 @@ fn passthrough_typedef_emits_nothing() {
     let cmod = lower(&program, "m");
     assert!(cmod.funs.is_empty());
     assert!(cmod.exports.is_empty());
+}
+
+#[test]
+fn passthrough_recorddef_populates_local_record_fields() {
+    // Regression: the construction-time pass only sees IMPORTED modules
+    // via `module_ctx.modules`; the currently-compiling module's records
+    // must be absorbed from the program's Passthrough(RecordDef) entries.
+    let mk_field = |name: &str| ast::Annotated {
+        node: (name.to_string(), type_named("Int")),
+        leading_trivia: vec![],
+        trailing_comment: None,
+        trailing_trivia: vec![],
+    };
+    let decl = ast::Decl::RecordDef {
+        id: dummy_node(),
+        doc: vec![],
+        public: true,
+        name: "TestCaseData".to_string(),
+        name_span: span(),
+        type_params: vec![],
+        fields: vec![mk_field("name"), mk_field("body")],
+        deriving: vec![],
+        multiline: false,
+        dangling_trivia: vec![],
+        span: span(),
+    };
+    let program = vec![MDecl::Passthrough(decl)];
+
+    let resolution = ResolutionMap::new();
+    let ctors = ConstructorAtoms::new();
+    let ctx = CodegenContext::default();
+    let handler_info = HandlerAnalysis::default();
+    let storage = EffectInfoStorage::empty();
+    let effect_info = storage.view();
+    let mut lowerer = Lowerer::new(&resolution, &ctors, &ctx, &handler_info, &effect_info);
+    let _ = lowerer.lower_module("Std.Test", &program);
+
+    // Both qualified and bare keys should now resolve.
+    let order_qual = lowerer
+        .record_fields
+        .get("Std.Test.TestCaseData")
+        .expect("qualified record_fields entry should be populated");
+    assert_eq!(order_qual, &vec!["name".to_string(), "body".to_string()]);
+    assert_eq!(
+        lowerer.record_fields.get("TestCaseData"),
+        Some(&vec!["name".to_string(), "body".to_string()])
+    );
+
+    // lower_field_access must resolve declared order without panicking.
+    let access = lowerer.lower_field_access(
+        &atom_var("rec"),
+        "body",
+        Some("Std.Test.TestCaseData"),
+    );
+    // The access path wraps the element/2 call in apply _ReturnK(...).
+    match access {
+        CExpr::Apply(callee, args) => {
+            assert!(matches!(callee.as_ref(), CExpr::Var(n) if n == "_ReturnK"));
+            assert_eq!(args.len(), 1);
+            match &args[0] {
+                CExpr::Call(m, f, call_args) => {
+                    assert_eq!(m, "erlang");
+                    assert_eq!(f, "element");
+                    // index = position_of("body") + 2 = 1 + 2 = 3
+                    assert!(matches!(call_args[0], CExpr::Lit(CLit::Int(3))));
+                }
+                other => panic!("expected erlang:element call, got {other:?}"),
+            }
+        }
+        other => panic!("expected Apply, got {other:?}"),
+    }
 }
 
 #[test]

@@ -83,27 +83,7 @@ impl<'ctx> Lowerer<'ctx> {
         }
     }
 
-    /// Lower the body of an `MDecl::Val`.
-    ///
-    /// Vals are arity-0 constants with no `_ReturnK` in scope. The expected
-    /// shape after translation is `Pure(atom)` — the atom is the constant
-    /// value. We lower it in place, with no continuation application.
-    ///
-    /// Anything other than `Pure(atom)` is an invariant violation (the
-    /// translator should never have produced a sequencing/binding shape for
-    /// a const-binding body). We panic with a clear message rather than
-    /// invent semantics.
-    pub(super) fn lower_val_body(&mut self, value: &MExpr) -> CExpr {
-        match value {
-            MExpr::Pure(atom) => self.lower_atom(atom),
-            other => panic!(
-                "lower_val_body: val body must be Pure(atom) in 7c; got {:?}",
-                std::mem::discriminant(other)
-            ),
-        }
-    }
-
-    /// `Resume(atom)` → `apply <current_K>(<atom>)`.
+/// `Resume(atom)` → `apply <current_K>(<atom>)`.
     ///
     /// Under uniform K-threading, `Resume` and `Pure` emit identical CEL
     /// inside a handler arm: in an arm body, `current_return_k` is the arm's
