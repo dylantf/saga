@@ -31,6 +31,7 @@
 #![allow(dead_code)] // 7a scaffolding; consumers land in 7b–7g.
 
 mod decls;
+mod effects;
 mod exprs;
 mod pats;
 mod util;
@@ -71,6 +72,14 @@ pub struct Lowerer<'ctx> {
     /// Monotonic counter for fresh K names. Reset at each function entry to
     /// keep emitted Core Erlang stable across decls.
     k_counter: u32,
+    /// Name of the in-scope evidence vector variable. Defaults to `_Evidence`
+    /// at every function/lambda entry; `With` lowering rebinds it temporarily
+    /// to a freshly-generated `_Ev{n}` name for the duration of the handler's
+    /// body, mirroring the [`current_return_k`] pattern.
+    current_evidence: String,
+    /// Monotonic counter for fresh evidence-var names. Reset at each function
+    /// entry to keep emitted Core Erlang stable across decls.
+    ev_counter: u32,
 }
 
 impl<'ctx> Lowerer<'ctx> {
@@ -89,7 +98,17 @@ impl<'ctx> Lowerer<'ctx> {
             effect_info,
             current_return_k: exprs::RETURN_K_VAR.to_string(),
             k_counter: 0,
+            current_evidence: exprs::EVIDENCE_VAR.to_string(),
+            ev_counter: 0,
         }
+    }
+
+    /// Mint a fresh Core Erlang variable name for a `With`-extended evidence
+    /// vector. Form `_Ev{n}` — parallel to `_K{n}` from [`fresh_k_name`].
+    pub(super) fn fresh_evidence_name(&mut self) -> String {
+        let n = self.ev_counter;
+        self.ev_counter += 1;
+        format!("_Ev{}", n)
     }
 
     /// Mint a fresh Core Erlang variable name for a `Bind` continuation.
@@ -116,6 +135,8 @@ impl<'ctx> Lowerer<'ctx> {
     pub(super) fn reset_k_state(&mut self) {
         self.current_return_k = exprs::RETURN_K_VAR.to_string();
         self.k_counter = 0;
+        self.current_evidence = exprs::EVIDENCE_VAR.to_string();
+        self.ev_counter = 0;
     }
 
     /// Lower an entire `MProgram` to a Core Erlang `CModule`.
