@@ -1,5 +1,6 @@
 pub mod call_effects;
 pub mod cerl;
+pub mod handler_analysis;
 pub mod lower;
 pub mod normalize;
 pub mod resolve;
