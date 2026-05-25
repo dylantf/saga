@@ -7,7 +7,7 @@ use std::collections::HashMap;
 
 use super::*;
 use crate::ast::{self, Lit, NodeId, Pat};
-use crate::codegen::cerl::CExpr;
+use crate::codegen::cerl::{CExpr, CPat};
 use crate::codegen::handler_analysis::HandlerAnalysis;
 use crate::codegen::monadic::ir::{
     Atom, EffectInfo, MArm, MBitSegment, MDecl, MDictConstructor, MExpr, MFunBinding, MVal,
@@ -2463,6 +2463,675 @@ fn case_arm_guard_lowers_to_pure_binop() {
         }
         other => panic!("expected guard Call, got {other:?}"),
     }
+}
+
+// ----------------------------------------------------------------------
+// Sub-step 7g part B — pattern coverage, external wrapper, bootstrap,
+// visibility resolution
+// ----------------------------------------------------------------------
+
+fn pat_var(name: &str) -> Pat {
+    Pat::Var {
+        id: dummy_node(),
+        name: name.to_string(),
+        span: span(),
+    }
+}
+
+fn pat_wild() -> Pat {
+    Pat::Wildcard {
+        id: dummy_node(),
+        span: span(),
+    }
+}
+
+/// Lower a case-scrutinee with a single arm carrying `pat` as its pattern;
+/// return the lowered CPat. Lets pattern tests focus on the CPat shape
+/// without re-asserting the surrounding Case wrap.
+fn lower_pat_in_case(pat: Pat, lowerer_setup: impl FnOnce(&mut Lowerer<'_>)) -> CPat {
+    let resolution = ResolutionMap::new();
+    let ctors = ConstructorAtoms::new();
+    let ctx = CodegenContext::default();
+    let handler_info = HandlerAnalysis::default();
+    let storage = EffectInfoStorage::empty();
+    let effect_info = storage.view();
+    let mut lowerer = Lowerer::new(&resolution, &ctors, &ctx, &handler_info, &effect_info);
+    lowerer_setup(&mut lowerer);
+    let expr = MExpr::Case {
+        scrutinee: atom_var("x"),
+        arms: vec![MArm {
+            pattern: pat,
+            guard: None,
+            body: MExpr::Pure(atom_lit(Lit::Unit)),
+            span: span(),
+        }],
+        source: dummy_node(),
+    };
+    let ce = lowerer.lower_expr(&expr);
+    match ce {
+        CExpr::Case(_, mut arms) => arms.remove(0).pat,
+        other => panic!("expected Case, got {other:?}"),
+    }
+}
+
+#[test]
+fn pat_record_uses_declared_field_order() {
+    // record Pt { x, y }; pattern { x = a, y = b } should lower to
+    // CPat::Tuple([Atom("Pt"), Var(A), Var(B)]) — declared field order.
+    let pat = Pat::Record {
+        id: dummy_node(),
+        name: "Pt".to_string(),
+        fields: vec![
+            ("y".to_string(), Some(pat_var("b"))),
+            ("x".to_string(), Some(pat_var("a"))),
+        ],
+        rest: false,
+        as_name: None,
+        span: span(),
+    };
+    let cpat = lower_pat_in_case(pat, |l| {
+        l.record_fields.insert(
+            "Pt".to_string(),
+            vec!["x".to_string(), "y".to_string()],
+        );
+    });
+    let elems = match cpat {
+        CPat::Tuple(es) => es,
+        other => panic!("expected Tuple, got {other:?}"),
+    };
+    assert_eq!(elems.len(), 3);
+    assert!(matches!(&elems[0], CPat::Lit(CLit::Atom(a)) if a == "Pt"));
+    assert!(matches!(&elems[1], CPat::Var(n) if n == "A"));
+    assert!(matches!(&elems[2], CPat::Var(n) if n == "B"));
+}
+
+#[test]
+fn pat_record_with_as_name_aliases_tuple() {
+    let pat = Pat::Record {
+        id: dummy_node(),
+        name: "Pt".to_string(),
+        fields: vec![("x".to_string(), None), ("y".to_string(), None)],
+        rest: false,
+        as_name: Some("whole".to_string()),
+        span: span(),
+    };
+    let cpat = lower_pat_in_case(pat, |l| {
+        l.record_fields.insert(
+            "Pt".to_string(),
+            vec!["x".to_string(), "y".to_string()],
+        );
+    });
+    match cpat {
+        CPat::Alias(var, inner) => {
+            assert_eq!(var, "Whole");
+            assert!(matches!(inner.as_ref(), CPat::Tuple(_)));
+        }
+        other => panic!("expected Alias, got {other:?}"),
+    }
+}
+
+#[test]
+fn pat_anon_record_sorts_fields_alphabetically() {
+    // Source-order: y, x. Sorted: x, y. Tag depends on sorted names.
+    let pat = Pat::AnonRecord {
+        id: dummy_node(),
+        fields: vec![
+            ("y".to_string(), Some(pat_var("b"))),
+            ("x".to_string(), Some(pat_var("a"))),
+        ],
+        rest: false,
+        span: span(),
+    };
+    let cpat = lower_pat_in_case(pat, |_| {});
+    let elems = match cpat {
+        CPat::Tuple(es) => es,
+        other => panic!("expected Tuple, got {other:?}"),
+    };
+    assert_eq!(elems.len(), 3);
+    // Sorted order x, y → element[1] is A, element[2] is B.
+    assert!(matches!(&elems[1], CPat::Var(n) if n == "A"));
+    assert!(matches!(&elems[2], CPat::Var(n) if n == "B"));
+}
+
+#[test]
+fn pat_string_prefix_lowers_to_binary_with_byte_run_and_tail() {
+    let pat = Pat::StringPrefix {
+        id: dummy_node(),
+        prefix: "ok".to_string(),
+        rest: Box::new(pat_var("tail")),
+        span: span(),
+    };
+    let cpat = lower_pat_in_case(pat, |_| {});
+    match cpat {
+        CPat::Binary(segs) => {
+            assert_eq!(segs.len(), 3);
+            assert!(matches!(segs[0], CBinSeg::Byte(b'o')));
+            assert!(matches!(segs[1], CBinSeg::Byte(b'k')));
+            match &segs[2] {
+                CBinSeg::BinaryAll(p) => {
+                    assert!(matches!(p, CPat::Var(n) if n == "Tail"))
+                }
+                other => panic!("expected BinaryAll tail, got {other:?}"),
+            }
+        }
+        other => panic!("expected Binary, got {other:?}"),
+    }
+}
+
+#[test]
+fn pat_bitstring_with_int_size_emits_sized_segment() {
+    use crate::ast::BitSegment;
+    let int_size_expr = ast::Expr::synth(
+        span(),
+        ast::ExprKind::Lit {
+            value: Lit::Int("16".to_string(), 16),
+        },
+    );
+    let pat = Pat::BitStringPat {
+        id: dummy_node(),
+        segments: vec![BitSegment {
+            value: pat_var("x"),
+            size: Some(Box::new(int_size_expr)),
+            specs: vec![],
+            span: span(),
+        }],
+        span: span(),
+    };
+    let cpat = lower_pat_in_case(pat, |_| {});
+    match cpat {
+        CPat::Binary(segs) => {
+            assert_eq!(segs.len(), 1);
+            match &segs[0] {
+                CBinSeg::Segment { value, size, .. } => {
+                    assert!(matches!(value, CPat::Var(n) if n == "X"));
+                    match size {
+                        crate::codegen::cerl::BinSegSize::Expr(CExpr::Lit(CLit::Int(16))) => {}
+                        other => panic!("expected size 16, got {other:?}"),
+                    }
+                }
+                other => panic!("expected Segment, got {other:?}"),
+            }
+        }
+        other => panic!("expected Binary, got {other:?}"),
+    }
+}
+
+#[test]
+fn pat_bitstring_binary_no_size_emits_binary_all() {
+    use crate::ast::{BitSegSpec, BitSegment};
+    let pat = Pat::BitStringPat {
+        id: dummy_node(),
+        segments: vec![BitSegment {
+            value: pat_var("rest"),
+            size: None,
+            specs: vec![BitSegSpec::Binary],
+            span: span(),
+        }],
+        span: span(),
+    };
+    let cpat = lower_pat_in_case(pat, |_| {});
+    match cpat {
+        CPat::Binary(segs) => match &segs[0] {
+            CBinSeg::BinaryAll(p) => {
+                assert!(matches!(p, CPat::Var(n) if n == "Rest"))
+            }
+            other => panic!("expected BinaryAll, got {other:?}"),
+        },
+        other => panic!("expected Binary, got {other:?}"),
+    }
+}
+
+#[test]
+#[should_panic(expected = "desugared")]
+fn pat_or_is_unreachable_post_desugar() {
+    let pat = Pat::Or {
+        id: dummy_node(),
+        patterns: vec![pat_var("a"), pat_var("b")],
+        span: span(),
+    };
+    let _ = lower_pat_in_case(pat, |_| {});
+}
+
+#[test]
+#[should_panic(expected = "desugared")]
+fn pat_list_is_unreachable_post_desugar() {
+    let pat = Pat::ListPat {
+        id: dummy_node(),
+        elements: vec![pat_var("a")],
+        span: span(),
+    };
+    let _ = lower_pat_in_case(pat, |_| {});
+}
+
+// --- @external wrapper -------------------------------------------------
+
+fn type_named(name: &str) -> ast::TypeExpr {
+    ast::TypeExpr::Named {
+        id: dummy_node(),
+        name: name.to_string(),
+        span: span(),
+    }
+}
+
+#[test]
+fn external_fun_signature_emits_uniform_wrapper() {
+    let decl = ast::Decl::FunSignature {
+        id: dummy_node(),
+        doc: vec![],
+        public: true,
+        name: "reverse".to_string(),
+        name_span: span(),
+        params: vec![("xs".to_string(), type_named("List"))],
+        return_type: type_named("List"),
+        effects: vec![],
+        effect_row_var: None,
+        where_clause: vec![],
+        annotations: vec![ast::Annotation {
+            name: "external".to_string(),
+            name_span: span(),
+            args: vec![
+                Lit::String("runtime".to_string(), crate::token::StringKind::Normal),
+                Lit::String("lists".to_string(), crate::token::StringKind::Normal),
+                Lit::String("reverse".to_string(), crate::token::StringKind::Normal),
+            ],
+            span: span(),
+        }],
+        span: span(),
+    };
+    let program = vec![MDecl::Passthrough(decl)];
+    let cmod = lower(&program, "m");
+    assert_eq!(cmod.funs.len(), 1);
+    let f = &cmod.funs[0];
+    assert_eq!(f.name, "reverse");
+    // 1 user param + _Evidence + _ReturnK = 3
+    assert_eq!(f.arity, 3);
+    // public → exported.
+    assert_eq!(cmod.exports, vec![("reverse".to_string(), 3)]);
+    let (params, body) = match &f.body {
+        CExpr::Fun(p, b) => (p.clone(), b.as_ref()),
+        other => panic!("expected Fun, got {other:?}"),
+    };
+    assert_eq!(params, vec!["_Ext0", "_Evidence", "_ReturnK"]);
+    // body: apply _ReturnK(call 'lists':'reverse'(_Ext0))
+    let arg = match body {
+        CExpr::Apply(c, args) => {
+            assert!(matches!(c.as_ref(), CExpr::Var(n) if n == "_ReturnK"));
+            &args[0]
+        }
+        other => panic!("expected Apply, got {other:?}"),
+    };
+    match arg {
+        CExpr::Call(m, f, call_args) => {
+            assert_eq!(m, "lists");
+            assert_eq!(f, "reverse");
+            assert_eq!(call_args.len(), 1);
+            assert!(matches!(&call_args[0], CExpr::Var(n) if n == "_Ext0"));
+        }
+        other => panic!("expected Call inside Apply, got {other:?}"),
+    }
+}
+
+#[test]
+fn external_wrapper_filters_unit_params_from_call() {
+    // fun foo : Unit -> Int; @external("runtime", "m", "f")
+    // Wrapper arity is still 3 (unit param + Evidence + ReturnK),
+    // but the call site to 'm':'f' takes 0 args.
+    let decl = ast::Decl::FunSignature {
+        id: dummy_node(),
+        doc: vec![],
+        public: true,
+        name: "foo".to_string(),
+        name_span: span(),
+        params: vec![("u".to_string(), type_named("Unit"))],
+        return_type: type_named("Int"),
+        effects: vec![],
+        effect_row_var: None,
+        where_clause: vec![],
+        annotations: vec![ast::Annotation {
+            name: "external".to_string(),
+            name_span: span(),
+            args: vec![
+                Lit::String("runtime".to_string(), crate::token::StringKind::Normal),
+                Lit::String("m".to_string(), crate::token::StringKind::Normal),
+                Lit::String("f".to_string(), crate::token::StringKind::Normal),
+            ],
+            span: span(),
+        }],
+        span: span(),
+    };
+    let cmod = lower(&vec![MDecl::Passthrough(decl)], "m");
+    let f = &cmod.funs[0];
+    assert_eq!(f.arity, 3);
+    let body = match &f.body {
+        CExpr::Fun(_, b) => b.as_ref(),
+        _ => unreachable!(),
+    };
+    let call = match body {
+        CExpr::Apply(_, args) => &args[0],
+        _ => unreachable!(),
+    };
+    match call {
+        CExpr::Call(_, _, ca) => assert!(
+            ca.is_empty(),
+            "Unit param must be filtered from BIF call args"
+        ),
+        other => panic!("expected Call, got {other:?}"),
+    }
+}
+
+#[test]
+fn external_wrapper_not_emitted_for_non_external_signature() {
+    let decl = ast::Decl::FunSignature {
+        id: dummy_node(),
+        doc: vec![],
+        public: true,
+        name: "no_ext".to_string(),
+        name_span: span(),
+        params: vec![],
+        return_type: type_named("Int"),
+        effects: vec![],
+        effect_row_var: None,
+        where_clause: vec![],
+        annotations: vec![],
+        span: span(),
+    };
+    let cmod = lower(&vec![MDecl::Passthrough(decl)], "m");
+    assert!(cmod.funs.is_empty());
+    assert!(cmod.exports.is_empty());
+}
+
+#[test]
+fn private_external_signature_not_exported() {
+    let decl = ast::Decl::FunSignature {
+        id: dummy_node(),
+        doc: vec![],
+        public: false,
+        name: "priv".to_string(),
+        name_span: span(),
+        params: vec![],
+        return_type: type_named("Int"),
+        effects: vec![],
+        effect_row_var: None,
+        where_clause: vec![],
+        annotations: vec![ast::Annotation {
+            name: "external".to_string(),
+            name_span: span(),
+            args: vec![
+                Lit::String("runtime".to_string(), crate::token::StringKind::Normal),
+                Lit::String("m".to_string(), crate::token::StringKind::Normal),
+                Lit::String("f".to_string(), crate::token::StringKind::Normal),
+            ],
+            span: span(),
+        }],
+        span: span(),
+    };
+    let cmod = lower(&vec![MDecl::Passthrough(decl)], "m");
+    assert_eq!(cmod.funs.len(), 1, "private external still emits fundef");
+    assert!(
+        cmod.exports.is_empty(),
+        "but is not exported"
+    );
+}
+
+// --- Bootstrap ---------------------------------------------------------
+
+#[test]
+fn bootstrap_emits_initial_evidence_fn_when_enabled() {
+    let resolution = ResolutionMap::new();
+    let ctors = ConstructorAtoms::new();
+    let ctx = CodegenContext::default();
+    let handler_info = HandlerAnalysis::default();
+    let storage = EffectInfoStorage::empty();
+    let effect_info = storage.view();
+    let mut lowerer = Lowerer::new(&resolution, &ctors, &ctx, &handler_info, &effect_info)
+        .with_bootstrap_emission(true);
+    let cmod = lowerer.lower_module("entry", &vec![]);
+    let names: Vec<&str> = cmod.funs.iter().map(|f| f.name.as_str()).collect();
+    assert!(
+        names.contains(&"__saga_initial_evidence"),
+        "expected bootstrap fn in emitted funs, got {names:?}"
+    );
+    let f = cmod
+        .funs
+        .iter()
+        .find(|f| f.name == "__saga_initial_evidence")
+        .unwrap();
+    assert_eq!(f.arity, 0);
+}
+
+#[test]
+fn bootstrap_not_emitted_when_disabled() {
+    let cmod = lower(&vec![], "m");
+    assert!(
+        cmod.funs.is_empty(),
+        "no bootstrap when emit_bootstrap is off"
+    );
+}
+
+#[test]
+fn bootstrap_evidence_vector_has_canonical_effect_entries() {
+    let resolution = ResolutionMap::new();
+    let ctors = ConstructorAtoms::new();
+    let ctx = CodegenContext::default();
+    let handler_info = HandlerAnalysis::default();
+    let storage = EffectInfoStorage::empty();
+    let effect_info = storage.view();
+    let mut lowerer = Lowerer::new(&resolution, &ctors, &ctx, &handler_info, &effect_info)
+        .with_bootstrap_emission(true);
+    let cmod = lowerer.lower_module("entry", &vec![]);
+    let f = cmod
+        .funs
+        .iter()
+        .find(|f| f.name == "__saga_initial_evidence")
+        .unwrap();
+    let body = match &f.body {
+        CExpr::Fun(_, b) => b.as_ref(),
+        _ => panic!("expected Fun"),
+    };
+    // Body is a tuple of {EffectAtom, OpTuple} pairs.
+    let entries = match body {
+        CExpr::Tuple(es) => es,
+        other => panic!("expected Tuple body, got {other:?}"),
+    };
+    assert_eq!(entries.len(), super::bootstrap::native_effect_count());
+    // Each entry: {EffectAtom, OpTuple}
+    for (entry, &expected_tag) in entries.iter().zip(super::bootstrap::native_effect_tags().iter())
+    {
+        match entry {
+            CExpr::Tuple(pair) => {
+                assert_eq!(pair.len(), 2);
+                match &pair[0] {
+                    CExpr::Lit(CLit::Atom(a)) => assert_eq!(a, expected_tag),
+                    other => panic!("expected EffectAtom tag, got {other:?}"),
+                }
+                let op_count = super::bootstrap::ops_for_effect(expected_tag).unwrap().len();
+                match &pair[1] {
+                    CExpr::Tuple(ops) => assert_eq!(ops.len(), op_count),
+                    other => panic!("expected OpTuple, got {other:?}"),
+                }
+            }
+            other => panic!("expected entry tuple, got {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn bootstrap_identity_op_closure_calls_bif_and_applies_k() {
+    // Process.self/0 has Identity shape: fun(K) -> apply K(erlang:self())
+    let resolution = ResolutionMap::new();
+    let ctors = ConstructorAtoms::new();
+    let ctx = CodegenContext::default();
+    let handler_info = HandlerAnalysis::default();
+    let storage = EffectInfoStorage::empty();
+    let effect_info = storage.view();
+    let mut lowerer = Lowerer::new(&resolution, &ctors, &ctx, &handler_info, &effect_info)
+        .with_bootstrap_emission(true);
+    let cmod = lowerer.lower_module("entry", &vec![]);
+    let f = cmod
+        .funs
+        .iter()
+        .find(|f| f.name == "__saga_initial_evidence")
+        .unwrap();
+    let body = match &f.body {
+        CExpr::Fun(_, b) => b.as_ref(),
+        _ => unreachable!(),
+    };
+    // Walk to Process entry → OpTuple
+    let entries = match body {
+        CExpr::Tuple(es) => es,
+        _ => unreachable!(),
+    };
+    let process_entry = entries
+        .iter()
+        .find(|e| match e {
+            CExpr::Tuple(p) => matches!(&p[0], CExpr::Lit(CLit::Atom(a)) if a == "Process"),
+            _ => false,
+        })
+        .expect("Process entry");
+    let op_tuple = match process_entry {
+        CExpr::Tuple(p) => &p[1],
+        _ => unreachable!(),
+    };
+    let ops = match op_tuple {
+        CExpr::Tuple(o) => o,
+        _ => unreachable!(),
+    };
+    // alphabetical Process ops: demonitor(0), exit(1), link(2), monitor(3),
+    // self(4), send(5), spawn(6), unlink(7)
+    let self_closure = &ops[4];
+    let (params, closure_body) = match self_closure {
+        CExpr::Fun(p, b) => (p.clone(), b.as_ref()),
+        other => panic!("expected Fun, got {other:?}"),
+    };
+    assert_eq!(params, vec!["_K"]); // 0 args + K
+    match closure_body {
+        CExpr::Apply(c, args) => {
+            assert!(matches!(c.as_ref(), CExpr::Var(n) if n == "_K"));
+            match &args[0] {
+                CExpr::Call(m, fname, ca) => {
+                    assert_eq!(m, "erlang");
+                    assert_eq!(fname, "self");
+                    assert!(ca.is_empty());
+                }
+                other => panic!("expected erlang:self call, got {other:?}"),
+            }
+        }
+        other => panic!("expected Apply body, got {other:?}"),
+    }
+}
+
+#[test]
+fn bootstrap_unimplemented_op_emits_exit_stub() {
+    // Process.spawn needs WrapThunk → stub: erlang:exit({not_implemented_native_op,...})
+    let resolution = ResolutionMap::new();
+    let ctors = ConstructorAtoms::new();
+    let ctx = CodegenContext::default();
+    let handler_info = HandlerAnalysis::default();
+    let storage = EffectInfoStorage::empty();
+    let effect_info = storage.view();
+    let mut lowerer = Lowerer::new(&resolution, &ctors, &ctx, &handler_info, &effect_info)
+        .with_bootstrap_emission(true);
+    let cmod = lowerer.lower_module("entry", &vec![]);
+    let f = cmod
+        .funs
+        .iter()
+        .find(|f| f.name == "__saga_initial_evidence")
+        .unwrap();
+    let body = match &f.body {
+        CExpr::Fun(_, b) => b.as_ref(),
+        _ => unreachable!(),
+    };
+    let entries = match body {
+        CExpr::Tuple(es) => es,
+        _ => unreachable!(),
+    };
+    let process_entry = entries
+        .iter()
+        .find(|e| match e {
+            CExpr::Tuple(p) => matches!(&p[0], CExpr::Lit(CLit::Atom(a)) if a == "Process"),
+            _ => false,
+        })
+        .unwrap();
+    let ops = match process_entry {
+        CExpr::Tuple(p) => match &p[1] {
+            CExpr::Tuple(o) => o,
+            _ => unreachable!(),
+        },
+        _ => unreachable!(),
+    };
+    // spawn is index 6 in alphabetical Process ops
+    let spawn_closure = &ops[6];
+    let closure_body = match spawn_closure {
+        CExpr::Fun(_, b) => b.as_ref(),
+        _ => unreachable!(),
+    };
+    // apply _K(erlang:exit({not_implemented_native_op, 'Process', 'spawn'}))
+    match closure_body {
+        CExpr::Apply(_, args) => match &args[0] {
+            CExpr::Call(m, f, ca) => {
+                assert_eq!(m, "erlang");
+                assert_eq!(f, "exit");
+                let tag = match &ca[0] {
+                    CExpr::Tuple(t) => t,
+                    _ => panic!(),
+                };
+                assert!(matches!(&tag[0], CExpr::Lit(CLit::Atom(a)) if a == "not_implemented_native_op"));
+                assert!(matches!(&tag[1], CExpr::Lit(CLit::Atom(a)) if a == "Process"));
+                assert!(matches!(&tag[2], CExpr::Lit(CLit::Atom(a)) if a == "spawn"));
+            }
+            other => panic!("expected exit call, got {other:?}"),
+        },
+        other => panic!("expected Apply, got {other:?}"),
+    }
+}
+
+// --- public flag resolution -------------------------------------------
+
+#[test]
+fn fun_binding_not_in_exports_is_not_exported() {
+    // When the lowerer is given a ModuleCodegenInfo whose exports list
+    // does not contain the FunBinding name, the binding stays unexported.
+    use crate::codegen::CompiledModule;
+    use crate::typechecker::Scheme;
+
+    let mut compiled = CompiledModule::default();
+    // Mark "pubfn" public, leave "privfn" out.
+    compiled.codegen_info.exports.push((
+        "pubfn".to_string(),
+        Scheme {
+            forall: vec![],
+            constraints: vec![],
+            ty: crate::typechecker::Type::int(),
+        },
+    ));
+    let mod_name = "vis_test".to_string();
+    let mut ctx = CodegenContext::default();
+    ctx.modules.insert(mod_name.clone(), compiled);
+
+    let resolution = ResolutionMap::new();
+    let ctors = ConstructorAtoms::new();
+    let handler_info = HandlerAnalysis::default();
+    let storage = EffectInfoStorage::empty();
+    let effect_info = storage.view();
+    let mut lowerer = Lowerer::new(&resolution, &ctors, &ctx, &handler_info, &effect_info);
+
+    let mk_fb = |name: &str| {
+        MDecl::FunBinding(MFunBinding {
+            id: dummy_node(),
+            name: name.to_string(),
+            name_span: span(),
+            params: vec![pat_var("x")],
+            body: pure_unit(),
+            span: span(),
+        })
+    };
+    let program = vec![mk_fb("pubfn"), mk_fb("privfn")];
+    let cmod = lowerer.lower_module(&mod_name, &program);
+    let exported: Vec<&str> = cmod.exports.iter().map(|(n, _)| n.as_str()).collect();
+    assert!(exported.contains(&"pubfn"), "pubfn must be exported");
+    assert!(!exported.contains(&"privfn"), "privfn must NOT be exported");
+    // both fundefs still emitted
+    assert_eq!(cmod.funs.len(), 2);
 }
 
 #[test]

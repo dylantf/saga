@@ -30,6 +30,7 @@
 
 #![allow(dead_code)] // 7a scaffolding; consumers land in 7b–7g.
 
+mod bootstrap;
 mod decls;
 mod effects;
 mod exprs;
@@ -102,6 +103,11 @@ pub struct Lowerer<'ctx> {
     /// into a positional `element/2` access — there is no field-name
     /// metadata at runtime, only positions in the underlying tuple.
     pub(super) record_fields: HashMap<String, Vec<String>>,
+    /// Whether [`lower_module`] should also emit the bootstrap evidence
+    /// builder (`__saga_initial_evidence/0`). Off by default — only the
+    /// designated entry-point module needs the bootstrap, and step 8's
+    /// toggle wiring decides when to flip it on. See `bootstrap.rs`.
+    pub(super) emit_bootstrap: bool,
 }
 
 impl<'ctx> Lowerer<'ctx> {
@@ -136,7 +142,17 @@ impl<'ctx> Lowerer<'ctx> {
             ret_k_counter: 0,
             helper_counter: 0,
             record_fields,
+            emit_bootstrap: false,
         }
+    }
+
+    /// Enable emission of the bootstrap evidence builder
+    /// (`__saga_initial_evidence/0`) on the next call to [`lower_module`].
+    /// Intended for the entry-point module; step 8's toggle hook flips
+    /// this on for the module hosting `main`.
+    pub fn with_bootstrap_emission(mut self, on: bool) -> Self {
+        self.emit_bootstrap = on;
+        self
     }
 
     /// Mint a fresh handler-arm K name (`_K_arm{n}`). Distinct from Bind-K
@@ -215,18 +231,48 @@ impl<'ctx> Lowerer<'ctx> {
     ///
     /// Export list:
     ///   - `MVal` carries its own `public` flag → exported when true.
-    ///   - `MFunBinding` and `MDictConstructor` have no pub field on the IR.
-    ///     For 7a, both are exported unconditionally so the emitted module
-    ///     compiles standalone. Sub-step 7g (or earlier, if a real test
-    ///     exposes the gap) wires this back to the source-decl visibility.
+    ///   - `MFunBinding` and `MDictConstructor` don't carry a `public` flag on
+    ///     the IR. We resolve visibility from the current module's
+    ///     `ModuleCodegenInfo.exports` (built by the typechecker, lists all
+    ///     public bindings by name). When that lookup is unavailable
+    ///     (e.g. unit-test contexts using `CodegenContext::default()`),
+    ///     we fall back to exporting everything — preserves test ergonomics
+    ///     and matches the pre-7g-B behaviour of the new path.
+    ///
+    /// `@external` wrappers: `Passthrough(FunSignature)` decls with an
+    /// `@external("runtime", "<erl_module>", "<erl_func>")` annotation get a
+    /// synthesized arity-N+2 wrapper that bridges the uniform calling
+    /// convention to the raw BIF. See [`lower_external_wrapper`] in
+    /// `decls.rs`.
     pub fn lower_module(&mut self, module_name: &str, program: &MProgram) -> CModule {
         let mut exports = Vec::new();
         let mut funs = Vec::new();
 
+        // Public-name set for FunBinding / DictConstructor visibility.
+        // When the module isn't registered in `module_ctx` (test contexts),
+        // `pub_names` is `None`: callers default to exporting everything.
+        let pub_names: Option<std::collections::HashSet<String>> = self
+            .module_ctx
+            .modules
+            .get(module_name)
+            .map(|m| {
+                m.codegen_info
+                    .exports
+                    .iter()
+                    .map(|(n, _)| n.clone())
+                    .collect()
+            });
+
+        let is_public = |name: &str| -> bool {
+            pub_names.as_ref().is_none_or(|s| s.contains(name))
+        };
+
         for decl in program {
             match decl {
                 MDecl::FunBinding(fb) => {
-                    exports.push((fb.name.clone(), fun_binding_arity(&fb.params)));
+                    if is_public(&fb.name) {
+                        exports.push((fb.name.clone(), fun_binding_arity(&fb.params)));
+                    }
                     funs.push(self.lower_fun_binding(fb));
                 }
                 MDecl::Val(v) => {
@@ -236,15 +282,26 @@ impl<'ctx> Lowerer<'ctx> {
                     funs.push(self.lower_val(v));
                 }
                 MDecl::DictConstructor(dc) => {
-                    exports.push((dc.name.clone(), dict_constructor_arity(dc)));
+                    if is_public(&dc.name) {
+                        exports.push((dc.name.clone(), dict_constructor_arity(dc)));
+                    }
                     funs.push(self.lower_dict_constructor(dc));
                 }
-                MDecl::Passthrough(_) => {
-                    // No runtime emission for type/effect/trait/import/module
-                    // headers. `@external` wrappers and other code-emitting
-                    // passthroughs are deferred to a later sub-step.
+                MDecl::Passthrough(decl) => {
+                    if let Some((wrapper, arity, public)) =
+                        decls::lower_external_wrapper(decl)
+                    {
+                        if public {
+                            exports.push((wrapper.name.clone(), arity));
+                        }
+                        funs.push(wrapper);
+                    }
                 }
             }
+        }
+
+        if self.emit_bootstrap {
+            funs.push(bootstrap::build_initial_evidence_fundef());
         }
 
         CModule {

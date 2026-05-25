@@ -14,7 +14,7 @@ Tick boxes as steps land. Each box → one focused agent session.
 - [x] **4.** `src/codegen/monadic/translate.rs` — see stage 10
 - [x] **5.** `src/codegen/monadic/print.rs` — debug pretty-printer
 - [x] **6.** `src/codegen/monadic/effect_opt/` as identity — see stage 11
-- [ ] **7.** `src/codegen/lower_monadic/` — see stage 12 (sub-tasks 7a–7g; see "Implementation phases")
+- [x] **7.** `src/codegen/lower_monadic/` — see stage 12 (sub-tasks 7a–7g; see "Implementation phases")
   - [x] **7a.** Function/decl scaffolding (stubbed bodies)
   - [x] **7b.** Atom → CExpr
   - [x] **7c.** MExpr structural variants (Pure, Bind, Let, Case, If, App) + DictConstructor tuple synthesis
@@ -23,7 +23,7 @@ Tick boxes as steps land. Each box → one focused agent session.
   - [x] **7f.** ~~BEAM-native effect bodies~~ — **dropped.** Slow path uses uniform find_evidence; module-init bootstrap installs default native handlers (folded into 7g). Direct-native fast-path deferred to phase 2+ as an optimizer rewrite.
   - **7g.** Edge cases (split into two parts):
     - [x] **7g.A.** Expression-level edge cases: records, bitstrings, receive, dict-method-access, foreign calls, BinOp/UnaryMinus, arm guards
-    - [ ] **7g.B.** Patterns, decls, bootstrap: Pat::Or + surface-syntax patterns, `@external` wrappers, module-init bootstrap for BEAM-native default handlers, `public` flag resolution
+    - [x] **7g.B.** Patterns, decls, bootstrap: Pat::Or + surface-syntax patterns, `@external` wrappers, module-init bootstrap for BEAM-native default handlers, `public` flag resolution
 - [ ] **8.** Toggle wiring in `src/codegen/mod.rs` — both entry points
 
 **Milestone:** new path passes the full test suite under the toggle.

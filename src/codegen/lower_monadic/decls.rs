@@ -12,7 +12,7 @@
 //! return continuation, regardless of whether the source function performs
 //! any effects. See the planning doc's "slow uniform path" section.
 
-use crate::ast::Pat;
+use crate::ast::{self, Annotation, Decl, Lit, Pat, TypeExpr};
 use crate::codegen::cerl::{CExpr, CFunDef};
 use crate::codegen::monadic::ir::{Atom, MDictConstructor, MExpr, MFunBinding, MVal};
 
@@ -132,3 +132,107 @@ pub(super) fn val_arity() -> usize {
 pub(super) fn dict_constructor_arity(dc: &MDictConstructor) -> usize {
     dc.dict_params.len() + 2
 }
+
+/// Extract the `(erl_module, erl_func)` pair from an
+/// `@external("runtime", "<mod>", "<func>")` annotation list. Returns
+/// `None` when no such annotation is present. Copied from
+/// `src/codegen/lower/init.rs::extract_external` per the agent-guide's
+/// "no imports from frozen files" rule.
+fn extract_external(annotations: &[Annotation]) -> Option<(String, String)> {
+    annotations.iter().find(|a| a.name == "external").and_then(|a| {
+        if a.args.len() >= 3
+            && let (Lit::String(module, _), Lit::String(func, _)) = (&a.args[1], &a.args[2])
+        {
+            Some((module.clone(), func.clone()))
+        } else {
+            None
+        }
+    })
+}
+
+/// Lower an `@external` `FunSignature` decl into a wrapper `CFunDef`.
+///
+/// Returns `Some((CFunDef, exported_arity, public))` for FunSignature decls
+/// carrying an `@external("runtime", "<mod>", "<func>")` annotation;
+/// `None` for any other decl shape (callers skip those).
+///
+/// **Shape.** Under the new path's uniform calling convention, every
+/// callable receives `(user_args..., _Evidence, _ReturnK)`. External
+/// wrappers bridge to a raw BIF that doesn't know about evidence or
+/// continuations — so the wrapper:
+///
+/// ```text
+/// fun (_Ext0, ..., _ExtN, _Evidence, _ReturnK) ->
+///   apply _ReturnK(call '<mod>':'<func>'(_Ext0, ..., _ExtN))
+/// ```
+///
+/// `_Evidence` is unused at the wrapper level (the wrapped BIF performs
+/// no effects), but the param is included so the wrapper has the uniform
+/// arity every caller of the new path expects.
+///
+/// **Unit-type filtering.** The old lowerer skips `Unit`-typed params
+/// from the BIF call (`is_unit_type_expr(ty)`) — Saga's `Unit` becomes
+/// the runtime atom `'unit'`, which most BIFs don't accept. We mirror
+/// the same filter so the emitted call shape matches the old path.
+pub(super) fn lower_external_wrapper(decl: &Decl) -> Option<(CFunDef, usize, bool)> {
+    let Decl::FunSignature {
+        public,
+        name,
+        params,
+        annotations,
+        ..
+    } = decl
+    else {
+        return None;
+    };
+    let (erl_module, erl_func) = extract_external(annotations)?;
+    let user_arity = params.len();
+
+    // User-arg param names; Evidence + ReturnK appended for uniform shape.
+    let mut param_vars: Vec<String> = (0..user_arity).map(|i| format!("_Ext{}", i)).collect();
+    let call_args: Vec<CExpr> = param_vars
+        .iter()
+        .zip(params.iter())
+        .filter(|(_, (_, ty))| !is_unit_type_expr(ty))
+        .map(|(v, _)| CExpr::Var(v.clone()))
+        .collect();
+    param_vars.push(EVIDENCE_VAR.to_string());
+    param_vars.push(RETURN_K_VAR.to_string());
+    let total_arity = param_vars.len();
+
+    let call = CExpr::Call(erl_module, erl_func, call_args);
+    let body = CExpr::Apply(
+        Box::new(CExpr::Var(RETURN_K_VAR.to_string())),
+        vec![call],
+    );
+
+    Some((
+        CFunDef {
+            name: name.clone(),
+            arity: total_arity,
+            body: CExpr::Fun(param_vars, Box::new(body)),
+        },
+        total_arity,
+        *public,
+    ))
+}
+
+/// Returns `true` if the given AST type expression resolves to `Unit`.
+/// Copied verbatim from `src/codegen/lower/mod.rs::is_unit_type_expr`.
+fn is_unit_type_expr(ty: &TypeExpr) -> bool {
+    match ty {
+        TypeExpr::Named { name, .. } => {
+            crate::typechecker::canonicalize_type_name(name)
+                == crate::typechecker::canonicalize_type_name("Unit")
+        }
+        TypeExpr::Labeled { inner, .. } => is_unit_type_expr(inner),
+        _ => false,
+    }
+}
+
+// Keep `ast` import referenced to avoid an "unused" warning when the
+// concrete `Decl::FunSignature` pattern above doesn't drag the prelude
+// in by itself.
+const _: fn() = || {
+    let _ = std::marker::PhantomData::<ast::Decl>;
+};

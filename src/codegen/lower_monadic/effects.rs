@@ -22,7 +22,6 @@ use crate::codegen::cerl::{CArm, CExpr, CLit, CPat};
 use crate::codegen::monadic::ir::{Atom, EffectOpRef, MExpr, MHandler, MHandlerArm};
 
 use super::Lowerer;
-use super::pats::lower_pat;
 use super::util::core_var;
 
 /// Erlang module hosting the runtime helpers
@@ -445,14 +444,9 @@ impl<'ctx> Lowerer<'ctx> {
                 ce
             };
             let pat = if n_params == 1 {
-                lower_pat(&arm.params[0], self.ctors)
+                self.lower_pat(&arm.params[0])
             } else {
-                CPat::Values(
-                    arm.params
-                        .iter()
-                        .map(|p| lower_pat(p, self.ctors))
-                        .collect(),
-                )
+                CPat::Values(arm.params.iter().map(|p| self.lower_pat(p)).collect())
             };
             case_arms.push(CArm {
                 pat,
@@ -506,7 +500,7 @@ impl<'ctx> Lowerer<'ctx> {
         let body_with_pat = match body_wrap {
             None => body_ce,
             Some(pat) => {
-                let cpat = lower_pat(&pat, self.ctors);
+                let cpat = self.lower_pat(&pat);
                 CExpr::Case(
                     Box::new(CExpr::Var(param_name.clone())),
                     vec![CArm {
@@ -552,7 +546,7 @@ impl<'ctx> Lowerer<'ctx> {
         wraps: Vec<(String, Pat)>,
     ) -> CExpr {
         for (arg_name, pat) in wraps.into_iter().rev() {
-            let cpat = lower_pat(&pat, self.ctors);
+            let cpat = self.lower_pat(&pat);
             body = CExpr::Case(
                 Box::new(CExpr::Var(arg_name)),
                 vec![CArm {
