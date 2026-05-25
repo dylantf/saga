@@ -488,10 +488,7 @@ impl Checker {
         // coexist as distinct concrete impls. The real Type::Con name stays
         // bare ("Std.Base.Tuple") so impl body type-checking and call-site
         // unification still work — only the lookup key carries arity.
-        let target_key = super::arity_keyed_target_name(
-            &resolved_target_type,
-            type_params.len(),
-        );
+        let target_key = super::arity_keyed_target_name(&resolved_target_type, type_params.len());
         let dup_key = (
             trait_name.to_string(),
             trait_type_args_names.clone(),

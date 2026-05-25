@@ -1640,8 +1640,7 @@ impl Checker {
         // `where {a: Generic r, r: MyJson}` introduces `r`). These must be
         // quantified in the scheme so instantiation freshens them in lockstep
         // with visible vars and the companion constraint survives.
-        let mut where_var_ids: std::collections::HashSet<u32> =
-            std::collections::HashSet::new();
+        let mut where_var_ids: std::collections::HashSet<u32> = std::collections::HashSet::new();
         for (_, var_id, extra_types) in where_constraints {
             if let Type::Var(id) = self.sub.apply(&Type::Var(*var_id)) {
                 where_var_ids.insert(id);
@@ -1685,8 +1684,7 @@ impl Checker {
             // An inferred constraint var is "covered" if it appears in the
             // visible function type OR if it's a where-clause existential that
             // will be pinned at the call site.
-            let covered =
-                type_vars.contains(&var_id) || where_var_ids.contains(&var_id);
+            let covered = type_vars.contains(&var_id) || where_var_ids.contains(&var_id);
             if !covered {
                 let display = trait_name.rsplit('.').next().unwrap_or(&trait_name);
                 return Err(Diagnostic::error_at(
@@ -3134,8 +3132,7 @@ impl Checker {
                             None
                         }
                     };
-                    let primary_key =
-                        (supertrait.clone(), vec![], target_type.clone());
+                    let primary_key = (supertrait.clone(), vec![], target_type.clone());
                     if !self.trait_state.impls.contains_key(&primary_key)
                         && !bare_tuple_fallback
                             .as_ref()

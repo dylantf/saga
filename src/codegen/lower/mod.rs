@@ -1102,12 +1102,15 @@ impl<'a> Lowerer<'a> {
             // The repro shape — `Ctor (eff_call) with { fail e = ... }`
             // inside a case arm — is the abort-only case, which is the
             // shape that drops K silently today.
-            ExprKind::With { expr: inner, handler } => {
+            ExprKind::With {
+                expr: inner,
+                handler,
+            } => {
                 let inline_abort_only = match handler.as_ref() {
-                    ast::Handler::Inline { .. } => handler
-                        .inline_arms()
-                        .all(|arm| !arm.body.contains_resume())
-                        && handler.return_clause().is_none(),
+                    ast::Handler::Inline { .. } => {
+                        handler.inline_arms().all(|arm| !arm.body.contains_resume())
+                            && handler.return_clause().is_none()
+                    }
                     ast::Handler::Named(_) => false,
                 };
                 inline_abort_only && self.branch_is_effectful(inner)

@@ -164,6 +164,26 @@ impl CheckResult {
         self.modules.map.as_ref()
     }
 
+    /// Per-package private (non-`expose`d) dependency modules.
+    pub fn private_modules(
+        &self,
+    ) -> Option<&std::collections::HashMap<String, super::check_module::ModuleMap>> {
+        self.modules.private_modules.as_ref()
+    }
+
+    /// Resolve a module name to its source file, checking the global map first
+    /// then falling back to any package's private modules. Used by codegen,
+    /// which needs to read source files for modules that were typechecked
+    /// (including private modules consumed transitively through the package).
+    pub fn resolve_module_path(&self, name: &str) -> Option<std::path::PathBuf> {
+        if let Some(p) = self.module_map().and_then(|m| m.get(name)) {
+            return Some(p.clone());
+        }
+        self.private_modules()?
+            .values()
+            .find_map(|m| m.get(name).cloned())
+    }
+
     /// Cached module exports (module name -> exports) for all typechecked modules.
     pub fn module_exports(&self) -> &std::collections::HashMap<String, super::ModuleExports> {
         &self.modules.exports

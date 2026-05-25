@@ -1121,8 +1121,7 @@ impl Parser {
                 self.expect(Token::RParen)?;
                 if params.len() < 2 {
                     return Err(ParseError {
-                        message: "tuple impl target needs at least two type parameters"
-                            .to_string(),
+                        message: "tuple impl target needs at least two type parameters".to_string(),
                         span: start.to(end),
                     });
                 }

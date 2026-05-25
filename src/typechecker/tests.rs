@@ -8701,8 +8701,7 @@ fn impl_for_tuple_missing_element_constraint_is_error() {
     .err()
     .expect("expected no-impl diagnostic for String");
     assert!(
-        err.message.contains("no impl of ToJson")
-            && err.message.contains("String"),
+        err.message.contains("no impl of ToJson") && err.message.contains("String"),
         "expected missing-impl-of-ToJson-for-String, got: {}",
         err.message
     );

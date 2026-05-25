@@ -688,7 +688,8 @@ impl<'a> Lowerer<'a> {
             (None, Some(item)) => self.named_return_lambda(item),
             (None, None) => None,
         };
-        let result = self.lower_handled_inner_expr(expr, return_k_lambda, inherited_return_k.clone());
+        let result =
+            self.lower_handled_inner_expr(expr, return_k_lambda, inherited_return_k.clone());
 
         // Handler arm bodies must see the *outer* evidence, not the new one
         // we just installed for the body of `with`. A re-perform of the same
@@ -710,8 +711,10 @@ impl<'a> Lowerer<'a> {
         //
         // Thread the with's outer K into abort-handler-arm bodies so their
         // terminal value flows through the host context's CPS chain.
-        let saved_handler_inherited_k =
-            std::mem::replace(&mut self.current_handler_inherited_k, inherited_return_k.clone());
+        let saved_handler_inherited_k = std::mem::replace(
+            &mut self.current_handler_inherited_k,
+            inherited_return_k.clone(),
+        );
         let mut handler_bindings: Vec<(String, CExpr)> = Vec::new();
         for (_eff, op, var_name, plan) in &op_vars {
             let binding = match plan {

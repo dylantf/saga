@@ -234,10 +234,7 @@ impl ModuleExports {
         // Collect declared param kinds (e.g. `Proxy (n : Symbol)`) so the
         // importer can enforce kind-correct uses at type-application sites.
         let mut type_param_kinds: HashMap<String, Vec<crate::ast::Kind>> = HashMap::new();
-        for name in type_constructors
-            .keys()
-            .chain(type_aliases_out.keys())
-        {
+        for name in type_constructors.keys().chain(type_aliases_out.keys()) {
             let canonical = if module_prefix.is_empty() {
                 name.clone()
             } else {
@@ -443,6 +440,18 @@ fn ctor_arity(ty: &Type) -> usize {
 
 /// Map from module name (e.g. "Foo.Bar.Baz") to the file path that declares it.
 pub type ModuleMap = HashMap<String, PathBuf>;
+
+/// Visibility metadata for a module: which package it originates from and whether
+/// it is exposed across the package boundary (listed in `[library] expose`).
+#[derive(Debug, Clone)]
+pub struct ModuleVisibility {
+    pub package: String,
+    pub exposed: bool,
+}
+
+/// Map from module name to its visibility metadata. Modules without an entry
+/// are treated as local (no package, accessible only to other local modules).
+pub type ModuleVisibilityMap = HashMap<String, ModuleVisibility>;
 
 /// Scan all .saga files under `root`, extract their `module` declarations,
 /// and build a map from declared module name to file path.
@@ -682,24 +691,74 @@ impl Checker {
             ));
         }
 
-        // Cache hit: return cached exports
-        if let Some(exports) = self.modules.exports.get(&module_name).cloned() {
-            return Ok(exports);
-        }
-
-        // Resolve source: builtin modules are embedded, others looked up via module map
-        let source = if let Some(src) = builtin_module_source(module_path) {
-            src.to_string()
+        // Resolve the module to a file path (or detect that it's a builtin)
+        // BEFORE consulting the exports cache. Private modules are only
+        // reachable to importers from the same package; doing this check up
+        // front prevents the cache from short-circuiting an import that
+        // shouldn't be allowed across the package boundary.
+        let is_builtin_resolved = builtin_module_source(module_path).is_some();
+        let resolved_path: Option<PathBuf> = if is_builtin_resolved {
+            None
         } else {
-            let file_path = self
+            let importer_pkg = self
+                .current_module
+                .as_ref()
+                .and_then(|m| self.modules.visibility.as_ref()?.get(m))
+                .map(|v| v.package.clone());
+            let global = self
                 .modules
                 .map
                 .as_ref()
                 .and_then(|m| m.get(&module_name))
-                .ok_or_else(|| {
-                    Diagnostic::error_at(span, format!("unknown module '{}'", module_name))
-                })?
-                .clone();
+                .cloned();
+            // If the global hit is an exposed module from a different package
+            // than the importer, that's fine. If it's a private/internal name
+            // (no global hit), fall back to the importer's package private map.
+            let path = global.or_else(|| {
+                let pkg = importer_pkg.as_ref()?;
+                self.modules
+                    .private_modules
+                    .as_ref()?
+                    .get(pkg)?
+                    .get(&module_name)
+                    .cloned()
+            });
+            if path.is_none() {
+                // Distinguish "doesn't exist" from "exists but private to
+                // another package" for a better error message.
+                let in_other_package = self.modules.private_modules.as_ref().is_some_and(|pm| {
+                    pm.iter().any(|(pkg, m)| {
+                        Some(pkg) != importer_pkg.as_ref() && m.contains_key(&module_name)
+                    })
+                });
+                if in_other_package {
+                    return Err(Diagnostic::error_at(
+                        span,
+                        format!(
+                            "module '{}' is private to its package and not listed in `expose`",
+                            module_name
+                        ),
+                    ));
+                }
+                return Err(Diagnostic::error_at(
+                    span,
+                    format!("unknown module '{}'", module_name),
+                ));
+            }
+            path
+        };
+
+        // Cache hit: return cached exports (reachability already verified)
+        if let Some(exports) = self.modules.exports.get(&module_name).cloned() {
+            return Ok(exports);
+        }
+
+        // Resolve source: builtin modules are embedded, others read from the
+        // file path resolved above.
+        let source = if let Some(src) = builtin_module_source(module_path) {
+            src.to_string()
+        } else {
+            let file_path = resolved_path.expect("non-builtin path resolved above");
             std::fs::read_to_string(&file_path).map_err(|e| {
                 Diagnostic::error_at(span, format!("cannot read module '{}': {}", module_name, e))
             })?
@@ -742,6 +801,8 @@ impl Checker {
                     None => super::Checker::new(),
                 };
                 snapshot.modules.map = self.modules.map.clone();
+                snapshot.modules.visibility = self.modules.visibility.clone();
+                snapshot.modules.private_modules = self.modules.private_modules.clone();
                 // Load prelude (which imports Std first, then stdlib modules)
                 let prelude_src = include_str!("../stdlib/prelude.saga");
                 let prelude_tokens = crate::lexer::Lexer::new(prelude_src)
@@ -778,6 +839,8 @@ impl Checker {
         mod_checker.modules.codegen_info = self.modules.codegen_info.clone();
         mod_checker.modules.programs = self.modules.programs.clone();
         mod_checker.modules.map = self.modules.map.clone();
+        mod_checker.modules.visibility = self.modules.visibility.clone();
+        mod_checker.modules.private_modules = self.modules.private_modules.clone();
         // Share the loading set so circular imports are detected across
         // nested typecheck_import calls (child checkers need to see which
         // modules are mid-load in their ancestors).
@@ -949,6 +1012,8 @@ impl Checker {
         mc.modules.codegen_info = self.modules.codegen_info.clone();
         mc.modules.programs = self.modules.programs.clone();
         mc.modules.map = self.modules.map.clone();
+        mc.modules.visibility = self.modules.visibility.clone();
+        mc.modules.private_modules = self.modules.private_modules.clone();
         mc.modules.base_trait_impls = self.modules.base_trait_impls.clone();
         mc
     }
@@ -1772,10 +1837,8 @@ fn collect_codegen_info(
                     .collect();
                 let canonical_trait_type_args = canonical_trait_type_args(&trait_type_arg_names);
                 let canonical_target_type = canonical_type_name(target_type);
-                let canonical_target_type = super::arity_keyed_target_name(
-                    &canonical_target_type,
-                    type_params.len(),
-                );
+                let canonical_target_type =
+                    super::arity_keyed_target_name(&canonical_target_type, type_params.len());
                 let dict_name = super::make_dict_name(
                     &canonical_trait,
                     &canonical_trait_type_args,

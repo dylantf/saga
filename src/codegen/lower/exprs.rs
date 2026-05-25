@@ -260,7 +260,12 @@ impl<'a> Lowerer<'a> {
             // the host's continuation, so any abort handler body lowers
             // without the host's CPS chain to thread into. Forward the
             // return_k explicitly.
-            if let ExprKind::With { expr: inner, handler, .. } = &expr.kind {
+            if let ExprKind::With {
+                expr: inner,
+                handler,
+                ..
+            } = &expr.kind
+            {
                 return self.lower_with_inherited_return_k(inner, handler, return_k);
             }
             return self.lower_terminal_effectful_expr_with_return_k(expr, return_k);
@@ -1492,9 +1497,7 @@ impl<'a> Lowerer<'a> {
                 // wrap around it. CPS-chain each argument via slot bindings
                 // so effectful args run in CPS with handlers, and the
                 // pure outer call assembles them through `k_var`.
-                if matches!(expr.kind, ExprKind::App { .. })
-                    && !self.expr_is_effectful_call(expr)
-                {
+                if matches!(expr.kind, ExprKind::App { .. }) && !self.expr_is_effectful_call(expr) {
                     let mut current: &Expr = expr;
                     let mut args_rev: Vec<&Expr> = Vec::new();
                     while let ExprKind::App { func, arg, .. } = &current.kind {

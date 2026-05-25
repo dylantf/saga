@@ -521,7 +521,8 @@ impl Elaborator {
                     {
                         for trait_method in &info.methods {
                             if methods.iter().any(|m| m.node.name == trait_method.name) {
-                                impl_effects.extend(trait_method.effect_sig.effects.iter().cloned());
+                                impl_effects
+                                    .extend(trait_method.effect_sig.effects.iter().cloned());
                             }
                         }
                     }
@@ -1848,13 +1849,8 @@ impl Elaborator {
                 // Tuple impls are arity-keyed (`Std.Base.Tuple.2`), so for
                 // tuple lookup we synthesize that name from the args. Non-
                 // tuple names pass through `arity_keyed_target_name` unchanged.
-                let keyed_name =
-                    crate::typechecker::arity_keyed_target_name(name, args.len());
-                let key = (
-                    trait_name.to_string(),
-                    trait_type_args.to_vec(),
-                    keyed_name,
-                );
+                let keyed_name = crate::typechecker::arity_keyed_target_name(name, args.len());
+                let key = (trait_name.to_string(), trait_type_args.to_vec(), keyed_name);
                 let dict_name = self.dict_names.get(&key)?;
                 let mut dict_expr: Expr = Expr::synth(
                     span,

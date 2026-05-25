@@ -2,7 +2,8 @@ mod builtins;
 mod check_decl;
 mod check_module;
 pub use check_module::{
-    BUILTIN_MODULES, ModuleMap, builtin_module_source, scan_project_modules, scan_source_dir,
+    BUILTIN_MODULES, ModuleMap, ModuleVisibility, ModuleVisibilityMap, builtin_module_source,
+    scan_project_modules, scan_source_dir,
 };
 mod check_traits;
 mod effects;
@@ -1351,6 +1352,16 @@ pub struct ModuleContext {
     pub(crate) project_root: Option<std::path::PathBuf>,
     /// Map from declared module name to file path. Built by scanning the project at startup.
     pub map: Option<check_module::ModuleMap>,
+    /// Per-module visibility metadata for dependency modules. Used to identify
+    /// which package a module belongs to so internal cross-imports within a
+    /// dependency can resolve. Local project modules have no entry.
+    pub visibility: Option<check_module::ModuleVisibilityMap>,
+    /// Private (non-`expose`d) modules of each dependency, keyed by the
+    /// package's `lib.module` name. Looked up as a fallback when an importer
+    /// from the same package references a module not in the global `map`.
+    /// Kept out of the global map so private module names don't collide with
+    /// other packages or the consumer's own modules.
+    pub private_modules: Option<HashMap<String, check_module::ModuleMap>>,
     /// Cache of already-typechecked modules: module name -> all public exports.
     pub(crate) exports: HashMap<String, ModuleExports>,
     /// Cache of codegen-relevant info for each typechecked module.
@@ -1740,6 +1751,22 @@ impl Checker {
 
     pub fn module_map_mut(&mut self) -> Option<&mut check_module::ModuleMap> {
         self.modules.map.as_mut()
+    }
+
+    pub fn set_module_visibility(&mut self, vis: check_module::ModuleVisibilityMap) {
+        self.modules.visibility = Some(vis);
+    }
+
+    pub fn module_visibility(&self) -> Option<&check_module::ModuleVisibilityMap> {
+        self.modules.visibility.as_ref()
+    }
+
+    pub fn set_private_modules(&mut self, m: HashMap<String, check_module::ModuleMap>) {
+        self.modules.private_modules = Some(m);
+    }
+
+    pub fn private_modules(&self) -> Option<&HashMap<String, check_module::ModuleMap>> {
+        self.modules.private_modules.as_ref()
     }
 
     /// Typecheck a module by name, triggering the full dependency walk.

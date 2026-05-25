@@ -954,20 +954,46 @@ pub fn install_deps(project_root: &Path) -> Result<(), String> {
 
 // --- Resolve deps into the checker's module map ---
 
-/// Recursively resolve dependencies and collect their exposed modules.
+/// Accumulators populated while walking a project's (transitive) deps.
+/// Bundled into a struct so [`resolve_deps_recursive`] doesn't drown in args.
+#[derive(Default)]
+struct ResolvedDeps {
+    /// Consumer-visible modules (exposed modules, possibly aliased).
+    modules: typechecker::ModuleMap,
+    /// Per-module visibility metadata. Includes entries for both exposed and
+    /// private dep modules so [`load_module`] can identify their package.
+    visibility: typechecker::ModuleVisibilityMap,
+    /// Private (non-`expose`d) modules keyed by their package's `lib.module`
+    /// name. Kept out of `modules` so private names cannot collide with the
+    /// consumer or with other deps.
+    private: HashMap<String, typechecker::ModuleMap>,
+}
+
+/// Inputs to a single recursive walk of a project's deps. The walking state
+/// (`acc`, `resolving`) is passed separately as `&mut`.
+struct DepWalkCtx<'a> {
+    top_project_root: &'a Path,
+    config_dir: &'a Path,
+    deps: &'a HashMap<String, DepEntry>,
+    lockfile: Option<&'a Lockfile>,
+    depth: usize,
+}
+
+/// Recursively resolve dependencies and collect their modules.
 ///
 /// Git deps are resolved flat under `top_project_root/deps/`. `config_dir` is
 /// the directory of the current project.toml being walked — used to resolve
 /// path deps relative to the file that declared them.
 fn resolve_deps_recursive(
-    top_project_root: &Path,
-    config_dir: &Path,
-    deps: &HashMap<String, DepEntry>,
-    lockfile: Option<&Lockfile>,
-    dep_modules: &mut typechecker::ModuleMap,
+    ctx: &DepWalkCtx<'_>,
+    acc: &mut ResolvedDeps,
     resolving: &mut HashSet<String>,
-    depth: usize,
 ) -> Result<(), String> {
+    let top_project_root = ctx.top_project_root;
+    let config_dir = ctx.config_dir;
+    let deps = ctx.deps;
+    let lockfile = ctx.lockfile;
+    let depth = ctx.depth;
     let indent = "  ".repeat(depth + 1);
 
     for (dep_name, dep_entry) in deps {
@@ -1008,46 +1034,86 @@ fn resolve_deps_recursive(
         // Recurse into this dep's own dependencies first
         if let Some(transitive_deps) = &dep_config.deps {
             resolve_deps_recursive(
-                top_project_root,
-                &dep_path,
-                transitive_deps,
-                lockfile,
-                dep_modules,
+                &DepWalkCtx {
+                    top_project_root,
+                    config_dir: &dep_path,
+                    deps: transitive_deps,
+                    lockfile,
+                    depth: depth + 1,
+                },
+                acc,
                 resolving,
-                depth + 1,
             )?;
         }
 
-        // Now scan and collect this dep's exposed modules
+        // Scan all modules in this dep. Validate that every `expose` entry exists.
         let dep_map = typechecker::scan_project_modules(&dep_path)
             .map_err(|e| format!("scanning dependency '{}': {}", dep_name, e))?;
 
+        let exposed_set: HashSet<&String> = lib.expose.iter().collect();
         for exposed in &lib.expose {
-            let file_path = dep_map
-                .get(exposed)
-                .ok_or_else(|| {
-                    format!(
-                        "dependency '{}' exposes module '{}' but it was not found",
-                        dep_name, exposed
-                    )
-                })?
-                .clone();
+            if !dep_map.contains_key(exposed) {
+                return Err(format!(
+                    "dependency '{}' exposes module '{}' but it was not found",
+                    dep_name, exposed
+                ));
+            }
+        }
+
+        // Walk every module the dep defines. Exposed modules go into the
+        // global `dep_modules` map (visible to the consumer, with aliasing
+        // applied). Non-exposed modules go into a per-package `private_modules`
+        // side-table — they're never inserted into the global map, so their
+        // names cannot collide with the consumer's modules or with other
+        // dependencies. They're only resolvable when another module in the
+        // same package imports them (see `load_module`).
+        let pkg_private = acc.private.entry(lib.module.clone()).or_default();
+
+        for (real_name, file_path) in &dep_map {
+            let is_exposed = exposed_set.contains(real_name);
+
+            if !is_exposed {
+                // Private to the package — register only under its real name
+                // in the per-package side table.
+                if let Some(existing) = pkg_private.get(real_name) {
+                    if existing != file_path {
+                        return Err(format!(
+                            "internal module '{}' in package '{}' resolved to two paths ({} and {})",
+                            real_name,
+                            lib.module,
+                            existing.display(),
+                            file_path.display()
+                        ));
+                    }
+                } else {
+                    pkg_private.insert(real_name.clone(), file_path.clone());
+                }
+                // Visibility entry lets `load_module` recognize that the
+                // dep's own modules belong to this package.
+                acc.visibility.insert(
+                    real_name.clone(),
+                    typechecker::ModuleVisibility {
+                        package: lib.module.clone(),
+                        exposed: false,
+                    },
+                );
+                continue;
+            }
 
             let mapped_name = if let Some(alias) = &dep_entry.alias {
-                if exposed == &lib.module {
+                if real_name == &lib.module {
                     alias.clone()
-                } else if let Some(suffix) = exposed.strip_prefix(&format!("{}.", lib.module)) {
+                } else if let Some(suffix) = real_name.strip_prefix(&format!("{}.", lib.module)) {
                     format!("{}.{}", alias, suffix)
                 } else {
-                    exposed.clone()
+                    real_name.clone()
                 }
             } else {
-                exposed.clone()
+                real_name.clone()
             };
 
-            if let Some(existing) = dep_modules.get(&mapped_name) {
-                // Same file path = same module from a shared transitive dep, not a collision
-                if existing != &file_path {
+            if let Some(existing) = acc.modules.get(&mapped_name) {
+                if existing != file_path {
                     return Err(format!(
                         "module name collision '{}' between dependency '{}' and another dependency ({}). \
                          Hint: use `as` in project.toml to alias one of the dependencies",
@@ -1057,7 +1123,35 @@ fn resolve_deps_recursive(
                     ));
                 }
             } else {
-                dep_modules.insert(mapped_name, file_path);
+                acc.modules.insert(mapped_name.clone(), file_path.clone());
+            }
+
+            // Track visibility under both the consumer-facing (possibly aliased)
+            // name and the real name. The real name is what the dep's own
+            // source files use when importing this module internally; the
+            // package lookup in load_module needs to find it either way.
+            acc.visibility.insert(
+                mapped_name.clone(),
+                typechecker::ModuleVisibility {
+                    package: lib.module.clone(),
+                    exposed: true,
+                },
+            );
+            if mapped_name != *real_name {
+                acc.visibility.insert(
+                    real_name.clone(),
+                    typechecker::ModuleVisibility {
+                        package: lib.module.clone(),
+                        exposed: true,
+                    },
+                );
+                // Also expose the exposed module under its real name in the
+                // per-package private map so internal imports within the dep
+                // resolve to the original name even when consumer-facing alias
+                // hides it from the global map.
+                pkg_private
+                    .entry(real_name.clone())
+                    .or_insert_with(|| file_path.clone());
             }
         }
 
@@ -1073,22 +1167,24 @@ pub fn resolve_deps(
     project_root: &Path,
     deps: &HashMap<String, DepEntry>,
 ) -> Result<(), String> {
-    let mut dep_modules = typechecker::ModuleMap::new();
     let lockfile = Lockfile::load(project_root);
+    let mut acc = ResolvedDeps::default();
     let mut resolving = HashSet::new();
 
     resolve_deps_recursive(
-        project_root,
-        project_root,
-        deps,
-        lockfile.as_ref(),
-        &mut dep_modules,
+        &DepWalkCtx {
+            top_project_root: project_root,
+            config_dir: project_root,
+            deps,
+            lockfile: lockfile.as_ref(),
+            depth: 0,
+        },
+        &mut acc,
         &mut resolving,
-        0,
     )?;
 
-    if !dep_modules.is_empty() {
-        let module_names: Vec<&str> = dep_modules.keys().map(|s| s.as_str()).collect();
+    if !acc.modules.is_empty() || !acc.private.is_empty() {
+        let module_names: Vec<&str> = acc.modules.keys().map(|s| s.as_str()).collect();
         eprintln!(
             "  {} {} dependency module(s): {}",
             cyan("Resolved"),
@@ -1096,7 +1192,7 @@ pub fn resolve_deps(
             module_names.join(", ")
         );
         let mut map = checker.module_map().cloned().unwrap_or_default();
-        for (name, path) in dep_modules {
+        for (name, path) in acc.modules {
             if let Some(existing) = map.get(&name) {
                 return Err(format!(
                     "dependency module '{}' conflicts with local module at {}. \
@@ -1108,6 +1204,14 @@ pub fn resolve_deps(
             map.insert(name, path);
         }
         checker.set_module_map(map);
+        let mut vis = checker.module_visibility().cloned().unwrap_or_default();
+        vis.extend(acc.visibility);
+        checker.set_module_visibility(vis);
+        let mut existing = checker.private_modules().cloned().unwrap_or_default();
+        for (pkg, modules) in acc.private {
+            existing.entry(pkg).or_default().extend(modules);
+        }
+        checker.set_private_modules(existing);
     }
 
     Ok(())

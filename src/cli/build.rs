@@ -902,14 +902,10 @@ pub fn build_project_ext(
         eprintln!("  {} {}...", color::dim("Compiling"), module_name);
 
         // Resolve file path for this module (needed for source info and fresh parse)
-        let file_path = result
-            .module_map()
-            .and_then(|m| m.get(module_name))
-            .unwrap_or_else(|| {
-                eprintln!("Module '{}' not found in module map", module_name);
-                std::process::exit(1);
-            })
-            .clone();
+        let file_path = result.resolve_module_path(module_name).unwrap_or_else(|| {
+            eprintln!("Module '{}' not found in module map", module_name);
+            std::process::exit(1);
+        });
 
         // Cached programs were already expanded and desugared during Phase 1
         // (inside typecheck_import). Re-running expand_derives on them would
