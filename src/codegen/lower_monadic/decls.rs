@@ -13,7 +13,7 @@
 //! any effects. See the planning doc's "slow uniform path" section.
 
 use crate::ast::{self, Annotation, Decl, Lit, Pat, TypeExpr};
-use crate::codegen::cerl::{CExpr, CFunDef};
+use crate::codegen::cerl::{CArm, CExpr, CFunDef, CPat};
 use crate::codegen::monadic::ir::{Atom, MDictConstructor, MExpr, MFunBinding, MVal};
 
 use super::Lowerer;
@@ -28,7 +28,18 @@ impl<'ctx> Lowerer<'ctx> {
     /// Lower an `MDecl::FunBinding` to a `CFunDef`.
     ///
     /// Signature: `(param_0, ..., param_{n-1}, _Evidence, _ReturnK)`.
+    ///
+    /// If any source param is a non-Var pattern (tuple destructure, literal,
+    /// constructor pattern, etc.), route through [`lower_fun_binding_clauses`]
+    /// with a single-element group — that already builds a `case` over the
+    /// arg tuple, which is exactly what we need to bind the pattern's
+    /// sub-variables so the body's references resolve. Without this, e.g.
+    /// `normalize_suite (module_name, entries) = …` would get `_Arg0` as the
+    /// param and leave `module_name` / `entries` unbound in the body.
     pub(super) fn lower_fun_binding(&mut self, fb: &MFunBinding) -> CFunDef {
+        if fb.params.iter().any(|p| !matches!(p, Pat::Var { .. })) {
+            return self.lower_fun_binding_clauses(&[fb]);
+        }
         let mut params = lower_param_names(&fb.params);
         params.push(EVIDENCE_VAR.to_string());
         params.push(RETURN_K_VAR.to_string());
@@ -39,6 +50,88 @@ impl<'ctx> Lowerer<'ctx> {
             name: fb.name.clone(),
             arity,
             body: CExpr::Fun(params, Box::new(body)),
+        }
+    }
+
+    /// Lower a multi-clause function (group of `MFunBinding`s with the same
+    /// name and arity) into a single `CFunDef`. Each clause's user-arg
+    /// patterns become arms of a `case` over a tuple of fresh `_Arg{i}`
+    /// parameters; the clause body is lowered under the standard K-threading
+    /// rules — same convention as [`lower_fun_binding`].
+    ///
+    /// Saga source like:
+    /// ```text
+    /// supervised 0 f = body0
+    /// supervised n f = body1
+    /// ```
+    /// emits:
+    /// ```text
+    /// 'supervised'/4 = fun (_Arg0, _Arg1, _Evidence, _ReturnK) ->
+    ///   case {_Arg0, _Arg1} of
+    ///     {0, F}  -> <body0>
+    ///     {N, F}  -> <body1>
+    ///   end
+    /// ```
+    /// Mirrors the old lowerer's `clause_groups` ([lower/mod.rs:1624-1648]).
+    ///
+    /// Invariant (asserted): every clause in `group` has the same arity.
+    /// The translator preserves this from the source (the typechecker
+    /// rejects clauses with mismatched arities).
+    pub(super) fn lower_fun_binding_clauses(&mut self, group: &[&MFunBinding]) -> CFunDef {
+        assert!(
+            !group.is_empty(),
+            "lower_fun_binding_clauses: empty group is impossible"
+        );
+        let n_user = group[0].params.len();
+        for fb in group {
+            assert_eq!(
+                fb.params.len(),
+                n_user,
+                "lower_fun_binding_clauses: clause arity mismatch for '{}'",
+                fb.name
+            );
+        }
+
+        // Synthesize positional `_Arg{i}` user-arg params plus the uniform
+        // `_Evidence` / `_ReturnK`. Names are uppercase so they're valid Core
+        // Erlang variables and don't collide with source-level identifiers
+        // (which `core_var` always produces with at least an `_` prefix or
+        // capitalization mangling — `_Arg{i}` is in the same namespace).
+        let arg_names: Vec<String> = (0..n_user).map(|i| format!("_Arg{}", i)).collect();
+        let mut params = arg_names.clone();
+        params.push(EVIDENCE_VAR.to_string());
+        params.push(RETURN_K_VAR.to_string());
+        let arity = params.len();
+
+        // Build the case scrutinee: a tuple of the arg-var refs. Single-arg
+        // functions could in principle skip the wrapping tuple; emitting it
+        // uniformly keeps the lowering symmetric and matches the old path.
+        let scrut = CExpr::Tuple(
+            arg_names
+                .iter()
+                .map(|v| CExpr::Var(v.clone()))
+                .collect(),
+        );
+
+        // Lower each clause body under a fresh K state (each clause is its
+        // own tail context but they share the function-entry `_ReturnK`).
+        let mut arms: Vec<CArm> = Vec::with_capacity(group.len());
+        for fb in group {
+            self.reset_k_state();
+            let pat = CPat::Tuple(fb.params.iter().map(|p| self.lower_pat(p)).collect());
+            let body = self.lower_expr(&fb.body);
+            arms.push(CArm {
+                pat,
+                guard: None,
+                body,
+            });
+        }
+
+        let case_body = CExpr::Case(Box::new(scrut), arms);
+        CFunDef {
+            name: group[0].name.clone(),
+            arity,
+            body: CExpr::Fun(params, Box::new(case_body)),
         }
     }
 
@@ -101,20 +194,29 @@ impl<'ctx> Lowerer<'ctx> {
     /// resulting tuple is returned through `_ReturnK`, matching every
     /// other uniform-shape callable.
     ///
-    /// **Open question.** The dict ctor is called like a normal fn at the
-    /// callsite (`apply __dict_Show_Int(_Evidence, _K)`); returning through
-    /// `_ReturnK` is the same convention as any other fn. If a future use
-    /// site invokes the ctor specially (module-init context with no K in
-    /// scope), the uniform shape will need to drop — flagging now so the
-    /// integration step (7d/8) can catch it.
+    /// **Calling convention (note).** Unlike functions, dict constructors
+    /// are NOT emitted under the uniform `(args…, _Evidence, _ReturnK)`
+    /// convention. A dict is a pure value (a tuple of method closures);
+    /// the constructor's role is to materialise that tuple given any
+    /// sub-dict params required by the impl's `where` clause. Threading
+    /// evidence and return-K through it would force every use site to
+    /// pay CPS overhead just to read a constant. So:
+    ///
+    ///   - Arity = `dict_params.len()` (where-clause sub-dict count). Zero
+    ///     for monomorphic impls.
+    ///   - Body returns the dict tuple **directly** (no `apply _ReturnK`).
+    ///
+    /// Callers that have a dict-ref as a value get the tuple by calling
+    /// `mod:__dict_…/0` (arity-0 case) or `mod:__dict_…(_SubDict0, …)`
+    /// (arity-N case). The uniform calling convention applies to the
+    /// **methods inside** the tuple — each method closure is a
+    /// `fun(args…, _Evidence, _ReturnK) -> …`.
     pub(super) fn lower_dict_constructor(&mut self, dc: &MDictConstructor) -> CFunDef {
-        let mut params: Vec<String> = dc
+        let params: Vec<String> = dc
             .dict_params
             .iter()
             .map(|p| super::util::core_var(p))
             .collect();
-        params.push(EVIDENCE_VAR.to_string());
-        params.push(RETURN_K_VAR.to_string());
         let arity = params.len();
         self.reset_k_state();
 
@@ -131,12 +233,11 @@ impl<'ctx> Lowerer<'ctx> {
             .collect();
 
         let tuple = CExpr::Tuple(method_ces);
-        let body = CExpr::Apply(Box::new(CExpr::Var(RETURN_K_VAR.to_string())), vec![tuple]);
 
         CFunDef {
             name: dc.name.clone(),
             arity,
-            body: CExpr::Fun(params, Box::new(body)),
+            body: CExpr::Fun(params, Box::new(tuple)),
         }
     }
 }
@@ -153,7 +254,9 @@ pub(super) fn val_arity() -> usize {
 }
 
 pub(super) fn dict_constructor_arity(dc: &MDictConstructor) -> usize {
-    dc.dict_params.len() + 2
+    // No `+2` — dict constructors are non-CPS builders for a constant
+    // tuple value; see [`Lowerer::lower_dict_constructor`].
+    dc.dict_params.len()
 }
 
 /// Extract the `(erl_module, erl_func)` pair from an
@@ -238,6 +341,287 @@ pub(super) fn lower_external_wrapper(decl: &Decl) -> Option<(CFunDef, usize, boo
         total_arity,
         *public,
     ))
+}
+
+/// Lower a `@builtin` `FunSignature` decl into a wrapper `CFunDef` that
+/// performs the intrinsic inline. Returns `None` for non-builtin decls or
+/// for builtins this stage doesn't know how to wrap yet.
+///
+/// **Why a wrapper?** Builtins like `Std.Process.catch_panic` are
+/// `@builtin`-annotated decls that the old lowerer special-cases at every
+/// `App` site via `lower_intrinsic`. The new path's uniform calling
+/// convention means a builtin used in value position (`let f = catch_panic
+/// in …`) — or even called via the standard `App` path — needs an actual
+/// callable function with the uniform shape `(user_args…, _Evidence,
+/// _ReturnK)`. Generating one wrapper per builtin per defining module
+/// keeps the lowerer's App/value paths uniform with no intrinsic-specific
+/// branches.
+pub(super) fn lower_builtin_wrapper(decl: &Decl) -> Option<(CFunDef, usize, bool)> {
+    let Decl::FunSignature {
+        public,
+        name,
+        annotations,
+        ..
+    } = decl
+    else {
+        return None;
+    };
+    if !annotations.iter().any(|a| a.name == "builtin") {
+        return None;
+    }
+    match name.as_str() {
+        "catch_panic" => Some((build_catch_panic_wrapper(name.clone()), 3, *public)),
+        "print_stdout" => Some((build_print_wrapper(name.clone(), false), 3, *public)),
+        "print_stderr" => Some((build_print_wrapper(name.clone(), true), 3, *public)),
+        "dbg" => Some((build_dbg_wrapper(name.clone()), 4, *public)),
+        _ => None,
+    }
+}
+
+/// Wrapper for `print_stdout` / `print_stderr` builtins. Shape:
+///
+/// ```text
+/// fun (S, _Evidence, _ReturnK) ->
+///   let <_R> = call 'io':'format' (["standard_error", ]"~ts", [S])
+///   in apply _ReturnK('unit')
+/// ```
+fn build_print_wrapper(name: String, stderr: bool) -> CFunDef {
+    let s_param = "S".to_string();
+    let r_var = "_R".to_string();
+
+    let mut fmt_args: Vec<CExpr> = vec![
+        CExpr::Lit(crate::codegen::cerl::CLit::Str("~ts".to_string())),
+        CExpr::Cons(
+            Box::new(CExpr::Var(s_param.clone())),
+            Box::new(CExpr::Nil),
+        ),
+    ];
+    if stderr {
+        fmt_args.insert(
+            0,
+            CExpr::Lit(crate::codegen::cerl::CLit::Atom(
+                "standard_error".to_string(),
+            )),
+        );
+    }
+    let print_call = CExpr::Call("io".to_string(), "format".to_string(), fmt_args);
+    let apply_k = CExpr::Apply(
+        Box::new(CExpr::Var(RETURN_K_VAR.to_string())),
+        vec![CExpr::Lit(crate::codegen::cerl::CLit::Atom(
+            "unit".to_string(),
+        ))],
+    );
+    let body = CExpr::Let(r_var, Box::new(print_call), Box::new(apply_k));
+
+    CFunDef {
+        name,
+        arity: 3,
+        body: CExpr::Fun(
+            vec![s_param, EVIDENCE_VAR.to_string(), RETURN_K_VAR.to_string()],
+            Box::new(body),
+        ),
+    }
+}
+
+/// Wrapper for `dbg` builtin. After elaboration the user-facing call
+/// `dbg x` becomes `dbg dict x`, so the uniform wrapper has shape
+/// `(Dict, X, _Evidence, _ReturnK)`.
+///
+/// ```text
+/// fun (Dict, X, _Evidence, _ReturnK) ->
+///   let <_DebugFn> = call 'erlang':'element'(1, Dict) in
+///   let <_Str> = apply _DebugFn(X) in
+///   let <_R> = call 'io':'format'('standard_error', "~ts~n", [_Str])
+///   in apply _ReturnK(X)
+/// ```
+///
+/// **Note.** The dict's debug method is itself a uniform-shape closure
+/// (`fun(X, _Evidence, _ReturnK) -> …`), so applying it as `_DebugFn(X)`
+/// alone would underfill the arity. The wrapper threads outer
+/// `_Evidence` and an identity continuation through.
+fn build_dbg_wrapper(name: String) -> CFunDef {
+    let dict_param = "Dict".to_string();
+    let x_param = "X".to_string();
+    let debug_fn_var = "_DebugFn".to_string();
+    let id_k_var = "_IdK".to_string();
+    let v_param = "_V".to_string();
+    let str_var = "_Str".to_string();
+    let r_var = "_R".to_string();
+
+    let extract = CExpr::Call(
+        "erlang".to_string(),
+        "element".to_string(),
+        vec![
+            CExpr::Lit(crate::codegen::cerl::CLit::Int(1)),
+            CExpr::Var(dict_param.clone()),
+        ],
+    );
+    let id_k = CExpr::Fun(vec![v_param.clone()], Box::new(CExpr::Var(v_param)));
+    let apply_debug = CExpr::Apply(
+        Box::new(CExpr::Var(debug_fn_var.clone())),
+        vec![
+            CExpr::Var(x_param.clone()),
+            CExpr::Var(EVIDENCE_VAR.to_string()),
+            CExpr::Var(id_k_var.clone()),
+        ],
+    );
+    let print = CExpr::Call(
+        "io".to_string(),
+        "format".to_string(),
+        vec![
+            CExpr::Lit(crate::codegen::cerl::CLit::Atom(
+                "standard_error".to_string(),
+            )),
+            CExpr::Lit(crate::codegen::cerl::CLit::Str("~ts~n".to_string())),
+            CExpr::Cons(
+                Box::new(CExpr::Var(str_var.clone())),
+                Box::new(CExpr::Nil),
+            ),
+        ],
+    );
+    let apply_k = CExpr::Apply(
+        Box::new(CExpr::Var(RETURN_K_VAR.to_string())),
+        vec![CExpr::Var(x_param.clone())],
+    );
+
+    let let_r = CExpr::Let(r_var, Box::new(print), Box::new(apply_k));
+    let let_str = CExpr::Let(str_var, Box::new(apply_debug), Box::new(let_r));
+    let let_id_k = CExpr::Let(id_k_var, Box::new(id_k), Box::new(let_str));
+    let let_debug_fn = CExpr::Let(debug_fn_var, Box::new(extract), Box::new(let_id_k));
+
+    CFunDef {
+        name,
+        arity: 4,
+        body: CExpr::Fun(
+            vec![
+                dict_param,
+                x_param,
+                EVIDENCE_VAR.to_string(),
+                RETURN_K_VAR.to_string(),
+            ],
+            Box::new(let_debug_fn),
+        ),
+    }
+}
+
+/// Build the wrapper for `Std.Process.catch_panic`. Equivalent to the old
+/// lowerer's `lower_catch_panic` but materialized as a standalone
+/// `CFunDef`. Shape (3-arity uniform: 1 user param + `_Evidence` +
+/// `_ReturnK`):
+///
+/// ```text
+/// fun (F, _Evidence, _ReturnK) ->
+///   let <_IdK> = fun (_V) -> _V in
+///   let <_Result> =
+///     try apply F('unit', _Evidence, _IdK)
+///     of <_OkVal> -> {'ok', _OkVal}
+///     catch <_Cls, _Reason, _Trace> ->
+///       case _Reason of
+///         {'saga_error', _, Msg, _, _, _, _} -> {'error', Msg}
+///         _ -> {'error', call 'saga_runtime':'format_caught_panic'(_Cls, _Reason)}
+///       end
+///   in apply _ReturnK(_Result)
+/// ```
+///
+/// The `_IdK` (identity continuation) isolates the thunk's tail-apply from
+/// the outer `_ReturnK`: the thunk is invoked under uniform CPS shape, but
+/// its result must materialize as a value so we can wrap it in `{'ok', …}`
+/// and pass through `_ReturnK` only after the try/catch resolves.
+fn build_catch_panic_wrapper(name: String) -> CFunDef {
+    let f_param = "F".to_string();
+    let id_k_var = "_IdK".to_string();
+    let id_k_param = "_V".to_string();
+    let ok_var = "_OkVal".to_string();
+    let class_var = "_Cls".to_string();
+    let reason_var = "_Reason".to_string();
+    let trace_var = "_Trace".to_string();
+    let msg_var = "Msg".to_string();
+    let result_var = "_Result".to_string();
+
+    let id_k = CExpr::Fun(
+        vec![id_k_param.clone()],
+        Box::new(CExpr::Var(id_k_param)),
+    );
+
+    let applied = CExpr::Apply(
+        Box::new(CExpr::Var(f_param.clone())),
+        vec![
+            CExpr::Lit(crate::codegen::cerl::CLit::Atom("unit".to_string())),
+            CExpr::Var(EVIDENCE_VAR.to_string()),
+            CExpr::Var(id_k_var.clone()),
+        ],
+    );
+
+    let ok_body = CExpr::Tuple(vec![
+        CExpr::Lit(crate::codegen::cerl::CLit::Atom("ok".to_string())),
+        CExpr::Var(ok_var.clone()),
+    ]);
+
+    let catch_body = CExpr::Case(
+        Box::new(CExpr::Var(reason_var.clone())),
+        vec![
+            CArm {
+                pat: CPat::Tuple(vec![
+                    CPat::Lit(crate::codegen::cerl::CLit::Atom("saga_error".to_string())),
+                    CPat::Wildcard,
+                    CPat::Var(msg_var.clone()),
+                    CPat::Wildcard,
+                    CPat::Wildcard,
+                    CPat::Wildcard,
+                    CPat::Wildcard,
+                ]),
+                guard: None,
+                body: CExpr::Tuple(vec![
+                    CExpr::Lit(crate::codegen::cerl::CLit::Atom("error".to_string())),
+                    CExpr::Var(msg_var),
+                ]),
+            },
+            CArm {
+                pat: CPat::Wildcard,
+                guard: None,
+                body: CExpr::Tuple(vec![
+                    CExpr::Lit(crate::codegen::cerl::CLit::Atom("error".to_string())),
+                    CExpr::Call(
+                        "saga_runtime".to_string(),
+                        "format_caught_panic".to_string(),
+                        vec![
+                            CExpr::Var(class_var.clone()),
+                            CExpr::Var(reason_var.clone()),
+                        ],
+                    ),
+                ]),
+            },
+        ],
+    );
+
+    let try_expr = CExpr::Try {
+        expr: Box::new(applied),
+        ok_var,
+        ok_body: Box::new(ok_body),
+        catch_vars: (class_var, reason_var, trace_var),
+        catch_body: Box::new(catch_body),
+    };
+
+    let apply_k = CExpr::Apply(
+        Box::new(CExpr::Var(RETURN_K_VAR.to_string())),
+        vec![CExpr::Var(result_var.clone())],
+    );
+
+    let let_result = CExpr::Let(result_var, Box::new(try_expr), Box::new(apply_k));
+    let body = CExpr::Let(id_k_var, Box::new(id_k), Box::new(let_result));
+
+    CFunDef {
+        name,
+        arity: 3,
+        body: CExpr::Fun(
+            vec![
+                f_param,
+                EVIDENCE_VAR.to_string(),
+                RETURN_K_VAR.to_string(),
+            ],
+            Box::new(body),
+        ),
+    }
 }
 
 /// Returns `true` if the given AST type expression resolves to `Unit`.

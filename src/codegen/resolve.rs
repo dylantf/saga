@@ -919,11 +919,21 @@ fn scoped_to_resolved(scoped: &ScopedName) -> ResolvedSymbol {
 
 fn collect_local_fun_arities(program: &Program) -> HashMap<String, usize> {
     let mut local_funs: HashMap<String, usize> = HashMap::new();
+    // First pass: prefer `FunBinding.params.len()` — after elaboration this
+    // includes dict params prepended for `where {T: Trait}` constraints, so
+    // the value matches the actually-exported function arity. `FunSignature`
+    // alone (e.g. `@external` decls with no binding) carries only the source
+    // user-param count.
+    for decl in program {
+        if let Decl::FunBinding { name, params, .. } = decl {
+            local_funs.insert(name.clone(), params.len());
+        }
+    }
+    // Second pass: fill in entries not seen in the first pass. `Val` is
+    // always arity-0; `FunSignature` is the source arity (used when there
+    // is no FunBinding to refine it — e.g. `@external` wrappers).
     for decl in program {
         match decl {
-            Decl::FunBinding { name, params, .. } => {
-                local_funs.entry(name.clone()).or_insert(params.len());
-            }
             Decl::Val { name, .. } => {
                 local_funs.entry(name.clone()).or_insert(0);
             }

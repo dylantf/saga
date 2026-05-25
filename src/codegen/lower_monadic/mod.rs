@@ -108,6 +108,12 @@ pub struct Lowerer<'ctx> {
     /// designated entry-point module needs the bootstrap, and step 8's
     /// toggle wiring decides when to flip it on. See `bootstrap.rs`.
     pub(super) emit_bootstrap: bool,
+    /// Erlang-mangled name of the module currently being lowered (e.g.
+    /// `std_base`). Set at the top of [`lower_module`]; used to decide
+    /// whether a resolved cross-module reference is actually local (so we
+    /// can emit a `FunRef` instead of `erlang:make_fun/3`, which requires
+    /// the target to be exported).
+    pub(super) current_erlang_module: String,
 }
 
 impl<'ctx> Lowerer<'ctx> {
@@ -143,6 +149,7 @@ impl<'ctx> Lowerer<'ctx> {
             helper_counter: 0,
             record_fields,
             emit_bootstrap: false,
+            current_erlang_module: String::new(),
         }
     }
 
@@ -281,6 +288,10 @@ impl<'ctx> Lowerer<'ctx> {
     /// convention to the raw BIF. See [`lower_external_wrapper`] in
     /// `decls.rs`.
     pub fn lower_module(&mut self, module_name: &str, program: &MProgram) -> CModule {
+        // Track the current module's Erlang name so we can collapse
+        // same-module references to a local FunRef in `lower_resolved_value_ref`.
+        self.current_erlang_module = module_name.to_string();
+
         // Populate `record_fields` from the currently-compiling module's own
         // `RecordDef` decls. The construction-time pass only sees IMPORTED
         // modules via `module_ctx.modules`; the current module isn't stored
@@ -310,25 +321,56 @@ impl<'ctx> Lowerer<'ctx> {
             pub_names.as_ref().is_none_or(|s| s.contains(name))
         };
 
-        for decl in program {
+        // Group adjacent `MDecl::FunBinding` entries with the same name: each
+        // run is one Saga function defined by multiple clauses (`fn 0 x = …`
+        // / `fn n x = …`). Translation emits one `MFunBinding` per clause; if
+        // we lowered each as its own `CFunDef`, the emitted module would have
+        // duplicate `'name'/N = …` definitions and `erlc` would crash. Mirrors
+        // the old lowerer's `clause_groups` ([lower/mod.rs:1624-1648]).
+        let mut i = 0;
+        while i < program.len() {
+            let decl = &program[i];
             match decl {
                 MDecl::FunBinding(fb) => {
+                    // Collect any adjacent same-name clauses into one group.
+                    let mut group: Vec<&crate::codegen::monadic::ir::MFunBinding> = vec![fb];
+                    let mut j = i + 1;
+                    while j < program.len() {
+                        if let MDecl::FunBinding(next) = &program[j] {
+                            if next.name == fb.name {
+                                group.push(next);
+                                j += 1;
+                                continue;
+                            }
+                        }
+                        break;
+                    }
                     if is_public(&fb.name) {
                         exports.push((fb.name.clone(), fun_binding_arity(&fb.params)));
                     }
-                    funs.push(self.lower_fun_binding(fb));
+                    if group.len() == 1 {
+                        funs.push(self.lower_fun_binding(fb));
+                    } else {
+                        funs.push(self.lower_fun_binding_clauses(&group));
+                    }
+                    i = j;
+                    continue;
                 }
                 MDecl::Val(v) => {
                     if v.public {
                         exports.push((v.name.clone(), val_arity()));
                     }
                     funs.push(self.lower_val(v));
+                    i += 1;
+                    continue;
                 }
                 MDecl::DictConstructor(dc) => {
                     if is_public(&dc.name) {
                         exports.push((dc.name.clone(), dict_constructor_arity(dc)));
                     }
                     funs.push(self.lower_dict_constructor(dc));
+                    i += 1;
+                    continue;
                 }
                 MDecl::Passthrough(decl) => {
                     if let Some((wrapper, arity, public)) =
@@ -338,13 +380,31 @@ impl<'ctx> Lowerer<'ctx> {
                             exports.push((wrapper.name.clone(), arity));
                         }
                         funs.push(wrapper);
+                    } else if let Some((wrapper, arity, public)) =
+                        decls::lower_builtin_wrapper(decl)
+                    {
+                        if public {
+                            exports.push((wrapper.name.clone(), arity));
+                        }
+                        funs.push(wrapper);
                     }
+                    i += 1;
+                    continue;
                 }
             }
         }
 
         if self.emit_bootstrap {
             funs.push(bootstrap::build_initial_evidence_fundef());
+            // Entry-point wrapper: the BEAM runner (`exec_erl`) invokes
+            // `Module:main/1` with the atom `'unit'`, but the new path
+            // exports the user's `main` under the uniform calling
+            // convention as `main/3` (1 user param + `_Evidence` +
+            // `_ReturnK`). Synthesize a `main/1` shim that materialises the
+            // initial evidence vector and threads it (plus an identity
+            // continuation) into `main/3`.
+            funs.push(bootstrap::build_main_entry_wrapper());
+            exports.push(("main".to_string(), 1));
         }
 
         CModule {
