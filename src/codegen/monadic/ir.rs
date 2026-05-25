@@ -390,4 +390,14 @@ pub struct EffectInfo<'a> {
     /// Per-NodeId resolved type. Used to read effect rows on expressions
     /// (row-polymorphic call effects after zonking).
     pub type_at_node: &'a HashMap<NodeId, Type>,
+
+    /// Effect name → list of op names in canonical (alphabetical) order.
+    /// Required for translation to compute `EffectOpRef.op_index` for
+    /// **cross-module** effects — in-program effects can be derived
+    /// locally by scanning `Decl::EffectDef`, but imported effects need
+    /// this map. Built at the entry-point boundary from `CheckResult`
+    /// (`build_effect_info` in `src/codegen/mod.rs`). Both bare and
+    /// `Module.Name` keys are inserted so lookups by either spelling
+    /// succeed.
+    pub effect_ops: &'a HashMap<String, Vec<String>>,
 }
