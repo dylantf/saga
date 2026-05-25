@@ -24,7 +24,7 @@ Tick boxes as steps land. Each box → one focused agent session.
   - **7g.** Edge cases (split into two parts):
     - [x] **7g.A.** Expression-level edge cases: records, bitstrings, receive, dict-method-access, foreign calls, BinOp/UnaryMinus, arm guards
     - [x] **7g.B.** Patterns, decls, bootstrap: Pat::Or + surface-syntax patterns, `@external` wrappers, module-init bootstrap for BEAM-native default handlers, `public` flag resolution
-- [ ] **8.** Toggle wiring in `src/codegen/mod.rs` — both entry points
+- [x] **8.** Toggle wiring in `src/codegen/mod.rs` — both entry points
 
 **Milestone:** new path passes the full test suite under the toggle.
 

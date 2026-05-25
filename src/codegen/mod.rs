@@ -12,7 +12,7 @@ pub mod runtime_shape;
 mod tests;
 
 use crate::ast;
-use crate::typechecker::ModuleCodegenInfo;
+use crate::typechecker::{CheckResult, ModuleCodegenInfo};
 use std::collections::HashMap;
 
 /// Result of compiling a single module: codegen metadata, elaborated AST,
@@ -99,17 +99,38 @@ pub fn compile_module_from_result(
     let codegen_info = result.codegen_info();
     let info = codegen_info.get(module_name).cloned().unwrap_or_default();
     let elaborated = crate::elaborate::elaborate_module(program, mod_result, module_name);
-    let normalized = normalize::normalize_effects(&elaborated);
+
+    // === OLD PATH (active) ===
+    // Normalize then resolve on the normalized AST. Stores the normalized
+    // form in `CompiledModule.elaborated` for the old lowerer to consume.
+    // let normalized = normalize::normalize_effects(&elaborated);
+    // let resolution = resolve::resolve_names(
+    //     module_name,
+    //     &normalized,
+    //     codegen_info,
+    //     &result.prelude_imports,
+    //     &mod_result.resolution,
+    // );
+    // let stored = normalized;
+
+    // === NEW PATH (toggle: comment out OLD block above, uncomment below) ===
+    // Skip `normalize::normalize_effects` entirely — ANF runs at emit time
+    // inside `emit_module_with_context`. Resolve operates on the raw
+    // elaborated AST, and that raw form is what `CompiledModule.elaborated`
+    // stores. `call_effects` is unused by the new path.
+    //
     let resolution = resolve::resolve_names(
         module_name,
-        &normalized,
+        &elaborated,
         codegen_info,
         &result.prelude_imports,
         &mod_result.resolution,
     );
+    let stored = elaborated;
+
     Some(CompiledModule {
         codegen_info: info,
-        elaborated: normalized,
+        elaborated: stored,
         resolution,
         front_resolution: mod_result.resolution.clone(),
         call_effects: call_effects::CallEffectMap::new(),
@@ -132,14 +153,133 @@ pub fn emit_module_with_context(
     source_file: Option<&SourceFile>,
     entry_export: Option<&str>,
 ) -> String {
+    // === OLD PATH (active) ===
+    // let codegen_info = ctx.codegen_info();
+    // let program = normalize::normalize_effects(program);
+    // let constructor_atoms = resolve::build_constructor_atoms(
+    //     module_name,
+    //     &program,
+    //     &codegen_info,
+    //     &ctx.prelude_imports,
+    // );
+    // let front_resolution = check_result
+    //     .module_check_results()
+    //     .get(module_name)
+    //     .map(|m| &m.resolution)
+    //     .unwrap_or(&check_result.resolution);
+    // let mut resolution_map = resolve::resolve_names(
+    //     module_name,
+    //     &program,
+    //     &codegen_info,
+    //     &ctx.prelude_imports,
+    //     front_resolution,
+    // );
+    // // Merge in pre-computed resolution maps from all compiled modules.
+    // // Their NodeIds don't overlap with ours, so this is a simple extend.
+    // for compiled in ctx.modules.values() {
+    //     resolution_map.extend(compiled.resolution.iter().map(|(k, v)| (*k, v.clone())));
+    // }
+    // let source_info =
+    //     source_file.map(|sf| lower::errors::SourceInfo::new(sf.path.clone(), &sf.source));
+    // let cmod = lower::Lowerer::new(
+    //     ctx,
+    //     constructor_atoms,
+    //     resolution_map,
+    //     check_result,
+    //     source_info,
+    //     entry_export.map(str::to_string),
+    // )
+    // .lower_module(module_name, &program);
+    // cerl::print_module(&cmod)
+
+    // === NEW PATH (toggle: comment out OLD block above, uncomment below) ===
+    // The new path consumes the raw elaborated AST (no `normalize`), runs
+    // ANF + monadic translation + effect optimization, then lowers via
+    // `lower_monadic::Lowerer`. Bootstrap evidence emission is on only for
+    // the entry-point module (`entry_export.is_some()`).
+    //
+    emit_module_via_new_path(module_name, program, ctx, check_result, entry_export)
+}
+
+// -------------------------------------------------------------------------
+// New-path helpers (Phase 1, step 8)
+// -------------------------------------------------------------------------
+
+/// Storage for the narrowed [`monadic::ir::EffectInfo`] view's
+/// `effect_ops` field. The view itself borrows; this struct owns the
+/// underlying map so the borrow stays alive for the duration of one
+/// emit.
+pub struct EffectOpsTable {
+    pub map: HashMap<String, Vec<String>>,
+}
+
+/// Build the canonical effect-name → ops list from `CheckResult.effects`.
+/// Both the bare effect name and the fully-qualified `Module.Name` form
+/// are inserted so callers can look up by either spelling.
+fn build_effect_ops_table(check_result: &CheckResult) -> EffectOpsTable {
+    let mut map: HashMap<String, Vec<String>> = HashMap::new();
+    for (name, info) in &check_result.effects {
+        let mut ops: Vec<String> = info.ops.iter().map(|op| op.name.clone()).collect();
+        ops.sort();
+        // Bare name. If multiple effects share a bare name across modules,
+        // the last-write wins — qualified lookups stay unambiguous.
+        map.insert(name.clone(), ops.clone());
+        if let Some(src_mod) = &info.source_module {
+            map.insert(format!("{}.{}", src_mod, name), ops);
+        }
+    }
+    EffectOpsTable { map }
+}
+
+/// Build the narrowed [`monadic::ir::EffectInfo`] view from a
+/// `CheckResult` plus per-module `ResolutionResult`.
+///
+/// All fields are borrowed from the inputs except `effect_ops`, which is
+/// synthesized into `ops_storage` and then borrowed back into the view.
+/// The caller owns `ops_storage` and must keep it alive while the view
+/// is in use.
+pub fn build_effect_info<'a>(
+    check_result: &'a CheckResult,
+    module_check_result: &'a CheckResult,
+    ops_storage: &'a EffectOpsTable,
+) -> monadic::ir::EffectInfo<'a> {
+    monadic::ir::EffectInfo {
+        effect_calls: &module_check_result.resolution.effect_calls,
+        handler_arms: &module_check_result.resolution.handler_arms,
+        fun_effects: &check_result.fun_effects,
+        let_effect_bindings: &check_result.let_effect_bindings,
+        type_at_node: &check_result.type_at_node,
+        effect_ops: &ops_storage.map,
+    }
+}
+
+/// New-path emit. Sequence:
+///   a. resolution_map = resolve::resolve_names(module_name, raw_elaborated, …)
+///   b. effect_info  = build_effect_info(check_result, module_check_result)
+///   c. handler_info = handler_analysis::analyze(raw_elaborated)
+///   d. anf_program  = anf::normalize(raw_elaborated.clone())
+///   e. monadic      = monadic::translate(&anf_program, &resolution_map, &effect_info)
+///   f. optimized    = monadic::effect_opt::run(monadic, &handler_info, &effect_info)
+///   g. cmod         = lower_monadic::Lowerer::new(…)
+///                         .with_bootstrap_emission(entry_export.is_some())
+///                         .lower_module(module_name, &optimized)
+///   h. cerl::print_module(&cmod)
+///
+/// `program` should be the raw elaborated AST (no `normalize_effects`
+/// applied). Bootstrap emission is on iff `entry_export.is_some()` — the
+/// only module the build pipeline passes an entry-export name to is the
+/// designated entry-point module.
+pub fn emit_module_via_new_path(
+    module_name: &str,
+    program: &ast::Program,
+    ctx: &CodegenContext,
+    check_result: &crate::typechecker::CheckResult,
+    entry_export: Option<&str>,
+) -> String {
+    let _ = entry_export; // currently consumed only via is_main below
     let codegen_info = ctx.codegen_info();
-    let program = normalize::normalize_effects(program);
-    let constructor_atoms = resolve::build_constructor_atoms(
-        module_name,
-        &program,
-        &codegen_info,
-        &ctx.prelude_imports,
-    );
+    let constructor_atoms =
+        resolve::build_constructor_atoms(module_name, program, &codegen_info, &ctx.prelude_imports);
     let front_resolution = check_result
         .module_check_results()
         .get(module_name)
@@ -147,26 +287,40 @@ pub fn emit_module_with_context(
         .unwrap_or(&check_result.resolution);
     let mut resolution_map = resolve::resolve_names(
         module_name,
-        &program,
+        program,
         &codegen_info,
         &ctx.prelude_imports,
         front_resolution,
     );
-    // Merge in pre-computed resolution maps from all compiled modules.
-    // Their NodeIds don't overlap with ours, so this is a simple extend.
     for compiled in ctx.modules.values() {
         resolution_map.extend(compiled.resolution.iter().map(|(k, v)| (*k, v.clone())));
     }
-    let source_info =
-        source_file.map(|sf| lower::errors::SourceInfo::new(sf.path.clone(), &sf.source));
-    let cmod = lower::Lowerer::new(
+
+    // Effect info: build the ops table once (borrowed by the view).
+    let ops_storage = build_effect_ops_table(check_result);
+    // Per-module CheckResult yields the per-module ResolutionResult that
+    // carries effect_calls / handler_arms. Script/test contexts (no module
+    // registered) fall back to the top-level check_result.
+    let mod_check_ref: &CheckResult = check_result
+        .module_check_results()
+        .get(module_name)
+        .unwrap_or(check_result);
+    let effect_info = build_effect_info(check_result, mod_check_ref, &ops_storage);
+
+    let handler_info = handler_analysis::analyze(program);
+    let anf_program = anf::normalize(program.clone());
+    let monadic_prog = monadic::translate::translate(&anf_program, &resolution_map, &effect_info);
+    let optimized = monadic::effect_opt::run(monadic_prog, &handler_info, &effect_info);
+
+    let is_main = entry_export.is_some();
+    let cmod = lower_monadic::Lowerer::new(
+        &resolution_map,
+        &constructor_atoms,
         ctx,
-        constructor_atoms,
-        resolution_map,
-        check_result,
-        source_info,
-        entry_export.map(str::to_string),
+        &handler_info,
+        &effect_info,
     )
-    .lower_module(module_name, &program);
+    .with_bootstrap_emission(is_main)
+    .lower_module(module_name, &optimized);
     cerl::print_module(&cmod)
 }

@@ -69,6 +69,11 @@ impl<'a> Translator<'a> {
     fn new(p: &'a ast::Program, r: &'a ResolutionMap, e: &'a EffectInfo<'a>) -> Self {
         let mut effect_ops: HashMap<String, Vec<String>> = HashMap::new();
         let mut handler_decls: HashMap<String, HandlerBody> = HashMap::new();
+        // Seed cross-module effects from the narrowed view first; local
+        // `Decl::EffectDef` scans below take precedence on key collisions.
+        for (name, ops) in e.effect_ops.iter() {
+            effect_ops.insert(name.clone(), ops.clone());
+        }
         for decl in p {
             match decl {
                 Decl::EffectDef {

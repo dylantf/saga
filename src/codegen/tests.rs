@@ -1204,3 +1204,138 @@ fn no_annotations_without_source_info() {
         "Expected no annotations without source info in:\n{out}"
     );
 }
+
+// -----------------------------------------------------------------------
+// Phase 1, step 8 — new-path wiring tests.
+//
+// Old path is the active one in `emit_module_with_context`. The new path
+// is exercised here via `emit_module_via_new_path` (always compiled) so
+// we get a smoke signal end-to-end without flipping the comment toggle.
+// -----------------------------------------------------------------------
+
+fn check_program(src: &str) -> (crate::ast::Program, crate::typechecker::CheckResult) {
+    let tokens = Lexer::new(src).lex().expect("lex error");
+    let mut program = Parser::new(tokens).parse_program().expect("parse error");
+    derive::expand_derives(&mut program, &derive::ImportedDecls::empty());
+    desugar::desugar_program(&mut program);
+    let mut checker = typechecker::Checker::with_prelude(None).expect("prelude error");
+    let result = checker.check_program(&mut program);
+    assert!(!result.has_errors(), "Type errors: {:?}", result.errors());
+    let elaborated = elaborate::elaborate(&program, &result);
+    (elaborated, result)
+}
+
+#[test]
+fn build_effect_ops_table_includes_local_and_qualified_keys() {
+    let src = "effect Log {\n  fun log : (msg: String) -> Unit\n  fun warn : (msg: String) -> Unit\n}\n\nmain () = ()";
+    let (_, result) = check_program(src);
+    let table = super::build_effect_ops_table(&result);
+    // The effect is declared in the script body, source_module is None →
+    // only the bare key is present.
+    let ops = table
+        .map
+        .get("Log")
+        .expect("expected `Log` entry in effect ops table");
+    assert_eq!(ops, &vec!["log".to_string(), "warn".to_string()]);
+}
+
+#[test]
+fn build_effect_ops_table_ops_sorted_alphabetically() {
+    let src = "effect E {\n  fun z : Unit -> Unit\n  fun a : Unit -> Unit\n  fun m : Unit -> Unit\n}\n\nmain () = ()";
+    let (_, result) = check_program(src);
+    let table = super::build_effect_ops_table(&result);
+    let ops = table.map.get("E").expect("E missing");
+    assert_eq!(
+        ops,
+        &vec!["a".to_string(), "m".to_string(), "z".to_string()]
+    );
+}
+
+#[test]
+fn build_effect_info_populates_all_fields_from_check_result() {
+    let src = "effect Log {\n  fun log : (msg: String) -> Unit\n}\n\nmain () = ()";
+    let (_, result) = check_program(src);
+    let ops_storage = super::build_effect_ops_table(&result);
+    let info = super::build_effect_info(&result, &result, &ops_storage);
+
+    // type_at_node and fun_effects come from check_result.
+    assert!(std::ptr::eq(info.type_at_node, &result.type_at_node));
+    assert!(std::ptr::eq(info.fun_effects, &result.fun_effects));
+    assert!(std::ptr::eq(
+        info.let_effect_bindings,
+        &result.let_effect_bindings
+    ));
+    // effect_calls / handler_arms come from the (per-module) resolution.
+    assert!(std::ptr::eq(
+        info.effect_calls,
+        &result.resolution.effect_calls
+    ));
+    assert!(std::ptr::eq(
+        info.handler_arms,
+        &result.resolution.handler_arms
+    ));
+    // effect_ops borrows from the supplied storage.
+    assert!(std::ptr::eq(info.effect_ops, &ops_storage.map));
+    // And actually carries the declared op.
+    assert_eq!(info.effect_ops.get("Log"), Some(&vec!["log".to_string()]));
+}
+
+/// Smoke test the full new path on a trivial program. The point is to
+/// surface integration bugs in steps 1-7 — if this crashes, that's the
+/// signal. Marked `#[ignore]` so it doesn't gate the default suite while
+/// step 8 lands; run with:
+///
+///     cargo test -p saga -- --ignored new_path_smoke
+#[test]
+#[ignore]
+fn new_path_smoke_hello_world() {
+    let src = "main () = ()";
+    let (elaborated, result) = check_program(src);
+    let ctx = super::CodegenContext {
+        modules: std::collections::HashMap::new(),
+        let_effect_bindings: result.let_effect_bindings.clone(),
+        prelude_imports: result.prelude_imports.clone(),
+    };
+    let core = super::emit_module_via_new_path(
+        "_script",
+        &elaborated,
+        &ctx,
+        &result,
+        Some("main"),
+    );
+    assert!(
+        core.contains("module '_script'"),
+        "Core Erlang module header missing:\n{core}"
+    );
+    assert!(
+        core.contains("__saga_initial_evidence"),
+        "Bootstrap function should be emitted for entry-point module:\n{core}"
+    );
+
+    // erlc-accept check. Writes the .core to a tempdir and shells out to
+    // erlc; skips silently if erlc isn't on PATH (sandbox / CI variant).
+    if std::process::Command::new("erlc")
+        .arg("--help")
+        .output()
+        .is_ok()
+    {
+        let tmp = std::env::temp_dir().join("saga-new-path-smoke");
+        std::fs::create_dir_all(&tmp).unwrap();
+        let core_path = tmp.join("_script.core");
+        std::fs::write(&core_path, &core).unwrap();
+        let out = std::process::Command::new("erlc")
+            .arg("+from_core")
+            .arg("-o")
+            .arg(&tmp)
+            .arg(&core_path)
+            .output()
+            .expect("erlc spawn");
+        assert!(
+            out.status.success(),
+            "erlc rejected new-path output:\nstdout: {}\nstderr: {}\ncore: {}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr),
+            core
+        );
+    }
+}
