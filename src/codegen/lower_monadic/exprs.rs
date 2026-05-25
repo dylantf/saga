@@ -11,7 +11,7 @@ use crate::codegen::resolve::{ResolvedCodegenKind, ResolvedSymbol};
 
 use super::Lowerer;
 use super::exprs_edge::binop_atoms;
-use super::pats::{lower_param_names, lower_pat};
+use super::pats::lower_param_names;
 use super::util::{core_var, lower_lit_atom, lower_string_to_binary, mangle_ctor_atom};
 
 // Name of the function-entry return-continuation variable. Every emitted
@@ -208,7 +208,7 @@ impl<'ctx> Lowerer<'ctx> {
 
     /// Lower a single MArm into a `CArm`. Shared between `Case` and `Receive`.
     pub(super) fn lower_arm(&mut self, arm: &MArm) -> CArm {
-        let pat = lower_pat(&arm.pattern, self.ctors);
+        let pat = self.lower_pat(&arm.pattern);
         let guard = arm.guard.as_ref().map(|g| self.lower_guard(g));
         let body = self.lower_expr(&arm.body);
         CArm { pat, guard, body }
