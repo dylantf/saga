@@ -146,9 +146,28 @@ impl<'ctx> Lowerer<'ctx> {
         // 1. Build per-effect entries from the arms. Arm closures reference
         //    `outer_evidence` / `outer_return_k` inside; we build them with
         //    the lowerer state still pointing at the outer scope.
-        let mut entry_bindings: Vec<(String, CExpr)> = Vec::with_capacity(effects.len());
+        //
+        // The handler's `effects` vec carries the **bare** source-level
+        // effect names (e.g. `Stdio`). Arm `op.effect` carries the
+        // **canonical** name (e.g. `Std.IO.Stdio`) from the typechecker's
+        // `effect_calls` map. The lowerer's `Yield` path also uses
+        // canonical names to look up evidence at runtime, so the with-site
+        // must install entries under the canonical tag — otherwise the
+        // tags don't match and `find_evidence` reports
+        // `evidence_tag_not_found`. We therefore derive the effect set
+        // from the arms, ignoring the bare-named `effects` parameter
+        // (left in for spec parity).
+        let _ = effects;
+        let mut canonical_effects: Vec<String> = Vec::new();
+        for arm in arms {
+            if !canonical_effects.contains(&arm.op.effect) {
+                canonical_effects.push(arm.op.effect.clone());
+            }
+        }
+        let mut entry_bindings: Vec<(String, CExpr)> =
+            Vec::with_capacity(canonical_effects.len());
         let mut acc_evidence_var = outer_evidence.clone();
-        for eff in effects {
+        for eff in &canonical_effects {
             let effect_arms: Vec<&MHandlerArm> =
                 arms.iter().filter(|a| a.op.effect == *eff).collect();
             let op_tuple = self.build_op_tuple_for_effect(eff, &effect_arms);

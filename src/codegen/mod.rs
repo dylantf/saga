@@ -221,11 +221,25 @@ fn build_effect_ops_table(check_result: &CheckResult) -> EffectOpsTable {
     for (name, info) in &check_result.effects {
         let mut ops: Vec<String> = info.ops.iter().map(|op| op.name.clone()).collect();
         ops.sort();
-        // Bare name. If multiple effects share a bare name across modules,
-        // the last-write wins — qualified lookups stay unambiguous.
+        // `check_result.effects` may key by either bare (`Stdio`) or canonical
+        // (`Std.IO.Stdio`) names depending on where the entry was inserted
+        // (see `check_decl.rs:2219` for the canonical branch). Insert under
+        // both spellings so downstream lookups succeed either way, but avoid
+        // re-prepending the source module to a name that already contains it
+        // — `format!("Std.IO.{}", "Std.IO.Stdio")` would produce
+        // `Std.IO.Std.IO.Stdio` and poison the canonical lookup.
         map.insert(name.clone(), ops.clone());
         if let Some(src_mod) = &info.source_module {
-            map.insert(format!("{}.{}", src_mod, name), ops);
+            let bare = name.rsplit('.').next().unwrap_or(name);
+            let canonical = format!("{}.{}", src_mod, bare);
+            if canonical != *name {
+                map.insert(canonical, ops.clone());
+            }
+            // Also register the bare key explicitly if `name` is canonical,
+            // so `canonical_effect_name` can find the bare→canonical mapping.
+            if bare != name.as_str() {
+                map.entry(bare.to_string()).or_insert_with(|| ops.clone());
+            }
         }
     }
     EffectOpsTable { map }
