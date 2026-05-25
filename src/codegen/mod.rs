@@ -322,7 +322,7 @@ pub fn emit_module_via_new_path(
     let effect_info = build_effect_info(check_result, mod_check_ref, &ops_storage);
 
     let handler_info = handler_analysis::analyze(program);
-    let anf_program = anf::normalize(program.clone());
+    let anf_program = anf::normalize(program.clone(), Some(&resolution_map));
     // Collect imported handler bodies so `with <imported_handler>` translates
     // to `Static` (arms inlined) instead of falling back to `Dynamic` with an
     // empty effect list — the lowerer's Dynamic path requires a concrete
@@ -335,7 +335,7 @@ pub fn emit_module_via_new_path(
     // satisfy the ANF atomicity invariant.
     let mut imported_handler_decls: HashMap<String, ast::HandlerBody> = HashMap::new();
     for compiled in ctx.modules.values() {
-        let anf_imported = anf::normalize(compiled.elaborated.clone());
+        let anf_imported = anf::normalize(compiled.elaborated.clone(), Some(&compiled.resolution));
         for decl in &anf_imported {
             if let ast::Decl::HandlerDef { name, body, .. } = decl {
                 imported_handler_decls

@@ -96,6 +96,14 @@ impl Anf {
                 };
                 rebuilt = if matches!(rebuilt.kind, ExprKind::App { .. }) {
                     self.normalize_into(rebuilt, bindings)
+                } else if self.is_dict_ctor_head(&rebuilt) {
+                    // Dict-ctor refs are "atomic as App heads": the App
+                    // itself is the materialization site (CPS-calls the
+                    // ctor with its sub-dict args). Atomizing the head
+                    // would lift the bare ref into a separate let,
+                    // splitting the saturated CPS call so the lifted-let
+                    // path would CPS-call with zero sub-dicts.
+                    self.normalize_into(rebuilt, bindings)
                 } else {
                     self.atomize_into(rebuilt, bindings)
                 };
@@ -589,13 +597,21 @@ impl Anf {
         tail.unwrap_or_else(|| Expr::synth(block_span, ExprKind::Lit { value: Lit::Unit }))
     }
 
+    /// Whether `e` is a dict-constructor reference at App-head position.
+    pub(super) fn is_dict_ctor_head(&self, e: &Expr) -> bool {
+        matches!(
+            &e.kind,
+            ExprKind::DictRef { .. } | ExprKind::QualifiedName { .. }
+        ) && self.dict_ctor_node_ids.contains(&e.id)
+    }
+
     /// Like `normalize_into`, but lifts the result to an atom (`Var`) if not
     /// already atomic, appending a synthetic let to `bindings`. The lifted
     /// value retains its original `NodeId`; the wrapper let pattern and
     /// replacement `Var` use fresh IDs (`Expr::synth`).
     fn atomize_into(&mut self, e: Expr, bindings: &mut Vec<Annotated<Stmt>>) -> Expr {
         let normalized = self.normalize_into(e, bindings);
-        if is_atom(&normalized) {
+        if is_atom(&normalized, &self.dict_ctor_node_ids) {
             return normalized;
         }
         let name = self.fresh.fresh("v");
@@ -637,8 +653,18 @@ pub(super) fn finish(bindings: Vec<Annotated<Stmt>>, tail: Expr) -> Expr {
 /// Tuples/records are atomic only if all their fields are atomic
 /// (recursively); a lambda is atomic at its construction site regardless of
 /// its body.
-fn is_atom(e: &Expr) -> bool {
+fn is_atom(e: &Expr, dict_ctor_node_ids: &std::collections::HashSet<NodeId>) -> bool {
     match &e.kind {
+        // Dict-constructor refs are CPS callables under the uniform
+        // convention; their value form is a fun reference, not a tuple.
+        // Treating them as non-atomic forces ANF to lift each reference
+        // into a `let v = DictRef in …` so the translator can emit a
+        // zero-arg CPS call and bind the materialized tuple to `v`.
+        ExprKind::DictRef { .. } | ExprKind::QualifiedName { .. }
+            if dict_ctor_node_ids.contains(&e.id) =>
+        {
+            false
+        }
         ExprKind::Lit { .. }
         | ExprKind::Var { .. }
         | ExprKind::QualifiedName { .. }
@@ -646,9 +672,11 @@ fn is_atom(e: &Expr) -> bool {
         | ExprKind::SymbolIntrinsic { .. }
         | ExprKind::Constructor { .. }
         | ExprKind::Lambda { .. } => true,
-        ExprKind::Tuple { elements } => elements.iter().all(is_atom),
+        ExprKind::Tuple { elements } => elements.iter().all(|x| is_atom(x, dict_ctor_node_ids)),
         ExprKind::RecordCreate { fields, .. } | ExprKind::AnonRecordCreate { fields } => {
-            fields.iter().all(|(_, _, x)| is_atom(x))
+            fields
+                .iter()
+                .all(|(_, _, x)| is_atom(x, dict_ctor_node_ids))
         }
         _ => false,
     }

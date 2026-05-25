@@ -114,6 +114,13 @@ pub struct Lowerer<'ctx> {
     /// can emit a `FunRef` instead of `erlang:make_fun/3`, which requires
     /// the target to be exported).
     pub(super) current_erlang_module: String,
+    /// Source-level names of every handler decl known to the program (local
+    /// + imported). Used by [`lower_var_atom`] to detect handler-as-value
+    ///   references (`let logger = if dev then console_log else silent_log`)
+    ///   that wouldn't otherwise resolve, and emit a placeholder rather than
+    ///   a bare-Erlang-var that `erlc` would reject. Populated by step 8's
+    ///   toggle wiring; empty by default.
+    pub(super) handler_names: std::collections::HashSet<String>,
 }
 
 impl<'ctx> Lowerer<'ctx> {
@@ -150,6 +157,7 @@ impl<'ctx> Lowerer<'ctx> {
             record_fields,
             emit_bootstrap: false,
             current_erlang_module: String::new(),
+            handler_names: std::collections::HashSet::new(),
         }
     }
 
@@ -290,6 +298,26 @@ impl<'ctx> Lowerer<'ctx> {
         // Track the current module's Erlang name so we can collapse
         // same-module references to a local FunRef in `lower_resolved_value_ref`.
         self.current_erlang_module = module_name.to_string();
+
+        // Collect handler names (local + imported) so `lower_var_atom` can
+        // recognize a handler-as-value reference. Includes both bare names
+        // and module-qualified canonical names for safety. Local handlers
+        // come from this program's `Passthrough(HandlerDef)`; imported
+        // ones are listed in each compiled module's
+        // `codegen_info.handler_defs`.
+        self.handler_names.clear();
+        for decl in program {
+            if let MDecl::Passthrough(crate::ast::Decl::HandlerDef { name, .. }) = decl {
+                self.handler_names.insert(name.clone());
+            }
+        }
+        for compiled in self.module_ctx.modules.values() {
+            for hname in &compiled.codegen_info.handler_defs {
+                let bare = hname.rsplit('.').next().unwrap_or(hname).to_string();
+                self.handler_names.insert(bare);
+                self.handler_names.insert(hname.clone());
+            }
+        }
 
         // Populate `record_fields` from the currently-compiling module's own
         // `RecordDef` decls. The construction-time pass only sees IMPORTED
