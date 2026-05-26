@@ -16,7 +16,7 @@ use crate::ast::{self, Annotation, Decl, Lit, Pat, TypeExpr};
 use crate::codegen::cerl::{CArm, CExpr, CFunDef, CPat};
 use crate::codegen::monadic::ir::{Atom, MDictConstructor, MExpr, MFunBinding, MVal};
 
-use super::Lowerer;
+use super::{LowerCtx, Lowerer};
 use super::pats::lower_param_names;
 
 /// Variable name for the evidence-vector parameter on every emitted CFunDef.
@@ -44,8 +44,8 @@ impl<'ctx> Lowerer<'ctx> {
         params.push(EVIDENCE_VAR.to_string());
         params.push(RETURN_K_VAR.to_string());
         let arity = params.len();
-        self.reset_k_state();
-        let body = self.lower_expr(&fb.body);
+        self.reset_counters();
+        let body = self.lower_expr(&fb.body, &LowerCtx::fresh());
         CFunDef {
             name: fb.name.clone(),
             arity,
@@ -112,9 +112,9 @@ impl<'ctx> Lowerer<'ctx> {
         // own tail context but they share the function-entry `_ReturnK`).
         let mut arms: Vec<CArm> = Vec::with_capacity(group.len());
         for fb in group {
-            self.reset_k_state();
+            self.reset_counters();
             let pat = CPat::Tuple(fb.params.iter().map(|p| self.lower_pat(p)).collect());
-            let body = self.lower_expr(&fb.body);
+            let body = self.lower_expr(&fb.body, &LowerCtx::fresh());
             arms.push(CArm {
                 pat,
                 guard: None,
@@ -141,7 +141,7 @@ impl<'ctx> Lowerer<'ctx> {
     /// However, after ANF + monadic translation, the body's `MExpr` shape
     /// is not restricted to `Pure(atom)` — it may contain `Bind` / `Let` /
     /// `If` / `Case` / `BinOp` etc. (a `val x = 1 + 2`, for instance).
-    /// `lower_expr` ends every tail with `apply <current_return_k>(value)`,
+    /// `lower_expr` ends every tail with `apply <ctx.return_k>(value)`,
     /// so we bind `_ReturnK` locally to the identity function inside the
     /// arity-0 wrapper — the final `apply` then beta-reduces (in spirit;
     /// the Erlang compiler does the actual inlining) to just the value.
@@ -150,8 +150,8 @@ impl<'ctx> Lowerer<'ctx> {
     /// reference (defensive — pure bodies should not produce one) doesn't
     /// surface as an unbound-var error in `erlc`.
     pub(super) fn lower_val(&mut self, v: &MVal) -> CFunDef {
-        self.reset_k_state();
-        let body_inner = self.lower_expr(&v.value);
+        self.reset_counters();
+        let body_inner = self.lower_expr(&v.value, &LowerCtx::fresh());
         // let <_Evidence> = 'unit', <_ReturnK> = fun (_X) -> _X in <body_inner>
         let id_param = "_X".to_string();
         let id_k = CExpr::Fun(vec![id_param.clone()], Box::new(CExpr::Var(id_param)));
@@ -190,7 +190,7 @@ impl<'ctx> Lowerer<'ctx> {
         params.push(EVIDENCE_VAR.to_string());
         params.push(RETURN_K_VAR.to_string());
         let arity = params.len();
-        self.reset_k_state();
+        self.reset_counters();
 
         let method_ces: Vec<CExpr> = dc
             .methods

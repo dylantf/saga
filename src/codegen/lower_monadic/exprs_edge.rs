@@ -4,7 +4,7 @@
 //! Each method here is dispatched from `exprs.rs::lower_expr`; the
 //! K-threading conventions follow the rules established for the other
 //! variants (every non-`Bind`/`Let` final value flows through
-//! `apply current_return_k(...)`).
+//! `apply <ctx.return_k>(...)`).
 //!
 //! Covers: `FieldAccess`, `RecordUpdate`, `DictMethodAccess`, `ForeignCall`,
 //! `BinOp`, `UnaryMinus`, `BitString`, `Receive`. Also hosts the
@@ -14,7 +14,7 @@ use crate::ast::BinOp as AstBinOp;
 use crate::codegen::cerl::{CArm, CBinSeg, CExpr, CLit};
 use crate::codegen::monadic::ir::{Atom, MArm, MBitSegment, MExpr};
 
-use super::Lowerer;
+use super::{LowerCtx, Lowerer};
 use super::util::{resolve_bit_segment_flags, resolve_bit_segment_meta, resolve_bit_segment_size};
 
 impl<'ctx> Lowerer<'ctx> {
@@ -38,6 +38,7 @@ impl<'ctx> Lowerer<'ctx> {
         record: &Atom,
         field: &str,
         record_name: Option<&str>,
+        ctx: &LowerCtx,
     ) -> CExpr {
         // Anonymous records (`{ a: …, b: … }`) use a synthetic tag of the
         // form `__anon_<sorted_field_names_joined_by_underscore>` — the tag
@@ -72,7 +73,7 @@ impl<'ctx> Lowerer<'ctx> {
             "element".to_string(),
             vec![CExpr::Lit(CLit::Int(idx)), rec],
         );
-        self.apply_current_k(access)
+        self.apply_current_k(access, ctx)
     }
 
     /// Lower `RecordUpdate { record, fields, record_name, .. }`.
@@ -88,6 +89,7 @@ impl<'ctx> Lowerer<'ctx> {
         record: &Atom,
         fields: &[(String, Atom)],
         record_name: Option<&str>,
+        ctx: &LowerCtx,
     ) -> CExpr {
         // See `lower_field_access`: anon record tags encode their sorted
         // field order in the tag itself (`__anon_<f0>_<f1>_…`). Use that
@@ -137,7 +139,7 @@ impl<'ctx> Lowerer<'ctx> {
         }
         let tuple = CExpr::Tuple(elems);
         let inner = CExpr::Let(rec_var, Box::new(rec_ce), Box::new(tuple));
-        self.apply_current_k(inner)
+        self.apply_current_k(inner, ctx)
     }
 
     /// Lower `DictMethodAccess { dict, method_index, .. }`.
@@ -152,54 +154,71 @@ impl<'ctx> Lowerer<'ctx> {
     /// but the old lowerer uses `method_index + 1`. The IR field is the AST
     /// field passed through verbatim by the translator, so we match the old
     /// behavior to avoid changing dict-call semantics here.
-    pub(super) fn lower_dict_method_access(&mut self, dict: &Atom, method_index: usize) -> CExpr {
+    pub(super) fn lower_dict_method_access(
+        &mut self,
+        dict: &Atom,
+        method_index: usize,
+        ctx: &LowerCtx,
+    ) -> CExpr {
         let d = self.lower_atom(dict);
         let elem = CExpr::Call(
             "erlang".to_string(),
             "element".to_string(),
             vec![CExpr::Lit(CLit::Int(method_index as i64 + 1)), d],
         );
-        self.apply_current_k(elem)
+        self.apply_current_k(elem, ctx)
     }
 
     /// Lower `ForeignCall { module, func, args, .. }`.
     ///
     /// Emits `call '<module>':'<func>'(<args...>)`. There is no `_Evidence`
     /// / `_ReturnK` threading — foreign calls are raw BIFs. The result flows
-    /// through the ambient `current_return_k` so the caller's continuation
-    /// receives the BIF's return value.
-    pub(super) fn lower_foreign_call(&mut self, module: &str, func: &str, args: &[Atom]) -> CExpr {
+    /// through the ambient continuation in `ctx.return_k` so the caller's
+    /// continuation receives the BIF's return value.
+    pub(super) fn lower_foreign_call(
+        &mut self,
+        module: &str,
+        func: &str,
+        args: &[Atom],
+        ctx: &LowerCtx,
+    ) -> CExpr {
         let call_args: Vec<CExpr> = args.iter().map(|a| self.lower_atom(a)).collect();
         let call = CExpr::Call(module.to_string(), func.to_string(), call_args);
-        self.apply_current_k(call)
+        self.apply_current_k(call, ctx)
     }
 
     /// Lower `BinOp { op, left, right, .. }`.
     ///
     /// Both operands are atoms by ANF, so we lower them inline and emit the
     /// native Core Erlang shape via [`binop_atoms`]. Result flows through
-    /// the ambient `current_return_k`.
+    /// the ambient continuation in `ctx.return_k`.
     ///
     /// `And`/`Or`: ANF guarantees both operands are non-effectful, so eager
     /// evaluation matches Saga's source semantics. We lower these to the
     /// `erlang:'and'`/`erlang:'or'` BIFs rather than short-circuit `case`
     /// rewrites; the old lowerer's short-circuit shape is unnecessary here.
-    pub(super) fn lower_binop(&mut self, op: &AstBinOp, left: &Atom, right: &Atom) -> CExpr {
+    pub(super) fn lower_binop(
+        &mut self,
+        op: &AstBinOp,
+        left: &Atom,
+        right: &Atom,
+        ctx: &LowerCtx,
+    ) -> CExpr {
         let l = self.lower_atom(left);
         let r = self.lower_atom(right);
-        self.apply_current_k(binop_atoms(op, l, r))
+        self.apply_current_k(binop_atoms(op, l, r), ctx)
     }
 
     /// Lower `UnaryMinus { value, .. }` to `0 - value` via the integer
     /// negation BIF. Atomic by ANF.
-    pub(super) fn lower_unary_minus(&mut self, value: &Atom) -> CExpr {
+    pub(super) fn lower_unary_minus(&mut self, value: &Atom, ctx: &LowerCtx) -> CExpr {
         let v = self.lower_atom(value);
         let neg = CExpr::Call(
             "erlang".to_string(),
             "-".to_string(),
             vec![CExpr::Lit(CLit::Int(0)), v],
         );
-        self.apply_current_k(neg)
+        self.apply_current_k(neg, ctx)
     }
 
     /// Lower `BitString { segments, .. }` (construction; pattern lowering
@@ -209,7 +228,7 @@ impl<'ctx> Lowerer<'ctx> {
     /// inline and wrap in `CBinSeg::Segment` (or `BinaryAll` for an
     /// unsized binary splice, or `Byte` runs for literal-string sugar).
     /// Spec encoding copied verbatim from `src/codegen/lower/exprs.rs::lower_bitstring_expr`.
-    pub(super) fn lower_bitstring(&mut self, segments: &[MBitSegment]) -> CExpr {
+    pub(super) fn lower_bitstring(&mut self, segments: &[MBitSegment], ctx: &LowerCtx) -> CExpr {
         let mut segs: Vec<CBinSeg<CExpr>> = Vec::new();
         for seg in segments {
             // String literal sugar — expand to byte segments.
@@ -250,7 +269,7 @@ impl<'ctx> Lowerer<'ctx> {
                 flags,
             });
         }
-        self.apply_current_k(CExpr::Binary(segs))
+        self.apply_current_k(CExpr::Binary(segs), ctx)
     }
 
     /// Lower `Receive { arms, after, .. }`.
@@ -276,10 +295,11 @@ impl<'ctx> Lowerer<'ctx> {
         &mut self,
         arms: &[MArm],
         after: Option<&(Atom, Box<MExpr>)>,
+        ctx: &LowerCtx,
     ) -> CExpr {
-        let carms: Vec<CArm> = arms.iter().map(|arm| self.lower_arm(arm)).collect();
+        let carms: Vec<CArm> = arms.iter().map(|arm| self.lower_arm(arm, ctx)).collect();
         let (timeout, timeout_body) = match after {
-            Some((t, body)) => (self.lower_atom(t), self.lower_expr(body)),
+            Some((t, body)) => (self.lower_atom(t), self.lower_expr(body, ctx)),
             None => (
                 CExpr::Lit(CLit::Atom("infinity".to_string())),
                 CExpr::Lit(CLit::Atom("true".to_string())),

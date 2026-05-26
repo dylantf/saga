@@ -30,13 +30,31 @@
 
 #![allow(dead_code)] // 7a scaffolding; consumers land in 7b–7g.
 
+mod app;
+mod atom;
 mod bootstrap;
+mod case;
+mod ctx;
 mod decls;
 mod effects;
 mod exprs;
 mod exprs_edge;
 mod pats;
 mod util;
+
+pub(super) use ctx::LowerCtx;
+
+/// Snapshot of every fresh-name counter on the lowerer. Returned by
+/// [`Lowerer::snapshot_counters`] and consumed by
+/// [`Lowerer::restore_counters`] when lowering nested bodies (lambdas,
+/// letfuns) that need their own monotonic naming.
+pub(super) struct CounterSnapshot {
+    k_counter: u32,
+    ev_counter: u32,
+    arm_k_counter: u32,
+    ret_k_counter: u32,
+    helper_counter: u32,
+}
 
 use std::collections::HashMap;
 
@@ -68,29 +86,12 @@ pub struct Lowerer<'ctx> {
     module_ctx: &'ctx CodegenContext,
     handler_info: &'ctx HandlerAnalysis,
     effect_info: &'ctx EffectInfo<'ctx>,
-    /// Name of the in-scope return continuation. Defaults to `_ReturnK` at
-    /// every function/lambda entry; `Bind` lowering rebinds it temporarily
-    /// to a freshly-generated `_K{n}` name for the duration of lowering the
-    /// bound value.
-    current_return_k: String,
     /// Monotonic counter for fresh K names. Reset at each function entry to
     /// keep emitted Core Erlang stable across decls.
     k_counter: u32,
-    /// Name of the in-scope evidence vector variable. Defaults to `_Evidence`
-    /// at every function/lambda entry; `With` lowering rebinds it temporarily
-    /// to a freshly-generated `_Ev{n}` name for the duration of the handler's
-    /// body, mirroring the [`current_return_k`] pattern.
-    current_evidence: String,
     /// Monotonic counter for fresh evidence-var names. Reset at each function
     /// entry to keep emitted Core Erlang stable across decls.
     ev_counter: u32,
-    /// Name of the captured perform-site continuation while lowering inside a
-    /// handler arm body. `None` outside an arm. `Resume(v)` calls this K
-    /// (continuing at the perform site); `Pure(v)` calls `current_return_k`
-    /// (the with-site K — abort/escape semantics). Mirrors the old lowerer's
-    /// split between `current_handler_k` (resume target) and
-    /// `current_handler_inherited_k` (abort target).
-    current_arm_k: Option<String>,
     /// Monotonic counter for fresh handler-arm continuation names (`_K_arm{n}`).
     /// Distinct from `k_counter` so Bind-K names stay stable as tests already
     /// pin them (`_K0`, `_K1`, ...) independently of any handler arms in scope.
@@ -154,11 +155,8 @@ impl<'ctx> Lowerer<'ctx> {
             module_ctx,
             handler_info,
             effect_info,
-            current_return_k: exprs::RETURN_K_VAR.to_string(),
             k_counter: 0,
-            current_evidence: exprs::EVIDENCE_VAR.to_string(),
             ev_counter: 0,
-            current_arm_k: None,
             arm_k_counter: 0,
             ret_k_counter: 0,
             helper_counter: 0,
@@ -255,27 +253,41 @@ impl<'ctx> Lowerer<'ctx> {
         format!("_K{}", n)
     }
 
-    /// Run `body` with `current_return_k` set to `k`, restoring the previous
-    /// value afterward. Used by `Bind` to redirect the inner computation's
-    /// tail to a freshly-bound continuation.
-    pub(super) fn with_return_k<R>(&mut self, k: String, body: impl FnOnce(&mut Self) -> R) -> R {
-        let prev = std::mem::replace(&mut self.current_return_k, k);
-        let r = body(self);
-        self.current_return_k = prev;
-        r
-    }
-
-    /// Reset the K-naming counter and ambient return continuation at the
-    /// start of a fresh function/lambda body.
-    pub(super) fn reset_k_state(&mut self) {
-        self.current_return_k = exprs::RETURN_K_VAR.to_string();
+    /// Reset every fresh-name counter at the start of a fresh
+    /// function/lambda/letfun body. Continuation-flavored state (return-K,
+    /// evidence, arm-K) now lives in [`LowerCtx`] and is constructed afresh
+    /// at each entry point rather than reset here.
+    pub(super) fn reset_counters(&mut self) {
         self.k_counter = 0;
-        self.current_evidence = exprs::EVIDENCE_VAR.to_string();
         self.ev_counter = 0;
-        self.current_arm_k = None;
         self.arm_k_counter = 0;
         self.ret_k_counter = 0;
         self.helper_counter = 0;
+    }
+
+    /// Snapshot the fresh-name counters so they can be restored after
+    /// lowering a nested function body (lambda / letfun). Mirrors the
+    /// behaviour of the prior `mem::replace` clusters: each nested body
+    /// emits stable `_K0`, `_K1`, … names independently of the outer body's
+    /// counter state.
+    pub(super) fn snapshot_counters(&self) -> CounterSnapshot {
+        CounterSnapshot {
+            k_counter: self.k_counter,
+            ev_counter: self.ev_counter,
+            arm_k_counter: self.arm_k_counter,
+            ret_k_counter: self.ret_k_counter,
+            helper_counter: self.helper_counter,
+        }
+    }
+
+    /// Restore counters from a [`snapshot_counters`](Self::snapshot_counters)
+    /// result.
+    pub(super) fn restore_counters(&mut self, s: CounterSnapshot) {
+        self.k_counter = s.k_counter;
+        self.ev_counter = s.ev_counter;
+        self.arm_k_counter = s.arm_k_counter;
+        self.ret_k_counter = s.ret_k_counter;
+        self.helper_counter = s.helper_counter;
     }
 
     /// Lower an entire `MProgram` to a Core Erlang `CModule`.

@@ -21,7 +21,7 @@ use crate::ast::Pat;
 use crate::codegen::cerl::{CArm, CExpr, CLit, CPat};
 use crate::codegen::monadic::ir::{Atom, EffectOpRef, MExpr, MHandler, MHandlerArm};
 
-use super::Lowerer;
+use super::{LowerCtx, Lowerer};
 use super::util::core_var;
 
 /// Erlang module hosting the runtime helpers
@@ -42,7 +42,7 @@ impl<'ctx> Lowerer<'ctx> {
     ///   apply (call 'erlang':'element'(<op_index>,
     ///             call 'std_evidence_bridge':'find_evidence'(
     ///                 _Evidence, '<EffectAtom>')))
-    ///         (<args...>, <current_return_k>)
+    ///         (<args...>, <ctx.return_k>)
     /// ```
     ///
     /// `find_evidence/2` returns the per-effect `OpTuple` (a runtime tuple
@@ -55,7 +55,12 @@ impl<'ctx> Lowerer<'ctx> {
     /// per-call decisions that the new path explicitly avoids. The runtime
     /// walk is O(n) over a typically-≤5-entry tuple; closed-row
     /// specialization is a step-11+ optimization.
-    pub(super) fn lower_yield(&mut self, op: &EffectOpRef, args: &[Atom]) -> CExpr {
+    pub(super) fn lower_yield(
+        &mut self,
+        op: &EffectOpRef,
+        args: &[Atom],
+        ctx: &LowerCtx,
+    ) -> CExpr {
         // Lower args first — they're atoms (ANF), so non-effectful.
         let lowered_args: Vec<CExpr> = args.iter().map(|a| self.lower_atom(a)).collect();
 
@@ -63,7 +68,7 @@ impl<'ctx> Lowerer<'ctx> {
             EVIDENCE_BRIDGE_MODULE.to_string(),
             "find_evidence".to_string(),
             vec![
-                CExpr::Var(self.current_evidence.clone()),
+                CExpr::Var(ctx.evidence.clone()),
                 CExpr::Lit(CLit::Atom(op.effect.clone())),
             ],
         );
@@ -74,7 +79,7 @@ impl<'ctx> Lowerer<'ctx> {
         );
 
         let mut apply_args = lowered_args;
-        apply_args.push(CExpr::Var(self.current_return_k.clone()));
+        apply_args.push(CExpr::Var(ctx.return_k.clone()));
         CExpr::Apply(Box::new(op_closure), apply_args)
     }
 
@@ -89,14 +94,19 @@ impl<'ctx> Lowerer<'ctx> {
     /// Multi-effect static handlers emit one `insert_canonical` per effect
     /// in sequence; innermost-wins ordering falls out of the runtime helper
     /// (it replaces a same-tagged entry rather than appending).
-    pub(super) fn lower_with(&mut self, handler: &MHandler, body: &MExpr) -> CExpr {
+    pub(super) fn lower_with(
+        &mut self,
+        handler: &MHandler,
+        body: &MExpr,
+        ctx: &LowerCtx,
+    ) -> CExpr {
         match handler {
             MHandler::Static {
                 effects,
                 arms,
                 return_clause,
                 ..
-            } => self.lower_with_static(effects, arms, return_clause.as_ref(), body),
+            } => self.lower_with_static(effects, arms, return_clause.as_ref(), body, ctx),
             MHandler::Dynamic {
                 effects,
                 op_tuple,
@@ -121,7 +131,7 @@ impl<'ctx> Lowerer<'ctx> {
                         "  warning: dynamic handler at `with` site has unknown effect tag — \
                          evidence install skipped (deferred new-path support)"
                     );
-                    return self.lower_expr(body);
+                    return self.lower_expr(body, ctx);
                 }
                 if effects.len() != 1 {
                     panic!(
@@ -130,7 +140,7 @@ impl<'ctx> Lowerer<'ctx> {
                         effects
                     );
                 }
-                self.lower_with_dynamic(&effects[0], op_tuple, return_lambda.as_ref(), body)
+                self.lower_with_dynamic(&effects[0], op_tuple, return_lambda.as_ref(), body, ctx)
             }
         }
     }
@@ -141,23 +151,25 @@ impl<'ctx> Lowerer<'ctx> {
     /// (if any) as a fresh `_K_ret{n}` continuation; finally lower the body
     /// under the extended evidence with K = return-clause K (or outer K).
     ///
-    /// Arm closures are built while `self.current_evidence` / `self.current_return_k`
-    /// still reflect the *outer* scope — re-performs from inside an arm body
-    /// must reach the outer handler stack, not recurse into the just-installed
-    /// entry. This falls out of building the closures before swapping the
-    /// evidence var for the body.
+    /// Arm closures are built using the outer `ctx` (its `ctx.evidence` /
+    /// `ctx.return_k` still reflect the *outer* scope) — re-performs from
+    /// inside an arm body must reach the outer handler stack, not recurse
+    /// into the just-installed entry. This falls out of building the
+    /// closures before deriving a `body_ctx` with the extended evidence
+    /// for lowering the `with` body.
     fn lower_with_static(
         &mut self,
         effects: &[String],
         arms: &[MHandlerArm],
         return_clause: Option<&MHandlerArm>,
         body: &MExpr,
+        ctx: &LowerCtx,
     ) -> CExpr {
         // Snapshot the outer scope. Arm bodies and the return-clause body
         // both lower with these in scope, so re-performs hit the outer
         // handler stack and the return clause forwards through the outer K.
-        let outer_evidence = self.current_evidence.clone();
-        let outer_return_k = self.current_return_k.clone();
+        let outer_evidence = ctx.evidence.clone();
+        let outer_return_k = ctx.return_k.clone();
 
         // 1. Build per-effect entries from the arms. Arm closures reference
         //    `outer_evidence` / `outer_return_k` inside; we build them with
@@ -185,7 +197,7 @@ impl<'ctx> Lowerer<'ctx> {
         for eff in &canonical_effects {
             let effect_arms: Vec<&MHandlerArm> =
                 arms.iter().filter(|a| a.op.effect == *eff).collect();
-            let op_tuple = self.build_op_tuple_for_effect(eff, &effect_arms);
+            let op_tuple = self.build_op_tuple_for_effect(eff, &effect_arms, ctx);
             let entry = CExpr::Tuple(vec![CExpr::Lit(CLit::Atom(eff.clone())), op_tuple]);
             let insert = CExpr::Call(
                 EVIDENCE_BRIDGE_MODULE.to_string(),
@@ -201,7 +213,7 @@ impl<'ctx> Lowerer<'ctx> {
         //    state still reflects outer scope so its body forwards through
         //    the outer K and references the outer evidence.
         let ret_binding: Option<(String, CExpr)> = return_clause.map(|arm| {
-            let closure = self.build_return_clause_closure(arm);
+            let closure = self.build_return_clause_closure(arm, ctx);
             (self.fresh_k_ret_name(), closure)
         });
 
@@ -211,14 +223,10 @@ impl<'ctx> Lowerer<'ctx> {
             .as_ref()
             .map(|(name, _)| name.clone())
             .unwrap_or_else(|| outer_return_k.clone());
-        let body_ce = {
-            let saved_ev = std::mem::replace(&mut self.current_evidence, acc_evidence_var);
-            let saved_k = std::mem::replace(&mut self.current_return_k, inner_k);
-            let ce = self.lower_expr(body);
-            self.current_return_k = saved_k;
-            self.current_evidence = saved_ev;
-            ce
-        };
+        let body_ctx = ctx
+            .with_evidence(acc_evidence_var)
+            .with_return_k(inner_k);
+        let body_ce = self.lower_expr(body, &body_ctx);
 
         // 4. Wrap inside-out: insert_canonical chain wraps the body, then
         //    the return-K binding (if any) wraps the chain. Outer K binding
@@ -248,9 +256,10 @@ impl<'ctx> Lowerer<'ctx> {
         op_tuple: &Atom,
         return_lambda: Option<&Atom>,
         body: &MExpr,
+        ctx: &LowerCtx,
     ) -> CExpr {
-        let outer_evidence = self.current_evidence.clone();
-        let outer_return_k = self.current_return_k.clone();
+        let outer_evidence = ctx.evidence.clone();
+        let outer_return_k = ctx.return_k.clone();
 
         let op_tuple_ce = self.lower_atom(op_tuple);
 
@@ -290,14 +299,10 @@ impl<'ctx> Lowerer<'ctx> {
         );
         let new_ev_name = self.fresh_evidence_name();
 
-        let body_ce = {
-            let saved_ev = std::mem::replace(&mut self.current_evidence, new_ev_name.clone());
-            let saved_k = std::mem::replace(&mut self.current_return_k, inner_k);
-            let ce = self.lower_expr(body);
-            self.current_return_k = saved_k;
-            self.current_evidence = saved_ev;
-            ce
-        };
+        let body_ctx = ctx
+            .with_evidence(new_ev_name.clone())
+            .with_return_k(inner_k);
+        let body_ce = self.lower_expr(body, &body_ctx);
 
         let with_evidence = CExpr::Let(new_ev_name, Box::new(insert), Box::new(body_ce));
         match ret_binding {
@@ -324,7 +329,12 @@ impl<'ctx> Lowerer<'ctx> {
     /// thread effect-op-set info via `EffectInfo` and pad missing ops with
     /// a passthrough closure — same as `build_passthrough_handler_fun` in
     /// the old lowerer.)
-    fn build_op_tuple_for_effect(&mut self, eff: &str, arms: &[&MHandlerArm]) -> CExpr {
+    fn build_op_tuple_for_effect(
+        &mut self,
+        eff: &str,
+        arms: &[&MHandlerArm],
+        ctx: &LowerCtx,
+    ) -> CExpr {
         let mut sorted: Vec<&MHandlerArm> = arms.to_vec();
         sorted.sort_by_key(|a| a.op.op_index);
 
@@ -360,9 +370,9 @@ impl<'ctx> Lowerer<'ctx> {
             .into_iter()
             .map(|g| {
                 if g.len() == 1 {
-                    self.build_arm_closure(g[0])
+                    self.build_arm_closure(g[0], ctx)
                 } else {
-                    self.build_multi_arm_op_closure(&g)
+                    self.build_multi_arm_op_closure(&g, ctx)
                 }
             })
             .collect();
@@ -380,7 +390,7 @@ impl<'ctx> Lowerer<'ctx> {
     ///   - `Pat::Var { name }` → that name (mangled via `core_var`).
     ///   - non-Var patterns → a positional `_HArg{i}` plus a destructuring
     ///     `case` wrap around the body.
-    fn build_arm_closure(&mut self, arm: &MHandlerArm) -> CExpr {
+    fn build_arm_closure(&mut self, arm: &MHandlerArm, ctx: &LowerCtx) -> CExpr {
         if arm.finally_block.is_some() {
             // `finally` blocks aren't wired in the new path yet — see the
             // old lowerer's `current_handler_finally` flow and the
@@ -404,12 +414,7 @@ impl<'ctx> Lowerer<'ctx> {
 
         let (closure_params, body_wraps) = self.plan_arm_params(&arm.params);
         let k_arm = self.fresh_k_arm_name();
-        let body_ce = {
-            let saved = std::mem::replace(&mut self.current_arm_k, Some(k_arm.clone()));
-            let ce = self.lower_expr(&arm.body);
-            self.current_arm_k = saved;
-            ce
-        };
+        let body_ce = self.lower_expr(&arm.body, &ctx.with_arm_k(k_arm.clone()));
         let body_with_pats = self.wrap_arm_param_destructures(body_ce, body_wraps);
 
         let mut params = closure_params;
@@ -435,7 +440,7 @@ impl<'ctx> Lowerer<'ctx> {
     ///
     /// All arms share one K (`_K_arm{n}`) — the captured continuation of the
     /// perform site is independent of which arm matched.
-    fn build_multi_arm_op_closure(&mut self, arms: &[&MHandlerArm]) -> CExpr {
+    fn build_multi_arm_op_closure(&mut self, arms: &[&MHandlerArm], ctx: &LowerCtx) -> CExpr {
         let n_params = arms[0].params.len();
         for arm in arms.iter().skip(1) {
             if arm.finally_block.is_some() {
@@ -470,13 +475,9 @@ impl<'ctx> Lowerer<'ctx> {
         };
 
         let mut case_arms: Vec<CArm> = Vec::with_capacity(arms.len());
+        let arm_ctx = ctx.with_arm_k(k_arm.clone());
         for arm in arms {
-            let body_ce = {
-                let saved = std::mem::replace(&mut self.current_arm_k, Some(k_arm.clone()));
-                let ce = self.lower_expr(&arm.body);
-                self.current_arm_k = saved;
-                ce
-            };
+            let body_ce = self.lower_expr(&arm.body, &arm_ctx);
             let pat = if n_params == 1 {
                 self.lower_pat(&arm.params[0])
             } else {
@@ -507,7 +508,7 @@ impl<'ctx> Lowerer<'ctx> {
     /// construction: each inner with binds its own `_K_ret{m}` referring
     /// to the next-outer K, which is itself a `_K_ret{m-1}` if that layer
     /// has a return clause.
-    fn build_return_clause_closure(&mut self, arm: &MHandlerArm) -> CExpr {
+    fn build_return_clause_closure(&mut self, arm: &MHandlerArm, ctx: &LowerCtx) -> CExpr {
         if arm.finally_block.is_some() {
             panic!(
                 "build_return_clause_closure: finally_block on a return clause is unusual; \
@@ -528,9 +529,9 @@ impl<'ctx> Lowerer<'ctx> {
             ),
         };
 
-        // Body lowers under the outer K + outer evidence (the lowerer state
-        // is still pointing there when this is called — see lower_with_static).
-        let body_ce = self.lower_expr(&arm.body);
+        // Body lowers under the outer K + outer evidence (the ctx passed in
+        // by `lower_with_static` is the outer scope — see that fn).
+        let body_ce = self.lower_expr(&arm.body, ctx);
         let body_with_pat = match body_wrap {
             None => body_ce,
             Some(pat) => {

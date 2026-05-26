@@ -364,8 +364,12 @@ fn passthrough_recorddef_populates_local_record_fields() {
     );
 
     // lower_field_access must resolve declared order without panicking.
-    let access =
-        lowerer.lower_field_access(&atom_var("rec"), "body", Some("Std.Test.TestCaseData"));
+    let access = lowerer.lower_field_access(
+        &atom_var("rec"),
+        "body",
+        Some("Std.Test.TestCaseData"),
+        &crate::codegen::lower_monadic::LowerCtx::fresh(),
+    );
     // The access path wraps the element/2 call in apply _ReturnK(...).
     match access {
         CExpr::Apply(callee, args) => {
@@ -890,7 +894,9 @@ fn symbol_lowers_to_binary() {
 fn lower_expr_default(expr: &MExpr) -> CExpr {
     let r = ResolutionMap::new();
     let c = ConstructorAtoms::new();
-    with_lowerer(&r, &c, |l| l.lower_expr(expr))
+    with_lowerer(&r, &c, |l| {
+        l.lower_expr(expr, &crate::codegen::lower_monadic::LowerCtx::fresh())
+    })
 }
 
 #[test]
@@ -1318,10 +1324,11 @@ fn with_static_single_arm_emits_real_arm_closure() {
     match &ops[0] {
         CExpr::Fun(ps, fbody) => {
             assert_eq!(ps, &vec!["P0".to_string(), "_K_arm0".to_string()]);
-            // Body: apply _K_arm0('unit')
+            // Body: apply _ReturnK('unit') — arm body is `Pure(unit)`,
+            // which escapes to the with-site K, not the arm K.
             match fbody.as_ref() {
                 CExpr::Apply(callee, args) => {
-                    assert!(matches!(callee.as_ref(), CExpr::Var(n) if n == "_K_arm0"));
+                    assert!(matches!(callee.as_ref(), CExpr::Var(n) if n == "_ReturnK"));
                     assert_eq!(args.len(), 1);
                     assert!(matches!(&args[0], CExpr::Lit(CLit::Atom(a)) if a == "unit"));
                 }
@@ -1622,8 +1629,11 @@ fn extract_op_tuple_at(
 }
 
 #[test]
-fn arm_body_uses_arm_k_as_return_k() {
-    // arm: { p0 -> resume p0 } — Pure should apply _K_arm0(P0).
+fn pure_in_arm_tail_escapes_to_with_site_k() {
+    // arm: { p0 -> Pure p0 } — Pure in arm tail must escape to the
+    // with-site K (here `_ReturnK`), NOT resume the perform-site K
+    // (`_K_arm0`). This is abort-style semantics: a handler arm that
+    // returns a Pure value aborts the handled computation.
     let arm = handler_arm_with_body(
         "E",
         "op",
@@ -1653,7 +1663,11 @@ fn arm_body_uses_arm_k_as_return_k() {
             assert_eq!(ps, &vec!["P0".to_string(), "_K_arm0".to_string()]);
             match body.as_ref() {
                 CExpr::Apply(c, args) => {
-                    assert!(matches!(c.as_ref(), CExpr::Var(n) if n == "_K_arm0"));
+                    assert!(
+                        matches!(c.as_ref(), CExpr::Var(n) if n == "_ReturnK"),
+                        "Pure in arm tail must apply with-site K (_ReturnK), got {:?}",
+                        c
+                    );
                     assert!(matches!(&args[0], CExpr::Var(n) if n == "P0"));
                 }
                 other => panic!("expected Apply body, got {other:?}"),
@@ -1664,8 +1678,12 @@ fn arm_body_uses_arm_k_as_return_k() {
 }
 
 #[test]
-fn resume_and_pure_emit_identical_cel_at_arm_tail() {
-    // The uniform translation collapses Resume and Pure to the same shape.
+fn pure_and_resume_emit_different_cel_at_arm_tail() {
+    // Pure(v) in arm tail must escape to the with-site K (`_ReturnK`),
+    // while Resume(v) in arm tail must continue the perform-site K
+    // (`_K_arm0`). These have distinct semantics and must lower to
+    // distinct CEL. (Previously this test asserted identity, which
+    // encoded the abort-bug; the new lowerer correctly distinguishes.)
     let p_arm = handler_arm_with_body(
         "E",
         "op",
@@ -1703,10 +1721,10 @@ fn resume_and_pure_emit_identical_cel_at_arm_tail() {
     };
     let pce = lower_expr_default(&mk(p_arm));
     let rce = lower_expr_default(&mk(r_arm));
-    assert_eq!(
+    assert_ne!(
         format!("{:?}", pce),
         format!("{:?}", rce),
-        "Resume(v) and Pure(v) must lower identically in arm tail position"
+        "Pure(v) (escape) and Resume(v) (continue) must lower to distinct CEL"
     );
 }
 
@@ -1760,11 +1778,12 @@ fn multi_arm_per_op_emits_single_closure_with_case() {
                 CExpr::Case(scrut, case_arms) => {
                     assert!(matches!(scrut.as_ref(), CExpr::Var(n) if n == "_HArg0"));
                     assert_eq!(case_arms.len(), 2);
-                    // Both arms use the same _K_arm0.
+                    // Both arms end in `Pure(...)` which must escape to the
+                    // with-site K (`_ReturnK`), not resume `_K_arm0`.
                     for arm in case_arms {
                         match &arm.body {
                             CExpr::Apply(c, _) => {
-                                assert!(matches!(c.as_ref(), CExpr::Var(n) if n == "_K_arm0"));
+                                assert!(matches!(c.as_ref(), CExpr::Var(n) if n == "_ReturnK"));
                             }
                             other => panic!("expected Apply arm body, got {other:?}"),
                         }
@@ -2086,7 +2105,9 @@ fn dynamic_return_lambda_composes_via_wrapper() {
 fn resume_inside_lambda_in_arm_body_uses_lambda_k_not_arm_k() {
     // Arm body: Pure(lambda{ () -> Resume(unit) }). The inner lambda's
     // Resume must apply the lambda's own _ReturnK, not the arm's _K_arm0
-    // — verifying that lambda lowering saves/restores `current_return_k`.
+    // — verifying that lambda lowering establishes its own `ctx.return_k`
+    // (the lambda's `_ReturnK` parameter) rather than inheriting the
+    // enclosing arm's K.
     let lambda_atom = Atom::Lambda {
         params: vec![Pat::Var {
             id: dummy_node(),
@@ -2121,10 +2142,11 @@ fn resume_inside_lambda_in_arm_body_uses_lambda_k_not_arm_k() {
         }
         other => panic!("expected arm Fun, got {other:?}"),
     };
-    // arm body: apply _K_arm0(<inner lambda>)
+    // arm body: apply _ReturnK(<inner lambda>) — the outer Pure escapes
+    // to the with-site K, not the arm K.
     let inner_lambda = match arm_body {
         CExpr::Apply(c, args) => {
-            assert!(matches!(c.as_ref(), CExpr::Var(n) if n == "_K_arm0"));
+            assert!(matches!(c.as_ref(), CExpr::Var(n) if n == "_ReturnK"));
             &args[0]
         }
         other => panic!("expected arm body apply, got {other:?}"),
@@ -2155,10 +2177,16 @@ fn resume_inside_lambda_in_arm_body_uses_lambda_k_not_arm_k() {
 }
 
 #[test]
-fn resume_in_bind_position_threads_bind_k() {
+fn resume_in_bind_position_calls_arm_k_directly() {
     // Arm body: Bind { x = Resume(unit), body = Pure(Var x) }.
-    // Resume is in non-tail position; the Bind wraps it. Resume should
-    // apply the Bind's continuation (which itself eventually calls _K_arm0).
+    //
+    // Resume never returns — when the perform-site continuation
+    // (`_K_arm0`) is invoked, control transfers out and never comes
+    // back. The Bind's continuation (body `Pure(x)`) is therefore dead
+    // code. The lowerer emits the Resume as a direct
+    // `apply _K_arm0('unit')`; the bound continuation closure that
+    // would have wrapped `Pure(x)` is still synthesized as `_K0` but
+    // is unreachable.
     let arm_body = MExpr::Bind {
         var: mvar("x"),
         value: Box::new(MExpr::Resume {
@@ -2181,7 +2209,6 @@ fn resume_in_bind_position_threads_bind_k() {
     };
     let ce = lower_expr_default(&e);
     let ops = extract_op_tuple_at(&ce, 0, "_Evidence", "E");
-    // Arm body shape: let _K0 = fun(X) -> apply _K_arm0(X) in apply _K0('unit')
     let inner = match &ops[0] {
         CExpr::Fun(ps, body) => {
             assert_eq!(ps, &vec!["_K_arm0".to_string()]);
@@ -2189,25 +2216,20 @@ fn resume_in_bind_position_threads_bind_k() {
         }
         other => panic!("expected arm Fun, got {other:?}"),
     };
-    let (k_name, k_fun, k_body) = match inner {
-        CExpr::Let(n, v, b) => (n.clone(), v.clone(), b.clone()),
-        other => panic!("expected arm body Let, got {other:?}"),
-    };
-    assert_eq!(k_name, "_K0");
-    // The continuation closure: fun(X) -> apply _K_arm0(X).
-    match k_fun.as_ref() {
-        CExpr::Fun(_, fbody) => match fbody.as_ref() {
-            CExpr::Apply(c, _) => {
-                assert!(matches!(c.as_ref(), CExpr::Var(n) if n == "_K_arm0"));
-            }
-            other => panic!("expected K body Apply, got {other:?}"),
-        },
-        other => panic!("expected K Fun, got {other:?}"),
+    // Walk past any synthesized continuation `Let`s; what we care
+    // about is that the Resume call lands on `_K_arm0`, not on a
+    // wrapper that threads through `_ReturnK`.
+    let mut cur = inner;
+    while let CExpr::Let(_, _, b) = cur {
+        cur = b.as_ref();
     }
-    // Resume call: apply _K0('unit').
-    match k_body.as_ref() {
+    match cur {
         CExpr::Apply(c, args) => {
-            assert!(matches!(c.as_ref(), CExpr::Var(n) if n == "_K0"));
+            assert!(
+                matches!(c.as_ref(), CExpr::Var(n) if n == "_K_arm0"),
+                "Resume must apply the perform-site K (_K_arm0), got {:?}",
+                c
+            );
             assert!(matches!(&args[0], CExpr::Lit(CLit::Atom(a)) if a == "unit"));
         }
         other => panic!("expected Resume Apply, got {other:?}"),
@@ -2254,7 +2276,9 @@ fn field_access_emits_element_call_wrapped_in_return_k() {
         record_name: Some("Foo".to_string()),
         source: dummy_node(),
     };
-    let ce = lower_with_records(&[("Foo", vec!["a", "b", "c"])], |l| l.lower_expr(&expr));
+    let ce = lower_with_records(&[("Foo", vec!["a", "b", "c"])], |l| {
+        l.lower_expr(&expr, &crate::codegen::lower_monadic::LowerCtx::fresh())
+    });
     match ce {
         CExpr::Apply(callee, args) => {
             assert!(matches!(callee.as_ref(), CExpr::Var(n) if n == "_ReturnK"));
@@ -2283,7 +2307,9 @@ fn record_update_rebuilds_tuple_with_tag_preserved() {
         record_name: Some("Pair".to_string()),
         source: dummy_node(),
     };
-    let ce = lower_with_records(&[("Pair", vec!["x", "y"])], |l| l.lower_expr(&expr));
+    let ce = lower_with_records(&[("Pair", vec!["x", "y"])], |l| {
+        l.lower_expr(&expr, &crate::codegen::lower_monadic::LowerCtx::fresh())
+    });
     let arg = match ce {
         CExpr::Apply(callee, args) => {
             assert!(matches!(callee.as_ref(), CExpr::Var(n) if n == "_ReturnK"));
@@ -2652,7 +2678,7 @@ fn lower_pat_in_case(pat: Pat, lowerer_setup: impl FnOnce(&mut Lowerer<'_>)) -> 
         }],
         source: dummy_node(),
     };
-    let ce = lowerer.lower_expr(&expr);
+    let ce = lowerer.lower_expr(&expr, &crate::codegen::lower_monadic::LowerCtx::fresh());
     match ce {
         CExpr::Case(_, mut arms) => arms.remove(0).pat,
         other => panic!("expected Case, got {other:?}"),
