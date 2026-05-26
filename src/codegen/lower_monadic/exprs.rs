@@ -169,7 +169,11 @@ impl<'ctx> Lowerer<'ctx> {
     /// while `Pure(v)` in arm tail position remains an abort-style return.
     fn lower_resume(&mut self, value: &Atom) -> CExpr {
         let v = self.lower_atom(value);
-        self.apply_current_k(v)
+        let k = self
+            .current_arm_k
+            .clone()
+            .unwrap_or_else(|| self.current_return_k.clone());
+        CExpr::Apply(Box::new(CExpr::Var(k)), vec![v])
     }
 
     /// `Pure(atom)` → `apply <current_K>(<atom>)`.

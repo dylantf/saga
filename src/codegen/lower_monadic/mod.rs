@@ -84,6 +84,13 @@ pub struct Lowerer<'ctx> {
     /// Monotonic counter for fresh evidence-var names. Reset at each function
     /// entry to keep emitted Core Erlang stable across decls.
     ev_counter: u32,
+    /// Name of the captured perform-site continuation while lowering inside a
+    /// handler arm body. `None` outside an arm. `Resume(v)` calls this K
+    /// (continuing at the perform site); `Pure(v)` calls `current_return_k`
+    /// (the with-site K — abort/escape semantics). Mirrors the old lowerer's
+    /// split between `current_handler_k` (resume target) and
+    /// `current_handler_inherited_k` (abort target).
+    current_arm_k: Option<String>,
     /// Monotonic counter for fresh handler-arm continuation names (`_K_arm{n}`).
     /// Distinct from `k_counter` so Bind-K names stay stable as tests already
     /// pin them (`_K0`, `_K1`, ...) independently of any handler arms in scope.
@@ -151,6 +158,7 @@ impl<'ctx> Lowerer<'ctx> {
             k_counter: 0,
             current_evidence: exprs::EVIDENCE_VAR.to_string(),
             ev_counter: 0,
+            current_arm_k: None,
             arm_k_counter: 0,
             ret_k_counter: 0,
             helper_counter: 0,
@@ -264,6 +272,7 @@ impl<'ctx> Lowerer<'ctx> {
         self.k_counter = 0;
         self.current_evidence = exprs::EVIDENCE_VAR.to_string();
         self.ev_counter = 0;
+        self.current_arm_k = None;
         self.arm_k_counter = 0;
         self.ret_k_counter = 0;
         self.helper_counter = 0;

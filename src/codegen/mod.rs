@@ -150,7 +150,7 @@ pub fn emit_module_with_context(
     program: &ast::Program,
     ctx: &CodegenContext,
     check_result: &crate::typechecker::CheckResult,
-    source_file: Option<&SourceFile>,
+    _source_file: Option<&SourceFile>,
     entry_export: Option<&str>,
 ) -> String {
     // === OLD PATH (active) ===

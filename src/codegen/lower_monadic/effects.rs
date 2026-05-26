@@ -405,9 +405,9 @@ impl<'ctx> Lowerer<'ctx> {
         let (closure_params, body_wraps) = self.plan_arm_params(&arm.params);
         let k_arm = self.fresh_k_arm_name();
         let body_ce = {
-            let saved = std::mem::replace(&mut self.current_return_k, k_arm.clone());
+            let saved = std::mem::replace(&mut self.current_arm_k, Some(k_arm.clone()));
             let ce = self.lower_expr(&arm.body);
-            self.current_return_k = saved;
+            self.current_arm_k = saved;
             ce
         };
         let body_with_pats = self.wrap_arm_param_destructures(body_ce, body_wraps);
@@ -472,9 +472,9 @@ impl<'ctx> Lowerer<'ctx> {
         let mut case_arms: Vec<CArm> = Vec::with_capacity(arms.len());
         for arm in arms {
             let body_ce = {
-                let saved = std::mem::replace(&mut self.current_return_k, k_arm.clone());
+                let saved = std::mem::replace(&mut self.current_arm_k, Some(k_arm.clone()));
                 let ce = self.lower_expr(&arm.body);
-                self.current_return_k = saved;
+                self.current_arm_k = saved;
                 ce
             };
             let pat = if n_params == 1 {
