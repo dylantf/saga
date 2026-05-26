@@ -99,9 +99,9 @@ correctness-safe pass:
    extends it. This is just a parameter — not CPS.
 
 2. **Monadic translation (uniform, then optimized).** Every sequencing point
-   becomes a monadic bind over `Pure | Yield`. effect optimization collapses `bind(Pure(v),
-k)` to `k(v)` and rewrites tail-resumptive `perform` to a direct call into
-   the handler.
+   becomes a monadic bind over `Pure | Yield`. effect optimization collapses
+   `bind(Pure(v), k)` to `k(v)` and rewrites tail-resumptive `perform` to a
+   direct call into the handler.
 
 The slow path is correct by construction. The optimizer can only make code
 faster, never wrong. New features cannot reopen correctness — they're more

@@ -327,14 +327,7 @@ fn write_tail(out: &mut String, indent: usize, e: &MExpr) {
             rest,
             source,
         } => {
-            writeln!(
-                out,
-                "{p}letfun {}/{} [#{}] =",
-                name,
-                params.len(),
-                source.0
-            )
-            .unwrap();
+            writeln!(out, "{p}letfun {}/{} [#{}] =", name, params.len(), source.0).unwrap();
             write_expr(out, indent + 2, body);
             writeln!(out, "{p}in").unwrap();
             write_expr(out, indent + 2, rest);

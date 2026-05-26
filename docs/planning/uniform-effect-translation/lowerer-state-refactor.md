@@ -282,6 +282,40 @@ If a new failure surfaces and the fix wants ambient state again,
 needs to be added to `LowerCtx`, not that the field model was right
 all along.
 
+## Follow-up landed: value-producing `resume`
+
+Example 25 (`State`) exposed a second continuation distinction beyond
+the arm-K bug: under uniform CPS, `resume v` must be usable as a value,
+not only as a tail jump. The state handler pattern:
+
+```saga
+get () = fun s -> (resume s) s
+```
+
+requires `(resume s)` to evaluate to the handled body's eventual result
+from the perform site. In this example that result is another state
+function, which is then applied to the current state.
+
+The lowerer now treats `with` as a delimiter:
+
+- `lower_with_*` binds a local raw-result continuation
+  (`_K_retN = fun v -> v`).
+- Handler arm bodies lower with `return_k = raw_result_k` and
+  `arm_k = perform_site_k`, so `Pure(v)` returns a raw arm result and
+  `Resume(v)` continues the perform site.
+- The handled body lowers with `return_k = return_clause_k` when a
+  return clause exists, otherwise `return_k = raw_result_k`.
+- The whole `with` expression then binds the raw body/arm result and
+  applies the outer `ctx.return_k` exactly once.
+- `lower_resume` now emits `let r = apply _K_arm(v) in apply
+  ctx.return_k(r)`, which preserves local suffixes such as
+  `let r = resume s; r s`.
+
+This keeps the op closure ABI unchanged (`fun(args..., K) -> ...`) but
+changes the meaning of the K passed at a perform site: it is now a
+delimited continuation that returns the with-block value, matching the
+old selective-CPS behavior while preserving the `LowerCtx` model.
+
 ## Anti-goals
 
 - **Don't rewrite the lowerer from scratch.** The MExpr → CExpr

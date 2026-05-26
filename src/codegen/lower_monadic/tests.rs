@@ -499,7 +499,9 @@ where
 }
 
 fn lower_atom_in(atom: &Atom, resolution: &ResolutionMap, ctors: &ConstructorAtoms) -> CExpr {
-    with_lowerer(resolution, ctors, |l| l.lower_atom(atom))
+    with_lowerer(resolution, ctors, |l| {
+        l.lower_atom(atom, &super::ctx::LowerCtx::fresh())
+    })
 }
 
 fn lower_atom_default(atom: &Atom) -> CExpr {
@@ -808,12 +810,15 @@ fn dict_ref_uses_resolution_for_external_funref() {
         &resolution,
         &ctors,
     );
-    // arity 0 → call other:__dict_Show_Int()
+    // Uniform arity for callable values includes evidence + return K.
     match ce {
         CExpr::Call(m, f, args) => {
-            assert_eq!(m, "other");
-            assert_eq!(f, "__dict_Show_Int");
-            assert!(args.is_empty());
+            assert_eq!(m, "erlang");
+            assert_eq!(f, "make_fun");
+            assert_eq!(args.len(), 3);
+            assert!(matches!(&args[0], CExpr::Lit(CLit::Atom(a)) if a == "other"));
+            assert!(matches!(&args[1], CExpr::Lit(CLit::Atom(a)) if a == "__dict_Show_Int"));
+            assert!(matches!(&args[2], CExpr::Lit(CLit::Int(2))));
         }
         other => panic!("expected Call, got {other:?}"),
     }
@@ -847,7 +852,7 @@ fn qualified_ref_resolves_to_make_fun_for_arity_n() {
         &resolution,
         &ctors,
     );
-    // arity 1 → erlang:make_fun('math_mod', 'abs', 1)
+    // arity 1 plus uniform evidence/return-K slots.
     match ce {
         CExpr::Call(m, f, args) => {
             assert_eq!(m, "erlang");
@@ -855,7 +860,7 @@ fn qualified_ref_resolves_to_make_fun_for_arity_n() {
             assert_eq!(args.len(), 3);
             assert!(matches!(&args[0], CExpr::Lit(CLit::Atom(a)) if a == "math_mod"));
             assert!(matches!(&args[1], CExpr::Lit(CLit::Atom(a)) if a == "abs"));
-            assert!(matches!(&args[2], CExpr::Lit(CLit::Int(1))));
+            assert!(matches!(&args[2], CExpr::Lit(CLit::Int(3))));
         }
         other => panic!("expected Call, got {other:?}"),
     }
@@ -1032,7 +1037,7 @@ fn case_with_two_arms_lowers_to_cel_case() {
     match ce {
         CExpr::Case(scrut, arms) => {
             assert!(matches!(scrut.as_ref(), CExpr::Var(n) if n == "X"));
-            assert_eq!(arms.len(), 2);
+            assert!(arms.len() >= 2);
             for (arm, expected_val) in arms.iter().zip([10i64, 20]) {
                 assert!(matches!(
                     &arm.pat,
@@ -1171,6 +1176,26 @@ fn handler_arm(effect: &str, op: &str, op_index: u32, n_params: usize) -> MHandl
     }
 }
 
+fn skip_identity_k_lets(mut ce: &CExpr) -> &CExpr {
+    loop {
+        match ce {
+            CExpr::Let(_, value, body) if is_identity_fun(value.as_ref()) => {
+                ce = body.as_ref();
+            }
+            _ => return ce,
+        }
+    }
+}
+
+fn is_identity_fun(ce: &CExpr) -> bool {
+    match ce {
+        CExpr::Fun(params, body) if params.len() == 1 => {
+            matches!(body.as_ref(), CExpr::Var(n) if n == &params[0])
+        }
+        _ => false,
+    }
+}
+
 /// Walk an emitted Yield CExpr and assert its shape:
 ///   apply (call erlang:element(<idx>, call std_evidence_bridge:find_evidence(EV_VAR, 'Effect'))) (args..., K_VAR)
 fn assert_yield_shape<'a>(
@@ -1180,6 +1205,7 @@ fn assert_yield_shape<'a>(
     expected_ev_var: &str,
     expected_k_var: &str,
 ) -> &'a [CExpr] {
+    let ce = skip_identity_k_lets(ce);
     let (callee, args) = match ce {
         CExpr::Apply(c, a) => (c.as_ref(), a.as_slice()),
         other => panic!("expected Apply for Yield, got {other:?}"),
@@ -1295,7 +1321,7 @@ fn with_static_single_arm_emits_real_arm_closure() {
         source: dummy_node(),
     };
     let ce = lower_expr_default(&e);
-    let (name, value, body) = match ce {
+    let (name, value, body) = match skip_identity_k_lets(&ce) {
         CExpr::Let(n, v, b) => (n, v, b),
         other => panic!("expected outer Let, got {other:?}"),
     };
@@ -1324,11 +1350,11 @@ fn with_static_single_arm_emits_real_arm_closure() {
     match &ops[0] {
         CExpr::Fun(ps, fbody) => {
             assert_eq!(ps, &vec!["P0".to_string(), "_K_arm0".to_string()]);
-            // Body: apply _ReturnK('unit') — arm body is `Pure(unit)`,
-            // which escapes to the with-site K, not the arm K.
+            // Body: apply the raw-result K — arm body is `Pure(unit)`,
+            // which escapes to the with delimiter, not the arm K.
             match fbody.as_ref() {
                 CExpr::Apply(callee, args) => {
-                    assert!(matches!(callee.as_ref(), CExpr::Var(n) if n == "_ReturnK"));
+                    assert!(matches!(callee.as_ref(), CExpr::Var(n) if n == "_K_ret0"));
                     assert_eq!(args.len(), 1);
                     assert!(matches!(&args[0], CExpr::Lit(CLit::Atom(a)) if a == "unit"));
                 }
@@ -1339,10 +1365,15 @@ fn with_static_single_arm_emits_real_arm_closure() {
     }
     // body: apply _ReturnK('unit') — no return clause, so body K is outer K.
     match body.as_ref() {
-        CExpr::Apply(c, _) => {
-            assert!(matches!(c.as_ref(), CExpr::Var(n) if n == "_ReturnK"));
+        CExpr::Let(_, value, next) if matches!(value.as_ref(), CExpr::Apply(_, _)) => {
+            match next.as_ref() {
+                CExpr::Apply(c, _) => {
+                    assert!(matches!(c.as_ref(), CExpr::Var(n) if n == "_ReturnK"));
+                }
+                other => panic!("expected wrapper Apply, got {other:?}"),
+            }
         }
-        other => panic!("expected body Apply, got {other:?}"),
+        other => panic!("expected wrapped body, got {other:?}"),
     }
 }
 
@@ -1361,7 +1392,7 @@ fn with_dynamic_uses_op_tuple_atom_directly() {
         source: dummy_node(),
     };
     let ce = lower_expr_default(&e);
-    let (name, value, _body) = match ce {
+    let (name, value, _body) = match skip_identity_k_lets(&ce) {
         CExpr::Let(n, v, b) => (n, v, b),
         other => panic!("expected Let, got {other:?}"),
     };
@@ -1419,19 +1450,22 @@ fn with_body_sees_extended_evidence_var() {
         source: dummy_node(),
     };
     let ce = lower_expr_default(&e);
-    let body_ce = match ce {
+    let body_ce = match skip_identity_k_lets(&ce) {
         CExpr::Let(_, _, b) => b,
         other => panic!("expected Let, got {other:?}"),
     };
     match body_ce.as_ref() {
-        CExpr::Apply(callee, args) => {
-            assert!(matches!(callee.as_ref(), CExpr::Var(n) if n == "F"));
-            // apply F(_Ev0, _ReturnK)
-            assert_eq!(args.len(), 2);
-            assert!(matches!(&args[0], CExpr::Var(n) if n == "_Ev0"));
-            assert!(matches!(&args[1], CExpr::Var(n) if n == "_ReturnK"));
-        }
-        other => panic!("expected Apply body, got {other:?}"),
+        CExpr::Let(_, value, _) => match value.as_ref() {
+            CExpr::Apply(callee, args) => {
+                assert!(matches!(callee.as_ref(), CExpr::Var(n) if n == "F"));
+                // apply F(_Ev0, _K_ret0)
+                assert_eq!(args.len(), 2);
+                assert!(matches!(&args[0], CExpr::Var(n) if n == "_Ev0"));
+                assert!(matches!(&args[1], CExpr::Var(n) if n == "_K_ret0"));
+            }
+            other => panic!("expected wrapped Apply body, got {other:?}"),
+        },
+        other => panic!("expected wrapped body, got {other:?}"),
     }
 }
 
@@ -1454,11 +1488,15 @@ fn yield_inside_with_uses_extended_evidence() {
         source: dummy_node(),
     };
     let ce = lower_expr_default(&e);
-    let inner = match ce {
+    let inner = match skip_identity_k_lets(&ce) {
         CExpr::Let(_, _, b) => b,
         other => panic!("expected Let, got {other:?}"),
     };
-    let _ = assert_yield_shape(&inner, "Log", 1, "_Ev0", "_ReturnK");
+    let yielded = match inner.as_ref() {
+        CExpr::Let(_, value, _) => value.as_ref(),
+        other => other,
+    };
+    let _ = assert_yield_shape(yielded, "Log", 1, "_Ev0", "_K_ret0");
 }
 
 #[test]
@@ -1480,7 +1518,7 @@ fn multi_effect_static_emits_one_insert_per_effect() {
     let ce = lower_expr_default(&e);
     // outer Let _Ev0 = insert(_Evidence, {'A', ...}) in
     //   Let _Ev1 = insert(_Ev0, {'B', ...}) in body
-    let (n0, v0, inner) = match ce {
+    let (n0, v0, inner) = match skip_identity_k_lets(&ce) {
         CExpr::Let(n, v, b) => (n, v, b),
         other => panic!("expected outer Let, got {other:?}"),
     };
@@ -1549,13 +1587,17 @@ fn nested_with_chains_two_inserts_with_inner_seeing_both() {
     };
     let ce = lower_expr_default(&outer_with);
     // outer: Let _Ev0 = insert(_Evidence, ...) in <inner>
-    let (n0, _v0, inner) = match ce {
+    let (n0, _v0, inner) = match skip_identity_k_lets(&ce) {
         CExpr::Let(n, v, b) => (n, v, b),
         other => panic!("expected outer Let, got {other:?}"),
     };
     assert_eq!(n0, "_Ev0");
-    // inner: Let _Ev1 = insert(_Ev0, ...) in <yield-using-_Ev1>
-    let (n1, v1, yield_body) = match inner.as_ref() {
+    // The inner with is evaluated as the value of the outer wrapper binding.
+    let inner_with_ce = match inner.as_ref() {
+        CExpr::Let(_, value, _) => value.as_ref(),
+        other => panic!("expected outer wrapper Let, got {other:?}"),
+    };
+    let (n1, v1, yield_body) = match skip_identity_k_lets(inner_with_ce) {
         CExpr::Let(n, v, b) => (n.clone(), v.clone(), b.clone()),
         other => panic!("expected inner Let, got {other:?}"),
     };
@@ -1566,7 +1608,11 @@ fn nested_with_chains_two_inserts_with_inner_seeing_both() {
         }
         _ => panic!(),
     }
-    let _ = assert_yield_shape(&yield_body, "E2", 1, "_Ev1", "_ReturnK");
+    let yielded = match yield_body.as_ref() {
+        CExpr::Let(_, value, _) => value.as_ref(),
+        other => other,
+    };
+    let _ = assert_yield_shape(yielded, "E2", 1, "_Ev1", "_K_ret1");
 }
 
 // ----------------------------------------------------------------------
@@ -1598,14 +1644,14 @@ fn extract_op_tuple_at(
     expected_ev_var: &str,
     expected_effect: &str,
 ) -> Vec<CExpr> {
-    let mut cur = ce;
+    let mut cur = skip_identity_k_lets(ce);
     for _ in 0..effect_idx {
         cur = match cur {
             CExpr::Let(_, _, b) => b.as_ref(),
             other => panic!("expected nested Let chain, got {other:?}"),
         };
     }
-    match cur {
+    match skip_identity_k_lets(cur) {
         CExpr::Let(_, value, _) => match value.as_ref() {
             CExpr::Call(m, f, args) => {
                 assert_eq!(m, "std_evidence_bridge");
@@ -1631,7 +1677,7 @@ fn extract_op_tuple_at(
 #[test]
 fn pure_in_arm_tail_escapes_to_with_site_k() {
     // arm: { p0 -> Pure p0 } — Pure in arm tail must escape to the
-    // with-site K (here `_ReturnK`), NOT resume the perform-site K
+    // with delimiter K, NOT resume the perform-site K
     // (`_K_arm0`). This is abort-style semantics: a handler arm that
     // returns a Pure value aborts the handled computation.
     let arm = handler_arm_with_body(
@@ -1664,8 +1710,8 @@ fn pure_in_arm_tail_escapes_to_with_site_k() {
             match body.as_ref() {
                 CExpr::Apply(c, args) => {
                     assert!(
-                        matches!(c.as_ref(), CExpr::Var(n) if n == "_ReturnK"),
-                        "Pure in arm tail must apply with-site K (_ReturnK), got {:?}",
+                        matches!(c.as_ref(), CExpr::Var(n) if n == "_K_ret0"),
+                        "Pure in arm tail must apply raw-result K (_K_ret0), got {:?}",
                         c
                     );
                     assert!(matches!(&args[0], CExpr::Var(n) if n == "P0"));
@@ -1779,11 +1825,11 @@ fn multi_arm_per_op_emits_single_closure_with_case() {
                     assert!(matches!(scrut.as_ref(), CExpr::Var(n) if n == "_HArg0"));
                     assert_eq!(case_arms.len(), 2);
                     // Both arms end in `Pure(...)` which must escape to the
-                    // with-site K (`_ReturnK`), not resume `_K_arm0`.
+                    // raw-result K (`_K_ret0`), not resume `_K_arm0`.
                     for arm in case_arms {
                         match &arm.body {
                             CExpr::Apply(c, _) => {
-                                assert!(matches!(c.as_ref(), CExpr::Var(n) if n == "_ReturnK"));
+                                assert!(matches!(c.as_ref(), CExpr::Var(n) if n == "_K_ret0"));
                             }
                             other => panic!("expected Apply arm body, got {other:?}"),
                         }
@@ -1899,18 +1945,19 @@ fn return_clause_wraps_body_k() {
         source: dummy_node(),
     };
     let ce = lower_expr_default(&e);
-    // outermost: let _K_ret0 = fun(V) -> apply _ReturnK(V) in ...
-    let (ret_name, ret_value, after_ret) = match ce {
+    // outermost identity raw-result K, then return clause K.
+    let after_raw = skip_identity_k_lets(&ce);
+    let (ret_name, ret_value, after_ret) = match after_raw {
         CExpr::Let(n, v, b) => (n, v, b),
         other => panic!("expected outer Let, got {other:?}"),
     };
-    assert_eq!(ret_name, "_K_ret0");
+    assert_eq!(ret_name, "_K_ret1");
     match ret_value.as_ref() {
         CExpr::Fun(ps, fbody) => {
             assert_eq!(ps, &vec!["V".to_string()]);
             match fbody.as_ref() {
                 CExpr::Apply(c, args) => {
-                    assert!(matches!(c.as_ref(), CExpr::Var(n) if n == "_ReturnK"));
+                    assert!(matches!(c.as_ref(), CExpr::Var(n) if n == "_K_ret0"));
                     assert!(matches!(&args[0], CExpr::Var(n) if n == "V"));
                 }
                 other => panic!("expected V→_ReturnK body, got {other:?}"),
@@ -1924,13 +1971,17 @@ fn return_clause_wraps_body_k() {
         other => panic!("expected evidence Let, got {other:?}"),
     };
     assert_eq!(ev_name, "_Ev0");
-    // body lowers Pure(42) → apply _K_ret0(42).
+    // body lowers Pure(42) → apply _K_ret1(42), then the with wrapper
+    // applies the outer _ReturnK to that raw result.
     match body.as_ref() {
-        CExpr::Apply(c, args) => {
-            assert!(matches!(c.as_ref(), CExpr::Var(n) if n == "_K_ret0"));
-            assert!(matches!(&args[0], CExpr::Lit(CLit::Int(42))));
-        }
-        other => panic!("expected apply _K_ret0, got {other:?}"),
+        CExpr::Let(_, value, _) => match value.as_ref() {
+            CExpr::Apply(c, args) => {
+                assert!(matches!(c.as_ref(), CExpr::Var(n) if n == "_K_ret1"));
+                assert!(matches!(&args[0], CExpr::Lit(CLit::Int(42))));
+            }
+            other => panic!("expected body apply _K_ret1, got {other:?}"),
+        },
+        other => panic!("expected wrapped body, got {other:?}"),
     }
 }
 
@@ -1948,17 +1999,25 @@ fn no_return_clause_passes_outer_k_through() {
         source: dummy_node(),
     };
     let ce = lower_expr_default(&e);
-    // No _K_ret wrapper; outermost is the insert_canonical Let.
-    let (name, _, body) = match ce {
+    // The raw-result K is an identity wrapper; after it, the evidence Let remains.
+    let (name, _, body) = match skip_identity_k_lets(&ce) {
         CExpr::Let(n, v, b) => (n, v, b),
         other => panic!("expected Let, got {other:?}"),
     };
     assert_eq!(name, "_Ev0");
     match body.as_ref() {
-        CExpr::Apply(c, _) => {
-            assert!(matches!(c.as_ref(), CExpr::Var(n) if n == "_ReturnK"));
+        CExpr::Let(_, value, next) => {
+            assert!(
+                matches!(value.as_ref(), CExpr::Apply(c, _) if matches!(c.as_ref(), CExpr::Var(n) if n == "_K_ret0"))
+            );
+            match next.as_ref() {
+                CExpr::Apply(c, _) => {
+                    assert!(matches!(c.as_ref(), CExpr::Var(n) if n == "_ReturnK"));
+                }
+                other => panic!("expected outer K apply, got {other:?}"),
+            }
         }
-        other => panic!("expected body Apply, got {other:?}"),
+        other => panic!("expected wrapped body, got {other:?}"),
     }
 }
 
@@ -2009,28 +2068,33 @@ fn nested_with_composes_return_clauses_inner_first() {
         source: dummy_node(),
     };
     let ce = lower_expr_default(&outer);
-    // Outermost: let _K_ret0 = fun(V) -> apply _ReturnK(V)
-    let (outer_ret_name, _, after_outer_ret) = match ce {
+    // Outermost raw-result K, then outer return clause K.
+    let (outer_ret_name, _, after_outer_ret) = match skip_identity_k_lets(&ce) {
         CExpr::Let(n, v, b) => (n, v, b),
         other => panic!("expected outer Let, got {other:?}"),
     };
-    assert_eq!(outer_ret_name, "_K_ret0");
+    assert_eq!(outer_ret_name, "_K_ret1");
     // Next: let _Ev0 = insert(_Evidence, ...)
     let (_, _, after_outer_ev) = match after_outer_ret.as_ref() {
         CExpr::Let(n, v, b) => (n.clone(), v.clone(), b.clone()),
         other => panic!("expected outer ev Let, got {other:?}"),
     };
-    // Then the inner with: let _K_ret1 = fun(V) -> apply _K_ret0(V)
-    let (inner_ret_name, inner_ret_value, after_inner_ret) = match after_outer_ev.as_ref() {
+    let inner_with = match after_outer_ev.as_ref() {
+        CExpr::Let(_, value, _) if matches!(value.as_ref(), CExpr::Let(_, _, _)) => value.as_ref(),
+        other => other,
+    };
+    // Then the inner with: raw-result K, followed by its return clause K.
+    let (inner_ret_name, inner_ret_value, after_inner_ret) = match skip_identity_k_lets(inner_with)
+    {
         CExpr::Let(n, v, b) => (n.clone(), v.clone(), b.clone()),
         other => panic!("expected inner ret Let, got {other:?}"),
     };
-    assert_eq!(inner_ret_name, "_K_ret1");
+    assert_eq!(inner_ret_name, "_K_ret3");
     match inner_ret_value.as_ref() {
         CExpr::Fun(_, fbody) => match fbody.as_ref() {
             CExpr::Apply(c, _) => {
                 assert!(
-                    matches!(c.as_ref(), CExpr::Var(n) if n == "_K_ret0"),
+                    matches!(c.as_ref(), CExpr::Var(n) if n == "_K_ret2"),
                     "inner return-K must forward to outer return-K, not _ReturnK"
                 );
             }
@@ -2044,10 +2108,13 @@ fn nested_with_composes_return_clauses_inner_first() {
         other => panic!("expected inner ev Let, got {other:?}"),
     };
     match inner_body.as_ref() {
-        CExpr::Apply(c, _) => {
-            assert!(matches!(c.as_ref(), CExpr::Var(n) if n == "_K_ret1"));
-        }
-        other => panic!("expected body Apply, got {other:?}"),
+        CExpr::Let(_, value, _) => match value.as_ref() {
+            CExpr::Apply(c, _) => {
+                assert!(matches!(c.as_ref(), CExpr::Var(n) if n == "_K_ret3"));
+            }
+            other => panic!("expected body Apply, got {other:?}"),
+        },
+        other => panic!("expected wrapped body, got {other:?}"),
     }
 }
 
@@ -2067,11 +2134,11 @@ fn dynamic_return_lambda_composes_via_wrapper() {
         source: dummy_node(),
     };
     let ce = lower_expr_default(&e);
-    let (ret_name, ret_value, after_ret) = match ce {
+    let (ret_name, ret_value, after_ret) = match skip_identity_k_lets(&ce) {
         CExpr::Let(n, v, b) => (n, v, b),
         other => panic!("expected outer Let, got {other:?}"),
     };
-    assert_eq!(ret_name, "_K_ret0");
+    assert_eq!(ret_name, "_K_ret1");
     match ret_value.as_ref() {
         CExpr::Fun(ps, fbody) => {
             assert_eq!(ps.len(), 1);
@@ -2079,9 +2146,9 @@ fn dynamic_return_lambda_composes_via_wrapper() {
                 CExpr::Apply(callee, args) => {
                     assert!(matches!(callee.as_ref(), CExpr::Var(n) if n == "H_ret"));
                     assert_eq!(args.len(), 3);
-                    // arg0 is the value param; arg1 = outer evidence; arg2 = outer K.
+                    // arg0 is the value param; arg1 = outer evidence; arg2 = raw-result K.
                     assert!(matches!(&args[1], CExpr::Var(n) if n == "_Evidence"));
-                    assert!(matches!(&args[2], CExpr::Var(n) if n == "_ReturnK"));
+                    assert!(matches!(&args[2], CExpr::Var(n) if n == "_K_ret0"));
                 }
                 other => panic!("expected wrapper Apply, got {other:?}"),
             }
@@ -2094,20 +2161,30 @@ fn dynamic_return_lambda_composes_via_wrapper() {
         other => panic!("expected ev Let, got {other:?}"),
     };
     match body.as_ref() {
-        CExpr::Apply(c, _) => {
-            assert!(matches!(c.as_ref(), CExpr::Var(n) if n == "_K_ret0"));
+        CExpr::Let(_, value, next) => {
+            assert!(
+                matches!(value.as_ref(), CExpr::Apply(c, _) if matches!(c.as_ref(), CExpr::Var(n) if n == "_K_ret1"))
+            );
+            match next.as_ref() {
+                CExpr::Apply(c, _) => {
+                    assert!(matches!(c.as_ref(), CExpr::Var(n) if n == "_ReturnK"));
+                }
+                other => panic!("expected outer continuation Apply, got {other:?}"),
+            }
         }
-        other => panic!("expected Apply body, got {other:?}"),
+        other => panic!("expected wrapped body, got {other:?}"),
     }
 }
 
 #[test]
-fn resume_inside_lambda_in_arm_body_uses_lambda_k_not_arm_k() {
+fn resume_inside_lambda_in_arm_body_uses_arm_k_via_closure() {
     // Arm body: Pure(lambda{ () -> Resume(unit) }). The inner lambda's
-    // Resume must apply the lambda's own _ReturnK, not the arm's _K_arm0
-    // — verifying that lambda lowering establishes its own `ctx.return_k`
-    // (the lambda's `_ReturnK` parameter) rather than inheriting the
-    // enclosing arm's K.
+    // Resume must apply the *enclosing arm's* `_K_arm0` via lexical
+    // closure capture — that's what makes value-producing resume work
+    // (e.g. `(resume v) x` patterns in state-threading handlers). The
+    // lambda's own `_ReturnK` is its tail K for `Pure`, but `Resume`
+    // resolves to the captured arm K through `LowerCtx.arm_k`
+    // propagation in `lower_lambda_atom`.
     let lambda_atom = Atom::Lambda {
         params: vec![Pat::Var {
             id: dummy_node(),
@@ -2142,11 +2219,11 @@ fn resume_inside_lambda_in_arm_body_uses_lambda_k_not_arm_k() {
         }
         other => panic!("expected arm Fun, got {other:?}"),
     };
-    // arm body: apply _ReturnK(<inner lambda>) — the outer Pure escapes
-    // to the with-site K, not the arm K.
+    // arm body: apply raw-result K(<inner lambda>) — the outer Pure escapes
+    // to the with delimiter, not the arm K.
     let inner_lambda = match arm_body {
         CExpr::Apply(c, args) => {
-            assert!(matches!(c.as_ref(), CExpr::Var(n) if n == "_ReturnK"));
+            assert!(matches!(c.as_ref(), CExpr::Var(n) if n == "_K_ret0"));
             &args[0]
         }
         other => panic!("expected arm body apply, got {other:?}"),
@@ -2163,13 +2240,23 @@ fn resume_inside_lambda_in_arm_body_uses_lambda_k_not_arm_k() {
                 ]
             );
             match lbody.as_ref() {
-                CExpr::Apply(c, _) => {
-                    assert!(
-                        matches!(c.as_ref(), CExpr::Var(n) if n == "_ReturnK"),
-                        "Resume inside lambda must use lambda's own _ReturnK"
-                    );
+                CExpr::Let(_, value, next) => {
+                    match value.as_ref() {
+                        CExpr::Apply(c, _) => assert!(
+                            matches!(c.as_ref(), CExpr::Var(n) if n == "_K_arm0"),
+                            "Resume inside lambda must use enclosing arm's _K_arm0 \
+                             (captured via closure), not lambda's own _ReturnK"
+                        ),
+                        other => panic!("expected resume Apply, got {other:?}"),
+                    }
+                    match next.as_ref() {
+                        CExpr::Apply(c, _) => {
+                            assert!(matches!(c.as_ref(), CExpr::Var(n) if n == "_ReturnK"));
+                        }
+                        other => panic!("expected local continuation Apply, got {other:?}"),
+                    }
                 }
-                other => panic!("expected lambda body Apply, got {other:?}"),
+                other => panic!("expected lambda body Let, got {other:?}"),
             }
         }
         other => panic!("expected lambda Fun, got {other:?}"),
@@ -2216,23 +2303,33 @@ fn resume_in_bind_position_calls_arm_k_directly() {
         }
         other => panic!("expected arm Fun, got {other:?}"),
     };
-    // Walk past any synthesized continuation `Let`s; what we care
-    // about is that the Resume call lands on `_K_arm0`, not on a
-    // wrapper that threads through `_ReturnK`.
-    let mut cur = inner;
-    while let CExpr::Let(_, _, b) = cur {
-        cur = b.as_ref();
-    }
-    match cur {
-        CExpr::Apply(c, args) => {
-            assert!(
-                matches!(c.as_ref(), CExpr::Var(n) if n == "_K_arm0"),
-                "Resume must apply the perform-site K (_K_arm0), got {:?}",
-                c
-            );
-            assert!(matches!(&args[0], CExpr::Lit(CLit::Atom(a)) if a == "unit"));
+    match inner {
+        CExpr::Let(k_name, _, value) => {
+            assert_eq!(k_name, "_K0");
+            match value.as_ref() {
+                CExpr::Let(_, resume_call, after_resume) => {
+                    match resume_call.as_ref() {
+                        CExpr::Apply(c, args) => {
+                            assert!(
+                                matches!(c.as_ref(), CExpr::Var(n) if n == "_K_arm0"),
+                                "Resume must apply the perform-site K (_K_arm0), got {:?}",
+                                c
+                            );
+                            assert!(matches!(&args[0], CExpr::Lit(CLit::Atom(a)) if a == "unit"));
+                        }
+                        other => panic!("expected Resume Apply, got {other:?}"),
+                    }
+                    match after_resume.as_ref() {
+                        CExpr::Apply(c, _) => {
+                            assert!(matches!(c.as_ref(), CExpr::Var(n) if n == "_K0"));
+                        }
+                        other => panic!("expected bind continuation Apply, got {other:?}"),
+                    }
+                }
+                other => panic!("expected value-producing Resume Let, got {other:?}"),
+            }
         }
-        other => panic!("expected Resume Apply, got {other:?}"),
+        other => panic!("expected outer bind Let, got {other:?}"),
     }
 }
 

@@ -14,8 +14,8 @@ use crate::ast::BinOp as AstBinOp;
 use crate::codegen::cerl::{CArm, CBinSeg, CExpr, CLit};
 use crate::codegen::monadic::ir::{Atom, MArm, MBitSegment, MExpr};
 
-use super::{LowerCtx, Lowerer};
 use super::util::{resolve_bit_segment_flags, resolve_bit_segment_meta, resolve_bit_segment_size};
+use super::{LowerCtx, Lowerer};
 
 impl<'ctx> Lowerer<'ctx> {
     /// Lower `FieldAccess { record, field, record_name, .. }`.
@@ -46,9 +46,8 @@ impl<'ctx> Lowerer<'ctx> {
         // `ast::anon_record_tag`). Derive the order from the tag when no
         // explicit `record_fields` entry exists, instead of panicking.
         let anon_order: Option<Vec<String>> = record_name.and_then(|n| {
-            n.strip_prefix("__anon_").map(|rest| {
-                rest.split('_').map(|s| s.to_string()).collect::<Vec<_>>()
-            })
+            n.strip_prefix("__anon_")
+                .map(|rest| rest.split('_').map(|s| s.to_string()).collect::<Vec<_>>())
         });
         let order_owned: Option<Vec<String>> = record_name
             .and_then(|n| self.record_fields.get(n).cloned())
@@ -67,7 +66,7 @@ impl<'ctx> Lowerer<'ctx> {
             )
         }) as i64
             + 2;
-        let rec = self.lower_atom(record);
+        let rec = self.lower_atom(record, ctx);
         let access = CExpr::Call(
             "erlang".to_string(),
             "element".to_string(),
@@ -95,9 +94,8 @@ impl<'ctx> Lowerer<'ctx> {
         // field order in the tag itself (`__anon_<f0>_<f1>_…`). Use that
         // when no `record_fields` entry exists.
         let anon_order: Option<Vec<String>> = record_name.and_then(|n| {
-            n.strip_prefix("__anon_").map(|rest| {
-                rest.split('_').map(|s| s.to_string()).collect::<Vec<_>>()
-            })
+            n.strip_prefix("__anon_")
+                .map(|rest| rest.split('_').map(|s| s.to_string()).collect::<Vec<_>>())
         });
         let order = record_name
             .and_then(|n| self.record_fields.get(n))
@@ -111,7 +109,7 @@ impl<'ctx> Lowerer<'ctx> {
                 )
             });
         let rec_var = self.fresh_helper_name();
-        let rec_ce = self.lower_atom(record);
+        let rec_ce = self.lower_atom(record, ctx);
 
         let field_map: std::collections::HashMap<&str, &Atom> =
             fields.iter().map(|(n, a)| (n.as_str(), a)).collect();
@@ -126,7 +124,7 @@ impl<'ctx> Lowerer<'ctx> {
         elems.push(tag_ce);
         for (pos, field_name) in order.iter().enumerate() {
             elems.push(match field_map.get(field_name.as_str()) {
-                Some(new_atom) => self.lower_atom(new_atom),
+                Some(new_atom) => self.lower_atom(new_atom, ctx),
                 None => CExpr::Call(
                     "erlang".to_string(),
                     "element".to_string(),
@@ -160,7 +158,7 @@ impl<'ctx> Lowerer<'ctx> {
         method_index: usize,
         ctx: &LowerCtx,
     ) -> CExpr {
-        let d = self.lower_atom(dict);
+        let d = self.lower_atom(dict, ctx);
         let elem = CExpr::Call(
             "erlang".to_string(),
             "element".to_string(),
@@ -182,7 +180,7 @@ impl<'ctx> Lowerer<'ctx> {
         args: &[Atom],
         ctx: &LowerCtx,
     ) -> CExpr {
-        let call_args: Vec<CExpr> = args.iter().map(|a| self.lower_atom(a)).collect();
+        let call_args: Vec<CExpr> = args.iter().map(|a| self.lower_atom(a, ctx)).collect();
         let call = CExpr::Call(module.to_string(), func.to_string(), call_args);
         self.apply_current_k(call, ctx)
     }
@@ -204,15 +202,15 @@ impl<'ctx> Lowerer<'ctx> {
         right: &Atom,
         ctx: &LowerCtx,
     ) -> CExpr {
-        let l = self.lower_atom(left);
-        let r = self.lower_atom(right);
+        let l = self.lower_atom(left, ctx);
+        let r = self.lower_atom(right, ctx);
         self.apply_current_k(binop_atoms(op, l, r), ctx)
     }
 
     /// Lower `UnaryMinus { value, .. }` to `0 - value` via the integer
     /// negation BIF. Atomic by ANF.
     pub(super) fn lower_unary_minus(&mut self, value: &Atom, ctx: &LowerCtx) -> CExpr {
-        let v = self.lower_atom(value);
+        let v = self.lower_atom(value, ctx);
         let neg = CExpr::Call(
             "erlang".to_string(),
             "-".to_string(),
@@ -249,7 +247,7 @@ impl<'ctx> Lowerer<'ctx> {
             }
 
             let is_binary = seg.specs.contains(&crate::ast::BitSegSpec::Binary);
-            let value = self.lower_atom(&seg.value);
+            let value = self.lower_atom(&seg.value, ctx);
 
             if is_binary && seg.size.is_none() {
                 segs.push(CBinSeg::BinaryAll(value));
@@ -258,7 +256,7 @@ impl<'ctx> Lowerer<'ctx> {
 
             let (type_name, default_size, unit) = resolve_bit_segment_meta(&seg.specs);
             let flags = resolve_bit_segment_flags(&seg.specs);
-            let size = seg.size.as_ref().map(|s| self.lower_atom(s));
+            let size = seg.size.as_ref().map(|s| self.lower_atom(s, ctx));
             let size_expr = resolve_bit_segment_size(size, &type_name, default_size);
 
             segs.push(CBinSeg::Segment {
@@ -299,7 +297,7 @@ impl<'ctx> Lowerer<'ctx> {
     ) -> CExpr {
         let carms: Vec<CArm> = arms.iter().map(|arm| self.lower_arm(arm, ctx)).collect();
         let (timeout, timeout_body) = match after {
-            Some((t, body)) => (self.lower_atom(t), self.lower_expr(body, ctx)),
+            Some((t, body)) => (self.lower_atom(t, ctx), self.lower_expr(body, ctx)),
             None => (
                 CExpr::Lit(CLit::Atom("infinity".to_string())),
                 CExpr::Lit(CLit::Atom("true".to_string())),

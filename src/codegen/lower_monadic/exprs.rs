@@ -8,9 +8,9 @@ use crate::ast::Pat;
 use crate::codegen::cerl::{CArm, CExpr, CPat};
 use crate::codegen::monadic::ir::{Atom, MExpr, MVar};
 
-use super::{LowerCtx, Lowerer};
 use super::pats::lower_param_names;
 use super::util::core_var;
+use super::{LowerCtx, Lowerer};
 
 // Name of the function-entry return-continuation variable. Every emitted
 // CFunDef binds this as its trailing parameter (after `_Evidence`); the body
@@ -142,40 +142,47 @@ impl<'ctx> Lowerer<'ctx> {
         CExpr::LetRec(vec![(name.to_string(), arity, fun)], Box::new(rest_ce))
     }
 
-    /// `Resume(atom)` → `apply <current_K>(<atom>)`.
+    /// `Resume(atom)` → bind the value returned by the perform-site K, then
+    /// continue locally.
     ///
-    /// Inside a handler arm, the arm's captured `_K_arm{n}` continuation
-    /// (the perform-site continuation) lives in `ctx.arm_k`. `Resume`
-    /// applies that K directly, falling back to the ambient `ctx.return_k`
-    /// when there is no arm K in scope.
-    ///
-    /// The distinction matters semantically (Resume = "continue at the perform
-    /// site"; Pure = "this arm's result value, skipping the perform-site
-    /// continuation"), but the slow uniform path collapses them by
-    /// construction. Effect optimization (step 11) is where the two diverge:
-    /// `TailResumptive` rewrites can fold `Resume(v)` into a direct call,
-    /// while `Pure(v)` in arm tail position remains an abort-style return.
+    /// Inside a handler arm, the captured `_K_arm{n}` is a delimited
+    /// continuation: applying it returns the eventual value of the enclosing
+    /// `with` body from the perform site. `resume` is therefore a
+    /// value-producing expression, not just a tail jump. The local
+    /// `ctx.return_k` still matters for suffixes such as `let r = resume s;
+    /// r s`.
     fn lower_resume(&mut self, value: &Atom, ctx: &LowerCtx) -> CExpr {
-        let v = self.lower_atom(value);
-        let k = ctx
-            .arm_k
-            .clone()
-            .unwrap_or_else(|| ctx.return_k.clone());
-        CExpr::Apply(Box::new(CExpr::Var(k)), vec![v])
+        let v = self.lower_atom(value, ctx);
+        // arm_k must be Some — `resume` is only legal inside a handler arm
+        // body, and arm_k is preserved through lambda boundaries via
+        // `lower_lambda_atom`. A None here is a real bug (translator emitted
+        // Resume outside an arm, or arm_k propagation broke); falling back
+        // to return_k silently miscompiles `(resume v) ...` patterns.
+        let k = ctx.arm_k.as_ref().unwrap_or_else(|| {
+            panic!(
+                "lower_resume: arm_k is None — `resume` reached without an enclosing arm body. \
+                 This indicates either a translator bug (Resume outside arm body) or an arm_k \
+                 propagation bug (lambda body lost the enclosing arm K)."
+            )
+        });
+        let resumed = self.fresh_helper_name();
+        let resume_call = CExpr::Apply(Box::new(CExpr::Var(k.clone())), vec![v]);
+        CExpr::Let(
+            resumed.clone(),
+            Box::new(resume_call),
+            Box::new(self.apply_current_k(CExpr::Var(resumed), ctx)),
+        )
     }
 
     /// `Pure(atom)` → `apply <current_K>(<atom>)`.
     fn lower_pure(&mut self, atom: &Atom, ctx: &LowerCtx) -> CExpr {
-        let value = self.lower_atom(atom);
+        let value = self.lower_atom(atom, ctx);
         self.apply_current_k(value, ctx)
     }
 
     /// Apply the in-scope return continuation to a single value.
     pub(super) fn apply_current_k(&self, value: CExpr, ctx: &LowerCtx) -> CExpr {
-        CExpr::Apply(
-            Box::new(CExpr::Var(ctx.return_k.clone())),
-            vec![value],
-        )
+        CExpr::Apply(Box::new(CExpr::Var(ctx.return_k.clone())), vec![value])
     }
 
     /// Lower `Bind { var, value, body }`:
@@ -222,7 +229,7 @@ impl<'ctx> Lowerer<'ctx> {
     /// optimizer output to drive the cases.
     fn lower_let(&mut self, var: &MVar, value: &MExpr, body: &MExpr, ctx: &LowerCtx) -> CExpr {
         let value_ce = match value {
-            MExpr::Pure(atom) => self.lower_atom(atom),
+            MExpr::Pure(atom) => self.lower_atom(atom, ctx),
             other => panic!(
                 "lower_let: Let value must be Pure(atom) until step 10's Bind→Let promotion lands \
                  and brings a `lower_pure_expr` for the broader pure subset; got {:?}",
@@ -246,7 +253,12 @@ impl<'ctx> Lowerer<'ctx> {
     /// outer state, reset to the entry-fn defaults (current K = `_ReturnK`,
     /// fresh K counter starts back at zero so nested lambdas get stable
     /// names), lower the body, then restore.
-    pub(super) fn lower_lambda_atom(&mut self, params: &[Pat], body: &MExpr) -> CExpr {
+    pub(super) fn lower_lambda_atom(
+        &mut self,
+        params: &[Pat],
+        body: &MExpr,
+        enclosing: &LowerCtx,
+    ) -> CExpr {
         // Non-Var patterns in lambda params (e.g. `fun (Currency a) -> show a`)
         // need a case-on-tuple-of-args destructure inside the body — same
         // shape as multi-clause fun bindings. `lower_param_names` collapses
@@ -263,7 +275,18 @@ impl<'ctx> Lowerer<'ctx> {
         param_vars.push(RETURN_K_VAR.to_string());
         let snap = self.snapshot_counters();
         self.reset_counters();
-        let body_ce_inner = self.lower_expr(body, &LowerCtx::fresh());
+        // Lambda body lowers under fresh return_k/evidence (the lambda's own
+        // params shadow the enclosing _ReturnK / _Evidence), but inherits
+        // arm_k from the enclosing context. A `resume` inside a lambda
+        // defined inside a handler arm body must call the *enclosing arm's*
+        // K via lexical closure capture — losing arm_k here silently
+        // miscompiles into a `resume` that calls the lambda's own _ReturnK.
+        let body_ctx = LowerCtx {
+            return_k: RETURN_K_VAR.to_string(),
+            evidence: EVIDENCE_VAR.to_string(),
+            arm_k: enclosing.arm_k.clone(),
+        };
+        let body_ce_inner = self.lower_expr(body, &body_ctx);
         let body_ce = if has_non_var_pat {
             let scrut = CExpr::Tuple(
                 (0..params.len())

@@ -673,11 +673,9 @@ fn is_atom(e: &Expr, dict_ctor_node_ids: &std::collections::HashSet<NodeId>) -> 
         | ExprKind::Constructor { .. }
         | ExprKind::Lambda { .. } => true,
         ExprKind::Tuple { elements } => elements.iter().all(|x| is_atom(x, dict_ctor_node_ids)),
-        ExprKind::RecordCreate { fields, .. } | ExprKind::AnonRecordCreate { fields } => {
-            fields
-                .iter()
-                .all(|(_, _, x)| is_atom(x, dict_ctor_node_ids))
-        }
+        ExprKind::RecordCreate { fields, .. } | ExprKind::AnonRecordCreate { fields } => fields
+            .iter()
+            .all(|(_, _, x)| is_atom(x, dict_ctor_node_ids)),
         _ => false,
     }
 }

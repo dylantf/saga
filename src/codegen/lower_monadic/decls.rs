@@ -16,8 +16,8 @@ use crate::ast::{self, Annotation, Decl, Lit, Pat, TypeExpr};
 use crate::codegen::cerl::{CArm, CExpr, CFunDef, CPat};
 use crate::codegen::monadic::ir::{Atom, MDictConstructor, MExpr, MFunBinding, MVal};
 
-use super::{LowerCtx, Lowerer};
 use super::pats::lower_param_names;
+use super::{LowerCtx, Lowerer};
 
 /// Variable name for the evidence-vector parameter on every emitted CFunDef.
 pub(super) const EVIDENCE_VAR: &str = "_Evidence";
@@ -196,7 +196,9 @@ impl<'ctx> Lowerer<'ctx> {
             .methods
             .iter()
             .map(|m| match m {
-                MExpr::Pure(atom @ Atom::Lambda { .. }) => self.lower_atom(atom),
+                MExpr::Pure(atom @ Atom::Lambda { .. }) => {
+                    self.lower_atom(atom, &super::ctx::LowerCtx::fresh())
+                }
                 other => panic!(
                     "lower_dict_constructor: expected Pure(Atom::Lambda) per IR spec, got {:?}",
                     std::mem::discriminant(other)

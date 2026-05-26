@@ -401,16 +401,17 @@ impl<'a> Translator<'a> {
         // call error. This matches the old lowerer's `collect_ctor_call`
         // recognizer in `lower/exprs.rs` (which folds `App(...App(Ctor, a),
         // ..., n)` into a single `lower_ctor` call).
-        if let Atom::Ctor { name, args: existing_args, source } = head {
+        if let Atom::Ctor {
+            name,
+            args: existing_args,
+            source,
+        } = head
+        {
             debug_assert!(
                 existing_args.is_empty(),
                 "translate: nullary Constructor expression should produce empty Ctor args"
             );
-            return MExpr::Pure(Atom::Ctor {
-                name,
-                args,
-                source,
-            });
+            return MExpr::Pure(Atom::Ctor { name, args, source });
         }
         MExpr::App {
             head,

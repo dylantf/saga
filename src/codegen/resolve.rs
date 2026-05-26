@@ -953,9 +953,7 @@ fn collect_local_fun_arities(program: &Program) -> HashMap<String, usize> {
             Decl::DictConstructor {
                 name, dict_params, ..
             } => {
-                local_funs
-                    .entry(name.clone())
-                    .or_insert(dict_params.len());
+                local_funs.entry(name.clone()).or_insert(dict_params.len());
             }
             _ => {}
         }

@@ -6,6 +6,7 @@ use crate::codegen::monadic::ir::{Atom, MVar};
 use crate::codegen::resolve::{ResolvedCodegenKind, ResolvedSymbol};
 
 use super::Lowerer;
+use super::ctx::LowerCtx;
 use super::util::{core_var, lower_lit_atom, lower_string_to_binary, mangle_ctor_atom};
 
 impl<'ctx> Lowerer<'ctx> {
@@ -18,17 +19,23 @@ impl<'ctx> Lowerer<'ctx> {
     /// no continuation involved. Recursive `Atom` positions (constructor
     /// args, tuple elements, record fields) are lowered in place; there is
     /// no "lift to let" path because those positions are themselves atomic.
-    pub(super) fn lower_atom(&mut self, atom: &Atom) -> CExpr {
+    ///
+    /// The `ctx` is plumbed through only because `Atom::Lambda` contains an
+    /// `MExpr` body whose lowering is continuation-sensitive — in particular,
+    /// a `Resume` inside a lambda defined inside a handler arm body must
+    /// resolve to the *enclosing arm's* K, not the lambda's own _ReturnK.
+    /// All other atom variants ignore the ctx.
+    pub(super) fn lower_atom(&mut self, atom: &Atom, ctx: &LowerCtx) -> CExpr {
         match atom {
             Atom::Var { name, source } => self.lower_var_atom(name, *source),
             Atom::Lit { value, .. } => lower_lit_atom(value),
-            Atom::Ctor { name, args, .. } => self.lower_ctor_atom(name, args),
+            Atom::Ctor { name, args, .. } => self.lower_ctor_atom(name, args, ctx),
             Atom::Tuple { elements, .. } => {
-                CExpr::Tuple(elements.iter().map(|e| self.lower_atom(e)).collect())
+                CExpr::Tuple(elements.iter().map(|e| self.lower_atom(e, ctx)).collect())
             }
-            Atom::AnonRecord { fields, .. } => self.lower_anon_record_atom(fields),
-            Atom::Record { name, fields, .. } => self.lower_record_atom(name, fields),
-            Atom::Lambda { params, body, .. } => self.lower_lambda_atom(params, body),
+            Atom::AnonRecord { fields, .. } => self.lower_anon_record_atom(fields, ctx),
+            Atom::Record { name, fields, .. } => self.lower_record_atom(name, fields, ctx),
+            Atom::Lambda { params, body, .. } => self.lower_lambda_atom(params, body, ctx),
             Atom::DictRef { name, source } => self.lower_dict_ref_atom(name, *source),
             Atom::QualifiedRef {
                 module,
@@ -81,7 +88,7 @@ impl<'ctx> Lowerer<'ctx> {
     ///   - other nullary BEAM-interop atoms (exit reasons) → bare atoms
     ///     (skipped here — 7b sticks to the common path; sub-step 7g revisits)
     ///   - everything else → `{tag_atom, arg_0, arg_1, ...}` tagged tuple
-    fn lower_ctor_atom(&mut self, name: &str, args: &[Atom]) -> CExpr {
+    fn lower_ctor_atom(&mut self, name: &str, args: &[Atom], ctx: &LowerCtx) -> CExpr {
         let bare = name.rsplit('.').next().unwrap_or(name);
         match bare {
             "Nil" if args.is_empty() => return CExpr::Nil,
@@ -90,15 +97,15 @@ impl<'ctx> Lowerer<'ctx> {
             _ => {}
         }
         if name == "Cons" && args.len() == 2 {
-            let head = self.lower_atom(&args[0]);
-            let tail = self.lower_atom(&args[1]);
+            let head = self.lower_atom(&args[0], ctx);
+            let tail = self.lower_atom(&args[1], ctx);
             return CExpr::Cons(Box::new(head), Box::new(tail));
         }
         let tag = mangle_ctor_atom(name, self.ctors);
         let mut elems: Vec<CExpr> = Vec::with_capacity(args.len() + 1);
         elems.push(CExpr::Lit(CLit::Atom(tag)));
         for arg in args {
-            elems.push(self.lower_atom(arg));
+            elems.push(self.lower_atom(arg, ctx));
         }
         CExpr::Tuple(elems)
     }
@@ -111,7 +118,7 @@ impl<'ctx> Lowerer<'ctx> {
     ///   name. Sorting yields a stable representation regardless of source
     ///   field order, which is what makes two anon records with the same
     ///   fields structurally equal at the BEAM level.
-    fn lower_anon_record_atom(&mut self, fields: &[(String, Atom)]) -> CExpr {
+    fn lower_anon_record_atom(&mut self, fields: &[(String, Atom)], ctx: &LowerCtx) -> CExpr {
         let names: Vec<&str> = fields.iter().map(|(n, _)| n.as_str()).collect();
         let tag = crate::ast::anon_record_tag(&names);
         let mut sorted: Vec<&(String, Atom)> = fields.iter().collect();
@@ -119,7 +126,7 @@ impl<'ctx> Lowerer<'ctx> {
         let mut elems: Vec<CExpr> = Vec::with_capacity(fields.len() + 1);
         elems.push(CExpr::Lit(CLit::Atom(tag)));
         for (_, value) in sorted {
-            elems.push(self.lower_atom(value));
+            elems.push(self.lower_atom(value, ctx));
         }
         CExpr::Tuple(elems)
     }
@@ -140,12 +147,17 @@ impl<'ctx> Lowerer<'ctx> {
     /// when records are constructed with declaration-order fields. A later
     /// sub-step (likely 7d's record-update work) is the right place to
     /// add a declared-order lookup. Flagged in the step report.
-    fn lower_record_atom(&mut self, name: &str, fields: &[(String, Atom)]) -> CExpr {
+    fn lower_record_atom(
+        &mut self,
+        name: &str,
+        fields: &[(String, Atom)],
+        ctx: &LowerCtx,
+    ) -> CExpr {
         let tag = mangle_ctor_atom(name, self.ctors);
         let mut elems: Vec<CExpr> = Vec::with_capacity(fields.len() + 1);
         elems.push(CExpr::Lit(CLit::Atom(tag)));
         for (_, value) in fields {
-            elems.push(self.lower_atom(value));
+            elems.push(self.lower_atom(value, ctx));
         }
         CExpr::Tuple(elems)
     }
@@ -249,7 +261,7 @@ impl<'ctx> Lowerer<'ctx> {
                 // for private decls aren't exported. The old lowerer's
                 // [`lower_local_fun_ref`] makes the same choice.
                 if erlang_mod == self.current_erlang_module {
-                    CExpr::FunRef(name, uniform)
+                    local_value_ref(name, uniform)
                 } else {
                     fun_value_of(erlang_mod, name, uniform)
                 }
@@ -263,7 +275,7 @@ impl<'ctx> Lowerer<'ctx> {
             } => {
                 let uniform = uniform_value_arity(arity, &effects, &name);
                 if erlang_mod == self.current_erlang_module {
-                    CExpr::FunRef(name, uniform)
+                    local_value_ref(name, uniform)
                 } else {
                     fun_value_of(erlang_mod, name, uniform)
                 }
@@ -273,7 +285,7 @@ impl<'ctx> Lowerer<'ctx> {
                 arity,
                 effects,
                 ..
-            } => CExpr::FunRef(name.clone(), uniform_value_arity(arity, &effects, &name)),
+            } => local_value_ref(name.clone(), uniform_value_arity(arity, &effects, &name)),
         }
     }
 }
@@ -306,6 +318,20 @@ pub(super) fn uniform_value_arity(arity: usize, effects: &[String], name: &str) 
         // Pure function — resolution carries source + dict count only;
         // add `+2` for uniform `(_Evidence, _ReturnK)`.
         arity + 2
+    }
+}
+
+/// Emit a value-position reference to a same-module callable.
+///
+/// Arity-0 entries are top-level `val` constants — referencing them must
+/// invoke the local function to materialize the value, not produce a
+/// fun reference (which is a callable, not a tuple/record/etc.).
+/// Arity > 0 stays a `FunRef`, the caller `apply`s it when needed.
+fn local_value_ref(name: String, uniform: usize) -> CExpr {
+    if uniform == 0 {
+        CExpr::Apply(Box::new(CExpr::FunRef(name, 0)), vec![])
+    } else {
+        CExpr::FunRef(name, uniform)
     }
 }
 

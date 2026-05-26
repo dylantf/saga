@@ -325,7 +325,6 @@ pub fn cmd_inspect(file: &str, stage: &str) {
             println!("{:#?}", anf_program);
         }
         "monadic" | "monadic-opt" => {
-
             // Build a minimal CodegenContext (std modules + this user module)
             // so resolve/effect-info match what the new path sees in production.
             let module_name =
@@ -379,7 +378,10 @@ pub fn cmd_inspect(file: &str, stage: &str) {
                 saga::ast::HandlerBody,
             > = std::collections::HashMap::new();
             for compiled in ctx.modules.values() {
-                let anf_imported = codegen::anf::normalize(compiled.elaborated.clone(), Some(&compiled.resolution));
+                let anf_imported = codegen::anf::normalize(
+                    compiled.elaborated.clone(),
+                    Some(&compiled.resolution),
+                );
                 for decl in &anf_imported {
                     if let saga::ast::Decl::HandlerDef { name, body, .. } = decl {
                         imported_handler_decls

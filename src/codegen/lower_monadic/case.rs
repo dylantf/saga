@@ -4,9 +4,9 @@ use crate::ast::Pat;
 use crate::codegen::cerl::{CArm, CExpr, CLit, CPat};
 use crate::codegen::monadic::ir::{Atom, MArm, MExpr};
 
-use super::{LowerCtx, Lowerer};
 use super::exprs_edge::binop_atoms;
 use super::util::core_var;
+use super::{LowerCtx, Lowerer};
 
 impl<'ctx> Lowerer<'ctx> {
     /// Lower `Case { scrutinee, arms }`. By ANF the scrutinee is atomic, so
@@ -32,7 +32,7 @@ impl<'ctx> Lowerer<'ctx> {
             return self.lower_case_chain(scrutinee, arms, ctx);
         }
 
-        let scrut_ce = self.lower_atom(scrutinee);
+        let scrut_ce = self.lower_atom(scrutinee, ctx);
         let mut carms: Vec<CArm> = arms.iter().map(|arm| self.lower_arm(arm, ctx)).collect();
         // erlc's `bs_start_match3` consistency check requires a wildcard
         // fallthrough on bitstring case-expressions even when the typechecker
@@ -58,7 +58,7 @@ impl<'ctx> Lowerer<'ctx> {
     /// CPS-evaluated outside the inner `case` and scrutinised on their
     /// boolean value.
     fn lower_case_chain(&mut self, scrutinee: &Atom, arms: &[MArm], ctx: &LowerCtx) -> CExpr {
-        let scrut_ce = self.lower_atom(scrutinee);
+        let scrut_ce = self.lower_atom(scrutinee, ctx);
         let scrut_var = self.fresh_helper_name();
 
         let mut rest: CExpr = self.case_clause_error();
@@ -92,7 +92,7 @@ impl<'ctx> Lowerer<'ctx> {
                     }
                 }
                 Some(guard) if guard_safe(guard) => {
-                    let g = self.lower_guard(guard);
+                    let g = self.lower_guard(guard, ctx);
                     let body_ce = self.lower_expr(&arm.body, ctx);
                     CExpr::Case(
                         Box::new(CExpr::Var(scrut_var.clone())),
@@ -133,8 +133,7 @@ impl<'ctx> Lowerer<'ctx> {
                     let k_inner = CExpr::Fun(vec![guard_val], Box::new(inner_case));
                     let k_name = self.fresh_k_name();
                     let guard_ce = self.lower_expr(guard, &ctx.with_return_k(k_name.clone()));
-                    let guarded_body =
-                        CExpr::Let(k_name, Box::new(k_inner), Box::new(guard_ce));
+                    let guarded_body = CExpr::Let(k_name, Box::new(k_inner), Box::new(guard_ce));
                     if is_catchall {
                         self.bind_catchall_pattern(&scrut_var, &arm.pattern, guarded_body)
                     } else {
@@ -197,7 +196,7 @@ impl<'ctx> Lowerer<'ctx> {
     /// Lower a single MArm into a `CArm`. Shared between `Case` and `Receive`.
     pub(super) fn lower_arm(&mut self, arm: &MArm, ctx: &LowerCtx) -> CArm {
         let pat = self.lower_pat(&arm.pattern);
-        let guard = arm.guard.as_ref().map(|g| self.lower_guard(g));
+        let guard = arm.guard.as_ref().map(|g| self.lower_guard(g, ctx));
         let body = self.lower_expr(&arm.body, ctx);
         CArm { pat, guard, body }
     }
@@ -213,18 +212,18 @@ impl<'ctx> Lowerer<'ctx> {
     /// RecordUpdate, DictMethodAccess, BitString) are syntactically illegal
     /// in Core Erlang guards anyway — we panic with a clear message rather
     /// than emit invalid CEL.
-    pub(super) fn lower_guard(&mut self, guard: &MExpr) -> CExpr {
+    pub(super) fn lower_guard(&mut self, guard: &MExpr, ctx: &LowerCtx) -> CExpr {
         match guard {
-            MExpr::Pure(atom) => self.lower_atom(atom),
+            MExpr::Pure(atom) => self.lower_atom(atom, ctx),
             MExpr::BinOp {
                 op, left, right, ..
             } => {
-                let l = self.lower_atom(left);
-                let r = self.lower_atom(right);
+                let l = self.lower_atom(left, ctx);
+                let r = self.lower_atom(right, ctx);
                 binop_atoms(op, l, r)
             }
             MExpr::UnaryMinus { value, .. } => {
-                let v = self.lower_atom(value);
+                let v = self.lower_atom(value, ctx);
                 CExpr::Call(
                     "erlang".to_string(),
                     "-".to_string(),
@@ -236,7 +235,7 @@ impl<'ctx> Lowerer<'ctx> {
             } => CExpr::Call(
                 module.clone(),
                 func.clone(),
-                args.iter().map(|a| self.lower_atom(a)).collect(),
+                args.iter().map(|a| self.lower_atom(a, ctx)).collect(),
             ),
             // ANF atomizes sub-expressions in guards too (e.g. `n % 15 == 0`
             // becomes `let v0 = n % 15 in v0 == 0`), and the translator
@@ -246,8 +245,8 @@ impl<'ctx> Lowerer<'ctx> {
             // sides under `lower_guard` and rebuild as a `CExpr::Let`.
             // `Let` (post-Bind→Let promotion) gets the same treatment.
             MExpr::Bind { var, value, body } | MExpr::Let { var, value, body } => {
-                let val_ce = self.lower_guard(value);
-                let body_ce = self.lower_guard(body);
+                let val_ce = self.lower_guard(value, ctx);
+                let body_ce = self.lower_guard(body, ctx);
                 CExpr::Let(core_var(&var.name), Box::new(val_ce), Box::new(body_ce))
             }
             other => panic!(
@@ -267,7 +266,7 @@ impl<'ctx> Lowerer<'ctx> {
         else_branch: &MExpr,
         ctx: &LowerCtx,
     ) -> CExpr {
-        let cond_ce = self.lower_atom(cond);
+        let cond_ce = self.lower_atom(cond, ctx);
         let then_ce = self.lower_expr(then_branch, ctx);
         let else_ce = self.lower_expr(else_branch, ctx);
         CExpr::Case(

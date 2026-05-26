@@ -21,8 +21,8 @@ use crate::ast::Pat;
 use crate::codegen::cerl::{CArm, CExpr, CLit, CPat};
 use crate::codegen::monadic::ir::{Atom, EffectOpRef, MExpr, MHandler, MHandlerArm};
 
-use super::{LowerCtx, Lowerer};
 use super::util::core_var;
+use super::{LowerCtx, Lowerer};
 
 /// Erlang module hosting the runtime helpers
 /// (`find_evidence/2`, `insert_canonical/2`, `project_evidence/2`).
@@ -55,14 +55,9 @@ impl<'ctx> Lowerer<'ctx> {
     /// per-call decisions that the new path explicitly avoids. The runtime
     /// walk is O(n) over a typically-≤5-entry tuple; closed-row
     /// specialization is a step-11+ optimization.
-    pub(super) fn lower_yield(
-        &mut self,
-        op: &EffectOpRef,
-        args: &[Atom],
-        ctx: &LowerCtx,
-    ) -> CExpr {
+    pub(super) fn lower_yield(&mut self, op: &EffectOpRef, args: &[Atom], ctx: &LowerCtx) -> CExpr {
         // Lower args first — they're atoms (ANF), so non-effectful.
-        let lowered_args: Vec<CExpr> = args.iter().map(|a| self.lower_atom(a)).collect();
+        let lowered_args: Vec<CExpr> = args.iter().map(|a| self.lower_atom(a, ctx)).collect();
 
         let find_call = CExpr::Call(
             EVIDENCE_BRIDGE_MODULE.to_string(),
@@ -94,12 +89,7 @@ impl<'ctx> Lowerer<'ctx> {
     /// Multi-effect static handlers emit one `insert_canonical` per effect
     /// in sequence; innermost-wins ordering falls out of the runtime helper
     /// (it replaces a same-tagged entry rather than appending).
-    pub(super) fn lower_with(
-        &mut self,
-        handler: &MHandler,
-        body: &MExpr,
-        ctx: &LowerCtx,
-    ) -> CExpr {
+    pub(super) fn lower_with(&mut self, handler: &MHandler, body: &MExpr, ctx: &LowerCtx) -> CExpr {
         match handler {
             MHandler::Static {
                 effects,
@@ -169,7 +159,12 @@ impl<'ctx> Lowerer<'ctx> {
         // both lower with these in scope, so re-performs hit the outer
         // handler stack and the return clause forwards through the outer K.
         let outer_evidence = ctx.evidence.clone();
-        let outer_return_k = ctx.return_k.clone();
+        let raw_result_k = self.fresh_k_ret_name();
+        let raw_result_k_binding = CExpr::Fun(
+            vec!["_V".to_string()],
+            Box::new(CExpr::Var("_V".to_string())),
+        );
+        let arm_ctx = ctx.with_return_k(raw_result_k.clone());
 
         // 1. Build per-effect entries from the arms. Arm closures reference
         //    `outer_evidence` / `outer_return_k` inside; we build them with
@@ -197,7 +192,7 @@ impl<'ctx> Lowerer<'ctx> {
         for eff in &canonical_effects {
             let effect_arms: Vec<&MHandlerArm> =
                 arms.iter().filter(|a| a.op.effect == *eff).collect();
-            let op_tuple = self.build_op_tuple_for_effect(eff, &effect_arms, ctx);
+            let op_tuple = self.build_op_tuple_for_effect(eff, &effect_arms, &arm_ctx);
             let entry = CExpr::Tuple(vec![CExpr::Lit(CLit::Atom(eff.clone())), op_tuple]);
             let insert = CExpr::Call(
                 EVIDENCE_BRIDGE_MODULE.to_string(),
@@ -213,7 +208,7 @@ impl<'ctx> Lowerer<'ctx> {
         //    state still reflects outer scope so its body forwards through
         //    the outer K and references the outer evidence.
         let ret_binding: Option<(String, CExpr)> = return_clause.map(|arm| {
-            let closure = self.build_return_clause_closure(arm, ctx);
+            let closure = self.build_return_clause_closure(arm, &arm_ctx);
             (self.fresh_k_ret_name(), closure)
         });
 
@@ -222,26 +217,36 @@ impl<'ctx> Lowerer<'ctx> {
         let inner_k = ret_binding
             .as_ref()
             .map(|(name, _)| name.clone())
-            .unwrap_or_else(|| outer_return_k.clone());
-        let body_ctx = ctx
-            .with_evidence(acc_evidence_var)
-            .with_return_k(inner_k);
+            .unwrap_or_else(|| raw_result_k.clone());
+        let body_ctx = ctx.with_evidence(acc_evidence_var).with_return_k(inner_k);
         let body_ce = self.lower_expr(body, &body_ctx);
+        let with_result = self.fresh_helper_name();
+        let wrapped_body = CExpr::Let(
+            with_result.clone(),
+            Box::new(body_ce),
+            Box::new(self.apply_current_k(CExpr::Var(with_result), ctx)),
+        );
 
         // 4. Wrap inside-out: insert_canonical chain wraps the body, then
-        //    the return-K binding (if any) wraps the chain. Outer K binding
-        //    sits outermost so its closure value can reference outer evidence
-        //    by name (which is in scope at the with site).
+        //    the return-K binding (if any) wraps the chain. The raw-result
+        //    K sits outermost so both handler arms and return clauses can
+        //    produce values back to the `with` delimiter; only the wrapper
+        //    around the whole handled computation applies the outer K.
         let with_evidence = entry_bindings
             .into_iter()
             .rev()
-            .fold(body_ce, |inner, (name, value)| {
+            .fold(wrapped_body, |inner, (name, value)| {
                 CExpr::Let(name, Box::new(value), Box::new(inner))
             });
-        match ret_binding {
+        let with_return = match ret_binding {
             Some((name, value)) => CExpr::Let(name, Box::new(value), Box::new(with_evidence)),
             None => with_evidence,
-        }
+        };
+        CExpr::Let(
+            raw_result_k,
+            Box::new(raw_result_k_binding),
+            Box::new(with_return),
+        )
     }
 
     /// Dynamic-handler case of [`lower_with`]. The op tuple is a runtime
@@ -259,16 +264,21 @@ impl<'ctx> Lowerer<'ctx> {
         ctx: &LowerCtx,
     ) -> CExpr {
         let outer_evidence = ctx.evidence.clone();
-        let outer_return_k = ctx.return_k.clone();
+        let raw_result_k = self.fresh_k_ret_name();
+        let raw_result_k_binding = CExpr::Fun(
+            vec!["_V".to_string()],
+            Box::new(CExpr::Var("_V".to_string())),
+        );
 
-        let op_tuple_ce = self.lower_atom(op_tuple);
+        let op_tuple_ce = self.lower_atom(op_tuple, ctx);
 
         // Return-lambda composition (built under outer scope).
         let ret_binding: Option<(String, CExpr)> = return_lambda.map(|atom| {
-            let lambda_ce = self.lower_atom(atom);
+            let lambda_ce = self.lower_atom(atom, ctx);
             let v_param = self.fresh_helper_name();
             // The Atom is a uniform-CPS lambda: `fun(value, _Evidence, _ReturnK)`.
-            // Wrap as a continuation: `fun(_V) -> apply <lambda>(_V, outer_ev, outer_k)`.
+            // Wrap as a delimited continuation: the lambda produces a raw
+            // with-result, and the `with` wrapper applies the outer K once.
             let wrapper = CExpr::Fun(
                 vec![v_param.clone()],
                 Box::new(CExpr::Apply(
@@ -276,7 +286,7 @@ impl<'ctx> Lowerer<'ctx> {
                     vec![
                         CExpr::Var(v_param),
                         CExpr::Var(outer_evidence.clone()),
-                        CExpr::Var(outer_return_k.clone()),
+                        CExpr::Var(raw_result_k.clone()),
                     ],
                 )),
             );
@@ -286,7 +296,7 @@ impl<'ctx> Lowerer<'ctx> {
         let inner_k = ret_binding
             .as_ref()
             .map(|(name, _)| name.clone())
-            .unwrap_or_else(|| outer_return_k.clone());
+            .unwrap_or_else(|| raw_result_k.clone());
 
         let entry = CExpr::Tuple(vec![
             CExpr::Lit(CLit::Atom(effect.to_string())),
@@ -303,12 +313,23 @@ impl<'ctx> Lowerer<'ctx> {
             .with_evidence(new_ev_name.clone())
             .with_return_k(inner_k);
         let body_ce = self.lower_expr(body, &body_ctx);
+        let with_result = self.fresh_helper_name();
+        let wrapped_body = CExpr::Let(
+            with_result.clone(),
+            Box::new(body_ce),
+            Box::new(self.apply_current_k(CExpr::Var(with_result), ctx)),
+        );
 
-        let with_evidence = CExpr::Let(new_ev_name, Box::new(insert), Box::new(body_ce));
-        match ret_binding {
+        let with_evidence = CExpr::Let(new_ev_name, Box::new(insert), Box::new(wrapped_body));
+        let with_return = match ret_binding {
             Some((name, value)) => CExpr::Let(name, Box::new(value), Box::new(with_evidence)),
             None => with_evidence,
-        }
+        };
+        CExpr::Let(
+            raw_result_k,
+            Box::new(raw_result_k_binding),
+            Box::new(with_return),
+        )
     }
 
     // -----------------------------------------------------------------

@@ -30,7 +30,7 @@ impl<'ctx> Lowerer<'ctx> {
             && args.len() == 1
             && (name.name == "panic" || name.name == "todo")
         {
-            return self.lower_panic_or_todo(&name.name, &args[0]);
+            return self.lower_panic_or_todo(&name.name, &args[0], ctx);
         }
 
         // Partial application: if the head resolves to a known-arity callable
@@ -45,8 +45,8 @@ impl<'ctx> Lowerer<'ctx> {
             return self.eta_expand_partial_app(head, args, expected, ctx);
         }
 
-        let head_ce = self.lower_atom(head);
-        let mut call_args: Vec<CExpr> = args.iter().map(|a| self.lower_atom(a)).collect();
+        let head_ce = self.lower_atom(head, ctx);
+        let mut call_args: Vec<CExpr> = args.iter().map(|a| self.lower_atom(a, ctx)).collect();
         call_args.push(CExpr::Var(ctx.evidence.clone()));
         call_args.push(CExpr::Var(ctx.return_k.clone()));
         CExpr::Apply(Box::new(head_ce), call_args)
@@ -88,11 +88,11 @@ impl<'ctx> Lowerer<'ctx> {
         ctx: &LowerCtx,
     ) -> CExpr {
         let missing = expected - args.len();
-        let lowered_supplied: Vec<CExpr> = args.iter().map(|a| self.lower_atom(a)).collect();
+        let lowered_supplied: Vec<CExpr> = args.iter().map(|a| self.lower_atom(a, ctx)).collect();
         let eta_names: Vec<String> = (0..missing).map(|i| format!("_Eta{}", i)).collect();
         let inner_ev = "_Evidence".to_string();
         let inner_k = "_ReturnK".to_string();
-        let head_ce = self.lower_atom(head);
+        let head_ce = self.lower_atom(head, ctx);
 
         let mut full_args: Vec<CExpr> = lowered_supplied;
         full_args.extend(eta_names.iter().map(|n| CExpr::Var(n.clone())));
@@ -106,10 +106,7 @@ impl<'ctx> Lowerer<'ctx> {
         let inner_apply = CExpr::Apply(Box::new(head_ce), full_args);
         let lambda = CExpr::Fun(lambda_params, Box::new(inner_apply));
         // Yield the lambda value through the current K.
-        CExpr::Apply(
-            Box::new(CExpr::Var(ctx.return_k.clone())),
-            vec![lambda],
-        )
+        CExpr::Apply(Box::new(CExpr::Var(ctx.return_k.clone())), vec![lambda])
     }
 
     /// Emit `call 'erlang':'error'({saga_error, <kind>, Msg, …})` for the
@@ -117,12 +114,12 @@ impl<'ctx> Lowerer<'ctx> {
     /// source-info (module, function, file, line) here; the new path
     /// doesn't yet thread that, so we use empty placeholders — the kind
     /// atom + message string are enough to identify the failure at runtime.
-    fn lower_panic_or_todo(&mut self, name: &str, msg_atom: &Atom) -> CExpr {
+    fn lower_panic_or_todo(&mut self, name: &str, msg_atom: &Atom, ctx: &LowerCtx) -> CExpr {
         let kind_atom = if name == "todo" { "todo" } else { "panic" };
         let msg = if name == "todo" {
             super::util::lower_string_to_binary("not implemented")
         } else {
-            self.lower_atom(msg_atom)
+            self.lower_atom(msg_atom, ctx)
         };
         let msg_var = self.fresh_helper_name();
         let err_term = CExpr::Tuple(vec![
