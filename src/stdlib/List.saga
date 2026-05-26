@@ -51,12 +51,22 @@ is_empty xs = case xs {
 }
 
 #@ Applies a function to every element, returning a new list of results.
-@external("erlang", "lists", "map")
+# @external("erlang", "lists", "map")
 pub fun map : (f: a -> b) -> (xs: List a) -> List b
+map f xs = case xs {
+  [] -> []
+  h :: t -> f h :: map f t
+}
 
 #@ Returns a list of elements for which the predicate returns True.
-@external("erlang", "lists", "filter")
+# @external("erlang", "lists", "filter")
 pub fun filter : (pred: a -> Bool) -> (xs: List a) -> List a
+filter pred xs = case xs {
+  [] -> []
+  h :: t ->
+    if pred h then h :: filter pred t
+    else filter pred t
+}
 
 #@ Left fold. Applies f to the accumulator and each element, left to right.
 pub fun foldl : (f: b -> a -> b) -> (acc: b) -> (xs: List a) -> b
@@ -66,8 +76,12 @@ foldl f acc xs = case xs {
 }
 
 #@ Right fold. Applies f to each element and the accumulator, right to left.
-@external("erlang", "lists", "foldr")
+# @external("erlang", "lists", "foldr")
 pub fun foldr : (f: a -> b -> b) -> (acc: b) -> (xs: List a) -> b
+foldr f acc xs = case xs {
+  [] -> acc
+  h :: t -> f h (foldr f acc t)
+}
 
 #@ Returns a list with elements in reverse order.
 @external("erlang", "lists", "reverse")
@@ -78,8 +92,12 @@ pub fun reverse : (xs: List a) -> List a
 pub fun append : (xs: List a) -> (ys: List a) -> List a
 
 #@ Maps a function over a list and flattens the results by one level.
-@external("erlang", "lists", "flatmap")
+# @external("erlang", "lists", "flatmap")
 pub fun flat_map : (f: a -> List b) -> (xs: List a) -> List b
+flat_map f xs = case xs {
+  [] -> []
+  h :: t -> append (f h) (flat_map f t)
+}
 
 #@ Maps a function over a list and keeps only the Just results.
 pub fun filter_map : (f: a -> Maybe b) -> (xs: List a) -> List b
@@ -185,8 +203,15 @@ zip_with f xs ys = case xs {
 pub fun unzip : (xs: List (a, b)) -> (List a, List b)
 
 #@ Splits a list into two: elements that satisfy the predicate and those that don't.
-@external("erlang", "lists", "partition")
+# @external("erlang", "lists", "partition")
 pub fun partition : (pred: a -> Bool) -> (xs: List a) -> (List a, List a)
+partition pred xs = case xs {
+  [] -> ([], [])
+  h :: t -> {
+    let (yes, no) = partition pred t
+    if pred h then (h :: yes, no) else (yes, h :: no)
+  }
+}
 
 #@ Pairs each element with its 0-based index.
 @external("erlang", "std_list_bridge", "enumerate")
