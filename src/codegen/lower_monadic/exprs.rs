@@ -80,7 +80,78 @@ impl<'ctx> Lowerer<'ctx> {
             MExpr::UnaryMinus { value, .. } => self.lower_unary_minus(value),
             MExpr::BitString { segments, .. } => self.lower_bitstring(segments),
             MExpr::Receive { arms, after, .. } => self.lower_receive(arms, after.as_ref()),
+            MExpr::LetFun {
+                name,
+                params,
+                body,
+                rest,
+                ..
+            } => self.lower_let_fun(name, params, body, rest),
         }
+    }
+
+    /// Lower `MExpr::LetFun { name, params, body, rest }` to a Core Erlang
+    /// `letrec`. The bound function follows the uniform calling
+    /// convention `(params…, _Evidence, _ReturnK)` so call sites that
+    /// resolved the name to a `BeamFunction { erlang_mod: None }` via
+    /// the backend resolution map find it at the expected arity.
+    ///
+    /// Body lowers under a fresh K context — its `_ReturnK` is its own
+    /// parameter, not the enclosing fn's continuation.
+    fn lower_let_fun(
+        &mut self,
+        name: &str,
+        params: &[Pat],
+        body: &MExpr,
+        rest: &MExpr,
+    ) -> CExpr {
+        let has_non_var_pat = params.iter().any(|p| !matches!(p, Pat::Var { .. }));
+        let mut param_vars: Vec<String> = if has_non_var_pat {
+            (0..params.len()).map(|i| format!("_Arg{}", i)).collect()
+        } else {
+            super::pats::lower_param_names(params)
+        };
+        param_vars.push(EVIDENCE_VAR.to_string());
+        param_vars.push(RETURN_K_VAR.to_string());
+        let arity = param_vars.len();
+
+        let saved_k = std::mem::replace(&mut self.current_return_k, RETURN_K_VAR.to_string());
+        let saved_counter = std::mem::replace(&mut self.k_counter, 0);
+        let saved_ev = std::mem::replace(&mut self.current_evidence, EVIDENCE_VAR.to_string());
+        let saved_ev_counter = std::mem::replace(&mut self.ev_counter, 0);
+        let saved_arm_k = std::mem::replace(&mut self.arm_k_counter, 0);
+        let saved_ret_k = std::mem::replace(&mut self.ret_k_counter, 0);
+        let saved_helper = std::mem::replace(&mut self.helper_counter, 0);
+        let body_ce_inner = self.lower_expr(body);
+        let body_ce = if has_non_var_pat {
+            let scrut = CExpr::Tuple(
+                (0..params.len())
+                    .map(|i| CExpr::Var(format!("_Arg{}", i)))
+                    .collect(),
+            );
+            let pat = CPat::Tuple(params.iter().map(|p| self.lower_pat(p)).collect());
+            CExpr::Case(
+                Box::new(scrut),
+                vec![CArm {
+                    pat,
+                    guard: None,
+                    body: body_ce_inner,
+                }],
+            )
+        } else {
+            body_ce_inner
+        };
+        self.current_return_k = saved_k;
+        self.k_counter = saved_counter;
+        self.current_evidence = saved_ev;
+        self.ev_counter = saved_ev_counter;
+        self.arm_k_counter = saved_arm_k;
+        self.ret_k_counter = saved_ret_k;
+        self.helper_counter = saved_helper;
+
+        let fun = CExpr::Fun(param_vars, Box::new(body_ce));
+        let rest_ce = self.lower_expr(rest);
+        CExpr::LetRec(vec![(name.to_string(), arity, fun)], Box::new(rest_ce))
     }
 
     /// `Resume(atom)` → `apply <current_K>(<atom>)`.
@@ -181,6 +252,18 @@ impl<'ctx> Lowerer<'ctx> {
     /// into a `CExpr` placed directly in `CArm.guard`; see
     /// [`lower_guard`](Self::lower_guard) for the supported shape.
     fn lower_case(&mut self, scrutinee: &Atom, arms: &[MArm]) -> CExpr {
+        // Complex guards (function calls, `Yield`, anything not legal in a
+        // Core Erlang guard) cannot be emitted as `case … when …`. Emit a
+        // right-associated chain of one-arm cases where each complex guard
+        // is scrutinised at the value level — mirrors the old lowerer's
+        // [`lower_case_expr_chain`] in `lower/exprs.rs:409`.
+        let needs_chain = arms
+            .iter()
+            .any(|a| a.guard.as_ref().is_some_and(|g| !guard_safe(g)));
+        if needs_chain {
+            return self.lower_case_chain(scrutinee, arms);
+        }
+
         let scrut_ce = self.lower_atom(scrutinee);
         let mut carms: Vec<CArm> = arms.iter().map(|arm| self.lower_arm(arm)).collect();
         // erlc's `bs_start_match3` consistency check requires a wildcard
@@ -199,6 +282,137 @@ impl<'ctx> Lowerer<'ctx> {
             });
         }
         CExpr::Case(Box::new(scrut_ce), carms)
+    }
+
+    /// Emit a case as a right-associated chain of one-arm cases, with the
+    /// fallthrough of each step thunked into a `fun () -> rest` and applied
+    /// when the arm doesn't match. Complex (non-guard-safe) guards are
+    /// CPS-evaluated outside the inner `case` and scrutinised on their
+    /// boolean value.
+    fn lower_case_chain(&mut self, scrutinee: &Atom, arms: &[MArm]) -> CExpr {
+        let scrut_ce = self.lower_atom(scrutinee);
+        let scrut_var = self.fresh_helper_name();
+
+        let mut rest: CExpr = self.case_clause_error();
+        for arm in arms.iter().rev() {
+            let rest_var = self.fresh_helper_name();
+            let rest_ref = || CExpr::Apply(Box::new(CExpr::Var(rest_var.clone())), vec![]);
+            let pat = self.lower_pat(&arm.pattern);
+            let is_catchall = matches!(&arm.pattern, Pat::Wildcard { .. } | Pat::Var { .. });
+
+            let current = match arm.guard.as_ref() {
+                None => {
+                    let body_ce = self.lower_expr(&arm.body);
+                    if is_catchall {
+                        self.bind_catchall_pattern(&scrut_var, &arm.pattern, body_ce)
+                    } else {
+                        CExpr::Case(
+                            Box::new(CExpr::Var(scrut_var.clone())),
+                            vec![
+                                CArm {
+                                    pat,
+                                    guard: None,
+                                    body: body_ce,
+                                },
+                                CArm {
+                                    pat: CPat::Wildcard,
+                                    guard: None,
+                                    body: rest_ref(),
+                                },
+                            ],
+                        )
+                    }
+                }
+                Some(guard) if guard_safe(guard) => {
+                    let g = self.lower_guard(guard);
+                    let body_ce = self.lower_expr(&arm.body);
+                    CExpr::Case(
+                        Box::new(CExpr::Var(scrut_var.clone())),
+                        vec![
+                            CArm {
+                                pat,
+                                guard: Some(g),
+                                body: body_ce,
+                            },
+                            CArm {
+                                pat: CPat::Wildcard,
+                                guard: None,
+                                body: rest_ref(),
+                            },
+                        ],
+                    )
+                }
+                Some(guard) => {
+                    // CPS-evaluate the guard: bind its value through a fresh
+                    // K, then scrutinise the bound value on 'true'/_.
+                    let body_ce = self.lower_expr(&arm.body);
+                    let guard_val = self.fresh_helper_name();
+                    let inner_case = CExpr::Case(
+                        Box::new(CExpr::Var(guard_val.clone())),
+                        vec![
+                            CArm {
+                                pat: CPat::Lit(CLit::Atom("true".to_string())),
+                                guard: None,
+                                body: body_ce,
+                            },
+                            CArm {
+                                pat: CPat::Wildcard,
+                                guard: None,
+                                body: rest_ref(),
+                            },
+                        ],
+                    );
+                    let k_inner = CExpr::Fun(vec![guard_val], Box::new(inner_case));
+                    let k_name = self.fresh_k_name();
+                    let guard_ce = self
+                        .with_return_k(k_name.clone(), |this| this.lower_expr(guard));
+                    let guarded_body =
+                        CExpr::Let(k_name, Box::new(k_inner), Box::new(guard_ce));
+                    if is_catchall {
+                        self.bind_catchall_pattern(&scrut_var, &arm.pattern, guarded_body)
+                    } else {
+                        CExpr::Case(
+                            Box::new(CExpr::Var(scrut_var.clone())),
+                            vec![
+                                CArm {
+                                    pat,
+                                    guard: None,
+                                    body: guarded_body,
+                                },
+                                CArm {
+                                    pat: CPat::Wildcard,
+                                    guard: None,
+                                    body: rest_ref(),
+                                },
+                            ],
+                        )
+                    }
+                }
+            };
+
+            rest = CExpr::Let(
+                rest_var,
+                Box::new(CExpr::Fun(vec![], Box::new(rest))),
+                Box::new(current),
+            );
+        }
+
+        CExpr::Let(scrut_var, Box::new(scrut_ce), Box::new(rest))
+    }
+
+    /// Bind a catchall (`Wildcard` or `Var`) arm pattern directly without an
+    /// enclosing `case` — the wildcard pattern matches everything, and a
+    /// var pattern is bound to the scrutinee with a `let`.
+    fn bind_catchall_pattern(&self, scrut_var: &str, pat: &Pat, body: CExpr) -> CExpr {
+        match pat {
+            Pat::Wildcard { .. } => body,
+            Pat::Var { name, .. } => CExpr::Let(
+                core_var(name),
+                Box::new(CExpr::Var(scrut_var.to_string())),
+                Box::new(body),
+            ),
+            _ => unreachable!("bind_catchall_pattern called on non-catchall pattern"),
+        }
     }
 
     /// Emit a Core Erlang expression that crashes with a `case_clause` error,
@@ -754,6 +968,22 @@ impl<'ctx> Lowerer<'ctx> {
                 ..
             } => CExpr::FunRef(name.clone(), uniform_value_arity(arity, &effects, &name)),
         }
+    }
+}
+
+/// Whether `g` is structurally legal in a Core Erlang `case` arm guard.
+/// Matches the subset accepted by [`Lowerer::lower_guard`]: `Pure`, `BinOp`,
+/// `UnaryMinus`, guard-safe `ForeignCall` (BIFs), and `Bind`/`Let` whose
+/// value and body are themselves guard-safe. `App`, `Yield`, etc. require
+/// the case-chain fallback.
+fn guard_safe(g: &MExpr) -> bool {
+    match g {
+        MExpr::Pure(_) | MExpr::BinOp { .. } | MExpr::UnaryMinus { .. } => true,
+        MExpr::ForeignCall { .. } => true,
+        MExpr::Bind { value, body, .. } | MExpr::Let { value, body, .. } => {
+            guard_safe(value) && guard_safe(body)
+        }
+        _ => false,
     }
 }
 

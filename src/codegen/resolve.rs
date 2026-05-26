@@ -932,6 +932,10 @@ fn collect_local_fun_arities(program: &Program) -> HashMap<String, usize> {
     // Second pass: fill in entries not seen in the first pass. `Val` is
     // always arity-0; `FunSignature` is the source arity (used when there
     // is no FunBinding to refine it — e.g. `@external` wrappers).
+    // `DictConstructor` exposes the dict tuple at `dict_params.len()` user
+    // args; under the new path the uniform calling convention adds the
+    // `_Evidence`/`_ReturnK` pair at the call site via the `__dict_…`
+    // branch of `uniform_value_arity`.
     for decl in program {
         match decl {
             Decl::Val { name, .. } => {
@@ -945,6 +949,13 @@ fn collect_local_fun_arities(program: &Program) -> HashMap<String, usize> {
             } => {
                 let _ = extract_external(annotations);
                 local_funs.entry(name.clone()).or_insert(params.len());
+            }
+            Decl::DictConstructor {
+                name, dict_params, ..
+            } => {
+                local_funs
+                    .entry(name.clone())
+                    .or_insert(dict_params.len());
             }
             _ => {}
         }

@@ -491,26 +491,34 @@ impl<'a> Translator<'a> {
                     body,
                     ..
                 } => {
-                    // `let f x = body` inside a block. The body is its own
-                    // computation context (lambda). We lift it as a Lambda
-                    // atom under a Bind on the function name.
-                    let lambda_body = self.translate_expr(body);
-                    let atom = Atom::Lambda {
-                        params: params.clone(),
-                        body: Box::new(lambda_body),
-                        source: *id,
-                    };
-                    let var = MVar {
-                        name: name.clone(),
-                        id: self.next_mvar_id(),
-                    };
-                    bindings.push((var, MExpr::Pure(atom), None));
-                    if is_last {
-                        tail = Some(MExpr::Pure(Atom::Lit {
+                    // `let f x = body` inside a block. The name resolves to
+                    // a local recursive function (BeamFunction with
+                    // erlang_mod = None) — call sites emit `apply
+                    // f/arity(args, _Ev, _RK)`, not closure-apply on a
+                    // bound var. Emit a dedicated `MExpr::LetFun` so the
+                    // lowerer can wrap the rest of the block in a
+                    // `CExpr::LetRec` that actually defines `f/arity` for
+                    // those calls to resolve against. The lambda body is a
+                    // separate computation context.
+                    let fun_body = self.translate_expr(body);
+                    let rest_stmts = &stmts[idx + 1..];
+                    let rest = if rest_stmts.is_empty() {
+                        MExpr::Pure(Atom::Lit {
                             value: Lit::Unit,
                             source: fresh_node_id(),
-                        }));
-                    }
+                        })
+                    } else {
+                        self.translate_block(rest_stmts, block_span)
+                    };
+                    let letfun = MExpr::LetFun {
+                        name: name.clone(),
+                        params: params.clone(),
+                        body: Box::new(fun_body),
+                        rest: Box::new(rest),
+                        source: *id,
+                    };
+                    self.local_static_handlers = saved;
+                    return wrap_binds(bindings, letfun);
                 }
                 Stmt::Expr(expr) => {
                     let translated = self.translate_expr(expr);

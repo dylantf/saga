@@ -320,6 +320,25 @@ fn write_tail(out: &mut String, indent: usize, e: &MExpr) {
                 write_expr(out, indent + 2, body);
             }
         }
+        MExpr::LetFun {
+            name,
+            params,
+            body,
+            rest,
+            source,
+        } => {
+            writeln!(
+                out,
+                "{p}letfun {}/{} [#{}] =",
+                name,
+                params.len(),
+                source.0
+            )
+            .unwrap();
+            write_expr(out, indent + 2, body);
+            writeln!(out, "{p}in").unwrap();
+            write_expr(out, indent + 2, rest);
+        }
     }
 }
 
@@ -442,6 +461,7 @@ fn expr_compact(e: &MExpr) -> String {
             source.0
         ),
         MExpr::Receive { source, .. } => format!("<Receive [#{}]>", source.0),
+        MExpr::LetFun { source, .. } => format!("<LetFun [#{}]>", source.0),
     }
 }
 

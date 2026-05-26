@@ -235,6 +235,20 @@ pub enum MExpr {
         after: Option<(Atom, Box<MExpr>)>,
         source: NodeId,
     },
+
+    /// `let f x y = …` inside a block. The bound name resolves to a local
+    /// recursive function (via backend `ResolutionMap` as `BeamFunction
+    /// { erlang_mod: None }`), so call sites emit `apply f/arity(args, _Ev,
+    /// _ReturnK)` rather than chasing a closure value. The lowerer emits a
+    /// `CExpr::LetRec` so that arity-N name actually exists at the call
+    /// sites that follow.
+    LetFun {
+        name: String,
+        params: Vec<crate::ast::Pat>,
+        body: Box<MExpr>,
+        rest: Box<MExpr>,
+        source: NodeId,
+    },
 }
 
 // -------------------------------------------------------------------------

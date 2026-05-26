@@ -841,6 +841,60 @@ effects) must have **zero** continuation-closure allocations and **zero**
 `Yield`/`Pure` constructions in the emitted Core Erlang. Anything else there
 means the optimizer didn't fire — that's the debug signal.
 
+## Deferred follow-ups (post-phase-1)
+
+Items that surfaced during phase 1 implementation and need addressing
+but aren't blockers for phase 1 milestone completion.
+
+### Higher-order `@external` adapter
+
+**Problem:** under the new path's uniform calling convention, every
+Saga function is arity+2 (`args..., _Evidence, _ReturnK`). BIFs that
+expect native-arity fun callbacks (e.g. `lists:map`, `lists:filter`)
+can't be handed Saga funs directly — invoking a uniform-arity fun
+with native arity crashes.
+
+**Tactical workaround (phase 1, in-flight):** re-implement the ~15
+higher-order stdlib functions (`List.map`, `List.filter`, `List.foldr`,
+`List.flatmap`, `List.partition`, `Set.map`/`filter`/`fold`,
+`Dict.map_values`/`filter_entries`/`fold_entries`,
+`Array.map`/`foldl`, `List.sort_with`/`sort_by`) as pure Saga
+recursion. Unblocks the test suite but doesn't generalize — any future
+`@external` taking a fun arg hits the same wall.
+
+**Strategic fix (after phase 1):** add automatic fun-arg adaptation in
+`lower_external_wrapper`. Wrapper consults source param types (from
+`CheckResult` / `EffectInfo`) at emission time; for each fun-typed
+param, emit an inline adapter bridging uniform-arity Saga fun →
+native-arity callback. The adapter uses synchronous extraction
+(throw/catch is simplest):
+
+```erlang
+fun(X) ->
+  try
+    apply SagaF(X, _EmptyEv, fun(R) -> throw({'__capture__', R}) end),
+    erlang:error(unreachable_pure_fun_returned)
+  catch
+    throw:{'__capture__', R} -> R
+  end
+end
+```
+
+Soundness: fun args in `(a -> b)` signatures (without effect row) are
+already typechecker-enforced to be pure, so synchronous extraction is
+always well-defined for the cases the typechecker admits. For
+hypothetical effectful fun args the adapter would be structurally
+unsound, but those aren't typeable in this position.
+
+Cost: ~100 LOC in `lower_external_wrapper`. Once in place the new path
+supports the same higher-order `@external` surface area as the old
+path, no stdlib special-casing required.
+
+**Priority:** medium. Phase 1 ships without it (stdlib re-impl
+covers known cases). Belongs in a phase-2 follow-up alongside the
+effect optimization rewrites, or as a standalone improvement after
+the cleanup commit lands.
+
 ## Correctness gate
 
 The **direct-call rewrite** (and only the direct-call rewrite) is unsound
