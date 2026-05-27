@@ -1,5 +1,6 @@
 //! `App` lowering for the monadic-IR → Core Erlang pipeline.
 
+use crate::ast::Lit;
 use crate::codegen::cerl::{CExpr, CLit};
 use crate::codegen::monadic::ir::Atom;
 use crate::codegen::resolve::ResolvedCodegenKind;
@@ -45,11 +46,92 @@ impl<'ctx> Lowerer<'ctx> {
             return self.eta_expand_partial_app(head, args, expected, ctx);
         }
 
+        if let Some(call) = self.lower_saturated_external_app(head, args, ctx) {
+            return call;
+        }
+
         let head_ce = self.lower_atom(head, ctx);
         let mut call_args: Vec<CExpr> = args.iter().map(|a| self.lower_atom(a, ctx)).collect();
         call_args.push(CExpr::Var(ctx.evidence.clone()));
         call_args.push(CExpr::Var(ctx.return_k.clone()));
         CExpr::Apply(Box::new(head_ce), call_args)
+    }
+
+    fn lower_saturated_external_app(
+        &mut self,
+        head: &Atom,
+        args: &[Atom],
+        ctx: &LowerCtx,
+    ) -> Option<CExpr> {
+        let node = match head {
+            Atom::Var { source, .. } | Atom::QualifiedRef { source, .. } => *source,
+            _ => return None,
+        };
+        let resolved = self.resolution.get(&node)?;
+        let ResolvedCodegenKind::ExternalFunction {
+            target_erlang_mod,
+            target_name,
+            arity,
+            ..
+        } = &resolved.kind
+        else {
+            return None;
+        };
+        if args.len() != *arity {
+            return None;
+        }
+
+        let callback_shape = external_callback_arg(target_erlang_mod, target_name);
+        let call_args: Vec<CExpr> = args
+            .iter()
+            .enumerate()
+            .filter(|(_, arg)| {
+                !matches!(
+                    arg,
+                    Atom::Lit {
+                        value: Lit::Unit,
+                        ..
+                    }
+                )
+            })
+            .map(|(idx, arg)| {
+                if let Some((callback_idx, callback_arity)) = callback_shape
+                    && idx == callback_idx
+                {
+                    self.external_callback_adapter(arg, callback_arity, ctx)
+                } else {
+                    self.lower_atom(arg, ctx)
+                }
+            })
+            .collect();
+        let call = CExpr::Call(target_erlang_mod.clone(), target_name.clone(), call_args);
+        Some(CExpr::Apply(
+            Box::new(CExpr::Var(ctx.return_k.clone())),
+            vec![call],
+        ))
+    }
+
+    fn external_callback_adapter(
+        &mut self,
+        callback: &Atom,
+        callback_arity: usize,
+        ctx: &LowerCtx,
+    ) -> CExpr {
+        let callback_ce = self.lower_atom(callback, ctx);
+        let params: Vec<String> = (0..callback_arity)
+            .map(|i| format!("_ExtCb{}", i))
+            .collect();
+        let k_var = "_ExtCbK".to_string();
+        let v_var = "_ExtCbV".to_string();
+        let id_k = CExpr::Fun(vec![v_var.clone()], Box::new(CExpr::Var(v_var)));
+        let mut apply_args: Vec<CExpr> = params.iter().cloned().map(CExpr::Var).collect();
+        apply_args.push(CExpr::Var(ctx.evidence.clone()));
+        apply_args.push(CExpr::Var(k_var.clone()));
+        let apply_callback = CExpr::Apply(Box::new(callback_ce), apply_args);
+        CExpr::Fun(
+            params,
+            Box::new(CExpr::Let(k_var, Box::new(id_k), Box::new(apply_callback))),
+        )
     }
 
     /// Number of user/dict args the head atom's callable expects (i.e. the
@@ -133,5 +215,13 @@ impl<'ctx> Lowerer<'ctx> {
         ]);
         let err_call = CExpr::Call("erlang".to_string(), "error".to_string(), vec![err_term]);
         CExpr::Let(msg_var, Box::new(msg), Box::new(err_call))
+    }
+}
+
+fn external_callback_arg(module: &str, function: &str) -> Option<(usize, usize)> {
+    match (module, function) {
+        ("std_set_bridge", "map") | ("std_set_bridge", "filter") => Some((0, 1)),
+        ("std_set_bridge", "fold") => Some((0, 2)),
+        _ => None,
     }
 }

@@ -98,6 +98,20 @@ impl<'ctx> Lowerer<'ctx> {
                 return_clause,
                 ..
             } => self.lower_with_static(effects, arms, return_clause.as_ref(), body, ctx),
+            MHandler::Native {
+                effects, handler, ..
+            } => self.lower_with_native(effects, handler, body, ctx),
+            MHandler::Composite { handlers, source } => {
+                let nested = handlers
+                    .iter()
+                    .rev()
+                    .fold(body.clone(), |acc, h| MExpr::With {
+                        handler: h.clone(),
+                        body: Box::new(acc),
+                        source: *source,
+                    });
+                self.lower_expr(&nested, ctx)
+            }
             MHandler::Dynamic {
                 effects,
                 op_tuple,
@@ -134,6 +148,46 @@ impl<'ctx> Lowerer<'ctx> {
                 self.lower_with_dynamic(&effects[0], op_tuple, return_lambda.as_ref(), body, ctx)
             }
         }
+    }
+
+    fn lower_with_native(
+        &mut self,
+        effects: &[String],
+        handler: &str,
+        body: &MExpr,
+        ctx: &LowerCtx,
+    ) -> CExpr {
+        let mut entry_bindings: Vec<(String, CExpr)> = Vec::with_capacity(effects.len());
+        let mut acc_evidence_var = ctx.evidence.clone();
+
+        for effect in effects {
+            let Some(op_tuple) = super::bootstrap::native_handler_op_tuple(effect, handler) else {
+                eprintln!(
+                    "  warning: native handler `{}` for effect `{}` is not implemented in \
+                     the new lowerer; evidence install skipped",
+                    handler, effect
+                );
+                continue;
+            };
+            let entry = CExpr::Tuple(vec![CExpr::Lit(CLit::Atom(effect.clone())), op_tuple]);
+            let insert = CExpr::Call(
+                EVIDENCE_BRIDGE_MODULE.to_string(),
+                "insert_canonical".to_string(),
+                vec![CExpr::Var(acc_evidence_var.clone()), entry],
+            );
+            let new_name = self.fresh_evidence_name();
+            entry_bindings.push((new_name.clone(), insert));
+            acc_evidence_var = new_name;
+        }
+
+        let body_ctx = ctx.with_evidence(acc_evidence_var);
+        let body_ce = self.lower_expr(body, &body_ctx);
+        entry_bindings
+            .into_iter()
+            .rev()
+            .fold(body_ce, |inner, (name, value)| {
+                CExpr::Let(name, Box::new(value), Box::new(inner))
+            })
     }
 
     /// Static-handler case of [`lower_with`]. For each effect handled, build

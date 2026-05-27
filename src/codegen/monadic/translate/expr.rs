@@ -250,7 +250,12 @@ impl<'a> Translator<'a> {
                 source: e.id,
             }),
             ExprKind::Constructor { name } => Some(Atom::Ctor {
-                name: name.clone(),
+                name: self
+                    .effect_info
+                    .constructors
+                    .get(&e.id)
+                    .cloned()
+                    .unwrap_or_else(|| name.clone()),
                 args: Vec::new(),
                 source: e.id,
             }),
@@ -366,10 +371,143 @@ impl<'a> Translator<'a> {
 
     fn translate_case_arm(&mut self, arm: &ast::CaseArm) -> MArm {
         MArm {
-            pattern: arm.pattern.clone(),
+            pattern: self.canonicalize_pat_constructors(&arm.pattern),
             guard: arm.guard.as_ref().map(|g| self.translate_expr(g)),
             body: self.translate_expr(&arm.body),
             span: arm.span,
+        }
+    }
+
+    pub(crate) fn canonicalize_pat_constructors(&self, pat: &ast::Pat) -> ast::Pat {
+        use ast::Pat;
+
+        match pat {
+            Pat::Constructor {
+                id,
+                name,
+                args,
+                span,
+            } => Pat::Constructor {
+                id: *id,
+                name: self
+                    .effect_info
+                    .constructors
+                    .get(id)
+                    .cloned()
+                    .unwrap_or_else(|| name.clone()),
+                args: args
+                    .iter()
+                    .map(|p| self.canonicalize_pat_constructors(p))
+                    .collect(),
+                span: *span,
+            },
+            Pat::Record {
+                id,
+                name,
+                fields,
+                rest,
+                as_name,
+                span,
+            } => Pat::Record {
+                id: *id,
+                name: self
+                    .effect_info
+                    .constructors
+                    .get(id)
+                    .cloned()
+                    .unwrap_or_else(|| name.clone()),
+                fields: fields
+                    .iter()
+                    .map(|(field, pat)| {
+                        (
+                            field.clone(),
+                            pat.as_ref().map(|p| self.canonicalize_pat_constructors(p)),
+                        )
+                    })
+                    .collect(),
+                rest: *rest,
+                as_name: as_name.clone(),
+                span: *span,
+            },
+            Pat::AnonRecord {
+                id,
+                fields,
+                rest,
+                span,
+            } => Pat::AnonRecord {
+                id: *id,
+                fields: fields
+                    .iter()
+                    .map(|(field, pat)| {
+                        (
+                            field.clone(),
+                            pat.as_ref().map(|p| self.canonicalize_pat_constructors(p)),
+                        )
+                    })
+                    .collect(),
+                rest: *rest,
+                span: *span,
+            },
+            Pat::Tuple { id, elements, span } => Pat::Tuple {
+                id: *id,
+                elements: elements
+                    .iter()
+                    .map(|p| self.canonicalize_pat_constructors(p))
+                    .collect(),
+                span: *span,
+            },
+            Pat::StringPrefix {
+                id,
+                prefix,
+                rest,
+                span,
+            } => Pat::StringPrefix {
+                id: *id,
+                prefix: prefix.clone(),
+                rest: Box::new(self.canonicalize_pat_constructors(rest)),
+                span: *span,
+            },
+            Pat::BitStringPat { id, segments, span } => Pat::BitStringPat {
+                id: *id,
+                segments: segments
+                    .iter()
+                    .map(|seg| crate::ast::BitSegment {
+                        value: self.canonicalize_pat_constructors(&seg.value),
+                        size: seg.size.clone(),
+                        specs: seg.specs.clone(),
+                        span: seg.span,
+                    })
+                    .collect(),
+                span: *span,
+            },
+            Pat::ListPat { id, elements, span } => Pat::ListPat {
+                id: *id,
+                elements: elements
+                    .iter()
+                    .map(|p| self.canonicalize_pat_constructors(p))
+                    .collect(),
+                span: *span,
+            },
+            Pat::ConsPat {
+                id,
+                head,
+                tail,
+                span,
+            } => Pat::ConsPat {
+                id: *id,
+                head: Box::new(self.canonicalize_pat_constructors(head)),
+                tail: Box::new(self.canonicalize_pat_constructors(tail)),
+                span: *span,
+            },
+            Pat::Or { id, patterns, span } => Pat::Or {
+                id: *id,
+                patterns: patterns
+                    .iter()
+                    .map(|p| self.canonicalize_pat_constructors(p))
+                    .collect(),
+                span: *span,
+            },
+            Pat::Wildcard { .. } | Pat::Var { .. } | Pat::Lit { .. } => pat.clone(),
         }
     }
 
@@ -611,12 +749,41 @@ impl<'a> Translator<'a> {
             };
         }
         // Fallback: the qualifier (if any) is the effect name in source.
-        let effect = qualifier.unwrap_or("").to_string();
+        // Imported handler bodies can be re-ANF-normalized at the entry
+        // module boundary, which may leave their effect-call NodeIds without
+        // a matching entry in this module's resolution map. If the source op
+        // name is globally unique in the visible effect table, recover the
+        // canonical effect from that table instead of emitting the empty
+        // sentinel tag that would become `find_evidence(_, '')`.
+        let effect = qualifier
+            .map(str::to_string)
+            .or_else(|| self.unique_effect_for_op(op_name))
+            .unwrap_or_default();
         let op_index = self.op_index(&effect, op_name);
         EffectOpRef {
             effect,
             op: op_name.to_string(),
             op_index,
+        }
+    }
+
+    fn unique_effect_for_op(&self, op_name: &str) -> Option<String> {
+        let mut matches: Vec<String> = self
+            .effect_ops
+            .iter()
+            .filter_map(|(effect, ops)| {
+                if effect.contains('.') && ops.iter().any(|op| op == op_name) {
+                    Some(effect.clone())
+                } else {
+                    None
+                }
+            })
+            .collect();
+        matches.sort();
+        matches.dedup();
+        match matches.as_slice() {
+            [effect] => Some(effect.clone()),
+            _ => None,
         }
     }
 }

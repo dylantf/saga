@@ -23,10 +23,10 @@ impl<'a> Translator<'a> {
     /// handler whose op tuple is carried as a runtime value.
     fn handler_for_named(&mut self, name: &str, ref_id: NodeId, site_span: Span) -> MHandler {
         if let Some(body) = self.handler_decls.get(name).cloned() {
-            return self.static_from_body(&body, ref_id);
+            return self.static_from_body(name, &body, ref_id);
         }
         if let Some(Some(body)) = self.local_static_handlers.get(name).cloned() {
-            return self.static_from_body(&body, ref_id);
+            return self.static_from_body(name, &body, ref_id);
         }
         // Dynamic — runtime value held in `name`.
         MHandler::Dynamic {
@@ -64,6 +64,7 @@ impl<'a> Translator<'a> {
         let mut return_clause: Option<HandlerArm> = None;
         let mut effects: Vec<String> = Vec::new();
         let mut any_dynamic: Option<(String, NodeId)> = None;
+        let mut native_handlers: Vec<MHandler> = Vec::new();
 
         for ann in items {
             match &ann.node {
@@ -75,6 +76,11 @@ impl<'a> Translator<'a> {
                 }
                 HandlerItem::Named(named) => {
                     if let Some(body) = self.handler_decls.get(&named.name).cloned() {
+                        if let Some(native) = self.native_from_body(&named.name, &body, named.id) {
+                            native_handlers.push(native);
+                            merge_body_effects(&body, &mut effects);
+                            continue;
+                        }
                         merge_body_effects(&body, &mut effects);
                         for ann_arm in &body.arms {
                             arms_src.push(ann_arm.node.clone());
@@ -87,6 +93,11 @@ impl<'a> Translator<'a> {
                     } else if let Some(Some(body)) =
                         self.local_static_handlers.get(&named.name).cloned()
                     {
+                        if let Some(native) = self.native_from_body(&named.name, &body, named.id) {
+                            native_handlers.push(native);
+                            merge_body_effects(&body, &mut effects);
+                            continue;
+                        }
                         merge_body_effects(&body, &mut effects);
                         for ann_arm in &body.arms {
                             arms_src.push(ann_arm.node.clone());
@@ -122,7 +133,7 @@ impl<'a> Translator<'a> {
             .iter()
             .map(|e| self.canonical_effect_name(e))
             .collect();
-        let arms = arms_src
+        let arms: Vec<MHandlerArm> = arms_src
             .iter()
             .map(|a| self.translate_handler_arm(a, &canonical_effects))
             .collect();
@@ -130,16 +141,42 @@ impl<'a> Translator<'a> {
             .as_ref()
             .map(|a| self.translate_handler_arm(a, &canonical_effects));
 
-        MHandler::Static {
-            effects: canonical_effects,
-            arms,
-            return_clause,
-            source: site_span_to_node_id(site_span, NodeId::fresh()),
+        let static_part = if !arms.is_empty() || return_clause.is_some() {
+            Some(MHandler::Static {
+                effects: canonical_effects.clone(),
+                arms,
+                return_clause,
+                source: site_span_to_node_id(site_span, NodeId::fresh()),
+            })
+        } else {
+            None
+        };
+
+        let mut handlers = native_handlers;
+        if let Some(static_handler) = static_part {
+            handlers.push(static_handler);
+        }
+
+        match handlers.len() {
+            0 => MHandler::Static {
+                effects: canonical_effects.clone(),
+                arms: Vec::new(),
+                return_clause: None,
+                source: site_span_to_node_id(site_span, NodeId::fresh()),
+            },
+            1 => handlers.pop().unwrap(),
+            _ => MHandler::Composite {
+                handlers,
+                source: site_span_to_node_id(site_span, NodeId::fresh()),
+            },
         }
     }
 
     /// Build a Static handler from a known `HandlerBody`.
-    fn static_from_body(&mut self, body: &HandlerBody, source: NodeId) -> MHandler {
+    fn static_from_body(&mut self, name: &str, body: &HandlerBody, source: NodeId) -> MHandler {
+        if let Some(native) = self.native_from_body(name, body, source) {
+            return native;
+        }
         let mut effects: Vec<String> = Vec::new();
         merge_body_effects(body, &mut effects);
         // Canonicalize the handler's declared effects via `effect_ops` so the
@@ -167,6 +204,23 @@ impl<'a> Translator<'a> {
         }
     }
 
+    fn native_from_body(&self, name: &str, body: &HandlerBody, source: NodeId) -> Option<MHandler> {
+        if !body.arms.is_empty() || body.return_clause.is_some() || !is_native_handler_name(name) {
+            return None;
+        }
+        let mut effects: Vec<String> = Vec::new();
+        merge_body_effects(body, &mut effects);
+        let canonical_effects: Vec<String> = effects
+            .iter()
+            .map(|e| self.canonical_effect_name(e))
+            .collect();
+        Some(MHandler::Native {
+            effects: canonical_effects,
+            handler: name.to_string(),
+            source,
+        })
+    }
+
     fn translate_handler_arm(
         &mut self,
         arm: &HandlerArm,
@@ -176,7 +230,11 @@ impl<'a> Translator<'a> {
         MHandlerArm {
             id: arm.id,
             op,
-            params: arm.params.clone(),
+            params: arm
+                .params
+                .iter()
+                .map(|p| self.canonicalize_pat_constructors(p))
+                .collect(),
             body: Box::new(self.translate_expr(&arm.body)),
             finally_block: arm
                 .finally_block
@@ -257,6 +315,13 @@ fn merge_body_effects(body: &HandlerBody, out: &mut Vec<String>) {
 
 fn effect_ref_name(r: &EffectRef) -> String {
     r.name.clone()
+}
+
+fn is_native_handler_name(name: &str) -> bool {
+    matches!(
+        name.rsplit('.').next().unwrap_or(name),
+        "beam_ref" | "ets_ref" | "beam_actor" | "atomic_ref" | "beam_vec"
+    )
 }
 
 /// The `With` MExpr variant carries the with-site's NodeId via the calling

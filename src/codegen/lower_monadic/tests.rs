@@ -34,6 +34,7 @@ fn pure_unit() -> MExpr {
 struct EffectInfoStorage {
     effect_calls: HashMap<NodeId, crate::typechecker::ResolvedEffectOp>,
     handler_arms: HashMap<NodeId, crate::typechecker::ResolvedEffectOp>,
+    constructors: HashMap<NodeId, String>,
     fun_effects: HashMap<String, std::collections::HashSet<String>>,
     let_effect_bindings: HashMap<String, Vec<String>>,
     type_at_node: HashMap<NodeId, crate::typechecker::Type>,
@@ -45,6 +46,7 @@ impl EffectInfoStorage {
         Self {
             effect_calls: HashMap::new(),
             handler_arms: HashMap::new(),
+            constructors: HashMap::new(),
             fun_effects: HashMap::new(),
             let_effect_bindings: HashMap::new(),
             type_at_node: HashMap::new(),
@@ -56,6 +58,7 @@ impl EffectInfoStorage {
         EffectInfo {
             effect_calls: &self.effect_calls,
             handler_arms: &self.handler_arms,
+            constructors: &self.constructors,
             fun_effects: &self.fun_effects,
             let_effect_bindings: &self.let_effect_bindings,
             type_at_node: &self.type_at_node,

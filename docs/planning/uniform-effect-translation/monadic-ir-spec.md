@@ -257,11 +257,15 @@ pub struct MBitSegment {
 
 ### `MHandler` / `MHandlerArm`
 
-Two variants — **static** and **dynamic** — preserving the distinction
-that effect optimization's direct-call rewrite depends on. Static handlers
-have arms known at compile time (literal handler expressions, static name
-references, static aliases). Dynamic handlers carry a runtime
-closure-tuple value (conditional bindings, factory function results).
+Four variants preserve the distinctions the lowerer and effect optimizer
+need. Static handlers have source arms known at compile time (literal
+handler expressions, static name references, static aliases). Native
+handlers are compiler-built-in stdlib handlers with no source arms but
+handler-specific runtime backends (`beam_ref` vs `ets_ref`, `beam_vec`,
+`beam_actor`). Composite handlers represent inline blocks that combine
+multiple statically-known handlers, such as `{ets_ref, beam_actor}`.
+Dynamic handlers carry a runtime closure-tuple value (conditional bindings,
+factory function results).
 
 ```rust
 #[derive(Debug, Clone, PartialEq)]
@@ -278,6 +282,21 @@ pub enum MHandler {
         effects: Vec<String>,            // effects this handler discharges
         arms: Vec<MHandlerArm>,
         return_clause: Option<MHandlerArm>,
+        source: NodeId,
+    },
+
+    /// Compiler-builtin native handler. The lowerer materializes the op
+    /// tuple directly because the effect tag alone is not enough to choose
+    /// the runtime backend.
+    Native {
+        effects: Vec<String>,
+        handler: String,                 // e.g. "ets_ref", "beam_vec"
+        source: NodeId,
+    },
+
+    /// Inline composition of statically-known handlers.
+    Composite {
+        handlers: Vec<MHandler>,
         source: NodeId,
     },
 
@@ -422,6 +441,11 @@ pub struct EffectInfo<'a> {
 
     /// Handler-arm NodeId → which effect/op the arm handles.
     pub handler_arms: &'a HashMap<NodeId, typechecker::ResolvedEffectOp>,
+
+    /// Constructor expression/pattern NodeId → canonical constructor name.
+    /// Required when imported handler bodies are inlined into another
+    /// module but must keep their defining-module runtime tags.
+    pub constructors: &'a HashMap<NodeId, String>,
 
     /// Function name → set of effect names the function performs.
     /// Used by Bind→Let promotion to look up callee effect rows.

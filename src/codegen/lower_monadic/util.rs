@@ -161,5 +161,47 @@ pub(super) fn resolve_bit_segment_size(
 /// needs it for imported-handler bodies); when a sub-step requires that
 /// behavior, extend this helper rather than reaching into the old code.
 pub(super) fn mangle_ctor_atom(name: &str, ctors: &HashMap<String, String>) -> String {
-    ctors.get(name).cloned().unwrap_or_else(|| name.to_string())
+    if let Some(atom) = ctors.get(name) {
+        return atom.clone();
+    }
+    if name.contains('.') {
+        let mut parts: Vec<&str> = name.split('.').collect();
+        if let Some(ctor) = parts.pop() {
+            if let Some(atom) = beam_ctor_override(ctor) {
+                return atom.to_string();
+            }
+            let module = parts.join("_").to_lowercase();
+            return format!("{}_{}", module, ctor);
+        }
+    }
+    if !name.contains('.') {
+        let mut matches = ctors.iter().filter_map(|(key, atom)| {
+            key.rsplit('.')
+                .next()
+                .filter(|bare| *bare == name)
+                .map(|_| atom.clone())
+        });
+        if let Some(first) = matches.next()
+            && matches.next().is_none()
+        {
+            return first;
+        }
+    }
+    name.to_string()
+}
+
+fn beam_ctor_override(name: &str) -> Option<&'static str> {
+    match name {
+        "Ok" => Some("ok"),
+        "Err" => Some("error"),
+        "Just" => Some("just"),
+        "Nothing" => Some("nothing"),
+        "True" => Some("true"),
+        "False" => Some("false"),
+        "Normal" => Some("normal"),
+        "Shutdown" => Some("shutdown"),
+        "Killed" => Some("killed"),
+        "Noproc" => Some("noproc"),
+        _ => None,
+    }
 }

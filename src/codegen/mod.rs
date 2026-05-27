@@ -260,6 +260,7 @@ pub fn build_effect_info<'a>(
     monadic::ir::EffectInfo {
         effect_calls: &module_check_result.resolution.effect_calls,
         handler_arms: &module_check_result.resolution.handler_arms,
+        constructors: &module_check_result.resolution.constructors,
         fun_effects: &check_result.fun_effects,
         let_effect_bindings: &check_result.let_effect_bindings,
         type_at_node: &check_result.type_at_node,
@@ -319,7 +320,41 @@ pub fn emit_module_via_new_path(
         .module_check_results()
         .get(module_name)
         .unwrap_or(check_result);
-    let effect_info = build_effect_info(check_result, mod_check_ref, &ops_storage);
+    let mut combined_effect_calls = mod_check_ref.resolution.effect_calls.clone();
+    let mut combined_handler_arms = mod_check_ref.resolution.handler_arms.clone();
+    let mut combined_constructors = mod_check_ref.resolution.constructors.clone();
+    for compiled in ctx.modules.values() {
+        combined_effect_calls.extend(
+            compiled
+                .front_resolution
+                .effect_calls
+                .iter()
+                .map(|(k, v)| (*k, v.clone())),
+        );
+        combined_handler_arms.extend(
+            compiled
+                .front_resolution
+                .handler_arms
+                .iter()
+                .map(|(k, v)| (*k, v.clone())),
+        );
+        combined_constructors.extend(
+            compiled
+                .front_resolution
+                .constructors
+                .iter()
+                .map(|(k, v)| (*k, v.clone())),
+        );
+    }
+    let effect_info = monadic::ir::EffectInfo {
+        effect_calls: &combined_effect_calls,
+        handler_arms: &combined_handler_arms,
+        constructors: &combined_constructors,
+        fun_effects: &check_result.fun_effects,
+        let_effect_bindings: &check_result.let_effect_bindings,
+        type_at_node: &check_result.type_at_node,
+        effect_ops: &ops_storage.map,
+    };
 
     let handler_info = handler_analysis::analyze(program);
     let anf_program = anf::normalize(program.clone(), Some(&resolution_map));

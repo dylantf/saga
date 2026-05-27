@@ -295,6 +295,23 @@ pub enum MHandler {
         source: NodeId,
     },
 
+    /// Compiler-builtin native handler whose op tuple is emitted directly by
+    /// the lowerer. This preserves handler identity for empty stdlib handler
+    /// declarations such as `Std.Ref.ets_ref`, where the effect alone is not
+    /// enough to choose the runtime backend.
+    Native {
+        effects: Vec<String>,
+        handler: String,
+        source: NodeId,
+    },
+
+    /// Inline handler block that composes several statically-known handlers,
+    /// usually native stdlib handlers (`with {ets_ref, beam_actor}`).
+    Composite {
+        handlers: Vec<MHandler>,
+        source: NodeId,
+    },
+
     /// Arms are a runtime closure-tuple value. Direct-call rewrite must NOT
     /// fire here — the optimizer skips this variant entirely.
     ///
@@ -392,6 +409,12 @@ pub struct EffectInfo<'a> {
 
     /// Handler-arm NodeId → which effect/op the arm handles.
     pub handler_arms: &'a HashMap<NodeId, ResolvedEffectOp>,
+
+    /// Constructor expression/pattern NodeId → canonical constructor name.
+    /// Used when imported handler bodies are inlined into another module:
+    /// their bare constructor spelling must still lower to the defining
+    /// module's runtime tag.
+    pub constructors: &'a HashMap<NodeId, String>,
 
     /// Function name → set of effect names the function performs. Used by
     /// Bind→Let promotion to look up callee effect rows.

@@ -550,6 +550,27 @@ fn write_handler(out: &mut String, indent: usize, h: &MHandler) {
             }
             writeln!(out, "{p}}} in").unwrap();
         }
+        MHandler::Native {
+            effects,
+            handler,
+            source,
+        } => {
+            writeln!(
+                out,
+                "{p}with handler<Native>(handler={}, effects=[{}]) [#{}] {{}} in",
+                handler,
+                effects.join(", "),
+                source.0
+            )
+            .unwrap();
+        }
+        MHandler::Composite { handlers, source } => {
+            writeln!(out, "{p}with handler<Composite> [#{}] {{", source.0).unwrap();
+            for handler in handlers {
+                write_handler(out, indent + 2, handler);
+            }
+            writeln!(out, "{p}}} in").unwrap();
+        }
         MHandler::Dynamic {
             effects,
             op_tuple,

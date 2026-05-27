@@ -110,6 +110,7 @@ fn empty_info() -> EmptyInfo {
 struct EmptyInfo {
     effect_calls: HashMap<NodeId, ResolvedEffectOp>,
     handler_arms: HashMap<NodeId, ResolvedEffectOp>,
+    constructors: HashMap<NodeId, String>,
     fun_effects: HashMap<String, HashSet<String>>,
     let_effect_bindings: HashMap<String, Vec<String>>,
     type_at_node: HashMap<NodeId, Type>,
@@ -121,6 +122,7 @@ impl EmptyInfo {
         EffectInfo {
             effect_calls: &self.effect_calls,
             handler_arms: &self.handler_arms,
+            constructors: &self.constructors,
             fun_effects: &self.fun_effects,
             let_effect_bindings: &self.let_effect_bindings,
             type_at_node: &self.type_at_node,

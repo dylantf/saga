@@ -46,7 +46,7 @@
 //! op-tuples are indexed alphabetically by op name. The
 //! [`NATIVE_EFFECTS`] table here enforces that: ops are pre-sorted.
 
-use crate::codegen::cerl::{CExpr, CFunDef, CLit};
+use crate::codegen::cerl::{CArm, CExpr, CFunDef, CLit, CPat};
 
 /// Name of the emitted bootstrap function. Arity 0; returns the initial
 /// evidence vector value.
@@ -317,12 +317,58 @@ pub(super) fn build_main_entry_wrapper() -> CFunDef {
     );
     let let_k = CExpr::Let(k_var, Box::new(identity_k), Box::new(apply_main));
     let let_ev = CExpr::Let(ev_var, Box::new(evidence_call), Box::new(let_k));
+    let body = wrap_table_init(
+        wrap_table_init(let_ev, "saga_vec_store", "_EtsVecInit"),
+        "saga_ref_store",
+        "_EtsRefInit",
+    );
 
     CFunDef {
         name: "main".to_string(),
         arity: 1,
-        body: CExpr::Fun(vec![arg_param], Box::new(let_ev)),
+        body: CExpr::Fun(vec![arg_param], Box::new(body)),
     }
+}
+
+fn wrap_table_init(body: CExpr, table_name: &str, bind_name: &str) -> CExpr {
+    let table = CExpr::Lit(CLit::Atom(table_name.to_string()));
+    let init_expr = CExpr::Case(
+        Box::new(CExpr::Call(
+            "ets".to_string(),
+            "info".to_string(),
+            vec![table.clone()],
+        )),
+        vec![
+            CArm {
+                pat: CPat::Lit(CLit::Atom("undefined".to_string())),
+                guard: None,
+                body: CExpr::Call(
+                    "ets".to_string(),
+                    "new".to_string(),
+                    vec![table, ets_table_options()],
+                ),
+            },
+            CArm {
+                pat: CPat::Wildcard,
+                guard: None,
+                body: CExpr::Lit(CLit::Atom("unit".to_string())),
+            },
+        ],
+    );
+    CExpr::Let(bind_name.to_string(), Box::new(init_expr), Box::new(body))
+}
+
+fn ets_table_options() -> CExpr {
+    CExpr::Cons(
+        Box::new(CExpr::Lit(CLit::Atom("set".to_string()))),
+        Box::new(CExpr::Cons(
+            Box::new(CExpr::Lit(CLit::Atom("public".to_string()))),
+            Box::new(CExpr::Cons(
+                Box::new(CExpr::Lit(CLit::Atom("named_table".to_string()))),
+                Box::new(CExpr::Nil),
+            )),
+        )),
+    )
 }
 
 /// Build a single op closure for an `OpTuple` slot.
@@ -338,7 +384,9 @@ fn build_op_closure(effect_tag: &str, op: &NativeOp) -> CExpr {
     params.push(evidence_var.clone());
     params.push(k_var.clone());
 
-    let result_expr = if op.erl_module.is_empty() {
+    let result_expr = if effect_tag == "Std.Ref.Ref" {
+        build_ref_call(op, &evidence_var, RefBackend::ProcessDictionary)
+    } else if op.erl_module.is_empty() {
         // Stub: not-implemented exit. Tag carries effect + op for
         // debugging when this fires at runtime.
         CExpr::Call(
@@ -360,6 +408,827 @@ fn build_op_closure(effect_tag: &str, op: &NativeOp) -> CExpr {
     };
     let apply_k = CExpr::Apply(Box::new(CExpr::Var(k_var)), vec![result_expr]);
     CExpr::Fun(params, Box::new(apply_k))
+}
+
+#[derive(Clone, Copy)]
+enum RefBackend {
+    ProcessDictionary,
+    Ets,
+}
+
+pub(super) fn native_handler_op_tuple(effect: &str, handler: &str) -> Option<CExpr> {
+    let handler = handler.rsplit('.').next().unwrap_or(handler);
+    match (effect, handler) {
+        ("Std.Ref.Ref", "beam_ref") => Some(ref_op_tuple(RefBackend::ProcessDictionary)),
+        ("Std.Ref.Ref", "ets_ref") => Some(ref_op_tuple(RefBackend::Ets)),
+        ("Std.Vec.Vec", "beam_vec") => Some(vec_op_tuple()),
+        (_, "beam_actor") => NATIVE_EFFECTS
+            .iter()
+            .find(|native| native.tag == effect && native.tag.starts_with("Std.Actor."))
+            .map(|native| {
+                CExpr::Tuple(
+                    native
+                        .ops
+                        .iter()
+                        .map(|op| build_op_closure(native.tag, op))
+                        .collect(),
+                )
+            }),
+        _ => None,
+    }
+}
+
+fn vec_op_tuple() -> CExpr {
+    let ops = [
+        NativeOp {
+            name: "freeze",
+            erl_module: "",
+            erl_func: "",
+            param_count: 1,
+            arg_transform: ArgTransform::Identity,
+        },
+        NativeOp {
+            name: "thaw",
+            erl_module: "",
+            erl_func: "",
+            param_count: 1,
+            arg_transform: ArgTransform::Identity,
+        },
+        NativeOp {
+            name: "vec_get",
+            erl_module: "",
+            erl_func: "",
+            param_count: 2,
+            arg_transform: ArgTransform::Identity,
+        },
+        NativeOp {
+            name: "vec_len",
+            erl_module: "",
+            erl_func: "",
+            param_count: 1,
+            arg_transform: ArgTransform::Identity,
+        },
+        NativeOp {
+            name: "vec_new",
+            erl_module: "",
+            erl_func: "",
+            param_count: 1,
+            arg_transform: ArgTransform::Identity,
+        },
+        NativeOp {
+            name: "vec_pop",
+            erl_module: "",
+            erl_func: "",
+            param_count: 1,
+            arg_transform: ArgTransform::Identity,
+        },
+        NativeOp {
+            name: "vec_push",
+            erl_module: "",
+            erl_func: "",
+            param_count: 2,
+            arg_transform: ArgTransform::Identity,
+        },
+        NativeOp {
+            name: "vec_set",
+            erl_module: "",
+            erl_func: "",
+            param_count: 3,
+            arg_transform: ArgTransform::Identity,
+        },
+    ];
+    CExpr::Tuple(ops.iter().map(build_vec_op_closure).collect())
+}
+
+fn build_vec_op_closure(op: &NativeOp) -> CExpr {
+    let mut params: Vec<String> = (0..op.param_count).map(|i| format!("_Arg{}", i)).collect();
+    let evidence_var = "_EvidenceAtPerform".to_string();
+    let k_var = "_K".to_string();
+    params.push(evidence_var);
+    params.push(k_var.clone());
+    let result_expr = build_vec_call(op);
+    CExpr::Fun(
+        params,
+        Box::new(CExpr::Apply(Box::new(CExpr::Var(k_var)), vec![result_expr])),
+    )
+}
+
+fn build_vec_call(op: &NativeOp) -> CExpr {
+    let table = CExpr::Lit(CLit::Atom("saga_vec_store".to_string()));
+    let length_atom = CExpr::Lit(CLit::Atom("length".to_string()));
+    match op.name {
+        "vec_new" => {
+            let id = "_VecId".to_string();
+            let d = "_VecInsert".to_string();
+            CExpr::Let(
+                id.clone(),
+                Box::new(CExpr::Call(
+                    "erlang".to_string(),
+                    "make_ref".to_string(),
+                    vec![],
+                )),
+                Box::new(CExpr::Let(
+                    d,
+                    Box::new(CExpr::Call(
+                        "ets".to_string(),
+                        "insert".to_string(),
+                        vec![
+                            table,
+                            CExpr::Tuple(vec![
+                                CExpr::Tuple(vec![CExpr::Var(id.clone()), length_atom]),
+                                CExpr::Lit(CLit::Int(0)),
+                            ]),
+                        ],
+                    )),
+                    Box::new(CExpr::Var(id)),
+                )),
+            )
+        }
+        "vec_len" => vec_lookup_value(
+            table,
+            CExpr::Tuple(vec![CExpr::Var("_Arg0".to_string()), length_atom]),
+            "_VecLenLookup",
+            "_VecLen",
+        ),
+        "vec_get" => vec_lookup_value(
+            table,
+            CExpr::Tuple(vec![
+                CExpr::Var("_Arg0".to_string()),
+                CExpr::Var("_Arg1".to_string()),
+            ]),
+            "_VecGetLookup",
+            "_VecValue",
+        ),
+        "vec_set" => {
+            let d = "_VecInsert".to_string();
+            CExpr::Let(
+                d,
+                Box::new(CExpr::Call(
+                    "ets".to_string(),
+                    "insert".to_string(),
+                    vec![
+                        table,
+                        CExpr::Tuple(vec![
+                            CExpr::Tuple(vec![
+                                CExpr::Var("_Arg0".to_string()),
+                                CExpr::Var("_Arg1".to_string()),
+                            ]),
+                            CExpr::Var("_Arg2".to_string()),
+                        ]),
+                    ],
+                )),
+                Box::new(CExpr::Lit(CLit::Atom("unit".to_string()))),
+            )
+        }
+        "vec_push" => {
+            let lookup = "_VecLenLookup".to_string();
+            let len = "_VecLen".to_string();
+            let d1 = "_VecInsertValue".to_string();
+            let d2 = "_VecInsertLen".to_string();
+            CExpr::Let(
+                lookup.clone(),
+                Box::new(CExpr::Call(
+                    "ets".to_string(),
+                    "lookup".to_string(),
+                    vec![
+                        table.clone(),
+                        CExpr::Tuple(vec![CExpr::Var("_Arg0".to_string()), length_atom.clone()]),
+                    ],
+                )),
+                Box::new(CExpr::Case(
+                    Box::new(CExpr::Var(lookup)),
+                    vec![CArm {
+                        pat: CPat::Cons(
+                            Box::new(CPat::Tuple(vec![CPat::Wildcard, CPat::Var(len.clone())])),
+                            Box::new(CPat::Nil),
+                        ),
+                        guard: None,
+                        body: CExpr::Let(
+                            d1,
+                            Box::new(CExpr::Call(
+                                "ets".to_string(),
+                                "insert".to_string(),
+                                vec![
+                                    table.clone(),
+                                    CExpr::Tuple(vec![
+                                        CExpr::Tuple(vec![
+                                            CExpr::Var("_Arg0".to_string()),
+                                            CExpr::Var(len.clone()),
+                                        ]),
+                                        CExpr::Var("_Arg1".to_string()),
+                                    ]),
+                                ],
+                            )),
+                            Box::new(CExpr::Let(
+                                d2,
+                                Box::new(CExpr::Call(
+                                    "ets".to_string(),
+                                    "insert".to_string(),
+                                    vec![
+                                        table,
+                                        CExpr::Tuple(vec![
+                                            CExpr::Tuple(vec![
+                                                CExpr::Var("_Arg0".to_string()),
+                                                length_atom,
+                                            ]),
+                                            CExpr::Call(
+                                                "erlang".to_string(),
+                                                "+".to_string(),
+                                                vec![CExpr::Var(len), CExpr::Lit(CLit::Int(1))],
+                                            ),
+                                        ]),
+                                    ],
+                                )),
+                                Box::new(CExpr::Lit(CLit::Atom("unit".to_string()))),
+                            )),
+                        ),
+                    }],
+                )),
+            )
+        }
+        "vec_pop" => {
+            let lookup = "_VecLenLookup".to_string();
+            let len = "_VecLen".to_string();
+            let new_len = "_VecNewLen".to_string();
+            let elem_lookup = "_VecElemLookup".to_string();
+            let elem = "_VecElem".to_string();
+            let d1 = "_VecDelete".to_string();
+            let d2 = "_VecSetLen".to_string();
+            CExpr::Let(
+                lookup.clone(),
+                Box::new(CExpr::Call(
+                    "ets".to_string(),
+                    "lookup".to_string(),
+                    vec![
+                        table.clone(),
+                        CExpr::Tuple(vec![CExpr::Var("_Arg0".to_string()), length_atom.clone()]),
+                    ],
+                )),
+                Box::new(CExpr::Case(
+                    Box::new(CExpr::Var(lookup)),
+                    vec![CArm {
+                        pat: CPat::Cons(
+                            Box::new(CPat::Tuple(vec![CPat::Wildcard, CPat::Var(len.clone())])),
+                            Box::new(CPat::Nil),
+                        ),
+                        guard: None,
+                        body: CExpr::Let(
+                            new_len.clone(),
+                            Box::new(CExpr::Call(
+                                "erlang".to_string(),
+                                "-".to_string(),
+                                vec![CExpr::Var(len), CExpr::Lit(CLit::Int(1))],
+                            )),
+                            Box::new(CExpr::Let(
+                                elem_lookup.clone(),
+                                Box::new(CExpr::Call(
+                                    "ets".to_string(),
+                                    "lookup".to_string(),
+                                    vec![
+                                        table.clone(),
+                                        CExpr::Tuple(vec![
+                                            CExpr::Var("_Arg0".to_string()),
+                                            CExpr::Var(new_len.clone()),
+                                        ]),
+                                    ],
+                                )),
+                                Box::new(CExpr::Case(
+                                    Box::new(CExpr::Var(elem_lookup)),
+                                    vec![CArm {
+                                        pat: CPat::Cons(
+                                            Box::new(CPat::Tuple(vec![
+                                                CPat::Wildcard,
+                                                CPat::Var(elem.clone()),
+                                            ])),
+                                            Box::new(CPat::Nil),
+                                        ),
+                                        guard: None,
+                                        body: CExpr::Let(
+                                            d1,
+                                            Box::new(CExpr::Call(
+                                                "ets".to_string(),
+                                                "delete".to_string(),
+                                                vec![
+                                                    table.clone(),
+                                                    CExpr::Tuple(vec![
+                                                        CExpr::Var("_Arg0".to_string()),
+                                                        CExpr::Var(new_len.clone()),
+                                                    ]),
+                                                ],
+                                            )),
+                                            Box::new(CExpr::Let(
+                                                d2,
+                                                Box::new(CExpr::Call(
+                                                    "ets".to_string(),
+                                                    "insert".to_string(),
+                                                    vec![
+                                                        table,
+                                                        CExpr::Tuple(vec![
+                                                            CExpr::Tuple(vec![
+                                                                CExpr::Var("_Arg0".to_string()),
+                                                                length_atom,
+                                                            ]),
+                                                            CExpr::Var(new_len),
+                                                        ]),
+                                                    ],
+                                                )),
+                                                Box::new(CExpr::Var(elem)),
+                                            )),
+                                        ),
+                                    }],
+                                )),
+                            )),
+                        ),
+                    }],
+                )),
+            )
+        }
+        "freeze" => {
+            let len = "_VecLen".to_string();
+            let last = "_VecLast".to_string();
+            let indices = "_VecIndices".to_string();
+            let idx = "_VecIndex".to_string();
+            let lookup = "_VecLookup".to_string();
+            let value = "_VecValue".to_string();
+            let len_expr = build_vec_call(&NativeOp {
+                name: "vec_len",
+                erl_module: "",
+                erl_func: "",
+                param_count: 1,
+                arg_transform: ArgTransform::Identity,
+            });
+            CExpr::Let(
+                len.clone(),
+                Box::new(len_expr),
+                Box::new(CExpr::Case(
+                    Box::new(CExpr::Var(len.clone())),
+                    vec![
+                        CArm {
+                            pat: CPat::Lit(CLit::Int(0)),
+                            guard: None,
+                            body: CExpr::Nil,
+                        },
+                        CArm {
+                            pat: CPat::Wildcard,
+                            guard: None,
+                            body: CExpr::Let(
+                                last.clone(),
+                                Box::new(CExpr::Call(
+                                    "erlang".to_string(),
+                                    "-".to_string(),
+                                    vec![CExpr::Var(len), CExpr::Lit(CLit::Int(1))],
+                                )),
+                                Box::new(CExpr::Let(
+                                    indices.clone(),
+                                    Box::new(CExpr::Call(
+                                        "lists".to_string(),
+                                        "seq".to_string(),
+                                        vec![CExpr::Lit(CLit::Int(0)), CExpr::Var(last)],
+                                    )),
+                                    Box::new(CExpr::Call(
+                                        "lists".to_string(),
+                                        "map".to_string(),
+                                        vec![
+                                            CExpr::Fun(
+                                                vec![idx.clone()],
+                                                Box::new(CExpr::Let(
+                                                    lookup.clone(),
+                                                    Box::new(CExpr::Call(
+                                                        "ets".to_string(),
+                                                        "lookup".to_string(),
+                                                        vec![
+                                                            table,
+                                                            CExpr::Tuple(vec![
+                                                                CExpr::Var("_Arg0".to_string()),
+                                                                CExpr::Var(idx),
+                                                            ]),
+                                                        ],
+                                                    )),
+                                                    Box::new(CExpr::Case(
+                                                        Box::new(CExpr::Var(lookup)),
+                                                        vec![CArm {
+                                                            pat: CPat::Cons(
+                                                                Box::new(CPat::Tuple(vec![
+                                                                    CPat::Wildcard,
+                                                                    CPat::Var(value.clone()),
+                                                                ])),
+                                                                Box::new(CPat::Nil),
+                                                            ),
+                                                            guard: None,
+                                                            body: CExpr::Var(value),
+                                                        }],
+                                                    )),
+                                                )),
+                                            ),
+                                            CExpr::Var(indices),
+                                        ],
+                                    )),
+                                )),
+                            ),
+                        },
+                    ],
+                )),
+            )
+        }
+        "thaw" => {
+            let id = "_VecId".to_string();
+            let idx = "_VecIndex".to_string();
+            let elem = "_VecElem".to_string();
+            let final_len = "_VecFinalLen".to_string();
+            let d = "_VecLenInsert".to_string();
+            CExpr::Let(
+                id.clone(),
+                Box::new(CExpr::Call(
+                    "erlang".to_string(),
+                    "make_ref".to_string(),
+                    vec![],
+                )),
+                Box::new(CExpr::Let(
+                    final_len.clone(),
+                    Box::new(CExpr::Call(
+                        "lists".to_string(),
+                        "foldl".to_string(),
+                        vec![
+                            CExpr::Fun(
+                                vec![elem.clone(), idx.clone()],
+                                Box::new(CExpr::Let(
+                                    "_VecElemInsert".to_string(),
+                                    Box::new(CExpr::Call(
+                                        "ets".to_string(),
+                                        "insert".to_string(),
+                                        vec![
+                                            table.clone(),
+                                            CExpr::Tuple(vec![
+                                                CExpr::Tuple(vec![
+                                                    CExpr::Var(id.clone()),
+                                                    CExpr::Var(idx.clone()),
+                                                ]),
+                                                CExpr::Var(elem),
+                                            ]),
+                                        ],
+                                    )),
+                                    Box::new(CExpr::Call(
+                                        "erlang".to_string(),
+                                        "+".to_string(),
+                                        vec![CExpr::Var(idx), CExpr::Lit(CLit::Int(1))],
+                                    )),
+                                )),
+                            ),
+                            CExpr::Lit(CLit::Int(0)),
+                            CExpr::Var("_Arg0".to_string()),
+                        ],
+                    )),
+                    Box::new(CExpr::Let(
+                        d,
+                        Box::new(CExpr::Call(
+                            "ets".to_string(),
+                            "insert".to_string(),
+                            vec![
+                                table,
+                                CExpr::Tuple(vec![
+                                    CExpr::Tuple(vec![CExpr::Var(id.clone()), length_atom]),
+                                    CExpr::Var(final_len),
+                                ]),
+                            ],
+                        )),
+                        Box::new(CExpr::Var(id)),
+                    )),
+                )),
+            )
+        }
+        _ => CExpr::Call(
+            "erlang".to_string(),
+            "exit".to_string(),
+            vec![CExpr::Tuple(vec![
+                CExpr::Lit(CLit::Atom("not_implemented_native_op".to_string())),
+                CExpr::Lit(CLit::Atom("Std.Vec.Vec".to_string())),
+                CExpr::Lit(CLit::Atom(op.name.to_string())),
+            ])],
+        ),
+    }
+}
+
+fn vec_lookup_value(table: CExpr, key: CExpr, lookup_name: &str, value_name: &str) -> CExpr {
+    CExpr::Let(
+        lookup_name.to_string(),
+        Box::new(CExpr::Call(
+            "ets".to_string(),
+            "lookup".to_string(),
+            vec![table, key],
+        )),
+        Box::new(CExpr::Case(
+            Box::new(CExpr::Var(lookup_name.to_string())),
+            vec![CArm {
+                pat: CPat::Cons(
+                    Box::new(CPat::Tuple(vec![
+                        CPat::Wildcard,
+                        CPat::Var(value_name.to_string()),
+                    ])),
+                    Box::new(CPat::Nil),
+                ),
+                guard: None,
+                body: CExpr::Var(value_name.to_string()),
+            }],
+        )),
+    )
+}
+
+fn ref_op_tuple(backend: RefBackend) -> CExpr {
+    let ops = [
+        NativeOp {
+            name: "get",
+            erl_module: "",
+            erl_func: "",
+            param_count: 1,
+            arg_transform: ArgTransform::Identity,
+        },
+        NativeOp {
+            name: "modify",
+            erl_module: "",
+            erl_func: "",
+            param_count: 2,
+            arg_transform: ArgTransform::Identity,
+        },
+        NativeOp {
+            name: "new",
+            erl_module: "",
+            erl_func: "",
+            param_count: 1,
+            arg_transform: ArgTransform::Identity,
+        },
+        NativeOp {
+            name: "set",
+            erl_module: "",
+            erl_func: "",
+            param_count: 2,
+            arg_transform: ArgTransform::Identity,
+        },
+    ];
+    CExpr::Tuple(
+        ops.iter()
+            .map(|op| build_ref_op_closure(op, backend))
+            .collect(),
+    )
+}
+
+fn build_ref_op_closure(op: &NativeOp, backend: RefBackend) -> CExpr {
+    let mut params: Vec<String> = (0..op.param_count).map(|i| format!("_Arg{}", i)).collect();
+    let evidence_var = "_EvidenceAtPerform".to_string();
+    let k_var = "_K".to_string();
+    params.push(evidence_var.clone());
+    params.push(k_var.clone());
+    let result_expr = build_ref_call(op, &evidence_var, backend);
+    CExpr::Fun(
+        params,
+        Box::new(CExpr::Apply(Box::new(CExpr::Var(k_var)), vec![result_expr])),
+    )
+}
+
+fn build_ref_call(op: &NativeOp, evidence_var: &str, backend: RefBackend) -> CExpr {
+    match backend {
+        RefBackend::ProcessDictionary => build_ref_procdict_call(op, evidence_var),
+        RefBackend::Ets => build_ref_ets_call(op, evidence_var),
+    }
+}
+
+fn build_ref_procdict_call(op: &NativeOp, evidence_var: &str) -> CExpr {
+    match op.name {
+        "new" => {
+            let key = "_RefKey".to_string();
+            let discard = "_RefPut".to_string();
+            CExpr::Let(
+                key.clone(),
+                Box::new(CExpr::Call(
+                    "erlang".to_string(),
+                    "make_ref".to_string(),
+                    vec![],
+                )),
+                Box::new(CExpr::Let(
+                    discard,
+                    Box::new(CExpr::Call(
+                        "erlang".to_string(),
+                        "put".to_string(),
+                        vec![CExpr::Var(key.clone()), CExpr::Var("_Arg0".to_string())],
+                    )),
+                    Box::new(CExpr::Var(key)),
+                )),
+            )
+        }
+        "get" => CExpr::Call(
+            "erlang".to_string(),
+            "get".to_string(),
+            vec![CExpr::Var("_Arg0".to_string())],
+        ),
+        "set" => {
+            let discard = "_RefPut".to_string();
+            CExpr::Let(
+                discard,
+                Box::new(CExpr::Call(
+                    "erlang".to_string(),
+                    "put".to_string(),
+                    vec![
+                        CExpr::Var("_Arg0".to_string()),
+                        CExpr::Var("_Arg1".to_string()),
+                    ],
+                )),
+                Box::new(CExpr::Lit(CLit::Atom("unit".to_string()))),
+            )
+        }
+        "modify" => {
+            let old = "_RefOld".to_string();
+            let new_value = "_RefNew".to_string();
+            let discard = "_RefPut".to_string();
+            let k_var = "_RefK".to_string();
+            let v_var = "_RefV".to_string();
+            let id_k = CExpr::Fun(vec![v_var.clone()], Box::new(CExpr::Var(v_var)));
+            let apply_f = CExpr::Apply(
+                Box::new(CExpr::Var("_Arg1".to_string())),
+                vec![
+                    CExpr::Var(old.clone()),
+                    CExpr::Var(evidence_var.to_string()),
+                    CExpr::Var(k_var.clone()),
+                ],
+            );
+            CExpr::Let(
+                old.clone(),
+                Box::new(CExpr::Call(
+                    "erlang".to_string(),
+                    "get".to_string(),
+                    vec![CExpr::Var("_Arg0".to_string())],
+                )),
+                Box::new(CExpr::Let(
+                    k_var,
+                    Box::new(id_k),
+                    Box::new(CExpr::Let(
+                        new_value.clone(),
+                        Box::new(apply_f),
+                        Box::new(CExpr::Let(
+                            discard,
+                            Box::new(CExpr::Call(
+                                "erlang".to_string(),
+                                "put".to_string(),
+                                vec![
+                                    CExpr::Var("_Arg0".to_string()),
+                                    CExpr::Var(new_value.clone()),
+                                ],
+                            )),
+                            Box::new(CExpr::Var(new_value)),
+                        )),
+                    )),
+                )),
+            )
+        }
+        _ => CExpr::Call(
+            "erlang".to_string(),
+            "exit".to_string(),
+            vec![CExpr::Tuple(vec![
+                CExpr::Lit(CLit::Atom("not_implemented_native_op".to_string())),
+                CExpr::Lit(CLit::Atom("Std.Ref.Ref".to_string())),
+                CExpr::Lit(CLit::Atom(op.name.to_string())),
+            ])],
+        ),
+    }
+}
+
+fn build_ref_ets_call(op: &NativeOp, evidence_var: &str) -> CExpr {
+    let table = CExpr::Lit(CLit::Atom("saga_ref_store".to_string()));
+    match op.name {
+        "new" => {
+            let key = "_RefKey".to_string();
+            let discard = "_RefInsert".to_string();
+            CExpr::Let(
+                key.clone(),
+                Box::new(CExpr::Call(
+                    "erlang".to_string(),
+                    "make_ref".to_string(),
+                    vec![],
+                )),
+                Box::new(CExpr::Let(
+                    discard,
+                    Box::new(CExpr::Call(
+                        "ets".to_string(),
+                        "insert".to_string(),
+                        vec![
+                            table,
+                            CExpr::Tuple(vec![
+                                CExpr::Var(key.clone()),
+                                CExpr::Var("_Arg0".to_string()),
+                            ]),
+                        ],
+                    )),
+                    Box::new(CExpr::Var(key)),
+                )),
+            )
+        }
+        "get" => {
+            let lookup = "_RefLookup".to_string();
+            let value = "_RefValue".to_string();
+            CExpr::Let(
+                lookup.clone(),
+                Box::new(CExpr::Call(
+                    "ets".to_string(),
+                    "lookup".to_string(),
+                    vec![table, CExpr::Var("_Arg0".to_string())],
+                )),
+                Box::new(CExpr::Case(
+                    Box::new(CExpr::Var(lookup)),
+                    vec![CArm {
+                        pat: CPat::Cons(
+                            Box::new(CPat::Tuple(vec![CPat::Wildcard, CPat::Var(value.clone())])),
+                            Box::new(CPat::Nil),
+                        ),
+                        guard: None,
+                        body: CExpr::Var(value),
+                    }],
+                )),
+            )
+        }
+        "set" => {
+            let discard = "_RefInsert".to_string();
+            CExpr::Let(
+                discard,
+                Box::new(CExpr::Call(
+                    "ets".to_string(),
+                    "insert".to_string(),
+                    vec![
+                        table,
+                        CExpr::Tuple(vec![
+                            CExpr::Var("_Arg0".to_string()),
+                            CExpr::Var("_Arg1".to_string()),
+                        ]),
+                    ],
+                )),
+                Box::new(CExpr::Lit(CLit::Atom("unit".to_string()))),
+            )
+        }
+        "modify" => {
+            let lookup = "_RefLookup".to_string();
+            let old = "_RefOld".to_string();
+            let new_value = "_RefNew".to_string();
+            let discard = "_RefInsert".to_string();
+            let k_var = "_RefK".to_string();
+            let v_var = "_RefV".to_string();
+            let id_k = CExpr::Fun(vec![v_var.clone()], Box::new(CExpr::Var(v_var)));
+            let apply_f = CExpr::Apply(
+                Box::new(CExpr::Var("_Arg1".to_string())),
+                vec![
+                    CExpr::Var(old.clone()),
+                    CExpr::Var(evidence_var.to_string()),
+                    CExpr::Var(k_var.clone()),
+                ],
+            );
+            CExpr::Let(
+                lookup.clone(),
+                Box::new(CExpr::Call(
+                    "ets".to_string(),
+                    "lookup".to_string(),
+                    vec![table.clone(), CExpr::Var("_Arg0".to_string())],
+                )),
+                Box::new(CExpr::Case(
+                    Box::new(CExpr::Var(lookup)),
+                    vec![CArm {
+                        pat: CPat::Cons(
+                            Box::new(CPat::Tuple(vec![CPat::Wildcard, CPat::Var(old.clone())])),
+                            Box::new(CPat::Nil),
+                        ),
+                        guard: None,
+                        body: CExpr::Let(
+                            k_var,
+                            Box::new(id_k),
+                            Box::new(CExpr::Let(
+                                new_value.clone(),
+                                Box::new(apply_f),
+                                Box::new(CExpr::Let(
+                                    discard,
+                                    Box::new(CExpr::Call(
+                                        "ets".to_string(),
+                                        "insert".to_string(),
+                                        vec![
+                                            table,
+                                            CExpr::Tuple(vec![
+                                                CExpr::Var("_Arg0".to_string()),
+                                                CExpr::Var(new_value.clone()),
+                                            ]),
+                                        ],
+                                    )),
+                                    Box::new(CExpr::Var(new_value)),
+                                )),
+                            )),
+                        ),
+                    }],
+                )),
+            )
+        }
+        _ => CExpr::Call(
+            "erlang".to_string(),
+            "exit".to_string(),
+            vec![CExpr::Tuple(vec![
+                CExpr::Lit(CLit::Atom("not_implemented_native_op".to_string())),
+                CExpr::Lit(CLit::Atom("Std.Ref.Ref".to_string())),
+                CExpr::Lit(CLit::Atom(op.name.to_string())),
+            ])],
+        ),
+    }
 }
 
 fn native_call_args(op: &NativeOp, evidence_var: &str) -> Vec<CExpr> {

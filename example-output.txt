@@ -1,0 +1,794 @@
+=== 00-compiles.saga ===
+  Compiling examples/00-compiles.saga...
+  Built in 0.30s
+
+=== 01-hello-world.saga ===
+  Compiling examples/01-hello-world.saga...
+  Built in 0.30s
+Hello world
+
+=== 02-fibonacci.saga ===
+  Compiling examples/02-fibonacci.saga...
+  Built in 0.36s
+55
+
+=== 03-booleans.saga ===
+  Compiling examples/03-booleans.saga...
+  Built in 0.31s
+False
+True
+True
+True
+True
+True
+True
+False
+
+=== 04-fizzbuzz.saga ===
+  Compiling examples/04-fizzbuzz.saga...
+  Built in 0.31s
+"FizzBuzz"
+"FizzBuzz"
+"FizzBuzz"
+"FizzBuzz"
+"FizzBuzz"
+"FizzBuzz"
+"FizzBuzz"
+"FizzBuzz"
+"FizzBuzz"
+"FizzBuzz"
+"FizzBuzz"
+"FizzBuzz"
+"FizzBuzz"
+"FizzBuzz"
+"FizzBuzz"
+"FizzBuzz"
+"FizzBuzz"
+"FizzBuzz"
+"FizzBuzz"
+"FizzBuzz"
+"FizzBuzz"
+"FizzBuzz"
+"FizzBuzz"
+"FizzBuzz"
+"FizzBuzz"
+"FizzBuzz"
+"FizzBuzz"
+"FizzBuzz"
+"FizzBuzz"
+"FizzBuzz"
+"FizzBuzz"
+"FizzBuzz"
+"FizzBuzz"
+"FizzBuzz"
+"FizzBuzz"
+"FizzBuzz"
+"FizzBuzz"
+"FizzBuzz"
+"FizzBuzz"
+"FizzBuzz"
+"FizzBuzz"
+"FizzBuzz"
+"FizzBuzz"
+"FizzBuzz"
+"FizzBuzz"
+"FizzBuzz"
+"FizzBuzz"
+"FizzBuzz"
+"FizzBuzz"
+"FizzBuzz"
+"FizzBuzz"
+"FizzBuzz"
+"FizzBuzz"
+"FizzBuzz"
+"FizzBuzz"
+"FizzBuzz"
+"FizzBuzz"
+"FizzBuzz"
+"FizzBuzz"
+"FizzBuzz"
+"FizzBuzz"
+"FizzBuzz"
+"FizzBuzz"
+"FizzBuzz"
+"FizzBuzz"
+"FizzBuzz"
+"FizzBuzz"
+"FizzBuzz"
+"FizzBuzz"
+"FizzBuzz"
+"FizzBuzz"
+"FizzBuzz"
+"FizzBuzz"
+"FizzBuzz"
+"FizzBuzz"
+"FizzBuzz"
+"FizzBuzz"
+"FizzBuzz"
+"FizzBuzz"
+"FizzBuzz"
+"FizzBuzz"
+"FizzBuzz"
+"FizzBuzz"
+"FizzBuzz"
+"FizzBuzz"
+"FizzBuzz"
+"FizzBuzz"
+"FizzBuzz"
+"FizzBuzz"
+"FizzBuzz"
+"FizzBuzz"
+"FizzBuzz"
+"FizzBuzz"
+"FizzBuzz"
+"FizzBuzz"
+"FizzBuzz"
+"FizzBuzz"
+"FizzBuzz"
+"FizzBuzz"
+"FizzBuzz"
+
+=== 05-records.saga ===
+  Compiling examples/05-records.saga...
+  Built in 0.34s
+"Point { x: 3, y: 4 }"
+"Point { x: 4, y: -1 }"
+"I"
+"IV"
+"42"
+"hello"
+"99"
+"School { name: "Some school", students: [Student { name: "John", grade: 2 }, Student { name: "Suzy", grade: 3 }] }"
+"School { name: "Some school", students: [Student { name: "小明", grade: 6 }, Student { name: "John", grade: 2 }, Student { name: "Suzy", grade: 3 }] }"
+"House { year_built: 2005, address: { number: 123, street: "Fake Street" } }"
+"Real Street"
+"123"
+"Fake Street"
+
+=== 06-lists.saga ===
+  Compiling examples/06-lists.saga...
+  Built in 0.32s
+[1, 2, 3, 4, 5]
+[2, 4, 6, 8, 10]
+[2, 4]
+15
+15
+[5, 4, 3, 2, 1]
+[1, 2, 3, 4]
+1
+[2, 3, 4, 5]
+5
+["hello", "world"]
+
+=== 07-pattern-matching.saga ===
+  Compiling examples/07-pattern-matching.saga...
+Warning at examples/07-pattern-matching.saga:68:1: unused function: `is_shape_fun`
+  68 | is_shape_fun shape = case shape {
+     | ^^^^^^^^^^^^
+Warning at examples/07-pattern-matching.saga:77:1: unused function: `is_big_fun_shape`
+  77 | is_big_fun_shape shape = case shape {
+     | ^^^^^^^^^^^^^^^^
+Warning at examples/07-pattern-matching.saga:103:7: unused variable: `foo`
+  103 |   let foo = "Hello"
+      |       ^^^
+  Built in 0.36s
+"circle"
+"rectangle"
+"triangle"
+"Q1"
+"Q2"
+"empty"
+"one element"
+"two elements"
+"many elements"
+"7"
+"10 and 20"
+"fewer than two elements"
+"Info: this is some helpful info :)"
+"Warning: test warning"
+"greeting!"
+"unknown: something else"
+
+=== 08-bst.saga ===
+  Compiling examples/08-bst.saga...
+  Built in 0.38s
+[1, 3, 4, 5, 6, 7, 8]
+True
+False
+
+=== 09-sorting.saga ===
+  Compiling examples/09-sorting.saga...
+  Built in 0.36s
+[1, 2, 3, 4, 5, 6, 7, 8, 9]
+[1, 2, 3, 4, 5, 6, 7, 8, 9]
+[1, 2, 3, 4, 5, 6, 7, 8, 9]
+[1, 2, 3, 4, 5, 6, 7, 8, 9]
+
+=== 10-log-effect.saga ===
+  Compiling examples/10-log-effect.saga...
+  Built in 0.29s
+"hello"
+
+=== 11-fail-effect.saga ===
+  Compiling examples/11-fail-effect.saga...
+  Built in 0.37s
+"a: Ok(5)"
+"b: 0"
+"c: 0"
+"String should be Hello: Ok("Hello")"
+"String should have been aborted: Err("String was too short, here's a default one")"
+"About to panic..."
+"Panicking: division by zero"
+
+=== 12-effect-continuation.saga ===
+  Compiling examples/12-effect-continuation.saga...
+  Built in 0.31s
+"--- with console_log ---"
+"[LOG] starting"
+"[LOG] computed x = 30"
+"[LOG] computed y = 60"
+"result: 60"
+"--- with silent_log ---"
+"result: 60"
+
+=== 13-strings.saga ===
+  Compiling examples/13-strings.saga...
+  Built in 0.34s
+"hello, world"
+"Name: Dylan, Age: 30"
+"Roses are red,
+Violets are blue,
+Multiline strings are neat,
+And so are you."
+"if x > 0 then
+  dbg "positive"
+else
+  dbg "non-positive""
+"col1   col2    col3
+a       b       c"
+"C:\Users\dylan\documents"
+"Common patterns:
+d+     one or more digits
+s*     zero or more whitespace
+[a-z]+  one or more lowercase letters"
+"Calculation Report
+==================
+x = 10
+y = 20
+sum = 30"
+
+=== 14-fail-to-result.saga ===
+  Compiling examples/14-fail-to-result.saga...
+  Built in 0.33s
+"success: Ok(50)"
+"div by zero: Err("division by zero")"
+"negative: Err("expected positive number, got -25")"
+"piped ok: Ok(70)"
+"piped err: Err("FAILED: division by zero")"
+
+=== 15-typechecking-errors.saga ===
+  Compiling examples/15-typechecking-errors.saga...
+Warning at examples/15-typechecking-errors.saga:11:1: unused function: `const`
+  11 | const x _ = x
+     | ^^^^^
+  Built in 0.32s
+"42"
+"hello"
+"30"
+"3.0"
+"got: 99"
+"nothing"
+"safe_div result: 25"
+"42"
+"hello"
+
+=== 16-traits.saga ===
+  Compiling examples/16-traits.saga...
+  Built in 0.31s
+Alice (age: 30)
+(0, 0)
+User: Alice (age: 30), registered=true
+
+=== 17-tuples.saga ===
+  Compiling examples/17-tuples.saga...
+  Built in 0.37s
+"point: (3.0, 4.0)"
+"distance squared: 25.0"
+"swapped: (4.0, 3.0)"
+"color: (255, 128, 0)"
+"fst: hello"
+"snd: 42"
+(1, 2, 3, 4, 5)
+"nested: ((1, 2), (3, 4))"
+"sum: 10"
+
+=== 18-destructuring.saga ===
+  Compiling examples/18-destructuring.saga...
+Warning at examples/18-destructuring.saga:21:1: unused function: `add_points`
+  21 | add_points (x1, y1) (x2, y2) = (x1 + x2, y1 + y2)
+     | ^^^^^^^^^^
+  Built in 0.36s
+"Alice is 30"
+"origin: (0, 0)"
+"Just x: (0, [not destructured])"
+"inner: 42"
+"r2: 10.0"
+"head: 1"
+"tail: [2, 3, 4, 5]"
+"sum: 10"
+"Circle(10.0) has area 314.0"
+"Rect(3.0, 4.0) has area 12.0"
+
+=== 19-string-interpolation.saga ===
+  Compiling examples/19-string-interpolation.saga...
+  Built in 0.34s
+"Hello, Alice!"
+"Hello, Bob!"
+"Alice is 30 years old."
+"List has 5 elements."
+"Sum: 15"
+
+=== 20-validation-applicative.saga ===
+  Compiling examples/20-validation-applicative.saga...
+  Built in 0.32s
+"Valid: ValidUser { name: "Alice", age: 25 }"
+"Invalid: ["name is required"]"
+"Invalid: ["age must be at least 18"]"
+"Invalid: ["name is required", "age must be at least 18"]"
+
+=== 21-do-else.saga ===
+  Compiling examples/21-do-else.saga...
+  Built in 0.34s
+"Ok("A")"
+"Err("no user with id 2")"
+"95"
+"0"
+"Ok("A")"
+
+=== 22-dictionaries.saga ===
+  Compiling examples/22-dictionaries.saga...
+  Built in 0.38s
+"ages: {"alice": 30, "bob": 25, "charlie": 35}"
+"size: 3"
+"alice: Just(30)"
+"dave: Nothing"
+"added dave: {"alice": 30, "bob": 25, "charlie": 35, "dave": 28}"
+"updated alice: {"alice": 31, "bob": 25, "charlie": 35, "dave": 28}"
+"removed bob: {"alice": 31, "charlie": 35, "dave": 28}"
+"has alice: True"
+"has dave: False"
+"keys: ["alice", "bob", "charlie"]"
+"values: [30, 25, 35]"
+"to_list: [("alice", 30), ("bob", 25), ("charlie", 35)]"
+"from empty: {"x": 1, "y": 2}"
+
+=== 23-list-comprehensions.saga ===
+  Compiling examples/23-list-comprehensions.saga...
+  Built in 0.35s
+"[2, 4, 6, 8, 10]"
+"[2, 4]"
+"[14, 15, 24, 25, 34, 35]"
+"[8, 10]"
+"[14, 15]"
+
+=== 24-double-shot-continuation.saga ===
+  Compiling examples/24-double-shot-continuation.saga...
+  Built in 0.33s
+"[1] A"
+"[1] B"
+"[2] B"
+"[2] A"
+"[1] B"
+"[2] B"
+
+=== 25-state-effect.saga ===
+  Compiling examples/25-state-effect.saga...
+  Built in 0.33s
+"5"
+"hello world"
+
+=== 26-generic-effects.saga ===
+  Compiling examples/26-generic-effects.saga...
+  Built in 0.31s
+"Ok(5)"
+"Err("division by zero")"
+"0"
+
+=== 27-ffi.saga ===
+  Compiling examples/27-ffi.saga...
+  Built in 0.32s
+"[2, 4, 1, 3, 5]"
+"[1, 2, 3, 4, 5]"
+"5"
+
+=== 28-deriving.saga ===
+  Compiling examples/28-deriving.saga...
+  Built in 0.44s
+"Dog(age: 5) says woof"
+"Hans and Dylan are: ✅ Equal!"
+"Hans and Hanna are ✅ Equal!"
+"Oddbjørn"
+"Hans and Oddbjørn are ✅ Equal!"
+"Red vs Blue: Lt"
+"Green vs Green: Eq"
+"Blue vs Red: Gt"
+"High > Low"
+"Medium <= Medium"
+"Scored(score: 10, value: first) vs Scored(score: 10, value: second): Lt"
+"Scored(score: 10, value: first) vs Scored(score: 20, value: third): Lt"
+"Red = 0, Green = 1, Blue = 2"
+"from_enum 1 = Green"
+"from_enum 2 = High"
+
+=== 29-actors.saga ===
+  Compiling examples/29-actors.saga...
+  Built in 0.35s
+"8"
+
+=== 30-pingpong.saga ===
+  Compiling examples/30-pingpong.saga...
+  Built in 0.34s
+"got pong #0"
+"got pong #1"
+"got pong #2"
+
+=== 31-supervisor.saga ===
+  Compiling examples/31-supervisor.saga...
+  Built in 0.34s
+"unreliable: Err("something went wrong")"
+
+=== 32-monitor.saga ===
+  Compiling examples/32-monitor.saga...
+  Built in 0.37s
+"Working on 42"
+"Worker shutting down"
+"Worker died: Normal"
+
+=== 33-timer.saga ===
+  Compiling examples/33-timer.saga...
+  Built in 0.32s
+"Sleeping for 1 second..."
+"Done!"
+
+=== 34-link.saga ===
+  Compiling examples/34-link.saga...
+  Built in 0.33s
+"Worker doing work..."
+"Child exited: Error(something broke!)"
+
+=== 35-async.saga ===
+  Compiling examples/35-async.saga...
+  Built in 0.34s
+Runtime error: error: {evidence_tag_not_found,''}
+
+  Stack trace:
+    Std.Evidence_bridge:find_evidence_at/4 (examples/_build/.stdlib/.tmp-b2b6cee7bbbc456e-2/std_evidence_bridge.erl:16)
+    main
+    main/3
+
+=== 36-sync-actor.saga ===
+  Compiling examples/36-sync-actor.saga...
+  Built in 0.32s
+"No-op, try to reimplement this at some point. Needs receive handling I think"
+
+=== 37-trait-constrained-effects.saga ===
+  Compiling examples/37-trait-constrained-effects.saga...
+  Built in 0.33s
+"Current state: Dylan"
+
+=== 38-file-io.saga ===
+  Compiling examples/38-file-io.saga...
+  Built in 0.35s
+Runtime error: called a function that does not exist
+
+  Stack trace:
+    Std.File:write_file/4
+    main/3
+
+=== 39-effect-row-polymorphism.saga ===
+  Compiling examples/39-effect-row-polymorphism.saga...
+  Built in 0.32s
+"5 doubled twice: 20"
+"hello, world"
+"hello, "
+"caught: empty name"
+
+=== 40-binop-traits.saga ===
+  Compiling examples/40-binop-traits.saga...
+  Built in 0.33s
+"73.5"
+"False"
+"True"
+"746.75"
+
+=== 41-val-bindings.saga ===
+  Compiling examples/41-val-bindings.saga...
+  Built in 0.31s
+"3.14159"
+"hello world"
+"5"
+"["localhost", "example.com"]"
+
+=== 42-val-inline.saga ===
+  Compiling examples/42-val-inline.saga...
+  Built in 0.31s
+"3.14159"
+"saga"
+"[1, 2, 3]"
+"[2, 4, 6]"
+
+=== 43-sets.saga ===
+  Compiling examples/43-sets.saga...
+  Built in 0.39s
+3
+5
+1
+2
+True
+False
+False
+True
+Runtime error: no function clause matched the given arguments
+
+  Stack trace:
+    sets:map/2 (sets.erl:888)
+    Std.Set:map/4
+
+=== 44-handle-bindings.saga ===
+  Compiling examples/44-handle-bindings.saga...
+  warning: dynamic handler at `with` site has unknown effect tag — evidence install skipped (deferred new-path support)
+  warning: dynamic handler at `with` site has unknown effect tag — evidence install skipped (deferred new-path support)
+  warning: dynamic handler at `with` site has unknown effect tag — evidence install skipped (deferred new-path support)
+  Built in 0.34s
+"hello from let binding"
+"hello from inline block"
+Runtime error: error: {evidence_tag_not_found,'Log'}
+
+  Stack trace:
+    Std.Evidence_bridge:find_evidence_at/4 (examples/_build/.stdlib/.tmp-b2b6cee7bbbc456e-2/std_evidence_bridge.erl:16)
+    main
+
+=== 45-finally.saga ===
+  Compiling examples/45-finally.saga...
+  warning: handler arm `finally` block ignored (deferred new-path support) — effect=Resource, op=acquire
+  warning: handler arm `finally` block ignored (deferred new-path support) — effect=Resource, op=acquire
+  Built in 0.33s
+"1. Normal completion:"
+"  acquired [db]"
+"  working with [db]"
+"  result: done"
+"2. Abort via Fail:"
+"  acquired [db]"
+"  working with [db]"
+Runtime error: bad argument
+
+  Stack trace:
+    Std.String_bridge:append/2 (examples/_build/.stdlib/.tmp-b2b6cee7bbbc456e-2/std_string_bridge.erl:6)
+    Std.Base:semigroup_string_combine/4
+
+=== 46-scoped-resources.saga ===
+  Compiling examples/46-scoped-resources.saga...
+  warning: handler arm `finally` block ignored (deferred new-path support) — effect=Scope, op=acquire_scoped
+  warning: handler arm `finally` block ignored (deferred new-path support) — effect=Scope, op=acquire_scoped
+  Built in 0.35s
+"  connecting: postgres"
+"  connecting: redis"
+"  query postgres"
+"  get redis"
+"---"
+"  connecting: postgres"
+"  connecting: redis"
+"  query postgres"
+"  ok"
+
+=== 47-actor-cleanup.saga ===
+  Compiling examples/47-actor-cleanup.saga...
+  warning: handler arm `finally` block ignored (deferred new-path support) — effect=Scope, op=scoped
+  Built in 0.35s
+"Actor + Scope test:"
+"  acquired: my-connection"
+"  reply: result from my-connection"
+
+=== 48-bitstring.saga ===
+  Compiling examples/48-bitstring.saga...
+  Built in 0.34s
+"<<72, 101, 108, 108, 111>>"
+"5"
+"<<72, 101, 108, 108, 111>>"
+"<<72, 101, 108, 108, 111, 32, 72, 101, 108, 108, 111>>"
+"<<1, 1, 0, 104, 101, 108, 108, 111>>"
+"tag: 1"
+"len: 256"
+"rest: <<104, 101, 108, 108, 111>>"
+"True"
+"head: <<104, 101, 108, 108, 111>>"
+"rest: <<119, 111, 114, 108, 100>>"
+
+=== 49-dynamic.saga ===
+  Compiling examples/49-dynamic.saga...
+  Built in 0.35s
+"Int"
+"String"
+"Bool"
+Ok(("Alice", 30))
+Err(DecodeError(expected: "String", found: "Int", path: []))
+Ok(("Bob", 25))
+
+=== 50-refs.saga ===
+  Compiling examples/50-refs.saga...
+  Built in 0.34s
+Runtime error: process exited: {not_implemented_native_op,'Std.Ref.Ref',new}
+
+  Stack trace:
+    __saga_initial_evidence
+    main/3
+
+=== 51-shared-refs.saga ===
+  Compiling examples/51-shared-refs.saga...
+  Built in 0.34s
+Runtime error: process exited: {not_implemented_native_op,'Std.Ref.Ref',new}
+
+  Stack trace:
+    __saga_initial_evidence
+    main/3
+
+=== 52-atomic-refs.saga ===
+  Compiling examples/52-atomic-refs.saga...
+  warning: handler arm `finally` block ignored (deferred new-path support) — effect=Std.AtomicRef.AtomicRef, op=atomic_new
+_script: undefined function lock_server/3 in main/3
+erlc failed
+
+=== 53-mutable-vectors.saga ===
+  Compiling examples/53-mutable-vectors.saga...
+  Built in 0.38s
+Runtime error: error: {evidence_tag_not_found,'Std.Vec.Vec'}
+
+  Stack trace:
+    Std.Evidence_bridge:find_evidence_at/4 (examples/_build/.stdlib/.tmp-b2b6cee7bbbc456e-2/std_evidence_bridge.erl:16)
+    insertion_sort/3
+    main/3
+
+=== 54-choose-backtracking.saga ===
+  Compiling examples/54-choose-backtracking.saga...
+  Built in 0.35s
+"Pythagorean triples up to 20:"
+"(3, 4, 5)"
+"(5, 12, 13)"
+"(6, 8, 10)"
+"(8, 15, 17)"
+"(9, 12, 15)"
+"(12, 16, 20)"
+
+=== 55-nqueens-solver.saga ===
+  Compiling examples/55-nqueens-solver.saga...
+  Built in 0.39s
+4-Queens solutions:
+[2, 4, 1, 3]
+[3, 1, 4, 2]
+Found 2 solutions
+
+8-Queens: found 92 solutions
+
+=== 56-ambient-reader.saga ===
+  Compiling examples/56-ambient-reader.saga...
+  Built in 0.39s
+"[req=req-001] alice checked out 3 items, total 19"
+"[req=req-002] bob checked out 3 items, total 25"
+
+=== 57-ambient-writer.saga ===
+  Compiling examples/57-ambient-writer.saga...
+  Built in 0.32s
+"order placed: book"
+"audit trail (3 events):"
+Event { step: "inventory", detail: "reserved 1x book" }
+Event { step: "billing", detail: "charged 1299 cents" }
+Event { step: "shipping", detail: "queued book for shipment" }
+
+=== 58-streams.saga ===
+  Compiling examples/58-streams.saga...
+  Built in 0.35s
+[0, 4, 16, 36, 64]
+[1, 2, 3, 4, 5]
+[1, 2, 4, 8, 16, 32, 64, 128]
+[(1, "a"), (2, "b"), (3, "c")]
+55
+
+=== 59-symbols-tagging.saga ===
+  Compiling examples/59-symbols-tagging.saga...
+  Built in 0.39s
+True
+admin
+editor
+
+=== 60-type-aliases.saga ===
+  Compiling examples/60-type-aliases.saga...
+  Built in 0.30s
+43
+6
+type aliases ok
+
+=== 99-abort-escape.saga ===
+  Compiling examples/99-abort-escape.saga...
+  Built in 0.30s
+"ESCAPE OK: got Err ABORTED"
+
+=== 99b-generic-derived.saga ===
+  Compiling examples/99b-generic-derived.saga...
+  Built in 0.36s
+"{"name": "Alice", "age": 30, "email": "alice@example.com"}"
+
+=== 99c-generic-adt.saga ===
+  Compiling examples/99c-generic-adt.saga...
+  Built in 0.37s
+"{"Circle": 1.5}"
+"{"Rect": 2.0, 3.0}"
+"{"Triangle": null}"
+
+=== 99d-generic-parameterized.saga ===
+  Compiling examples/99d-generic-parameterized.saga...
+  Built in 0.33s
+"{"value": 42}"
+"{"value": "hello"}"
+"{"Some": 7}"
+"{"Nada": null}"
+
+=== 99e-generic-recursive.saga ===
+  Compiling examples/99e-generic-recursive.saga...
+  Built in 0.33s
+"{"ICons": 1, {"ICons": 2, {"ICons": 3, {"INil": null}}}}"
+
+=== 99f-generic-derived-tojson.saga ===
+  Compiling examples/99f-generic-derived-tojson.saga...
+  Built in 0.35s
+"{"name": "Alice", "age": 30}"
+"{"value": 42}"
+"{"value": "hello"}"
+"{"Some": 7}"
+"{"Nada": null}"
+"{"ICons": 1, {"ICons": 2, {"ICons": 3, {"INil": null}}}}"
+
+=== 99-generic-spike.saga ===
+  Compiling examples/99-generic-spike.saga...
+  Built in 0.34s
+"{"name": "Alice", "age": 30, "email": "alice@example.com"}"
+
+=== 99g-generic-derived-fromjson.saga ===
+  Compiling examples/99g-generic-derived-fromjson.saga...
+  Built in 0.42s
+"7"
+"Ok Box { v: 42 }"
+"1"
+"Ok Some(42)"
+
+=== 99h-generic-derived-codec.saga ===
+  Compiling examples/99h-generic-derived-codec.saga...
+  Built in 0.36s
+"{"v": 7}"
+"Ok Box { v: 42 }"
+"{"Some": 1}"
+"Ok Some(42)"
+
+=== 99i-generic-derived-custom-wrapper.saga ===
+  Compiling examples/99i-generic-derived-custom-wrapper.saga...
+  Built in 0.35s
+"DbOk Person { name: "ignored", age: 42 }"
+"DbOk Circle(42)"
+
+=== 99j-generic-derived-multi-param.saga ===
+  Compiling examples/99j-generic-derived-multi-param.saga...
+  Built in 0.39s
+True
+False
+True
+False
+True
+False
+True
+False
+
+=== 99k-generic-derived-defaults.saga ===
+  Compiling examples/99k-generic-derived-defaults.saga...
+  Built in 0.37s
+"{"name": "alice", "age": 30}"
+"{"Circle": 7}"
+"{"Square": 4}"

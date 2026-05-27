@@ -50,6 +50,7 @@ mod tests {
         h: HandlerAnalysis,
         effect_calls: HashMap<crate::ast::NodeId, ResolvedEffectOp>,
         handler_arms: HashMap<crate::ast::NodeId, ResolvedEffectOp>,
+        constructors: HashMap<crate::ast::NodeId, String>,
         fun_effects: HashMap<String, HashSet<String>>,
         let_effect_bindings: HashMap<String, Vec<String>>,
         type_at_node: HashMap<crate::ast::NodeId, crate::typechecker::Type>,
@@ -62,6 +63,7 @@ mod tests {
                 h: HandlerAnalysis::default(),
                 effect_calls: HashMap::new(),
                 handler_arms: HashMap::new(),
+                constructors: HashMap::new(),
                 fun_effects: HashMap::new(),
                 let_effect_bindings: HashMap::new(),
                 type_at_node: HashMap::new(),
@@ -73,6 +75,7 @@ mod tests {
             EffectInfo {
                 effect_calls: &self.effect_calls,
                 handler_arms: &self.handler_arms,
+                constructors: &self.constructors,
                 fun_effects: &self.fun_effects,
                 let_effect_bindings: &self.let_effect_bindings,
                 type_at_node: &self.type_at_node,
