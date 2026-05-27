@@ -354,6 +354,7 @@ pub struct MFunBinding {
     pub name: String,
     pub name_span: Span,
     pub params: Vec<Pat>,
+    pub guard: Option<MExpr>,
     pub body: MExpr,
     pub span: Span,
 }

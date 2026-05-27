@@ -491,7 +491,8 @@ impl<'ctx> Lowerer<'ctx> {
         let (closure_params, body_wraps) = self.plan_arm_params(&arm.params);
         let perform_ev = self.fresh_helper_name();
         let k_arm = self.fresh_k_arm_name();
-        let body_ce = self.lower_expr(&arm.body, &ctx.with_arm_k(k_arm.clone()));
+        let arm_ctx = ctx.with_arm_k(k_arm.clone()).with_param_locals(&arm.params);
+        let body_ce = self.lower_expr(&arm.body, &arm_ctx);
         let body_with_pats = self.wrap_arm_param_destructures(body_ce, body_wraps);
 
         let mut params = closure_params;
@@ -554,8 +555,8 @@ impl<'ctx> Lowerer<'ctx> {
         };
 
         let mut case_arms: Vec<CArm> = Vec::with_capacity(arms.len());
-        let arm_ctx = ctx.with_arm_k(k_arm.clone());
         for arm in arms {
+            let arm_ctx = ctx.with_arm_k(k_arm.clone()).with_param_locals(&arm.params);
             let body_ce = self.lower_expr(&arm.body, &arm_ctx);
             let pat = if n_params == 1 {
                 self.lower_pat(&arm.params[0])
@@ -611,7 +612,8 @@ impl<'ctx> Lowerer<'ctx> {
 
         // Body lowers under the outer K + outer evidence (the ctx passed in
         // by `lower_with_static` is the outer scope — see that fn).
-        let body_ce = self.lower_expr(&arm.body, ctx);
+        let body_ctx = ctx.with_param_locals(&arm.params);
+        let body_ce = self.lower_expr(&arm.body, &body_ctx);
         let body_with_pat = match body_wrap {
             None => body_ce,
             Some(pat) => {

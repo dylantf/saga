@@ -1,7 +1,7 @@
 //! `App` lowering for the monadic-IR → Core Erlang pipeline.
 
 use crate::ast::Lit;
-use crate::codegen::cerl::{CExpr, CLit};
+use crate::codegen::cerl::{CArm, CExpr, CLit, CPat};
 use crate::codegen::monadic::ir::Atom;
 use crate::codegen::resolve::ResolvedCodegenKind;
 
@@ -105,6 +105,11 @@ impl<'ctx> Lowerer<'ctx> {
             })
             .collect();
         let call = CExpr::Call(target_erlang_mod.clone(), target_name.clone(), call_args);
+        let call = if external_returns_legacy_maybe(target_erlang_mod, target_name) {
+            normalize_legacy_maybe(call)
+        } else {
+            call
+        };
         Some(CExpr::Apply(
             Box::new(CExpr::Var(ctx.return_k.clone())),
             vec![call],
@@ -220,8 +225,60 @@ impl<'ctx> Lowerer<'ctx> {
 
 fn external_callback_arg(module: &str, function: &str) -> Option<(usize, usize)> {
     match (module, function) {
+        ("std_array_bridge", "map") => Some((0, 1)),
+        ("std_array_bridge", "foldl") => Some((0, 2)),
         ("std_set_bridge", "map") | ("std_set_bridge", "filter") => Some((0, 1)),
         ("std_set_bridge", "fold") => Some((0, 2)),
         _ => None,
     }
+}
+
+fn external_returns_legacy_maybe(module: &str, function: &str) -> bool {
+    matches!(
+        (module, function),
+        ("std_array_bridge", "get")
+            | ("std_dict_bridge", "get")
+            | ("std_env_bridge", "get")
+            | ("std_float_bridge", "parse")
+            | ("std_int_bridge", "parse")
+            | ("std_int_bridge", "parse_hex")
+            | ("std_list_bridge", "nth")
+            | ("std_regex_bridge", "match")
+            | ("std_regex_bridge", "find")
+            | ("std_string_bridge", "find")
+            | ("std_string_bridge", "strip_prefix")
+            | ("std_bitstring_bridge", "at")
+    )
+}
+
+fn normalize_legacy_maybe(call: CExpr) -> CExpr {
+    let value_var = "_MaybeValue".to_string();
+    CExpr::Case(
+        Box::new(call),
+        vec![
+            CArm {
+                pat: CPat::Tuple(vec![
+                    CPat::Lit(CLit::Atom("just".to_string())),
+                    CPat::Var(value_var.clone()),
+                ]),
+                guard: None,
+                body: CExpr::Tuple(vec![
+                    CExpr::Lit(CLit::Atom("std_maybe_Just".to_string())),
+                    CExpr::Var(value_var),
+                ]),
+            },
+            CArm {
+                pat: CPat::Tuple(vec![CPat::Lit(CLit::Atom("nothing".to_string()))]),
+                guard: None,
+                body: CExpr::Tuple(vec![CExpr::Lit(CLit::Atom(
+                    "std_maybe_Nothing".to_string(),
+                ))]),
+            },
+            CArm {
+                pat: CPat::Var("_MaybeOther".to_string()),
+                guard: None,
+                body: CExpr::Var("_MaybeOther".to_string()),
+            },
+        ],
+    )
 }

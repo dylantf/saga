@@ -178,16 +178,19 @@ impl<'a> Translator<'a> {
                 name,
                 name_span,
                 params,
+                guard,
                 body,
                 span,
                 ..
             } => {
+                let guard = guard.as_ref().map(|g| self.translate_expr(g));
                 let body = self.translate_expr(body);
                 MDecl::FunBinding(MFunBinding {
                     id: *id,
                     name: name.clone(),
                     name_span: *name_span,
                     params: params.clone(),
+                    guard,
                     body,
                     span: *span,
                 })

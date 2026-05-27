@@ -28,16 +28,10 @@
 //! This is the structural scaffolding. The op-body table here covers the
 //! Identity / NoArgs / simple argument-transform subset — direct passthrough
 //! to a BIF, `spawn` thunk wrapping, `monitor` atom-prepend, and
-//! `send_after` argument reordering. Richer conversion (`exit`'s
-//! ExitReason↔atom conversion, handler-specific Ref backends) lives in
-//! `src/codegen/lower/beam_interop.rs`, which is frozen per the
-//! agent-guide allowlist. Promoting that module to shared
-//! infrastructure — or copying its ~250-LOC op-table + argument-shaping
-//! into `lower_monadic/` — is the follow-up to lift those op closures
-//! to runtime-correct behaviour. Until then, ops not covered by the
-//! entries here emit a `not_implemented` exit stub: the evidence vector has
-//! the correct shape, but invoking a stubbed op at runtime crashes with a
-//! clear tag.
+//! `send_after` argument reordering. Handler-specific Ref backends now live
+//! in this module too. Ops not covered by the entries here emit a
+//! `not_implemented` exit stub: the evidence vector has the correct shape,
+//! but invoking a stubbed op at runtime crashes with a clear tag.
 //!
 //! ## Effect / op canonical ordering
 //!
@@ -143,9 +137,8 @@ const NATIVE_EFFECTS: &[NativeEffect] = &[
         // Alphabetical: exit, send, spawn
         ops: &[
             NativeOp {
-                // exit needs ExitReason conversion; stub for now.
                 name: "exit",
-                erl_module: "",
+                erl_module: "erlang",
                 erl_func: "exit",
                 param_count: 2,
                 arg_transform: ArgTransform::Identity,

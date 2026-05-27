@@ -37,7 +37,7 @@ impl<'ctx> Lowerer<'ctx> {
     /// `normalize_suite (module_name, entries) = …` would get `_Arg0` as the
     /// param and leave `module_name` / `entries` unbound in the body.
     pub(super) fn lower_fun_binding(&mut self, fb: &MFunBinding) -> CFunDef {
-        if fb.params.iter().any(|p| !matches!(p, Pat::Var { .. })) {
+        if fb.guard.is_some() || fb.params.iter().any(|p| !matches!(p, Pat::Var { .. })) {
             return self.lower_fun_binding_clauses(&[fb]);
         }
         let mut params = lower_param_names(&fb.params);
@@ -45,7 +45,8 @@ impl<'ctx> Lowerer<'ctx> {
         params.push(RETURN_K_VAR.to_string());
         let arity = params.len();
         self.reset_counters();
-        let body = self.lower_expr(&fb.body, &LowerCtx::fresh());
+        let body_ctx = LowerCtx::fresh().with_param_locals(&fb.params);
+        let body = self.lower_expr(&fb.body, &body_ctx);
         CFunDef {
             name: fb.name.clone(),
             arity,
@@ -114,10 +115,12 @@ impl<'ctx> Lowerer<'ctx> {
         for fb in group {
             self.reset_counters();
             let pat = CPat::Tuple(fb.params.iter().map(|p| self.lower_pat(p)).collect());
-            let body = self.lower_expr(&fb.body, &LowerCtx::fresh());
+            let body_ctx = LowerCtx::fresh().with_param_locals(&fb.params);
+            let guard = fb.guard.as_ref().map(|g| self.lower_guard(g, &body_ctx));
+            let body = self.lower_expr(&fb.body, &body_ctx);
             arms.push(CArm {
                 pat,
-                guard: None,
+                guard,
                 body,
             });
         }
@@ -197,7 +200,9 @@ impl<'ctx> Lowerer<'ctx> {
             .iter()
             .map(|m| match m {
                 MExpr::Pure(atom @ Atom::Lambda { .. }) => {
-                    self.lower_atom(atom, &super::ctx::LowerCtx::fresh())
+                    let body_ctx = super::ctx::LowerCtx::fresh()
+                        .with_locals(dc.dict_params.iter().cloned());
+                    self.lower_atom(atom, &body_ctx)
                 }
                 other => panic!(
                     "lower_dict_constructor: expected Pure(Atom::Lambda) per IR spec, got {:?}",

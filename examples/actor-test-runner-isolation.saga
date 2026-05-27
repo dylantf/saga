@@ -1,0 +1,76 @@
+import Std.Actor (Process, Actor, beam_actor)
+import Std.Test (Testing, describe, test, assert_eq, run_modules)
+
+type CounterMsg =
+  | Increment Int
+  | GetCount (Pid Int)
+  | Stop
+
+fun counter : (count: Int) -> Unit needs {Process, Actor CounterMsg}
+counter count = {
+  receive {
+    Increment n -> counter (count + n)
+    GetCount caller -> {
+      send! caller count
+      counter count
+    }
+    Stop -> ()
+  }
+}
+
+type EchoMsg = Echo String (Pid String)
+
+fun echo_server : Unit -> Unit needs {Process, Actor EchoMsg}
+echo_server () = {
+  receive {
+    Echo msg caller -> {
+      send! caller msg
+      echo_server ()
+    }
+  }
+}
+
+fun test_echo : Unit -> String needs {Process, Actor String}
+test_echo () = {
+  let pid = spawn! (fun () -> echo_server ())
+  send! pid (Echo "hello" (self! ()))
+  receive {
+    msg -> msg
+  }
+}
+
+fun test_counter_accumulate : Unit -> Int needs {Process, Actor Int}
+test_counter_accumulate () = {
+  let pid = spawn! (fun () -> counter 0)
+  send! pid (Increment 5)
+  send! pid (Increment 3)
+  send! pid (GetCount (self! ()))
+  receive {
+    n -> n
+  }
+}
+
+fun tests : Unit -> Unit needs {Testing}
+tests () = {
+  describe "Actor" (fun () -> {
+    describe "spawn and send" (fun () -> {
+      test "spawn a process and exchange messages" (fun () -> {
+        let result = test_echo () with beam_actor
+        assert_eq result "hello"
+      })
+
+      test "with in arg position" (fun () -> {
+        assert_eq (test_echo () with beam_actor) "hello"
+      })
+    })
+
+    describe "counter" (fun () -> {
+      test "accumulates state across messages" (fun () -> {
+        let result = test_counter_accumulate () with beam_actor
+        assert_eq result 8
+      })
+    })
+  })
+}
+
+main () = run_modules [("ActorTest", tests)]

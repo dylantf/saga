@@ -9,7 +9,12 @@
 //! See `docs/planning/uniform-effect-translation/lowerer-state-refactor.md`
 //! for the design rationale (step 1).
 
+use std::collections::BTreeSet;
+
+use crate::ast::Pat;
+
 use super::exprs;
+use super::pats::pat_bound_names;
 
 /// Immutable per-derivation lowering context.
 ///
@@ -32,6 +37,14 @@ pub(crate) struct LowerCtx {
     /// `Some(perform_site_k)` while lowering a handler arm body. `None`
     /// outside an arm. `Resume(v)` applies this K when set.
     pub arm_k: Option<String>,
+
+    /// Source-level names bound in the current lexical scope.
+    ///
+    /// The backend resolution map is keyed by original AST node ids and may
+    /// still contain top-level/import resolutions for names that are later
+    /// shadowed by ANF/monadic binders. Local binders must win before those
+    /// resolved symbols are considered.
+    pub locals: BTreeSet<String>,
 }
 
 impl LowerCtx {
@@ -41,6 +54,7 @@ impl LowerCtx {
             return_k: exprs::RETURN_K_VAR.to_string(),
             evidence: exprs::EVIDENCE_VAR.to_string(),
             arm_k: None,
+            locals: BTreeSet::new(),
         }
     }
 
@@ -66,5 +80,36 @@ impl LowerCtx {
             arm_k: Some(k),
             ..self.clone()
         }
+    }
+
+    /// Clone + add one source-level local binding.
+    pub fn with_local(&self, name: impl Into<String>) -> Self {
+        let mut next = self.clone();
+        next.locals.insert(name.into());
+        next
+    }
+
+    /// Clone + add many source-level local bindings.
+    pub fn with_locals<I>(&self, names: I) -> Self
+    where
+        I: IntoIterator<Item = String>,
+    {
+        let mut next = self.clone();
+        next.locals.extend(names);
+        next
+    }
+
+    /// Clone + add every variable bound by a pattern.
+    pub fn with_pat_locals(&self, pat: &Pat) -> Self {
+        self.with_locals(pat_bound_names(pat))
+    }
+
+    /// Clone + add every variable bound by a parameter/pattern list.
+    pub fn with_param_locals(&self, params: &[Pat]) -> Self {
+        let mut names = Vec::new();
+        for pat in params {
+            names.extend(pat_bound_names(pat));
+        }
+        self.with_locals(names)
     }
 }

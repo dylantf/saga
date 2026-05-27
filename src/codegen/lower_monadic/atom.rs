@@ -27,7 +27,7 @@ impl<'ctx> Lowerer<'ctx> {
     /// All other atom variants ignore the ctx.
     pub(super) fn lower_atom(&mut self, atom: &Atom, ctx: &LowerCtx) -> CExpr {
         match atom {
-            Atom::Var { name, source } => self.lower_var_atom(name, *source),
+            Atom::Var { name, source } => self.lower_var_atom(name, *source, ctx),
             Atom::Lit { value, .. } => lower_lit_atom(value),
             Atom::Ctor { name, args, .. } => self.lower_ctor_atom(name, args, ctx),
             Atom::Tuple { elements, .. } => {
@@ -60,12 +60,12 @@ impl<'ctx> Lowerer<'ctx> {
     /// case 2 — dispatch through [`lower_resolved_value_ref`] exactly like
     /// the old lowerer's `ExprKind::Var` branch ([lower/mod.rs:3334-3351]).
     /// Otherwise fall back to a bare var.
-    fn lower_var_atom(&mut self, mvar: &MVar, source: NodeId) -> CExpr {
+    fn lower_var_atom(&mut self, mvar: &MVar, source: NodeId, ctx: &LowerCtx) -> CExpr {
+        if ctx.locals.contains(&mvar.name) {
+            return CExpr::Var(core_var(&mvar.name));
+        }
         if let Some(resolved) = self.resolution.get(&source).cloned() {
             return self.lower_resolved_value_ref(resolved);
-        }
-        if let Some(fun) = self.unique_imported_fun_value(&mvar.name) {
-            return fun;
         }
         // Handler-as-value references (`let logger = if dev then console_log
         // else silent_log`) need a real op-tuple value. The new path doesn't
@@ -80,42 +80,6 @@ impl<'ctx> Lowerer<'ctx> {
             return CExpr::Lit(CLit::Atom("unit".to_string()));
         }
         CExpr::Var(core_var(&mvar.name))
-    }
-
-    fn unique_imported_fun_value(&self, name: &str) -> Option<CExpr> {
-        let mut found: Option<CExpr> = None;
-        for (module_name, compiled) in &self.module_ctx.modules {
-            let erlang_mod = module_name.to_lowercase().replace('.', "_");
-            for (export_name, scheme) in &compiled.codegen_info.exports {
-                if export_name != name {
-                    continue;
-                }
-                if found.is_some() {
-                    return None;
-                }
-                let (source_arity, mut effects) = arity_and_effects_from_type(&scheme.ty);
-                if let Some((_, annotated)) = compiled
-                    .codegen_info
-                    .fun_effects
-                    .iter()
-                    .find(|(n, _)| n == name)
-                {
-                    for effect in annotated {
-                        if !effects.contains(effect) {
-                            effects.push(effect.clone());
-                        }
-                    }
-                }
-                let dict_params = scheme.constraints.len();
-                let uniform = if effects.is_empty() {
-                    uniform_value_arity(source_arity + dict_params, &effects, name)
-                } else {
-                    source_arity + dict_params + 2
-                };
-                found = Some(fun_value_of(erlang_mod.clone(), name.to_string(), uniform));
-            }
-        }
-        found
     }
 
     /// Lower an `Atom::Ctor` — a recursively-atomic constructor application.
@@ -380,25 +344,6 @@ pub(super) fn uniform_value_arity(arity: usize, effects: &[String], name: &str) 
         // add `+2` for uniform `(_Evidence, _ReturnK)`.
         arity + 2
     }
-}
-
-fn arity_and_effects_from_type(ty: &crate::typechecker::Type) -> (usize, Vec<String>) {
-    use crate::typechecker::Type;
-
-    let mut arity = 0;
-    let mut effects = Vec::new();
-    let mut cur = ty;
-    while let Type::Fun(_, ret, row) = cur {
-        arity += 1;
-        for effect in &row.effects {
-            if !effects.contains(&effect.name) {
-                effects.push(effect.name.clone());
-            }
-        }
-        cur = ret;
-    }
-    effects.sort();
-    (arity, effects)
 }
 
 /// Emit a value-position reference to a same-module callable.

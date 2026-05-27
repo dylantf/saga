@@ -116,7 +116,8 @@ impl<'ctx> Lowerer<'ctx> {
 
         let snap = self.snapshot_counters();
         self.reset_counters();
-        let body_ce_inner = self.lower_expr(body, &LowerCtx::fresh());
+        let body_ctx = LowerCtx::fresh().with_param_locals(params);
+        let body_ce_inner = self.lower_expr(body, &body_ctx);
         let body_ce = if has_non_var_pat {
             let scrut = CExpr::Tuple(
                 (0..params.len())
@@ -198,7 +199,8 @@ impl<'ctx> Lowerer<'ctx> {
     /// plain Core Erlang `let` binding the continuation — straightforward
     /// CPS reification.
     fn lower_bind(&mut self, var: &MVar, value: &MExpr, body: &MExpr, ctx: &LowerCtx) -> CExpr {
-        let body_ce = self.lower_expr(body, ctx);
+        let body_ctx = ctx.with_local(var.name.clone());
+        let body_ce = self.lower_expr(body, &body_ctx);
         let bound_var = core_var(&var.name);
         let k_name = self.fresh_k_name();
         let k_fun = CExpr::Fun(vec![bound_var], Box::new(body_ce));
@@ -236,7 +238,8 @@ impl<'ctx> Lowerer<'ctx> {
                 std::mem::discriminant(other)
             ),
         };
-        let body_ce = self.lower_expr(body, ctx);
+        let body_ctx = ctx.with_local(var.name.clone());
+        let body_ce = self.lower_expr(body, &body_ctx);
         CExpr::Let(core_var(&var.name), Box::new(value_ce), Box::new(body_ce))
     }
 
@@ -285,7 +288,9 @@ impl<'ctx> Lowerer<'ctx> {
             return_k: RETURN_K_VAR.to_string(),
             evidence: EVIDENCE_VAR.to_string(),
             arm_k: enclosing.arm_k.clone(),
-        };
+            locals: enclosing.locals.clone(),
+        }
+        .with_param_locals(params);
         let body_ce_inner = self.lower_expr(body, &body_ctx);
         let body_ce = if has_non_var_pat {
             let scrut = CExpr::Tuple(

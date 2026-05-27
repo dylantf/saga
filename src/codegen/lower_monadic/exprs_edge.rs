@@ -308,9 +308,10 @@ impl<'ctx> Lowerer<'ctx> {
     }
 
     fn lower_receive_arm(&mut self, arm: &MArm, ctx: &LowerCtx) -> CArm {
+        let arm_ctx = ctx.with_pat_locals(&arm.pattern);
         let (pat, reason_wrapper) = self.lower_receive_pat(&arm.pattern);
-        let guard = arm.guard.as_ref().map(|g| self.lower_guard(g, ctx));
-        let raw_body = self.lower_expr(&arm.body, ctx);
+        let guard = arm.guard.as_ref().map(|g| self.lower_guard(g, &arm_ctx));
+        let raw_body = self.lower_expr(&arm.body, &arm_ctx);
         let body = match reason_wrapper {
             Some((user_var, raw_var)) => {
                 let conversion = self.exit_reason_from_erlang(&raw_var);

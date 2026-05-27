@@ -70,7 +70,8 @@ impl<'ctx> Lowerer<'ctx> {
 
             let current = match arm.guard.as_ref() {
                 None => {
-                    let body_ce = self.lower_expr(&arm.body, ctx);
+                    let arm_ctx = ctx.with_pat_locals(&arm.pattern);
+                    let body_ce = self.lower_expr(&arm.body, &arm_ctx);
                     if is_catchall {
                         self.bind_catchall_pattern(&scrut_var, &arm.pattern, body_ce)
                     } else {
@@ -92,8 +93,9 @@ impl<'ctx> Lowerer<'ctx> {
                     }
                 }
                 Some(guard) if guard_safe(guard) => {
-                    let g = self.lower_guard(guard, ctx);
-                    let body_ce = self.lower_expr(&arm.body, ctx);
+                    let arm_ctx = ctx.with_pat_locals(&arm.pattern);
+                    let g = self.lower_guard(guard, &arm_ctx);
+                    let body_ce = self.lower_expr(&arm.body, &arm_ctx);
                     CExpr::Case(
                         Box::new(CExpr::Var(scrut_var.clone())),
                         vec![
@@ -111,9 +113,10 @@ impl<'ctx> Lowerer<'ctx> {
                     )
                 }
                 Some(guard) => {
+                    let arm_ctx = ctx.with_pat_locals(&arm.pattern);
                     // CPS-evaluate the guard: bind its value through a fresh
                     // K, then scrutinise the bound value on 'true'/_.
-                    let body_ce = self.lower_expr(&arm.body, ctx);
+                    let body_ce = self.lower_expr(&arm.body, &arm_ctx);
                     let guard_val = self.fresh_helper_name();
                     let inner_case = CExpr::Case(
                         Box::new(CExpr::Var(guard_val.clone())),
@@ -132,7 +135,7 @@ impl<'ctx> Lowerer<'ctx> {
                     );
                     let k_inner = CExpr::Fun(vec![guard_val], Box::new(inner_case));
                     let k_name = self.fresh_k_name();
-                    let guard_ce = self.lower_expr(guard, &ctx.with_return_k(k_name.clone()));
+                    let guard_ce = self.lower_expr(guard, &arm_ctx.with_return_k(k_name.clone()));
                     let guarded_body = CExpr::Let(k_name, Box::new(k_inner), Box::new(guard_ce));
                     if is_catchall {
                         self.bind_catchall_pattern(&scrut_var, &arm.pattern, guarded_body)
@@ -196,8 +199,9 @@ impl<'ctx> Lowerer<'ctx> {
     /// Lower a single MArm into a `CArm`. Shared between `Case` and `Receive`.
     pub(super) fn lower_arm(&mut self, arm: &MArm, ctx: &LowerCtx) -> CArm {
         let pat = self.lower_pat(&arm.pattern);
-        let guard = arm.guard.as_ref().map(|g| self.lower_guard(g, ctx));
-        let body = self.lower_expr(&arm.body, ctx);
+        let arm_ctx = ctx.with_pat_locals(&arm.pattern);
+        let guard = arm.guard.as_ref().map(|g| self.lower_guard(g, &arm_ctx));
+        let body = self.lower_expr(&arm.body, &arm_ctx);
         CArm { pat, guard, body }
     }
 

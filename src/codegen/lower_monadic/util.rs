@@ -161,12 +161,33 @@ pub(super) fn resolve_bit_segment_size(
 /// needs it for imported-handler bodies); when a sub-step requires that
 /// behavior, extend this helper rather than reaching into the old code.
 pub(super) fn mangle_ctor_atom(name: &str, ctors: &HashMap<String, String>) -> String {
+    if matches!(name, "Ok" | "Err")
+        && let Some(atom) = beam_ctor_override(name)
+    {
+        return atom.to_string();
+    }
+    if name.ends_with(".Ok") {
+        return "ok".to_string();
+    }
+    if name.ends_with(".Err") {
+        return "error".to_string();
+    }
     if let Some(atom) = ctors.get(name) {
         return atom.clone();
     }
     if name.contains('.') {
         let mut parts: Vec<&str> = name.split('.').collect();
         if let Some(ctor) = parts.pop() {
+            // Maybe's constructors are ordinary stdlib ADT tags in the new
+            // path. Keep the historical bare-name overrides below for legacy
+            // runtime bridge values, but do not apply them to qualified
+            // references such as `Std.Maybe.Nothing`.
+            if matches!(ctor, "Just" | "Nothing") {
+                let module = parts.join("_").to_lowercase();
+                if module == "std_maybe" || module == "maybe" {
+                    return format!("std_maybe_{}", ctor);
+                }
+            }
             if let Some(atom) = beam_ctor_override(ctor) {
                 return atom.to_string();
             }

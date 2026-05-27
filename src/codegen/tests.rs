@@ -450,16 +450,19 @@ main () = id 42
 
 #[test]
 fn nothing_is_tagged_tuple() {
-    // `Nothing` -> {'nothing'} (tagged 1-tuple)
-    assert_contains("main () = Nothing", "{'nothing'}");
+    // `Nothing` -> {'std_maybe_Nothing'} (tagged 1-tuple)
+    assert_contains("main () = Nothing", "{'std_maybe_Nothing'}");
 }
 
 #[test]
 fn just_is_tagged_tuple() {
-    // `Just(42)` -> {'just', 42} (tagged tuple)
+    // `Just(42)` -> {'std_maybe_Just', 42} (tagged tuple)
     let out = emit("main () = Just(42)");
     assert!(out.contains("42"), "missing value\n{out}");
-    assert!(out.contains("'just'"), "missing just tag\n{out}");
+    assert!(
+        out.contains("'std_maybe_Just'"),
+        "missing just tag\n{out}"
+    );
 }
 
 #[test]
@@ -521,7 +524,7 @@ main () = case True {
 
 #[test]
 fn case_maybe_patterns() {
-    // Just(v) lowers to {'just', v}, Nothing to {'nothing'}.
+    // Just(v) lowers to {'std_maybe_Just', v}, Nothing to {'std_maybe_Nothing'}.
     // Arms stay in source order -- no reordering needed.
     let src = "
 unwrap opt = case opt {
@@ -531,11 +534,11 @@ unwrap opt = case opt {
 ";
     let out = emit(src);
     assert!(
-        out.contains("'nothing'"),
+        out.contains("'std_maybe_Nothing'"),
         "missing nothing pattern for Nothing\n{out}"
     );
     assert!(
-        out.contains("'just'"),
+        out.contains("'std_maybe_Just'"),
         "missing just tag for Just pattern\n{out}"
     );
 }
@@ -1069,9 +1072,7 @@ main () = {
 
 #[test]
 fn external_fun_returning_maybe() {
-    // An external function returning Maybe needs a bridge wrapper to convert
-    // Erlang's Value|undefined convention to {just, Value}|{nothing}.
-    // For now, test that the pattern match uses the tagged tuple form.
+    // The pattern match should use the new stdlib Maybe tags.
     let src = r#"
 @external("erlang", "os", "getenv")
 fun getenv : (name: String) -> Maybe String
@@ -1089,11 +1090,11 @@ main () = case getenv "HOME" {
     );
     // Pattern match should use tagged tuples
     assert!(
-        out.contains("'just'"),
+        out.contains("'std_maybe_Just'"),
         "Expected just tag for Just pattern in:\n{out}"
     );
     assert!(
-        out.contains("'nothing'"),
+        out.contains("'std_maybe_Nothing'"),
         "Expected nothing tag for Nothing pattern in:\n{out}"
     );
 }

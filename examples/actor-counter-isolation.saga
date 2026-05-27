@@ -1,0 +1,34 @@
+import Std.Actor (Process, Actor, beam_actor)
+
+type CounterMsg =
+  | Increment Int
+  | GetCount (Pid Int)
+  | Stop
+
+fun counter : (count: Int) -> Unit needs {Process, Actor CounterMsg}
+counter count = {
+  receive {
+    Increment n -> counter (count + n)
+    GetCount caller -> {
+      send! caller count
+      counter count
+    }
+    Stop -> ()
+  }
+}
+
+fun test_counter_accumulate : Unit -> Int needs {Process, Actor Int}
+test_counter_accumulate () = {
+  let pid = spawn! (fun () -> counter 0)
+  send! pid (Increment 5)
+  send! pid (Increment 3)
+  send! pid (GetCount (self! ()))
+  receive {
+    n -> n
+  }
+}
+
+main () = {
+  let result = test_counter_accumulate () with beam_actor
+  dbg (show result)
+}

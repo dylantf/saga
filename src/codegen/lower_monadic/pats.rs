@@ -39,6 +39,64 @@ pub(super) fn lower_param_names(params: &[Pat]) -> Vec<String> {
         .collect()
 }
 
+/// Source-level names bound by a pattern.
+///
+/// This is used by the monadic lowerer's lexical context, not Core-pattern
+/// emission. Keep the names unmangled so they can be compared to `MVar.name`
+/// before `core_var` is applied.
+pub(super) fn pat_bound_names(pat: &Pat) -> Vec<String> {
+    let mut out = Vec::new();
+    collect_pat_bound_names(pat, &mut out);
+    out
+}
+
+fn collect_pat_bound_names(pat: &Pat, out: &mut Vec<String>) {
+    match pat {
+        Pat::Var { name, .. } => out.push(name.clone()),
+        Pat::Constructor { args, .. } => {
+            for arg in args {
+                collect_pat_bound_names(arg, out);
+            }
+        }
+        Pat::Record {
+            fields, as_name, ..
+        } => {
+            for (field_name, alias) in fields {
+                match alias {
+                    Some(p) => collect_pat_bound_names(p, out),
+                    None => out.push(field_name.clone()),
+                }
+            }
+            if let Some(name) = as_name {
+                out.push(name.clone());
+            }
+        }
+        Pat::AnonRecord { fields, .. } => {
+            for (field_name, alias) in fields {
+                match alias {
+                    Some(p) => collect_pat_bound_names(p, out),
+                    None => out.push(field_name.clone()),
+                }
+            }
+        }
+        Pat::Tuple { elements, .. } => {
+            for element in elements {
+                collect_pat_bound_names(element, out);
+            }
+        }
+        Pat::StringPrefix { rest, .. } => collect_pat_bound_names(rest, out),
+        Pat::BitStringPat { segments, .. } => {
+            for seg in segments {
+                collect_pat_bound_names(&seg.value, out);
+            }
+        }
+        Pat::Wildcard { .. } | Pat::Lit { .. } => {}
+        Pat::ListPat { .. } | Pat::ConsPat { .. } | Pat::Or { .. } => {
+            unreachable!("surface syntax should be desugared before codegen")
+        }
+    }
+}
+
 impl<'ctx> Lowerer<'ctx> {
     /// Lower an AST `Pat` to a Core Erlang `CPat`.
     ///

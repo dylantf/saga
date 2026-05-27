@@ -121,6 +121,7 @@ fn fun_binding_with_two_user_params_emits_arity_four() {
                 span: span(),
             },
         ],
+        guard: None,
         body: pure_unit(),
         span: span(),
     };
@@ -155,6 +156,7 @@ fn multiple_fun_bindings_emit_in_source_order() {
                 name: "a".to_string(),
                 span: span(),
             }],
+            guard: None,
             body: pure_unit(),
             span: span(),
         })
@@ -542,6 +544,47 @@ fn var_lowers_to_core_var_name() {
     // already-uppercase source name → underscore-prefixed
     let ce = lower_atom_default(&atom_var("X"));
     assert!(matches!(ce, CExpr::Var(ref n) if n == "_X"));
+}
+
+#[test]
+fn local_var_shadows_stale_global_resolution() {
+    let node = dummy_node();
+    let mut resolution = ResolutionMap::new();
+    resolution.insert(
+        node,
+        ResolvedSymbol {
+            name: "next".to_string(),
+            source_module: Some("Std.Stream".to_string()),
+            canonical_name: "Std.Stream.next".to_string(),
+            kind: ResolvedCodegenKind::BeamFunction {
+                erlang_mod: Some("std_stream".to_string()),
+                name: "next".to_string(),
+                arity: 1,
+                effects: vec![],
+            },
+        },
+    );
+    let ctors = ConstructorAtoms::new();
+    let ce = with_lowerer(&resolution, &ctors, |lowerer| {
+        lowerer.lower_atom(
+            &Atom::Var {
+                name: mvar("next"),
+                source: node,
+            },
+            &super::ctx::LowerCtx::fresh().with_local("next"),
+        )
+    });
+    assert!(matches!(ce, CExpr::Var(ref n) if n == "Next"));
+}
+
+#[test]
+fn unresolved_unqualified_var_does_not_scan_all_imported_exports() {
+    let atom = Atom::Var {
+        name: mvar("next"),
+        source: dummy_node(),
+    };
+    let ce = lower_atom_default(&atom);
+    assert!(matches!(ce, CExpr::Var(ref n) if n == "Next"));
 }
 
 #[test]
@@ -3400,8 +3443,7 @@ fn bootstrap_spawn_thunk_uses_perform_site_evidence() {
 }
 
 #[test]
-fn bootstrap_unimplemented_op_emits_exit_stub() {
-    // Process.exit still needs ExitReason conversion, so it remains a clear stub.
+fn bootstrap_process_exit_calls_erlang_exit() {
     let resolution = ResolutionMap::new();
     let ctors = ConstructorAtoms::new();
     let ctx = CodegenContext::default();
@@ -3445,21 +3487,15 @@ fn bootstrap_unimplemented_op_emits_exit_stub() {
         CExpr::Fun(_, b) => b.as_ref(),
         _ => unreachable!(),
     };
-    // apply _K(erlang:exit({not_implemented_native_op, 'Std.Actor.Process', 'exit'}))
+    // apply _K(erlang:exit(_Arg0, _Arg1))
     match closure_body {
         CExpr::Apply(_, args) => match &args[0] {
             CExpr::Call(m, f, ca) => {
                 assert_eq!(m, "erlang");
                 assert_eq!(f, "exit");
-                let tag = match &ca[0] {
-                    CExpr::Tuple(t) => t,
-                    _ => panic!(),
-                };
-                assert!(
-                    matches!(&tag[0], CExpr::Lit(CLit::Atom(a)) if a == "not_implemented_native_op")
-                );
-                assert!(matches!(&tag[1], CExpr::Lit(CLit::Atom(a)) if a == "Std.Actor.Process"));
-                assert!(matches!(&tag[2], CExpr::Lit(CLit::Atom(a)) if a == "exit"));
+                assert_eq!(ca.len(), 2);
+                assert!(matches!(&ca[0], CExpr::Var(n) if n == "_Arg0"));
+                assert!(matches!(&ca[1], CExpr::Var(n) if n == "_Arg1"));
             }
             other => panic!("expected exit call, got {other:?}"),
         },
@@ -3503,6 +3539,7 @@ fn fun_binding_not_in_exports_is_not_exported() {
             name: name.to_string(),
             name_span: span(),
             params: vec![pat_var("x")],
+            guard: None,
             body: pure_unit(),
             span: span(),
         })

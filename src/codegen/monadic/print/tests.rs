@@ -68,6 +68,7 @@ fn bind_chain_is_flat_and_deterministic() {
             name: "x".to_string(),
             span: sp(),
         }],
+        guard: None,
         body,
         span: sp(),
     };
