@@ -343,6 +343,35 @@ the inlined body sits in the same lexical position as the original
 inherits this — we trust the tag, never widen eligibility. False
 `Multishot` is fine (slow). False `TailResumptive` would be a miscompile.
 
+### Native-handler specialization
+
+The slow uniform ABI applies every op closure as:
+
+```
+apply Op(args..., EvidenceAtPerform, K)
+```
+
+That extra evidence argument is required for correctness when a native
+handler invokes a Saga callback across a BEAM boundary. `Process.spawn`, for
+example, must adapt a Saga callback of shape `fun(Unit, Evidence, K)` to
+Erlang's `fun()` while preserving the evidence visible at the `spawn!` site.
+
+After correctness is established, direct-native optimization may erase the
+generic evidence lookup and op-closure application when it can prove the
+active handler is the default BEAM-native handler:
+
+```
+Yield(Process.spawn, [F])
+⟶
+erlang:spawn(fun() -> apply F('unit', CapturedEvidence, IdK))
+```
+
+The optimizer may remove `find_evidence`, `element`, and the native op
+closure hop. It must not remove the Erlang callback thunk itself for APIs
+like `spawn/1`, because the BEAM API requires that callback shape. Similar
+callback-adapter specialization applies to any native op or external wrapper
+whose raw target calls a Saga function value.
+
 ---
 
 ## Ordering / fixpoint

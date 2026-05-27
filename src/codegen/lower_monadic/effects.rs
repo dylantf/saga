@@ -35,14 +35,14 @@ impl<'ctx> Lowerer<'ctx> {
 
     /// Lower `Yield { op, args }` to an open-row evidence lookup followed
     /// by an `apply` of the resolved op closure to the user args plus the
-    /// ambient return continuation.
+    /// perform-site evidence vector and ambient return continuation.
     ///
     /// Emits (sketch):
     /// ```text
     ///   apply (call 'erlang':'element'(<op_index>,
     ///             call 'std_evidence_bridge':'find_evidence'(
     ///                 _Evidence, '<EffectAtom>')))
-    ///         (<args...>, <ctx.return_k>)
+    ///         (<args...>, <ctx.evidence>, <ctx.return_k>)
     /// ```
     ///
     /// `find_evidence/2` returns the per-effect `OpTuple` (a runtime tuple
@@ -74,6 +74,7 @@ impl<'ctx> Lowerer<'ctx> {
         );
 
         let mut apply_args = lowered_args;
+        apply_args.push(CExpr::Var(ctx.evidence.clone()));
         apply_args.push(CExpr::Var(ctx.return_k.clone()));
         CExpr::Apply(Box::new(op_closure), apply_args)
     }
@@ -404,7 +405,7 @@ impl<'ctx> Lowerer<'ctx> {
     /// Compile a single `MHandlerArm` into its per-op closure:
     ///
     /// ```text
-    /// fun(<arm.params...>, _K_arm{n}) -> <arm.body lowered under _K_arm{n}>
+    /// fun(<arm.params...>, _Ev_perform, _K_arm{n}) -> <arm.body lowered under _K_arm{n}>
     /// ```
     ///
     /// Each arm param maps to a closure parameter:
@@ -434,11 +435,13 @@ impl<'ctx> Lowerer<'ctx> {
         }
 
         let (closure_params, body_wraps) = self.plan_arm_params(&arm.params);
+        let perform_ev = self.fresh_helper_name();
         let k_arm = self.fresh_k_arm_name();
         let body_ce = self.lower_expr(&arm.body, &ctx.with_arm_k(k_arm.clone()));
         let body_with_pats = self.wrap_arm_param_destructures(body_ce, body_wraps);
 
         let mut params = closure_params;
+        params.push(perform_ev);
         params.push(k_arm);
         CExpr::Fun(params, Box::new(body_with_pats))
     }
@@ -447,7 +450,7 @@ impl<'ctx> Lowerer<'ctx> {
     /// op params; emit:
     ///
     /// ```text
-    /// fun(_HArg0, ..., _HArgK, _K_arm{n}) ->
+    /// fun(_HArg0, ..., _HArgK, _Ev_perform, _K_arm{n}) ->
     ///   case _HArg0 of
     ///     <arm0.params[0]> -> <arm0.body under _K_arm{n}>
     ///     <arm1.params[0]> -> <arm1.body under _K_arm{n}>
@@ -487,6 +490,7 @@ impl<'ctx> Lowerer<'ctx> {
         }
 
         let positional: Vec<String> = (0..n_params).map(|i| format!("_HArg{}", i)).collect();
+        let perform_ev = self.fresh_helper_name();
         let k_arm = self.fresh_k_arm_name();
 
         let scrutinee = if n_params == 1 {
@@ -512,6 +516,7 @@ impl<'ctx> Lowerer<'ctx> {
         }
 
         let mut fun_params = positional;
+        fun_params.push(perform_ev);
         fun_params.push(k_arm);
         CExpr::Fun(
             fun_params,

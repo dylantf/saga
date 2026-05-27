@@ -10,11 +10,14 @@
 //! `BinOp`, `UnaryMinus`, `BitString`, `Receive`. Also hosts the
 //! `binop_atoms` operator-dispatch helper.
 
-use crate::ast::BinOp as AstBinOp;
-use crate::codegen::cerl::{CArm, CBinSeg, CExpr, CLit};
+use crate::ast::{BinOp as AstBinOp, Pat};
+use crate::codegen::cerl::{CArm, CBinSeg, CExpr, CLit, CPat};
 use crate::codegen::monadic::ir::{Atom, MArm, MBitSegment, MExpr};
 
-use super::util::{resolve_bit_segment_flags, resolve_bit_segment_meta, resolve_bit_segment_size};
+use super::util::{
+    core_var, lower_string_to_binary, mangle_ctor_atom, resolve_bit_segment_flags,
+    resolve_bit_segment_meta, resolve_bit_segment_size,
+};
 use super::{LowerCtx, Lowerer};
 
 impl<'ctx> Lowerer<'ctx> {
@@ -278,24 +281,22 @@ impl<'ctx> Lowerer<'ctx> {
     /// `after`, default to `infinity` / `'true'` — matching the old
     /// lowerer's shape.
     ///
-    /// **Deferred (flagged for follow-up):** the old lowerer recognises
-    /// `Down`/`Exit` system-message constructor patterns and rewrites them
-    /// into raw Erlang `{'DOWN', ...}` / `{'EXIT', ...}` tuple patterns
-    /// plus a reason-conversion let-wrap (see
-    /// `src/codegen/lower/mod.rs::ExprKind::Receive` arm). That logic
-    /// lives in `lower/beam_interop.rs` which is frozen per the agent
-    /// guide. Lowering it requires either copying `beam_interop.rs` into
-    /// `lower_monadic/` or promoting it to shared infrastructure — out of
-    /// scope for 7g part A. Until then, `Down`/`Exit` patterns in receive
-    /// arms emit as plain constructor tuples, which will not match real
-    /// system messages at runtime.
+    /// BEAM system-message constructors are represented differently in
+    /// mailboxes than ordinary Saga ADTs. `Down(pid, reason)` matches
+    /// `{'DOWN', _Ref, 'process', Pid, RawReason}` and `Exit(pid, reason)`
+    /// matches `{'EXIT', Pid, RawReason}`. When the reason pattern is a
+    /// variable, the raw Erlang reason is converted back to Saga
+    /// `ExitReason` before the arm body runs.
     pub(super) fn lower_receive(
         &mut self,
         arms: &[MArm],
         after: Option<&(Atom, Box<MExpr>)>,
         ctx: &LowerCtx,
     ) -> CExpr {
-        let carms: Vec<CArm> = arms.iter().map(|arm| self.lower_arm(arm, ctx)).collect();
+        let carms: Vec<CArm> = arms
+            .iter()
+            .map(|arm| self.lower_receive_arm(arm, ctx))
+            .collect();
         let (timeout, timeout_body) = match after {
             Some((t, body)) => (self.lower_atom(t, ctx), self.lower_expr(body, ctx)),
             None => (
@@ -304,6 +305,159 @@ impl<'ctx> Lowerer<'ctx> {
             ),
         };
         CExpr::Receive(carms, Box::new(timeout), Box::new(timeout_body))
+    }
+
+    fn lower_receive_arm(&mut self, arm: &MArm, ctx: &LowerCtx) -> CArm {
+        let (pat, reason_wrapper) = self.lower_receive_pat(&arm.pattern);
+        let guard = arm.guard.as_ref().map(|g| self.lower_guard(g, ctx));
+        let raw_body = self.lower_expr(&arm.body, ctx);
+        let body = match reason_wrapper {
+            Some((user_var, raw_var)) => {
+                let conversion = self.exit_reason_from_erlang(&raw_var);
+                CExpr::Let(user_var, Box::new(conversion), Box::new(raw_body))
+            }
+            None => raw_body,
+        };
+        CArm { pat, guard, body }
+    }
+
+    fn lower_receive_pat(&mut self, pat: &Pat) -> (CPat, Option<(String, String)>) {
+        match pat {
+            Pat::Constructor { name, args, .. } if is_system_msg(name) && args.len() == 2 => {
+                let pid_pat = self.lower_pat(&args[0]);
+                let (reason_pat, wrapper) = match &args[1] {
+                    Pat::Var { name, .. } => {
+                        let raw = self.fresh_helper_name();
+                        (CPat::Var(raw.clone()), Some((core_var(name), raw)))
+                    }
+                    other => (self.lower_pat(other), None),
+                };
+                (system_msg_pattern(name, pid_pat, reason_pat), wrapper)
+            }
+            _ => (self.lower_pat(pat), None),
+        }
+    }
+
+    fn exit_reason_from_erlang(&mut self, raw_var: &str) -> CExpr {
+        let normal = mangle_ctor_atom("Normal", self.ctors);
+        let shutdown = mangle_ctor_atom("Shutdown", self.ctors);
+        let killed = mangle_ctor_atom("Killed", self.ctors);
+        let noproc = mangle_ctor_atom("Noproc", self.ctors);
+        let error = mangle_ctor_atom("Error", self.ctors);
+        let other = mangle_ctor_atom("Other", self.ctors);
+
+        let error_msg_var = self.fresh_helper_name();
+        let error_msg_var2 = self.fresh_helper_name();
+        let other_var = self.fresh_helper_name();
+        let fmt_var = self.fresh_helper_name();
+        let stringify = CExpr::Call(
+            "unicode".to_string(),
+            "characters_to_binary".to_string(),
+            vec![CExpr::Call(
+                "io_lib".to_string(),
+                "format".to_string(),
+                vec![
+                    lower_string_to_binary("~p"),
+                    CExpr::Cons(
+                        Box::new(CExpr::Var(other_var.clone())),
+                        Box::new(CExpr::Nil),
+                    ),
+                ],
+            )],
+        );
+
+        CExpr::Case(
+            Box::new(CExpr::Var(raw_var.to_string())),
+            vec![
+                CArm {
+                    pat: CPat::Lit(CLit::Atom("normal".to_string())),
+                    guard: None,
+                    body: CExpr::Lit(CLit::Atom(normal)),
+                },
+                CArm {
+                    pat: CPat::Lit(CLit::Atom("shutdown".to_string())),
+                    guard: None,
+                    body: CExpr::Lit(CLit::Atom(shutdown)),
+                },
+                CArm {
+                    pat: CPat::Lit(CLit::Atom("killed".to_string())),
+                    guard: None,
+                    body: CExpr::Lit(CLit::Atom(killed)),
+                },
+                CArm {
+                    pat: CPat::Lit(CLit::Atom("noproc".to_string())),
+                    guard: None,
+                    body: CExpr::Lit(CLit::Atom(noproc)),
+                },
+                CArm {
+                    pat: CPat::Tuple(vec![
+                        CPat::Tuple(vec![
+                            CPat::Lit(CLit::Atom("saga_error".to_string())),
+                            CPat::Wildcard,
+                            CPat::Var(error_msg_var.clone()),
+                            CPat::Wildcard,
+                            CPat::Wildcard,
+                            CPat::Wildcard,
+                            CPat::Wildcard,
+                        ]),
+                        CPat::Wildcard,
+                    ]),
+                    guard: None,
+                    body: CExpr::Tuple(vec![
+                        CExpr::Lit(CLit::Atom(error.clone())),
+                        CExpr::Var(error_msg_var),
+                    ]),
+                },
+                CArm {
+                    pat: CPat::Tuple(vec![CPat::Var(error_msg_var2.clone()), CPat::Wildcard]),
+                    guard: Some(CExpr::Call(
+                        "erlang".to_string(),
+                        "is_binary".to_string(),
+                        vec![CExpr::Var(error_msg_var2.clone())],
+                    )),
+                    body: CExpr::Tuple(vec![
+                        CExpr::Lit(CLit::Atom(error)),
+                        CExpr::Var(error_msg_var2),
+                    ]),
+                },
+                CArm {
+                    pat: CPat::Var(other_var.clone()),
+                    guard: None,
+                    body: CExpr::Let(
+                        fmt_var.clone(),
+                        Box::new(stringify),
+                        Box::new(CExpr::Tuple(vec![
+                            CExpr::Lit(CLit::Atom(other)),
+                            CExpr::Var(fmt_var),
+                        ])),
+                    ),
+                },
+            ],
+        )
+    }
+}
+
+fn is_system_msg(ctor_name: &str) -> bool {
+    let bare = ctor_name.rsplit('.').next().unwrap_or(ctor_name);
+    matches!(bare, "Down" | "Exit")
+}
+
+fn system_msg_pattern(ctor_name: &str, pid_pat: CPat, reason_pat: CPat) -> CPat {
+    let bare = ctor_name.rsplit('.').next().unwrap_or(ctor_name);
+    match bare {
+        "Down" => CPat::Tuple(vec![
+            CPat::Lit(CLit::Atom("DOWN".to_string())),
+            CPat::Wildcard,
+            CPat::Lit(CLit::Atom("process".to_string())),
+            pid_pat,
+            reason_pat,
+        ]),
+        "Exit" => CPat::Tuple(vec![
+            CPat::Lit(CLit::Atom("EXIT".to_string())),
+            pid_pat,
+            reason_pat,
+        ]),
+        _ => unreachable!("not a system message: {}", ctor_name),
     }
 }
 

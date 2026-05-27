@@ -83,6 +83,9 @@ impl<'ctx> Lowerer<'ctx> {
                     "Nil" if args.is_empty() => CPat::Nil,
                     "True" if args.is_empty() => CPat::Lit(CLit::Atom("true".to_string())),
                     "False" if args.is_empty() => CPat::Lit(CLit::Atom("false".to_string())),
+                    "Normal" | "Shutdown" | "Killed" | "Noproc" if args.is_empty() => {
+                        CPat::Lit(CLit::Atom(exit_reason_bare_atom(bare).to_string()))
+                    }
                     _ => {
                         if name == "Cons" && args.len() == 2 {
                             return CPat::Cons(
@@ -224,6 +227,16 @@ impl<'ctx> Lowerer<'ctx> {
             type_name,
             flags,
         }
+    }
+}
+
+fn exit_reason_bare_atom(name: &str) -> &'static str {
+    match name {
+        "Normal" => "normal",
+        "Shutdown" => "shutdown",
+        "Killed" => "killed",
+        "Noproc" => "noproc",
+        _ => unreachable!("not a nullary ExitReason constructor: {}", name),
     }
 }
 

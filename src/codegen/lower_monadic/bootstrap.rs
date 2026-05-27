@@ -2,7 +2,7 @@
 //!
 //! The slow uniform path on the new lowerer routes every effect call
 //! through `find_evidence/2` at runtime. The old lowerer short-circuits
-//! BEAM-native effect calls (Process, Timer, Ref, …) into direct BIF
+//! BEAM-native effect calls (Process, Actor, Timer, Ref, …) into direct BIF
 //! calls at lowering time — there is no runtime-resident handler for
 //! them. The new uniform path can't take that shortcut, so it needs
 //! default handlers visible in `_Evidence` whenever no user `with` has
@@ -14,7 +14,9 @@
 //! function whose body is the canonical evidence vector containing the
 //! BEAM-native handlers. Each entry is `{EffectAtom, OpTuple}`; each
 //! closure inside an `OpTuple` has shape
-//! `fun(Arg0, …, ArgN, K) -> apply K(call '<erl_mod>':'<func>'(args))`.
+//! `fun(Arg0, …, ArgN, EvidenceAtPerform, K) -> apply K(call '<erl_mod>':'<func>'(args))`.
+//! The perform-site evidence parameter is ignored by first-order native
+//! ops and used by callback-invoking ops such as `spawn`.
 //!
 //! The function is emitted as `/0`-arity with no `_Evidence` / `_ReturnK`
 //! threading: it's a pure constant-shaped builder consumed once at the
@@ -24,18 +26,18 @@
 //! ## Scope (7g part B)
 //!
 //! This is the structural scaffolding. The op-body table here covers the
-//! Identity / NoArgs subset — direct passthrough to a BIF, no argument
-//! reordering, no `ExitReason` ADT conversion. The richer subset
-//! (`spawn`'s `WrapThunk`, `monitor`'s `PrependAtom`, `send_after`'s
-//! `Reorder`, `exit`'s ExitReason↔atom conversion) lives in
+//! Identity / NoArgs / simple argument-transform subset — direct passthrough
+//! to a BIF, `spawn` thunk wrapping, `monitor` atom-prepend, and
+//! `send_after` argument reordering. Richer conversion (`exit`'s
+//! ExitReason↔atom conversion, handler-specific Ref backends) lives in
 //! `src/codegen/lower/beam_interop.rs`, which is frozen per the
 //! agent-guide allowlist. Promoting that module to shared
 //! infrastructure — or copying its ~250-LOC op-table + argument-shaping
 //! into `lower_monadic/` — is the follow-up to lift those op closures
 //! to runtime-correct behaviour. Until then, ops not covered by the
-//! Identity-subset entries here emit a `not_implemented` exit stub: the
-//! evidence vector has the correct shape, but invoking a stubbed op at
-//! runtime crashes with a clear tag.
+//! entries here emit a `not_implemented` exit stub: the evidence vector has
+//! the correct shape, but invoking a stubbed op at runtime crashes with a
+//! clear tag.
 //!
 //! ## Effect / op canonical ordering
 //!
@@ -51,98 +53,121 @@ use crate::codegen::cerl::{CExpr, CFunDef, CLit};
 pub(super) const BOOTSTRAP_FN_NAME: &str = "__saga_initial_evidence";
 
 /// A single BEAM-native op stub entry: how to forward saga-side args to
-/// the underlying BIF. Only `Identity` / `NoArgs` shapes are emitted as
-/// runtime-correct bodies; everything else gets a `not_implemented` stub.
+/// the underlying BIF.
 struct NativeOp {
     /// Source op name (matches the Saga effect-decl op name).
     name: &'static str,
-    /// Erlang module/function the BIF lives in. Empty `module` ("")
-    /// means "not implemented in this scaffold — stub body".
+    /// Erlang module/function the BIF lives in. Empty `module` ("") means
+    /// "not implemented in this scaffold — stub body".
     erl_module: &'static str,
     erl_func: &'static str,
     /// Number of saga-side args this op takes. Closure arity is
-    /// `param_count + 1` (the trailing K continuation).
+    /// `param_count + 2` (perform-site evidence + trailing K continuation).
     param_count: usize,
+    arg_transform: ArgTransform,
+}
+
+enum ArgTransform {
+    Identity,
+    NoArgs,
+    PrependAtom(&'static str),
+    Reorder(&'static [usize]),
+    WrapThunk(usize),
 }
 
 /// A BEAM-native effect + its ops in canonical (alphabetical) order.
 ///
 /// The effect tag is the canonical effect name as it appears in
-/// `find_evidence`'s lookup (`'Process'`, `'Timer'`, …). Ops are
-/// pre-sorted; the runtime indexes them via `element(op_index, OpTuple)`.
+/// `find_evidence`'s lookup (`'Std.Actor.Process'`, `'Std.Actor.Timer'`, …).
+/// Ops are pre-sorted; the runtime indexes them via `element(op_index,
+/// OpTuple)`.
 struct NativeEffect {
     tag: &'static str,
     ops: &'static [NativeOp],
 }
 
-/// Pre-sorted native effect / op table. Names match canonical effect /
-/// op names produced by the typechecker and used by the translator's
+/// Pre-sorted native effect / op table. Tags and op ordering match the
+/// canonical names produced by the typechecker and used by the translator's
 /// `EffectOpRef`.
-///
-/// **Identity-only coverage:** only ops with direct `(args...) -> BIF(args...)`
-/// shape get real bodies. Ops needing `WrapThunk` / `PrependAtom` /
-/// `Reorder` / `ExitReason` conversion appear here with `erl_module: ""`
-/// and lower to a `not_implemented` exit stub — see module-level docs.
 const NATIVE_EFFECTS: &[NativeEffect] = &[
     NativeEffect {
-        tag: "Process",
-        // Alphabetical: demonitor, exit, link, monitor, self, send, spawn, unlink
+        tag: "Std.Actor.Actor",
+        ops: &[NativeOp {
+            name: "self",
+            erl_module: "erlang",
+            erl_func: "self",
+            param_count: 1,
+            arg_transform: ArgTransform::NoArgs,
+        }],
+    },
+    NativeEffect {
+        tag: "Std.Actor.Link",
         ops: &[
-            NativeOp {
-                name: "demonitor",
-                erl_module: "erlang",
-                erl_func: "demonitor",
-                param_count: 1,
-            },
-            // exit: needs ExitReason conversion → stub
-            NativeOp {
-                name: "exit",
-                erl_module: "",
-                erl_func: "exit",
-                param_count: 2,
-            },
             NativeOp {
                 name: "link",
                 erl_module: "erlang",
                 erl_func: "link",
                 param_count: 1,
-            },
-            // monitor: needs PrependAtom("process") → stub
-            NativeOp {
-                name: "monitor",
-                erl_module: "",
-                erl_func: "monitor",
-                param_count: 1,
-            },
-            NativeOp {
-                name: "self",
-                erl_module: "erlang",
-                erl_func: "self",
-                param_count: 0,
-            },
-            NativeOp {
-                name: "send",
-                erl_module: "erlang",
-                erl_func: "send",
-                param_count: 2,
-            },
-            // spawn: needs WrapThunk → stub
-            NativeOp {
-                name: "spawn",
-                erl_module: "",
-                erl_func: "spawn",
-                param_count: 1,
+                arg_transform: ArgTransform::Identity,
             },
             NativeOp {
                 name: "unlink",
                 erl_module: "erlang",
                 erl_func: "unlink",
                 param_count: 1,
+                arg_transform: ArgTransform::Identity,
             },
         ],
     },
     NativeEffect {
-        tag: "Timer",
+        tag: "Std.Actor.Monitor",
+        ops: &[
+            NativeOp {
+                name: "demonitor",
+                erl_module: "erlang",
+                erl_func: "demonitor",
+                param_count: 1,
+                arg_transform: ArgTransform::Identity,
+            },
+            NativeOp {
+                name: "monitor",
+                erl_module: "erlang",
+                erl_func: "monitor",
+                param_count: 1,
+                arg_transform: ArgTransform::PrependAtom("process"),
+            },
+        ],
+    },
+    NativeEffect {
+        tag: "Std.Actor.Process",
+        // Alphabetical: exit, send, spawn
+        ops: &[
+            NativeOp {
+                // exit needs ExitReason conversion; stub for now.
+                name: "exit",
+                erl_module: "",
+                erl_func: "exit",
+                param_count: 2,
+                arg_transform: ArgTransform::Identity,
+            },
+            NativeOp {
+                name: "send",
+                erl_module: "erlang",
+                erl_func: "send",
+                param_count: 2,
+                arg_transform: ArgTransform::Identity,
+            },
+            NativeOp {
+                name: "spawn",
+                erl_module: "erlang",
+                erl_func: "spawn",
+                param_count: 1,
+                arg_transform: ArgTransform::WrapThunk(0),
+            },
+        ],
+    },
+    NativeEffect {
+        tag: "Std.Actor.Timer",
         // Alphabetical: cancel_timer, send_after, sleep
         ops: &[
             NativeOp {
@@ -150,24 +175,36 @@ const NATIVE_EFFECTS: &[NativeEffect] = &[
                 erl_module: "erlang",
                 erl_func: "cancel_timer",
                 param_count: 1,
+                arg_transform: ArgTransform::Identity,
             },
-            // send_after: needs Reorder([1,0,2]) → stub
             NativeOp {
                 name: "send_after",
-                erl_module: "",
+                erl_module: "erlang",
                 erl_func: "send_after",
                 param_count: 3,
+                arg_transform: ArgTransform::Reorder(&[1, 0, 2]),
             },
             NativeOp {
                 name: "sleep",
                 erl_module: "timer",
                 erl_func: "sleep",
                 param_count: 1,
+                arg_transform: ArgTransform::Identity,
             },
         ],
     },
     NativeEffect {
-        tag: "Ref",
+        tag: "Std.Process.Signal",
+        ops: &[NativeOp {
+            name: "await_signal",
+            erl_module: "saga_runtime",
+            erl_func: "await_signal",
+            param_count: 1,
+            arg_transform: ArgTransform::Identity,
+        }],
+    },
+    NativeEffect {
+        tag: "Std.Ref.Ref",
         // Alphabetical: get, modify, new, set
         ops: &[
             NativeOp {
@@ -175,6 +212,7 @@ const NATIVE_EFFECTS: &[NativeEffect] = &[
                 erl_module: "erlang",
                 erl_func: "get",
                 param_count: 1,
+                arg_transform: ArgTransform::Identity,
             },
             // modify: handler-specific (procdict vs ETS) → stub
             NativeOp {
@@ -182,6 +220,7 @@ const NATIVE_EFFECTS: &[NativeEffect] = &[
                 erl_module: "",
                 erl_func: "get",
                 param_count: 2,
+                arg_transform: ArgTransform::Identity,
             },
             // new: handler-specific → stub
             NativeOp {
@@ -189,12 +228,14 @@ const NATIVE_EFFECTS: &[NativeEffect] = &[
                 erl_module: "",
                 erl_func: "make_ref",
                 param_count: 1,
+                arg_transform: ArgTransform::Identity,
             },
             NativeOp {
                 name: "set",
                 erl_module: "erlang",
                 erl_func: "put",
                 param_count: 2,
+                arg_transform: ArgTransform::Identity,
             },
         ],
     },
@@ -286,13 +327,15 @@ pub(super) fn build_main_entry_wrapper() -> CFunDef {
 
 /// Build a single op closure for an `OpTuple` slot.
 ///
-/// Shape: `fun(Arg0, …, ArgN, K) -> apply K(<body>)` where `<body>` is
+/// Shape: `fun(Arg0, …, ArgN, EvidenceAtPerform, K) -> apply K(<body>)` where `<body>` is
 /// either `call '<erl_mod>':'<func>'(args)` (Identity stubs) or
 /// `erlang:exit({not_implemented_native_op, '<effect>', '<op>'})` for
 /// shapes outside the Identity subset.
 fn build_op_closure(effect_tag: &str, op: &NativeOp) -> CExpr {
     let mut params: Vec<String> = (0..op.param_count).map(|i| format!("_Arg{}", i)).collect();
+    let evidence_var = "_EvidenceAtPerform".to_string();
     let k_var = "_K".to_string();
+    params.push(evidence_var.clone());
     params.push(k_var.clone());
 
     let result_expr = if op.erl_module.is_empty() {
@@ -308,9 +351,7 @@ fn build_op_closure(effect_tag: &str, op: &NativeOp) -> CExpr {
             ])],
         )
     } else {
-        let call_args: Vec<CExpr> = (0..op.param_count)
-            .map(|i| CExpr::Var(format!("_Arg{}", i)))
-            .collect();
+        let call_args = native_call_args(op, &evidence_var);
         CExpr::Call(
             op.erl_module.to_string(),
             op.erl_func.to_string(),
@@ -319,6 +360,55 @@ fn build_op_closure(effect_tag: &str, op: &NativeOp) -> CExpr {
     };
     let apply_k = CExpr::Apply(Box::new(CExpr::Var(k_var)), vec![result_expr]);
     CExpr::Fun(params, Box::new(apply_k))
+}
+
+fn native_call_args(op: &NativeOp, evidence_var: &str) -> Vec<CExpr> {
+    match &op.arg_transform {
+        ArgTransform::Identity => (0..op.param_count)
+            .map(|i| CExpr::Var(format!("_Arg{}", i)))
+            .collect(),
+        ArgTransform::NoArgs => Vec::new(),
+        ArgTransform::PrependAtom(atom) => {
+            let mut args = vec![CExpr::Lit(CLit::Atom((*atom).to_string()))];
+            args.extend((0..op.param_count).map(|i| CExpr::Var(format!("_Arg{}", i))));
+            args
+        }
+        ArgTransform::Reorder(indices) => indices
+            .iter()
+            .map(|&i| CExpr::Var(format!("_Arg{}", i)))
+            .collect(),
+        ArgTransform::WrapThunk(idx) => (0..op.param_count)
+            .map(|i| {
+                if i == *idx {
+                    spawn_thunk(format!("_Arg{}", i), evidence_var.to_string())
+                } else {
+                    CExpr::Var(format!("_Arg{}", i))
+                }
+            })
+            .collect(),
+    }
+}
+
+fn spawn_thunk(callback_var: String, evidence_var: String) -> CExpr {
+    let k_var = "_SpawnK".to_string();
+    let v_var = "_SpawnV".to_string();
+    let identity_k = CExpr::Fun(vec![v_var.clone()], Box::new(CExpr::Var(v_var)));
+    let apply_callback = CExpr::Apply(
+        Box::new(CExpr::Var(callback_var)),
+        vec![
+            CExpr::Lit(CLit::Atom("unit".to_string())),
+            CExpr::Var(evidence_var),
+            CExpr::Var(k_var.clone()),
+        ],
+    );
+    CExpr::Fun(
+        vec![],
+        Box::new(CExpr::Let(
+            k_var,
+            Box::new(identity_k),
+            Box::new(apply_callback),
+        )),
+    )
 }
 
 /// Number of native effect entries in the bootstrap evidence vector.

@@ -232,19 +232,27 @@ These reductions cut roughly half the runtime apparatus a Koka-faithful implemen
 
 ### Handler Representation
 
-Handler declarations are compiled to per-op handler functions at `with` sites and packaged as the `OpTuple` of an evidence entry. Each op closure has shape `fun(args..., K) -> ...`:
+Handler declarations are compiled to per-op handler functions at `with` sites and packaged as the `OpTuple` of an evidence entry. Each op closure has shape `fun(args..., EvidenceAtPerform, K) -> ...`:
 
 ```erlang
 % handler console_log for Log { log msg -> { print msg; resume () } }
 % At the `with` site, the log arm becomes:
-fun (Msg, K) ->
+fun (Msg, _EvidenceAtPerform, K) ->
   call 'io':'format'("~s~n", [Msg]),
   apply K('unit')
 
 % handler to_result for Fail { fail reason -> Err(reason) }
-fun (Reason, _K) ->
+fun (Reason, _EvidenceAtPerform, _K) ->
   {'Err', Reason}       % don't call K = abort
 ```
+
+The perform-site evidence parameter is ignored by ordinary source-level
+handler arms because those closures are built at the `with` site and already
+capture their outer evidence lexically. It exists for runtime/native handler
+bodies that may invoke Saga callback values after crossing a BEAM boundary
+(for example `Process.spawn` adapting `fun(Unit, Evidence, K)` to Erlang's
+`fun()`). Those handlers must call callbacks with the evidence that was in
+scope at the original `Yield`, not a freshly-built default vector.
 
 ### Handler Bindings (Dynamic Handlers)
 

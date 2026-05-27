@@ -1197,7 +1197,7 @@ fn is_identity_fun(ce: &CExpr) -> bool {
 }
 
 /// Walk an emitted Yield CExpr and assert its shape:
-///   apply (call erlang:element(<idx>, call std_evidence_bridge:find_evidence(EV_VAR, 'Effect'))) (args..., K_VAR)
+///   apply (call erlang:element(<idx>, call std_evidence_bridge:find_evidence(EV_VAR, 'Effect'))) (args..., EV_VAR, K_VAR)
 fn assert_yield_shape<'a>(
     ce: &'a CExpr,
     expected_effect: &str,
@@ -1210,11 +1210,18 @@ fn assert_yield_shape<'a>(
         CExpr::Apply(c, a) => (c.as_ref(), a.as_slice()),
         other => panic!("expected Apply for Yield, got {other:?}"),
     };
-    // Last arg is the K var
+    // Last arg is the K var; penultimate arg is the perform-site evidence.
     let k = args.last().expect("Yield apply must have at least K");
     match k {
         CExpr::Var(n) => assert_eq!(n, expected_k_var, "K var"),
         other => panic!("expected K Var, got {other:?}"),
+    }
+    let ev_arg = args
+        .get(args.len().saturating_sub(2))
+        .expect("Yield apply must include perform-site evidence");
+    match ev_arg {
+        CExpr::Var(n) => assert_eq!(n, expected_ev_var, "perform-site evidence arg"),
+        other => panic!("expected perform-site evidence Var, got {other:?}"),
     }
     // Callee: call erlang:element(idx, <find_call>)
     match callee {
@@ -1245,7 +1252,7 @@ fn assert_yield_shape<'a>(
         }
         other => panic!("expected erlang:element callee, got {other:?}"),
     }
-    &args[..args.len() - 1]
+    &args[..args.len() - 2]
 }
 
 #[test]
@@ -1308,7 +1315,7 @@ fn yield_in_bind_position_threads_bind_k_as_op_continuation() {
 #[test]
 fn with_static_single_arm_emits_real_arm_closure() {
     // Arm: handler Log { info p0 -> Pure(unit) }
-    // Closure shape: fun(P0, _K_arm0) -> apply _K_arm0('unit')
+    // Closure shape: fun(P0, _Ev_perform, _K_arm0) -> apply _K_arm0('unit')
     let handler = MHandler::Static {
         effects: vec!["Log".to_string()],
         arms: vec![handler_arm("Log", "info", 1, 1)],
@@ -1349,7 +1356,10 @@ fn with_static_single_arm_emits_real_arm_closure() {
     assert_eq!(ops.len(), 1);
     match &ops[0] {
         CExpr::Fun(ps, fbody) => {
-            assert_eq!(ps, &vec!["P0".to_string(), "_K_arm0".to_string()]);
+            assert_eq!(
+                ps,
+                &vec!["P0".to_string(), "_H0".to_string(), "_K_arm0".to_string()]
+            );
             // Body: apply the raw-result K — arm body is `Pure(unit)`,
             // which escapes to the with delimiter, not the arm K.
             match fbody.as_ref() {
@@ -1706,7 +1716,10 @@ fn pure_in_arm_tail_escapes_to_with_site_k() {
     let ops = extract_op_tuple_at(&ce, 0, "_Evidence", "E");
     match &ops[0] {
         CExpr::Fun(ps, body) => {
-            assert_eq!(ps, &vec!["P0".to_string(), "_K_arm0".to_string()]);
+            assert_eq!(
+                ps,
+                &vec!["P0".to_string(), "_H0".to_string(), "_K_arm0".to_string()]
+            );
             match body.as_ref() {
                 CExpr::Apply(c, args) => {
                     assert!(
@@ -1776,7 +1789,8 @@ fn pure_and_resume_emit_different_cel_at_arm_tail() {
 
 #[test]
 fn multi_arm_per_op_emits_single_closure_with_case() {
-    // Two arms on the same op (op_index 1). Single closure: fun(_HArg0, _K_arm0) -> case ...
+    // Two arms on the same op (op_index 1). Single closure:
+    // fun(_HArg0, _Ev_perform, _K_arm0) -> case ...
     let arms = vec![
         handler_arm_with_body(
             "E",
@@ -1819,7 +1833,14 @@ fn multi_arm_per_op_emits_single_closure_with_case() {
     assert_eq!(ops.len(), 1, "multi-arm-per-op collapses to one closure");
     match &ops[0] {
         CExpr::Fun(ps, body) => {
-            assert_eq!(ps, &vec!["_HArg0".to_string(), "_K_arm0".to_string()]);
+            assert_eq!(
+                ps,
+                &vec![
+                    "_HArg0".to_string(),
+                    "_H0".to_string(),
+                    "_K_arm0".to_string()
+                ]
+            );
             match body.as_ref() {
                 CExpr::Case(scrut, case_arms) => {
                     assert!(matches!(scrut.as_ref(), CExpr::Var(n) if n == "_HArg0"));
@@ -1863,12 +1884,13 @@ fn multi_op_static_handler_orders_closures_by_op_index() {
     let ce = lower_expr_default(&e);
     let ops = extract_op_tuple_at(&ce, 0, "_Evidence", "E");
     assert_eq!(ops.len(), 2);
-    // Both are zero-arg arms, so closures only have the K_arm param.
+    // Both are zero-arg arms, so closures have perform-site evidence + K_arm params.
     for (i, op) in ops.iter().enumerate() {
         let arm_k = format!("_K_arm{}", i);
+        let perform_ev = format!("_H{}", i);
         match op {
             CExpr::Fun(ps, _) => {
-                assert_eq!(ps, &vec![arm_k]);
+                assert_eq!(ps, &vec![perform_ev, arm_k]);
             }
             other => panic!("expected Fun, got {other:?}"),
         }
@@ -2211,10 +2233,10 @@ fn resume_inside_lambda_in_arm_body_uses_arm_k_via_closure() {
     };
     let ce = lower_expr_default(&e);
     let ops = extract_op_tuple_at(&ce, 0, "_Evidence", "E");
-    // Outer: fun(_K_arm0) -> apply _K_arm0(<lambda>).
+    // Outer: fun(_Ev_perform, _K_arm0) -> apply _K_arm0(<lambda>).
     let arm_body = match &ops[0] {
         CExpr::Fun(ps, body) => {
-            assert_eq!(ps, &vec!["_K_arm0".to_string()]);
+            assert_eq!(ps, &vec!["_H0".to_string(), "_K_arm0".to_string()]);
             body.as_ref()
         }
         other => panic!("expected arm Fun, got {other:?}"),
@@ -2298,7 +2320,7 @@ fn resume_in_bind_position_calls_arm_k_directly() {
     let ops = extract_op_tuple_at(&ce, 0, "_Evidence", "E");
     let inner = match &ops[0] {
         CExpr::Fun(ps, body) => {
-            assert_eq!(ps, &vec!["_K_arm0".to_string()]);
+            assert_eq!(ps, &vec!["_H0".to_string(), "_K_arm0".to_string()]);
             body.as_ref()
         }
         other => panic!("expected arm Fun, got {other:?}"),
@@ -3222,7 +3244,7 @@ fn bootstrap_evidence_vector_has_canonical_effect_entries() {
 
 #[test]
 fn bootstrap_identity_op_closure_calls_bif_and_applies_k() {
-    // Process.self/0 has Identity shape: fun(K) -> apply K(erlang:self())
+    // Actor.self has NoArgs shape: fun(Unit, EvidenceAtPerform, K) -> apply K(erlang:self())
     let resolution = ResolutionMap::new();
     let ctors = ConstructorAtoms::new();
     let ctx = CodegenContext::default();
@@ -3241,19 +3263,21 @@ fn bootstrap_identity_op_closure_calls_bif_and_applies_k() {
         CExpr::Fun(_, b) => b.as_ref(),
         _ => unreachable!(),
     };
-    // Walk to Process entry → OpTuple
+    // Walk to Actor entry → OpTuple
     let entries = match body {
         CExpr::Tuple(es) => es,
         _ => unreachable!(),
     };
-    let process_entry = entries
+    let actor_entry = entries
         .iter()
         .find(|e| match e {
-            CExpr::Tuple(p) => matches!(&p[0], CExpr::Lit(CLit::Atom(a)) if a == "Process"),
+            CExpr::Tuple(p) => {
+                matches!(&p[0], CExpr::Lit(CLit::Atom(a)) if a == "Std.Actor.Actor")
+            }
             _ => false,
         })
-        .expect("Process entry");
-    let op_tuple = match process_entry {
+        .expect("Actor entry");
+    let op_tuple = match actor_entry {
         CExpr::Tuple(p) => &p[1],
         _ => unreachable!(),
     };
@@ -3261,14 +3285,12 @@ fn bootstrap_identity_op_closure_calls_bif_and_applies_k() {
         CExpr::Tuple(o) => o,
         _ => unreachable!(),
     };
-    // alphabetical Process ops: demonitor(0), exit(1), link(2), monitor(3),
-    // self(4), send(5), spawn(6), unlink(7)
-    let self_closure = &ops[4];
+    let self_closure = &ops[0];
     let (params, closure_body) = match self_closure {
         CExpr::Fun(p, b) => (p.clone(), b.as_ref()),
         other => panic!("expected Fun, got {other:?}"),
     };
-    assert_eq!(params, vec!["_K"]); // 0 args + K
+    assert_eq!(params, vec!["_Arg0", "_EvidenceAtPerform", "_K"]);
     match closure_body {
         CExpr::Apply(c, args) => {
             assert!(matches!(c.as_ref(), CExpr::Var(n) if n == "_K"));
@@ -3286,8 +3308,7 @@ fn bootstrap_identity_op_closure_calls_bif_and_applies_k() {
 }
 
 #[test]
-fn bootstrap_unimplemented_op_emits_exit_stub() {
-    // Process.spawn needs WrapThunk → stub: erlang:exit({not_implemented_native_op,...})
+fn bootstrap_spawn_thunk_uses_perform_site_evidence() {
     let resolution = ResolutionMap::new();
     let ctors = ConstructorAtoms::new();
     let ctx = CodegenContext::default();
@@ -3313,7 +3334,99 @@ fn bootstrap_unimplemented_op_emits_exit_stub() {
     let process_entry = entries
         .iter()
         .find(|e| match e {
-            CExpr::Tuple(p) => matches!(&p[0], CExpr::Lit(CLit::Atom(a)) if a == "Process"),
+            CExpr::Tuple(p) => {
+                matches!(&p[0], CExpr::Lit(CLit::Atom(a)) if a == "Std.Actor.Process")
+            }
+            _ => false,
+        })
+        .expect("Process entry");
+    let ops = match process_entry {
+        CExpr::Tuple(p) => match &p[1] {
+            CExpr::Tuple(o) => o,
+            _ => unreachable!(),
+        },
+        _ => unreachable!(),
+    };
+    let spawn_closure = &ops[2];
+    let (params, body) = match spawn_closure {
+        CExpr::Fun(p, b) => (p, b.as_ref()),
+        other => panic!("expected spawn Fun, got {other:?}"),
+    };
+    assert_eq!(params, &vec!["_Arg0", "_EvidenceAtPerform", "_K"]);
+
+    let thunk = match body {
+        CExpr::Apply(c, args) => {
+            assert!(matches!(c.as_ref(), CExpr::Var(n) if n == "_K"));
+            match &args[0] {
+                CExpr::Call(m, f, call_args) => {
+                    assert_eq!(m, "erlang");
+                    assert_eq!(f, "spawn");
+                    assert_eq!(call_args.len(), 1);
+                    &call_args[0]
+                }
+                other => panic!("expected erlang:spawn call, got {other:?}"),
+            }
+        }
+        other => panic!("expected Apply body, got {other:?}"),
+    };
+
+    match thunk {
+        CExpr::Fun(params, body) => {
+            assert!(params.is_empty());
+            match body.as_ref() {
+                CExpr::Let(k_name, _, apply) => {
+                    assert_eq!(k_name, "_SpawnK");
+                    match apply.as_ref() {
+                        CExpr::Apply(callback, args) => {
+                            assert!(matches!(callback.as_ref(), CExpr::Var(n) if n == "_Arg0"));
+                            assert!(matches!(&args[0], CExpr::Lit(CLit::Atom(a)) if a == "unit"));
+                            assert!(
+                                matches!(&args[1], CExpr::Var(n) if n == "_EvidenceAtPerform"),
+                                "spawn callback must receive perform-site evidence"
+                            );
+                            assert!(matches!(&args[2], CExpr::Var(n) if n == "_SpawnK"));
+                        }
+                        other => panic!("expected callback apply, got {other:?}"),
+                    }
+                }
+                other => panic!("expected _SpawnK let, got {other:?}"),
+            }
+        }
+        other => panic!("expected spawn thunk Fun, got {other:?}"),
+    }
+}
+
+#[test]
+fn bootstrap_unimplemented_op_emits_exit_stub() {
+    // Process.exit still needs ExitReason conversion, so it remains a clear stub.
+    let resolution = ResolutionMap::new();
+    let ctors = ConstructorAtoms::new();
+    let ctx = CodegenContext::default();
+    let handler_info = HandlerAnalysis::default();
+    let storage = EffectInfoStorage::empty();
+    let effect_info = storage.view();
+    let mut lowerer = Lowerer::new(&resolution, &ctors, &ctx, &handler_info, &effect_info)
+        .with_bootstrap_emission(true);
+    let cmod = lowerer.lower_module("entry", &vec![]);
+    let f = cmod
+        .funs
+        .iter()
+        .find(|f| f.name == "__saga_initial_evidence")
+        .unwrap();
+    let body = match &f.body {
+        CExpr::Fun(_, b) => b.as_ref(),
+        _ => unreachable!(),
+    };
+    let entries = match body {
+        CExpr::Tuple(es) => es,
+        _ => unreachable!(),
+    };
+    let process_entry = entries
+        .iter()
+        .find(|e| match e {
+            CExpr::Tuple(p) => {
+                matches!(&p[0], CExpr::Lit(CLit::Atom(a)) if a == "Std.Actor.Process")
+            }
             _ => false,
         })
         .unwrap();
@@ -3324,13 +3437,12 @@ fn bootstrap_unimplemented_op_emits_exit_stub() {
         },
         _ => unreachable!(),
     };
-    // spawn is index 6 in alphabetical Process ops
-    let spawn_closure = &ops[6];
-    let closure_body = match spawn_closure {
+    let exit_closure = &ops[0];
+    let closure_body = match exit_closure {
         CExpr::Fun(_, b) => b.as_ref(),
         _ => unreachable!(),
     };
-    // apply _K(erlang:exit({not_implemented_native_op, 'Process', 'spawn'}))
+    // apply _K(erlang:exit({not_implemented_native_op, 'Std.Actor.Process', 'exit'}))
     match closure_body {
         CExpr::Apply(_, args) => match &args[0] {
             CExpr::Call(m, f, ca) => {
@@ -3343,8 +3455,8 @@ fn bootstrap_unimplemented_op_emits_exit_stub() {
                 assert!(
                     matches!(&tag[0], CExpr::Lit(CLit::Atom(a)) if a == "not_implemented_native_op")
                 );
-                assert!(matches!(&tag[1], CExpr::Lit(CLit::Atom(a)) if a == "Process"));
-                assert!(matches!(&tag[2], CExpr::Lit(CLit::Atom(a)) if a == "spawn"));
+                assert!(matches!(&tag[1], CExpr::Lit(CLit::Atom(a)) if a == "Std.Actor.Process"));
+                assert!(matches!(&tag[2], CExpr::Lit(CLit::Atom(a)) if a == "exit"));
             }
             other => panic!("expected exit call, got {other:?}"),
         },
