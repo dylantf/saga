@@ -409,7 +409,7 @@ fn build_print_wrapper(name: String, stderr: bool) -> CFunDef {
 ///   let <_DebugFn> = call 'erlang':'element'(1, Dict) in
 ///   let <_Str> = apply _DebugFn(X) in
 ///   let <_R> = call 'io':'format'('standard_error', "~ts~n", [_Str])
-///   in apply _ReturnK(X)
+///   in apply _ReturnK('unit')
 /// ```
 ///
 /// **Note.** The dict's debug method is itself a uniform-shape closure
@@ -455,7 +455,9 @@ fn build_dbg_wrapper(name: String) -> CFunDef {
     );
     let apply_k = CExpr::Apply(
         Box::new(CExpr::Var(RETURN_K_VAR.to_string())),
-        vec![CExpr::Var(x_param.clone())],
+        vec![CExpr::Lit(crate::codegen::cerl::CLit::Atom(
+            "unit".to_string(),
+        ))],
     );
 
     let let_r = CExpr::Let(r_var, Box::new(print), Box::new(apply_k));

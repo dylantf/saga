@@ -256,6 +256,8 @@ pub fn build_effect_info<'a>(
     check_result: &'a CheckResult,
     module_check_result: &'a CheckResult,
     ops_storage: &'a EffectOpsTable,
+    handler_effects_storage: &'a HashMap<String, Vec<String>>,
+    let_handler_effects_storage: &'a HashMap<ast::NodeId, Vec<String>>,
 ) -> monadic::ir::EffectInfo<'a> {
     monadic::ir::EffectInfo {
         effect_calls: &module_check_result.resolution.effect_calls,
@@ -265,7 +267,29 @@ pub fn build_effect_info<'a>(
         let_effect_bindings: &check_result.let_effect_bindings,
         type_at_node: &check_result.type_at_node,
         effect_ops: &ops_storage.map,
+        handler_effects: handler_effects_storage,
+        let_handler_effects: let_handler_effects_storage,
     }
+}
+
+/// Build handler name → effects mapping from `CheckResult.handlers`.
+pub fn build_handler_effects(check_result: &CheckResult) -> HashMap<String, Vec<String>> {
+    check_result
+        .handlers
+        .iter()
+        .map(|(name, info)| (name.clone(), info.effects.clone()))
+        .collect()
+}
+
+/// Build pattern NodeId → effects mapping from `CheckResult.let_binding_handlers`.
+pub fn build_let_handler_effects(
+    check_result: &CheckResult,
+) -> HashMap<ast::NodeId, Vec<String>> {
+    check_result
+        .let_binding_handlers
+        .iter()
+        .map(|(id, info)| (*id, info.effects.clone()))
+        .collect()
 }
 
 /// New-path emit. Sequence:
@@ -346,6 +370,8 @@ pub fn emit_module_via_new_path(
                 .map(|(k, v)| (*k, v.clone())),
         );
     }
+    let handler_effects_storage = build_handler_effects(check_result);
+    let let_handler_effects_storage = build_let_handler_effects(check_result);
     let effect_info = monadic::ir::EffectInfo {
         effect_calls: &combined_effect_calls,
         handler_arms: &combined_handler_arms,
@@ -354,6 +380,8 @@ pub fn emit_module_via_new_path(
         let_effect_bindings: &check_result.let_effect_bindings,
         type_at_node: &check_result.type_at_node,
         effect_ops: &ops_storage.map,
+        handler_effects: &handler_effects_storage,
+        let_handler_effects: &let_handler_effects_storage,
     };
 
     let handler_info = handler_analysis::analyze(program);
@@ -379,7 +407,7 @@ pub fn emit_module_via_new_path(
             }
         }
     }
-    let monadic_prog = monadic::translate::translate_with_imports(
+    let (monadic_prog, handler_value_map) = monadic::translate::translate_with_imports(
         &anf_program,
         &resolution_map,
         &effect_info,
@@ -394,6 +422,7 @@ pub fn emit_module_via_new_path(
         ctx,
         &handler_info,
         &effect_info,
+        &handler_value_map,
     )
     .with_bootstrap_emission(is_main)
     .lower_module(module_name, &optimized);

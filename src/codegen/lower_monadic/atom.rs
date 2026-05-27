@@ -67,19 +67,35 @@ impl<'ctx> Lowerer<'ctx> {
         if let Some(resolved) = self.resolution.get(&source).cloned() {
             return self.lower_resolved_value_ref(resolved);
         }
-        // Handler-as-value references (`let logger = if dev then console_log
-        // else silent_log`) need a real op-tuple value. The new path doesn't
-        // yet synthesize one for arbitrary handler names — emit a placeholder
-        // `'unit'` atom so `erlc` accepts the module. Any subsequent `with
-        // logger body` site then takes the empty-effects Dynamic branch
-        // (warning + body-only), making this a clean runtime failure rather
-        // than a compile-time block. TODO: synthesize the proper op-tuple
-        // (see `lower_handler_def_to_tuple` in the old lowerer for the
-        // shape).
         if self.handler_names.contains(&mvar.name) {
+            if let Some(info) = self.handler_value_map.get(&mvar.name) {
+                return self.build_handler_value_tuple(info, ctx);
+            }
             return CExpr::Lit(CLit::Atom("unit".to_string()));
         }
         CExpr::Var(core_var(&mvar.name))
+    }
+
+    /// Build a runtime op-tuple `CExpr::Tuple` from pre-translated handler
+    /// arms. Handler values may be created long before their `with` site, so
+    /// their arm closures must return directly instead of capturing the
+    /// definition site's return continuation.
+    fn build_handler_value_tuple(
+        &mut self,
+        info: &crate::codegen::monadic::ir::HandlerValueInfo,
+        ctx: &LowerCtx,
+    ) -> CExpr {
+        let mut sorted_arms: Vec<&crate::codegen::monadic::ir::MHandlerArm> =
+            info.arms.iter().collect();
+        sorted_arms.sort_by_key(|a| (a.op.effect.clone(), a.op.op_index));
+        let elements: Vec<CExpr> = sorted_arms
+            .iter()
+            .map(|arm| self.build_handler_value_arm_closure(arm, ctx))
+            .collect();
+        // Dynamic handler return clauses need an explicit runtime ABI slot;
+        // until that lands, only op arms participate in the op tuple.
+        let _ = &info.return_clause;
+        CExpr::Tuple(elements)
     }
 
     /// Lower an `Atom::Ctor` — a recursively-atomic constructor application.

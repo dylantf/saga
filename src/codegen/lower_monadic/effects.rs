@@ -28,6 +28,12 @@ use super::{LowerCtx, Lowerer};
 /// (`find_evidence/2`, `insert_canonical/2`, `project_evidence/2`).
 const EVIDENCE_BRIDGE_MODULE: &str = "std_evidence_bridge";
 
+#[derive(Clone, Copy)]
+enum ArmReturnMode {
+    Captured,
+    Direct,
+}
+
 impl<'ctx> Lowerer<'ctx> {
     // -----------------------------------------------------------------
     // MExpr::Yield
@@ -118,23 +124,10 @@ impl<'ctx> Lowerer<'ctx> {
                 return_lambda,
                 ..
             } => {
-                // Per the spec, the translator currently only emits Dynamic
-                // handlers carrying a single effect. Empty effects happen
-                // when a `with <runtime-handler-value> body` site references
-                // a let-bound or factory-produced handler — the translator
-                // doesn't have the effect tag in that case yet (a
-                // type-resolution thread that hasn't landed). Rather than
-                // block the whole pipeline, we emit a body-only lowering
-                // (no evidence install). Any `Yield` inside `body` that
-                // needs this handler's effect will then `find_evidence`-
-                // miss at runtime with a clear `evidence_tag_not_found`,
-                // matching the placeholder behaviour for `HandlerExpr` as
-                // a value. Real multi-effect Dynamic handlers (not yet
-                // emitted by the translator) would also fall here.
                 if effects.is_empty() {
                     eprintln!(
                         "  warning: dynamic handler at `with` site has unknown effect tag — \
-                         evidence install skipped (deferred new-path support)"
+                         evidence install skipped"
                     );
                     return self.lower_expr(body, ctx);
                 }
@@ -466,7 +459,24 @@ impl<'ctx> Lowerer<'ctx> {
     ///   - `Pat::Var { name }` → that name (mangled via `core_var`).
     ///   - non-Var patterns → a positional `_HArg{i}` plus a destructuring
     ///     `case` wrap around the body.
-    fn build_arm_closure(&mut self, arm: &MHandlerArm, ctx: &LowerCtx) -> CExpr {
+    pub(super) fn build_arm_closure(&mut self, arm: &MHandlerArm, ctx: &LowerCtx) -> CExpr {
+        self.build_arm_closure_with_return_mode(arm, ctx, ArmReturnMode::Captured)
+    }
+
+    pub(super) fn build_handler_value_arm_closure(
+        &mut self,
+        arm: &MHandlerArm,
+        ctx: &LowerCtx,
+    ) -> CExpr {
+        self.build_arm_closure_with_return_mode(arm, ctx, ArmReturnMode::Direct)
+    }
+
+    fn build_arm_closure_with_return_mode(
+        &mut self,
+        arm: &MHandlerArm,
+        ctx: &LowerCtx,
+        mode: ArmReturnMode,
+    ) -> CExpr {
         if arm.finally_block.is_some() {
             // `finally` blocks aren't wired in the new path yet — see the
             // old lowerer's `current_handler_finally` flow and the
@@ -491,8 +501,29 @@ impl<'ctx> Lowerer<'ctx> {
         let (closure_params, body_wraps) = self.plan_arm_params(&arm.params);
         let perform_ev = self.fresh_helper_name();
         let k_arm = self.fresh_k_arm_name();
-        let arm_ctx = ctx.with_arm_k(k_arm.clone()).with_param_locals(&arm.params);
-        let body_ce = self.lower_expr(&arm.body, &arm_ctx);
+        let direct_k = if matches!(mode, ArmReturnMode::Direct) {
+            Some(self.fresh_helper_name())
+        } else {
+            None
+        };
+        let body_ctx = match mode {
+            ArmReturnMode::Captured => ctx.with_arm_k(k_arm.clone()),
+            ArmReturnMode::Direct => ctx
+                .with_arm_k(k_arm.clone())
+                .with_return_k(direct_k.as_ref().unwrap().clone()),
+        };
+        let arm_ctx = body_ctx.with_param_locals(&arm.params);
+        let mut body_ce = self.lower_expr(&arm.body, &arm_ctx);
+        if let Some(direct_k) = direct_k {
+            body_ce = CExpr::Let(
+                direct_k,
+                Box::new(CExpr::Fun(
+                    vec!["_V".to_string()],
+                    Box::new(CExpr::Var("_V".to_string())),
+                )),
+                Box::new(body_ce),
+            );
+        }
         let body_with_pats = self.wrap_arm_param_destructures(body_ce, body_wraps);
 
         let mut params = closure_params;
@@ -589,7 +620,7 @@ impl<'ctx> Lowerer<'ctx> {
     /// construction: each inner with binds its own `_K_ret{m}` referring
     /// to the next-outer K, which is itself a `_K_ret{m-1}` if that layer
     /// has a return clause.
-    fn build_return_clause_closure(&mut self, arm: &MHandlerArm, ctx: &LowerCtx) -> CExpr {
+    pub(super) fn build_return_clause_closure(&mut self, arm: &MHandlerArm, ctx: &LowerCtx) -> CExpr {
         if arm.finally_block.is_some() {
             panic!(
                 "build_return_clause_closure: finally_block on a return clause is unusual; \

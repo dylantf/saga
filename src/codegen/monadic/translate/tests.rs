@@ -115,6 +115,8 @@ struct EmptyInfo {
     let_effect_bindings: HashMap<String, Vec<String>>,
     type_at_node: HashMap<NodeId, Type>,
     effect_ops: HashMap<String, Vec<String>>,
+    handler_effects: HashMap<String, Vec<String>>,
+    let_handler_effects: HashMap<NodeId, Vec<String>>,
 }
 
 impl EmptyInfo {
@@ -127,6 +129,8 @@ impl EmptyInfo {
             let_effect_bindings: &self.let_effect_bindings,
             type_at_node: &self.type_at_node,
             effect_ops: &self.effect_ops,
+            handler_effects: &self.handler_effects,
+            let_handler_effects: &self.let_handler_effects,
         }
     }
 }
@@ -136,14 +140,15 @@ fn run_decl(decl: Decl) -> MDecl {
     let info = empty_info();
     let view = info.as_view();
     let rmap = ResolutionMap::new();
-    let mut out = translate(&program, &rmap, &view);
+    let (mut out, _) = translate(&program, &rmap, &view);
     out.remove(0)
 }
 
 fn run_program(program: Vec<Decl>, info: &EmptyInfo) -> Vec<MDecl> {
     let view = info.as_view();
     let rmap = ResolutionMap::new();
-    translate(&program, &rmap, &view)
+    let (out, _) = translate(&program, &rmap, &view);
+    out
 }
 
 fn fun_body(decl: MDecl) -> MExpr {

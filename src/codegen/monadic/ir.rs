@@ -249,6 +249,17 @@ pub enum MExpr {
         rest: Box<MExpr>,
         source: NodeId,
     },
+
+    /// Handler expression used as a runtime value (returned from a function,
+    /// stored in a variable, etc.). The lowerer builds the op-tuple CExpr
+    /// using `build_arm_closure` / `build_return_clause_closure` so that
+    /// `resume`, evidence threading, and arm_k are handled correctly.
+    HandlerValue {
+        effects: Vec<String>,
+        arms: Vec<MHandlerArm>,
+        return_clause: Option<Box<MHandlerArm>>,
+        source: NodeId,
+    },
 }
 
 // -------------------------------------------------------------------------
@@ -396,6 +407,19 @@ pub enum MDecl {
 
 pub type MProgram = Vec<MDecl>;
 
+/// Pre-translated handler arms for handler-as-value lowering.
+/// Produced by the translator for each handler definition; consumed by
+/// the lowerer to build runtime op-tuples when a handler name appears
+/// as a value (e.g. `let h = if cond then handler_a else handler_b`).
+#[derive(Debug, Clone)]
+pub struct HandlerValueInfo {
+    pub effects: Vec<String>,
+    pub arms: Vec<MHandlerArm>,
+    pub return_clause: Option<MHandlerArm>,
+}
+
+pub type HandlerValueMap = HashMap<String, HandlerValueInfo>;
+
 // -------------------------------------------------------------------------
 // EffectInfo (narrowed read-only view)
 // -------------------------------------------------------------------------
@@ -438,4 +462,16 @@ pub struct EffectInfo<'a> {
     /// `Module.Name` keys are inserted so lookups by either spelling
     /// succeed.
     pub effect_ops: &'a HashMap<String, Vec<String>>,
+
+    /// Handler name → list of effect names the handler handles. Built
+    /// from `CheckResult.handlers` so the translator can populate
+    /// `MHandler::Dynamic.effects` for let-bound / factory-produced
+    /// handler values whose arms aren't statically visible.
+    pub handler_effects: &'a HashMap<String, Vec<String>>,
+
+    /// Let-binding pattern NodeId → effect names for handler-valued
+    /// let bindings. Built from `CheckResult.let_binding_handlers`.
+    /// Used by the translator when `with <local_var>` references a
+    /// dynamically-bound handler to recover the effect tag.
+    pub let_handler_effects: &'a HashMap<NodeId, Vec<String>>,
 }

@@ -1257,7 +1257,9 @@ fn build_effect_info_populates_all_fields_from_check_result() {
     let src = "effect Log {\n  fun log : (msg: String) -> Unit\n}\n\nmain () = ()";
     let (_, result) = check_program(src);
     let ops_storage = super::build_effect_ops_table(&result);
-    let info = super::build_effect_info(&result, &result, &ops_storage);
+    let handler_effects_storage = super::build_handler_effects(&result);
+    let let_handler_effects_storage = super::build_let_handler_effects(&result);
+    let info = super::build_effect_info(&result, &result, &ops_storage, &handler_effects_storage, &let_handler_effects_storage);
 
     // type_at_node and fun_effects come from check_result.
     assert!(std::ptr::eq(info.type_at_node, &result.type_at_node));

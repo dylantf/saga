@@ -129,6 +129,10 @@ pub struct Lowerer<'ctx> {
     ///   a bare-Erlang-var that `erlc` would reject. Populated by step 8's
     ///   toggle wiring; empty by default.
     pub(super) handler_names: std::collections::HashSet<String>,
+    /// Pre-translated handler arms for handler-as-value lowering. When a
+    /// handler name appears as a runtime value, the lowerer builds the
+    /// op-tuple CExpr from these pre-translated MHandlerArms.
+    handler_value_map: &'ctx crate::codegen::monadic::ir::HandlerValueMap,
 }
 
 impl<'ctx> Lowerer<'ctx> {
@@ -138,6 +142,7 @@ impl<'ctx> Lowerer<'ctx> {
         module_ctx: &'ctx CodegenContext,
         handler_info: &'ctx HandlerAnalysis,
         effect_info: &'ctx EffectInfo<'ctx>,
+        handler_value_map: &'ctx crate::codegen::monadic::ir::HandlerValueMap,
     ) -> Self {
         let mut record_fields: HashMap<String, Vec<String>> = HashMap::new();
         for (mod_name, m) in &module_ctx.modules {
@@ -164,6 +169,7 @@ impl<'ctx> Lowerer<'ctx> {
             emit_bootstrap: false,
             current_erlang_module: String::new(),
             handler_names: std::collections::HashSet::new(),
+            handler_value_map,
         }
     }
 

@@ -20,7 +20,7 @@ use std::collections::HashMap;
 
 use crate::ast::{self, Decl, ExprKind, HandlerBody, NodeId};
 use crate::codegen::monadic::ir::{
-    EffectInfo, MDecl, MDictConstructor, MExpr, MFunBinding, MProgram, MVal, MVar,
+    EffectInfo, HandlerValueMap, MDecl, MDictConstructor, MExpr, MFunBinding, MProgram, MVal, MVar,
 };
 use crate::codegen::resolve::ResolutionMap;
 
@@ -29,7 +29,11 @@ use crate::codegen::resolve::ResolutionMap;
 /// `p` must already be ANF-normalized (`codegen::anf::normalize`). `r` is the
 /// backend resolution map. `e` is the narrowed effect-info view. Tests
 /// construct `EffectInfo` manually with only the fields they need.
-pub fn translate(p: &ast::Program, r: &ResolutionMap, e: &EffectInfo<'_>) -> MProgram {
+pub fn translate(
+    p: &ast::Program,
+    r: &ResolutionMap,
+    e: &EffectInfo<'_>,
+) -> (MProgram, HandlerValueMap) {
     translate_with_imports(p, r, e, &HashMap::new())
 }
 
@@ -46,14 +50,16 @@ pub fn translate_with_imports(
     r: &ResolutionMap,
     e: &EffectInfo<'_>,
     imported_handler_decls: &HashMap<String, HandlerBody>,
-) -> MProgram {
+) -> (MProgram, HandlerValueMap) {
     let mut tr = Translator::new(p, r, e);
     for (name, body) in imported_handler_decls {
         tr.handler_decls
             .entry(name.clone())
             .or_insert_with(|| body.clone());
     }
-    p.iter().map(|d| tr.translate_decl(d)).collect()
+    let program = p.iter().map(|d| tr.translate_decl(d)).collect();
+    let handler_values = tr.build_handler_value_map();
+    (program, handler_values)
 }
 
 /// Translator state. One instance per program; reset is not needed between
@@ -83,6 +89,11 @@ pub(crate) struct Translator<'a> {
     /// `None` means the binding is known to hold a handler value but its
     /// arms are not statically known (dynamic — e.g. produced by a factory).
     pub(crate) local_static_handlers: HashMap<String, Option<HandlerBody>>,
+    /// Local variable names known to hold handler values whose arms are
+    /// dynamic, but whose handled effects are known from the type
+    /// (e.g. `let h = if cond then a else b` where both branches handle `Log`).
+    /// Keyed by variable name, value is canonicalized effect names.
+    pub(crate) local_handler_effects: HashMap<String, Vec<String>>,
     /// Fresh MVar id counter — program-wide unique.
     pub(crate) fresh_mvar: u32,
 }
@@ -118,6 +129,7 @@ impl<'a> Translator<'a> {
             effect_ops,
             handler_decls,
             local_static_handlers: HashMap::new(),
+            local_handler_effects: HashMap::new(),
             fresh_mvar: 0,
         }
     }
@@ -128,6 +140,55 @@ impl<'a> Translator<'a> {
         let n = self.fresh_mvar;
         self.fresh_mvar += 1;
         n
+    }
+
+    /// Build a map of handler name → pre-translated handler arms for
+    /// handler-as-value lowering. Called after the main translation pass.
+    /// Skips handlers whose effects aren't visible to the translator
+    /// (cross-module effects that aren't in `effect_ops`).
+    pub(crate) fn build_handler_value_map(&mut self) -> HandlerValueMap {
+        use crate::codegen::monadic::ir::HandlerValueInfo;
+        let decls: Vec<(String, HandlerBody)> = self.handler_decls.clone().into_iter().collect();
+        let mut map = HandlerValueMap::new();
+        for (name, body) in &decls {
+            let mut effects: Vec<String> = Vec::new();
+            for effect_ref in &body.effects {
+                let ename = effect_ref.name.clone();
+                if !effects.contains(&ename) {
+                    effects.push(ename);
+                }
+            }
+            let canonical_effects: Vec<String> = effects
+                .iter()
+                .map(|e| self.canonical_effect_name(e))
+                .collect();
+            // Skip handlers whose effects aren't in effect_ops (cross-module
+            // effects not visible to the translator).
+            if canonical_effects
+                .iter()
+                .any(|e| !self.effect_ops.contains_key(e))
+            {
+                continue;
+            }
+            let arms = body
+                .arms
+                .iter()
+                .map(|a| self.translate_handler_arm(&a.node, &canonical_effects))
+                .collect();
+            let return_clause = body
+                .return_clause
+                .as_ref()
+                .map(|a| self.translate_handler_arm(a, &canonical_effects));
+            map.insert(
+                name.clone(),
+                HandlerValueInfo {
+                    effects: canonical_effects,
+                    arms,
+                    return_clause,
+                },
+            );
+        }
+        map
     }
 
     #[allow(dead_code)]

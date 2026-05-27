@@ -39,6 +39,8 @@ struct EffectInfoStorage {
     let_effect_bindings: HashMap<String, Vec<String>>,
     type_at_node: HashMap<NodeId, crate::typechecker::Type>,
     effect_ops: HashMap<String, Vec<String>>,
+    handler_effects: HashMap<String, Vec<String>>,
+    let_handler_effects: HashMap<NodeId, Vec<String>>,
 }
 
 impl EffectInfoStorage {
@@ -51,6 +53,8 @@ impl EffectInfoStorage {
             let_effect_bindings: HashMap::new(),
             type_at_node: HashMap::new(),
             effect_ops: HashMap::new(),
+            handler_effects: HashMap::new(),
+            let_handler_effects: HashMap::new(),
         }
     }
 
@@ -63,6 +67,8 @@ impl EffectInfoStorage {
             let_effect_bindings: &self.let_effect_bindings,
             type_at_node: &self.type_at_node,
             effect_ops: &self.effect_ops,
+            handler_effects: &self.handler_effects,
+            let_handler_effects: &self.let_handler_effects,
         }
     }
 }
@@ -74,7 +80,8 @@ fn lower(program: &MProgram, module_name: &str) -> CModule {
     let handler_info = HandlerAnalysis::default();
     let storage = EffectInfoStorage::empty();
     let effect_info = storage.view();
-    let mut lowerer = Lowerer::new(&resolution, &ctors, &ctx, &handler_info, &effect_info);
+    let hvm = crate::codegen::monadic::ir::HandlerValueMap::new();
+    let mut lowerer = Lowerer::new(&resolution, &ctors, &ctx, &handler_info, &effect_info, &hvm);
     lowerer.lower_module(module_name, program)
 }
 
@@ -354,7 +361,8 @@ fn passthrough_recorddef_populates_local_record_fields() {
     let handler_info = HandlerAnalysis::default();
     let storage = EffectInfoStorage::empty();
     let effect_info = storage.view();
-    let mut lowerer = Lowerer::new(&resolution, &ctors, &ctx, &handler_info, &effect_info);
+    let hvm = crate::codegen::monadic::ir::HandlerValueMap::new();
+    let mut lowerer = Lowerer::new(&resolution, &ctors, &ctx, &handler_info, &effect_info, &hvm);
     let _ = lowerer.lower_module("Std.Test", &program);
 
     // Both qualified and bare keys should now resolve.
@@ -499,7 +507,8 @@ where
     let handler_info = HandlerAnalysis::default();
     let storage = EffectInfoStorage::empty();
     let effect_info = storage.view();
-    let mut lowerer = Lowerer::new(resolution, ctors, &ctx, &handler_info, &effect_info);
+    let hvm = crate::codegen::monadic::ir::HandlerValueMap::new();
+    let mut lowerer = Lowerer::new(resolution, ctors, &ctx, &handler_info, &effect_info, &hvm);
     op(&mut lowerer)
 }
 
@@ -2422,7 +2431,8 @@ where
     let handler_info = HandlerAnalysis::default();
     let storage = EffectInfoStorage::empty();
     let effect_info = storage.view();
-    let mut lowerer = Lowerer::new(&resolution, &ctors, &ctx, &handler_info, &effect_info);
+    let hvm = crate::codegen::monadic::ir::HandlerValueMap::new();
+    let mut lowerer = Lowerer::new(&resolution, &ctors, &ctx, &handler_info, &effect_info, &hvm);
     for (rec, fields) in fields_by_record {
         lowerer.record_fields.insert(
             rec.to_string(),
@@ -2831,7 +2841,8 @@ fn lower_pat_in_case(pat: Pat, lowerer_setup: impl FnOnce(&mut Lowerer<'_>)) -> 
     let handler_info = HandlerAnalysis::default();
     let storage = EffectInfoStorage::empty();
     let effect_info = storage.view();
-    let mut lowerer = Lowerer::new(&resolution, &ctors, &ctx, &handler_info, &effect_info);
+    let hvm = crate::codegen::monadic::ir::HandlerValueMap::new();
+    let mut lowerer = Lowerer::new(&resolution, &ctors, &ctx, &handler_info, &effect_info, &hvm);
     lowerer_setup(&mut lowerer);
     let expr = MExpr::Case {
         scrutinee: atom_var("x"),
@@ -3212,7 +3223,8 @@ fn bootstrap_emits_initial_evidence_fn_when_enabled() {
     let handler_info = HandlerAnalysis::default();
     let storage = EffectInfoStorage::empty();
     let effect_info = storage.view();
-    let mut lowerer = Lowerer::new(&resolution, &ctors, &ctx, &handler_info, &effect_info)
+    let hvm = crate::codegen::monadic::ir::HandlerValueMap::new();
+    let mut lowerer = Lowerer::new(&resolution, &ctors, &ctx, &handler_info, &effect_info, &hvm)
         .with_bootstrap_emission(true);
     let cmod = lowerer.lower_module("entry", &vec![]);
     let names: Vec<&str> = cmod.funs.iter().map(|f| f.name.as_str()).collect();
@@ -3245,7 +3257,8 @@ fn bootstrap_evidence_vector_has_canonical_effect_entries() {
     let handler_info = HandlerAnalysis::default();
     let storage = EffectInfoStorage::empty();
     let effect_info = storage.view();
-    let mut lowerer = Lowerer::new(&resolution, &ctors, &ctx, &handler_info, &effect_info)
+    let hvm = crate::codegen::monadic::ir::HandlerValueMap::new();
+    let mut lowerer = Lowerer::new(&resolution, &ctors, &ctx, &handler_info, &effect_info, &hvm)
         .with_bootstrap_emission(true);
     let cmod = lowerer.lower_module("entry", &vec![]);
     let f = cmod
@@ -3297,7 +3310,8 @@ fn bootstrap_identity_op_closure_calls_bif_and_applies_k() {
     let handler_info = HandlerAnalysis::default();
     let storage = EffectInfoStorage::empty();
     let effect_info = storage.view();
-    let mut lowerer = Lowerer::new(&resolution, &ctors, &ctx, &handler_info, &effect_info)
+    let hvm = crate::codegen::monadic::ir::HandlerValueMap::new();
+    let mut lowerer = Lowerer::new(&resolution, &ctors, &ctx, &handler_info, &effect_info, &hvm)
         .with_bootstrap_emission(true);
     let cmod = lowerer.lower_module("entry", &vec![]);
     let f = cmod
@@ -3361,7 +3375,8 @@ fn bootstrap_spawn_thunk_uses_perform_site_evidence() {
     let handler_info = HandlerAnalysis::default();
     let storage = EffectInfoStorage::empty();
     let effect_info = storage.view();
-    let mut lowerer = Lowerer::new(&resolution, &ctors, &ctx, &handler_info, &effect_info)
+    let hvm = crate::codegen::monadic::ir::HandlerValueMap::new();
+    let mut lowerer = Lowerer::new(&resolution, &ctors, &ctx, &handler_info, &effect_info, &hvm)
         .with_bootstrap_emission(true);
     let cmod = lowerer.lower_module("entry", &vec![]);
     let f = cmod
@@ -3450,7 +3465,8 @@ fn bootstrap_process_exit_calls_erlang_exit() {
     let handler_info = HandlerAnalysis::default();
     let storage = EffectInfoStorage::empty();
     let effect_info = storage.view();
-    let mut lowerer = Lowerer::new(&resolution, &ctors, &ctx, &handler_info, &effect_info)
+    let hvm = crate::codegen::monadic::ir::HandlerValueMap::new();
+    let mut lowerer = Lowerer::new(&resolution, &ctors, &ctx, &handler_info, &effect_info, &hvm)
         .with_bootstrap_emission(true);
     let cmod = lowerer.lower_module("entry", &vec![]);
     let f = cmod
@@ -3531,7 +3547,8 @@ fn fun_binding_not_in_exports_is_not_exported() {
     let handler_info = HandlerAnalysis::default();
     let storage = EffectInfoStorage::empty();
     let effect_info = storage.view();
-    let mut lowerer = Lowerer::new(&resolution, &ctors, &ctx, &handler_info, &effect_info);
+    let hvm = crate::codegen::monadic::ir::HandlerValueMap::new();
+    let mut lowerer = Lowerer::new(&resolution, &ctors, &ctx, &handler_info, &effect_info, &hvm);
 
     let mk_fb = |name: &str| {
         MDecl::FunBinding(MFunBinding {

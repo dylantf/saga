@@ -332,6 +332,21 @@ fn write_tail(out: &mut String, indent: usize, e: &MExpr) {
             writeln!(out, "{p}in").unwrap();
             write_expr(out, indent + 2, rest);
         }
+        MExpr::HandlerValue {
+            effects,
+            arms,
+            source,
+            ..
+        } => {
+            writeln!(
+                out,
+                "{p}handler_value for {} ({} arms) [#{}]",
+                effects.join(", "),
+                arms.len(),
+                source.0
+            )
+            .unwrap();
+        }
     }
 }
 
@@ -455,6 +470,7 @@ fn expr_compact(e: &MExpr) -> String {
         ),
         MExpr::Receive { source, .. } => format!("<Receive [#{}]>", source.0),
         MExpr::LetFun { source, .. } => format!("<LetFun [#{}]>", source.0),
+        MExpr::HandlerValue { source, .. } => format!("<HandlerValue [#{}]>", source.0),
     }
 }
 

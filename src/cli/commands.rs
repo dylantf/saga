@@ -370,7 +370,9 @@ pub fn cmd_inspect(file: &str, stage: &str) {
                 .module_check_results()
                 .get(&module_name)
                 .unwrap_or(&result);
-            let effect_info = codegen::build_effect_info(&result, mod_check_ref, &ops_storage);
+            let handler_effects_storage = codegen::build_handler_effects(&result);
+            let let_handler_effects_storage = codegen::build_let_handler_effects(&result);
+            let effect_info = codegen::build_effect_info(&result, mod_check_ref, &ops_storage, &handler_effects_storage, &let_handler_effects_storage);
 
             // Collect imported handler bodies (matches new-path emit behavior).
             let mut imported_handler_decls: std::collections::HashMap<
@@ -391,7 +393,7 @@ pub fn cmd_inspect(file: &str, stage: &str) {
                 }
             }
 
-            let monadic_prog = monadic::translate::translate_with_imports(
+            let (monadic_prog, _handler_value_map) = monadic::translate::translate_with_imports(
                 &anf_program,
                 &resolution_map,
                 &effect_info,

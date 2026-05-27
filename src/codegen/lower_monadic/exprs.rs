@@ -85,7 +85,38 @@ impl<'ctx> Lowerer<'ctx> {
                 rest,
                 ..
             } => self.lower_let_fun(name, params, body, rest, ctx),
+            MExpr::HandlerValue {
+                arms,
+                return_clause,
+                ..
+            } => self.lower_handler_value(arms, return_clause.as_deref(), ctx),
         }
+    }
+
+    /// Lower `MExpr::HandlerValue` to a runtime op-tuple. Each arm is
+    /// compiled as a direct-returning handler-value closure: it can call the
+    /// perform-site `resume` continuation, then returns the arm result to the
+    /// dynamic `with` delimiter instead of applying the definition-site K.
+    fn lower_handler_value(
+        &mut self,
+        arms: &[crate::codegen::monadic::ir::MHandlerArm],
+        return_clause: Option<&crate::codegen::monadic::ir::MHandlerArm>,
+        ctx: &LowerCtx,
+    ) -> CExpr {
+        // Use a fresh context so arm closures are self-contained and don't
+        // capture the definition site's return_k/evidence.
+        let mut sorted_arms: Vec<&crate::codegen::monadic::ir::MHandlerArm> =
+            arms.iter().collect();
+        sorted_arms.sort_by_key(|a| (a.op.effect.clone(), a.op.op_index));
+        let elements: Vec<CExpr> = sorted_arms
+            .iter()
+            .map(|arm| self.build_handler_value_arm_closure(arm, ctx))
+            .collect();
+        // Dynamic handler return clauses need an explicit runtime ABI slot;
+        // until that lands, only op arms participate in the op tuple.
+        let _ = return_clause;
+        let tuple = CExpr::Tuple(elements);
+        self.apply_current_k(tuple, ctx)
     }
 
     /// Lower `MExpr::LetFun { name, params, body, rest }` to a Core Erlang

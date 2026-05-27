@@ -29,8 +29,11 @@ impl<'a> Translator<'a> {
             return self.static_from_body(name, &body, ref_id);
         }
         // Dynamic — runtime value held in `name`.
+        // Extract the effect tag from the typechecker's handler registry so
+        // the lowerer can install evidence under the correct tag.
+        let effects = self.resolve_dynamic_handler_effects(name);
         MHandler::Dynamic {
-            effects: Vec::new(),
+            effects,
             op_tuple: Atom::Var {
                 name: MVar {
                     name: name.to_string(),
@@ -115,8 +118,9 @@ impl<'a> Translator<'a> {
         }
 
         if let Some((name, ref_id)) = any_dynamic {
+            let effects = self.resolve_dynamic_handler_effects(&name);
             return MHandler::Dynamic {
-                effects: Vec::new(),
+                effects,
                 op_tuple: Atom::Var {
                     name: MVar {
                         name,
@@ -221,7 +225,7 @@ impl<'a> Translator<'a> {
         })
     }
 
-    fn translate_handler_arm(
+    pub(crate) fn translate_handler_arm(
         &mut self,
         arm: &HandlerArm,
         handler_effects: &[String],
@@ -284,11 +288,28 @@ impl<'a> Translator<'a> {
         }
     }
 
+    /// Resolve the effect names for a dynamic handler variable by looking
+    /// up the handler name in `EffectInfo.handler_effects` (populated from
+    /// the typechecker's handler registry). Returns canonicalized effect
+    /// names so `insert_canonical` tags match `find_evidence` lookups.
+    fn resolve_dynamic_handler_effects(&self, name: &str) -> Vec<String> {
+        if let Some(effects) = self.local_handler_effects.get(name) {
+            return effects.clone();
+        }
+        if let Some(effects) = self.effect_info.handler_effects.get(name) {
+            return effects
+                .iter()
+                .map(|e| self.canonical_effect_name(e))
+                .collect();
+        }
+        Vec::new()
+    }
+
     /// Map a bare effect name (e.g. `Stdio`) to its canonical form (e.g.
     /// `Std.IO.Stdio`) by scanning `effect_ops` for a dotted key whose
     /// last segment matches. Returns the input unchanged if no canonical
     /// alias is found (already-canonical names pass through).
-    fn canonical_effect_name(&self, bare: &str) -> String {
+    pub(crate) fn canonical_effect_name(&self, bare: &str) -> String {
         if bare.contains('.') {
             return bare.to_string();
         }

@@ -55,6 +55,8 @@ mod tests {
         let_effect_bindings: HashMap<String, Vec<String>>,
         type_at_node: HashMap<crate::ast::NodeId, crate::typechecker::Type>,
         effect_ops: HashMap<String, Vec<String>>,
+        handler_effects: HashMap<String, Vec<String>>,
+        let_handler_effects: HashMap<crate::ast::NodeId, Vec<String>>,
     }
 
     impl Fixture {
@@ -68,6 +70,8 @@ mod tests {
                 let_effect_bindings: HashMap::new(),
                 type_at_node: HashMap::new(),
                 effect_ops: HashMap::new(),
+                handler_effects: HashMap::new(),
+                let_handler_effects: HashMap::new(),
             }
         }
 
@@ -80,6 +84,8 @@ mod tests {
                 let_effect_bindings: &self.let_effect_bindings,
                 type_at_node: &self.type_at_node,
                 effect_ops: &self.effect_ops,
+                handler_effects: &self.handler_effects,
+                let_handler_effects: &self.let_handler_effects,
             }
         }
     }

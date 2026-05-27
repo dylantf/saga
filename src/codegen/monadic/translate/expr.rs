@@ -179,27 +179,34 @@ impl<'a> Translator<'a> {
                 source: e.id,
             },
 
-            // ----- HandlerExpr at value position.
-            //
-            // `handler for E { … }` used as an expression value (e.g. as the
-            // body of a factory function `make_logger v = handler for Log
-            // { … }`, or in a let-binding that escapes the local-alias scope)
-            // produces a runtime handler value. The new path's full
-            // dynamic-handler treatment isn't wired yet — `MHandler::Dynamic`
-            // demands a known effect tag, which the translator doesn't have
-            // for an arbitrary `HandlerExpr` here without threading the
-            // typechecker's resolution. We emit a placeholder
-            // `Pure(Atom::Lit Unit)` so compilation succeeds; any
-            // `with <handler-value> body` site that actually consumes the
-            // value will crash at runtime with a clear shape error (the
-            // value isn't an op tuple). The downstream `with` site is what
-            // also still falls into `MHandler::Dynamic`'s
-            // single-effect-only path, which already panics with a spec
-            // message — so this isn't hiding a regression.
-            ExprKind::HandlerExpr { .. } => MExpr::Pure(Atom::Lit {
-                value: Lit::Unit,
-                source: e.id,
-            }),
+            ExprKind::HandlerExpr { body } => {
+                let mut effects: Vec<String> = Vec::new();
+                for effect_ref in &body.effects {
+                    let ename = effect_ref.name.clone();
+                    if !effects.contains(&ename) {
+                        effects.push(ename);
+                    }
+                }
+                let canonical_effects: Vec<String> = effects
+                    .iter()
+                    .map(|eff| self.canonical_effect_name(eff))
+                    .collect();
+                let arms = body
+                    .arms
+                    .iter()
+                    .map(|a| self.translate_handler_arm(&a.node, &canonical_effects))
+                    .collect();
+                let return_clause = body
+                    .return_clause
+                    .as_ref()
+                    .map(|a| Box::new(self.translate_handler_arm(a, &canonical_effects)));
+                MExpr::HandlerValue {
+                    effects: canonical_effects,
+                    arms,
+                    return_clause,
+                    source: e.id,
+                }
+            }
 
             // Surface-syntax variants must be desugared before codegen.
             ExprKind::Pipe { .. }
@@ -568,6 +575,7 @@ impl<'a> Translator<'a> {
     ) -> MExpr {
         // Save+restore scope so handler aliases don't leak across blocks.
         let saved = self.local_static_handlers.clone();
+        let saved_effects = self.local_handler_effects.clone();
 
         let n = stmts.len();
         if n == 0 {
@@ -591,8 +599,8 @@ impl<'a> Translator<'a> {
             match &ann.node {
                 Stmt::Let { pattern, value, .. } => {
                     // Record handler-alias info before translating the body.
-                    if let Pat::Var { name, .. } = pattern {
-                        self.record_handler_alias(name, value);
+                    if let Pat::Var { name, id, .. } = pattern {
+                        self.record_handler_alias(name, *id, value);
                     }
                     // `let h = handler for E { ... }` is bookkeeping: we
                     // recorded the alias above and the handler value itself
@@ -657,6 +665,7 @@ impl<'a> Translator<'a> {
                         source: *id,
                     };
                     self.local_static_handlers = saved;
+                    self.local_handler_effects = saved_effects;
                     return wrap_binds(bindings, letfun);
                 }
                 Stmt::Expr(expr) => {
@@ -686,6 +695,7 @@ impl<'a> Translator<'a> {
 
         // Restore scope.
         self.local_static_handlers = saved;
+        self.local_handler_effects = saved_effects;
         result
     }
 
@@ -711,8 +721,16 @@ impl<'a> Translator<'a> {
 
     /// If `value` is itself a handler (inline `HandlerExpr`, or a Var/Name
     /// that resolves to a static handler), record the alias so `with name`
-    /// later in the block can be classified as `Static`.
-    fn record_handler_alias(&mut self, name: &str, value: &Expr) {
+    /// later in the block can be classified as `Static`. For dynamic handler
+    /// bindings (conditionals, factory calls), extract the handled effects
+    /// from `let_handler_effects` (populated by the typechecker from the
+    /// binding's type) so the lowerer can install evidence.
+    fn record_handler_alias(
+        &mut self,
+        name: &str,
+        pat_id: crate::ast::NodeId,
+        value: &Expr,
+    ) {
         if let Some(body) = super::match_handler_expr(value) {
             self.local_static_handlers
                 .insert(name.to_string(), Some(body.clone()));
@@ -726,9 +744,23 @@ impl<'a> Translator<'a> {
             }
             if let Some(entry) = self.local_static_handlers.get(rhs).cloned() {
                 self.local_static_handlers.insert(name.to_string(), entry);
+                return;
+            }
+        }
+        // For dynamic handler bindings (conditionals, factory calls), look up
+        // the typechecker's persistent handler info keyed by pattern NodeId.
+        if let Some(effects) = self.effect_info.let_handler_effects.get(&pat_id) {
+            let canonical: Vec<String> = effects
+                .iter()
+                .map(|e| self.canonical_effect_name(e))
+                .collect();
+            if !canonical.is_empty() {
+                self.local_handler_effects
+                    .insert(name.to_string(), canonical);
             }
         }
     }
+
 
     /// Pre-resolve an `EffectCall` to its `EffectOpRef`. Uses
     /// `EffectInfo.effect_calls` (typechecker output) for the canonical
