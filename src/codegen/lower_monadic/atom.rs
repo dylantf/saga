@@ -129,6 +129,7 @@ impl<'ctx> Lowerer<'ctx> {
             abort_marker: enclosing.abort_marker.clone(),
             finally_block: enclosing.finally_block.clone(),
             preserve_abort_marker: enclosing.preserve_abort_marker,
+            result_delimiter: enclosing.result_delimiter.clone(),
             locals: enclosing.locals.clone(),
         }
         .with_param_locals(&arm.params);

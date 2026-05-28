@@ -315,7 +315,11 @@ impl<'ctx> Lowerer<'ctx> {
                                     ctx,
                                 )
                             } else {
-                                continue_with_value(self, CExpr::Var(other_abort_value), ctx)
+                                CExpr::Tuple(vec![
+                                    CExpr::Lit(CLit::Atom(ABORT_TAG.to_string())),
+                                    CExpr::Var(other_marker),
+                                    CExpr::Var(other_abort_value),
+                                ])
                             },
                         },
                         CArm {
@@ -397,12 +401,90 @@ impl<'ctx> Lowerer<'ctx> {
             return self.lower_value_position_bind(var, value, body, ctx);
         }
         let body_ctx = ctx.with_local(var.name.clone());
-        let body_ce = self.lower_expr(body, &body_ctx);
+        let mut body_ce = self.lower_expr(body, &body_ctx);
+        if let Some(delimiter) = &ctx.result_delimiter {
+            body_ce = self.wrap_with_result_delimiter_raw(
+                body_ce,
+                &delimiter.abort_marker,
+                delimiter.preserve_abort_marker,
+            );
+        }
+        body_ce = self.bubble_abort_to_k(body_ce, &ctx.return_k);
         let bound_var = core_var(&var.name);
         let k_name = self.fresh_k_name();
-        let k_fun = CExpr::Fun(vec![bound_var], Box::new(body_ce));
+        let k_arg = self.fresh_helper_name();
+        let other_marker = self.fresh_helper_name();
+        let other_abort_value = self.fresh_helper_name();
+        let k_body = CExpr::Case(
+            Box::new(CExpr::Var(k_arg.clone())),
+            vec![
+                CArm {
+                    pat: CPat::Tuple(vec![
+                        CPat::Lit(CLit::Atom(ABORT_TAG.to_string())),
+                        CPat::Var(other_marker.clone()),
+                        CPat::Var(other_abort_value.clone()),
+                    ]),
+                    guard: None,
+                    body: CExpr::Apply(
+                        Box::new(CExpr::Var(ctx.return_k.clone())),
+                        vec![CExpr::Tuple(vec![
+                            CExpr::Lit(CLit::Atom(ABORT_TAG.to_string())),
+                            CExpr::Var(other_marker),
+                            CExpr::Var(other_abort_value),
+                        ])],
+                    ),
+                },
+                CArm {
+                    pat: CPat::Var("_BindArg".to_string()),
+                    guard: None,
+                    body: CExpr::Let(
+                        bound_var,
+                        Box::new(CExpr::Var("_BindArg".to_string())),
+                        Box::new(body_ce),
+                    ),
+                },
+            ],
+        );
+        let k_fun = CExpr::Fun(vec![k_arg], Box::new(k_body));
         let value_ce = self.lower_expr(value, &ctx.with_return_k(k_name.clone()));
-        CExpr::Let(k_name, Box::new(k_fun), Box::new(value_ce))
+        let bind_ce = CExpr::Let(k_name, Box::new(k_fun), Box::new(value_ce));
+        self.bubble_abort_to_k(bind_ce, &ctx.return_k)
+    }
+
+    fn bubble_abort_to_k(&mut self, body_ce: CExpr, return_k: &str) -> CExpr {
+        let result = self.fresh_helper_name();
+        let other_marker = self.fresh_helper_name();
+        let other_abort_value = self.fresh_helper_name();
+        CExpr::Let(
+            result.clone(),
+            Box::new(body_ce),
+            Box::new(CExpr::Case(
+                Box::new(CExpr::Var(result.clone())),
+                vec![
+                    CArm {
+                        pat: CPat::Tuple(vec![
+                            CPat::Lit(CLit::Atom(ABORT_TAG.to_string())),
+                            CPat::Var(other_marker.clone()),
+                            CPat::Var(other_abort_value.clone()),
+                        ]),
+                        guard: None,
+                        body: CExpr::Apply(
+                            Box::new(CExpr::Var(return_k.to_string())),
+                            vec![CExpr::Tuple(vec![
+                                CExpr::Lit(CLit::Atom(ABORT_TAG.to_string())),
+                                CExpr::Var(other_marker),
+                                CExpr::Var(other_abort_value),
+                            ])],
+                        ),
+                    },
+                    CArm {
+                        pat: CPat::Var("_BindValue".to_string()),
+                        guard: None,
+                        body: CExpr::Var("_BindValue".to_string()),
+                    },
+                ],
+            )),
+        )
     }
 
     fn lower_value_position_bind(
@@ -432,7 +514,7 @@ impl<'ctx> Lowerer<'ctx> {
         let other_marker = self.fresh_helper_name();
         let other_abort_value = self.fresh_helper_name();
         let raw_value = self.fresh_helper_name();
-        CExpr::Let(
+        let value_bind = CExpr::Let(
             local_k,
             Box::new(local_k_fun),
             Box::new(CExpr::Let(
@@ -474,7 +556,8 @@ impl<'ctx> Lowerer<'ctx> {
                     ],
                 )),
             )),
-        )
+        );
+        self.bubble_abort_to_k(value_bind, &ctx.return_k)
     }
 
     /// Lower `Let { var, value, body }` — a pure (non-yielding) binder
@@ -560,6 +643,7 @@ impl<'ctx> Lowerer<'ctx> {
             abort_marker: enclosing.abort_marker.clone(),
             finally_block: enclosing.finally_block.clone(),
             preserve_abort_marker: enclosing.preserve_abort_marker,
+            result_delimiter: enclosing.result_delimiter.clone(),
             locals: enclosing.locals.clone(),
         }
         .with_param_locals(params);

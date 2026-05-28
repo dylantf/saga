@@ -212,6 +212,7 @@ impl<'ctx> Lowerer<'ctx> {
         let abort_marker = format!("__saga_abort_{raw_result_k}");
         let raw_result_k_binding = identity_continuation();
         let arm_ctx = ctx
+            .without_result_delimiter()
             .with_return_k(raw_result_k.clone())
             .with_abort_marker(abort_marker.clone());
 
@@ -267,7 +268,18 @@ impl<'ctx> Lowerer<'ctx> {
             .as_ref()
             .map(|(name, _)| name.clone())
             .unwrap_or_else(|| raw_result_k.clone());
-        let body_ctx = ctx.with_evidence(acc_evidence_var).with_return_k(inner_k);
+        let prompt_k = self.fresh_k_ret_name();
+        let prompt_k_binding =
+            self.build_result_delimiter_k(&abort_marker, &inner_k, &raw_result_k);
+
+        let body_ctx = ctx
+            .with_evidence(acc_evidence_var)
+            .with_return_k(prompt_k.clone())
+            .with_result_delimiter(
+                abort_marker.clone(),
+                prompt_k.clone(),
+                ctx.preserve_abort_marker,
+            );
         let body_ce = self.lower_expr(body, &body_ctx);
         let wrapped_body = self.wrap_with_result_delimiter(body_ce, &abort_marker, ctx);
 
@@ -282,9 +294,14 @@ impl<'ctx> Lowerer<'ctx> {
             .fold(wrapped_body, |inner, (name, value)| {
                 CExpr::Let(name, Box::new(value), Box::new(inner))
             });
+        let with_prompt = CExpr::Let(
+            prompt_k,
+            Box::new(prompt_k_binding),
+            Box::new(with_evidence),
+        );
         let with_return = match ret_binding {
-            Some((name, value)) => CExpr::Let(name, Box::new(value), Box::new(with_evidence)),
-            None => with_evidence,
+            Some((name, value)) => CExpr::Let(name, Box::new(value), Box::new(with_prompt)),
+            None => with_prompt,
         };
         CExpr::Let(
             raw_result_k,
@@ -400,20 +417,34 @@ impl<'ctx> Lowerer<'ctx> {
         );
         let new_ev_name = self.fresh_evidence_name();
 
+        let prompt_k = self.fresh_k_ret_name();
+        let prompt_k_binding =
+            self.build_result_delimiter_k(&abort_marker, &inner_k, &raw_result_k);
+
         let body_ctx = ctx
             .with_evidence(new_ev_name.clone())
-            .with_return_k(inner_k);
+            .with_return_k(prompt_k.clone())
+            .with_result_delimiter(
+                abort_marker.clone(),
+                prompt_k.clone(),
+                ctx.preserve_abort_marker,
+            );
         let body_ce = self.lower_expr(body, &body_ctx);
         let wrapped_body = self.wrap_with_result_delimiter(body_ce, &abort_marker, ctx);
 
         let with_evidence = CExpr::Let(new_ev_name, Box::new(insert), Box::new(wrapped_body));
+        let with_prompt = CExpr::Let(
+            prompt_k,
+            Box::new(prompt_k_binding),
+            Box::new(with_evidence),
+        );
         let with_runtime_return = CExpr::Let(
             runtime_return_var,
             Box::new(runtime_return_value),
             Box::new(CExpr::Let(
                 runtime_ret_k,
                 Box::new(runtime_ret_binding),
-                Box::new(with_evidence),
+                Box::new(with_prompt),
             )),
         );
         let with_return = match ret_binding {
@@ -432,6 +463,59 @@ impl<'ctx> Lowerer<'ctx> {
         )
     }
 
+    fn build_result_delimiter_k(
+        &mut self,
+        abort_marker: &str,
+        success_k: &str,
+        abort_k: &str,
+    ) -> CExpr {
+        let result = self.fresh_helper_name();
+        let abort_value = self.fresh_helper_name();
+        let other_marker = self.fresh_helper_name();
+        let other_abort_value = self.fresh_helper_name();
+        CExpr::Fun(
+            vec![result.clone()],
+            Box::new(CExpr::Case(
+                Box::new(CExpr::Var(result)),
+                vec![
+                    CArm {
+                        pat: CPat::Tuple(vec![
+                            CPat::Lit(CLit::Atom(ABORT_TAG.to_string())),
+                            CPat::Lit(CLit::Atom(abort_marker.to_string())),
+                            CPat::Var(abort_value.clone()),
+                        ]),
+                        guard: None,
+                        body: CExpr::Apply(
+                            Box::new(CExpr::Var(abort_k.to_string())),
+                            vec![CExpr::Var(abort_value)],
+                        ),
+                    },
+                    CArm {
+                        pat: CPat::Tuple(vec![
+                            CPat::Lit(CLit::Atom(ABORT_TAG.to_string())),
+                            CPat::Var(other_marker.clone()),
+                            CPat::Var(other_abort_value.clone()),
+                        ]),
+                        guard: None,
+                        body: CExpr::Tuple(vec![
+                            CExpr::Lit(CLit::Atom(ABORT_TAG.to_string())),
+                            CExpr::Var(other_marker),
+                            CExpr::Var(other_abort_value),
+                        ]),
+                    },
+                    CArm {
+                        pat: CPat::Var("_WithValue".to_string()),
+                        guard: None,
+                        body: CExpr::Apply(
+                            Box::new(CExpr::Var(success_k.to_string())),
+                            vec![CExpr::Var("_WithValue".to_string())],
+                        ),
+                    },
+                ],
+            )),
+        )
+    }
+
     /// Wrap a lowered `with` body in the common delimiter that interprets
     /// local abort markers and forwards ordinary values through the outer K.
     fn wrap_with_result_delimiter(
@@ -439,6 +523,21 @@ impl<'ctx> Lowerer<'ctx> {
         body_ce: CExpr,
         abort_marker: &str,
         ctx: &LowerCtx,
+    ) -> CExpr {
+        self.wrap_with_result_delimiter_to_k(
+            body_ce,
+            abort_marker,
+            &ctx.return_k,
+            ctx.preserve_abort_marker,
+        )
+    }
+
+    pub(super) fn wrap_with_result_delimiter_to_k(
+        &mut self,
+        body_ce: CExpr,
+        abort_marker: &str,
+        return_k: &str,
+        preserve_abort_marker: bool,
     ) -> CExpr {
         let with_result = self.fresh_helper_name();
         let abort_value = self.fresh_helper_name();
@@ -457,14 +556,17 @@ impl<'ctx> Lowerer<'ctx> {
                             CPat::Var(abort_value.clone()),
                         ]),
                         guard: None,
-                        body: if ctx.preserve_abort_marker {
+                        body: if preserve_abort_marker {
                             CExpr::Tuple(vec![
                                 CExpr::Lit(CLit::Atom(ABORT_TAG.to_string())),
                                 CExpr::Lit(CLit::Atom(abort_marker.to_string())),
                                 CExpr::Var(abort_value),
                             ])
                         } else {
-                            self.apply_current_k(CExpr::Var(abort_value), ctx)
+                            CExpr::Apply(
+                                Box::new(CExpr::Var(return_k.to_string())),
+                                vec![CExpr::Var(abort_value)],
+                            )
                         },
                     },
                     CArm {
@@ -483,7 +585,66 @@ impl<'ctx> Lowerer<'ctx> {
                     CArm {
                         pat: CPat::Var("_WithValue".to_string()),
                         guard: None,
-                        body: self.apply_current_k(CExpr::Var("_WithValue".to_string()), ctx),
+                        body: CExpr::Apply(
+                            Box::new(CExpr::Var(return_k.to_string())),
+                            vec![CExpr::Var("_WithValue".to_string())],
+                        ),
+                    },
+                ],
+            )),
+        )
+    }
+
+    pub(super) fn wrap_with_result_delimiter_raw(
+        &mut self,
+        body_ce: CExpr,
+        abort_marker: &str,
+        preserve_abort_marker: bool,
+    ) -> CExpr {
+        let with_result = self.fresh_helper_name();
+        let abort_value = self.fresh_helper_name();
+        let other_marker = self.fresh_helper_name();
+        let other_abort_value = self.fresh_helper_name();
+        CExpr::Let(
+            with_result.clone(),
+            Box::new(body_ce),
+            Box::new(CExpr::Case(
+                Box::new(CExpr::Var(with_result.clone())),
+                vec![
+                    CArm {
+                        pat: CPat::Tuple(vec![
+                            CPat::Lit(CLit::Atom(ABORT_TAG.to_string())),
+                            CPat::Lit(CLit::Atom(abort_marker.to_string())),
+                            CPat::Var(abort_value.clone()),
+                        ]),
+                        guard: None,
+                        body: if preserve_abort_marker {
+                            CExpr::Tuple(vec![
+                                CExpr::Lit(CLit::Atom(ABORT_TAG.to_string())),
+                                CExpr::Lit(CLit::Atom(abort_marker.to_string())),
+                                CExpr::Var(abort_value),
+                            ])
+                        } else {
+                            CExpr::Var(abort_value)
+                        },
+                    },
+                    CArm {
+                        pat: CPat::Tuple(vec![
+                            CPat::Lit(CLit::Atom(ABORT_TAG.to_string())),
+                            CPat::Var(other_marker.clone()),
+                            CPat::Var(other_abort_value.clone()),
+                        ]),
+                        guard: None,
+                        body: CExpr::Tuple(vec![
+                            CExpr::Lit(CLit::Atom(ABORT_TAG.to_string())),
+                            CExpr::Var(other_marker),
+                            CExpr::Var(other_abort_value),
+                        ]),
+                    },
+                    CArm {
+                        pat: CPat::Var("_WithValue".to_string()),
+                        guard: None,
+                        body: CExpr::Var("_WithValue".to_string()),
                     },
                 ],
             )),

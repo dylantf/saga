@@ -16,6 +16,17 @@ use crate::ast::Pat;
 use super::exprs;
 use super::pats::pat_bound_names;
 
+/// Runtime delimiter/prompt that should be re-entered by continuations captured
+/// inside a `with` body. Ordinary evaluation is still wrapped at the `with`
+/// site, but resumptions call bind continuations directly; carrying this lets
+/// those continuation bodies reinstall the same delimiter.
+#[derive(Clone)]
+pub(crate) struct ResultDelimiter {
+    pub abort_marker: String,
+    pub return_k: String,
+    pub preserve_abort_marker: bool,
+}
+
 /// Immutable per-derivation lowering context.
 ///
 /// Cloning three short strings per `Bind` / `With` / arm derivation is cheap
@@ -57,6 +68,10 @@ pub(crate) struct LowerCtx {
     /// argument values.
     pub preserve_abort_marker: bool,
 
+    /// Active with-body delimiter to wrap bind-continuation bodies with. This
+    /// is separate from `abort_marker`, which belongs to handler arm bodies.
+    pub result_delimiter: Option<ResultDelimiter>,
+
     /// Source-level names bound in the current lexical scope.
     ///
     /// The backend resolution map is keyed by original AST node ids and may
@@ -76,6 +91,7 @@ impl LowerCtx {
             abort_marker: None,
             finally_block: None,
             preserve_abort_marker: false,
+            result_delimiter: None,
             locals: BTreeSet::new(),
         }
     }
@@ -133,6 +149,34 @@ impl LowerCtx {
     pub fn with_preserve_abort_marker(&self, preserve_abort_marker: bool) -> Self {
         Self {
             preserve_abort_marker,
+            ..self.clone()
+        }
+    }
+
+    /// Clone + install the with-body delimiter that captured bind
+    /// continuations should re-enter.
+    pub fn with_result_delimiter(
+        &self,
+        abort_marker: String,
+        return_k: String,
+        preserve_abort_marker: bool,
+    ) -> Self {
+        Self {
+            result_delimiter: Some(ResultDelimiter {
+                abort_marker,
+                return_k,
+                preserve_abort_marker,
+            }),
+            ..self.clone()
+        }
+    }
+
+    /// Clone + clear the active with-body delimiter. Handler arm bodies use the
+    /// outer evidence and K, but they are not lexically part of the handled body
+    /// whose prompt captured resumptions must re-enter.
+    pub fn without_result_delimiter(&self) -> Self {
+        Self {
+            result_delimiter: None,
             ..self.clone()
         }
     }

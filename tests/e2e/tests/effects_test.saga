@@ -589,7 +589,7 @@ tests () = {
       # (correct only when the aborting handler is INNER), so this currently
       # mis-routes. Fixing it needs delimiter-scope awareness, not a blanket
       # propagate/unwrap. Tracked in docs/planning/uniform-effect-translation.
-      skip "foreign abort propagates through an inner resuming arm" (fun () -> {
+      test "foreign abort propagates through an inner resuming arm" (fun () -> {
         let result = foreign_abort_through_resume ()
         assert_eq result (Err "boom")
       })
