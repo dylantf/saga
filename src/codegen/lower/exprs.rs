@@ -1442,6 +1442,7 @@ impl<'a> Lowerer<'a> {
                 expr: rec_expr,
                 field,
                 record_name: resolved_name,
+                ..
             } if self.expr_is_effectful_call(rec_expr)
                 || self.has_nested_effectful_expr(rec_expr) =>
             {
@@ -1462,6 +1463,7 @@ impl<'a> Lowerer<'a> {
                 record: rec_expr,
                 fields,
                 record_name: resolved_name,
+                ..
             } if self.expr_is_effectful_call(rec_expr)
                 || self.has_nested_effectful_expr(rec_expr)
                 || fields.iter().any(|(_, _, e)| {

@@ -103,9 +103,6 @@ pub(super) fn process_string_escapes(s: &str) -> String {
 
 /// Shared segment metadata resolution for bitstring expressions.
 /// Given a set of specifiers, returns (type, default_size, unit).
-///
-/// Copied verbatim from `src/codegen/lower/util.rs::resolve_bit_segment_meta`
-/// per the agent-guide's no-imports rule.
 pub(super) fn resolve_bit_segment_meta(specs: &[BitSegSpec]) -> (BinSegType, i64, u8) {
     let has = |s: &BitSegSpec| specs.contains(s);
     if has(&BitSegSpec::Float) {

@@ -197,6 +197,10 @@ pub enum MExpr {
         record: Atom,
         field: String,
         record_name: Option<String>,
+        /// Canonical sorted field order for anonymous records (from
+        /// elaboration); lets lowering read field positions structurally
+        /// instead of decoding the runtime tag. `None` for named records.
+        anon_fields: Option<Vec<String>>,
         source: NodeId,
     },
 
@@ -204,6 +208,9 @@ pub enum MExpr {
         record: Atom,
         fields: Vec<(String, Atom)>,
         record_name: Option<String>,
+        /// Canonical sorted field order for anonymous records. `None` for
+        /// named records.
+        anon_fields: Option<Vec<String>>,
         source: NodeId,
     },
 

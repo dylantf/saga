@@ -315,6 +315,7 @@ impl Normalizer {
                 expr: inner,
                 field,
                 record_name,
+                anon_fields,
             } => {
                 let new_inner = self.normalize_and_lift(inner, lifted);
                 Expr::rebuild_like(
@@ -323,6 +324,7 @@ impl Normalizer {
                         expr: Box::new(new_inner),
                         field: field.clone(),
                         record_name: record_name.clone(),
+                        anon_fields: anon_fields.clone(),
                     },
                 )
             }
@@ -356,6 +358,7 @@ impl Normalizer {
                 record,
                 fields,
                 record_name,
+                anon_fields,
             } => {
                 let new_record = self.normalize_and_lift(record, lifted);
                 let new_fields = fields
@@ -368,6 +371,7 @@ impl Normalizer {
                         record: Box::new(new_record),
                         fields: new_fields,
                         record_name: record_name.clone(),
+                        anon_fields: anon_fields.clone(),
                     },
                 )
             }

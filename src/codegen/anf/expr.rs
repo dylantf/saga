@@ -163,6 +163,7 @@ impl Anf {
                 expr,
                 field,
                 record_name,
+                anon_fields,
             } => {
                 let expr = self.atomize_into(*expr, bindings);
                 Expr {
@@ -172,6 +173,7 @@ impl Anf {
                         expr: Box::new(expr),
                         field,
                         record_name,
+                        anon_fields,
                     },
                 }
             }
@@ -212,6 +214,7 @@ impl Anf {
                 record,
                 fields,
                 record_name,
+                anon_fields,
             } => {
                 let record = self.atomize_into(*record, bindings);
                 let fields = fields
@@ -225,6 +228,7 @@ impl Anf {
                         record: Box::new(record),
                         fields,
                         record_name,
+                        anon_fields,
                     },
                 }
             }

@@ -700,16 +700,27 @@ impl Elaborator {
         output
     }
 
-    /// Resolve the record type name from a node's inferred type.
-    fn resolve_record_name(&self, node_id: crate::ast::NodeId) -> Option<String> {
-        let ty = self.type_at_node.get(&node_id)?;
+    /// Resolve the record identity from a node's inferred type: the type
+    /// name/tag plus, for anonymous records, the canonical sorted field order
+    /// so lowering can read field positions structurally instead of decoding
+    /// the runtime tag.
+    fn resolve_record_layout(
+        &self,
+        node_id: crate::ast::NodeId,
+    ) -> (Option<String>, Option<Vec<String>>) {
+        let Some(ty) = self.type_at_node.get(&node_id) else {
+            return (None, None);
+        };
         match ty {
-            Type::Con(name, _) => Some(name.clone()),
+            Type::Con(name, _) => (Some(name.clone()), None),
             Type::Record(fields) => {
-                let names: Vec<&str> = fields.iter().map(|(n, _)| n.as_str()).collect();
-                Some(crate::ast::anon_record_tag(&names))
+                let mut names: Vec<String> = fields.iter().map(|(n, _)| n.clone()).collect();
+                names.sort();
+                let name_refs: Vec<&str> = names.iter().map(|s| s.as_str()).collect();
+                let tag = crate::ast::anon_record_tag(&name_refs);
+                (Some(tag), Some(names))
             }
-            _ => None,
+            _ => (None, None),
         }
     }
 
@@ -1216,13 +1227,14 @@ impl Elaborator {
             ),
 
             ExprKind::FieldAccess { expr: e, field, .. } => {
-                let record_name = self.resolve_record_name(e.id);
+                let (record_name, anon_fields) = self.resolve_record_layout(e.id);
                 Expr::rebuild_like(
                     expr,
                     ExprKind::FieldAccess {
                         expr: Box::new(self.elaborate_expr(e)),
                         field: field.clone(),
                         record_name,
+                        anon_fields,
                     },
                 )
             }
@@ -1249,7 +1261,7 @@ impl Elaborator {
             ),
 
             ExprKind::RecordUpdate { record, fields, .. } => {
-                let record_name = self.resolve_record_name(record.id);
+                let (record_name, anon_fields) = self.resolve_record_layout(record.id);
                 Expr::rebuild_like(
                     expr,
                     ExprKind::RecordUpdate {
@@ -1259,6 +1271,7 @@ impl Elaborator {
                             .map(|(n, s, e)| (n.clone(), *s, self.elaborate_expr(e)))
                             .collect(),
                         record_name,
+                        anon_fields,
                     },
                 )
             }

@@ -430,22 +430,17 @@ Contract:
 
 Findings:
 
-- `ast::anon_record_tag` currently emits `__anon_<fields_joined_by_underscore>`.
-  This is not injective: `{a_b, c}` and `{a, b_c}` both encode to
-  `__anon_a_b_c`.
-- `elaborate.rs::resolve_record_name` maps `Type::Record(fields)` back into the
-  same encoded tag string and stores it in `ExprKind::FieldAccess.record_name`
-  / `RecordUpdate.record_name`.
-- The monadic IR preserves only that `Option<String>` record name/tag. It does
-  not carry anonymous-record field order.
-- `lower_monadic::exprs_edge` therefore recovers anonymous field order by
-  `strip_prefix("__anon_").split('_')`, which is necessarily lossy and fails on
-  underscore-containing field names.
-- `lower_monadic::mod::absorb_anon_record_atoms_from_program` partially masks
-  this by registering anon-record atom tags into `record_fields`, but this only
-  helps when an `Atom::AnonRecord` of the same shape exists in the lowered
-  program. It does not make the tag encoding injective, and it is not a real
-  source of layout truth for field access on parameters/imported values.
+- Implemented in this branch. `ast::anon_record_tag` now uses a
+  length-prefixed opaque atom format, so `{a_b, c}` and `{a, b_c}` no longer
+  collide at runtime.
+- `ExprKind::FieldAccess` / `ExprKind::RecordUpdate` and the monadic IR now
+  carry `anon_fields: Option<Vec<String>>`. Elaboration fills this from
+  `Type::Record` using the canonical sorted field order.
+- `lower_monadic::exprs_edge` resolves field order from structural metadata:
+  anonymous records use `anon_fields`; named records use
+  `ModuleCodegenInfo::record_fields`. It no longer decodes the runtime tag.
+- Tests cover anonymous field access/update with underscore field names and a
+  direct `anon_record_tag` collision regression.
 
 Recommended fix:
 
@@ -473,6 +468,13 @@ Recommended fix:
    - collision pair `{a_b, c}` vs `{a, b_c}` must not pattern-match/equal as
      the same runtime shape,
    - named-record access/update still uses declared field order across modules.
+
+Follow-up:
+
+- If the frozen old lowerer must remain behaviorally togglable for anonymous
+  record field access/update, it would need to consume the same structural
+  field-order metadata. Under the current frozen-old-path rule, only mechanical
+  match updates were made there.
 
 Decision:
 
@@ -631,15 +633,9 @@ Recommended action:
    because they are part of the same callable-boundary contract.
 
 2. **Record metadata.**
-   Fix anonymous record field names with underscores. NOTE: this is a real
-   latent bug, not just a test fixture — `ast::anon_record_tag` joins sorted
-   field names with an unescaped `_`, so a field name containing `_` both
-   corrupts the new-path "recover order from tag" decode
-   (`exprs_edge.rs::lower_field_access` / `lower_record_update`) **and** collides
-   at encode time (`{a_b, c}` and `{a, b_c}` produce the same tag, affecting
-   both paths). Fix by threading `RecordInfo` field order rather than recovering
-   it from the tag string. Untested today because no test uses underscore field
-   names.
+   Done for the new path. Anonymous runtime tags are length-prefixed and
+   lowering receives structural anonymous field order through AST/monadic IR
+   metadata instead of decoding the tag string.
 
 3. ~~**Cross-module `InlineVal`.**~~ Resolved by removing `@inline` (see
    Decisions Log).

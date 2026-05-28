@@ -465,6 +465,7 @@ fn passthrough_recorddef_populates_local_record_fields() {
         &atom_var("rec"),
         "body",
         Some("Std.Test.TestCaseData"),
+        None,
         &crate::codegen::lower_monadic::LowerCtx::fresh(),
     );
     // The access path wraps the element/2 call in apply _ReturnK(...).
@@ -2472,6 +2473,7 @@ fn field_access_emits_element_call_wrapped_in_return_k() {
         record: atom_var("r"),
         field: "b".to_string(),
         record_name: Some("Foo".to_string()),
+        anon_fields: None,
         source: dummy_node(),
     };
     let ce = lower_with_records(&[("Foo", vec!["a", "b", "c"])], |l| {
@@ -2496,6 +2498,34 @@ fn field_access_emits_element_call_wrapped_in_return_k() {
 }
 
 #[test]
+fn field_access_uses_anon_fields_without_record_fields_entry() {
+    // Anonymous record `{ a_b, c }`: field order comes from `anon_fields`,
+    // not from any `record_fields` entry and not by decoding the tag. A field
+    // name containing `_` must still resolve. `.c` → element(3, R).
+    let ce = lower_with_records(&[], |l| {
+        l.lower_field_access(
+            &atom_var("r"),
+            "c",
+            Some("__anon_3_a_b_1_c"),
+            Some(&["a_b".to_string(), "c".to_string()]),
+            &crate::codegen::lower_monadic::LowerCtx::fresh(),
+        )
+    });
+    match ce {
+        CExpr::Apply(_, args) => match &args[0] {
+            CExpr::Call(m, f, call_args) => {
+                assert_eq!(m, "erlang");
+                assert_eq!(f, "element");
+                // position_of("c") in [a_b, c] = 1; index = 1 + 2 = 3.
+                assert!(matches!(&call_args[0], CExpr::Lit(CLit::Int(3))));
+            }
+            other => panic!("expected element call, got {other:?}"),
+        },
+        other => panic!("expected Apply, got {other:?}"),
+    }
+}
+
+#[test]
 fn record_update_rebuilds_tuple_with_tag_preserved() {
     // record Pair { x, y }; update {r | y = 9}.
     // Expected: apply _ReturnK(let _H0 = R in {element(1,_H0), element(2,_H0), 9})
@@ -2503,6 +2533,7 @@ fn record_update_rebuilds_tuple_with_tag_preserved() {
         record: atom_var("r"),
         fields: vec![("y".to_string(), atom_int(9))],
         record_name: Some("Pair".to_string()),
+        anon_fields: None,
         source: dummy_node(),
     };
     let ce = lower_with_records(&[("Pair", vec!["x", "y"])], |l| {

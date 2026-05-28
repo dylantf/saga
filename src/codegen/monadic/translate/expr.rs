@@ -120,10 +120,12 @@ impl<'a> Translator<'a> {
                 expr,
                 field,
                 record_name,
+                anon_fields,
             } => MExpr::FieldAccess {
                 record: self.expect_atom(expr),
                 field: field.clone(),
                 record_name: record_name.clone(),
+                anon_fields: anon_fields.clone(),
                 source: e.id,
             },
 
@@ -131,6 +133,7 @@ impl<'a> Translator<'a> {
                 record,
                 fields,
                 record_name,
+                anon_fields,
             } => MExpr::RecordUpdate {
                 record: self.expect_atom(record),
                 fields: fields
@@ -138,6 +141,7 @@ impl<'a> Translator<'a> {
                     .map(|(n, _, x)| (n.clone(), self.expect_atom(x)))
                     .collect(),
                 record_name: record_name.clone(),
+                anon_fields: anon_fields.clone(),
                 source: e.id,
             },
 

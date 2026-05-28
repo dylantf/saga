@@ -3673,6 +3673,7 @@ impl<'a> Lowerer<'a> {
                 expr,
                 field,
                 record_name: resolved_name,
+                ..
             } => {
                 let idx = resolved_name
                     .as_deref()
@@ -3702,6 +3703,7 @@ impl<'a> Lowerer<'a> {
                 record,
                 fields,
                 record_name: resolved_name,
+                ..
             } => {
                 let rec_var = self.fresh();
                 let rec_ce = self.lower_expr_value(record);

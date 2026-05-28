@@ -571,6 +571,7 @@ impl Parser {
                     expr: Box::new(expr),
                     field,
                     record_name: None,
+                    anon_fields: None,
                 },
             };
         }
@@ -1058,6 +1059,7 @@ impl Parser {
                                 record: Box::new(record),
                                 fields,
                                 record_name: None,
+                                anon_fields: None,
                             },
                         });
                     }

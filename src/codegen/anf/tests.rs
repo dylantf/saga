@@ -185,6 +185,7 @@ fn field_access_target_lifted() {
             expr: Box::new(app(var("g"), var("x"))),
             field: "name".into(),
             record_name: None,
+            anon_fields: None,
         },
     );
     match run(fa).kind {

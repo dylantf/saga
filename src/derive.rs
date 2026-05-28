@@ -2777,6 +2777,7 @@ fn build_rep_to_expr(fields: &[(String, TypeExpr)], record_var: &Expr, span: Spa
                 expr: Box::new(record_var.clone()),
                 field: fname.into(),
                 record_name: None,
+                anon_fields: None,
             },
         );
         let leaf = apply_ctor(&generic_name("Leaf"), field_access, span);
@@ -2934,6 +2935,7 @@ fn build_record_debug_expr(
                 expr: Box::new(base_expr.clone()),
                 field: field_name.clone(),
                 record_name: None,
+                anon_fields: None,
             },
         );
 

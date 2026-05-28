@@ -21,47 +21,50 @@ use super::util::{
 use super::{LowerCtx, Lowerer};
 
 impl<'ctx> Lowerer<'ctx> {
-    /// Lower `FieldAccess { record, field, record_name, .. }`.
+    /// Resolve a record's field order from structural metadata. Anonymous
+    /// records carry their canonical sorted order in `anon_fields`; named
+    /// records are looked up in the `record_fields` cache by `record_name`.
+    /// Never decodes the runtime tag string.
+    fn record_field_order(
+        &self,
+        record_name: Option<&str>,
+        anon_fields: Option<&[String]>,
+    ) -> Vec<String> {
+        if let Some(order) = anon_fields {
+            return order.to_vec();
+        }
+        record_name
+            .and_then(|n| self.record_fields.get(n).cloned())
+            .unwrap_or_else(|| {
+                panic!(
+                    "record_field_order: cannot resolve field order (record_name={:?}); \
+                     named records must appear in record_fields and anonymous records \
+                     must carry anon_fields from elaboration",
+                    record_name
+                )
+            })
+    }
+
+    /// Lower `FieldAccess { record, field, record_name, anon_fields, .. }`.
     ///
     /// Records are runtime-represented as `{tag, f0, f1, ...}`. A field at
     /// declared position `i` lives at Erlang tuple index `i + 2` (1-based
-    /// indexing, +1 for the leading tag). The declared field order comes
-    /// from the per-module `ModuleCodegenInfo::record_fields` cache built
-    /// at lowerer construction.
+    /// indexing, +1 for the leading tag).
     ///
-    /// **Open question, flagged.** When `record_name` is `None` (the
-    /// translator couldn't resolve which record type this access belongs
-    /// to), we cannot recover field order. The old lowerer has a richer
-    /// `current_record_type_name` fallback via `front_resolution` per
-    /// NodeId — the new path doesn't thread that yet. Panicking here
-    /// surfaces the gap precisely; tighten when 7g part B / step 8 has a
-    /// real test that hits it.
+    /// Field order comes from structural metadata, never by decoding the
+    /// runtime tag: for anonymous records the translator carries the canonical
+    /// sorted order in `anon_fields`; for named records we look it up in the
+    /// per-module `ModuleCodegenInfo::record_fields` cache keyed by
+    /// `record_name`.
     pub(super) fn lower_field_access(
         &mut self,
         record: &Atom,
         field: &str,
         record_name: Option<&str>,
+        anon_fields: Option<&[String]>,
         ctx: &LowerCtx,
     ) -> CExpr {
-        // Anonymous records (`{ a: …, b: … }`) use a synthetic tag of the
-        // form `__anon_<sorted_field_names_joined_by_underscore>` — the tag
-        // itself encodes the field order, sorted alphabetically (see
-        // `ast::anon_record_tag`). Derive the order from the tag when no
-        // explicit `record_fields` entry exists, instead of panicking.
-        let anon_order: Option<Vec<String>> = record_name.and_then(|n| {
-            n.strip_prefix("__anon_")
-                .map(|rest| rest.split('_').map(|s| s.to_string()).collect::<Vec<_>>())
-        });
-        let order_owned: Option<Vec<String>> = record_name
-            .and_then(|n| self.record_fields.get(n).cloned())
-            .or(anon_order);
-        let order = order_owned.unwrap_or_else(|| {
-            panic!(
-                "lower_field_access: cannot resolve record field order (record_name={:?}); \
-                 RecordInfo threading from CheckResult is the follow-up — see exprs_edge.rs flag",
-                record_name
-            )
-        });
+        let order = self.record_field_order(record_name, anon_fields);
         let idx = order.iter().position(|f| f == field).unwrap_or_else(|| {
             panic!(
                 "lower_field_access: field '{}' not in declared order for record {:?} (order={:?})",
@@ -78,7 +81,7 @@ impl<'ctx> Lowerer<'ctx> {
         self.apply_current_k(access, ctx)
     }
 
-    /// Lower `RecordUpdate { record, fields, record_name, .. }`.
+    /// Lower `RecordUpdate { record, fields, record_name, anon_fields, .. }`.
     ///
     /// Build a fresh tuple `{tag, f0', f1', ...}` where each `fi'` is the
     /// updated value (if present in `fields`) or `element(i+2, base)` (if
@@ -91,26 +94,10 @@ impl<'ctx> Lowerer<'ctx> {
         record: &Atom,
         fields: &[(String, Atom)],
         record_name: Option<&str>,
+        anon_fields: Option<&[String]>,
         ctx: &LowerCtx,
     ) -> CExpr {
-        // See `lower_field_access`: anon record tags encode their sorted
-        // field order in the tag itself (`__anon_<f0>_<f1>_…`). Use that
-        // when no `record_fields` entry exists.
-        let anon_order: Option<Vec<String>> = record_name.and_then(|n| {
-            n.strip_prefix("__anon_")
-                .map(|rest| rest.split('_').map(|s| s.to_string()).collect::<Vec<_>>())
-        });
-        let order = record_name
-            .and_then(|n| self.record_fields.get(n))
-            .cloned()
-            .or(anon_order)
-            .unwrap_or_else(|| {
-                panic!(
-                    "lower_record_update: cannot resolve record field order (record_name={:?}); \
-                     RecordInfo threading from CheckResult is the follow-up — see exprs_edge.rs flag",
-                    record_name
-                )
-            });
+        let order = self.record_field_order(record_name, anon_fields);
         let rec_var = self.fresh_helper_name();
         let rec_ce = self.lower_atom(record, ctx);
 

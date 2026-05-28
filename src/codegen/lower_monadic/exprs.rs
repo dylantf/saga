@@ -65,14 +65,28 @@ impl<'ctx> Lowerer<'ctx> {
                 record,
                 field,
                 record_name,
+                anon_fields,
                 ..
-            } => self.lower_field_access(record, field, record_name.as_deref(), ctx),
+            } => self.lower_field_access(
+                record,
+                field,
+                record_name.as_deref(),
+                anon_fields.as_deref(),
+                ctx,
+            ),
             MExpr::RecordUpdate {
                 record,
                 fields,
                 record_name,
+                anon_fields,
                 ..
-            } => self.lower_record_update(record, fields, record_name.as_deref(), ctx),
+            } => self.lower_record_update(
+                record,
+                fields,
+                record_name.as_deref(),
+                anon_fields.as_deref(),
+                ctx,
+            ),
             MExpr::DictMethodAccess {
                 dict, method_index, ..
             } => self.lower_dict_method_access(dict, *method_index, ctx),

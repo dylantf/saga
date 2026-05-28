@@ -224,6 +224,7 @@ fn write_tail(out: &mut String, indent: usize, e: &MExpr) {
             field,
             record_name,
             source,
+            ..
         } => {
             let rn = record_name
                 .as_deref()
@@ -244,6 +245,7 @@ fn write_tail(out: &mut String, indent: usize, e: &MExpr) {
             fields,
             record_name,
             source,
+            ..
         } => {
             let rn = record_name
                 .as_deref()
@@ -413,6 +415,7 @@ fn expr_compact(e: &MExpr) -> String {
             field,
             record_name,
             source,
+            ..
         } => {
             let rn = record_name
                 .as_deref()
@@ -431,6 +434,7 @@ fn expr_compact(e: &MExpr) -> String {
             fields,
             record_name,
             source,
+            ..
         } => {
             let rn = record_name
                 .as_deref()
