@@ -6,6 +6,35 @@ This is a working review map for the large uniform-effect-translation PR. It
 is intentionally not a complete audit. Use it to decide where to spend review
 and refactor time before starting strategic phase 2.
 
+## Decisions Log
+
+Intentional scope decisions made during review, so nobody re-litigates them or
+mistakes them for accidental feature deletion.
+
+- **`@inline val` optimization removed (for now).** The cross-module inline-val
+  substitution was a premature compiler optimization and the only thing
+  producing the two `qualified_inline_val_*` red tests (those tests asserted
+  the *old-path* substitution semantics, which the uniform path deliberately
+  does not implement — vals are uniformly emitted as arity-0 constants). Rather
+  than build inline support into the new path to satisfy old-path-shaped tests,
+  we dropped the feature:
+  - parser no longer accepts the `@inline` annotation
+    (`KNOWN_ANNOTATIONS` in `src/parser/decl.rs`),
+  - the typechecker no longer collects or validates inline vals
+    (`inline_vals` population in `check_module.rs`; `is_inlineable_expr` /
+    `@inline` validation removed from `check_decl.rs`),
+  - vals now fall through to the uniform arity-0 `BeamFunction` path on **both**
+    old and new codegen, so no old-path code was edited,
+  - the two `qualified_inline_val_*` tests were deleted; `@inline` stripped from
+    `examples/42-val-inline.saga` and the fully-qualified-import bug example.
+
+  The `inline_vals` field on `ModuleCodegenInfo` and
+  `ResolvedCodegenKind::InlineVal` are now permanently empty/unreachable. They
+  were left in place only because the frozen old `lower/` path still references
+  them; delete both together with the old path. This resolves the Stage 8
+  `InlineVal`-panic blocker and the Open Question "Should `InlineVal` survive
+  backend resolve at all in the new path?" (answer: no — the feature is gone).
+
 ## Current Diff Shape
 
 Compared with `main`, this branch is roughly:
@@ -30,15 +59,16 @@ stage boundary.
 
 Useful default failures should stay visible until fixed.
 
-- `tests/codegen_integration.rs`: 5 real failures.
-- `tests/effect_property_tests.rs`: 4 real failures.
-- `tests/module_codegen_integration.rs`: at least the two `InlineVal`
-  failures are real new-path failures; many other ignored tests are stale
-  old-Core-shape assertions.
-- `tests/stdlib_tests.rs::stdlib_test_suite`: 12 stdlib native/bridge callback
-  failures.
-- `tests/e2e`: currently green, but it does not cover the full stdlib callback
-  surface.
+- `tests/codegen_integration.rs`: green.
+- `tests/effect_property_tests.rs`: green.
+- `tests/module_codegen_integration.rs`: green for active tests; remaining
+  ignored tests should be reclassified individually. Many are stale
+  old-Core-shape assertions, while some may still cover real cross-module
+  behavior worth rewriting.
+- `tests/stdlib_tests.rs::stdlib_test_suite`: green, including first-class
+  references to bridge HOFs / legacy-Maybe externals.
+- `tests/e2e`: green in the latest full Saga test sweep, but it does not cover
+  the full stdlib callback surface.
 
 ## Review Strategy
 
@@ -52,6 +82,40 @@ For each stage:
 3. Verify it does not make decisions owned by later stages.
 4. Map any failing tests to the first stage where the incorrect shape appears.
 5. Fix locally, then rerun the narrowest failing tests.
+
+## Abstraction / Duplication Watch
+
+This refactor is intended to simplify correctness by making evidence and
+continuations uniform. That goal is undermined if the new path encodes the same
+ABI rule in several handwritten places. Treat these as cleanup blockers before
+phase-2 optimization, even when tests are green.
+
+- **External-call ABI is shared.** Saturated external calls in
+  `lower_monadic/app.rs` and first-class external wrappers in
+  `lower_monadic/decls.rs` now both route through
+  `util::lower_external_native_call`, so bridge callback adapters and
+  legacy-Maybe normalization apply in both paths.
+- **Handler `with` delimiter logic is duplicated.** `lower_with_static` and
+  `lower_with_dynamic` both construct raw-result K, abort marker handling,
+  evidence insertion, body wrapping, and outer-K forwarding. The dynamic path
+  has extra handler-value extraction, but the delimiter should be one helper
+  with mode-specific inputs.
+- **Native handler bootstrap is becoming a second lowering language.**
+  `lower_monadic/bootstrap.rs` has a useful table-driven core, but Ref/Vec and
+  callback-invoking ops are growing custom Core Erlang emitters. Prefer a
+  small native-op DSL/descriptor plus focused escape hatches over more
+  handwritten nested `CExpr` trees.
+- **Record metadata is reconstructed from runtime tags.** Anonymous-record
+  field order should come from structural metadata (`RecordInfo`/type info), not
+  from parsing the encoded tag string in lowering.
+- **Old-path helper copies should either become shared code or disappear with
+  old path deletion.** `lower_monadic/util.rs` is an acceptable temporary clone
+  because the agent guide forbids imports from `lower/`, but it should not grow
+  new semantics independently.
+- **Shape-heavy unit tests are useful but expensive.** `lower_monadic/tests.rs`
+  is large because it asserts exact Core Erlang shapes. Keep a small set of
+  ABI-shape tests, but prefer runtime/e2e/property coverage for behavior so
+  local refactors do not require rewriting thousands of brittle assertions.
 
 ## Stage Triage
 
@@ -71,16 +135,18 @@ Review checkpoints:
   Since `resolve.rs` is shared infrastructure this may be acceptable for now,
   but it is a cleanup/architecture risk: the final old-path deletion cannot
   leave `resolve.rs` depending on deleted lower modules.
-- `ResolvedCodegenKind::InlineVal` is still produced and can reach
-  `lower_monadic::atom`, which deliberately panics. This maps directly to:
-  - `qualified_inline_val_cross_module_substitutes_rhs`
-  - `qualified_inline_val_cross_module_resolves_sibling_ref_in_defining_module`
+- `ResolvedCodegenKind::InlineVal` — **RESOLVED, see Decisions Log.** The
+  `@inline val` optimization was removed, so this kind is no longer produced and
+  the `lower_monadic::atom` panic is now unreachable. The two
+  `qualified_inline_val_*` tests it mapped to were deleted. The variant + the
+  `inline_vals` field remain only as dead code for the frozen old path; delete
+  with the old path.
 
 Likely action:
 
-- Decide whether `InlineVal` should be normalized before monadic lowering or
-  represented explicitly in the new path. Do not leave a panic as the contract.
-- Move any shared helper logic out of old `lower/` before cleanup.
+- Move any shared helper logic out of old `lower/` before cleanup. The
+  `resolve.rs` imports from `lower/` (above) are the remaining real Stage 8
+  cleanup blocker.
 
 ### Stage 8.5: Handler Analysis
 
@@ -294,15 +360,16 @@ Known-good signal today:
 
 Risk areas to audit anyway:
 
-- `ResolvedCodegenKind::InlineVal` still panics in the new atom path. Decide
-  whether this kind should be eliminated before monadic lowering or supported
-  explicitly. The module-codegen `InlineVal` failures are still the main known
-  callable-resolution smell.
+- `ResolvedCodegenKind::InlineVal` still exists as dead old-path residue after
+  removing `@inline`; it should remain unreachable until old-path deletion.
 - `uniform_value_arity` relies on old-path resolution conventions: effectful
   imported arities may already include `+2`, while pure arities do not. This
   is subtle and should be locked down with tests before deleting old code.
 - `external_callback_arg` is a hardcoded bridge table. It is acceptable as a
   phase-1 parity bridge, but it is not the final architecture.
+- Saturated external calls and first-class external references now share
+  `util::lower_external_native_call`; stdlib tests cover `List.sort_by` and
+  `List.nth` through first-class references.
 - `external_callback_adapter` uses identity K and direct return. This is only
   correct for callbacks used synchronously by bridge/native code; async
   boundaries such as actor spawn need dedicated native-effect handling.
@@ -320,21 +387,228 @@ Execution checklist:
    intrinsic wrappers.
 2. Build a small table: source construct → `MExpr`/`Atom` shape → expected
    Core Erlang callable/value shape.
-3. Trace resolution metadata for each `ResolvedCodegenKind`, especially
-   `BeamFunction`, `ExternalFunction`, `Intrinsic`, and `InlineVal`.
-4. Decide the `InlineVal` contract and either remove it from the new path
-   before lowering or implement a value materialization path.
+3. Trace resolution metadata for each live `ResolvedCodegenKind`, especially
+   `BeamFunction`, `ExternalFunction`, and `Intrinsic`.
+4. Confirm the dead `InlineVal` path is unreachable after parser removal; do
+   not reintroduce support unless `@inline` returns as a deliberate feature.
 5. Audit `uniform_value_arity` assumptions against imported pure/effectful
    functions and dict constructors; add/adjust focused tests if the current
    convention stays.
 6. Replace or document `external_callback_arg` as the phase-1 bridge table;
    add tests for any public bridge HOF not covered by stdlib/e2e.
-7. Re-run:
+7. ~~Unify external wrapper lowering with saturated external-call lowering so
+   callback adapters and legacy-Maybe normalization apply whether an external
+   is called directly or through a first-class function reference.~~ Done via
+   `util::lower_external_native_call`.
+8. Re-run:
    - `cargo test -q -p saga --test codegen_integration -- --nocapture`
    - `cargo test -q -p saga --test module_codegen_integration -- --nocapture`
    - `cargo test -q -p saga --test stdlib_tests -- --nocapture`
    - `cargo run --bin saga --quiet -- test` in `tests/e2e`
    - `cargo clippy -q`
+
+### Review Pass 4: Record Metadata / Tuple Layout
+
+Scope:
+
+- Anonymous record tag construction in `src/ast.rs::anon_record_tag`.
+- Elaboration of field access/update record identity in `src/elaborate.rs`.
+- `MExpr::FieldAccess` / `MExpr::RecordUpdate` layout payloads in
+  `src/codegen/monadic/ir.rs`.
+- Lowering in `src/codegen/lower_monadic/exprs_edge.rs`.
+- Runtime tuple tag expectations in pattern lowering and old/new record
+  construction paths.
+
+Contract:
+
+- Lowering must know field position from structural metadata, not by parsing a
+  runtime tag string.
+- Anonymous record runtime tags must be injective over field-name sets.
+- Named records keep declared field order from `RecordInfo` /
+  `ModuleCodegenInfo::record_fields`.
+- Anonymous records use canonical sorted field order from `Type::Record`.
+
+Findings:
+
+- `ast::anon_record_tag` currently emits `__anon_<fields_joined_by_underscore>`.
+  This is not injective: `{a_b, c}` and `{a, b_c}` both encode to
+  `__anon_a_b_c`.
+- `elaborate.rs::resolve_record_name` maps `Type::Record(fields)` back into the
+  same encoded tag string and stores it in `ExprKind::FieldAccess.record_name`
+  / `RecordUpdate.record_name`.
+- The monadic IR preserves only that `Option<String>` record name/tag. It does
+  not carry anonymous-record field order.
+- `lower_monadic::exprs_edge` therefore recovers anonymous field order by
+  `strip_prefix("__anon_").split('_')`, which is necessarily lossy and fails on
+  underscore-containing field names.
+- `lower_monadic::mod::absorb_anon_record_atoms_from_program` partially masks
+  this by registering anon-record atom tags into `record_fields`, but this only
+  helps when an `Atom::AnonRecord` of the same shape exists in the lowered
+  program. It does not make the tag encoding injective, and it is not a real
+  source of layout truth for field access on parameters/imported values.
+
+Recommended fix:
+
+1. Introduce an explicit record-layout payload instead of overloading
+   `record_name: Option<String>`. For example:
+
+   ```rust
+   enum RecordLayout {
+       Named(String),
+       Anonymous(Vec<String>), // sorted canonical field order
+   }
+   ```
+
+   This can live in AST first, monadic IR first, or both. The important bit is
+   that `FieldAccess` and `RecordUpdate` carry `Anonymous(Vec<String>)` through
+   translation so lowering never decodes a runtime tag.
+
+2. Change anonymous runtime tag encoding to be injective. A length-prefixed or
+   escaped atom format is enough, e.g. `__anon_3:a_b|1:c`; both old and new
+   construction/pattern paths should use the same helper.
+
+3. Add tests before/with the fix:
+   - anonymous record access with underscore field names,
+   - anonymous record update with underscore field names,
+   - collision pair `{a_b, c}` vs `{a, b_c}` must not pattern-match/equal as
+     the same runtime shape,
+   - named-record access/update still uses declared field order across modules.
+
+Decision:
+
+- Do not patch this locally by teaching the lowerer a better string split. The
+  bug is in the metadata contract and runtime tag encoding, not just the parser
+  for the current tag format.
+
+### Review Pass 5: Native Handler Bootstrap
+
+Scope:
+
+- `src/codegen/lower_monadic/bootstrap.rs`
+- Native handler installation from `lower_monadic/effects.rs`
+- Native effect declarations in `src/stdlib/Actor.saga`, `Ref.saga`,
+  `Vec.saga`
+- Shape tests in `src/codegen/lower_monadic/tests.rs`
+- Runtime/e2e coverage in actor/ref/vector examples and tests
+
+Contract:
+
+- The uniform path must install runtime evidence entries for BEAM-native
+  effects that the old lowerer handled by direct special cases.
+- Native op closures share the same handler ABI as user handler arms:
+  `fun(args..., EvidenceAtPerform, K) -> apply K(result)`.
+- Callback-taking native ops must invoke Saga callbacks with uniform CPS
+  arguments and the correct evidence vector.
+- Explicit native handlers (`with beam_ref`, `with ets_ref`, `with beam_vec`,
+  `with beam_actor`) and the entry-point initial evidence should use compatible
+  op tuple shapes.
+
+Findings:
+
+- The file currently mixes three concerns:
+  - initial evidence vector / `main/1` entry wrapper,
+  - generic native-op descriptor lowering (`NativeEffect`, `NativeOp`,
+    `ArgTransform`),
+  - bespoke Ref/Vec storage implementations as handwritten nested `CExpr`
+    trees.
+- The table-driven core is good and should be kept. The bespoke Ref/Vec code is
+  where complexity pools; it is not yet bad enough to block review, but it is
+  the prime target for a later abstraction pass.
+- Callback adaptation exists in multiple conceptual forms:
+  - bridge callback adapters in `util::lower_external_native_call`,
+  - `spawn_thunk` for async spawned callbacks,
+  - Ref `modify` callbacks with an identity K.
+
+  These are intentionally not all the same abstraction: `spawn` is async and
+  must carry perform-site evidence into a new process; Ref `modify` is pure by
+  the stdlib type (`a -> a`); bridge HOFs are synchronous native calls. Still,
+  they should be documented as three callback boundary classes so future
+  patches do not merge them accidentally.
+- Bootstrap comments still mention “future step 8” in a few places even though
+  the toggle wiring now exists. Clean this wording during the abstraction pass.
+- Tests cover bootstrap shape, op tuple counts/tags, basic BIF forwarding, and
+  spawn evidence threading. E2E covers actors, refs, ETS refs, and vectors.
+  Remaining risk is not obvious missing behavior; it is maintainability and
+  hand-written Core Erlang fragility.
+
+Recommended cleanup later:
+
+1. Split `bootstrap.rs` by concern, or at least group it into sections with
+   smaller builders:
+   - initial evidence / entry wrapper,
+   - generic native effect descriptors,
+   - Ref backend builders,
+   - Vec backend builders.
+2. Replace repeated continuation wrappers with helpers such as
+   `native_closure(params, result_expr)` and `identity_k(name)`.
+3. Name the callback boundary classes explicitly:
+   - synchronous native bridge callback,
+   - async spawn callback,
+   - pure in-handler callback.
+4. Keep Ref/Vec as bespoke backends unless/until more native stateful effects
+   appear; a too-general DSL would be premature.
+
+### Review Pass 6: Handler Cleanup / `finally`
+
+Scope:
+
+- `src/codegen/lower_monadic/effects.rs`
+- `src/codegen/lower_monadic/exprs.rs::lower_resume`
+- `src/codegen/lower_monadic/ctx.rs`
+- `MExpr::contains_resume` / `Atom::contains_resume`
+- E2E finally tests in `tests/e2e/tests/effects_test.saga`
+
+Contract:
+
+- A handler arm's `finally` block must run on both:
+  - successful/resuming completion, after the resumed computation returns to
+    the arm, and
+  - non-resuming/abort completion, after the arm body has produced its abort
+    result.
+- Cleanup must be injected into the continuation chain. Wrapping only the
+  `resume` call in Erlang `try/catch` is not sufficient under uniform CPS,
+  because effect aborts are values flowing through handler continuations, not
+  Erlang exceptions.
+- `finally` must preserve abort markers correctly: cleanup should run, but it
+  must not turn another delimiter's abort tuple into an ordinary success value.
+
+Findings:
+
+- Single-arm operation clauses have partial `finally` support:
+  - if the arm body syntactically contains `resume`, `lower_resume` sequences
+    cleanup after the delimited resume result,
+  - if the arm body does not contain `resume`, `build_arm_closure_with_return_mode`
+    appends cleanup after the arm body.
+- Multi-arm-per-op closures still panic when any arm has `finally_block`.
+  This is a real parity gap if the source language permits multiple pattern
+  arms for the same operation with `finally`.
+- Return-clause `finally_block` also panics as deferred. This is probably less
+  urgent because return clauses having `finally` may be syntactically unusual,
+  but the invariant should be enforced earlier or supported deliberately.
+- Cleanup behavior depends on `contains_resume`, which descends into
+  `Atom::Lambda` bodies. That is conservative for propagating `arm_k` into
+  lambdas, but it can misclassify an arm that merely *returns* a lambda
+  containing `resume` as a resuming arm. In that case the no-resume cleanup path
+  is skipped unless the returned lambda is later invoked. This may be illegal or
+  unreachable in well-typed Saga today, but the assumption should be pinned down
+  with a test or with a more precise predicate.
+- `lower_resume` still contains two local cleanup helper closures with nearly
+  identical setup. This is an abstraction smell, not a behavior bug by itself.
+
+Recommended action:
+
+1. Add focused tests before changing behavior:
+   - multi-clause op arm with `finally`,
+   - return clause with `finally` if syntax/typechecker accepts it,
+   - arm returning a lambda that contains `resume`, to decide whether this is
+     rejected, cleaned up immediately, or cleaned up only when invoked.
+2. Decide whether `contains_resume` should mean “may resume if evaluated now”
+   rather than “contains resume anywhere under lambdas.” If yes, split it into
+   two predicates:
+   - lexical `contains_resume` for arm-K propagation,
+   - immediate/body `may_resume_now` for finally scheduling.
+3. Extract cleanup sequencing in `lower_resume` after semantics are pinned
+   down; do not refactor it first.
 
 ## Open Questions
 
@@ -343,7 +617,8 @@ Execution checklist:
   op tuple plus return handler?
 - Should effect-op references as values be represented in monadic IR, or
   always eta-expanded during translation?
-- Should `InlineVal` survive backend resolve at all in the new path?
+- ~~Should `InlineVal` survive backend resolve at all in the new path?~~
+  Answered: no — `@inline` removed (see Decisions Log).
 - Which old module-codegen assertions are worth rewriting against uniform
   Core shape, and which should be deleted as old-lowerer implementation tests?
 - Do finally blocks need multi-arm/return-clause support before phase 1 is
@@ -356,11 +631,18 @@ Execution checklist:
    because they are part of the same callable-boundary contract.
 
 2. **Record metadata.**
-   Fix anonymous record field names with underscores if still failing in the
-   remaining normal test sweep.
+   Fix anonymous record field names with underscores. NOTE: this is a real
+   latent bug, not just a test fixture — `ast::anon_record_tag` joins sorted
+   field names with an unescaped `_`, so a field name containing `_` both
+   corrupts the new-path "recover order from tag" decode
+   (`exprs_edge.rs::lower_field_access` / `lower_record_update`) **and** collides
+   at encode time (`{a_b, c}` and `{a, b_c}` produce the same tag, affecting
+   both paths). Fix by threading `RecordInfo` field order rather than recovering
+   it from the tag string. Untested today because no test uses underscore field
+   names.
 
-3. **Cross-module `InlineVal`.**
-   This may be resolved during Pass 3. If not, handle it immediately after.
+3. ~~**Cross-module `InlineVal`.**~~ Resolved by removing `@inline` (see
+   Decisions Log).
 
 4. **Stale tests.**
    Rewrite or delete old Core-shape assertions after the runtime/parity

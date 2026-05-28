@@ -1,10 +1,11 @@
 //! `App` lowering for the monadic-IR → Core Erlang pipeline.
 
 use crate::ast::Lit;
-use crate::codegen::cerl::{CArm, CExpr, CLit, CPat};
+use crate::codegen::cerl::{CExpr, CLit};
 use crate::codegen::monadic::ir::Atom;
 use crate::codegen::resolve::ResolvedCodegenKind;
 
+use super::util::lower_external_native_call;
 use super::{LowerCtx, Lowerer};
 
 impl<'ctx> Lowerer<'ctx> {
@@ -98,8 +99,7 @@ impl<'ctx> Lowerer<'ctx> {
             return None;
         }
 
-        let callback_shape = external_callback_arg(target_erlang_mod, target_name);
-        let call_args: Vec<CExpr> = args
+        let call_args: Vec<(usize, CExpr)> = args
             .iter()
             .enumerate()
             .filter(|(_, arg)| {
@@ -111,49 +111,14 @@ impl<'ctx> Lowerer<'ctx> {
                     }
                 )
             })
-            .map(|(idx, arg)| {
-                if let Some((callback_idx, callback_arity)) = callback_shape
-                    && idx == callback_idx
-                {
-                    self.external_callback_adapter(arg, callback_arity, ctx)
-                } else {
-                    self.lower_atom(arg, ctx)
-                }
-            })
+            .map(|(idx, arg)| (idx, self.lower_atom(arg, ctx)))
             .collect();
-        let call = CExpr::Call(target_erlang_mod.clone(), target_name.clone(), call_args);
-        let call = if external_returns_legacy_maybe(target_erlang_mod, target_name) {
-            normalize_legacy_maybe(call)
-        } else {
-            call
-        };
+        let call =
+            lower_external_native_call(target_erlang_mod, target_name, call_args, &ctx.evidence);
         Some(CExpr::Apply(
             Box::new(CExpr::Var(ctx.return_k.clone())),
             vec![call],
         ))
-    }
-
-    fn external_callback_adapter(
-        &mut self,
-        callback: &Atom,
-        callback_arity: usize,
-        ctx: &LowerCtx,
-    ) -> CExpr {
-        let callback_ce = self.lower_atom(callback, ctx);
-        let params: Vec<String> = (0..callback_arity)
-            .map(|i| format!("_ExtCb{}", i))
-            .collect();
-        let k_var = "_ExtCbK".to_string();
-        let v_var = "_ExtCbV".to_string();
-        let id_k = CExpr::Fun(vec![v_var.clone()], Box::new(CExpr::Var(v_var)));
-        let mut apply_args: Vec<CExpr> = params.iter().cloned().map(CExpr::Var).collect();
-        apply_args.push(CExpr::Var(ctx.evidence.clone()));
-        apply_args.push(CExpr::Var(k_var.clone()));
-        let apply_callback = CExpr::Apply(Box::new(callback_ce), apply_args);
-        CExpr::Fun(
-            params,
-            Box::new(CExpr::Let(k_var, Box::new(id_k), Box::new(apply_callback))),
-        )
     }
 
     /// Number of user/dict args the head atom's callable expects (i.e. the
@@ -307,70 +272,4 @@ impl<'ctx> Lowerer<'ctx> {
         let err_call = CExpr::Call("erlang".to_string(), "error".to_string(), vec![err_term]);
         CExpr::Let(msg_var, Box::new(msg), Box::new(err_call))
     }
-}
-
-fn external_callback_arg(module: &str, function: &str) -> Option<(usize, usize)> {
-    match (module, function) {
-        ("std_array_bridge", "map") => Some((0, 1)),
-        ("std_array_bridge", "foldl") => Some((0, 2)),
-        ("std_dict_bridge", "map_values") => Some((0, 1)),
-        ("std_dict_bridge", "filter_entries") => Some((0, 2)),
-        ("std_dict_bridge", "fold_entries") => Some((0, 3)),
-        ("std_dict_bridge", "update") => Some((1, 1)),
-        ("std_list_bridge", "sort_with") => Some((0, 2)),
-        ("std_list_bridge", "sort_by") => Some((0, 1)),
-        ("std_set_bridge", "map") | ("std_set_bridge", "filter") => Some((0, 1)),
-        ("std_set_bridge", "fold") => Some((0, 2)),
-        _ => None,
-    }
-}
-
-fn external_returns_legacy_maybe(module: &str, function: &str) -> bool {
-    matches!(
-        (module, function),
-        ("std_array_bridge", "get")
-            | ("std_dict_bridge", "get")
-            | ("std_env_bridge", "get")
-            | ("std_float_bridge", "parse")
-            | ("std_int_bridge", "parse")
-            | ("std_int_bridge", "parse_hex")
-            | ("std_list_bridge", "nth")
-            | ("std_regex_bridge", "match")
-            | ("std_regex_bridge", "find")
-            | ("std_string_bridge", "find")
-            | ("std_string_bridge", "strip_prefix")
-            | ("std_bitstring_bridge", "at")
-    )
-}
-
-fn normalize_legacy_maybe(call: CExpr) -> CExpr {
-    let value_var = "_MaybeValue".to_string();
-    CExpr::Case(
-        Box::new(call),
-        vec![
-            CArm {
-                pat: CPat::Tuple(vec![
-                    CPat::Lit(CLit::Atom("just".to_string())),
-                    CPat::Var(value_var.clone()),
-                ]),
-                guard: None,
-                body: CExpr::Tuple(vec![
-                    CExpr::Lit(CLit::Atom("std_maybe_Just".to_string())),
-                    CExpr::Var(value_var),
-                ]),
-            },
-            CArm {
-                pat: CPat::Tuple(vec![CPat::Lit(CLit::Atom("nothing".to_string()))]),
-                guard: None,
-                body: CExpr::Tuple(vec![CExpr::Lit(CLit::Atom(
-                    "std_maybe_Nothing".to_string(),
-                ))]),
-            },
-            CArm {
-                pat: CPat::Var("_MaybeOther".to_string()),
-                guard: None,
-                body: CExpr::Var("_MaybeOther".to_string()),
-            },
-        ],
-    )
 }

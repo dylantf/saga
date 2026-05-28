@@ -17,6 +17,7 @@ use crate::codegen::cerl::{CArm, CExpr, CFunDef, CPat};
 use crate::codegen::monadic::ir::{Atom, MDictConstructor, MExpr, MFunBinding, MVal};
 
 use super::pats::lower_param_names;
+use super::util::lower_external_native_call;
 use super::{LowerCtx, Lowerer};
 
 /// Variable name for the evidence-vector parameter on every emitted CFunDef.
@@ -295,17 +296,18 @@ pub(super) fn lower_external_wrapper(decl: &Decl) -> Option<(CFunDef, usize, boo
 
     // User-arg param names; Evidence + ReturnK appended for uniform shape.
     let mut param_vars: Vec<String> = (0..user_arity).map(|i| format!("_Ext{}", i)).collect();
-    let call_args: Vec<CExpr> = param_vars
+    let call_args: Vec<(usize, CExpr)> = param_vars
         .iter()
         .zip(params.iter())
-        .filter(|(_, (_, ty))| !is_unit_type_expr(ty))
-        .map(|(v, _)| CExpr::Var(v.clone()))
+        .enumerate()
+        .filter(|(_, (_, (_, ty)))| !is_unit_type_expr(ty))
+        .map(|(idx, (v, _))| (idx, CExpr::Var(v.clone())))
         .collect();
     param_vars.push(EVIDENCE_VAR.to_string());
     param_vars.push(RETURN_K_VAR.to_string());
     let total_arity = param_vars.len();
 
-    let call = CExpr::Call(erl_module, erl_func, call_args);
+    let call = lower_external_native_call(&erl_module, &erl_func, call_args, EVIDENCE_VAR);
     let body = CExpr::Apply(Box::new(CExpr::Var(RETURN_K_VAR.to_string())), vec![call]);
 
     Some((

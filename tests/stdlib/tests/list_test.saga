@@ -245,6 +245,11 @@ tests () = {
       test "sorts by key function" (fun () -> {
         assert_eq (List.sort_by (fun x -> 0 - x) [3, 1, 4, 1, 5]) [5, 4, 3, 1, 1]
       })
+
+      test "works through first-class reference" (fun () -> {
+        let sorter = List.sort_by
+        assert_eq (sorter (fun x -> 0 - x) [3, 1, 4, 1, 5]) [5, 4, 3, 1, 1]
+      })
     })
 
     describe "find" (fun () -> {
@@ -290,6 +295,11 @@ tests () = {
 
       test "negative index returns Nothing" (fun () -> {
         assert_nothing (List.nth (-1) [10, 20, 30])
+      })
+
+      test "normalizes Maybe through first-class reference" (fun () -> {
+        let nth = List.nth
+        assert_eq (nth 1 [10, 20, 30]) (Just 20)
       })
     })
 

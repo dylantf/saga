@@ -1,32 +1,12 @@
 use std::collections::HashMap;
 
-use crate::ast::{self, Decl, ExprKind, Lit, TypeParam};
+use crate::ast::{self, Decl, TypeParam};
 
 use super::result::CheckResult;
 use super::{
     Checker, Diagnostic, EffectDefInfo, EffectEntry, EffectOpSig, EffectRow, HandlerInfo,
     RecordInfo, Scheme, Span, Type, find_effect_call,
 };
-
-/// Check if an expression is a compile-time inlineable value:
-/// scalar literals, lists/tuples of inlineable values, constructors, or refs to other vals.
-/// Note: list literals [1, 2, 3] are desugared to Cons/Nil chains before typechecking,
-/// so we also accept Constructor and App(Constructor, ...) forms.
-fn is_inlineable_expr(expr: &ast::Expr) -> bool {
-    match &expr.kind {
-        ExprKind::Lit { value, .. } => matches!(
-            value,
-            Lit::Int(..) | Lit::Float(..) | Lit::String(..) | Lit::Bool(..)
-        ),
-        ExprKind::ListLit { elements, .. } => elements.iter().all(is_inlineable_expr),
-        ExprKind::Tuple { elements, .. } => elements.iter().all(is_inlineable_expr),
-        ExprKind::Constructor { .. } => true, // Nil, True, etc.
-        ExprKind::App { func, arg, .. } => is_inlineable_expr(func) && is_inlineable_expr(arg),
-        ExprKind::Var { .. } => true, // reference to another val (validated at use site)
-        ExprKind::UnaryMinus { expr: inner, .. } => is_inlineable_expr(inner),
-        _ => false,
-    }
-}
 
 /// Walk an arrow chain and return the EffectRow from the innermost Fun.
 fn innermost_effect_row(ty: &Type) -> Option<EffectRow> {
@@ -389,7 +369,6 @@ impl Checker {
                 id,
                 name,
                 name_span,
-                annotations,
                 value,
                 span,
                 ..
@@ -416,17 +395,6 @@ impl Checker {
                     return Err(Diagnostic::error_at(
                         *span,
                         "'val' bindings cannot have function type; use 'fun' to define functions instead".to_string(),
-                    ));
-                }
-
-                // @inline vals must have compile-time inlineable RHS
-                if annotations.iter().any(|a| a.name == "inline") && !is_inlineable_expr(value) {
-                    return Err(Diagnostic::error_at(
-                        *span,
-                        format!(
-                            "@inline val '{}' must have a compile-time literal value (scalar, list, or tuple of literals)",
-                            name
-                        ),
                     ));
                 }
 

@@ -1,14 +1,11 @@
-//! Local utilities for the new lowerer.
-//!
-//! Copied (not imported) from the old lowerer per the agent-guide's
-//! "no imports from frozen files" rule. Each helper here mirrors the
-//! corresponding one in `src/codegen/lower/util.rs` so emitted Core Erlang
-//! matches the old path's identifier conventions.
+//! Local utilities for the monadic lowerer
 
 use std::collections::HashMap;
 
 use crate::ast::{BitSegSpec, Lit};
-use crate::codegen::cerl::{BinSegFlags, BinSegSize, BinSegType, CBinSeg, CExpr, CLit, Endianness};
+use crate::codegen::cerl::{
+    BinSegFlags, BinSegSize, BinSegType, CArm, CBinSeg, CExpr, CLit, CPat, Endianness,
+};
 
 /// Map a Saga identifier to a Core Erlang variable name.
 ///
@@ -225,4 +222,123 @@ fn beam_ctor_override(name: &str) -> Option<&'static str> {
         "Noproc" => Some("noproc"),
         _ => None,
     }
+}
+
+/// Build a native Erlang external call from source-indexed user arguments.
+///
+/// Both saturated external applications and first-class external wrappers use
+/// this helper so bridge callbacks and legacy-Maybe normalization cannot drift
+/// between the direct-call and wrapper paths.
+pub(super) fn lower_external_native_call(
+    module: &str,
+    function: &str,
+    indexed_args: Vec<(usize, CExpr)>,
+    evidence_var: &str,
+) -> CExpr {
+    let callback_shape = external_callback_arg(module, function);
+    let call_args: Vec<CExpr> = indexed_args
+        .into_iter()
+        .map(|(idx, arg)| {
+            if let Some((callback_idx, callback_arity)) = callback_shape
+                && idx == callback_idx
+            {
+                external_callback_adapter_expr(arg, callback_arity, evidence_var)
+            } else {
+                arg
+            }
+        })
+        .collect();
+    let call = CExpr::Call(module.to_string(), function.to_string(), call_args);
+    if external_returns_legacy_maybe(module, function) {
+        normalize_legacy_maybe(call)
+    } else {
+        call
+    }
+}
+
+fn external_callback_adapter_expr(
+    callback_ce: CExpr,
+    callback_arity: usize,
+    evidence_var: &str,
+) -> CExpr {
+    let params: Vec<String> = (0..callback_arity)
+        .map(|i| format!("_ExtCb{}", i))
+        .collect();
+    let k_var = "_ExtCbK".to_string();
+    let v_var = "_ExtCbV".to_string();
+    let id_k = CExpr::Fun(vec![v_var.clone()], Box::new(CExpr::Var(v_var)));
+    let mut apply_args: Vec<CExpr> = params.iter().cloned().map(CExpr::Var).collect();
+    apply_args.push(CExpr::Var(evidence_var.to_string()));
+    apply_args.push(CExpr::Var(k_var.clone()));
+    let apply_callback = CExpr::Apply(Box::new(callback_ce), apply_args);
+    CExpr::Fun(
+        params,
+        Box::new(CExpr::Let(k_var, Box::new(id_k), Box::new(apply_callback))),
+    )
+}
+
+fn external_callback_arg(module: &str, function: &str) -> Option<(usize, usize)> {
+    match (module, function) {
+        ("std_array_bridge", "map") => Some((0, 1)),
+        ("std_array_bridge", "foldl") => Some((0, 2)),
+        ("std_dict_bridge", "map_values") => Some((0, 1)),
+        ("std_dict_bridge", "filter_entries") => Some((0, 2)),
+        ("std_dict_bridge", "fold_entries") => Some((0, 3)),
+        ("std_dict_bridge", "update") => Some((1, 1)),
+        ("std_list_bridge", "sort_with") => Some((0, 2)),
+        ("std_list_bridge", "sort_by") => Some((0, 1)),
+        ("std_set_bridge", "map") | ("std_set_bridge", "filter") => Some((0, 1)),
+        ("std_set_bridge", "fold") => Some((0, 2)),
+        _ => None,
+    }
+}
+
+fn external_returns_legacy_maybe(module: &str, function: &str) -> bool {
+    matches!(
+        (module, function),
+        ("std_array_bridge", "get")
+            | ("std_dict_bridge", "get")
+            | ("std_env_bridge", "get")
+            | ("std_float_bridge", "parse")
+            | ("std_int_bridge", "parse")
+            | ("std_int_bridge", "parse_hex")
+            | ("std_list_bridge", "nth")
+            | ("std_regex_bridge", "match")
+            | ("std_regex_bridge", "find")
+            | ("std_string_bridge", "find")
+            | ("std_string_bridge", "strip_prefix")
+            | ("std_bitstring_bridge", "at")
+    )
+}
+
+fn normalize_legacy_maybe(call: CExpr) -> CExpr {
+    let value_var = "_MaybeValue".to_string();
+    CExpr::Case(
+        Box::new(call),
+        vec![
+            CArm {
+                pat: CPat::Tuple(vec![
+                    CPat::Lit(CLit::Atom("just".to_string())),
+                    CPat::Var(value_var.clone()),
+                ]),
+                guard: None,
+                body: CExpr::Tuple(vec![
+                    CExpr::Lit(CLit::Atom("std_maybe_Just".to_string())),
+                    CExpr::Var(value_var),
+                ]),
+            },
+            CArm {
+                pat: CPat::Tuple(vec![CPat::Lit(CLit::Atom("nothing".to_string()))]),
+                guard: None,
+                body: CExpr::Tuple(vec![CExpr::Lit(CLit::Atom(
+                    "std_maybe_Nothing".to_string(),
+                ))]),
+            },
+            CArm {
+                pat: CPat::Var("_MaybeOther".to_string()),
+                guard: None,
+                body: CExpr::Var("_MaybeOther".to_string()),
+            },
+        ],
+    )
 }

@@ -502,7 +502,7 @@ impl Parser {
             let name = self.expect_ident()?;
             let name_span = self.tokens[self.pos - 1].span;
 
-            const KNOWN_ANNOTATIONS: &[&str] = &["external", "builtin", "inline"];
+            const KNOWN_ANNOTATIONS: &[&str] = &["external", "builtin"];
             if !KNOWN_ANNOTATIONS.contains(&name.as_str()) {
                 return Err(ParseError {
                     message: format!("unknown annotation @{}", name),

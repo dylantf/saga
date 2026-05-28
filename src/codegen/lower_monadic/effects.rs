@@ -210,10 +210,7 @@ impl<'ctx> Lowerer<'ctx> {
         let outer_evidence = ctx.evidence.clone();
         let raw_result_k = self.fresh_k_ret_name();
         let abort_marker = format!("__saga_abort_{raw_result_k}");
-        let raw_result_k_binding = CExpr::Fun(
-            vec!["_V".to_string()],
-            Box::new(CExpr::Var("_V".to_string())),
-        );
+        let raw_result_k_binding = identity_continuation();
         let arm_ctx = ctx
             .with_return_k(raw_result_k.clone())
             .with_abort_marker(abort_marker.clone());
@@ -272,54 +269,7 @@ impl<'ctx> Lowerer<'ctx> {
             .unwrap_or_else(|| raw_result_k.clone());
         let body_ctx = ctx.with_evidence(acc_evidence_var).with_return_k(inner_k);
         let body_ce = self.lower_expr(body, &body_ctx);
-        let with_result = self.fresh_helper_name();
-        let abort_value = self.fresh_helper_name();
-        let other_marker = self.fresh_helper_name();
-        let other_abort_value = self.fresh_helper_name();
-        let wrapped_body = CExpr::Let(
-            with_result.clone(),
-            Box::new(body_ce),
-            Box::new(CExpr::Case(
-                Box::new(CExpr::Var(with_result.clone())),
-                vec![
-                    CArm {
-                        pat: CPat::Tuple(vec![
-                            CPat::Lit(CLit::Atom(ABORT_TAG.to_string())),
-                            CPat::Lit(CLit::Atom(abort_marker.clone())),
-                            CPat::Var(abort_value.clone()),
-                        ]),
-                        guard: None,
-                        body: if ctx.preserve_abort_marker {
-                            CExpr::Tuple(vec![
-                                CExpr::Lit(CLit::Atom(ABORT_TAG.to_string())),
-                                CExpr::Lit(CLit::Atom(abort_marker.clone())),
-                                CExpr::Var(abort_value),
-                            ])
-                        } else {
-                            self.apply_current_k(CExpr::Var(abort_value), ctx)
-                        },
-                    },
-                    CArm {
-                        pat: CPat::Tuple(vec![
-                            CPat::Lit(CLit::Atom(ABORT_TAG.to_string())),
-                            CPat::Var(other_marker.clone()),
-                            CPat::Var(other_abort_value.clone()),
-                        ]),
-                        guard: None,
-                        body: CExpr::Tuple(vec![
-                            CExpr::Lit(CLit::Atom(ABORT_TAG.to_string())),
-                            CExpr::Var(other_marker),
-                            CExpr::Var(other_abort_value),
-                        ]),
-                    },
-                    CArm {
-                        pat: CPat::Var("_WithValue".to_string()),
-                        guard: None,
-                        body: self.apply_current_k(CExpr::Var("_WithValue".to_string()), ctx),
-                    },
-                ],
-            )),
-        );
+        let wrapped_body = self.wrap_with_result_delimiter(body_ce, &abort_marker, ctx);
 
         // 4. Wrap inside-out: insert_canonical chain wraps the body, then
         //    the return-K binding (if any) wraps the chain. The raw-result
@@ -360,10 +310,7 @@ impl<'ctx> Lowerer<'ctx> {
         let outer_evidence = ctx.evidence.clone();
         let raw_result_k = self.fresh_k_ret_name();
         let abort_marker = format!("__saga_abort_{raw_result_k}");
-        let raw_result_k_binding = CExpr::Fun(
-            vec!["_V".to_string()],
-            Box::new(CExpr::Var("_V".to_string())),
-        );
+        let raw_result_k_binding = identity_continuation();
 
         let handler_value_ce = self.lower_atom(op_tuple, ctx);
         let handler_value_var = self.fresh_helper_name();
@@ -457,11 +404,47 @@ impl<'ctx> Lowerer<'ctx> {
             .with_evidence(new_ev_name.clone())
             .with_return_k(inner_k);
         let body_ce = self.lower_expr(body, &body_ctx);
+        let wrapped_body = self.wrap_with_result_delimiter(body_ce, &abort_marker, ctx);
+
+        let with_evidence = CExpr::Let(new_ev_name, Box::new(insert), Box::new(wrapped_body));
+        let with_runtime_return = CExpr::Let(
+            runtime_return_var,
+            Box::new(runtime_return_value),
+            Box::new(CExpr::Let(
+                runtime_ret_k,
+                Box::new(runtime_ret_binding),
+                Box::new(with_evidence),
+            )),
+        );
+        let with_return = match ret_binding {
+            Some((name, value)) => CExpr::Let(name, Box::new(value), Box::new(with_runtime_return)),
+            None => with_runtime_return,
+        };
+        let with_handler_value = CExpr::Let(
+            handler_value_var,
+            Box::new(handler_value_ce),
+            Box::new(with_return),
+        );
+        CExpr::Let(
+            raw_result_k,
+            Box::new(raw_result_k_binding),
+            Box::new(with_handler_value),
+        )
+    }
+
+    /// Wrap a lowered `with` body in the common delimiter that interprets
+    /// local abort markers and forwards ordinary values through the outer K.
+    fn wrap_with_result_delimiter(
+        &mut self,
+        body_ce: CExpr,
+        abort_marker: &str,
+        ctx: &LowerCtx,
+    ) -> CExpr {
         let with_result = self.fresh_helper_name();
         let abort_value = self.fresh_helper_name();
         let other_marker = self.fresh_helper_name();
         let other_abort_value = self.fresh_helper_name();
-        let wrapped_body = CExpr::Let(
+        CExpr::Let(
             with_result.clone(),
             Box::new(body_ce),
             Box::new(CExpr::Case(
@@ -470,14 +453,14 @@ impl<'ctx> Lowerer<'ctx> {
                     CArm {
                         pat: CPat::Tuple(vec![
                             CPat::Lit(CLit::Atom(ABORT_TAG.to_string())),
-                            CPat::Lit(CLit::Atom(abort_marker.clone())),
+                            CPat::Lit(CLit::Atom(abort_marker.to_string())),
                             CPat::Var(abort_value.clone()),
                         ]),
                         guard: None,
                         body: if ctx.preserve_abort_marker {
                             CExpr::Tuple(vec![
                                 CExpr::Lit(CLit::Atom(ABORT_TAG.to_string())),
-                                CExpr::Lit(CLit::Atom(abort_marker.clone())),
+                                CExpr::Lit(CLit::Atom(abort_marker.to_string())),
                                 CExpr::Var(abort_value),
                             ])
                         } else {
@@ -504,31 +487,6 @@ impl<'ctx> Lowerer<'ctx> {
                     },
                 ],
             )),
-        );
-
-        let with_evidence = CExpr::Let(new_ev_name, Box::new(insert), Box::new(wrapped_body));
-        let with_runtime_return = CExpr::Let(
-            runtime_return_var,
-            Box::new(runtime_return_value),
-            Box::new(CExpr::Let(
-                runtime_ret_k,
-                Box::new(runtime_ret_binding),
-                Box::new(with_evidence),
-            )),
-        );
-        let with_return = match ret_binding {
-            Some((name, value)) => CExpr::Let(name, Box::new(value), Box::new(with_runtime_return)),
-            None => with_runtime_return,
-        };
-        let with_handler_value = CExpr::Let(
-            handler_value_var,
-            Box::new(handler_value_ce),
-            Box::new(with_return),
-        );
-        CExpr::Let(
-            raw_result_k,
-            Box::new(raw_result_k_binding),
-            Box::new(with_handler_value),
         )
     }
 
@@ -907,4 +865,11 @@ impl<'ctx> Lowerer<'ctx> {
         }
         body
     }
+}
+
+fn identity_continuation() -> CExpr {
+    CExpr::Fun(
+        vec!["_V".to_string()],
+        Box::new(CExpr::Var("_V".to_string())),
+    )
 }

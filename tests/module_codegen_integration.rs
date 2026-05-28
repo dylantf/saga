@@ -3112,8 +3112,8 @@ run () = {
 //
 // These pin the codegen analogue of the typecheck-side rule:
 // loaded modules must be resolvable canonically without an explicit import,
-// and decls without a BEAM function (`@builtin`, `@inline val`) must intercept
-// at the use site for both bare AND qualified spellings.
+// and decls without a BEAM function (`@builtin`) must intercept at the use site
+// for both bare AND qualified spellings.
 
 /// Qualified-form `Std.IO.Unsafe.print_stdout` is `@builtin`: it has no BEAM
 /// implementation. Lowering must inline it as `io:format`, *not* emit a call
@@ -3257,58 +3257,6 @@ main () = Std.Process.catch_panic (fun () -> 42)
     assert!(
         !out.contains("'std_process':'catch_panic'"),
         "Std.Process.catch_panic must lower as intrinsic, not a BEAM call:\n{out}"
-    );
-}
-
-/// Cross-module qualified reference to an `@inline val` must substitute the
-/// RHS expression at the use site. No BEAM function is emitted for inline
-/// vals, so a direct call would fail at runtime (`undef`).
-#[test]
-fn qualified_inline_val_cross_module_substitutes_rhs() {
-    let lib = r#"module Lib
-
-@inline
-pub val answer = 123
-"#;
-    let main = r#"module Main
-
-main () = Lib.answer
-"#;
-    let out = with_temp_project_files(&[("src/Lib.saga", lib)], main, |checker, program| {
-        emit_from_program(program, "main", checker)
-    });
-    // Substitution should produce a literal 123 in main, with no call to lib:answer/0.
-    assert_contains(&out, "123");
-    assert!(
-        !out.contains("'lib':'answer'"),
-        "@inline val cross-module ref must not emit a BEAM call:\n{out}"
-    );
-}
-
-/// Cross-module inline vals must be lowered under the defining module's
-/// semantic context. `answer = base` used to lower `base` against Main's
-/// resolver/inline table and could emit a bad `lib:base/0` reference.
-#[test]
-fn qualified_inline_val_cross_module_resolves_sibling_ref_in_defining_module() {
-    let lib = r#"module Lib
-
-@inline
-pub val base = 123
-
-@inline
-pub val answer = base
-"#;
-    let main = r#"module Main
-
-main () = Lib.answer
-"#;
-    let out = with_temp_project_files(&[("src/Lib.saga", lib)], main, |checker, program| {
-        emit_from_program(program, "main", checker)
-    });
-    assert_contains(&out, "123");
-    assert!(
-        !out.contains("'lib':'base'") && !out.contains("'main':'base'"),
-        "@inline val sibling refs must be substituted in the defining module:\n{out}"
     );
 }
 
