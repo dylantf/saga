@@ -2330,14 +2330,11 @@ fn resume_inside_lambda_in_arm_body_uses_arm_k_via_closure() {
             );
             match lbody.as_ref() {
                 CExpr::Let(_, value, next) => {
-                    match value.as_ref() {
-                        CExpr::Apply(c, _) => assert!(
-                            matches!(c.as_ref(), CExpr::Var(n) if n == "_K_arm0"),
-                            "Resume inside lambda must use enclosing arm's _K_arm0 \
-                             (captured via closure), not lambda's own _ReturnK"
-                        ),
-                        other => panic!("expected resume Apply, got {other:?}"),
-                    }
+                    assert!(
+                        contains_apply_to(value, "_K_arm0"),
+                        "Resume inside lambda must use enclosing arm's _K_arm0 \
+                         (captured via closure), not lambda's own _ReturnK; got {value:?}"
+                    );
                     match next.as_ref() {
                         CExpr::Apply(c, _) => {
                             assert!(matches!(c.as_ref(), CExpr::Var(n) if n == "_ReturnK"));
@@ -2397,17 +2394,10 @@ fn resume_in_bind_position_calls_arm_k_directly() {
             assert_eq!(k_name, "_K0");
             match value.as_ref() {
                 CExpr::Let(_, resume_call, after_resume) => {
-                    match resume_call.as_ref() {
-                        CExpr::Apply(c, args) => {
-                            assert!(
-                                matches!(c.as_ref(), CExpr::Var(n) if n == "_K_arm0"),
-                                "Resume must apply the perform-site K (_K_arm0), got {:?}",
-                                c
-                            );
-                            assert!(matches!(&args[0], CExpr::Lit(CLit::Atom(a)) if a == "unit"));
-                        }
-                        other => panic!("expected Resume Apply, got {other:?}"),
-                    }
+                    assert!(
+                        contains_apply_to(resume_call, "_K_arm0"),
+                        "Resume must apply the perform-site K (_K_arm0), got {resume_call:?}"
+                    );
                     match after_resume.as_ref() {
                         CExpr::Apply(c, _) => {
                             assert!(matches!(c.as_ref(), CExpr::Var(n) if n == "_K0"));

@@ -22,6 +22,10 @@ effect Choose {
   fun choose : Unit -> Bool
 }
 
+effect ChooseList a {
+  fun choose_from : List a -> a
+}
+
 effect Recorder a {
   fun log_state : (entity: a) -> Unit
 }
@@ -71,6 +75,17 @@ handler all_choices for Choose {
     let b = resume False
     List.append a b
   }
+  return v = [v]
+}
+
+handler all_list_choices for ChooseList a {
+  choose_from options = List.flat_map (fun x -> resume x) options
+  return v = [v]
+}
+
+handler all_list_solutions for ChooseList a, Fail String {
+  choose_from options = List.flat_map (fun x -> resume x) options
+  fail _ = []
   return v = [v]
 }
 
@@ -634,6 +649,25 @@ tests () = {
           x + y
         } with all_choices
         assert_eq results [11, 21, 12, 22]
+      })
+
+      test "flat_map branches collect list results" (fun () -> {
+        let results = {
+          let a = choose_from! [1, 2]
+          let b = choose_from! (List.range a 3)
+          (a, b)
+        } with all_list_choices
+        assert_eq results [(1, 1), (1, 2), (1, 3), (2, 2), (2, 3)]
+      })
+
+      test "flat_map branches can prune with abort arm" (fun () -> {
+        let results = {
+          let a = choose_from! [1, 2, 3]
+          let b = choose_from! (List.range a 4)
+          if a + b == 5 then () else fail! "pruned"
+          (a, b)
+        } with all_list_solutions
+        assert_eq results [(1, 4), (2, 3)]
       })
     })
 

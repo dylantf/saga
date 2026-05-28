@@ -5,7 +5,7 @@
 //! stubbed; they arrive in sub-step 7c.
 
 use crate::ast::Pat;
-use crate::codegen::cerl::{CArm, CExpr, CPat};
+use crate::codegen::cerl::{CArm, CExpr, CLit, CPat};
 use crate::codegen::monadic::ir::{Atom, MExpr, MVar};
 
 use super::pats::lower_param_names;
@@ -19,6 +19,7 @@ pub(super) const RETURN_K_VAR: &str = "_ReturnK";
 /// Function-entry evidence-vector parameter name. Kept in sync with
 /// `decls.rs`'s [`EVIDENCE_VAR`].
 pub(super) const EVIDENCE_VAR: &str = "_Evidence";
+const ABORT_TAG: &str = "__saga_handler_abort";
 
 impl<'ctx> Lowerer<'ctx> {
     // ---------------------------------------------------------------
@@ -193,6 +194,50 @@ impl<'ctx> Lowerer<'ctx> {
         });
         let resumed = self.fresh_helper_name();
         let resume_call = CExpr::Apply(Box::new(CExpr::Var(k.clone())), vec![v]);
+        let resumed_value = if let Some(marker) = &ctx.abort_marker {
+            let raw_resumed = self.fresh_helper_name();
+            let abort_value = self.fresh_helper_name();
+            let other_marker = self.fresh_helper_name();
+            let other_abort_value = self.fresh_helper_name();
+            CExpr::Let(
+                raw_resumed.clone(),
+                Box::new(resume_call),
+                Box::new(CExpr::Case(
+                    Box::new(CExpr::Var(raw_resumed)),
+                    vec![
+                        CArm {
+                            pat: CPat::Tuple(vec![
+                                CPat::Lit(CLit::Atom(ABORT_TAG.to_string())),
+                                CPat::Lit(CLit::Atom(marker.clone())),
+                                CPat::Var(abort_value.clone()),
+                            ]),
+                            guard: None,
+                            body: CExpr::Var(abort_value),
+                        },
+                        CArm {
+                            pat: CPat::Tuple(vec![
+                                CPat::Lit(CLit::Atom(ABORT_TAG.to_string())),
+                                CPat::Var(other_marker.clone()),
+                                CPat::Var(other_abort_value.clone()),
+                            ]),
+                            guard: None,
+                            body: CExpr::Tuple(vec![
+                                CExpr::Lit(CLit::Atom(ABORT_TAG.to_string())),
+                                CExpr::Var(other_marker),
+                                CExpr::Var(other_abort_value),
+                            ]),
+                        },
+                        CArm {
+                            pat: CPat::Var("_ResumeValue".to_string()),
+                            guard: None,
+                            body: CExpr::Var("_ResumeValue".to_string()),
+                        },
+                    ],
+                )),
+            )
+        } else {
+            resume_call
+        };
 
         if let Some(finally_expr) = ctx.finally_block.clone() {
             let cleanup_k = self.fresh_helper_name();
@@ -209,7 +254,7 @@ impl<'ctx> Lowerer<'ctx> {
                 Box::new(cleanup_done_k),
                 Box::new(CExpr::Let(
                     resumed.clone(),
-                    Box::new(resume_call),
+                    Box::new(resumed_value),
                     Box::new(CExpr::Let(
                         "_".to_string(),
                         Box::new(cleanup_ce),
@@ -220,7 +265,7 @@ impl<'ctx> Lowerer<'ctx> {
         } else {
             CExpr::Let(
                 resumed.clone(),
-                Box::new(resume_call),
+                Box::new(resumed_value),
                 Box::new(self.apply_current_k(CExpr::Var(resumed), ctx)),
             )
         }
