@@ -157,6 +157,22 @@ nested_outer_fails () = double_positive (parse_or_fail (-3)) with to_result
 fun nested_both_succeed : Unit -> Result Int String
 nested_both_succeed () = double_positive (parse_or_fail 5) with to_result
 
+# Regression: a foreign abort (targeting the OUTER handler) must propagate
+# through an INNER resuming arm. Here `log!` is handled by `silent_log` (which
+# resumes); the resumed continuation then performs `fail!`, which must abort to
+# the outer `to_result` handler and yield `Err "boom"` — not be swallowed by
+# the inner Log delimiter.
+fun log_then_fail : Unit -> Int needs {Log, Fail String}
+log_then_fail () = {
+  log! "before"
+  fail! "boom"
+  99
+}
+
+fun foreign_abort_through_resume : Unit -> Result Int String
+foreign_abort_through_resume () =
+  (log_then_fail () with silent_log) with to_result
+
 fun let_wrapped_fallback : Unit -> String
 let_wrapped_fallback () = {
   let x = safe_div 10 0 with int_fallback
@@ -565,6 +581,17 @@ tests () = {
       test "effect can bubble through multiple wrapped functions before being handled" (fun () -> {
         let result = counter_bubble_outer ()
         assert_eq result 81
+      })
+
+      # KNOWN GAP: when the resuming handler is INNER and the aborting handler
+      # is OUTER, the foreign abort must propagate past the inner resuming
+      # delimiter. Today `lower_resume`'s foreign-abort arm unwraps the abort
+      # (correct only when the aborting handler is INNER), so this currently
+      # mis-routes. Fixing it needs delimiter-scope awareness, not a blanket
+      # propagate/unwrap. Tracked in docs/planning/uniform-effect-translation.
+      skip "foreign abort propagates through an inner resuming arm" (fun () -> {
+        let result = foreign_abort_through_resume ()
+        assert_eq result (Err "boom")
       })
     })
 

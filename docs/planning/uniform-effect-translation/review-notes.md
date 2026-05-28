@@ -597,6 +597,32 @@ Findings:
 - `lower_resume` still contains two local cleanup helper closures with nearly
   identical setup. This is an abstraction smell, not a behavior bug by itself.
 
+Verified finding (new — confirmed live bug):
+
+- **Foreign-abort routing through a resuming arm is only half-correct.** In
+  `lower_resume`, the foreign-abort case (arm matching `{abort, other_marker,
+  v}` — an abort whose marker is *not* this delimiter's) **unwraps** the abort
+  and delivers `v` to this arm's continuation. That is correct only when the
+  aborting handler is **inner** relative to the resuming handler (its delimiter
+  is inside the resumed continuation and has already produced its result). When
+  the aborting handler is **outer**, the abort must instead **propagate** past
+  the inner resuming delimiter — unwrapping mis-routes it.
+  - Inner-aborting case (passes today): `fail_handler_inside_resume_aborts_correctly`
+    in `tests/effect_property_tests.rs` — resuming `collect` (Log) is outer,
+    aborting `to_result_str` (Fail) is inner.
+  - Outer-aborting case (broken): resuming `silent_log` (Log) is inner, aborting
+    `to_result` (Fail) is outer. Minimal repro returns a type-confused
+    `Ok (Err "boom")` instead of `Err "boom"`. Captured as a **skipped** e2e
+    test, `effects_test.saga` → "foreign abort propagates through an inner
+    resuming arm".
+  - A blanket "always propagate" fixes the outer case but breaks the inner one
+    (tried — regresses the property test). The correct fix needs **delimiter
+    scope awareness**: distinguish whether `other_marker` belongs to a delimiter
+    enclosing this `with` (propagate) or nested within the resumed continuation
+    (deliver as value). There is no marker ordering/scope registry today, so
+    this is a real design task, not a one-line change. Do not patch arm 3
+    blindly.
+
 Recommended action:
 
 1. Add focused tests before changing behavior:
