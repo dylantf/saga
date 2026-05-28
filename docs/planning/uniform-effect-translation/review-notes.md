@@ -229,18 +229,112 @@ Contract:
 - Native Erlang callbacks expect native source arity.
 - Any boundary from native/bridge code into Saga callback values must adapt.
 
-Current failure:
+Current status:
 
-- `stdlib_test_suite` fails `Dict`, `List.sort*`, and `Set.to_list` tests with
-  arity mismatches such as "function called with 2 argument(s), but expects 4".
+- `stdlib_test_suite` is currently green. `lower_monadic/app.rs` has callback
+  adapters for known bridge functions such as Array/Dict/List/Set HOFs.
+- The current implementation is table-driven but still ad hoc: callback
+  argument positions/arity live in `external_callback_arg`, not in resolved
+  type metadata.
 
-Likely action:
+Review checkpoints:
 
-- Implement a general callback adapter at the external/native boundary.
-- Avoid one-off stdlib rewrites unless they are temporary scaffolding.
+- Confirm every stdlib bridge HOF in public API either routes through Saga
+  code or appears in `external_callback_arg`.
 - The adapter must be designed carefully for pure vs effectful callback types;
   do not use a throw/catch synchronous extractor for effectful callbacks unless
   the type system proves the callback is pure at that boundary.
+- Long-term cleanup: move callback shape out of a hardcoded module/function
+  table and derive it from function types/effect metadata.
+
+### Review Pass 3: Application / Callable ABI
+
+Scope:
+
+- `src/codegen/lower_monadic/app.rs`
+- callable value emission in `src/codegen/lower_monadic/atom.rs`
+- callable definitions/wrappers in `src/codegen/lower_monadic/decls.rs`
+- app translation in `src/codegen/monadic/translate/expr.rs`
+- backend resolution metadata consumed by the above
+
+Why this is one pass:
+
+- The same ABI question appears in several shapes: direct calls, function
+  references, vals in function position, partial application, over-application,
+  external calls, bridge callbacks, dict constructors, intrinsics, and
+  eta-reduced effect op references. Reviewing these separately tends to create
+  local fixes that disagree about arity or callable value shape.
+
+Contract:
+
+- Saga-defined callable values use uniform CPS shape:
+  `(user/dict args..., _Evidence, _ReturnK)`.
+- Top-level `val`s are arity-0 materializers, not callable values. A val whose
+  materialized value is a function must be invoked in two steps:
+  materialize val, then apply returned function with uniform args.
+- Dict constructors are callable values even when their source arity is zero;
+  they still need the uniform `_Evidence, _ReturnK` slots.
+- External/runtime functions are direct Erlang calls at source/runtime arity
+  when saturated. If a Saga callback crosses that boundary, wrap it in a
+  native-arity adapter that supplies evidence and an identity return K.
+- Partial application must eta-expand to a uniform Saga callable, never emit an
+  under-applied Core Erlang `apply`.
+- Eta-reduced effect ops as values should stay explicitly eta-expanded by the
+  translator unless/until the IR grows a first-class effect-op-reference atom.
+- Local source binders shadow imported/top-level resolution before any
+  function-reference lowering happens.
+
+Known-good signal today:
+
+- `tests/codegen_integration.rs` is green, including partial application,
+  zero-arity over-application, effectful callbacks, eta-reduced effect-op
+  callbacks, external disambiguation, and import shadowing tests.
+- `tests/stdlib_tests.rs` and `tests/e2e` are green, including bridge HOFs and
+  actor callback cases.
+
+Risk areas to audit anyway:
+
+- `ResolvedCodegenKind::InlineVal` still panics in the new atom path. Decide
+  whether this kind should be eliminated before monadic lowering or supported
+  explicitly. The module-codegen `InlineVal` failures are still the main known
+  callable-resolution smell.
+- `uniform_value_arity` relies on old-path resolution conventions: effectful
+  imported arities may already include `+2`, while pure arities do not. This
+  is subtle and should be locked down with tests before deleting old code.
+- `external_callback_arg` is a hardcoded bridge table. It is acceptable as a
+  phase-1 parity bridge, but it is not the final architecture.
+- `external_callback_adapter` uses identity K and direct return. This is only
+  correct for callbacks used synchronously by bridge/native code; async
+  boundaries such as actor spawn need dedicated native-effect handling.
+- Value-position `BindMode` changed effectful argument evaluation. Recheck
+  nested effectful arguments plus partial application together so callable ABI
+  does not accidentally reintroduce continuation capture bugs.
+- Intrinsic references now use wrapper functions when source-module metadata
+  is available. Missing wrappers should fail loudly, but the review should
+  confirm which intrinsics are meant to be first-class.
+
+Execution checklist:
+
+1. Inventory all callable emitters: `lower_app`, `lower_atom` resolved refs,
+   val lowering, fun/letfun lowering, dict constructor lowering, external and
+   intrinsic wrappers.
+2. Build a small table: source construct → `MExpr`/`Atom` shape → expected
+   Core Erlang callable/value shape.
+3. Trace resolution metadata for each `ResolvedCodegenKind`, especially
+   `BeamFunction`, `ExternalFunction`, `Intrinsic`, and `InlineVal`.
+4. Decide the `InlineVal` contract and either remove it from the new path
+   before lowering or implement a value materialization path.
+5. Audit `uniform_value_arity` assumptions against imported pure/effectful
+   functions and dict constructors; add/adjust focused tests if the current
+   convention stays.
+6. Replace or document `external_callback_arg` as the phase-1 bridge table;
+   add tests for any public bridge HOF not covered by stdlib/e2e.
+7. Re-run:
+   - `cargo test -q -p saga --test codegen_integration -- --nocapture`
+   - `cargo test -q -p saga --test module_codegen_integration -- --nocapture`
+   - `cargo test -q -p saga --test stdlib_tests -- --nocapture`
+   - `cargo run --bin saga --quiet -- test` in `tests/e2e`
+   - `cargo clippy -q`
 
 ## Open Questions
 
@@ -257,25 +351,18 @@ Likely action:
 
 ## Recommended Next Review/Refactor Order
 
-1. **Application ABI review/fix.**
-   Tackle zero-arity value functions and eta-reduced effect op callbacks
-   together. They both smell like "value in function position has wrong
-   callable shape."
+1. **Application / callable ABI review.**
+   Use Review Pass 3 above. This now includes native/bridge callback adapters
+   because they are part of the same callable-boundary contract.
 
-2. **Handler ABI review/fix.**
-   Tackle dynamic handler return clauses, same-effect shadowing, conditional
-   handler values, and abort marker crossing resume together.
+2. **Record metadata.**
+   Fix anonymous record field names with underscores if still failing in the
+   remaining normal test sweep.
 
-3. **Native/bridge callback adapters.**
-   Fix the stdlib suite's arity failures with a general boundary adapter.
+3. **Cross-module `InlineVal`.**
+   This may be resolved during Pass 3. If not, handle it immediately after.
 
-4. **Record metadata.**
-   Fix anonymous record field names with underscores.
-
-5. **Cross-module `InlineVal`.**
-   Remove or support stale `InlineVal` resolution in the new path.
-
-6. **Stale tests.**
+4. **Stale tests.**
    Rewrite or delete old Core-shape assertions after the runtime/parity
    failures are fixed. Do not spend much energy here before the real bugs.
 
