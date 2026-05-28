@@ -3356,6 +3356,25 @@ fn bootstrap_evidence_vector_has_canonical_effect_entries() {
 }
 
 #[test]
+fn bootstrap_native_op_order_is_alphabetical() {
+    // The perform site indexes an op tuple by `EffectOpRef.op_index`, which is
+    // the op's position in `build_effect_ops_table` — and that table always
+    // sorts ops alphabetically. The hand-maintained `NATIVE_EFFECTS` table must
+    // match that order or native ops dispatch to the wrong BIF at runtime with
+    // no error. Guard the hand-maintained order here so a mis-ordered table
+    // fails at test time instead of as a silent wrong-dispatch.
+    for tag in super::bootstrap::native_effect_tags() {
+        let ops = super::bootstrap::ops_for_effect(tag).unwrap();
+        let mut sorted = ops.clone();
+        sorted.sort();
+        assert_eq!(
+            ops, sorted,
+            "NATIVE_EFFECTS ops for '{tag}' must be alphabetical to match op_index; got {ops:?}"
+        );
+    }
+}
+
+#[test]
 fn bootstrap_identity_op_closure_calls_bif_and_applies_k() {
     // Actor.self has NoArgs shape: fun(Unit, EvidenceAtPerform, K) -> apply K(erlang:self())
     let resolution = ResolutionMap::new();

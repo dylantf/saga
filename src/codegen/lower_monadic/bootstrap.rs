@@ -1251,6 +1251,11 @@ fn native_call_args(op: &NativeOp, evidence_var: &str) -> Vec<CExpr> {
     }
 }
 
+/// Build the `fun() -> ...` thunk passed to `erlang:spawn`. The child runs the
+/// callback with a *copy* of the perform-site evidence (BEAM copies the closure
+/// env into the child's heap). This is correct for process-portable effects
+/// (native BIFs, `ets_ref`) but silently forks non-portable ones (user handlers,
+/// process-dict `beam_ref`). See `docs/planning/spawn-effect-evidence.md`.
 fn spawn_thunk(callback_var: String, evidence_var: String) -> CExpr {
     let k_var = "_SpawnK".to_string();
     let v_var = "_SpawnV".to_string();
