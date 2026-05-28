@@ -692,7 +692,7 @@ identity` into `ResolutionResult`. AST stays source-shaped.
 - **What:** translate the ANF'd `Program` into a monadic IR (`MExpr`) where
   every sequencing point is a `Bind`, every value-returning subterm is
   `Pure(atom)`, and every `perform` is `Yield { op, args, source }`. Uniform
-  — no per-site decision. The translator emits `Bind` everywhere; the
+  — no selective CPS decision. The translator emits `Bind` everywhere; the
   effect optimization stage rewrites pure binders to `Let`.
 - **Inputs:** ANF `Program`, `ResolutionMap` (read-only).
 - **Outputs:** monadic IR program (`MProgram` — selectively-parallel decl
@@ -720,8 +720,17 @@ identity` into `ResolutionResult`. AST stays source-shaped.
   - **Both `Bind` and `Let` are variants.** `Bind` is monadic sequencing
     (value may yield). `Let` is a pure binder (value provably never
     yields). The translator emits `Bind` uniformly; effect optimization
-    promotes to `Let` where pure. The lowerer dispatches on the variant —
-    `Bind` → CPS-continuation threading, `Let` → ordinary Erlang `let`.
+    promotes to `Let` where pure.
+  - **`Bind` carries a `BindMode`.** Source/block sequencing uses
+    `Sequence`: the bound computation's continuation is the rest of the
+    program. ANF-introduced value-position temporaries use `ValuePosition`:
+    the bound computation is delimited to produce a value for a surrounding
+    expression before that expression runs. This preserves direct-style
+    argument evaluation for value-producing `resume` while still bubbling
+    abort tuples to the enclosing handler delimiter. The lowerer dispatches
+    on the variant/mode — `Bind(Sequence)` → CPS-continuation threading,
+    `Bind(ValuePosition)` → success-tagged local delimiter, `Let` → ordinary
+    Erlang `let`.
   - **NodeIds live on `Atom` variants and on structural `MExpr` variants
     (`App`, `Case`, `If`, `With`, `FieldAccess`, etc.).** `Pure` and `Bind`
     do **not** carry their own `source: NodeId` — `Pure` wraps an atom that

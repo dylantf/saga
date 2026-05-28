@@ -233,7 +233,9 @@ fn let_x_in_body_becomes_bind() {
     );
     let body = fun_body(run_decl(fun_binding("f", block)));
     match body {
-        MExpr::Bind { var, value, body } => {
+        MExpr::Bind {
+            var, value, body, ..
+        } => {
             assert_eq!(var.name, "x");
             // value is App(g, [y])
             match *value {

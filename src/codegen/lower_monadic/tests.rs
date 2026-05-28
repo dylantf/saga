@@ -10,7 +10,8 @@ use crate::ast::{self, Lit, NodeId, Pat};
 use crate::codegen::cerl::{CExpr, CLit, CPat};
 use crate::codegen::handler_analysis::HandlerAnalysis;
 use crate::codegen::monadic::ir::{
-    Atom, EffectInfo, MArm, MBitSegment, MDecl, MDictConstructor, MExpr, MFunBinding, MVal,
+    Atom, BindMode, EffectInfo, MArm, MBitSegment, MDecl, MDictConstructor, MExpr, MFunBinding,
+    MVal,
 };
 use crate::token::Span;
 
@@ -58,7 +59,8 @@ fn eventually_applies_return_k(expr: &CExpr) -> bool {
 fn contains_call(expr: &CExpr, module: &str, function: &str) -> bool {
     match expr {
         CExpr::Call(m, f, args) => {
-            (m == module && f == function) || args.iter().any(|a| contains_call(a, module, function))
+            (m == module && f == function)
+                || args.iter().any(|a| contains_call(a, module, function))
         }
         CExpr::Apply(callee, args) => {
             contains_call(callee, module, function)
@@ -69,7 +71,9 @@ fn contains_call(expr: &CExpr, module: &str, function: &str) -> bool {
         }
         CExpr::Case(scrutinee, arms) => {
             contains_call(scrutinee, module, function)
-                || arms.iter().any(|arm| contains_call(&arm.body, module, function))
+                || arms
+                    .iter()
+                    .any(|arm| contains_call(&arm.body, module, function))
         }
         CExpr::Fun(_, body) => contains_call(body, module, function),
         CExpr::Tuple(values) | CExpr::Values(values) => {
@@ -101,9 +105,9 @@ fn contains_element_access_index(expr: &CExpr, index: i64) -> bool {
                     .any(|arm| contains_element_access_index(&arm.body, index))
         }
         CExpr::Fun(_, body) => contains_element_access_index(body, index),
-        CExpr::Tuple(values) | CExpr::Values(values) => {
-            values.iter().any(|v| contains_element_access_index(v, index))
-        }
+        CExpr::Tuple(values) | CExpr::Values(values) => values
+            .iter()
+            .any(|v| contains_element_access_index(v, index)),
         _ => false,
     }
 }
@@ -319,6 +323,7 @@ fn val_with_bind_sequenced_body_lowers_without_panic() {
         },
         value: Box::new(MExpr::Pure(atom_lit(Lit::Int("1".into(), 1)))),
         body: Box::new(MExpr::Pure(atom_lit(Lit::Int("2".into(), 2)))),
+        mode: BindMode::Sequence,
     };
     let v = MVal {
         id: dummy_node(),
@@ -1098,6 +1103,7 @@ fn bind_lowers_to_let_with_continuation_fun() {
             source: dummy_node(),
         })),
         body: Box::new(MExpr::Pure(atom_var("x"))),
+        mode: BindMode::Sequence,
     };
     let ce = lower_expr_default(&e);
     match ce {
@@ -1434,6 +1440,7 @@ fn yield_in_bind_position_threads_bind_k_as_op_continuation() {
             source: dummy_node(),
         }),
         body: Box::new(MExpr::Pure(atom_var("x"))),
+        mode: BindMode::Sequence,
     };
     let ce = lower_expr_default(&e);
     let (k_name, value_ce) = match ce {
@@ -2352,12 +2359,11 @@ fn resume_inside_lambda_in_arm_body_uses_arm_k_via_closure() {
                         "Resume inside lambda must use enclosing arm's _K_arm0 \
                          (captured via closure), not lambda's own _ReturnK; got {value:?}"
                     );
-                    match next.as_ref() {
-                        CExpr::Apply(c, _) => {
-                            assert!(matches!(c.as_ref(), CExpr::Var(n) if n == "_ReturnK"));
-                        }
-                        other => panic!("expected local continuation Apply, got {other:?}"),
-                    }
+                    assert!(
+                        contains_apply_to(next, "_ReturnK"),
+                        "resume result must continue through the lambda's local _ReturnK \
+                         after abort-marker unwrapping; got {next:?}"
+                    );
                 }
                 other => panic!("expected lambda body Let, got {other:?}"),
             }
@@ -2370,13 +2376,11 @@ fn resume_inside_lambda_in_arm_body_uses_arm_k_via_closure() {
 fn resume_in_bind_position_calls_arm_k_directly() {
     // Arm body: Bind { x = Resume(unit), body = Pure(Var x) }.
     //
-    // Resume never returns — when the perform-site continuation
-    // (`_K_arm0`) is invoked, control transfers out and never comes
-    // back. The Bind's continuation (body `Pure(x)`) is therefore dead
-    // code. The lowerer emits the Resume as a direct
-    // `apply _K_arm0('unit')`; the bound continuation closure that
-    // would have wrapped `Pure(x)` is still synthesized as `_K0` but
-    // is unreachable.
+    // Resume is value-producing: it applies the perform-site continuation
+    // (`_K_arm0`) and then feeds the returned handled-body value into the
+    // local Bind continuation (`_K0`). Abort-marker unwrapping may insert a
+    // case between the two, but the captured arm K must still be the call
+    // target and the local K must still receive the result.
     let arm_body = MExpr::Bind {
         var: mvar("x"),
         value: Box::new(MExpr::Resume {
@@ -2384,6 +2388,7 @@ fn resume_in_bind_position_calls_arm_k_directly() {
             source: dummy_node(),
         }),
         body: Box::new(MExpr::Pure(atom_var("x"))),
+        mode: BindMode::Sequence,
     };
     let arm = handler_arm_with_body("E", "op", 1, vec![], arm_body);
     let handler = MHandler::Static {
@@ -2415,12 +2420,11 @@ fn resume_in_bind_position_calls_arm_k_directly() {
                         contains_apply_to(resume_call, "_K_arm0"),
                         "Resume must apply the perform-site K (_K_arm0), got {resume_call:?}"
                     );
-                    match after_resume.as_ref() {
-                        CExpr::Apply(c, _) => {
-                            assert!(matches!(c.as_ref(), CExpr::Var(n) if n == "_K0"));
-                        }
-                        other => panic!("expected bind continuation Apply, got {other:?}"),
-                    }
+                    assert!(
+                        contains_apply_to(after_resume, "_K0"),
+                        "resume result must continue through the bind continuation _K0 \
+                         after abort-marker unwrapping; got {after_resume:?}"
+                    );
                 }
                 other => panic!("expected value-producing Resume Let, got {other:?}"),
             }
@@ -3602,6 +3606,7 @@ fn binop_under_bind_threads_inner_k() {
             source: dummy_node(),
         }),
         body: Box::new(MExpr::Pure(atom_var("x"))),
+        mode: BindMode::Sequence,
     };
     let ce = lower_expr_default(&expr);
     let body = match ce {

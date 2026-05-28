@@ -132,8 +132,17 @@ fn write_expr(out: &mut String, indent: usize, e: &MExpr) {
     let mut cur = e;
     loop {
         match cur {
-            MExpr::Bind { var, value, body } => {
-                write_bind_line(out, indent, "bind", var, value);
+            MExpr::Bind {
+                var,
+                value,
+                body,
+                mode,
+            } => {
+                let kw = match mode {
+                    crate::codegen::monadic::ir::BindMode::Sequence => "bind",
+                    crate::codegen::monadic::ir::BindMode::ValuePosition => "bind[value]",
+                };
+                write_bind_line(out, indent, kw, var, value);
                 cur = body;
             }
             MExpr::Let { var, value, body } => {
@@ -358,12 +367,23 @@ fn write_tail(out: &mut String, indent: usize, e: &MExpr) {
 fn expr_compact(e: &MExpr) -> String {
     match e {
         MExpr::Pure(a) => format!("Pure({})", atom_str(a)),
-        MExpr::Bind { var, value, body } => format!(
-            "bind {} <- {}; {}",
-            mvar_str(var),
-            expr_compact(value),
-            expr_compact(body)
-        ),
+        MExpr::Bind {
+            var,
+            value,
+            body,
+            mode,
+        } => {
+            let kw = match mode {
+                crate::codegen::monadic::ir::BindMode::Sequence => "bind",
+                crate::codegen::monadic::ir::BindMode::ValuePosition => "bind[value]",
+            };
+            format!(
+                "{kw} {} <- {}; {}",
+                mvar_str(var),
+                expr_compact(value),
+                expr_compact(body)
+            )
+        }
         MExpr::Let { var, value, body } => format!(
             "let {} <- {}; {}",
             mvar_str(var),

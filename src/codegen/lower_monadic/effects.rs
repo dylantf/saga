@@ -289,7 +289,15 @@ impl<'ctx> Lowerer<'ctx> {
                             CPat::Var(abort_value.clone()),
                         ]),
                         guard: None,
-                        body: self.apply_current_k(CExpr::Var(abort_value), ctx),
+                        body: if ctx.preserve_abort_marker {
+                            CExpr::Tuple(vec![
+                                CExpr::Lit(CLit::Atom(ABORT_TAG.to_string())),
+                                CExpr::Lit(CLit::Atom(abort_marker.clone())),
+                                CExpr::Var(abort_value),
+                            ])
+                        } else {
+                            self.apply_current_k(CExpr::Var(abort_value), ctx)
+                        },
                     },
                     CArm {
                         pat: CPat::Tuple(vec![
@@ -462,11 +470,19 @@ impl<'ctx> Lowerer<'ctx> {
                     CArm {
                         pat: CPat::Tuple(vec![
                             CPat::Lit(CLit::Atom(ABORT_TAG.to_string())),
-                            CPat::Lit(CLit::Atom(abort_marker)),
+                            CPat::Lit(CLit::Atom(abort_marker.clone())),
                             CPat::Var(abort_value.clone()),
                         ]),
                         guard: None,
-                        body: self.apply_current_k(CExpr::Var(abort_value), ctx),
+                        body: if ctx.preserve_abort_marker {
+                            CExpr::Tuple(vec![
+                                CExpr::Lit(CLit::Atom(ABORT_TAG.to_string())),
+                                CExpr::Lit(CLit::Atom(abort_marker.clone())),
+                                CExpr::Var(abort_value),
+                            ])
+                        } else {
+                            self.apply_current_k(CExpr::Var(abort_value), ctx)
+                        },
                     },
                     CArm {
                         pat: CPat::Tuple(vec![

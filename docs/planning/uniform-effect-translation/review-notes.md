@@ -208,6 +208,19 @@ Likely action:
   application, and over-application.
 - Then review edge expressions: records, field access, receive, bitstrings.
 
+Step 2 status:
+
+- Abort markers crossing a value-producing `resume` are now unwrapped at the
+  resume boundary before the arm-local continuation runs. This fixes
+  `fail_handler_inside_resume_aborts_correctly`.
+- `BindMode::ValuePosition` now distinguishes ANF-introduced value-position
+  delimiters from source sequencing. This fixes
+  `lambda_head_effectful_call_nested_in_outer_effectful_call` without changing
+  ordinary source/block `Bind` continuation capture.
+- `nested_same_effect_inner_shadows_outer` now asserts op dispatch shadowing
+  with an identity outer return clause. Return-clause composition remains
+  lexical and is covered by the e2e nested-return tests.
+
 ### Native / Bridge Callback Boundary
 
 Contract:

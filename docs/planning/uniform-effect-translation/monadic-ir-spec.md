@@ -46,6 +46,22 @@ pub struct EffectOpRef {
 }
 ```
 
+### `BindMode`
+
+```rust
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BindMode {
+    /// Source/block sequencing: the bound computation resumes into `body`.
+    Sequence,
+
+    /// ANF-introduced value-position evaluation: the bound computation first
+    /// produces a local value for a surrounding expression. Successful
+    /// resumptions are delimited locally; abort tuples still bubble to the
+    /// enclosing handler delimiter.
+    ValuePosition,
+}
+```
+
 ### `Atom`
 
 ANF atomic positions. Every position the ANF invariant declares atomic is
@@ -133,12 +149,14 @@ pub enum MExpr {
     },
 
     /// Monadic sequencing: run `value` (may yield), bind result to `var`,
-    /// continue with `body`. Emitted uniformly by the translator. No
-    /// NodeId — `Bind` is pure scaffolding.
+    /// continue with `body`. `mode` records whether this binder is source
+    /// sequencing or an ANF-introduced value-position delimiter. Emitted
+    /// uniformly by the translator. No NodeId — `Bind` is pure scaffolding.
     Bind {
         var: MVar,
         value: Box<MExpr>,
         body: Box<MExpr>,
+        mode: BindMode,
     },
 
     // --- structural: pure binder & control flow ---

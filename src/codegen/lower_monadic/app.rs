@@ -230,8 +230,10 @@ impl<'ctx> Lowerer<'ctx> {
             args.iter().map(|a| self.lower_atom(a, ctx)).collect();
         returned_fun_args.push(CExpr::Var(ctx.evidence.clone()));
         returned_fun_args.push(CExpr::Var(ctx.return_k.clone()));
-        let apply_returned_fun =
-            CExpr::Apply(Box::new(CExpr::Var(result_fun_var.clone())), returned_fun_args);
+        let apply_returned_fun = CExpr::Apply(
+            Box::new(CExpr::Var(result_fun_var.clone())),
+            returned_fun_args,
+        );
         let split_k = CExpr::Fun(vec![result_fun_var], Box::new(apply_returned_fun));
 
         let split_k_var = self.fresh_helper_name();

@@ -51,6 +51,12 @@ pub(crate) struct LowerCtx {
     /// site's lexical scope for values captured by the cleanup block.
     pub finally_block: Option<Box<crate::codegen::monadic::ir::MExpr>>,
 
+    /// Preserve abort tuples instead of unwrapping the current delimiter's
+    /// marker through `return_k`. Used by value-position binds, whose local
+    /// success continuation must not turn aborting handler arms into ordinary
+    /// argument values.
+    pub preserve_abort_marker: bool,
+
     /// Source-level names bound in the current lexical scope.
     ///
     /// The backend resolution map is keyed by original AST node ids and may
@@ -69,6 +75,7 @@ impl LowerCtx {
             arm_k: None,
             abort_marker: None,
             finally_block: None,
+            preserve_abort_marker: false,
             locals: BTreeSet::new(),
         }
     }
@@ -117,6 +124,15 @@ impl LowerCtx {
     pub fn without_finally(&self) -> Self {
         Self {
             finally_block: None,
+            ..self.clone()
+        }
+    }
+
+    /// Clone + set whether current `with` delimiters should preserve abort
+    /// tuples for a surrounding value-position binder.
+    pub fn with_preserve_abort_marker(&self, preserve_abort_marker: bool) -> Self {
+        Self {
+            preserve_abort_marker,
             ..self.clone()
         }
     }

@@ -1,5 +1,6 @@
 use super::*;
 use crate::ast::{Lit, NodeId, Pat};
+use crate::codegen::monadic::ir::BindMode;
 use crate::token::{Span, StringKind};
 
 fn sp() -> Span {
@@ -57,7 +58,9 @@ fn bind_chain_is_flat_and_deterministic() {
                 source: nid(16),
             }),
             body: Box::new(MExpr::Pure(var("z", 17))),
+            mode: BindMode::Sequence,
         }),
+        mode: BindMode::Sequence,
     };
     let f = MFunBinding {
         id: nid(1),
@@ -250,6 +253,7 @@ fn static_handler_with_arms_and_return() {
                 },
                 source: nid(43),
             }),
+            mode: BindMode::Sequence,
         }),
         finally_block: None,
         span: sp(),

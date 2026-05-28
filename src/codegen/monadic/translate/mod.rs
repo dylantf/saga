@@ -20,7 +20,8 @@ use std::collections::HashMap;
 
 use crate::ast::{self, Decl, ExprKind, HandlerBody, NodeId};
 use crate::codegen::monadic::ir::{
-    EffectInfo, HandlerValueMap, MDecl, MDictConstructor, MExpr, MFunBinding, MProgram, MVal, MVar,
+    BindMode, EffectInfo, HandlerValueMap, MDecl, MDictConstructor, MExpr, MFunBinding, MProgram,
+    MVal, MVar,
 };
 use crate::codegen::resolve::ResolutionMap;
 
@@ -343,6 +344,7 @@ pub(crate) fn wrap_binds(
 ) -> MExpr {
     let mut acc = tail;
     for (var, value, destructure_pat) in bindings.into_iter().rev() {
+        let mode = bind_mode_for(&var, &value);
         let body = if let Some(pat) = destructure_pat {
             MExpr::Case {
                 scrutinee: crate::codegen::monadic::ir::Atom::Var {
@@ -364,9 +366,66 @@ pub(crate) fn wrap_binds(
             var,
             value: Box::new(value),
             body: Box::new(body),
+            mode,
         };
     }
     acc
+}
+
+fn bind_mode_for(var: &MVar, value: &MExpr) -> BindMode {
+    if var.name.starts_with("__anf_") && needs_value_position_delimiter(value) {
+        BindMode::ValuePosition
+    } else {
+        BindMode::Sequence
+    }
+}
+
+fn needs_value_position_delimiter(value: &MExpr) -> bool {
+    match value {
+        MExpr::Yield { .. } | MExpr::Resume { .. } | MExpr::With { .. } => true,
+        MExpr::Bind { value, body, .. } | MExpr::Let { value, body, .. } => {
+            needs_value_position_delimiter(value) || needs_value_position_delimiter(body)
+        }
+        MExpr::If {
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            needs_value_position_delimiter(then_branch)
+                || needs_value_position_delimiter(else_branch)
+        }
+        MExpr::Case { arms, .. } | MExpr::Receive { arms, .. } => arms
+            .iter()
+            .any(|arm| needs_value_position_delimiter(&arm.body)),
+        MExpr::App {
+            head:
+                crate::codegen::monadic::ir::Atom::Lambda {
+                    body: lambda_body, ..
+                },
+            ..
+        } => needs_value_position_delimiter(lambda_body),
+        MExpr::HandlerValue {
+            arms,
+            return_clause,
+            ..
+        } => {
+            arms.iter()
+                .any(|arm| needs_value_position_delimiter(&arm.body))
+                || return_clause
+                    .as_ref()
+                    .is_some_and(|arm| needs_value_position_delimiter(&arm.body))
+        }
+        MExpr::Pure(_)
+        | MExpr::App { .. }
+        | MExpr::ForeignCall { .. }
+        | MExpr::BinOp { .. }
+        | MExpr::UnaryMinus { .. }
+        | MExpr::FieldAccess { .. }
+        | MExpr::RecordUpdate { .. }
+        | MExpr::DictMethodAccess { .. }
+        | MExpr::BitString { .. }
+        | MExpr::LetFun { .. } => false,
+    }
 }
 
 /// Helper: take an arbitrary node id from an AST node kind we'll need a

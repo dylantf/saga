@@ -128,6 +128,7 @@ impl<'ctx> Lowerer<'ctx> {
             arm_k: enclosing.arm_k.clone(),
             abort_marker: enclosing.abort_marker.clone(),
             finally_block: enclosing.finally_block.clone(),
+            preserve_abort_marker: enclosing.preserve_abort_marker,
             locals: enclosing.locals.clone(),
         }
         .with_param_locals(&arm.params);
@@ -321,8 +322,8 @@ impl<'ctx> Lowerer<'ctx> {
                     let erlang_mod: String = src_mod.to_lowercase().replace('.', "_");
                     // Intrinsics have no effect annotation; treat them as
                     // pure for the uniform-arity calculation.
-                let uniform = self.uniform_arity_for_resolved(arity, &[], &resolved.name);
-                fun_value_of(erlang_mod, resolved.name, uniform)
+                    let uniform = self.uniform_arity_for_resolved(arity, &[], &resolved.name);
+                    fun_value_of(erlang_mod, resolved.name, uniform)
                 } else {
                     CExpr::FunRef(resolved.name, arity)
                 }

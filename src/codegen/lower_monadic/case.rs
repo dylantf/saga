@@ -248,7 +248,10 @@ impl<'ctx> Lowerer<'ctx> {
             // are themselves guard expressions, so we recurse into both
             // sides under `lower_guard` and rebuild as a `CExpr::Let`.
             // `Let` (post-Bind→Let promotion) gets the same treatment.
-            MExpr::Bind { var, value, body } | MExpr::Let { var, value, body } => {
+            MExpr::Bind {
+                var, value, body, ..
+            }
+            | MExpr::Let { var, value, body } => {
                 let val_ce = self.lower_guard(value, ctx);
                 let body_ce = self.lower_guard(body, ctx);
                 CExpr::Let(core_var(&var.name), Box::new(val_ce), Box::new(body_ce))

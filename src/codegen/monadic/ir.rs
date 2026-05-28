@@ -39,6 +39,16 @@ pub struct EffectOpRef {
     pub op_index: u32,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BindMode {
+    /// Source/block sequencing: the bound computation resumes into `body`.
+    Sequence,
+    /// ANF-introduced value-position evaluation: the bound computation first
+    /// produces a local value; only successful completion continues into
+    /// `body`, while abort tuples bubble to the enclosing delimiter.
+    ValuePosition,
+}
+
 // -------------------------------------------------------------------------
 // Atoms (ANF atomic positions)
 // -------------------------------------------------------------------------
@@ -137,6 +147,7 @@ pub enum MExpr {
         var: MVar,
         value: Box<MExpr>,
         body: Box<MExpr>,
+        mode: BindMode,
     },
 
     // --- structural: pure binder & control flow ---

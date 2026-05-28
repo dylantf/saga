@@ -844,7 +844,7 @@ effect Log {
 
 handler outer for Log {
   log msg = "OUTER:" <> msg <> resume ()
-  return _ = ""
+  return value = value
 }
 
 handler inner for Log {
