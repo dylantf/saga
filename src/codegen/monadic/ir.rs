@@ -262,6 +262,83 @@ pub enum MExpr {
     },
 }
 
+impl MExpr {
+    pub fn contains_resume(&self) -> bool {
+        match self {
+            MExpr::Resume { .. } => true,
+            MExpr::Pure(atom) => atom.contains_resume(),
+            MExpr::Yield { args, .. } => args.iter().any(Atom::contains_resume),
+            MExpr::Bind { value, body, .. } | MExpr::Let { value, body, .. } => {
+                value.contains_resume() || body.contains_resume()
+            }
+            MExpr::Case {
+                scrutinee, arms, ..
+            } => scrutinee.contains_resume() || arms.iter().any(|a| a.body.contains_resume()),
+            MExpr::If {
+                cond,
+                then_branch,
+                else_branch,
+                ..
+            } => {
+                cond.contains_resume()
+                    || then_branch.contains_resume()
+                    || else_branch.contains_resume()
+            }
+            MExpr::App { head, args, .. } => {
+                head.contains_resume() || args.iter().any(Atom::contains_resume)
+            }
+            MExpr::ForeignCall { args, .. } => args.iter().any(Atom::contains_resume),
+            MExpr::BinOp { left, right, .. } => left.contains_resume() || right.contains_resume(),
+            MExpr::UnaryMinus { value, .. } => value.contains_resume(),
+            MExpr::FieldAccess { record, .. } => record.contains_resume(),
+            MExpr::RecordUpdate { record, fields, .. } => {
+                record.contains_resume() || fields.iter().any(|(_, atom)| atom.contains_resume())
+            }
+            MExpr::DictMethodAccess { dict, .. } => dict.contains_resume(),
+            MExpr::BitString { segments, .. } => segments.iter().any(|seg| {
+                seg.value.contains_resume() || seg.size.as_ref().is_some_and(Atom::contains_resume)
+            }),
+            MExpr::With { body, .. } => body.contains_resume(),
+            MExpr::Receive { arms, after, .. } => {
+                arms.iter().any(|a| a.body.contains_resume())
+                    || after.as_ref().is_some_and(|(timeout, b)| {
+                        timeout.contains_resume() || b.contains_resume()
+                    })
+            }
+            MExpr::LetFun { body, rest, .. } => body.contains_resume() || rest.contains_resume(),
+            MExpr::HandlerValue {
+                arms,
+                return_clause,
+                ..
+            } => {
+                arms.iter().any(|a| a.body.contains_resume())
+                    || return_clause
+                        .as_ref()
+                        .is_some_and(|a| a.body.contains_resume())
+            }
+        }
+    }
+}
+
+impl Atom {
+    pub fn contains_resume(&self) -> bool {
+        match self {
+            Atom::Lambda { body, .. } => body.contains_resume(),
+            Atom::Ctor { args, .. } | Atom::Tuple { elements: args, .. } => {
+                args.iter().any(Atom::contains_resume)
+            }
+            Atom::AnonRecord { fields, .. } | Atom::Record { fields, .. } => {
+                fields.iter().any(|(_, atom)| atom.contains_resume())
+            }
+            Atom::Var { .. }
+            | Atom::Lit { .. }
+            | Atom::DictRef { .. }
+            | Atom::QualifiedRef { .. }
+            | Atom::Symbol { .. } => false,
+        }
+    }
+}
+
 // -------------------------------------------------------------------------
 // Arm / bit segment
 // -------------------------------------------------------------------------

@@ -459,10 +459,7 @@ fn just_is_tagged_tuple() {
     // `Just(42)` -> {'std_maybe_Just', 42} (tagged tuple)
     let out = emit("main () = Just(42)");
     assert!(out.contains("42"), "missing value\n{out}");
-    assert!(
-        out.contains("'std_maybe_Just'"),
-        "missing just tag\n{out}"
-    );
+    assert!(out.contains("'std_maybe_Just'"), "missing just tag\n{out}");
 }
 
 #[test]
@@ -1259,7 +1256,13 @@ fn build_effect_info_populates_all_fields_from_check_result() {
     let ops_storage = super::build_effect_ops_table(&result);
     let handler_effects_storage = super::build_handler_effects(&result);
     let let_handler_effects_storage = super::build_let_handler_effects(&result);
-    let info = super::build_effect_info(&result, &result, &ops_storage, &handler_effects_storage, &let_handler_effects_storage);
+    let info = super::build_effect_info(
+        &result,
+        &result,
+        &ops_storage,
+        &handler_effects_storage,
+        &let_handler_effects_storage,
+    );
 
     // type_at_node and fun_effects come from check_result.
     assert!(std::ptr::eq(info.type_at_node, &result.type_at_node));

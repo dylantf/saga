@@ -105,8 +105,7 @@ impl<'ctx> Lowerer<'ctx> {
     ) -> CExpr {
         // Use a fresh context so arm closures are self-contained and don't
         // capture the definition site's return_k/evidence.
-        let mut sorted_arms: Vec<&crate::codegen::monadic::ir::MHandlerArm> =
-            arms.iter().collect();
+        let mut sorted_arms: Vec<&crate::codegen::monadic::ir::MHandlerArm> = arms.iter().collect();
         sorted_arms.sort_by_key(|a| (a.op.effect.clone(), a.op.op_index));
         let elements: Vec<CExpr> = sorted_arms
             .iter()
@@ -185,11 +184,6 @@ impl<'ctx> Lowerer<'ctx> {
     /// r s`.
     fn lower_resume(&mut self, value: &Atom, ctx: &LowerCtx) -> CExpr {
         let v = self.lower_atom(value, ctx);
-        // arm_k must be Some — `resume` is only legal inside a handler arm
-        // body, and arm_k is preserved through lambda boundaries via
-        // `lower_lambda_atom`. A None here is a real bug (translator emitted
-        // Resume outside an arm, or arm_k propagation broke); falling back
-        // to return_k silently miscompiles `(resume v) ...` patterns.
         let k = ctx.arm_k.as_ref().unwrap_or_else(|| {
             panic!(
                 "lower_resume: arm_k is None — `resume` reached without an enclosing arm body. \
@@ -199,11 +193,37 @@ impl<'ctx> Lowerer<'ctx> {
         });
         let resumed = self.fresh_helper_name();
         let resume_call = CExpr::Apply(Box::new(CExpr::Var(k.clone())), vec![v]);
-        CExpr::Let(
-            resumed.clone(),
-            Box::new(resume_call),
-            Box::new(self.apply_current_k(CExpr::Var(resumed), ctx)),
-        )
+
+        if let Some(finally_expr) = ctx.finally_block.clone() {
+            let cleanup_k = self.fresh_helper_name();
+            let cleanup_ctx = ctx.without_finally().with_return_k(cleanup_k.clone());
+            let cleanup_ce = self.lower_expr(&finally_expr, &cleanup_ctx);
+            let cleanup_done_k = CExpr::Fun(
+                vec!["_".to_string()],
+                Box::new(CExpr::Lit(crate::codegen::cerl::CLit::Atom(
+                    "unit".to_string(),
+                ))),
+            );
+            CExpr::Let(
+                cleanup_k,
+                Box::new(cleanup_done_k),
+                Box::new(CExpr::Let(
+                    resumed.clone(),
+                    Box::new(resume_call),
+                    Box::new(CExpr::Let(
+                        "_".to_string(),
+                        Box::new(cleanup_ce),
+                        Box::new(self.apply_current_k(CExpr::Var(resumed), ctx)),
+                    )),
+                )),
+            )
+        } else {
+            CExpr::Let(
+                resumed.clone(),
+                Box::new(resume_call),
+                Box::new(self.apply_current_k(CExpr::Var(resumed), ctx)),
+            )
+        }
     }
 
     /// `Pure(atom)` → `apply <current_K>(<atom>)`.
@@ -319,6 +339,8 @@ impl<'ctx> Lowerer<'ctx> {
             return_k: RETURN_K_VAR.to_string(),
             evidence: EVIDENCE_VAR.to_string(),
             arm_k: enclosing.arm_k.clone(),
+            abort_marker: enclosing.abort_marker.clone(),
+            finally_block: enclosing.finally_block.clone(),
             locals: enclosing.locals.clone(),
         }
         .with_param_locals(params);

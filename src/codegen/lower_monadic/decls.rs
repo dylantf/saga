@@ -118,11 +118,7 @@ impl<'ctx> Lowerer<'ctx> {
             let body_ctx = LowerCtx::fresh().with_param_locals(&fb.params);
             let guard = fb.guard.as_ref().map(|g| self.lower_guard(g, &body_ctx));
             let body = self.lower_expr(&fb.body, &body_ctx);
-            arms.push(CArm {
-                pat,
-                guard,
-                body,
-            });
+            arms.push(CArm { pat, guard, body });
         }
 
         let case_body = CExpr::Case(Box::new(scrut), arms);
@@ -200,8 +196,8 @@ impl<'ctx> Lowerer<'ctx> {
             .iter()
             .map(|m| match m {
                 MExpr::Pure(atom @ Atom::Lambda { .. }) => {
-                    let body_ctx = super::ctx::LowerCtx::fresh()
-                        .with_locals(dc.dict_params.iter().cloned());
+                    let body_ctx =
+                        super::ctx::LowerCtx::fresh().with_locals(dc.dict_params.iter().cloned());
                     self.lower_atom(atom, &body_ctx)
                 }
                 other => panic!(

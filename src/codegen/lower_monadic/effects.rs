@@ -27,6 +27,7 @@ use super::{LowerCtx, Lowerer};
 /// Erlang module hosting the runtime helpers
 /// (`find_evidence/2`, `insert_canonical/2`, `project_evidence/2`).
 const EVIDENCE_BRIDGE_MODULE: &str = "std_evidence_bridge";
+const ABORT_TAG: &str = "__saga_handler_abort";
 
 #[derive(Clone, Copy)]
 enum ArmReturnMode {
@@ -208,11 +209,14 @@ impl<'ctx> Lowerer<'ctx> {
         // handler stack and the return clause forwards through the outer K.
         let outer_evidence = ctx.evidence.clone();
         let raw_result_k = self.fresh_k_ret_name();
+        let abort_marker = format!("__saga_abort_{raw_result_k}");
         let raw_result_k_binding = CExpr::Fun(
             vec!["_V".to_string()],
             Box::new(CExpr::Var("_V".to_string())),
         );
-        let arm_ctx = ctx.with_return_k(raw_result_k.clone());
+        let arm_ctx = ctx
+            .with_return_k(raw_result_k.clone())
+            .with_abort_marker(abort_marker.clone());
 
         // 1. Build per-effect entries from the arms. Arm closures reference
         //    `outer_evidence` / `outer_return_k` inside; we build them with
@@ -269,10 +273,44 @@ impl<'ctx> Lowerer<'ctx> {
         let body_ctx = ctx.with_evidence(acc_evidence_var).with_return_k(inner_k);
         let body_ce = self.lower_expr(body, &body_ctx);
         let with_result = self.fresh_helper_name();
+        let abort_value = self.fresh_helper_name();
+        let other_marker = self.fresh_helper_name();
+        let other_abort_value = self.fresh_helper_name();
         let wrapped_body = CExpr::Let(
             with_result.clone(),
             Box::new(body_ce),
-            Box::new(self.apply_current_k(CExpr::Var(with_result), ctx)),
+            Box::new(CExpr::Case(
+                Box::new(CExpr::Var(with_result.clone())),
+                vec![
+                    CArm {
+                        pat: CPat::Tuple(vec![
+                            CPat::Lit(CLit::Atom(ABORT_TAG.to_string())),
+                            CPat::Lit(CLit::Atom(abort_marker.clone())),
+                            CPat::Var(abort_value.clone()),
+                        ]),
+                        guard: None,
+                        body: self.apply_current_k(CExpr::Var(abort_value), ctx),
+                    },
+                    CArm {
+                        pat: CPat::Tuple(vec![
+                            CPat::Lit(CLit::Atom(ABORT_TAG.to_string())),
+                            CPat::Var(other_marker.clone()),
+                            CPat::Var(other_abort_value.clone()),
+                        ]),
+                        guard: None,
+                        body: CExpr::Tuple(vec![
+                            CExpr::Lit(CLit::Atom(ABORT_TAG.to_string())),
+                            CExpr::Var(other_marker),
+                            CExpr::Var(other_abort_value),
+                        ]),
+                    },
+                    CArm {
+                        pat: CPat::Var("_WithValue".to_string()),
+                        guard: None,
+                        body: self.apply_current_k(CExpr::Var("_WithValue".to_string()), ctx),
+                    },
+                ],
+            )),
         );
 
         // 4. Wrap inside-out: insert_canonical chain wraps the body, then
@@ -313,6 +351,7 @@ impl<'ctx> Lowerer<'ctx> {
     ) -> CExpr {
         let outer_evidence = ctx.evidence.clone();
         let raw_result_k = self.fresh_k_ret_name();
+        let abort_marker = format!("__saga_abort_{raw_result_k}");
         let raw_result_k_binding = CExpr::Fun(
             vec!["_V".to_string()],
             Box::new(CExpr::Var("_V".to_string())),
@@ -362,10 +401,44 @@ impl<'ctx> Lowerer<'ctx> {
             .with_return_k(inner_k);
         let body_ce = self.lower_expr(body, &body_ctx);
         let with_result = self.fresh_helper_name();
+        let abort_value = self.fresh_helper_name();
+        let other_marker = self.fresh_helper_name();
+        let other_abort_value = self.fresh_helper_name();
         let wrapped_body = CExpr::Let(
             with_result.clone(),
             Box::new(body_ce),
-            Box::new(self.apply_current_k(CExpr::Var(with_result), ctx)),
+            Box::new(CExpr::Case(
+                Box::new(CExpr::Var(with_result.clone())),
+                vec![
+                    CArm {
+                        pat: CPat::Tuple(vec![
+                            CPat::Lit(CLit::Atom(ABORT_TAG.to_string())),
+                            CPat::Lit(CLit::Atom(abort_marker)),
+                            CPat::Var(abort_value.clone()),
+                        ]),
+                        guard: None,
+                        body: self.apply_current_k(CExpr::Var(abort_value), ctx),
+                    },
+                    CArm {
+                        pat: CPat::Tuple(vec![
+                            CPat::Lit(CLit::Atom(ABORT_TAG.to_string())),
+                            CPat::Var(other_marker.clone()),
+                            CPat::Var(other_abort_value.clone()),
+                        ]),
+                        guard: None,
+                        body: CExpr::Tuple(vec![
+                            CExpr::Lit(CLit::Atom(ABORT_TAG.to_string())),
+                            CExpr::Var(other_marker),
+                            CExpr::Var(other_abort_value),
+                        ]),
+                    },
+                    CArm {
+                        pat: CPat::Var("_WithValue".to_string()),
+                        guard: None,
+                        body: self.apply_current_k(CExpr::Var("_WithValue".to_string()), ctx),
+                    },
+                ],
+            )),
         );
 
         let with_evidence = CExpr::Let(new_ev_name, Box::new(insert), Box::new(wrapped_body));
@@ -477,26 +550,7 @@ impl<'ctx> Lowerer<'ctx> {
         ctx: &LowerCtx,
         mode: ArmReturnMode,
     ) -> CExpr {
-        if arm.finally_block.is_some() {
-            // `finally` blocks aren't wired in the new path yet — see the
-            // old lowerer's `current_handler_finally` flow and the
-            // composition challenge under uniform K-threading. Rather than
-            // panic and block the whole test runner, drop the `finally`
-            // here: the arm still produces correct results for the
-            // happy-path tests, and the cleanup side-effect is just
-            // skipped. The compilation warning is intentional so a real
-            // workload that depends on `finally` fires loudly at runtime.
-            //
-            // TODO: implement `finally` properly. Sketch — synthesize a
-            // wrapper K that runs the finally block before forwarding to
-            // the captured arm-K, with a try/catch around the body so
-            // crashes also fire cleanup.
-            eprintln!(
-                "  warning: handler arm `finally` block ignored (deferred new-path support) — \
-                 effect={}, op={}",
-                arm.op.effect, arm.op.op
-            );
-        }
+        let has_resume = arm.body.contains_resume();
 
         let (closure_params, body_wraps) = self.plan_arm_params(&arm.params);
         let perform_ev = self.fresh_helper_name();
@@ -506,14 +560,82 @@ impl<'ctx> Lowerer<'ctx> {
         } else {
             None
         };
-        let body_ctx = match mode {
+        let mut body_ctx = match mode {
             ArmReturnMode::Captured => ctx.with_arm_k(k_arm.clone()),
             ArmReturnMode::Direct => ctx
                 .with_arm_k(k_arm.clone())
                 .with_return_k(direct_k.as_ref().unwrap().clone()),
         };
+        if let Some(ref fb) = arm.finally_block
+            && has_resume
+        {
+            body_ctx = body_ctx.with_finally(fb.clone());
+        }
         let arm_ctx = body_ctx.with_param_locals(&arm.params);
         let mut body_ce = self.lower_expr(&arm.body, &arm_ctx);
+
+        // For abort arms (no resume) with finally: append cleanup after body.
+        if let (Some(fb), false) = (&arm.finally_block, has_resume) {
+            let cleanup_k = self.fresh_helper_name();
+            let cleanup_ctx = arm_ctx.without_finally().with_return_k(cleanup_k.clone());
+            let cleanup_ce = self.lower_expr(fb, &cleanup_ctx);
+            let cleanup_done_k = CExpr::Fun(
+                vec!["_".to_string()],
+                Box::new(CExpr::Lit(CLit::Atom("unit".to_string()))),
+            );
+            let result_var = self.fresh_helper_name();
+            body_ce = CExpr::Let(
+                cleanup_k,
+                Box::new(cleanup_done_k),
+                Box::new(CExpr::Let(
+                    result_var.clone(),
+                    Box::new(body_ce),
+                    Box::new(CExpr::Let(
+                        "_".to_string(),
+                        Box::new(cleanup_ce),
+                        Box::new(CExpr::Var(result_var)),
+                    )),
+                )),
+            );
+        }
+
+        if !has_resume && let Some(marker) = &arm_ctx.abort_marker {
+            let result_var = self.fresh_helper_name();
+            let other_marker = self.fresh_helper_name();
+            let other_abort_value = self.fresh_helper_name();
+            body_ce = CExpr::Let(
+                result_var.clone(),
+                Box::new(body_ce),
+                Box::new(CExpr::Case(
+                    Box::new(CExpr::Var(result_var.clone())),
+                    vec![
+                        CArm {
+                            pat: CPat::Tuple(vec![
+                                CPat::Lit(CLit::Atom(ABORT_TAG.to_string())),
+                                CPat::Var(other_marker.clone()),
+                                CPat::Var(other_abort_value.clone()),
+                            ]),
+                            guard: None,
+                            body: CExpr::Tuple(vec![
+                                CExpr::Lit(CLit::Atom(ABORT_TAG.to_string())),
+                                CExpr::Var(other_marker),
+                                CExpr::Var(other_abort_value),
+                            ]),
+                        },
+                        CArm {
+                            pat: CPat::Var("_AbortValue".to_string()),
+                            guard: None,
+                            body: CExpr::Tuple(vec![
+                                CExpr::Lit(CLit::Atom(ABORT_TAG.to_string())),
+                                CExpr::Lit(CLit::Atom(marker.clone())),
+                                CExpr::Var("_AbortValue".to_string()),
+                            ]),
+                        },
+                    ],
+                )),
+            );
+        }
+
         if let Some(direct_k) = direct_k {
             body_ce = CExpr::Let(
                 direct_k,
@@ -620,7 +742,11 @@ impl<'ctx> Lowerer<'ctx> {
     /// construction: each inner with binds its own `_K_ret{m}` referring
     /// to the next-outer K, which is itself a `_K_ret{m-1}` if that layer
     /// has a return clause.
-    pub(super) fn build_return_clause_closure(&mut self, arm: &MHandlerArm, ctx: &LowerCtx) -> CExpr {
+    pub(super) fn build_return_clause_closure(
+        &mut self,
+        arm: &MHandlerArm,
+        ctx: &LowerCtx,
+    ) -> CExpr {
         if arm.finally_block.is_some() {
             panic!(
                 "build_return_clause_closure: finally_block on a return clause is unusual; \

@@ -725,12 +725,7 @@ impl<'a> Translator<'a> {
     /// bindings (conditionals, factory calls), extract the handled effects
     /// from `let_handler_effects` (populated by the typechecker from the
     /// binding's type) so the lowerer can install evidence.
-    fn record_handler_alias(
-        &mut self,
-        name: &str,
-        pat_id: crate::ast::NodeId,
-        value: &Expr,
-    ) {
+    fn record_handler_alias(&mut self, name: &str, pat_id: crate::ast::NodeId, value: &Expr) {
         if let Some(body) = super::match_handler_expr(value) {
             self.local_static_handlers
                 .insert(name.to_string(), Some(body.clone()));
@@ -760,7 +755,6 @@ impl<'a> Translator<'a> {
             }
         }
     }
-
 
     /// Pre-resolve an `EffectCall` to its `EffectOpRef`. Uses
     /// `EffectInfo.effect_calls` (typechecker output) for the canonical

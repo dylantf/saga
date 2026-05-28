@@ -38,6 +38,19 @@ pub(crate) struct LowerCtx {
     /// outside an arm. `Resume(v)` applies this K when set.
     pub arm_k: Option<String>,
 
+    /// Marker for aborting handler arms at the current `with` delimiter.
+    /// Non-resuming arms wrap their result with this marker so nested `with`
+    /// boundaries can propagate the abort until the owning delimiter unwraps
+    /// it. This keeps outer return clauses from treating abort values as
+    /// successful inner results.
+    pub abort_marker: Option<String>,
+
+    /// `Some(finally_block)` while lowering a handler arm body that has a
+    /// `finally` clause. `lower_resume` sequences this cleanup after the
+    /// delimited resume continuation returns, while preserving the resume
+    /// site's lexical scope for values captured by the cleanup block.
+    pub finally_block: Option<Box<crate::codegen::monadic::ir::MExpr>>,
+
     /// Source-level names bound in the current lexical scope.
     ///
     /// The backend resolution map is keyed by original AST node ids and may
@@ -54,6 +67,8 @@ impl LowerCtx {
             return_k: exprs::RETURN_K_VAR.to_string(),
             evidence: exprs::EVIDENCE_VAR.to_string(),
             arm_k: None,
+            abort_marker: None,
+            finally_block: None,
             locals: BTreeSet::new(),
         }
     }
@@ -78,6 +93,30 @@ impl LowerCtx {
     pub fn with_arm_k(&self, k: String) -> Self {
         Self {
             arm_k: Some(k),
+            ..self.clone()
+        }
+    }
+
+    /// Clone + set the current handler-abort marker.
+    pub fn with_abort_marker(&self, marker: String) -> Self {
+        Self {
+            abort_marker: Some(marker),
+            ..self.clone()
+        }
+    }
+
+    /// Clone + set `finally_block`.
+    pub fn with_finally(&self, block: Box<crate::codegen::monadic::ir::MExpr>) -> Self {
+        Self {
+            finally_block: Some(block),
+            ..self.clone()
+        }
+    }
+
+    /// Clone + clear `finally_block`.
+    pub fn without_finally(&self) -> Self {
+        Self {
+            finally_block: None,
             ..self.clone()
         }
     }

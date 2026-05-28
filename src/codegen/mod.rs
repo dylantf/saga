@@ -282,9 +282,7 @@ pub fn build_handler_effects(check_result: &CheckResult) -> HashMap<String, Vec<
 }
 
 /// Build pattern NodeId → effects mapping from `CheckResult.let_binding_handlers`.
-pub fn build_let_handler_effects(
-    check_result: &CheckResult,
-) -> HashMap<ast::NodeId, Vec<String>> {
+pub fn build_let_handler_effects(check_result: &CheckResult) -> HashMap<ast::NodeId, Vec<String>> {
     check_result
         .let_binding_handlers
         .iter()

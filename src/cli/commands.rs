@@ -372,7 +372,13 @@ pub fn cmd_inspect(file: &str, stage: &str) {
                 .unwrap_or(&result);
             let handler_effects_storage = codegen::build_handler_effects(&result);
             let let_handler_effects_storage = codegen::build_let_handler_effects(&result);
-            let effect_info = codegen::build_effect_info(&result, mod_check_ref, &ops_storage, &handler_effects_storage, &let_handler_effects_storage);
+            let effect_info = codegen::build_effect_info(
+                &result,
+                mod_check_ref,
+                &ops_storage,
+                &handler_effects_storage,
+                &let_handler_effects_storage,
+            );
 
             // Collect imported handler bodies (matches new-path emit behavior).
             let mut imported_handler_decls: std::collections::HashMap<
