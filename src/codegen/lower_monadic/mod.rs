@@ -61,7 +61,7 @@ use std::collections::HashMap;
 use crate::codegen::CodegenContext;
 use crate::codegen::cerl::CModule;
 use crate::codegen::handler_analysis::HandlerAnalysis;
-use crate::codegen::monadic::ir::{EffectInfo, MDecl, MProgram};
+use crate::codegen::monadic::ir::{Atom, EffectInfo, MDecl, MExpr, MProgram};
 use crate::codegen::resolve::{ConstructorAtoms, ResolutionMap};
 
 use decls::{dict_constructor_arity, fun_binding_arity, val_arity};
@@ -133,6 +133,13 @@ pub struct Lowerer<'ctx> {
     /// handler name appears as a runtime value, the lowerer builds the
     /// op-tuple CExpr from these pre-translated MHandlerArms.
     handler_value_map: &'ctx crate::codegen::monadic::ir::HandlerValueMap,
+    /// Current-module top-level `val` declarations. Resolution reports both
+    /// vals and zero-parameter function bindings as arity 0; this set keeps
+    /// their BEAM shapes distinct (`val/0` vs uniform `fun/2`).
+    pub(super) top_level_val_names: std::collections::HashSet<String>,
+    /// Current-module zero-parameter function bindings. These are uniform
+    /// callables at arity 2 even though their source arity is 0.
+    pub(super) zero_arg_fun_names: std::collections::HashSet<String>,
 }
 
 impl<'ctx> Lowerer<'ctx> {
@@ -170,6 +177,8 @@ impl<'ctx> Lowerer<'ctx> {
             current_erlang_module: String::new(),
             handler_names: std::collections::HashSet::new(),
             handler_value_map,
+            top_level_val_names: std::collections::HashSet::new(),
+            zero_arg_fun_names: std::collections::HashSet::new(),
         }
     }
 
@@ -204,6 +213,148 @@ impl<'ctx> Lowerer<'ctx> {
                 self.record_fields
                     .entry(name.clone())
                     .or_insert(field_names);
+            }
+        }
+    }
+
+    fn absorb_anon_record_atoms_from_program(&mut self, program: &MProgram) {
+        for decl in program {
+            match decl {
+                MDecl::FunBinding(fb) => self.absorb_anon_record_atoms_from_expr(&fb.body),
+                MDecl::Val(v) => self.absorb_anon_record_atoms_from_expr(&v.value),
+                MDecl::DictConstructor(dc) => {
+                    for method in &dc.methods {
+                        self.absorb_anon_record_atoms_from_expr(method);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    fn absorb_anon_record_atoms_from_atom(&mut self, atom: &Atom) {
+        match atom {
+            Atom::AnonRecord { fields, .. } => {
+                let mut names: Vec<&str> = fields.iter().map(|(n, _)| n.as_str()).collect();
+                let tag = crate::ast::anon_record_tag(&names);
+                names.sort();
+                self.record_fields
+                    .entry(tag)
+                    .or_insert_with(|| names.into_iter().map(str::to_string).collect());
+                for (_, value) in fields {
+                    self.absorb_anon_record_atoms_from_atom(value);
+                }
+            }
+            Atom::Ctor { args, .. } | Atom::Tuple { elements: args, .. } => {
+                for arg in args {
+                    self.absorb_anon_record_atoms_from_atom(arg);
+                }
+            }
+            Atom::Record { fields, .. } => {
+                for (_, value) in fields {
+                    self.absorb_anon_record_atoms_from_atom(value);
+                }
+            }
+            Atom::Lambda { body, .. } => self.absorb_anon_record_atoms_from_expr(body),
+            Atom::Var { .. }
+            | Atom::Lit { .. }
+            | Atom::DictRef { .. }
+            | Atom::QualifiedRef { .. }
+            | Atom::Symbol { .. } => {}
+        }
+    }
+
+    fn absorb_anon_record_atoms_from_expr(&mut self, expr: &MExpr) {
+        match expr {
+            MExpr::Pure(atom) | MExpr::Resume { value: atom, .. } => {
+                self.absorb_anon_record_atoms_from_atom(atom);
+            }
+            MExpr::Yield { args, .. } | MExpr::ForeignCall { args, .. } => {
+                for arg in args {
+                    self.absorb_anon_record_atoms_from_atom(arg);
+                }
+            }
+            MExpr::Bind { value, body, .. } | MExpr::Let { value, body, .. } => {
+                self.absorb_anon_record_atoms_from_expr(value);
+                self.absorb_anon_record_atoms_from_expr(body);
+            }
+            MExpr::Case {
+                scrutinee, arms, ..
+            } => {
+                self.absorb_anon_record_atoms_from_atom(scrutinee);
+                for arm in arms {
+                    if let Some(guard) = &arm.guard {
+                        self.absorb_anon_record_atoms_from_expr(guard);
+                    }
+                    self.absorb_anon_record_atoms_from_expr(&arm.body);
+                }
+            }
+            MExpr::If {
+                cond,
+                then_branch,
+                else_branch,
+                ..
+            } => {
+                self.absorb_anon_record_atoms_from_atom(cond);
+                self.absorb_anon_record_atoms_from_expr(then_branch);
+                self.absorb_anon_record_atoms_from_expr(else_branch);
+            }
+            MExpr::App { head, args, .. } => {
+                self.absorb_anon_record_atoms_from_atom(head);
+                for arg in args {
+                    self.absorb_anon_record_atoms_from_atom(arg);
+                }
+            }
+            MExpr::With { body, .. } => self.absorb_anon_record_atoms_from_expr(body),
+            MExpr::FieldAccess { record, .. } | MExpr::DictMethodAccess { dict: record, .. } => {
+                self.absorb_anon_record_atoms_from_atom(record);
+            }
+            MExpr::RecordUpdate { record, fields, .. } => {
+                self.absorb_anon_record_atoms_from_atom(record);
+                for (_, atom) in fields {
+                    self.absorb_anon_record_atoms_from_atom(atom);
+                }
+            }
+            MExpr::BinOp { left, right, .. } => {
+                self.absorb_anon_record_atoms_from_atom(left);
+                self.absorb_anon_record_atoms_from_atom(right);
+            }
+            MExpr::UnaryMinus { value, .. } => self.absorb_anon_record_atoms_from_atom(value),
+            MExpr::BitString { segments, .. } => {
+                for segment in segments {
+                    self.absorb_anon_record_atoms_from_atom(&segment.value);
+                    if let Some(size) = &segment.size {
+                        self.absorb_anon_record_atoms_from_atom(size);
+                    }
+                }
+            }
+            MExpr::Receive { arms, after, .. } => {
+                for arm in arms {
+                    if let Some(guard) = &arm.guard {
+                        self.absorb_anon_record_atoms_from_expr(guard);
+                    }
+                    self.absorb_anon_record_atoms_from_expr(&arm.body);
+                }
+                if let Some((timeout, body)) = after {
+                    self.absorb_anon_record_atoms_from_atom(timeout);
+                    self.absorb_anon_record_atoms_from_expr(body);
+                }
+            }
+            MExpr::LetFun { body, rest, .. } => {
+                self.absorb_anon_record_atoms_from_expr(body);
+                self.absorb_anon_record_atoms_from_expr(rest);
+            }
+            MExpr::HandlerValue {
+                arms,
+                return_clause,
+                ..
+            } => {
+                for arm in arms {
+                    self.absorb_anon_record_atoms_from_expr(&arm.body);
+                }
+                if let Some(arm) = return_clause {
+                    self.absorb_anon_record_atoms_from_expr(&arm.body);
+                }
             }
         }
     }
@@ -326,6 +477,20 @@ impl<'ctx> Lowerer<'ctx> {
         // same-module references to a local FunRef in `lower_resolved_value_ref`.
         self.current_erlang_module = module_name.to_string();
 
+        self.top_level_val_names.clear();
+        self.zero_arg_fun_names.clear();
+        for decl in program {
+            match decl {
+                MDecl::Val(v) => {
+                    self.top_level_val_names.insert(v.name.clone());
+                }
+                MDecl::FunBinding(fb) if fb.params.is_empty() => {
+                    self.zero_arg_fun_names.insert(fb.name.clone());
+                }
+                _ => {}
+            }
+        }
+
         // Collect handler names (local + imported) so `lower_var_atom` can
         // recognize a handler-as-value reference. Includes both bare names
         // and module-qualified canonical names for safety. Local handlers
@@ -352,6 +517,7 @@ impl<'ctx> Lowerer<'ctx> {
         // there yet, so its records would be missing without this scan.
         // Mirrors the old lowerer's behavior in `lower/init.rs`.
         self.absorb_local_record_defs(module_name, program);
+        self.absorb_anon_record_atoms_from_program(program);
 
         let mut exports = Vec::new();
         let mut funs = Vec::new();

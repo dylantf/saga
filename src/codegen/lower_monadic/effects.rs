@@ -357,7 +357,25 @@ impl<'ctx> Lowerer<'ctx> {
             Box::new(CExpr::Var("_V".to_string())),
         );
 
-        let op_tuple_ce = self.lower_atom(op_tuple, ctx);
+        let handler_value_ce = self.lower_atom(op_tuple, ctx);
+        let handler_value_var = self.fresh_helper_name();
+        let runtime_return_var = self.fresh_helper_name();
+        let runtime_return_value = CExpr::Call(
+            "erlang".to_string(),
+            "element".to_string(),
+            vec![
+                CExpr::Lit(CLit::Int(3)),
+                CExpr::Var(handler_value_var.clone()),
+            ],
+        );
+        let op_tuple_ce = CExpr::Call(
+            "erlang".to_string(),
+            "element".to_string(),
+            vec![
+                CExpr::Lit(CLit::Int(2)),
+                CExpr::Var(handler_value_var.clone()),
+            ],
+        );
 
         // Return-lambda composition (built under outer scope).
         let ret_binding: Option<(String, CExpr)> = return_lambda.map(|atom| {
@@ -380,10 +398,41 @@ impl<'ctx> Lowerer<'ctx> {
             (self.fresh_k_ret_name(), wrapper)
         });
 
+        let runtime_ret_k = self.fresh_k_ret_name();
+        let runtime_ret_param = self.fresh_helper_name();
+        let runtime_ret_binding = CExpr::Fun(
+            vec![runtime_ret_param.clone()],
+            Box::new(CExpr::Case(
+                Box::new(CExpr::Var(runtime_return_var.clone())),
+                vec![
+                    CArm {
+                        pat: CPat::Lit(CLit::Atom("unit".to_string())),
+                        guard: None,
+                        body: CExpr::Apply(
+                            Box::new(CExpr::Var(raw_result_k.clone())),
+                            vec![CExpr::Var(runtime_ret_param.clone())],
+                        ),
+                    },
+                    CArm {
+                        pat: CPat::Var("_RuntimeReturn".to_string()),
+                        guard: None,
+                        body: CExpr::Apply(
+                            Box::new(CExpr::Var("_RuntimeReturn".to_string())),
+                            vec![
+                                CExpr::Var(runtime_ret_param),
+                                CExpr::Var(outer_evidence.clone()),
+                                CExpr::Var(raw_result_k.clone()),
+                            ],
+                        ),
+                    },
+                ],
+            )),
+        );
+
         let inner_k = ret_binding
             .as_ref()
             .map(|(name, _)| name.clone())
-            .unwrap_or_else(|| raw_result_k.clone());
+            .unwrap_or_else(|| runtime_ret_k.clone());
 
         let entry = CExpr::Tuple(vec![
             CExpr::Lit(CLit::Atom(effect.to_string())),
@@ -442,14 +491,28 @@ impl<'ctx> Lowerer<'ctx> {
         );
 
         let with_evidence = CExpr::Let(new_ev_name, Box::new(insert), Box::new(wrapped_body));
+        let with_runtime_return = CExpr::Let(
+            runtime_return_var,
+            Box::new(runtime_return_value),
+            Box::new(CExpr::Let(
+                runtime_ret_k,
+                Box::new(runtime_ret_binding),
+                Box::new(with_evidence),
+            )),
+        );
         let with_return = match ret_binding {
-            Some((name, value)) => CExpr::Let(name, Box::new(value), Box::new(with_evidence)),
-            None => with_evidence,
+            Some((name, value)) => CExpr::Let(name, Box::new(value), Box::new(with_runtime_return)),
+            None => with_runtime_return,
         };
+        let with_handler_value = CExpr::Let(
+            handler_value_var,
+            Box::new(handler_value_ce),
+            Box::new(with_return),
+        );
         CExpr::Let(
             raw_result_k,
             Box::new(raw_result_k_binding),
-            Box::new(with_return),
+            Box::new(with_handler_value),
         )
     }
 

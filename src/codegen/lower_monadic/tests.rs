@@ -7,7 +7,7 @@ use std::collections::HashMap;
 
 use super::*;
 use crate::ast::{self, Lit, NodeId, Pat};
-use crate::codegen::cerl::{CExpr, CPat};
+use crate::codegen::cerl::{CExpr, CLit, CPat};
 use crate::codegen::handler_analysis::HandlerAnalysis;
 use crate::codegen::monadic::ir::{
     Atom, EffectInfo, MArm, MBitSegment, MDecl, MDictConstructor, MExpr, MFunBinding, MVal,
@@ -53,6 +53,59 @@ fn contains_apply_to(expr: &CExpr, name: &str) -> bool {
 
 fn eventually_applies_return_k(expr: &CExpr) -> bool {
     contains_apply_to(expr, "_ReturnK")
+}
+
+fn contains_call(expr: &CExpr, module: &str, function: &str) -> bool {
+    match expr {
+        CExpr::Call(m, f, args) => {
+            (m == module && f == function) || args.iter().any(|a| contains_call(a, module, function))
+        }
+        CExpr::Apply(callee, args) => {
+            contains_call(callee, module, function)
+                || args.iter().any(|a| contains_call(a, module, function))
+        }
+        CExpr::Let(_, value, body) => {
+            contains_call(value, module, function) || contains_call(body, module, function)
+        }
+        CExpr::Case(scrutinee, arms) => {
+            contains_call(scrutinee, module, function)
+                || arms.iter().any(|arm| contains_call(&arm.body, module, function))
+        }
+        CExpr::Fun(_, body) => contains_call(body, module, function),
+        CExpr::Tuple(values) | CExpr::Values(values) => {
+            values.iter().any(|v| contains_call(v, module, function))
+        }
+        _ => false,
+    }
+}
+
+fn contains_element_access_index(expr: &CExpr, index: i64) -> bool {
+    match expr {
+        CExpr::Call(m, f, args) if m == "erlang" && f == "element" => {
+            matches!(args.first(), Some(CExpr::Lit(CLit::Int(i))) if *i == index)
+                || args.iter().any(|a| contains_element_access_index(a, index))
+        }
+        CExpr::Call(_, _, args) => args.iter().any(|a| contains_element_access_index(a, index)),
+        CExpr::Apply(callee, args) => {
+            contains_element_access_index(callee, index)
+                || args.iter().any(|a| contains_element_access_index(a, index))
+        }
+        CExpr::Let(_, value, body) => {
+            contains_element_access_index(value, index)
+                || contains_element_access_index(body, index)
+        }
+        CExpr::Case(scrutinee, arms) => {
+            contains_element_access_index(scrutinee, index)
+                || arms
+                    .iter()
+                    .any(|arm| contains_element_access_index(&arm.body, index))
+        }
+        CExpr::Fun(_, body) => contains_element_access_index(body, index),
+        CExpr::Tuple(values) | CExpr::Values(values) => {
+            values.iter().any(|v| contains_element_access_index(v, index))
+        }
+        _ => false,
+    }
 }
 
 /// EffectInfo borrows; tests stash the backing storage here so the
@@ -516,7 +569,7 @@ fn module_shell_name_matches_input() {
 // Atom lowering (sub-step 7b)
 // ----------------------------------------------------------------------
 
-use crate::codegen::cerl::{CBinSeg, CLit};
+use crate::codegen::cerl::CBinSeg;
 use crate::codegen::monadic::ir::MVar;
 use crate::codegen::resolve::{ResolvedCodegenKind, ResolvedSymbol};
 use crate::token::StringKind;
@@ -1466,7 +1519,8 @@ fn with_static_single_arm_emits_real_arm_closure() {
 
 #[test]
 fn with_dynamic_uses_op_tuple_atom_directly() {
-    // Dynamic op_tuple is itself an Atom — here a Var referencing a runtime closure-tuple.
+    // Dynamic handler values carry `{__saga_handler_value, OpTuple, Return}`.
+    // The evidence entry must install element(2, H), not H itself.
     let handler = MHandler::Dynamic {
         effects: vec!["Std.Fail.Fail".to_string()],
         op_tuple: atom_var("h"),
@@ -1479,25 +1533,14 @@ fn with_dynamic_uses_op_tuple_atom_directly() {
         source: dummy_node(),
     };
     let ce = lower_expr_default(&e);
-    let (name, value, _body) = match skip_identity_k_lets(&ce) {
-        CExpr::Let(n, v, b) => (n, v, b),
-        other => panic!("expected Let, got {other:?}"),
-    };
-    assert_eq!(name, "_Ev0");
-    match value.as_ref() {
-        CExpr::Call(_, f, args) => {
-            assert_eq!(f, "insert_canonical");
-            match &args[1] {
-                CExpr::Tuple(t) => {
-                    assert!(matches!(&t[0], CExpr::Lit(CLit::Atom(a)) if a == "Std.Fail.Fail"));
-                    // op_tuple is the atom directly — lowered Atom::Var → CExpr::Var("H")
-                    assert!(matches!(&t[1], CExpr::Var(n) if n == "H"));
-                }
-                other => panic!("expected entry Tuple, got {other:?}"),
-            }
-        }
-        other => panic!("expected Call, got {other:?}"),
-    }
+    assert!(
+        contains_call(&ce, "std_evidence_bridge", "insert_canonical"),
+        "expected dynamic with to install evidence, got {ce:?}"
+    );
+    assert!(
+        contains_element_access_index(&ce, 2),
+        "expected dynamic with to install element(2, handler value), got {ce:?}"
+    );
 }
 
 #[test]
@@ -2225,44 +2268,18 @@ fn dynamic_return_lambda_composes_via_wrapper() {
         source: dummy_node(),
     };
     let ce = lower_expr_default(&e);
-    let (ret_name, ret_value, after_ret) = match skip_identity_k_lets(&ce) {
-        CExpr::Let(n, v, b) => (n, v, b),
-        other => panic!("expected outer Let, got {other:?}"),
-    };
-    assert_eq!(ret_name, "_K_ret1");
-    match ret_value.as_ref() {
-        CExpr::Fun(ps, fbody) => {
-            assert_eq!(ps.len(), 1);
-            match fbody.as_ref() {
-                CExpr::Apply(callee, args) => {
-                    assert!(matches!(callee.as_ref(), CExpr::Var(n) if n == "H_ret"));
-                    assert_eq!(args.len(), 3);
-                    // arg0 is the value param; arg1 = outer evidence; arg2 = raw-result K.
-                    assert!(matches!(&args[1], CExpr::Var(n) if n == "_Evidence"));
-                    assert!(matches!(&args[2], CExpr::Var(n) if n == "_K_ret0"));
-                }
-                other => panic!("expected wrapper Apply, got {other:?}"),
-            }
-        }
-        other => panic!("expected wrapper Fun, got {other:?}"),
-    }
-    // Body uses _K_ret0.
-    let (_, _, body) = match after_ret.as_ref() {
-        CExpr::Let(n, v, b) => (n.clone(), v.clone(), b.clone()),
-        other => panic!("expected ev Let, got {other:?}"),
-    };
-    match body.as_ref() {
-        CExpr::Let(_, value, next) => {
-            assert!(
-                matches!(value.as_ref(), CExpr::Apply(c, _) if matches!(c.as_ref(), CExpr::Var(n) if n == "_K_ret1"))
-            );
-            assert!(
-                eventually_applies_return_k(next),
-                "expected outer continuation Apply, got {next:?}"
-            );
-        }
-        other => panic!("expected wrapped body, got {other:?}"),
-    }
+    assert!(
+        contains_apply_to(&ce, "H_ret"),
+        "expected explicit dynamic return lambda to be applied, got {ce:?}"
+    );
+    assert!(
+        contains_apply_to(&ce, "_K_ret0"),
+        "expected return lambda wrapper to target raw-result K, got {ce:?}"
+    );
+    assert!(
+        eventually_applies_return_k(&ce),
+        "expected dynamic with to eventually apply outer continuation, got {ce:?}"
+    );
 }
 
 #[test]

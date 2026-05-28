@@ -1,7 +1,7 @@
 //! `Atom → CExpr` lowering for the monadic-IR → Core Erlang pipeline.
 
 use crate::ast::NodeId;
-use crate::codegen::cerl::{CExpr, CLit};
+use crate::codegen::cerl::{CArm, CExpr, CLit};
 use crate::codegen::monadic::ir::{Atom, MVar};
 use crate::codegen::resolve::{ResolvedCodegenKind, ResolvedSymbol};
 
@@ -92,10 +92,67 @@ impl<'ctx> Lowerer<'ctx> {
             .iter()
             .map(|arm| self.build_handler_value_arm_closure(arm, ctx))
             .collect();
-        // Dynamic handler return clauses need an explicit runtime ABI slot;
-        // until that lands, only op arms participate in the op tuple.
-        let _ = &info.return_clause;
-        CExpr::Tuple(elements)
+        let op_tuple = CExpr::Tuple(elements);
+        let return_value = info
+            .return_clause
+            .as_ref()
+            .map(|arm| self.build_handler_value_return_lambda(arm, ctx))
+            .unwrap_or_else(|| CExpr::Lit(CLit::Atom("unit".to_string())));
+        CExpr::Tuple(vec![
+            CExpr::Lit(CLit::Atom("__saga_handler_value".to_string())),
+            op_tuple,
+            return_value,
+        ])
+    }
+
+    pub(super) fn build_handler_value_return_lambda(
+        &mut self,
+        arm: &crate::codegen::monadic::ir::MHandlerArm,
+        enclosing: &LowerCtx,
+    ) -> CExpr {
+        let (value_param, body_wrap) = match arm.params.as_slice() {
+            [] => (self.fresh_helper_name(), None),
+            [crate::ast::Pat::Var { name, .. }] => (core_var(name), None),
+            [pat] => ("_HArg0".to_string(), Some(pat.clone())),
+            many => panic!(
+                "build_handler_value_return_lambda: return clause expected ≤1 param; got {}",
+                many.len()
+            ),
+        };
+
+        let snap = self.snapshot_counters();
+        self.reset_counters();
+        let body_ctx = LowerCtx {
+            return_k: super::exprs::RETURN_K_VAR.to_string(),
+            evidence: super::exprs::EVIDENCE_VAR.to_string(),
+            arm_k: enclosing.arm_k.clone(),
+            abort_marker: enclosing.abort_marker.clone(),
+            finally_block: enclosing.finally_block.clone(),
+            locals: enclosing.locals.clone(),
+        }
+        .with_param_locals(&arm.params);
+        let body_ce = self.lower_expr(&arm.body, &body_ctx);
+        let body_ce = match body_wrap {
+            None => body_ce,
+            Some(pat) => CExpr::Case(
+                Box::new(CExpr::Var(value_param.clone())),
+                vec![CArm {
+                    pat: self.lower_pat(&pat),
+                    guard: None,
+                    body: body_ce,
+                }],
+            ),
+        };
+        self.restore_counters(snap);
+
+        CExpr::Fun(
+            vec![
+                value_param,
+                super::exprs::EVIDENCE_VAR.to_string(),
+                super::exprs::RETURN_K_VAR.to_string(),
+            ],
+            Box::new(body_ce),
+        )
     }
 
     /// Lower an `Atom::Ctor` — a recursively-atomic constructor application.
@@ -264,8 +321,8 @@ impl<'ctx> Lowerer<'ctx> {
                     let erlang_mod: String = src_mod.to_lowercase().replace('.', "_");
                     // Intrinsics have no effect annotation; treat them as
                     // pure for the uniform-arity calculation.
-                    let uniform = uniform_value_arity(arity, &[], &resolved.name);
-                    fun_value_of(erlang_mod, resolved.name, uniform)
+                let uniform = self.uniform_arity_for_resolved(arity, &[], &resolved.name);
+                fun_value_of(erlang_mod, resolved.name, uniform)
                 } else {
                     CExpr::FunRef(resolved.name, arity)
                 }
@@ -277,7 +334,7 @@ impl<'ctx> Lowerer<'ctx> {
                 effects,
                 ..
             } => {
-                let uniform = uniform_value_arity(arity, &effects, &name);
+                let uniform = self.uniform_arity_for_resolved(arity, &effects, &name);
                 // Same-module refs use FunRef — `erlang:make_fun/3` requires
                 // the target to be exported, but local @external wrappers
                 // for private decls aren't exported. The old lowerer's
@@ -295,7 +352,7 @@ impl<'ctx> Lowerer<'ctx> {
                 effects,
                 ..
             } => {
-                let uniform = uniform_value_arity(arity, &effects, &name);
+                let uniform = self.uniform_arity_for_resolved(arity, &effects, &name);
                 if erlang_mod == self.current_erlang_module {
                     local_value_ref(name, uniform)
                 } else {
@@ -308,7 +365,7 @@ impl<'ctx> Lowerer<'ctx> {
                 effects,
                 ..
             } => {
-                let uniform = uniform_value_arity(arity, &effects, &name);
+                let uniform = self.uniform_arity_for_resolved(arity, &effects, &name);
                 if let Some(src_mod) = &resolved.source_module {
                     let erlang_mod = src_mod.to_lowercase().replace('.', "_");
                     if erlang_mod != self.current_erlang_module {
@@ -317,6 +374,19 @@ impl<'ctx> Lowerer<'ctx> {
                 }
                 local_value_ref(name.clone(), uniform)
             }
+        }
+    }
+
+    pub(super) fn uniform_arity_for_resolved(
+        &self,
+        arity: usize,
+        effects: &[String],
+        name: &str,
+    ) -> usize {
+        if arity == 0 && effects.is_empty() && self.zero_arg_fun_names.contains(name) {
+            2
+        } else {
+            uniform_value_arity(arity, effects, name)
         }
     }
 }

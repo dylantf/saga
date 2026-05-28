@@ -112,11 +112,16 @@ impl<'ctx> Lowerer<'ctx> {
             .iter()
             .map(|arm| self.build_handler_value_arm_closure(arm, ctx))
             .collect();
-        // Dynamic handler return clauses need an explicit runtime ABI slot;
-        // until that lands, only op arms participate in the op tuple.
-        let _ = return_clause;
-        let tuple = CExpr::Tuple(elements);
-        self.apply_current_k(tuple, ctx)
+        let op_tuple = CExpr::Tuple(elements);
+        let return_value = return_clause
+            .map(|arm| self.build_handler_value_return_lambda(arm, ctx))
+            .unwrap_or_else(|| CExpr::Lit(CLit::Atom("unit".to_string())));
+        let handler_value = CExpr::Tuple(vec![
+            CExpr::Lit(CLit::Atom("__saga_handler_value".to_string())),
+            op_tuple,
+            return_value,
+        ]);
+        self.apply_current_k(handler_value, ctx)
     }
 
     /// Lower `MExpr::LetFun { name, params, body, rest }` to a Core Erlang

@@ -77,6 +77,10 @@ pub(crate) struct Translator<'a> {
     /// effect decls or extend the narrowed view. Tests insert the effect's
     /// decl into the program shell to populate this map.
     pub(crate) effect_ops: HashMap<String, Vec<String>>,
+    /// `(effect, op)` → source parameter count, populated from local effect
+    /// declarations. Used to distinguish eta-reduced op references (`ping!`
+    /// as a callback) from immediate performs after ANF has lifted them.
+    pub(crate) effect_op_param_counts: HashMap<(String, String), usize>,
     /// Top-level `handler ... for E { ... }` declarations indexed by name.
     /// Used to resolve `with <name>` into a `Static` handler at translation
     /// time.
@@ -101,6 +105,7 @@ pub(crate) struct Translator<'a> {
 impl<'a> Translator<'a> {
     fn new(p: &'a ast::Program, r: &'a ResolutionMap, e: &'a EffectInfo<'a>) -> Self {
         let mut effect_ops: HashMap<String, Vec<String>> = HashMap::new();
+        let mut effect_op_param_counts: HashMap<(String, String), usize> = HashMap::new();
         let mut handler_decls: HashMap<String, HandlerBody> = HashMap::new();
         // Seed cross-module effects from the narrowed view first; local
         // `Decl::EffectDef` scans below take precedence on key collisions.
@@ -116,6 +121,10 @@ impl<'a> Translator<'a> {
                         operations.iter().map(|op| op.node.name.clone()).collect();
                     ops.sort();
                     effect_ops.insert(name.clone(), ops);
+                    for op in operations {
+                        effect_op_param_counts
+                            .insert((name.clone(), op.node.name.clone()), op.node.params.len());
+                    }
                 }
                 Decl::HandlerDef { name, body, .. } => {
                     handler_decls.insert(name.clone(), body.clone());
@@ -127,6 +136,7 @@ impl<'a> Translator<'a> {
             resolution: r,
             effect_info: e,
             effect_ops,
+            effect_op_param_counts,
             handler_decls,
             local_static_handlers: HashMap::new(),
             local_handler_effects: HashMap::new(),

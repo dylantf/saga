@@ -6,6 +6,7 @@
 use super::{Translator, fresh_node_id, wrap_binds};
 use crate::ast::{self, Annotated, Expr, ExprKind, HandlerBody, Lit, NodeId, Pat, Stmt};
 use crate::codegen::monadic::ir::{Atom, EffectOpRef, MArm, MBitSegment, MExpr, MHandler, MVar};
+use crate::typechecker::Type;
 
 impl<'a> Translator<'a> {
     /// Translate an expression in tail position (its own computation context).
@@ -45,6 +46,11 @@ impl<'a> Translator<'a> {
                 args,
             } => {
                 let op = self.resolve_effect_op(e.id, name, qualifier.as_deref());
+                if args.is_empty()
+                    && let Some(lambda) = self.try_eta_reduced_effect_op_lambda(e, &op)
+                {
+                    return lambda;
+                }
                 let args = args.iter().map(|a| self.expect_atom(a)).collect();
                 MExpr::Yield {
                     op,
@@ -363,6 +369,52 @@ impl<'a> Translator<'a> {
         }
     }
 
+    fn try_eta_reduced_effect_op_lambda(&mut self, e: &Expr, op: &EffectOpRef) -> Option<MExpr> {
+        let param_count = self
+            .effect_op_param_counts
+            .get(&(op.effect.clone(), op.op.clone()))
+            .copied()
+            .unwrap_or_else(|| {
+                self.effect_info
+                    .type_at_node
+                    .get(&e.id)
+                    .map(function_param_count)
+                    .unwrap_or(0)
+            });
+        if param_count == 0 {
+            return None;
+        }
+
+        let mut params = Vec::with_capacity(param_count);
+        let mut args = Vec::with_capacity(param_count);
+        for idx in 0..param_count {
+            let id = fresh_node_id();
+            let name = format!("__eta_effect_arg{}", idx);
+            params.push(Pat::Var {
+                id,
+                name: name.clone(),
+                span: e.span,
+            });
+            args.push(Atom::Var {
+                name: MVar {
+                    name,
+                    id: self.next_mvar_id(),
+                },
+                source: id,
+            });
+        }
+
+        Some(MExpr::Pure(Atom::Lambda {
+            params,
+            body: Box::new(MExpr::Yield {
+                op: op.clone(),
+                args,
+                source: e.id,
+            }),
+            source: e.id,
+        }))
+    }
+
     /// Require an atomic expression here (ANF guarantees the invariant).
     /// Panics with a clear message if violated — that would be an ANF bug.
     pub(crate) fn expect_atom(&mut self, e: &Expr) -> Atom {
@@ -602,20 +654,6 @@ impl<'a> Translator<'a> {
                     if let Pat::Var { name, id, .. } = pattern {
                         self.record_handler_alias(name, *id, value);
                     }
-                    // `let h = handler for E { ... }` is bookkeeping: we
-                    // recorded the alias above and the handler value itself
-                    // has no representation outside a `with` site. Skip
-                    // emitting a Bind for it. This matches the spec: a bare
-                    // `HandlerExpr` has no standalone MExpr variant.
-                    if super::match_handler_expr(value).is_some() {
-                        if is_last {
-                            tail = Some(MExpr::Pure(Atom::Lit {
-                                value: Lit::Unit,
-                                source: fresh_node_id(),
-                            }));
-                        }
-                        continue;
-                    }
                     let translated = self.translate_expr(value);
                     let var = self.binder_from_pat(pattern);
                     let pat = if matches!(pattern, Pat::Var { .. } | Pat::Wildcard { .. }) {
@@ -812,6 +850,16 @@ impl<'a> Translator<'a> {
             _ => None,
         }
     }
+}
+
+fn function_param_count(ty: &Type) -> usize {
+    let mut count = 0;
+    let mut cur = ty;
+    while let Type::Fun(_, ret, _) = cur {
+        count += 1;
+        cur = ret;
+    }
+    count
 }
 
 // Suppress unused-import lints if any helpers prove unused as the file evolves.

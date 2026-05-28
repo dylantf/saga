@@ -5,7 +5,6 @@ use crate::codegen::cerl::{CArm, CExpr, CLit, CPat};
 use crate::codegen::monadic::ir::Atom;
 use crate::codegen::resolve::ResolvedCodegenKind;
 
-use super::atom::uniform_value_arity;
 use super::{LowerCtx, Lowerer};
 
 impl<'ctx> Lowerer<'ctx> {
@@ -34,16 +33,34 @@ impl<'ctx> Lowerer<'ctx> {
             return self.lower_panic_or_todo(&name.name, &args[0], ctx);
         }
 
+        // Over-application of a top-level `val` whose value is itself a
+        // function, e.g. `increment = add 1` followed by `increment 6`.
+        //
+        // Vals are emitted as arity-0 wrappers that materialize their value;
+        // they are not directly callable at the uniform arity. So split the
+        // application into:
+        //
+        //   let F = increment() in apply F(args..., _Evidence, _ReturnK)
+        //
+        // Value-position lowering of the head already knows how to
+        // materialize same-module and cross-module vals, so reuse it here.
+        if !args.is_empty() && self.head_atom_is_top_level_val(head) {
+            return self.lower_over_applied_val(head, args, ctx);
+        }
+
         // Partial application: if the head resolves to a known-arity callable
         // and the call site supplies fewer user/dict args than expected,
         // eta-expand into a closure that captures the supplied args and
         // takes the remaining user/dict args plus the uniform `_Evidence` /
         // `_ReturnK` pair. Under uniform CPS you can't just `Apply` with
         // too few args — `erlc` rejects it as an arity mismatch.
-        if let Some(expected) = self.head_atom_expected_user_args(head)
-            && args.len() < expected
-        {
-            return self.eta_expand_partial_app(head, args, expected, ctx);
+        if let Some(expected) = self.head_atom_expected_user_args(head) {
+            if expected == 0 && !args.is_empty() {
+                return self.lower_over_applied_zero_arg_callable(head, args, ctx);
+            }
+            if args.len() < expected {
+                return self.eta_expand_partial_app(head, args, expected, ctx);
+            }
         }
 
         if let Some(call) = self.lower_saturated_external_app(head, args, ctx) {
@@ -157,9 +174,76 @@ impl<'ctx> Lowerer<'ctx> {
             ResolvedCodegenKind::Intrinsic { arity, .. } => (*arity, &[]),
             ResolvedCodegenKind::InlineVal => return None,
         };
-        let uniform = uniform_value_arity(arity, effects, &resolved.name);
-        // Vals (uniform == 0) aren't callables; skip them.
-        uniform.checked_sub(2).filter(|&n| n > 0)
+        let uniform = self.uniform_arity_for_resolved(arity, effects, &resolved.name);
+        // Vals (uniform == 0) aren't uniform callables; skip them.
+        uniform.checked_sub(2)
+    }
+
+    fn head_atom_is_top_level_val(&self, head: &Atom) -> bool {
+        let node = match head {
+            Atom::Var { source, .. } => *source,
+            Atom::QualifiedRef { source, .. } => *source,
+            _ => return false,
+        };
+        let Some(resolved) = self.resolution.get(&node) else {
+            return false;
+        };
+        let (arity, effects, name): (usize, &[String], &str) = match &resolved.kind {
+            ResolvedCodegenKind::BeamFunction {
+                arity,
+                effects,
+                name,
+                ..
+            }
+            | ResolvedCodegenKind::ExternalFunction {
+                arity,
+                effects,
+                name,
+                ..
+            } => (*arity, effects, name),
+            _ => return false,
+        };
+        arity == 0
+            && effects.is_empty()
+            && !name.starts_with("__dict_")
+            && self.top_level_val_names.contains(name)
+    }
+
+    fn lower_over_applied_val(&mut self, head: &Atom, args: &[Atom], ctx: &LowerCtx) -> CExpr {
+        let value_fun = self.lower_atom(head, ctx);
+        let fun_var = self.fresh_helper_name();
+        let mut call_args: Vec<CExpr> = args.iter().map(|a| self.lower_atom(a, ctx)).collect();
+        call_args.push(CExpr::Var(ctx.evidence.clone()));
+        call_args.push(CExpr::Var(ctx.return_k.clone()));
+        let apply_value = CExpr::Apply(Box::new(CExpr::Var(fun_var.clone())), call_args);
+        CExpr::Let(fun_var, Box::new(value_fun), Box::new(apply_value))
+    }
+
+    fn lower_over_applied_zero_arg_callable(
+        &mut self,
+        head: &Atom,
+        args: &[Atom],
+        ctx: &LowerCtx,
+    ) -> CExpr {
+        let result_fun_var = self.fresh_helper_name();
+        let mut returned_fun_args: Vec<CExpr> =
+            args.iter().map(|a| self.lower_atom(a, ctx)).collect();
+        returned_fun_args.push(CExpr::Var(ctx.evidence.clone()));
+        returned_fun_args.push(CExpr::Var(ctx.return_k.clone()));
+        let apply_returned_fun =
+            CExpr::Apply(Box::new(CExpr::Var(result_fun_var.clone())), returned_fun_args);
+        let split_k = CExpr::Fun(vec![result_fun_var], Box::new(apply_returned_fun));
+
+        let split_k_var = self.fresh_helper_name();
+        let head_ce = self.lower_atom(head, ctx);
+        let materialize_head = CExpr::Apply(
+            Box::new(head_ce),
+            vec![
+                CExpr::Var(ctx.evidence.clone()),
+                CExpr::Var(split_k_var.clone()),
+            ],
+        );
+        CExpr::Let(split_k_var, Box::new(split_k), Box::new(materialize_head))
     }
 
     /// Eta-expand a partial application `head(args…)` into a lambda that
@@ -227,6 +311,12 @@ fn external_callback_arg(module: &str, function: &str) -> Option<(usize, usize)>
     match (module, function) {
         ("std_array_bridge", "map") => Some((0, 1)),
         ("std_array_bridge", "foldl") => Some((0, 2)),
+        ("std_dict_bridge", "map_values") => Some((0, 1)),
+        ("std_dict_bridge", "filter_entries") => Some((0, 2)),
+        ("std_dict_bridge", "fold_entries") => Some((0, 3)),
+        ("std_dict_bridge", "update") => Some((1, 1)),
+        ("std_list_bridge", "sort_with") => Some((0, 2)),
+        ("std_list_bridge", "sort_by") => Some((0, 1)),
         ("std_set_bridge", "map") | ("std_set_bridge", "filter") => Some((0, 1)),
         ("std_set_bridge", "fold") => Some((0, 2)),
         _ => None,
