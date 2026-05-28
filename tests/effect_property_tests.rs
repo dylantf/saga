@@ -380,6 +380,12 @@ fn run_erl(dir: &PathBuf, eval: &str, fixture: &str) -> String {
     String::from_utf8_lossy(&run.stdout).into_owned()
 }
 
+fn result_eval(format: &str) -> String {
+    format!(
+        "Ev = case erlang:function_exported(main, '__saga_initial_evidence', 0) of true -> main:'__saga_initial_evidence'(); false -> {{}} end, K = fun(V) -> V end, io:format(\"{format}\", [main:result(unit, Ev, K)]), init:stop()."
+    )
+}
+
 /// Compile a single-module Saga source and call `main:result(unit)`,
 /// asserting the returned string equals `expected`. The fixture must
 /// declare `module Main` and define `pub fun result : Unit -> String`.
@@ -387,14 +393,10 @@ fn check_result_string(fixture: &str, src: &str, expected: &str) {
     let root = fixtures_root_for_main_only();
     let mut checker = make_checker(root.clone());
     let program = typecheck_source(src, &mut checker, fixture);
-    let core = emit_program(&program, "main", &checker, Some("main"));
+    let core = emit_program(&program, "main", &checker, None);
     let dir = fresh_dir(fixture);
     compile_with_erlc(&dir, &core, "main", fixture);
-    let stdout = run_erl(
-        &dir,
-        "io:format(\"~s\", [main:result(unit)]), init:stop().",
-        fixture,
-    );
+    let stdout = run_erl(&dir, &result_eval("~s"), fixture);
     let _ = std::fs::remove_dir_all(&dir);
     let _ = std::fs::remove_dir_all(&root);
     assert_eq!(
@@ -410,14 +412,10 @@ fn check_result_int(fixture: &str, src: &str, expected: i64) {
     let root = fixtures_root_for_main_only();
     let mut checker = make_checker(root.clone());
     let program = typecheck_source(src, &mut checker, fixture);
-    let core = emit_program(&program, "main", &checker, Some("main"));
+    let core = emit_program(&program, "main", &checker, None);
     let dir = fresh_dir(fixture);
     compile_with_erlc(&dir, &core, "main", fixture);
-    let stdout = run_erl(
-        &dir,
-        "io:format(\"~p\", [main:result(unit)]), init:stop().",
-        fixture,
-    );
+    let stdout = run_erl(&dir, &result_eval("~p"), fixture);
     let _ = std::fs::remove_dir_all(&dir);
     let _ = std::fs::remove_dir_all(&root);
     let trimmed = stdout.trim();
@@ -482,14 +480,10 @@ fn check_cross_module(fixture: &str, modules: &[(&str, &str)], main_src: &str, e
         let core = emit_program(program, &erl_name, &checker, None);
         compile_with_erlc(&dir, &core, &erl_name, fixture);
     }
-    let main_core = emit_program(&main_program, "main", &checker, Some("main"));
+    let main_core = emit_program(&main_program, "main", &checker, None);
     compile_with_erlc(&dir, &main_core, "main", fixture);
 
-    let stdout = run_erl(
-        &dir,
-        "io:format(\"~s\", [main:result(unit)]), init:stop().",
-        fixture,
-    );
+    let stdout = run_erl(&dir, &result_eval("~s"), fixture);
     let _ = std::fs::remove_dir_all(&dir);
     let _ = std::fs::remove_dir_all(&root);
     assert_eq!(
