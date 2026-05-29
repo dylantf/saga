@@ -30,6 +30,28 @@ pub(super) fn core_var(name: &str) -> String {
     }
 }
 
+/// Build `{Tag, Marker, Value}` for routed handler-control results.
+pub(super) fn marked_control_tuple(tag: &str, marker: CExpr, value: CExpr) -> CExpr {
+    CExpr::Tuple(vec![CExpr::Lit(CLit::Atom(tag.to_string())), marker, value])
+}
+
+/// Case arm that propagates a foreign routed control result unchanged.
+pub(super) fn propagate_marked_control_arm(
+    tag: &str,
+    marker_var: String,
+    value_var: String,
+) -> CArm {
+    CArm {
+        pat: CPat::Tuple(vec![
+            CPat::Lit(CLit::Atom(tag.to_string())),
+            CPat::Var(marker_var.clone()),
+            CPat::Var(value_var.clone()),
+        ]),
+        guard: None,
+        body: marked_control_tuple(tag, CExpr::Var(marker_var), CExpr::Var(value_var)),
+    }
+}
+
 /// Lower a literal to its `CLit` representation for use in a `CExpr::Lit`.
 ///
 /// Strings are NOT handled here — the old lowerer routes string-as-value

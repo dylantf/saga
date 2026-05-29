@@ -9,7 +9,7 @@ use crate::codegen::cerl::{CArm, CExpr, CLit, CPat};
 use crate::codegen::monadic::ir::{Atom, BindMode, MExpr, MVar};
 
 use super::pats::lower_param_names;
-use super::util::core_var;
+use super::util::{core_var, marked_control_tuple, propagate_marked_control_arm};
 use super::{LowerCtx, Lowerer};
 
 // Name of the function-entry return-continuation variable. Every emitted
@@ -416,6 +416,63 @@ impl<'ctx> Lowerer<'ctx> {
         CExpr::Apply(Box::new(CExpr::Var(ctx.return_k.clone())), vec![value])
     }
 
+    fn propagate_foreign_control_arms_unapplied(&mut self) -> Vec<CArm> {
+        let other_value_marker = self.fresh_helper_name();
+        let other_value = self.fresh_helper_name();
+        let other_abort_marker = self.fresh_helper_name();
+        let other_abort_value = self.fresh_helper_name();
+        vec![
+            propagate_marked_control_arm(VALUE_RESULT_TAG, other_value_marker, other_value),
+            propagate_marked_control_arm(ABORT_TAG, other_abort_marker, other_abort_value),
+        ]
+    }
+
+    fn apply_foreign_control_arms_to_k(&mut self, return_k: &str) -> Vec<CArm> {
+        let other_value_marker = self.fresh_helper_name();
+        let other_value = self.fresh_helper_name();
+        let other_abort_marker = self.fresh_helper_name();
+        let other_abort_value = self.fresh_helper_name();
+        vec![
+            self.apply_marked_control_arm_to_k(
+                VALUE_RESULT_TAG,
+                other_value_marker,
+                other_value,
+                return_k,
+            ),
+            self.apply_marked_control_arm_to_k(
+                ABORT_TAG,
+                other_abort_marker,
+                other_abort_value,
+                return_k,
+            ),
+        ]
+    }
+
+    fn apply_marked_control_arm_to_k(
+        &self,
+        tag: &str,
+        marker_var: String,
+        value_var: String,
+        return_k: &str,
+    ) -> CArm {
+        CArm {
+            pat: CPat::Tuple(vec![
+                CPat::Lit(CLit::Atom(tag.to_string())),
+                CPat::Var(marker_var.clone()),
+                CPat::Var(value_var.clone()),
+            ]),
+            guard: None,
+            body: CExpr::Apply(
+                Box::new(CExpr::Var(return_k.to_string())),
+                vec![marked_control_tuple(
+                    tag,
+                    CExpr::Var(marker_var),
+                    CExpr::Var(value_var),
+                )],
+            ),
+        }
+    }
+
     /// Lower `Bind { var, value, body }`:
     ///
     /// ```text
@@ -445,56 +502,17 @@ impl<'ctx> Lowerer<'ctx> {
         let bound_var = core_var(&var.name);
         let k_name = self.fresh_k_name();
         let k_arg = self.fresh_helper_name();
-        let other_marker = self.fresh_helper_name();
-        let other_abort_value = self.fresh_helper_name();
-        let other_value_marker = self.fresh_helper_name();
-        let other_value = self.fresh_helper_name();
-        let k_body = CExpr::Case(
-            Box::new(CExpr::Var(k_arg.clone())),
-            vec![
-                CArm {
-                    pat: CPat::Tuple(vec![
-                        CPat::Lit(CLit::Atom(VALUE_RESULT_TAG.to_string())),
-                        CPat::Var(other_value_marker.clone()),
-                        CPat::Var(other_value.clone()),
-                    ]),
-                    guard: None,
-                    body: CExpr::Apply(
-                        Box::new(CExpr::Var(ctx.return_k.clone())),
-                        vec![CExpr::Tuple(vec![
-                            CExpr::Lit(CLit::Atom(VALUE_RESULT_TAG.to_string())),
-                            CExpr::Var(other_value_marker),
-                            CExpr::Var(other_value),
-                        ])],
-                    ),
-                },
-                CArm {
-                    pat: CPat::Tuple(vec![
-                        CPat::Lit(CLit::Atom(ABORT_TAG.to_string())),
-                        CPat::Var(other_marker.clone()),
-                        CPat::Var(other_abort_value.clone()),
-                    ]),
-                    guard: None,
-                    body: CExpr::Apply(
-                        Box::new(CExpr::Var(ctx.return_k.clone())),
-                        vec![CExpr::Tuple(vec![
-                            CExpr::Lit(CLit::Atom(ABORT_TAG.to_string())),
-                            CExpr::Var(other_marker),
-                            CExpr::Var(other_abort_value),
-                        ])],
-                    ),
-                },
-                CArm {
-                    pat: CPat::Var("_BindArg".to_string()),
-                    guard: None,
-                    body: CExpr::Let(
-                        bound_var,
-                        Box::new(CExpr::Var("_BindArg".to_string())),
-                        Box::new(body_ce),
-                    ),
-                },
-            ],
-        );
+        let mut k_arms = self.apply_foreign_control_arms_to_k(&ctx.return_k);
+        k_arms.push(CArm {
+            pat: CPat::Var("_BindArg".to_string()),
+            guard: None,
+            body: CExpr::Let(
+                bound_var,
+                Box::new(CExpr::Var("_BindArg".to_string())),
+                Box::new(body_ce),
+            ),
+        });
+        let k_body = CExpr::Case(Box::new(CExpr::Var(k_arg.clone())), k_arms);
         let k_fun = CExpr::Fun(vec![k_arg], Box::new(k_body));
         let value_ce = self.lower_expr(value, &ctx.with_return_k(k_name.clone()));
         let bind_ce = CExpr::Let(k_name, Box::new(k_fun), Box::new(value_ce));
@@ -503,55 +521,16 @@ impl<'ctx> Lowerer<'ctx> {
 
     fn bubble_abort_to_k(&mut self, body_ce: CExpr, return_k: &str) -> CExpr {
         let result = self.fresh_helper_name();
-        let other_marker = self.fresh_helper_name();
-        let other_abort_value = self.fresh_helper_name();
-        let other_value_marker = self.fresh_helper_name();
-        let other_value = self.fresh_helper_name();
+        let mut arms = self.apply_foreign_control_arms_to_k(return_k);
+        arms.push(CArm {
+            pat: CPat::Var("_BindValue".to_string()),
+            guard: None,
+            body: CExpr::Var("_BindValue".to_string()),
+        });
         CExpr::Let(
             result.clone(),
             Box::new(body_ce),
-            Box::new(CExpr::Case(
-                Box::new(CExpr::Var(result.clone())),
-                vec![
-                    CArm {
-                        pat: CPat::Tuple(vec![
-                            CPat::Lit(CLit::Atom(VALUE_RESULT_TAG.to_string())),
-                            CPat::Var(other_value_marker.clone()),
-                            CPat::Var(other_value.clone()),
-                        ]),
-                        guard: None,
-                        body: CExpr::Apply(
-                            Box::new(CExpr::Var(return_k.to_string())),
-                            vec![CExpr::Tuple(vec![
-                                CExpr::Lit(CLit::Atom(VALUE_RESULT_TAG.to_string())),
-                                CExpr::Var(other_value_marker),
-                                CExpr::Var(other_value),
-                            ])],
-                        ),
-                    },
-                    CArm {
-                        pat: CPat::Tuple(vec![
-                            CPat::Lit(CLit::Atom(ABORT_TAG.to_string())),
-                            CPat::Var(other_marker.clone()),
-                            CPat::Var(other_abort_value.clone()),
-                        ]),
-                        guard: None,
-                        body: CExpr::Apply(
-                            Box::new(CExpr::Var(return_k.to_string())),
-                            vec![CExpr::Tuple(vec![
-                                CExpr::Lit(CLit::Atom(ABORT_TAG.to_string())),
-                                CExpr::Var(other_marker),
-                                CExpr::Var(other_abort_value),
-                            ])],
-                        ),
-                    },
-                    CArm {
-                        pat: CPat::Var("_BindValue".to_string()),
-                        guard: None,
-                        body: CExpr::Var("_BindValue".to_string()),
-                    },
-                ],
-            )),
+            Box::new(CExpr::Case(Box::new(CExpr::Var(result)), arms)),
         )
     }
 
@@ -590,65 +569,29 @@ impl<'ctx> Lowerer<'ctx> {
         let value_ce = self.lower_expr(value, &value_ctx);
         let body_ctx = ctx.with_local(var.name.clone());
         let body_ce = self.lower_expr(body, &body_ctx);
-        let other_marker = self.fresh_helper_name();
-        let other_abort_value = self.fresh_helper_name();
-        let other_value_marker = self.fresh_helper_name();
-        let other_value = self.fresh_helper_name();
         let raw_value = self.fresh_helper_name();
+        let mut value_arms = vec![CArm {
+            pat: CPat::Tuple(vec![CPat::Lit(success_tag), CPat::Var(bound_var.clone())]),
+            guard: None,
+            body: body_ce.clone(),
+        }];
+        value_arms.extend(self.propagate_foreign_control_arms_unapplied());
+        value_arms.push(CArm {
+            pat: CPat::Var(raw_value.clone()),
+            guard: None,
+            body: CExpr::Let(
+                bound_var,
+                Box::new(CExpr::Var(raw_value)),
+                Box::new(body_ce),
+            ),
+        });
         let value_bind = CExpr::Let(
             local_k,
             Box::new(local_k_fun),
             Box::new(CExpr::Let(
                 raw_result.clone(),
                 Box::new(value_ce),
-                Box::new(CExpr::Case(
-                    Box::new(CExpr::Var(raw_result)),
-                    vec![
-                        CArm {
-                            pat: CPat::Tuple(vec![
-                                CPat::Lit(success_tag),
-                                CPat::Var(bound_var.clone()),
-                            ]),
-                            guard: None,
-                            body: body_ce.clone(),
-                        },
-                        CArm {
-                            pat: CPat::Tuple(vec![
-                                CPat::Lit(CLit::Atom(VALUE_RESULT_TAG.to_string())),
-                                CPat::Var(other_value_marker.clone()),
-                                CPat::Var(other_value.clone()),
-                            ]),
-                            guard: None,
-                            body: CExpr::Tuple(vec![
-                                CExpr::Lit(CLit::Atom(VALUE_RESULT_TAG.to_string())),
-                                CExpr::Var(other_value_marker),
-                                CExpr::Var(other_value),
-                            ]),
-                        },
-                        CArm {
-                            pat: CPat::Tuple(vec![
-                                CPat::Lit(CLit::Atom(ABORT_TAG.to_string())),
-                                CPat::Var(other_marker.clone()),
-                                CPat::Var(other_abort_value.clone()),
-                            ]),
-                            guard: None,
-                            body: CExpr::Tuple(vec![
-                                CExpr::Lit(CLit::Atom(ABORT_TAG.to_string())),
-                                CExpr::Var(other_marker),
-                                CExpr::Var(other_abort_value),
-                            ]),
-                        },
-                        CArm {
-                            pat: CPat::Var(raw_value.clone()),
-                            guard: None,
-                            body: CExpr::Let(
-                                bound_var,
-                                Box::new(CExpr::Var(raw_value)),
-                                Box::new(body_ce),
-                            ),
-                        },
-                    ],
-                )),
+                Box::new(CExpr::Case(Box::new(CExpr::Var(raw_result)), value_arms)),
             )),
         );
         self.bubble_abort_to_k(value_bind, &ctx.return_k)
