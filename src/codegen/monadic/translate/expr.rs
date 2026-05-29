@@ -276,11 +276,25 @@ impl<'a> Translator<'a> {
                 args: Vec::new(),
                 source: e.id,
             }),
-            ExprKind::QualifiedName { module, name, .. } => Some(Atom::QualifiedRef {
-                module: module.clone(),
-                name: name.clone(),
-                source: e.id,
-            }),
+            ExprKind::QualifiedName { module, name, .. } => {
+                // A qualified name resolved to a constructor (e.g.
+                // `Json.InvalidShape`) must become a `Ctor` atom — App-folding
+                // then builds the tagged tuple. Otherwise it would lower as a
+                // uniform-CPS call to a nonexistent `Module:Ctor/(n+2)`.
+                if let Some(canonical) = self.effect_info.constructors.get(&e.id) {
+                    Some(Atom::Ctor {
+                        name: canonical.clone(),
+                        args: Vec::new(),
+                        source: e.id,
+                    })
+                } else {
+                    Some(Atom::QualifiedRef {
+                        module: module.clone(),
+                        name: name.clone(),
+                        source: e.id,
+                    })
+                }
+            }
             ExprKind::DictRef { name } => Some(Atom::DictRef {
                 name: name.clone(),
                 source: e.id,

@@ -120,6 +120,10 @@ Reproductions of bugs go under `examples/bugs/` — never scratch projects in `/
 - project repros: `examples/bugs/<name>/` with its own `project.toml` + `src/` (needed whenever the repro imports user modules / has multiple modules).
 Keep the repro minimal and name it after the bug. Run a project repro with `cargo run --bin saga -- run` from its directory.
 
+### No subagents
+
+Do not spawn subagents (the Agent/Task tooling). Do all work inline. Subagent tool calls surface a permission prompt for every action, which is unworkable here. Trace, repro, and fix directly.
+
 ### Build Output
 
 - `_build/{dev,release}/` — compiled project beams

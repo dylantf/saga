@@ -2,6 +2,8 @@ module AdvancedTest
 
 import Std.BitString as BitString
 import Std.Test (Testing, describe, test, assert_eq, assert_true, assert_false)
+import QualCtorLib (Shape, Rect, Circle)
+import QualCtorLib as Q
 
 # --- Types for deriving tests ---
 
@@ -378,6 +380,25 @@ tests () = {
       test "qualified partial app stored in let then mapped" (fun () -> {
         let strip_m = String.replace "m" ""
         assert_eq (["7m", "9m"] |> List.map strip_m) ["7", "9"]
+      })
+    })
+
+    # Regression: a constructor referenced through a qualified module alias
+    # (`Q.Rect`) used to lower to a uniform-CPS call `module:Ctor/(n+2)` —
+    # a nonexistent function — instead of building the tagged tuple. It must
+    # construct the same value as the directly-imported constructor.
+    describe "qualified constructor application" (fun () -> {
+      test "qualified constructor builds the same value as a bare one" (fun () -> {
+        assert_eq (Q.Rect 3 4) (Rect 3 4)
+      })
+
+      test "qualified single-arg constructor" (fun () -> {
+        assert_eq (Q.Circle 5) (Circle 5)
+      })
+
+      test "qualified constructor inside a wrapper (Result)" (fun () -> {
+        let r : Result Shape String = Ok (Q.Rect 1 2)
+        assert_eq r (Ok (Rect 1 2))
       })
     })
   })

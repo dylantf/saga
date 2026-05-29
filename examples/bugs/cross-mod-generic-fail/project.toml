@@ -1,0 +1,5 @@
+[project]
+name = "cross-mod-generic-fail"
+
+[bin]
+main = "src/Main.saga"
