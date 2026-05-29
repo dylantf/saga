@@ -1,0 +1,33 @@
+#@ Same lexical `with` site, re-installed at each recursion level. Each level
+#@ catches the inner Fail and re-raises with a prefix, so the error must thread
+#@ outward through every level.
+#@
+#@ Faithful (Koka) semantics: Err "L2:L1:L0:boom".
+#@
+#@ This is the case static-per-site abort markers cannot distinguish: every
+#@ activation of `nest`'s `with` shares one marker atom, so a level's own
+#@ delimiter can wrongly catch an abort meant for an outer level. Koka mints a
+#@ fresh marker per handler *activation* at runtime, which this would need.
+module Main
+
+import Std.IO (console)
+import Std.Fail (Fail)
+
+handler to_result for Fail a {
+  fail e = Err e
+  return v = Ok v
+}
+
+fun nest : Int -> Int needs {Fail String}
+nest depth =
+  (if depth == 0 then fail! "boom" else nest (depth - 1)) with {
+    fail e = fail! ($"L{depth}:{e}")
+  }
+
+main () = {
+  let r : Result Int String = nest 2 with to_result
+  case r {
+    Ok n -> println $"Ok {n} (unexpected)"
+    Err e -> println $"Err: {e}"
+  }
+} with console

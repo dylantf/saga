@@ -298,7 +298,7 @@ impl<'ctx> Lowerer<'ctx> {
         // handler stack and the return clause forwards through the outer K.
         let outer_evidence = ctx.evidence.clone();
         let raw_result_k = self.fresh_k_ret_name();
-        let abort_marker = format!("__saga_abort_{raw_result_k}");
+        let abort_marker = self.fresh_abort_marker();
         let raw_result_k_binding = identity_continuation();
         let arm_ctx = ctx
             .with_return_k(raw_result_k.clone())
@@ -415,7 +415,7 @@ impl<'ctx> Lowerer<'ctx> {
     ) -> CExpr {
         let outer_evidence = ctx.evidence.clone();
         let raw_result_k = self.fresh_k_ret_name();
-        let abort_marker = format!("__saga_abort_{raw_result_k}");
+        let abort_marker = self.fresh_abort_marker();
         let raw_result_k_binding = identity_continuation();
 
         let handler_value_ce = self.lower_atom(op_tuple, ctx);

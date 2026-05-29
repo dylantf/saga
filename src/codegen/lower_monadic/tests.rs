@@ -1183,12 +1183,11 @@ fn bind_lowers_to_let_with_continuation_fun() {
             match k_fun.as_ref() {
                 CExpr::Fun(params, body) => {
                     assert_eq!(params.len(), 1);
-                    match body.as_ref() {
-                        other => assert!(
-                            contains_apply_to(other, "_ReturnK"),
-                            "expected K body to eventually apply _ReturnK, got {other:?}"
-                        ),
-                    }
+                    let other = body.as_ref();
+                    assert!(
+                        contains_apply_to(other, "_ReturnK"),
+                        "expected K body to eventually apply _ReturnK, got {other:?}"
+                    )
                 }
                 other => panic!("expected Fun for K, got {other:?}"),
             }
@@ -1560,7 +1559,7 @@ fn yield_in_bind_position_threads_bind_k_as_op_continuation() {
     };
     assert_eq!(k_name, "_K0");
     // value_ce: Yield apply with _K0 as the K var
-    let user_args = assert_yield_shape(&value_ce, "Log", 1, "_Evidence", "_K0");
+    let user_args = assert_yield_shape(value_ce, "Log", 1, "_Evidence", "_K0");
     assert!(user_args.is_empty());
 }
 

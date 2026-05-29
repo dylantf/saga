@@ -102,6 +102,15 @@ pub struct Lowerer<'ctx> {
     /// positional per arm; this counter is used for transient internals like
     /// return-clause param fallbacks).
     helper_counter: u32,
+    /// Monotonic counter for abort/delimiter marker atoms. Unlike the other
+    /// counters this is NEVER reset (not in `reset_counters` /
+    /// `CounterSnapshot`): marker atoms are runtime values that bubble across
+    /// function-call boundaries, so they must be unique across every `with`
+    /// site in the module — not merely within one function body. Combined with
+    /// `current_erlang_module` this yields a program-global unique marker.
+    /// (Resetting it per function caused two functions' first handlers to mint
+    /// the same atom, so a callee's prompt would catch a caller's abort.)
+    marker_counter: u32,
     /// Declared field order for every known record type. Keyed by record name
     /// (both bare `Foo` and fully-qualified `ModuleName.Foo`) so a lookup
     /// using either form succeeds. Populated at construction from each
@@ -172,6 +181,7 @@ impl<'ctx> Lowerer<'ctx> {
             arm_k_counter: 0,
             ret_k_counter: 0,
             helper_counter: 0,
+            marker_counter: 0,
             record_fields,
             emit_bootstrap: false,
             current_erlang_module: String::new(),
@@ -383,6 +393,29 @@ impl<'ctx> Lowerer<'ctx> {
         let n = self.ret_k_counter;
         self.ret_k_counter += 1;
         format!("_K_ret{}", n)
+    }
+
+    /// Mint a program-globally-unique abort/delimiter marker atom. The marker
+    /// is a runtime value that bubbles across function-call boundaries, so it
+    /// must be unique across every `with` site — not just within one function.
+    /// Qualifying with `current_erlang_module` (each module is lowered by its
+    /// own `Lowerer`) plus a never-reset counter guarantees that.
+    ///
+    /// Note this is one atom *per lexical `with` site*, not per runtime handler
+    /// activation (Koka mints a fresh marker per activation). Static-per-site is
+    /// sound here because: performs dispatch to the nearest handler via
+    /// evidence, and a terminal (non-resuming) abort bubbles to the *innermost*
+    /// matching delimiter — so an abort is always produced and caught by the
+    /// same activation even when one site is live twice on the stack
+    /// (recursion). Re-raises are performs, not own-marker aborts, so they never
+    /// emit a colliding tuple. Revisit (switch to a runtime-fresh marker bound
+    /// at install + guard equality in the prompt) only if first-class/named
+    /// handlers gain continuations resumed outside their original dynamic
+    /// extent, where two activations of one site must be told apart by identity.
+    pub(super) fn fresh_abort_marker(&mut self) -> String {
+        let n = self.marker_counter;
+        self.marker_counter += 1;
+        format!("__saga_abort_{}_{}", self.current_erlang_module, n)
     }
 
     /// Mint a fresh helper name (`_H{n}`). Used for transient internals

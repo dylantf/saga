@@ -113,6 +113,13 @@ Files declare `module Foo.Bar` and are imported with `import Foo.Bar`. Projects 
 
 Typechecker tests use `check(src)` which loads the prelude then checks the source. Codegen tests use `emit(src)` (lowering only, no typechecking) and `emit_full(src)` (full pipeline). To test codegen changes end-to-end, build and run via `cargo run -- run` rather than the Rust interpreter.
 
+### Repros (always inside the repo, never /tmp)
+
+Reproductions of bugs go under `examples/bugs/` — never scratch projects in `/tmp` (it forces permission prompts and loses the repro). Two layouts already in use there:
+- single-file repros: a bare `examples/bugs/<name>.saga` (for cases that need no imports of user modules),
+- project repros: `examples/bugs/<name>/` with its own `project.toml` + `src/` (needed whenever the repro imports user modules / has multiple modules).
+Keep the repro minimal and name it after the bug. Run a project repro with `cargo run --bin saga -- run` from its directory.
+
 ### Build Output
 
 - `_build/{dev,release}/` — compiled project beams
