@@ -1995,14 +1995,30 @@ fn multi_arm_per_op_emits_single_closure_with_case() {
                 CExpr::Case(scrut, case_arms) => {
                     assert!(matches!(scrut.as_ref(), CExpr::Var(n) if n == "_HArg0"));
                     assert_eq!(case_arms.len(), 2);
-                    // Both arms end in `Pure(...)` which must escape to the
-                    // raw-result K (`_K_ret0`), not resume `_K_arm0`.
+                    // Neither arm resumes, so each escapes its `Pure(...)` to
+                    // the raw-result K (`_K_ret0`), then — because the with site
+                    // has an abort marker — tags the result so nested `with`
+                    // boundaries can propagate the abort. This matches the
+                    // single-arm aborting-arm shape (`lower_captured_arm_body`).
                     for arm in case_arms {
                         match &arm.body {
-                            CExpr::Apply(c, _) => {
-                                assert!(matches!(c.as_ref(), CExpr::Var(n) if n == "_K_ret0"));
+                            CExpr::Let(_, value, body) => {
+                                match value.as_ref() {
+                                    CExpr::Apply(c, _) => assert!(
+                                        matches!(c.as_ref(), CExpr::Var(n) if n == "_K_ret0")
+                                    ),
+                                    other => {
+                                        panic!("expected Apply(_K_ret0, _) bound value, got {other:?}")
+                                    }
+                                }
+                                // The wrapping case carries an `_AbortValue` arm
+                                // that builds an abort tuple with the with-site
+                                // marker.
+                                let has_abort_arm = matches!(body.as_ref(), CExpr::Case(_, wrap)
+                                    if wrap.iter().any(|a| matches!(&a.pat, CPat::Var(n) if n == "_AbortValue")));
+                                assert!(has_abort_arm, "expected abort-tagging case, got {body:?}");
                             }
-                            other => panic!("expected Apply arm body, got {other:?}"),
+                            other => panic!("expected Let(abort-tag) arm body, got {other:?}"),
                         }
                     }
                 }

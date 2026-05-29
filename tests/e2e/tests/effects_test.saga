@@ -34,6 +34,10 @@ effect Validate {
   fun invalid : String -> Unit
 }
 
+effect Pick {
+  fun pick : Int -> Int
+}
+
 # --- Named handlers ---
 
 handler console_log for Log {
@@ -759,6 +763,20 @@ tests () = {
         work_and_fail () with managed
       } with to_result
       assert_eq result (Err "something went wrong" : Result String String)
+    })
+
+    # Regression: a multi-arm-per-op handler (two arms pattern-matching the
+    # same op's param) where each arm carries its own `finally` block used to
+    # panic in the monadic lowerer ("finally_block deferred"). The cleanup is
+    # threaded per-arm exactly as the single-arm path does.
+    test "multi-arm-per-op arms each carry finally" (fun () -> {
+      let result = {
+        pick! 0 + pick! 5
+      } with {
+        pick 0 = resume 100 finally { () }
+        pick n = resume (n * 2) finally { () }
+      }
+      assert_eq result 110
     })
   })
 

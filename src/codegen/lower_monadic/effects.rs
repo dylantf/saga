@@ -845,8 +845,6 @@ impl<'ctx> Lowerer<'ctx> {
         ctx: &LowerCtx,
         mode: ArmReturnMode,
     ) -> CExpr {
-        let has_resume = arm.body.contains_resume();
-
         let (closure_params, body_wraps) = self.plan_arm_params(&arm.params);
         let perform_ev = self.fresh_helper_name();
         let k_arm = self.fresh_k_arm_name();
@@ -855,18 +853,53 @@ impl<'ctx> Lowerer<'ctx> {
         } else {
             None
         };
-        let mut body_ctx = match mode {
+        let body_ctx = match mode {
             ArmReturnMode::Captured => ctx.with_arm_k(k_arm.clone()),
             ArmReturnMode::Direct => ctx
                 .with_arm_k(k_arm.clone())
                 .with_return_k(direct_k.as_ref().unwrap().clone()),
         };
+        let mut body_ce = self.lower_captured_arm_body(arm, &body_ctx);
+
+        if let Some(direct_k) = direct_k {
+            body_ce = CExpr::Let(
+                direct_k,
+                Box::new(CExpr::Fun(
+                    vec!["_V".to_string()],
+                    Box::new(CExpr::Var("_V".to_string())),
+                )),
+                Box::new(body_ce),
+            );
+        }
+        let body_with_pats = self.wrap_arm_param_destructures(body_ce, body_wraps);
+
+        let mut params = closure_params;
+        params.push(perform_ev);
+        params.push(k_arm);
+        CExpr::Fun(params, Box::new(body_with_pats))
+    }
+
+    /// Lower a handler arm's body under a continuation already set in
+    /// `body_ctx` (its `arm_k`, and for value arms its `return_k`), applying
+    /// the arm's `finally` cleanup and abort-marker tagging:
+    ///   - resuming arm + finally: the cleanup runs at each resume site
+    ///     (threaded via `with_finally`, consumed in `lower_resume`).
+    ///   - aborting arm + finally: the cleanup is appended after the body.
+    ///   - aborting arm (no resume): the result is tagged with the with-site's
+    ///     abort marker so nested delimiters can propagate it.
+    ///
+    /// Param binding (closure params for single arms, case patterns for
+    /// multi-arm-per-op) is the caller's job; this only registers `arm.params`
+    /// as locals so the body resolves them.
+    fn lower_captured_arm_body(&mut self, arm: &MHandlerArm, body_ctx: &LowerCtx) -> CExpr {
+        let has_resume = arm.body.contains_resume();
+        let mut lower_ctx = body_ctx.clone();
         if let Some(ref fb) = arm.finally_block
             && has_resume
         {
-            body_ctx = body_ctx.with_finally(fb.clone());
+            lower_ctx = lower_ctx.with_finally(fb.clone());
         }
-        let arm_ctx = body_ctx.with_param_locals(&arm.params);
+        let arm_ctx = lower_ctx.with_param_locals(&arm.params);
         let mut body_ce = self.lower_expr(&arm.body, &arm_ctx);
 
         // For abort arms (no resume) with finally: append cleanup after body.
@@ -913,22 +946,7 @@ impl<'ctx> Lowerer<'ctx> {
             );
         }
 
-        if let Some(direct_k) = direct_k {
-            body_ce = CExpr::Let(
-                direct_k,
-                Box::new(CExpr::Fun(
-                    vec!["_V".to_string()],
-                    Box::new(CExpr::Var("_V".to_string())),
-                )),
-                Box::new(body_ce),
-            );
-        }
-        let body_with_pats = self.wrap_arm_param_destructures(body_ce, body_wraps);
-
-        let mut params = closure_params;
-        params.push(perform_ev);
-        params.push(k_arm);
-        CExpr::Fun(params, Box::new(body_with_pats))
+        body_ce
     }
 
     /// Multi-arm-per-op closure. The op has N>1 arms that pattern-match on
@@ -952,12 +970,6 @@ impl<'ctx> Lowerer<'ctx> {
     fn build_multi_arm_op_closure(&mut self, arms: &[&MHandlerArm], ctx: &LowerCtx) -> CExpr {
         let n_params = arms[0].params.len();
         for arm in arms.iter().skip(1) {
-            if arm.finally_block.is_some() {
-                panic!(
-                    "build_multi_arm_op_closure: finally_block deferred (effect={}, op={})",
-                    arm.op.effect, arm.op.op
-                );
-            }
             assert_eq!(
                 arm.params.len(),
                 n_params,
@@ -965,12 +977,6 @@ impl<'ctx> Lowerer<'ctx> {
                  (effect={}, op={})",
                 arm.op.effect,
                 arm.op.op
-            );
-        }
-        if arms[0].finally_block.is_some() {
-            panic!(
-                "build_multi_arm_op_closure: finally_block deferred (effect={}, op={})",
-                arms[0].op.effect, arms[0].op.op
             );
         }
 
@@ -984,10 +990,10 @@ impl<'ctx> Lowerer<'ctx> {
             CExpr::Values(positional.iter().cloned().map(CExpr::Var).collect())
         };
 
+        let body_ctx = ctx.with_arm_k(k_arm.clone());
         let mut case_arms: Vec<CArm> = Vec::with_capacity(arms.len());
         for arm in arms {
-            let arm_ctx = ctx.with_arm_k(k_arm.clone()).with_param_locals(&arm.params);
-            let body_ce = self.lower_expr(&arm.body, &arm_ctx);
+            let body_ce = self.lower_captured_arm_body(arm, &body_ctx);
             let pat = if n_params == 1 {
                 self.lower_pat(&arm.params[0])
             } else {
@@ -1024,13 +1030,16 @@ impl<'ctx> Lowerer<'ctx> {
         arm: &MHandlerArm,
         ctx: &LowerCtx,
     ) -> CExpr {
-        if arm.finally_block.is_some() {
-            panic!(
-                "build_return_clause_closure: finally_block on a return clause is unusual; \
-                 deferred until needed (effect={}, op={})",
-                arm.op.effect, arm.op.op
-            );
-        }
+        // The parser never attaches a `finally` to a `return` clause (both the
+        // named- and inline-handler paths hardcode `finally_block: None`), so a
+        // return clause's cleanup is structurally impossible. Asserted, not
+        // handled.
+        debug_assert!(
+            arm.finally_block.is_none(),
+            "return clause unexpectedly carries a finally block (effect={}, op={})",
+            arm.op.effect,
+            arm.op.op
+        );
         let (param_name, body_wrap) = match arm.params.as_slice() {
             [] => (self.fresh_helper_name(), None),
             [Pat::Var { name, .. }] => (core_var(name), None),

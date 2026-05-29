@@ -109,8 +109,21 @@ Use it as the first place to look for real regressions.
 
 From a `panic!`/`unimplemented!`/`deferred` sweep of the new path:
 
-- **REAL — multi-arm-per-op `finally`** deferred-panic, `effects.rs:956/971`.
-- **REAL — return-clause `finally`** deferred-panic, `effects.rs:1027`.
+- **RESOLVED — multi-arm-per-op `finally`** (was `effects.rs:956/971`). Reachable
+  via inline `with` handlers (the named-handler path is blocked by the
+  typechecker's duplicate-arm check, but inline handlers are not). Extracted the
+  single-arm finally + abort-marker wrapping into `lower_captured_arm_body` and
+  call it from both the single-arm and multi-arm paths. This also closed a latent
+  gap: non-resuming multi-arm arms previously skipped abort-marker tagging, so
+  they couldn't propagate aborts across nested `with` boundaries — they now match
+  the single-arm aborting-arm shape. Regression: `effects_test.saga` "multi-arm-
+  per-op arms each carry finally"; updated unit test
+  `multi_arm_per_op_emits_single_closure_with_case`; repro
+  `examples/bugs/multiarm-finally/`.
+- **NOT a blocker — return-clause `finally`** (was `effects.rs:1027`). Unreachable:
+  both parser paths (`decl.rs:708`, `expr.rs:708`) hardcode `finally_block: None`
+  on `return` clauses, so a return clause can never carry a finally. The panic was
+  replaced with a `debug_assert!` documenting the parser invariant.
 - **Low-priority edge — nullary eta-reduced effect-op-as-value**,
   `translate/expr.rs:388` (falls through to `Yield`, performs instead of
   producing a callable). Non-nullary eta-refs are handled.
@@ -313,9 +326,10 @@ Review checkpoints:
   - `fail_handler_inside_resume_aborts_correctly` leaks an abort marker into
     string append.
   - same-effect/dynamic-handler tests lose or misroute values.
-- `effects.rs` still contains deferred panics for `finally_block` on multi-arm
-  op closures and return clauses. E2E finally tests pass, but the implementation
-  is not obviously complete.
+- ~~`effects.rs` still contains deferred panics for `finally_block` on multi-arm
+  op closures and return clauses.~~ Both resolved: multi-arm finally implemented
+  via `lower_captured_arm_body`; return-clause finally shown unreachable
+  (parser-enforced) and downgraded to `debug_assert!`.
 - `bootstrap.rs` is large and easy to special-case incorrectly. Native handler
   tuple shapes must match normal handler tuple shapes.
 - `app.rs` has the likely `/0` vs `/2` value-function bug.
@@ -639,12 +653,17 @@ Findings:
     cleanup after the delimited resume result,
   - if the arm body does not contain `resume`, `build_arm_closure_with_return_mode`
     appends cleanup after the arm body.
-- Multi-arm-per-op closures still panic when any arm has `finally_block`.
-  This is a real parity gap if the source language permits multiple pattern
-  arms for the same operation with `finally`.
-- Return-clause `finally_block` also panics as deferred. This is probably less
-  urgent because return clauses having `finally` may be syntactically unusual,
-  but the invariant should be enforced earlier or supported deliberately.
+- ~~Multi-arm-per-op closures still panic when any arm has `finally_block`.~~
+  RESOLVED. The source language *does* permit multi-arm-per-op via inline `with`
+  handlers, so this was a real parity gap. Fixed by extracting the single-arm
+  finally + abort-marker logic into `lower_captured_arm_body` and sharing it with
+  the multi-arm path (which also gained abort-marker tagging for non-resuming
+  arms — a latent gap). Verified to match single-arm behavior byte-for-byte on
+  the `examples/bugs/multiarm-finally/` parity repro.
+- ~~Return-clause `finally_block` also panics as deferred.~~ Confirmed
+  unreachable: both parser paths hardcode `finally_block: None` on `return`
+  clauses, so the invariant is enforced at parse time. Panic downgraded to a
+  `debug_assert!`.
 - Cleanup behavior depends on `contains_resume`, which descends into
   `Atom::Lambda` bodies. That is conservative for propagating `arm_k` into
   lambdas, but it can misclassify an arm that merely *returns* a lambda
@@ -715,13 +734,14 @@ Recommended action:
 The slow path must be a complete oracle before the optimization pass (Stage 11)
 starts. Remaining order:
 
-1. **`finally` deferred-panics — the real Phase-1 blockers.**
-   Implement multi-arm-per-op `finally` (`effects.rs:956/971`) and return-clause
-   `finally` (`effects.rs:1027`). See "Phase-1 completion blockers" above. These
-   are the clearest "make the slow path an oracle" wins.
+1. **`finally` deferred-panics — DONE.** Multi-arm-per-op `finally` implemented
+   via the shared `lower_captured_arm_body` helper; return-clause `finally` shown
+   unreachable (parser hardcodes `None`) and downgraded to a `debug_assert!`. See
+   "Phase-1 completion blockers" above for details.
 
 2. **Behavior-verify dynamic-handler return clauses** (wired, not panicking) and
    decide the nullary eta-reduced-effect-op-as-value edge (`translate/expr.rs:388`).
+   These are now the clearest remaining "make the slow path an oracle" items.
 
 3. **Re-pin the leftover shape tests.** `alias_chase_let_h_is_static` (lib) and
    `tail_recursive_apply_in_tail_position` (codegen_integration) are pre-existing
