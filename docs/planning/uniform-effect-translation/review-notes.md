@@ -59,16 +59,69 @@ stage boundary.
 
 Useful default failures should stay visible until fixed.
 
-- `tests/codegen_integration.rs`: green.
-- `tests/effect_property_tests.rs`: green.
-- `tests/module_codegen_integration.rs`: green for active tests; remaining
-  ignored tests should be reclassified individually. Many are stale
-  old-Core-shape assertions, while some may still cover real cross-module
-  behavior worth rewriting.
+- `tests/codegen_integration.rs`: 1 pre-existing failure
+  (`tail_recursive_apply_in_tail_position`), rest green.
+- `tests/effect_property_tests.rs`: green (63).
+- `tests/module_codegen_integration.rs`: green for active tests (35); 45 ignored.
+  Many ignored are stale old-Core-shape assertions; some still cover real
+  cross-module behavior worth rewriting. The runtime-assertion tests are ignored
+  because the harness calls `/1` entrypoints instead of uniform-CPS `/3`.
 - `tests/stdlib_tests.rs::stdlib_test_suite`: green, including first-class
   references to bridge HOFs / legacy-Maybe externals.
-- `tests/e2e`: green in the latest full Saga test sweep, but it does not cover
+- `tests/e2e`: green in the latest full Saga sweep (370), but it does not cover
   the full stdlib callback surface.
+- Lib unit tests: 1 pre-existing shape-pin failure
+  (`codegen::monadic::translate::tests::alias_chase_let_h_is_static`) — leftover
+  from the marked-value-result work; needs re-pinning, not a behavior bug.
+
+### Real-world corpus: `~/projects/saga_json`
+
+A ~3.3k-line JSON library (lib + bin demos + 218-test suite) is now a load-bearing
+oracle for the new path. Run its suite with `saga test` from the project dir; run
+the demos with `saga run`. It shook out the two bugs below; **218/0** after fixes.
+Use it as the first place to look for real regressions.
+
+## Resolved this pass (real bugs, with fixes)
+
+1. **Abort-marker collision across function-call boundaries** (commit `176492a`).
+   Markers were derived from the per-function `ret_k` counter, which resets at
+   every function entry, so the first `with` in every function minted the same
+   atom (`__saga_abort__K_ret0`). A callee's prompt then caught a *caller's*
+   abort by string match and unwrapped it — a re-aborting handler (`fail e =
+   fail! ...`) called through a function boundary leaked its abort as a value.
+   Fix: `fresh_abort_marker` in `lower_monadic/mod.rs` mints a never-reset,
+   module-qualified marker. Static-per-site (vs Koka's per-activation) is sound
+   under deep-handler + evidence dispatch; see the note on `fresh_abort_marker`
+   and [[koka-faithful-abort-routing]]. Guard:
+   `effects_test.saga` "re-abort propagates across a function-call boundary".
+
+2. **Qualified-alias constructors lowered as CPS calls** (commit `09f79ca`).
+   `Json.InvalidShape` / `Lib.Boom` (qualified via alias) resolved only as a
+   value, so codegen emitted `module:Ctor/(arity+2)` — a nonexistent function →
+   runtime `undef`. Directly-imported constructors were fine. Fix: `resolve.rs`
+   `QualifiedName` arm also records a constructor into `constructors[expr.id]`;
+   `translate/expr.rs` emits `Atom::Ctor` so App-folding builds a tuple. Guard:
+   `advanced_test.saga` "qualified constructor application" (+
+   `tests/e2e/lib/QualCtorLib.saga`). Repro anchor:
+   `examples/bugs/cross-mod-generic-fail`.
+
+## Phase-1 completion blockers (gate the optimization pass)
+
+From a `panic!`/`unimplemented!`/`deferred` sweep of the new path:
+
+- **REAL — multi-arm-per-op `finally`** deferred-panic, `effects.rs:956/971`.
+- **REAL — return-clause `finally`** deferred-panic, `effects.rs:1027`.
+- **Low-priority edge — nullary eta-reduced effect-op-as-value**,
+  `translate/expr.rs:388` (falls through to `Yield`, performs instead of
+  producing a callable). Non-nullary eta-refs are handled.
+- **NOT a blocker — cross-module effect-op panic** at `translate/mod.rs:230`
+  ("Cross-module effect ops are not yet wired"). Empirically unreachable: project
+  builds populate `EffectInfo.effect_ops` across the module graph, so user
+  effects declared in one module and performed/handled in another work (verified
+  A/B/C variants). The comment at `translate/mod.rs:220-224` is stale/misleading.
+- **Wired, not a panic — dynamic-handler return clauses.** `lower_with_dynamic`
+  reads the element-3 runtime-return slot; needs behavior verification, not
+  implementation.
 
 ## Review Strategy
 
@@ -166,27 +219,32 @@ Likely action:
 
 - Low priority until phase 2, unless direct-call optimization begins.
 
-### Stage 9: ANF
+### Stage 9: ANF — REVIEWED, clean
 
 Contract:
 
 - Full ANF over all expression positions.
 - Does not cross lambda/branch/handler-arm boundaries.
-- Preserves source `NodeId` on relocated expressions via `rebuild_like`.
+- Preserves source `NodeId` on relocated expressions.
 - Uses fresh IDs only for synthetic wrappers and variables.
 
-Review checkpoints:
+Review outcome (this pass): **clean, no work needed.** All three load-bearing
+properties hold:
 
-- Field access and anonymous-record metadata failures may originate before
-  lowering if ANF or type/resolution metadata splits field names incorrectly.
-- Search for any `Expr::synth` use around relocated source expressions.
-- Confirm handler-arm bodies, lambda bodies, receive arms, and case arms are
-  ANF'd in their own contexts, not lifted outward.
+- Nested contexts (handler-arm, lambda, case/receive arms, if-branches) each run
+  their own `anf_expr` with a fresh bindings vec; bindings are not lifted across
+  those boundaries (only `flatten_block_into` hoists, within one context).
+- `NodeId` preservation: **there is no `rebuild_like` helper** (the old contract
+  bullet was aspirational) — the discipline is followed by reusing the captured
+  `id`/`span` on every structural rewrite; `NodeId::fresh()` appears only on
+  synthetic App-spine nodes and let-binders.
+- `Expr::synth` is used only for genuinely synthetic nodes (empty-block `Unit`,
+  the replacement `Var` after lifting, the `finish` wrapper block), never
+  wrapping a relocated source expression.
 
-Likely action:
-
-- Use `handler_bindings_from_record_fields_compile` to trace anonymous record
-  field metadata from parse/typecheck through ANF into `lower_field_access`.
+Anonymous-record field-order metadata (the earlier worry) was resolved in
+Review Pass 4 (structural `anon_fields`), so the ANF path no longer risks
+splitting field names.
 
 ### Stage 10: Monadic Translation
 
@@ -654,21 +712,28 @@ Recommended action:
 
 ## Recommended Next Review/Refactor Order
 
-1. **Application / callable ABI review.**
-   Use Review Pass 3 above. This now includes native/bridge callback adapters
-   because they are part of the same callable-boundary contract.
+The slow path must be a complete oracle before the optimization pass (Stage 11)
+starts. Remaining order:
 
-2. **Record metadata.**
-   Done for the new path. Anonymous runtime tags are length-prefixed and
-   lowering receives structural anonymous field order through AST/monadic IR
-   metadata instead of decoding the tag string.
+1. **`finally` deferred-panics — the real Phase-1 blockers.**
+   Implement multi-arm-per-op `finally` (`effects.rs:956/971`) and return-clause
+   `finally` (`effects.rs:1027`). See "Phase-1 completion blockers" above. These
+   are the clearest "make the slow path an oracle" wins.
 
-3. ~~**Cross-module `InlineVal`.**~~ Resolved by removing `@inline` (see
-   Decisions Log).
+2. **Behavior-verify dynamic-handler return clauses** (wired, not panicking) and
+   decide the nullary eta-reduced-effect-op-as-value edge (`translate/expr.rs:388`).
 
-4. **Stale tests.**
-   Rewrite or delete old Core-shape assertions after the runtime/parity
-   failures are fixed. Do not spend much energy here before the real bugs.
+3. **Re-pin the leftover shape tests.** `alias_chase_let_h_is_static` (lib) and
+   `tail_recursive_apply_in_tail_position` (codegen_integration) are pre-existing
+   pins, not behavior bugs. Prefer runtime/e2e/property coverage over brittle
+   Core-shape assertions.
+
+4. **Keep using `~/projects/saga_json` as the shakedown corpus** after each
+   change — it surfaced both bugs resolved this pass.
+
+Done earlier: callable/ABI review (Pass 3), record metadata (Pass 4), native
+bootstrap (Pass 5), finally/abort routing diagnosis + the marker and
+qualified-constructor fixes, ANF review (clean). `@inline`/`InlineVal` removed.
 
 ## Commands Used For This Triage
 

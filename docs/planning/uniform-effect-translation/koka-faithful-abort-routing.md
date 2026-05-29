@@ -99,6 +99,19 @@ tuple/CPS encoding rather than introducing a literal `Pure | Yield` IR node:
   `"foreign abort propagates through an inner resuming arm"` is unskipped.
 - The mirror arm-body repro is pinned by
   `fail_inside_nonresuming_arm_captures_outer_prompt`.
+- **Markers must be globally unique, not per-function** (commit `176492a`). The
+  marker atom is built once per lexical `with` site by `fresh_abort_marker`
+  (`lower_monadic/mod.rs`) from a never-reset, module-qualified counter — NOT
+  from the per-function `ret_k` counter (which resets at every function entry
+  and made the first `with` in every function share one atom, so a callee's
+  prompt caught a caller's abort). Static-per-site (vs Koka's fresh-per-
+  activation) is sound here because performs dispatch to the nearest handler via
+  evidence and a terminal abort bubbles to the innermost matching delimiter, so
+  an abort is produced and caught by the same activation even under recursion;
+  re-raises are performs, not own-marker aborts. Revisit only if first-class /
+  named handlers gain continuations resumed outside their original dynamic
+  extent. Guard: `effects_test.saga` "re-abort propagates across a
+  function-call boundary".
 
 This is intentionally the unoptimized form. It adds extra `case` inspection at
 bind boundaries so the optimization phase has a correct control protocol to
