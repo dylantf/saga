@@ -77,19 +77,101 @@ tuple/CPS encoding rather than introducing a literal `Pure | Yield` IR node:
 - `with` bodies install a `ResultDelimiter` in `LowerCtx`. Static and dynamic
   handlers route their body return through a prompt K that catches the current
   marker and propagates foreign markers.
+- `ResultDelimiter` is a stack, not a single slot. Each delimiter records the
+  effects it handles, its marker, and its parent prompt. A perform-site K is
+  wrapped only through the prefix needed to reach the handler selected for that
+  operation.
 - Ordinary binds and value-position binds now inspect abort tuples and bubble
   them to the enclosing return K instead of binding them as ordinary values.
-- Captured bind continuations re-enter the current result delimiter before
-  returning to the resuming handler, which restores the prompt frames needed for
-  resumed computations.
-- Handler arm bodies clear the lexical `ResultDelimiter`: they run under the
-  outer evidence/return K, but they are not part of the handled body prompt.
+- Handler arm bodies restore the previous delimiter stack from the `with` site
+  instead of clearing it. This keeps enclosing prompts available to operations
+  performed inside arm bodies.
+- Performs inside handler arm bodies reify successful handler-arm results as
+  target-marked value results. That lets the result escape to the handler that
+  owns the operation without being mistaken for an ordinary value at an
+  intervening perform site. Ordinary body performs keep the existing return
+  composition path.
+- There are two `__saga_value_result` tuple shapes by design:
+  `{__saga_value_result, value}` is local to value-position bind, while
+  `{__saga_value_result, marker, value}` is the routed form that bubbles to the
+  prompt identified by `marker`.
 - The e2e repro
   `"foreign abort propagates through an inner resuming arm"` is unskipped.
+- The mirror arm-body repro is pinned by
+  `fail_inside_nonresuming_arm_captures_outer_prompt`.
 
 This is intentionally the unoptimized form. It adds extra `case` inspection at
 bind boundaries so the optimization phase has a correct control protocol to
 simplify later.
+
+## Finding 3 (the arm-body case was the symmetric gap)
+
+The "Implemented Shape" bullet *"Handler arm bodies clear the lexical
+`ResultDelimiter`"* (`arm_ctx = ctx.without_result_delimiter()...` in
+`lower_with_static`) is the dual of the bug just fixed, and it is wrong for the
+same reason — one level out.
+
+**Confirmed empirically.** Take the exact oracle
+(`fail_handler_inside_resume_aborts_correctly`) and move its `log!; fail!`
+sequence out of `work`'s *body* and into a non-resuming handler's *arm body*:
+
+```saga
+handler fire_h for Trigger needs {Log, Fail String} {
+  fire () = { log! "before"; fail! "bang"; log! "after"; "tail" }
+}
+result () = ((fire! () with fire_h) with to_result_str) with collect
+```
+
+This is semantically the oracle plus a transparent (non-resuming) `fire_h`
+layer, so it must return `before/err:bang`. Before the fix it returned
+**`err:bang`** — the `before/` was lost because the abort short-circuited *past*
+`collect.log`'s `resume()` instead of returning through it. Root cause:
+`collect` (outer,
+resuming) captures a continuation *inside `fire_h`'s arm body*, and that arm
+body's binds have no delimiter to re-install, so `fail!`'s abort to the *outer*
+`to_result_str` never re-enters its prompt. A control case with **no resume**
+(arm body aborts directly, no continuation captured) returns the correct
+`err:boom` — confirming the gap needs a continuation captured *in the arm body*,
+which is exactly when the cleared slot matters.
+
+**Why clearing is the wrong operation.** At the `with` site, `ctx` is the *outer*
+scope; this handler's delimiter is installed only on `body_ctx`. So
+`ctx.result_delimiter` at that point is already the **enclosing** delimiter
+(`prev`), not this handler's. `without_result_delimiter()` therefore removes the
+*enclosing* delimiter from arm bodies — even though arm bodies run inside the
+enclosing handler. The intended discipline is save/restore: snapshot `prev` on
+`with` entry, install this handler's on the body, and **restore `prev`** (not
+empty) for arm + return-clause bodies.
+
+**The one-line "restore prev" was necessary but not sufficient.** Dropping the
+`without_result_delimiter()` call (so `arm_ctx` keeps `ctx`'s `prev`) *does* fix
+the routing — `before/err:bang` reappears — but it was incomplete two ways:
+
+1. **Over-application.** The repro then returns `ok:before/err:bang`: re-installing
+   the full enclosing delimiter as a `_raw` wrap unwraps the abort to a plain
+   value too early, and the *real* outer delimiter reprocesses it through its
+   return clause (`ok:`). The resumption needs *this* handler's delimiter for the
+   duration of the resumed body, then `prev` *after* — two regimes in sequence.
+   A single carried `ResultDelimiter` can't express both across (multishot)
+   invocations; the captured continuation must carry the pair.
+2. **Finally regressions.** It breaks `"cleanup runs on abort"` and
+   `"abort still cleans up"` in `effects_test.saga` — restoring `prev` changes
+   how aborts traverse the finally cleanup path, which has to be reconciled
+   (see Step 9).
+
+The implemented fix is the per-operation delimiter-prefix regime:
+
+- keep the enclosing delimiter stack in arm bodies,
+- push a new delimiter only for the handled body,
+- when lowering a perform, wrap the K through the stack prefix up to the
+  delimiter that handles that effect,
+- for performs inside handler arm bodies, bubble successful arm results as
+  target-marked value results so they escape to the owning handler delimiter
+  rather than falling back into the perform site,
+- preserve abort tuples through finally cleanup.
+
+This keeps the mirror repro, the original inner-abort property, multishot
+handlers, return-only handlers, and finally cleanup green together.
 
 ## Target Invariant
 

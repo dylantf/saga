@@ -1915,6 +1915,94 @@ result () = (work () with to_result_str) with collect
 }
 
 #[test]
+fn fail_inside_nonresuming_arm_captures_outer_prompt() {
+    // Same routing shape as `fail_handler_inside_resume_aborts_correctly`, but
+    // the Log+Fail sequence lives inside a non-resuming handler arm. The Log
+    // handler is outside the Fail handler, so its `resume` must capture the
+    // Fail prompt from the arm body and return the handled error as a value.
+    let src = r#"module Main
+
+import Std.Fail (Fail)
+
+effect Log {
+  fun log : String -> Unit
+}
+
+effect Trigger {
+  fun fire : Unit -> String
+}
+
+handler collect for Log {
+  log msg = msg <> "/" <> resume ()
+}
+
+handler to_result_str for Fail String {
+  fail e = "err:" <> e
+  return v = "ok:" <> v
+}
+
+handler fire_h for Trigger needs {Log, Fail String} {
+  fire () = {
+    log! "before"
+    fail! "bang"
+    log! "after"
+    "tail"
+  }
+}
+
+pub fun result : Unit -> String
+result () = ((fire! () with fire_h) with to_result_str) with collect
+"#;
+    check_result_string(
+        "fail_inside_nonresuming_arm_captures_outer_prompt",
+        src,
+        "before/err:bang",
+    );
+}
+
+#[test]
+fn marked_value_result_bubbles_through_value_position_bind() {
+    // A routed value result can appear while lowering an argument/value-position
+    // bind. It must bubble to its marked prompt instead of being consumed by the
+    // local 2-tuple value-position protocol.
+    let src = r#"module Main
+
+import Std.Fail (Fail)
+
+effect Log {
+  fun log : String -> Unit
+}
+
+handler collect for Log {
+  log msg = msg <> "/" <> resume ()
+}
+
+handler to_result_str for Fail String {
+  fail e = "err:" <> e
+  return v = "ok:" <> v
+}
+
+fun id : String -> String
+id x = x
+
+fun work : Unit -> String needs {Log, Fail String}
+work () = {
+  log! "before"
+  fail! "bang"
+  "tail"
+}
+
+pub fun result : Unit -> String
+result () = id (work () with to_result_str) with collect
+"#;
+    check_result_string(
+        "marked_value_result_bubbles_through_value_position_bind",
+        src,
+        "before/err:bang",
+    );
+}
+
+#[test]
 fn cross_module_effectful_var_binding() {
     // The lib exports an effectful function; main partially applies it,
     // binds the result, and calls it twice under a local handler.

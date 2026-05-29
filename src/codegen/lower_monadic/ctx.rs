@@ -22,9 +22,11 @@ use super::pats::pat_bound_names;
 /// those continuation bodies reinstall the same delimiter.
 #[derive(Clone)]
 pub(crate) struct ResultDelimiter {
+    pub effects: Vec<String>,
     pub abort_marker: String,
     pub return_k: String,
     pub preserve_abort_marker: bool,
+    pub parent: Option<Box<ResultDelimiter>>,
 }
 
 /// Immutable per-derivation lowering context.
@@ -157,15 +159,18 @@ impl LowerCtx {
     /// continuations should re-enter.
     pub fn with_result_delimiter(
         &self,
+        effects: Vec<String>,
         abort_marker: String,
         return_k: String,
         preserve_abort_marker: bool,
     ) -> Self {
         Self {
             result_delimiter: Some(ResultDelimiter {
+                effects,
                 abort_marker,
                 return_k,
                 preserve_abort_marker,
+                parent: self.result_delimiter.clone().map(Box::new),
             }),
             ..self.clone()
         }
