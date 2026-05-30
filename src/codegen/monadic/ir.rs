@@ -110,6 +110,14 @@ pub enum Atom {
         symbol: String,
         source: NodeId,
     },
+    /// Backend-only Erlang atom value. This is not produced from Saga source:
+    /// `Symbol` remains a type/generic-level source construct that lowers to a
+    /// binary. Optimizer-native rewrites use this when a BEAM BIF requires an
+    /// actual Erlang atom argument.
+    BackendAtom {
+        atom: String,
+        source: NodeId,
+    },
 }
 
 // -------------------------------------------------------------------------
@@ -361,7 +369,8 @@ impl Atom {
             | Atom::Lit { .. }
             | Atom::DictRef { .. }
             | Atom::QualifiedRef { .. }
-            | Atom::Symbol { .. } => false,
+            | Atom::Symbol { .. }
+            | Atom::BackendAtom { .. } => false,
         }
     }
 }

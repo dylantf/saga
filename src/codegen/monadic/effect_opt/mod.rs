@@ -850,7 +850,8 @@ impl<'info, 'data> Optimizer<'info, 'data> {
             | Atom::Lit { .. }
             | Atom::DictRef { .. }
             | Atom::QualifiedRef { .. }
-            | Atom::Symbol { .. } => (atom, Change::Unchanged),
+            | Atom::Symbol { .. }
+            | Atom::BackendAtom { .. } => (atom, Change::Unchanged),
         }
     }
 
@@ -1073,7 +1074,8 @@ impl<'info, 'data> Optimizer<'info, 'data> {
             | Atom::Lit { .. }
             | Atom::DictRef { .. }
             | Atom::QualifiedRef { .. }
-            | Atom::Symbol { .. } => false,
+            | Atom::Symbol { .. }
+            | Atom::BackendAtom { .. } => false,
         }
     }
 
@@ -1521,7 +1523,12 @@ fn native_direct_call_expr(
     let args = match spec.arg_transform {
         NativeArgTransform::Identity => args.to_vec(),
         NativeArgTransform::NoArgs => Vec::new(),
-        NativeArgTransform::PrependAtom(_) => return None,
+        NativeArgTransform::PrependAtom(atom) => {
+            let mut out = Vec::with_capacity(args.len() + 1);
+            out.push(backend_atom_at(atom, source));
+            out.extend(args.iter().cloned());
+            out
+        }
         NativeArgTransform::Reorder(indices) => {
             let mut out = Vec::with_capacity(indices.len());
             for &idx in indices {
@@ -1612,6 +1619,13 @@ fn generated_native_var(prefix: &str, source: crate::ast::NodeId, salt: u32) -> 
 fn unit_atom_at(source: crate::ast::NodeId) -> Atom {
     Atom::Lit {
         value: crate::ast::Lit::Unit,
+        source,
+    }
+}
+
+fn backend_atom_at(atom: &str, source: crate::ast::NodeId) -> Atom {
+    Atom::BackendAtom {
+        atom: atom.to_string(),
         source,
     }
 }
@@ -1707,7 +1721,8 @@ fn atom_node_count(atom: &Atom) -> usize {
         | Atom::Lit { .. }
         | Atom::DictRef { .. }
         | Atom::QualifiedRef { .. }
-        | Atom::Symbol { .. } => 1,
+        | Atom::Symbol { .. }
+        | Atom::BackendAtom { .. } => 1,
     }
 }
 
@@ -1906,7 +1921,8 @@ fn atom_yield_count(atom: &Atom) -> usize {
         | Atom::Lit { .. }
         | Atom::DictRef { .. }
         | Atom::QualifiedRef { .. }
-        | Atom::Symbol { .. } => 0,
+        | Atom::Symbol { .. }
+        | Atom::BackendAtom { .. } => 0,
     }
 }
 
@@ -2090,7 +2106,8 @@ fn atom_contains_inline_forbidden_shape(atom: &Atom) -> bool {
         | Atom::Lit { .. }
         | Atom::DictRef { .. }
         | Atom::QualifiedRef { .. }
-        | Atom::Symbol { .. } => false,
+        | Atom::Symbol { .. }
+        | Atom::BackendAtom { .. } => false,
     }
 }
 
@@ -2189,7 +2206,8 @@ fn atom_calls_any(atom: &Atom, names: &HashSet<String>) -> bool {
         | Atom::Lit { .. }
         | Atom::DictRef { .. }
         | Atom::QualifiedRef { .. }
-        | Atom::Symbol { .. } => false,
+        | Atom::Symbol { .. }
+        | Atom::BackendAtom { .. } => false,
     }
 }
 
@@ -2242,7 +2260,8 @@ fn atom_contains_yield(atom: &Atom) -> bool {
         | Atom::Lit { .. }
         | Atom::DictRef { .. }
         | Atom::QualifiedRef { .. }
-        | Atom::Symbol { .. } => false,
+        | Atom::Symbol { .. }
+        | Atom::BackendAtom { .. } => false,
     }
 }
 
@@ -2569,7 +2588,8 @@ fn rewrite_resumes_in_atom(atom: Atom) -> Atom {
         | Atom::Lit { .. }
         | Atom::DictRef { .. }
         | Atom::QualifiedRef { .. }
-        | Atom::Symbol { .. } => atom,
+        | Atom::Symbol { .. }
+        | Atom::BackendAtom { .. } => atom,
     }
 }
 
@@ -3012,7 +3032,8 @@ fn subst_atom(
         | Atom::Lit { .. }
         | Atom::DictRef { .. }
         | Atom::QualifiedRef { .. }
-        | Atom::Symbol { .. } => SubstOutcome::unchanged(atom),
+        | Atom::Symbol { .. }
+        | Atom::BackendAtom { .. } => SubstOutcome::unchanged(atom),
     }
 }
 
@@ -3298,7 +3319,8 @@ fn collect_atom_var_names(atom: &Atom, out: &mut HashSet<String>) {
         Atom::Lit { .. }
         | Atom::DictRef { .. }
         | Atom::QualifiedRef { .. }
-        | Atom::Symbol { .. } => {}
+        | Atom::Symbol { .. }
+        | Atom::BackendAtom { .. } => {}
     }
 }
 
@@ -3426,7 +3448,8 @@ fn atom_contains_target(atom: &Atom, target: &MVar) -> bool {
         Atom::Lit { .. }
         | Atom::DictRef { .. }
         | Atom::QualifiedRef { .. }
-        | Atom::Symbol { .. } => false,
+        | Atom::Symbol { .. }
+        | Atom::BackendAtom { .. } => false,
     }
 }
 
@@ -4669,6 +4692,33 @@ mod tests {
     }
 
     #[test]
+    fn native_direct_call_rewrites_prepend_atom_op() {
+        let f = Fixture::new();
+        let handler = native_handler("Std.Actor.Monitor", "beam_actor", 222);
+        let yield_expr = yield_native("Std.Actor.Monitor", "monitor", vec![lit_int("1", 1)], 223);
+        let prog = val_program(with_expr(handler.clone(), yield_expr));
+        let info = f.info();
+
+        let out = run(prog, &f.h, &info);
+
+        assert_eq!(
+            out,
+            val_program(with_expr(
+                handler,
+                MExpr::ForeignCall {
+                    module: "erlang".to_string(),
+                    func: "monitor".to_string(),
+                    args: vec![
+                        backend_atom_at("process", crate::ast::NodeId(223)),
+                        lit_int("1", 1)
+                    ],
+                    source: crate::ast::NodeId(223),
+                }
+            ))
+        );
+    }
+
+    #[test]
     fn native_direct_call_rewrites_beam_ref_get() {
         let f = Fixture::new();
         let handler = native_handler("Std.Ref.Ref", "beam_ref", 223);
@@ -4785,31 +4835,16 @@ mod tests {
     }
 
     #[test]
-    fn native_direct_call_skips_prepend_atom_and_spawn() {
-        for (effect, op, args, source) in [
-            (
-                "Std.Actor.Monitor",
-                "monitor",
-                vec![lit_int("1", 1)],
-                crate::ast::NodeId(230),
-            ),
-            (
-                "Std.Actor.Process",
-                "spawn",
-                vec![unit_atom()],
-                crate::ast::NodeId(231),
-            ),
-        ] {
-            let f = Fixture::new();
-            let handler = native_handler(effect, "beam_actor", source.0 + 10);
-            let yield_expr = yield_native(effect, op, args, source.0);
-            let prog = val_program(with_expr(handler.clone(), yield_expr.clone()));
-            let info = f.info();
+    fn native_direct_call_skips_spawn() {
+        let f = Fixture::new();
+        let handler = native_handler("Std.Actor.Process", "beam_actor", 241);
+        let yield_expr = yield_native("Std.Actor.Process", "spawn", vec![unit_atom()], 231);
+        let prog = val_program(with_expr(handler.clone(), yield_expr.clone()));
+        let info = f.info();
 
-            let out = run(prog, &f.h, &info);
+        let out = run(prog, &f.h, &info);
 
-            assert_eq!(out, val_program(with_expr(handler, yield_expr)));
-        }
+        assert_eq!(out, val_program(with_expr(handler, yield_expr)));
     }
 
     #[test]

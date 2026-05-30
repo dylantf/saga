@@ -577,6 +577,26 @@ main () = {
 }
 
 #[test]
+fn beam_actor_monitor_uses_backend_atom_direct_call() {
+    let src = r#"
+import Std.Actor (Actor, Monitor, beam_actor)
+
+main () = {
+  let pid = self! ()
+  let _ref = monitor! pid
+  ()
+} with beam_actor
+"#;
+
+    let out = emit_elaborated_with_std(src);
+    assert!(
+        out.contains("call 'erlang':'monitor'\n") && out.contains("'process'"),
+        "monitor! should direct-call erlang:monitor(process, Pid)\n{out}"
+    );
+    assert_core_compiles(&out);
+}
+
+#[test]
 fn async_handler_with_beam_actor_lowers_without_scoped_binding_cycle() {
     let src = r#"
 import Std.Actor (Process, beam_actor)

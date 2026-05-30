@@ -211,7 +211,8 @@ impl Stats {
             | Atom::Lit { .. }
             | Atom::DictRef { .. }
             | Atom::QualifiedRef { .. }
-            | Atom::Symbol { .. } => {}
+            | Atom::Symbol { .. }
+            | Atom::BackendAtom { .. } => {}
         }
     }
 

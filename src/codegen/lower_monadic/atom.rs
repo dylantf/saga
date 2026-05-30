@@ -43,6 +43,7 @@ impl<'ctx> Lowerer<'ctx> {
                 source,
             } => self.lower_qualified_ref_atom(module, name, *source),
             Atom::Symbol { symbol, .. } => lower_string_to_binary(symbol),
+            Atom::BackendAtom { atom, .. } => CExpr::Lit(CLit::Atom(atom.clone())),
         }
     }
 

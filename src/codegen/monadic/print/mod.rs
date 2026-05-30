@@ -558,6 +558,7 @@ fn atom_str(a: &Atom) -> String {
             format!("QualifiedRef({}.{})", module, name)
         }
         Atom::Symbol { symbol, .. } => format!("Symbol({})", symbol),
+        Atom::BackendAtom { atom, .. } => format!("BackendAtom({})", atom),
     }
 }
 

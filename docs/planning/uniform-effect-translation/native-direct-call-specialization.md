@@ -17,11 +17,12 @@ fun(args..., _EvidenceAtPerform, K) -> apply K(erlang_or_runtime_call(args...))
 
 Everything else stays on the slow evidence path.
 
-Status: **milestone 2 implemented**. The optimizer rewrites simple first-order
+Status: **milestone 3 implemented**. The optimizer rewrites simple first-order
 native yields to `ForeignCall` for `Identity`, `NoArgs`, and `Reorder`
-transforms. Milestone 2 also rewrites `beam_ref` `new`, `get`, and `set` to
-direct process-dictionary calls. It skips `PrependAtom`, `WrapThunk`,
-`beam_ref.modify`, `ets_ref`, Vec, dynamic handlers, and composite handlers.
+transforms, and now supports `PrependAtom` through an internal backend-atom IR
+value. Milestone 2 also rewrites `beam_ref` `new`, `get`, and `set` to direct
+process-dictionary calls. It skips `WrapThunk`, `beam_ref.modify`, `ets_ref`,
+Vec, dynamic handlers, and composite handlers.
 
 ## Why This Is Separate From Static Handler Direct-Call
 
@@ -57,10 +58,6 @@ Skip:
 
 - `WrapThunk` (`spawn`) because it needs a Core Erlang closure capturing
   evidence.
-- `PrependAtom` (`monitor`) because `MExpr::ForeignCall` args are `Atom`s and
-  Saga `Atom::Symbol` is a type-level/generic symbol that lowers to a binary,
-  not a backend Erlang atom. Optimizing these needs either an explicit
-  backend-atom IR value or a later lowerer-level native specialization.
 - Ref/Vec store backends because they currently require bespoke `CExpr`
   builders, not `MExpr::ForeignCall`.
 - Dynamic handlers.
@@ -193,6 +190,23 @@ Still skipped:
   scaffolding and are better handled as a separate backend-lowering milestone.
 - `beam_vec`, for the same reason as `ets_ref`.
 
+## Third Milestone Scope
+
+Milestone 3 adds a backend-only `Atom::BackendAtom` for optimizer-generated
+Erlang atoms. This is deliberately separate from source-level `Symbol`, which
+still lowers to a binary and remains primarily a type/generic-system construct.
+
+With that internal atom form, `PrependAtom("process")` native ops such as
+`monitor` can lower to:
+
+```text
+ForeignCall(erlang:monitor, [BackendAtom(process), pid])
+```
+
+This closes the local op-shape gap. It does not optimize `monitor!` calls that
+sit behind function boundaries; those still need interprocedural/native
+specialization.
+
 ## Tests
 
 Implemented optimizer unit tests:
@@ -200,8 +214,8 @@ Implemented optimizer unit tests:
 - Native `Timer.sleep` under `beam_actor` or the relevant native timer handler
   rewrites `Yield` to `ForeignCall("timer", "sleep", [ms])`.
 - Native `Actor.self`/no-args transform rewrites to a zero-arg foreign call.
-- Native `Monitor.monitor` / `PrependAtom("process")` does not rewrite in
-  milestone 1 because Saga `Symbol` is not a runtime Erlang atom.
+- Native `Monitor.monitor` / `PrependAtom("process")` rewrites using
+  `BackendAtom(process)`.
 - Native `Timer.send_after` reorders args.
 - `Process.spawn` does not rewrite.
 - `beam_ref`, `ets_ref`, and `beam_vec` do not rewrite in milestone 1.
