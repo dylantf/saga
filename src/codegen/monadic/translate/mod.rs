@@ -255,8 +255,34 @@ impl<'a> Translator<'a> {
                 span,
                 ..
             } => {
+                // Register `Handler E …`-typed parameters as dynamic handler
+                // names for this function's body. The typechecker populates
+                // `let_handler_effects` keyed by parameter NodeId
+                // ([check_decl.rs] near `bind_pattern`); without this,
+                // `with h` over a parameter would fall through with empty
+                // effects and skip evidence install.
+                let saved_handler_effects = self.local_handler_effects.clone();
+                for pat in params {
+                    if let ast::Pat::Var {
+                        id: pat_id,
+                        name: pname,
+                        ..
+                    } = pat
+                        && let Some(effects) = self.effect_info.let_handler_effects.get(pat_id)
+                    {
+                        let canonical: Vec<String> = effects
+                            .iter()
+                            .map(|e| self.canonical_effect_name(e))
+                            .collect();
+                        if !canonical.is_empty() {
+                            self.local_handler_effects
+                                .insert(pname.clone(), canonical);
+                        }
+                    }
+                }
                 let guard = guard.as_ref().map(|g| self.translate_expr(g));
                 let body = self.translate_expr(body);
+                self.local_handler_effects = saved_handler_effects;
                 MDecl::FunBinding(MFunBinding {
                     id: *id,
                     name: name.clone(),

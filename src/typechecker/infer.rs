@@ -1353,7 +1353,7 @@ impl Checker {
 
     /// Build a minimal HandlerInfo from a Handler type.
     /// Used for dynamic handle bindings where the handler arms aren't statically known.
-    fn handler_info_from_type(&mut self, ty: &Type) -> Option<super::HandlerInfo> {
+    pub(crate) fn handler_info_from_type(&mut self, ty: &Type) -> Option<super::HandlerInfo> {
         let resolved = self.sub.apply(ty);
         if let Type::Con(ref name, ref args) = resolved
             && name == super::canonicalize_type_name("Handler")

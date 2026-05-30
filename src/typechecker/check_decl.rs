@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use crate::ast::{self, Decl, TypeParam};
+use crate::ast::{self, Decl, Pat, TypeParam};
 
 use super::result::CheckResult;
 use super::{
@@ -1105,6 +1105,16 @@ impl Checker {
 
             for (pat, ty) in params.iter().zip(param_types.iter()) {
                 self.bind_pattern(pat, ty)?;
+                // If a parameter's type is `Handler E …`, record the binding
+                // under the parameter's NodeId so the codegen-side translator
+                // can resolve evidence-install effects at a `with name` site.
+                // `with h` already typechecks via `handler_effects_from_env`;
+                // this populates the persistent codegen-side map.
+                if let Pat::Var { id: pat_id, .. } = pat
+                    && let Some(info) = self.handler_info_from_type(ty)
+                {
+                    self.let_binding_handlers.insert(*pat_id, info);
+                }
             }
 
             if let Some(guard) = guard {
