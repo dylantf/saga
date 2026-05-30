@@ -1020,10 +1020,11 @@ main () = greet \"world\" with {
     let program = typecheck_source(main_src, &mut checker);
     let out = emit_from_program(&program, "main", &checker);
 
-    // Exposed effectful call should still be inter-module
+    // Exposed effectful call may be specialized into a caller-local variant
+    // when the inline handler fully consumes the imported effect.
     assert_contains(&out, "call 'std_evidence_bridge':'insert_canonical'");
     assert_contains(&out, "'Logger.Log'");
-    assert_contains(&out, "'logger', 'greet', 3");
+    assert_contains(&out, "__saga_static_variant__xmod__Logger__greet");
 }
 
 #[test]
@@ -2625,7 +2626,7 @@ main () = greet \"world\" with {
     let out = emit_from_program(&program, "main", &checker);
     assert_contains(&out, "call 'std_evidence_bridge':'insert_canonical'");
     assert_contains(&out, "'Logger.Log'");
-    assert_contains(&out, "'logger', 'greet', 3");
+    assert_contains(&out, "__saga_static_variant__xmod__Logger__greet");
 }
 
 #[test]
@@ -3219,6 +3220,42 @@ main () = worker () with beam_actor
     assert!(
         out.contains("call 'lib':'worker'") || out.contains("'lib', 'worker'"),
         "expected fallback to imported worker:\n{out}"
+    );
+    assert_erlc_compiles(&out, "main");
+}
+
+#[test]
+fn cross_module_static_variant_generates_caller_local_variant_when_fully_handled() {
+    let lib = r#"module LogLib
+
+pub effect Log {
+  fun log : Unit -> Unit
+}
+
+pub fun worker : Unit -> Unit needs {Log}
+worker () = {
+  log! ()
+  log! ()
+}
+"#;
+    let main = r#"module Main
+
+import LogLib (Log, worker)
+
+handler collect for Log {
+  log () = resume ()
+}
+
+main () = worker () with collect
+"#;
+    let out = with_temp_project_files(&[("src/LogLib.saga", lib)], main, |checker, program| {
+        emit_from_program(program, "main", checker)
+    });
+
+    assert_contains(&out, "__saga_static_variant__xmod__LogLib__worker");
+    assert!(
+        !out.contains("call 'loglib':'worker'"),
+        "caller should use its local generated static variant, not the imported slow path:\n{out}"
     );
     assert_erlc_compiles(&out, "main");
 }

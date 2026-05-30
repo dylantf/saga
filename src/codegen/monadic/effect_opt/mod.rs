@@ -74,11 +74,11 @@ pub struct RunOptions {
 #[derive(Debug, Clone, Default)]
 pub struct OptimizerContext {
     pub resolution: ResolutionMap,
-    pub imported_native_variants: HashMap<String, ImportedNativeVariantCandidate>,
+    pub imported_function_variants: HashMap<String, ImportedFunctionVariantCandidate>,
 }
 
 #[derive(Debug, Clone)]
-pub struct ImportedNativeVariantCandidate {
+pub struct ImportedFunctionVariantCandidate {
     pub source_module: String,
     pub binding: MFunBinding,
     pub public_names: HashSet<String>,
@@ -946,7 +946,7 @@ impl<'info> Optimizer<'info> {
             return (expr, change);
         }
 
-        self.try_imported_native_function_variant_call(expr)
+        self.try_imported_function_variant_call(expr, variant_name_for_imported, false)
     }
 
     fn try_static_function_variant_call(&mut self, expr: MExpr) -> (MExpr, Change) {
@@ -954,7 +954,12 @@ impl<'info> Optimizer<'info> {
             return (expr, Change::Unchanged);
         }
 
-        self.try_function_variant_call(expr, static_variant_name, true)
+        let (expr, change) = self.try_function_variant_call(expr, static_variant_name, true);
+        if change == Change::Changed {
+            return (expr, change);
+        }
+
+        self.try_imported_function_variant_call(expr, variant_name_for_imported_static, true)
     }
 
     fn try_function_variant_call(
@@ -1046,7 +1051,12 @@ impl<'info> Optimizer<'info> {
         )
     }
 
-    fn try_imported_native_function_variant_call(&mut self, expr: MExpr) -> (MExpr, Change) {
+    fn try_imported_function_variant_call(
+        &mut self,
+        expr: MExpr,
+        variant_name_for_imported: fn(&str, &str, &[HandlerFrame]) -> String,
+        require_no_residual_yields: bool,
+    ) -> (MExpr, Change) {
         let MExpr::App { head, args, source } = expr else {
             return (expr, Change::Unchanged);
         };
@@ -1073,8 +1083,9 @@ impl<'info> Optimizer<'info> {
 
         let Some(candidate) = self
             .context
-            .imported_native_variants
+            .imported_function_variants
             .get(&resolved.canonical_name)
+            .or_else(|| self.context.imported_function_variants.get(&resolved.name))
             .cloned()
         else {
             return (MExpr::App { head, args, source }, Change::Unchanged);
@@ -1086,7 +1097,7 @@ impl<'info> Optimizer<'info> {
             return (MExpr::App { head, args, source }, Change::Unchanged);
         }
 
-        let variant_name = imported_native_variant_name(
+        let variant_name = variant_name_for_imported(
             &candidate.source_module,
             &candidate.binding.name,
             &self.handler_stack,
@@ -1108,6 +1119,9 @@ impl<'info> Optimizer<'info> {
         variant_body = optimized_body;
 
         if body_change == Change::Unchanged {
+            return (MExpr::App { head, args, source }, Change::Unchanged);
+        }
+        if require_no_residual_yields && expr_yield_count(&variant_body) != 0 {
             return (MExpr::App { head, args, source }, Change::Unchanged);
         }
 
@@ -1471,11 +1485,11 @@ impl<'info> Optimizer<'info> {
         for frame in self.handler_stack.iter().rev() {
             match frame {
                 HandlerFrame::Static { effects, arms }
-                    if effects.iter().any(|e| e == &op.effect) =>
+                    if effects.iter().any(|e| same_effect_name(e, &op.effect)) =>
                 {
-                    let mut matching = arms
-                        .iter()
-                        .filter(|arm| arm.op.effect == op.effect && arm.op.op == op.op);
+                    let mut matching = arms.iter().filter(|arm| {
+                        same_effect_name(&arm.op.effect, &op.effect) && arm.op.op == op.op
+                    });
                     let arm = matching.next()?;
                     if matching.next().is_some() {
                         return None;
@@ -1493,13 +1507,19 @@ impl<'info> Optimizer<'info> {
                     }
                     return Some(arm);
                 }
-                HandlerFrame::Static { effects, .. } if effects.iter().any(|e| e == &op.effect) => {
+                HandlerFrame::Static { effects, .. }
+                    if effects.iter().any(|e| same_effect_name(e, &op.effect)) =>
+                {
                     return None;
                 }
-                HandlerFrame::Native { effects, .. } if effects.iter().any(|e| e == &op.effect) => {
+                HandlerFrame::Native { effects, .. }
+                    if effects.iter().any(|e| same_effect_name(e, &op.effect)) =>
+                {
                     return None;
                 }
-                HandlerFrame::Blocking { effects } if effects.iter().any(|e| e == &op.effect) => {
+                HandlerFrame::Blocking { effects }
+                    if effects.iter().any(|e| same_effect_name(e, &op.effect)) =>
+                {
                     return None;
                 }
                 _ => {}
@@ -1515,11 +1535,11 @@ impl<'info> Optimizer<'info> {
         for frame in self.handler_stack.iter().rev() {
             match frame {
                 HandlerFrame::Static { effects, arms }
-                    if effects.iter().any(|e| e == &op.effect) =>
+                    if effects.iter().any(|e| same_effect_name(e, &op.effect)) =>
                 {
-                    let mut matching = arms
-                        .iter()
-                        .filter(|arm| arm.op.effect == op.effect && arm.op.op == op.op);
+                    let mut matching = arms.iter().filter(|arm| {
+                        same_effect_name(&arm.op.effect, &op.effect) && arm.op.op == op.op
+                    });
                     let arm = matching.next()?;
                     if matching.next().is_some() {
                         return None;
@@ -1538,13 +1558,19 @@ impl<'info> Optimizer<'info> {
                     }
                     return Some(arm);
                 }
-                HandlerFrame::Static { effects, .. } if effects.iter().any(|e| e == &op.effect) => {
+                HandlerFrame::Static { effects, .. }
+                    if effects.iter().any(|e| same_effect_name(e, &op.effect)) =>
+                {
                     return None;
                 }
-                HandlerFrame::Native { effects, .. } if effects.iter().any(|e| e == &op.effect) => {
+                HandlerFrame::Native { effects, .. }
+                    if effects.iter().any(|e| same_effect_name(e, &op.effect)) =>
+                {
                     return None;
                 }
-                HandlerFrame::Blocking { effects } if effects.iter().any(|e| e == &op.effect) => {
+                HandlerFrame::Blocking { effects }
+                    if effects.iter().any(|e| same_effect_name(e, &op.effect)) =>
+                {
                     return None;
                 }
                 _ => {}
@@ -1804,12 +1830,12 @@ fn collect_variant_candidates(program: &MProgram) -> HashMap<String, VariantCand
     candidates
 }
 
-pub fn collect_imported_native_variant_candidates(
+pub fn collect_imported_function_variant_candidates(
     source_module: &str,
     program: &MProgram,
     resolution: &ResolutionMap,
     codegen_info: &ModuleCodegenInfo,
-) -> HashMap<String, ImportedNativeVariantCandidate> {
+) -> HashMap<String, ImportedFunctionVariantCandidate> {
     let public_names: HashSet<String> = codegen_info
         .exports
         .iter()
@@ -1855,7 +1881,7 @@ pub fn collect_imported_native_variant_candidates(
             continue;
         }
 
-        let candidate = ImportedNativeVariantCandidate {
+        let candidate = ImportedFunctionVariantCandidate {
             source_module: source_module.to_string(),
             binding: f.clone(),
             public_names: public_names.clone(),
@@ -2004,8 +2030,16 @@ fn native_variant_name(name: &str, stack: &[HandlerFrame]) -> String {
     parts.join("__")
 }
 
-fn imported_native_variant_name(source_module: &str, name: &str, stack: &[HandlerFrame]) -> String {
+fn variant_name_for_imported(source_module: &str, name: &str, stack: &[HandlerFrame]) -> String {
     native_variant_name(&format!("xmod__{source_module}__{name}"), stack)
+}
+
+fn variant_name_for_imported_static(
+    source_module: &str,
+    name: &str,
+    stack: &[HandlerFrame],
+) -> String {
+    static_variant_name(&format!("xmod__{source_module}__{name}"), stack)
 }
 
 fn static_variant_name(name: &str, stack: &[HandlerFrame]) -> String {
@@ -2752,6 +2786,10 @@ fn static_frame_effects(effects: &[String], arms: &[MHandlerArm]) -> Vec<String>
         push_unique_effect(&mut out, &arm.op.effect);
     }
     out
+}
+
+fn same_effect_name(a: &str, b: &str) -> bool {
+    a == b || a.rsplit('.').next() == Some(b) || b.rsplit('.').next() == Some(a)
 }
 
 fn collect_handler_effects(handler: &MHandler, out: &mut Vec<String>) {
@@ -6763,7 +6801,7 @@ mod tests {
             resolved_beam("worker", Some("Lib"), "Lib.worker"),
         );
         context
-            .imported_native_variants
+            .imported_function_variants
             .insert("Lib.worker".to_string(), imported);
         let info = f.info();
 
@@ -6861,7 +6899,7 @@ mod tests {
             resolved_beam("worker", Some("Lib"), "Lib.worker"),
         );
         context
-            .imported_native_variants
+            .imported_function_variants
             .insert("Lib.worker".to_string(), imported);
         let info = f.info();
 
@@ -6927,7 +6965,7 @@ mod tests {
             resolved_beam("worker", Some("Lib"), "Lib.worker"),
         );
         context
-            .imported_native_variants
+            .imported_function_variants
             .insert("Lib.worker".to_string(), imported);
         let info = f.info();
 
@@ -6937,6 +6975,114 @@ mod tests {
             out,
             vec![MDecl::Val(MVal {
                 id: crate::ast::NodeId(373),
+                public: true,
+                name: "caller".to_string(),
+                value: with_expr(handler, call),
+                span: span(),
+            })]
+        );
+    }
+
+    #[test]
+    fn imported_static_function_variant_specializes_when_all_yields_are_removed() {
+        let mut f = Fixture::new();
+        let arm = tail_arm(390, vec![pat_unit(391)], resume(lit_int("42", 42)), None);
+        f.h.resumption
+            .insert(crate::ast::NodeId(390), ResumptionKind::TailResumptive);
+        let handler = static_log_handler(vec![arm]);
+        let imported = imported_candidate(
+            "Lib",
+            "worker",
+            392,
+            bind_expr(
+                mv("_first", 393),
+                yield_log(vec![unit_atom()], crate::ast::NodeId(394)),
+                yield_log(vec![unit_atom()], crate::ast::NodeId(395)),
+            ),
+        );
+        let caller = MDecl::Val(MVal {
+            id: crate::ast::NodeId(396),
+            public: true,
+            name: "caller".to_string(),
+            value: with_expr(
+                handler,
+                MExpr::App {
+                    head: var("worker", 397),
+                    args: vec![unit_atom()],
+                    source: crate::ast::NodeId(398),
+                },
+            ),
+            span: span(),
+        });
+        let mut context = OptimizerContext::default();
+        context.resolution.insert(
+            crate::ast::NodeId(397),
+            resolved_beam("worker", Some("Lib"), "Lib.worker"),
+        );
+        context
+            .imported_function_variants
+            .insert("Lib.worker".to_string(), imported);
+        let info = f.info();
+
+        let out = run_with_context(vec![caller], &f.h, &info, context);
+
+        let variant = out
+            .iter()
+            .find_map(|decl| match decl {
+                MDecl::FunBinding(f) if f.name.starts_with(STATIC_VARIANT_PREFIX) => Some(f),
+                _ => None,
+            })
+            .expect("expected generated imported static function variant");
+        assert!(variant.name.contains("xmod"));
+        assert_eq!(expr_yield_count(&variant.body), 0);
+        assert_eq!(variant.body, MExpr::Pure(lit_int("42", 42)));
+    }
+
+    #[test]
+    fn imported_static_function_variant_skips_when_residual_yield_remains() {
+        let mut f = Fixture::new();
+        let arm = tail_arm(400, vec![pat_unit(401)], resume(lit_int("42", 42)), None);
+        f.h.resumption
+            .insert(crate::ast::NodeId(400), ResumptionKind::TailResumptive);
+        let handler = static_log_handler(vec![arm]);
+        let imported = imported_candidate(
+            "Lib",
+            "worker",
+            402,
+            bind_expr(
+                mv("_first", 403),
+                yield_log(vec![unit_atom()], crate::ast::NodeId(404)),
+                yield_fail(vec![lit_int("1", 1)], crate::ast::NodeId(405)),
+            ),
+        );
+        let call = MExpr::App {
+            head: var("worker", 406),
+            args: vec![unit_atom()],
+            source: crate::ast::NodeId(407),
+        };
+        let caller = MDecl::Val(MVal {
+            id: crate::ast::NodeId(408),
+            public: true,
+            name: "caller".to_string(),
+            value: with_expr(handler.clone(), call.clone()),
+            span: span(),
+        });
+        let mut context = OptimizerContext::default();
+        context.resolution.insert(
+            crate::ast::NodeId(406),
+            resolved_beam("worker", Some("Lib"), "Lib.worker"),
+        );
+        context
+            .imported_function_variants
+            .insert("Lib.worker".to_string(), imported);
+        let info = f.info();
+
+        let out = run_with_context(vec![caller], &f.h, &info, context);
+
+        assert_eq!(
+            out,
+            vec![MDecl::Val(MVal {
+                id: crate::ast::NodeId(408),
                 public: true,
                 name: "caller".to_string(),
                 value: with_expr(handler, call),
@@ -6969,7 +7115,7 @@ mod tests {
         );
         let info = module_info_with_exports(&["worker"]);
 
-        let candidates = collect_imported_native_variant_candidates(
+        let candidates = collect_imported_function_variant_candidates(
             "Lib",
             &vec![worker, private_helper],
             &resolution,
@@ -7002,7 +7148,7 @@ mod tests {
         );
         let info = module_info_with_exports(&["worker", "public_helper"]);
 
-        let candidates = collect_imported_native_variant_candidates(
+        let candidates = collect_imported_function_variant_candidates(
             "Lib",
             &vec![worker, public_helper],
             &resolution,
@@ -7027,7 +7173,7 @@ mod tests {
             1,
         ));
 
-        let candidates = collect_imported_native_variant_candidates(
+        let candidates = collect_imported_function_variant_candidates(
             "Lib",
             &vec![worker],
             &ResolutionMap::new(),
@@ -7220,7 +7366,7 @@ mod tests {
         name: &str,
         id: u32,
         body: MExpr,
-    ) -> ImportedNativeVariantCandidate {
+    ) -> ImportedFunctionVariantCandidate {
         let binding = MFunBinding {
             id: crate::ast::NodeId(id),
             public: true,
@@ -7231,7 +7377,7 @@ mod tests {
             body,
             span: span(),
         };
-        ImportedNativeVariantCandidate {
+        ImportedFunctionVariantCandidate {
             source_module: source_module.to_string(),
             binding,
             public_names: HashSet::from([name.to_string()]),

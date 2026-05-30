@@ -72,13 +72,15 @@ implicit debt.
   ids, not original reference ids, so the lowerer does not resolve them back to
   the slow path.
 
-- [x] **Cross-module native function variants, v1.**
-  Imported public Saga functions called under BEAM-native handler stacks can
-  get caller-local generated variants. The v1 implementation is deliberately
-  conservative: it skips imported `@external` wrappers, private-helper
-  dependencies, static/dynamic/composite specialization, and imported bodies
-  with closure/handler/local-function shapes. Generated variants live only in
-  the caller module, so callee exports and dependency caches are unchanged.
+- [x] **Cross-module function variants, v1.**
+  Imported public Saga functions called under BEAM-native or fully-erasing
+  static handler stacks can get caller-local generated variants. The v1
+  implementation is deliberately conservative: it skips imported `@external`
+  wrappers, private-helper dependencies, dynamic/composite specialization, and
+  imported bodies with closure/handler/local-function shapes. Static xmod
+  variants are kept only when specialization removes every residual `Yield`.
+  Generated variants live only in the caller module, so callee exports and
+  dependency caches are unchanged.
 
 ## Bounded Remaining Candidates
 
@@ -93,11 +95,11 @@ or when it removes visible compiler complexity.
   return-clause ambiguity, cleanup ambiguity, and partial-consumption shapes
   such as `log! (); fail! "x"`.
 
-- [ ] **Cross-module specialization beyond native v1.**
-  Static handler variants across module boundaries, recursive private-helper
-  cloning, package-cache-aware callee variants, and synthetic shared variant
-  modules remain deferred. Promote one only after stats show that caller-local
-  native v1 leaves a real hot path behind.
+- [ ] **Cross-module specialization beyond caller-local v1.**
+  Broader static handler variants, recursive private-helper cloning,
+  package-cache-aware callee variants, and synthetic shared variant modules
+  remain deferred. Promote one only after stats show that caller-local v1
+  leaves a real hot path behind.
 
 ## Next Decision Point
 
@@ -110,9 +112,9 @@ hardening/cleanup pass over expanding variants:
    entry-reachable static-handler yields in real code that the conservative
    all-yields-removed milestone skips.
 
-Do not expand cross-module specialization beyond native v1 without a separate
-design note. Static xmod variants and private-helper cloning are compilation
-model features, not just local rewrites.
+Do not expand cross-module specialization beyond caller-local v1 without a
+separate design note. Private-helper cloning and shared/callee variants are
+compilation model features, not just local rewrites.
 
 ## Known Slow Paths We Accept For Now
 

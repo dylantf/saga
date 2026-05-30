@@ -373,7 +373,7 @@ pub fn emit_module_via_new_path(
     // every reachable expression (including inlined handler arm bodies) to
     // satisfy the ANF atomicity invariant.
     let mut imported_handler_decls: HashMap<String, ast::HandlerBody> = HashMap::new();
-    let mut imported_native_variants = HashMap::new();
+    let mut imported_function_variants = HashMap::new();
     for (imported_module_name, compiled) in &ctx.modules {
         let anf_imported = anf::normalize(compiled.elaborated.clone(), Some(&compiled.resolution));
         for decl in &anf_imported {
@@ -393,8 +393,8 @@ pub fn emit_module_via_new_path(
         if imported_module_name != module_name {
             let (imported_monadic, _) =
                 monadic::translate::translate(&anf_imported, &compiled.resolution, &effect_info);
-            imported_native_variants.extend(
-                monadic::effect_opt::collect_imported_native_variant_candidates(
+            imported_function_variants.extend(
+                monadic::effect_opt::collect_imported_function_variant_candidates(
                     imported_module_name,
                     &imported_monadic,
                     &compiled.resolution,
@@ -415,7 +415,7 @@ pub fn emit_module_via_new_path(
         &effect_info,
         monadic::effect_opt::OptimizerContext {
             resolution: resolution_map.clone(),
-            imported_native_variants,
+            imported_function_variants,
         },
     );
 
