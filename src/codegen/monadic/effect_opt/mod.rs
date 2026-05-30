@@ -210,6 +210,7 @@ impl<'info> Optimizer<'info> {
         let (expr, child_change) = self.optimize_children(expr);
         let (expr, variant_change) = self.try_native_function_variant_call(expr);
         let (expr, inline_change) = self.try_inline_helper_call(expr);
+        let (expr, static_variant_change) = self.try_static_function_variant_call(expr);
         let (expr, native_change) = self.try_native_direct_call(expr);
         let (expr, finally_direct_change) = self.try_finally_direct_call(expr);
         let (expr, direct_change) = self.try_direct_call(expr);
@@ -219,6 +220,7 @@ impl<'info> Optimizer<'info> {
         let mut change = child_change;
         change.mark_if(variant_change);
         change.mark_if(inline_change);
+        change.mark_if(static_variant_change);
         change.mark_if(native_change);
         change.mark_if(finally_direct_change);
         change.mark_if(direct_change);
@@ -894,6 +896,23 @@ impl<'info> Optimizer<'info> {
             return (expr, Change::Unchanged);
         }
 
+        self.try_function_variant_call(expr, native_variant_name, false)
+    }
+
+    fn try_static_function_variant_call(&mut self, expr: MExpr) -> (MExpr, Change) {
+        if !self.opts.static_function_variants() || !self.static_variant_stack_eligible() {
+            return (expr, Change::Unchanged);
+        }
+
+        self.try_function_variant_call(expr, static_variant_name, true)
+    }
+
+    fn try_function_variant_call(
+        &mut self,
+        expr: MExpr,
+        variant_name_for_stack: fn(&str, &[HandlerFrame]) -> String,
+        require_no_residual_yields: bool,
+    ) -> (MExpr, Change) {
         let MExpr::App { head, args, source } = expr else {
             return (expr, Change::Unchanged);
         };
@@ -921,7 +940,7 @@ impl<'info> Optimizer<'info> {
             return (MExpr::App { head, args, source }, Change::Unchanged);
         }
 
-        let variant_name = native_variant_name(&candidate.binding.name, &self.handler_stack);
+        let variant_name = variant_name_for_stack(&candidate.binding.name, &self.handler_stack);
         if variant_name == name.name {
             return (MExpr::App { head, args, source }, Change::Unchanged);
         }
@@ -936,6 +955,9 @@ impl<'info> Optimizer<'info> {
         variant_body = optimized_body;
 
         if body_change == Change::Unchanged {
+            return (MExpr::App { head, args, source }, Change::Unchanged);
+        }
+        if require_no_residual_yields && expr_yield_count(&variant_body) != 0 {
             return (MExpr::App { head, args, source }, Change::Unchanged);
         }
 
@@ -974,6 +996,18 @@ impl<'info> Optimizer<'info> {
             }
         }
         has_native
+    }
+
+    fn static_variant_stack_eligible(&self) -> bool {
+        let mut has_static = false;
+        for frame in &self.handler_stack {
+            match frame {
+                HandlerFrame::Static { .. } => has_static = true,
+                HandlerFrame::Native { .. } => return false,
+                HandlerFrame::Blocking { .. } => {}
+            }
+        }
+        has_static
     }
 
     fn optimize_spawn_callback_atom(&mut self, atom: Atom) -> (Atom, Change) {
@@ -1453,6 +1487,10 @@ impl RunOptions {
         !self.skip
     }
 
+    fn static_function_variants(self) -> bool {
+        !self.skip
+    }
+
     fn dead_pure_let(self) -> bool {
         !self.skip
     }
@@ -1546,6 +1584,7 @@ fn expr_is_pure(expr: &MExpr) -> bool {
 const INLINE_HELPER_BODY_BUDGET: usize = 30;
 const NATIVE_VARIANT_BODY_BUDGET: usize = 220;
 const NATIVE_VARIANT_PREFIX: &str = "__saga_native_variant";
+const STATIC_VARIANT_PREFIX: &str = "__saga_static_variant";
 
 fn collect_inline_candidates(program: &MProgram) -> HashMap<String, InlineCandidate> {
     let mut counts: HashMap<String, usize> = HashMap::new();
@@ -1637,8 +1676,54 @@ fn native_variant_name(name: &str, stack: &[HandlerFrame]) -> String {
     parts.join("__")
 }
 
+fn static_variant_name(name: &str, stack: &[HandlerFrame]) -> String {
+    let mut parts = vec![STATIC_VARIANT_PREFIX.to_string(), sanitize_ident_part(name)];
+    for frame in stack {
+        match frame {
+            HandlerFrame::Static { effects, arms } => {
+                parts.push("static".to_string());
+                for effect in effects {
+                    parts.push(sanitize_ident_part(effect));
+                }
+                let mut arm_keys: Vec<_> = arms
+                    .iter()
+                    .map(|arm| {
+                        (
+                            arm.op.effect.as_str(),
+                            arm.op.op.as_str(),
+                            arm.id.0,
+                            arm.op.op_index,
+                        )
+                    })
+                    .collect();
+                arm_keys.sort();
+                for (effect, op, id, op_index) in arm_keys {
+                    parts.push(sanitize_ident_part(effect));
+                    parts.push(sanitize_ident_part(op));
+                    parts.push(id.to_string());
+                    parts.push(op_index.to_string());
+                }
+            }
+            HandlerFrame::Blocking { effects } => {
+                parts.push("blocking".to_string());
+                for effect in effects {
+                    parts.push(sanitize_ident_part(effect));
+                }
+            }
+            HandlerFrame::Native { effects, handler } => {
+                parts.push("native".to_string());
+                parts.push(sanitize_ident_part(handler));
+                for effect in effects {
+                    parts.push(sanitize_ident_part(effect));
+                }
+            }
+        }
+    }
+    parts.join("__")
+}
+
 pub(crate) fn is_generated_variant_name(name: &str) -> bool {
-    name.starts_with(NATIVE_VARIANT_PREFIX)
+    name.starts_with(NATIVE_VARIANT_PREFIX) || name.starts_with(STATIC_VARIANT_PREFIX)
 }
 
 fn sanitize_ident_part(value: &str) -> String {
@@ -5991,6 +6076,120 @@ mod tests {
                     source: crate::ast::NodeId(344),
                 }
             )
+        );
+    }
+
+    #[test]
+    fn static_function_variant_specializes_multi_yield_same_module_call() {
+        let mut f = Fixture::new();
+        let arm = tail_arm(360, vec![pat_unit(361)], resume(lit_int("42", 42)), None);
+        f.h.resumption
+            .insert(crate::ast::NodeId(360), ResumptionKind::TailResumptive);
+        let handler = static_log_handler(vec![arm]);
+        let helper_body = bind_expr(
+            mv("_first", 362),
+            yield_log(vec![unit_atom()], crate::ast::NodeId(363)),
+            yield_log(vec![unit_atom()], crate::ast::NodeId(364)),
+        );
+        let helper = helper_fun("helper", 365, vec![pat_unit(366)], helper_body);
+        let caller = MDecl::Val(MVal {
+            id: crate::ast::NodeId(367),
+            public: false,
+            name: "caller".to_string(),
+            value: with_expr(
+                handler,
+                MExpr::App {
+                    head: var("helper", 368),
+                    args: vec![unit_atom()],
+                    source: crate::ast::NodeId(369),
+                },
+            ),
+            span: span(),
+        });
+        let info = f.info();
+
+        let out = run(vec![helper.clone(), caller], &f.h, &info);
+
+        let variant_name = out
+            .iter()
+            .find_map(|decl| match decl {
+                MDecl::FunBinding(f) if f.name.starts_with(STATIC_VARIANT_PREFIX) => {
+                    Some(f.name.clone())
+                }
+                _ => None,
+            })
+            .expect("expected generated static function variant");
+        assert!(out.iter().any(|decl| decl == &helper));
+
+        let MDecl::Val(caller) = &out[1] else {
+            panic!("expected caller val");
+        };
+        let MExpr::With { body, .. } = &caller.value else {
+            panic!("expected caller with-expression");
+        };
+        assert_eq!(
+            body.as_ref(),
+            &MExpr::App {
+                head: Atom::Var {
+                    name: mv(&variant_name, 368),
+                    source: crate::ast::NodeId(368),
+                },
+                args: vec![unit_atom()],
+                source: crate::ast::NodeId(369),
+            }
+        );
+
+        let variant = out
+            .iter()
+            .find_map(|decl| match decl {
+                MDecl::FunBinding(f) if f.name == variant_name => Some(f),
+                _ => None,
+            })
+            .expect("expected generated variant decl");
+        assert_eq!(variant.body, MExpr::Pure(lit_int("42", 42)));
+    }
+
+    #[test]
+    fn static_function_variant_skips_multishot_arm() {
+        let mut f = Fixture::new();
+        let arm = tail_arm(370, vec![pat_unit(371)], resume(lit_int("42", 42)), None);
+        f.h.resumption
+            .insert(crate::ast::NodeId(370), ResumptionKind::Multishot);
+        let handler = static_log_handler(vec![arm]);
+        let helper_body = bind_expr(
+            mv("_first", 372),
+            yield_log(vec![unit_atom()], crate::ast::NodeId(373)),
+            yield_log(vec![unit_atom()], crate::ast::NodeId(374)),
+        );
+        let helper = helper_fun("helper", 375, vec![pat_unit(376)], helper_body);
+        let call = MExpr::App {
+            head: var("helper", 377),
+            args: vec![unit_atom()],
+            source: crate::ast::NodeId(378),
+        };
+        let caller = MDecl::Val(MVal {
+            id: crate::ast::NodeId(379),
+            public: false,
+            name: "caller".to_string(),
+            value: with_expr(handler.clone(), call.clone()),
+            span: span(),
+        });
+        let info = f.info();
+
+        let out = run(vec![helper.clone(), caller], &f.h, &info);
+
+        assert_eq!(
+            out,
+            vec![
+                helper,
+                MDecl::Val(MVal {
+                    id: crate::ast::NodeId(379),
+                    public: false,
+                    name: "caller".to_string(),
+                    value: with_expr(handler, call),
+                    span: span(),
+                })
+            ]
         );
     }
 

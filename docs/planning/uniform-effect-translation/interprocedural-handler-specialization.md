@@ -1,6 +1,6 @@
 # Interprocedural Handler Specialization
 
-Status: **milestone 2 implemented**.
+Status: **milestone 3 implemented**.
 
 The monadic optimizer can currently direct-call only when the `Yield` is
 lexically inside the handled body:
@@ -171,11 +171,52 @@ direct `erlang:self` / `erlang:send` calls.
 
 ## Open Follow-Up
 
-Function variants are still deliberately native-only. Before expanding them to
-static Saga handlers or cross-module calls, decide:
+Function variants now cover native stacks and conservative same-module static
+handler stacks. Before expanding them to cross-module calls or less
+conservative static shapes, decide:
 
 - a code-size policy;
 - a reachability/export policy for keeping or dropping original functions;
 - stats that can separate generated variants from source declarations, or count
   only reachable entry-point paths;
 - a naming/debuggability story for generated functions.
+
+## Milestone 3: Conservative Static Handler Function Variants
+
+Implemented in `src/codegen/monadic/effect_opt/mod.rs`.
+
+Generate specialized same-module function siblings when a call happens under a
+known static handler stack and the generated body can be fully discharged by
+the existing local direct-call rewrites:
+
+```text
+with h_tail { helper () }
+```
+
+becomes a call to a generated helper variant whose body was optimized under
+that static stack. This is deliberately stricter than native variants: after
+optimizing the generated body, it must contain no residual `Yield`s. That keeps
+the first milestone from partially consuming a helper such as
+`log! (); fail! "x"` and moving only one operation across the function
+boundary.
+
+Eligibility:
+
+- callee is a same-module `App(Var(f), args)`;
+- callee has exactly one clause;
+- clause has no guard;
+- call is saturated;
+- params are only supported first-milestone patterns:
+  - `Pat::Var`,
+  - `Pat::Wildcard`,
+  - `Pat::Lit(Unit)`;
+- body size is under the same conservative variant budget;
+- the current handler stack contains at least one static handler and no native
+  handler frame;
+- the callee body exposes a direct-call opportunity under that static stack;
+- optimizing the generated body removes every residual `Yield`;
+- do not specialize generated variants again.
+
+Dynamic and composite handlers remain blocker frames. Multishot/oneshot arms,
+multi-arm dispatch, unsupported parameter patterns, and cleanup ambiguity keep
+the call on the slow path.

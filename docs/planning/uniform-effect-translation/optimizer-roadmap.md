@@ -46,6 +46,11 @@ implicit debt.
   Calls under native handler stacks can redirect to generated same-module
   sibling functions optimized under that native stack.
 
+- [x] **Same-module static handler function variants.**
+  Calls under static handler stacks can redirect to generated same-module
+  sibling functions when specialization removes every residual `Yield` from the
+  generated body.
+
 - [x] **Native callback/thunk specialization.**
   Native ops that wrap callbacks, especially `spawn`, have targeted fast paths
   where actor-heavy stats justified them.
@@ -72,15 +77,25 @@ or when it removes visible compiler complexity.
   today `MFunBinding` visibility is recovered later by the lowerer from
   `ModuleCodegenInfo`, so deleting originals in the optimizer would be unsafe.
 
-- [ ] **Static handler function variants for obvious cases.**
+- [x] **Static handler function variants for obvious cases.**
   Generate variants for same-module calls under static handlers only when the
-  callee body is small, non-recursive, and all exposed operations are handled by
-  single matching tail-resumptive arms. Skip dynamic/composite handlers,
-  multishot/oneshot arms, return-clause ambiguity, and cleanup ambiguity.
+  callee body is small, non-recursive, and specialization removes every
+  residual `Yield` from the generated body. Skip native-mixed stacks,
+  dynamic/composite blockers for relevant effects, multishot/oneshot arms,
+  return-clause ambiguity, cleanup ambiguity, and partial-consumption shapes
+  such as `log! (); fail! "x"`.
 
 - [ ] **Cross-module specialization.**
   Deferred until there is an export/cache story. Cross-module variants are a
   real compilation-model feature, not just another local rewrite.
+
+  **Investigate next.** This is important for real libraries: once code moves
+  into packages such as `saga_http`, `saga_json`, or application frameworks,
+  same-module helper inlining and variants stop seeing the callee bodies that
+  matter. Before implementation, write down where generated variants live
+  (caller module, callee module, or synthetic module), how dependency build
+  caches are invalidated, how exported/public functions are represented, and
+  how stack traces should name specialized callees.
 
 ## Next Decision Point
 
@@ -91,10 +106,13 @@ hardening/cleanup pass over expanding variants:
 1. Update emitted-Core spot checks and docs for the old-path deletion.
 2. Add export/visibility metadata to `MFunBinding` only if dead slow-path
    cleanup is worth doing next.
-3. Prototype static handler function variants only if fresh stats show
-   residual entry-reachable static-handler yields in real code.
+3. Extend static handler variants only if fresh stats show residual
+   entry-reachable static-handler yields in real code that the conservative
+   all-yields-removed milestone skips.
 
-Do not start cross-module specialization without a separate design note.
+Do not start cross-module specialization without a separate design note. It is
+probably the next major optimizer design after the local/static cleanup passes,
+because external packages are where most nontrivial Saga code will live.
 
 ## Known Slow Paths We Accept For Now
 
