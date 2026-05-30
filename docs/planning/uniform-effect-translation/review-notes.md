@@ -914,8 +914,12 @@ while preserving the slow-path oracle.
   "apply foreign control to K" arms. Second extraction added a shared
   `identity_k` helper for synchronous Saga/native callback boundaries
   (`@external` callback adapters, `main` entry wrapper, Ref `modify`, and
-  `spawn` thunk). Behavior unchanged; focused lowerer/effect/property/e2e
-  checks stayed green.
+  `spawn` thunk). Third extraction named the native op closure shell and
+  not-implemented native-op stub constructor in `bootstrap.rs`, leaving the
+  bespoke Ref/Vec call bodies untouched. Fourth extraction factored finally
+  cleanup sequencing into a shared `sequence_finally_then` helper, used by
+  both `resume` cleanup and non-resuming arm cleanup. Behavior unchanged;
+  focused lowerer/effect/property/e2e checks stayed green.
 
 ### Recommended Implementation Order
 

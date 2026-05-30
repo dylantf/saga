@@ -934,26 +934,11 @@ impl<'ctx> Lowerer<'ctx> {
 
         // For abort arms (no resume) with finally: append cleanup after body.
         if let (Some(fb), false) = (&arm.finally_block, has_resume) {
-            let cleanup_k = self.fresh_helper_name();
-            let cleanup_ctx = arm_ctx.without_finally().with_return_k(cleanup_k.clone());
-            let cleanup_ce = self.lower_expr(fb, &cleanup_ctx);
-            let cleanup_done_k = CExpr::Fun(
-                vec!["_".to_string()],
-                Box::new(CExpr::Lit(CLit::Atom("unit".to_string()))),
-            );
             let result_var = self.fresh_helper_name();
             body_ce = CExpr::Let(
-                cleanup_k,
-                Box::new(cleanup_done_k),
-                Box::new(CExpr::Let(
-                    result_var.clone(),
-                    Box::new(body_ce),
-                    Box::new(CExpr::Let(
-                        "_".to_string(),
-                        Box::new(cleanup_ce),
-                        Box::new(CExpr::Var(result_var)),
-                    )),
-                )),
+                result_var.clone(),
+                Box::new(body_ce),
+                Box::new(self.sequence_finally_then(fb, &arm_ctx, CExpr::Var(result_var))),
             );
         }
 

@@ -6,8 +6,9 @@ use crate::ast::{BitSegSpec, Lit};
 use crate::codegen::cerl::{
     BinSegFlags, BinSegSize, BinSegType, CArm, CBinSeg, CExpr, CLit, CPat, Endianness,
 };
+use crate::codegen::monadic::ir::MExpr;
 
-use super::Lowerer;
+use super::{LowerCtx, Lowerer};
 
 pub(super) const ABORT_TAG: &str = "__saga_handler_abort";
 pub(super) const VALUE_RESULT_TAG: &str = "__saga_value_result";
@@ -124,6 +125,29 @@ impl<'ctx> Lowerer<'ctx> {
                 return_k,
             ),
         ]
+    }
+
+    /// Run a handler `finally` block with a local dummy return continuation,
+    /// then evaluate `next`. The cleanup result is discarded; routed control
+    /// tuples inside `next` are deliberately untouched.
+    pub(super) fn sequence_finally_then(
+        &mut self,
+        finally_expr: &MExpr,
+        ctx: &LowerCtx,
+        next: CExpr,
+    ) -> CExpr {
+        let cleanup_k = self.fresh_helper_name();
+        let cleanup_ctx = ctx.without_finally().with_return_k(cleanup_k.clone());
+        let cleanup_ce = self.lower_expr(finally_expr, &cleanup_ctx);
+        CExpr::Let(
+            cleanup_k,
+            Box::new(identity_k("_")),
+            Box::new(CExpr::Let(
+                "_".to_string(),
+                Box::new(cleanup_ce),
+                Box::new(next),
+            )),
+        )
     }
 }
 

@@ -217,48 +217,14 @@ impl<'ctx> Lowerer<'ctx> {
 
         let continue_with_value = |this: &mut Self, value: CExpr, ctx: &LowerCtx| {
             if let Some(finally_expr) = ctx.finally_block.clone() {
-                let cleanup_k = this.fresh_helper_name();
-                let cleanup_ctx = ctx.without_finally().with_return_k(cleanup_k.clone());
-                let cleanup_ce = this.lower_expr(&finally_expr, &cleanup_ctx);
-                let cleanup_done_k = CExpr::Fun(
-                    vec!["_".to_string()],
-                    Box::new(CExpr::Lit(crate::codegen::cerl::CLit::Atom(
-                        "unit".to_string(),
-                    ))),
-                );
-                CExpr::Let(
-                    cleanup_k,
-                    Box::new(cleanup_done_k),
-                    Box::new(CExpr::Let(
-                        "_".to_string(),
-                        Box::new(cleanup_ce),
-                        Box::new(this.apply_current_k(value, ctx)),
-                    )),
-                )
+                this.sequence_finally_then(&finally_expr, ctx, this.apply_current_k(value, ctx))
             } else {
                 this.apply_current_k(value, ctx)
             }
         };
         let cleanup_then_value = |this: &mut Self, value: CExpr, ctx: &LowerCtx| {
             if let Some(finally_expr) = ctx.finally_block.clone() {
-                let cleanup_k = this.fresh_helper_name();
-                let cleanup_ctx = ctx.without_finally().with_return_k(cleanup_k.clone());
-                let cleanup_ce = this.lower_expr(&finally_expr, &cleanup_ctx);
-                let cleanup_done_k = CExpr::Fun(
-                    vec!["_".to_string()],
-                    Box::new(CExpr::Lit(crate::codegen::cerl::CLit::Atom(
-                        "unit".to_string(),
-                    ))),
-                );
-                CExpr::Let(
-                    cleanup_k,
-                    Box::new(cleanup_done_k),
-                    Box::new(CExpr::Let(
-                        "_".to_string(),
-                        Box::new(cleanup_ce),
-                        Box::new(value),
-                    )),
-                )
+                this.sequence_finally_then(&finally_expr, ctx, value)
             } else {
                 value
             }

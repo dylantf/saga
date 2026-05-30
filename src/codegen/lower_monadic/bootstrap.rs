@@ -373,36 +373,47 @@ fn ets_table_options() -> CExpr {
 /// `erlang:exit({not_implemented_native_op, '<effect>', '<op>'})` for
 /// shapes outside the Identity subset.
 fn build_op_closure(effect_tag: &str, op: &NativeOp) -> CExpr {
-    let mut params: Vec<String> = (0..op.param_count).map(|i| format!("_Arg{}", i)).collect();
+    native_op_closure(op.param_count, |evidence_var| {
+        build_default_native_call(effect_tag, op, evidence_var)
+    })
+}
+
+fn native_op_closure(param_count: usize, result_expr: impl FnOnce(&str) -> CExpr) -> CExpr {
+    let mut params: Vec<String> = (0..param_count).map(|i| format!("_Arg{}", i)).collect();
     let evidence_var = "_EvidenceAtPerform".to_string();
     let k_var = "_K".to_string();
     params.push(evidence_var.clone());
     params.push(k_var.clone());
+    let result_expr = result_expr(&evidence_var);
+    let apply_k = CExpr::Apply(Box::new(CExpr::Var(k_var)), vec![result_expr]);
+    CExpr::Fun(params, Box::new(apply_k))
+}
 
-    let result_expr = if effect_tag == "Std.Ref.Ref" {
-        build_ref_call(op, &evidence_var, RefBackend::ProcessDictionary)
+fn not_implemented_native_op(effect_tag: &str, op_name: &str) -> CExpr {
+    CExpr::Call(
+        "erlang".to_string(),
+        "exit".to_string(),
+        vec![CExpr::Tuple(vec![
+            CExpr::Lit(CLit::Atom("not_implemented_native_op".to_string())),
+            CExpr::Lit(CLit::Atom(effect_tag.to_string())),
+            CExpr::Lit(CLit::Atom(op_name.to_string())),
+        ])],
+    )
+}
+
+fn build_default_native_call(effect_tag: &str, op: &NativeOp, evidence_var: &str) -> CExpr {
+    if effect_tag == "Std.Ref.Ref" {
+        build_ref_call(op, evidence_var, RefBackend::ProcessDictionary)
     } else if op.erl_module.is_empty() {
-        // Stub: not-implemented exit. Tag carries effect + op for
-        // debugging when this fires at runtime.
-        CExpr::Call(
-            "erlang".to_string(),
-            "exit".to_string(),
-            vec![CExpr::Tuple(vec![
-                CExpr::Lit(CLit::Atom("not_implemented_native_op".to_string())),
-                CExpr::Lit(CLit::Atom(effect_tag.to_string())),
-                CExpr::Lit(CLit::Atom(op.name.to_string())),
-            ])],
-        )
+        not_implemented_native_op(effect_tag, op.name)
     } else {
-        let call_args = native_call_args(op, &evidence_var);
+        let call_args = native_call_args(op, evidence_var);
         CExpr::Call(
             op.erl_module.to_string(),
             op.erl_func.to_string(),
             call_args,
         )
-    };
-    let apply_k = CExpr::Apply(Box::new(CExpr::Var(k_var)), vec![result_expr]);
-    CExpr::Fun(params, Box::new(apply_k))
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -496,16 +507,7 @@ fn vec_op_tuple() -> CExpr {
 }
 
 fn build_vec_op_closure(op: &NativeOp) -> CExpr {
-    let mut params: Vec<String> = (0..op.param_count).map(|i| format!("_Arg{}", i)).collect();
-    let evidence_var = "_EvidenceAtPerform".to_string();
-    let k_var = "_K".to_string();
-    params.push(evidence_var);
-    params.push(k_var.clone());
-    let result_expr = build_vec_call(op);
-    CExpr::Fun(
-        params,
-        Box::new(CExpr::Apply(Box::new(CExpr::Var(k_var)), vec![result_expr])),
-    )
+    native_op_closure(op.param_count, |_| build_vec_call(op))
 }
 
 fn build_vec_call(op: &NativeOp) -> CExpr {
@@ -891,15 +893,7 @@ fn build_vec_call(op: &NativeOp) -> CExpr {
                 )),
             )
         }
-        _ => CExpr::Call(
-            "erlang".to_string(),
-            "exit".to_string(),
-            vec![CExpr::Tuple(vec![
-                CExpr::Lit(CLit::Atom("not_implemented_native_op".to_string())),
-                CExpr::Lit(CLit::Atom("Std.Vec.Vec".to_string())),
-                CExpr::Lit(CLit::Atom(op.name.to_string())),
-            ])],
-        ),
+        _ => not_implemented_native_op("Std.Vec.Vec", op.name),
     }
 }
 
@@ -967,16 +961,9 @@ fn ref_op_tuple(backend: RefBackend) -> CExpr {
 }
 
 fn build_ref_op_closure(op: &NativeOp, backend: RefBackend) -> CExpr {
-    let mut params: Vec<String> = (0..op.param_count).map(|i| format!("_Arg{}", i)).collect();
-    let evidence_var = "_EvidenceAtPerform".to_string();
-    let k_var = "_K".to_string();
-    params.push(evidence_var.clone());
-    params.push(k_var.clone());
-    let result_expr = build_ref_call(op, &evidence_var, backend);
-    CExpr::Fun(
-        params,
-        Box::new(CExpr::Apply(Box::new(CExpr::Var(k_var)), vec![result_expr])),
-    )
+    native_op_closure(op.param_count, |evidence_var| {
+        build_ref_call(op, evidence_var, backend)
+    })
 }
 
 fn build_ref_call(op: &NativeOp, evidence_var: &str, backend: RefBackend) -> CExpr {
@@ -1073,15 +1060,7 @@ fn build_ref_procdict_call(op: &NativeOp, evidence_var: &str) -> CExpr {
                 )),
             )
         }
-        _ => CExpr::Call(
-            "erlang".to_string(),
-            "exit".to_string(),
-            vec![CExpr::Tuple(vec![
-                CExpr::Lit(CLit::Atom("not_implemented_native_op".to_string())),
-                CExpr::Lit(CLit::Atom("Std.Ref.Ref".to_string())),
-                CExpr::Lit(CLit::Atom(op.name.to_string())),
-            ])],
-        ),
+        _ => not_implemented_native_op("Std.Ref.Ref", op.name),
     }
 }
 
@@ -1214,15 +1193,7 @@ fn build_ref_ets_call(op: &NativeOp, evidence_var: &str) -> CExpr {
                 )),
             )
         }
-        _ => CExpr::Call(
-            "erlang".to_string(),
-            "exit".to_string(),
-            vec![CExpr::Tuple(vec![
-                CExpr::Lit(CLit::Atom("not_implemented_native_op".to_string())),
-                CExpr::Lit(CLit::Atom("Std.Ref.Ref".to_string())),
-                CExpr::Lit(CLit::Atom(op.name.to_string())),
-            ])],
-        ),
+        _ => not_implemented_native_op("Std.Ref.Ref", op.name),
     }
 }
 
