@@ -72,6 +72,14 @@ implicit debt.
   ids, not original reference ids, so the lowerer does not resolve them back to
   the slow path.
 
+- [x] **Cross-module native function variants, v1.**
+  Imported public Saga functions called under BEAM-native handler stacks can
+  get caller-local generated variants. The v1 implementation is deliberately
+  conservative: it skips imported `@external` wrappers, private-helper
+  dependencies, static/dynamic/composite specialization, and imported bodies
+  with closure/handler/local-function shapes. Generated variants live only in
+  the caller module, so callee exports and dependency caches are unchanged.
+
 ## Bounded Remaining Candidates
 
 Only promote an item from this list when stats show it matters for common code
@@ -85,17 +93,11 @@ or when it removes visible compiler complexity.
   return-clause ambiguity, cleanup ambiguity, and partial-consumption shapes
   such as `log! (); fail! "x"`.
 
-- [ ] **Cross-module specialization.**
-  Deferred until there is an export/cache story. Cross-module variants are a
-  real compilation-model feature, not just another local rewrite.
-
-  **Investigate next.** This is important for real libraries: once code moves
-  into packages such as `saga_http`, `saga_json`, or application frameworks,
-  same-module helper inlining and variants stop seeing the callee bodies that
-  matter. Before implementation, write down where generated variants live
-  (caller module, callee module, or synthetic module), how dependency build
-  caches are invalidated, how exported/public functions are represented, and
-  how stack traces should name specialized callees.
+- [ ] **Cross-module specialization beyond native v1.**
+  Static handler variants across module boundaries, recursive private-helper
+  cloning, package-cache-aware callee variants, and synthetic shared variant
+  modules remain deferred. Promote one only after stats show that caller-local
+  native v1 leaves a real hot path behind.
 
 ## Next Decision Point
 
@@ -108,9 +110,9 @@ hardening/cleanup pass over expanding variants:
    entry-reachable static-handler yields in real code that the conservative
    all-yields-removed milestone skips.
 
-Do not start cross-module specialization without a separate design note. It is
-probably the next major optimizer design after the local/static cleanup passes,
-because external packages are where most nontrivial Saga code will live.
+Do not expand cross-module specialization beyond native v1 without a separate
+design note. Static xmod variants and private-helper cloning are compilation
+model features, not just local rewrites.
 
 ## Known Slow Paths We Accept For Now
 
@@ -124,7 +126,7 @@ proves otherwise:
 - handler arms with nontrivial parameter patterns;
 - handler arms whose cleanup cannot be moved to the perform site;
 - native handlers with backend-specific stateful implementations;
-- cross-module effectful calls not exposed by same-module inlining/variants.
+- cross-module effectful calls not covered by caller-local native variants.
 
 ## Measurement Set
 

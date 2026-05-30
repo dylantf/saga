@@ -18,6 +18,8 @@ use crate::codegen::monadic::ir::{
     MProgram, MVal, MVar,
 };
 use crate::codegen::native_effects::{NativeArgTransform, native_op};
+use crate::codegen::resolve::{ResolutionMap, ResolvedCodegenKind};
+use crate::typechecker::ModuleCodegenInfo;
 use std::collections::{HashMap, HashSet};
 
 /// Run the effect-optimization stage with default options.
@@ -35,11 +37,30 @@ pub fn run_with_options(
     _e: &EffectInfo,
     opts: RunOptions,
 ) -> MProgram {
+    run_with_options_and_context(m, h, _e, opts, OptimizerContext::default())
+}
+
+pub fn run_with_context(
+    m: MProgram,
+    h: &HandlerAnalysis,
+    e: &EffectInfo,
+    context: OptimizerContext,
+) -> MProgram {
+    run_with_options_and_context(m, h, e, RunOptions::default(), context)
+}
+
+pub fn run_with_options_and_context(
+    m: MProgram,
+    h: &HandlerAnalysis,
+    _e: &EffectInfo,
+    opts: RunOptions,
+    context: OptimizerContext,
+) -> MProgram {
     if opts.skip {
         return m;
     }
 
-    let mut optimizer = Optimizer::new(opts, h);
+    let mut optimizer = Optimizer::new(opts, h, context);
     optimizer.optimize_program(m)
 }
 
@@ -50,8 +71,22 @@ pub struct RunOptions {
     pub skip: bool,
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct OptimizerContext {
+    pub resolution: ResolutionMap,
+    pub imported_native_variants: HashMap<String, ImportedNativeVariantCandidate>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ImportedNativeVariantCandidate {
+    pub source_module: String,
+    pub binding: MFunBinding,
+    pub public_names: HashSet<String>,
+}
+
 struct Optimizer<'info> {
     opts: RunOptions,
+    context: OptimizerContext,
     handler_analysis: &'info HandlerAnalysis,
     handler_stack: Vec<HandlerFrame>,
     inline_candidates: HashMap<String, InlineCandidate>,
@@ -135,9 +170,14 @@ impl<T> SubstOutcome<T> {
 }
 
 impl<'info> Optimizer<'info> {
-    fn new(opts: RunOptions, handler_analysis: &'info HandlerAnalysis) -> Self {
+    fn new(
+        opts: RunOptions,
+        handler_analysis: &'info HandlerAnalysis,
+        context: OptimizerContext,
+    ) -> Self {
         Self {
             opts,
+            context,
             handler_analysis,
             handler_stack: Vec::new(),
             inline_candidates: HashMap::new(),
@@ -901,7 +941,12 @@ impl<'info> Optimizer<'info> {
             return (expr, Change::Unchanged);
         }
 
-        self.try_function_variant_call(expr, native_variant_name, false)
+        let (expr, change) = self.try_function_variant_call(expr, native_variant_name, false);
+        if change == Change::Changed {
+            return (expr, change);
+        }
+
+        self.try_imported_native_function_variant_call(expr)
     }
 
     fn try_static_function_variant_call(&mut self, expr: MExpr) -> (MExpr, Change) {
@@ -992,6 +1037,97 @@ impl<'info> Optimizer<'info> {
                     // NodeId makes the lowerer resolve this call back to the
                     // source function, so attach the function declaration id
                     // instead.
+                    source: candidate.binding.id,
+                },
+                args,
+                source,
+            },
+            Change::Changed,
+        )
+    }
+
+    fn try_imported_native_function_variant_call(&mut self, expr: MExpr) -> (MExpr, Change) {
+        let MExpr::App { head, args, source } = expr else {
+            return (expr, Change::Unchanged);
+        };
+
+        let Atom::Var {
+            name,
+            source: head_source,
+        } = &head
+        else {
+            return (MExpr::App { head, args, source }, Change::Unchanged);
+        };
+        if is_generated_variant_name(&name.name)
+            || self.inline_blocked_names.iter().any(|n| n == &name.name)
+        {
+            return (MExpr::App { head, args, source }, Change::Unchanged);
+        }
+
+        let Some(resolved) = self.context.resolution.get(head_source) else {
+            return (MExpr::App { head, args, source }, Change::Unchanged);
+        };
+        if !matches!(resolved.kind, ResolvedCodegenKind::BeamFunction { .. }) {
+            return (MExpr::App { head, args, source }, Change::Unchanged);
+        }
+
+        let Some(candidate) = self
+            .context
+            .imported_native_variants
+            .get(&resolved.canonical_name)
+            .cloned()
+        else {
+            return (MExpr::App { head, args, source }, Change::Unchanged);
+        };
+        if args.len() != candidate.binding.params.len() {
+            return (MExpr::App { head, args, source }, Change::Unchanged);
+        }
+        if !self.expr_has_direct_call_opportunity(&candidate.binding.body) {
+            return (MExpr::App { head, args, source }, Change::Unchanged);
+        }
+
+        let variant_name = imported_native_variant_name(
+            &candidate.source_module,
+            &candidate.binding.name,
+            &self.handler_stack,
+        );
+        let mut variant_body = rewrite_direct_calls_to_name(
+            candidate.binding.body.clone(),
+            &candidate.binding.name,
+            &variant_name,
+            candidate.binding.id,
+        );
+
+        let old_blocked_len = self.inline_blocked_names.len();
+        self.inline_blocked_names
+            .extend(bound_names_in_pats(&candidate.binding.params));
+        self.inline_blocked_names
+            .extend(candidate.public_names.iter().cloned());
+        let (optimized_body, body_change) = self.optimize_expr(variant_body);
+        self.inline_blocked_names.truncate(old_blocked_len);
+        variant_body = optimized_body;
+
+        if body_change == Change::Unchanged {
+            return (MExpr::App { head, args, source }, Change::Unchanged);
+        }
+
+        if !self.generated_variant_names.contains(&variant_name) {
+            self.generated_variant_names.insert(variant_name.clone());
+            self.pending_variants.push(MDecl::FunBinding(MFunBinding {
+                name: variant_name.clone(),
+                public: false,
+                body: variant_body,
+                ..candidate.binding
+            }));
+        }
+
+        (
+            MExpr::App {
+                head: Atom::Var {
+                    name: MVar {
+                        name: variant_name,
+                        id: name.id,
+                    },
                     source: candidate.binding.id,
                 },
                 args,
@@ -1668,6 +1804,69 @@ fn collect_variant_candidates(program: &MProgram) -> HashMap<String, VariantCand
     candidates
 }
 
+pub fn collect_imported_native_variant_candidates(
+    source_module: &str,
+    program: &MProgram,
+    resolution: &ResolutionMap,
+    codegen_info: &ModuleCodegenInfo,
+) -> HashMap<String, ImportedNativeVariantCandidate> {
+    let public_names: HashSet<String> = codegen_info
+        .exports
+        .iter()
+        .map(|(name, _)| name.clone())
+        .collect();
+    let external_names: HashSet<String> = codegen_info
+        .external_funs
+        .iter()
+        .map(|(name, _, _, _)| name.clone())
+        .collect();
+
+    let mut counts: HashMap<String, usize> = HashMap::new();
+    for decl in program {
+        if let MDecl::FunBinding(f) = decl
+            && f.public
+            && !is_generated_variant_name(&f.name)
+        {
+            *counts.entry(f.name.clone()).or_default() += 1;
+        }
+    }
+
+    let mut candidates = HashMap::new();
+    for decl in program {
+        let MDecl::FunBinding(f) = decl else {
+            continue;
+        };
+        if !f.public
+            || is_generated_variant_name(&f.name)
+            || counts.get(&f.name) != Some(&1)
+            || external_names.contains(&f.name)
+            || f.guard.is_some()
+            || !helper_params_are_supported(&f.params)
+            || expr_node_count(&f.body) > NATIVE_VARIANT_BODY_BUDGET
+            || expr_contains_xmod_variant_forbidden_shape(&f.body)
+            || expr_has_private_same_module_refs(
+                &f.body,
+                source_module,
+                &f.name,
+                &public_names,
+                resolution,
+            )
+        {
+            continue;
+        }
+
+        let candidate = ImportedNativeVariantCandidate {
+            source_module: source_module.to_string(),
+            binding: f.clone(),
+            public_names: public_names.clone(),
+        };
+        candidates.insert(f.name.clone(), candidate.clone());
+        candidates.insert(format!("{source_module}.{}", f.name), candidate);
+    }
+
+    candidates
+}
+
 fn remove_dead_variant_sources(program: MProgram) -> MProgram {
     let reachable = reachable_decl_names(&program);
     let generated_source_ids = generated_variant_source_ids(&program, &reachable);
@@ -1803,6 +2002,10 @@ fn native_variant_name(name: &str, stack: &[HandlerFrame]) -> String {
         }
     }
     parts.join("__")
+}
+
+fn imported_native_variant_name(source_module: &str, name: &str, stack: &[HandlerFrame]) -> String {
+    native_variant_name(&format!("xmod__{source_module}__{name}"), stack)
 }
 
 fn static_variant_name(name: &str, stack: &[HandlerFrame]) -> String {
@@ -2857,6 +3060,103 @@ fn atom_contains_inline_forbidden_shape(atom: &Atom) -> bool {
     }
 }
 
+fn expr_contains_xmod_variant_forbidden_shape(expr: &MExpr) -> bool {
+    match expr {
+        MExpr::With { .. } | MExpr::LetFun { .. } | MExpr::HandlerValue { .. } => true,
+        MExpr::Pure(atom) => atom_contains_xmod_variant_forbidden_shape(atom),
+        MExpr::Yield { args, .. } | MExpr::ForeignCall { args, .. } => {
+            args.iter().any(atom_contains_xmod_variant_forbidden_shape)
+        }
+        MExpr::Bind { value, body, .. } | MExpr::Let { value, body, .. } => {
+            expr_contains_xmod_variant_forbidden_shape(value)
+                || expr_contains_xmod_variant_forbidden_shape(body)
+        }
+        MExpr::Ensure { body, cleanup } => {
+            expr_contains_xmod_variant_forbidden_shape(body)
+                || expr_contains_xmod_variant_forbidden_shape(cleanup)
+        }
+        MExpr::Case {
+            scrutinee, arms, ..
+        } => {
+            atom_contains_xmod_variant_forbidden_shape(scrutinee)
+                || arms.iter().any(|arm| {
+                    arm.guard
+                        .as_ref()
+                        .is_some_and(expr_contains_xmod_variant_forbidden_shape)
+                        || expr_contains_xmod_variant_forbidden_shape(&arm.body)
+                })
+        }
+        MExpr::If {
+            cond,
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            atom_contains_xmod_variant_forbidden_shape(cond)
+                || expr_contains_xmod_variant_forbidden_shape(then_branch)
+                || expr_contains_xmod_variant_forbidden_shape(else_branch)
+        }
+        MExpr::App { head, args, .. } => {
+            atom_contains_xmod_variant_forbidden_shape(head)
+                || args.iter().any(atom_contains_xmod_variant_forbidden_shape)
+        }
+        MExpr::Resume { value, .. }
+        | MExpr::FieldAccess { record: value, .. }
+        | MExpr::DictMethodAccess { dict: value, .. }
+        | MExpr::UnaryMinus { value, .. } => atom_contains_xmod_variant_forbidden_shape(value),
+        MExpr::RecordUpdate { record, fields, .. } => {
+            atom_contains_xmod_variant_forbidden_shape(record)
+                || fields
+                    .iter()
+                    .any(|(_, atom)| atom_contains_xmod_variant_forbidden_shape(atom))
+        }
+        MExpr::BinOp { left, right, .. } => {
+            atom_contains_xmod_variant_forbidden_shape(left)
+                || atom_contains_xmod_variant_forbidden_shape(right)
+        }
+        MExpr::BitString { segments, .. } => segments.iter().any(|seg| {
+            atom_contains_xmod_variant_forbidden_shape(&seg.value)
+                || seg
+                    .size
+                    .as_ref()
+                    .is_some_and(atom_contains_xmod_variant_forbidden_shape)
+        }),
+        MExpr::Receive { arms, after, .. } => {
+            arms.iter().any(|arm| {
+                arm.guard
+                    .as_ref()
+                    .is_some_and(expr_contains_xmod_variant_forbidden_shape)
+                    || expr_contains_xmod_variant_forbidden_shape(&arm.body)
+            }) || after.as_ref().is_some_and(|(timeout, body)| {
+                atom_contains_xmod_variant_forbidden_shape(timeout)
+                    || expr_contains_xmod_variant_forbidden_shape(body)
+            })
+        }
+    }
+}
+
+fn atom_contains_xmod_variant_forbidden_shape(atom: &Atom) -> bool {
+    match atom {
+        Atom::Lambda { .. } => true,
+        Atom::Ctor { args, .. } => args.iter().any(atom_contains_xmod_variant_forbidden_shape),
+        Atom::Tuple { elements, .. } => elements
+            .iter()
+            .any(atom_contains_xmod_variant_forbidden_shape),
+        Atom::AnonRecord { fields, .. } | Atom::Record { fields, .. } => fields
+            .iter()
+            .any(|(_, atom)| atom_contains_xmod_variant_forbidden_shape(atom)),
+        Atom::BackendSpawnThunk { callback, .. } => {
+            atom_contains_xmod_variant_forbidden_shape(callback)
+        }
+        Atom::Var { .. }
+        | Atom::Lit { .. }
+        | Atom::DictRef { .. }
+        | Atom::QualifiedRef { .. }
+        | Atom::Symbol { .. }
+        | Atom::BackendAtom { .. } => false,
+    }
+}
+
 fn expr_calls_any(expr: &MExpr, names: &HashSet<String>) -> bool {
     match expr {
         MExpr::App { head, args, .. } => {
@@ -2993,6 +3293,199 @@ fn handler_arm_calls_any(arm: &MHandlerArm, names: &HashSet<String>) -> bool {
             .finally_block
             .as_ref()
             .is_some_and(|cleanup| expr_calls_any(cleanup, names))
+}
+
+fn expr_has_private_same_module_refs(
+    expr: &MExpr,
+    source_module: &str,
+    self_name: &str,
+    public_names: &HashSet<String>,
+    resolution: &ResolutionMap,
+) -> bool {
+    let mut refs = Vec::new();
+    collect_app_head_refs(expr, &mut refs);
+    refs.into_iter().any(|(name, source)| {
+        let Some(resolved) = resolution.get(&source) else {
+            return false;
+        };
+        if !matches!(
+            resolved.kind,
+            ResolvedCodegenKind::BeamFunction { .. }
+                | ResolvedCodegenKind::ExternalFunction { .. }
+                | ResolvedCodegenKind::Intrinsic { .. }
+        ) {
+            return false;
+        }
+        let same_module = resolved
+            .source_module
+            .as_deref()
+            .is_none_or(|module| module == source_module);
+        same_module && name != self_name && !public_names.contains(&name)
+    })
+}
+
+fn collect_app_head_refs(expr: &MExpr, out: &mut Vec<(String, crate::ast::NodeId)>) {
+    match expr {
+        MExpr::App { head, args, .. } => {
+            if let Atom::Var { name, source } = head {
+                out.push((name.name.clone(), *source));
+            }
+            collect_atom_list_app_refs(args, out);
+        }
+        MExpr::Pure(atom) => collect_atom_app_refs(atom, out),
+        MExpr::Yield { args, .. } | MExpr::ForeignCall { args, .. } => {
+            collect_atom_list_app_refs(args, out)
+        }
+        MExpr::Bind { value, body, .. } | MExpr::Let { value, body, .. } => {
+            collect_app_head_refs(value, out);
+            collect_app_head_refs(body, out);
+        }
+        MExpr::Ensure { body, cleanup } => {
+            collect_app_head_refs(body, out);
+            collect_app_head_refs(cleanup, out);
+        }
+        MExpr::Case {
+            scrutinee, arms, ..
+        } => {
+            collect_atom_app_refs(scrutinee, out);
+            for arm in arms {
+                if let Some(guard) = &arm.guard {
+                    collect_app_head_refs(guard, out);
+                }
+                collect_app_head_refs(&arm.body, out);
+            }
+        }
+        MExpr::If {
+            cond,
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            collect_atom_app_refs(cond, out);
+            collect_app_head_refs(then_branch, out);
+            collect_app_head_refs(else_branch, out);
+        }
+        MExpr::With { handler, body, .. } => {
+            collect_handler_app_refs(handler, out);
+            collect_app_head_refs(body, out);
+        }
+        MExpr::Resume { value, .. }
+        | MExpr::FieldAccess { record: value, .. }
+        | MExpr::DictMethodAccess { dict: value, .. }
+        | MExpr::UnaryMinus { value, .. } => collect_atom_app_refs(value, out),
+        MExpr::RecordUpdate { record, fields, .. } => {
+            collect_atom_app_refs(record, out);
+            for (_, atom) in fields {
+                collect_atom_app_refs(atom, out);
+            }
+        }
+        MExpr::BinOp { left, right, .. } => {
+            collect_atom_app_refs(left, out);
+            collect_atom_app_refs(right, out);
+        }
+        MExpr::BitString { segments, .. } => {
+            for seg in segments {
+                collect_atom_app_refs(&seg.value, out);
+                if let Some(size) = &seg.size {
+                    collect_atom_app_refs(size, out);
+                }
+            }
+        }
+        MExpr::Receive { arms, after, .. } => {
+            for arm in arms {
+                if let Some(guard) = &arm.guard {
+                    collect_app_head_refs(guard, out);
+                }
+                collect_app_head_refs(&arm.body, out);
+            }
+            if let Some((timeout, body)) = after {
+                collect_atom_app_refs(timeout, out);
+                collect_app_head_refs(body, out);
+            }
+        }
+        MExpr::LetFun { body, rest, .. } => {
+            collect_app_head_refs(body, out);
+            collect_app_head_refs(rest, out);
+        }
+        MExpr::HandlerValue {
+            arms,
+            return_clause,
+            ..
+        } => {
+            for arm in arms {
+                collect_handler_arm_app_refs(arm, out);
+            }
+            if let Some(arm) = return_clause {
+                collect_handler_arm_app_refs(arm, out);
+            }
+        }
+    }
+}
+
+fn collect_atom_app_refs(atom: &Atom, out: &mut Vec<(String, crate::ast::NodeId)>) {
+    match atom {
+        Atom::Lambda { body, .. } => collect_app_head_refs(body, out),
+        Atom::Ctor { args, .. } => collect_atom_list_app_refs(args, out),
+        Atom::Tuple { elements, .. } => collect_atom_list_app_refs(elements, out),
+        Atom::AnonRecord { fields, .. } | Atom::Record { fields, .. } => {
+            for (_, atom) in fields {
+                collect_atom_app_refs(atom, out);
+            }
+        }
+        Atom::BackendSpawnThunk { callback, .. } => collect_atom_app_refs(callback, out),
+        Atom::Var { .. }
+        | Atom::Lit { .. }
+        | Atom::DictRef { .. }
+        | Atom::QualifiedRef { .. }
+        | Atom::Symbol { .. }
+        | Atom::BackendAtom { .. } => {}
+    }
+}
+
+fn collect_atom_list_app_refs(atoms: &[Atom], out: &mut Vec<(String, crate::ast::NodeId)>) {
+    for atom in atoms {
+        collect_atom_app_refs(atom, out);
+    }
+}
+
+fn collect_handler_app_refs(handler: &MHandler, out: &mut Vec<(String, crate::ast::NodeId)>) {
+    match handler {
+        MHandler::Static {
+            arms,
+            return_clause,
+            ..
+        } => {
+            for arm in arms {
+                collect_handler_arm_app_refs(arm, out);
+            }
+            if let Some(arm) = return_clause {
+                collect_handler_arm_app_refs(arm, out);
+            }
+        }
+        MHandler::Native { .. } => {}
+        MHandler::Composite { handlers, .. } => {
+            for handler in handlers {
+                collect_handler_app_refs(handler, out);
+            }
+        }
+        MHandler::Dynamic {
+            op_tuple,
+            return_lambda,
+            ..
+        } => {
+            collect_atom_app_refs(op_tuple, out);
+            if let Some(atom) = return_lambda {
+                collect_atom_app_refs(atom, out);
+            }
+        }
+    }
+}
+
+fn collect_handler_arm_app_refs(arm: &MHandlerArm, out: &mut Vec<(String, crate::ast::NodeId)>) {
+    collect_app_head_refs(&arm.body, out);
+    if let Some(cleanup) = &arm.finally_block {
+        collect_app_head_refs(cleanup, out);
+    }
 }
 
 fn atom_contains_yield(atom: &Atom) -> bool {
@@ -6237,6 +6730,314 @@ mod tests {
     }
 
     #[test]
+    fn imported_native_function_variant_specializes_public_call_under_native_handler() {
+        let f = Fixture::new();
+        let handler = native_handler("Std.Actor.Timer", "beam_actor", 350);
+        let imported = imported_candidate(
+            "Lib",
+            "worker",
+            351,
+            bind_expr(
+                mv("_first", 352),
+                yield_native("Std.Actor.Timer", "sleep", vec![lit_int("10", 10)], 353),
+                yield_native("Std.Actor.Timer", "sleep", vec![lit_int("20", 20)], 354),
+            ),
+        );
+        let caller = MDecl::Val(MVal {
+            id: crate::ast::NodeId(355),
+            public: true,
+            name: "caller".to_string(),
+            value: with_expr(
+                handler,
+                MExpr::App {
+                    head: var("worker", 356),
+                    args: vec![unit_atom()],
+                    source: crate::ast::NodeId(357),
+                },
+            ),
+            span: span(),
+        });
+        let mut context = OptimizerContext::default();
+        context.resolution.insert(
+            crate::ast::NodeId(356),
+            resolved_beam("worker", Some("Lib"), "Lib.worker"),
+        );
+        context
+            .imported_native_variants
+            .insert("Lib.worker".to_string(), imported);
+        let info = f.info();
+
+        let out = run_with_context(vec![caller], &f.h, &info, context);
+
+        let variant_name = out
+            .iter()
+            .find_map(|decl| match decl {
+                MDecl::FunBinding(f) if is_generated_variant_name(&f.name) => Some(f.name.clone()),
+                _ => None,
+            })
+            .expect("expected generated imported native function variant");
+        assert!(variant_name.contains("xmod"));
+        assert!(variant_name.contains("Lib"));
+
+        let caller = find_val(&out, "caller");
+        let MExpr::With { body, .. } = &caller.value else {
+            panic!("expected caller with-expression");
+        };
+        assert_eq!(
+            body.as_ref(),
+            &MExpr::App {
+                head: Atom::Var {
+                    name: mv(&variant_name, 356),
+                    source: crate::ast::NodeId(351),
+                },
+                args: vec![unit_atom()],
+                source: crate::ast::NodeId(357),
+            }
+        );
+
+        let variant = out
+            .iter()
+            .find_map(|decl| match decl {
+                MDecl::FunBinding(f) if f.name == variant_name => Some(f),
+                _ => None,
+            })
+            .expect("expected generated variant decl");
+        assert!(!variant.public);
+        assert_eq!(
+            variant.body,
+            bind_expr(
+                mv("_first", 352),
+                MExpr::ForeignCall {
+                    module: "timer".to_string(),
+                    func: "sleep".to_string(),
+                    args: vec![lit_int("10", 10)],
+                    source: crate::ast::NodeId(353),
+                },
+                MExpr::ForeignCall {
+                    module: "timer".to_string(),
+                    func: "sleep".to_string(),
+                    args: vec![lit_int("20", 20)],
+                    source: crate::ast::NodeId(354),
+                }
+            )
+        );
+    }
+
+    #[test]
+    fn imported_native_function_variant_rewrites_self_recursion_to_caller_variant() {
+        let f = Fixture::new();
+        let handler = native_handler("Std.Actor.Timer", "beam_actor", 358);
+        let imported = imported_candidate(
+            "Lib",
+            "worker",
+            359,
+            bind_expr(
+                mv("_first", 360),
+                yield_native("Std.Actor.Timer", "sleep", vec![lit_int("10", 10)], 361),
+                MExpr::App {
+                    head: var("worker", 362),
+                    args: vec![unit_atom()],
+                    source: crate::ast::NodeId(363),
+                },
+            ),
+        );
+        let caller = MDecl::Val(MVal {
+            id: crate::ast::NodeId(364),
+            public: true,
+            name: "caller".to_string(),
+            value: with_expr(
+                handler,
+                MExpr::App {
+                    head: var("worker", 365),
+                    args: vec![unit_atom()],
+                    source: crate::ast::NodeId(366),
+                },
+            ),
+            span: span(),
+        });
+        let mut context = OptimizerContext::default();
+        context.resolution.insert(
+            crate::ast::NodeId(365),
+            resolved_beam("worker", Some("Lib"), "Lib.worker"),
+        );
+        context
+            .imported_native_variants
+            .insert("Lib.worker".to_string(), imported);
+        let info = f.info();
+
+        let out = run_with_context(vec![caller], &f.h, &info, context);
+
+        let variant = out
+            .iter()
+            .find_map(|decl| match decl {
+                MDecl::FunBinding(f) if is_generated_variant_name(&f.name) => Some(f),
+                _ => None,
+            })
+            .expect("expected generated imported native function variant");
+        assert_eq!(
+            variant.body,
+            bind_expr(
+                mv("_first", 360),
+                MExpr::ForeignCall {
+                    module: "timer".to_string(),
+                    func: "sleep".to_string(),
+                    args: vec![lit_int("10", 10)],
+                    source: crate::ast::NodeId(361),
+                },
+                MExpr::App {
+                    head: Atom::Var {
+                        name: mv(&variant.name, 362),
+                        source: crate::ast::NodeId(359),
+                    },
+                    args: vec![unit_atom()],
+                    source: crate::ast::NodeId(363),
+                }
+            )
+        );
+    }
+
+    #[test]
+    fn imported_native_function_variant_skips_static_handler_stack() {
+        let mut f = Fixture::new();
+        let arm = tail_arm(367, vec![pat_unit(368)], resume(lit_int("42", 42)), None);
+        f.h.resumption
+            .insert(crate::ast::NodeId(367), ResumptionKind::TailResumptive);
+        let handler = static_log_handler(vec![arm]);
+        let imported = imported_candidate(
+            "Lib",
+            "worker",
+            369,
+            yield_native("Std.Actor.Timer", "sleep", vec![lit_int("10", 10)], 370),
+        );
+        let call = MExpr::App {
+            head: var("worker", 371),
+            args: vec![unit_atom()],
+            source: crate::ast::NodeId(372),
+        };
+        let caller = MDecl::Val(MVal {
+            id: crate::ast::NodeId(373),
+            public: true,
+            name: "caller".to_string(),
+            value: with_expr(handler.clone(), call.clone()),
+            span: span(),
+        });
+        let mut context = OptimizerContext::default();
+        context.resolution.insert(
+            crate::ast::NodeId(371),
+            resolved_beam("worker", Some("Lib"), "Lib.worker"),
+        );
+        context
+            .imported_native_variants
+            .insert("Lib.worker".to_string(), imported);
+        let info = f.info();
+
+        let out = run_with_context(vec![caller], &f.h, &info, context);
+
+        assert_eq!(
+            out,
+            vec![MDecl::Val(MVal {
+                id: crate::ast::NodeId(373),
+                public: true,
+                name: "caller".to_string(),
+                value: with_expr(handler, call),
+                span: span(),
+            })]
+        );
+    }
+
+    #[test]
+    fn imported_native_candidate_collection_skips_private_helper_dependency() {
+        let worker = public_helper_fun(
+            "worker",
+            374,
+            MExpr::App {
+                head: var("private_helper", 375),
+                args: vec![unit_atom()],
+                source: crate::ast::NodeId(376),
+            },
+        );
+        let private_helper = helper_fun(
+            "private_helper",
+            377,
+            vec![pat_unit(378)],
+            yield_native("Std.Actor.Timer", "sleep", vec![lit_int("10", 10)], 379),
+        );
+        let mut resolution = ResolutionMap::new();
+        resolution.insert(
+            crate::ast::NodeId(375),
+            resolved_beam("private_helper", None, "private_helper"),
+        );
+        let info = module_info_with_exports(&["worker"]);
+
+        let candidates = collect_imported_native_variant_candidates(
+            "Lib",
+            &vec![worker, private_helper],
+            &resolution,
+            &info,
+        );
+
+        assert!(!candidates.contains_key("Lib.worker"));
+    }
+
+    #[test]
+    fn imported_native_candidate_collection_allows_public_helper_dependency() {
+        let worker = public_helper_fun(
+            "worker",
+            380,
+            MExpr::App {
+                head: var("public_helper", 381),
+                args: vec![unit_atom()],
+                source: crate::ast::NodeId(382),
+            },
+        );
+        let public_helper = public_helper_fun(
+            "public_helper",
+            383,
+            yield_native("Std.Actor.Timer", "sleep", vec![lit_int("10", 10)], 384),
+        );
+        let mut resolution = ResolutionMap::new();
+        resolution.insert(
+            crate::ast::NodeId(381),
+            resolved_beam("public_helper", None, "public_helper"),
+        );
+        let info = module_info_with_exports(&["worker", "public_helper"]);
+
+        let candidates = collect_imported_native_variant_candidates(
+            "Lib",
+            &vec![worker, public_helper],
+            &resolution,
+            &info,
+        );
+
+        assert!(candidates.contains_key("Lib.worker"));
+    }
+
+    #[test]
+    fn imported_native_candidate_collection_skips_external_wrapper() {
+        let worker = public_helper_fun(
+            "worker",
+            385,
+            yield_native("Std.Actor.Timer", "sleep", vec![lit_int("10", 10)], 386),
+        );
+        let mut info = module_info_with_exports(&["worker"]);
+        info.external_funs.push((
+            "worker".to_string(),
+            "lib".to_string(),
+            "worker".to_string(),
+            1,
+        ));
+
+        let candidates = collect_imported_native_variant_candidates(
+            "Lib",
+            &vec![worker],
+            &ResolutionMap::new(),
+            &info,
+        );
+
+        assert!(!candidates.contains_key("Lib.worker"));
+    }
+
+    #[test]
     fn static_function_variant_specializes_multi_yield_same_module_call() {
         let mut f = Fixture::new();
         let arm = tail_arm(360, vec![pat_unit(361)], resume(lit_int("42", 42)), None);
@@ -6403,6 +7204,75 @@ mod tests {
             body,
             span: span(),
         })
+    }
+
+    fn public_helper_fun(name: &str, id: u32, body: MExpr) -> MDecl {
+        let mut decl = helper_fun(name, id, vec![pat_unit(id + 1000)], body);
+        let MDecl::FunBinding(f) = &mut decl else {
+            panic!("expected helper fun");
+        };
+        f.public = true;
+        decl
+    }
+
+    fn imported_candidate(
+        source_module: &str,
+        name: &str,
+        id: u32,
+        body: MExpr,
+    ) -> ImportedNativeVariantCandidate {
+        let binding = MFunBinding {
+            id: crate::ast::NodeId(id),
+            public: true,
+            name: name.to_string(),
+            name_span: span(),
+            params: vec![pat_unit(id + 1000)],
+            guard: None,
+            body,
+            span: span(),
+        };
+        ImportedNativeVariantCandidate {
+            source_module: source_module.to_string(),
+            binding,
+            public_names: HashSet::from([name.to_string()]),
+        }
+    }
+
+    fn resolved_beam(
+        name: &str,
+        source_module: Option<&str>,
+        canonical_name: &str,
+    ) -> crate::codegen::resolve::ResolvedSymbol {
+        crate::codegen::resolve::ResolvedSymbol {
+            name: name.to_string(),
+            source_module: source_module.map(str::to_string),
+            canonical_name: canonical_name.to_string(),
+            kind: ResolvedCodegenKind::BeamFunction {
+                erlang_mod: source_module.map(|module| module.to_lowercase().replace('.', "_")),
+                name: name.to_string(),
+                arity: 1,
+                effects: vec!["Std.Actor.Timer".to_string()],
+            },
+        }
+    }
+
+    fn module_info_with_exports(names: &[&str]) -> ModuleCodegenInfo {
+        ModuleCodegenInfo {
+            exports: names
+                .iter()
+                .map(|name| {
+                    (
+                        (*name).to_string(),
+                        crate::typechecker::Scheme {
+                            forall: vec![],
+                            constraints: vec![],
+                            ty: crate::typechecker::Type::int(),
+                        },
+                    )
+                })
+                .collect(),
+            ..Default::default()
+        }
     }
 
     fn find_val<'a>(program: &'a MProgram, name: &str) -> &'a MVal {

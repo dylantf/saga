@@ -21,7 +21,8 @@ multishot, abort, value-producing resume, dynamic handlers, or cleanup arms.
 
 Interprocedural handler specialization is intentionally separate from the local
 direct-call rewrite. Milestones 1 and 2 are implemented as conservative
-same-module helper inlining and same-module native function variants. See
+same-module helper inlining, same-module native function variants, and a
+caller-local v1 for cross-module native function variants. See
 [interprocedural-handler-specialization.md](./interprocedural-handler-specialization.md)
 for details, and [optimizer-roadmap.md](./optimizer-roadmap.md) for the bounded
 phase-2 stopping criteria.

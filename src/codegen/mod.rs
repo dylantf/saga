@@ -373,7 +373,8 @@ pub fn emit_module_via_new_path(
     // every reachable expression (including inlined handler arm bodies) to
     // satisfy the ANF atomicity invariant.
     let mut imported_handler_decls: HashMap<String, ast::HandlerBody> = HashMap::new();
-    for compiled in ctx.modules.values() {
+    let mut imported_native_variants = HashMap::new();
+    for (imported_module_name, compiled) in &ctx.modules {
         let anf_imported = anf::normalize(compiled.elaborated.clone(), Some(&compiled.resolution));
         for decl in &anf_imported {
             if let ast::Decl::HandlerDef { name, body, .. } = decl {
@@ -389,6 +390,18 @@ pub fn emit_module_via_new_path(
                 }
             }
         }
+        if imported_module_name != module_name {
+            let (imported_monadic, _) =
+                monadic::translate::translate(&anf_imported, &compiled.resolution, &effect_info);
+            imported_native_variants.extend(
+                monadic::effect_opt::collect_imported_native_variant_candidates(
+                    imported_module_name,
+                    &imported_monadic,
+                    &compiled.resolution,
+                    &compiled.codegen_info,
+                ),
+            );
+        }
     }
     let (monadic_prog, handler_value_map) = monadic::translate::translate_with_imports(
         &anf_program,
@@ -396,7 +409,15 @@ pub fn emit_module_via_new_path(
         &effect_info,
         &imported_handler_decls,
     );
-    let optimized = monadic::effect_opt::run(monadic_prog, &handler_info, &effect_info);
+    let optimized = monadic::effect_opt::run_with_context(
+        monadic_prog,
+        &handler_info,
+        &effect_info,
+        monadic::effect_opt::OptimizerContext {
+            resolution: resolution_map.clone(),
+            imported_native_variants,
+        },
+    );
 
     let is_main = entry_export.is_some();
     let mut lowerer = lower::Lowerer::new(

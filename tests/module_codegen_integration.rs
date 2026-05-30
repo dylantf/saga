@@ -3151,6 +3151,78 @@ main () = Lib.greet "world"
     );
 }
 
+#[test]
+fn cross_module_native_variant_generates_caller_local_variant() {
+    let lib = r#"module Lib
+
+import Std.Actor (Timer)
+
+pub fun worker : Unit -> Unit needs {Timer}
+worker () = {
+  sleep! 1
+  sleep! 2
+}
+"#;
+    let main = r#"module Main
+
+import Std.Actor (Timer, beam_actor)
+import Lib (worker)
+
+main () = worker () with beam_actor
+"#;
+    let out = with_temp_project_files(&[("src/Lib.saga", lib)], main, |checker, program| {
+        emit_from_program(program, "main", checker)
+    });
+
+    assert_contains(&out, "__saga_native_variant__xmod__Lib__worker");
+    assert!(
+        out.contains("call 'timer':'sleep'"),
+        "expected imported worker body to be optimized into native timer calls:\n{out}"
+    );
+    assert!(
+        !out.contains("call 'lib':'worker'"),
+        "caller should use its local generated variant, not the imported slow path:\n{out}"
+    );
+    assert_erlc_compiles(&out, "main");
+}
+
+#[test]
+fn cross_module_native_variant_skips_private_helper_dependency() {
+    let lib = r#"module Lib
+
+import Std.Actor (Timer)
+
+pub fun worker : Unit -> Unit needs {Timer}
+worker () = {
+  private_sleep ()
+  private_sleep ()
+}
+
+fun private_sleep : Unit -> Unit needs {Timer}
+private_sleep () = sleep! 1
+"#;
+    let main = r#"module Main
+
+import Std.Actor (Timer, beam_actor)
+import Lib (worker)
+
+main () = worker () with beam_actor
+"#;
+    let out = with_temp_project_files(&[("src/Lib.saga", lib)], main, |checker, program| {
+        emit_from_program(program, "main", checker)
+    });
+
+    assert!(
+        !out.contains("__saga_native_variant__xmod__Lib__worker"),
+        "private helper dependency should keep the imported slow path:\n{out}"
+    );
+    assert!(
+        out.contains("call 'lib':'worker'") || out.contains("'lib', 'worker'"),
+        "expected fallback to imported worker:\n{out}"
+    );
+    assert_erlc_compiles(&out, "main");
+}
+
 /// Phase 6.5: a routed-derivable trait (here `ToJson`) shipped in a library
 /// module can be derived on a user record in another module. Before Phase
 /// 6.5, expand_derives only saw trait defs in the current program and
