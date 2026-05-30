@@ -875,6 +875,10 @@ Each rewrite ships as its own increment with its own differential-test
 pass. Pass 3's no-op identity is the baseline; each rewrite is a strict
 improvement.
 
+After steps 9-11, run the acceptance/hardening checklist before starting a
+larger follow-up optimization. See
+[acceptance-hardening.md](./uniform-effect-translation/acceptance-hardening.md).
+
 ### Realistic single-session targets
 
 - **Front-half session:** steps 1–6 + a stubbed step 7 that handles

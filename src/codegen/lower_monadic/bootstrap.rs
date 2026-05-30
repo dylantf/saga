@@ -42,6 +42,8 @@
 
 use crate::codegen::cerl::{CArm, CExpr, CFunDef, CLit, CPat};
 
+use super::util::identity_k;
+
 /// Name of the emitted bootstrap function. Arity 0; returns the initial
 /// evidence vector value.
 pub(super) const BOOTSTRAP_FN_NAME: &str = "__saga_initial_evidence";
@@ -299,7 +301,7 @@ pub(super) fn build_main_entry_wrapper() -> CFunDef {
     let v_param = "_V".to_string();
 
     let evidence_call = call_initial_evidence();
-    let identity_k = CExpr::Fun(vec![v_param.clone()], Box::new(CExpr::Var(v_param)));
+    let identity_k = identity_k(v_param);
     let apply_main = CExpr::Apply(
         Box::new(CExpr::FunRef("main".to_string(), 3)),
         vec![
@@ -1033,7 +1035,7 @@ fn build_ref_procdict_call(op: &NativeOp, evidence_var: &str) -> CExpr {
             let discard = "_RefPut".to_string();
             let k_var = "_RefK".to_string();
             let v_var = "_RefV".to_string();
-            let id_k = CExpr::Fun(vec![v_var.clone()], Box::new(CExpr::Var(v_var)));
+            let id_k = identity_k(v_var);
             let apply_f = CExpr::Apply(
                 Box::new(CExpr::Var("_Arg1".to_string())),
                 vec![
@@ -1161,7 +1163,7 @@ fn build_ref_ets_call(op: &NativeOp, evidence_var: &str) -> CExpr {
             let discard = "_RefInsert".to_string();
             let k_var = "_RefK".to_string();
             let v_var = "_RefV".to_string();
-            let id_k = CExpr::Fun(vec![v_var.clone()], Box::new(CExpr::Var(v_var)));
+            let id_k = identity_k(v_var);
             let apply_f = CExpr::Apply(
                 Box::new(CExpr::Var("_Arg1".to_string())),
                 vec![
@@ -1259,7 +1261,7 @@ fn native_call_args(op: &NativeOp, evidence_var: &str) -> Vec<CExpr> {
 fn spawn_thunk(callback_var: String, evidence_var: String) -> CExpr {
     let k_var = "_SpawnK".to_string();
     let v_var = "_SpawnV".to_string();
-    let identity_k = CExpr::Fun(vec![v_var.clone()], Box::new(CExpr::Var(v_var)));
+    let identity_k = identity_k(v_var);
     let apply_callback = CExpr::Apply(
         Box::new(CExpr::Var(callback_var)),
         vec![

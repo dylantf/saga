@@ -10,7 +10,7 @@ use crate::codegen::monadic::ir::{Atom, BindMode, MExpr, MVar};
 
 use super::exprs_edge::binop_atoms;
 use super::pats::lower_param_names;
-use super::util::{core_var, marked_control_tuple, propagate_marked_control_arm};
+use super::util::{ABORT_TAG, VALUE_RESULT_TAG, core_var};
 use super::{LowerCtx, Lowerer};
 
 // Name of the function-entry return-continuation variable. Every emitted
@@ -20,9 +20,6 @@ pub(super) const RETURN_K_VAR: &str = "_ReturnK";
 /// Function-entry evidence-vector parameter name. Kept in sync with
 /// `decls.rs`'s [`EVIDENCE_VAR`].
 pub(super) const EVIDENCE_VAR: &str = "_Evidence";
-const ABORT_TAG: &str = "__saga_handler_abort";
-const VALUE_RESULT_TAG: &str = "__saga_value_result";
-
 impl<'ctx> Lowerer<'ctx> {
     // ---------------------------------------------------------------
     // MExpr lowering (sub-step 7c)
@@ -415,63 +412,6 @@ impl<'ctx> Lowerer<'ctx> {
         CExpr::Apply(Box::new(CExpr::Var(ctx.return_k.clone())), vec![value])
     }
 
-    fn propagate_foreign_control_arms_unapplied(&mut self) -> Vec<CArm> {
-        let other_value_marker = self.fresh_helper_name();
-        let other_value = self.fresh_helper_name();
-        let other_abort_marker = self.fresh_helper_name();
-        let other_abort_value = self.fresh_helper_name();
-        vec![
-            propagate_marked_control_arm(VALUE_RESULT_TAG, other_value_marker, other_value),
-            propagate_marked_control_arm(ABORT_TAG, other_abort_marker, other_abort_value),
-        ]
-    }
-
-    fn apply_foreign_control_arms_to_k(&mut self, return_k: &str) -> Vec<CArm> {
-        let other_value_marker = self.fresh_helper_name();
-        let other_value = self.fresh_helper_name();
-        let other_abort_marker = self.fresh_helper_name();
-        let other_abort_value = self.fresh_helper_name();
-        vec![
-            self.apply_marked_control_arm_to_k(
-                VALUE_RESULT_TAG,
-                other_value_marker,
-                other_value,
-                return_k,
-            ),
-            self.apply_marked_control_arm_to_k(
-                ABORT_TAG,
-                other_abort_marker,
-                other_abort_value,
-                return_k,
-            ),
-        ]
-    }
-
-    fn apply_marked_control_arm_to_k(
-        &self,
-        tag: &str,
-        marker_var: String,
-        value_var: String,
-        return_k: &str,
-    ) -> CArm {
-        CArm {
-            pat: CPat::Tuple(vec![
-                CPat::Lit(CLit::Atom(tag.to_string())),
-                CPat::Var(marker_var.clone()),
-                CPat::Var(value_var.clone()),
-            ]),
-            guard: None,
-            body: CExpr::Apply(
-                Box::new(CExpr::Var(return_k.to_string())),
-                vec![marked_control_tuple(
-                    tag,
-                    CExpr::Var(marker_var),
-                    CExpr::Var(value_var),
-                )],
-            ),
-        }
-    }
-
     /// Lower `Bind { var, value, body }`:
     ///
     /// ```text
@@ -501,7 +441,7 @@ impl<'ctx> Lowerer<'ctx> {
         let bound_var = core_var(&var.name);
         let k_name = self.fresh_k_name();
         let k_arg = self.fresh_helper_name();
-        let mut k_arms = self.apply_foreign_control_arms_to_k(&ctx.return_k);
+        let mut k_arms = self.apply_marked_control_arms_to_k(&ctx.return_k);
         k_arms.push(CArm {
             pat: CPat::Var("_BindArg".to_string()),
             guard: None,
@@ -520,7 +460,7 @@ impl<'ctx> Lowerer<'ctx> {
 
     fn bubble_abort_to_k(&mut self, body_ce: CExpr, return_k: &str) -> CExpr {
         let result = self.fresh_helper_name();
-        let mut arms = self.apply_foreign_control_arms_to_k(return_k);
+        let mut arms = self.apply_marked_control_arms_to_k(return_k);
         arms.push(CArm {
             pat: CPat::Var("_BindValue".to_string()),
             guard: None,
@@ -574,7 +514,7 @@ impl<'ctx> Lowerer<'ctx> {
             guard: None,
             body: body_ce.clone(),
         }];
-        value_arms.extend(self.propagate_foreign_control_arms_unapplied());
+        value_arms.extend(self.propagate_marked_control_arms());
         value_arms.push(CArm {
             pat: CPat::Var(raw_value.clone()),
             guard: None,

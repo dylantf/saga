@@ -902,6 +902,21 @@ while preserving the slow-path oracle.
   patterns, `OneShot`, and `Multishot`. Native specialization remains future
   work.
 
+- **Next checkpoint — acceptance/hardening.** Before adding another optimizer
+  extension, follow
+  [`acceptance-hardening.md`](./acceptance-hardening.md): repo validation,
+  external shakedown, slow-path oracle checks, emitted-Core spot checks, and
+  then choose one next track.
+
+- **Abstraction cleanup — STARTED.** First low-risk extraction centralized the
+  marked control-result protocol in `lower_monadic::util`: shared
+  `ABORT_TAG` / `VALUE_RESULT_TAG`, foreign-control propagation arms, and
+  "apply foreign control to K" arms. Second extraction added a shared
+  `identity_k` helper for synchronous Saga/native callback boundaries
+  (`@external` callback adapters, `main` entry wrapper, Ref `modify`, and
+  `spawn` thunk). Behavior unchanged; focused lowerer/effect/property/e2e
+  checks stayed green.
+
 ### Recommended Implementation Order
 
 1. **Build optimizer scaffolding first.**

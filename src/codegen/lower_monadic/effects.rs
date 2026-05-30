@@ -22,15 +22,12 @@ use crate::codegen::cerl::{CArm, CExpr, CLit, CPat};
 use crate::codegen::monadic::ir::{Atom, EffectOpRef, MExpr, MHandler, MHandlerArm};
 
 use super::ctx::ResultDelimiter;
-use super::util::{core_var, marked_control_tuple, propagate_marked_control_arm};
+use super::util::{ABORT_TAG, VALUE_RESULT_TAG, core_var, marked_control_tuple};
 use super::{LowerCtx, Lowerer};
 
 /// Erlang module hosting the runtime helpers
 /// (`find_evidence/2`, `insert_canonical/2`, `project_evidence/2`).
 const EVIDENCE_BRIDGE_MODULE: &str = "std_evidence_bridge";
-const ABORT_TAG: &str = "__saga_handler_abort";
-const VALUE_RESULT_TAG: &str = "__saga_value_result";
-
 #[derive(Clone, Copy)]
 enum ArmReturnMode {
     Captured,
@@ -147,7 +144,7 @@ impl<'ctx> Lowerer<'ctx> {
 
     fn wrap_yield_result_for_target(&mut self, op_apply: CExpr, target_marker: &str) -> CExpr {
         let result = self.fresh_helper_name();
-        let mut arms = self.propagate_foreign_control_arms();
+        let mut arms = self.propagate_marked_control_arms();
         arms.push(CArm {
             pat: CPat::Var("_YieldValue".to_string()),
             guard: None,
@@ -162,17 +159,6 @@ impl<'ctx> Lowerer<'ctx> {
             Box::new(op_apply),
             Box::new(CExpr::Case(Box::new(CExpr::Var(result)), arms)),
         )
-    }
-
-    fn propagate_foreign_control_arms(&mut self) -> Vec<CArm> {
-        let other_value_marker = self.fresh_helper_name();
-        let other_value = self.fresh_helper_name();
-        let other_abort_marker = self.fresh_helper_name();
-        let other_abort_value = self.fresh_helper_name();
-        vec![
-            propagate_marked_control_arm(VALUE_RESULT_TAG, other_value_marker, other_value),
-            propagate_marked_control_arm(ABORT_TAG, other_abort_marker, other_abort_value),
-        ]
     }
 
     // -----------------------------------------------------------------
@@ -631,7 +617,7 @@ impl<'ctx> Lowerer<'ctx> {
                 ),
             },
         ];
-        arms.extend(self.propagate_foreign_control_arms());
+        arms.extend(self.propagate_marked_control_arms());
         arms.push(CArm {
             pat: CPat::Var("_WithValue".to_string()),
             guard: None,
@@ -705,7 +691,7 @@ impl<'ctx> Lowerer<'ctx> {
                 },
             },
         ];
-        arms.extend(self.propagate_foreign_control_arms());
+        arms.extend(self.propagate_marked_control_arms());
         arms.push(CArm {
             pat: CPat::Var("_WithValue".to_string()),
             guard: None,
@@ -757,7 +743,7 @@ impl<'ctx> Lowerer<'ctx> {
                 },
             },
         ];
-        arms.extend(self.propagate_foreign_control_arms());
+        arms.extend(self.propagate_marked_control_arms());
         arms.push(CArm {
             pat: CPat::Var("_WithValue".to_string()),
             guard: None,
@@ -973,7 +959,7 @@ impl<'ctx> Lowerer<'ctx> {
 
         if !has_resume && let Some(marker) = &arm_ctx.abort_marker {
             let result_var = self.fresh_helper_name();
-            let mut arms = self.propagate_foreign_control_arms();
+            let mut arms = self.propagate_marked_control_arms();
             arms.push(CArm {
                 pat: CPat::Var("_AbortValue".to_string()),
                 guard: None,

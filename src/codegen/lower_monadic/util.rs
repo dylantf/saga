@@ -7,6 +7,11 @@ use crate::codegen::cerl::{
     BinSegFlags, BinSegSize, BinSegType, CArm, CBinSeg, CExpr, CLit, CPat, Endianness,
 };
 
+use super::Lowerer;
+
+pub(super) const ABORT_TAG: &str = "__saga_handler_abort";
+pub(super) const VALUE_RESULT_TAG: &str = "__saga_value_result";
+
 /// Map a Saga identifier to a Core Erlang variable name.
 ///
 /// Core Erlang variables must start with an uppercase letter or underscore.
@@ -35,6 +40,14 @@ pub(super) fn marked_control_tuple(tag: &str, marker: CExpr, value: CExpr) -> CE
     CExpr::Tuple(vec![CExpr::Lit(CLit::Atom(tag.to_string())), marker, value])
 }
 
+/// `fun(V) -> V`: the local return continuation used at synchronous
+/// Saga/native boundaries where a uniform-CPS Saga callback must produce a
+/// direct Erlang value.
+pub(super) fn identity_k(value_param: impl Into<String>) -> CExpr {
+    let value_param = value_param.into();
+    CExpr::Fun(vec![value_param.clone()], Box::new(CExpr::Var(value_param)))
+}
+
 /// Case arm that propagates a foreign routed control result unchanged.
 pub(super) fn propagate_marked_control_arm(
     tag: &str,
@@ -49,6 +62,68 @@ pub(super) fn propagate_marked_control_arm(
         ]),
         guard: None,
         body: marked_control_tuple(tag, CExpr::Var(marker_var), CExpr::Var(value_var)),
+    }
+}
+
+fn apply_marked_control_arm_to_k(
+    tag: &str,
+    marker_var: String,
+    value_var: String,
+    return_k: &str,
+) -> CArm {
+    CArm {
+        pat: CPat::Tuple(vec![
+            CPat::Lit(CLit::Atom(tag.to_string())),
+            CPat::Var(marker_var.clone()),
+            CPat::Var(value_var.clone()),
+        ]),
+        guard: None,
+        body: CExpr::Apply(
+            Box::new(CExpr::Var(return_k.to_string())),
+            vec![marked_control_tuple(
+                tag,
+                CExpr::Var(marker_var),
+                CExpr::Var(value_var),
+            )],
+        ),
+    }
+}
+
+impl<'ctx> Lowerer<'ctx> {
+    /// Arms that bubble a routed handler-control result unchanged until the
+    /// owning result delimiter catches it.
+    pub(super) fn propagate_marked_control_arms(&mut self) -> Vec<CArm> {
+        let other_value_marker = self.fresh_helper_name();
+        let other_value = self.fresh_helper_name();
+        let other_abort_marker = self.fresh_helper_name();
+        let other_abort_value = self.fresh_helper_name();
+        vec![
+            propagate_marked_control_arm(VALUE_RESULT_TAG, other_value_marker, other_value),
+            propagate_marked_control_arm(ABORT_TAG, other_abort_marker, other_abort_value),
+        ]
+    }
+
+    /// Arms that forward a foreign routed handler-control result through the
+    /// current continuation rather than unwrapping it at the wrong delimiter.
+    pub(super) fn apply_marked_control_arms_to_k(&mut self, return_k: &str) -> Vec<CArm> {
+        let other_value_marker = self.fresh_helper_name();
+        let other_value = self.fresh_helper_name();
+        let other_abort_marker = self.fresh_helper_name();
+        let other_abort_value = self.fresh_helper_name();
+        vec![
+            apply_marked_control_arm_to_k(
+                VALUE_RESULT_TAG,
+                other_value_marker,
+                other_value,
+                return_k,
+            ),
+            apply_marked_control_arm_to_k(
+                ABORT_TAG,
+                other_abort_marker,
+                other_abort_value,
+                return_k,
+            ),
+        ]
     }
 }
 

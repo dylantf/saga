@@ -17,7 +17,7 @@ use crate::codegen::cerl::{CArm, CExpr, CFunDef, CPat};
 use crate::codegen::monadic::ir::{Atom, MDictConstructor, MExpr, MFunBinding, MVal};
 
 use super::pats::lower_param_names;
-use super::util::lower_external_native_call;
+use super::util::{identity_k, lower_external_native_call};
 use super::{LowerCtx, Lowerer};
 
 /// Variable name for the evidence-vector parameter on every emitted CFunDef.
@@ -153,8 +153,7 @@ impl<'ctx> Lowerer<'ctx> {
         self.reset_counters();
         let body_inner = self.lower_expr(&v.value, &LowerCtx::fresh());
         // let <_Evidence> = 'unit', <_ReturnK> = fun (_X) -> _X in <body_inner>
-        let id_param = "_X".to_string();
-        let id_k = CExpr::Fun(vec![id_param.clone()], Box::new(CExpr::Var(id_param)));
+        let id_k = identity_k("_X");
         let evidence_dummy = CExpr::Lit(crate::codegen::cerl::CLit::Atom("unit".to_string()));
         let body_with_k = CExpr::Let(
             RETURN_K_VAR.to_string(),
@@ -370,7 +369,7 @@ fn build_callback_adapter(callback_var: &str, arity: usize, evidence_var: &str) 
     let cb_args: Vec<String> = (0..arity).map(|i| format!("_CbArg{}", i)).collect();
     let k_var = "_CbK".to_string();
     let v_var = "_CbV".to_string();
-    let id_k = CExpr::Fun(vec![v_var.clone()], Box::new(CExpr::Var(v_var)));
+    let id_k = identity_k(v_var);
     let mut apply_args: Vec<CExpr> = cb_args.iter().cloned().map(CExpr::Var).collect();
     apply_args.push(CExpr::Var(evidence_var.to_string()));
     apply_args.push(CExpr::Var(k_var.clone()));
@@ -491,7 +490,7 @@ fn build_dbg_wrapper(name: String) -> CFunDef {
             CExpr::Var(dict_param.clone()),
         ],
     );
-    let id_k = CExpr::Fun(vec![v_param.clone()], Box::new(CExpr::Var(v_param)));
+    let id_k = identity_k(v_param);
     let apply_debug = CExpr::Apply(
         Box::new(CExpr::Var(debug_fn_var.clone())),
         vec![
@@ -572,7 +571,7 @@ fn build_catch_panic_wrapper(name: String) -> CFunDef {
     let msg_var = "Msg".to_string();
     let result_var = "_Result".to_string();
 
-    let id_k = CExpr::Fun(vec![id_k_param.clone()], Box::new(CExpr::Var(id_k_param)));
+    let id_k = identity_k(id_k_param);
 
     let applied = CExpr::Apply(
         Box::new(CExpr::Var(f_param.clone())),
