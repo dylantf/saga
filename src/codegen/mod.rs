@@ -1,13 +1,10 @@
 pub mod anf;
-pub mod call_effects;
 pub mod cerl;
 pub mod external;
 pub mod handler_analysis;
 pub mod lower;
-pub mod lower_monadic;
 pub mod monadic;
 pub mod native_effects;
-pub mod normalize;
 pub mod resolve;
 pub mod runtime_shape;
 mod source_spans;
@@ -28,11 +25,6 @@ pub struct CompiledModule {
     pub resolution: resolve::ResolutionMap,
     /// Front-end name resolution from the typechecker.
     pub front_resolution: crate::typechecker::ResolutionResult,
-    /// Per-call effect metadata produced by the call-effects pre-pass. Empty
-    /// until the module has been lowered (the Lowerer populates this map and
-    /// writes it back via `set_compiled_call_effects`). Read by the lowerer at
-    /// every effectful call site to drive evidence threading and projection.
-    pub call_effects: call_effects::CallEffectMap,
 }
 
 pub struct ModuleSemantics<'a> {
@@ -104,25 +96,9 @@ pub fn compile_module_from_result(
     let info = codegen_info.get(module_name).cloned().unwrap_or_default();
     let elaborated = crate::elaborate::elaborate_module(program, mod_result, module_name);
 
-    // === OLD PATH (active) ===
-    // Normalize then resolve on the normalized AST. Stores the normalized
-    // form in `CompiledModule.elaborated` for the old lowerer to consume.
-    // let normalized = normalize::normalize_effects(&elaborated);
-    // let resolution = resolve::resolve_names(
-    //     module_name,
-    //     &normalized,
-    //     codegen_info,
-    //     &result.prelude_imports,
-    //     &mod_result.resolution,
-    // );
-    // let stored = normalized;
-
-    // === NEW PATH (toggle: comment out OLD block above, uncomment below) ===
-    // Skip `normalize::normalize_effects` entirely — ANF runs at emit time
-    // inside `emit_module_with_context`. Resolve operates on the raw
-    // elaborated AST, and that raw form is what `CompiledModule.elaborated`
-    // stores. `call_effects` is unused by the new path.
-    //
+    // Store the raw elaborated AST. ANF runs at emit time inside
+    // `emit_module_with_context`, and backend resolution is keyed to the same
+    // raw elaborated NodeIds.
     let resolution = resolve::resolve_names(
         module_name,
         &elaborated,
@@ -137,7 +113,6 @@ pub fn compile_module_from_result(
         elaborated: stored,
         resolution,
         front_resolution: mod_result.resolution.clone(),
-        call_effects: call_effects::CallEffectMap::new(),
     })
 }
 
@@ -157,51 +132,10 @@ pub fn emit_module_with_context(
     source_file: Option<&SourceFile>,
     entry_export: Option<&str>,
 ) -> String {
-    // === OLD PATH (active) ===
-    // let codegen_info = ctx.codegen_info();
-    // let program = normalize::normalize_effects(program);
-    // let constructor_atoms = resolve::build_constructor_atoms(
-    //     module_name,
-    //     &program,
-    //     &codegen_info,
-    //     &ctx.prelude_imports,
-    // );
-    // let front_resolution = check_result
-    //     .module_check_results()
-    //     .get(module_name)
-    //     .map(|m| &m.resolution)
-    //     .unwrap_or(&check_result.resolution);
-    // let mut resolution_map = resolve::resolve_names(
-    //     module_name,
-    //     &program,
-    //     &codegen_info,
-    //     &ctx.prelude_imports,
-    //     front_resolution,
-    // );
-    // // Merge in pre-computed resolution maps from all compiled modules.
-    // // Their NodeIds don't overlap with ours, so this is a simple extend.
-    // for compiled in ctx.modules.values() {
-    //     resolution_map.extend(compiled.resolution.iter().map(|(k, v)| (*k, v.clone())));
-    // }
-    // let source_info =
-    //     source_file.map(|sf| lower::errors::SourceInfo::new(sf.path.clone(), &sf.source));
-    // let cmod = lower::Lowerer::new(
-    //     ctx,
-    //     constructor_atoms,
-    //     resolution_map,
-    //     check_result,
-    //     source_info,
-    //     entry_export.map(str::to_string),
-    // )
-    // .lower_module(module_name, &program);
-    // cerl::print_module(&cmod)
-
-    // === NEW PATH (toggle: comment out OLD block above, uncomment below) ===
-    // The new path consumes the raw elaborated AST (no `normalize`), runs
-    // ANF + monadic translation + effect optimization, then lowers via
-    // `lower_monadic::Lowerer`. Bootstrap evidence emission is on only for
+    // The uniform path consumes the raw elaborated AST, runs ANF + monadic
+    // translation + effect optimization, then lowers via
+    // `lower::Lowerer`. Bootstrap evidence emission is on only for
     // the entry-point module (`entry_export.is_some()`).
-    //
     emit_module_via_new_path(
         module_name,
         program,
@@ -336,7 +270,7 @@ pub fn build_let_handler_effects(check_result: &CheckResult) -> HashMap<ast::Nod
 ///   d. anf_program  = anf::normalize(raw_elaborated.clone())
 ///   e. monadic      = monadic::translate(&anf_program, &resolution_map, &effect_info)
 ///   f. optimized    = monadic::effect_opt::run(monadic, &handler_info, &effect_info)
-///   g. cmod         = lower_monadic::Lowerer::new(…)
+///   g. cmod         = lower::Lowerer::new(…)
 ///                         .with_bootstrap_emission(entry_export.is_some())
 ///                         .lower_module(module_name, &optimized)
 ///   h. cerl::print_module(&cmod)
@@ -465,7 +399,7 @@ pub fn emit_module_via_new_path(
     let optimized = monadic::effect_opt::run(monadic_prog, &handler_info, &effect_info);
 
     let is_main = entry_export.is_some();
-    let mut lowerer = lower_monadic::Lowerer::new(
+    let mut lowerer = lower::Lowerer::new(
         &resolution_map,
         &constructor_atoms,
         ctx,
@@ -475,7 +409,7 @@ pub fn emit_module_via_new_path(
     );
     if let Some(source_file) = source_file {
         let source_spans = source_spans::for_program(&anf_program, &check_result.node_spans);
-        lowerer = lowerer.with_source_info(lower_monadic::SourceInfo::new(
+        lowerer = lowerer.with_source_info(lower::SourceInfo::new(
             source_file.path.clone(),
             &source_file.source,
             source_spans,

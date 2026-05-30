@@ -4,7 +4,7 @@ use crate::codegen::cerl::{CArm, CExpr, CLit, CPat};
 
 use super::native_effects::{ArgTransform, NativeOp};
 use super::{native_op_closure, not_implemented_native_op};
-use crate::codegen::lower_monadic::util::identity_k;
+use crate::codegen::lower::util::identity_k;
 
 #[derive(Clone, Copy)]
 pub(super) enum RefBackend {

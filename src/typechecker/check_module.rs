@@ -401,11 +401,6 @@ pub struct ModuleCodegenInfo {
     pub external_funs: Vec<(String, String, String, usize)>,
     /// Compiler intrinsic exports: source name -> intrinsic id.
     pub intrinsic_exports: Vec<(String, crate::intrinsics::IntrinsicId)>,
-    /// Former public `@inline val` declarations: name -> RHS expression.
-    ///
-    /// `@inline val` was removed; this field is kept temporarily because the
-    /// frozen old lowerer still references it, but it is no longer populated.
-    pub inline_vals: Vec<(String, crate::ast::Expr)>,
 }
 
 fn collect_effects_from_fun_type(ty: &Type) -> Vec<String> {
@@ -1665,10 +1660,6 @@ fn collect_codegen_info(
     let mut trait_impl_dicts = Vec::new();
     let mut external_funs = Vec::new();
     let mut intrinsic_exports = Vec::new();
-    // Inlining of `@inline val`s was removed; the field stays for the frozen
-    // old codegen path and is always empty now.
-    let inline_vals = Vec::new();
-
     // Erlang module name: "Foo.Bar" -> "foo_bar"
     let erlang_module = module_name
         .split('.')
@@ -1917,7 +1908,6 @@ fn collect_codegen_info(
         trait_impl_dicts,
         external_funs,
         intrinsic_exports,
-        inline_vals,
     }
 }
 

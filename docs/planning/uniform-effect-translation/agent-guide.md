@@ -257,7 +257,7 @@ commit ([planning doc](../uniform-effect-translation.md),
 
 - Don't write code that depends on the old path's existence.
 - Don't write code in old-path files thinking "I'll move it later."
-- Module names with `_monadic` suffix (e.g. `lower_monadic`) are
+- Module names with `_monadic` suffix (e.g. `lower`) are
   temporary. They'll become the canonical names at cleanup.
 
 ---

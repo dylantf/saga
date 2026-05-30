@@ -88,7 +88,7 @@ Implemented shape:
 - add optimizer-produced `Atom::BackendSpawnThunk`, valid only as a native
   `ForeignCall` argument;
 - lower that backend thunk to the same Core Erlang shape as
-  `spawn_thunk` in `src/codegen/lower_monadic/bootstrap.rs`;
+  `spawn_thunk` in `src/codegen/lower/bootstrap.rs`;
 - preserve the documented evidence behavior in
   [spawn-effect-evidence.md](../spawn-effect-evidence.md): the spawned process
   receives a copy of the perform-site evidence;
@@ -107,7 +107,7 @@ semantic limitation around non-portable spawned effects unchanged and documented
 ## Metadata Refactor
 
 The optimizer currently lives in `src/codegen/monadic/effect_opt/`, while
-native metadata lives under `src/codegen/lower_monadic/bootstrap/`. Do not make
+native metadata lives under `src/codegen/lower/bootstrap/`. Do not make
 the optimizer import the lowerer.
 
 The pure metadata now lives in a shared backend-neutral module:
@@ -141,9 +141,9 @@ pub enum NativeArgTransform {
 }
 ```
 
-`lower_monadic/bootstrap/native_effects.rs` re-exports the shared table for
+`lower/bootstrap/native_effects.rs` re-exports the shared table for
 lowerer-local names. Bootstrap-specific Core builders stay in
-`lower_monadic/bootstrap.rs` and `lower_monadic/bootstrap/stores.rs`. The
+`lower/bootstrap.rs` and `lower/bootstrap/stores.rs`. The
 optimizer consumes only the shared descriptor table.
 
 ## Optimizer Shape
@@ -275,7 +275,7 @@ Run:
 
 ```bash
 cargo test -q -p saga --lib codegen::monadic::effect_opt
-cargo test -q -p saga --lib codegen::lower_monadic
+cargo test -q -p saga --lib codegen::lower
 cargo test -q --test effect_property_tests
 cargo test -q --test stdlib_tests stdlib_test_suite
 cargo test -q --test e2e

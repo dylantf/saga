@@ -274,7 +274,6 @@ pub fn cmd_emit(file: &str) {
             elaborated: elaborated.clone(),
             resolution: codegen::resolve::ResolutionMap::new(),
             front_resolution: result.resolution.clone(),
-            call_effects: codegen::call_effects::CallEffectMap::new(),
         },
     );
     let ctx = codegen::CodegenContext {
@@ -338,7 +337,6 @@ pub fn cmd_inspect(file: &str, stage: &str) {
                     elaborated: elaborated.clone(),
                     resolution: codegen::resolve::ResolutionMap::new(),
                     front_resolution: result.resolution.clone(),
-                    call_effects: codegen::call_effects::CallEffectMap::new(),
                 },
             );
             let ctx = codegen::CodegenContext {

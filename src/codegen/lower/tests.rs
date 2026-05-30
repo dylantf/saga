@@ -540,7 +540,7 @@ fn passthrough_recorddef_populates_local_record_fields() {
         "body",
         Some("Std.Test.TestCaseData"),
         None,
-        &crate::codegen::lower_monadic::LowerCtx::fresh(),
+        &crate::codegen::lower::LowerCtx::fresh(),
     );
     // The access path wraps the element/2 call in apply _ReturnK(...).
     match access {
@@ -1140,7 +1140,7 @@ fn lower_expr_default(expr: &MExpr) -> CExpr {
     let r = ResolutionMap::new();
     let c = ConstructorAtoms::new();
     with_lowerer(&r, &c, |l| {
-        l.lower_expr(expr, &crate::codegen::lower_monadic::LowerCtx::fresh())
+        l.lower_expr(expr, &crate::codegen::lower::LowerCtx::fresh())
     })
 }
 
@@ -2497,7 +2497,7 @@ fn field_access_emits_element_call_wrapped_in_return_k() {
         source: dummy_node(),
     };
     let ce = lower_with_records(&[("Foo", vec!["a", "b", "c"])], |l| {
-        l.lower_expr(&expr, &crate::codegen::lower_monadic::LowerCtx::fresh())
+        l.lower_expr(&expr, &crate::codegen::lower::LowerCtx::fresh())
     });
     match ce {
         CExpr::Apply(callee, args) => {
@@ -2528,7 +2528,7 @@ fn field_access_uses_anon_fields_without_record_fields_entry() {
             "c",
             Some("__anon_3_a_b_1_c"),
             Some(&["a_b".to_string(), "c".to_string()]),
-            &crate::codegen::lower_monadic::LowerCtx::fresh(),
+            &crate::codegen::lower::LowerCtx::fresh(),
         )
     });
     match ce {
@@ -2557,7 +2557,7 @@ fn record_update_rebuilds_tuple_with_tag_preserved() {
         source: dummy_node(),
     };
     let ce = lower_with_records(&[("Pair", vec!["x", "y"])], |l| {
-        l.lower_expr(&expr, &crate::codegen::lower_monadic::LowerCtx::fresh())
+        l.lower_expr(&expr, &crate::codegen::lower::LowerCtx::fresh())
     });
     let arg = match ce {
         CExpr::Apply(callee, args) => {
@@ -2928,7 +2928,7 @@ fn lower_pat_in_case(pat: Pat, lowerer_setup: impl FnOnce(&mut Lowerer<'_>)) -> 
         }],
         source: dummy_node(),
     };
-    let ce = lowerer.lower_expr(&expr, &crate::codegen::lower_monadic::LowerCtx::fresh());
+    let ce = lowerer.lower_expr(&expr, &crate::codegen::lower::LowerCtx::fresh());
     match ce {
         CExpr::Case(_, mut arms) => arms.remove(0).pat,
         other => panic!("expected Case, got {other:?}"),

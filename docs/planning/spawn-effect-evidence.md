@@ -6,7 +6,7 @@ Status: **known limitation, documented behavior**. Not yet enforced.
 
 When `spawn` starts a new process, the spawned callback runs with a **copy of
 the perform-site evidence vector** — the full set of handlers in scope at the
-`spawn` site (see `spawn_thunk` in `src/codegen/lower_monadic/bootstrap.rs`).
+`spawn` site (see `spawn_thunk` in `src/codegen/lower/bootstrap.rs`).
 BEAM copies the closure and its captured environment into the child's separate
 heap, so the child gets a *snapshot fork* of the parent's handler stack.
 

@@ -80,7 +80,7 @@ local-pub, where `pub foo : T` + `foo = e` works exactly like a function.
 
 Erlang has no top-level value bindings. Module constants are zero-arity
 functions: `pi` is `math:pi/0`, called as `math:pi()`. Today's `val` already
-lowers to a `/0` function (see [atom.rs:414](../../src/codegen/lower_monadic/atom.rs#L414),
+lowers to a `/0` function (see [atom.rs:414](../../src/codegen/lower/atom.rs#L414),
 regression test [tests.rs:1402](../../src/codegen/tests.rs#L1402)) and is
 recomputed on each reference — `math:pi()` does the same. Erlang doesn't
 memoize module constants either, so Saga's recompute-on-use is the *native*

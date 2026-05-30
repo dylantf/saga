@@ -523,7 +523,7 @@ pub fn run(
     e: &EffectInfo,
 ) -> MProgram;
 
-// src/codegen/lower_monadic/mod.rs
+// src/codegen/lower/mod.rs
 impl<'ctx> Lowerer<'ctx> {
     pub fn new(
         resolution: &'ctx ResolutionMap,

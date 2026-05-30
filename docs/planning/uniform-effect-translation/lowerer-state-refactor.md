@@ -1,12 +1,12 @@
 # Lowerer state refactor
 
 **Status:** planning. Triggered by the arm-K bug in Example 11 and the
-broader recognition that `lower_monadic/`'s ambient-state model is the
+broader recognition that `lower/`'s ambient-state model is the
 wrong shape for a lowerer consuming uniform monadic IR.
 
 ## Background
 
-`lower_monadic/` consumes a uniform monadic IR where every sequencing
+`lower/` consumes a uniform monadic IR where every sequencing
 point is `Bind` and every yielding effect is `Yield`. The MExpr → CExpr
 translation algorithm itself is **correct**: `lower_bind` does textbook
 monadic-CPS reification (lower body first, build K-fun around it, lower
@@ -37,11 +37,11 @@ has `current_arm_k: Option<String>` but the arm-construction code
 
 ## Scope
 
-This refactor touches `src/codegen/lower_monadic/` only. ANF, monadic
+This refactor touches `src/codegen/lower/` only. ANF, monadic
 IR, translation, handler-analysis, effect-opt stub, and toggle wiring
 are out of scope — they are not the source of the issue.
 
-Existing test coverage in `lower_monadic/tests.rs` (3,317 LOC) stays
+Existing test coverage in `lower/tests.rs` (3,317 LOC) stays
 green throughout. The refactor is mechanical and behavior-preserving
 *except* for the arm-K fix in step 3, which is the one new line of
 business logic.
@@ -51,7 +51,7 @@ business logic.
 ### `LowerCtx` value, threaded by argument
 
 ```rust
-// src/codegen/lower_monadic/ctx.rs
+// src/codegen/lower/ctx.rs
 #[derive(Clone)]
 pub(super) struct LowerCtx {
     /// What `Pure(v)` applies — the "tail" target of the current
@@ -181,7 +181,7 @@ Every `lower_*` helper that today reads `self.current_return_k` /
 
 **Verification:**
 - `cargo build` green.
-- `cargo test -p saga lower_monadic` green (existing 3,317 LOC of
+- `cargo test -p saga lower` green (existing 3,317 LOC of
   tests must pass unchanged — this step is purely structural).
 - E2E test suite still failing at exactly the same set of cases as
   before this step (no behavior change).
@@ -261,7 +261,7 @@ failures drive any further refactoring.
   commit per the main planning doc).
 - Renaming `CodegenContext` to `ModuleCodegenContext` (deferred — the
   type-note comment in `Lowerer` can stay).
-- Test reorganization. The 3,317 LOC of `lower_monadic/tests.rs` is
+- Test reorganization. The 3,317 LOC of `lower/tests.rs` is
   big but it is the safety net for this refactor. Reorganizing it
   belongs in a separate pass after the e2e suite is green.
 - Any optimization-stage work. Phase 2 (effect_opt rewrites) does not

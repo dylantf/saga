@@ -15,7 +15,7 @@ Tick boxes as steps land. Each box → one focused agent session.
 - [x] **4.** `src/codegen/monadic/translate.rs` — see stage 10
 - [x] **5.** `src/codegen/monadic/print.rs` — debug pretty-printer
 - [x] **6.** `src/codegen/monadic/effect_opt/` as identity — see stage 11
-- [x] **7.** `src/codegen/lower_monadic/` — see stage 12 (sub-tasks 7a–7g; see "Implementation phases")
+- [x] **7.** `src/codegen/lower/` — see stage 12 (sub-tasks 7a–7g; see "Implementation phases")
   - [x] **7a.** Function/decl scaffolding (stubbed bodies)
   - [x] **7b.** Atom → CExpr
   - [x] **7c.** MExpr structural variants (Pure, Bind, Let, Case, If, App) + DictConstructor tuple synthesis
@@ -72,8 +72,8 @@ pass-by-pass investigation notes.
   value flow.
 
 - [x] **8i. Stale `InlineVal` resolution reaching the new backend.**
-  `@inline val` was removed as a premature optimization. `InlineVal` metadata
-  remains only as unreachable old-path residue until old-path deletion.
+  `@inline val` was removed as a premature optimization. The stale
+  `InlineVal` resolution/runtime metadata has been deleted.
 
 **Milestone:** complete. The new slow path passes the behavioral test suites
 and is the oracle for strategic phase 2. Old Core-shape string assertions that
@@ -131,9 +131,9 @@ The optimizer roadmap defines the finite acceptance target, current completed
 milestones, bounded remaining candidates, accepted slow paths, measurement set,
 and cleanup cadence.
 
-### Cleanup (single mechanical commit)
+### Cleanup
 
-- [ ] Delete old path; rename `lower_monadic/` → `lower/`. See
+- [x] Delete old path; rename `lower_monadic/` → `lower/`. See
       [Cleanup](#cleanup) section for the full checklist.
 
 ## Required reading before working on this
@@ -156,8 +156,8 @@ For anyone (human or agent) implementing any stage of this rewrite:
    unchanged by the rewrite** and must be preserved exactly.
 4. [src/ast.rs](../../src/ast.rs) — `Expr`, `Decl`, `Handler`, `HandlerArm`
    types. The new IR mirrors a subset of these.
-5. [src/codegen/lower/evidence.rs](../../src/codegen/lower/evidence.rs) —
-   shared with the new lowerer. Read to know what helpers exist.
+5. [src/codegen/lower/](../../src/codegen/lower/) — the active uniform
+   lowerer. Read alongside the monadic IR docs when changing Core emission.
 
 Sibling planning docs (older, partially superseded by this one):
 [evidence-passing.md](./evidence-passing.md),
@@ -170,16 +170,15 @@ their guidance on _whether_ to CPS-transform a given site as obsolete.
 
 ## Motivation
 
-Today's lowerer does **selective CPS**: it decides per call site whether the
+The old lowerer did **selective CPS**: it decided per call site whether the
 site needs evidence + return-continuation arguments, based on a
-shape-enumerating pre-pass (`CallEffectMap` in
-[src/codegen/call_effects.rs](../../src/codegen/call_effects.rs)). When the
+shape-enumerating pre-pass (`CallEffectMap`, now deleted). When the
 populator fails to recognize a call shape (novel higher-order pattern,
 polymorphic dispatch, etc.), the lowerer emits a call without evidence/K and
 we get a **runtime arity mismatch** — a miscompile discovered late and only
 by hitting it.
 
-Correctness today depends on completeness of shape recognition, and the case
+Correctness used to depend on completeness of shape recognition, and the case
 set never closes. Each new language feature reopens it.
 
 ## Target
@@ -212,15 +211,11 @@ code translated uniformly.
 
 ## Cross-cutting principles
 
-- **File size discipline.** Several existing codegen files are oversized
-  ([lower/mod.rs](../../src/codegen/lower/mod.rs) at ~4100 LOC,
-  [lower/exprs.rs](../../src/codegen/lower/exprs.rs) at ~2050,
-  [lower/effects.rs](../../src/codegen/lower/effects.rs) at ~1950).
-  The lowerer refactor is the natural opportunity to break these down. New
-  modules introduced by this rewrite (monadic IR, translation, effect optimization,
-  handler analysis) should be split by responsibility from the start, not
-  allowed to grow into multi-thousand-line files. Rough target: any single
-  file over ~800 LOC should justify why it isn't split.
+- **File size discipline.** The deleted old lowerer had multi-thousand-line
+  files. New modules introduced by this rewrite (monadic IR, translation,
+  effect optimization, handler analysis, lowering) should stay split by
+  responsibility. Rough target: any single file over ~800 LOC should justify
+  why it isn't split.
 
 ## Migration strategy
 
@@ -241,40 +236,27 @@ between them. Both entry points need toggles.
 ```rust
 let elaborated = elaborate::elaborate_module(program, mod_result, module_name);
 
-// === OLD PATH ===
-let normalized = normalize::normalize_effects(&elaborated);
-let resolution = resolve::resolve_names(module_name, &normalized, ...);
-let stored = normalized;
-
-// === NEW PATH ===
-// Skip normalize entirely — anf runs at emit time.
-// let resolution = resolve::resolve_names(module_name, &elaborated, ...);
-// let stored = elaborated;
+// Uniform path: skip partial normalize entirely; ANF runs at emit time.
+let resolution = resolve::resolve_names(module_name, &elaborated, ...);
+let stored = elaborated;
 
 Some(CompiledModule {
     elaborated: stored,
     resolution,
     ...
-    call_effects: CallEffectMap::new(),   // unused by new path; populated by old lowerer only
 })
 ```
 
 **`emit_module_with_context`** (final emit):
 
 ```rust
-// === OLD PATH ===
-let program = normalize::normalize_effects(program);
-let resolution_map = resolve::resolve_names(...);
-let cmod = lower::Lowerer::new(...).lower_module(module_name, &program);
-
-// === NEW PATH ===
-// let resolution_map = resolve::resolve_names(...);                // on raw elaborated
-// let effect_info = build_effect_info(check_result, ...);          // narrowed view
-// let handler_info = handler_analysis::analyze(program);
-// let anf = anf::normalize(program.clone());
-// let monadic = monadic::translate(&anf, &resolution_map, &effect_info);
-// let optimized = monadic::effect_opt::run(monadic, &handler_info, &effect_info);
-// let cmod = lower_monadic::Lowerer::new(...).lower_module(module_name, &optimized);
+let resolution_map = resolve::resolve_names(...);                // on raw elaborated
+let effect_info = build_effect_info(check_result, ...);          // narrowed view
+let handler_info = handler_analysis::analyze(program);
+let anf = anf::normalize(program.clone());
+let monadic = monadic::translate(&anf, &resolution_map, &effect_info);
+let optimized = monadic::effect_opt::run(monadic, &handler_info, &effect_info);
+let cmod = lower::Lowerer::new(...).lower_module(module_name, &optimized);
 
 cerl::print_module(&cmod)
 ```
@@ -291,45 +273,37 @@ this matters, caching `MProgram` per module is a follow-up; not now.
 
 ### Why this works
 
-- **Old path stays frozen.** We do not edit
-  [normalize.rs](../../src/codegen/normalize.rs),
-  [call_effects.rs](../../src/codegen/call_effects.rs), or
-  [lower/](../../src/codegen/lower/). Maintenance cost on the old path is
-  ~zero.
-- **New code lives in parallel modules**, not edits to existing ones (see
-  file layout below).
-- **No type coupling.** `lower::Lowerer` and `lower_monadic::Lowerer` are
-  independent types sharing no trait. Both produce `CModule`; the toggle
-  decides which is instantiated. `cerl::print_module` is shared.
+- **Old path is gone.** `normalize.rs`, `call_effects.rs`, and the selective
+  CPS lowerer have been deleted. The uniform pipeline is the only compiled
+  codegen path.
+- **New code lives in staged modules** (ANF, monadic translate, optimizer,
+  lower), with each boundary carrying explicit IR/data.
+- **No type coupling.** The old and new lowerers no longer coexist. The
+  active lowerer consumes optimized monadic IR and produces `CModule`;
+  `cerl::print_module` remains the shared printer.
 - **`CompiledModule` needs no new fields.** New path stores raw
   elaborated AST (skipping normalize); ANF, translation, and optimization
   run fresh inside `emit_module_with_context`. No cross-module `MProgram`
   caching needed — see "Migration strategy" entry points for details.
 - **Shared infrastructure stays shared:**
-  [resolve.rs](../../src/codegen/resolve.rs) (runs in both paths),
-  [lower/evidence.rs](../../src/codegen/lower/evidence.rs) (runtime evidence
-  layout helpers — new lowerer can call them directly).
+  [resolve.rs](../../src/codegen/resolve.rs),
+  [runtime_shape.rs](../../src/codegen/runtime_shape.rs), and
+  [cerl.rs](../../src/codegen/cerl.rs).
 
-### Strict invariant: no imports from old files into new files
+### Strict invariant: no legacy-path imports
 
-The new modules (`anf.rs`, `handler_analysis.rs`, `monadic/`,
-`lower_monadic/`) **must not** import from `normalize.rs`, `call_effects.rs`,
-or `lower/` (except for the explicitly shared modules above:
-`resolve.rs`, `lower/evidence.rs`, and obviously `cerl.rs`). The new path is
-copy-and-add only.
+The active modules (`anf.rs`, `handler_analysis.rs`, `monadic/`, `lower/`)
+must not reintroduce dependencies on deleted selective-CPS concepts such as
+per-site `CallEffectMap` classification or the old partial-normalization pass.
 
-Rationale: anything the new path inherits from old code is a coupling that
-makes the eventual cleanup commit harder. If a helper from the old path is
-genuinely worth reusing, copy it into the new module and let the original
-die with the old path.
+Rationale: the uniform translation should stay correctness-owned by the
+monadic IR and optimizer, not by shape recognition side tables.
 
 Explicitly allowed cross-imports (shared, will outlive the old path):
 
-- `src/codegen/resolve.rs` — backend resolve, used by both
-- `src/codegen/lower/evidence.rs` — runtime evidence layout helpers
+- `src/codegen/resolve.rs` — backend resolve
 - `src/codegen/cerl.rs` — Core Erlang IR and printer
 - `src/codegen/runtime_shape.rs` — runtime layout helpers
-- `src/codegen/lower/errors.rs` — diagnostics helpers (if still useful)
 
 ### Benchmark workflow
 
@@ -345,74 +319,59 @@ are confirmed, a single mechanical commit performs the migration.
 
 **Current readiness scan:**
 
-The new path is active, but the old-path directory is still referenced by a few
-shared or frozen pieces. Do a small prep commit before the destructive
-delete/rename commit:
-
 - Done: type-shape helpers used by shared code now live in
-  `codegen::type_shape`; the old lowerer delegates through its frozen
-  `lower/util.rs` facade.
+  `codegen::type_shape`.
 - Done: `@external` annotation extraction now lives in `codegen::external`
-  instead of `lower/init.rs`.
+  instead of the deleted old-path init code.
 - Done: BEAM-native handler resource metadata used by the typechecker now
   lives in backend-neutral `codegen::native_effects`.
-- Remove old-path-only metadata after the old path is gone:
+- Done: old-path-only `InlineVal` metadata was deleted:
   `ResolvedCodegenKind::InlineVal`, `RuntimeFunctionShape::InlineVal`, and
   `ModuleCodegenInfo::inline_vals`.
-- Remove `CompiledModule::call_effects` once `call_effects.rs` is deleted.
+- Done: `CompiledModule::call_effects` was removed.
 - Done: ignored codegen tests were either deleted as stale old-path shape
   assertions or revived with new-path coverage. `src/codegen/tests.rs` and
   `tests/module_codegen_integration.rs` are fully active; structured
   `let assert` errors and source annotations now pass through the monadic path.
 
-After that prep, the delete/rename step below should be mechanical.
+The old selective-CPS implementation has been removed from the compiled code,
+and the uniform lowerer now owns `src/codegen/lower/`.
 
 **Files / directories to delete:**
 
-- `src/codegen/normalize.rs` — partial-ANF pass; superseded by `anf.rs`.
-- `src/codegen/call_effects.rs` — per-site CPS decision; no analogue in
+- Done: `src/codegen/normalize.rs` — partial-ANF pass; superseded by `anf.rs`.
+- Done: `src/codegen/call_effects.rs` — per-site CPS decision; no analogue in
   the new path (case set is closed by uniform translation).
-- `src/codegen/lower/` — entire directory, including:
+- Done: `src/codegen/lower/` — entire old lowerer directory, including:
   - `lower/mod.rs` (~4100 LOC) — old lowerer
   - `lower/exprs.rs` (~2050) — old expression lowering
   - `lower/effects.rs` (~1950) — selective-CPS emission, `lower_effect_call`,
     `lower_with`, `build_op_handler_fun`, etc.
   - `lower/pats.rs`, `lower/builtins.rs`, `lower/beam_interop.rs`,
-    `lower/init.rs`, `lower/util.rs` — all replaced by their equivalents
-    in `lower_monadic/`.
-- **Keep, move to new location:**
-  - `lower/evidence.rs` — shared with new lowerer during migration; on
-    cleanup, moves to `src/codegen/evidence.rs` (or stays under the renamed
-    `lower/` per step below).
-  - `lower/errors.rs` — diagnostics helpers; either moves alongside
-    `evidence.rs` or stays under renamed `lower/`.
+    `lower/init.rs`, `lower/util.rs` — all replaced by the uniform lowerer.
 
 **Fields / methods to remove:**
 
-- `CompiledModule::call_effects` ([src/codegen/mod.rs:27](../../src/codegen/mod.rs#L27))
-  and the `set_compiled_call_effects` writeback — both belong to the old
-  call-effects pre-pass.
+- Done: `CompiledModule::call_effects` and old-path writeback plumbing.
 
 **Entry-point edits ([src/codegen/mod.rs](../../src/codegen/mod.rs)):**
 
-1. Delete the `// === OLD PATH ===` blocks from `compile_module_from_result`
-   and `emit_module_with_context`. Uncomment the `// === NEW PATH ===`
-   blocks (they become the only path).
-2. Remove the `pub mod normalize;` and `pub mod call_effects;` declarations.
-3. Remove `pub mod lower;` (or rename per step 4).
+1. Done: delete the `// === OLD PATH ===` blocks from
+   `compile_module_from_result` and `emit_module_with_context`; the uniform
+   path is now the only path.
+2. Done: remove the `pub mod normalize;` and `pub mod call_effects;`
+   declarations.
+3. Done: remove `pub mod lower;`.
 
 **Module rename:**
 
-4. Rename `src/codegen/lower_monadic/` → `src/codegen/lower/`. Update the
-   `pub mod` declaration and all `lower_monadic::` imports in the new path's
-   files to `lower::`.
+4. Done: rename `src/codegen/lower_monadic/` → `src/codegen/lower/` and
+   update Rust imports.
 
 **Test fallout:**
 
-5. Any tests that import from frozen paths
-   (`crate::codegen::normalize`, `crate::codegen::call_effects`,
-   `crate::codegen::lower::Lowerer` with old-shape arguments) — delete or
-   migrate to the new lowerer.
+5. Done: tests that imported frozen paths were deleted or migrated to the
+   uniform lowerer.
 
 **Sibling planning docs** ([evidence-passing.md](./evidence-passing.md),
 [effectful-call-detection.md](./effectful-call-detection.md),
@@ -422,8 +381,8 @@ under uniform translation; their notes on runtime evidence layout may
 still be relevant and can be folded into
 [docs/effect-implementation.md](../effect-implementation.md).
 
-One commit, mechanical. After this commit, the only remaining trace of
-the old path is in git history.
+After this cleanup, the only remaining trace of the old path is in git
+history and historical planning prose.
 
 ## Pipeline shape (target)
 
@@ -433,11 +392,11 @@ resolve → typecheck → elaborate
   → ANF / let-normalize        (new — anf.rs)
   → monadic translation        (new — AST → MExpr)
   → effect optimization        (new — bind-collapse, Bind→Let promotion, tail-resumptive direct-call)
-  → lower                      (new lower_monadic/ — consumes MExpr)
+  → lower                      (new lower/ — consumes MExpr)
   → emit Core Erlang
 ```
 
-Compare to today:
+Historical old path:
 
 ```
 resolve → typecheck → elaborate
@@ -489,12 +448,12 @@ Per [docs/compiler-overview.md](../compiler-overview.md) and
 | Concern                     | Current location                                                                                  | Disposition                                                                               |
 | --------------------------- | ------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------- |
 | Effect-row inference        | `src/typechecker/`                                                                                | unchanged                                                                                 |
-| Evidence vector format      | runtime + `lower/evidence.rs`                                                                     | unchanged (shared with new lowerer)                                                       |
-| `with` ⇒ `insert_canonical` | `lower/effects.rs::lower_with`                                                                    | helper reused via `lower/evidence.rs`; emission reimplemented in new lowerer              |
-| Partial ANF (effect args)   | `src/codegen/normalize.rs` (997 LOC)                                                              | frozen; new `anf.rs` does general ANF; normalize.rs deleted at cleanup                    |
-| Per-site CPS decision       | `src/codegen/call_effects.rs` (1086 LOC)                                                          | frozen; new path doesn't have an analogue; deleted at cleanup                             |
-| Selective CPS emission      | `src/codegen/lower/effects.rs` (1952 LOC), `lower/mod.rs` (4111 LOC), `lower/exprs.rs` (2056 LOC) | frozen; new `lower_monadic/` is a fresh implementation; old `lower/` deleted at cleanup   |
-| Handler arms / `resume`     | `lower/effects.rs::build_op_handler_fun`                                                          | reimplemented in new lowerer; new `handler_analysis.rs` adds `one_shot`/`tail_resumptive` |
+| Evidence vector format      | runtime evidence bridge                                                                           | unchanged                                                                                 |
+| `with` ⇒ `insert_canonical` | `src/codegen/lower/effects.rs`                                                                    | implemented in the uniform lowerer                                                        |
+| Partial ANF (effect args)   | deleted `src/codegen/normalize.rs`                                                                | replaced by general `anf.rs`                                                              |
+| Per-site CPS decision       | deleted `src/codegen/call_effects.rs`                                                             | no analogue; uniform translation owns correctness                                         |
+| Selective CPS emission      | deleted old `src/codegen/lower/`                                                                  | replaced by the uniform lowerer now at `src/codegen/lower/`                               |
+| Handler arms / `resume`     | `src/codegen/lower/effects.rs`                                                                    | implemented with handler analysis + monadic result delimiters                             |
 
 ## Pipeline stages (detailed)
 
@@ -645,12 +604,10 @@ identity` into `ResolutionResult`. AST stays source-shaped.
   `bind(e, λx. body)`, no conditional rule).
 - **Inputs:** elaborated `Program`.
 - **Outputs:** `Program` in A-normal form.
-- **Files:** new module — `src/codegen/anf.rs`. Do **not** extend the
-  existing [src/codegen/normalize.rs](../../src/codegen/normalize.rs); that
-  file belongs to the old path and stays frozen until cleanup.
-- **Disposition:** **new.** `normalize.rs` is partial ANF for effect-arg
-  positions only; `anf.rs` does the general transform. The old normalize
-  pass is not a usable starting point — different invariants, different
+- **Files:** `src/codegen/anf.rs`.
+- **Disposition:** **new.** The deleted `normalize.rs` was partial ANF for
+  effect-arg positions only; `anf.rs` does the general transform. The old
+  normalize pass was not a usable starting point — different invariants, different
   output shape — so this is a fresh implementation, not a port.
 - **Granularity: full ANF, atoms stay atomic.** Every non-atomic subexpression
   gets bound to a `let`. _Atomic_ expressions — variables, literals, and
@@ -727,7 +684,7 @@ identity` into `ResolutionResult`. AST stays source-shaped.
   Prefix `__anf_` is distinct from old path's `__eff` so generated names are
   visually distinguishable in emitted `.core` files during benchmark toggle.
   Promote to a shared module (e.g. `src/codegen/monadic/fresh.rs`) if effect optimization
-  or `lower_monadic/` need their own fresh names.
+  or `lower/` need their own fresh names.
 
 - **`Expr::rebuild_like` vs. `Expr::synth` is load-bearing.** `ResolutionMap`
   is keyed by source `NodeId`s. ANF must use `rebuild_like` when a source
@@ -845,7 +802,7 @@ identity` into `ResolutionResult`. AST stays source-shaped.
   - Synthesized inlinings do not appear in `ResolutionMap`; the new lowerer
     handles them via direct `apply` on closures it already has.
 
-### 12. Lower **(new — parallel module `lower_monadic/`)**
+### 12. Lower **(new — parallel module `lower/`)**
 
 - **What:** translate the optimized monadic IR into Core Erlang (`CModule`).
   Handles handler emission, evidence threading at `with`, BEAM-native effect
@@ -853,19 +810,13 @@ identity` into `ResolutionResult`. AST stays source-shaped.
 - **Inputs:** monadic IR program, `ResolutionMap`, `ConstructorAtoms`,
   module codegen context.
 - **Outputs:** `CModule`.
-- **Files:** new module — `src/codegen/lower_monadic/`. The old
-  [src/codegen/lower/](../../src/codegen/lower/) stays untouched until
-  cleanup. Renamed to `lower/` only in the final cleanup commit.
+- **Files:** `src/codegen/lower/`.
 - **Disposition:** **new module, fresh implementation.** Not a refactor of
   the old lowerer. Old lowerer's selective-CPS branching, per-call
   conditional emission, and `CallEffectMap` consumption have no analogue
   in the new lowerer — it consumes uniform monadic IR (`Pure` → value
   emission, `Yield` → evidence lookup + apply, `Bind` → sequenced
   let-bindings).
-- **Shared with old path** (allowed cross-imports):
-  - [lower/evidence.rs](../../src/codegen/lower/evidence.rs) — evidence
-    layout, `insert_canonical`, `project_evidence`, `find_evidence`,
-    `EvidenceLayout`.
   - [cerl.rs](../../src/codegen/cerl.rs) — Core Erlang IR and printer.
   - [runtime_shape.rs](../../src/codegen/runtime_shape.rs) — runtime layout
     helpers.
@@ -918,9 +869,9 @@ Within strategic phase 1, the module order is:
 | 2   | `src/codegen/anf.rs` + `FreshNames`           | Foundation for translation; mechanical; depends on nothing else new                              | ~1 day       |
 | 3   | `src/codegen/monadic/ir.rs`                   | Type defs only; paste from [monadic-ir-spec.md](./uniform-effect-translation/monadic-ir-spec.md) | ~few hours   |
 | 4   | `src/codegen/monadic/translate.rs`            | Mechanical given ANF + ir.rs                                                                     | ~2 days      |
-| 5   | `src/codegen/monadic/print.rs`                | Debug pretty-printer; useful before lower_monadic so we can inspect IR                           | ~0.5 day     |
+| 5   | `src/codegen/monadic/print.rs`                | Debug pretty-printer; useful before lower so we can inspect IR                           | ~0.5 day     |
 | 6   | `src/codegen/monadic/effect_opt/` as identity | Stub `fn run(m, _h) -> m`; unblocks lowerer testing                                              | ~hour        |
-| 7   | `src/codegen/lower_monadic/`                  | The bulk; every MExpr variant + handler emission + BEAM-native effects                           | ~5–8 days    |
+| 7   | `src/codegen/lower/`                  | The bulk; every MExpr variant + handler emission + BEAM-native effects                           | ~5–8 days    |
 | 8   | Wire toggle in `src/codegen/mod.rs`           | Two entry points; comment-toggle pattern                                                         | ~hour        |
 
 After step 8 and the phase-1 parity blockers above, the new path is

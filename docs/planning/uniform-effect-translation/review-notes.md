@@ -44,7 +44,7 @@ Compared with `main`, this branch is roughly:
   - `src/codegen/anf/`
   - `src/codegen/handler_analysis.rs`
   - `src/codegen/monadic/`
-  - `src/codegen/lower_monadic/`
+  - `src/codegen/lower/`
 - Existing-path touch points:
   - `src/codegen/mod.rs`
   - `src/codegen/resolve.rs`
@@ -88,7 +88,7 @@ Use it as the first place to look for real regressions.
    atom (`__saga_abort__K_ret0`). A callee's prompt then caught a *caller's*
    abort by string match and unwrapped it — a re-aborting handler (`fail e =
    fail! ...`) called through a function boundary leaked its abort as a value.
-   Fix: `fresh_abort_marker` in `lower_monadic/mod.rs` mints a never-reset,
+   Fix: `fresh_abort_marker` in `lower/mod.rs` mints a never-reset,
    module-qualified marker. Static-per-site (vs Koka's per-activation) is sound
    under deep-handler + evidence dispatch; see the note on `fresh_abort_marker`
    and [[koka-faithful-abort-routing]]. Guard:
@@ -244,8 +244,8 @@ ABI rule in several handwritten places. Treat these as cleanup blockers before
 phase-2 optimization, even when tests are green.
 
 - **External-call ABI is shared.** Saturated external calls in
-  `lower_monadic/app.rs` and first-class external wrappers in
-  `lower_monadic/decls.rs` now both route through
+  `lower/app.rs` and first-class external wrappers in
+  `lower/decls.rs` now both route through
   `util::lower_external_native_call`; callback-shaped `@external` params are
   detected with shared type helpers and adapted by the generated wrapper.
 - **Handler `with` delimiter logic is duplicated.** `lower_with_static` and
@@ -254,7 +254,7 @@ phase-2 optimization, even when tests are green.
   has extra handler-value extraction, but the delimiter should be one helper
   with mode-specific inputs.
 - **Native handler bootstrap is becoming a second lowering language.**
-  `lower_monadic/bootstrap.rs` now keeps static native effect metadata in a
+  `lower/bootstrap.rs` now keeps static native effect metadata in a
   child module, but Ref/Vec and callback-invoking ops are still custom Core
   Erlang emitters. Prefer a small native-op DSL/descriptor plus focused escape
   hatches over more handwritten nested `CExpr` trees.
@@ -262,10 +262,10 @@ phase-2 optimization, even when tests are green.
   field order should come from structural metadata (`RecordInfo`/type info), not
   from parsing the encoded tag string in lowering.
 - **Old-path helper copies should either become shared code or disappear with
-  old path deletion.** `lower_monadic/util.rs` is an acceptable temporary clone
+  old path deletion.** `lower/util.rs` is an acceptable temporary clone
   because the agent guide forbids imports from `lower/`, but it should not grow
   new semantics independently.
-- **Shape-heavy unit tests are useful but expensive.** `lower_monadic/tests.rs`
+- **Shape-heavy unit tests are useful but expensive.** `lower/tests.rs`
   is large because it asserts exact Core Erlang shapes. Keep a small set of
   ABI-shape tests, but prefer runtime/e2e/property coverage for behavior so
   local refactors do not require rewriting thousands of brittle assertions.
@@ -290,7 +290,7 @@ Review checkpoints:
   leave `resolve.rs` depending on deleted lower modules.
 - `ResolvedCodegenKind::InlineVal` — **RESOLVED, see Decisions Log.** The
   `@inline val` optimization was removed, so this kind is no longer produced and
-  the `lower_monadic::atom` panic is now unreachable. The two
+  the `lower::atom` panic is now unreachable. The two
   `qualified_inline_val_*` tests it mapped to were deleted. The variant + the
   `inline_vals` field remain only as dead code for the frozen old path; delete
   with the old path.
@@ -474,9 +474,9 @@ Review checkpoints:
 
 Scope:
 
-- `src/codegen/lower_monadic/app.rs`
-- callable value emission in `src/codegen/lower_monadic/atom.rs`
-- callable definitions/wrappers in `src/codegen/lower_monadic/decls.rs`
+- `src/codegen/lower/app.rs`
+- callable value emission in `src/codegen/lower/atom.rs`
+- callable definitions/wrappers in `src/codegen/lower/decls.rs`
 - app translation in `src/codegen/monadic/translate/expr.rs`
 - backend resolution metadata consumed by the above
 
@@ -571,7 +571,7 @@ Scope:
 - Elaboration of field access/update record identity in `src/elaborate.rs`.
 - `MExpr::FieldAccess` / `MExpr::RecordUpdate` layout payloads in
   `src/codegen/monadic/ir.rs`.
-- Lowering in `src/codegen/lower_monadic/exprs_edge.rs`.
+- Lowering in `src/codegen/lower/exprs_edge.rs`.
 - Runtime tuple tag expectations in pattern lowering and old/new record
   construction paths.
 
@@ -592,7 +592,7 @@ Findings:
 - `ExprKind::FieldAccess` / `ExprKind::RecordUpdate` and the monadic IR now
   carry `anon_fields: Option<Vec<String>>`. Elaboration fills this from
   `Type::Record` using the canonical sorted field order.
-- `lower_monadic::exprs_edge` resolves field order from structural metadata:
+- `lower::exprs_edge` resolves field order from structural metadata:
   anonymous records use `anon_fields`; named records use
   `ModuleCodegenInfo::record_fields`. It no longer decodes the runtime tag.
 - Tests cover anonymous field access/update with underscore field names and a
@@ -642,11 +642,11 @@ Decision:
 
 Scope:
 
-- `src/codegen/lower_monadic/bootstrap.rs`
-- Native handler installation from `lower_monadic/effects.rs`
+- `src/codegen/lower/bootstrap.rs`
+- Native handler installation from `lower/effects.rs`
 - Native effect declarations in `src/stdlib/Actor.saga`, `Ref.saga`,
   `Vec.saga`
-- Shape tests in `src/codegen/lower_monadic/tests.rs`
+- Shape tests in `src/codegen/lower/tests.rs`
 - Runtime/e2e coverage in actor/ref/vector examples and tests
 
 Contract:
@@ -711,9 +711,9 @@ Recommended cleanup later:
 
 Scope:
 
-- `src/codegen/lower_monadic/effects.rs`
-- `src/codegen/lower_monadic/exprs.rs::lower_resume`
-- `src/codegen/lower_monadic/ctx.rs`
+- `src/codegen/lower/effects.rs`
+- `src/codegen/lower/exprs.rs::lower_resume`
+- `src/codegen/lower/ctx.rs`
 - `MExpr::contains_resume` / `Atom::contains_resume`
 - E2E finally tests in `tests/e2e/tests/effects_test.saga`
 
@@ -916,7 +916,7 @@ while preserving the slow-path oracle.
 
 - **Abstraction cleanup — DONE for the current batch.** First low-risk
   extraction centralized the marked control-result protocol in
-  `lower_monadic::util`: shared
+  `lower::util`: shared
   `ABORT_TAG` / `VALUE_RESULT_TAG`, foreign-control propagation arms, and
   "apply foreign control to K" arms; follow-up helper constructors now cover
   the common marked-control tuple/pattern shapes. Second extraction added a
@@ -1015,5 +1015,5 @@ while preserving the slow-path oracle.
 git diff --stat main...HEAD
 git diff --name-status main...HEAD
 rg -n "crate::codegen::lower::|normalize::|call_effects::|TODO|panic!|unimplemented|not implemented|deferred|InlineVal" \
-  src/codegen/anf src/codegen/monadic src/codegen/lower_monadic src/codegen/mod.rs src/codegen/resolve.rs
+  src/codegen/anf src/codegen/monadic src/codegen/lower src/codegen/mod.rs src/codegen/resolve.rs
 ```

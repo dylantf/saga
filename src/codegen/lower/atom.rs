@@ -346,9 +346,6 @@ impl<'ctx> Lowerer<'ctx> {
     ///
     /// Copied from the old lowerer (`lower/mod.rs::lower_resolved_value_ref`)
     /// and stripped to the value-only path the new lowerer needs:
-    ///   - `InlineVal` — old-path-only perf optimization; the new path
-    ///     gets equivalent perf from effect-optimization (bind-collapse +
-    ///     Bind→Let). Hard panic if encountered (see arm body).
     ///   - `Intrinsic` becomes a `FunRef` at its declared arity. Intrinsics
     ///     are direct BIFs / compiler primitives with no Saga wrapper, so the
     ///     uniform-shape +2 expansion does NOT apply to them.
@@ -363,15 +360,6 @@ impl<'ctx> Lowerer<'ctx> {
     ///     constant value.
     pub(super) fn lower_resolved_value_ref(&mut self, resolved: ResolvedSymbol) -> CExpr {
         match resolved.kind {
-            ResolvedCodegenKind::InlineVal => {
-                panic!(
-                    "InlineVal resolution not used in new path — vals are uniformly emitted as \
-                     arity-0 constants; this resolution kind should not appear post-translation. \
-                     If it does, the translator or backend-resolve is producing stale resolution \
-                     info. (canonical_name={})",
-                    resolved.canonical_name
-                )
-            }
             ResolvedCodegenKind::Intrinsic { arity, .. } => {
                 // `@builtin` decls are wrapped at their defining module under
                 // the uniform calling convention by

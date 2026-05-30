@@ -192,8 +192,6 @@ pub enum ResolvedCodegenKind {
         id: crate::intrinsics::IntrinsicId,
         arity: usize,
     },
-    /// An `@inline val`; lowering clones the canonical lowered RHS.
-    InlineVal,
 }
 
 impl ResolvedCodegenKind {
@@ -202,7 +200,6 @@ impl ResolvedCodegenKind {
             ResolvedCodegenKind::BeamFunction { arity, .. }
             | ResolvedCodegenKind::ExternalFunction { arity, .. }
             | ResolvedCodegenKind::Intrinsic { arity, .. } => *arity,
-            ResolvedCodegenKind::InlineVal => 0,
         }
     }
 
@@ -210,7 +207,7 @@ impl ResolvedCodegenKind {
         match self {
             ResolvedCodegenKind::BeamFunction { effects, .. }
             | ResolvedCodegenKind::ExternalFunction { effects, .. } => effects,
-            ResolvedCodegenKind::Intrinsic { .. } | ResolvedCodegenKind::InlineVal => &[],
+            ResolvedCodegenKind::Intrinsic { .. } => &[],
         }
     }
 }
@@ -960,7 +957,7 @@ fn collect_local_fun_arities(program: &Program) -> HashMap<String, usize> {
 }
 
 /// Classify a declaration into its codegen kind by consulting the module's
-/// `intrinsic_exports` / `inline_vals` / `external_funs` tables. Shared by
+/// `intrinsic_exports` / `external_funs` tables. Shared by
 /// local-scope registration (`erlang_mod_for_beam = None`) and imported-scope
 /// registration (`erlang_mod_for_beam = Some(...)`).
 ///
@@ -982,9 +979,6 @@ fn classify_codegen_kind(
             id: *intrinsic,
             arity,
         };
-    }
-    if info.is_some_and(|info| info.inline_vals.iter().any(|(n, _)| n == name)) {
-        return ResolvedCodegenKind::InlineVal;
     }
     if let Some((_, target_mod, target_fun, _)) = info.and_then(|info| {
         info.external_funs

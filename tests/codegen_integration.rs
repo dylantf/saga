@@ -96,7 +96,6 @@ fn emit_elaborated_inner_with_entry(
                 elaborated: Vec::new(),
                 resolution: codegen::resolve::ResolutionMap::new(),
                 front_resolution: Default::default(),
-                call_effects: codegen::call_effects::CallEffectMap::new(),
             },
         );
     }

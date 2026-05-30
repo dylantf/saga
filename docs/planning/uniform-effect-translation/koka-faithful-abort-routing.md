@@ -101,7 +101,7 @@ tuple/CPS encoding rather than introducing a literal `Pure | Yield` IR node:
   `fail_inside_nonresuming_arm_captures_outer_prompt`.
 - **Markers must be globally unique, not per-function** (commit `176492a`). The
   marker atom is built once per lexical `with` site by `fresh_abort_marker`
-  (`lower_monadic/mod.rs`) from a never-reset, module-qualified counter — NOT
+  (`lower/mod.rs`) from a never-reset, module-qualified counter — NOT
   from the per-function `ret_k` counter (which resets at every function entry
   and made the first `with` in every function share one atom, so a callee's
   prompt caught a caller's abort). Static-per-site (vs Koka's fresh-per-
@@ -237,7 +237,7 @@ Keep both tests green when touching bind, resume, or handler prompt lowering.
 
 ## Step 2: Make Foreign Propagation Locally
 
-Temporarily change `src/codegen/lower_monadic/exprs.rs::lower_resume` so foreign
+Temporarily change `src/codegen/lower/exprs.rs::lower_resume` so foreign
 abort tuples propagate unchanged:
 
 ```text
@@ -259,11 +259,11 @@ Keep this as the debugging posture while fixing continuation construction.
 
 Focus on these paths:
 
-- `src/codegen/lower_monadic/effects.rs::lower_with_static`
-- `src/codegen/lower_monadic/effects.rs::wrap_with_result_delimiter`
-- `src/codegen/lower_monadic/effects.rs::lower_yield`
-- `src/codegen/lower_monadic/exprs.rs::lower_bind`
-- `src/codegen/lower_monadic/exprs.rs::lower_value_position_bind`
+- `src/codegen/lower/effects.rs::lower_with_static`
+- `src/codegen/lower/effects.rs::wrap_with_result_delimiter`
+- `src/codegen/lower/effects.rs::lower_yield`
+- `src/codegen/lower/exprs.rs::lower_bind`
+- `src/codegen/lower/exprs.rs::lower_value_position_bind`
 
 For the inner-abort case:
 

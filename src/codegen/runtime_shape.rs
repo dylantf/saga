@@ -19,7 +19,6 @@ pub enum RuntimeFunctionShape {
     Pure,
     Cps(CpsShape),
     Intrinsic,
-    InlineVal,
 }
 
 impl RuntimeFunctionShape {
@@ -50,7 +49,6 @@ impl RuntimeFunctionShape {
     ) -> Self {
         match &resolved.kind {
             ResolvedCodegenKind::Intrinsic { .. } => RuntimeFunctionShape::Intrinsic,
-            ResolvedCodegenKind::InlineVal => RuntimeFunctionShape::InlineVal,
             ResolvedCodegenKind::BeamFunction { effects, .. }
             | ResolvedCodegenKind::ExternalFunction { effects, .. } => {
                 let fallback = fallback_ty
@@ -78,18 +76,14 @@ impl RuntimeFunctionShape {
     pub fn cps_shape(&self) -> Option<CpsShape> {
         match self {
             RuntimeFunctionShape::Cps(shape) => Some(shape.clone()),
-            RuntimeFunctionShape::Pure
-            | RuntimeFunctionShape::Intrinsic
-            | RuntimeFunctionShape::InlineVal => None,
+            RuntimeFunctionShape::Pure | RuntimeFunctionShape::Intrinsic => None,
         }
     }
 
     pub fn expanded_arity(&self, base_arity: usize) -> usize {
         match self {
             RuntimeFunctionShape::Cps(_) => base_arity + 2,
-            RuntimeFunctionShape::Pure
-            | RuntimeFunctionShape::Intrinsic
-            | RuntimeFunctionShape::InlineVal => base_arity,
+            RuntimeFunctionShape::Pure | RuntimeFunctionShape::Intrinsic => base_arity,
         }
     }
 }

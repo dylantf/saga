@@ -13,7 +13,7 @@ use crate::typechecker::Type;
 /// Count the number of curried arrows in a function type — i.e. the user-arg
 /// arity of a Saga callable with this type. Returns 0 for non-function types.
 /// Duplicate of `function_param_count` in `monadic::translate::expr` (kept
-/// local to avoid a cross-module dependency from `lower_monadic` into
+/// local to avoid a cross-module dependency from `lower` into
 /// `translate` internals).
 fn arrow_count(ty: &Type) -> usize {
     let mut count = 0;
@@ -194,7 +194,6 @@ impl<'ctx> Lowerer<'ctx> {
                 ResolvedCodegenKind::BeamFunction { arity, effects, .. }
                 | ResolvedCodegenKind::ExternalFunction { arity, effects, .. } => (*arity, effects),
                 ResolvedCodegenKind::Intrinsic { arity, .. } => (*arity, &[]),
-                ResolvedCodegenKind::InlineVal => return None,
             };
             let uniform = self.uniform_arity_for_resolved(arity, effects, &resolved.name);
             // Vals (uniform == 0) aren't uniform callables; skip them.

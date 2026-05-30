@@ -45,8 +45,8 @@ important files from this detour are:
 
 - `src/codegen/mod.rs`
 - `src/codegen/monadic/translate/mod.rs`
-- `src/codegen/lower_monadic/mod.rs`
-- `src/codegen/lower_monadic/bootstrap.rs`
+- `src/codegen/lower/mod.rs`
+- `src/codegen/lower/bootstrap.rs`
 - `src/codegen/tests.rs`
 - `docs/planning/uniform-effect-translation/review-notes.md`
 
@@ -262,7 +262,7 @@ Status: **green** after the abstraction cleanup batch.
   - `1121 passed; 0 failed; 12 ignored`
 - `cargo test -q --test codegen_integration`
   - `102 passed`
-- `cargo test -q -p saga --lib codegen::lower_monadic`
+- `cargo test -q -p saga --lib codegen::lower`
   - `93 passed`
 - `cargo test -q --test effect_property_tests`
   - `63 passed`
@@ -283,7 +283,7 @@ Status: **green** for the first native direct-call milestone.
 
 - `cargo test -q -p saga --lib codegen::monadic::effect_opt`
   - `34 passed`
-- `cargo test -q -p saga --lib codegen::lower_monadic`
+- `cargo test -q -p saga --lib codegen::lower`
   - `93 passed`
 - `cargo test -q --test codegen_integration`
   - `102 passed`

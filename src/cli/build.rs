@@ -971,10 +971,9 @@ pub fn build_project_ext(
         }
 
         let elaborated = elaborate::elaborate_module(&program, &mod_result, module_name);
-        let normalized = codegen::normalize::normalize_effects(&elaborated);
         let resolution = codegen::resolve::resolve_names(
             module_name,
-            &normalized,
+            &elaborated,
             codegen_info_map,
             &result.prelude_imports,
             &mod_result.resolution,
@@ -986,10 +985,9 @@ pub fn build_project_ext(
                     .get(module_name)
                     .cloned()
                     .unwrap_or_default(),
-                elaborated: normalized,
+                elaborated,
                 resolution,
                 front_resolution: mod_result.resolution.clone(),
-                call_effects: codegen::call_effects::CallEffectMap::new(),
             },
         );
     }
@@ -1005,7 +1003,6 @@ pub fn build_project_ext(
                 elaborated: main_elaborated,
                 resolution: codegen::resolve::ResolutionMap::new(),
                 front_resolution: result.resolution.clone(),
-                call_effects: codegen::call_effects::CallEffectMap::new(),
             },
         );
         let source_file = main_source
@@ -1166,7 +1163,6 @@ pub fn build_script(file: &str, profile: &str) -> ScriptBuild {
             elaborated,
             resolution: codegen::resolve::ResolutionMap::new(),
             front_resolution: result.resolution.clone(),
-            call_effects: codegen::call_effects::CallEffectMap::new(),
         },
     );
 
