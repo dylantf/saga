@@ -1,6 +1,6 @@
 # Interprocedural Handler Specialization
 
-Status: **milestone 1 implemented**.
+Status: **milestone 2 implemented**.
 
 The monadic optimizer can currently direct-call only when the `Yield` is
 lexically inside the handled body:
@@ -125,14 +125,54 @@ come from simple helper boundaries.
 - Multi-yield helper does not inline, even if one yield would direct-call.
 - Body-size budget prevents large helper inlining.
 
+## Milestone 2: Conservative Native Function Variants
+
+Implemented in `src/codegen/monadic/effect_opt/mod.rs`.
+
+Generate specialized same-module function siblings when a call happens under a
+known native handler stack:
+
+```text
+with beam_actor { helper () }
+```
+
+becomes a call to a generated helper variant whose body is optimized under the
+native handler stack. The original function remains emitted; entry-reachable
+stats are the useful metric for this milestone because whole-program stats now
+include both the original slow-path function and the generated fast-path
+variant.
+
+Eligibility:
+
+- callee is a same-module `App(Var(f), args)`;
+- callee has exactly one clause;
+- clause has no guard;
+- callee is not directly recursive;
+- call is saturated;
+- params are only supported first-milestone patterns:
+  - `Pat::Var`,
+  - `Pat::Wildcard`,
+  - `Pat::Lit(Unit)`;
+- body size is under a fixed budget;
+- the current handler stack contains at least one native handler and no static
+  handler frame;
+- the callee body exposes a direct-call opportunity under that native stack;
+- do not specialize generated variants again.
+
+Dynamic/composite/static same-effect interactions stay conservative. Dynamic
+and composite handlers are represented as blocker frames in the stack key; a
+variant generated under such a stack preserves that shadowing context but only
+native frames can introduce direct calls.
+
+`examples/29-actors.saga` is the first measurement target. The whole-program
+stats get one generated declaration, but the entry-reachable section drops the
+residual native yields for `self` and most `send` calls and replaces them with
+direct `erlang:self` / `erlang:send` calls.
+
 ## Open Follow-Up
 
-If same-module inlining produces useful stats, design function-variant
-specialization as a separate stage. A quick native-variant prototype showed the
-main design wrinkle: redirecting a call to a specialized sibling improves that
-call path, but whole-program structural stats get worse unless the original
-function is proven dead or the stats report reachability-aware counts. Do not
-land function variants until the design includes:
+Function variants are still deliberately native-only. Before expanding them to
+static Saga handlers or cross-module calls, decide:
 
 - a code-size policy;
 - a reachability/export policy for keeping or dropping original functions;

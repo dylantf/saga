@@ -115,11 +115,14 @@ call path while increasing whole-program emitted IR. Use this before choosing
 the next optimizer milestone.
 
 **Latest optimizer milestone:** interprocedural handler specialization
-milestone 1 is implemented; see
+milestone 2 is implemented; see
 [interprocedural-handler-specialization.md](./uniform-effect-translation/interprocedural-handler-specialization.md).
 It performs conservative same-module helper inlining under a known handler
-stack for single-clause, single-yield helpers. Function-variant generation is
-deliberately deferred.
+stack for single-clause, single-yield helpers, and generates conservative
+same-module native function variants for calls under native handler stacks.
+The variant path currently targets native direct-call exposure only; static
+handler variants, cross-module variants, and dead-source-function cleanup remain
+future optimization work.
 
 ### Cleanup (single mechanical commit)
 

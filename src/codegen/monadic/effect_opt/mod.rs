@@ -56,6 +56,9 @@ struct Optimizer<'info, 'data> {
     effect_info: &'info EffectInfo<'data>,
     handler_stack: Vec<HandlerFrame>,
     inline_candidates: HashMap<String, InlineCandidate>,
+    variant_candidates: HashMap<String, VariantCandidate>,
+    generated_variant_names: HashSet<String>,
+    pending_variants: Vec<MDecl>,
     inline_blocked_names: Vec<String>,
 }
 
@@ -78,6 +81,11 @@ enum HandlerFrame {
 struct InlineCandidate {
     params: Vec<Pat>,
     body: MExpr,
+}
+
+#[derive(Debug, Clone)]
+struct VariantCandidate {
+    binding: MFunBinding,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -139,6 +147,9 @@ impl<'info, 'data> Optimizer<'info, 'data> {
             effect_info,
             handler_stack: Vec::new(),
             inline_candidates: HashMap::new(),
+            variant_candidates: HashMap::new(),
+            generated_variant_names: HashSet::new(),
+            pending_variants: Vec::new(),
             inline_blocked_names: Vec::new(),
         }
     }
@@ -147,6 +158,8 @@ impl<'info, 'data> Optimizer<'info, 'data> {
         let mut changed = true;
         while changed {
             self.inline_candidates = collect_inline_candidates(&program);
+            self.variant_candidates = collect_variant_candidates(&program);
+            self.pending_variants.clear();
             changed = false;
             program = program
                 .into_iter()
@@ -156,6 +169,10 @@ impl<'info, 'data> Optimizer<'info, 'data> {
                     decl
                 })
                 .collect();
+            if !self.pending_variants.is_empty() {
+                changed = true;
+                program.append(&mut self.pending_variants);
+            }
         }
         program
     }
@@ -197,6 +214,7 @@ impl<'info, 'data> Optimizer<'info, 'data> {
 
     fn optimize_expr(&mut self, expr: MExpr) -> (MExpr, Change) {
         let (expr, child_change) = self.optimize_children(expr);
+        let (expr, variant_change) = self.try_native_function_variant_call(expr);
         let (expr, inline_change) = self.try_inline_helper_call(expr);
         let (expr, native_change) = self.try_native_direct_call(expr);
         let (expr, finally_direct_change) = self.try_finally_direct_call(expr);
@@ -204,6 +222,7 @@ impl<'info, 'data> Optimizer<'info, 'data> {
         let (expr, collapse_change) = self.try_bind_collapse(expr);
         let (expr, let_change) = self.try_bind_to_let(expr);
         let mut change = child_change;
+        change.mark_if(variant_change);
         change.mark_if(inline_change);
         change.mark_if(native_change);
         change.mark_if(finally_direct_change);
@@ -917,6 +936,92 @@ impl<'info, 'data> Optimizer<'info, 'data> {
         out
     }
 
+    fn try_native_function_variant_call(&mut self, expr: MExpr) -> (MExpr, Change) {
+        if !self.opts.native_function_variants() || !self.native_variant_stack_eligible() {
+            return (expr, Change::Unchanged);
+        }
+
+        let MExpr::App { head, args, source } = expr else {
+            return (expr, Change::Unchanged);
+        };
+
+        let Atom::Var {
+            name,
+            source: head_source,
+        } = &head
+        else {
+            return (MExpr::App { head, args, source }, Change::Unchanged);
+        };
+        if is_generated_variant_name(&name.name)
+            || self.inline_blocked_names.iter().any(|n| n == &name.name)
+        {
+            return (MExpr::App { head, args, source }, Change::Unchanged);
+        }
+
+        let Some(candidate) = self.variant_candidates.get(&name.name).cloned() else {
+            return (MExpr::App { head, args, source }, Change::Unchanged);
+        };
+        if args.len() != candidate.binding.params.len() {
+            return (MExpr::App { head, args, source }, Change::Unchanged);
+        }
+        if !self.expr_has_direct_call_opportunity(&candidate.binding.body) {
+            return (MExpr::App { head, args, source }, Change::Unchanged);
+        }
+
+        let variant_name = native_variant_name(&candidate.binding.name, &self.handler_stack);
+        if variant_name == name.name {
+            return (MExpr::App { head, args, source }, Change::Unchanged);
+        }
+
+        let mut variant_body = candidate.binding.body.clone();
+        let old_blocked_len = self.inline_blocked_names.len();
+        self.inline_blocked_names
+            .extend(bound_names_in_pats(&candidate.binding.params));
+        let (optimized_body, body_change) = self.optimize_expr(variant_body);
+        self.inline_blocked_names.truncate(old_blocked_len);
+        variant_body = optimized_body;
+
+        if body_change == Change::Unchanged {
+            return (MExpr::App { head, args, source }, Change::Unchanged);
+        }
+
+        if !self.generated_variant_names.contains(&variant_name) {
+            self.generated_variant_names.insert(variant_name.clone());
+            self.pending_variants.push(MDecl::FunBinding(MFunBinding {
+                name: variant_name.clone(),
+                body: variant_body,
+                ..candidate.binding
+            }));
+        }
+
+        (
+            MExpr::App {
+                head: Atom::Var {
+                    name: MVar {
+                        name: variant_name,
+                        id: name.id,
+                    },
+                    source: *head_source,
+                },
+                args,
+                source,
+            },
+            Change::Changed,
+        )
+    }
+
+    fn native_variant_stack_eligible(&self) -> bool {
+        let mut has_native = false;
+        for frame in &self.handler_stack {
+            match frame {
+                HandlerFrame::Native { .. } => has_native = true,
+                HandlerFrame::Static { .. } => return false,
+                HandlerFrame::Blocking { .. } => {}
+            }
+        }
+        has_native
+    }
+
     fn try_inline_helper_call(&self, expr: MExpr) -> (MExpr, Change) {
         if !self.opts.helper_inline() || self.handler_stack.is_empty() {
             return (expr, Change::Unchanged);
@@ -1347,6 +1452,10 @@ impl RunOptions {
     fn helper_inline(self) -> bool {
         !self.skip
     }
+
+    fn native_function_variants(self) -> bool {
+        !self.skip
+    }
 }
 
 fn optimize_optional_expr_with(
@@ -1415,6 +1524,8 @@ fn fun_type_effects_are_empty(ty: &typechecker::Type) -> bool {
 }
 
 const INLINE_HELPER_BODY_BUDGET: usize = 30;
+const NATIVE_VARIANT_BODY_BUDGET: usize = 220;
+const NATIVE_VARIANT_PREFIX: &str = "__saga_native_variant";
 
 fn collect_inline_candidates(program: &MProgram) -> HashMap<String, InlineCandidate> {
     let mut counts: HashMap<String, usize> = HashMap::new();
@@ -1452,6 +1563,75 @@ fn collect_inline_candidates(program: &MProgram) -> HashMap<String, InlineCandid
         );
     }
     candidates
+}
+
+fn collect_variant_candidates(program: &MProgram) -> HashMap<String, VariantCandidate> {
+    let mut counts: HashMap<String, usize> = HashMap::new();
+    for decl in program {
+        if let MDecl::FunBinding(f) = decl
+            && !is_generated_variant_name(&f.name)
+        {
+            *counts.entry(f.name.clone()).or_default() += 1;
+        }
+    }
+
+    let mut candidates = HashMap::new();
+    for decl in program {
+        let MDecl::FunBinding(f) = decl else {
+            continue;
+        };
+        if is_generated_variant_name(&f.name) || counts.get(&f.name) != Some(&1) {
+            continue;
+        }
+        if f.guard.is_some()
+            || !helper_params_are_supported(&f.params)
+            || expr_node_count(&f.body) > NATIVE_VARIANT_BODY_BUDGET
+            || expr_calls_any(&f.body, &HashSet::from([f.name.clone()]))
+        {
+            continue;
+        }
+        candidates.insert(f.name.clone(), VariantCandidate { binding: f.clone() });
+    }
+    candidates
+}
+
+fn native_variant_name(name: &str, stack: &[HandlerFrame]) -> String {
+    let mut parts = vec![NATIVE_VARIANT_PREFIX.to_string(), sanitize_ident_part(name)];
+    for frame in stack {
+        match frame {
+            HandlerFrame::Native { effects, handler } => {
+                parts.push("native".to_string());
+                parts.push(sanitize_ident_part(handler));
+                for effect in effects {
+                    parts.push(sanitize_ident_part(effect));
+                }
+            }
+            HandlerFrame::Blocking { effects } => {
+                parts.push("blocking".to_string());
+                for effect in effects {
+                    parts.push(sanitize_ident_part(effect));
+                }
+            }
+            HandlerFrame::Static { .. } => {}
+        }
+    }
+    parts.join("__")
+}
+
+fn is_generated_variant_name(name: &str) -> bool {
+    name.starts_with(NATIVE_VARIANT_PREFIX)
+}
+
+fn sanitize_ident_part(value: &str) -> String {
+    let mut out = String::new();
+    for ch in value.chars() {
+        if ch.is_ascii_alphanumeric() || ch == '_' {
+            out.push(ch);
+        } else {
+            out.push('_');
+        }
+    }
+    if out.is_empty() { "_".to_string() } else { out }
 }
 
 fn helper_params_are_supported(params: &[Pat]) -> bool {
@@ -5168,6 +5348,134 @@ mod tests {
                 helper,
                 MDecl::Val(MVal {
                     id: crate::ast::NodeId(319),
+                    public: false,
+                    name: "caller".to_string(),
+                    value: with_expr(handler, call),
+                    span: span(),
+                })
+            ]
+        );
+    }
+
+    #[test]
+    fn native_function_variant_specializes_same_module_call_under_native_handler() {
+        let f = Fixture::new();
+        let handler = native_handler("Std.Actor.Timer", "beam_actor", 330);
+        let helper_body = bind_expr(
+            mv("_first", 331),
+            yield_native("Std.Actor.Timer", "sleep", vec![lit_int("10", 10)], 332),
+            yield_native("Std.Actor.Timer", "sleep", vec![lit_int("20", 20)], 333),
+        );
+        let helper = helper_fun("helper", 334, vec![pat_unit(335)], helper_body);
+        let caller = MDecl::Val(MVal {
+            id: crate::ast::NodeId(336),
+            public: false,
+            name: "caller".to_string(),
+            value: with_expr(
+                handler,
+                MExpr::App {
+                    head: var("helper", 337),
+                    args: vec![unit_atom()],
+                    source: crate::ast::NodeId(338),
+                },
+            ),
+            span: span(),
+        });
+        let info = f.info();
+
+        let out = run(vec![helper.clone(), caller], &f.h, &info);
+
+        let variant_name = out
+            .iter()
+            .find_map(|decl| match decl {
+                MDecl::FunBinding(f) if is_generated_variant_name(&f.name) => Some(f.name.clone()),
+                _ => None,
+            })
+            .expect("expected generated native function variant");
+        assert_ne!(variant_name, "helper");
+        assert!(out.iter().any(|decl| decl == &helper));
+
+        let MDecl::Val(caller) = &out[1] else {
+            panic!("expected caller val");
+        };
+        let MExpr::With { body, .. } = &caller.value else {
+            panic!("expected caller with-expression");
+        };
+        assert_eq!(
+            body.as_ref(),
+            &MExpr::App {
+                head: Atom::Var {
+                    name: mv(&variant_name, 337),
+                    source: crate::ast::NodeId(337),
+                },
+                args: vec![unit_atom()],
+                source: crate::ast::NodeId(338),
+            }
+        );
+
+        let variant = out
+            .iter()
+            .find_map(|decl| match decl {
+                MDecl::FunBinding(f) if f.name == variant_name => Some(f),
+                _ => None,
+            })
+            .expect("expected generated variant decl");
+        assert_eq!(
+            variant.body,
+            bind_expr(
+                mv("_first", 331),
+                MExpr::ForeignCall {
+                    module: "timer".to_string(),
+                    func: "sleep".to_string(),
+                    args: vec![lit_int("10", 10)],
+                    source: crate::ast::NodeId(332),
+                },
+                MExpr::ForeignCall {
+                    module: "timer".to_string(),
+                    func: "sleep".to_string(),
+                    args: vec![lit_int("20", 20)],
+                    source: crate::ast::NodeId(333),
+                }
+            )
+        );
+    }
+
+    #[test]
+    fn native_function_variant_skips_recursive_candidate() {
+        let f = Fixture::new();
+        let handler = native_handler("Std.Actor.Timer", "beam_actor", 340);
+        let helper_body = bind_expr(
+            mv("_first", 341),
+            yield_native("Std.Actor.Timer", "sleep", vec![lit_int("10", 10)], 342),
+            MExpr::App {
+                head: var("helper", 343),
+                args: vec![unit_atom()],
+                source: crate::ast::NodeId(344),
+            },
+        );
+        let helper = helper_fun("helper", 345, vec![pat_unit(346)], helper_body);
+        let call = MExpr::App {
+            head: var("helper", 347),
+            args: vec![unit_atom()],
+            source: crate::ast::NodeId(348),
+        };
+        let caller = MDecl::Val(MVal {
+            id: crate::ast::NodeId(349),
+            public: false,
+            name: "caller".to_string(),
+            value: with_expr(handler.clone(), call.clone()),
+            span: span(),
+        });
+        let info = f.info();
+
+        let out = run(vec![helper.clone(), caller], &f.h, &info);
+
+        assert_eq!(
+            out,
+            vec![
+                helper,
+                MDecl::Val(MVal {
+                    id: crate::ast::NodeId(349),
                     public: false,
                     name: "caller".to_string(),
                     value: with_expr(handler, call),
