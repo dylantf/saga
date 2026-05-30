@@ -154,11 +154,81 @@ things state their effects; anonymous/local bindings infer them."
      precompiled library serializes the wrapper's effect row so a downstream
      project (not same-build) enforces it. In-project multi-module path is
      proven; the precompiled-lib path is a separate serialization path.
-   - PRE-EXISTING WRINKLE (not from this change; accessor is annotated): the HO
-     `accessor : Unit -> (String -> Unit needs {Audit})` emits a spurious
-     "declares needs {Audit} but never uses it" warning — the unused-effects
-     heuristic mis-attributes the inner (returned) arrow's row to the outer fn.
-     Runs correctly; warning only. File separately if it bothers you.
+   - HO-RETURN WARNING BUG (separate from infer-local-effects; ran it down):
+     `accessor : Unit -> (String -> Unit needs {Audit})` falsely warned "declares
+     needs {Audit} but never uses it". Single-file repros: `/tmp/.../ho2.saga`,
+     `disc.saga`. ROOT CAUSE: `check_decl.rs::innermost_effect_row` is
+     arity-unaware — it recurses to the DEEPEST arrow and treats a *returned*
+     function's effect row as the declaring fn's own. Used at 4 sites: warning
+     (was 1284), callback codegen-ICE guard (1216), type construction (1399,
+     where unify scrubs it so it's cosmetic-only — verified: callers/codegen
+     unaffected, `disc.saga` stays pure), and `main`-effects check (265).
+     FIX APPLIED (live in tree, separable from the gate change): added
+     `effect_row_at_arity(ty, arity)` and swapped sites 1216/1284/1399. Site 265
+     (main) left on `innermost` for now (arity not handy; main rarely returns an
+     effectful fn). Verified: kills the HO-return warning; multi-arrow eta/
+     partial-application cases (`curried = logged_add`, `partial a = logged_add a`)
+     now correct AND previously false-warned under `innermost`; 0 new test
+     regressions (511 pass, same 5 infer fallout).
+   - POINT-FREE / ETA WARNING — FIXED (live in tree, third separable change).
+     Root cause: the unused-effects check asked "does the BODY *perform* the
+     declared effects?" — but a forwarding body (point-free `greet = emit`, eta,
+     returning an effectful fn) never *performs* them; it *forwards* them via the
+     referenced value's type. NOTE (corrected an earlier wrong assumption):
+     unification does NOT catch a genuinely-wrong point-free decl — `greet =
+     ignore` (pure body, declares {Log}) compiles with only the warning, so the
+     warning is the ONLY catcher. Therefore we can't blanket-suppress for
+     point-free; need the precise distinction. FIX: added `collect_arrow_effects`
+     and changed the unused set to `declared − performed − FORWARDED − absorbed`,
+     where FORWARDED = effects on the body's result-type arrows
+     (`self.sub.apply(&result_ty)`). Verified: `greet = emit` / accessor / eta /
+     partial → no warning; `greet = ignore` (pure) and `f x = x+1` → still warn
+     (genuine); 0 new test regressions.
+
+## Final change set (live in tree; FULL SUITE GREEN)
+Two changes (the arity-aware attempt was REVERTED — see below):
+1. **infer-local-effects gate** (`check_decl.rs`, `if annotation.is_some()`
+   around `check_effects_via_row`) — the feature. 5 typechecker tests rewritten
+   (assert inference/propagation instead of error; helper `fun_effects` added in
+   tests.rs).
+2. **forwarded-effect unused check** (`collect_arrow_effects` +
+   `unused = declared − performed − FORWARDED − absorbed`, where FORWARDED =
+   effects on the body's result-type arrows) — fixes the entire
+   "declares needs but never uses it" false-positive class (HO-return,
+   point-free, eta, partial).
+
+### Why the arity-aware change (`effect_row_at_arity`) was reverted
+It swapped the SHARED `declared_row` (used by BOTH `check_effects_via_row` and
+the unused-warning) to the arrow-at-arity row. That broke
+`effectful_var_binding_*` property tests: for
+`make_logger : Unit -> (String -> Unit needs {Log})` /
+`make_logger () = fun s -> log! s`, the lambda's {Log} BUBBLES into the body's
+performed effects, and `check_effects_via_row` needs the FULL declared row
+(innermost) to cover it — arity-row ({} on the outer arrow) wrongly rejected it.
+Lesson: `check_effects_via_row` wants ALL signature-declared effects; only the
+warning wants the own-arrow notion. The forwarded-subtraction (#2) fixes the
+warning class WITHOUT touching `declared_row`, so it subsumes the arity change.
+
+### Known limitation (accepted — narrower than it first looked)
+The unused-effects warning is suppressed only when the body's RESULT is itself a
+function (its type has arrows: alias / eta / partial application / HO-return) —
+verified: a function that applies its args to a concrete (arrow-free) result
+still warns (`greet s = ignore s` warns; `greet = ignore` does not). In the
+suppressed cases the effect is genuinely forwarded via the returned function's
+type, so not warning is defensible. The single degenerate loss is a bare alias
+of a PURE fn under an effectful annotation (`greet = ignore`) — a no-op
+passthrough; over-declaring is sound; style lint only. Documented at the call
+site.
+
+### Test status
+`cargo test` FULL SUITE GREEN (953 + 102 + 61 + 82 + 1 + 1, 0 failures).
+Verified repros: ho2/eta1 → no warning; unused1 (saturated) → warns;
+multi-module example runs; eta/partial clean.
+
+### Still TODO before/with PR
+- `saga build --lib` type-info SIDECAR multi-module check (plan item 4b).
+- Guide updates (item 5): "private functions infer effects too".
+- Roadmap note (item 6).
 5. Guide updates: the "needs clause" / "Performing effects" sections
    (llms-full.txt ~1666-1700) and "Visibility" (~2957) currently imply `needs`
    is required for effect-carrying fns and only show PURE inferred privates.

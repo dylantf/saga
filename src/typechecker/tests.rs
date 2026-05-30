@@ -548,15 +548,38 @@ fn pipe_operator() {
 
 // --- Effect needs tracking ---
 
+/// All effect names appearing on any arrow of a checked function's inferred
+/// type. Lets effect-inference assertions ignore which arrow the row landed on
+/// (e.g. effects on a returned function vs the function's own arrow).
+fn fun_effects(checker: &Checker, name: &str) -> Vec<String> {
+    fn walk(ty: &Type, out: &mut std::collections::HashSet<String>) {
+        if let Type::Fun(_, ret, row) = ty {
+            for e in &row.effects {
+                out.insert(e.name.clone());
+            }
+            walk(ret, out);
+        }
+    }
+    let scheme = checker.env.get(name).expect("function not in env");
+    let ty = checker.sub.apply(&scheme.ty);
+    let mut set = std::collections::HashSet::new();
+    walk(&ty, &mut set);
+    let mut v: Vec<String> = set.into_iter().collect();
+    v.sort();
+    v
+}
+
 #[test]
-fn effect_call_without_needs_is_error() {
-    let result = check("effect Fail {\n  fun fail : (msg: String) -> a\n}\nfoo x = fail! \"oops\"");
-    assert!(result.is_err());
-    let err = result.err().expect("expected error");
+fn effect_call_without_needs_infers_for_local() {
+    // A local (unannotated) function that performs an effect now INFERS its
+    // effect row instead of erroring -- `needs` is only required on `pub`
+    // functions (which carry an annotation).
+    let c = check("effect Fail {\n  fun fail : (msg: String) -> a\n}\nfoo x = fail! \"oops\"")
+        .expect("unannotated effectful local should check");
     assert!(
-        err.message.contains("needs"),
-        "expected needs error, got: {}",
-        err.message
+        fun_effects(&c, "foo").iter().any(|e| e.contains("Fail")),
+        "foo should infer {{Fail}}, got: {:?}",
+        fun_effects(&c, "foo")
     );
 }
 
@@ -601,16 +624,16 @@ fn effect_handled_with_inline_handler() {
 
 #[test]
 fn effect_propagates_through_function_call() {
-    // Calling a function that needs {Fail} requires the caller to also declare needs {Fail}
-    let result = check(
+    // An unannotated caller of a `needs {Fail}` function INFERS and propagates
+    // {Fail} without needing its own declaration.
+    let c = check(
         "effect Fail {\n  fun fail : (msg: String) -> a\n}\nfun bar : (x: Int) -> Int needs {Fail}\nbar x = fail! \"oops\"\nfoo x = bar x",
-    );
-    assert!(result.is_err());
-    let err = result.err().expect("expected error");
+    )
+    .expect("unannotated caller should infer the propagated effect");
     assert!(
-        err.message.contains("Fail"),
-        "expected Fail propagation error, got: {}",
-        err.message
+        fun_effects(&c, "foo").iter().any(|e| e.contains("Fail")),
+        "foo should infer propagated {{Fail}}, got: {:?}",
+        fun_effects(&c, "foo")
     );
 }
 
@@ -710,35 +733,34 @@ fn inline_handler_finally_effect_can_be_handled_by_outer_scope_under_nested_sema
 
 #[test]
 fn handler_arm_body_unhandled_effect_propagates() {
-    // An inline handler arm body uses Log, but Log is NOT handled by the `with`.
-    // Should require `needs {Log}` on the enclosing function.
-    let result = check(
+    // An inline handler arm body uses Log, not handled by the `with`. The
+    // enclosing unannotated function INFERS {Log} (propagated from the arm body).
+    let c = check(
         "effect Log {\n  fun log : (msg: String) -> Unit\n}\n\
          effect Fail {\n  fun fail : (msg: String) -> a\n}\n\
          fun risky : Unit -> Int needs {Fail}\n\
          risky () = fail! \"oops\"\n\
          foo () = risky () with {\n  fail msg = {\n    log! \"caught\"\n    0\n  }\n}",
-    );
-    assert!(result.is_err());
-    let err = result.err().expect("expected error");
+    )
+    .expect("unannotated foo should infer the unhandled arm-body effect");
     assert!(
-        err.message.contains("Log"),
-        "expected Log propagation error, got: {}",
-        err.message
+        fun_effects(&c, "foo").iter().any(|e| e.contains("Log")),
+        "foo should infer {{Log}} from the arm body, got: {:?}",
+        fun_effects(&c, "foo")
     );
 }
 
 #[test]
-fn lambda_effects_propagate_to_enclosing_function() {
-    // Effects inside a lambda propagate up to the enclosing function boundary
-    let result =
-        check("effect Fail {\n  fun fail : (msg: String) -> a\n}\nfoo x = fun y -> fail! \"oops\"");
-    assert!(result.is_err());
-    let err = result.err().expect("expected error");
+fn lambda_effects_ride_on_returned_function_type() {
+    // `foo x = fun y -> fail! ...` RETURNS an effectful function. The effect
+    // rides on the returned arrow (calling `foo` itself performs nothing), so
+    // the unannotated foo checks and its type carries {Fail}.
+    let c = check("effect Fail {\n  fun fail : (msg: String) -> a\n}\nfoo x = fun y -> fail! \"oops\"")
+        .expect("function returning an effectful lambda should check");
     assert!(
-        err.message.contains("Fail"),
-        "expected Fail in error, got: {}",
-        err.message
+        fun_effects(&c, "foo").iter().any(|e| e.contains("Fail")),
+        "foo's type should carry {{Fail}} on the returned arrow, got: {:?}",
+        fun_effects(&c, "foo")
     );
 }
 
@@ -855,16 +877,22 @@ fn multiple_effects_all_declared() {
 
 #[test]
 fn with_subtracts_only_handled_effect() {
-    // Handler handles Log but not Fail, so Fail still needs declaration
-    let result = check(
+    // `with console` handles Log but not Fail. The unannotated foo INFERS the
+    // remaining {Fail} and NOT {Log} (subtracted by the handler).
+    let c = check(
         "effect Fail {\n  fun fail : (msg: String) -> a\n}\neffect Log {\n  fun log : (msg: String) -> Unit\n}\nhandler console for Log {\n  log msg = { dbg msg; resume () }\n}\nfoo x = {\n  log! \"hello\"\n  fail! \"oops\"\n} with console",
-    );
-    assert!(result.is_err());
-    let err = result.err().expect("expected error");
+    )
+    .expect("unannotated foo should infer the unhandled remainder");
+    let effs = fun_effects(&c, "foo");
     assert!(
-        err.message.contains("Fail"),
-        "expected Fail in error, got: {}",
-        err.message
+        effs.iter().any(|e| e.contains("Fail")),
+        "foo should infer remaining {{Fail}}, got: {:?}",
+        effs
+    );
+    assert!(
+        !effs.iter().any(|e| e.contains("Log")),
+        "Log should be subtracted by `with console`, got: {:?}",
+        effs
     );
 }
 
