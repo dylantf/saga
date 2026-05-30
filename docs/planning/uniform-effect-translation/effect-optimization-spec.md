@@ -53,18 +53,21 @@ Throughout this doc:
 
 ---
 
-## Three rewrites
+## Local rewrites
 
-The stage runs three correctness-safe rewrites in a shared bottom-up
+The stage runs local correctness-safe rewrites in a shared bottom-up
 fixpoint:
 
 1. **Bind-collapse** — eliminate `Bind(Pure(a), x, body)` by substitution
 2. **Bind→Let promotion** — pure binders become Erlang lets
-3. **Direct-call** — tail-resumptive `Yield` becomes inlined arm body
+3. **Dead pure-let cleanup** — eliminate `Let(x, pure_value, body)` when
+   `x` is not used by `body`
+4. **Direct-call** — tail-resumptive `Yield` becomes inlined arm body
 
 Implemented order in the fixpoint loop: optimize children, then bind-collapse,
-then Bind→Let, bottom-up at each node. Direct-call will be inserted later, but
-must preserve this property: bind-collapse runs before Bind→Let so
+then Bind→Let, then dead pure-let cleanup, bottom-up at each node. Direct-call
+runs before the local bind cleanup so inlined arm bodies can expose new local
+simplification opportunities. Bind-collapse still runs before Bind→Let so
 `Bind(Pure(a), x, body)` gets beta-reduced instead of being frozen as `Let`.
 Loop until no rewrite fires.
 

@@ -71,7 +71,7 @@ or when it removes visible compiler complexity.
   Native ops that currently stay slow because they wrap callbacks, especially
   `spawn`, get targeted fast paths when actor-heavy stats justify it.
 
-- [ ] **Pure generated-let cleanup.**
+- [x] **Pure generated-let cleanup.**
   Remove dead let/bind temporaries introduced by direct native lowering when
   they are provably unused and side-effect-free.
 

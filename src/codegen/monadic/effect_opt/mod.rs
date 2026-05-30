@@ -3,6 +3,7 @@
 // Currently implements steps 9-11:
 //   - bind collapse — Bind(Pure(a), x, B) → B[x := a]
 //   - Bind→Let promotion — pure binders become direct lets
+//   - dead pure-let cleanup — remove unused pure lets
 //   - step 11: direct_call.rs     — tail-resumptive Yield → inlined arm body
 //
 // See docs/planning/uniform-effect-translation/effect-optimization-spec.md
@@ -221,6 +222,7 @@ impl<'info, 'data> Optimizer<'info, 'data> {
         let (expr, direct_change) = self.try_direct_call(expr);
         let (expr, collapse_change) = self.try_bind_collapse(expr);
         let (expr, let_change) = self.try_bind_to_let(expr);
+        let (expr, dead_let_change) = self.try_dead_pure_let(expr);
         let mut change = child_change;
         change.mark_if(variant_change);
         change.mark_if(inline_change);
@@ -229,6 +231,7 @@ impl<'info, 'data> Optimizer<'info, 'data> {
         change.mark_if(direct_change);
         change.mark_if(collapse_change);
         change.mark_if(let_change);
+        change.mark_if(dead_let_change);
         (expr, change)
     }
 
@@ -652,6 +655,22 @@ impl<'info, 'data> Optimizer<'info, 'data> {
                 },
                 Change::Unchanged,
             )
+        }
+    }
+
+    fn try_dead_pure_let(&self, expr: MExpr) -> (MExpr, Change) {
+        if !self.opts.dead_pure_let() {
+            return (expr, Change::Unchanged);
+        }
+
+        let MExpr::Let { var, value, body } = expr else {
+            return (expr, Change::Unchanged);
+        };
+
+        if self.expr_is_pure(&value) && !expr_contains_target(&body, &var) {
+            (*body, Change::Changed)
+        } else {
+            (MExpr::Let { var, value, body }, Change::Unchanged)
         }
     }
 
@@ -1507,6 +1526,10 @@ impl RunOptions {
     }
 
     fn native_function_variants(self) -> bool {
+        !self.skip
+    }
+
+    fn dead_pure_let(self) -> bool {
         !self.skip
     }
 }
@@ -3901,12 +3924,13 @@ fn expr_contains_target(expr: &MExpr, target: &MVar) -> bool {
         } => {
             atom_contains_target(scrutinee, target)
                 || arms.iter().any(|arm| {
-                    !pat_binds_name(&arm.pattern, &target.name)
-                        && (arm
-                            .guard
-                            .as_ref()
-                            .is_some_and(|g| expr_contains_target(g, target))
-                            || expr_contains_target(&arm.body, target))
+                    pat_has_nonbinding_ref(&arm.pattern, &target.name)
+                        || !pat_binds_name(&arm.pattern, &target.name)
+                            && (arm
+                                .guard
+                                .as_ref()
+                                .is_some_and(|g| expr_contains_target(g, target))
+                                || expr_contains_target(&arm.body, target))
                 })
         }
         MExpr::If {
@@ -3946,12 +3970,13 @@ fn expr_contains_target(expr: &MExpr, target: &MVar) -> bool {
         }),
         MExpr::Receive { arms, after, .. } => {
             arms.iter().any(|arm| {
-                !pat_binds_name(&arm.pattern, &target.name)
-                    && (arm
-                        .guard
-                        .as_ref()
-                        .is_some_and(|g| expr_contains_target(g, target))
-                        || expr_contains_target(&arm.body, target))
+                pat_has_nonbinding_ref(&arm.pattern, &target.name)
+                    || !pat_binds_name(&arm.pattern, &target.name)
+                        && (arm
+                            .guard
+                            .as_ref()
+                            .is_some_and(|g| expr_contains_target(g, target))
+                            || expr_contains_target(&arm.body, target))
             }) || after.as_ref().is_some_and(|(timeout, body)| {
                 atom_contains_target(timeout, target) || expr_contains_target(body, target)
             })
@@ -4763,6 +4788,124 @@ mod tests {
                 var: mv("x", 1),
                 value: Box::new(value),
                 body: Box::new(body),
+            })
+        );
+    }
+
+    #[test]
+    fn dead_pure_let_drops_unused_pure_value() {
+        let f = Fixture::new();
+        let info = f.info();
+        let value = MExpr::BinOp {
+            op: crate::ast::BinOp::Add,
+            left: lit_int("1", 1),
+            right: lit_int("2", 2),
+            source: crate::ast::NodeId(75),
+        };
+        let prog = val_program(MExpr::Let {
+            var: mv("unused", 76),
+            value: Box::new(value),
+            body: Box::new(MExpr::Pure(lit_int("3", 3))),
+        });
+
+        let out = run(prog, &f.h, &info);
+
+        assert_eq!(out, val_program(MExpr::Pure(lit_int("3", 3))));
+    }
+
+    #[test]
+    fn dead_pure_let_keeps_used_value() {
+        let f = Fixture::new();
+        let info = f.info();
+        let value = MExpr::BinOp {
+            op: crate::ast::BinOp::Add,
+            left: lit_int("1", 1),
+            right: lit_int("2", 2),
+            source: crate::ast::NodeId(77),
+        };
+        let prog = val_program(MExpr::Let {
+            var: mv("x", 78),
+            value: Box::new(value.clone()),
+            body: Box::new(MExpr::Pure(var("x", 78))),
+        });
+
+        let out = run(prog, &f.h, &info);
+
+        assert_eq!(
+            out,
+            val_program(MExpr::Let {
+                var: mv("x", 78),
+                value: Box::new(value),
+                body: Box::new(MExpr::Pure(var("x", 78))),
+            })
+        );
+    }
+
+    #[test]
+    fn dead_pure_let_keeps_pattern_size_reference() {
+        let f = Fixture::new();
+        let info = f.info();
+        let size_ref = crate::ast::Expr::synth(
+            span(),
+            crate::ast::ExprKind::Var {
+                name: "i".to_string(),
+            },
+        );
+        let pattern = Pat::BitStringPat {
+            id: crate::ast::NodeId(180),
+            segments: vec![crate::ast::BitSegment {
+                value: pat_var("head", 181),
+                size: Some(Box::new(size_ref)),
+                specs: vec![],
+                span: span(),
+            }],
+            span: span(),
+        };
+        let body = MExpr::Case {
+            scrutinee: var("bits", 182),
+            arms: vec![MArm {
+                pattern,
+                guard: None,
+                body: MExpr::Pure(lit_int("1", 1)),
+                span: span(),
+            }],
+            source: crate::ast::NodeId(183),
+        };
+        let prog = val_program(MExpr::Let {
+            var: mv("i", 184),
+            value: Box::new(MExpr::Pure(lit_int("2", 2))),
+            body: Box::new(body.clone()),
+        });
+
+        let out = run(prog.clone(), &f.h, &info);
+
+        assert_eq!(out, prog);
+    }
+
+    #[test]
+    fn dead_pure_let_keeps_unused_effectful_value() {
+        let f = Fixture::new();
+        let info = f.info();
+        let value = MExpr::ForeignCall {
+            module: "erlang".to_string(),
+            func: "monotonic_time".to_string(),
+            args: vec![],
+            source: crate::ast::NodeId(79),
+        };
+        let prog = val_program(MExpr::Let {
+            var: mv("unused", 80),
+            value: Box::new(value.clone()),
+            body: Box::new(MExpr::Pure(lit_int("3", 3))),
+        });
+
+        let out = run(prog, &f.h, &info);
+
+        assert_eq!(
+            out,
+            val_program(MExpr::Let {
+                var: mv("unused", 80),
+                value: Box::new(value),
+                body: Box::new(MExpr::Pure(lit_int("3", 3))),
             })
         );
     }
