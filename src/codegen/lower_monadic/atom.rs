@@ -7,7 +7,7 @@ use crate::codegen::resolve::{ResolvedCodegenKind, ResolvedSymbol};
 
 use super::Lowerer;
 use super::ctx::LowerCtx;
-use super::util::{core_var, lower_lit_atom, lower_string_to_binary, mangle_ctor_atom};
+use super::util::{core_var, identity_k, lower_lit_atom, lower_string_to_binary, mangle_ctor_atom};
 
 impl<'ctx> Lowerer<'ctx> {
     // ---------------------------------------------------------------
@@ -44,7 +44,38 @@ impl<'ctx> Lowerer<'ctx> {
             } => self.lower_qualified_ref_atom(module, name, *source),
             Atom::Symbol { symbol, .. } => lower_string_to_binary(symbol),
             Atom::BackendAtom { atom, .. } => CExpr::Lit(CLit::Atom(atom.clone())),
+            Atom::BackendSpawnThunk { callback, source } => {
+                self.lower_backend_spawn_thunk(callback, *source, ctx)
+            }
         }
+    }
+
+    fn lower_backend_spawn_thunk(
+        &mut self,
+        callback: &Atom,
+        source: NodeId,
+        ctx: &LowerCtx,
+    ) -> CExpr {
+        let callback_expr = self.lower_atom(callback, ctx);
+        let k_var = format!("_SpawnK{}", source.0);
+        let v_var = format!("_SpawnV{}", source.0);
+        let identity_k = identity_k(v_var);
+        let apply_callback = CExpr::Apply(
+            Box::new(callback_expr),
+            vec![
+                CExpr::Lit(CLit::Atom("unit".to_string())),
+                CExpr::Var(ctx.evidence.clone()),
+                CExpr::Var(k_var.clone()),
+            ],
+        );
+        CExpr::Fun(
+            vec![],
+            Box::new(CExpr::Let(
+                k_var,
+                Box::new(identity_k),
+                Box::new(apply_callback),
+            )),
+        )
     }
 
     /// Lower an `Atom::Var` reference.

@@ -48,6 +48,46 @@ impl Stats {
         stats
     }
 
+    pub fn collect_reachable_program(program: &MProgram, roots: &[&str]) -> Self {
+        let decls: BTreeMap<&str, &MDecl> = program
+            .iter()
+            .filter_map(|decl| match decl {
+                MDecl::FunBinding(f) => Some((f.name.as_str(), decl)),
+                MDecl::Val(v) => Some((v.name.as_str(), decl)),
+                MDecl::DictConstructor(d) => Some((d.name.as_str(), decl)),
+                MDecl::Passthrough(_) => None,
+            })
+            .collect();
+
+        let mut stats = Self::default();
+        let mut seen = BTreeSet::new();
+        let mut worklist = roots
+            .iter()
+            .filter(|root| decls.contains_key(**root))
+            .map(|root| (*root).to_string())
+            .collect::<Vec<_>>();
+
+        while let Some(name) = worklist.pop() {
+            if !seen.insert(name.clone()) {
+                continue;
+            }
+            let Some(decl) = decls.get(name.as_str()) else {
+                continue;
+            };
+            stats.visit_decl(decl);
+
+            let mut calls = BTreeSet::new();
+            collect_decl_calls(decl, &mut calls);
+            for call in calls {
+                if decls.contains_key(call.as_str()) && !seen.contains(&call) {
+                    worklist.push(call);
+                }
+            }
+        }
+
+        stats
+    }
+
     fn visit_decl(&mut self, decl: &MDecl) {
         self.decls += 1;
         match decl {
@@ -207,6 +247,7 @@ impl Stats {
                 self.lambda_atoms += 1;
                 self.visit_expr(body);
             }
+            Atom::BackendSpawnThunk { callback, .. } => self.visit_atom(callback),
             Atom::Var { .. }
             | Atom::Lit { .. }
             | Atom::DictRef { .. }
@@ -285,11 +326,9 @@ impl StatsDiff {
     pub fn new(before: Stats, after: Stats) -> Self {
         Self { before, after }
     }
-}
 
-impl fmt::Display for StatsDiff {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        writeln!(f, "monadic IR stats")?;
+    fn fmt_with_title(&self, f: &mut fmt::Formatter<'_>, title: &str) -> fmt::Result {
+        writeln!(f, "{title}")?;
         writeln!(f, "metric                before    after    delta")?;
         writeln!(f, "----------------------------------------------")?;
         for (name, before, after) in rows(&self.before, &self.after) {
@@ -312,6 +351,219 @@ impl fmt::Display for StatsDiff {
             &self.after.foreign_calls,
         )?;
         Ok(())
+    }
+}
+
+impl fmt::Display for StatsDiff {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.fmt_with_title(f, "monadic IR stats")
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StatsReport {
+    whole: StatsDiff,
+    reachable: Option<StatsDiff>,
+}
+
+impl StatsReport {
+    pub fn new(whole: StatsDiff, reachable: Option<StatsDiff>) -> Self {
+        Self { whole, reachable }
+    }
+}
+
+impl fmt::Display for StatsReport {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.whole.fmt_with_title(f, "monadic IR stats")?;
+        if let Some(reachable) = &self.reachable {
+            writeln!(f)?;
+            reachable.fmt_with_title(f, "entry-reachable monadic IR stats")?;
+        }
+        Ok(())
+    }
+}
+
+fn collect_decl_calls(decl: &MDecl, out: &mut BTreeSet<String>) {
+    match decl {
+        MDecl::FunBinding(f) => {
+            if let Some(guard) = &f.guard {
+                collect_expr_calls(guard, out);
+            }
+            collect_expr_calls(&f.body, out);
+        }
+        MDecl::Val(v) => collect_expr_calls(&v.value, out),
+        MDecl::DictConstructor(d) => {
+            for method in &d.methods {
+                collect_expr_calls(method, out);
+            }
+        }
+        MDecl::Passthrough(_) => {}
+    }
+}
+
+fn collect_expr_calls(expr: &MExpr, out: &mut BTreeSet<String>) {
+    match expr {
+        MExpr::App { head, args, .. } => {
+            if let Atom::Var { name, .. } = head {
+                out.insert(name.name.clone());
+            }
+            collect_atom_calls(head, out);
+            for arg in args {
+                collect_atom_calls(arg, out);
+            }
+        }
+        MExpr::Pure(atom)
+        | MExpr::Resume { value: atom, .. }
+        | MExpr::FieldAccess { record: atom, .. }
+        | MExpr::DictMethodAccess { dict: atom, .. }
+        | MExpr::UnaryMinus { value: atom, .. } => collect_atom_calls(atom, out),
+        MExpr::Yield { args, .. } | MExpr::ForeignCall { args, .. } => {
+            for arg in args {
+                collect_atom_calls(arg, out);
+            }
+        }
+        MExpr::Bind { value, body, .. } | MExpr::Let { value, body, .. } => {
+            collect_expr_calls(value, out);
+            collect_expr_calls(body, out);
+        }
+        MExpr::Ensure { body, cleanup } => {
+            collect_expr_calls(body, out);
+            collect_expr_calls(cleanup, out);
+        }
+        MExpr::Case {
+            scrutinee, arms, ..
+        } => {
+            collect_atom_calls(scrutinee, out);
+            for arm in arms {
+                if let Some(guard) = &arm.guard {
+                    collect_expr_calls(guard, out);
+                }
+                collect_expr_calls(&arm.body, out);
+            }
+        }
+        MExpr::If {
+            cond,
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            collect_atom_calls(cond, out);
+            collect_expr_calls(then_branch, out);
+            collect_expr_calls(else_branch, out);
+        }
+        MExpr::With { handler, body, .. } => {
+            collect_handler_calls(handler, out);
+            collect_expr_calls(body, out);
+        }
+        MExpr::RecordUpdate { record, fields, .. } => {
+            collect_atom_calls(record, out);
+            for (_, atom) in fields {
+                collect_atom_calls(atom, out);
+            }
+        }
+        MExpr::BinOp { left, right, .. } => {
+            collect_atom_calls(left, out);
+            collect_atom_calls(right, out);
+        }
+        MExpr::BitString { segments, .. } => {
+            for segment in segments {
+                collect_atom_calls(&segment.value, out);
+                if let Some(size) = &segment.size {
+                    collect_atom_calls(size, out);
+                }
+            }
+        }
+        MExpr::Receive { arms, after, .. } => {
+            for arm in arms {
+                if let Some(guard) = &arm.guard {
+                    collect_expr_calls(guard, out);
+                }
+                collect_expr_calls(&arm.body, out);
+            }
+            if let Some((timeout, body)) = after {
+                collect_atom_calls(timeout, out);
+                collect_expr_calls(body, out);
+            }
+        }
+        MExpr::LetFun { body, rest, .. } => {
+            collect_expr_calls(body, out);
+            collect_expr_calls(rest, out);
+        }
+        MExpr::HandlerValue {
+            arms,
+            return_clause,
+            ..
+        } => {
+            for arm in arms {
+                collect_handler_arm_calls(arm, out);
+            }
+            if let Some(return_clause) = return_clause {
+                collect_handler_arm_calls(return_clause, out);
+            }
+        }
+    }
+}
+
+fn collect_atom_calls(atom: &Atom, out: &mut BTreeSet<String>) {
+    match atom {
+        Atom::Ctor { args, .. } | Atom::Tuple { elements: args, .. } => {
+            for arg in args {
+                collect_atom_calls(arg, out);
+            }
+        }
+        Atom::AnonRecord { fields, .. } | Atom::Record { fields, .. } => {
+            for (_, atom) in fields {
+                collect_atom_calls(atom, out);
+            }
+        }
+        Atom::Lambda { body, .. } => collect_expr_calls(body, out),
+        Atom::BackendSpawnThunk { callback, .. } => collect_atom_calls(callback, out),
+        Atom::Var { .. }
+        | Atom::Lit { .. }
+        | Atom::DictRef { .. }
+        | Atom::QualifiedRef { .. }
+        | Atom::Symbol { .. }
+        | Atom::BackendAtom { .. } => {}
+    }
+}
+
+fn collect_handler_calls(handler: &MHandler, out: &mut BTreeSet<String>) {
+    match handler {
+        MHandler::Static {
+            arms,
+            return_clause,
+            ..
+        } => {
+            for arm in arms {
+                collect_handler_arm_calls(arm, out);
+            }
+            if let Some(return_clause) = return_clause {
+                collect_handler_arm_calls(return_clause, out);
+            }
+        }
+        MHandler::Native { .. } => {}
+        MHandler::Composite { handlers, .. } => {
+            for handler in handlers {
+                collect_handler_calls(handler, out);
+            }
+        }
+        MHandler::Dynamic {
+            op_tuple,
+            return_lambda,
+            ..
+        } => {
+            collect_atom_calls(op_tuple, out);
+            if let Some(return_lambda) = return_lambda {
+                collect_atom_calls(return_lambda, out);
+            }
+        }
+    }
+}
+
+fn collect_handler_arm_calls(arm: &MHandlerArm, out: &mut BTreeSet<String>) {
+    collect_expr_calls(&arm.body, out);
+    if let Some(finally_block) = &arm.finally_block {
+        collect_expr_calls(finally_block, out);
     }
 }
 
@@ -448,5 +700,70 @@ mod tests {
         assert_eq!(stats.yield_, 1);
         assert_eq!(stats.pure, 1);
         assert_eq!(stats.yield_ops.get("E::op"), Some(&1));
+    }
+
+    #[test]
+    fn reachable_stats_follow_calls_from_entry_roots() {
+        let helper = MDecl::FunBinding(MFunBinding {
+            id: NodeId(10),
+            name: "helper".into(),
+            name_span: span(),
+            params: vec![],
+            guard: None,
+            body: MExpr::Yield {
+                op: crate::codegen::monadic::ir::EffectOpRef {
+                    effect: "E".into(),
+                    op: "op".into(),
+                    op_index: 1,
+                },
+                args: vec![],
+                source: NodeId(11),
+            },
+            span: span(),
+        });
+        let unused = MDecl::FunBinding(MFunBinding {
+            id: NodeId(20),
+            name: "unused".into(),
+            name_span: span(),
+            params: vec![],
+            guard: None,
+            body: MExpr::Yield {
+                op: crate::codegen::monadic::ir::EffectOpRef {
+                    effect: "Unused".into(),
+                    op: "op".into(),
+                    op_index: 1,
+                },
+                args: vec![],
+                source: NodeId(21),
+            },
+            span: span(),
+        });
+        let main = MDecl::FunBinding(MFunBinding {
+            id: NodeId(30),
+            name: "main".into(),
+            name_span: span(),
+            params: vec![],
+            guard: None,
+            body: MExpr::App {
+                head: Atom::Var {
+                    name: MVar {
+                        name: "helper".into(),
+                        id: 31,
+                    },
+                    source: NodeId(31),
+                },
+                args: vec![],
+                source: NodeId(32),
+            },
+            span: span(),
+        });
+        let program = vec![helper, unused, main];
+
+        let stats = Stats::collect_reachable_program(&program, &["main"]);
+
+        assert_eq!(stats.decls, 2);
+        assert_eq!(stats.yield_, 1);
+        assert_eq!(stats.yield_ops.get("E::op"), Some(&1));
+        assert_eq!(stats.yield_ops.get("Unused::op"), None);
     }
 }

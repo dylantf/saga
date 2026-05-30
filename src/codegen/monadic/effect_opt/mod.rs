@@ -56,6 +56,9 @@ struct Optimizer<'info, 'data> {
     effect_info: &'info EffectInfo<'data>,
     handler_stack: Vec<HandlerFrame>,
     inline_candidates: HashMap<String, InlineCandidate>,
+    variant_candidates: HashMap<String, VariantCandidate>,
+    generated_variant_names: HashSet<String>,
+    pending_variants: Vec<MDecl>,
     inline_blocked_names: Vec<String>,
 }
 
@@ -78,6 +81,11 @@ enum HandlerFrame {
 struct InlineCandidate {
     params: Vec<Pat>,
     body: MExpr,
+}
+
+#[derive(Debug, Clone)]
+struct VariantCandidate {
+    binding: MFunBinding,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -139,6 +147,9 @@ impl<'info, 'data> Optimizer<'info, 'data> {
             effect_info,
             handler_stack: Vec::new(),
             inline_candidates: HashMap::new(),
+            variant_candidates: HashMap::new(),
+            generated_variant_names: HashSet::new(),
+            pending_variants: Vec::new(),
             inline_blocked_names: Vec::new(),
         }
     }
@@ -147,6 +158,8 @@ impl<'info, 'data> Optimizer<'info, 'data> {
         let mut changed = true;
         while changed {
             self.inline_candidates = collect_inline_candidates(&program);
+            self.variant_candidates = collect_variant_candidates(&program);
+            self.pending_variants.clear();
             changed = false;
             program = program
                 .into_iter()
@@ -156,6 +169,10 @@ impl<'info, 'data> Optimizer<'info, 'data> {
                     decl
                 })
                 .collect();
+            if !self.pending_variants.is_empty() {
+                changed = true;
+                program.append(&mut self.pending_variants);
+            }
         }
         program
     }
@@ -197,6 +214,7 @@ impl<'info, 'data> Optimizer<'info, 'data> {
 
     fn optimize_expr(&mut self, expr: MExpr) -> (MExpr, Change) {
         let (expr, child_change) = self.optimize_children(expr);
+        let (expr, variant_change) = self.try_native_function_variant_call(expr);
         let (expr, inline_change) = self.try_inline_helper_call(expr);
         let (expr, native_change) = self.try_native_direct_call(expr);
         let (expr, finally_direct_change) = self.try_finally_direct_call(expr);
@@ -204,6 +222,7 @@ impl<'info, 'data> Optimizer<'info, 'data> {
         let (expr, collapse_change) = self.try_bind_collapse(expr);
         let (expr, let_change) = self.try_bind_to_let(expr);
         let mut change = child_change;
+        change.mark_if(variant_change);
         change.mark_if(inline_change);
         change.mark_if(native_change);
         change.mark_if(finally_direct_change);
@@ -846,6 +865,16 @@ impl<'info, 'data> Optimizer<'info, 'data> {
                     change,
                 )
             }
+            Atom::BackendSpawnThunk { callback, source } => {
+                let (callback, change) = self.optimize_spawn_callback_atom(*callback);
+                (
+                    Atom::BackendSpawnThunk {
+                        callback: Box::new(callback),
+                        source,
+                    },
+                    change,
+                )
+            }
             Atom::Var { .. }
             | Atom::Lit { .. }
             | Atom::DictRef { .. }
@@ -915,6 +944,115 @@ impl<'info, 'data> Optimizer<'info, 'data> {
         let out = self.optimize_expr(expr);
         self.handler_stack.pop();
         out
+    }
+
+    fn try_native_function_variant_call(&mut self, expr: MExpr) -> (MExpr, Change) {
+        if !self.opts.native_function_variants() || !self.native_variant_stack_eligible() {
+            return (expr, Change::Unchanged);
+        }
+
+        let MExpr::App { head, args, source } = expr else {
+            return (expr, Change::Unchanged);
+        };
+
+        let Atom::Var {
+            name,
+            source: head_source,
+        } = &head
+        else {
+            return (MExpr::App { head, args, source }, Change::Unchanged);
+        };
+        if is_generated_variant_name(&name.name)
+            || self.inline_blocked_names.iter().any(|n| n == &name.name)
+        {
+            return (MExpr::App { head, args, source }, Change::Unchanged);
+        }
+
+        let Some(candidate) = self.variant_candidates.get(&name.name).cloned() else {
+            return (MExpr::App { head, args, source }, Change::Unchanged);
+        };
+        if args.len() != candidate.binding.params.len() {
+            return (MExpr::App { head, args, source }, Change::Unchanged);
+        }
+        if !self.expr_has_direct_call_opportunity(&candidate.binding.body) {
+            return (MExpr::App { head, args, source }, Change::Unchanged);
+        }
+
+        let variant_name = native_variant_name(&candidate.binding.name, &self.handler_stack);
+        if variant_name == name.name {
+            return (MExpr::App { head, args, source }, Change::Unchanged);
+        }
+
+        let mut variant_body =
+            rewrite_direct_calls_to_name(candidate.binding.body.clone(), &name.name, &variant_name);
+        let old_blocked_len = self.inline_blocked_names.len();
+        self.inline_blocked_names
+            .extend(bound_names_in_pats(&candidate.binding.params));
+        let (optimized_body, body_change) = self.optimize_expr(variant_body);
+        self.inline_blocked_names.truncate(old_blocked_len);
+        variant_body = optimized_body;
+
+        if body_change == Change::Unchanged {
+            return (MExpr::App { head, args, source }, Change::Unchanged);
+        }
+
+        if !self.generated_variant_names.contains(&variant_name) {
+            self.generated_variant_names.insert(variant_name.clone());
+            self.pending_variants.push(MDecl::FunBinding(MFunBinding {
+                name: variant_name.clone(),
+                body: variant_body,
+                ..candidate.binding
+            }));
+        }
+
+        (
+            MExpr::App {
+                head: Atom::Var {
+                    name: MVar {
+                        name: variant_name,
+                        id: name.id,
+                    },
+                    source: *head_source,
+                },
+                args,
+                source,
+            },
+            Change::Changed,
+        )
+    }
+
+    fn native_variant_stack_eligible(&self) -> bool {
+        let mut has_native = false;
+        for frame in &self.handler_stack {
+            match frame {
+                HandlerFrame::Native { .. } => has_native = true,
+                HandlerFrame::Static { .. } => return false,
+                HandlerFrame::Blocking { .. } => {}
+            }
+        }
+        has_native
+    }
+
+    fn optimize_spawn_callback_atom(&mut self, atom: Atom) -> (Atom, Change) {
+        match atom {
+            Atom::Lambda {
+                params,
+                body,
+                source,
+            } => {
+                let blocked_names = bound_names_in_pats(&params);
+                let (body, change) = self.optimize_expr_with_blocked_names(blocked_names, *body);
+                (
+                    Atom::Lambda {
+                        params,
+                        body: Box::new(body),
+                        source,
+                    },
+                    change,
+                )
+            }
+            other => self.optimize_atom(other),
+        }
     }
 
     fn try_inline_helper_call(&self, expr: MExpr) -> (MExpr, Change) {
@@ -1070,6 +1208,9 @@ impl<'info, 'data> Optimizer<'info, 'data> {
             Atom::AnonRecord { fields, .. } | Atom::Record { fields, .. } => fields
                 .iter()
                 .any(|(_, atom)| self.atom_has_direct_call_opportunity(atom)),
+            Atom::BackendSpawnThunk { callback, .. } => {
+                self.atom_has_direct_call_opportunity(callback)
+            }
             Atom::Var { .. }
             | Atom::Lit { .. }
             | Atom::DictRef { .. }
@@ -1284,7 +1425,7 @@ impl<'info, 'data> Optimizer<'info, 'data> {
         None
     }
 
-    fn try_native_direct_call(&self, expr: MExpr) -> (MExpr, Change) {
+    fn try_native_direct_call(&mut self, expr: MExpr) -> (MExpr, Change) {
         if !self.opts.native_direct_call() {
             return (expr, Change::Unchanged);
         }
@@ -1296,6 +1437,23 @@ impl<'info, 'data> Optimizer<'info, 'data> {
         let Some(handler) = self.resolve_native_direct_call_handler(&op) else {
             return (MExpr::Yield { op, args, source }, Change::Unchanged);
         };
+
+        if handler.rsplit('.').next().unwrap_or(handler) == "beam_actor"
+            && op.effect == "Std.Actor.Process"
+            && op.op == "spawn"
+            && args.len() == 1
+        {
+            let (callback, _) = self.optimize_spawn_callback_atom(args[0].clone());
+            return (
+                MExpr::ForeignCall {
+                    module: "erlang".to_string(),
+                    func: "spawn".to_string(),
+                    args: vec![backend_spawn_thunk_at(callback, source)],
+                    source,
+                },
+                Change::Changed,
+            );
+        }
 
         let Some(direct_call) = native_direct_call_expr(handler, &op, &args, source) else {
             return (MExpr::Yield { op, args, source }, Change::Unchanged);
@@ -1345,6 +1503,10 @@ impl RunOptions {
     }
 
     fn helper_inline(self) -> bool {
+        !self.skip
+    }
+
+    fn native_function_variants(self) -> bool {
         !self.skip
     }
 }
@@ -1415,6 +1577,8 @@ fn fun_type_effects_are_empty(ty: &typechecker::Type) -> bool {
 }
 
 const INLINE_HELPER_BODY_BUDGET: usize = 30;
+const NATIVE_VARIANT_BODY_BUDGET: usize = 220;
+const NATIVE_VARIANT_PREFIX: &str = "__saga_native_variant";
 
 fn collect_inline_candidates(program: &MProgram) -> HashMap<String, InlineCandidate> {
     let mut counts: HashMap<String, usize> = HashMap::new();
@@ -1452,6 +1616,357 @@ fn collect_inline_candidates(program: &MProgram) -> HashMap<String, InlineCandid
         );
     }
     candidates
+}
+
+fn collect_variant_candidates(program: &MProgram) -> HashMap<String, VariantCandidate> {
+    let mut counts: HashMap<String, usize> = HashMap::new();
+    for decl in program {
+        if let MDecl::FunBinding(f) = decl
+            && !is_generated_variant_name(&f.name)
+        {
+            *counts.entry(f.name.clone()).or_default() += 1;
+        }
+    }
+
+    let mut candidates = HashMap::new();
+    for decl in program {
+        let MDecl::FunBinding(f) = decl else {
+            continue;
+        };
+        if is_generated_variant_name(&f.name) || counts.get(&f.name) != Some(&1) {
+            continue;
+        }
+        if f.guard.is_some()
+            || !helper_params_are_supported(&f.params)
+            || expr_node_count(&f.body) > NATIVE_VARIANT_BODY_BUDGET
+        {
+            continue;
+        }
+        candidates.insert(f.name.clone(), VariantCandidate { binding: f.clone() });
+    }
+    candidates
+}
+
+fn native_variant_name(name: &str, stack: &[HandlerFrame]) -> String {
+    let mut parts = vec![NATIVE_VARIANT_PREFIX.to_string(), sanitize_ident_part(name)];
+    for frame in stack {
+        match frame {
+            HandlerFrame::Native { effects, handler } => {
+                parts.push("native".to_string());
+                parts.push(sanitize_ident_part(handler));
+                for effect in effects {
+                    parts.push(sanitize_ident_part(effect));
+                }
+            }
+            HandlerFrame::Blocking { effects } => {
+                parts.push("blocking".to_string());
+                for effect in effects {
+                    parts.push(sanitize_ident_part(effect));
+                }
+            }
+            HandlerFrame::Static { .. } => {}
+        }
+    }
+    parts.join("__")
+}
+
+fn is_generated_variant_name(name: &str) -> bool {
+    name.starts_with(NATIVE_VARIANT_PREFIX)
+}
+
+fn sanitize_ident_part(value: &str) -> String {
+    let mut out = String::new();
+    for ch in value.chars() {
+        if ch.is_ascii_alphanumeric() || ch == '_' {
+            out.push(ch);
+        } else {
+            out.push('_');
+        }
+    }
+    if out.is_empty() { "_".to_string() } else { out }
+}
+
+fn rewrite_direct_calls_to_name(expr: MExpr, old_name: &str, new_name: &str) -> MExpr {
+    match expr {
+        MExpr::App { head, args, source } => MExpr::App {
+            head: rewrite_direct_call_atom_to_name(head, old_name, new_name),
+            args: args.into_iter().map(rewrite_non_call_atom_refs).collect(),
+            source,
+        },
+        MExpr::Pure(atom) => MExpr::Pure(rewrite_non_call_atom_refs(atom)),
+        MExpr::Yield { op, args, source } => MExpr::Yield {
+            op,
+            args: args.into_iter().map(rewrite_non_call_atom_refs).collect(),
+            source,
+        },
+        MExpr::Bind {
+            var,
+            value,
+            body,
+            mode,
+        } => {
+            let value = rewrite_direct_calls_to_name(*value, old_name, new_name);
+            let body = if var.name == old_name {
+                *body
+            } else {
+                rewrite_direct_calls_to_name(*body, old_name, new_name)
+            };
+            MExpr::Bind {
+                var,
+                value: Box::new(value),
+                body: Box::new(body),
+                mode,
+            }
+        }
+        MExpr::Let { var, value, body } => {
+            let value = rewrite_direct_calls_to_name(*value, old_name, new_name);
+            let body = if var.name == old_name {
+                *body
+            } else {
+                rewrite_direct_calls_to_name(*body, old_name, new_name)
+            };
+            MExpr::Let {
+                var,
+                value: Box::new(value),
+                body: Box::new(body),
+            }
+        }
+        MExpr::Ensure { body, cleanup } => MExpr::Ensure {
+            body: Box::new(rewrite_direct_calls_to_name(*body, old_name, new_name)),
+            cleanup: Box::new(rewrite_direct_calls_to_name(*cleanup, old_name, new_name)),
+        },
+        MExpr::Case {
+            scrutinee,
+            arms,
+            source,
+        } => MExpr::Case {
+            scrutinee: rewrite_non_call_atom_refs(scrutinee),
+            arms: arms
+                .into_iter()
+                .map(|arm| rewrite_call_arm_refs(arm, old_name, new_name))
+                .collect(),
+            source,
+        },
+        MExpr::If {
+            cond,
+            then_branch,
+            else_branch,
+            source,
+        } => MExpr::If {
+            cond: rewrite_non_call_atom_refs(cond),
+            then_branch: Box::new(rewrite_direct_calls_to_name(
+                *then_branch,
+                old_name,
+                new_name,
+            )),
+            else_branch: Box::new(rewrite_direct_calls_to_name(
+                *else_branch,
+                old_name,
+                new_name,
+            )),
+            source,
+        },
+        // A nested handler changes the evidence context. Keep recursive calls
+        // inside it on the original slow path unless a later optimizer pass
+        // deliberately specializes that inner context too.
+        MExpr::With { .. } => expr,
+        MExpr::Resume { value, source } => MExpr::Resume {
+            value: rewrite_non_call_atom_refs(value),
+            source,
+        },
+        MExpr::FieldAccess {
+            record,
+            field,
+            record_name,
+            anon_fields,
+            source,
+        } => MExpr::FieldAccess {
+            record: rewrite_non_call_atom_refs(record),
+            field,
+            record_name,
+            anon_fields,
+            source,
+        },
+        MExpr::RecordUpdate {
+            record,
+            fields,
+            record_name,
+            anon_fields,
+            source,
+        } => MExpr::RecordUpdate {
+            record: rewrite_non_call_atom_refs(record),
+            fields: fields
+                .into_iter()
+                .map(|(field, atom)| (field, rewrite_non_call_atom_refs(atom)))
+                .collect(),
+            record_name,
+            anon_fields,
+            source,
+        },
+        MExpr::DictMethodAccess {
+            dict,
+            trait_name,
+            method_index,
+            source,
+        } => MExpr::DictMethodAccess {
+            dict: rewrite_non_call_atom_refs(dict),
+            trait_name,
+            method_index,
+            source,
+        },
+        MExpr::ForeignCall {
+            module,
+            func,
+            args,
+            source,
+        } => MExpr::ForeignCall {
+            module,
+            func,
+            args: args.into_iter().map(rewrite_non_call_atom_refs).collect(),
+            source,
+        },
+        MExpr::BinOp {
+            op,
+            left,
+            right,
+            source,
+        } => MExpr::BinOp {
+            op,
+            left: rewrite_non_call_atom_refs(left),
+            right: rewrite_non_call_atom_refs(right),
+            source,
+        },
+        MExpr::UnaryMinus { value, source } => MExpr::UnaryMinus {
+            value: rewrite_non_call_atom_refs(value),
+            source,
+        },
+        MExpr::BitString { segments, source } => MExpr::BitString {
+            segments: segments
+                .into_iter()
+                .map(|mut seg| {
+                    seg.value = rewrite_non_call_atom_refs(seg.value);
+                    seg.size = seg.size.map(rewrite_non_call_atom_refs);
+                    seg
+                })
+                .collect(),
+            source,
+        },
+        MExpr::Receive {
+            arms,
+            after,
+            source,
+        } => MExpr::Receive {
+            arms: arms
+                .into_iter()
+                .map(|arm| rewrite_call_arm_refs(arm, old_name, new_name))
+                .collect(),
+            after: after.map(|(timeout, body)| {
+                (
+                    rewrite_non_call_atom_refs(timeout),
+                    Box::new(rewrite_direct_calls_to_name(*body, old_name, new_name)),
+                )
+            }),
+            source,
+        },
+        MExpr::LetFun {
+            name,
+            params,
+            body,
+            rest,
+            source,
+        } => {
+            let body = if name == old_name || pats_bind_name(&params, old_name) {
+                *body
+            } else {
+                rewrite_direct_calls_to_name(*body, old_name, new_name)
+            };
+            let rest = if name == old_name {
+                *rest
+            } else {
+                rewrite_direct_calls_to_name(*rest, old_name, new_name)
+            };
+            MExpr::LetFun {
+                name,
+                params,
+                body: Box::new(body),
+                rest: Box::new(rest),
+                source,
+            }
+        }
+        MExpr::HandlerValue { .. } => expr,
+    }
+}
+
+fn rewrite_direct_call_atom_to_name(atom: Atom, old_name: &str, new_name: &str) -> Atom {
+    match atom {
+        Atom::Var { mut name, source } if name.name == old_name => {
+            name.name = new_name.to_string();
+            Atom::Var { name, source }
+        }
+        other => rewrite_non_call_atom_refs(other),
+    }
+}
+
+fn rewrite_non_call_atom_refs(atom: Atom) -> Atom {
+    match atom {
+        Atom::Ctor { name, args, source } => Atom::Ctor {
+            name,
+            args: args.into_iter().map(rewrite_non_call_atom_refs).collect(),
+            source,
+        },
+        Atom::Tuple { elements, source } => Atom::Tuple {
+            elements: elements
+                .into_iter()
+                .map(rewrite_non_call_atom_refs)
+                .collect(),
+            source,
+        },
+        Atom::AnonRecord { fields, source } => Atom::AnonRecord {
+            fields: fields
+                .into_iter()
+                .map(|(field, atom)| (field, rewrite_non_call_atom_refs(atom)))
+                .collect(),
+            source,
+        },
+        Atom::Record {
+            name,
+            fields,
+            source,
+        } => Atom::Record {
+            name,
+            fields: fields
+                .into_iter()
+                .map(|(field, atom)| (field, rewrite_non_call_atom_refs(atom)))
+                .collect(),
+            source,
+        },
+        Atom::BackendSpawnThunk { callback, source } => Atom::BackendSpawnThunk {
+            callback: Box::new(rewrite_non_call_atom_refs(*callback)),
+            source,
+        },
+        // Lambda bodies run in their own call context. Do not rewrite recursive
+        // calls inside them as part of this generated function variant.
+        Atom::Lambda { .. }
+        | Atom::Var { .. }
+        | Atom::Lit { .. }
+        | Atom::DictRef { .. }
+        | Atom::QualifiedRef { .. }
+        | Atom::Symbol { .. }
+        | Atom::BackendAtom { .. } => atom,
+    }
+}
+
+fn rewrite_call_arm_refs(arm: MArm, old_name: &str, new_name: &str) -> MArm {
+    if pat_binds_name(&arm.pattern, old_name) {
+        return arm;
+    }
+    MArm {
+        guard: arm
+            .guard
+            .map(|guard| rewrite_direct_calls_to_name(guard, old_name, new_name)),
+        body: rewrite_direct_calls_to_name(arm.body, old_name, new_name),
+        ..arm
+    }
 }
 
 fn helper_params_are_supported(params: &[Pat]) -> bool {
@@ -1536,7 +2051,21 @@ fn native_direct_call_expr(
             }
             out
         }
-        NativeArgTransform::WrapThunk(_) => return None,
+        NativeArgTransform::WrapThunk(idx) => {
+            if op.effect != "Std.Actor.Process" || op.op != "spawn" {
+                return None;
+            }
+            let callback = args.get(idx)?.clone();
+            (0..spec.param_count)
+                .map(|i| {
+                    if i == idx {
+                        Some(backend_spawn_thunk_at(callback.clone(), source))
+                    } else {
+                        args.get(i).cloned()
+                    }
+                })
+                .collect::<Option<Vec<_>>>()?
+        }
     };
 
     Some(MExpr::ForeignCall {
@@ -1630,6 +2159,13 @@ fn backend_atom_at(atom: &str, source: crate::ast::NodeId) -> Atom {
     }
 }
 
+fn backend_spawn_thunk_at(callback: Atom, source: crate::ast::NodeId) -> Atom {
+    Atom::BackendSpawnThunk {
+        callback: Box::new(callback),
+        source,
+    }
+}
+
 fn expr_node_count(expr: &MExpr) -> usize {
     match expr {
         MExpr::Pure(atom) => 1 + atom_node_count(atom),
@@ -1717,6 +2253,7 @@ fn atom_node_count(atom: &Atom) -> usize {
                 .sum::<usize>()
         }
         Atom::Lambda { body, .. } => 1 + expr_node_count(body),
+        Atom::BackendSpawnThunk { callback, .. } => 1 + atom_node_count(callback),
         Atom::Var { .. }
         | Atom::Lit { .. }
         | Atom::DictRef { .. }
@@ -1917,6 +2454,7 @@ fn atom_yield_count(atom: &Atom) -> usize {
             fields.iter().map(|(_, atom)| atom_yield_count(atom)).sum()
         }
         Atom::Lambda { body, .. } => expr_yield_count(body),
+        Atom::BackendSpawnThunk { callback, .. } => atom_yield_count(callback),
         Atom::Var { .. }
         | Atom::Lit { .. }
         | Atom::DictRef { .. }
@@ -2102,6 +2640,7 @@ fn atom_contains_inline_forbidden_shape(atom: &Atom) -> bool {
         Atom::AnonRecord { fields, .. } | Atom::Record { fields, .. } => fields
             .iter()
             .any(|(_, atom)| atom_contains_inline_forbidden_shape(atom)),
+        Atom::BackendSpawnThunk { callback, .. } => atom_contains_inline_forbidden_shape(callback),
         Atom::Var { .. }
         | Atom::Lit { .. }
         | Atom::DictRef { .. }
@@ -2202,6 +2741,7 @@ fn atom_calls_any(atom: &Atom, names: &HashSet<String>) -> bool {
         Atom::AnonRecord { fields, .. } | Atom::Record { fields, .. } => {
             fields.iter().any(|(_, atom)| atom_calls_any(atom, names))
         }
+        Atom::BackendSpawnThunk { callback, .. } => atom_calls_any(callback, names),
         Atom::Var { .. }
         | Atom::Lit { .. }
         | Atom::DictRef { .. }
@@ -2255,6 +2795,7 @@ fn atom_contains_yield(atom: &Atom) -> bool {
         Atom::AnonRecord { fields, .. } | Atom::Record { fields, .. } => {
             fields.iter().any(|(_, atom)| atom_contains_yield(atom))
         }
+        Atom::BackendSpawnThunk { callback, .. } => atom_contains_yield(callback),
         Atom::Lambda { body, .. } => expr_contains_yield(body),
         Atom::Var { .. }
         | Atom::Lit { .. }
@@ -2584,6 +3125,7 @@ fn rewrite_resumes_in_atom(atom: Atom) -> Atom {
             source,
         },
         Atom::Lambda { .. } => atom,
+        Atom::BackendSpawnThunk { .. } => atom,
         Atom::Var { .. }
         | Atom::Lit { .. }
         | Atom::DictRef { .. }
@@ -3028,6 +3570,13 @@ fn subst_atom(
                 source,
             })
         }
+        Atom::BackendSpawnThunk { callback, source } => {
+            let out = subst_atom(*callback, target, replacement, replacement_free_names);
+            map_subst(out, |callback| Atom::BackendSpawnThunk {
+                callback: Box::new(callback),
+                source,
+            })
+        }
         Atom::Var { .. }
         | Atom::Lit { .. }
         | Atom::DictRef { .. }
@@ -3316,6 +3865,7 @@ fn collect_atom_var_names(atom: &Atom, out: &mut HashSet<String>) {
             }
         }
         Atom::Lambda { body, .. } => collect_expr_var_names(body, out),
+        Atom::BackendSpawnThunk { callback, .. } => collect_atom_var_names(callback, out),
         Atom::Lit { .. }
         | Atom::DictRef { .. }
         | Atom::QualifiedRef { .. }
@@ -3445,6 +3995,7 @@ fn atom_contains_target(atom: &Atom, target: &MVar) -> bool {
         Atom::Lambda { params, body, .. } => {
             !pats_bind_name(params, &target.name) && expr_contains_target(body, target)
         }
+        Atom::BackendSpawnThunk { callback, .. } => atom_contains_target(callback, target),
         Atom::Lit { .. }
         | Atom::DictRef { .. }
         | Atom::QualifiedRef { .. }
@@ -4835,16 +5386,31 @@ mod tests {
     }
 
     #[test]
-    fn native_direct_call_skips_spawn() {
+    fn native_direct_call_rewrites_spawn_with_backend_thunk() {
         let f = Fixture::new();
         let handler = native_handler("Std.Actor.Process", "beam_actor", 241);
-        let yield_expr = yield_native("Std.Actor.Process", "spawn", vec![unit_atom()], 231);
-        let prog = val_program(with_expr(handler.clone(), yield_expr.clone()));
+        let callback = var("callback", 230);
+        let yield_expr = yield_native("Std.Actor.Process", "spawn", vec![callback.clone()], 231);
+        let prog = val_program(with_expr(handler.clone(), yield_expr));
         let info = f.info();
 
         let out = run(prog, &f.h, &info);
 
-        assert_eq!(out, val_program(with_expr(handler, yield_expr)));
+        assert_eq!(
+            out,
+            val_program(with_expr(
+                handler,
+                MExpr::ForeignCall {
+                    module: "erlang".to_string(),
+                    func: "spawn".to_string(),
+                    args: vec![Atom::BackendSpawnThunk {
+                        callback: Box::new(callback),
+                        source: crate::ast::NodeId(231),
+                    }],
+                    source: crate::ast::NodeId(231),
+                }
+            ))
+        );
     }
 
     #[test]
@@ -5174,6 +5740,174 @@ mod tests {
                     span: span(),
                 })
             ]
+        );
+    }
+
+    #[test]
+    fn native_function_variant_specializes_same_module_call_under_native_handler() {
+        let f = Fixture::new();
+        let handler = native_handler("Std.Actor.Timer", "beam_actor", 330);
+        let helper_body = bind_expr(
+            mv("_first", 331),
+            yield_native("Std.Actor.Timer", "sleep", vec![lit_int("10", 10)], 332),
+            yield_native("Std.Actor.Timer", "sleep", vec![lit_int("20", 20)], 333),
+        );
+        let helper = helper_fun("helper", 334, vec![pat_unit(335)], helper_body);
+        let caller = MDecl::Val(MVal {
+            id: crate::ast::NodeId(336),
+            public: false,
+            name: "caller".to_string(),
+            value: with_expr(
+                handler,
+                MExpr::App {
+                    head: var("helper", 337),
+                    args: vec![unit_atom()],
+                    source: crate::ast::NodeId(338),
+                },
+            ),
+            span: span(),
+        });
+        let info = f.info();
+
+        let out = run(vec![helper.clone(), caller], &f.h, &info);
+
+        let variant_name = out
+            .iter()
+            .find_map(|decl| match decl {
+                MDecl::FunBinding(f) if is_generated_variant_name(&f.name) => Some(f.name.clone()),
+                _ => None,
+            })
+            .expect("expected generated native function variant");
+        assert_ne!(variant_name, "helper");
+        assert!(out.iter().any(|decl| decl == &helper));
+
+        let MDecl::Val(caller) = &out[1] else {
+            panic!("expected caller val");
+        };
+        let MExpr::With { body, .. } = &caller.value else {
+            panic!("expected caller with-expression");
+        };
+        assert_eq!(
+            body.as_ref(),
+            &MExpr::App {
+                head: Atom::Var {
+                    name: mv(&variant_name, 337),
+                    source: crate::ast::NodeId(337),
+                },
+                args: vec![unit_atom()],
+                source: crate::ast::NodeId(338),
+            }
+        );
+
+        let variant = out
+            .iter()
+            .find_map(|decl| match decl {
+                MDecl::FunBinding(f) if f.name == variant_name => Some(f),
+                _ => None,
+            })
+            .expect("expected generated variant decl");
+        assert_eq!(
+            variant.body,
+            bind_expr(
+                mv("_first", 331),
+                MExpr::ForeignCall {
+                    module: "timer".to_string(),
+                    func: "sleep".to_string(),
+                    args: vec![lit_int("10", 10)],
+                    source: crate::ast::NodeId(332),
+                },
+                MExpr::ForeignCall {
+                    module: "timer".to_string(),
+                    func: "sleep".to_string(),
+                    args: vec![lit_int("20", 20)],
+                    source: crate::ast::NodeId(333),
+                }
+            )
+        );
+    }
+
+    #[test]
+    fn native_function_variant_rewrites_direct_self_recursion_to_variant() {
+        let f = Fixture::new();
+        let handler = native_handler("Std.Actor.Timer", "beam_actor", 340);
+        let helper_body = bind_expr(
+            mv("_first", 341),
+            yield_native("Std.Actor.Timer", "sleep", vec![lit_int("10", 10)], 342),
+            MExpr::App {
+                head: var("helper", 343),
+                args: vec![unit_atom()],
+                source: crate::ast::NodeId(344),
+            },
+        );
+        let helper = helper_fun("helper", 345, vec![pat_unit(346)], helper_body);
+        let call = MExpr::App {
+            head: var("helper", 347),
+            args: vec![unit_atom()],
+            source: crate::ast::NodeId(348),
+        };
+        let caller = MDecl::Val(MVal {
+            id: crate::ast::NodeId(349),
+            public: false,
+            name: "caller".to_string(),
+            value: with_expr(handler.clone(), call.clone()),
+            span: span(),
+        });
+        let info = f.info();
+
+        let out = run(vec![helper.clone(), caller], &f.h, &info);
+
+        let variant_name = out
+            .iter()
+            .find_map(|decl| match decl {
+                MDecl::FunBinding(f) if is_generated_variant_name(&f.name) => Some(f.name.clone()),
+                _ => None,
+            })
+            .expect("expected generated native function variant");
+        assert!(out.iter().any(|decl| decl == &helper));
+        let MDecl::Val(caller) = &out[1] else {
+            panic!("expected caller val");
+        };
+        let MExpr::With { body, .. } = &caller.value else {
+            panic!("expected caller with-expression");
+        };
+        assert_eq!(
+            body.as_ref(),
+            &MExpr::App {
+                head: Atom::Var {
+                    name: mv(&variant_name, 347),
+                    source: crate::ast::NodeId(347),
+                },
+                args: vec![unit_atom()],
+                source: crate::ast::NodeId(348),
+            }
+        );
+
+        let variant = out
+            .iter()
+            .find_map(|decl| match decl {
+                MDecl::FunBinding(f) if f.name == variant_name => Some(f),
+                _ => None,
+            })
+            .expect("expected generated variant decl");
+        assert_eq!(
+            variant.body,
+            bind_expr(
+                mv("_first", 341),
+                MExpr::ForeignCall {
+                    module: "timer".to_string(),
+                    func: "sleep".to_string(),
+                    args: vec![lit_int("10", 10)],
+                    source: crate::ast::NodeId(342),
+                },
+                MExpr::App {
+                    head: Atom::Var {
+                        name: mv(&variant_name, 343),
+                        source: crate::ast::NodeId(343),
+                    },
+                    args: vec![unit_atom()],
+                    source: crate::ast::NodeId(344),
+                }
+            )
         );
     }
 

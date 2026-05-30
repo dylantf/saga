@@ -97,26 +97,39 @@ construction, and static native bootstrap metadata plus Ref/Vec store-specific
 builders. Further cleanup should stay opportunistic unless it is promoted to a
 separate semantic task.
 
-**Latest semantic track:** native direct-call specialization milestone 3 is
+**Latest semantic track:** native direct-call specialization milestone 4 is
 implemented; see
 [native-direct-call-specialization.md](./uniform-effect-translation/native-direct-call-specialization.md).
 It rewrites simple first-order actor/timer native yields plus `beam_ref`
 `new`/`get`/`set` to direct calls, supports optimizer-generated backend atom
-arguments for `monitor`, and keeps callback-heavy or backend-specific native
-handlers on the slow evidence path.
+arguments for `monitor`, and lowers `Process.spawn` through a backend thunk
+that captures perform-site evidence. Backend-specific store handlers remain on
+the slow evidence path unless explicitly optimized.
 
 **Measurement hook:** `saga inspect <file> --stage monadic-stats` prints
 pre/post optimizer structural counts for `Yield`, `Bind`, `Let`,
 `ForeignCall`, handlers, arms, and related monadic IR nodes, plus per-op
-`Yield` and per-target `ForeignCall` breakdowns. Use this before choosing the
-next optimizer milestone.
+`Yield` and per-target `ForeignCall` breakdowns. It also prints an
+entry-reachable section rooted at `main`/`tests`, which is important before
+landing function-variant specialization because variants can improve the hot
+call path while increasing whole-program emitted IR. Use this before choosing
+the next optimizer milestone.
 
 **Latest optimizer milestone:** interprocedural handler specialization
-milestone 1 is implemented; see
+milestone 2 is implemented; see
 [interprocedural-handler-specialization.md](./uniform-effect-translation/interprocedural-handler-specialization.md).
 It performs conservative same-module helper inlining under a known handler
-stack for single-clause, single-yield helpers. Function-variant generation is
-deliberately deferred.
+stack for single-clause, single-yield helpers, and generates conservative
+same-module native function variants for calls under native handler stacks.
+The variant path currently targets native direct-call exposure only; static
+handler variants, cross-module variants, and dead-source-function cleanup remain
+future optimization work.
+
+**Phase 2 scope control:** see
+[optimizer-roadmap.md](./uniform-effect-translation/optimizer-roadmap.md).
+The optimizer roadmap defines the finite acceptance target, current completed
+milestones, bounded remaining candidates, accepted slow paths, measurement set,
+and cleanup cadence.
 
 ### Cleanup (single mechanical commit)
 

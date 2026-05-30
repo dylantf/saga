@@ -118,6 +118,13 @@ pub enum Atom {
         atom: String,
         source: NodeId,
     },
+    /// Backend-only `fun() -> ...` thunk used by native APIs that call Saga
+    /// callbacks from Erlang. Currently produced only for `Process.spawn`
+    /// direct-call specialization.
+    BackendSpawnThunk {
+        callback: Box<Atom>,
+        source: NodeId,
+    },
 }
 
 // -------------------------------------------------------------------------
@@ -371,6 +378,7 @@ impl Atom {
             | Atom::QualifiedRef { .. }
             | Atom::Symbol { .. }
             | Atom::BackendAtom { .. } => false,
+            Atom::BackendSpawnThunk { callback, .. } => callback.contains_resume(),
         }
     }
 }

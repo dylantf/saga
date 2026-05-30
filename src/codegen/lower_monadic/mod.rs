@@ -265,6 +265,9 @@ impl<'ctx> Lowerer<'ctx> {
                 }
             }
             Atom::Lambda { body, .. } => self.absorb_anon_record_atoms_from_expr(body),
+            Atom::BackendSpawnThunk { callback, .. } => {
+                self.absorb_anon_record_atoms_from_atom(callback)
+            }
             Atom::Var { .. }
             | Atom::Lit { .. }
             | Atom::DictRef { .. }

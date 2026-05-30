@@ -113,6 +113,11 @@ pub enum Atom {
         source: NodeId,
     },
     Symbol { symbol: String, source: NodeId },
+    /// Optimizer-produced backend Erlang atom. Not source `Symbol`.
+    BackendAtom { atom: String, source: NodeId },
+    /// Optimizer-produced backend `fun() -> ...` thunk for native callback
+    /// APIs such as `Process.spawn`.
+    BackendSpawnThunk { callback: Box<Atom>, source: NodeId },
 }
 ```
 
