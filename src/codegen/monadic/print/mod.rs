@@ -559,6 +559,9 @@ fn atom_str(a: &Atom) -> String {
         }
         Atom::Symbol { symbol, .. } => format!("Symbol({})", symbol),
         Atom::BackendAtom { atom, .. } => format!("BackendAtom({})", atom),
+        Atom::BackendSpawnThunk { callback, .. } => {
+            format!("BackendSpawnThunk({})", atom_str(callback))
+        }
     }
 }
 

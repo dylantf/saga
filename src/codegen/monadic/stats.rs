@@ -247,6 +247,7 @@ impl Stats {
                 self.lambda_atoms += 1;
                 self.visit_expr(body);
             }
+            Atom::BackendSpawnThunk { callback, .. } => self.visit_atom(callback),
             Atom::Var { .. }
             | Atom::Lit { .. }
             | Atom::DictRef { .. }
@@ -516,6 +517,7 @@ fn collect_atom_calls(atom: &Atom, out: &mut BTreeSet<String>) {
             }
         }
         Atom::Lambda { body, .. } => collect_expr_calls(body, out),
+        Atom::BackendSpawnThunk { callback, .. } => collect_atom_calls(callback, out),
         Atom::Var { .. }
         | Atom::Lit { .. }
         | Atom::DictRef { .. }

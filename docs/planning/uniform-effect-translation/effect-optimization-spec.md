@@ -20,10 +20,11 @@ missed optimizer opportunities from deliberately slow-path operations such as
 multishot, abort, value-producing resume, dynamic handlers, or cleanup arms.
 
 Interprocedural handler specialization is intentionally separate from the local
-direct-call rewrite. Milestone 1 is implemented as conservative same-module
-helper inlining for single-clause, single-yield helpers. See
+direct-call rewrite. Milestones 1 and 2 are implemented as conservative
+same-module helper inlining and same-module native function variants. See
 [interprocedural-handler-specialization.md](./interprocedural-handler-specialization.md)
-for details and deferred function-variant specialization.
+for details, and [optimizer-roadmap.md](./optimizer-roadmap.md) for the bounded
+phase-2 stopping criteria.
 
 ## Required context
 

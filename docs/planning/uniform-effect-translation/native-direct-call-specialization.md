@@ -17,12 +17,13 @@ fun(args..., _EvidenceAtPerform, K) -> apply K(erlang_or_runtime_call(args...))
 
 Everything else stays on the slow evidence path.
 
-Status: **milestone 3 implemented**. The optimizer rewrites simple first-order
-native yields to `ForeignCall` for `Identity`, `NoArgs`, and `Reorder`
-transforms, and now supports `PrependAtom` through an internal backend-atom IR
-value. Milestone 2 also rewrites `beam_ref` `new`, `get`, and `set` to direct
-process-dictionary calls. It skips `WrapThunk`, `beam_ref.modify`, `ets_ref`,
-Vec, dynamic handlers, and composite handlers.
+Status: **milestone 4 implemented**.
+The optimizer rewrites simple first-order native yields to `ForeignCall` for
+`Identity`, `NoArgs`, and `Reorder` transforms, and now supports `PrependAtom`
+through an internal backend-atom IR value. Milestone 2 also rewrites `beam_ref`
+`new`, `get`, and `set` to direct process-dictionary calls. Milestone 4 rewrites
+`Process.spawn` through an internal backend-spawn-thunk IR value. It skips
+`beam_ref.modify`, `ets_ref`, Vec, dynamic handlers, and composite handlers.
 
 ## Why This Is Separate From Static Handler Direct-Call
 
@@ -65,6 +66,43 @@ Skip:
   deliberate decomposition rule.
 - Empty-module native metadata entries.
 - Any op whose result needs post-processing.
+
+## Fourth Milestone: `spawn` Thunk Specialization
+
+The targeted stats sweep in
+[optimizer-roadmap.md](./optimizer-roadmap.md#latest-snapshot) shows actor
+examples were mostly bottlenecked by residual `Std.Actor.Process::spawn`
+yields. This native-direct-call milestone cannot be represented as a plain
+source-level atom argument.
+Erlang `spawn/1` needs a raw backend `fun() -> ...` thunk that captures the
+perform-site evidence and calls a uniform Saga callback:
+
+```text
+ForeignCall(erlang:spawn, [
+  BackendSpawnThunk(fun() -> apply Callback('unit', CapturedEvidence, IdK))
+])
+```
+
+Implemented shape:
+
+- add optimizer-produced `Atom::BackendSpawnThunk`, valid only as a native
+  `ForeignCall` argument;
+- lower that backend thunk to the same Core Erlang shape as
+  `spawn_thunk` in `src/codegen/lower_monadic/bootstrap.rs`;
+- preserve the documented evidence behavior in
+  [spawn-effect-evidence.md](../spawn-effect-evidence.md): the spawned process
+  receives a copy of the perform-site evidence;
+- rewrite only `beam_actor` / `Std.Actor.Process::spawn` with exactly one
+  callback argument;
+- skip if the active handler is not the innermost native `beam_actor` handler;
+- keep callback portability checking out of scope for this optimizer milestone;
+- optimize direct lambda spawn callbacks under the captured native stack, so
+  same-module native variants can also specialize the spawned child function
+  body.
+
+This removes residual native actor `Yield`s from the entry path of
+`examples/29-actors.saga` and `examples/30-pingpong.saga`, while leaving the
+semantic limitation around non-portable spawned effects unchanged and documented.
 
 ## Metadata Refactor
 
@@ -217,7 +255,7 @@ Implemented optimizer unit tests:
 - Native `Monitor.monitor` / `PrependAtom("process")` rewrites using
   `BackendAtom(process)`.
 - Native `Timer.send_after` reorders args.
-- `Process.spawn` does not rewrite.
+- `Process.spawn` rewrites to `erlang:spawn` with `BackendSpawnThunk`.
 - `beam_ref`, `ets_ref`, and `beam_vec` do not rewrite in milestone 1.
 - `beam_ref` `new`, `get`, and `set` rewrite in milestone 2.
 - `beam_ref.modify`, `ets_ref`, and `beam_vec` remain slow-path.
@@ -249,10 +287,9 @@ cargo run --bin saga --quiet -- run examples/32-monitor.saga
 cargo run --bin saga --quiet -- run examples/33-timer.saga
 ```
 
-## Non-Goals For Milestone 1
+## Remaining Non-Goals
 
-- No Ref/Vec direct native lowering.
-- No `spawn` thunk specialization.
+- No ETS Ref/Vec direct native lowering.
 - No composite handler decomposition.
 - No cleanup/finally interaction.
 - No lowerer-level Core Erlang rewrite. Keep this as an MExpr optimization so

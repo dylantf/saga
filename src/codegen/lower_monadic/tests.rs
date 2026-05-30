@@ -1103,6 +1103,32 @@ fn symbol_lowers_to_binary() {
     }
 }
 
+#[test]
+fn backend_spawn_thunk_lowers_to_zero_arity_callback_wrapper() {
+    let ce = lower_atom_default(&Atom::BackendSpawnThunk {
+        callback: Box::new(atom_var("callback")),
+        source: dummy_node(),
+    });
+
+    let CExpr::Fun(params, body) = ce else {
+        panic!("expected zero-arity Fun, got {ce:?}");
+    };
+    assert!(params.is_empty());
+    let CExpr::Let(k_name, identity_k, apply_callback) = body.as_ref() else {
+        panic!("expected thunk to bind identity K, got {body:?}");
+    };
+    assert!(k_name.starts_with("_SpawnK"));
+    assert!(matches!(identity_k.as_ref(), CExpr::Fun(p, _) if p.len() == 1));
+    let CExpr::Apply(callee, args) = apply_callback.as_ref() else {
+        panic!("expected thunk to apply callback, got {apply_callback:?}");
+    };
+    assert!(matches!(callee.as_ref(), CExpr::Var(n) if n == "Callback"));
+    assert_eq!(args.len(), 3);
+    assert!(matches!(args[0], CExpr::Lit(CLit::Atom(ref a)) if a == "unit"));
+    assert!(matches!(args[1], CExpr::Var(ref n) if n == "_Evidence"));
+    assert!(matches!(args[2], CExpr::Var(ref n) if n == k_name));
+}
+
 // ----------------------------------------------------------------------
 // MExpr lowering (sub-step 7c)
 // ----------------------------------------------------------------------
