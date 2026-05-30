@@ -221,14 +221,7 @@ impl<'ctx> Lowerer<'ctx> {
                     );
                     return self.lower_expr(body, ctx);
                 }
-                if effects.len() != 1 {
-                    panic!(
-                        "lower_with: Dynamic handler must carry exactly one effect \
-                         (spec invariant); got {:?}",
-                        effects
-                    );
-                }
-                self.lower_with_dynamic(&effects[0], op_tuple, return_lambda.as_ref(), body, ctx)
+                self.lower_with_dynamic(effects, op_tuple, return_lambda.as_ref(), body, ctx)
             }
         }
     }
@@ -407,12 +400,19 @@ impl<'ctx> Lowerer<'ctx> {
     /// shape as Static's return clause.
     fn lower_with_dynamic(
         &mut self,
-        effect: &str,
+        effects: &[String],
         op_tuple: &Atom,
         return_lambda: Option<&Atom>,
         body: &MExpr,
         ctx: &LowerCtx,
     ) -> CExpr {
+        // Sort effects canonically (alphabetical) so the positional index of
+        // each effect into `OpsByEffect` matches the producer's ordering in
+        // `build_ops_by_effect_tuple`. Single-effect is a 1-element list and
+        // the loop below installs exactly one entry.
+        let mut sorted_effects: Vec<String> = effects.to_vec();
+        sorted_effects.sort();
+
         let outer_evidence = ctx.evidence.clone();
         let raw_result_k = self.fresh_k_ret_name();
         let abort_marker = self.fresh_abort_marker();
@@ -429,7 +429,9 @@ impl<'ctx> Lowerer<'ctx> {
                 CExpr::Var(handler_value_var.clone()),
             ],
         );
-        let op_tuple_ce = CExpr::Call(
+        // element 2 is the OpsByEffect tuple of {EffectAtom, OpTuple} pairs.
+        let ops_by_effect_var = self.fresh_helper_name();
+        let ops_by_effect_value = CExpr::Call(
             "erlang".to_string(),
             "element".to_string(),
             vec![
@@ -495,26 +497,58 @@ impl<'ctx> Lowerer<'ctx> {
             .map(|(name, _)| name.clone())
             .unwrap_or_else(|| runtime_ret_k.clone());
 
-        let entry = CExpr::Tuple(vec![
-            CExpr::Lit(CLit::Atom(effect.to_string())),
-            op_tuple_ce,
-        ]);
-        let insert = CExpr::Call(
-            EVIDENCE_BRIDGE_MODULE.to_string(),
-            "insert_canonical".to_string(),
-            vec![CExpr::Var(outer_evidence.clone()), entry],
-        );
-        let new_ev_name = self.fresh_evidence_name();
+        // Build the per-effect evidence-install chain. For each effect at
+        // sorted index i, extract `element(i+1, OpsByEffect)` (a
+        // {EffectAtom, OpTuple} pair), then `element(2, pair)` (the
+        // per-effect op tuple), then call `insert_canonical(acc_ev,
+        // {EffectAtom_literal, op_tuple})` to extend the evidence vector.
+        // The effect atom is re-emitted as a literal — the pair carries the
+        // same atom but the consumer reconstructs it from static knowledge.
+        let mut install_bindings: Vec<(String, CExpr)> = Vec::new();
+        let mut acc_ev = outer_evidence.clone();
+        for (i, eff) in sorted_effects.iter().enumerate() {
+            let pair_var = self.fresh_helper_name();
+            let pair_value = CExpr::Call(
+                "erlang".to_string(),
+                "element".to_string(),
+                vec![
+                    CExpr::Lit(CLit::Int((i as i64) + 1)),
+                    CExpr::Var(ops_by_effect_var.clone()),
+                ],
+            );
+            install_bindings.push((pair_var.clone(), pair_value));
+
+            let op_tuple_var = self.fresh_helper_name();
+            let op_tuple_value = CExpr::Call(
+                "erlang".to_string(),
+                "element".to_string(),
+                vec![CExpr::Lit(CLit::Int(2)), CExpr::Var(pair_var)],
+            );
+            install_bindings.push((op_tuple_var.clone(), op_tuple_value));
+
+            let entry = CExpr::Tuple(vec![
+                CExpr::Lit(CLit::Atom(eff.clone())),
+                CExpr::Var(op_tuple_var),
+            ]);
+            let insert = CExpr::Call(
+                EVIDENCE_BRIDGE_MODULE.to_string(),
+                "insert_canonical".to_string(),
+                vec![CExpr::Var(acc_ev.clone()), entry],
+            );
+            let new_ev_name = self.fresh_evidence_name();
+            install_bindings.push((new_ev_name.clone(), insert));
+            acc_ev = new_ev_name;
+        }
 
         let prompt_k = self.fresh_k_ret_name();
         let prompt_k_binding =
             self.build_result_delimiter_k(&abort_marker, &inner_k, &raw_result_k);
 
         let body_ctx = ctx
-            .with_evidence(new_ev_name.clone())
+            .with_evidence(acc_ev.clone())
             .with_return_k(prompt_k.clone())
             .with_result_delimiter(
-                vec![effect.to_string()],
+                sorted_effects.clone(),
                 abort_marker.clone(),
                 prompt_k.clone(),
                 ctx.preserve_abort_marker,
@@ -522,7 +556,13 @@ impl<'ctx> Lowerer<'ctx> {
         let body_ce = self.lower_expr(body, &body_ctx);
         let wrapped_body = self.wrap_with_result_delimiter(body_ce, &abort_marker, ctx);
 
-        let with_evidence = CExpr::Let(new_ev_name, Box::new(insert), Box::new(wrapped_body));
+        let with_evidence =
+            install_bindings
+                .into_iter()
+                .rev()
+                .fold(wrapped_body, |inner, (name, value)| {
+                    CExpr::Let(name, Box::new(value), Box::new(inner))
+                });
         let with_prompt = CExpr::Let(
             prompt_k,
             Box::new(prompt_k_binding),
@@ -541,10 +581,15 @@ impl<'ctx> Lowerer<'ctx> {
             Some((name, value)) => CExpr::Let(name, Box::new(value), Box::new(with_runtime_return)),
             None => with_runtime_return,
         };
+        let with_ops_by_effect = CExpr::Let(
+            ops_by_effect_var,
+            Box::new(ops_by_effect_value),
+            Box::new(with_return),
+        );
         let with_handler_value = CExpr::Let(
             handler_value_var,
             Box::new(handler_value_ce),
-            Box::new(with_return),
+            Box::new(with_ops_by_effect),
         );
         CExpr::Let(
             raw_result_k,

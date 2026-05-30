@@ -256,13 +256,25 @@ scope at the original `Yield`, not a freshly-built default vector.
 
 ### Handler Bindings (Dynamic Handlers)
 
-When a handler is bound to a variable via `let` (e.g. from a conditional or factory function), the binding holds a tuple of per-op lambdas — the same `OpTuple` shape that ends up inside an evidence entry, plus an optional return clause lambda. The wrapping into `{EffectAtom, OpTuple}` happens at the `with` site, not at the binding site.
+When a handler can't be resolved statically — bound to a `let`, returned from a factory, chosen by a conditional, **or passed as a function parameter** — its runtime representation is a self-describing tuple the lowerer can decode at every `with` site:
 
-This means handler-bound vars don't need separate compilation paths for the call site — the call site reads from evidence regardless of how the handler was obtained. The remaining distinctions are at `with` site emission:
+```text
+{__saga_handler_value, OpsByEffect, RuntimeReturn}
+  OpsByEffect = {{EffectAtom_1, OpTuple_1}, ..., {EffectAtom_n, OpTuple_n}}
+  RuntimeReturn = 'unit'  -- no return clause
+                | fun(value, _Evidence, _ReturnK) -> ...  -- uniform-CPS lambda
+```
 
-1. **Static alias** (`let foo = console_log`): resolved at compile time to the original handler declaration; the `OpTuple` is constructed inline at `with`.
-2. **Conditional** (`let foo = if dev then x else y`): the let value evaluates to an `OpTuple`; the `with` wraps it in `{EffectAtom, OpTuple}` and inserts it into evidence.
-3. **Dynamic** (`let foo = make_handler()` or `let foo = handler for Log { ... }`): the let value is an `OpTuple` produced at runtime; identical `with`-site treatment to the conditional case.
+A handler value handles `n ≥ 1` effects under one shared return clause. Both producer and consumer iterate effects in **canonical alphabetical order**, so the pair at position `i` always corresponds to the same effect at compile and run time — no runtime atom matching needed.
+
+Static-handler `with` sites still inline everything (no handler value built). Handler values are only materialized when the lowerer can't see the arms — see the four sources below. The call site reads from evidence regardless of how the handler was obtained.
+
+1. **Static alias** (`let foo = console_log`): resolved at compile time to the original handler declaration; the `OpTuple` is constructed inline at `with`. No handler value built.
+2. **Handler expression** (`let foo = handler for Log { ... }`): emits a `{__saga_handler_value, ...}` value at the `let`; `with` extracts `OpsByEffect` and chains one `insert_canonical` per effect.
+3. **Conditional / factory / parameter**: the value reaches the `with` site as a runtime variable of type `Handler E_1 ... E_n`. The lowerer extracts `element(2, h)` (the `OpsByEffect` tuple), iterates the statically-known effect names in canonical order, and for each pulls `element(i+1, OpsByEffect)` → `{EffectAtom, OpTuple}` pair → `element(2, pair)` → `OpTuple`, then installs `{EffectAtom, OpTuple}` into evidence.
+4. **Return clause dispatch**: `element(3, h)` is checked at runtime — the `'unit'` atom skips the wrapper and applies the with-site's raw-result K directly; any other value is treated as a uniform-CPS lambda and applied as the with-result transformer.
+
+**ABI history note.** An earlier shape was `{__saga_handler_value, OpTuple, RuntimeReturn}` — a single `OpTuple` directly in element 2. This restricted dynamic handler values to exactly one effect: the dynamic-with lowerer panicked with "Dynamic handler must carry exactly one effect (spec invariant)" if a multi-effect `handler for E1, E2 { ... }` was bound to a let or passed as a parameter. The current shape generalizes element 2 to a self-describing tuple of `{EffectAtom, OpTuple}` pairs while keeping static-handler with-sites and the call-site read path unchanged.
 
 ### `with` Attaches the Handler
 

@@ -1630,10 +1630,13 @@ fn with_dynamic_uses_op_tuple_atom_directly() {
 }
 
 #[test]
-#[should_panic(expected = "Dynamic handler must carry exactly one effect")]
-fn with_dynamic_multi_effect_panics() {
+fn with_dynamic_multi_effect_installs_evidence_per_effect() {
+    // Multi-effect dynamic handlers extract each per-effect op tuple from
+    // the runtime value's OpsByEffect tuple (element 2 of the handler value
+    // is a tuple of {EffectAtom, OpTuple} pairs in canonical alphabetical
+    // order) and chain `insert_canonical` calls — one per effect.
     let handler = MHandler::Dynamic {
-        effects: vec!["A".to_string(), "B".to_string()],
+        effects: vec!["B".to_string(), "A".to_string()],
         op_tuple: atom_var("h"),
         return_lambda: None,
         source: dummy_node(),
@@ -1643,7 +1646,39 @@ fn with_dynamic_multi_effect_panics() {
         body: Box::new(pure_unit()),
         source: dummy_node(),
     };
-    let _ = lower_expr_default(&e);
+    let ce = lower_expr_default(&e);
+    // Count `insert_canonical` Calls — one per effect.
+    fn count_inserts(e: &CExpr) -> usize {
+        match e {
+            CExpr::Call(m, f, args) => {
+                let here = (m == "std_evidence_bridge" && f == "insert_canonical") as usize;
+                here + args.iter().map(count_inserts).sum::<usize>()
+            }
+            CExpr::Apply(c, args) => {
+                count_inserts(c) + args.iter().map(count_inserts).sum::<usize>()
+            }
+            CExpr::Let(_, v, b) => count_inserts(v) + count_inserts(b),
+            CExpr::Case(s, arms) => {
+                count_inserts(s) + arms.iter().map(|a| count_inserts(&a.body)).sum::<usize>()
+            }
+            CExpr::Fun(_, b) => count_inserts(b),
+            CExpr::Tuple(vs) | CExpr::Values(vs) => vs.iter().map(count_inserts).sum(),
+            _ => 0,
+        }
+    }
+    let inserts = count_inserts(&ce);
+    assert_eq!(
+        inserts, 2,
+        "expected two insert_canonical calls (one per effect), got {inserts} in {ce:?}"
+    );
+    // Both effect atoms must appear as literals somewhere in the lowered
+    // tree — they're emitted as the first element of each install entry's
+    // tagged tuple.
+    let rendered = format!("{ce:?}");
+    assert!(
+        rendered.contains("Atom(\"A\")") && rendered.contains("Atom(\"B\")"),
+        "expected literal effect atoms for A and B, got {ce:?}"
+    );
 }
 
 #[test]

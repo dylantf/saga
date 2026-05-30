@@ -132,9 +132,40 @@ From a `panic!`/`unimplemented!`/`deferred` sweep of the new path:
   builds populate `EffectInfo.effect_ops` across the module graph, so user
   effects declared in one module and performed/handled in another work (verified
   A/B/C variants). The comment at `translate/mod.rs:220-224` is stale/misleading.
-- **Wired, not a panic — dynamic-handler return clauses.** `lower_with_dynamic`
-  reads the element-3 runtime-return slot; needs behavior verification, not
-  implementation.
+- **RESOLVED — dynamic-handler return clauses end-to-end** plus two adjacent
+  gaps surfaced during verification:
+  1. **Parameter-passed handler values silently dropped evidence install.** A
+     function parameter typed `Handler E` reached `lower_with_dynamic` with an
+     empty `effects` list (the typechecker's `let_binding_handlers` only covered
+     `let` bindings, not parameter NodeIds), so the `with` site bailed at the
+     `effects.is_empty()` warning and `find_evidence` panicked at runtime.
+     Typechecker (`check_decl.rs::check_fun_clauses`) now seeds
+     `let_binding_handlers` from each `Pat::Var` parameter with `Handler E`
+     type via `handler_info_from_type`; translator
+     (`translate_decl::FunBinding`) reads them into `local_handler_effects` for
+     the function body.
+  2. **Multi-effect dynamic handlers panicked at lowering.** The runtime
+     handler-value shape only carried one op tuple
+     (`{__saga_handler_value, OpTuple, RuntimeReturn}`), so
+     `lower_with_dynamic` had a `effects.len() != 1 → panic!("spec invariant")`
+     guard. We do NOT delete language features: the shape generalized to
+     `{__saga_handler_value, OpsByEffect, RuntimeReturn}` where `OpsByEffect`
+     is a self-describing tuple of `{EffectAtom, OpTuple}` pairs in canonical
+     alphabetical order. Both producers (`build_handler_value_tuple` in
+     `atom.rs`, `lower_handler_value` in `exprs.rs`) share a new
+     `build_ops_by_effect_tuple` helper. The consumer iterates the
+     statically-known `effects` in the same canonical order and extracts each
+     per-effect op tuple positionally — no runtime atom matching. Single-effect
+     is a 1-element outer tuple, same path. See
+     [`docs/effect-implementation.md`](../../effect-implementation.md) "Handler
+     Bindings (Dynamic Handlers)" for the runtime shape spec.
+
+  Regressions: `effects_test.saga` → "handler passed as function parameter" and
+  "multi-effect handler value used dynamically"; updated unit test
+  `with_dynamic_multi_effect_installs_evidence_per_effect` (flipped from the
+  prior `should_panic` pin); repros under `examples/bugs/dynamic-handler-return/`
+  cover conditional, factory, parameter-passed (single-effect), and multi-effect-
+  parameter scenarios.
 
 ## Review Strategy
 
@@ -739,17 +770,23 @@ starts. Remaining order:
    unreachable (parser hardcodes `None`) and downgraded to a `debug_assert!`. See
    "Phase-1 completion blockers" above for details.
 
-2. **Behavior-verify dynamic-handler return clauses** (wired, not panicking) and
-   decide the nullary eta-reduced-effect-op-as-value edge (`translate/expr.rs:388`).
-   These are now the clearest remaining "make the slow path an oracle" items.
+2. **Dynamic-handler return clauses + multi-effect dynamic — DONE.**
+   Verification surfaced two real bugs: parameter-passed handlers dropped
+   evidence install (typechecker gap), and multi-effect dynamic handlers
+   panicked at the lowerer. Both fixed; the runtime handler-value ABI was
+   generalized — see "Phase-1 completion blockers" above and the ABI history
+   note in [`docs/effect-implementation.md`](../../effect-implementation.md).
 
-3. **Re-pin the leftover shape tests.** `alias_chase_let_h_is_static` (lib) and
+3. **Nullary eta-reduced-effect-op-as-value edge** (`translate/expr.rs:388`):
+   currently the clearest remaining "make the slow path an oracle" item.
+
+4. **Re-pin the leftover shape tests.** `alias_chase_let_h_is_static` (lib) and
    `tail_recursive_apply_in_tail_position` (codegen_integration) are pre-existing
    pins, not behavior bugs. Prefer runtime/e2e/property coverage over brittle
    Core-shape assertions.
 
-4. **Keep using `~/projects/saga_json` as the shakedown corpus** after each
-   change — it surfaced both bugs resolved this pass.
+5. **Keep using `~/projects/saga_json` as the shakedown corpus** after each
+   change.
 
 Done earlier: callable/ABI review (Pass 3), record metadata (Pass 4), native
 bootstrap (Pass 5), finally/abort routing diagnosis + the marker and

@@ -299,6 +299,12 @@ make_logger verbose = handler for Log {
   }
 }
 
+# Takes a `Handler Log` value as a parameter and uses it dynamically. The
+# typechecker now seeds `let_binding_handlers` from parameter NodeIds with
+# `Handler E` type so the with-site can install evidence.
+fun run_with_logger : (h: Handler Log) -> Int
+run_with_logger h = do_work () with h
+
 fun require_non_empty : String -> String -> Unit needs {Validate}
 require_non_empty label value =
   if value == "" then invalid! $"{label} is required"
@@ -683,6 +689,34 @@ tests () = {
         let logger = make_logger False
         let result = do_work () with logger
         assert_eq result 30
+      })
+      # Regression: passing a `Handler E` value as a function parameter used
+      # to fall through with empty effects in the translator (no `let`-binding
+      # to seed `let_handler_effects`), so the lowerer skipped evidence
+      # install and `find_evidence` panicked at runtime. Parameter NodeIds
+      # now feed `let_binding_handlers` via the typechecker.
+      test "handler passed as function parameter" (fun () -> {
+        let logger = make_logger False
+        assert_eq (run_with_logger logger) 30
+      })
+      # Regression: multi-effect handler values used dynamically (let-bound,
+      # passed as a param, etc.) panicked at lowering with
+      # "Dynamic handler must carry exactly one effect" — the runtime
+      # handler-value shape only carried one op tuple. The shape now carries
+      # `OpsByEffect = {{EffectAtom, OpTuple}, ...}` in canonical order and
+      # the dynamic-with lowerer chains one `insert_canonical` per effect.
+      test "multi-effect handler value used dynamically" (fun () -> {
+        let h = handler for Log, Validate {
+          log _ = resume ()
+          invalid _ = resume ()
+          return v = v
+        }
+        let result = {
+          log! "hi"
+          invalid! "shrug"
+          42
+        } with h
+        assert_eq result 42
       })
     })
 

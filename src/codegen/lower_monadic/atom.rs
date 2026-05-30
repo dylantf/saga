@@ -76,23 +76,26 @@ impl<'ctx> Lowerer<'ctx> {
         CExpr::Var(core_var(&mvar.name))
     }
 
-    /// Build a runtime op-tuple `CExpr::Tuple` from pre-translated handler
-    /// arms. Handler values may be created long before their `with` site, so
-    /// their arm closures must return directly instead of capturing the
-    /// definition site's return continuation.
+    /// Build a runtime handler-value tuple from pre-translated handler arms.
+    /// Handler values may be created long before their `with` site, so their
+    /// arm closures must return directly instead of capturing the definition
+    /// site's return continuation.
+    ///
+    /// Runtime shape (single- and multi-effect handlers share the same
+    /// layout):
+    /// ```text
+    /// {__saga_handler_value, OpsByEffect, RuntimeReturn}
+    ///   OpsByEffect = {{EffectAtom_1, OpTuple_1}, ..., {EffectAtom_n, OpTuple_n}}
+    /// ```
+    /// Pairs are emitted in canonical alphabetical effect order so that
+    /// `lower_with_dynamic`, sorting `MHandler::Dynamic.effects` the same
+    /// way, can extract each per-effect op tuple positionally.
     fn build_handler_value_tuple(
         &mut self,
         info: &crate::codegen::monadic::ir::HandlerValueInfo,
         ctx: &LowerCtx,
     ) -> CExpr {
-        let mut sorted_arms: Vec<&crate::codegen::monadic::ir::MHandlerArm> =
-            info.arms.iter().collect();
-        sorted_arms.sort_by_key(|a| (a.op.effect.clone(), a.op.op_index));
-        let elements: Vec<CExpr> = sorted_arms
-            .iter()
-            .map(|arm| self.build_handler_value_arm_closure(arm, ctx))
-            .collect();
-        let op_tuple = CExpr::Tuple(elements);
+        let ops_by_effect = self.build_ops_by_effect_tuple(&info.arms, ctx);
         let return_value = info
             .return_clause
             .as_ref()
@@ -100,9 +103,40 @@ impl<'ctx> Lowerer<'ctx> {
             .unwrap_or_else(|| CExpr::Lit(CLit::Atom("unit".to_string())));
         CExpr::Tuple(vec![
             CExpr::Lit(CLit::Atom("__saga_handler_value".to_string())),
-            op_tuple,
+            ops_by_effect,
             return_value,
         ])
+    }
+
+    /// Group arms by canonical effect name (sorted alphabetically), and for
+    /// each group build `{EffectAtom, OpTuple}` where OpTuple holds the
+    /// arm closures ordered by op_index. Returns the outer tuple of pairs.
+    pub(super) fn build_ops_by_effect_tuple(
+        &mut self,
+        arms: &[crate::codegen::monadic::ir::MHandlerArm],
+        ctx: &LowerCtx,
+    ) -> CExpr {
+        use std::collections::BTreeMap;
+        let mut by_effect: BTreeMap<String, Vec<&crate::codegen::monadic::ir::MHandlerArm>> =
+            BTreeMap::new();
+        for arm in arms {
+            by_effect.entry(arm.op.effect.clone()).or_default().push(arm);
+        }
+        let pairs: Vec<CExpr> = by_effect
+            .into_iter()
+            .map(|(eff, mut group)| {
+                group.sort_by_key(|a| a.op.op_index);
+                let op_closures: Vec<CExpr> = group
+                    .iter()
+                    .map(|arm| self.build_handler_value_arm_closure(arm, ctx))
+                    .collect();
+                CExpr::Tuple(vec![
+                    CExpr::Lit(CLit::Atom(eff)),
+                    CExpr::Tuple(op_closures),
+                ])
+            })
+            .collect();
+        CExpr::Tuple(pairs)
     }
 
     pub(super) fn build_handler_value_return_lambda(

@@ -126,19 +126,17 @@ impl<'ctx> Lowerer<'ctx> {
     ) -> CExpr {
         // Use a fresh context so arm closures are self-contained and don't
         // capture the definition site's return_k/evidence.
-        let mut sorted_arms: Vec<&crate::codegen::monadic::ir::MHandlerArm> = arms.iter().collect();
-        sorted_arms.sort_by_key(|a| (a.op.effect.clone(), a.op.op_index));
-        let elements: Vec<CExpr> = sorted_arms
-            .iter()
-            .map(|arm| self.build_handler_value_arm_closure(arm, ctx))
-            .collect();
-        let op_tuple = CExpr::Tuple(elements);
+        //
+        // Element 2 is a tuple of `{EffectAtom, OpTuple}` pairs ordered
+        // alphabetically by effect — same shape as `build_handler_value_tuple`
+        // in atom.rs. See its doc comment for the runtime layout.
+        let ops_by_effect = self.build_ops_by_effect_tuple(arms, ctx);
         let return_value = return_clause
             .map(|arm| self.build_handler_value_return_lambda(arm, ctx))
             .unwrap_or_else(|| CExpr::Lit(CLit::Atom("unit".to_string())));
         let handler_value = CExpr::Tuple(vec![
             CExpr::Lit(CLit::Atom("__saga_handler_value".to_string())),
-            op_tuple,
+            ops_by_effect,
             return_value,
         ]);
         self.apply_current_k(handler_value, ctx)
