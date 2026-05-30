@@ -1319,12 +1319,18 @@ impl Checker {
                 Decl::FunBinding { span, .. } => *span,
                 _ => unreachable!(),
             };
-            self.check_effects_via_row(
-                &all_body_effs,
-                &declared_row,
-                &format!("function '{}'", name),
-                err_span,
-            )?;
+            // EXPERIMENT (infer-local-effects): only enforce the
+            // declared-vs-body effect check when the function is annotated.
+            // Unannotated functions are necessarily private (pub requires an
+            // annotation); let their inferred effect row stand and propagate.
+            if annotation.is_some() {
+                self.check_effects_via_row(
+                    &all_body_effs,
+                    &declared_row,
+                    &format!("function '{}'", name),
+                    err_span,
+                )?;
+            }
 
             // Check for effects declared but never used.
             // Effects that were absorbed during call-site HOF absorption (e.g. Actor
