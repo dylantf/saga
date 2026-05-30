@@ -44,18 +44,16 @@ tests () = {
         assert_eq (E.aliased_curried3 1 2 3) 6
       })
 
-      test "3-arg alias partially applied (one arg at a time)" (fun () -> {
-        # NOTE: Partial-application of a 3-arg function followed by another
-        # partial-app (one arg per call) currently returns a 2-arg lambda
-        # the caller treats as 1-arg + Ev + RK. This is a separate
-        # pre-existing limitation in `eta_expand_partial_app` (it builds a
-        # single multi-arg lambda rather than a curried chain) and is NOT
-        # specific to eta-reduced bindings — the same shape would fail for
-        # `raw_curried3 1` followed by `_ 2`. Tracked separately.
-        # For now this test exercises supplying the remaining args in one
-        # follow-up call, which works.
+      test "3-arg alias partially applied at each split" (fun () -> {
+        # Was previously broken: `eta_expand_partial_app` built a single
+        # multi-arg lambda, so a 1-arg follow-up call on the result
+        # hit an arity mismatch. Fixed by emitting a curried chain
+        # (one uniform-CPS layer per missing user param).
         let plus_one = E.aliased_curried3 1
-        assert_eq (plus_one 2 3) 6
+        let plus_one_two = plus_one 2
+        assert_eq (plus_one_two 3) 6
+        let plus_two = E.aliased_curried3 2
+        assert_eq (plus_two 3 4) 9
       })
     })
 

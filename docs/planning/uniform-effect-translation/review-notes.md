@@ -126,17 +126,31 @@ Use it as the first place to look for real regressions.
    in-module caller). Repro: `examples/bugs/eta-reduced-fun-binding/`.
    Verified `saga_pgo` runs end-to-end.
 
-## Known issues (newly surfaced)
+4. **Partial-app of a curried fn split via intermediate `let` bindings**
+   (surfaced while writing eta-reduction tests; pre-existing, not eta-
+   specific). `let one = three_args 1; let one_two = one 2; one_two 3`
+   panicked with "function called with 3 argument(s), but expects 4".
 
-- **Partial-app of a curried fn one arg at a time.** Discovered while writing
-  the eta-reduction tests; pre-existing, not eta-specific. Calling
-  `let one = three_args 1; let one_two = one 2; one_two 3` panics with
-  "function called with 3 argument(s), but expects 4".
-  `eta_expand_partial_app` builds a SINGLE multi-arg lambda holding all
-  missing params, so the next partial-app sees an opaque uniform-CPS
-  callable and applies just one more arg — but the lambda actually wants
-  all remaining args at once. Should build a CURRIED chain (one lambda per
-  missing arg) instead. Repro: `examples/bugs/partial-app-multi-step/`.
+   Two correct shapes are needed and the lowerer was honoring neither for
+   opaque heads:
+   - `(three_args 1) 2 3` — translator flattens nested Apps into one
+     multi-arg App. Caller supplies 2 args to a 2-arg-missing lambda.
+   - `((three_args 1) 2) 3` via lets — each intermediate is opaque; the
+     caller can't see its arity through the resolution map.
+
+   Fixed in two pieces:
+   - `eta_expand_partial_app` keeps producing a single `missing+2`-arity
+     lambda (the lambda's arity matches the remaining type's user-arg
+     arity).
+   - `head_atom_expected_user_args` gains a type-based fallback: for
+     opaque heads, count arrows in `effect_info.type_at_node[head_id]` and
+     treat under-saturated calls as a new partial-app. Each let-bound
+     intermediate now eta-expands again with the correct (smaller) arity,
+     producing an effective curried chain without us eagerly building one.
+
+   Tests: `tests/e2e/tests/partial_application_test.saga` (15 cases,
+   every split pattern across 2/3/4-arg curried fns + first-class use).
+   Repros: `examples/bugs/partial-app-multi-step/{repro,multi-arg-suffix}.saga`.
 
 ## Phase-1 completion blockers (gate the optimization pass)
 

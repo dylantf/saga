@@ -7,6 +7,22 @@ use crate::codegen::resolve::ResolvedCodegenKind;
 
 use super::util::lower_external_native_call;
 use super::{LowerCtx, Lowerer};
+use crate::typechecker::Type;
+
+/// Count the number of curried arrows in a function type — i.e. the user-arg
+/// arity of a Saga callable with this type. Returns 0 for non-function types.
+/// Duplicate of `function_param_count` in `monadic::translate::expr` (kept
+/// local to avoid a cross-module dependency from `lower_monadic` into
+/// `translate` internals).
+fn arrow_count(ty: &Type) -> usize {
+    let mut count = 0;
+    let mut cur = ty;
+    while let Type::Fun(_, ret, _) = cur {
+        count += 1;
+        cur = ret;
+    }
+    count
+}
 
 impl<'ctx> Lowerer<'ctx> {
     /// Lower `App { head, args }` under uniform calling convention.
@@ -123,25 +139,42 @@ impl<'ctx> Lowerer<'ctx> {
 
     /// Number of user/dict args the head atom's callable expects (i.e. the
     /// uniform arity minus the trailing `_Evidence` + `_ReturnK` slots),
-    /// when statically known. Returns `None` for opaque heads (local
-    /// `Var` binders, `DictRef` to a runtime tuple, etc.) — those skip
-    /// partial-app detection and fall through to the saturated path.
+    /// when statically known. Two information sources:
+    ///   1. The resolution map for resolved references (top-level functions,
+    ///      external calls, intrinsics).
+    ///   2. `effect_info.type_at_node` for *opaque* heads (let-bound runtime
+    ///      values from partial application, conditionals, etc.) — counts
+    ///      arrows in the inferred type to get the user-arg arity.
+    ///
+    /// The type-based fallback matters because partial-application
+    /// intermediates (`let one = three_args 1; one 2 3`) have no resolution
+    /// entry — without it the lowerer treats the call as saturated against
+    /// an unknown arity and emits `apply one(2, 3, Ev, RK)` (4 args) at an
+    /// opaque uniform-CPS lambda of arity 5 (or 3 after another partial-app
+    /// layer) — either way, arity mismatch at runtime.
     fn head_atom_expected_user_args(&self, head: &Atom) -> Option<usize> {
         let node = match head {
             Atom::Var { source, .. } => *source,
             Atom::QualifiedRef { source, .. } => *source,
             _ => return None,
         };
-        let resolved = self.resolution.get(&node)?;
-        let (arity, effects): (usize, &[String]) = match &resolved.kind {
-            ResolvedCodegenKind::BeamFunction { arity, effects, .. }
-            | ResolvedCodegenKind::ExternalFunction { arity, effects, .. } => (*arity, effects),
-            ResolvedCodegenKind::Intrinsic { arity, .. } => (*arity, &[]),
-            ResolvedCodegenKind::InlineVal => return None,
-        };
-        let uniform = self.uniform_arity_for_resolved(arity, effects, &resolved.name);
-        // Vals (uniform == 0) aren't uniform callables; skip them.
-        uniform.checked_sub(2)
+        if let Some(resolved) = self.resolution.get(&node) {
+            let (arity, effects): (usize, &[String]) = match &resolved.kind {
+                ResolvedCodegenKind::BeamFunction { arity, effects, .. }
+                | ResolvedCodegenKind::ExternalFunction { arity, effects, .. } => (*arity, effects),
+                ResolvedCodegenKind::Intrinsic { arity, .. } => (*arity, &[]),
+                ResolvedCodegenKind::InlineVal => return None,
+            };
+            let uniform = self.uniform_arity_for_resolved(arity, effects, &resolved.name);
+            // Vals (uniform == 0) aren't uniform callables; skip them.
+            return uniform.checked_sub(2);
+        }
+        // Opaque head: count arrows in the inferred type. Returns None for
+        // non-function types (so the caller falls through to the saturated
+        // path on, e.g., a let-bound integer that's not actually a callable).
+        let ty = self.effect_info.type_at_node.get(&node)?;
+        let arity = arrow_count(ty);
+        if arity == 0 { None } else { Some(arity) }
     }
 
     fn head_atom_is_top_level_val(&self, head: &Atom) -> bool {
@@ -213,11 +246,20 @@ impl<'ctx> Lowerer<'ctx> {
         CExpr::Let(split_k_var, Box::new(split_k), Box::new(materialize_head))
     }
 
-    /// Eta-expand a partial application `head(args…)` into a lambda that
-    /// closes over `args` and takes the remaining user/dict params plus the
-    /// uniform `_Evidence` / `_ReturnK` pair, then forwards everything to
-    /// `head` at full arity. The resulting lambda value is yielded through
-    /// the ambient return continuation.
+    /// Eta-expand a partial application `head(args…)` into a single
+    /// `missing+2`-arity lambda: `fun(_Eta_0, …, _Eta_{M-1}, _Evidence,
+    /// _ReturnK) -> apply head(<supplied…>, _Eta_0, …, _Eta_{M-1},
+    /// _Evidence, _ReturnK)`. The lambda's arity matches the expected user
+    /// arity of the remaining type (`a -> b -> c` after dropping supplied
+    /// args), so any subsequent call site that knows that type — via
+    /// resolution OR `head_atom_expected_user_args`'s type fallback — will
+    /// agree on the call arity.
+    ///
+    /// If a later call only supplies *some* of the missing args (e.g. `let
+    /// one = three_args 1; let one_two = one 2`), the lowerer detects that
+    /// via the type fallback and partial-eta-expands again, producing a new
+    /// smaller-arity lambda for the next intermediate. The effect is a
+    /// per-binding curried chain without us building one eagerly here.
     fn eta_expand_partial_app(
         &mut self,
         head: &Atom,
