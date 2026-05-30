@@ -113,15 +113,31 @@ For each candidate optimization, compare:
 - residual `Yield ops`, to decide whether the next rewrite has a real target;
 - new `ForeignCall` targets, to verify native direct-call movement.
 
+Run the standard sweep with:
+
+```bash
+bash scripts/optimizer_sweep.sh stats
+bash scripts/optimizer_sweep.sh bench 3
+```
+
+Benchmark mode defaults to `target/release/saga run --release`, so repeated
+runs can use the script build cache and avoid recompiling each example after
+the warm-up build. Set `SAGA_BIN=target/debug/saga SAGA_RUN_PROFILE=dev` for a
+debug compiler smoke run. The benchmark mode is still a wall-clock smoke check
+for cache lookup + BEAM startup/runtime, not a rigorous runtime microbenchmark,
+but it is good enough to catch large regressions and to compare broad optimizer
+direction on the same machine.
+
 ### Latest Snapshot
 
-Last sampled after native `spawn` thunk specialization:
+Last sampled after dead pure-let cleanup:
 
 | Example | Entry-reachable result | Reading |
 | --- | --- | --- |
 | `25-state-effect` | `Yield 3 -> 3`; `Bind 16 -> 9` | Value-producing resume remains on the accepted slow path. |
 | `29-actors` | `Yield 6 -> 0`; `ForeignCall 0 -> 6` | Native variants plus spawn thunk specialization remove all entry-reachable actor yields. |
 | `30-pingpong` | `Yield 8 -> 0`; `ForeignCall 0 -> 8` | Same actor shape as `29`; all entry-reachable actor yields direct-call Erlang. |
+| `32-monitor` | `Yield 4 -> 0`; `ForeignCall 0 -> 4` | Monitor/send/spawn native ops direct-call Erlang on the entry path. |
 | `49-dynamic` | `Yield 0 -> 0`; `Bind 75 -> 27` | No residual monadic yield pressure; dynamic path is not the next optimization target. |
 | `54-choose-backtracking` | `Yield 4 -> 4`; `Bind 35 -> 16` | Multishot/abort behavior remains intentionally slow. |
 | `55-nqueens-solver` | `Yield 2 -> 2`; `Bind 48 -> 23` | Multishot/abort behavior remains intentionally slow. |
@@ -129,6 +145,22 @@ Last sampled after native `spawn` thunk specialization:
 The actor-native hot path is now covered for these examples. The next optimizer
 target should come from a fresh stats sweep rather than from extending function
 variants by default.
+
+One-shot local timing smoke from `target/release/saga run --release` after
+warming the per-example script cache:
+
+| Example | Wall time |
+| --- | ---: |
+| `25-state-effect` | 1399ms |
+| `29-actors` | 1457ms |
+| `30-pingpong` | 1732ms |
+| `32-monitor` | 1444ms |
+| `49-dynamic` | 1461ms |
+| `54-choose-backtracking` | 1401ms |
+| `55-nqueens-solver` | 1531ms |
+
+These timings are only comparable to future runs on the same machine with the
+same build profile and cache state.
 
 ## Cleanup Cadence
 
