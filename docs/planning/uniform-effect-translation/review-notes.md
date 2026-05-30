@@ -67,7 +67,7 @@ Useful default failures should stay visible until fixed.
   cross-module behavior worth rewriting. The runtime-assertion tests are ignored
   because the harness calls `/1` entrypoints instead of uniform-CPS `/3`.
 - `tests/stdlib_tests.rs::stdlib_test_suite`: green, including first-class
-  references to bridge HOFs / legacy-Maybe externals.
+  references to bridge HOFs and optional-return externals.
 - `tests/e2e`: green in the latest full Saga sweep (370), but it does not cover
   the full stdlib callback surface.
 - Lib unit tests: 1 pre-existing shape-pin failure
@@ -247,18 +247,18 @@ phase-2 optimization, even when tests are green.
 - **External-call ABI is shared.** Saturated external calls in
   `lower_monadic/app.rs` and first-class external wrappers in
   `lower_monadic/decls.rs` now both route through
-  `util::lower_external_native_call`, so bridge callback adapters and
-  legacy-Maybe normalization apply in both paths.
+  `util::lower_external_native_call`; callback-shaped `@external` params are
+  detected with shared type helpers and adapted by the generated wrapper.
 - **Handler `with` delimiter logic is duplicated.** `lower_with_static` and
   `lower_with_dynamic` both construct raw-result K, abort marker handling,
   evidence insertion, body wrapping, and outer-K forwarding. The dynamic path
   has extra handler-value extraction, but the delimiter should be one helper
   with mode-specific inputs.
 - **Native handler bootstrap is becoming a second lowering language.**
-  `lower_monadic/bootstrap.rs` has a useful table-driven core, but Ref/Vec and
-  callback-invoking ops are growing custom Core Erlang emitters. Prefer a
-  small native-op DSL/descriptor plus focused escape hatches over more
-  handwritten nested `CExpr` trees.
+  `lower_monadic/bootstrap.rs` now keeps static native effect metadata in a
+  child module, but Ref/Vec and callback-invoking ops are still custom Core
+  Erlang emitters. Prefer a small native-op DSL/descriptor plus focused escape
+  hatches over more handwritten nested `CExpr` trees.
 - **Record metadata is reconstructed from runtime tags.** Anonymous-record
   field order should come from structural metadata (`RecordInfo`/type info), not
   from parsing the encoded tag string in lowering.
@@ -554,9 +554,9 @@ Execution checklist:
    add tests for any public bridge HOF not covered by stdlib/e2e.~~ Done by
    deriving callback adapters from `@external` function-typed parameters.
 7. ~~Unify external wrapper lowering with saturated external-call lowering so
-   callback adapters and legacy-Maybe normalization apply whether an external
-   is called directly or through a first-class function reference.~~ Done via
-   `util::lower_external_native_call`.
+   callback-shaped externals route consistently whether called directly or
+   through a first-class function reference.~~ Done via
+   `util::lower_external_native_call` plus shared callback type helpers.
 8. Re-run:
    - `cargo test -q -p saga --test codegen_integration -- --nocapture`
    - `cargo test -q -p saga --test module_codegen_integration -- --nocapture`
@@ -911,15 +911,21 @@ while preserving the slow-path oracle.
 - **Abstraction cleanup — STARTED.** First low-risk extraction centralized the
   marked control-result protocol in `lower_monadic::util`: shared
   `ABORT_TAG` / `VALUE_RESULT_TAG`, foreign-control propagation arms, and
-  "apply foreign control to K" arms. Second extraction added a shared
-  `identity_k` helper for synchronous Saga/native callback boundaries
+  "apply foreign control to K" arms; follow-up helper constructors now cover
+  the common marked-control tuple/pattern shapes. Second extraction added a
+  shared `identity_k` helper for synchronous Saga/native callback boundaries
   (`@external` callback adapters, `main` entry wrapper, Ref `modify`, and
-  `spawn` thunk). Third extraction named the native op closure shell and
-  not-implemented native-op stub constructor in `bootstrap.rs`, leaving the
-  bespoke Ref/Vec call bodies untouched. Fourth extraction factored finally
-  cleanup sequencing into a shared `sequence_finally_then` helper, used by
-  both `resume` cleanup and non-resuming arm cleanup. Behavior unchanged;
-  focused lowerer/effect/property/e2e checks stayed green.
+  `spawn` thunk), and shared type helpers now drive `@external` callback
+  detection from both the app and wrapper paths. Third extraction named the
+  native op closure shell and not-implemented native-op stub constructor in
+  `bootstrap.rs`; the static native effect table now lives in a child module,
+  leaving the bespoke Ref/Vec call bodies untouched. Fourth extraction
+  factored finally cleanup sequencing into a shared `sequence_finally_then`
+  helper, used by both `resume` cleanup and non-resuming arm cleanup. Fifth
+  extraction unified the local-marker/foreign-control arm construction for
+  result delimiters (`build_result_delimiter_k`,
+  `wrap_with_result_delimiter_to_k`, and `wrap_with_result_delimiter_raw`).
+  Behavior unchanged; focused lowerer/effect/property/e2e checks stayed green.
 
 ### Recommended Implementation Order
 

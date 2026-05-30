@@ -22,12 +22,19 @@ use crate::codegen::cerl::{CArm, CExpr, CLit, CPat};
 use crate::codegen::monadic::ir::{Atom, EffectOpRef, MExpr, MHandler, MHandlerArm};
 
 use super::ctx::ResultDelimiter;
-use super::util::{ABORT_TAG, VALUE_RESULT_TAG, core_var, marked_control_tuple};
+use super::util::{
+    ABORT_TAG, VALUE_RESULT_TAG, core_var, marked_control_pattern, marked_control_tuple,
+};
 use super::{LowerCtx, Lowerer};
 
 /// Erlang module hosting the runtime helpers
 /// (`find_evidence/2`, `insert_canonical/2`, `project_evidence/2`).
 const EVIDENCE_BRIDGE_MODULE: &str = "std_evidence_bridge";
+
+fn apply_to_k(k: &str, value: CExpr) -> CExpr {
+    CExpr::Apply(Box::new(CExpr::Var(k.to_string())), vec![value])
+}
+
 #[derive(Clone, Copy)]
 enum ArmReturnMode {
     Captured,
@@ -590,42 +597,12 @@ impl<'ctx> Lowerer<'ctx> {
         abort_k: &str,
     ) -> CExpr {
         let result = self.fresh_helper_name();
-        let abort_value = self.fresh_helper_name();
-        let mut arms = vec![
-            CArm {
-                pat: CPat::Tuple(vec![
-                    CPat::Lit(CLit::Atom(VALUE_RESULT_TAG.to_string())),
-                    CPat::Lit(CLit::Atom(abort_marker.to_string())),
-                    CPat::Var(abort_value.clone()),
-                ]),
-                guard: None,
-                body: CExpr::Apply(
-                    Box::new(CExpr::Var(success_k.to_string())),
-                    vec![CExpr::Var(abort_value.clone())],
-                ),
-            },
-            CArm {
-                pat: CPat::Tuple(vec![
-                    CPat::Lit(CLit::Atom(ABORT_TAG.to_string())),
-                    CPat::Lit(CLit::Atom(abort_marker.to_string())),
-                    CPat::Var(abort_value.clone()),
-                ]),
-                guard: None,
-                body: CExpr::Apply(
-                    Box::new(CExpr::Var(abort_k.to_string())),
-                    vec![CExpr::Var(abort_value)],
-                ),
-            },
-        ];
-        arms.extend(self.propagate_marked_control_arms());
-        arms.push(CArm {
-            pat: CPat::Var("_WithValue".to_string()),
-            guard: None,
-            body: CExpr::Apply(
-                Box::new(CExpr::Var(success_k.to_string())),
-                vec![CExpr::Var("_WithValue".to_string())],
-            ),
-        });
+        let arms = self.result_delimiter_arms(
+            abort_marker,
+            |value| apply_to_k(success_k, value),
+            |value| apply_to_k(abort_k, value),
+            |value| apply_to_k(success_k, value),
+        );
         CExpr::Fun(
             vec![result.clone()],
             Box::new(CExpr::Case(Box::new(CExpr::Var(result)), arms)),
@@ -656,50 +633,22 @@ impl<'ctx> Lowerer<'ctx> {
         preserve_abort_marker: bool,
     ) -> CExpr {
         let with_result = self.fresh_helper_name();
-        let abort_value = self.fresh_helper_name();
-        let mut arms = vec![
-            CArm {
-                pat: CPat::Tuple(vec![
-                    CPat::Lit(CLit::Atom(VALUE_RESULT_TAG.to_string())),
-                    CPat::Lit(CLit::Atom(abort_marker.to_string())),
-                    CPat::Var(abort_value.clone()),
-                ]),
-                guard: None,
-                body: CExpr::Apply(
-                    Box::new(CExpr::Var(return_k.to_string())),
-                    vec![CExpr::Var(abort_value.clone())],
-                ),
-            },
-            CArm {
-                pat: CPat::Tuple(vec![
-                    CPat::Lit(CLit::Atom(ABORT_TAG.to_string())),
-                    CPat::Lit(CLit::Atom(abort_marker.to_string())),
-                    CPat::Var(abort_value.clone()),
-                ]),
-                guard: None,
-                body: if preserve_abort_marker {
+        let arms = self.result_delimiter_arms(
+            abort_marker,
+            |value| apply_to_k(return_k, value),
+            |value| {
+                if preserve_abort_marker {
                     marked_control_tuple(
                         ABORT_TAG,
                         CExpr::Lit(CLit::Atom(abort_marker.to_string())),
-                        CExpr::Var(abort_value),
+                        value,
                     )
                 } else {
-                    CExpr::Apply(
-                        Box::new(CExpr::Var(return_k.to_string())),
-                        vec![CExpr::Var(abort_value)],
-                    )
-                },
+                    apply_to_k(return_k, value)
+                }
             },
-        ];
-        arms.extend(self.propagate_marked_control_arms());
-        arms.push(CArm {
-            pat: CPat::Var("_WithValue".to_string()),
-            guard: None,
-            body: CExpr::Apply(
-                Box::new(CExpr::Var(return_k.to_string())),
-                vec![CExpr::Var("_WithValue".to_string())],
-            ),
-        });
+            |value| apply_to_k(return_k, value),
+        );
         CExpr::Let(
             with_result.clone(),
             Box::new(body_ce),
@@ -714,46 +663,64 @@ impl<'ctx> Lowerer<'ctx> {
         preserve_abort_marker: bool,
     ) -> CExpr {
         let with_result = self.fresh_helper_name();
-        let abort_value = self.fresh_helper_name();
-        let mut arms = vec![
-            CArm {
-                pat: CPat::Tuple(vec![
-                    CPat::Lit(CLit::Atom(VALUE_RESULT_TAG.to_string())),
-                    CPat::Lit(CLit::Atom(abort_marker.to_string())),
-                    CPat::Var(abort_value.clone()),
-                ]),
-                guard: None,
-                body: CExpr::Var(abort_value.clone()),
-            },
-            CArm {
-                pat: CPat::Tuple(vec![
-                    CPat::Lit(CLit::Atom(ABORT_TAG.to_string())),
-                    CPat::Lit(CLit::Atom(abort_marker.to_string())),
-                    CPat::Var(abort_value.clone()),
-                ]),
-                guard: None,
-                body: if preserve_abort_marker {
+        let arms = self.result_delimiter_arms(
+            abort_marker,
+            |value| value,
+            |value| {
+                if preserve_abort_marker {
                     marked_control_tuple(
                         ABORT_TAG,
                         CExpr::Lit(CLit::Atom(abort_marker.to_string())),
-                        CExpr::Var(abort_value),
+                        value,
                     )
                 } else {
-                    CExpr::Var(abort_value)
-                },
+                    value
+                }
+            },
+            |value| value,
+        );
+        CExpr::Let(
+            with_result.clone(),
+            Box::new(body_ce),
+            Box::new(CExpr::Case(Box::new(CExpr::Var(with_result)), arms)),
+        )
+    }
+
+    fn result_delimiter_arms(
+        &mut self,
+        abort_marker: &str,
+        local_value_body: impl Fn(CExpr) -> CExpr,
+        local_abort_body: impl Fn(CExpr) -> CExpr,
+        ordinary_value_body: impl Fn(CExpr) -> CExpr,
+    ) -> Vec<CArm> {
+        let abort_value = self.fresh_helper_name();
+        let mut arms = vec![
+            CArm {
+                pat: marked_control_pattern(
+                    VALUE_RESULT_TAG,
+                    CPat::Lit(CLit::Atom(abort_marker.to_string())),
+                    abort_value.clone(),
+                ),
+                guard: None,
+                body: local_value_body(CExpr::Var(abort_value.clone())),
+            },
+            CArm {
+                pat: marked_control_pattern(
+                    ABORT_TAG,
+                    CPat::Lit(CLit::Atom(abort_marker.to_string())),
+                    abort_value.clone(),
+                ),
+                guard: None,
+                body: local_abort_body(CExpr::Var(abort_value)),
             },
         ];
         arms.extend(self.propagate_marked_control_arms());
         arms.push(CArm {
             pat: CPat::Var("_WithValue".to_string()),
             guard: None,
-            body: CExpr::Var("_WithValue".to_string()),
+            body: ordinary_value_body(CExpr::Var("_WithValue".to_string())),
         });
-        CExpr::Let(
-            with_result.clone(),
-            Box::new(body_ce),
-            Box::new(CExpr::Case(Box::new(CExpr::Var(with_result)), arms)),
-        )
+        arms
     }
 
     fn wrap_result_delimiter_stack_until(

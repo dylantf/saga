@@ -17,7 +17,7 @@ use crate::codegen::cerl::{CArm, CExpr, CFunDef, CPat};
 use crate::codegen::monadic::ir::{Atom, MDictConstructor, MExpr, MFunBinding, MVal};
 
 use super::pats::lower_param_names;
-use super::util::{identity_k, lower_external_native_call};
+use super::util::{identity_k, lower_external_native_call, type_expr_function_arity};
 use super::{LowerCtx, Lowerer};
 
 /// Variable name for the evidence-vector parameter on every emitted CFunDef.
@@ -311,7 +311,7 @@ pub(super) fn lower_external_wrapper(decl: &Decl) -> Option<(CFunDef, usize, boo
         .enumerate()
         .filter(|(_, (_, (_, ty)))| !is_unit_type_expr(ty))
         .map(|(idx, (v, (_, ty)))| {
-            if let Some(callback_arity) = function_type_arity(ty) {
+            if let Some(callback_arity) = type_expr_function_arity(ty) {
                 let adapter_name = format!("_Adapter{}", idx);
                 let adapter = build_callback_adapter(v, callback_arity, EVIDENCE_VAR);
                 adapter_bindings.push((adapter_name.clone(), adapter));
@@ -342,22 +342,6 @@ pub(super) fn lower_external_wrapper(decl: &Decl) -> Option<(CFunDef, usize, boo
         total_arity,
         *public,
     ))
-}
-
-/// Count arrows in a function-type `TypeExpr`. Returns `None` for non-function
-/// types. `(a -> b)` → `Some(1)`; `(a -> b -> c)` → `Some(2)`; `Int` → `None`.
-/// Used to size the adapter wrapping a function-typed `@external` callback
-/// param so it matches the native BIF's expected `fun(X1, …, Xn)` arity.
-fn function_type_arity(ty: &TypeExpr) -> Option<usize> {
-    fn count(ty: &TypeExpr) -> usize {
-        match ty {
-            TypeExpr::Arrow { to, .. } => 1 + count(to),
-            TypeExpr::Labeled { inner, .. } => count(inner),
-            _ => 0,
-        }
-    }
-    let arity = count(ty);
-    if arity == 0 { None } else { Some(arity) }
 }
 
 /// Build `fun(_CbArg0, …, _CbArg{n-1}) -> apply <callback_var>(_CbArg0, …,

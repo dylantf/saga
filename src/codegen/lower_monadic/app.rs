@@ -6,7 +6,7 @@ use crate::codegen::cerl::{CExpr, CLit};
 use crate::codegen::monadic::ir::Atom;
 use crate::codegen::resolve::ResolvedCodegenKind;
 
-use super::util::lower_external_native_call;
+use super::util::{lower_external_native_call, type_has_function_param};
 use super::{LowerCtx, Lowerer};
 use crate::typechecker::Type;
 
@@ -30,21 +30,6 @@ fn head_source(head: &Atom) -> Option<NodeId> {
         Atom::Var { source, .. } | Atom::QualifiedRef { source, .. } => Some(*source),
         _ => None,
     }
-}
-
-fn is_function_type(ty: &Type) -> bool {
-    matches!(ty, Type::Fun(_, _, _))
-}
-
-fn function_type_has_arrow_param(ty: &Type) -> bool {
-    let mut cur = ty;
-    while let Type::Fun(param, ret, _) = cur {
-        if is_function_type(param) {
-            return true;
-        }
-        cur = ret;
-    }
-    false
 }
 
 impl<'ctx> Lowerer<'ctx> {
@@ -151,7 +136,7 @@ impl<'ctx> Lowerer<'ctx> {
         // is the original AST var-ref, always typed.
         if let Some(head_src) = head_source(head)
             && let Some(fn_ty) = self.effect_info.type_at_node.get(&head_src)
-            && function_type_has_arrow_param(fn_ty)
+            && type_has_function_param(fn_ty)
         {
             return None;
         }

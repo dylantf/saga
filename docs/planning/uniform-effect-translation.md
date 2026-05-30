@@ -90,6 +90,12 @@ rewritten independently.
 test suite; sanity invariant (zero `Yield`/`Pure`/continuation allocations
 in pure-or-tail-resumptive functions) holds.
 
+**Current hardening track:** acceptance is green and the abstraction cleanup
+pass is in progress. Completed cleanup has centralized marked-control helpers,
+callback boundary helpers, `finally` sequencing, and static native bootstrap
+metadata. Remaining cleanup should stay mechanical unless it is promoted to a
+separate semantic task.
+
 ### Cleanup (single mechanical commit)
 
 - [ ] Delete old path; rename `lower_monadic/` → `lower/`. See

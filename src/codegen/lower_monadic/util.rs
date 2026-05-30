@@ -2,11 +2,12 @@
 
 use std::collections::HashMap;
 
-use crate::ast::{BitSegSpec, Lit};
+use crate::ast::{BitSegSpec, Lit, TypeExpr};
 use crate::codegen::cerl::{
     BinSegFlags, BinSegSize, BinSegType, CArm, CBinSeg, CExpr, CLit, CPat, Endianness,
 };
 use crate::codegen::monadic::ir::MExpr;
+use crate::typechecker::Type;
 
 use super::{LowerCtx, Lowerer};
 
@@ -41,6 +42,20 @@ pub(super) fn marked_control_tuple(tag: &str, marker: CExpr, value: CExpr) -> CE
     CExpr::Tuple(vec![CExpr::Lit(CLit::Atom(tag.to_string())), marker, value])
 }
 
+/// Match `{Tag, Marker, Value}` for routed handler-control results.
+pub(super) fn marked_control_pattern(tag: &str, marker: CPat, value_var: String) -> CPat {
+    CPat::Tuple(vec![
+        CPat::Lit(CLit::Atom(tag.to_string())),
+        marker,
+        CPat::Var(value_var),
+    ])
+}
+
+/// Match `{Tag, MarkerVar, ValueVar}` and bind both routed fields.
+pub(super) fn marked_control_var_pattern(tag: &str, marker_var: String, value_var: String) -> CPat {
+    marked_control_pattern(tag, CPat::Var(marker_var), value_var)
+}
+
 /// `fun(V) -> V`: the local return continuation used at synchronous
 /// Saga/native boundaries where a uniform-CPS Saga callback must produce a
 /// direct Erlang value.
@@ -56,11 +71,7 @@ pub(super) fn propagate_marked_control_arm(
     value_var: String,
 ) -> CArm {
     CArm {
-        pat: CPat::Tuple(vec![
-            CPat::Lit(CLit::Atom(tag.to_string())),
-            CPat::Var(marker_var.clone()),
-            CPat::Var(value_var.clone()),
-        ]),
+        pat: marked_control_var_pattern(tag, marker_var.clone(), value_var.clone()),
         guard: None,
         body: marked_control_tuple(tag, CExpr::Var(marker_var), CExpr::Var(value_var)),
     }
@@ -73,11 +84,7 @@ fn apply_marked_control_arm_to_k(
     return_k: &str,
 ) -> CArm {
     CArm {
-        pat: CPat::Tuple(vec![
-            CPat::Lit(CLit::Atom(tag.to_string())),
-            CPat::Var(marker_var.clone()),
-            CPat::Var(value_var.clone()),
-        ]),
+        pat: marked_control_var_pattern(tag, marker_var.clone(), value_var.clone()),
         guard: None,
         body: CExpr::Apply(
             Box::new(CExpr::Var(return_k.to_string())),
@@ -355,4 +362,38 @@ pub(super) fn lower_external_native_call(
     // wrapper level, or the position simply has no callback.
     let call_args: Vec<CExpr> = indexed_args.into_iter().map(|(_, arg)| arg).collect();
     CExpr::Call(module.to_string(), function.to_string(), call_args)
+}
+
+/// True when a fully inferred function type has any function-typed parameter.
+///
+/// Direct saturated `@external` applications use this to decide whether they
+/// must route through the generated wrapper so callback params are adapted
+/// from Saga's uniform-CPS shape to native Erlang arity.
+pub(super) fn type_has_function_param(ty: &Type) -> bool {
+    let mut cur = ty;
+    while let Type::Fun(param, ret, _) = cur {
+        if matches!(param.as_ref(), Type::Fun(_, _, _)) {
+            return true;
+        }
+        cur = ret;
+    }
+    false
+}
+
+/// Count arrows in a function-type `TypeExpr`. Returns `None` for non-function
+/// types. `(a -> b)` -> `Some(1)`; `(a -> b -> c)` -> `Some(2)`;
+/// `Int` -> `None`.
+///
+/// External wrappers use this to size the native-arity adapter wrapping a
+/// function-typed callback param.
+pub(super) fn type_expr_function_arity(ty: &TypeExpr) -> Option<usize> {
+    fn count(ty: &TypeExpr) -> usize {
+        match ty {
+            TypeExpr::Arrow { to, .. } => 1 + count(to),
+            TypeExpr::Labeled { inner, .. } => count(inner),
+            _ => 0,
+        }
+    }
+    let arity = count(ty);
+    if arity == 0 { None } else { Some(arity) }
 }

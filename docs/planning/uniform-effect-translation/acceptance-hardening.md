@@ -154,10 +154,13 @@ These are still meaningful and should be investigated if they appear:
 
 Pick exactly one next track after this checklist is green:
 
-1. **Abstraction cleanup pass.**
+1. **Abstraction cleanup pass.** **Started.**
    Reduce duplication and name the protocol helpers before more optimization.
-   Good targets: repeated foreign-result propagation arms, callback boundary
-   helpers, native bootstrap table shape.
+   Completed targets include marked-control tuple/arm helpers, callback
+   boundary identity/type helpers, finally cleanup sequencing, and separating
+   the static native bootstrap metadata from the Core builders. Remaining
+   cleanup is mostly structural: Ref/Vec bootstrap builders and duplicated
+   `with` delimiter construction.
 
 2. **Native direct-call specialization.**
    Optimize BEAM-native effects by bypassing evidence lookup where the handler
@@ -173,8 +176,8 @@ Pick exactly one next track after this checklist is green:
    This is less urgent than native/direct cleanup unless profiling says
    otherwise.
 
-Recommended order: finish acceptance, then do the abstraction cleanup pass
-before adding another semantic optimization.
+Recommended order: finish the started abstraction cleanup pass before adding
+another semantic optimization.
 
 ## Acceptance Run: 2026-05-30
 

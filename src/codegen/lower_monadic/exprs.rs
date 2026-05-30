@@ -10,7 +10,10 @@ use crate::codegen::monadic::ir::{Atom, BindMode, MExpr, MVar};
 
 use super::exprs_edge::binop_atoms;
 use super::pats::lower_param_names;
-use super::util::{ABORT_TAG, VALUE_RESULT_TAG, core_var};
+use super::util::{
+    ABORT_TAG, VALUE_RESULT_TAG, core_var, marked_control_pattern, marked_control_tuple,
+    marked_control_var_pattern,
+};
 use super::{LowerCtx, Lowerer};
 
 // Name of the function-entry return-continuation variable. Every emitted
@@ -245,35 +248,35 @@ impl<'ctx> Lowerer<'ctx> {
                     Box::new(CExpr::Var(raw_resumed)),
                     vec![
                         CArm {
-                            pat: CPat::Tuple(vec![
-                                CPat::Lit(CLit::Atom(ABORT_TAG.to_string())),
+                            pat: marked_control_pattern(
+                                ABORT_TAG,
                                 CPat::Lit(CLit::Atom(marker.clone())),
-                                CPat::Var(abort_value.clone()),
-                            ]),
+                                abort_value.clone(),
+                            ),
                             guard: None,
                             body: continue_with_value(self, CExpr::Var(abort_value), ctx),
                         },
                         CArm {
-                            pat: CPat::Tuple(vec![
-                                CPat::Lit(CLit::Atom(VALUE_RESULT_TAG.to_string())),
+                            pat: marked_control_pattern(
+                                VALUE_RESULT_TAG,
                                 CPat::Lit(CLit::Atom(marker.clone())),
-                                CPat::Var(value_result.clone()),
-                            ]),
+                                value_result.clone(),
+                            ),
                             guard: None,
                             body: continue_with_value(self, CExpr::Var(value_result.clone()), ctx),
                         },
                         CArm {
-                            pat: CPat::Tuple(vec![
-                                CPat::Lit(CLit::Atom(VALUE_RESULT_TAG.to_string())),
-                                CPat::Var(other_value_marker.clone()),
-                                CPat::Var(other_value.clone()),
-                            ]),
+                            pat: marked_control_var_pattern(
+                                VALUE_RESULT_TAG,
+                                other_value_marker.clone(),
+                                other_value.clone(),
+                            ),
                             guard: None,
-                            body: CExpr::Tuple(vec![
-                                CExpr::Lit(CLit::Atom(VALUE_RESULT_TAG.to_string())),
+                            body: marked_control_tuple(
+                                VALUE_RESULT_TAG,
                                 CExpr::Var(other_value_marker),
                                 CExpr::Var(other_value),
-                            ]),
+                            ),
                         },
                         CArm {
                             pat: CPat::Tuple(vec![
@@ -284,28 +287,28 @@ impl<'ctx> Lowerer<'ctx> {
                             body: continue_with_value(self, CExpr::Var(value_result), ctx),
                         },
                         CArm {
-                            pat: CPat::Tuple(vec![
-                                CPat::Lit(CLit::Atom(ABORT_TAG.to_string())),
-                                CPat::Var(other_marker.clone()),
-                                CPat::Var(other_abort_value.clone()),
-                            ]),
+                            pat: marked_control_var_pattern(
+                                ABORT_TAG,
+                                other_marker.clone(),
+                                other_abort_value.clone(),
+                            ),
                             guard: None,
                             body: if ctx.finally_block.is_some() {
                                 cleanup_then_value(
                                     self,
-                                    CExpr::Tuple(vec![
-                                        CExpr::Lit(CLit::Atom(ABORT_TAG.to_string())),
+                                    marked_control_tuple(
+                                        ABORT_TAG,
                                         CExpr::Var(other_marker),
                                         CExpr::Var(other_abort_value),
-                                    ]),
+                                    ),
                                     ctx,
                                 )
                             } else {
-                                CExpr::Tuple(vec![
-                                    CExpr::Lit(CLit::Atom(ABORT_TAG.to_string())),
+                                marked_control_tuple(
+                                    ABORT_TAG,
                                     CExpr::Var(other_marker),
                                     CExpr::Var(other_abort_value),
-                                ])
+                                )
                             },
                         },
                         CArm {
@@ -332,17 +335,17 @@ impl<'ctx> Lowerer<'ctx> {
                     Box::new(CExpr::Var(resumed)),
                     vec![
                         CArm {
-                            pat: CPat::Tuple(vec![
-                                CPat::Lit(CLit::Atom(VALUE_RESULT_TAG.to_string())),
-                                CPat::Var(other_value_marker.clone()),
-                                CPat::Var(other_value.clone()),
-                            ]),
+                            pat: marked_control_var_pattern(
+                                VALUE_RESULT_TAG,
+                                other_value_marker.clone(),
+                                other_value.clone(),
+                            ),
                             guard: None,
-                            body: CExpr::Tuple(vec![
-                                CExpr::Lit(CLit::Atom(VALUE_RESULT_TAG.to_string())),
+                            body: marked_control_tuple(
+                                VALUE_RESULT_TAG,
                                 CExpr::Var(other_value_marker),
                                 CExpr::Var(other_value),
-                            ]),
+                            ),
                         },
                         CArm {
                             pat: CPat::Tuple(vec![
