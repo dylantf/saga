@@ -124,9 +124,18 @@ From a `panic!`/`unimplemented!`/`deferred` sweep of the new path:
   both parser paths (`decl.rs:708`, `expr.rs:708`) hardcode `finally_block: None`
   on `return` clauses, so a return clause can never carry a finally. The panic was
   replaced with a `debug_assert!` documenting the parser invariant.
-- **Low-priority edge — nullary eta-reduced effect-op-as-value**,
-  `translate/expr.rs:388` (falls through to `Yield`, performs instead of
-  producing a callable). Non-nullary eta-refs are handled.
+- **NOT a blocker — nullary eta-reduced effect-op-as-value**
+  (`translate/expr.rs::try_eta_reduced_effect_op_lambda`). Confirmed
+  unreachable: the parser rejects 0-parameter effect-op declarations at parse
+  time (`effect operation 'X' has no parameters; use 'fun X : Unit -> ...'`),
+  and even synthetic test fixtures (`translate/tests.rs`) follow the
+  convention. Non-nullary eta-refs are handled via a `(\arg0,...) -> Yield(op,
+  arg0,...)` Lambda. The `param_count == 0 → return None` guard now carries a
+  comment explaining the parser invariant and noting that the fallback to a
+  direct `Yield` is the only safe behavior if it ever fires (a 0-param lambda
+  would crash the lowerer). Verified end-to-end with a 1-arg eta-reference
+  repro: `examples/bugs/nullary-eta-effect-op/unit-op.saga` (resumes twice
+  through an aliased `beep!`, returns 14 = 7+7).
 - **NOT a blocker — cross-module effect-op panic** at `translate/mod.rs:230`
   ("Cross-module effect ops are not yet wired"). Empirically unreachable: project
   builds populate `EffectInfo.effect_ops` across the module graph, so user
@@ -777,8 +786,9 @@ starts. Remaining order:
    generalized — see "Phase-1 completion blockers" above and the ABI history
    note in [`docs/effect-implementation.md`](../../effect-implementation.md).
 
-3. **Nullary eta-reduced-effect-op-as-value edge** (`translate/expr.rs:388`):
-   currently the clearest remaining "make the slow path an oracle" item.
+3. **Nullary eta-reduced-effect-op-as-value — DONE.** Confirmed unreachable
+   from valid source (parser-enforced); comment tightened. See "Phase-1
+   completion blockers" above.
 
 4. **Re-pin the leftover shape tests.** `alias_chase_let_h_is_static` (lib) and
    `tail_recursive_apply_in_tail_position` (codegen_integration) are pre-existing

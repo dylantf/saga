@@ -399,6 +399,12 @@ impl<'a> Translator<'a> {
                     .map(function_param_count)
                     .unwrap_or(0)
             });
+        // The parser rejects 0-parameter effect ops at declaration time
+        // (`fun beep : Int` errors; you must write `fun beep : Unit -> Int`),
+        // and test fixtures use the same convention. param_count == 0 is
+        // therefore unreachable from any valid source. If it ever fires, fall
+        // back to a direct `Yield`: building a 0-param lambda here would
+        // violate the no-zero-arg-functions invariant and crash the lowerer.
         if param_count == 0 {
             return None;
         }
