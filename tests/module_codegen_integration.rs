@@ -2336,7 +2336,6 @@ main () = {
 }
 
 #[test]
-#[ignore = "old constructor atom assertion; new path uses std_maybe_* tags"]
 fn prelude_constructors_mangled_with_std_prefix() {
     let main_src = "
 module Main
@@ -2350,18 +2349,8 @@ main () = case Just(42) {
     let program = typecheck_source(main_src, &mut checker);
     let out = emit_from_program(&program, "main", &checker);
 
-    // Just(v) compiles to {'just', v}, Nothing compiles to {'nothing'} (tagged tuples)
-    assert_contains(&out, "'just'");
-    assert_contains(&out, "'nothing'");
-    // Should use BEAM override atoms, not module-prefixed versions
-    assert!(
-        !out.contains("'std_maybe_Just'"),
-        "Just should use 'just' not module-prefixed atom"
-    );
-    assert!(
-        !out.contains("'std_maybe_Nothing'"),
-        "Nothing should use 'nothing' not module-prefixed atom"
-    );
+    assert_contains(&out, "'std_maybe_Just'");
+    assert_contains(&out, "'std_maybe_Nothing'");
 }
 
 #[test]

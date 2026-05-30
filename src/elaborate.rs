@@ -657,8 +657,7 @@ impl Elaborator {
                     // toward the LHS (they're prepended above and the type
                     // doesn't include them), so compare on user-arg arity
                     // by subtracting `extra_params.len()`.
-                    let declared_arity =
-                        self.fun_declared_arities.get(name).copied().unwrap_or(0);
+                    let declared_arity = self.fun_declared_arities.get(name).copied().unwrap_or(0);
                     let user_param_count = full_params.len().saturating_sub(
                         full_params
                             .iter()

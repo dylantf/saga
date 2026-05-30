@@ -1,6 +1,7 @@
 //! `App` lowering for the monadic-IR → Core Erlang pipeline.
 
 use crate::ast::Lit;
+use crate::ast::NodeId;
 use crate::codegen::cerl::{CExpr, CLit};
 use crate::codegen::monadic::ir::Atom;
 use crate::codegen::resolve::ResolvedCodegenKind;
@@ -22,6 +23,28 @@ fn arrow_count(ty: &Type) -> usize {
         cur = ret;
     }
     count
+}
+
+fn head_source(head: &Atom) -> Option<NodeId> {
+    match head {
+        Atom::Var { source, .. } | Atom::QualifiedRef { source, .. } => Some(*source),
+        _ => None,
+    }
+}
+
+fn is_function_type(ty: &Type) -> bool {
+    matches!(ty, Type::Fun(_, _, _))
+}
+
+fn function_type_has_arrow_param(ty: &Type) -> bool {
+    let mut cur = ty;
+    while let Type::Fun(param, ret, _) = cur {
+        if is_function_type(param) {
+            return true;
+        }
+        cur = ret;
+    }
+    false
 }
 
 impl<'ctx> Lowerer<'ctx> {
@@ -115,6 +138,24 @@ impl<'ctx> Lowerer<'ctx> {
             return None;
         }
 
+        // If the function's declared type has any function-typed param, the
+        // BIF needs a native-arity adapter around the Saga callback — and
+        // the `@external` wrapper already generates one. Bail so the call
+        // routes through the wrapper instead of trying to pass a uniform-CPS
+        // lambda directly to the BIF. (A future opt pass can inline the
+        // wrapper for known-pure callbacks.)
+        //
+        // We check the function's type rather than each arg's type because
+        // arg `Atom::Lambda` source NodeIds are sometimes synthetic (post-ANF
+        // hoisting) and miss `type_at_node`. The function's reference NodeId
+        // is the original AST var-ref, always typed.
+        if let Some(head_src) = head_source(head)
+            && let Some(fn_ty) = self.effect_info.type_at_node.get(&head_src)
+            && function_type_has_arrow_param(fn_ty)
+        {
+            return None;
+        }
+
         let call_args: Vec<(usize, CExpr)> = args
             .iter()
             .enumerate()
@@ -129,8 +170,7 @@ impl<'ctx> Lowerer<'ctx> {
             })
             .map(|(idx, arg)| (idx, self.lower_atom(arg, ctx)))
             .collect();
-        let call =
-            lower_external_native_call(target_erlang_mod, target_name, call_args, &ctx.evidence);
+        let call = lower_external_native_call(target_erlang_mod, target_name, call_args);
         Some(CExpr::Apply(
             Box::new(CExpr::Var(ctx.return_k.clone())),
             vec![call],

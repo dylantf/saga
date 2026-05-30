@@ -275,8 +275,7 @@ impl<'a> Translator<'a> {
                             .map(|e| self.canonical_effect_name(e))
                             .collect();
                         if !canonical.is_empty() {
-                            self.local_handler_effects
-                                .insert(pname.clone(), canonical);
+                            self.local_handler_effects.insert(pname.clone(), canonical);
                         }
                     }
                 }

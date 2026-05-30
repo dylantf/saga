@@ -2043,7 +2043,9 @@ fn multi_arm_per_op_emits_single_closure_with_case() {
                                         matches!(c.as_ref(), CExpr::Var(n) if n == "_K_ret0")
                                     ),
                                     other => {
-                                        panic!("expected Apply(_K_ret0, _) bound value, got {other:?}")
+                                        panic!(
+                                            "expected Apply(_K_ret0, _) bound value, got {other:?}"
+                                        )
                                     }
                                 }
                                 // The wrapping case carries an `_AbortValue` arm
@@ -3096,6 +3098,30 @@ fn type_named(name: &str) -> ast::TypeExpr {
     }
 }
 
+fn type_arrow(from: ast::TypeExpr, to: ast::TypeExpr) -> ast::TypeExpr {
+    ast::TypeExpr::Arrow {
+        id: dummy_node(),
+        from: Box::new(from),
+        to: Box::new(to),
+        effects: vec![],
+        effect_row_var: None,
+        span: span(),
+    }
+}
+
+fn external_annotation(module: &str, function: &str) -> ast::Annotation {
+    ast::Annotation {
+        name: "external".to_string(),
+        name_span: span(),
+        args: vec![
+            Lit::String("runtime".to_string(), crate::token::StringKind::Normal),
+            Lit::String(module.to_string(), crate::token::StringKind::Normal),
+            Lit::String(function.to_string(), crate::token::StringKind::Normal),
+        ],
+        span: span(),
+    }
+}
+
 #[test]
 fn external_fun_signature_emits_uniform_wrapper() {
     let decl = ast::Decl::FunSignature {
@@ -3109,16 +3135,7 @@ fn external_fun_signature_emits_uniform_wrapper() {
         effects: vec![],
         effect_row_var: None,
         where_clause: vec![],
-        annotations: vec![ast::Annotation {
-            name: "external".to_string(),
-            name_span: span(),
-            args: vec![
-                Lit::String("runtime".to_string(), crate::token::StringKind::Normal),
-                Lit::String("lists".to_string(), crate::token::StringKind::Normal),
-                Lit::String("reverse".to_string(), crate::token::StringKind::Normal),
-            ],
-            span: span(),
-        }],
+        annotations: vec![external_annotation("lists", "reverse")],
         span: span(),
     };
     let program = vec![MDecl::Passthrough(decl)];
@@ -3170,16 +3187,7 @@ fn external_wrapper_filters_unit_params_from_call() {
         effects: vec![],
         effect_row_var: None,
         where_clause: vec![],
-        annotations: vec![ast::Annotation {
-            name: "external".to_string(),
-            name_span: span(),
-            args: vec![
-                Lit::String("runtime".to_string(), crate::token::StringKind::Normal),
-                Lit::String("m".to_string(), crate::token::StringKind::Normal),
-                Lit::String("f".to_string(), crate::token::StringKind::Normal),
-            ],
-            span: span(),
-        }],
+        annotations: vec![external_annotation("m", "f")],
         span: span(),
     };
     let cmod = lower(&vec![MDecl::Passthrough(decl)], "m");
@@ -3199,6 +3207,57 @@ fn external_wrapper_filters_unit_params_from_call() {
             "Unit param must be filtered from BIF call args"
         ),
         other => panic!("expected Call, got {other:?}"),
+    }
+}
+
+#[test]
+fn external_wrapper_adapts_function_typed_params() {
+    let decl = ast::Decl::FunSignature {
+        id: dummy_node(),
+        doc: vec![],
+        public: true,
+        name: "map_ext".to_string(),
+        name_span: span(),
+        params: vec![
+            (
+                "f".to_string(),
+                type_arrow(type_named("Int"), type_named("Int")),
+            ),
+            ("xs".to_string(), type_named("List")),
+        ],
+        return_type: type_named("List"),
+        effects: vec![],
+        effect_row_var: None,
+        where_clause: vec![],
+        annotations: vec![external_annotation("lists", "map")],
+        span: span(),
+    };
+    let cmod = lower(&vec![MDecl::Passthrough(decl)], "m");
+    let f = &cmod.funs[0];
+    let body = match &f.body {
+        CExpr::Fun(_, b) => b.as_ref(),
+        _ => unreachable!(),
+    };
+    let CExpr::Let(adapter_name, adapter, body) = body else {
+        panic!("expected adapter let, got {body:?}");
+    };
+    assert_eq!(adapter_name, "_Adapter0");
+    let CExpr::Fun(cb_params, _) = adapter.as_ref() else {
+        panic!("expected adapter fun, got {adapter:?}");
+    };
+    assert_eq!(cb_params, &vec!["_CbArg0".to_string()]);
+    let call = match body.as_ref() {
+        CExpr::Apply(_, args) => &args[0],
+        other => panic!("expected return-k apply, got {other:?}"),
+    };
+    match call {
+        CExpr::Call(module, function, args) => {
+            assert_eq!(module, "lists");
+            assert_eq!(function, "map");
+            assert!(matches!(&args[0], CExpr::Var(name) if name == "_Adapter0"));
+            assert!(matches!(&args[1], CExpr::Var(name) if name == "_Ext1"));
+        }
+        other => panic!("expected native call, got {other:?}"),
     }
 }
 
@@ -3236,16 +3295,7 @@ fn private_external_signature_not_exported() {
         effects: vec![],
         effect_row_var: None,
         where_clause: vec![],
-        annotations: vec![ast::Annotation {
-            name: "external".to_string(),
-            name_span: span(),
-            args: vec![
-                Lit::String("runtime".to_string(), crate::token::StringKind::Normal),
-                Lit::String("m".to_string(), crate::token::StringKind::Normal),
-                Lit::String("f".to_string(), crate::token::StringKind::Normal),
-            ],
-            span: span(),
-        }],
+        annotations: vec![external_annotation("m", "f")],
         span: span(),
     };
     let cmod = lower(&vec![MDecl::Passthrough(decl)], "m");

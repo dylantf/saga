@@ -556,13 +556,12 @@ impl<'ctx> Lowerer<'ctx> {
         let body_ce = self.lower_expr(body, &body_ctx);
         let wrapped_body = self.wrap_with_result_delimiter(body_ce, &abort_marker, ctx);
 
-        let with_evidence =
-            install_bindings
-                .into_iter()
-                .rev()
-                .fold(wrapped_body, |inner, (name, value)| {
-                    CExpr::Let(name, Box::new(value), Box::new(inner))
-                });
+        let with_evidence = install_bindings
+            .into_iter()
+            .rev()
+            .fold(wrapped_body, |inner, (name, value)| {
+                CExpr::Let(name, Box::new(value), Box::new(inner))
+            });
         let with_prompt = CExpr::Let(
             prompt_k,
             Box::new(prompt_k_binding),

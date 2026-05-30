@@ -120,7 +120,10 @@ impl<'ctx> Lowerer<'ctx> {
         let mut by_effect: BTreeMap<String, Vec<&crate::codegen::monadic::ir::MHandlerArm>> =
             BTreeMap::new();
         for arm in arms {
-            by_effect.entry(arm.op.effect.clone()).or_default().push(arm);
+            by_effect
+                .entry(arm.op.effect.clone())
+                .or_default()
+                .push(arm);
         }
         let pairs: Vec<CExpr> = by_effect
             .into_iter()
@@ -130,10 +133,7 @@ impl<'ctx> Lowerer<'ctx> {
                     .iter()
                     .map(|arm| self.build_handler_value_arm_closure(arm, ctx))
                     .collect();
-                CExpr::Tuple(vec![
-                    CExpr::Lit(CLit::Atom(eff)),
-                    CExpr::Tuple(op_closures),
-                ])
+                CExpr::Tuple(vec![CExpr::Lit(CLit::Atom(eff)), CExpr::Tuple(op_closures)])
             })
             .collect();
         CExpr::Tuple(pairs)

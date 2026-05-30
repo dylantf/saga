@@ -296,19 +296,43 @@ pub(super) fn lower_external_wrapper(decl: &Decl) -> Option<(CFunDef, usize, boo
 
     // User-arg param names; Evidence + ReturnK appended for uniform shape.
     let mut param_vars: Vec<String> = (0..user_arity).map(|i| format!("_Ext{}", i)).collect();
+
+    // For each function-typed param, the wrapper receives a uniform-CPS Saga
+    // lambda but the native BIF expects a native-arity Erlang fun. Build an
+    // adapter `_Adapter{i} = fun(args...) -> apply _Ext{i}(args..., _Evidence,
+    // identity_K)` and pass the adapter to the BIF in that position. Identity
+    // K means the Saga callback's resumption flows through as the apply's
+    // return value — correct for pure callbacks; effectful callbacks (which
+    // would route control through K rather than returning) are an open design
+    // question, not blocked here.
+    let mut adapter_bindings: Vec<(String, CExpr)> = Vec::new();
     let call_args: Vec<(usize, CExpr)> = param_vars
         .iter()
         .zip(params.iter())
         .enumerate()
         .filter(|(_, (_, (_, ty)))| !is_unit_type_expr(ty))
-        .map(|(idx, (v, _))| (idx, CExpr::Var(v.clone())))
+        .map(|(idx, (v, (_, ty)))| {
+            if let Some(callback_arity) = function_type_arity(ty) {
+                let adapter_name = format!("_Adapter{}", idx);
+                let adapter = build_callback_adapter(v, callback_arity, EVIDENCE_VAR);
+                adapter_bindings.push((adapter_name.clone(), adapter));
+                (idx, CExpr::Var(adapter_name))
+            } else {
+                (idx, CExpr::Var(v.clone()))
+            }
+        })
         .collect();
     param_vars.push(EVIDENCE_VAR.to_string());
     param_vars.push(RETURN_K_VAR.to_string());
     let total_arity = param_vars.len();
 
-    let call = lower_external_native_call(&erl_module, &erl_func, call_args, EVIDENCE_VAR);
-    let body = CExpr::Apply(Box::new(CExpr::Var(RETURN_K_VAR.to_string())), vec![call]);
+    let call = lower_external_native_call(&erl_module, &erl_func, call_args);
+    let mut body = CExpr::Apply(Box::new(CExpr::Var(RETURN_K_VAR.to_string())), vec![call]);
+    // Wrap adapter bindings inside-out: outer adapter visible to all inner
+    // code, but order doesn't matter (each adapter only closes over `_ExtN`).
+    for (adapter_name, adapter) in adapter_bindings.into_iter().rev() {
+        body = CExpr::Let(adapter_name, Box::new(adapter), Box::new(body));
+    }
 
     Some((
         CFunDef {
@@ -319,6 +343,42 @@ pub(super) fn lower_external_wrapper(decl: &Decl) -> Option<(CFunDef, usize, boo
         total_arity,
         *public,
     ))
+}
+
+/// Count arrows in a function-type `TypeExpr`. Returns `None` for non-function
+/// types. `(a -> b)` → `Some(1)`; `(a -> b -> c)` → `Some(2)`; `Int` → `None`.
+/// Used to size the adapter wrapping a function-typed `@external` callback
+/// param so it matches the native BIF's expected `fun(X1, …, Xn)` arity.
+fn function_type_arity(ty: &TypeExpr) -> Option<usize> {
+    fn count(ty: &TypeExpr) -> usize {
+        match ty {
+            TypeExpr::Arrow { to, .. } => 1 + count(to),
+            TypeExpr::Labeled { inner, .. } => count(inner),
+            _ => 0,
+        }
+    }
+    let arity = count(ty);
+    if arity == 0 { None } else { Some(arity) }
+}
+
+/// Build `fun(_CbArg0, …, _CbArg{n-1}) -> apply <callback_var>(_CbArg0, …,
+/// _CbArg{n-1}, <evidence_var>, fun(_V) -> _V end)`. Wraps a Saga uniform-CPS
+/// callback (`fun(args…, _Evidence, _ReturnK)`) for use by a native BIF that
+/// expects `fun(args…)`. Identity K means the callback's return value flows
+/// through as the apply's result.
+fn build_callback_adapter(callback_var: &str, arity: usize, evidence_var: &str) -> CExpr {
+    let cb_args: Vec<String> = (0..arity).map(|i| format!("_CbArg{}", i)).collect();
+    let k_var = "_CbK".to_string();
+    let v_var = "_CbV".to_string();
+    let id_k = CExpr::Fun(vec![v_var.clone()], Box::new(CExpr::Var(v_var)));
+    let mut apply_args: Vec<CExpr> = cb_args.iter().cloned().map(CExpr::Var).collect();
+    apply_args.push(CExpr::Var(evidence_var.to_string()));
+    apply_args.push(CExpr::Var(k_var.clone()));
+    let apply_callback = CExpr::Apply(Box::new(CExpr::Var(callback_var.to_string())), apply_args);
+    CExpr::Fun(
+        cb_args,
+        Box::new(CExpr::Let(k_var, Box::new(id_k), Box::new(apply_callback))),
+    )
 }
 
 /// Lower a `@builtin` `FunSignature` decl into a wrapper `CFunDef` that

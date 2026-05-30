@@ -609,6 +609,10 @@ fn copy_bridges_from_dir(dir: &Path, build_dir: &Path, count: &mut usize) -> Res
         let entry = entry.map_err(|e| format!("read_dir error: {}", e))?;
         let path = entry.path();
         if path.is_dir() {
+            let name = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
+            if matches!(name, "_build" | "target") || name.starts_with('.') {
+                continue;
+            }
             copy_bridges_from_dir(&path, build_dir, count)?;
         } else if path.extension().is_some_and(|ext| ext == "erl") {
             let filename = path.file_name().unwrap();
