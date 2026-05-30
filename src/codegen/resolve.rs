@@ -15,7 +15,7 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::ast::{self, ComprehensionQualifier, Decl, Expr, ExprKind, NodeId, Pat, Program, Stmt};
-use crate::codegen::lower::init::extract_external;
+use crate::codegen::external::extract_external;
 use crate::typechecker::{ModuleCodegenInfo, ResolutionResult as FrontResolutionResult};
 
 /// Map from constructor name -> mangled Erlang atom.
@@ -1068,8 +1068,8 @@ fn build_imported_fun_scoped(
     fun_effects_map: &HashMap<&str, &Vec<String>>,
     effect_op_counts: &HashMap<String, usize>,
 ) -> ScopedName {
-    let (arity, mut effects) = crate::codegen::lower::util::arity_and_effects_from_type(&scheme.ty);
-    let dict_params = crate::codegen::lower::util::dict_param_count(&scheme.constraints);
+    let (arity, mut effects) = crate::codegen::type_shape::arity_and_effects_from_type(&scheme.ty);
+    let dict_params = crate::codegen::type_shape::dict_param_count(&scheme.constraints);
     // Merge with fun_effects (which strips beam-native effects in
     // check_module.rs but is otherwise the authoritative annotation list).
     // Effects from the type include beam-native ones; the lowered function

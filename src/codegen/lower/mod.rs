@@ -10,11 +10,12 @@ pub mod util;
 
 use crate::ast::{self, Decl, Expr, ExprKind, HandlerArm, Lit, NodeId, Pat, Stmt};
 use crate::codegen::cerl::{CArm, CExpr, CFunDef, CLit, CModule, CPat};
+use crate::codegen::external::extract_external;
 use crate::codegen::runtime_shape::{CpsShape, RuntimeFunctionShape};
 use std::collections::HashMap;
 
 use errors::{ErrorInfo, ErrorKind, SourceInfo};
-use init::{PendingAnnotation, extract_external};
+use init::PendingAnnotation;
 use pats::lower_params;
 use util::{
     cerl_call, collect_ctor_call, collect_effect_call, collect_effect_call_expr, collect_fun_call,

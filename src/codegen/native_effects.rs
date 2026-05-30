@@ -4,6 +4,64 @@
 //! to build bootstrap evidence closures; optimization uses it to identify the
 //! small subset of native yields that can be rewritten to direct `ForeignCall`s.
 
+pub(crate) struct NativeHandlerSpec {
+    pub(crate) source_module: &'static str,
+    pub(crate) canonical_name: &'static str,
+    pub(crate) needs_ets_table: bool,
+    pub(crate) needs_vec_table: bool,
+}
+
+pub(crate) const NATIVE_HANDLERS: &[NativeHandlerSpec] = &[
+    NativeHandlerSpec {
+        source_module: "Std.Actor",
+        canonical_name: "Std.Actor.beam_actor",
+        needs_ets_table: false,
+        needs_vec_table: false,
+    },
+    NativeHandlerSpec {
+        source_module: "Std.Ref",
+        canonical_name: "Std.Ref.beam_ref",
+        needs_ets_table: false,
+        needs_vec_table: false,
+    },
+    NativeHandlerSpec {
+        source_module: "Std.Ref",
+        canonical_name: "Std.Ref.ets_ref",
+        needs_ets_table: true,
+        needs_vec_table: false,
+    },
+    NativeHandlerSpec {
+        source_module: "Std.Vec",
+        canonical_name: "Std.Vec.beam_vec",
+        needs_ets_table: false,
+        needs_vec_table: true,
+    },
+    NativeHandlerSpec {
+        source_module: "Std.Process",
+        canonical_name: "Std.Process.beam_signal",
+        needs_ets_table: false,
+        needs_vec_table: false,
+    },
+];
+
+pub(crate) fn is_native_handler(source_module: &str, canonical_name: &str) -> bool {
+    NATIVE_HANDLERS
+        .iter()
+        .any(|h| h.source_module == source_module && h.canonical_name == canonical_name)
+}
+
+pub(crate) fn handler_needs_ets_table(canonical_name: &str) -> bool {
+    NATIVE_HANDLERS
+        .iter()
+        .any(|h| h.canonical_name == canonical_name && h.needs_ets_table)
+}
+
+pub(crate) fn handler_needs_vec_table(canonical_name: &str) -> bool {
+    NATIVE_HANDLERS
+        .iter()
+        .any(|h| h.canonical_name == canonical_name && h.needs_vec_table)
+}
+
 /// A single BEAM-native op entry: how source-side Saga args map to the
 /// underlying Erlang/runtime call.
 pub(crate) struct NativeOpSpec {

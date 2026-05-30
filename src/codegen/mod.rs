@@ -1,6 +1,7 @@
 pub mod anf;
 pub mod call_effects;
 pub mod cerl;
+pub mod external;
 pub mod handler_analysis;
 pub mod lower;
 pub mod lower_monadic;
@@ -11,6 +12,7 @@ pub mod resolve;
 pub mod runtime_shape;
 #[cfg(test)]
 mod tests;
+pub mod type_shape;
 
 use crate::ast;
 use crate::typechecker::{CheckResult, ModuleCodegenInfo};

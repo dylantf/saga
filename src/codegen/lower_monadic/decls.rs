@@ -12,8 +12,9 @@
 //! return continuation, regardless of whether the source function performs
 //! any effects. See the planning doc's "slow uniform path" section.
 
-use crate::ast::{self, Annotation, Decl, Lit, Pat, TypeExpr};
+use crate::ast::{self, Decl, Pat, TypeExpr};
 use crate::codegen::cerl::{CArm, CExpr, CFunDef, CPat};
+use crate::codegen::external::extract_external;
 use crate::codegen::monadic::ir::{Atom, MDictConstructor, MExpr, MFunBinding, MVal};
 
 use super::pats::lower_param_names;
@@ -233,26 +234,6 @@ pub(super) fn dict_constructor_arity(dc: &MDictConstructor) -> usize {
     // Uniform calling convention: dict ctors expose the same
     // `(args…, _Evidence, _ReturnK)` shape as every other callable.
     dc.dict_params.len() + 2
-}
-
-/// Extract the `(erl_module, erl_func)` pair from an
-/// `@external("runtime", "<mod>", "<func>")` annotation list. Returns
-/// `None` when no such annotation is present. Copied from
-/// `src/codegen/lower/init.rs::extract_external` per the agent-guide's
-/// "no imports from frozen files" rule.
-fn extract_external(annotations: &[Annotation]) -> Option<(String, String)> {
-    annotations
-        .iter()
-        .find(|a| a.name == "external")
-        .and_then(|a| {
-            if a.args.len() >= 3
-                && let (Lit::String(module, _), Lit::String(func, _)) = (&a.args[1], &a.args[2])
-            {
-                Some((module.clone(), func.clone()))
-            } else {
-                None
-            }
-        })
 }
 
 /// Lower an `@external` `FunSignature` decl into a wrapper `CFunDef`.

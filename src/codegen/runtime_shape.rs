@@ -1,5 +1,5 @@
-use crate::codegen::lower::util;
 use crate::codegen::resolve::{ResolvedCodegenKind, ResolvedSymbol};
+use crate::codegen::type_shape;
 use crate::typechecker::Type;
 
 /// Runtime CPS convention for a Saga function value.
@@ -30,9 +30,9 @@ impl RuntimeFunctionShape {
         if !matches!(ty, Type::Fun(..)) {
             return RuntimeFunctionShape::Pure;
         }
-        let (_, effects) = util::arity_and_effects_from_type(ty);
+        let (_, effects) = type_shape::arity_and_effects_from_type(ty);
         let static_effects = canonicalize_effects(effects);
-        let is_open_row = util::has_open_effect_row(ty);
+        let is_open_row = type_shape::has_open_effect_row(ty);
         if static_effects.is_empty() && !is_open_row {
             RuntimeFunctionShape::Pure
         } else {

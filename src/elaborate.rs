@@ -235,7 +235,7 @@ impl Elaborator {
         let mut fun_declared_arities: HashMap<String, usize> = HashMap::new();
         for (name, scheme) in result.env.iter() {
             let ty = result.sub.apply(&scheme.ty);
-            let arity = crate::codegen::lower::util::arity_and_effects_from_type(&ty).0;
+            let arity = crate::codegen::type_shape::arity_and_effects_from_type(&ty).0;
             if arity > 0 {
                 fun_declared_arities.insert(name.to_string(), arity);
             }

@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 
 use crate::ast::{self, Expr};
-use crate::codegen::lower::beam_interop;
+use crate::codegen::native_effects;
 use crate::token::Span;
 
 use super::{Checker, Diagnostic, EffectEntry, EffectRow, Type};
@@ -107,10 +107,10 @@ impl Checker {
                 .collect(),
         };
         for name in &handler_names {
-            if beam_interop::handler_needs_ets_table(name) {
+            if native_effects::handler_needs_ets_table(name) {
                 self.needs_ets_ref_table = true;
             }
-            if beam_interop::handler_needs_vec_table(name) {
+            if native_effects::handler_needs_vec_table(name) {
                 self.needs_vec_table = true;
             }
         }

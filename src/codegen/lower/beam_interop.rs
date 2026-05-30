@@ -9,6 +9,7 @@
 use std::collections::HashMap;
 
 use crate::codegen::cerl::{CArm, CExpr, CLit, CPat};
+use crate::codegen::native_effects;
 
 use super::util::{cerl_call, mangle_ctor_atom};
 
@@ -16,67 +17,9 @@ use super::util::{cerl_call, mangle_ctor_atom};
 // BEAM-native handler registry
 // ---------------------------------------------------------------------------
 
-/// Registry entry for a handler that skips CPS and lowers effect ops to direct
-/// BEAM calls. Resource flags indicate what runtime initialization is needed.
-struct BeamNativeHandler {
-    source_module: &'static str,
-    canonical_name: &'static str,
-    needs_ets_table: bool,
-    needs_vec_table: bool,
-}
-
-const BEAM_NATIVE_HANDLERS: &[BeamNativeHandler] = &[
-    BeamNativeHandler {
-        source_module: "Std.Actor",
-        canonical_name: "Std.Actor.beam_actor",
-        needs_ets_table: false,
-        needs_vec_table: false,
-    },
-    BeamNativeHandler {
-        source_module: "Std.Ref",
-        canonical_name: "Std.Ref.beam_ref",
-        needs_ets_table: false,
-        needs_vec_table: false,
-    },
-    BeamNativeHandler {
-        source_module: "Std.Ref",
-        canonical_name: "Std.Ref.ets_ref",
-        needs_ets_table: true,
-        needs_vec_table: false,
-    },
-    BeamNativeHandler {
-        source_module: "Std.Vec",
-        canonical_name: "Std.Vec.beam_vec",
-        needs_ets_table: false,
-        needs_vec_table: true,
-    },
-    BeamNativeHandler {
-        source_module: "Std.Process",
-        canonical_name: "Std.Process.beam_signal",
-        needs_ets_table: false,
-        needs_vec_table: false,
-    },
-];
-
 /// Check if a handler is BEAM-native by its source module and canonical name.
 pub fn is_beam_native_handler(source_module: &str, canonical_name: &str) -> bool {
-    BEAM_NATIVE_HANDLERS
-        .iter()
-        .any(|h| h.source_module == source_module && h.canonical_name == canonical_name)
-}
-
-/// Check if a canonical handler name requires ETS table initialization.
-pub fn handler_needs_ets_table(canonical_name: &str) -> bool {
-    BEAM_NATIVE_HANDLERS
-        .iter()
-        .any(|h| h.canonical_name == canonical_name && h.needs_ets_table)
-}
-
-/// Check if a canonical handler name requires vec table initialization.
-pub fn handler_needs_vec_table(canonical_name: &str) -> bool {
-    BEAM_NATIVE_HANDLERS
-        .iter()
-        .any(|h| h.canonical_name == canonical_name && h.needs_vec_table)
+    native_effects::is_native_handler(source_module, canonical_name)
 }
 
 // ---------------------------------------------------------------------------

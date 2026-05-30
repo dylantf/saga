@@ -2,6 +2,7 @@
 /// function metadata, imports, and type constructors from the program's
 /// declarations and imported module codegen info.
 use crate::ast::{self, Decl};
+use crate::codegen::external::extract_external;
 use crate::codegen::runtime_shape::{CpsShape, RuntimeFunctionShape};
 use std::collections::{BTreeSet, HashMap};
 
@@ -13,22 +14,6 @@ fn count_lambda_params(body: &ast::Expr) -> usize {
         ast::ExprKind::Lambda { params, body, .. } => params.len() + count_lambda_params(body),
         _ => 0,
     }
-}
-
-/// Extract the (module, func) pair from an `@external("runtime", "module", "func")` annotation.
-pub fn extract_external(annotations: &[ast::Annotation]) -> Option<(String, String)> {
-    annotations
-        .iter()
-        .find(|a| a.name == "external")
-        .and_then(|a| {
-            if a.args.len() >= 3
-                && let (ast::Lit::String(module, _), ast::Lit::String(func, _)) =
-                    (&a.args[1], &a.args[2])
-            {
-                return Some((module.clone(), func.clone()));
-            }
-            None
-        })
 }
 
 /// Staging area for FunSignature data consumed by FunBinding.

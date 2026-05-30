@@ -349,13 +349,13 @@ The new path is active, but the old-path directory is still referenced by a few
 shared or frozen pieces. Do a small prep commit before the destructive
 delete/rename commit:
 
-- Move or copy the type-shape helpers currently imported from
-  `lower/util.rs` into a backend-neutral module. Live users:
-  `codegen::resolve`, `codegen::runtime_shape`, and old
-  `codegen::call_effects`.
-- Move the BEAM-native handler/effect-family helper used by
-  `typechecker::handlers` out of `lower/beam_interop.rs` or replace it with
-  backend-neutral native-effect metadata.
+- Done: type-shape helpers used by shared code now live in
+  `codegen::type_shape`; the old lowerer delegates through its frozen
+  `lower/util.rs` facade.
+- Done: `@external` annotation extraction now lives in `codegen::external`
+  instead of `lower/init.rs`.
+- Done: BEAM-native handler resource metadata used by the typechecker now
+  lives in backend-neutral `codegen::native_effects`.
 - Remove old-path-only metadata after the old path is gone:
   `ResolvedCodegenKind::InlineVal`, `RuntimeFunctionShape::InlineVal`, and
   `ModuleCodegenInfo::inline_vals`.

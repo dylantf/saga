@@ -295,10 +295,7 @@ pub(super) fn module_name_to_erlang(path: &[String]) -> String {
 /// Count dictionary parameters from trait constraints.
 /// Excludes operator-dispatched traits (Num, Eq) which use BIF dispatch instead.
 pub fn dict_param_count(constraints: &[(String, u32, Vec<crate::typechecker::Type>)]) -> usize {
-    constraints
-        .iter()
-        .filter(|(trait_name, _, _)| trait_name != "Num" && trait_name != "Eq")
-        .count()
+    crate::codegen::type_shape::dict_param_count(constraints)
 }
 
 /// True if any effect row along the function arrow has an open tail
@@ -306,31 +303,14 @@ pub fn dict_param_count(constraints: &[(String, u32, Vec<crate::typechecker::Typ
 /// `StaticOps` (closed-row callees, project at the call boundary) from
 /// `RowForwarded` (open-row callees, forward full evidence).
 pub fn has_open_effect_row(ty: &Type) -> bool {
-    let mut current = ty;
-    while let Type::Fun(_, ret, row) = current {
-        if row.tail.is_some() {
-            return true;
-        }
-        current = ret;
-    }
-    false
+    crate::codegen::type_shape::has_open_effect_row(ty)
 }
 
 /// Derive base arity and effect names from a typechecker `Type`.
 /// Returns `(base_param_count, sorted_effect_names)`.
 /// The expanded arity (for codegen) is: base + effects.len() + if effects is non-empty { 1 } else { 0 }.
 pub fn arity_and_effects_from_type(ty: &Type) -> (usize, Vec<String>) {
-    let mut arity = 0;
-    let mut effects = BTreeSet::new();
-    let mut current = ty;
-    while let Type::Fun(_param, ret, row) = current {
-        arity += 1;
-        for entry in &row.effects {
-            effects.insert(entry.name.clone());
-        }
-        current = ret;
-    }
-    (arity, effects.into_iter().collect())
+    crate::codegen::type_shape::arity_and_effects_from_type(ty)
 }
 
 /// Phase-3 variant of [`arity_and_effects_from_type`] that also reports
@@ -344,9 +324,7 @@ pub fn arity_and_effects_from_type(ty: &Type) -> (usize, Vec<String>) {
 /// call sites against a known `EvidenceLayout`) and `RowForwarded`
 /// (open-row, forward full ambient evidence).
 pub fn arity_and_evidence_from_type(ty: &Type) -> (usize, Vec<String>, bool) {
-    let (user_arity, effects) = arity_and_effects_from_type(ty);
-    let is_open_row = has_open_effect_row(ty);
-    (user_arity, effects, is_open_row)
+    crate::codegen::type_shape::arity_and_evidence_from_type(ty)
 }
 
 /// Extract per-parameter absorbed effects from a function type.
