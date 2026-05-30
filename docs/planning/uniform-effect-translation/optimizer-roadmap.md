@@ -169,8 +169,8 @@ direction on the same machine.
 
 ### Latest Snapshot
 
-Last sampled after old-path deletion and the multishot value-position `Yield`
-fix:
+Last sampled after caller-local cross-module native/static variants, including
+qualified imported call heads:
 
 | Example | Entry-reachable result | Reading |
 | --- | --- | --- |
@@ -182,15 +182,39 @@ fix:
 | `54-choose-backtracking` | `Yield 4 -> 4`; `Bind 35 -> 21` | Multishot/abort behavior remains intentionally slow. |
 | `55-nqueens-solver` | `Yield 2 -> 2`; `Bind 48 -> 36` | Multishot/abort behavior remains intentionally slow. |
 
-The actor-native hot path is now covered for these examples. The next optimizer
-target should come from a fresh stats sweep rather than from extending function
-variants by default.
+The actor-native hot path is still covered for these examples after xmod
+variant support. The standard example set does not contain a cross-module
+variant hot path, so validate xmod movement with project-mode integration tests
+or real-package shakedowns rather than expecting this table to change.
+
+The remaining entry-reachable residual yields are understood:
+
+- `25-state-effect`: value-producing resume/state threading, accepted slow path.
+- `54-choose-backtracking` and `55-nqueens-solver`: multishot/abort control,
+  accepted slow path.
+
+Do not add another semantic optimizer rewrite from this snapshot alone. The
+next expansion should either come from real-package stats that show a new hot
+path, or from a small cleanup pass over the optimizer structure.
 
 The stats report now splits total declarations into `source decls` and
 `generated decls`. This makes native variant growth visible as optimizer-created
 code and shows when private slow paths are deleted: for example, `29-actors`
 whole-program `decls 7 -> 7` is `source decls 7 -> 5` plus
 `generated decls 0 -> 2`.
+
+Cleanup checkpoint after the cross-module variant milestone:
+
+- imported variant lookup now prefers the resolved canonical name and only uses
+  a bare-name fallback when it is unique for that source module;
+- effect-name matching is centralized and no longer treats two different
+  qualified effects with the same final segment as equal;
+- same-module and imported function variants share the cloned-body optimization
+  and generated-binding emission helpers;
+- direct-call and finally-direct-call rewrites share the same innermost-handler
+  stack lookup;
+- optimizer unit tests live in `effect_opt/tests.rs` instead of the main
+  optimizer module.
 
 `App` is intentionally not counted as pure in Bind-to-Let or dead-let cleanup.
 Saga effect rows track algebraic effects, not arbitrary builtin or external
