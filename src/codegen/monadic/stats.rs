@@ -690,6 +690,7 @@ mod tests {
     fn counts_basic_monadic_shapes() {
         let program = vec![MDecl::FunBinding(MFunBinding {
             id: NodeId(1),
+            public: false,
             name: "main".into(),
             name_span: span(),
             params: vec![],
@@ -733,6 +734,7 @@ mod tests {
     fn counts_optimizer_generated_decls_separately() {
         let source = MDecl::FunBinding(MFunBinding {
             id: NodeId(40),
+            public: false,
             name: "worker".into(),
             name_span: span(),
             params: vec![],
@@ -745,6 +747,7 @@ mod tests {
         });
         let generated = MDecl::FunBinding(MFunBinding {
             id: NodeId(42),
+            public: false,
             name: "__saga_native_variant__worker__native_beam_actor".into(),
             name_span: span(),
             params: vec![],
@@ -767,6 +770,7 @@ mod tests {
     fn reachable_stats_follow_calls_from_entry_roots() {
         let helper = MDecl::FunBinding(MFunBinding {
             id: NodeId(10),
+            public: false,
             name: "helper".into(),
             name_span: span(),
             params: vec![],
@@ -784,6 +788,7 @@ mod tests {
         });
         let unused = MDecl::FunBinding(MFunBinding {
             id: NodeId(20),
+            public: false,
             name: "unused".into(),
             name_span: span(),
             params: vec![],
@@ -801,6 +806,7 @@ mod tests {
         });
         let main = MDecl::FunBinding(MFunBinding {
             id: NodeId(30),
+            public: false,
             name: "main".into(),
             name_span: span(),
             params: vec![],

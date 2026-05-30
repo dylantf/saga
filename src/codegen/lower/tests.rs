@@ -271,6 +271,7 @@ fn assert_stub_body(body: &CExpr) {
 fn fun_binding_with_two_user_params_emits_arity_four() {
     let fb = MFunBinding {
         id: dummy_node(),
+        public: false,
         name: "add".to_string(),
         name_span: span(),
         params: vec![
@@ -313,6 +314,7 @@ fn multiple_fun_bindings_emit_in_source_order() {
     let mk = |name: &str| {
         MDecl::FunBinding(MFunBinding {
             id: dummy_node(),
+            public: false,
             name: name.to_string(),
             name_span: span(),
             params: vec![Pat::Var {
@@ -1365,6 +1367,27 @@ fn app_threads_evidence_and_return_k() {
             assert!(matches!(&args[1], CExpr::Lit(CLit::Int(2))));
             assert!(matches!(&args[2], CExpr::Var(n) if n == "_Evidence"));
             assert!(matches!(&args[3], CExpr::Var(n) if n == "_ReturnK"));
+        }
+        other => panic!("expected Apply, got {other:?}"),
+    }
+}
+
+#[test]
+fn app_to_generated_variant_lowers_as_local_fun_ref() {
+    let variant = "__saga_static_variant__do_work__static__Log__Log__log__1__1";
+    let e = MExpr::App {
+        head: atom_var(variant),
+        args: vec![atom_lit(Lit::Unit)],
+        source: dummy_node(),
+    };
+    let ce = lower_expr_default(&e);
+
+    match ce {
+        CExpr::Apply(callee, args) => {
+            assert!(matches!(callee.as_ref(), CExpr::FunRef(name, 3) if name == variant));
+            assert_eq!(args.len(), 3);
+            assert!(matches!(&args[1], CExpr::Var(n) if n == "_Evidence"));
+            assert!(matches!(&args[2], CExpr::Var(n) if n == "_ReturnK"));
         }
         other => panic!("expected Apply, got {other:?}"),
     }
@@ -3694,6 +3717,7 @@ fn fun_binding_not_in_exports_is_not_exported() {
     let mk_fb = |name: &str| {
         MDecl::FunBinding(MFunBinding {
             id: dummy_node(),
+            public: false,
             name: name.to_string(),
             name_span: span(),
             params: vec![pat_var("x")],

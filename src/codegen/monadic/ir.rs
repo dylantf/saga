@@ -483,6 +483,7 @@ pub struct MHandlerArm {
 #[derive(Debug, Clone, PartialEq)]
 pub struct MFunBinding {
     pub id: NodeId,
+    pub public: bool,
     pub name: String,
     pub name_span: Span,
     pub params: Vec<Pat>,

@@ -1206,13 +1206,9 @@ handler silent for Log {
 main () = do_work () with silent
 "#;
     let out = emit_elaborated(src);
-    // Should have two nested handler applies with continuations
-    // Count occurrences of apply _HandleLog
-    let count = out.matches("'std_evidence_bridge':'find_evidence'").count();
-    assert!(
-        count >= 2,
-        "expected at least 2 handler applies, got {count}\n{out}"
-    );
+    // Static tail-resumptive function variants can eliminate both handler
+    // lookups from this shape.
+    assert_contains(&out, "__saga_static_variant__do_work");
 }
 
 #[test]
@@ -1238,9 +1234,9 @@ do_work () = {
 main () = do_work () with silent
 "#;
     let out = emit_elaborated(src);
-    // do_work should have nested handler applies with continuations
-    // wrapping the let bindings and final value
-    assert_contains(&out, "'do_work'/3");
+    // do_work is specialized away under the static handler, but the let-bound
+    // arithmetic still appears in the generated variant.
+    assert_contains(&out, "__saga_static_variant__do_work");
     assert_contains(&out, "_Evidence");
     // x = 10 + 20 should appear inside a continuation
     assert_contains(&out, "call 'erlang':'+'");
@@ -1582,12 +1578,8 @@ main () = compute () with {
 }
 "#;
     let out = emit_elaborated(src);
-    // Should have two separate handler applies for the two ask! calls
-    let count = out.matches("'std_evidence_bridge':'find_evidence'").count();
-    assert!(
-        count >= 2,
-        "expected at least 2 handler applies, got {count}\n{out}"
-    );
+    // The two tail-resumptive ask! calls collapse into a static variant.
+    assert_contains(&out, "__saga_static_variant__compute");
 }
 
 #[test]

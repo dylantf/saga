@@ -64,6 +64,7 @@ fn bind_chain_is_flat_and_deterministic() {
     };
     let f = MFunBinding {
         id: nid(1),
+        public: false,
         name: "foo".to_string(),
         name_span: sp(),
         params: vec![Pat::Var {

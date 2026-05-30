@@ -16,7 +16,7 @@ mod handler;
 #[cfg(test)]
 mod tests;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::ast::{self, Decl, ExprKind, HandlerBody, NodeId};
 use crate::codegen::monadic::ir::{
@@ -81,6 +81,10 @@ pub(crate) struct Translator<'a> {
     /// Used to resolve `with <name>` into a `Static` handler at translation
     /// time.
     pub(crate) handler_decls: HashMap<String, HandlerBody>,
+    /// Function names with a public signature in this module. Function bodies
+    /// do not carry their own visibility bit in the source AST, so translation
+    /// recovers it from the corresponding `pub fun` signature.
+    pub(crate) public_funs: HashSet<String>,
     /// Local in-scope let-bindings whose RHS is a handler-valued expression
     /// (either an inline `handler for E { ... }` expression or an alias chain
     /// that ends at one). Populated/popped per-block-scope by `translate_block`.
@@ -103,6 +107,7 @@ impl<'a> Translator<'a> {
         let mut effect_ops: HashMap<String, Vec<String>> = HashMap::new();
         let mut effect_op_param_counts: HashMap<(String, String), usize> = HashMap::new();
         let mut handler_decls: HashMap<String, HandlerBody> = HashMap::new();
+        let mut public_funs: HashSet<String> = HashSet::new();
         // Seed cross-module effects from the narrowed view first; local
         // `Decl::EffectDef` scans below take precedence on key collisions.
         for (name, ops) in e.effect_ops.iter() {
@@ -125,6 +130,11 @@ impl<'a> Translator<'a> {
                 Decl::HandlerDef { name, body, .. } => {
                     handler_decls.insert(name.clone(), body.clone());
                 }
+                Decl::FunSignature {
+                    public: true, name, ..
+                } => {
+                    public_funs.insert(name.clone());
+                }
                 _ => {}
             }
         }
@@ -134,6 +144,7 @@ impl<'a> Translator<'a> {
             effect_ops,
             effect_op_param_counts,
             handler_decls,
+            public_funs,
             local_static_handlers: HashMap::new(),
             local_handler_effects: HashMap::new(),
             fresh_mvar: 0,
@@ -277,6 +288,7 @@ impl<'a> Translator<'a> {
                 self.local_handler_effects = saved_handler_effects;
                 MDecl::FunBinding(MFunBinding {
                     id: *id,
+                    public: self.public_funs.contains(name),
                     name: name.clone(),
                     name_span: *name_span,
                     params: params.clone(),

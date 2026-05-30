@@ -98,7 +98,15 @@ impl<'ctx> Lowerer<'ctx> {
             return call;
         }
 
-        let head_ce = self.lower_atom(head, ctx);
+        let head_ce = match head {
+            Atom::Var { name, source }
+                if self.resolution.get(source).is_none()
+                    && is_optimizer_generated_variant_name(&name.name) =>
+            {
+                CExpr::FunRef(name.name.clone(), args.len() + 2)
+            }
+            _ => self.lower_atom(head, ctx),
+        };
         let mut call_args: Vec<CExpr> = args.iter().map(|a| self.lower_atom(a, ctx)).collect();
         call_args.push(CExpr::Var(ctx.evidence.clone()));
         call_args.push(CExpr::Var(ctx.return_k.clone()));
@@ -344,4 +352,8 @@ impl<'ctx> Lowerer<'ctx> {
         let err_call = CExpr::Call("erlang".to_string(), "error".to_string(), vec![err_term]);
         CExpr::Let(msg_var, Box::new(msg), Box::new(err_call))
     }
+}
+
+fn is_optimizer_generated_variant_name(name: &str) -> bool {
+    name.starts_with("__saga_native_variant__") || name.starts_with("__saga_static_variant__")
 }

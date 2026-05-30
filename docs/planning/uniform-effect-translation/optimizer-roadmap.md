@@ -64,18 +64,18 @@ implicit debt.
   entry-reachable before/after counts, with per-op `Yield` and per-target
   `ForeignCall` breakdowns.
 
+- [x] **Dead generated slow-path cleanup.**
+  The optimizer records function visibility on `MFunBinding` and removes
+  private same-module source functions once reachable generated variants cover
+  every entry-reachable call. Public functions and conservatively referenced
+  private functions are retained. Generated variant call atoms use declaration
+  ids, not original reference ids, so the lowerer does not resolve them back to
+  the slow path.
+
 ## Bounded Remaining Candidates
 
 Only promote an item from this list when stats show it matters for common code
 or when it removes visible compiler complexity.
-
-- [ ] **Dead generated slow-path cleanup.**
-  Remove original same-module functions when all entry-reachable calls route
-  through generated variants and the original is not exported or otherwise
-  referenced. This is code-size work, not required for correctness. Deferred
-  until monadic IR or the optimizer has reliable export/visibility metadata:
-  today `MFunBinding` visibility is recovered later by the lowerer from
-  `ModuleCodegenInfo`, so deleting originals in the optimizer would be unsafe.
 
 - [x] **Static handler function variants for obvious cases.**
   Generate variants for same-module calls under static handlers only when the
@@ -104,9 +104,7 @@ the targeted set still looks like the latest snapshot, prefer a non-semantic
 hardening/cleanup pass over expanding variants:
 
 1. Update emitted-Core spot checks and docs for the old-path deletion.
-2. Add export/visibility metadata to `MFunBinding` only if dead slow-path
-   cleanup is worth doing next.
-3. Extend static handler variants only if fresh stats show residual
+2. Extend static handler variants only if fresh stats show residual
    entry-reachable static-handler yields in real code that the conservative
    all-yields-removed milestone skips.
 
@@ -173,9 +171,9 @@ fix:
 | Example | Entry-reachable result | Reading |
 | --- | --- | --- |
 | `25-state-effect` | `Yield 3 -> 3`; `Bind 16 -> 13` | Value-producing resume remains on the accepted slow path. |
-| `29-actors` | `Yield 6 -> 0`; `ForeignCall 0 -> 6` | Native variants plus spawn thunk specialization remove all entry-reachable actor yields. |
-| `30-pingpong` | `Yield 8 -> 0`; `ForeignCall 0 -> 8` | Same actor shape as `29`; all entry-reachable actor yields direct-call Erlang. |
-| `32-monitor` | `Yield 4 -> 0`; `ForeignCall 0 -> 4` | Monitor/send/spawn native ops direct-call Erlang on the entry path. |
+| `29-actors` | `Yield 6 -> 0`; `ForeignCall 0 -> 6`; `source decls 3 -> 1`, `generated 0 -> 2` | Native variants plus spawn thunk specialization remove all entry-reachable actor yields and delete replaced private slow paths. |
+| `30-pingpong` | `Yield 8 -> 0`; `ForeignCall 0 -> 8`; `source decls 3 -> 1`, `generated 0 -> 2` | Same actor shape as `29`; all entry-reachable actor yields direct-call Erlang. |
+| `32-monitor` | `Yield 4 -> 0`; `ForeignCall 0 -> 4`; `source decls 3 -> 2`, `generated 0 -> 1` | Monitor/send/spawn native ops direct-call Erlang on the entry path. |
 | `49-dynamic` | `Yield 0 -> 0`; `Bind 75 -> 56` | No residual monadic yield pressure; dynamic path is not the next optimization target. |
 | `54-choose-backtracking` | `Yield 4 -> 4`; `Bind 35 -> 21` | Multishot/abort behavior remains intentionally slow. |
 | `55-nqueens-solver` | `Yield 2 -> 2`; `Bind 48 -> 36` | Multishot/abort behavior remains intentionally slow. |
@@ -186,8 +184,9 @@ variants by default.
 
 The stats report now splits total declarations into `source decls` and
 `generated decls`. This makes native variant growth visible as optimizer-created
-code: for example, `29-actors` whole-program `decls 7 -> 9` is
-`source decls 7 -> 7` plus `generated decls 0 -> 2`.
+code and shows when private slow paths are deleted: for example, `29-actors`
+whole-program `decls 7 -> 7` is `source decls 7 -> 5` plus
+`generated decls 0 -> 2`.
 
 `App` is intentionally not counted as pure in Bind-to-Let or dead-let cleanup.
 Saga effect rows track algebraic effects, not arbitrary builtin or external
