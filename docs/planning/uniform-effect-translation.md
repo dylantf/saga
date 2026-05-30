@@ -103,6 +103,12 @@ implemented; see
 It rewrites simple first-order native yields to `ForeignCall` and keeps complex
 native handlers on the slow evidence path.
 
+**Measurement hook:** `saga inspect <file> --stage monadic-stats` prints
+pre/post optimizer structural counts for `Yield`, `Bind`, `Let`,
+`ForeignCall`, handlers, arms, and related monadic IR nodes, plus per-op
+`Yield` and per-target `ForeignCall` breakdowns. Use this before choosing the
+next optimizer milestone.
+
 ### Cleanup (single mechanical commit)
 
 - [ ] Delete old path; rename `lower_monadic/` → `lower/`. See

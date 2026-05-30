@@ -299,7 +299,8 @@ pub fn cmd_emit(file: &str) {
 
 /// Dump an intermediate IR stage for a single `.saga` file.
 ///
-/// Bypasses the codegen toggle for `anf` / `monadic` / `monadic-opt`: those
+/// Bypasses the codegen toggle for `anf` / `monadic` / `monadic-opt` /
+/// `monadic-stats`: those
 /// always run the new path (uniform-effect-translation), regardless of the
 /// active `emit_module_with_context` block. `elaborated` and `core` go through
 /// shared code and therefore observe the toggle.
@@ -324,7 +325,7 @@ pub fn cmd_inspect(file: &str, stage: &str) {
             let anf_program = codegen::anf::normalize(elaborated, None);
             println!("{:#?}", anf_program);
         }
-        "monadic" | "monadic-opt" => {
+        "monadic" | "monadic-opt" | "monadic-stats" => {
             // Build a minimal CodegenContext (std modules + this user module)
             // so resolve/effect-info match what the new path sees in production.
             let module_name =
@@ -406,6 +407,15 @@ pub fn cmd_inspect(file: &str, stage: &str) {
                 &imported_handler_decls,
             );
 
+            if stage == "monadic-stats" {
+                let before = monadic::stats::Stats::collect_program(&monadic_prog);
+                let handler_info = codegen::handler_analysis::analyze(&elaborated);
+                let optimized = monadic::effect_opt::run(monadic_prog, &handler_info, &effect_info);
+                let after = monadic::stats::Stats::collect_program(&optimized);
+                println!("{}", monadic::stats::StatsDiff::new(before, after));
+                return;
+            }
+
             let to_print = if stage == "monadic-opt" {
                 let handler_info = codegen::handler_analysis::analyze(&elaborated);
                 monadic::effect_opt::run(monadic_prog, &handler_info, &effect_info)
@@ -420,7 +430,7 @@ pub fn cmd_inspect(file: &str, stage: &str) {
         }
         other => {
             eprintln!(
-                "Unknown stage: '{}'. Expected one of: elaborated, anf, monadic, monadic-opt, core",
+                "Unknown stage: '{}'. Expected one of: elaborated, anf, monadic, monadic-opt, monadic-stats, core",
                 other
             );
             std::process::exit(1);

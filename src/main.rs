@@ -47,7 +47,7 @@ enum Command {
     Inspect {
         /// The .saga source file
         file: String,
-        /// Stage to dump: elaborated | anf | monadic | monadic-opt | core
+        /// Stage to dump: elaborated | anf | monadic | monadic-opt | monadic-stats | core
         #[arg(long)]
         stage: String,
     },

@@ -10,6 +10,14 @@ landed. Direct-call deliberately skips cleanup/composite/dynamic cases that
 need separate design. Native direct-call details live in
 [native-direct-call-specialization.md](./native-direct-call-specialization.md).
 
+Diagnostic counters are available through
+`saga inspect <file> --stage monadic-stats`. The report compares monadic IR
+before and after this stage so optimization work can be guided by visible
+`Yield`/`Bind`/`ForeignCall` movement instead of guesswork. It also breaks
+remaining `Yield`s down by `Effect::op`, which is the quickest way to separate
+missed optimizer opportunities from deliberately slow-path operations such as
+multishot, abort, value-producing resume, dynamic handlers, or cleanup arms.
+
 ## Required context
 
 Read these first:
