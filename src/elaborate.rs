@@ -88,6 +88,13 @@ struct Elaborator {
     /// var-id back to the source name so it can find the matching where-
     /// clause dict in `current_dict_params_by_var` (which is keyed by name).
     where_bound_var_names: HashMap<u32, String>,
+    /// Function name -> declared user-arg arity from its type scheme. Used to
+    /// eta-expand eta-reduced top-level bindings (`my_abs = ext_abs` whose
+    /// signature is `String -> Value` has LHS arity 0 but declared arity 1).
+    /// Cross-module callers derive arity from the type and call `/N`; if the
+    /// producer emits `/0`, the call site fails with `undef`. See
+    /// `examples/bugs/eta-reduced-fun-binding/`.
+    fun_declared_arities: HashMap<String, usize>,
 }
 
 impl Elaborator {
@@ -222,6 +229,18 @@ impl Elaborator {
             }
         }
 
+        // Pre-compute declared arity (count of arrows in the function's type)
+        // for every function in the env. Used to eta-expand eta-reduced
+        // top-level bindings whose LHS has fewer params than their signature.
+        let mut fun_declared_arities: HashMap<String, usize> = HashMap::new();
+        for (name, scheme) in result.env.iter() {
+            let ty = result.sub.apply(&scheme.ty);
+            let arity = crate::codegen::lower::util::arity_and_effects_from_type(&ty).0;
+            if arity > 0 {
+                fun_declared_arities.insert(name.to_string(), arity);
+            }
+        }
+
         Elaborator {
             trait_methods: HashMap::new(),
             fun_dict_params: inferred_dict_params,
@@ -241,7 +260,48 @@ impl Elaborator {
             resolution: result.resolution.clone(),
             type_at_node: result.type_at_node.clone(),
             where_bound_var_names: result.where_bound_var_names.clone(),
+            fun_declared_arities,
         }
+    }
+
+    /// Eta-expand an eta-reduced top-level function binding so its LHS
+    /// matches the type's declared arity.
+    ///
+    /// For `fun my_abs : String -> Value; my_abs = ext_abs` with
+    /// `eta_count = 1` and `span = …`:
+    ///   - synthesizes `___eta_0` as an extra `Pat::Var` param,
+    ///   - wraps the body as `(ext_abs) ___eta_0` (curried `App`),
+    ///     so downstream stages see `my_abs ___eta_0 = ext_abs ___eta_0` and
+    ///     emit the function at the type-implied arity.
+    fn eta_expand_fun_binding(
+        body: Expr,
+        mut params: Vec<Pat>,
+        eta_count: usize,
+        span: Span,
+    ) -> (Expr, Vec<Pat>) {
+        let mut wrapped = body;
+        for i in 0..eta_count {
+            let eta_name = format!("___eta_{}", i);
+            params.push(Pat::Var {
+                id: NodeId::fresh(),
+                name: eta_name.clone(),
+                span,
+            });
+            let eta_arg = Expr {
+                id: NodeId::fresh(),
+                span,
+                kind: ExprKind::Var { name: eta_name },
+            };
+            wrapped = Expr {
+                id: NodeId::fresh(),
+                span,
+                kind: ExprKind::App {
+                    func: Box::new(wrapped),
+                    arg: Box::new(eta_arg),
+                },
+            };
+        }
+        (wrapped, params)
     }
 
     /// Extract dict param info from a where clause: [(trait_name, type_var_name)]
@@ -588,6 +648,29 @@ impl Elaborator {
                     // Prepend dict params to the function's params
                     let mut full_params = extra_params;
                     full_params.extend(params.clone());
+
+                    // Eta-expand if the LHS has fewer params than the type
+                    // declares (e.g. `pg_text = coerce_value` with type
+                    // `String -> Value`). Without this, the producer emits the
+                    // function at LHS arity but cross-module callers derive
+                    // arity from the type and call `/N`. Dict params count
+                    // toward the LHS (they're prepended above and the type
+                    // doesn't include them), so compare on user-arg arity
+                    // by subtracting `extra_params.len()`.
+                    let declared_arity =
+                        self.fun_declared_arities.get(name).copied().unwrap_or(0);
+                    let user_param_count = full_params.len().saturating_sub(
+                        full_params
+                            .iter()
+                            .take_while(|p| matches!(p, Pat::Var { name, .. } if name.starts_with("__dict_")))
+                            .count(),
+                    );
+                    let (elab_body, full_params) = if declared_arity > user_param_count {
+                        let eta_count = declared_arity - user_param_count;
+                        Self::eta_expand_fun_binding(elab_body, full_params, eta_count, *span)
+                    } else {
+                        (elab_body, full_params)
+                    };
 
                     self.restore_dict_params(saved);
                     self.current_fun = None;

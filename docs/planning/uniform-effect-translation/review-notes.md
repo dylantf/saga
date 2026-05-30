@@ -105,6 +105,39 @@ Use it as the first place to look for real regressions.
    `tests/e2e/lib/QualCtorLib.saga`). Repro anchor:
    `examples/bugs/cross-mod-generic-fail`.
 
+3. **Eta-reduced top-level function bindings emitted at LHS arity, not type
+   arity** (surfaced in `saga_pgo`). `fun pg_text : String -> Value; pg_text =
+   coerce_value` has LHS arity 0 but type arity 1, so the producer emitted
+   `pg_text/2` while cross-module callers derive arity from the type and call
+   `pg_text/3` → runtime `undef`. The old path had explicit eta-expansion at
+   lowering ([`lower/mod.rs:1878-1903`](../../../src/codegen/lower/mod.rs#L1878-L1903)
+   with this exact `pg_text` example in the comment); the new path was missing
+   it.
+
+   Fixed by adding eta-expansion at **elaborate** time so all downstream
+   stages (resolve, ANF, translate, lower) see a normalized FunBinding with
+   LHS arity matching the type. `Elaborator::new` precomputes
+   `fun_declared_arities` from `result.env`'s schemes via
+   `arity_and_effects_from_type`; the FunBinding arm synthesizes `___eta_N`
+   `Pat::Var` params and wraps the body in curried `ExprKind::App` calls.
+
+   Tests: `tests/e2e/tests/eta_reduction_test.saga` (12 cases — @external
+   alias, 1/2/3-arg local aliases, polymorphic, HOF-passed, chained,
+   in-module caller). Repro: `examples/bugs/eta-reduced-fun-binding/`.
+   Verified `saga_pgo` runs end-to-end.
+
+## Known issues (newly surfaced)
+
+- **Partial-app of a curried fn one arg at a time.** Discovered while writing
+  the eta-reduction tests; pre-existing, not eta-specific. Calling
+  `let one = three_args 1; let one_two = one 2; one_two 3` panics with
+  "function called with 3 argument(s), but expects 4".
+  `eta_expand_partial_app` builds a SINGLE multi-arg lambda holding all
+  missing params, so the next partial-app sees an opaque uniform-CPS
+  callable and applies just one more arg — but the lambda actually wants
+  all remaining args at once. Should build a CURRIED chain (one lambda per
+  missing arg) instead. Repro: `examples/bugs/partial-app-multi-step/`.
+
 ## Phase-1 completion blockers (gate the optimization pass)
 
 From a `panic!`/`unimplemented!`/`deferred` sweep of the new path:

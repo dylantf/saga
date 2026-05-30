@@ -1,0 +1,9 @@
+module Main
+
+import Lib as L
+
+main () = {
+  dbg (L.my_abs (-7))
+  dbg (L.aliased_id 42)
+  dbg (L.in_module_uses_alias 99)
+}

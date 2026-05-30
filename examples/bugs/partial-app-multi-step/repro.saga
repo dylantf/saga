@@ -1,0 +1,13 @@
+# Repro: 3-arg function, partial-app one arg at a time. The bug surfaces
+# regardless of whether the function is eta-reduced — it's about how
+# `eta_expand_partial_app` builds a single multi-arg lambda instead of
+# a curried chain. Not specific to the saga_pgo eta-reduction fix.
+
+fun three_args : Int -> Int -> Int -> Int
+three_args a b c = a + b + c
+
+main () = {
+  let one = three_args 1
+  let one_two = one 2
+  dbg (one_two 3)
+}
