@@ -170,56 +170,6 @@ main () = run_all [fun () -> reg! "a"] with noop
     );
 }
 
-// Old selective-CPS shape expected a unary returned lambda. Uniform CPS
-// lambdas receive `(arg, evidence, return_k)`; behavior is covered by
-// value-producing resume/state tests.
-#[test]
-#[ignore]
-fn handler_returned_lambdas_capture_outer_effect_handlers() {
-    let src = r#"
-effect Log {
-  fun log : String -> Unit
-}
-
-effect Step {
-  fun step : Unit -> Unit
-}
-
-handler noop for Log {
-  log _ = resume ()
-}
-
-handler exec for Step needs {Log} {
-  step () = {
-    let k = resume ()
-    fun state -> {
-      log! "ok"
-      k state
-    }
-  }
-  return _ = fun state -> state
-}
-
-fun run : (Unit -> Unit needs {Step}) -> Unit
-  needs {Log}
-run body = {
-  let state_fn = { body () } with exec
-  state_fn ()
-}
-
-main () = run (fun () -> step! ()) with noop
-"#;
-    let out = emit_full(src);
-    assert!(
-        out.contains("fun (State) ->"),
-        "expected handler-returned lambda to stay unary and capture outer handlers\n{out}"
-    );
-    assert!(
-        !out.contains("fun (State, _Handle__script_Log_log"),
-        "handler-returned lambda unexpectedly took outer effect handlers as params\n{out}"
-    );
-}
-
 #[test]
 fn effectful_callbacks_in_records_get_evidence_threaded() {
     let src = r#"
@@ -814,100 +764,6 @@ process () = {
     );
 }
 
-// --- Handler arm bodies must not leak function-level _ReturnK ---
-
-// Old-path-specific assertion over `_Handle__...` local handler bindings.
-// New path installs handlers in evidence vectors instead; behavior is covered
-// by e2e nested handler return-composition tests.
-#[test]
-#[ignore]
-fn handler_arm_does_not_apply_outer_return_k() {
-    // When a function handles one effect internally (with { ... }) and also
-    // uses a different effect (needs), the handler arm body must NOT apply
-    // the function-level _ReturnK. The handler arm's result is the with-block
-    // value, which flows to the rest of the block via rest_k.
-    let src = r#"
-effect Inner {
-  fun inner_op : Unit -> Unit
-}
-
-effect Outer {
-  fun outer_op : Unit -> Unit
-}
-
-fun middle : (body: Unit -> Unit needs {Inner}) -> Unit needs {Outer}
-middle body = {
-  let result = { body () } with {
-    inner_op () = { resume (); "handled" }
-    return _ = "ok"
-  }
-  outer_op! ()
-}
-"#;
-    let out = emit(src);
-    // The handler function for inner_op should NOT reference _ReturnK.
-    // If it does, the handler bypasses outer_op! and returns directly
-    // from the function, which is wrong.
-    //
-    // Find the handler function body. It's bound to _Handle_Inner_inner_op.
-    // The key check: _ReturnK must not appear inside the handler function.
-    //
-    // Strategy: split output at the handler binding, check the handler fun
-    // doesn't contain _ReturnK.
-    // With canonical effect names, "_script.Inner" becomes "_Handle__script_Inner_inner_op"
-    assert!(
-        out.contains("_Handle__script_Inner_inner_op"),
-        "expected Inner handler param in output\n{out}"
-    );
-    // The handler function for inner_op is between the handler param binding
-    // and the string literal "handled". _ReturnK must not appear in that region.
-    if let Some(start) = out.find("_Handle__script_Inner_inner_op")
-        && let Some(end) = out[start..].find("\"handled\"")
-    {
-        let handler_body = &out[start..start + end];
-        assert!(
-            !handler_body.contains("_ReturnK"),
-            "handler arm body must not reference _ReturnK!\nHandler region:\n{handler_body}\n\nFull output:\n{out}"
-        );
-    }
-}
-
-// Old-path-specific assertion over `_Handle__...` local handler bindings.
-// New path installs canonical evidence entries and scopes them via `_EvN`.
-#[test]
-#[ignore]
-fn nested_named_handlers_use_distinct_local_handle_bindings() {
-    let src = r#"
-effect Counter {
-  fun get : Unit -> Int
-}
-
-handler add_one for Counter {
-  get () = resume 10
-  return value = value + 1
-}
-
-handler times_two for Counter {
-  get () = resume 20
-  return value = value * 2
-}
-
-main () = {
-  dbg (get! () with {add_one, times_two})
-}
-"#;
-    let out = emit_full(src);
-    let shadowed = "let <_Handle__script_Counter_get> =\n      fun";
-    assert!(
-        !out.contains(shadowed),
-        "expected nested named handlers to use fresh local binding names\n{out}"
-    );
-    assert!(
-        out.contains("_Handle__script_Counter_get__"),
-        "expected fresh scoped handler binding suffix in output\n{out}"
-    );
-}
-
 // --- Short-circuit operators ---
 
 #[test]
@@ -951,70 +807,10 @@ main () = {
     assert!(out.contains("A"), "expected bound variable A\n{out}");
 }
 
-// --- Conversion builtins ---
-
-// Int.to_float, Float.trunc/round/floor/ceil are now @external in Std/Int.saga and Std/Float.saga.
-// Their codegen is covered by module integration tests.
-
-// Isolated codegen tests do not compile stdlib modules into CodegenContext.
-// Runtime behavior is covered by e2e Float/Int tests.
-#[test]
-#[ignore]
-fn int_parse() {
-    let src = "import Std.Int\nmain () = Int.parse \"42\"";
-    let out = emit_full(src);
-    assert!(
-        out.contains("call 'std_int':'parse'"),
-        "expected std_int:parse\n{out}"
-    );
-}
-
-// Isolated codegen tests do not compile stdlib modules into CodegenContext.
-// Runtime behavior is covered by e2e Float tests.
-#[test]
-#[ignore]
-fn float_parse() {
-    let src = "import Std.Float\nmain () = Float.parse \"2.5\"";
-    let out = emit_full(src);
-    assert!(
-        out.contains("call 'std_float':'parse'"),
-        "expected std_float:parse\n{out}"
-    );
-}
-
-// --- Dict builtins ---
-
-// Isolated codegen tests do not compile stdlib modules into CodegenContext.
-// Runtime behavior is covered by dictionary examples/ref tests.
-#[test]
-#[ignore]
-fn dict_empty() {
-    let src = "import Std.Dict\nmain () = Dict.new ()";
-    let out = emit_full(src);
-    assert!(
-        out.contains("call 'std_dict':'new'") || out.contains("call 'std_dict_bridge':'new'"),
-        "expected dict new call\n{out}"
-    );
-}
-
-// Dict.put, Dict.remove, Dict.keys, Dict.values, Dict.size, Dict.from_list,
-// Dict.to_list, Dict.member are now @external in Std/Dict.saga.
-
-// Isolated codegen tests do not compile stdlib modules into CodegenContext.
-// Runtime behavior is covered by dictionary examples/ref tests.
-#[test]
-#[ignore]
-fn dict_get() {
-    let src = "import Std.Dict\nmain () = Dict.get \"a\" (Dict.new ())";
-    let out = emit_full(src);
-    assert!(
-        out.contains("call 'std_dict':'get'"),
-        "expected std_dict:get\n{out}"
-    );
-}
-
-// List.head, List.tail, List.length, List.map, List.filter, List.foldl, List.foldr,
-// List.reverse, List.append, List.flat_map are now defined in Std/List.saga.
+// Stdlib conversion and dictionary behavior is covered by the stdlib/e2e
+// suites. These isolated codegen tests intentionally do not compile imported
+// stdlib modules into a full CodegenContext, so they are the wrong harness for
+// asserting imported @external lowering.
 
 // --- @external ---
 
@@ -1180,7 +976,7 @@ fn todo_emits_structured_error_term() {
 // New monadic path currently lowers `let assert` mismatch to plain
 // `case_clause`; structured assert-fail terms are a parity follow-up.
 #[test]
-#[ignore]
+#[ignore = "new-path TODO: let assert mismatch should emit structured saga_error/assert_fail"]
 fn let_assert_emits_structured_error_term() {
     let out = emit_full("main () = {\n  let assert 1 = 2\n  1\n}");
     assert!(
@@ -1195,7 +991,7 @@ fn let_assert_emits_structured_error_term() {
 
 // Source annotations are not threaded through ANF/monadic lowering yet.
 #[test]
-#[ignore]
+#[ignore = "new-path TODO: thread source annotations through ANF/monadic lowering"]
 fn source_annotations_emitted_with_source_info() {
     let src = "fun add : Int -> Int -> Int\nadd x y = x + y\n\nmain () = add 1 2";
     let sf = super::SourceFile {
@@ -1212,7 +1008,7 @@ fn source_annotations_emitted_with_source_info() {
 
 // Source annotations are not threaded through ANF/monadic lowering yet.
 #[test]
-#[ignore]
+#[ignore = "new-path TODO: thread source annotations through ANF/monadic lowering"]
 fn binop_annotation_on_inner_call() {
     let src = "main () = 1 + 2";
     let sf = super::SourceFile {
@@ -1239,9 +1035,9 @@ fn no_annotations_without_source_info() {
 // -----------------------------------------------------------------------
 // Phase 1, step 8 — new-path wiring tests.
 //
-// Old path is the active one in `emit_module_with_context`. The new path
-// is exercised here via `emit_module_via_new_path` (always compiled) so
-// we get a smoke signal end-to-end without flipping the comment toggle.
+// The new path is active in `emit_module_with_context`; these tests keep
+// focused coverage for the entry-point wiring that originally guarded the
+// path switch.
 // -----------------------------------------------------------------------
 
 fn check_program(src: &str) -> (crate::ast::Program, crate::typechecker::CheckResult) {

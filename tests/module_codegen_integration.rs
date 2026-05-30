@@ -239,8 +239,26 @@ fn assert_contains(out: &str, needle: &str) {
     );
 }
 
+fn cps_main_call(function: &str) -> String {
+    format!("main:{function}(unit, {{}}, fun(V) -> V end)")
+}
+
+fn eval_format_one(function: &str) -> String {
+    format!(
+        "io:format(\"~s~n\", [{}]), init:stop().",
+        cps_main_call(function)
+    )
+}
+
+fn eval_format_two(left: &str, right: &str) -> String {
+    format!(
+        "io:format(\"~s|~s~n\", [{}, {}]), init:stop().",
+        cps_main_call(left),
+        cps_main_call(right)
+    )
+}
+
 #[test]
-#[ignore = "old Core-shape assertion: dynamic handlers are evidence entries"]
 fn imported_handler_factory_with_named_shorthand_lowers_as_dynamic_handler() {
     let db_module = r#"module Db
 
@@ -273,14 +291,14 @@ main () = {
         main_src,
         |checker, program| {
             let out = emit_from_program(program, "main", checker);
-            assert_contains(&out, "call 'erlang':'element'");
+            assert_contains(&out, "call 'std_evidence_bridge':'insert_canonical'");
+            assert_contains(&out, "'Db.Postgres'");
             assert_erlc_compiles(&out, "main");
         },
     );
 }
 
 #[test]
-#[ignore = "old Core-shape assertion: handlers are evidence entries, not _Handle vars"]
 fn cross_module_call_with_beam_native_and_user_effect_threads_all_handler_params() {
     // Regression: when an imported function declares `needs {Process, X}` for
     // some user-defined effect X, the function is lowered with handler params
@@ -331,32 +349,14 @@ main () = {
 
     with_temp_project_files(&[("lib/Server.saga", lib)], main_src, |checker, program| {
         let out = emit_from_program(program, "main", checker);
-        // The call to lib_server:run must pass user arg + Reporter handler
-        // + Process handlers (spawn/send/exit) + ReturnK.
-        assert_contains(&out, "_Handle_Lib_Server_Reporter_report");
-        assert_contains(&out, "call 'lib_server':'run'");
-        // Saturated, not partial-applied: the bug emitted a closure
-        // whose parameter list included `_Handle_Lib_Server_Reporter_report`
-        // and other handler params. A correctly threaded call binds those
-        // handler vars in `let <_Handle_...> = ...` and passes them to the
-        // call. Detect the bug shape: the handler param appearing as a
-        // *closure parameter* (right after `fun (` rather than inside a
-        // `let <...>` binding).
-        let bug_shape = "_Handle_Lib_Server_Reporter_report,";
-        let bug_present = out.lines().any(|line| {
-            let trimmed = line.trim_start();
-            trimmed.starts_with("fun (") && trimmed.contains(bug_shape)
-        });
-        assert!(
-            !bug_present,
-            "imported run call appears to be wrapped in a partial-app closure:\n{out}"
-        );
+        assert_contains(&out, "call 'std_evidence_bridge':'insert_canonical'");
+        assert_contains(&out, "'Lib.Server.Reporter'");
+        assert_contains(&out, "'lib_server', 'run', 3");
         assert_erlc_compiles(&out, "main");
     });
 }
 
 #[test]
-#[ignore = "old Core-shape assertion: cross-module calls use erlang:make_fun with CPS arity"]
 fn imported_private_effect_factory_threads_handler_into_imported_effectful_call() {
     let db_module = r#"module Db
 
@@ -389,22 +389,9 @@ main () = {
         main_src,
         |checker, program| {
             let out = emit_from_program(program, "main", checker);
-            assert_contains(&out, "_Handle_Db_Postgres_ping");
-            assert_contains(&out, "call 'db':'run'");
-            // The imported effectful call takes (arg, evidence, continuation).
-            let call_idx = out
-                .find("call 'db':'run'")
-                .expect("expected call to db:run");
-            let after_call = &out[call_idx..];
-            let args_start = after_call.find('(').expect("expected args after call");
-            let args_end = after_call.find(')').expect("expected closing paren");
-            let args = &after_call[args_start + 1..args_end];
-            let parts: Vec<&str> = args.split(',').map(str::trim).collect();
-            assert_eq!(
-                parts.len(),
-                3,
-                "expected (arg, evidence, continuation), got: {args}"
-            );
+            assert_contains(&out, "call 'std_evidence_bridge':'insert_canonical'");
+            assert_contains(&out, "'Db.Postgres'");
+            assert_contains(&out, "'db', 'run', 3");
             assert_erlc_compiles(&out, "main");
         },
     );
@@ -468,7 +455,7 @@ main () = {
 }
 
 #[test]
-#[ignore = "old Core-shape assertion: dynamic/static handlers are evidence entries"]
+#[ignore = "new-path TODO: dynamic handler effect tags must be known when mixed with static handlers"]
 fn imported_handler_factory_inside_wrapped_block_mixes_dynamic_and_static_handlers() {
     let db_module = r#"module Db
 
@@ -511,7 +498,7 @@ main () = {
 }
 
 #[test]
-#[ignore = "old Core-shape assertion plus anonymous record handler binding coverage moved to focused TODO"]
+#[ignore = "new-path TODO: dynamic handler values loaded from record fields need effect-tag metadata"]
 fn imported_record_field_handler_bindings_inside_wrapped_block_lower() {
     let db_module = r#"module Db
 
@@ -576,7 +563,6 @@ main () = {
 }
 
 #[test]
-#[ignore = "old export-shape assertion: entry module exports main/3 plus wrapper"]
 fn entry_module_main_is_exported_without_pub() {
     let main_src = r#"module Main
 
@@ -601,14 +587,13 @@ main () = 42
     let out =
         codegen::emit_module_with_context("main", &elaborated, &ctx, &result, None, Some("main"));
 
-    assert_contains(&out, "module 'main' ['main'/1]");
+    assert_contains(&out, "module 'main' ['main'/3, 'main'/1]");
     assert_erlc_compiles(&out, "main");
 }
 
 // ---- Qualified call emission ----
 
 #[test]
-#[ignore = "old Core-shape assertion: cross-module calls use erlang:make_fun with CPS arity"]
 fn qualified_call_emits_inter_module_call() {
     let main_src = "
 module Main
@@ -620,12 +605,10 @@ main () = Math.add 10 20
     let program = typecheck_source(main_src, &mut checker);
     let out = emit_from_program(&program, "main", &checker);
 
-    // Should emit call 'math':'add'(...)
-    assert_contains(&out, "call 'math':'add'");
-    // Should NOT use apply (local call)
+    assert_contains(&out, "'math', 'add', 4");
     assert!(
         !out.contains("apply 'add'"),
-        "should use inter-module call, not local apply\n{out}"
+        "should use inter-module function reference, not local apply\n{out}"
     );
 }
 
@@ -662,7 +645,6 @@ main () = run_log greet
 }
 
 #[test]
-#[ignore = "old Core-shape assertion: cross-module calls use erlang:make_fun with CPS arity"]
 fn qualified_call_with_alias() {
     let main_src = "
 module Main
@@ -675,13 +657,12 @@ main () = M.add 1 2
     let out = emit_from_program(&program, "main", &checker);
 
     // Alias 'M' should still resolve to erlang module 'math'
-    assert_contains(&out, "call 'math':'add'");
+    assert_contains(&out, "'math', 'add', 4");
 }
 
 // ---- Exposed (unqualified) imports ----
 
 #[test]
-#[ignore = "old Core-shape assertion: cross-module calls use erlang:make_fun with CPS arity"]
 fn exposed_import_emits_inter_module_call() {
     let main_src = "
 module Main
@@ -694,11 +675,10 @@ main () = add 10 20
     let out = emit_from_program(&program, "main", &checker);
 
     // Even though 'add' is unqualified, it should still emit an inter-module call
-    assert_contains(&out, "call 'math':'add'");
+    assert_contains(&out, "'math', 'add', 4");
 }
 
 #[test]
-#[ignore = "old Core-shape assertion: cross-module calls use erlang:make_fun with CPS arity"]
 fn exposed_and_qualified_same_module() {
     let main_src = "
 module Main
@@ -711,46 +691,25 @@ main () = add 1 (Math.double 3)
     let out = emit_from_program(&program, "main", &checker);
 
     // Both should be inter-module calls
-    assert_contains(&out, "call 'math':'add'");
-    assert_contains(&out, "call 'math':'double'");
+    assert_contains(&out, "'math', 'add', 4");
+    assert_contains(&out, "'math', 'double', 3");
 }
 
 // ---- Export filtering ----
 
 #[test]
-#[ignore = "old export-shape assertion: uniform CPS arities are expanded"]
 fn pub_functions_exported() {
     let math_src = std::fs::read_to_string(fixtures_root().join("Math.saga")).unwrap();
     let mut checker = make_project_checker();
     let program = typecheck_source(&math_src, &mut checker);
     let out = emit_from_program(&program, "math", &checker);
 
-    // pub functions should be in the export list
-    assert_contains(&out, "'add'/2");
-    assert_contains(&out, "'double'/1");
+    // Uniform CPS exports include evidence and return continuations.
+    assert_contains(&out, "'add'/4");
+    assert_contains(&out, "'double'/3");
 }
 
 #[test]
-#[ignore = "old export policy assertion predates uniform module emission"]
-fn private_functions_not_exported() {
-    let math_src = std::fs::read_to_string(fixtures_root().join("Math.saga")).unwrap();
-    let mut checker = make_project_checker();
-    let program = typecheck_source(&math_src, &mut checker);
-    let out = emit_from_program(&program, "math", &checker);
-
-    // 'secret' is private -- should be defined but not exported
-    // The export list is on the first line between [ ]
-    let export_line = out.lines().next().unwrap();
-    assert!(
-        !export_line.contains("'secret'"),
-        "private function 'secret' should not be in exports\n{export_line}"
-    );
-    // But it should still be defined in the module body
-    assert_contains(&out, "'secret'/");
-}
-
-#[test]
-#[ignore = "old export-shape assertion: uniform CPS exports use expanded arities"]
 fn no_module_decl_exports_everything() {
     // Single-file (no module declaration) should export all functions
     let src = "
@@ -764,15 +723,15 @@ main () = add 1 2
 
     let export_line = out.lines().next().unwrap();
     assert!(
-        export_line.contains("'add'/2"),
+        export_line.contains("'add'/4"),
         "add should be exported\n{export_line}"
     );
     assert!(
-        export_line.contains("'double'/1"),
+        export_line.contains("'double'/3"),
         "double should be exported\n{export_line}"
     );
     assert!(
-        export_line.contains("'main'/1"),
+        export_line.contains("'main'/3"),
         "main should be exported\n{export_line}"
     );
 }
@@ -903,7 +862,6 @@ main () = add 1 (double 10)
 }
 
 #[test]
-#[ignore = "old constructor/import Core-shape assertion pending new-path rewrite"]
 fn exposing_all_brings_constructors_into_scope() {
     // `import Shapes (..)` should expose the `Shape` type, its constructors
     // (`Circle`, `Rect`), and the `area` function as bare names.
@@ -916,7 +874,7 @@ main () = area (Circle 5.0)
     let mut checker = make_project_checker();
     let program = typecheck_source(main_src, &mut checker);
     let out = emit_from_program(&program, "main", &checker);
-    assert_contains(&out, "call 'shapes':'area'");
+    assert_contains(&out, "'shapes', 'area', 3");
 }
 
 // ---- Imported record field orders ----
@@ -944,7 +902,6 @@ main () = {
 // ---- Multiple imports from different modules ----
 
 #[test]
-#[ignore = "old Core-shape assertion: cross-module calls use erlang:make_fun with CPS arity"]
 fn imports_from_multiple_modules() {
     let main_src = "
 module Main
@@ -961,8 +918,8 @@ main () = {
     let out = emit_from_program(&program, "main", &checker);
 
     // Should have inter-module calls to both modules
-    assert_contains(&out, "call 'math':'add'");
-    assert_contains(&out, "call 'shapes':'area'");
+    assert_contains(&out, "'math', 'add', 4");
+    assert_contains(&out, "'shapes', 'area', 3");
 }
 
 // ---- Calling imported function that calls another imported function ----
@@ -1018,7 +975,6 @@ main () = area (Circle 5.0) + area (Rect 3.0 4.0)
 // ---- Cross-module effectful calls ----
 
 #[test]
-#[ignore = "old Core-shape assertion: cross-module calls use erlang:make_fun with CPS arity"]
 fn cross_module_effectful_qualified_call() {
     // Logger.greet needs {Log}, so the call should thread _HandleLog + _ReturnK
     let main_src = "
@@ -1037,14 +993,12 @@ main () = Logger.greet \"world\" with {
     let program = typecheck_source(main_src, &mut checker);
     let out = emit_from_program(&program, "main", &checker);
 
-    // Should emit inter-module call with handler params
-    assert_contains(&out, "call 'logger':'greet'");
-    // The call should have 3 args: name, _HandleLog, _ReturnK
-    // (not just 1 arg like a pure function)
+    assert_contains(&out, "call 'std_evidence_bridge':'insert_canonical'");
+    assert_contains(&out, "'Logger.Log'");
+    assert_contains(&out, "'logger', 'greet', 3");
 }
 
 #[test]
-#[ignore = "old Core-shape assertion: cross-module calls use erlang:make_fun with CPS arity"]
 fn cross_module_effectful_exposed_call() {
     // Same as above but with exposed import
     let main_src = "
@@ -1064,7 +1018,9 @@ main () = greet \"world\" with {
     let out = emit_from_program(&program, "main", &checker);
 
     // Exposed effectful call should still be inter-module
-    assert_contains(&out, "call 'logger':'greet'");
+    assert_contains(&out, "call 'std_evidence_bridge':'insert_canonical'");
+    assert_contains(&out, "'Logger.Log'");
+    assert_contains(&out, "'logger', 'greet', 3");
 }
 
 #[test]
@@ -1124,7 +1080,6 @@ main () = Logger.greet \"world\" with {
 /// `{error, _}` tuple to the outer return clause as a value (which would
 /// produce a garbage `Ok` wrapping the error).
 #[test]
-#[ignore = "old runtime harness calls /1 entrypoints instead of uniform CPS /3"]
 fn cross_module_nested_effectful_calls_abort_correctly() {
     let lib_src = std::fs::read_to_string(fixtures_root().join("EffectChain.saga")).unwrap();
     let main_src = "
@@ -1181,7 +1136,7 @@ run_ok () = {
         .arg("-pa")
         .arg(&dir)
         .arg("-eval")
-        .arg("io:format(\"~s|~s~n\", [main:run_fail(unit), main:run_ok(unit)]), init:stop().")
+        .arg(eval_format_two("run_fail", "run_ok"))
         .output()
         .expect("failed to run erl");
     let _ = std::fs::remove_dir_all(&dir);
@@ -1204,7 +1159,6 @@ run_ok () = {
 /// inner call's `_ReturnK` and an aborting handler's error tuple gets bound
 /// to `v` and then wrapped as `Ok`.
 #[test]
-#[ignore = "old runtime harness calls /1 entrypoints instead of uniform CPS /3"]
 fn cross_module_nested_effectful_calls_via_let_abort_correctly() {
     let lib_src = std::fs::read_to_string(fixtures_root().join("EffectChain.saga")).unwrap();
     let main_src = "
@@ -1269,7 +1223,7 @@ run_ok () = {
         .arg("-pa")
         .arg(&dir)
         .arg("-eval")
-        .arg("io:format(\"~s|~s~n\", [main:run_fail(unit), main:run_ok(unit)]), init:stop().")
+        .arg(eval_format_two("run_fail", "run_ok"))
         .output()
         .expect("failed to run erl");
     let _ = std::fs::remove_dir_all(&dir);
@@ -1291,7 +1245,6 @@ run_ok () = {
 /// into the record slot and the outer return clause wraps the whole record
 /// as `Ok`.
 #[test]
-#[ignore = "old runtime harness calls /1 entrypoints instead of uniform CPS /3"]
 fn cross_module_nested_effectful_calls_in_record_field_abort_correctly() {
     let lib_src = std::fs::read_to_string(fixtures_root().join("EffectChain.saga")).unwrap();
     let main_src = "
@@ -1355,7 +1308,7 @@ run_ok () = {
         .arg("-pa")
         .arg(&dir)
         .arg("-eval")
-        .arg("io:format(\"~s|~s~n\", [main:run_fail(unit), main:run_ok(unit)]), init:stop().")
+        .arg(eval_format_two("run_fail", "run_ok"))
         .output()
         .expect("failed to run erl");
     let _ = std::fs::remove_dir_all(&dir);
@@ -1378,7 +1331,6 @@ run_ok () = {
 /// inside the constructor and then wrapped as `Ok`, producing
 /// `Ok (Just (Err _))` instead of `Err _`.
 #[test]
-#[ignore = "old runtime harness calls /1 entrypoints instead of uniform CPS /3"]
 fn cross_module_nested_effectful_calls_in_ctor_arg_abort_correctly() {
     let lib_src = std::fs::read_to_string(fixtures_root().join("EffectChain.saga")).unwrap();
     let main_src = "
@@ -1441,7 +1393,7 @@ run_ok () = {
         .arg("-pa")
         .arg(&dir)
         .arg("-eval")
-        .arg("io:format(\"~s|~s~n\", [main:run_fail(unit), main:run_ok(unit)]), init:stop().")
+        .arg(eval_format_two("run_fail", "run_ok"))
         .output()
         .expect("failed to run erl");
     let _ = std::fs::remove_dir_all(&dir);
@@ -1462,7 +1414,6 @@ run_ok () = {
 /// handler skips the tuple build and the outer return clause — otherwise
 /// the `{error, _}` tuple gets bound into a tuple slot and wrapped as `Ok`.
 #[test]
-#[ignore = "old runtime harness calls /1 entrypoints instead of uniform CPS /3"]
 fn cross_module_nested_effectful_calls_in_tuple_elem_abort_correctly() {
     let lib_src = std::fs::read_to_string(fixtures_root().join("EffectChain.saga")).unwrap();
     let main_src = "
@@ -1524,7 +1475,7 @@ run_ok () = {
         .arg("-pa")
         .arg(&dir)
         .arg("-eval")
-        .arg("io:format(\"~s|~s~n\", [main:run_fail(unit), main:run_ok(unit)]), init:stop().")
+        .arg(eval_format_two("run_fail", "run_ok"))
         .output()
         .expect("failed to run erl");
     let _ = std::fs::remove_dir_all(&dir);
@@ -1545,7 +1496,6 @@ run_ok () = {
 /// skips the arithmetic call — otherwise the `{error, _}` tuple is passed
 /// to `erlang:+/2` and crashes with `badarith` at runtime.
 #[test]
-#[ignore = "old runtime harness calls /1 entrypoints instead of uniform CPS /3"]
 fn cross_module_nested_effectful_calls_in_binop_operand_abort_correctly() {
     let lib_src = std::fs::read_to_string(fixtures_root().join("EffectChain.saga")).unwrap();
     let main_src = "
@@ -1608,7 +1558,7 @@ run_ok () = {
         .arg("-pa")
         .arg(&dir)
         .arg("-eval")
-        .arg("io:format(\"~s|~s~n\", [main:run_fail(unit), main:run_ok(unit)]), init:stop().")
+        .arg(eval_format_two("run_fail", "run_ok"))
         .output()
         .expect("failed to run erl");
     let _ = std::fs::remove_dir_all(&dir);
@@ -1631,7 +1581,6 @@ run_ok () = {
 /// silently extract a wrong slot if the abort tuple happens to be the
 /// right arity).
 #[test]
-#[ignore = "old runtime harness calls /1 entrypoints instead of uniform CPS /3"]
 fn cross_module_nested_effectful_calls_in_field_access_abort_correctly() {
     let lib_src = std::fs::read_to_string(fixtures_root().join("EffectChain.saga")).unwrap();
     let main_src = "
@@ -1699,7 +1648,7 @@ run_ok () = {
         .arg("-pa")
         .arg(&dir)
         .arg("-eval")
-        .arg("io:format(\"~s|~s~n\", [main:run_fail(unit), main:run_ok(unit)]), init:stop().")
+        .arg(eval_format_two("run_fail", "run_ok"))
         .output()
         .expect("failed to run erl");
     let _ = std::fs::remove_dir_all(&dir);
@@ -1721,7 +1670,6 @@ run_ok () = {
 /// and the outer return clause, instead of binding the abort tuple into
 /// the field slot.
 #[test]
-#[ignore = "old runtime harness calls /1 entrypoints instead of uniform CPS /3"]
 fn cross_module_nested_effectful_calls_in_record_update_abort_correctly() {
     let lib_src = std::fs::read_to_string(fixtures_root().join("EffectChain.saga")).unwrap();
     let main_src = "
@@ -1787,7 +1735,7 @@ run_ok () = {
         .arg("-pa")
         .arg(&dir)
         .arg("-eval")
-        .arg("io:format(\"~s|~s~n\", [main:run_fail(unit), main:run_ok(unit)]), init:stop().")
+        .arg(eval_format_two("run_fail", "run_ok"))
         .output()
         .expect("failed to run erl");
     let _ = std::fs::remove_dir_all(&dir);
@@ -1808,7 +1756,6 @@ run_ok () = {
 /// case-on-cond (which would otherwise crash with "no matching clause"
 /// when the abort tuple matches neither `true` nor `false`).
 #[test]
-#[ignore = "old runtime harness calls /1 entrypoints instead of uniform CPS /3"]
 fn cross_module_nested_effectful_calls_in_if_cond_abort_correctly() {
     let lib_src = std::fs::read_to_string(fixtures_root().join("EffectChain.saga")).unwrap();
     let main_src = "
@@ -1873,7 +1820,7 @@ run_ok () = {
         .arg("-pa")
         .arg(&dir)
         .arg("-eval")
-        .arg("io:format(\"~s|~s~n\", [main:run_fail(unit), main:run_ok(unit)]), init:stop().")
+        .arg(eval_format_two("run_fail", "run_ok"))
         .output()
         .expect("failed to run erl");
     let _ = std::fs::remove_dir_all(&dir);
@@ -1894,7 +1841,6 @@ run_ok () = {
 /// arm matching (which would otherwise either crash on a no-match or
 /// silently fall through to the wildcard arm with the abort tuple).
 #[test]
-#[ignore = "old runtime harness calls /1 entrypoints instead of uniform CPS /3"]
 fn cross_module_nested_effectful_calls_in_case_scrutinee_abort_correctly() {
     let lib_src = std::fs::read_to_string(fixtures_root().join("EffectChain.saga")).unwrap();
     let main_src = "
@@ -1959,7 +1905,7 @@ run_ok () = {
         .arg("-pa")
         .arg(&dir)
         .arg("-eval")
-        .arg("io:format(\"~s|~s~n\", [main:run_fail(unit), main:run_ok(unit)]), init:stop().")
+        .arg(eval_format_two("run_fail", "run_ok"))
         .output()
         .expect("failed to run erl");
     let _ = std::fs::remove_dir_all(&dir);
@@ -1983,7 +1929,6 @@ run_ok () = {
 /// entirely and the lambda body returned an eta-wrapper instead of invoking
 /// the HOF, producing a closure where an `Ok`/`Err` tuple was expected.
 #[test]
-#[ignore = "old runtime harness calls /1 entrypoints instead of uniform CPS /3"]
 fn cross_module_effectful_fun_ref_passed_to_hof() {
     let lib_src = std::fs::read_to_string(fixtures_root().join("EffectChain.saga")).unwrap();
     let main_src = "
@@ -2038,9 +1983,7 @@ run_via_hof () = {
         .arg("-pa")
         .arg(&dir)
         .arg("-eval")
-        .arg(
-            "io:format(\"~s|~s~n\", [main:run_direct(unit), main:run_via_hof(unit)]), init:stop().",
-        )
+        .arg(eval_format_two("run_direct", "run_via_hof"))
         .output()
         .expect("failed to run erl");
     let _ = std::fs::remove_dir_all(&dir);
@@ -2065,7 +2008,6 @@ run_via_hof () = {
 /// a wrapper while cross-module references emitted `make_fun`, causing the
 /// callback to be invoked with the wrong arity (3 vs 1) and crashing.
 #[test]
-#[ignore = "old runtime harness calls /1 entrypoints instead of uniform CPS /3"]
 fn cross_module_hof_callback_local_and_imported_match_arity() {
     let lib_src = std::fs::read_to_string(fixtures_root().join("EffectChain.saga")).unwrap();
     let main_src = "
@@ -2124,9 +2066,7 @@ via_local () = {
         .arg("-pa")
         .arg(&dir)
         .arg("-eval")
-        .arg(
-            "io:format(\"~s|~s~n\", [main:via_imported(unit), main:via_local(unit)]), init:stop().",
-        )
+        .arg(eval_format_two("via_imported", "via_local"))
         .output()
         .expect("failed to run erl");
     let _ = std::fs::remove_dir_all(&dir);
@@ -2145,7 +2085,6 @@ via_local () = {
 // ---- Cross-module trait dicts ----
 
 #[test]
-#[ignore = "old Core-shape assertion: trait dict calls use erlang:make_fun with CPS arity"]
 fn cross_module_trait_dict_show_animal() {
     // Animals.saga defines `impl Show for Animal`.
     // Importing Animals should make the Show dict available for Animal.
@@ -2159,9 +2098,9 @@ main () = show (Animal { name: \"Rex\", species: \"Dog\" })
     let program = typecheck_source(main_src, &mut checker);
     let out = emit_from_program(&program, "main", &checker);
 
-    // The dict should be referenced as a cross-module call to animals module
+    // The dict should be referenced as a cross-module CPS function value.
     let dict = typechecker::make_dict_name("Std.Base.Show", &[], "animals", "Animals.Animal");
-    assert_contains(&out, &format!("call 'animals':'{dict}'"));
+    assert_contains(&out, &format!("'animals', '{dict}', 2"));
 }
 
 #[test]
@@ -2220,7 +2159,6 @@ fn local_dict_names_are_module_qualified() {
 }
 
 #[test]
-#[ignore = "old Core-shape assertion: main is uniform CPS /3, not /1"]
 fn bare_method_dispatches_via_resolved_trait_when_imports_collide() {
     // import A (Foo); import B (b_helper) → only A.Foo is bare-visible.
     // Bare `pp 1` must dispatch to A.Foo's dict, not B.Bar's, regardless of
@@ -2234,13 +2172,13 @@ fn bare_method_dispatches_via_resolved_trait_when_imports_collide() {
         main_src,
         |checker, program| {
             let out = emit_from_program(program, "main", checker);
-            // The `pp 1` call site inside main/1 must dispatch via the
+            // The `pp 1` call site inside main/3 must dispatch via the
             // A.Foo dict, not B.Bar's. (Both dict constructors are emitted
             // as top-level functions because both impls exist; what matters
-            // is which one main/1 applies.)
+            // is which one main/3 applies.)
             let foo_dict = typechecker::make_dict_name("A.Foo", &[], "main", "Std.Int.Int");
             let bar_dict = typechecker::make_dict_name("B.Bar", &[], "main", "Std.Int.Int");
-            let main_body_start = out.find("'main'/1 =").expect("missing main/1");
+            let main_body_start = out.find("'main'/3 =").expect("missing main/3");
             let main_body = &out[main_body_start..];
             let main_body_end = main_body
                 .find("\n'")
@@ -2249,11 +2187,11 @@ fn bare_method_dispatches_via_resolved_trait_when_imports_collide() {
             let main_body_slice = &out[main_body_start..main_body_end];
             assert!(
                 main_body_slice.contains(&format!("'{foo_dict}'")),
-                "main/1 should apply the A.Foo dict\n{main_body_slice}"
+                "main/3 should apply the A.Foo dict\n{main_body_slice}"
             );
             assert!(
                 !main_body_slice.contains(&format!("'{bar_dict}'")),
-                "main/1 must not apply the B.Bar dict (only A.Foo is exposed)\n{main_body_slice}"
+                "main/3 must not apply the B.Bar dict (only A.Foo is exposed)\n{main_body_slice}"
             );
         },
     );
@@ -2475,7 +2413,6 @@ main () = Secret \"abc\"
 }
 
 #[test]
-#[ignore = "old runtime harness calls /1 entrypoints instead of uniform CPS /3"]
 fn opaque_type_compiles_and_runs_on_beam() {
     let lib_src = "
 module OpaqueLib3
@@ -2524,7 +2461,7 @@ run () = reveal (make_token \"hello\")
         .arg("-pa")
         .arg(&dir)
         .arg("-eval")
-        .arg("io:format(\"~s~n\", [main:run(unit)]), init:stop().")
+        .arg(eval_format_one("run"))
         .output()
         .expect("failed to run erl");
     let _ = std::fs::remove_dir_all(&dir);
@@ -2649,7 +2586,6 @@ main () = Clock.now! () with {system_clock}
 }
 
 #[test]
-#[ignore = "old Core-shape assertion: cross-module calls use erlang:make_fun with CPS arity"]
 fn cross_module_effect_inline_handler_works() {
     // Inline handler with bare op names should match exposed imported effect ops
     let src = "
@@ -2664,11 +2600,12 @@ main () = Logger.greet \"world\" with {
     let mut checker = make_project_checker();
     let program = typecheck_source(src, &mut checker);
     let out = emit_from_program(&program, "main", &checker);
-    assert_contains(&out, "call 'logger':'greet'");
+    assert_contains(&out, "call 'std_evidence_bridge':'insert_canonical'");
+    assert_contains(&out, "'Logger.Log'");
+    assert_contains(&out, "'logger', 'greet', 3");
 }
 
 #[test]
-#[ignore = "old Core-shape assertion: cross-module calls use erlang:make_fun with CPS arity"]
 fn cross_module_effect_exposed_inline_handler() {
     // Exposed import + inline handler
     let src = "
@@ -2683,7 +2620,9 @@ main () = greet \"world\" with {
     let mut checker = make_project_checker();
     let program = typecheck_source(src, &mut checker);
     let out = emit_from_program(&program, "main", &checker);
-    assert_contains(&out, "call 'logger':'greet'");
+    assert_contains(&out, "call 'std_evidence_bridge':'insert_canonical'");
+    assert_contains(&out, "'Logger.Log'");
+    assert_contains(&out, "'logger', 'greet', 3");
 }
 
 #[test]
@@ -2763,7 +2702,6 @@ pub handler my_store for Store {
 /// like any other saturated effectful call so an aborting handler skips the
 /// surrounding block instead of letting the abort tuple fall through.
 #[test]
-#[ignore = "old runtime harness calls /1 entrypoints instead of uniform CPS /3"]
 fn effectful_var_call_aborts_correctly() {
     let lib_src = std::fs::read_to_string(fixtures_root().join("EffectChain.saga")).unwrap();
     let main_src = "
@@ -2828,7 +2766,7 @@ run_ok () = {
         .arg("-pa")
         .arg(&dir)
         .arg("-eval")
-        .arg("io:format(\"~s|~s~n\", [main:run_fail(unit), main:run_ok(unit)]), init:stop().")
+        .arg(eval_format_two("run_fail", "run_ok"))
         .output()
         .expect("failed to run erl");
     let _ = std::fs::remove_dir_all(&dir);
@@ -2849,7 +2787,6 @@ run_ok () = {
 /// first-class-callback shape: the binder's type carries the effect row, so
 /// the call site must look up the effectful var and thread handlers.
 #[test]
-#[ignore = "old runtime harness calls /1 entrypoints instead of uniform CPS /3"]
 fn eta_reduced_effectful_lambda_aborts_correctly() {
     let lib_src = std::fs::read_to_string(fixtures_root().join("EffectChain.saga")).unwrap();
     let main_src = "
@@ -2914,7 +2851,7 @@ run_ok () = {
         .arg("-pa")
         .arg(&dir)
         .arg("-eval")
-        .arg("io:format(\"~s|~s~n\", [main:run_fail(unit), main:run_ok(unit)]), init:stop().")
+        .arg(eval_format_two("run_fail", "run_ok"))
         .output()
         .expect("failed to run erl");
     let _ = std::fs::remove_dir_all(&dir);
@@ -2944,7 +2881,6 @@ run_ok () = {
 /// stored type was a raw `Type::Var(a)` carrying no effects. The pattern var
 /// was then classified as pure and the call site missed evidence threading.
 #[test]
-#[ignore = "old runtime harness calls /1 entrypoints instead of uniform CPS /3"]
 fn pattern_bound_effectful_function_in_list_threads_evidence() {
     let main_src = "
 module Main
@@ -3002,7 +2938,7 @@ run_miss () = choose [r1, r2] \"/nope\"
         .arg("-pa")
         .arg(&dir)
         .arg("-eval")
-        .arg("io:format(\"~s|~s~n\", [main:run_match(unit), main:run_miss(unit)]), init:stop().")
+        .arg(eval_format_two("run_match", "run_miss"))
         .output()
         .expect("failed to run erl");
     let _ = std::fs::remove_dir_all(&dir);
@@ -3032,7 +2968,6 @@ run_miss () = choose [r1, r2] \"/nope\"
 /// `lower_expr_value_with_expected_type` which sets `lambda_effect_context`
 /// for the duration of lowering.
 #[test]
-#[ignore = "old runtime harness calls /1 entrypoints instead of uniform CPS /3"]
 fn let_bound_effectful_lambda_compiles_as_cps_value() {
     let main_src = "
 module Main
@@ -3081,7 +3016,7 @@ run () = {
         .arg("-pa")
         .arg(&dir)
         .arg("-eval")
-        .arg("io:format(\"~s~n\", [main:run(unit)]), init:stop().")
+        .arg(eval_format_one("run"))
         .output()
         .expect("failed to run erl");
     let _ = std::fs::remove_dir_all(&dir);
@@ -3099,53 +3034,11 @@ run () = {
 
 // --- Codegen-side coverage for canonical-name auto-load ---
 //
-// These pin the codegen analogue of the typecheck-side rule:
-// loaded modules must be resolvable canonically without an explicit import,
-// and decls without a BEAM function (`@builtin`) must intercept at the use site
-// for both bare AND qualified spellings.
-
-/// Qualified-form `Std.IO.Unsafe.print_stdout` is `@builtin`: it has no BEAM
-/// implementation. Lowering must inline it as `io:format`, *not* emit a call
-/// to `std_io_unsafe:print_stdout/1` (which would crash at runtime). The bare
-/// form has always inlined; this regression-tests the qualified path.
-#[test]
-#[ignore = "old Core-shape assertion: std IO now lowers via CPS std_io_unsafe bridge"]
-fn qualified_call_to_builtin_inlines_as_io_format() {
-    let main = r#"main () = {
-  Std.IO.Unsafe.print_stdout "hi"
-}
-"#;
-    let out = with_temp_project_files(&[], main, |checker, program| {
-        emit_from_program(program, "_script", checker)
-    });
-    assert_contains(&out, "call 'io':'format'");
-    assert!(
-        !out.contains("'std_io_unsafe':'print_stdout'"),
-        "qualified call to @builtin must not emit a real BEAM call:\n{out}"
-    );
-}
+// These pin the codegen analogue of the typecheck-side rule: loaded modules
+// must be resolvable canonically without an explicit import, while user
+// definitions with names similar to std functions must remain user calls.
 
 #[test]
-#[ignore = "old Core-shape assertion: std IO now lowers via CPS std_io_unsafe bridge"]
-fn aliased_call_to_builtin_inlines_as_io_format() {
-    let main = r#"import Std.IO.Unsafe as U
-
-main () = {
-  U.print_stdout "hi"
-}
-"#;
-    let out = with_temp_project_files(&[], main, |checker, program| {
-        emit_from_program(program, "_script", checker)
-    });
-    assert_contains(&out, "call 'io':'format'");
-    assert!(
-        !out.contains("'std_io_unsafe':'print_stdout'"),
-        "aliased call to @builtin must not emit a real BEAM call:\n{out}"
-    );
-}
-
-#[test]
-#[ignore = "old export-shape assertion: uniform CPS arities are expanded"]
 fn user_defined_print_stdout_bare_is_not_hijacked_by_intrinsic() {
     let main = r#"module Main
 
@@ -3163,11 +3056,10 @@ main () = {
         !out.contains("call 'io':'format'"),
         "user-defined print_stdout must not lower as Std.IO.Unsafe.print_stdout:\n{out}"
     );
-    assert_contains(&out, "'print_stdout'/1");
+    assert_contains(&out, "'print_stdout'/3");
 }
 
 #[test]
-#[ignore = "old export-shape assertion: uniform CPS arities are expanded"]
 fn user_defined_dbg_bare_is_not_hijacked_by_intrinsic() {
     let main = r#"module Main
 
@@ -3183,7 +3075,7 @@ main () = dbg "hi"
         !out.contains("call 'io':'format'"),
         "user-defined dbg must not lower as Std.IO.dbg:\n{out}"
     );
-    assert_contains(&out, "'dbg'/2");
+    assert_contains(&out, "'dbg'/4");
 }
 
 #[test]
@@ -3213,7 +3105,6 @@ main () = {
 }
 
 #[test]
-#[ignore = "old export-shape assertion: uniform CPS arities are expanded"]
 fn user_defined_catch_panic_bare_is_not_hijacked_by_intrinsic() {
     let main = r#"module Main
 
@@ -3229,24 +3120,7 @@ main () = catch_panic "hi"
         !out.contains("try"),
         "user-defined catch_panic must not lower as Std.Process.catch_panic:\n{out}"
     );
-    assert_contains(&out, "'catch_panic'/1");
-}
-
-#[test]
-#[ignore = "old intrinsic assertion predates std Process CPS lowering"]
-fn qualified_std_process_catch_panic_lowers_as_intrinsic() {
-    let main = r#"module Main
-
-main () = Std.Process.catch_panic (fun () -> 42)
-"#;
-    let out = with_temp_project_files(&[], main, |checker, program| {
-        emit_from_program(program, "main", checker)
-    });
-    assert_contains(&out, "try");
-    assert!(
-        !out.contains("'std_process':'catch_panic'"),
-        "Std.Process.catch_panic must lower as intrinsic, not a BEAM call:\n{out}"
-    );
+    assert_contains(&out, "'catch_panic'/3");
 }
 
 /// Project module referenced by canonical name without `import Lib` should

@@ -361,13 +361,14 @@ delete/rename commit:
   `ModuleCodegenInfo::inline_vals`.
 - Remove `CompiledModule::call_effects` once `call_effects.rs` is deleted.
 - Revisit ignored codegen tests before deleting the old lowerer. Current scan:
-  `src/codegen/tests.rs` has 10 ignored default-test candidates after
-  unignoring the two new-path smoke tests; `tests/module_codegen_integration.rs`
-  has 44 ignored old-shape or old-runtime-harness tests. Classify each as:
-  delete stale selective-CPS/Core-shape assertion, migrate to a new-path shape
-  assertion, or replace with an existing/new behavioral test. Known real
-  follow-ups from the ignored lib tests are structured `let assert` errors and
-  source annotations through ANF/monadic lowering.
+  `src/codegen/tests.rs` is down to 3 ignored new-path TODOs after deleting
+  stale selective-CPS/Core-shape assertions and isolated-stdlib harness tests;
+  `tests/module_codegen_integration.rs` is down to 2 ignored new-path TODOs
+  after reviving the uniform-CPS runtime harness tests and migrating/deleting
+  stale old-shape assertions. The remaining ignored lib-codegen follow-ups are
+  structured `let assert` errors and source annotations through ANF/monadic
+  lowering. The remaining module integration follow-up is dynamic handler
+  values whose effect tag is not recoverable at some `with` sites yet.
 
 After that prep, the delete/rename step below should be mechanical.
 
