@@ -891,6 +891,15 @@ while preserving the slow-path oracle.
   lowerer now has a `lower_pure_expr` path for the promoted pure subset; pure
   uniform-CPS calls are bridged through a local identity continuation.
 
+- **Step 11 / tail-resumptive direct-call — DONE for the first conservative
+  milestone.** `Yield` sites under an innermost static handler now inline a
+  single matching `TailResumptive` arm, substitute supported op params, and
+  rewrite `Resume(v)` to `Pure(v)`. The handler stack uses blocker frames for
+  dynamic/native/composite handlers, resets at lambda and letfun bodies, and
+  skips arms with `finally_block`, multi-arm op dispatch, nontrivial op
+  patterns, `OneShot`, and `Multishot`. Native specialization remains future
+  work.
+
 ### Recommended Implementation Order
 
 1. **Build optimizer scaffolding first.**
@@ -922,7 +931,7 @@ while preserving the slow-path oracle.
    - A lambda body may yield and still be pure to *construct*; do not inspect
      through `Atom::Lambda` for construction-site purity.
 
-4. **Leave direct-call for last.**
+4. **Leave direct-call for last — DONE for the conservative milestone.**
    - This is the only phase-2 rewrite with a real semantic footgun. It depends
      on `HandlerAnalysis::TailResumptive`, static handler resolution, innermost
      handler shadowing, and the final result-delimiter protocol.

@@ -4,8 +4,10 @@ Companion to [uniform-effect-translation.md](../uniform-effect-translation.md)
 and [monadic-ir-spec.md](./monadic-ir-spec.md). Concrete rewrite
 specifications for the effect optimization stage (stage 11).
 
-Status: **partially implemented**. Bind-collapse and Bind→Let promotion have
-landed; direct-call remains design/implementation work.
+Status: **implemented conservatively**. Bind-collapse, Bind→Let promotion,
+and first-milestone direct-call have landed. Direct-call deliberately skips
+cleanup/native/composite/dynamic specialization cases that need separate
+design.
 
 ## Required context
 
@@ -240,18 +242,28 @@ A `Yield { op, args, source }` resolves statically to a handler arm iff:
 - The matching arm in that `Static` handler is a literal `MHandlerArm`
   for `op`.
 
-Concretely: effect optimization carries `handler_stack: Vec<&MHandler>`
-while walking. On entering `With { handler, body, … }`, push; on leaving,
-pop. **Reset on entering `Lambda` body** (a lambda may be invoked outside
-the current handler scope) — save and restore the stack.
+Concretely: effect optimization carries an owned lightweight handler stack
+while walking. On entering `With { handler, body, … }`, optimize the handler
+definition with the stack cleared, then push a frame while optimizing the
+handled body. **Reset on entering `Lambda` and `LetFun` bodies** (they may be
+invoked outside the current handler scope) — save and restore the stack.
 
 When a `Yield { op, … }` is encountered, scan the stack from top to find
 the matching effect. If found and the matched entry is
 `MHandler::Static`, the resolution is static. If the matched entry is
-`MHandler::Dynamic`, **skip** — `Yield` survives unchanged, falls
-through to the lowerer's standard evidence-lookup path. (A dynamic
-handler for the effect shadows any outer static handler for the same
-effect — innermost-wins, per the runtime evidence layout.)
+`MHandler::Dynamic`, `MHandler::Native`, or `MHandler::Composite`, **skip** —
+`Yield` survives unchanged and falls through to the lowerer's standard
+evidence-lookup path. These non-static frames are blockers for their effects:
+they shadow any outer static handler for the same effect, preserving
+innermost-wins evidence semantics.
+
+First milestone restrictions:
+
+- only one static arm may match `(effect, op)`;
+- the arm must have no `finally_block`;
+- supported op params are `Pat::Var`, `Pat::Wildcard`, and `Pat::Lit(Unit)`;
+- nontrivial op patterns skip the rewrite;
+- native direct-call specialization is not part of this rewrite.
 
 ### Rule
 
@@ -336,9 +348,13 @@ the inlined body sits in the same lexical position as the original
 - Handler resolved as `MHandler::Static`. On `MHandler::Dynamic`, skip
   — `Yield` stays; the lowerer emits the slow evidence-lookup-plus-apply
   path.
-- No intervening `MHandler::Dynamic` for the same effect between the
-  `Yield` and the resolved static arm. (Handler-stack walk picks the
-  innermost matching entry; if a `Dynamic` shadows the `Static`, give up.)
+- No intervening dynamic/native/composite frame for the same effect between
+  the `Yield` and the resolved static arm. (Handler-stack walk picks the
+  innermost matching entry; if a blocker shadows the `Static`, give up.)
+- Matching arm has no `finally_block`; cleanup-preserving direct-call is
+  deferred.
+- Matching arm uses only first-milestone parameter patterns: variable,
+  wildcard, or unit literal.
 - Capture-avoidance during parameter and resume substitution.
 
 ### Conservativeness rule
@@ -386,9 +402,9 @@ Single shared bottom-up fixpoint:
 loop {
     let mut changed = false;
     walk MProgram bottom-up:
+        at each node, try direct-call;
         at each node, try bind-collapse;
         at each node, try Bind→Let promotion;
-        at each node, try direct-call once it lands;
         if any fired, set changed = true.
     if !changed { break }
 }

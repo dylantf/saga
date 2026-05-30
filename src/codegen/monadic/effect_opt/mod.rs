@@ -1,10 +1,8 @@
 // effect_opt/ — monadic IR optimization stage.
 //
-// Currently implements steps 9-10:
+// Currently implements steps 9-11:
 //   - bind collapse — Bind(Pure(a), x, B) → B[x := a]
 //   - Bind→Let promotion — pure binders become direct lets
-//
-// Still deferred:
 //   - step 11: direct_call.rs     — tail-resumptive Yield → inlined arm body
 //
 // See docs/planning/uniform-effect-translation/effect-optimization-spec.md
@@ -13,7 +11,7 @@
 use crate::ast::{
     ComprehensionQualifier, Expr, ExprKind, Handler, HandlerItem, Pat, Stmt, StringPart,
 };
-use crate::codegen::handler_analysis::HandlerAnalysis;
+use crate::codegen::handler_analysis::{HandlerAnalysis, ResumptionKind};
 use crate::codegen::monadic::ir::{
     Atom, EffectInfo, MArm, MDecl, MDictConstructor, MExpr, MFunBinding, MHandler, MHandlerArm,
     MProgram, MVal, MVar,
@@ -32,7 +30,7 @@ pub fn run(m: MProgram, h: &HandlerAnalysis, e: &EffectInfo) -> MProgram {
 /// the currently-enabled optimizer rewrites.
 pub fn run_with_options(
     m: MProgram,
-    _h: &HandlerAnalysis,
+    h: &HandlerAnalysis,
     e: &EffectInfo,
     opts: RunOptions,
 ) -> MProgram {
@@ -40,7 +38,7 @@ pub fn run_with_options(
         return m;
     }
 
-    let mut optimizer = Optimizer::new(opts, e);
+    let mut optimizer = Optimizer::new(opts, h, e);
     optimizer.optimize_program(m)
 }
 
@@ -53,7 +51,20 @@ pub struct RunOptions {
 
 struct Optimizer<'info, 'data> {
     opts: RunOptions,
+    handler_analysis: &'info HandlerAnalysis,
     effect_info: &'info EffectInfo<'data>,
+    handler_stack: Vec<HandlerFrame>,
+}
+
+#[derive(Debug, Clone)]
+enum HandlerFrame {
+    Static {
+        effects: Vec<String>,
+        arms: Vec<MHandlerArm>,
+    },
+    Blocking {
+        effects: Vec<String>,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -104,8 +115,17 @@ impl<T> SubstOutcome<T> {
 }
 
 impl<'info, 'data> Optimizer<'info, 'data> {
-    fn new(opts: RunOptions, effect_info: &'info EffectInfo<'data>) -> Self {
-        Self { opts, effect_info }
+    fn new(
+        opts: RunOptions,
+        handler_analysis: &'info HandlerAnalysis,
+        effect_info: &'info EffectInfo<'data>,
+    ) -> Self {
+        Self {
+            opts,
+            handler_analysis,
+            effect_info,
+            handler_stack: Vec::new(),
+        }
     }
 
     fn optimize_program(&mut self, mut program: MProgram) -> MProgram {
@@ -159,9 +179,11 @@ impl<'info, 'data> Optimizer<'info, 'data> {
 
     fn optimize_expr(&mut self, expr: MExpr) -> (MExpr, Change) {
         let (expr, child_change) = self.optimize_children(expr);
+        let (expr, direct_change) = self.try_direct_call(expr);
         let (expr, collapse_change) = self.try_bind_collapse(expr);
         let (expr, let_change) = self.try_bind_to_let(expr);
         let mut change = child_change;
+        change.mark_if(direct_change);
         change.mark_if(collapse_change);
         change.mark_if(let_change);
         (expr, change)
@@ -268,8 +290,13 @@ impl<'info, 'data> Optimizer<'info, 'data> {
                 body,
                 source,
             } => {
-                let (handler, handler_change) = self.optimize_handler(handler);
-                let (body, body_change) = self.optimize_expr(*body);
+                let (handler, handler_change) = self.optimize_handler_with_cleared_stack(handler);
+                let frame = handler_frame(&handler);
+                let (body, body_change) = if let Some(frame) = frame {
+                    self.optimize_expr_with_frame(*body, frame)
+                } else {
+                    self.optimize_expr(*body)
+                };
                 let mut change = handler_change;
                 change.mark_if(body_change);
                 (
@@ -439,7 +466,7 @@ impl<'info, 'data> Optimizer<'info, 'data> {
                 rest,
                 source,
             } => {
-                let (body, body_change) = self.optimize_expr(*body);
+                let (body, body_change) = self.optimize_expr_with_cleared_stack(*body);
                 let (rest, rest_change) = self.optimize_expr(*rest);
                 let mut change = body_change;
                 change.mark_if(rest_change);
@@ -756,7 +783,7 @@ impl<'info, 'data> Optimizer<'info, 'data> {
                 body,
                 source,
             } => {
-                let (body, change) = self.optimize_expr(*body);
+                let (body, change) = self.optimize_expr_with_cleared_stack(*body);
                 (
                     Atom::Lambda {
                         params,
@@ -802,6 +829,88 @@ impl<'info, 'data> Optimizer<'info, 'data> {
             .collect();
         (fields, change)
     }
+
+    fn optimize_handler_with_cleared_stack(&mut self, handler: MHandler) -> (MHandler, Change) {
+        let saved = std::mem::take(&mut self.handler_stack);
+        let out = self.optimize_handler(handler);
+        self.handler_stack = saved;
+        out
+    }
+
+    fn optimize_expr_with_cleared_stack(&mut self, expr: MExpr) -> (MExpr, Change) {
+        let saved = std::mem::take(&mut self.handler_stack);
+        let out = self.optimize_expr(expr);
+        self.handler_stack = saved;
+        out
+    }
+
+    fn optimize_expr_with_frame(&mut self, expr: MExpr, frame: HandlerFrame) -> (MExpr, Change) {
+        self.handler_stack.push(frame);
+        let out = self.optimize_expr(expr);
+        self.handler_stack.pop();
+        out
+    }
+
+    fn try_direct_call(&self, expr: MExpr) -> (MExpr, Change) {
+        if !self.opts.direct_call() {
+            return (expr, Change::Unchanged);
+        }
+
+        let MExpr::Yield { op, args, source } = expr else {
+            return (expr, Change::Unchanged);
+        };
+
+        let Some(arm) = self.resolve_direct_call_arm(&op) else {
+            return (MExpr::Yield { op, args, source }, Change::Unchanged);
+        };
+
+        let Some(inlined) = inline_tail_resumptive_arm(arm, &args) else {
+            return (MExpr::Yield { op, args, source }, Change::Unchanged);
+        };
+
+        (rewrite_resumes_to_pure(inlined), Change::Changed)
+    }
+
+    fn resolve_direct_call_arm(
+        &self,
+        op: &crate::codegen::monadic::ir::EffectOpRef,
+    ) -> Option<&MHandlerArm> {
+        for frame in self.handler_stack.iter().rev() {
+            match frame {
+                HandlerFrame::Static { effects, arms }
+                    if effects.iter().any(|e| e == &op.effect) =>
+                {
+                    let mut matching = arms
+                        .iter()
+                        .filter(|arm| arm.op.effect == op.effect && arm.op.op == op.op);
+                    let arm = matching.next()?;
+                    if matching.next().is_some() {
+                        return None;
+                    }
+                    if arm.finally_block.is_some() {
+                        return None;
+                    }
+                    if expr_contains_yield(&arm.body) {
+                        return None;
+                    }
+                    if self.handler_analysis.resumption.get(&arm.id)
+                        != Some(&ResumptionKind::TailResumptive)
+                    {
+                        return None;
+                    }
+                    return Some(arm);
+                }
+                HandlerFrame::Static { effects, .. } if effects.iter().any(|e| e == &op.effect) => {
+                    return None;
+                }
+                HandlerFrame::Blocking { effects } if effects.iter().any(|e| e == &op.effect) => {
+                    return None;
+                }
+                _ => {}
+            }
+        }
+        None
+    }
 }
 
 impl RunOptions {
@@ -810,6 +919,10 @@ impl RunOptions {
     }
 
     fn bind_to_let(self) -> bool {
+        !self.skip
+    }
+
+    fn direct_call(self) -> bool {
         !self.skip
     }
 }
@@ -861,6 +974,455 @@ fn fun_type_effects_are_empty(ty: &typechecker::Type) -> bool {
                     || fun_type_effects_are_empty(ret))
         }
         _ => false,
+    }
+}
+
+fn handler_frame(handler: &MHandler) -> Option<HandlerFrame> {
+    match handler {
+        MHandler::Static { effects, arms, .. } => {
+            let effects = static_frame_effects(effects, arms);
+            if effects.is_empty() {
+                None
+            } else {
+                Some(HandlerFrame::Static {
+                    effects,
+                    arms: arms.clone(),
+                })
+            }
+        }
+        MHandler::Dynamic { effects, .. } | MHandler::Native { effects, .. } => {
+            blocking_frame(effects.clone())
+        }
+        MHandler::Composite { handlers, .. } => {
+            let mut effects = Vec::new();
+            for handler in handlers {
+                collect_handler_effects(handler, &mut effects);
+            }
+            blocking_frame(effects)
+        }
+    }
+}
+
+fn static_frame_effects(effects: &[String], arms: &[MHandlerArm]) -> Vec<String> {
+    let mut out = Vec::new();
+    for effect in effects {
+        push_unique_effect(&mut out, effect);
+    }
+    for arm in arms {
+        push_unique_effect(&mut out, &arm.op.effect);
+    }
+    out
+}
+
+fn collect_handler_effects(handler: &MHandler, out: &mut Vec<String>) {
+    match handler {
+        MHandler::Static { effects, arms, .. } => {
+            for effect in static_frame_effects(effects, arms) {
+                push_unique_effect(out, &effect);
+            }
+        }
+        MHandler::Dynamic { effects, .. } | MHandler::Native { effects, .. } => {
+            for effect in effects {
+                push_unique_effect(out, effect);
+            }
+        }
+        MHandler::Composite { handlers, .. } => {
+            for handler in handlers {
+                collect_handler_effects(handler, out);
+            }
+        }
+    }
+}
+
+fn blocking_frame(effects: Vec<String>) -> Option<HandlerFrame> {
+    if effects.is_empty() {
+        None
+    } else {
+        Some(HandlerFrame::Blocking { effects })
+    }
+}
+
+fn push_unique_effect(out: &mut Vec<String>, effect: &str) {
+    if !out.iter().any(|e| e == effect) {
+        out.push(effect.to_string());
+    }
+}
+
+fn expr_contains_yield(expr: &MExpr) -> bool {
+    match expr {
+        MExpr::Yield { .. } => true,
+        MExpr::Pure(atom) => atom_contains_yield(atom),
+        MExpr::Bind { value, body, .. } | MExpr::Let { value, body, .. } => {
+            expr_contains_yield(value) || expr_contains_yield(body)
+        }
+        MExpr::Case {
+            scrutinee, arms, ..
+        } => {
+            atom_contains_yield(scrutinee)
+                || arms.iter().any(|arm| {
+                    arm.guard.as_ref().is_some_and(expr_contains_yield)
+                        || expr_contains_yield(&arm.body)
+                })
+        }
+        MExpr::If {
+            cond,
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            atom_contains_yield(cond)
+                || expr_contains_yield(then_branch)
+                || expr_contains_yield(else_branch)
+        }
+        MExpr::App { head, args, .. } => {
+            atom_contains_yield(head) || args.iter().any(atom_contains_yield)
+        }
+        MExpr::With { handler, body, .. } => {
+            handler_contains_yield(handler) || expr_contains_yield(body)
+        }
+        MExpr::Resume { value, .. }
+        | MExpr::FieldAccess { record: value, .. }
+        | MExpr::DictMethodAccess { dict: value, .. }
+        | MExpr::UnaryMinus { value, .. } => atom_contains_yield(value),
+        MExpr::ForeignCall { args, .. } => args.iter().any(atom_contains_yield),
+        MExpr::RecordUpdate { record, fields, .. } => {
+            atom_contains_yield(record) || fields.iter().any(|(_, atom)| atom_contains_yield(atom))
+        }
+        MExpr::BinOp { left, right, .. } => atom_contains_yield(left) || atom_contains_yield(right),
+        MExpr::BitString { segments, .. } => segments.iter().any(|seg| {
+            atom_contains_yield(&seg.value) || seg.size.as_ref().is_some_and(atom_contains_yield)
+        }),
+        MExpr::Receive { arms, after, .. } => {
+            arms.iter().any(|arm| {
+                arm.guard.as_ref().is_some_and(expr_contains_yield)
+                    || expr_contains_yield(&arm.body)
+            }) || after.as_ref().is_some_and(|(timeout, body)| {
+                atom_contains_yield(timeout) || expr_contains_yield(body)
+            })
+        }
+        MExpr::LetFun { body, rest, .. } => expr_contains_yield(body) || expr_contains_yield(rest),
+        MExpr::HandlerValue {
+            arms,
+            return_clause,
+            ..
+        } => {
+            arms.iter().any(handler_arm_contains_yield)
+                || return_clause
+                    .as_ref()
+                    .is_some_and(|arm| handler_arm_contains_yield(arm))
+        }
+    }
+}
+
+fn atom_contains_yield(atom: &Atom) -> bool {
+    match atom {
+        Atom::Ctor { args, .. } => args.iter().any(atom_contains_yield),
+        Atom::Tuple { elements, .. } => elements.iter().any(atom_contains_yield),
+        Atom::AnonRecord { fields, .. } | Atom::Record { fields, .. } => {
+            fields.iter().any(|(_, atom)| atom_contains_yield(atom))
+        }
+        Atom::Lambda { body, .. } => expr_contains_yield(body),
+        Atom::Var { .. }
+        | Atom::Lit { .. }
+        | Atom::DictRef { .. }
+        | Atom::QualifiedRef { .. }
+        | Atom::Symbol { .. } => false,
+    }
+}
+
+fn handler_contains_yield(handler: &MHandler) -> bool {
+    match handler {
+        MHandler::Static {
+            arms,
+            return_clause,
+            ..
+        } => {
+            arms.iter().any(handler_arm_contains_yield)
+                || return_clause
+                    .as_ref()
+                    .is_some_and(handler_arm_contains_yield)
+        }
+        MHandler::Native { .. } => false,
+        MHandler::Composite { handlers, .. } => handlers.iter().any(handler_contains_yield),
+        MHandler::Dynamic {
+            op_tuple,
+            return_lambda,
+            ..
+        } => {
+            atom_contains_yield(op_tuple) || return_lambda.as_ref().is_some_and(atom_contains_yield)
+        }
+    }
+}
+
+fn handler_arm_contains_yield(arm: &MHandlerArm) -> bool {
+    expr_contains_yield(&arm.body)
+        || arm
+            .finally_block
+            .as_ref()
+            .is_some_and(|finally_block| expr_contains_yield(finally_block))
+}
+
+fn inline_tail_resumptive_arm(arm: &MHandlerArm, args: &[Atom]) -> Option<MExpr> {
+    if args.len() != arm.params.len() {
+        return None;
+    }
+
+    let mut body = (*arm.body).clone();
+    for (param, arg) in arm.params.iter().zip(args) {
+        match param {
+            Pat::Var { name, id, .. } => {
+                let target = MVar {
+                    name: name.clone(),
+                    id: id.0,
+                };
+                let free_names = free_atom_names(arg);
+                let substituted = subst_expr(body, &target, arg, &free_names);
+                if substituted.blocked {
+                    return None;
+                }
+                body = substituted.value;
+            }
+            Pat::Wildcard { .. }
+            | Pat::Lit {
+                value: crate::ast::Lit::Unit,
+                ..
+            } => {}
+            _ => return None,
+        }
+    }
+    Some(body)
+}
+
+fn rewrite_resumes_to_pure(expr: MExpr) -> MExpr {
+    match expr {
+        MExpr::Resume { value, .. } => MExpr::Pure(value),
+        MExpr::Pure(atom) => MExpr::Pure(rewrite_resumes_in_atom(atom)),
+        MExpr::Yield { op, args, source } => MExpr::Yield {
+            op,
+            args: args.into_iter().map(rewrite_resumes_in_atom).collect(),
+            source,
+        },
+        MExpr::Bind {
+            var,
+            value,
+            body,
+            mode,
+        } => MExpr::Bind {
+            var,
+            value: Box::new(rewrite_resumes_to_pure(*value)),
+            body: Box::new(rewrite_resumes_to_pure(*body)),
+            mode,
+        },
+        MExpr::Let { var, value, body } => MExpr::Let {
+            var,
+            value: Box::new(rewrite_resumes_to_pure(*value)),
+            body: Box::new(rewrite_resumes_to_pure(*body)),
+        },
+        MExpr::Case {
+            scrutinee,
+            arms,
+            source,
+        } => MExpr::Case {
+            scrutinee: rewrite_resumes_in_atom(scrutinee),
+            arms: arms
+                .into_iter()
+                .map(|arm| MArm {
+                    guard: arm.guard.map(rewrite_resumes_to_pure),
+                    body: rewrite_resumes_to_pure(arm.body),
+                    ..arm
+                })
+                .collect(),
+            source,
+        },
+        MExpr::If {
+            cond,
+            then_branch,
+            else_branch,
+            source,
+        } => MExpr::If {
+            cond: rewrite_resumes_in_atom(cond),
+            then_branch: Box::new(rewrite_resumes_to_pure(*then_branch)),
+            else_branch: Box::new(rewrite_resumes_to_pure(*else_branch)),
+            source,
+        },
+        MExpr::App { head, args, source } => MExpr::App {
+            head: rewrite_resumes_in_atom(head),
+            args: args.into_iter().map(rewrite_resumes_in_atom).collect(),
+            source,
+        },
+        MExpr::With {
+            handler,
+            body,
+            source,
+        } => MExpr::With {
+            handler,
+            body: Box::new(rewrite_resumes_to_pure(*body)),
+            source,
+        },
+        MExpr::FieldAccess {
+            record,
+            field,
+            record_name,
+            anon_fields,
+            source,
+        } => MExpr::FieldAccess {
+            record: rewrite_resumes_in_atom(record),
+            field,
+            record_name,
+            anon_fields,
+            source,
+        },
+        MExpr::RecordUpdate {
+            record,
+            fields,
+            record_name,
+            anon_fields,
+            source,
+        } => MExpr::RecordUpdate {
+            record: rewrite_resumes_in_atom(record),
+            fields: fields
+                .into_iter()
+                .map(|(name, atom)| (name, rewrite_resumes_in_atom(atom)))
+                .collect(),
+            record_name,
+            anon_fields,
+            source,
+        },
+        MExpr::DictMethodAccess {
+            dict,
+            trait_name,
+            method_index,
+            source,
+        } => MExpr::DictMethodAccess {
+            dict: rewrite_resumes_in_atom(dict),
+            trait_name,
+            method_index,
+            source,
+        },
+        MExpr::ForeignCall {
+            module,
+            func,
+            args,
+            source,
+        } => MExpr::ForeignCall {
+            module,
+            func,
+            args: args.into_iter().map(rewrite_resumes_in_atom).collect(),
+            source,
+        },
+        MExpr::BinOp {
+            op,
+            left,
+            right,
+            source,
+        } => MExpr::BinOp {
+            op,
+            left: rewrite_resumes_in_atom(left),
+            right: rewrite_resumes_in_atom(right),
+            source,
+        },
+        MExpr::UnaryMinus { value, source } => MExpr::UnaryMinus {
+            value: rewrite_resumes_in_atom(value),
+            source,
+        },
+        MExpr::BitString { segments, source } => MExpr::BitString {
+            segments: segments
+                .into_iter()
+                .map(|mut seg| {
+                    seg.value = rewrite_resumes_in_atom(seg.value);
+                    seg.size = seg.size.map(rewrite_resumes_in_atom);
+                    seg
+                })
+                .collect(),
+            source,
+        },
+        MExpr::Receive {
+            arms,
+            after,
+            source,
+        } => MExpr::Receive {
+            arms: arms
+                .into_iter()
+                .map(|arm| MArm {
+                    guard: arm.guard.map(rewrite_resumes_to_pure),
+                    body: rewrite_resumes_to_pure(arm.body),
+                    ..arm
+                })
+                .collect(),
+            after: after.map(|(timeout, body)| {
+                (
+                    rewrite_resumes_in_atom(timeout),
+                    Box::new(rewrite_resumes_to_pure(*body)),
+                )
+            }),
+            source,
+        },
+        MExpr::LetFun {
+            name,
+            params,
+            body,
+            rest,
+            source,
+        } => MExpr::LetFun {
+            name,
+            params,
+            // A nested local function has its own resume context; only the
+            // surrounding continuation remains part of the inlined arm body.
+            body,
+            rest: Box::new(rewrite_resumes_to_pure(*rest)),
+            source,
+        },
+        MExpr::HandlerValue {
+            effects,
+            arms,
+            return_clause,
+            source,
+        } => MExpr::HandlerValue {
+            effects,
+            // Handler-value arms introduce their own resume context.
+            arms,
+            return_clause,
+            source,
+        },
+    }
+}
+
+fn rewrite_resumes_in_atom(atom: Atom) -> Atom {
+    match atom {
+        Atom::Ctor { name, args, source } => Atom::Ctor {
+            name,
+            args: args.into_iter().map(rewrite_resumes_in_atom).collect(),
+            source,
+        },
+        Atom::Tuple { elements, source } => Atom::Tuple {
+            elements: elements.into_iter().map(rewrite_resumes_in_atom).collect(),
+            source,
+        },
+        Atom::AnonRecord { fields, source } => Atom::AnonRecord {
+            fields: fields
+                .into_iter()
+                .map(|(name, atom)| (name, rewrite_resumes_in_atom(atom)))
+                .collect(),
+            source,
+        },
+        Atom::Record {
+            name,
+            fields,
+            source,
+        } => Atom::Record {
+            name,
+            fields: fields
+                .into_iter()
+                .map(|(name, atom)| (name, rewrite_resumes_in_atom(atom)))
+                .collect(),
+            source,
+        },
+        Atom::Lambda { .. } => atom,
+        Atom::Var { .. }
+        | Atom::Lit { .. }
+        | Atom::DictRef { .. }
+        | Atom::QualifiedRef { .. }
+        | Atom::Symbol { .. } => atom,
     }
 }
 
@@ -2504,6 +3066,284 @@ mod tests {
         assert_eq!(out, prog);
     }
 
+    #[test]
+    fn direct_call_inlines_static_tail_resumptive_yield() {
+        let mut f = Fixture::new();
+        let arm = tail_arm(100, vec![pat_unit(101)], resume(lit_int("42", 42)), None);
+        f.h.resumption
+            .insert(crate::ast::NodeId(100), ResumptionKind::TailResumptive);
+        let handler = static_log_handler(vec![arm]);
+        let prog = val_program(with_expr(
+            handler.clone(),
+            yield_log(vec![unit_atom()], crate::ast::NodeId(102)),
+        ));
+        let info = f.info();
+
+        let out = run(prog, &f.h, &info);
+
+        assert_eq!(
+            out,
+            val_program(with_expr(handler, MExpr::Pure(lit_int("42", 42))))
+        );
+    }
+
+    #[test]
+    fn direct_call_exposes_bind_pure_collapse_in_same_fixpoint() {
+        let mut f = Fixture::new();
+        let arm = tail_arm(110, vec![pat_unit(111)], resume(lit_int("42", 42)), None);
+        f.h.resumption
+            .insert(crate::ast::NodeId(110), ResumptionKind::TailResumptive);
+        let handler = static_log_handler(vec![arm]);
+        let body = bind_expr(
+            mv("x", 1),
+            yield_log(vec![unit_atom()], crate::ast::NodeId(112)),
+            MExpr::Pure(var("x", 1)),
+        );
+        let prog = val_program(with_expr(handler.clone(), body));
+        let info = f.info();
+
+        let out = run(prog, &f.h, &info);
+
+        assert_eq!(
+            out,
+            val_program(with_expr(handler, MExpr::Pure(lit_int("42", 42))))
+        );
+    }
+
+    #[test]
+    fn direct_call_substitutes_supported_var_params() {
+        let mut f = Fixture::new();
+        let arm = tail_arm(
+            120,
+            vec![pat_var("msg", 121)],
+            resume(var("msg", 121)),
+            None,
+        );
+        f.h.resumption
+            .insert(crate::ast::NodeId(120), ResumptionKind::TailResumptive);
+        let handler = static_log_handler(vec![arm]);
+        let prog = val_program(with_expr(
+            handler.clone(),
+            yield_log(vec![lit_int("7", 7)], crate::ast::NodeId(122)),
+        ));
+        let info = f.info();
+
+        let out = run(prog, &f.h, &info);
+
+        assert_eq!(
+            out,
+            val_program(with_expr(handler, MExpr::Pure(lit_int("7", 7))))
+        );
+    }
+
+    #[test]
+    fn direct_call_keeps_oneshot_and_multishot_monadic() {
+        for (id, kind) in [
+            (130, ResumptionKind::OneShot),
+            (131, ResumptionKind::Multishot),
+        ] {
+            let mut f = Fixture::new();
+            let arm = tail_arm(id, vec![pat_unit(id + 10)], resume(lit_int("1", 1)), None);
+            f.h.resumption.insert(crate::ast::NodeId(id), kind);
+            let handler = static_log_handler(vec![arm]);
+            let yield_expr = yield_log(vec![unit_atom()], crate::ast::NodeId(id + 20));
+            let prog = val_program(with_expr(handler.clone(), yield_expr.clone()));
+            let info = f.info();
+
+            let out = run(prog, &f.h, &info);
+
+            assert_eq!(out, val_program(with_expr(handler, yield_expr)));
+        }
+    }
+
+    #[test]
+    fn direct_call_skips_arm_with_finally() {
+        let mut f = Fixture::new();
+        let arm = tail_arm(
+            140,
+            vec![pat_unit(141)],
+            resume(lit_int("1", 1)),
+            Some(MExpr::Pure(unit_atom())),
+        );
+        f.h.resumption
+            .insert(crate::ast::NodeId(140), ResumptionKind::TailResumptive);
+        let handler = static_log_handler(vec![arm]);
+        let yield_expr = yield_log(vec![unit_atom()], crate::ast::NodeId(142));
+        let prog = val_program(with_expr(handler.clone(), yield_expr.clone()));
+        let info = f.info();
+
+        let out = run(prog, &f.h, &info);
+
+        assert_eq!(out, val_program(with_expr(handler, yield_expr)));
+    }
+
+    #[test]
+    fn direct_call_skips_multi_arm_same_op_dispatch() {
+        let mut f = Fixture::new();
+        let arm_a = tail_arm(145, vec![pat_unit(146)], resume(lit_int("1", 1)), None);
+        let arm_b = tail_arm(147, vec![pat_unit(148)], resume(lit_int("2", 2)), None);
+        f.h.resumption
+            .insert(crate::ast::NodeId(145), ResumptionKind::TailResumptive);
+        f.h.resumption
+            .insert(crate::ast::NodeId(147), ResumptionKind::TailResumptive);
+        let handler = static_log_handler(vec![arm_a, arm_b]);
+        let yield_expr = yield_log(vec![unit_atom()], crate::ast::NodeId(149));
+        let prog = val_program(with_expr(handler.clone(), yield_expr.clone()));
+        let info = f.info();
+
+        let out = run(prog, &f.h, &info);
+
+        assert_eq!(out, val_program(with_expr(handler, yield_expr)));
+    }
+
+    #[test]
+    fn direct_call_skips_arm_body_with_yield_to_avoid_recursive_expansion() {
+        let mut f = Fixture::new();
+        let recursive_body = MExpr::Bind {
+            var: mv("_", 151),
+            value: Box::new(yield_log(vec![unit_atom()], crate::ast::NodeId(152))),
+            body: Box::new(resume(unit_atom())),
+            mode: crate::codegen::monadic::ir::BindMode::Sequence,
+        };
+        let arm = tail_arm(153, vec![pat_unit(154)], recursive_body, None);
+        f.h.resumption
+            .insert(crate::ast::NodeId(153), ResumptionKind::TailResumptive);
+        let handler = static_log_handler(vec![arm]);
+        let yield_expr = yield_log(vec![unit_atom()], crate::ast::NodeId(155));
+        let prog = val_program(with_expr(handler.clone(), yield_expr.clone()));
+        let info = f.info();
+
+        let out = run(prog, &f.h, &info);
+
+        assert_eq!(out, val_program(with_expr(handler, yield_expr)));
+    }
+
+    #[test]
+    fn direct_call_dynamic_same_effect_blocks_outer_static_handler() {
+        let mut f = Fixture::new();
+        let outer_arm = tail_arm(150, vec![pat_unit(151)], resume(lit_int("1", 1)), None);
+        f.h.resumption
+            .insert(crate::ast::NodeId(150), ResumptionKind::TailResumptive);
+        let outer = static_log_handler(vec![outer_arm]);
+        let inner = MHandler::Dynamic {
+            effects: vec!["Log".to_string()],
+            op_tuple: var("dynamic_ops", 152),
+            return_lambda: None,
+            source: crate::ast::NodeId(153),
+        };
+        let yield_expr = yield_log(vec![unit_atom()], crate::ast::NodeId(154));
+        let prog = val_program(with_expr(
+            outer.clone(),
+            with_expr(inner.clone(), yield_expr.clone()),
+        ));
+        let info = f.info();
+
+        let out = run(prog, &f.h, &info);
+
+        assert_eq!(
+            out,
+            val_program(with_expr(outer, with_expr(inner, yield_expr)))
+        );
+    }
+
+    #[test]
+    fn direct_call_native_same_effect_blocks_outer_static_handler() {
+        let mut f = Fixture::new();
+        let outer_arm = tail_arm(160, vec![pat_unit(161)], resume(lit_int("1", 1)), None);
+        f.h.resumption
+            .insert(crate::ast::NodeId(160), ResumptionKind::TailResumptive);
+        let outer = static_log_handler(vec![outer_arm]);
+        let inner = MHandler::Native {
+            effects: vec!["Log".to_string()],
+            handler: "native_log".to_string(),
+            source: crate::ast::NodeId(162),
+        };
+        let yield_expr = yield_log(vec![unit_atom()], crate::ast::NodeId(163));
+        let prog = val_program(with_expr(
+            outer.clone(),
+            with_expr(inner.clone(), yield_expr.clone()),
+        ));
+        let info = f.info();
+
+        let out = run(prog, &f.h, &info);
+
+        assert_eq!(
+            out,
+            val_program(with_expr(outer, with_expr(inner, yield_expr)))
+        );
+    }
+
+    #[test]
+    fn direct_call_composite_same_effect_is_blocking_not_decomposed() {
+        let mut f = Fixture::new();
+        let inner_arm = tail_arm(170, vec![pat_unit(171)], resume(lit_int("1", 1)), None);
+        f.h.resumption
+            .insert(crate::ast::NodeId(170), ResumptionKind::TailResumptive);
+        let inner_static = static_log_handler(vec![inner_arm]);
+        let composite = MHandler::Composite {
+            handlers: vec![inner_static],
+            source: crate::ast::NodeId(172),
+        };
+        let yield_expr = yield_log(vec![unit_atom()], crate::ast::NodeId(173));
+        let prog = val_program(with_expr(composite.clone(), yield_expr.clone()));
+        let info = f.info();
+
+        let out = run(prog, &f.h, &info);
+
+        assert_eq!(out, val_program(with_expr(composite, yield_expr)));
+    }
+
+    #[test]
+    fn direct_call_does_not_inherit_handler_stack_into_lambda_body() {
+        let mut f = Fixture::new();
+        let arm = tail_arm(180, vec![pat_unit(181)], resume(lit_int("1", 1)), None);
+        f.h.resumption
+            .insert(crate::ast::NodeId(180), ResumptionKind::TailResumptive);
+        let handler = static_log_handler(vec![arm]);
+        let lambda = Atom::Lambda {
+            params: vec![pat_unit(182)],
+            body: Box::new(yield_log(vec![unit_atom()], crate::ast::NodeId(183))),
+            source: crate::ast::NodeId(184),
+        };
+        let prog = val_program(with_expr(handler.clone(), MExpr::Pure(lambda.clone())));
+        let info = f.info();
+
+        let out = run(prog, &f.h, &info);
+
+        assert_eq!(out, val_program(with_expr(handler, MExpr::Pure(lambda))));
+    }
+
+    #[test]
+    fn direct_call_skips_unsupported_param_patterns() {
+        let mut f = Fixture::new();
+        let arm = tail_arm(
+            190,
+            vec![Pat::Tuple {
+                id: crate::ast::NodeId(191),
+                elements: vec![pat_var("x", 192)],
+                span: span(),
+            }],
+            resume(var("x", 192)),
+            None,
+        );
+        f.h.resumption
+            .insert(crate::ast::NodeId(190), ResumptionKind::TailResumptive);
+        let handler = static_log_handler(vec![arm]);
+        let yield_expr = yield_log(
+            vec![Atom::Tuple {
+                elements: vec![lit_int("1", 1)],
+                source: crate::ast::NodeId(193),
+            }],
+            crate::ast::NodeId(194),
+        );
+        let prog = val_program(with_expr(handler.clone(), yield_expr.clone()));
+        let info = f.info();
+
+        let out = run(prog, &f.h, &info);
+
+        assert_eq!(out, val_program(with_expr(handler, yield_expr)));
+    }
+
     fn val_program(value: MExpr) -> MProgram {
         vec![MDecl::Val(MVal {
             id: crate::ast::NodeId(1),
@@ -2548,11 +3388,82 @@ mod tests {
         }
     }
 
+    fn unit_atom() -> Atom {
+        Atom::Lit {
+            value: crate::ast::Lit::Unit,
+            source: crate::ast::NodeId(0),
+        }
+    }
+
     fn pat_var(name: &str, id: u32) -> Pat {
         Pat::Var {
             name: name.to_string(),
             id: crate::ast::NodeId(id),
             span: span(),
+        }
+    }
+
+    fn pat_unit(id: u32) -> Pat {
+        Pat::Lit {
+            id: crate::ast::NodeId(id),
+            value: crate::ast::Lit::Unit,
+            span: span(),
+        }
+    }
+
+    fn resume(value: Atom) -> MExpr {
+        MExpr::Resume {
+            value,
+            source: crate::ast::NodeId(999),
+        }
+    }
+
+    fn yield_log(args: Vec<Atom>, source: crate::ast::NodeId) -> MExpr {
+        MExpr::Yield {
+            op: log_op(),
+            args,
+            source,
+        }
+    }
+
+    fn with_expr(handler: MHandler, body: MExpr) -> MExpr {
+        MExpr::With {
+            handler,
+            body: Box::new(body),
+            source: crate::ast::NodeId(998),
+        }
+    }
+
+    fn static_log_handler(arms: Vec<MHandlerArm>) -> MHandler {
+        MHandler::Static {
+            effects: vec!["Log".to_string()],
+            arms,
+            return_clause: None,
+            source: crate::ast::NodeId(997),
+        }
+    }
+
+    fn tail_arm(
+        id: u32,
+        params: Vec<Pat>,
+        body: MExpr,
+        finally_block: Option<MExpr>,
+    ) -> MHandlerArm {
+        MHandlerArm {
+            id: crate::ast::NodeId(id),
+            op: log_op(),
+            params,
+            body: Box::new(body),
+            finally_block: finally_block.map(Box::new),
+            span: span(),
+        }
+    }
+
+    fn log_op() -> EffectOpRef {
+        EffectOpRef {
+            effect: "Log".to_string(),
+            op: "log".to_string(),
+            op_index: 1,
         }
     }
 

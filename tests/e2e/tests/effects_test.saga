@@ -380,6 +380,12 @@ fun stacked_named_returns_match_list_sugar : Unit -> Int
 stacked_named_returns_match_list_sugar () =
   (get_counter! () with add_one_counter) with times_two_counter
 
+fun tail_resumptive_direct_call_return_clause : Unit -> Int
+tail_resumptive_direct_call_return_clause () = {
+  let x = get_counter! () with add_one_counter
+  x + 1
+}
+
 fun return_only_inline_inside_named_handler : Unit -> Int
 return_only_inline_inside_named_handler () = get_counter! () with {
   return value = value + 1
@@ -575,6 +581,11 @@ tests () = {
       test "stacked with matches list sugar" (fun () -> {
         let result = stacked_named_returns_match_list_sugar ()
         assert_eq result 22
+      })
+
+      test "tail-resumptive direct-call preserves return clause" (fun () -> {
+        let result = tail_resumptive_direct_call_return_clause ()
+        assert_eq result 12
       })
 
       test "return-only inline layer inside named handler still composes" (fun () -> {
