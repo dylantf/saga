@@ -213,6 +213,39 @@ pub struct EffectOpsTable {
     pub map: HashMap<String, Vec<String>>,
 }
 
+fn insert_effect_ops_entry(
+    map: &mut HashMap<String, Vec<String>>,
+    name: &str,
+    source_module: Option<&str>,
+    ops: Vec<String>,
+) {
+    map.insert(name.to_string(), ops.clone());
+    let bare = name.rsplit('.').next().unwrap_or(name);
+    if bare != name {
+        map.entry(bare.to_string()).or_insert_with(|| ops.clone());
+    }
+    if let Some(src_mod) = source_module {
+        let canonical = format!("{}.{}", src_mod, bare);
+        if canonical != name {
+            map.insert(canonical, ops);
+        }
+    }
+}
+
+fn insert_module_effect_defs(
+    map: &mut HashMap<String, Vec<String>>,
+    codegen_info: &HashMap<String, ModuleCodegenInfo>,
+) {
+    for info in codegen_info.values() {
+        for effect_def in &info.effect_defs {
+            let mut ops: Vec<String> = effect_def.ops.iter().map(|op| op.name.clone()).collect();
+            ops.sort();
+            let source_module = effect_def.name.rsplit_once('.').map(|(module, _)| module);
+            insert_effect_ops_entry(map, &effect_def.name, source_module, ops);
+        }
+    }
+}
+
 /// Build the canonical effect-name → ops list from `CheckResult.effects`.
 /// Both the bare effect name and the fully-qualified `Module.Name` form
 /// are inserted so callers can look up by either spelling.
@@ -228,20 +261,13 @@ pub fn build_effect_ops_table(check_result: &CheckResult) -> EffectOpsTable {
         // re-prepending the source module to a name that already contains it
         // — `format!("Std.IO.{}", "Std.IO.Stdio")` would produce
         // `Std.IO.Std.IO.Stdio` and poison the canonical lookup.
-        map.insert(name.clone(), ops.clone());
-        if let Some(src_mod) = &info.source_module {
-            let bare = name.rsplit('.').next().unwrap_or(name);
-            let canonical = format!("{}.{}", src_mod, bare);
-            if canonical != *name {
-                map.insert(canonical, ops.clone());
-            }
-            // Also register the bare key explicitly if `name` is canonical,
-            // so `canonical_effect_name` can find the bare→canonical mapping.
-            if bare != name.as_str() {
-                map.entry(bare.to_string()).or_insert_with(|| ops.clone());
-            }
-        }
+        insert_effect_ops_entry(&mut map, name, info.source_module.as_deref(), ops);
     }
+
+    // Imported/dependency effect definitions may be visible through module
+    // metadata without being present in the entry module's `effects` map. The
+    // translator needs the same op-index table for those cross-module effects.
+    insert_module_effect_defs(&mut map, check_result.codegen_info());
     EffectOpsTable { map }
 }
 
@@ -335,7 +361,8 @@ pub fn emit_module_via_new_path(
     }
 
     // Effect info: build the ops table once (borrowed by the view).
-    let ops_storage = build_effect_ops_table(check_result);
+    let mut ops_storage = build_effect_ops_table(check_result);
+    insert_module_effect_defs(&mut ops_storage.map, &codegen_info);
     // Per-module CheckResult yields the per-module ResolutionResult that
     // carries effect_calls / handler_arms. Script/test contexts (no module
     // registered) fall back to the top-level check_result.

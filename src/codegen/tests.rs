@@ -1283,6 +1283,53 @@ fn build_effect_ops_table_ops_sorted_alphabetically() {
 }
 
 #[test]
+fn build_effect_ops_table_includes_imported_module_effect_defs() {
+    let src = r#"import Std.Fail (Fail)
+
+fun boom : Unit -> Int needs {Fail String}
+boom () = fail! "boom"
+
+main () = ()
+"#;
+    let (_, result) = check_program(src);
+    let table = super::build_effect_ops_table(&result);
+    assert_eq!(
+        table.map.get("Std.Fail.Fail"),
+        Some(&vec!["fail".to_string()])
+    );
+}
+
+#[test]
+fn module_effect_defs_can_extend_effect_ops_table_at_emit_boundary() {
+    let mut map = std::collections::HashMap::new();
+    let mut modules = std::collections::HashMap::new();
+    modules.insert(
+        "Dep.Effects".to_string(),
+        crate::typechecker::ModuleCodegenInfo {
+            effect_defs: vec![crate::typechecker::EffectDef {
+                name: "Dep.Effects.Remote".to_string(),
+                ops: vec![crate::typechecker::EffectOpDef {
+                    name: "run".to_string(),
+                    source_param_count: 1,
+                    runtime_param_count: 1,
+                    runtime_param_positions: vec![0],
+                    param_absorbed_effects: std::collections::HashMap::new(),
+                }],
+                type_param_count: 0,
+            }],
+            ..Default::default()
+        },
+    );
+
+    super::insert_module_effect_defs(&mut map, &modules);
+
+    assert_eq!(
+        map.get("Dep.Effects.Remote"),
+        Some(&vec!["run".to_string()])
+    );
+}
+
+#[test]
 fn build_effect_info_populates_all_fields_from_check_result() {
     let src = "effect Log {\n  fun log : (msg: String) -> Unit\n}\n\nmain () = ()";
     let (_, result) = check_program(src);

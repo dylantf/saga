@@ -183,11 +183,12 @@ From a `panic!`/`unimplemented!`/`deferred` sweep of the new path:
   would crash the lowerer). Verified end-to-end with a 1-arg eta-reference
   repro: `examples/bugs/nullary-eta-effect-op/unit-op.saga` (resumes twice
   through an aliased `beep!`, returns 14 = 7+7).
-- **NOT a blocker — cross-module effect-op panic** at `translate/mod.rs:230`
-  ("Cross-module effect ops are not yet wired"). Empirically unreachable: project
-  builds populate `EffectInfo.effect_ops` across the module graph, so user
-  effects declared in one module and performed/handled in another work (verified
-  A/B/C variants). The comment at `translate/mod.rs:220-224` is stale/misleading.
+- **RESOLVED — cross-module effect-op panic** at `translate/mod.rs:230`.
+  External project testing proved this was reachable: `effect_calls` could
+  resolve `Std.Fail.Fail` while the per-module op table lacked the imported
+  effect definition. `build_effect_ops_table` now merges
+  `ModuleCodegenInfo::effect_defs`, and `emit_module_via_new_path` extends the
+  table with the full codegen context before constructing `EffectInfo`.
 - **RESOLVED — dynamic-handler return clauses end-to-end** plus two adjacent
   gaps surfaced during verification:
   1. **Parameter-passed handler values silently dropped evidence install.** A
@@ -682,8 +683,9 @@ Findings:
   the stdlib type (`a -> a`); bridge HOFs are synchronous native calls. Still,
   they should be documented as three callback boundary classes so future
   patches do not merge them accidentally.
-- Bootstrap comments still mention “future step 8” in a few places even though
-  the toggle wiring now exists. Clean this wording during the abstraction pass.
+- Bootstrap comments that still mentioned “future step 8” were cleaned up
+  after the metadata scan; the live bootstrap risk is now the explicit
+  `not_implemented_native_op` stubs, not stale phase wording.
 - Tests cover bootstrap shape, op tuple counts/tags, basic BIF forwarding, and
   spawn evidence threading. E2E covers actors, refs, ETS refs, and vectors.
   Remaining risk is not obvious missing behavior; it is maintainability and

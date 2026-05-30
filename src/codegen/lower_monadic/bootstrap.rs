@@ -20,8 +20,8 @@
 //!
 //! The function is emitted as `/0`-arity with no `_Evidence` / `_ReturnK`
 //! threading: it's a pure constant-shaped builder consumed once at the
-//! entry point. Callers (a future `step 8` toggle hook) thread the
-//! result into `main`'s `_Evidence` slot before invoking user code.
+//! entry point. The new-path emit hook threads the result into `main`'s
+//! `_Evidence` slot before invoking user code.
 //!
 //! ## Scope (7g part B)
 //!

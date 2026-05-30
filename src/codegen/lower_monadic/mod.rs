@@ -2,8 +2,7 @@
 //!
 //! Consumes `MProgram` (post-ANF, monadic-translated, optionally-optimized)
 //! and produces a Core Erlang `CModule`. Designed to be invoked alongside the
-//! old lowerer via the toggle in `src/codegen/mod.rs` (wired in step 8, not
-//! this sub-step).
+//! old lowerer via the toggle in `src/codegen/mod.rs`.
 //!
 //! ## Sub-step 7a scope
 //!
@@ -122,8 +121,8 @@ pub struct Lowerer<'ctx> {
     pub(super) record_fields: HashMap<String, Vec<String>>,
     /// Whether [`lower_module`] should also emit the bootstrap evidence
     /// builder (`__saga_initial_evidence/0`). Off by default — only the
-    /// designated entry-point module needs the bootstrap, and step 8's
-    /// toggle wiring decides when to flip it on. See `bootstrap.rs`.
+    /// designated entry-point module needs the bootstrap. See
+    /// `bootstrap.rs`.
     pub(super) emit_bootstrap: bool,
     /// Erlang-mangled name of the module currently being lowered (e.g.
     /// `std_base`). Set at the top of [`lower_module`]; used to decide
@@ -135,8 +134,8 @@ pub struct Lowerer<'ctx> {
     /// + imported). Used by [`lower_var_atom`] to detect handler-as-value
     ///   references (`let logger = if dev then console_log else silent_log`)
     ///   that wouldn't otherwise resolve, and emit a placeholder rather than
-    ///   a bare-Erlang-var that `erlc` would reject. Populated by step 8's
-    ///   toggle wiring; empty by default.
+    ///   a bare-Erlang-var that `erlc` would reject. Populated from module
+    ///   metadata at the emit boundary; empty by default.
     pub(super) handler_names: std::collections::HashSet<String>,
     /// Pre-translated handler arms for handler-as-value lowering. When a
     /// handler name appears as a runtime value, the lowerer builds the
@@ -371,8 +370,7 @@ impl<'ctx> Lowerer<'ctx> {
 
     /// Enable emission of the bootstrap evidence builder
     /// (`__saga_initial_evidence/0`) on the next call to [`lower_module`].
-    /// Intended for the entry-point module; step 8's toggle hook flips
-    /// this on for the module hosting `main`.
+    /// Intended for the entry-point module hosting `main`.
     pub fn with_bootstrap_emission(mut self, on: bool) -> Self {
         self.emit_bootstrap = on;
         self

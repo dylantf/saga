@@ -69,14 +69,9 @@ pub(crate) struct Translator<'a> {
     #[allow(dead_code)] // consumed by later steps for head-side resolution lookups.
     pub(crate) resolution: &'a ResolutionMap,
     pub(crate) effect_info: &'a EffectInfo<'a>,
-    /// Map effect canonical name → ops sorted alphabetically. Built once at
-    /// construction by scanning `Decl::EffectDef` in the input program.
-    ///
-    /// **Limitation:** only effects defined in the current program are
-    /// indexed. Cross-module effect ops would need EffectInfo extension; the
-    /// real entry-point wiring (step 8) is expected to either inline all
-    /// effect decls or extend the narrowed view. Tests insert the effect's
-    /// decl into the program shell to populate this map.
+    /// Map effect canonical name → ops sorted alphabetically. Seeded from
+    /// `EffectInfo::effect_ops` so imported effects are visible, then extended
+    /// by scanning local `Decl::EffectDef` declarations in the input program.
     pub(crate) effect_ops: HashMap<String, Vec<String>>,
     /// `(effect, op)` → source parameter count, populated from local effect
     /// declarations. Used to distinguish eta-reduced op references (`ping!`
@@ -155,8 +150,8 @@ impl<'a> Translator<'a> {
 
     /// Build a map of handler name → pre-translated handler arms for
     /// handler-as-value lowering. Called after the main translation pass.
-    /// Skips handlers whose effects aren't visible to the translator
-    /// (cross-module effects that aren't in `effect_ops`).
+    /// Skips handlers only if their effect metadata is missing from the
+    /// entry-point `EffectInfo` table.
     pub(crate) fn build_handler_value_map(&mut self) -> HandlerValueMap {
         use crate::codegen::monadic::ir::HandlerValueInfo;
         let decls: Vec<(String, HandlerBody)> = self.handler_decls.clone().into_iter().collect();
@@ -173,8 +168,9 @@ impl<'a> Translator<'a> {
                 .iter()
                 .map(|e| self.canonical_effect_name(e))
                 .collect();
-            // Skip handlers whose effects aren't in effect_ops (cross-module
-            // effects not visible to the translator).
+            // Defensive guard: if the entry-point metadata omitted one of
+            // the handler's effects, leave it out of the handler-value map
+            // instead of building an op tuple with unknown indexes.
             if canonical_effects
                 .iter()
                 .any(|e| !self.effect_ops.contains_key(e))
@@ -217,11 +213,9 @@ impl<'a> Translator<'a> {
     /// `handler_arms`). In that case we have no name to look up, so we
     /// return `1` and rely on the lowerer's authoritative recomputation.
     ///
-    /// A non-empty `effect` not present in `effect_ops` indicates a
-    /// cross-module effect the translator wasn't given visibility into.
-    /// That's the open question flagged on step 4 — panic loudly so the
-    /// real wiring (step 8 / extending `EffectInfo` with the effect-op
-    /// map) can't be skipped silently.
+    /// A non-empty `effect` not present in `effect_ops` indicates that the
+    /// entry-point metadata omitted an effect definition that typechecking
+    /// nevertheless resolved for a perform site.
     pub(crate) fn op_index(&self, effect: &str, op: &str) -> u32 {
         if effect.is_empty() {
             return 1;
@@ -229,8 +223,7 @@ impl<'a> Translator<'a> {
         let Some(ops) = self.effect_ops.get(effect) else {
             panic!(
                 "monadic::translate: effect '{}' not visible to the translator (looking up op \
-                 '{}'). Cross-module effect ops are not yet wired — extend `EffectInfo` (e.g. \
-                 with an `effect_ops` field) at the entry-point boundary (planning step 8).",
+                 '{}'). The entry-point EffectInfo.effect_ops table is incomplete.",
                 effect, op
             );
         };
