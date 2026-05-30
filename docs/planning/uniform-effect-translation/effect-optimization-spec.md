@@ -7,7 +7,8 @@ specifications for the effect optimization stage (stage 11).
 Status: **implemented conservatively**. Bind-collapse, Bind→Let promotion,
 and first-milestone direct-call have landed. Direct-call deliberately skips
 cleanup/native/composite/dynamic specialization cases that need separate
-design.
+design. Native direct-call specialization is planned separately in
+[native-direct-call-specialization.md](./native-direct-call-specialization.md).
 
 ## Required context
 

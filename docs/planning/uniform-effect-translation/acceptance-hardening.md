@@ -158,9 +158,10 @@ Pick exactly one next track after this checklist is green:
    Reduce duplication and name the protocol helpers before more optimization.
    Completed targets include marked-control tuple/arm helpers, callback
    boundary identity/type helpers, finally cleanup sequencing, and separating
-   the static native bootstrap metadata from the Core builders. Remaining
-   cleanup is mostly structural: Ref/Vec bootstrap builders and duplicated
-   `with` delimiter construction.
+   the static native bootstrap metadata and Ref/Vec store-specific builders
+   from the bootstrap shell. Result-delimiter arm construction is also shared.
+   Remaining cleanup is mostly opportunistic; new semantic work should get its
+   own plan.
 
 2. **Native direct-call specialization.**
    Optimize BEAM-native effects by bypassing evidence lookup where the handler
@@ -248,3 +249,26 @@ Conclusion:
   shakedown corpus.
 - Next recommended track remains the **abstraction cleanup pass** before adding
   native direct-call or `finally_block`-preserving direct-call.
+
+## Post-Cleanup Hardening Run: 2026-05-30
+
+Status: **green** after the abstraction cleanup batch.
+
+- `cargo test -q -p saga --lib`
+  - `1121 passed; 0 failed; 12 ignored`
+- `cargo test -q --test codegen_integration`
+  - `102 passed`
+- `cargo test -q -p saga --lib codegen::lower_monadic`
+  - `93 passed`
+- `cargo test -q --test effect_property_tests`
+  - `63 passed`
+- `cargo test -q --test stdlib_tests stdlib_test_suite`
+  - `1 passed`
+- `cargo test -q --test e2e`
+  - `1 passed`
+- `cargo fmt --check`
+  - passed
+- `cargo clippy -q`
+  - passed
+- `./run_examples.sh`
+  - passed with exit 0

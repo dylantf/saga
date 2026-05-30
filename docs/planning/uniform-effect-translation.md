@@ -93,8 +93,13 @@ in pure-or-tail-resumptive functions) holds.
 **Current hardening track:** acceptance is green and the abstraction cleanup
 pass is in progress. Completed cleanup has centralized marked-control helpers,
 callback boundary helpers, `finally` sequencing, and static native bootstrap
-metadata. Remaining cleanup should stay mechanical unless it is promoted to a
-separate semantic task.
+metadata plus Ref/Vec store-specific builders. Remaining cleanup should stay
+mechanical unless it is promoted to a separate semantic task.
+
+**Next semantic track:** native direct-call specialization is planned in
+[native-direct-call-specialization.md](./uniform-effect-translation/native-direct-call-specialization.md).
+Implement it as a separate conservative Stage 11 rewrite after committing the
+cleanup batch.
 
 ### Cleanup (single mechanical commit)
 

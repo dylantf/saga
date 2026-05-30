@@ -908,6 +908,12 @@ while preserving the slow-path oracle.
   external shakedown, slow-path oracle checks, emitted-Core spot checks, and
   then choose one next track.
 
+- **Next semantic track — native direct-call specialization.** Planned in
+  [`native-direct-call-specialization.md`](./native-direct-call-specialization.md).
+  First milestone should rewrite only simple first-order native yields to
+  `ForeignCall`, after moving native metadata to a backend-neutral module. It
+  should continue skipping `spawn`, Ref, Vec, dynamic, and composite handlers.
+
 - **Abstraction cleanup — STARTED.** First low-risk extraction centralized the
   marked control-result protocol in `lower_monadic::util`: shared
   `ABORT_TAG` / `VALUE_RESULT_TAG`, foreign-control propagation arms, and
@@ -919,13 +925,14 @@ while preserving the slow-path oracle.
   detection from both the app and wrapper paths. Third extraction named the
   native op closure shell and not-implemented native-op stub constructor in
   `bootstrap.rs`; the static native effect table now lives in a child module,
-  leaving the bespoke Ref/Vec call bodies untouched. Fourth extraction
-  factored finally cleanup sequencing into a shared `sequence_finally_then`
-  helper, used by both `resume` cleanup and non-resuming arm cleanup. Fifth
-  extraction unified the local-marker/foreign-control arm construction for
-  result delimiters (`build_result_delimiter_k`,
-  `wrap_with_result_delimiter_to_k`, and `wrap_with_result_delimiter_raw`).
-  Behavior unchanged; focused lowerer/effect/property/e2e checks stayed green.
+  and the bespoke Ref/Vec store backends live in `bootstrap/stores.rs`.
+  Fourth extraction factored finally cleanup sequencing into a shared
+  `sequence_finally_then` helper, used by both `resume` cleanup and
+  non-resuming arm cleanup. Fifth extraction unified the
+  local-marker/foreign-control arm construction for result delimiters
+  (`build_result_delimiter_k`, `wrap_with_result_delimiter_to_k`, and
+  `wrap_with_result_delimiter_raw`). Behavior unchanged; focused
+  lowerer/effect/property/e2e checks stayed green.
 
 ### Recommended Implementation Order
 
