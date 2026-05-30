@@ -8,6 +8,7 @@ use crate::ast::Pat;
 use crate::codegen::cerl::{CArm, CExpr, CLit, CPat};
 use crate::codegen::monadic::ir::{Atom, BindMode, MExpr, MVar};
 
+use super::exprs_edge::binop_atoms;
 use super::pats::lower_param_names;
 use super::util::{core_var, marked_control_tuple, propagate_marked_control_arm};
 use super::{LowerCtx, Lowerer};
@@ -597,37 +598,117 @@ impl<'ctx> Lowerer<'ctx> {
 
     /// Lower `Let { var, value, body }` — a pure (non-yielding) binder
     /// produced by effect optimization's Bind→Let promotion rewrite.
-    ///
-    /// 7c restriction: `value` must be `Pure(atom)`. The translator never
-    /// emits `Let`, so this restriction is reachable only via hand-built
-    /// IR (tests). It is sound at this stage.
-    ///
-    /// **Deadline: step 10.** The effect-optimization spec's §2 purity
-    /// predicate (see `effect-optimization-spec.md`) classifies a much
-    /// richer subset as pure — pure `App`, `Case` with all-pure arms, `If`
-    /// with both-pure branches, nested `Let`, etc. By the time step 10
-    /// (Bind→Let promotion) lands, `Let.value` will routinely be one of
-    /// those shapes, and this restriction breaks. The right shape then is
-    /// a separate `lower_pure_expr(&self, &MExpr) -> CExpr` defined only
-    /// on the pure subset — it returns a direct CExpr value with no
-    /// `_ReturnK` threading. `lower_let` becomes
-    /// `CExpr::Let(var, lower_pure_expr(value), lower_expr(body))`. That
-    /// function is structurally different from `lower_expr` (no K
-    /// threading), so it deserves to live separately rather than being
-    /// merged in. Don't build it speculatively here — wait for step 10's
-    /// optimizer output to drive the cases.
     fn lower_let(&mut self, var: &MVar, value: &MExpr, body: &MExpr, ctx: &LowerCtx) -> CExpr {
-        let value_ce = match value {
-            MExpr::Pure(atom) => self.lower_atom(atom, ctx),
-            other => panic!(
-                "lower_let: Let value must be Pure(atom) until step 10's Bind→Let promotion lands \
-                 and brings a `lower_pure_expr` for the broader pure subset; got {:?}",
-                std::mem::discriminant(other)
-            ),
-        };
+        let value_ce = self.lower_pure_expr(value, ctx);
         let body_ctx = ctx.with_local(var.name.clone());
         let body_ce = self.lower_expr(body, &body_ctx);
         CExpr::Let(core_var(&var.name), Box::new(value_ce), Box::new(body_ce))
+    }
+
+    /// Lower the recursively pure subset accepted by Bind→Let promotion to a
+    /// Core expression that returns its value directly, rather than applying
+    /// the ambient continuation.
+    fn lower_pure_expr(&mut self, expr: &MExpr, ctx: &LowerCtx) -> CExpr {
+        match expr {
+            MExpr::Pure(atom) => self.lower_atom(atom, ctx),
+            MExpr::Let { var, value, body } => {
+                let value_ce = self.lower_pure_expr(value, ctx);
+                let body_ctx = ctx.with_local(var.name.clone());
+                let body_ce = self.lower_pure_expr(body, &body_ctx);
+                CExpr::Let(core_var(&var.name), Box::new(value_ce), Box::new(body_ce))
+            }
+            MExpr::Case {
+                scrutinee, arms, ..
+            } => {
+                let scrutinee = self.lower_atom(scrutinee, ctx);
+                let arms = arms
+                    .iter()
+                    .map(|arm| self.lower_pure_arm(arm, ctx))
+                    .collect();
+                CExpr::Case(Box::new(scrutinee), arms)
+            }
+            MExpr::If {
+                cond,
+                then_branch,
+                else_branch,
+                ..
+            } => {
+                let cond = self.lower_atom(cond, ctx);
+                let then_branch = self.lower_pure_expr(then_branch, ctx);
+                let else_branch = self.lower_pure_expr(else_branch, ctx);
+                CExpr::Case(
+                    Box::new(cond),
+                    vec![
+                        CArm {
+                            pat: CPat::Lit(CLit::Atom("true".to_string())),
+                            guard: None,
+                            body: then_branch,
+                        },
+                        CArm {
+                            pat: CPat::Lit(CLit::Atom("false".to_string())),
+                            guard: None,
+                            body: else_branch,
+                        },
+                    ],
+                )
+            }
+            MExpr::BinOp {
+                op, left, right, ..
+            } => {
+                let l = self.lower_atom(left, ctx);
+                let r = self.lower_atom(right, ctx);
+                binop_atoms(op, l, r)
+            }
+            MExpr::UnaryMinus { value, .. } => {
+                let v = self.lower_atom(value, ctx);
+                CExpr::Call(
+                    "erlang".to_string(),
+                    "-".to_string(),
+                    vec![CExpr::Lit(CLit::Int(0)), v],
+                )
+            }
+            MExpr::DictMethodAccess {
+                dict, method_index, ..
+            } => {
+                let d = self.lower_atom(dict, ctx);
+                CExpr::Call(
+                    "erlang".to_string(),
+                    "element".to_string(),
+                    vec![CExpr::Lit(CLit::Int(*method_index as i64 + 1)), d],
+                )
+            }
+            MExpr::App { .. }
+            | MExpr::FieldAccess { .. }
+            | MExpr::RecordUpdate { .. }
+            | MExpr::BitString { .. } => self.lower_pure_expr_via_identity_k(expr, ctx),
+            other => panic!(
+                "lower_pure_expr: MExpr variant is not in Bind→Let's pure subset: {:?}",
+                std::mem::discriminant(other)
+            ),
+        }
+    }
+
+    fn lower_pure_arm(&mut self, arm: &crate::codegen::monadic::ir::MArm, ctx: &LowerCtx) -> CArm {
+        let pat = self.lower_pat(&arm.pattern);
+        let arm_ctx = ctx.with_pat_locals(&arm.pattern);
+        let guard = arm.guard.as_ref().map(|g| self.lower_guard(g, &arm_ctx));
+        let body = self.lower_pure_expr(&arm.body, &arm_ctx);
+        CArm { pat, guard, body }
+    }
+
+    /// Bridge pure uniform-CPS calls back to direct value position. Pure Saga
+    /// functions still have the uniform `(args..., Evidence, ReturnK)` ABI, so
+    /// value-position lowering supplies an identity K and uses the apply result.
+    fn lower_pure_expr_via_identity_k(&mut self, expr: &MExpr, ctx: &LowerCtx) -> CExpr {
+        let k_name = self.fresh_helper_name();
+        let k_arg = self.fresh_helper_name();
+        let id_k = CExpr::Fun(vec![k_arg.clone()], Box::new(CExpr::Var(k_arg)));
+        let value_ctx = ctx.with_return_k(k_name.clone());
+        CExpr::Let(
+            k_name,
+            Box::new(id_k),
+            Box::new(self.lower_expr(expr, &value_ctx)),
+        )
     }
 
     /// Lower an `Atom::Lambda` — closure value at construction.

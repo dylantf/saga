@@ -1,10 +1,10 @@
 // effect_opt/ — monadic IR optimization stage.
 //
-// Currently implements step 9:
+// Currently implements steps 9-10:
 //   - bind collapse — Bind(Pure(a), x, B) → B[x := a]
+//   - Bind→Let promotion — pure binders become direct lets
 //
 // Still deferred:
-//   - step 10: bind_to_let.rs     — Bind → Let where value is pure
 //   - step 11: direct_call.rs     — tail-resumptive Yield → inlined arm body
 //
 // See docs/planning/uniform-effect-translation/effect-optimization-spec.md
@@ -18,6 +18,7 @@ use crate::codegen::monadic::ir::{
     Atom, EffectInfo, MArm, MDecl, MDictConstructor, MExpr, MFunBinding, MHandler, MHandlerArm,
     MProgram, MVal, MVar,
 };
+use crate::typechecker;
 use std::collections::HashSet;
 
 /// Run the effect-optimization stage with default options.
@@ -32,14 +33,14 @@ pub fn run(m: MProgram, h: &HandlerAnalysis, e: &EffectInfo) -> MProgram {
 pub fn run_with_options(
     m: MProgram,
     _h: &HandlerAnalysis,
-    _e: &EffectInfo,
+    e: &EffectInfo,
     opts: RunOptions,
 ) -> MProgram {
     if opts.skip {
         return m;
     }
 
-    let mut optimizer = Optimizer::new(opts);
+    let mut optimizer = Optimizer::new(opts, e);
     optimizer.optimize_program(m)
 }
 
@@ -50,8 +51,9 @@ pub struct RunOptions {
     pub skip: bool,
 }
 
-struct Optimizer {
+struct Optimizer<'info, 'data> {
     opts: RunOptions,
+    effect_info: &'info EffectInfo<'data>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -101,9 +103,9 @@ impl<T> SubstOutcome<T> {
     }
 }
 
-impl Optimizer {
-    fn new(opts: RunOptions) -> Self {
-        Self { opts }
+impl<'info, 'data> Optimizer<'info, 'data> {
+    fn new(opts: RunOptions, effect_info: &'info EffectInfo<'data>) -> Self {
+        Self { opts, effect_info }
     }
 
     fn optimize_program(&mut self, mut program: MProgram) -> MProgram {
@@ -157,9 +159,11 @@ impl Optimizer {
 
     fn optimize_expr(&mut self, expr: MExpr) -> (MExpr, Change) {
         let (expr, child_change) = self.optimize_children(expr);
-        let (expr, local_change) = self.try_bind_collapse(expr);
+        let (expr, collapse_change) = self.try_bind_collapse(expr);
+        let (expr, let_change) = self.try_bind_to_let(expr);
         let mut change = child_change;
-        change.mark_if(local_change);
+        change.mark_if(collapse_change);
+        change.mark_if(let_change);
         (expr, change)
     }
 
@@ -527,6 +531,104 @@ impl Optimizer {
         }
     }
 
+    fn try_bind_to_let(&self, expr: MExpr) -> (MExpr, Change) {
+        if !self.opts.bind_to_let() {
+            return (expr, Change::Unchanged);
+        }
+
+        let MExpr::Bind {
+            var,
+            value,
+            body,
+            mode,
+        } = expr
+        else {
+            return (expr, Change::Unchanged);
+        };
+
+        if self.expr_is_pure(&value) {
+            (MExpr::Let { var, value, body }, Change::Changed)
+        } else {
+            (
+                MExpr::Bind {
+                    var,
+                    value,
+                    body,
+                    mode,
+                },
+                Change::Unchanged,
+            )
+        }
+    }
+
+    fn expr_is_pure(&self, expr: &MExpr) -> bool {
+        match expr {
+            MExpr::Pure(_) => true,
+            MExpr::Let { value, body, .. } => self.expr_is_pure(value) && self.expr_is_pure(body),
+            MExpr::Case { arms, .. } => arms.iter().all(|arm| {
+                arm.guard.as_ref().is_none_or(|g| self.expr_is_pure(g))
+                    && self.expr_is_pure(&arm.body)
+            }),
+            MExpr::If {
+                then_branch,
+                else_branch,
+                ..
+            } => self.expr_is_pure(then_branch) && self.expr_is_pure(else_branch),
+            MExpr::App { head, .. } => self.app_is_pure(head),
+            MExpr::FieldAccess { .. }
+            | MExpr::RecordUpdate { .. }
+            | MExpr::DictMethodAccess { .. }
+            | MExpr::BinOp { .. }
+            | MExpr::UnaryMinus { .. }
+            | MExpr::BitString { .. } => true,
+            MExpr::Yield { .. }
+            | MExpr::Bind { .. }
+            | MExpr::With { .. }
+            | MExpr::Resume { .. }
+            | MExpr::ForeignCall { .. }
+            | MExpr::Receive { .. }
+            | MExpr::LetFun { .. }
+            | MExpr::HandlerValue { .. } => false,
+        }
+    }
+
+    fn app_is_pure(&self, head: &Atom) -> bool {
+        match head {
+            Atom::Var { name, source } => {
+                if let Some(effects) = self.effect_info.let_effect_bindings.get(&name.name) {
+                    return effects.is_empty();
+                }
+                self.effect_info
+                    .type_at_node
+                    .get(source)
+                    .is_some_and(fun_type_effects_are_empty)
+            }
+            Atom::QualifiedRef {
+                module,
+                name,
+                source,
+            } => {
+                let canonical = format!("{module}.{name}");
+                self.effect_info
+                    .fun_effects
+                    .get(&canonical)
+                    .or_else(|| self.effect_info.fun_effects.get(name))
+                    .is_some_and(|effects| effects.is_empty())
+                    || self
+                        .effect_info
+                        .type_at_node
+                        .get(source)
+                        .is_some_and(fun_type_effects_are_empty)
+            }
+            Atom::Lambda { source, .. } => self
+                .effect_info
+                .type_at_node
+                .get(source)
+                .is_some_and(fun_type_effects_are_empty),
+            _ => false,
+        }
+    }
+
     fn optimize_arm(&mut self, arm: MArm) -> (MArm, Change) {
         let (guard, guard_change) = optimize_optional_expr_with(self, arm.guard);
         let (body, body_change) = self.optimize_expr(arm.body);
@@ -706,6 +808,10 @@ impl RunOptions {
     fn bind_collapse(self) -> bool {
         !self.skip
     }
+
+    fn bind_to_let(self) -> bool {
+        !self.skip
+    }
 }
 
 fn optimize_optional_expr_with(
@@ -744,6 +850,17 @@ fn optimize_optional_atom_with(
             (Some(atom), change)
         }
         None => (None, Change::Unchanged),
+    }
+}
+
+fn fun_type_effects_are_empty(ty: &typechecker::Type) -> bool {
+    match ty {
+        typechecker::Type::Fun(_, ret, row) => {
+            row.is_empty()
+                && (!matches!(ret.as_ref(), typechecker::Type::Fun(_, _, _))
+                    || fun_type_effects_are_empty(ret))
+        }
+        _ => false,
     }
 }
 
@@ -2067,7 +2184,7 @@ fn pat_has_nonbinding_ref_in_handler_arm(params: &[Pat], name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::codegen::monadic::ir::MProgram;
+    use crate::codegen::monadic::ir::{EffectOpRef, MProgram};
     use crate::typechecker::ResolvedEffectOp;
     use std::collections::{HashMap, HashSet};
 
@@ -2193,7 +2310,7 @@ mod tests {
     }
 
     #[test]
-    fn bind_collapse_blocks_pattern_capture() {
+    fn bind_collapse_blocks_pattern_capture_but_promotes_to_let() {
         let f = Fixture::new();
         let info = f.info();
         let x = mv("x", 1);
@@ -2209,6 +2326,178 @@ mod tests {
             source: crate::ast::NodeId(30),
         };
         let prog = val_program(bind_pure(x, replacement, body));
+
+        let out = run(prog, &f.h, &info);
+
+        assert_eq!(
+            out,
+            val_program(MExpr::Let {
+                var: mv("x", 1),
+                value: Box::new(MExpr::Pure(var("y", 2))),
+                body: Box::new(MExpr::Case {
+                    scrutinee: var("scrut", 3),
+                    arms: vec![MArm {
+                        pattern: pat_var("y", 4),
+                        guard: None,
+                        body: MExpr::Pure(var("x", 1)),
+                        span: span(),
+                    }],
+                    source: crate::ast::NodeId(30),
+                }),
+            })
+        );
+    }
+
+    #[test]
+    fn bind_to_let_promotes_structurally_pure_expression() {
+        let f = Fixture::new();
+        let info = f.info();
+        let value = MExpr::BinOp {
+            op: crate::ast::BinOp::Add,
+            left: lit_int("1", 1),
+            right: lit_int("2", 2),
+            source: crate::ast::NodeId(40),
+        };
+        let body = MExpr::Pure(var("x", 1));
+        let prog = val_program(bind_expr(mv("x", 1), value.clone(), body.clone()));
+
+        let out = run(prog, &f.h, &info);
+
+        assert_eq!(
+            out,
+            val_program(MExpr::Let {
+                var: mv("x", 1),
+                value: Box::new(value),
+                body: Box::new(body),
+            })
+        );
+    }
+
+    #[test]
+    fn bind_to_let_keeps_yield_monadic() {
+        let f = Fixture::new();
+        let info = f.info();
+        let value = MExpr::Yield {
+            op: EffectOpRef {
+                effect: "Log".to_string(),
+                op: "log".to_string(),
+                op_index: 1,
+            },
+            args: vec![lit_int("1", 1)],
+            source: crate::ast::NodeId(50),
+        };
+        let body = MExpr::Pure(var("x", 1));
+        let prog = val_program(bind_expr(mv("x", 1), value, body));
+
+        let out = run(prog.clone(), &f.h, &info);
+
+        assert_eq!(out, prog);
+    }
+
+    #[test]
+    fn bind_to_let_keeps_foreign_call_conservative() {
+        let f = Fixture::new();
+        let info = f.info();
+        let value = MExpr::ForeignCall {
+            module: "erlang".to_string(),
+            func: "monotonic_time".to_string(),
+            args: vec![],
+            source: crate::ast::NodeId(60),
+        };
+        let body = MExpr::Pure(var("x", 1));
+        let prog = val_program(bind_expr(mv("x", 1), value, body));
+
+        let out = run(prog.clone(), &f.h, &info);
+
+        assert_eq!(out, prog);
+    }
+
+    #[test]
+    fn bind_to_let_keeps_with_conservative() {
+        let f = Fixture::new();
+        let info = f.info();
+        let value = MExpr::With {
+            handler: MHandler::Static {
+                effects: vec!["Log".to_string()],
+                arms: vec![],
+                return_clause: None,
+                source: crate::ast::NodeId(65),
+            },
+            body: Box::new(MExpr::Pure(lit_int("1", 1))),
+            source: crate::ast::NodeId(66),
+        };
+        let body = MExpr::Pure(var("x", 1));
+        let prog = val_program(bind_expr(mv("x", 1), value, body));
+
+        let out = run(prog.clone(), &f.h, &info);
+
+        assert_eq!(out, prog);
+    }
+
+    #[test]
+    fn bind_to_let_promotes_app_with_closed_empty_effect_row() {
+        let mut f = Fixture::new();
+        let source = crate::ast::NodeId(70);
+        let head_source = crate::ast::NodeId(71);
+        f.type_at_node.insert(head_source, pure_fun_type());
+        let info = f.info();
+        let value = MExpr::App {
+            head: var("pure_fun", 71),
+            args: vec![lit_int("1", 1)],
+            source,
+        };
+        let body = MExpr::Pure(var("x", 1));
+        let prog = val_program(bind_expr(mv("x", 1), value.clone(), body.clone()));
+
+        let out = run(prog, &f.h, &info);
+
+        assert_eq!(
+            out,
+            val_program(MExpr::Let {
+                var: mv("x", 1),
+                value: Box::new(value),
+                body: Box::new(body),
+            })
+        );
+    }
+
+    #[test]
+    fn bind_to_let_keeps_app_with_effect_row() {
+        let mut f = Fixture::new();
+        let source = crate::ast::NodeId(80);
+        let head_source = crate::ast::NodeId(81);
+        f.type_at_node
+            .insert(head_source, effectful_fun_type("Log"));
+        let info = f.info();
+        let value = MExpr::App {
+            head: var("log_fun", 81),
+            args: vec![lit_int("1", 1)],
+            source,
+        };
+        let body = MExpr::Pure(var("x", 1));
+        let prog = val_program(bind_expr(mv("x", 1), value, body));
+
+        let out = run(prog.clone(), &f.h, &info);
+
+        assert_eq!(out, prog);
+    }
+
+    #[test]
+    fn bind_to_let_does_not_treat_app_result_type_as_purity_evidence() {
+        let mut f = Fixture::new();
+        let source = crate::ast::NodeId(90);
+        f.type_at_node.insert(
+            source,
+            crate::typechecker::Type::Con("Int".to_string(), vec![]),
+        );
+        let info = f.info();
+        let value = MExpr::App {
+            head: var("unknown_fun", 91),
+            args: vec![lit_int("1", 1)],
+            source,
+        };
+        let body = MExpr::Pure(var("x", 1));
+        let prog = val_program(bind_expr(mv("x", 1), value, body));
 
         let out = run(prog.clone(), &f.h, &info);
 
@@ -2226,9 +2515,13 @@ mod tests {
     }
 
     fn bind_pure(var: MVar, value: Atom, body: MExpr) -> MExpr {
+        bind_expr(var, MExpr::Pure(value), body)
+    }
+
+    fn bind_expr(var: MVar, value: MExpr, body: MExpr) -> MExpr {
         MExpr::Bind {
             var,
-            value: Box::new(MExpr::Pure(value)),
+            value: Box::new(value),
             body: Box::new(body),
             mode: crate::codegen::monadic::ir::BindMode::Sequence,
         }
@@ -2261,6 +2554,25 @@ mod tests {
             id: crate::ast::NodeId(id),
             span: span(),
         }
+    }
+
+    fn pure_fun_type() -> crate::typechecker::Type {
+        crate::typechecker::Type::Fun(
+            Box::new(crate::typechecker::Type::Con("Int".to_string(), vec![])),
+            Box::new(crate::typechecker::Type::Con("Int".to_string(), vec![])),
+            crate::typechecker::EffectRow::empty(),
+        )
+    }
+
+    fn effectful_fun_type(effect: &str) -> crate::typechecker::Type {
+        crate::typechecker::Type::Fun(
+            Box::new(crate::typechecker::Type::Con("Int".to_string(), vec![])),
+            Box::new(crate::typechecker::Type::Con("Int".to_string(), vec![])),
+            crate::typechecker::EffectRow::closed(vec![crate::typechecker::EffectEntry::unnamed(
+                effect.to_string(),
+                vec![],
+            )]),
+        )
     }
 
     fn span() -> crate::token::Span {

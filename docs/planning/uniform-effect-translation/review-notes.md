@@ -881,6 +881,16 @@ while preserving the slow-path oracle.
   nested expressions refer to the collapsed binder. Guard tests cover simple
   substitution, fixpoint chains, shadowing, and pattern-capture blocking.
 
+- **Step 10 / Bind-to-Let promotion — DONE.** Remaining monadic binds whose
+  value is recursively pure become `Let`, letting the lowerer emit direct
+  value-position Core instead of threading the rest of the computation through
+  a bind continuation. The purity predicate is deliberately conservative:
+  structural pure forms promote; apps promote only from callee effect metadata
+  or a closed-empty function type on the callee; `ForeignCall`, `With`,
+  `Receive`, `Resume`, `HandlerValue`, and unknown apps stay monadic. The
+  lowerer now has a `lower_pure_expr` path for the promoted pure subset; pure
+  uniform-CPS calls are bridged through a local identity continuation.
+
 ### Recommended Implementation Order
 
 1. **Build optimizer scaffolding first.**
@@ -900,7 +910,7 @@ while preserving the slow-path oracle.
      capture unlikely; the rewrite should still either enforce the invariant or
      alpha-rename on collision.
 
-3. **Then Bind-to-Let promotion.**
+3. **Then Bind-to-Let promotion — DONE.**
    - Start conservative. Promoting too little is only slow; promoting an
      effectful expression is a miscompile.
    - `Pure`, structural record/tuple/operator forms, and apps whose callee has

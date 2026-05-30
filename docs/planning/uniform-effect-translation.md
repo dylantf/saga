@@ -1,7 +1,7 @@
 # Uniform Effect Translation
 
 Status: **phase 1 slow path complete; new path active; phase 2 effect
-optimization next.**
+optimization in progress.**
 
 ## Status
 
@@ -83,7 +83,7 @@ rewritten independently.
 ### Strategic phase 2 — effect optimization rewrites
 
 - [x] **9.** `effect_opt::bind_collapse` — see [effect-optimization-spec.md §1](./uniform-effect-translation/effect-optimization-spec.md)
-- [ ] **10.** `effect_opt::bind_to_let` — see [effect-optimization-spec.md §2](./uniform-effect-translation/effect-optimization-spec.md)
+- [x] **10.** `effect_opt::bind_to_let` — see [effect-optimization-spec.md §2](./uniform-effect-translation/effect-optimization-spec.md)
 - [ ] **11.** `effect_opt::direct_call` — see [effect-optimization-spec.md §3](./uniform-effect-translation/effect-optimization-spec.md)
 
 **Milestone:** new path performance matches or exceeds old path on the

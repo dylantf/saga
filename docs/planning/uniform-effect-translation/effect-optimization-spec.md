@@ -4,7 +4,8 @@ Companion to [uniform-effect-translation.md](../uniform-effect-translation.md)
 and [monadic-ir-spec.md](./monadic-ir-spec.md). Concrete rewrite
 specifications for the effect optimization stage (stage 11).
 
-Status: **draft / design**. Subject to revision during implementation.
+Status: **partially implemented**. Bind-collapse and Bind→Let promotion have
+landed; direct-call remains design/implementation work.
 
 ## Required context
 
@@ -42,8 +43,11 @@ fixpoint:
 2. **Bind→Let promotion** — pure binders become Erlang lets
 3. **Direct-call** — tail-resumptive `Yield` becomes inlined arm body
 
-Order in the fixpoint loop: try direct-call, then Bind→Let, then
-bind-collapse, bottom-up at each node. Loop until no rewrite fires.
+Implemented order in the fixpoint loop: optimize children, then bind-collapse,
+then Bind→Let, bottom-up at each node. Direct-call will be inserted later, but
+must preserve this property: bind-collapse runs before Bind→Let so
+`Bind(Pure(a), x, body)` gets beta-reduced instead of being frozen as `Let`.
+Loop until no rewrite fires.
 
 ---
 
@@ -162,10 +166,10 @@ iff `value` is **recursively pure** — i.e. `Yield` is not reachable from
 | `If { then_branch, else_branch, .. }` | both branches pure |
 | `App { head, .. }` | callee's effect row is `{}` (look up via `ResolutionMap` + typechecker effects) |
 | `FieldAccess { .. }`, `RecordUpdate { .. }`, `DictMethodAccess { .. }`, `BinOp { .. }`, `UnaryMinus { .. }`, `BitString { .. }` | yes (no side effects in IR semantics) |
-| `ForeignCall { .. }` | yes if marked pure in the FFI signature, else no (conservative default: no) |
+| `ForeignCall { .. }` | no in the first implementation (conservative default until the FFI signature carries an explicit purity bit) |
 | `Yield { .. }` | **no** |
 | `Bind { .. }` | **no** (it's still effectful even if its value happens to be pure — the rewrite is the very thing that would change that) |
-| `With { .. }` | yes if `body` is pure under the new handler's evidence; equivalently, yes if the handler discharges the only effects in `body`. Conservative: no, unless body is statically pure. |
+| `With { .. }` | no in the first implementation. Even a pure body may run an effectful return clause, so this needs explicit return-clause analysis before promotion. |
 | `Resume { .. }` | no (semantically yields control to the captured continuation) |
 | `Receive { .. }` | no (mailbox interaction) |
 | `Lambda { .. }` body | does **not** affect purity at the use site — constructing a closure is pure |
@@ -382,9 +386,9 @@ Single shared bottom-up fixpoint:
 loop {
     let mut changed = false;
     walk MProgram bottom-up:
-        at each node, try direct-call;
-        at each node, try Bind→Let promotion;
         at each node, try bind-collapse;
+        at each node, try Bind→Let promotion;
+        at each node, try direct-call once it lands;
         if any fired, set changed = true.
     if !changed { break }
 }
@@ -397,6 +401,9 @@ Rationale:
   matches bind-collapse and eliminates the binder.
 - **bind-collapse → Bind→Let** can also be productive (collapsing reveals
   a pure expression underneath that was previously gated by a bound name).
+- **bind-collapse must precede Bind→Let** for `Bind(Pure(a), x, body)`.
+  Promoting that shape to `Let` first preserves correctness but misses the
+  beta-reduction win the rewrite exists to recover.
 - **Bind→Let → direct-call** doesn't compose (Let doesn't host Yield) —
   no productive sequence there.
 
