@@ -109,11 +109,12 @@ pre/post optimizer structural counts for `Yield`, `Bind`, `Let`,
 `Yield` and per-target `ForeignCall` breakdowns. Use this before choosing the
 next optimizer milestone.
 
-**Next optimizer design gate:** interprocedural handler specialization is
-scoped in
+**Latest optimizer milestone:** interprocedural handler specialization
+milestone 1 is implemented; see
 [interprocedural-handler-specialization.md](./uniform-effect-translation/interprocedural-handler-specialization.md).
-The first proposed milestone is conservative same-module helper inlining under
-a known handler stack; function-variant generation is deliberately deferred.
+It performs conservative same-module helper inlining under a known handler
+stack for single-clause, single-yield helpers. Function-variant generation is
+deliberately deferred.
 
 ### Cleanup (single mechanical commit)
 

@@ -18,10 +18,11 @@ remaining `Yield`s down by `Effect::op`, which is the quickest way to separate
 missed optimizer opportunities from deliberately slow-path operations such as
 multishot, abort, value-producing resume, dynamic handlers, or cleanup arms.
 
-Interprocedural handler specialization is intentionally not part of the local
-direct-call rewrite. See
+Interprocedural handler specialization is intentionally separate from the local
+direct-call rewrite. Milestone 1 is implemented as conservative same-module
+helper inlining for single-clause, single-yield helpers. See
 [interprocedural-handler-specialization.md](./interprocedural-handler-specialization.md)
-for the proposed same-module inlining milestone.
+for details and deferred function-variant specialization.
 
 ## Required context
 

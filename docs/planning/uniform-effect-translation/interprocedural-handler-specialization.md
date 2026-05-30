@@ -1,6 +1,6 @@
 # Interprocedural Handler Specialization
 
-Status: **design gate before implementation**.
+Status: **milestone 1 implemented**.
 
 The monadic optimizer can currently direct-call only when the `Yield` is
 lexically inside the handled body:
@@ -43,6 +43,8 @@ powerful, but they are also an ABI/code-size feature and need their own design.
 
 ## Milestone 1: Conservative Same-Module Inlining
 
+Implemented in `src/codegen/monadic/effect_opt/mod.rs`.
+
 Rewrite eligible direct calls under a non-empty handler stack:
 
 ```text
@@ -66,8 +68,11 @@ Eligibility:
   - `Pat::Lit(Unit)`;
 - substitution is capture-safe using the existing substitution helpers;
 - body size is under a small fixed budget;
-- callee body does not contain `LetFun`, `HandlerValue`, `Receive`, or dynamic
-  handler installation for the first milestone;
+- callee body contains exactly one `Yield`;
+- callee body does not contain `With`, `LetFun`, `HandlerValue`, `Receive`, or
+  lambda bodies for the first milestone;
+- after substitution, the inlined body must expose a direct-call opportunity
+  under the current handler stack;
 - do not inline inside lambda bodies unless that lambda body itself is being
   optimized from a call-site substitution.
 
@@ -82,6 +87,9 @@ and unknown heads.
 - Inlining exposes callee `Yield`s to the caller's handler stack. That is the
   point, but it is also the risk: only inline bodies whose control structure is
   simple enough that the local optimizer remains the only semantic rewrite.
+- The single-yield gate is deliberate. A helper such as `log! (); fail! "x"`
+  might expose a direct-callable `Log` operation while leaving a new residual
+  `Fail` at the call site. Milestone 1 skips that partial-consumption shape.
 - The slow path remains the oracle. If any eligibility check is uncertain,
   skip.
 - Return clauses and evidence routing should not be reimplemented here. The
@@ -106,7 +114,7 @@ come from simple helper boundaries.
 
 ## Suggested Tests
 
-- Same-module single-clause helper:
+- Same-module single-clause single-yield helper:
   `helper () = op! (); helper () with h` loses the `Yield`.
 - Multi-clause helper does not inline.
 - Recursive helper does not inline.
@@ -114,6 +122,7 @@ come from simple helper boundaries.
 - Handler inside callee remains semantically local.
 - Inlining under a dynamic same-effect blocker does not reach an outer static
   handler.
+- Multi-yield helper does not inline, even if one yield would direct-call.
 - Body-size budget prevents large helper inlining.
 
 ## Open Follow-Up
