@@ -363,12 +363,10 @@ delete/rename commit:
 - Revisit ignored codegen tests before deleting the old lowerer. Current scan:
   `src/codegen/tests.rs` is down to 3 ignored new-path TODOs after deleting
   stale selective-CPS/Core-shape assertions and isolated-stdlib harness tests;
-  `tests/module_codegen_integration.rs` is down to 2 ignored new-path TODOs
-  after reviving the uniform-CPS runtime harness tests and migrating/deleting
-  stale old-shape assertions. The remaining ignored lib-codegen follow-ups are
-  structured `let assert` errors and source annotations through ANF/monadic
-  lowering. The remaining module integration follow-up is dynamic handler
-  values whose effect tag is not recoverable at some `with` sites yet.
+  `tests/module_codegen_integration.rs` is now fully active after reviving the
+  dynamic-handler factory/record-field fixtures. The remaining ignored
+  lib-codegen follow-ups are structured `let assert` errors and source
+  annotations through ANF/monadic lowering.
 
 After that prep, the delete/rename step below should be mechanical.
 

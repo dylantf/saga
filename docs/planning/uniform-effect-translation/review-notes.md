@@ -62,10 +62,9 @@ Useful default failures should stay visible until fixed.
 - `tests/codegen_integration.rs`: 1 pre-existing failure
   (`tail_recursive_apply_in_tail_position`), rest green.
 - `tests/effect_property_tests.rs`: green (63).
-- `tests/module_codegen_integration.rs`: green for active tests (35); 45 ignored.
-  Many ignored are stale old-Core-shape assertions; some still cover real
-  cross-module behavior worth rewriting. The runtime-assertion tests are ignored
-  because the harness calls `/1` entrypoints instead of uniform-CPS `/3`.
+- `tests/module_codegen_integration.rs`: green (76); 0 ignored. The last
+  dynamic-handler factory/record-field fixtures now assert new-path evidence
+  installation instead of old-Core helper names.
 - `tests/stdlib_tests.rs::stdlib_test_suite`: green, including first-class
   references to bridge HOFs and optional-return externals.
 - `tests/e2e`: green in the latest full Saga sweep (370), but it does not cover

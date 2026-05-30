@@ -33,7 +33,7 @@ impl<'a> Translator<'a> {
         // Dynamic — runtime value held in `name`.
         // Extract the effect tag from the typechecker's handler registry so
         // the lowerer can install evidence under the correct tag.
-        let effects = self.resolve_dynamic_handler_effects(name, &resolved_name);
+        let effects = self.resolve_dynamic_handler_effects(name, &resolved_name, Some(ref_id));
         MHandler::Dynamic {
             effects,
             op_tuple: Atom::Var {
@@ -68,7 +68,7 @@ impl<'a> Translator<'a> {
         let mut arms_src: Vec<HandlerArm> = Vec::new();
         let mut return_clause: Option<HandlerArm> = None;
         let mut effects: Vec<String> = Vec::new();
-        let mut any_dynamic: Option<(String, NodeId)> = None;
+        let mut dynamic_refs: Vec<(String, NodeId)> = Vec::new();
         let mut native_handlers: Vec<MHandler> = Vec::new();
 
         for ann in items {
@@ -115,28 +115,31 @@ impl<'a> Translator<'a> {
                         {
                             return_clause = Some((**r).clone());
                         }
-                    } else if any_dynamic.is_none() {
-                        any_dynamic = Some((resolved_name, named.id));
+                    } else {
+                        dynamic_refs.push((resolved_name, named.id));
                     }
                 }
             }
         }
 
-        if let Some((name, ref_id)) = any_dynamic {
-            let effects = self.resolve_dynamic_handler_effects(&name, &name);
-            return MHandler::Dynamic {
-                effects,
-                op_tuple: Atom::Var {
-                    name: MVar {
-                        name,
-                        id: self.next_mvar_id(),
+        let dynamic_handlers: Vec<MHandler> = dynamic_refs
+            .into_iter()
+            .map(|(name, ref_id)| {
+                let effects = self.resolve_dynamic_handler_effects(&name, &name, Some(ref_id));
+                MHandler::Dynamic {
+                    effects,
+                    op_tuple: Atom::Var {
+                        name: MVar {
+                            name,
+                            id: self.next_mvar_id(),
+                        },
+                        source: ref_id,
                     },
+                    return_lambda: None,
                     source: ref_id,
-                },
-                return_lambda: None,
-                source: ref_id,
-            };
-        }
+                }
+            })
+            .collect();
 
         let canonical_effects: Vec<String> = effects
             .iter()
@@ -162,6 +165,7 @@ impl<'a> Translator<'a> {
         };
 
         let mut handlers = native_handlers;
+        handlers.extend(dynamic_handlers);
         if let Some(static_handler) = static_part {
             handlers.push(static_handler);
         }
@@ -297,7 +301,12 @@ impl<'a> Translator<'a> {
     /// up the handler name in `EffectInfo.handler_effects` (populated from
     /// the typechecker's handler registry). Returns canonicalized effect
     /// names so `insert_canonical` tags match `find_evidence` lookups.
-    fn resolve_dynamic_handler_effects(&self, name: &str, resolved_name: &str) -> Vec<String> {
+    fn resolve_dynamic_handler_effects(
+        &self,
+        name: &str,
+        resolved_name: &str,
+        ref_id: Option<NodeId>,
+    ) -> Vec<String> {
         if let Some(effects) = self.local_handler_effects.get(name) {
             return effects.clone();
         }
@@ -320,6 +329,17 @@ impl<'a> Translator<'a> {
                 .iter()
                 .map(|e| self.canonical_effect_name(e))
                 .collect();
+        }
+        if let Some(ref_id) = ref_id {
+            let effects = self
+                .effect_info
+                .type_at_node
+                .get(&ref_id)
+                .map(|ty| self.handler_effects_from_type(ty))
+                .unwrap_or_default();
+            if !effects.is_empty() {
+                return effects;
+            }
         }
         Vec::new()
     }

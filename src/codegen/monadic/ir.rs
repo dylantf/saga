@@ -574,6 +574,11 @@ pub struct EffectInfo<'a> {
     /// (row-polymorphic call effects after zonking).
     pub type_at_node: &'a HashMap<NodeId, Type>,
 
+    /// Record definitions. Used by translation to recover handler-valued
+    /// field metadata when ANF synthesized field-access NodeIds do not have
+    /// direct `type_at_node` entries.
+    pub records: &'a HashMap<String, typechecker::RecordInfo>,
+
     /// Effect name → list of op names in canonical (alphabetical) order.
     /// Required for translation to compute `EffectOpRef.op_index` for
     /// **cross-module** effects — in-program effects can be derived

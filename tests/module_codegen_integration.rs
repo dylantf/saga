@@ -455,7 +455,6 @@ main () = {
 }
 
 #[test]
-#[ignore = "new-path TODO: dynamic handler effect tags must be known when mixed with static handlers"]
 fn imported_handler_factory_inside_wrapped_block_mixes_dynamic_and_static_handlers() {
     let db_module = r#"module Db
 
@@ -490,15 +489,17 @@ main () = {
         main_src,
         |checker, program| {
             let out = emit_from_program(program, "main", checker);
+            assert_contains(&out, "call 'std_evidence_bridge':'insert_canonical'");
+            assert_contains(&out, "'Db.Postgres'");
+            assert_contains(&out, "'Std.IO.Stdio'");
             assert_contains(&out, "call 'erlang':'element'");
-            assert_contains(&out, "call 'io':'format'");
+            assert_contains(&out, "'std_io', 'println', 3");
             assert_erlc_compiles(&out, "main");
         },
     );
 }
 
 #[test]
-#[ignore = "new-path TODO: dynamic handler values loaded from record fields need effect-tag metadata"]
 fn imported_record_field_handler_bindings_inside_wrapped_block_lower() {
     let db_module = r#"module Db
 
@@ -554,9 +555,11 @@ main () = {
         main_src,
         |checker, program| {
             let out = emit_from_program(program, "main", checker);
+            assert_contains(&out, "call 'std_evidence_bridge':'insert_canonical'");
+            assert_contains(&out, "'Db.Postgres'");
+            assert_contains(&out, "'Db.Transaction'");
             assert_contains(&out, "call 'erlang':'element'");
-            assert_contains(&out, "_Handle_Db_Postgres_ping");
-            assert_contains(&out, "_Handle_Db_Transaction_transaction");
+            assert_contains(&out, "'std_io', 'println', 3");
             assert_erlc_compiles(&out, "main");
         },
     );

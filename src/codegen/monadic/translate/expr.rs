@@ -4,9 +4,11 @@
 //! become structural `MExpr` variants. Every sequencing point is `Bind`.
 
 use super::{Translator, fresh_node_id, wrap_binds};
-use crate::ast::{self, Annotated, Expr, ExprKind, HandlerBody, Lit, NodeId, Pat, Stmt};
+use crate::ast::{
+    self, Annotated, Expr, ExprKind, Handler, HandlerBody, HandlerItem, Lit, NodeId, Pat, Stmt,
+};
 use crate::codegen::monadic::ir::{Atom, EffectOpRef, MArm, MBitSegment, MExpr, MHandler, MVar};
-use crate::typechecker::Type;
+use crate::typechecker::{Type, canonicalize_type_name};
 
 impl<'a> Translator<'a> {
     /// Translate an expression in tail position (its own computation context).
@@ -95,6 +97,9 @@ impl<'a> Translator<'a> {
 
             // ----- With expression → handler classification. -----
             ExprKind::With { expr, handler } => {
+                if let Some(split) = self.translate_nested_with_block_handler_prefix(e) {
+                    return split;
+                }
                 let handler = self.translate_handler(handler, e.span);
                 MExpr::With {
                     handler,
@@ -761,6 +766,116 @@ impl<'a> Translator<'a> {
         result
     }
 
+    /// Translate `{ let h = ...; body } with h` as
+    /// `let h = ... in body with h`. Handler expressions are evaluated
+    /// before the handled body, so a handler value produced by the block's
+    /// leading bindings must be split out before evidence installation.
+    ///
+    /// Inline handler composition is desugared into nested `with`
+    /// expressions before codegen (`body with pg with tx with console`), so
+    /// this looks through the whole nested chain and floats the shared prefix
+    /// once.
+    fn translate_nested_with_block_handler_prefix(&mut self, expr: &Expr) -> Option<MExpr> {
+        let mut handlers: Vec<(&Handler, NodeId, crate::token::Span)> = Vec::new();
+        let mut cursor = expr;
+        while let ExprKind::With { expr, handler } = &cursor.kind {
+            handlers.push((handler.as_ref(), cursor.id, cursor.span));
+            cursor = expr;
+        }
+
+        let ExprKind::Block { stmts, .. } = &cursor.kind else {
+            return None;
+        };
+
+        let handler_names: Vec<String> = handlers
+            .iter()
+            .flat_map(|(handler, _, _)| self.handler_reference_names(handler))
+            .collect();
+        if handler_names.is_empty() {
+            return None;
+        }
+
+        let split_idx = stmts
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, ann)| match &ann.node {
+                Stmt::Let {
+                    pattern: Pat::Var { name, .. },
+                    ..
+                } if handler_names
+                    .iter()
+                    .any(|handler_name| handler_name == name) =>
+                {
+                    Some(idx + 1)
+                }
+                _ => None,
+            })
+            .max()?;
+
+        let saved = self.local_static_handlers.clone();
+        let saved_effects = self.local_handler_effects.clone();
+        let mut bindings: Vec<(MVar, MExpr, Option<Pat>)> = Vec::new();
+
+        for ann in &stmts[..split_idx] {
+            let Stmt::Let { pattern, value, .. } = &ann.node else {
+                self.local_static_handlers = saved;
+                self.local_handler_effects = saved_effects;
+                return None;
+            };
+            if let Pat::Var { name, id, .. } = pattern {
+                self.record_handler_alias(name, *id, value);
+            }
+            let translated = self.translate_expr(value);
+            let var = self.binder_from_pat(pattern);
+            let pat = if matches!(pattern, Pat::Var { .. } | Pat::Wildcard { .. }) {
+                None
+            } else {
+                Some(pattern.clone())
+            };
+            bindings.push((var, translated, pat));
+        }
+
+        let handled_body = if split_idx < stmts.len() {
+            self.translate_block(&stmts[split_idx..], cursor.span)
+        } else {
+            MExpr::Pure(Atom::Lit {
+                value: Lit::Unit,
+                source: fresh_node_id(),
+            })
+        };
+        let nested =
+            handlers
+                .into_iter()
+                .rev()
+                .fold(handled_body, |acc, (handler, source, site_span)| {
+                    MExpr::With {
+                        handler: self.translate_handler(handler, site_span),
+                        body: Box::new(acc),
+                        source,
+                    }
+                });
+        let result = wrap_binds(bindings, nested);
+
+        self.local_static_handlers = saved;
+        self.local_handler_effects = saved_effects;
+        Some(result)
+    }
+
+    fn handler_reference_names(&self, handler: &Handler) -> Vec<String> {
+        let mut names = Vec::new();
+        match handler {
+            Handler::Named(named) => names.push(named.name.clone()),
+            Handler::Inline { items, .. } => {
+                for ann in items {
+                    if let HandlerItem::Named(named) = &ann.node {
+                        names.push(named.name.clone());
+                    }
+                }
+            }
+        }
+        names
+    }
+
     /// Choose an `MVar` for a `let` pattern binder. Non-`Var` patterns get a
     /// synthetic name; matching against the pattern itself is the lowerer's
     /// job (post-ANF most lets are `Var`).
@@ -784,9 +899,10 @@ impl<'a> Translator<'a> {
     /// If `value` is itself a handler (inline `HandlerExpr`, or a Var/Name
     /// that resolves to a static handler), record the alias so `with name`
     /// later in the block can be classified as `Static`. For dynamic handler
-    /// bindings (conditionals, factory calls), extract the handled effects
-    /// from `let_handler_effects` (populated by the typechecker from the
-    /// binding's type) so the lowerer can install evidence.
+    /// bindings (conditionals, factory calls, record-field projections),
+    /// extract the handled effects from either `let_handler_effects` or the
+    /// RHS expression's inferred `Handler E` type so the lowerer can install
+    /// evidence.
     fn record_handler_alias(&mut self, name: &str, pat_id: crate::ast::NodeId, value: &Expr) {
         if let Some(body) = super::match_handler_expr(value) {
             self.local_static_handlers
@@ -814,8 +930,56 @@ impl<'a> Translator<'a> {
             if !canonical.is_empty() {
                 self.local_handler_effects
                     .insert(name.to_string(), canonical);
+                return;
             }
         }
+
+        let canonical = self
+            .effect_info
+            .type_at_node
+            .get(&value.id)
+            .or_else(|| self.effect_info.type_at_node.get(&pat_id))
+            .map(|ty| self.handler_effects_from_type(ty))
+            .or_else(|| self.handler_effects_from_record_field(value))
+            .unwrap_or_default();
+        if !canonical.is_empty() {
+            self.local_handler_effects
+                .insert(name.to_string(), canonical);
+        }
+    }
+
+    pub(crate) fn handler_effects_from_type(&self, ty: &Type) -> Vec<String> {
+        let Type::Con(name, args) = ty else {
+            return Vec::new();
+        };
+        if name != canonicalize_type_name("Handler") && name != "Handler" {
+            return Vec::new();
+        }
+
+        args.iter()
+            .filter_map(|arg| match arg {
+                Type::Con(effect, _) => Some(self.canonical_effect_name(effect)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn handler_effects_from_record_field(&self, value: &Expr) -> Option<Vec<String>> {
+        let ExprKind::FieldAccess {
+            field,
+            record_name: Some(record_name),
+            ..
+        } = &value.kind
+        else {
+            return None;
+        };
+
+        self.effect_info
+            .records
+            .get(record_name)
+            .and_then(|record| record.fields.iter().find(|(name, _)| name == field))
+            .map(|(_, ty)| self.handler_effects_from_type(ty))
+            .filter(|effects| !effects.is_empty())
     }
 
     /// Pre-resolve an `EffectCall` to its `EffectOpRef`. Uses
