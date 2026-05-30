@@ -1061,20 +1061,16 @@ impl<'info> Optimizer<'info> {
             return (expr, Change::Unchanged);
         };
 
-        let Atom::Var {
-            name,
-            source: head_source,
-        } = &head
-        else {
+        let Some((head_name, head_id, head_source)) = imported_variant_head_info(&head) else {
             return (MExpr::App { head, args, source }, Change::Unchanged);
         };
-        if is_generated_variant_name(&name.name)
-            || self.inline_blocked_names.iter().any(|n| n == &name.name)
+        if is_generated_variant_name(&head_name)
+            || self.inline_blocked_names.iter().any(|n| n == &head_name)
         {
             return (MExpr::App { head, args, source }, Change::Unchanged);
         }
 
-        let Some(resolved) = self.context.resolution.get(head_source) else {
+        let Some(resolved) = self.context.resolution.get(&head_source) else {
             return (MExpr::App { head, args, source }, Change::Unchanged);
         };
         if !matches!(resolved.kind, ResolvedCodegenKind::BeamFunction { .. }) {
@@ -1140,7 +1136,7 @@ impl<'info> Optimizer<'info> {
                 head: Atom::Var {
                     name: MVar {
                         name: variant_name,
-                        id: name.id,
+                        id: head_id,
                     },
                     source: candidate.binding.id,
                 },
@@ -1891,6 +1887,14 @@ pub fn collect_imported_function_variant_candidates(
     }
 
     candidates
+}
+
+fn imported_variant_head_info(atom: &Atom) -> Option<(String, u32, crate::ast::NodeId)> {
+    match atom {
+        Atom::Var { name, source } => Some((name.name.clone(), name.id, *source)),
+        Atom::QualifiedRef { name, source, .. } => Some((name.clone(), source.0, *source)),
+        _ => None,
+    }
 }
 
 fn remove_dead_variant_sources(program: MProgram) -> MProgram {

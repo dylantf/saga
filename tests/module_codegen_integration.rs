@@ -998,7 +998,7 @@ main () = Logger.greet \"world\" with {
 
     assert_contains(&out, "call 'std_evidence_bridge':'insert_canonical'");
     assert_contains(&out, "'Logger.Log'");
-    assert_contains(&out, "'logger', 'greet', 3");
+    assert_contains(&out, "__saga_static_variant__xmod__Logger__greet");
 }
 
 #[test]
@@ -2606,7 +2606,7 @@ main () = Logger.greet \"world\" with {
     let out = emit_from_program(&program, "main", &checker);
     assert_contains(&out, "call 'std_evidence_bridge':'insert_canonical'");
     assert_contains(&out, "'Logger.Log'");
-    assert_contains(&out, "'logger', 'greet', 3");
+    assert_contains(&out, "__saga_static_variant__xmod__Logger__greet");
 }
 
 #[test]
@@ -3183,6 +3183,36 @@ main () = worker () with beam_actor
     assert!(
         !out.contains("call 'lib':'worker'"),
         "caller should use its local generated variant, not the imported slow path:\n{out}"
+    );
+    assert_erlc_compiles(&out, "main");
+}
+
+#[test]
+fn cross_module_native_variant_handles_qualified_call_head() {
+    let lib = r#"module Lib
+
+import Std.Actor (Timer)
+
+pub fun worker : Unit -> Unit needs {Timer}
+worker () = {
+  sleep! 1
+  sleep! 2
+}
+"#;
+    let main = r#"module Main
+
+import Std.Actor (Timer, beam_actor)
+
+main () = Lib.worker () with beam_actor
+"#;
+    let out = with_temp_project_files(&[("src/Lib.saga", lib)], main, |checker, program| {
+        emit_from_program(program, "main", checker)
+    });
+
+    assert_contains(&out, "__saga_native_variant__xmod__Lib__worker");
+    assert!(
+        !out.contains("call 'lib':'worker'"),
+        "qualified imported call should use its local generated variant:\n{out}"
     );
     assert_erlc_compiles(&out, "main");
 }
