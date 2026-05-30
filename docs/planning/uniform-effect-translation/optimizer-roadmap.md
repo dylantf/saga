@@ -46,6 +46,14 @@ implicit debt.
   Calls under native handler stacks can redirect to generated same-module
   sibling functions optimized under that native stack.
 
+- [x] **Native callback/thunk specialization.**
+  Native ops that wrap callbacks, especially `spawn`, have targeted fast paths
+  where actor-heavy stats justified them.
+
+- [x] **Pure generated-let cleanup.**
+  Dead let/bind temporaries introduced by direct native lowering are removed
+  when they are provably unused and side-effect-free.
+
 - [x] **Measurement hook.**
   `saga inspect <file> --stage monadic-stats` reports whole-program and
   entry-reachable before/after counts, with per-op `Yield` and per-target
@@ -70,17 +78,23 @@ or when it removes visible compiler complexity.
   single matching tail-resumptive arms. Skip dynamic/composite handlers,
   multishot/oneshot arms, return-clause ambiguity, and cleanup ambiguity.
 
-- [x] **Native callback/thunk specialization.**
-  Native ops that currently stay slow because they wrap callbacks, especially
-  `spawn`, get targeted fast paths when actor-heavy stats justify it.
-
-- [x] **Pure generated-let cleanup.**
-  Remove dead let/bind temporaries introduced by direct native lowering when
-  they are provably unused and side-effect-free.
-
 - [ ] **Cross-module specialization.**
   Deferred until there is an export/cache story. Cross-module variants are a
   real compilation-model feature, not just another local rewrite.
+
+## Next Decision Point
+
+Run a fresh stats sweep before starting another semantic optimizer rewrite. If
+the targeted set still looks like the latest snapshot, prefer a non-semantic
+hardening/cleanup pass over expanding variants:
+
+1. Update emitted-Core spot checks and docs for the old-path deletion.
+2. Add export/visibility metadata to `MFunBinding` only if dead slow-path
+   cleanup is worth doing next.
+3. Prototype static handler function variants only if fresh stats show
+   residual entry-reachable static-handler yields in real code.
+
+Do not start cross-module specialization without a separate design note.
 
 ## Known Slow Paths We Accept For Now
 
@@ -135,7 +149,8 @@ direction on the same machine.
 
 ### Latest Snapshot
 
-Last sampled after conservative `App` purity correction:
+Last sampled after old-path deletion and the multishot value-position `Yield`
+fix:
 
 | Example | Entry-reachable result | Reading |
 | --- | --- | --- |
@@ -203,5 +218,5 @@ Phase 2 can stop when:
 - remaining residual yields are understood and listed as accepted slow paths or
   bounded follow-up items.
 
-At that point, prefer old-path deletion and lowerer cleanup over speculative new
-optimizer rewrites.
+At that point, prefer lowerer/optimizer cleanup and real-package shakedown over
+speculative new optimizer rewrites.

@@ -1,6 +1,6 @@
 # Uniform Effect Translation
 
-Status: **phase 1 slow path complete; new path active; phase 2 effect
+Status: **phase 1 complete; old selective-CPS path deleted; phase 2 effect
 optimization in progress.**
 
 ## Status
@@ -25,7 +25,8 @@ Tick boxes as steps land. Each box → one focused agent session.
   - **7g.** Edge cases (split into two parts):
     - [x] **7g.A.** Expression-level edge cases: records, bitstrings, receive, dict-method-access, foreign calls, BinOp/UnaryMinus, arm guards
     - [x] **7g.B.** Patterns, decls, bootstrap: Pat::Or + surface-syntax patterns, `@external` wrappers, module-init bootstrap for BEAM-native default handlers, `public` flag resolution
-- [x] **8.** Toggle wiring in `src/codegen/mod.rs` — both entry points
+- [x] **8.** Uniform codegen wiring in `src/codegen/mod.rs` — now the only
+  compiled backend path
 
 #### Phase 1 parity blockers
 
@@ -86,9 +87,10 @@ rewritten independently.
 - [x] **10.** `effect_opt::bind_to_let` — see [effect-optimization-spec.md §2](./uniform-effect-translation/effect-optimization-spec.md)
 - [x] **11.** `effect_opt::direct_call` — see [effect-optimization-spec.md §3](./uniform-effect-translation/effect-optimization-spec.md)
 
-**Milestone:** new path performance matches or exceeds old path on the
-test suite; sanity invariant (zero `Yield`/`Pure`/continuation allocations
-in pure-or-tail-resumptive functions) holds.
+**Milestone:** optimized uniform output is good enough for common Saga code:
+pure and tail-resumptive code sheds avoidable monadic scaffolding, common
+BEAM-native operations direct-call their runtime targets, and residual slow
+paths are measured and intentionally accepted.
 
 **Current hardening track:** acceptance is green and the current abstraction
 cleanup batch is complete. Completed cleanup has centralized marked-control
@@ -124,6 +126,23 @@ same-module native function variants for calls under native handler stacks.
 The variant path currently targets native direct-call exposure only; static
 handler variants, cross-module variants, and dead-source-function cleanup remain
 future optimization work.
+
+**Current optimization map:** the actor/native hot path is covered for the
+targeted examples. Do not extend function variants by default. Before the next
+semantic optimizer rewrite, run the stats sweep and choose from the bounded
+roadmap:
+
+1. Static handler function variants for small obvious same-module helpers, if
+   residual entry-reachable static-handler yields dominate real examples.
+2. Dead generated slow-path cleanup, once `MFunBinding` carries reliable
+   export/visibility metadata or the optimizer has another safe visibility
+   source.
+3. Cross-module specialization only after there is an explicit export/cache
+   design; this is a compilation-model feature, not a local rewrite.
+
+Accepted slow paths for now include dynamic/composite handlers, multishot and
+oneshot resumptions, value-producing resume patterns, and backend-specific
+stateful native handlers that do not show up as hot residual yields.
 
 **Phase 2 scope control:** see
 [optimizer-roadmap.md](./uniform-effect-translation/optimizer-roadmap.md).
@@ -219,16 +238,13 @@ code translated uniformly.
 
 ## Migration strategy
 
-**Parallel paths in the same tree, selected by comment-toggle at two entry
-points.** No cargo feature, no runtime flag, no `const`. The pipeline is
-invoked from exactly two functions in
+This section records the path taken to land the rewrite. The migration is now
+complete: there is no comment-toggle and no compiled old selective-CPS backend.
+The uniform pipeline is invoked from exactly two functions in
 [src/codegen/mod.rs](../../src/codegen/mod.rs):
 
 - `compile_module_from_result` (used by `build_project`)
 - `emit_module_with_context` (used by final emit)
-
-Each function has both paths inline; you comment out one block to flip
-between them. Both entry points need toggles.
 
 **`compile_module_from_result`** (per-module compile, called during
 `build_project` to populate `CompiledModule` for cross-module use):
@@ -307,10 +323,13 @@ Explicitly allowed cross-imports (shared, will outlive the old path):
 
 ### Benchmark workflow
 
-Flip the toggle, `cargo build --release`, run the same test or example
-through both paths, compare emitted `.core` size, BEAM runtime, allocation
-counts. The new path's "skip effect optimization" debug switch gives a third comparison
-point (slow uniform vs. optimized uniform vs. old selective-CPS).
+The old-path toggle no longer exists. Compare the optimized uniform pipeline
+against the slow uniform oracle by using the optimizer skip/debug path and the
+stats/benchmark sweep:
+
+- `saga inspect <file> --stage monadic-stats` for pre/post optimizer IR counts;
+- `bash scripts/optimizer_sweep.sh stats` for the targeted measurement set;
+- `bash scripts/optimizer_sweep.sh bench 3` for broad wall-clock smoke checks.
 
 ### Cleanup
 
@@ -361,7 +380,8 @@ and the uniform lowerer now owns `src/codegen/lower/`.
    path is now the only path.
 2. Done: remove the `pub mod normalize;` and `pub mod call_effects;`
    declarations.
-3. Done: remove `pub mod lower;`.
+3. Done: remove the old `lower` module implementation and keep `pub mod lower;`
+   pointing at the renamed uniform lowerer.
 
 **Module rename:**
 
@@ -856,8 +876,10 @@ Strategic phases:
    then tail-resumptive direct-call as separate increments.
 3. Differential-test optimized output vs. slow oracle. Weight generation
    toward multishot patterns (the only place a gate error hides).
-4. Run alongside the current path (comment-toggle); switch once effect
-   optimization is reliable. **No big-bang.**
+4. Now that the old path is deleted, keep differential confidence by comparing
+   optimized output against the slow uniform oracle (`skip` optimizer mode) and
+   by running the effect-property/e2e suites after each semantic optimizer
+   change.
 
 ### Implementation phases (module-by-module)
 
@@ -872,7 +894,7 @@ Within strategic phase 1, the module order is:
 | 5   | `src/codegen/monadic/print.rs`                | Debug pretty-printer; useful before lower so we can inspect IR                           | ~0.5 day     |
 | 6   | `src/codegen/monadic/effect_opt/` as identity | Stub `fn run(m, _h) -> m`; unblocks lowerer testing                                              | ~hour        |
 | 7   | `src/codegen/lower/`                  | The bulk; every MExpr variant + handler emission + BEAM-native effects                           | ~5–8 days    |
-| 8   | Wire toggle in `src/codegen/mod.rs`           | Two entry points; comment-toggle pattern                                                         | ~hour        |
+| 8   | Wire uniform codegen in `src/codegen/mod.rs`  | Two entry points; now permanently route through ANF → monadic → optimizer → lower                 | ~hour        |
 
 After step 8 and the phase-1 parity blockers above, the new path is
 functional end-to-end through the slow uniform path. This is **strategic
@@ -898,12 +920,12 @@ larger follow-up optimization. See
 ### Realistic single-session targets
 
 - **Front-half session:** steps 1–6 + a stubbed step 7 that handles
-  literals/vars/lets/function calls only + step 8 → "hello world via new
-  toggle." Sets up the scaffolding and confirms the pipeline plumbs.
+  literals/vars/lets/function calls only + step 8 → "hello world via uniform
+  pipeline." Sets up the scaffolding and confirms the pipeline plumbs.
 - **Subsequent sessions:** flesh out step 7 by category (patterns, records,
   case/if, effects, handlers, BEAM-native effects, …). Each session
-  expands the new path's test-passing surface and the toggle stays usable
-  for differential comparison.
+  expands the uniform path's test-passing surface; the slow optimizer skip path
+  stays usable as the correctness oracle.
 - **Phase-2 sessions:** ship the three effect_opt rewrites one at a time
   (steps 9–11), each as its own increment with differential validation.
 
