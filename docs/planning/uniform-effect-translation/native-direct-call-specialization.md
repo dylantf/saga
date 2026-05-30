@@ -1,4 +1,4 @@
-# Native Direct-Call Specialization Plan
+# Native Direct-Call Specialization
 
 ## Summary
 
@@ -16,6 +16,11 @@ fun(args..., _EvidenceAtPerform, K) -> apply K(erlang_or_runtime_call(args...))
 ```
 
 Everything else stays on the slow evidence path.
+
+Status: **milestone 1 implemented**. The optimizer rewrites simple first-order
+native yields to `ForeignCall` for `Identity`, `NoArgs`, and `Reorder`
+transforms. It skips `PrependAtom`, `WrapThunk`, Ref, Vec, dynamic handlers,
+and composite handlers.
 
 ## Why This Is Separate From Static Handler Direct-Call
 
@@ -43,7 +48,6 @@ Optimize only:
 - op lowering is one of:
   - `Identity`
   - `NoArgs`
-  - `PrependAtom`
   - `Reorder`
 - target has a real Erlang/runtime module + function
 - every inserted argument can be represented as an `Atom`
@@ -52,6 +56,10 @@ Skip:
 
 - `WrapThunk` (`spawn`) because it needs a Core Erlang closure capturing
   evidence.
+- `PrependAtom` (`monitor`) because `MExpr::ForeignCall` args are `Atom`s and
+  Saga `Atom::Symbol` is a type-level/generic symbol that lowers to a binary,
+  not a backend Erlang atom. Optimizing these needs either an explicit
+  backend-atom IR value or a later lowerer-level native specialization.
 - Ref/Vec store backends because they currently require bespoke `CExpr`
   builders, not `MExpr::ForeignCall`.
 - Dynamic handlers.
@@ -60,14 +68,13 @@ Skip:
 - Empty-module native metadata entries.
 - Any op whose result needs post-processing.
 
-## Metadata Refactor First
+## Metadata Refactor
 
 The optimizer currently lives in `src/codegen/monadic/effect_opt/`, while
 native metadata lives under `src/codegen/lower_monadic/bootstrap/`. Do not make
 the optimizer import the lowerer.
 
-Before implementing the rewrite, move or duplicate the pure metadata into a
-shared backend-neutral module, for example:
+The pure metadata now lives in a shared backend-neutral module:
 
 ```text
 src/codegen/native_effects.rs
@@ -98,17 +105,14 @@ pub enum NativeArgTransform {
 }
 ```
 
-Then:
-
-- `lower_monadic/bootstrap/native_effects.rs` should go away or re-export the
-  shared table.
-- Bootstrap-specific Core builders stay in `lower_monadic/bootstrap.rs` and
-  `lower_monadic/bootstrap/stores.rs`.
-- The optimizer consumes only the shared descriptor table.
+`lower_monadic/bootstrap/native_effects.rs` re-exports the shared table for
+lowerer-local names. Bootstrap-specific Core builders stay in
+`lower_monadic/bootstrap.rs` and `lower_monadic/bootstrap/stores.rs`. The
+optimizer consumes only the shared descriptor table.
 
 ## Optimizer Shape
 
-Add a rewrite before existing static direct-call:
+The rewrite runs before existing static direct-call:
 
 ```text
 optimize children
@@ -149,7 +153,6 @@ The transformed args must be built from `Atom`s:
 
 - `Identity`: original args.
 - `NoArgs`: `[]`.
-- `PrependAtom(a)`: `[Atom::Lit(a), original args...]`.
 - `Reorder(indices)`: reorder original args; skip if any index is out of range.
 
 If anything does not line up, return unchanged.
@@ -173,12 +176,13 @@ without touching the complex store backends.
 
 ## Tests
 
-Add optimizer unit tests:
+Implemented optimizer unit tests:
 
 - Native `Timer.sleep` under `beam_actor` or the relevant native timer handler
   rewrites `Yield` to `ForeignCall("timer", "sleep", [ms])`.
 - Native `Actor.self`/no-args transform rewrites to a zero-arg foreign call.
-- Native `Monitor.monitor` prepends `process`.
+- Native `Monitor.monitor` / `PrependAtom("process")` does not rewrite in
+  milestone 1 because Saga `Symbol` is not a runtime Erlang atom.
 - Native `Timer.send_after` reorders args.
 - `Process.spawn` does not rewrite.
 - `beam_ref`, `ets_ref`, and `beam_vec` do not rewrite in milestone 1.
@@ -187,9 +191,10 @@ Add optimizer unit tests:
 - Composite same-effect handler blocks native rewrite in milestone 1.
 - Unknown op or arg-count mismatch leaves the `Yield` unchanged.
 
-Add one behavioral/e2e or integration check only after unit tests pass. A good
-candidate is a small actor/timer example whose emitted `monadic-opt` stage no
-longer contains the optimized native `Yield`.
+Spot check:
+
+- `examples/33-timer.saga --stage monadic-opt` rewrites `sleep` to
+  `ForeignCall(timer:sleep, [Lit(1000)])`.
 
 ## Validation
 
@@ -204,7 +209,9 @@ cargo test -q --test e2e
 cargo test -q -p saga --lib
 cargo fmt --check
 cargo clippy -q
-./run_examples.sh
+cargo run --bin saga --quiet -- run examples/29-actors.saga
+cargo run --bin saga --quiet -- run examples/32-monitor.saga
+cargo run --bin saga --quiet -- run examples/33-timer.saga
 ```
 
 ## Non-Goals For Milestone 1

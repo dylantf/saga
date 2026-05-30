@@ -154,19 +154,21 @@ These are still meaningful and should be investigated if they appear:
 
 Pick exactly one next track after this checklist is green:
 
-1. **Abstraction cleanup pass.** **Started.**
+1. **Abstraction cleanup pass.** **Done for current batch.**
    Reduce duplication and name the protocol helpers before more optimization.
    Completed targets include marked-control tuple/arm helpers, callback
    boundary identity/type helpers, finally cleanup sequencing, and separating
    the static native bootstrap metadata and Ref/Vec store-specific builders
-   from the bootstrap shell. Result-delimiter arm construction is also shared.
-   Remaining cleanup is mostly opportunistic; new semantic work should get its
-   own plan.
+   from the bootstrap shell. Result-delimiter arm construction is also shared,
+   and native effect metadata now lives in backend-neutral
+   `codegen::native_effects`. Remaining cleanup is opportunistic; new semantic
+   work should get its own plan.
 
-2. **Native direct-call specialization.**
+2. **Native direct-call specialization.** **First milestone done.**
    Optimize BEAM-native effects by bypassing evidence lookup where the handler
-   is statically known native. Keep this separate from tail-resumptive static
-   handler inlining.
+   is statically known native. The current milestone rewrites simple
+   first-order native ops to `ForeignCall` and keeps complex ops on the slow
+   path.
 
 3. **`finally_block`-preserving direct-call.**
    Extend direct-call to cleanup arms only after specifying exactly how cleanup
@@ -177,8 +179,10 @@ Pick exactly one next track after this checklist is green:
    This is less urgent than native/direct cleanup unless profiling says
    otherwise.
 
-Recommended order: finish the started abstraction cleanup pass before adding
-another semantic optimization.
+Recommended order: choose the next semantic optimization only after writing a
+small design note for it. Good candidates are `finally_block`-preserving
+direct-call, broader static direct-call coverage, or the next native
+specialization milestone.
 
 ## Acceptance Run: 2026-05-30
 
@@ -247,8 +251,8 @@ Conclusion:
 - The completed phase 1 slow path and conservative Stage 11 optimizer form a
   stable baseline across repo tests, examples, and the current external
   shakedown corpus.
-- Next recommended track remains the **abstraction cleanup pass** before adding
-  native direct-call or `finally_block`-preserving direct-call.
+- Next recommended track was the **abstraction cleanup pass**, now completed
+  for the current batch.
 
 ## Post-Cleanup Hardening Run: 2026-05-30
 
@@ -272,3 +276,35 @@ Status: **green** after the abstraction cleanup batch.
   - passed
 - `./run_examples.sh`
   - passed with exit 0
+
+## Post-Native-Direct-Call Validation: 2026-05-30
+
+Status: **green** for the first native direct-call milestone.
+
+- `cargo test -q -p saga --lib codegen::monadic::effect_opt`
+  - `34 passed`
+- `cargo test -q -p saga --lib codegen::lower_monadic`
+  - `93 passed`
+- `cargo test -q --test codegen_integration`
+  - `102 passed`
+- `cargo test -q --test effect_property_tests`
+  - `63 passed`
+- `cargo test -q --test stdlib_tests stdlib_test_suite`
+  - `1 passed`
+- `cargo test -q --test e2e`
+  - `1 passed`
+- `cargo test -q -p saga --lib`
+  - `1129 passed; 0 failed; 12 ignored`
+- `cargo fmt --check`
+  - passed
+- `cargo clippy -q`
+  - passed
+- Targeted examples:
+  - `examples/29-actors.saga` passed.
+  - `examples/32-monitor.saga` passed.
+  - `examples/33-timer.saga` passed and `--stage monadic-opt` shows
+    `timer:sleep` rewritten to `ForeignCall`.
+
+Note: a full `./run_examples.sh` pass also completed successfully during this
+run, but future hardening should prefer targeted examples unless a full sweep
+is explicitly needed.

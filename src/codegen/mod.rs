@@ -5,6 +5,7 @@ pub mod handler_analysis;
 pub mod lower;
 pub mod lower_monadic;
 pub mod monadic;
+pub mod native_effects;
 pub mod normalize;
 pub mod resolve;
 pub mod runtime_shape;

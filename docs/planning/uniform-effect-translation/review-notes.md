@@ -899,8 +899,8 @@ while preserving the slow-path oracle.
   rewrite `Resume(v)` to `Pure(v)`. The handler stack uses blocker frames for
   dynamic/native/composite handlers, resets at lambda and letfun bodies, and
   skips arms with `finally_block`, multi-arm op dispatch, nontrivial op
-  patterns, `OneShot`, and `Multishot`. Native specialization remains future
-  work.
+  patterns, `OneShot`, and `Multishot`. Native specialization is tracked
+  separately and its first milestone is now complete.
 
 - **Next checkpoint — acceptance/hardening.** Before adding another optimizer
   extension, follow
@@ -908,14 +908,16 @@ while preserving the slow-path oracle.
   external shakedown, slow-path oracle checks, emitted-Core spot checks, and
   then choose one next track.
 
-- **Next semantic track — native direct-call specialization.** Planned in
+- **Native direct-call specialization — DONE for first milestone.** Details in
   [`native-direct-call-specialization.md`](./native-direct-call-specialization.md).
-  First milestone should rewrite only simple first-order native yields to
-  `ForeignCall`, after moving native metadata to a backend-neutral module. It
-  should continue skipping `spawn`, Ref, Vec, dynamic, and composite handlers.
+  Native metadata now lives in backend-neutral `codegen::native_effects`, and
+  the optimizer rewrites simple first-order native yields to `ForeignCall`.
+  It deliberately skips `PrependAtom` (Saga `Symbol` is not a runtime Erlang
+  atom), `spawn`, Ref, Vec, dynamic, and composite handlers.
 
-- **Abstraction cleanup — STARTED.** First low-risk extraction centralized the
-  marked control-result protocol in `lower_monadic::util`: shared
+- **Abstraction cleanup — DONE for the current batch.** First low-risk
+  extraction centralized the marked control-result protocol in
+  `lower_monadic::util`: shared
   `ABORT_TAG` / `VALUE_RESULT_TAG`, foreign-control propagation arms, and
   "apply foreign control to K" arms; follow-up helper constructors now cover
   the common marked-control tuple/pattern shapes. Second extraction added a
@@ -931,8 +933,11 @@ while preserving the slow-path oracle.
   non-resuming arm cleanup. Fifth extraction unified the
   local-marker/foreign-control arm construction for result delimiters
   (`build_result_delimiter_k`, `wrap_with_result_delimiter_to_k`, and
-  `wrap_with_result_delimiter_raw`). Behavior unchanged; focused
-  lowerer/effect/property/e2e checks stayed green.
+  `wrap_with_result_delimiter_raw`). Sixth extraction moved native effect
+  metadata to backend-neutral `codegen::native_effects` so bootstrap and the
+  optimizer share one table. Behavior unchanged except for the intended native
+  direct-call optimization; focused lowerer/effect/property/e2e checks stayed
+  green.
 
 ### Recommended Implementation Order
 

@@ -90,16 +90,18 @@ rewritten independently.
 test suite; sanity invariant (zero `Yield`/`Pure`/continuation allocations
 in pure-or-tail-resumptive functions) holds.
 
-**Current hardening track:** acceptance is green and the abstraction cleanup
-pass is in progress. Completed cleanup has centralized marked-control helpers,
-callback boundary helpers, `finally` sequencing, and static native bootstrap
-metadata plus Ref/Vec store-specific builders. Remaining cleanup should stay
-mechanical unless it is promoted to a separate semantic task.
+**Current hardening track:** acceptance is green and the current abstraction
+cleanup batch is complete. Completed cleanup has centralized marked-control
+helpers, callback boundary helpers, `finally` sequencing, result-delimiter arm
+construction, and static native bootstrap metadata plus Ref/Vec store-specific
+builders. Further cleanup should stay opportunistic unless it is promoted to a
+separate semantic task.
 
-**Next semantic track:** native direct-call specialization is planned in
+**Latest semantic track:** native direct-call specialization milestone 1 is
+implemented; see
 [native-direct-call-specialization.md](./uniform-effect-translation/native-direct-call-specialization.md).
-Implement it as a separate conservative Stage 11 rewrite after committing the
-cleanup batch.
+It rewrites simple first-order native yields to `ForeignCall` and keeps complex
+native handlers on the slow evidence path.
 
 ### Cleanup (single mechanical commit)
 

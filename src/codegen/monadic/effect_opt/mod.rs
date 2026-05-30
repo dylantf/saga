@@ -16,6 +16,7 @@ use crate::codegen::monadic::ir::{
     Atom, EffectInfo, MArm, MDecl, MDictConstructor, MExpr, MFunBinding, MHandler, MHandlerArm,
     MProgram, MVal, MVar,
 };
+use crate::codegen::native_effects::{NativeArgTransform, native_op};
 use crate::typechecker;
 use std::collections::HashSet;
 
@@ -61,6 +62,10 @@ enum HandlerFrame {
     Static {
         effects: Vec<String>,
         arms: Vec<MHandlerArm>,
+    },
+    Native {
+        effects: Vec<String>,
+        handler: String,
     },
     Blocking {
         effects: Vec<String>,
@@ -179,10 +184,12 @@ impl<'info, 'data> Optimizer<'info, 'data> {
 
     fn optimize_expr(&mut self, expr: MExpr) -> (MExpr, Change) {
         let (expr, child_change) = self.optimize_children(expr);
+        let (expr, native_change) = self.try_native_direct_call(expr);
         let (expr, direct_change) = self.try_direct_call(expr);
         let (expr, collapse_change) = self.try_bind_collapse(expr);
         let (expr, let_change) = self.try_bind_to_let(expr);
         let mut change = child_change;
+        change.mark_if(native_change);
         change.mark_if(direct_change);
         change.mark_if(collapse_change);
         change.mark_if(let_change);
@@ -903,7 +910,60 @@ impl<'info, 'data> Optimizer<'info, 'data> {
                 HandlerFrame::Static { effects, .. } if effects.iter().any(|e| e == &op.effect) => {
                     return None;
                 }
+                HandlerFrame::Native { effects, .. } if effects.iter().any(|e| e == &op.effect) => {
+                    return None;
+                }
                 HandlerFrame::Blocking { effects } if effects.iter().any(|e| e == &op.effect) => {
+                    return None;
+                }
+                _ => {}
+            }
+        }
+        None
+    }
+
+    fn try_native_direct_call(&self, expr: MExpr) -> (MExpr, Change) {
+        if !self.opts.native_direct_call() {
+            return (expr, Change::Unchanged);
+        }
+
+        let MExpr::Yield { op, args, source } = expr else {
+            return (expr, Change::Unchanged);
+        };
+
+        let Some(handler) = self.resolve_native_direct_call_handler(&op) else {
+            return (MExpr::Yield { op, args, source }, Change::Unchanged);
+        };
+
+        let Some((module, func, direct_args)) = native_direct_call_expr(handler, &op, &args) else {
+            return (MExpr::Yield { op, args, source }, Change::Unchanged);
+        };
+
+        (
+            MExpr::ForeignCall {
+                module,
+                func,
+                args: direct_args,
+                source,
+            },
+            Change::Changed,
+        )
+    }
+
+    fn resolve_native_direct_call_handler(
+        &self,
+        op: &crate::codegen::monadic::ir::EffectOpRef,
+    ) -> Option<&str> {
+        for frame in self.handler_stack.iter().rev() {
+            match frame {
+                HandlerFrame::Native { effects, handler }
+                    if effects.iter().any(|e| e == &op.effect) =>
+                {
+                    return Some(handler);
+                }
+                HandlerFrame::Static { effects, .. } | HandlerFrame::Blocking { effects }
+                    if effects.iter().any(|e| e == &op.effect) =>
+                {
                     return None;
                 }
                 _ => {}
@@ -923,6 +983,10 @@ impl RunOptions {
     }
 
     fn direct_call(self) -> bool {
+        !self.skip
+    }
+
+    fn native_direct_call(self) -> bool {
         !self.skip
     }
 }
@@ -977,6 +1041,41 @@ fn fun_type_effects_are_empty(ty: &typechecker::Type) -> bool {
     }
 }
 
+fn native_direct_call_expr(
+    handler: &str,
+    op: &crate::codegen::monadic::ir::EffectOpRef,
+    args: &[Atom],
+) -> Option<(String, String, Vec<Atom>)> {
+    if !native_handler_allows_first_order_direct_call(handler, &op.effect) {
+        return None;
+    }
+    let spec = native_op(&op.effect, &op.op)?;
+    if spec.erl_module.is_empty() || args.len() != spec.param_count {
+        return None;
+    }
+
+    let args = match spec.arg_transform {
+        NativeArgTransform::Identity => args.to_vec(),
+        NativeArgTransform::NoArgs => Vec::new(),
+        NativeArgTransform::PrependAtom(_) => return None,
+        NativeArgTransform::Reorder(indices) => {
+            let mut out = Vec::with_capacity(indices.len());
+            for &idx in indices {
+                out.push(args.get(idx)?.clone());
+            }
+            out
+        }
+        NativeArgTransform::WrapThunk(_) => return None,
+    };
+
+    Some((spec.erl_module.to_string(), spec.erl_func.to_string(), args))
+}
+
+fn native_handler_allows_first_order_direct_call(handler: &str, effect: &str) -> bool {
+    let handler = handler.rsplit('.').next().unwrap_or(handler);
+    handler == "beam_actor" && effect.starts_with("Std.Actor.")
+}
+
 fn handler_frame(handler: &MHandler) -> Option<HandlerFrame> {
     match handler {
         MHandler::Static { effects, arms, .. } => {
@@ -990,9 +1089,19 @@ fn handler_frame(handler: &MHandler) -> Option<HandlerFrame> {
                 })
             }
         }
-        MHandler::Dynamic { effects, .. } | MHandler::Native { effects, .. } => {
-            blocking_frame(effects.clone())
+        MHandler::Native {
+            effects, handler, ..
+        } => {
+            if effects.is_empty() {
+                None
+            } else {
+                Some(HandlerFrame::Native {
+                    effects: effects.clone(),
+                    handler: handler.clone(),
+                })
+            }
         }
+        MHandler::Dynamic { effects, .. } => blocking_frame(effects.clone()),
         MHandler::Composite { handlers, .. } => {
             let mut effects = Vec::new();
             for handler in handlers {
@@ -3344,6 +3453,231 @@ mod tests {
         assert_eq!(out, val_program(with_expr(handler, yield_expr)));
     }
 
+    #[test]
+    fn native_direct_call_rewrites_identity_op() {
+        let f = Fixture::new();
+        let handler = native_handler("Std.Actor.Timer", "beam_actor", 200);
+        let yield_expr = yield_native("Std.Actor.Timer", "sleep", vec![lit_int("10", 10)], 201);
+        let prog = val_program(with_expr(handler.clone(), yield_expr));
+        let info = f.info();
+
+        let out = run(prog, &f.h, &info);
+
+        assert_eq!(
+            out,
+            val_program(with_expr(
+                handler,
+                MExpr::ForeignCall {
+                    module: "timer".to_string(),
+                    func: "sleep".to_string(),
+                    args: vec![lit_int("10", 10)],
+                    source: crate::ast::NodeId(201),
+                }
+            ))
+        );
+    }
+
+    #[test]
+    fn native_direct_call_rewrites_no_args_op() {
+        let f = Fixture::new();
+        let handler = native_handler("Std.Actor.Actor", "beam_actor", 210);
+        let yield_expr = yield_native("Std.Actor.Actor", "self", vec![unit_atom()], 211);
+        let prog = val_program(with_expr(handler.clone(), yield_expr));
+        let info = f.info();
+
+        let out = run(prog, &f.h, &info);
+
+        assert_eq!(
+            out,
+            val_program(with_expr(
+                handler,
+                MExpr::ForeignCall {
+                    module: "erlang".to_string(),
+                    func: "self".to_string(),
+                    args: vec![],
+                    source: crate::ast::NodeId(211),
+                }
+            ))
+        );
+    }
+
+    #[test]
+    fn native_direct_call_rewrites_reordered_args() {
+        let f = Fixture::new();
+        let handler = native_handler("Std.Actor.Timer", "beam_actor", 220);
+        let yield_expr = yield_native(
+            "Std.Actor.Timer",
+            "send_after",
+            vec![lit_int("1", 1), lit_int("2", 2), lit_int("3", 3)],
+            221,
+        );
+        let prog = val_program(with_expr(handler.clone(), yield_expr));
+        let info = f.info();
+
+        let out = run(prog, &f.h, &info);
+
+        assert_eq!(
+            out,
+            val_program(with_expr(
+                handler,
+                MExpr::ForeignCall {
+                    module: "erlang".to_string(),
+                    func: "send_after".to_string(),
+                    args: vec![lit_int("2", 2), lit_int("1", 1), lit_int("3", 3)],
+                    source: crate::ast::NodeId(221),
+                }
+            ))
+        );
+    }
+
+    #[test]
+    fn native_direct_call_skips_prepend_atom_and_spawn() {
+        for (effect, op, args, source) in [
+            (
+                "Std.Actor.Monitor",
+                "monitor",
+                vec![lit_int("1", 1)],
+                crate::ast::NodeId(230),
+            ),
+            (
+                "Std.Actor.Process",
+                "spawn",
+                vec![unit_atom()],
+                crate::ast::NodeId(231),
+            ),
+        ] {
+            let f = Fixture::new();
+            let handler = native_handler(effect, "beam_actor", source.0 + 10);
+            let yield_expr = yield_native(effect, op, args, source.0);
+            let prog = val_program(with_expr(handler.clone(), yield_expr.clone()));
+            let info = f.info();
+
+            let out = run(prog, &f.h, &info);
+
+            assert_eq!(out, val_program(with_expr(handler, yield_expr)));
+        }
+    }
+
+    #[test]
+    fn native_direct_call_skips_ref_vec_and_unknown_handler_backends() {
+        for (effect, handler_name, op, args, source) in [
+            (
+                "Std.Ref.Ref",
+                "beam_ref",
+                "get",
+                vec![lit_int("1", 1)],
+                crate::ast::NodeId(240),
+            ),
+            (
+                "Std.Ref.Ref",
+                "ets_ref",
+                "get",
+                vec![lit_int("1", 1)],
+                crate::ast::NodeId(241),
+            ),
+            (
+                "Std.Vec.Vec",
+                "beam_vec",
+                "vec_len",
+                vec![lit_int("1", 1)],
+                crate::ast::NodeId(242),
+            ),
+        ] {
+            let f = Fixture::new();
+            let handler = native_handler(effect, handler_name, source.0 + 10);
+            let yield_expr = yield_native(effect, op, args, source.0);
+            let prog = val_program(with_expr(handler.clone(), yield_expr.clone()));
+            let info = f.info();
+
+            let out = run(prog, &f.h, &info);
+
+            assert_eq!(out, val_program(with_expr(handler, yield_expr)));
+        }
+    }
+
+    #[test]
+    fn native_direct_call_respects_inner_blockers() {
+        let f = Fixture::new();
+        let outer = native_handler("Std.Actor.Timer", "beam_actor", 250);
+        let dynamic = MHandler::Dynamic {
+            effects: vec!["Std.Actor.Timer".to_string()],
+            op_tuple: var("ops", 251),
+            return_lambda: None,
+            source: crate::ast::NodeId(252),
+        };
+        let yield_expr = yield_native("Std.Actor.Timer", "sleep", vec![lit_int("10", 10)], 253);
+        let prog = val_program(with_expr(
+            outer.clone(),
+            with_expr(dynamic.clone(), yield_expr.clone()),
+        ));
+        let info = f.info();
+
+        let out = run(prog, &f.h, &info);
+
+        assert_eq!(
+            out,
+            val_program(with_expr(outer, with_expr(dynamic, yield_expr)))
+        );
+    }
+
+    #[test]
+    fn native_direct_call_respects_static_and_composite_blockers() {
+        let f = Fixture::new();
+        let outer = native_handler("Std.Actor.Timer", "beam_actor", 260);
+        let blocking_arm = MHandlerArm {
+            id: crate::ast::NodeId(261),
+            op: effect_op("Std.Actor.Timer", "sleep", 2),
+            params: vec![pat_var("ms", 262)],
+            body: Box::new(resume(var("ms", 262))),
+            finally_block: None,
+            span: span(),
+        };
+        let static_inner = MHandler::Static {
+            effects: vec!["Std.Actor.Timer".to_string()],
+            arms: vec![blocking_arm],
+            return_clause: None,
+            source: crate::ast::NodeId(263),
+        };
+        let composite = MHandler::Composite {
+            handlers: vec![native_handler("Std.Actor.Timer", "beam_actor", 264)],
+            source: crate::ast::NodeId(265),
+        };
+
+        for inner in [static_inner, composite] {
+            let yield_expr = yield_native("Std.Actor.Timer", "sleep", vec![lit_int("10", 10)], 266);
+            let prog = val_program(with_expr(
+                outer.clone(),
+                with_expr(inner.clone(), yield_expr.clone()),
+            ));
+            let info = f.info();
+
+            let out = run(prog, &f.h, &info);
+
+            assert_eq!(
+                out,
+                val_program(with_expr(outer.clone(), with_expr(inner, yield_expr)))
+            );
+        }
+    }
+
+    #[test]
+    fn native_direct_call_skips_unknown_op_and_arg_mismatch() {
+        for (op, args, source) in [
+            ("missing", vec![lit_int("1", 1)], crate::ast::NodeId(270)),
+            ("sleep", vec![], crate::ast::NodeId(271)),
+        ] {
+            let f = Fixture::new();
+            let handler = native_handler("Std.Actor.Timer", "beam_actor", source.0 + 10);
+            let yield_expr = yield_native("Std.Actor.Timer", op, args, source.0);
+            let prog = val_program(with_expr(handler.clone(), yield_expr.clone()));
+            let info = f.info();
+
+            let out = run(prog, &f.h, &info);
+
+            assert_eq!(out, val_program(with_expr(handler, yield_expr)));
+        }
+    }
+
     fn val_program(value: MExpr) -> MProgram {
         vec![MDecl::Val(MVal {
             id: crate::ast::NodeId(1),
@@ -3426,6 +3760,22 @@ mod tests {
         }
     }
 
+    fn yield_native(effect: &str, op: &str, args: Vec<Atom>, source: u32) -> MExpr {
+        MExpr::Yield {
+            op: effect_op(effect, op, 0),
+            args,
+            source: crate::ast::NodeId(source),
+        }
+    }
+
+    fn effect_op(effect: &str, op: &str, op_index: u32) -> EffectOpRef {
+        EffectOpRef {
+            effect: effect.to_string(),
+            op: op.to_string(),
+            op_index,
+        }
+    }
+
     fn with_expr(handler: MHandler, body: MExpr) -> MExpr {
         MExpr::With {
             handler,
@@ -3440,6 +3790,14 @@ mod tests {
             arms,
             return_clause: None,
             source: crate::ast::NodeId(997),
+        }
+    }
+
+    fn native_handler(effect: &str, handler: &str, source: u32) -> MHandler {
+        MHandler::Native {
+            effects: vec![effect.to_string()],
+            handler: handler.to_string(),
+            source: crate::ast::NodeId(source),
         }
     }
 
