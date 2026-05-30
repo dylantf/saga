@@ -560,12 +560,18 @@ main () = {
 
     let out = emit_elaborated_with_std(src);
     assert!(
-        out.contains("'Std.Ref.Ref'") && out.contains("'std_evidence_bridge':'find_evidence'"),
-        "beam_ref should install and project evidence for Ref ops\n{out}"
+        out.contains("'Std.Ref.Ref'") && out.contains("'std_evidence_bridge':'insert_canonical'"),
+        "beam_ref should still install native evidence\n{out}"
     );
     assert!(
-        out.contains("call 'erlang':'make_ref'"),
-        "beam_ref should still lower through native Erlang ref operations\n{out}"
+        out.contains("call 'erlang':'make_ref'")
+            && out.contains("call 'erlang':'put'")
+            && out.contains("call 'erlang':'get'"),
+        "beam_ref new/get should direct-call native Erlang ref operations\n{out}"
+    );
+    assert!(
+        !out.contains("'std_evidence_bridge':'find_evidence'"),
+        "beam_ref new/get should not project evidence after native direct-call\n{out}"
     );
     assert_core_compiles(&out);
 }
@@ -1032,10 +1038,11 @@ do_work () = {
 main () = do_work () with silent
 "#;
     let out = emit_elaborated(src);
-    // main should bind _HandleLog from the silent handler and call do_work
+    // main should install the named handler. The optimizer may then direct-call
+    // the tail-resumptive log operation instead of preserving the do_work call.
     assert_contains(&out, "'std_evidence_bridge':'insert_canonical'");
     assert_contains(&out, "'Log'");
-    assert_contains(&out, "apply 'do_work'/3");
+    assert_core_compiles(&out);
 }
 
 #[test]

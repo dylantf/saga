@@ -952,7 +952,9 @@ impl<'info, 'data> Optimizer<'info, 'data> {
                     .is_some_and(|arm| inline_tail_resumptive_arm(arm, args).is_some())
                     || self
                         .resolve_native_direct_call_handler(op)
-                        .and_then(|handler| native_direct_call_expr(handler, op, args))
+                        .and_then(|handler| {
+                            native_direct_call_expr(handler, op, args, crate::ast::NodeId(0))
+                        })
                         .is_some()
             }
             MExpr::Bind { value, body, .. } => {
@@ -1293,19 +1295,11 @@ impl<'info, 'data> Optimizer<'info, 'data> {
             return (MExpr::Yield { op, args, source }, Change::Unchanged);
         };
 
-        let Some((module, func, direct_args)) = native_direct_call_expr(handler, &op, &args) else {
+        let Some(direct_call) = native_direct_call_expr(handler, &op, &args, source) else {
             return (MExpr::Yield { op, args, source }, Change::Unchanged);
         };
 
-        (
-            MExpr::ForeignCall {
-                module,
-                func,
-                args: direct_args,
-                source,
-            },
-            Change::Changed,
-        )
+        (direct_call, Change::Changed)
     }
 
     fn resolve_native_direct_call_handler(
@@ -1509,7 +1503,13 @@ fn native_direct_call_expr(
     handler: &str,
     op: &crate::codegen::monadic::ir::EffectOpRef,
     args: &[Atom],
-) -> Option<(String, String, Vec<Atom>)> {
+    source: crate::ast::NodeId,
+) -> Option<MExpr> {
+    let handler_name = handler.rsplit('.').next().unwrap_or(handler);
+    if handler_name == "beam_ref" && op.effect == "Std.Ref.Ref" {
+        return beam_ref_direct_call_expr(&op.op, args, source);
+    }
+
     if !native_handler_allows_first_order_direct_call(handler, &op.effect) {
         return None;
     }
@@ -1532,12 +1532,88 @@ fn native_direct_call_expr(
         NativeArgTransform::WrapThunk(_) => return None,
     };
 
-    Some((spec.erl_module.to_string(), spec.erl_func.to_string(), args))
+    Some(MExpr::ForeignCall {
+        module: spec.erl_module.to_string(),
+        func: spec.erl_func.to_string(),
+        args,
+        source,
+    })
 }
 
 fn native_handler_allows_first_order_direct_call(handler: &str, effect: &str) -> bool {
     let handler = handler.rsplit('.').next().unwrap_or(handler);
     handler == "beam_actor" && effect.starts_with("Std.Actor.")
+}
+
+fn beam_ref_direct_call_expr(op: &str, args: &[Atom], source: crate::ast::NodeId) -> Option<MExpr> {
+    match op {
+        "get" if args.len() == 1 => Some(MExpr::ForeignCall {
+            module: "erlang".to_string(),
+            func: "get".to_string(),
+            args: args.to_vec(),
+            source,
+        }),
+        "set" if args.len() == 2 => {
+            let discard = generated_native_var("__native_ref_set", source, 0);
+            Some(MExpr::Bind {
+                var: discard,
+                value: Box::new(MExpr::ForeignCall {
+                    module: "erlang".to_string(),
+                    func: "put".to_string(),
+                    args: args.to_vec(),
+                    source,
+                }),
+                body: Box::new(MExpr::Pure(unit_atom_at(source))),
+                mode: crate::codegen::monadic::ir::BindMode::Sequence,
+            })
+        }
+        "new" if args.len() == 1 => {
+            let key = generated_native_var("__native_ref_key", source, 0);
+            let discard = generated_native_var("__native_ref_put", source, 1);
+            Some(MExpr::Bind {
+                var: key.clone(),
+                value: Box::new(MExpr::ForeignCall {
+                    module: "erlang".to_string(),
+                    func: "make_ref".to_string(),
+                    args: Vec::new(),
+                    source,
+                }),
+                body: Box::new(MExpr::Bind {
+                    var: discard,
+                    value: Box::new(MExpr::ForeignCall {
+                        module: "erlang".to_string(),
+                        func: "put".to_string(),
+                        args: vec![
+                            Atom::Var {
+                                name: key.clone(),
+                                source,
+                            },
+                            args[0].clone(),
+                        ],
+                        source,
+                    }),
+                    body: Box::new(MExpr::Pure(Atom::Var { name: key, source })),
+                    mode: crate::codegen::monadic::ir::BindMode::Sequence,
+                }),
+                mode: crate::codegen::monadic::ir::BindMode::Sequence,
+            })
+        }
+        _ => None,
+    }
+}
+
+fn generated_native_var(prefix: &str, source: crate::ast::NodeId, salt: u32) -> MVar {
+    MVar {
+        name: format!("{prefix}_{}", source.0),
+        id: source.0.saturating_add(salt),
+    }
+}
+
+fn unit_atom_at(source: crate::ast::NodeId) -> Atom {
+    Atom::Lit {
+        value: crate::ast::Lit::Unit,
+        source,
+    }
 }
 
 fn expr_node_count(expr: &MExpr) -> usize {
@@ -4593,6 +4669,122 @@ mod tests {
     }
 
     #[test]
+    fn native_direct_call_rewrites_beam_ref_get() {
+        let f = Fixture::new();
+        let handler = native_handler("Std.Ref.Ref", "beam_ref", 223);
+        let yield_expr = yield_native("Std.Ref.Ref", "get", vec![lit_int("1", 1)], 224);
+        let prog = val_program(with_expr(handler.clone(), yield_expr));
+        let info = f.info();
+
+        let out = run(prog, &f.h, &info);
+
+        assert_eq!(
+            out,
+            val_program(with_expr(
+                handler,
+                MExpr::ForeignCall {
+                    module: "erlang".to_string(),
+                    func: "get".to_string(),
+                    args: vec![lit_int("1", 1)],
+                    source: crate::ast::NodeId(224),
+                }
+            ))
+        );
+    }
+
+    #[test]
+    fn native_direct_call_rewrites_beam_ref_set() {
+        let f = Fixture::new();
+        let handler = native_handler("Std.Ref.Ref", "beam_ref", 225);
+        let yield_expr = yield_native(
+            "Std.Ref.Ref",
+            "set",
+            vec![lit_int("1", 1), lit_int("2", 2)],
+            226,
+        );
+        let prog = val_program(with_expr(handler.clone(), yield_expr));
+        let info = f.info();
+
+        let out = run(prog, &f.h, &info);
+
+        assert_eq!(
+            out,
+            val_program(with_expr(
+                handler,
+                MExpr::Bind {
+                    var: MVar {
+                        name: "__native_ref_set_226".to_string(),
+                        id: 226,
+                    },
+                    value: Box::new(MExpr::ForeignCall {
+                        module: "erlang".to_string(),
+                        func: "put".to_string(),
+                        args: vec![lit_int("1", 1), lit_int("2", 2)],
+                        source: crate::ast::NodeId(226),
+                    }),
+                    body: Box::new(MExpr::Pure(unit_atom_at(crate::ast::NodeId(226)))),
+                    mode: crate::codegen::monadic::ir::BindMode::Sequence,
+                }
+            ))
+        );
+    }
+
+    #[test]
+    fn native_direct_call_rewrites_beam_ref_new() {
+        let f = Fixture::new();
+        let handler = native_handler("Std.Ref.Ref", "beam_ref", 227);
+        let yield_expr = yield_native("Std.Ref.Ref", "new", vec![lit_int("42", 42)], 228);
+        let key = MVar {
+            name: "__native_ref_key_228".to_string(),
+            id: 228,
+        };
+        let prog = val_program(with_expr(handler.clone(), yield_expr));
+        let info = f.info();
+
+        let out = run(prog, &f.h, &info);
+
+        assert_eq!(
+            out,
+            val_program(with_expr(
+                handler,
+                MExpr::Bind {
+                    var: key.clone(),
+                    value: Box::new(MExpr::ForeignCall {
+                        module: "erlang".to_string(),
+                        func: "make_ref".to_string(),
+                        args: vec![],
+                        source: crate::ast::NodeId(228),
+                    }),
+                    body: Box::new(MExpr::Bind {
+                        var: MVar {
+                            name: "__native_ref_put_228".to_string(),
+                            id: 229,
+                        },
+                        value: Box::new(MExpr::ForeignCall {
+                            module: "erlang".to_string(),
+                            func: "put".to_string(),
+                            args: vec![
+                                Atom::Var {
+                                    name: key.clone(),
+                                    source: crate::ast::NodeId(228),
+                                },
+                                lit_int("42", 42),
+                            ],
+                            source: crate::ast::NodeId(228),
+                        }),
+                        body: Box::new(MExpr::Pure(Atom::Var {
+                            name: key,
+                            source: crate::ast::NodeId(228),
+                        })),
+                        mode: crate::codegen::monadic::ir::BindMode::Sequence,
+                    }),
+                    mode: crate::codegen::monadic::ir::BindMode::Sequence,
+                }
+            ))
+        );
+    }
+
+    #[test]
     fn native_direct_call_skips_prepend_atom_and_spawn() {
         for (effect, op, args, source) in [
             (
@@ -4625,13 +4817,6 @@ mod tests {
         for (effect, handler_name, op, args, source) in [
             (
                 "Std.Ref.Ref",
-                "beam_ref",
-                "get",
-                vec![lit_int("1", 1)],
-                crate::ast::NodeId(240),
-            ),
-            (
-                "Std.Ref.Ref",
                 "ets_ref",
                 "get",
                 vec![lit_int("1", 1)],
@@ -4643,6 +4828,13 @@ mod tests {
                 "vec_len",
                 vec![lit_int("1", 1)],
                 crate::ast::NodeId(242),
+            ),
+            (
+                "Std.Ref.Ref",
+                "beam_ref",
+                "modify",
+                vec![lit_int("1", 1), unit_atom()],
+                crate::ast::NodeId(243),
             ),
         ] {
             let f = Fixture::new();

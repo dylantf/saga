@@ -17,10 +17,11 @@ fun(args..., _EvidenceAtPerform, K) -> apply K(erlang_or_runtime_call(args...))
 
 Everything else stays on the slow evidence path.
 
-Status: **milestone 1 implemented**. The optimizer rewrites simple first-order
+Status: **milestone 2 implemented**. The optimizer rewrites simple first-order
 native yields to `ForeignCall` for `Identity`, `NoArgs`, and `Reorder`
-transforms. It skips `PrependAtom`, `WrapThunk`, Ref, Vec, dynamic handlers,
-and composite handlers.
+transforms. Milestone 2 also rewrites `beam_ref` `new`, `get`, and `set` to
+direct process-dictionary calls. It skips `PrependAtom`, `WrapThunk`,
+`beam_ref.modify`, `ets_ref`, Vec, dynamic handlers, and composite handlers.
 
 ## Why This Is Separate From Static Handler Direct-Call
 
@@ -174,6 +175,24 @@ First milestone mapping:
 That makes the first implementation useful for common actor/timer operations
 without touching the complex store backends.
 
+## Second Milestone Scope
+
+Milestone 2 adds process-dictionary `beam_ref` operations whose bootstrap
+closures do not apply Saga callbacks:
+
+- `new initial` becomes `erlang:make_ref()`, `erlang:put(ref, initial)`, then
+  returns the generated ref.
+- `get ref` becomes `erlang:get(ref)`.
+- `set ref value` becomes `erlang:put(ref, value)` followed by Saga `Unit`.
+
+Still skipped:
+
+- `beam_ref.modify`, because it applies a Saga callback under the current
+  evidence and needs callback-boundary handling.
+- `ets_ref`, because `new`, `get`, and `set` need ETS-specific tuple/case
+  scaffolding and are better handled as a separate backend-lowering milestone.
+- `beam_vec`, for the same reason as `ets_ref`.
+
 ## Tests
 
 Implemented optimizer unit tests:
@@ -186,6 +205,8 @@ Implemented optimizer unit tests:
 - Native `Timer.send_after` reorders args.
 - `Process.spawn` does not rewrite.
 - `beam_ref`, `ets_ref`, and `beam_vec` do not rewrite in milestone 1.
+- `beam_ref` `new`, `get`, and `set` rewrite in milestone 2.
+- `beam_ref.modify`, `ets_ref`, and `beam_vec` remain slow-path.
 - Dynamic same-effect inner handler blocks native rewrite.
 - Static same-effect inner handler blocks outer native rewrite.
 - Composite same-effect handler blocks native rewrite in milestone 1.

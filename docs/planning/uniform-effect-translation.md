@@ -97,10 +97,11 @@ construction, and static native bootstrap metadata plus Ref/Vec store-specific
 builders. Further cleanup should stay opportunistic unless it is promoted to a
 separate semantic task.
 
-**Latest semantic track:** native direct-call specialization milestone 1 is
+**Latest semantic track:** native direct-call specialization milestone 2 is
 implemented; see
 [native-direct-call-specialization.md](./uniform-effect-translation/native-direct-call-specialization.md).
-It rewrites simple first-order native yields to `ForeignCall` and keeps complex
+It rewrites simple first-order actor/timer native yields plus `beam_ref`
+`new`/`get`/`set` to direct calls, and keeps callback-heavy or backend-specific
 native handlers on the slow evidence path.
 
 **Measurement hook:** `saga inspect <file> --stage monadic-stats` prints

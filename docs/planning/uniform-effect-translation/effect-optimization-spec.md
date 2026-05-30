@@ -5,9 +5,10 @@ and [monadic-ir-spec.md](./monadic-ir-spec.md). Concrete rewrite
 specifications for the effect optimization stage (stage 11).
 
 Status: **implemented conservatively**. Bind-collapse, Bind→Let promotion,
-first-milestone static direct-call, and first-milestone native direct-call have
-landed. Direct-call deliberately skips cleanup/composite/dynamic cases that
-need separate design. Native direct-call details live in
+first-milestone static direct-call, cleanup-preserving `Ensure` direct-call,
+and second-milestone native direct-call have landed. Direct-call deliberately
+skips composite/dynamic cases that need separate design. Native direct-call
+details live in
 [native-direct-call-specialization.md](./native-direct-call-specialization.md).
 
 Diagnostic counters are available through
