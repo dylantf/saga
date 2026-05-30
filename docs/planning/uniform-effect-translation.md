@@ -1,7 +1,7 @@
 # Uniform Effect Translation
 
-Status: **phase 1 implementation in progress; new path active; parity
-blockers remain.**
+Status: **phase 1 slow path complete; new path active; phase 2 effect
+optimization next.**
 
 ## Status
 
@@ -29,76 +29,60 @@ Tick boxes as steps land. Each box → one focused agent session.
 
 #### Phase 1 parity blockers
 
-These are not phase-2 optimization work. They are the remaining known
-correctness/parity failures that should stay visible in the default test
-suite until fixed.
+These were the correctness/parity failures that blocked the slow uniform path
+from becoming the phase-2 optimization oracle. They are now resolved; keep this
+list as the historical checklist for why phase 2 is unblocked. See
+[`review-notes.md`](./uniform-effect-translation/review-notes.md) for the
+pass-by-pass investigation notes.
 
-- [ ] **8a. Native/bridge higher-order callback adapters.**
-  `tests/stdlib_tests.rs::stdlib_test_suite` currently fails 12 stdlib
-  tests where native/bridge code calls Saga callbacks at source arity:
-  `Dict.keys`, `Dict.values`, `Dict.map`, `Dict.filter`, `Dict.fold`,
-  `Dict.update`, `List.sort`, `List.sort_with`, `List.sort_by`, and
-  `Set.to_list`. Implement a general adapter for CPS-shaped Saga callbacks
-  crossing into native/bridge code instead of relying on per-stdlib
-  workarounds.
+- [x] **8a. Native/bridge higher-order callback adapters.**
+  General `@external` wrappers now adapt function-typed parameters from
+  uniform CPS shape to native Erlang callback arity. Saturated external calls
+  with callback-shaped arguments route through the wrapper instead of handing a
+  raw Saga closure to a BIF/bridge function.
 
-- [ ] **8b. Dynamic handler values with return clauses.**
-  `tests/codegen_integration.rs::handler_factory_let_binding_runs_return_clause`
-  returns `unit` instead of applying the dynamic handler's `return` clause.
-  Handler-value tuples need a runtime ABI slot or equivalent representation
-  for return-clause behavior.
+- [x] **8b. Dynamic handler values with return clauses.**
+  Runtime handler-value tuples now carry return-clause behavior, and dynamic
+  handler installation handles single-effect and multi-effect values.
 
-- [ ] **8c. Eta-reduced effect operation callbacks.**
-  `tests/codegen_integration.rs::eta_reduced_effect_op_callback_forwarded_through_wrapper_runs`
-  crashes with a CPS arity mismatch when an effect op such as `ping!` is
-  passed as a callback. Lowering needs to eta-expand or adapt op references
-  into the expected uniform function shape.
+- [x] **8c. Eta-reduced effect operation callbacks.**
+  Effect operation references used as callback values are eta-expanded into the
+  expected uniform function shape during monadic translation.
 
-- [ ] **8d. Zero-arity value functions used as returned function values.**
-  `tests/codegen_integration.rs::{pure_partial_application_compiles,
-  over_application_of_zero_arity_compiles}` emit `apply 'increment'/0()`
-  even though uniform lowering emits `increment/2`. Calling a zero-arity Saga
-  value function and then applying the returned function must go through
-  `(Evidence, ReturnK)` first.
+- [x] **8d. Zero-arity value functions used as returned function values.**
+  Nullary Saga vals/functions are materialized through the uniform
+  `(Evidence, ReturnK)` path before applying any returned function value.
 
-- [ ] **8e. Anonymous record field metadata with underscores.**
-  `tests/codegen_integration.rs::handler_bindings_from_record_fields_compile`
-  panics because anonymous record field order stores `one_handler` /
-  `two_handler` as split pieces (`["one", "handler", ...]`). Preserve full
-  field names in anonymous record metadata.
+- [x] **8e. Anonymous record field metadata with underscores.**
+  Anonymous record field order is structural metadata (`anon_fields`), not
+  decoded from runtime tags; anonymous runtime tags are injective over field
+  sets.
 
-- [ ] **8f. Nested/same-effect dynamic handler semantics.**
-  `tests/effect_property_tests.rs::{handler_chosen_conditionally,
-  nested_same_effect_inner_shadows_outer}` still fail. Conditional handler
-  selection can feed `unit` into string append, and same-effect inner handler
-  shadowing loses the inner handler result.
+- [x] **8f. Nested/same-effect dynamic handler semantics.**
+  Dynamic handler metadata, same-effect shadowing, and conditional handler
+  selection have parity coverage in the effect property and e2e suites.
 
-- [ ] **8g. Abort marker crossing resume.**
-  `tests/effect_property_tests.rs::fail_handler_inside_resume_aborts_correctly`
-  leaks a `{'__saga_handler_abort', ...}` marker into normal string append.
-  Abort markers must be unwrapped or propagated at the correct delimited
-  boundary when failure occurs inside resumed computation.
+- [x] **8g. Abort marker crossing resume.**
+  Handler result delimiters now route abort and marked value-result tuples by
+  marker, re-installing the delimiter stack needed for resumed computations.
 
-- [ ] **8h. Effectful lambda-head evaluation order/value flow.**
-  `tests/effect_property_tests.rs::lambda_head_effectful_call_nested_in_outer_effectful_call`
-  produces `[inner][x]x` instead of `[[inner]x]x`. The value observed by the
-  outer operation differs when the function position itself is effectful.
+- [x] **8h. Effectful lambda-head evaluation order/value flow.**
+  `BindMode::ValuePosition` distinguishes ANF-introduced value-position
+  evaluation from source sequencing, preserving effectful function-position
+  value flow.
 
-- [ ] **8i. Stale `InlineVal` resolution reaching the new backend.**
-  `tests/module_codegen_integration.rs::{qualified_inline_val_cross_module_substitutes_rhs,
-  qualified_inline_val_cross_module_resolves_sibling_ref_in_defining_module}`
-  panic in `lower_monadic::atom` because `InlineVal` resolution is still
-  present after translation. Either normalize it before monadic lowering or
-  teach the new path the correct cross-module val behavior.
+- [x] **8i. Stale `InlineVal` resolution reaching the new backend.**
+  `@inline val` was removed as a premature optimization. `InlineVal` metadata
+  remains only as unreachable old-path residue until old-path deletion.
 
-**Milestone:** new path passes the full test suite under the toggle. Old
-Core-shape string assertions that only describe the deleted selective-CPS
-implementation may stay ignored or be rewritten, but the runtime/parity tests
-above must pass before strategic phase 2 starts.
+**Milestone:** complete. The new slow path passes the behavioral test suites
+and is the oracle for strategic phase 2. Old Core-shape string assertions that
+only describe the deleted selective-CPS implementation may stay ignored or be
+rewritten independently.
 
 ### Strategic phase 2 — effect optimization rewrites
 
-- [ ] **9.** `effect_opt::bind_collapse` — see [effect-optimization-spec.md §1](./uniform-effect-translation/effect-optimization-spec.md)
+- [x] **9.** `effect_opt::bind_collapse` — see [effect-optimization-spec.md §1](./uniform-effect-translation/effect-optimization-spec.md)
 - [ ] **10.** `effect_opt::bind_to_let` — see [effect-optimization-spec.md §2](./uniform-effect-translation/effect-optimization-spec.md)
 - [ ] **11.** `effect_opt::direct_call` — see [effect-optimization-spec.md §3](./uniform-effect-translation/effect-optimization-spec.md)
 
@@ -926,8 +910,8 @@ but aren't blockers for phase 1 milestone completion.
 
 ### Higher-order `@external` adapter
 
-**Status:** promoted back into phase 1 as blocker **8a** above. This section
-is kept for design notes.
+**Status:** landed in phase 1 as blocker **8a** above. This section is kept for
+design notes and soundness constraints.
 
 **Problem:** under the new path's uniform calling convention, every
 Saga function is arity+2 (`args..., _Evidence, _ReturnK`). BIFs that
@@ -943,23 +927,12 @@ higher-order stdlib functions (`List.map`, `List.filter`, `List.foldr`,
 recursion. Unblocks the test suite but doesn't generalize — any future
 `@external` taking a fun arg hits the same wall.
 
-**Strategic fix:** add automatic fun-arg adaptation in
-`lower_external_wrapper`. Wrapper consults source param types (from
-`CheckResult` / `EffectInfo`) at emission time; for each fun-typed
-param, emit an inline adapter bridging uniform-arity Saga fun →
-native-arity callback. The adapter uses synchronous extraction
-(throw/catch is simplest):
-
-```erlang
-fun(X) ->
-  try
-    apply SagaF(X, _EmptyEv, fun(R) -> throw({'__capture__', R}) end),
-    erlang:error(unreachable_pure_fun_returned)
-  catch
-    throw:{'__capture__', R} -> R
-  end
-end
-```
+**Strategic fix:** automatic fun-arg adaptation in `lower_external_wrapper`.
+The wrapper consults source parameter types at emission time; for each
+fun-typed parameter it emits an inline adapter bridging a uniform-arity Saga
+function to the native-arity callback expected by the Erlang target. Saturated
+external applications with callback-shaped arguments route through this wrapper
+so the same adaptation applies to direct calls and first-class references.
 
 Soundness: fun args in `(a -> b)` signatures (without effect row) are
 already typechecker-enforced to be pure, so synchronous extraction is
@@ -967,12 +940,8 @@ always well-defined for the cases the typechecker admits. For
 hypothetical effectful fun args the adapter would be structurally
 unsound, but those aren't typeable in this position.
 
-Cost: ~100 LOC in `lower_external_wrapper`. Once in place the new path
-supports the same higher-order `@external` surface area as the old
-path, no stdlib special-casing required.
-
-**Priority:** high. Phase 1 does not ship without it; the stdlib test suite
-still exposes missing callback adaptation.
+The new path supports higher-order `@external` calls without a stdlib-specific
+callback table.
 
 ## Correctness gate
 

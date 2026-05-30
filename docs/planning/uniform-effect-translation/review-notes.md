@@ -456,21 +456,19 @@ Contract:
 
 Current status:
 
-- `stdlib_test_suite` is currently green. `lower_monadic/app.rs` has callback
-  adapters for known bridge functions such as Array/Dict/List/Set HOFs.
-- The current implementation is table-driven but still ad hoc: callback
-  argument positions/arity live in `external_callback_arg`, not in resolved
-  type metadata.
+- `stdlib_test_suite` is currently green.
+- The hardcoded `external_callback_arg` table was removed. `@external`
+  wrappers now derive callback adapters from function-typed source parameters,
+  and saturated external calls with callback-shaped arguments route through the
+  wrapper instead of the raw BIF/bridge target.
 
 Review checkpoints:
 
-- Confirm every stdlib bridge HOF in public API either routes through Saga
-  code or appears in `external_callback_arg`.
 - The adapter must be designed carefully for pure vs effectful callback types;
-  do not use a throw/catch synchronous extractor for effectful callbacks unless
-  the type system proves the callback is pure at that boundary.
-- Long-term cleanup: move callback shape out of a hardcoded module/function
-  table and derive it from function types/effect metadata.
+  only use the synchronous identity-K/direct-return adapter where the callback
+  type is admitted as pure at that boundary.
+- External-library shakedowns (`saga_json`, `saga_pgo`, `saga_http`) are useful
+  guardrails because they exercise non-stdlib `@external` declarations.
 
 ### Review Pass 3: Application / Callable ABI
 
@@ -524,12 +522,10 @@ Risk areas to audit anyway:
 - `uniform_value_arity` relies on old-path resolution conventions: effectful
   imported arities may already include `+2`, while pure arities do not. This
   is subtle and should be locked down with tests before deleting old code.
-- `external_callback_arg` is a hardcoded bridge table. It is acceptable as a
-  phase-1 parity bridge, but it is not the final architecture.
 - Saturated external calls and first-class external references now share
   `util::lower_external_native_call`; stdlib tests cover `List.sort_by` and
   `List.nth` through first-class references.
-- `external_callback_adapter` uses identity K and direct return. This is only
+- External callback adapters use identity K and direct return. This is only
   correct for callbacks used synchronously by bridge/native code; async
   boundaries such as actor spawn need dedicated native-effect handling.
 - Value-position `BindMode` changed effectful argument evaluation. Recheck
@@ -553,8 +549,9 @@ Execution checklist:
 5. Audit `uniform_value_arity` assumptions against imported pure/effectful
    functions and dict constructors; add/adjust focused tests if the current
    convention stays.
-6. Replace or document `external_callback_arg` as the phase-1 bridge table;
-   add tests for any public bridge HOF not covered by stdlib/e2e.
+6. ~~Replace or document `external_callback_arg` as the phase-1 bridge table;
+   add tests for any public bridge HOF not covered by stdlib/e2e.~~ Done by
+   deriving callback adapters from `@external` function-typed parameters.
 7. ~~Unify external wrapper lowering with saturated external-call lowering so
    callback adapters and legacy-Maybe normalization apply whether an external
    is called directly or through a first-class function reference.~~ Done via
@@ -866,6 +863,94 @@ qualified-constructor fixes, ANF review (clean). `@inline`/`InlineVal` removed.
 green (1094 lib + 102 codegen_integration + 373 e2e + 218 saga_json).
 **Stage 11 (effect optimization) is unblocked** — the slow path is now a
 complete oracle.
+
+## Phase 2 Optimization Review
+
+This is the starting read before implementing
+[`effect-optimization-spec.md`](./effect-optimization-spec.md). The current
+code in `src/codegen/monadic/effect_opt/mod.rs` has the right
+`RunOptions { skip }` shape, so phase 2 can land as small optimizer increments
+while preserving the slow-path oracle.
+
+### Progress
+
+- **Step 9 / bind-collapse — DONE.** The optimizer now runs a bottom-up
+  fixpoint for `Bind(Pure(a), x, body) -> body[x := a]`. Substitution follows
+  the lowerer's source-name variable identity, blocks on pattern-capture risk,
+  and stays conservative around raw AST patterns whose bitstring sizes or
+  nested expressions refer to the collapsed binder. Guard tests cover simple
+  substitution, fixpoint chains, shadowing, and pattern-capture blocking.
+
+### Recommended Implementation Order
+
+1. **Build optimizer scaffolding first.**
+   - Add the bottom-up/fixpoint walker and a real `skip` fast path.
+   - Keep each rewrite individually togglable while developing, even if the
+     public option stays one `skip` bit.
+   - Add unit tests at the monadic IR level before enabling any rewrite in the
+     full compiler path.
+
+2. **Ship bind-collapse first — DONE.**
+   - This is the safest rewrite: `Bind(Pure(a), x, body) -> body[x := a]`.
+   - Substitute by `MVar` identity, not just source name. Pattern binders are
+     still raw AST `Pat`s, so shadowing checks should be conservative where
+     pattern-bound names can hide an `MVar`.
+   - Treat lambda atoms carefully: construction is atomic, but substituting a
+     lambda value carries free variables. The fresh-name discipline should make
+     capture unlikely; the rewrite should still either enforce the invariant or
+     alpha-rename on collision.
+
+3. **Then Bind-to-Let promotion.**
+   - Start conservative. Promoting too little is only slow; promoting an
+     effectful expression is a miscompile.
+   - `Pure`, structural record/tuple/operator forms, and apps whose callee has
+     an empty effect row are the first useful targets.
+   - Be careful with `ForeignCall`: the IR currently has module/function/args
+     but no explicit purity flag. Unless the source annotation gives a reliable
+     no-effect fact at the `source` node, default to "not pure" for the first
+     pass.
+   - A lambda body may yield and still be pure to *construct*; do not inspect
+     through `Atom::Lambda` for construction-site purity.
+
+4. **Leave direct-call for last.**
+   - This is the only phase-2 rewrite with a real semantic footgun. It depends
+     on `HandlerAnalysis::TailResumptive`, static handler resolution, innermost
+     handler shadowing, and the final result-delimiter protocol.
+   - The existing spec's core rule is still right for simple tail-resumptive
+     arms, but it predates the phase-1 `finally` and marked-value-result
+     repairs. Do **not** inline a handler arm with `finally_block` until the
+     optimizer has explicit cleanup-preserving semantics. The safe first gate
+     is: direct-call only when the selected arm has no `finally_block`.
+   - Direct-call should skip `MHandler::Dynamic`, `MHandler::Native`, and
+     `MHandler::Composite` at first. Native specialization is a separate
+     optimization, not the first direct-call milestone.
+   - Reset the static handler stack at lambda boundaries, as the spec says. A
+     lambda can be invoked outside the lexical handler extent.
+
+### Test Strategy
+
+- Keep `run_with_options(..., skip: true)` as the always-correct baseline.
+- For each rewrite, compare optimized vs. skipped output behavior on:
+  - `tests/codegen_integration.rs`,
+  - `tests/effect_property_tests.rs`,
+  - `tests/e2e`,
+  - stdlib tests,
+  - `~/projects/saga_json`, and any external-lib shakedown corpus currently in
+    use.
+- Add focused IR tests for capture avoidance and handler-stack shadowing. The
+  runtime suites are good at finding misroutes, but they are too coarse to pin
+  optimizer invariants by themselves.
+
+### Spec Updates Needed Before Direct-Call
+
+- Extend `effect-optimization-spec.md` with a `finally_block` direct-call gate
+  or a cleanup-preserving transformation.
+- Spell out how direct-call interacts with the current marker/value-result
+  delimiter protocol. The slow path now routes both abort tuples and
+  `{value_result, marker, value}` tuples; optimized output must not bypass
+  return clauses, cleanup, or foreign-abort propagation.
+- Decide whether direct-native specialization belongs in this same pass or a
+  later pass. The conservative answer is later.
 
 ## Commands Used For This Triage
 
