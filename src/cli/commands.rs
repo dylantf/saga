@@ -409,10 +409,26 @@ pub fn cmd_inspect(file: &str, stage: &str) {
 
             if stage == "monadic-stats" {
                 let before = monadic::stats::Stats::collect_program(&monadic_prog);
+                let before_reachable = monadic::stats::Stats::collect_reachable_program(
+                    &monadic_prog,
+                    &["main", "tests"],
+                );
                 let handler_info = codegen::handler_analysis::analyze(&elaborated);
                 let optimized = monadic::effect_opt::run(monadic_prog, &handler_info, &effect_info);
                 let after = monadic::stats::Stats::collect_program(&optimized);
-                println!("{}", monadic::stats::StatsDiff::new(before, after));
+                let after_reachable = monadic::stats::Stats::collect_reachable_program(
+                    &optimized,
+                    &["main", "tests"],
+                );
+                let reachable = (before_reachable.decls > 0 || after_reachable.decls > 0)
+                    .then(|| monadic::stats::StatsDiff::new(before_reachable, after_reachable));
+                println!(
+                    "{}",
+                    monadic::stats::StatsReport::new(
+                        monadic::stats::StatsDiff::new(before, after),
+                        reachable,
+                    )
+                );
                 return;
             }
 

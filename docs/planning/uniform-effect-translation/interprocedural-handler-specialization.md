@@ -128,5 +128,14 @@ come from simple helper boundaries.
 ## Open Follow-Up
 
 If same-module inlining produces useful stats, design function-variant
-specialization as a separate stage. If it does not, interprocedural handler
-optimization should wait until profiling shows a concrete hotspot.
+specialization as a separate stage. A quick native-variant prototype showed the
+main design wrinkle: redirecting a call to a specialized sibling improves that
+call path, but whole-program structural stats get worse unless the original
+function is proven dead or the stats report reachability-aware counts. Do not
+land function variants until the design includes:
+
+- a code-size policy;
+- a reachability/export policy for keeping or dropping original functions;
+- stats that can separate generated variants from source declarations, or count
+  only reachable entry-point paths;
+- a naming/debuggability story for generated functions.

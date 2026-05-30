@@ -108,8 +108,11 @@ handlers on the slow evidence path.
 **Measurement hook:** `saga inspect <file> --stage monadic-stats` prints
 pre/post optimizer structural counts for `Yield`, `Bind`, `Let`,
 `ForeignCall`, handlers, arms, and related monadic IR nodes, plus per-op
-`Yield` and per-target `ForeignCall` breakdowns. Use this before choosing the
-next optimizer milestone.
+`Yield` and per-target `ForeignCall` breakdowns. It also prints an
+entry-reachable section rooted at `main`/`tests`, which is important before
+landing function-variant specialization because variants can improve the hot
+call path while increasing whole-program emitted IR. Use this before choosing
+the next optimizer milestone.
 
 **Latest optimizer milestone:** interprocedural handler specialization
 milestone 1 is implemented; see
