@@ -185,11 +185,13 @@ impl<'info, 'data> Optimizer<'info, 'data> {
     fn optimize_expr(&mut self, expr: MExpr) -> (MExpr, Change) {
         let (expr, child_change) = self.optimize_children(expr);
         let (expr, native_change) = self.try_native_direct_call(expr);
+        let (expr, finally_direct_change) = self.try_finally_direct_call(expr);
         let (expr, direct_change) = self.try_direct_call(expr);
         let (expr, collapse_change) = self.try_bind_collapse(expr);
         let (expr, let_change) = self.try_bind_to_let(expr);
         let mut change = child_change;
         change.mark_if(native_change);
+        change.mark_if(finally_direct_change);
         change.mark_if(direct_change);
         change.mark_if(collapse_change);
         change.mark_if(let_change);
@@ -236,6 +238,19 @@ impl<'info, 'data> Optimizer<'info, 'data> {
                         var,
                         value: Box::new(value),
                         body: Box::new(body),
+                    },
+                    change,
+                )
+            }
+            MExpr::Ensure { body, cleanup } => {
+                let (body, body_change) = self.optimize_expr(*body);
+                let (cleanup, cleanup_change) = self.optimize_expr(*cleanup);
+                let mut change = body_change;
+                change.mark_if(cleanup_change);
+                (
+                    MExpr::Ensure {
+                        body: Box::new(body),
+                        cleanup: Box::new(cleanup),
                     },
                     change,
                 )
@@ -599,6 +614,7 @@ impl<'info, 'data> Optimizer<'info, 'data> {
         match expr {
             MExpr::Pure(_) => true,
             MExpr::Let { value, body, .. } => self.expr_is_pure(value) && self.expr_is_pure(body),
+            MExpr::Ensure { .. } => false,
             MExpr::Case { arms, .. } => arms.iter().all(|arm| {
                 arm.guard.as_ref().is_none_or(|g| self.expr_is_pure(g))
                     && self.expr_is_pure(&arm.body)
@@ -875,7 +891,95 @@ impl<'info, 'data> Optimizer<'info, 'data> {
             return (MExpr::Yield { op, args, source }, Change::Unchanged);
         };
 
-        (rewrite_resumes_to_pure(inlined), Change::Changed)
+        (rewrite_resumes_to_pure(inlined.body), Change::Changed)
+    }
+
+    fn try_finally_direct_call(&self, expr: MExpr) -> (MExpr, Change) {
+        if !self.opts.direct_call() {
+            return (expr, Change::Unchanged);
+        }
+
+        let MExpr::Bind {
+            var,
+            value,
+            body,
+            mode,
+        } = expr
+        else {
+            return (expr, Change::Unchanged);
+        };
+
+        let MExpr::Yield { op, args, .. } = &*value else {
+            return (
+                MExpr::Bind {
+                    var,
+                    value,
+                    body,
+                    mode,
+                },
+                Change::Unchanged,
+            );
+        };
+
+        let Some(arm) = self.resolve_finally_direct_call_arm(op) else {
+            return (
+                MExpr::Bind {
+                    var,
+                    value,
+                    body,
+                    mode,
+                },
+                Change::Unchanged,
+            );
+        };
+
+        let Some(inlined) = inline_tail_resumptive_arm(arm, args) else {
+            return (
+                MExpr::Bind {
+                    var,
+                    value,
+                    body,
+                    mode,
+                },
+                Change::Unchanged,
+            );
+        };
+        let Some(cleanup) = inlined.finally_block else {
+            return (
+                MExpr::Bind {
+                    var,
+                    value,
+                    body,
+                    mode,
+                },
+                Change::Unchanged,
+            );
+        };
+        if !cleanup_vars_are_available_at_perform_site(&cleanup, args) {
+            return (
+                MExpr::Bind {
+                    var,
+                    value,
+                    body,
+                    mode,
+                },
+                Change::Unchanged,
+            );
+        }
+
+        let continued = MExpr::Bind {
+            var,
+            value: Box::new(rewrite_resumes_to_pure(inlined.body)),
+            body,
+            mode,
+        };
+        (
+            MExpr::Ensure {
+                body: Box::new(continued),
+                cleanup: Box::new(cleanup),
+            },
+            Change::Changed,
+        )
     }
 
     fn resolve_direct_call_arm(
@@ -895,6 +999,51 @@ impl<'info, 'data> Optimizer<'info, 'data> {
                         return None;
                     }
                     if arm.finally_block.is_some() {
+                        return None;
+                    }
+                    if expr_contains_yield(&arm.body) {
+                        return None;
+                    }
+                    if self.handler_analysis.resumption.get(&arm.id)
+                        != Some(&ResumptionKind::TailResumptive)
+                    {
+                        return None;
+                    }
+                    return Some(arm);
+                }
+                HandlerFrame::Static { effects, .. } if effects.iter().any(|e| e == &op.effect) => {
+                    return None;
+                }
+                HandlerFrame::Native { effects, .. } if effects.iter().any(|e| e == &op.effect) => {
+                    return None;
+                }
+                HandlerFrame::Blocking { effects } if effects.iter().any(|e| e == &op.effect) => {
+                    return None;
+                }
+                _ => {}
+            }
+        }
+        None
+    }
+
+    fn resolve_finally_direct_call_arm(
+        &self,
+        op: &crate::codegen::monadic::ir::EffectOpRef,
+    ) -> Option<&MHandlerArm> {
+        for frame in self.handler_stack.iter().rev() {
+            match frame {
+                HandlerFrame::Static { effects, arms }
+                    if effects.iter().any(|e| e == &op.effect) =>
+                {
+                    let mut matching = arms
+                        .iter()
+                        .filter(|arm| arm.op.effect == op.effect && arm.op.op == op.op);
+                    let arm = matching.next()?;
+                    if matching.next().is_some() {
+                        return None;
+                    }
+                    let cleanup = arm.finally_block.as_ref()?;
+                    if cleanup.contains_resume() {
                         return None;
                     }
                     if expr_contains_yield(&arm.body) {
@@ -1164,6 +1313,9 @@ fn expr_contains_yield(expr: &MExpr) -> bool {
         MExpr::Bind { value, body, .. } | MExpr::Let { value, body, .. } => {
             expr_contains_yield(value) || expr_contains_yield(body)
         }
+        MExpr::Ensure { body, cleanup } => {
+            expr_contains_yield(body) || expr_contains_yield(cleanup)
+        }
         MExpr::Case {
             scrutinee, arms, ..
         } => {
@@ -1271,12 +1423,29 @@ fn handler_arm_contains_yield(arm: &MHandlerArm) -> bool {
             .is_some_and(|finally_block| expr_contains_yield(finally_block))
 }
 
-fn inline_tail_resumptive_arm(arm: &MHandlerArm, args: &[Atom]) -> Option<MExpr> {
+fn cleanup_vars_are_available_at_perform_site(cleanup: &MExpr, args: &[Atom]) -> bool {
+    let mut available = HashSet::new();
+    for arg in args {
+        collect_atom_var_names(arg, &mut available);
+    }
+
+    let mut cleanup_names = HashSet::new();
+    collect_expr_var_names(cleanup, &mut cleanup_names);
+    cleanup_names.is_subset(&available)
+}
+
+struct InlinedArm {
+    body: MExpr,
+    finally_block: Option<MExpr>,
+}
+
+fn inline_tail_resumptive_arm(arm: &MHandlerArm, args: &[Atom]) -> Option<InlinedArm> {
     if args.len() != arm.params.len() {
         return None;
     }
 
     let mut body = (*arm.body).clone();
+    let mut finally_block = arm.finally_block.as_deref().cloned();
     for (param, arg) in arm.params.iter().zip(args) {
         match param {
             Pat::Var { name, id, .. } => {
@@ -1290,6 +1459,13 @@ fn inline_tail_resumptive_arm(arm: &MHandlerArm, args: &[Atom]) -> Option<MExpr>
                     return None;
                 }
                 body = substituted.value;
+                if let Some(cleanup) = finally_block {
+                    let substituted = subst_expr(cleanup, &target, arg, &free_names);
+                    if substituted.blocked {
+                        return None;
+                    }
+                    finally_block = Some(substituted.value);
+                }
             }
             Pat::Wildcard { .. }
             | Pat::Lit {
@@ -1299,7 +1475,10 @@ fn inline_tail_resumptive_arm(arm: &MHandlerArm, args: &[Atom]) -> Option<MExpr>
             _ => return None,
         }
     }
-    Some(body)
+    Some(InlinedArm {
+        body,
+        finally_block,
+    })
 }
 
 fn rewrite_resumes_to_pure(expr: MExpr) -> MExpr {
@@ -1326,6 +1505,10 @@ fn rewrite_resumes_to_pure(expr: MExpr) -> MExpr {
             var,
             value: Box::new(rewrite_resumes_to_pure(*value)),
             body: Box::new(rewrite_resumes_to_pure(*body)),
+        },
+        MExpr::Ensure { body, cleanup } => MExpr::Ensure {
+            body: Box::new(rewrite_resumes_to_pure(*body)),
+            cleanup: Box::new(rewrite_resumes_to_pure(*cleanup)),
         },
         MExpr::Case {
             scrutinee,
@@ -1643,6 +1826,14 @@ fn subst_expr(
                 var,
                 value: Box::new(value),
                 body: Box::new(body),
+            })
+        }
+        MExpr::Ensure { body, cleanup } => {
+            let body_out = subst_expr(*body, target, replacement, replacement_free_names);
+            let cleanup_out = subst_expr(*cleanup, target, replacement, replacement_free_names);
+            combine_pair(body_out, cleanup_out, |body, cleanup| MExpr::Ensure {
+                body: Box::new(body),
+                cleanup: Box::new(cleanup),
             })
         }
         MExpr::Case {
@@ -2275,6 +2466,9 @@ fn expr_contains_target(expr: &MExpr, target: &MVar) -> bool {
             expr_contains_target(value, target)
                 || ((!var_matches(var, target)) && expr_contains_target(body, target))
         }
+        MExpr::Ensure { body, cleanup } => {
+            expr_contains_target(body, target) || expr_contains_target(cleanup, target)
+        }
         MExpr::Case {
             scrutinee, arms, ..
         } => {
@@ -2429,6 +2623,10 @@ fn collect_expr_var_names(expr: &MExpr, out: &mut HashSet<String>) {
         MExpr::Bind { value, body, .. } | MExpr::Let { value, body, .. } => {
             collect_expr_var_names(value, out);
             collect_expr_var_names(body, out);
+        }
+        MExpr::Ensure { body, cleanup } => {
+            collect_expr_var_names(body, out);
+            collect_expr_var_names(cleanup, out);
         }
         MExpr::Case {
             scrutinee, arms, ..
@@ -3284,6 +3482,83 @@ mod tests {
         let out = run(prog, &f.h, &info);
 
         assert_eq!(out, val_program(with_expr(handler, yield_expr)));
+    }
+
+    #[test]
+    fn direct_call_with_finally_wraps_resumed_continuation_in_ensure() {
+        let mut f = Fixture::new();
+        let arm = tail_arm(
+            143,
+            vec![pat_unit(144)],
+            resume(lit_int("1", 1)),
+            Some(MExpr::Pure(unit_atom())),
+        );
+        f.h.resumption
+            .insert(crate::ast::NodeId(143), ResumptionKind::TailResumptive);
+        let handler = static_log_handler(vec![arm]);
+        let body = bind_expr(
+            mv("x", 145),
+            yield_log(vec![unit_atom()], crate::ast::NodeId(146)),
+            MExpr::Pure(var("x", 145)),
+        );
+        let prog = val_program(with_expr(handler.clone(), body));
+        let info = f.info();
+
+        let out = run(prog, &f.h, &info);
+
+        assert_eq!(
+            out,
+            val_program(with_expr(
+                handler,
+                MExpr::Ensure {
+                    body: Box::new(MExpr::Pure(lit_int("1", 1))),
+                    cleanup: Box::new(MExpr::Pure(unit_atom())),
+                }
+            ))
+        );
+    }
+
+    #[test]
+    fn direct_call_with_finally_skips_cleanup_that_uses_arm_local() {
+        let mut f = Fixture::new();
+        let arm_body = bind_expr(
+            mv("resource", 148),
+            MExpr::Pure(lit_int("1", 1)),
+            resume(var("resource", 148)),
+        );
+        let arm = tail_arm(
+            149,
+            vec![pat_unit(150)],
+            arm_body,
+            Some(MExpr::Pure(var("resource", 148))),
+        );
+        f.h.resumption
+            .insert(crate::ast::NodeId(149), ResumptionKind::TailResumptive);
+        let handler = static_log_handler(vec![arm]);
+        let body = bind_expr(
+            mv("x", 151),
+            yield_log(vec![unit_atom()], crate::ast::NodeId(152)),
+            MExpr::Pure(var("x", 151)),
+        );
+        let prog = val_program(with_expr(handler.clone(), body.clone()));
+        let info = f.info();
+
+        let out = run(prog, &f.h, &info);
+
+        let MDecl::Val(MVal {
+            value: MExpr::With { body, .. },
+            ..
+        }) = &out[0]
+        else {
+            panic!("expected val with with-expression");
+        };
+        assert!(matches!(
+            &**body,
+            MExpr::Bind {
+                value,
+                ..
+            } if matches!(&**value, MExpr::Yield { .. })
+        ));
     }
 
     #[test]

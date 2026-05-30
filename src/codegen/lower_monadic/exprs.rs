@@ -49,6 +49,7 @@ impl<'ctx> Lowerer<'ctx> {
                 mode,
             } => self.lower_bind(var, value, body, *mode, ctx),
             MExpr::Let { var, value, body } => self.lower_let(var, value, body, ctx),
+            MExpr::Ensure { body, cleanup } => self.lower_ensure(body, cleanup, ctx),
             MExpr::Case {
                 scrutinee, arms, ..
             } => self.lower_case(scrutinee, arms, ctx),
@@ -141,6 +142,22 @@ impl<'ctx> Lowerer<'ctx> {
             return_value,
         ]);
         self.apply_current_k(handler_value, ctx)
+    }
+
+    fn lower_ensure(&mut self, body: &MExpr, cleanup: &MExpr, ctx: &LowerCtx) -> CExpr {
+        let ensure_result = self.fresh_helper_name();
+        let ensure_k = self.fresh_helper_name();
+        let body_ctx = ctx.with_return_k(ensure_k.clone());
+        let body_ce = self.lower_expr(body, &body_ctx);
+        let forward_result = self.apply_current_k(CExpr::Var(ensure_result.clone()), ctx);
+        CExpr::Let(
+            ensure_k,
+            Box::new(CExpr::Fun(
+                vec![ensure_result],
+                Box::new(self.sequence_finally_then(cleanup, ctx, forward_result)),
+            )),
+            Box::new(body_ce),
+        )
     }
 
     /// Lower `MExpr::LetFun { name, params, body, rest }` to a Core Erlang

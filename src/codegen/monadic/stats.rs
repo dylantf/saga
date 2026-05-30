@@ -18,6 +18,7 @@ pub struct Stats {
     pub yield_: usize,
     pub bind: usize,
     pub let_: usize,
+    pub ensure: usize,
     pub app: usize,
     pub foreign_call: usize,
     pub with: usize,
@@ -90,6 +91,11 @@ impl Stats {
                 self.let_ += 1;
                 self.visit_expr(value);
                 self.visit_expr(body);
+            }
+            MExpr::Ensure { body, cleanup } => {
+                self.ensure += 1;
+                self.visit_expr(body);
+                self.visit_expr(cleanup);
             }
             MExpr::Case {
                 scrutinee, arms, ..
@@ -341,7 +347,7 @@ fn write_breakdown(
     Ok(())
 }
 
-fn rows(before: &Stats, after: &Stats) -> [(&'static str, usize, usize); 23] {
+fn rows(before: &Stats, after: &Stats) -> [(&'static str, usize, usize); 24] {
     [
         ("decls", before.decls, after.decls),
         ("exprs", before.exprs, after.exprs),
@@ -350,6 +356,7 @@ fn rows(before: &Stats, after: &Stats) -> [(&'static str, usize, usize); 23] {
         ("Yield", before.yield_, after.yield_),
         ("Bind", before.bind, after.bind),
         ("Let", before.let_, after.let_),
+        ("Ensure", before.ensure, after.ensure),
         ("App", before.app, after.app),
         ("ForeignCall", before.foreign_call, after.foreign_call),
         ("With", before.with, after.with),

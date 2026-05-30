@@ -287,6 +287,10 @@ impl<'ctx> Lowerer<'ctx> {
                 self.absorb_anon_record_atoms_from_expr(value);
                 self.absorb_anon_record_atoms_from_expr(body);
             }
+            MExpr::Ensure { body, cleanup } => {
+                self.absorb_anon_record_atoms_from_expr(body);
+                self.absorb_anon_record_atoms_from_expr(cleanup);
+            }
             MExpr::Case {
                 scrutinee, arms, ..
             } => {

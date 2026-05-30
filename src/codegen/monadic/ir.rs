@@ -160,6 +160,14 @@ pub enum MExpr {
         body: Box<MExpr>,
     },
 
+    /// Run `body`, then run `cleanup`, preserving `body`'s result. Produced by
+    /// effect optimization when it can direct-call a tail-resumptive arm with a
+    /// `finally` block. The translator never emits this directly.
+    Ensure {
+        body: Box<MExpr>,
+        cleanup: Box<MExpr>,
+    },
+
     Case {
         scrutinee: Atom,
         arms: Vec<MArm>,
@@ -289,6 +297,7 @@ impl MExpr {
             MExpr::Bind { value, body, .. } | MExpr::Let { value, body, .. } => {
                 value.contains_resume() || body.contains_resume()
             }
+            MExpr::Ensure { body, cleanup } => body.contains_resume() || cleanup.contains_resume(),
             MExpr::Case {
                 scrutinee, arms, ..
             } => scrutinee.contains_resume() || arms.iter().any(|a| a.body.contains_resume()),

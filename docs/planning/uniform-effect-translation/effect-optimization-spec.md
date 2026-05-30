@@ -18,6 +18,11 @@ remaining `Yield`s down by `Effect::op`, which is the quickest way to separate
 missed optimizer opportunities from deliberately slow-path operations such as
 multishot, abort, value-producing resume, dynamic handlers, or cleanup arms.
 
+Interprocedural handler specialization is intentionally not part of the local
+direct-call rewrite. See
+[interprocedural-handler-specialization.md](./interprocedural-handler-specialization.md)
+for the proposed same-module inlining milestone.
+
 ## Required context
 
 Read these first:
@@ -360,8 +365,8 @@ the inlined body sits in the same lexical position as the original
 - No intervening dynamic/native/composite frame for the same effect between
   the `Yield` and the resolved static arm. (Handler-stack walk picks the
   innermost matching entry; if a blocker shadows the `Static`, give up.)
-- Matching arm has no `finally_block`; cleanup-preserving direct-call is
-  deferred.
+- Matching arm has no `finally_block`; the only exception is the conservative
+  `Ensure` milestone below.
 - Matching arm uses only first-milestone parameter patterns: variable,
   wildcard, or unit literal.
 - Capture-avoidance during parameter and resume substitution.
@@ -400,6 +405,58 @@ closure hop. It must not remove the Erlang callback thunk itself for APIs
 like `spawn/1`, because the BEAM API requires that callback shape. Similar
 callback-adapter specialization applies to any native op or external wrapper
 whose raw target calls a Saga function value.
+
+### Cleanup-preserving direct-call with `Ensure`
+
+The first cleanup-preserving milestone introduces an optimizer-only monadic IR
+node:
+
+```text
+Ensure { body, cleanup }
+```
+
+Lowering runs `body`, then runs `cleanup`, then forwards `body`'s result. This
+gives the optimizer somewhere explicit to put a handler arm's `finally` block
+after direct-call removes the slow handler-arm closure.
+
+The rewrite fires only for a nonterminal bind:
+
+```text
+Bind(Yield(E.op, args), x, rest)
+```
+
+when the selected static arm is `TailResumptive`, has exactly one matching op
+arm, and otherwise satisfies the normal direct-call gates. The result is:
+
+```text
+Ensure {
+  body = Bind(inlined_arm_body_with_resume_as_pure, x, rest),
+  cleanup = substituted_finally_block
+}
+```
+
+Additional conservative gates:
+
+- cleanup must not contain `resume`;
+- arm body must not contain an inner `Yield`;
+- after op-param substitution, cleanup may only reference variable names that
+  are available at the perform site through the op arguments.
+
+The last gate is load-bearing. A common resource pattern binds a value inside
+the arm before `resume` and refers to it in `finally`:
+
+```saga
+acquire_scoped acquire release = {
+  let resource = acquire ()
+  resume resource
+} finally {
+  release resource
+}
+```
+
+Moving that cleanup outside the arm would put `resource` out of scope, so this
+case deliberately stays on the slow path for now. Supporting it requires a
+richer scoped-resource representation, not simple substitution.
 
 ---
 

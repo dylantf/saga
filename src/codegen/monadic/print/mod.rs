@@ -149,6 +149,7 @@ fn write_expr(out: &mut String, indent: usize, e: &MExpr) {
                 write_bind_line(out, indent, "let", var, value);
                 cur = body;
             }
+            MExpr::Ensure { .. } => break,
             _ => break,
         }
     }
@@ -170,6 +171,13 @@ fn write_tail(out: &mut String, indent: usize, e: &MExpr) {
     let p = pad(indent);
     match e {
         MExpr::Bind { .. } | MExpr::Let { .. } => unreachable!("flattened above"),
+        MExpr::Ensure { body, cleanup } => {
+            writeln!(out, "{p}ensure {{").unwrap();
+            write_expr(out, indent + 1, body);
+            writeln!(out, "{p}}} finally {{").unwrap();
+            write_expr(out, indent + 1, cleanup);
+            writeln!(out, "{p}}}").unwrap();
+        }
         MExpr::Pure(a) => writeln!(out, "{p}Pure({})", atom_str(a)).unwrap(),
         MExpr::Yield { op, args, source } => writeln!(
             out,
@@ -392,6 +400,7 @@ fn expr_compact(e: &MExpr) -> String {
             expr_compact(value),
             expr_compact(body)
         ),
+        MExpr::Ensure { .. } => "<Ensure>".to_string(),
         MExpr::Yield { op, args, source } => format!(
             "Yield({}, [{}]) [#{}]",
             op_str(op),
@@ -506,6 +515,7 @@ fn should_inline_value(e: &MExpr) -> bool {
         e,
         MExpr::Pure(_)
             | MExpr::Yield { .. }
+            | MExpr::Ensure { .. }
             | MExpr::App { .. }
             | MExpr::ForeignCall { .. }
             | MExpr::BinOp { .. }

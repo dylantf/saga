@@ -404,6 +404,9 @@ fn needs_value_position_delimiter(value: &MExpr) -> bool {
         MExpr::Bind { value, body, .. } | MExpr::Let { value, body, .. } => {
             needs_value_position_delimiter(value) || needs_value_position_delimiter(body)
         }
+        MExpr::Ensure { body, cleanup } => {
+            needs_value_position_delimiter(body) || needs_value_position_delimiter(cleanup)
+        }
         MExpr::If {
             then_branch,
             else_branch,
