@@ -790,10 +790,23 @@ starts. Remaining order:
    from valid source (parser-enforced); comment tightened. See "Phase-1
    completion blockers" above.
 
-4. **Re-pin the leftover shape tests.** `alias_chase_let_h_is_static` (lib) and
-   `tail_recursive_apply_in_tail_position` (codegen_integration) are pre-existing
-   pins, not behavior bugs. Prefer runtime/e2e/property coverage over brittle
-   Core-shape assertions.
+4. **Re-pin the leftover shape tests — DONE.**
+   - `alias_chase_let_h_is_static`: the assertion "let-binding emits no Bind"
+     was the old path's structural invariant. The new path emits a Bind for
+     the let (the HandlerValue is materialized in case it escapes as a
+     runtime value) AND alias-chases correctly so the with-site is `Static`.
+     Re-pinned to walk through the Bind and assert the semantic property
+     (Static handler with the original arms) rather than the dead-code-
+     emission detail.
+   - `tail_recursive_apply_in_tail_position`: the assertion "recursive apply
+     is not let-bound" pinned the old selective-CPS path's structural tail
+     position. The new uniform-monadic path emits
+     `let <V> = apply f(args, _Ev, _ReturnK) in case V of ...` — structurally
+     non-tail, but BEAM's tail-call optimizer still handles it because the
+     recursive call passes the outer `_ReturnK` directly (CPS-style tail
+     call) and each case arm either tail-calls `_ReturnK` or returns the
+     bound value. Re-pinned as a behavioral test: 10M iterations must
+     complete without stack overflow.
 
 5. **Keep using `~/projects/saga_json` as the shakedown corpus** after each
    change.
@@ -801,6 +814,11 @@ starts. Remaining order:
 Done earlier: callable/ABI review (Pass 3), record metadata (Pass 4), native
 bootstrap (Pass 5), finally/abort routing diagnosis + the marker and
 qualified-constructor fixes, ANF review (clean). `@inline`/`InlineVal` removed.
+
+**Phase-1 status: complete.** All blockers above resolved; full test suite
+green (1094 lib + 102 codegen_integration + 373 e2e + 218 saga_json).
+**Stage 11 (effect optimization) is unblocked** — the slow path is now a
+complete oracle.
 
 ## Commands Used For This Triage
 

@@ -632,15 +632,29 @@ fn alias_chase_let_h_is_static() {
         },
     );
     let body = fun_body(run_decl(fun_binding("f", block)));
-    // The let-binding of a `HandlerExpr` is bookkeeping only; the translator
-    // records the alias and skips emitting a Bind for it. The block's tail
-    // is the `with h` expression which should classify as Static.
-    match body {
-        MExpr::With { handler, .. } => match handler {
-            MHandler::Static { arms, .. } => assert_eq!(arms.len(), 1),
-            _ => panic!("expected Static handler from chased alias"),
-        },
-        other => panic!("expected With at block tail, got {:?}", other),
+    // The translator records the alias in `local_static_handlers` so the
+    // `with h` site resolves to the original handler arms directly. The
+    // current pipeline still emits a `Bind h = HandlerValue { ... }` for
+    // the let-binding (since `h` could in principle escape as a runtime
+    // value); a future DCE pass over unused-as-value handler binds could
+    // drop it. The behavior under test is that alias-chasing succeeded —
+    // i.e. the with-site classifies as `Static`, not `Dynamic`.
+    fn find_with_handler(e: &MExpr) -> Option<&MHandler> {
+        match e {
+            MExpr::With { handler, .. } => Some(handler),
+            MExpr::Bind { body, .. } => find_with_handler(body),
+            _ => None,
+        }
+    }
+    let handler = find_with_handler(&body)
+        .unwrap_or_else(|| panic!("expected With somewhere in block tail, got {body:?}"));
+    match handler {
+        MHandler::Static { arms, .. } => assert_eq!(
+            arms.len(),
+            1,
+            "alias-chased Static handler must carry the original arm"
+        ),
+        other => panic!("expected Static handler from chased alias, got {other:?}"),
     }
 }
 

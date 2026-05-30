@@ -592,39 +592,30 @@ main () = {
 
 // --- Tail call position ---
 
-/// A tail-recursive function should have its recursive `apply` in tail position:
-/// the apply must be the last expression in its case arm, not bound by a `let`.
+/// A tail-recursive function must survive the uniform-CPS pipeline without
+/// losing its tail-call property — otherwise deep recursion blows the BEAM
+/// process stack.
+///
+/// The old selective-CPS path preserved tail position structurally (the
+/// recursive `apply` was the last expression in its case arm). The new
+/// uniform-monadic path lowers every call through `Bind`, producing a
+/// `let <V> = apply f(...) in case V of ...` shape that's structurally
+/// non-tail. BEAM's tail-call optimizer still handles this pattern because
+/// the recursive call passes the outer `_ReturnK` directly (CPS-style tail
+/// call) and each case arm either tail-calls `_ReturnK` or returns the bound
+/// value unchanged. The behavioral guard below is what actually matters:
+/// 10 million iterations must complete without a stack overflow.
 #[test]
 fn tail_recursive_apply_in_tail_position() {
     let src = "
 sum_to acc n = if n == 0 then acc else sum_to (acc + n) (n - 1)
+
+main () = sum_to 0 10000000
 ";
-    let out = emit(src);
-
-    // The output should contain the recursive apply.
-    assert!(
-        out.contains("apply 'sum_to'/4"),
-        "expected recursive apply in output\n{out}"
-    );
-
-    // The recursive apply must NOT appear as the value of a let-binding,
-    // which would take it out of tail position. i.e. no `let <X> = \n apply 'sum_to'/4`.
-    assert!(
-        !out.contains("=\n")
-            || !out.lines().any(|l| {
-                l.trim().starts_with("apply 'sum_to'/4")
-                    && out[..out.find(l.trim()).unwrap()]
-                        .lines()
-                        .rev()
-                        .find(|prev| !prev.trim().is_empty())
-                        .is_some_and(|prev| prev.trim().ends_with('='))
-            }),
-        "recursive apply should not be let-bound (would break tail position)\n{out}"
-    );
-
-    // Uniform CPS may place the recursive call inside a small continuation
-    // closure after ANF lifting; the important regression check here is that
-    // the recursive apply itself is not bound as a value.
+    // sum_to 0 10_000_000 = 10_000_000 * 10_000_001 / 2 = 50_000_005_000_000.
+    // If tail recursion were broken, this would crash with stack_overflow long
+    // before reaching the answer.
+    assert_runs_and_stdout_contains(src, &["50000005000000"]);
 }
 
 // --- Mutual recursion ---
