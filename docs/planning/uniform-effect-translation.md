@@ -343,6 +343,34 @@ point (slow uniform vs. optimized uniform vs. old selective-CPS).
 Once the new path is reliable across the full test suite and benchmark wins
 are confirmed, a single mechanical commit performs the migration.
 
+**Current readiness scan:**
+
+The new path is active, but the old-path directory is still referenced by a few
+shared or frozen pieces. Do a small prep commit before the destructive
+delete/rename commit:
+
+- Move or copy the type-shape helpers currently imported from
+  `lower/util.rs` into a backend-neutral module. Live users:
+  `codegen::resolve`, `codegen::runtime_shape`, and old
+  `codegen::call_effects`.
+- Move the BEAM-native handler/effect-family helper used by
+  `typechecker::handlers` out of `lower/beam_interop.rs` or replace it with
+  backend-neutral native-effect metadata.
+- Remove old-path-only metadata after the old path is gone:
+  `ResolvedCodegenKind::InlineVal`, `RuntimeFunctionShape::InlineVal`, and
+  `ModuleCodegenInfo::inline_vals`.
+- Remove `CompiledModule::call_effects` once `call_effects.rs` is deleted.
+- Revisit ignored codegen tests before deleting the old lowerer. Current scan:
+  `src/codegen/tests.rs` has 10 ignored default-test candidates after
+  unignoring the two new-path smoke tests; `tests/module_codegen_integration.rs`
+  has 44 ignored old-shape or old-runtime-harness tests. Classify each as:
+  delete stale selective-CPS/Core-shape assertion, migrate to a new-path shape
+  assertion, or replace with an existing/new behavioral test. Known real
+  follow-ups from the ignored lib tests are structured `let assert` errors and
+  source annotations through ANF/monadic lowering.
+
+After that prep, the delete/rename step below should be mechanical.
+
 **Files / directories to delete:**
 
 - `src/codegen/normalize.rs` — partial-ANF pass; superseded by `anf.rs`.

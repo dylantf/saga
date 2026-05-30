@@ -173,8 +173,9 @@ given their own local predicates.
 Bind { var, value, body }   ⟶   Let { var, value, body }
 ```
 
-iff `value` is **recursively pure** — i.e. `Yield` is not reachable from
-`value`.
+iff `value` is **recursively pure**. This is stricter than "no algebraic
+effects": ordinary calls may still perform builtin or external side effects
+even when their Saga effect row is empty.
 
 ### Purity predicate
 
@@ -186,7 +187,7 @@ iff `value` is **recursively pure** — i.e. `Yield` is not reachable from
 | `Let { value, body, .. }` | `pure(value) && pure(body)` |
 | `Case { arms, .. }` | every arm body pure, every guard pure |
 | `If { then_branch, else_branch, .. }` | both branches pure |
-| `App { head, .. }` | callee's effect row is `{}` (look up via `ResolutionMap` + typechecker effects) |
+| `App { .. }` | no for now. An empty algebraic effect row is not a purity proof: builtins such as `dbg` and arbitrary `@external` wrappers can be side-effectful. |
 | `FieldAccess { .. }`, `RecordUpdate { .. }`, `DictMethodAccess { .. }`, `BinOp { .. }`, `UnaryMinus { .. }`, `BitString { .. }` | yes (no side effects in IR semantics) |
 | `ForeignCall { .. }` | no in the first implementation (conservative default until the FFI signature carries an explicit purity bit) |
 | `Yield { .. }` | **no** |
@@ -196,18 +197,13 @@ iff `value` is **recursively pure** — i.e. `Yield` is not reachable from
 | `Receive { .. }` | no (mailbox interaction) |
 | `Lambda { .. }` body | does **not** affect purity at the use site — constructing a closure is pure |
 
-### Where the effect-row info comes from
+### Why calls are conservative
 
-`App { head, .. }`: the callee's effect row is known. Cases:
-- `head` is `Atom::Var(x)` and `x` is a local function definition — look up
-  `fun_effects` for that definition.
-- `head` is `Atom::QualifiedRef { module, name }` — look up
-  `ResolutionMap[source_node_id]` to find the callee, then its
-  `fun_effects`.
-- `head` is `Atom::Lambda { … }` — the lambda's body's effect row is
-  known from the typechecker at the lambda's NodeId.
-- `head` is `Atom::DictRef`, `Atom::Symbol`, or otherwise dynamic — be
-  conservative and treat as effectful.
+The typechecker tracks algebraic effects, not general referential
+transparency. Calls with an empty effect row can still print, read, call an
+arbitrary external function, or invoke a builtin with observable behavior.
+Until the IR carries explicit purity metadata, `App` is not promoted to `Let`
+and dead-let cleanup must not delete unused call results.
 
 ### Termination
 
@@ -226,7 +222,7 @@ behavior is unchanged.
 ```
 fun do_thing () = {
   let x = perform get
-  let y = pure_helper x      -- pure_helper has effect row {}
+  let y = x + 1
   perform put y
 }
 ```
@@ -234,14 +230,14 @@ fun do_thing () = {
 After translation:
 ```
 Bind { value: Yield { op = get, .. }, var: x,
-  body: Bind { value: App { head: pure_helper, args: [Var x] }, var: y,
+  body: Bind { value: BinOp { op = Add, left: Var x, right: 1 }, var: y,
     body: Yield { op = put, args = [Var y] } } }
 ```
 
 After bind→let promotion (middle binder's value is pure):
 ```
 Bind { value: Yield { op = get, .. }, var: x,
-  body: Let { value: App { head: pure_helper, args: [Var x] }, var: y,
+  body: Let { value: BinOp { op = Add, left: Var x, right: 1 }, var: y,
     body: Yield { op = put, args = [Var y] } } }
 ```
 

@@ -1366,14 +1366,9 @@ fn build_effect_info_populates_all_fields_from_check_result() {
     assert_eq!(info.effect_ops.get("Log"), Some(&vec!["log".to_string()]));
 }
 
-/// Smoke test the full new path on a trivial program. The point is to
-/// surface integration bugs in steps 1-7 — if this crashes, that's the
-/// signal. Marked `#[ignore]` so it doesn't gate the default suite while
-/// step 8 lands; run with:
-///
-///     cargo test -p saga -- --ignored new_path_smoke
+/// Smoke test the full new path on a trivial program. Kept as a default test
+/// now that the new path is active.
 #[test]
-#[ignore]
 fn new_path_smoke_hello_world() {
     let src = "main () = ()";
     let (elaborated, result) = check_program(src);
@@ -1427,7 +1422,6 @@ fn new_path_smoke_hello_world() {
 /// `_ReturnK = fun(X) -> X` so `Bind` / `If` / etc. inside the body lower
 /// cleanly.
 #[test]
-#[ignore]
 fn new_path_smoke_val_with_computation() {
     let src = "\
 val answer = 1 + 2

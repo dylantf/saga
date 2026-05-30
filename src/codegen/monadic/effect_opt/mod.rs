@@ -18,7 +18,6 @@ use crate::codegen::monadic::ir::{
     MProgram, MVal, MVar,
 };
 use crate::codegen::native_effects::{NativeArgTransform, native_op};
-use crate::typechecker;
 use std::collections::{HashMap, HashSet};
 
 /// Run the effect-optimization stage with default options.
@@ -33,14 +32,14 @@ pub fn run(m: MProgram, h: &HandlerAnalysis, e: &EffectInfo) -> MProgram {
 pub fn run_with_options(
     m: MProgram,
     h: &HandlerAnalysis,
-    e: &EffectInfo,
+    _e: &EffectInfo,
     opts: RunOptions,
 ) -> MProgram {
     if opts.skip {
         return m;
     }
 
-    let mut optimizer = Optimizer::new(opts, h, e);
+    let mut optimizer = Optimizer::new(opts, h);
     optimizer.optimize_program(m)
 }
 
@@ -51,10 +50,9 @@ pub struct RunOptions {
     pub skip: bool,
 }
 
-struct Optimizer<'info, 'data> {
+struct Optimizer<'info> {
     opts: RunOptions,
     handler_analysis: &'info HandlerAnalysis,
-    effect_info: &'info EffectInfo<'data>,
     handler_stack: Vec<HandlerFrame>,
     inline_candidates: HashMap<String, InlineCandidate>,
     variant_candidates: HashMap<String, VariantCandidate>,
@@ -136,16 +134,11 @@ impl<T> SubstOutcome<T> {
     }
 }
 
-impl<'info, 'data> Optimizer<'info, 'data> {
-    fn new(
-        opts: RunOptions,
-        handler_analysis: &'info HandlerAnalysis,
-        effect_info: &'info EffectInfo<'data>,
-    ) -> Self {
+impl<'info> Optimizer<'info> {
+    fn new(opts: RunOptions, handler_analysis: &'info HandlerAnalysis) -> Self {
         Self {
             opts,
             handler_analysis,
-            effect_info,
             handler_stack: Vec::new(),
             inline_candidates: HashMap::new(),
             variant_candidates: HashMap::new(),
@@ -643,7 +636,7 @@ impl<'info, 'data> Optimizer<'info, 'data> {
             return (expr, Change::Unchanged);
         };
 
-        if self.expr_is_pure(&value) {
+        if expr_is_pure(&value) {
             (MExpr::Let { var, value, body }, Change::Changed)
         } else {
             (
@@ -667,79 +660,10 @@ impl<'info, 'data> Optimizer<'info, 'data> {
             return (expr, Change::Unchanged);
         };
 
-        if self.expr_is_pure(&value) && !expr_contains_target(&body, &var) {
+        if expr_is_pure(&value) && !expr_contains_target(&body, &var) {
             (*body, Change::Changed)
         } else {
             (MExpr::Let { var, value, body }, Change::Unchanged)
-        }
-    }
-
-    fn expr_is_pure(&self, expr: &MExpr) -> bool {
-        match expr {
-            MExpr::Pure(_) => true,
-            MExpr::Let { value, body, .. } => self.expr_is_pure(value) && self.expr_is_pure(body),
-            MExpr::Ensure { .. } => false,
-            MExpr::Case { arms, .. } => arms.iter().all(|arm| {
-                arm.guard.as_ref().is_none_or(|g| self.expr_is_pure(g))
-                    && self.expr_is_pure(&arm.body)
-            }),
-            MExpr::If {
-                then_branch,
-                else_branch,
-                ..
-            } => self.expr_is_pure(then_branch) && self.expr_is_pure(else_branch),
-            MExpr::App { head, .. } => self.app_is_pure(head),
-            MExpr::FieldAccess { .. }
-            | MExpr::RecordUpdate { .. }
-            | MExpr::DictMethodAccess { .. }
-            | MExpr::BinOp { .. }
-            | MExpr::UnaryMinus { .. }
-            | MExpr::BitString { .. } => true,
-            MExpr::Yield { .. }
-            | MExpr::Bind { .. }
-            | MExpr::With { .. }
-            | MExpr::Resume { .. }
-            | MExpr::ForeignCall { .. }
-            | MExpr::Receive { .. }
-            | MExpr::LetFun { .. }
-            | MExpr::HandlerValue { .. } => false,
-        }
-    }
-
-    fn app_is_pure(&self, head: &Atom) -> bool {
-        match head {
-            Atom::Var { name, source } => {
-                if let Some(effects) = self.effect_info.let_effect_bindings.get(&name.name) {
-                    return effects.is_empty();
-                }
-                self.effect_info
-                    .type_at_node
-                    .get(source)
-                    .is_some_and(fun_type_effects_are_empty)
-            }
-            Atom::QualifiedRef {
-                module,
-                name,
-                source,
-            } => {
-                let canonical = format!("{module}.{name}");
-                self.effect_info
-                    .fun_effects
-                    .get(&canonical)
-                    .or_else(|| self.effect_info.fun_effects.get(name))
-                    .is_some_and(|effects| effects.is_empty())
-                    || self
-                        .effect_info
-                        .type_at_node
-                        .get(source)
-                        .is_some_and(fun_type_effects_are_empty)
-            }
-            Atom::Lambda { source, .. } => self
-                .effect_info
-                .type_at_node
-                .get(source)
-                .is_some_and(fun_type_effects_are_empty),
-            _ => false,
         }
     }
 
@@ -1588,14 +1512,34 @@ fn optimize_optional_atom_with(
     }
 }
 
-fn fun_type_effects_are_empty(ty: &typechecker::Type) -> bool {
-    match ty {
-        typechecker::Type::Fun(_, ret, row) => {
-            row.is_empty()
-                && (!matches!(ret.as_ref(), typechecker::Type::Fun(_, _, _))
-                    || fun_type_effects_are_empty(ret))
-        }
-        _ => false,
+fn expr_is_pure(expr: &MExpr) -> bool {
+    match expr {
+        MExpr::Pure(_) => true,
+        MExpr::Let { value, body, .. } => expr_is_pure(value) && expr_is_pure(body),
+        MExpr::Ensure { .. } => false,
+        MExpr::Case { arms, .. } => arms
+            .iter()
+            .all(|arm| arm.guard.as_ref().is_none_or(expr_is_pure) && expr_is_pure(&arm.body)),
+        MExpr::If {
+            then_branch,
+            else_branch,
+            ..
+        } => expr_is_pure(then_branch) && expr_is_pure(else_branch),
+        MExpr::FieldAccess { .. }
+        | MExpr::RecordUpdate { .. }
+        | MExpr::DictMethodAccess { .. }
+        | MExpr::BinOp { .. }
+        | MExpr::UnaryMinus { .. }
+        | MExpr::BitString { .. } => true,
+        MExpr::Yield { .. }
+        | MExpr::Bind { .. }
+        | MExpr::App { .. }
+        | MExpr::With { .. }
+        | MExpr::Resume { .. }
+        | MExpr::ForeignCall { .. }
+        | MExpr::Receive { .. }
+        | MExpr::LetFun { .. }
+        | MExpr::HandlerValue { .. } => false,
     }
 }
 
@@ -4766,7 +4710,7 @@ mod tests {
     }
 
     #[test]
-    fn bind_to_let_promotes_app_with_closed_empty_effect_row() {
+    fn bind_to_let_keeps_app_with_closed_empty_effect_row_conservative() {
         let mut f = Fixture::new();
         let source = crate::ast::NodeId(70);
         let head_source = crate::ast::NodeId(71);
@@ -4778,18 +4722,11 @@ mod tests {
             source,
         };
         let body = MExpr::Pure(var("x", 1));
-        let prog = val_program(bind_expr(mv("x", 1), value.clone(), body.clone()));
+        let prog = val_program(bind_expr(mv("x", 1), value, body));
 
-        let out = run(prog, &f.h, &info);
+        let out = run(prog.clone(), &f.h, &info);
 
-        assert_eq!(
-            out,
-            val_program(MExpr::Let {
-                var: mv("x", 1),
-                value: Box::new(value),
-                body: Box::new(body),
-            })
-        );
+        assert_eq!(out, prog);
     }
 
     #[test]

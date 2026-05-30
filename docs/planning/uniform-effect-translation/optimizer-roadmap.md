@@ -135,17 +135,17 @@ direction on the same machine.
 
 ### Latest Snapshot
 
-Last sampled after dead pure-let cleanup:
+Last sampled after conservative `App` purity correction:
 
 | Example | Entry-reachable result | Reading |
 | --- | --- | --- |
-| `25-state-effect` | `Yield 3 -> 3`; `Bind 16 -> 9` | Value-producing resume remains on the accepted slow path. |
+| `25-state-effect` | `Yield 3 -> 3`; `Bind 16 -> 13` | Value-producing resume remains on the accepted slow path. |
 | `29-actors` | `Yield 6 -> 0`; `ForeignCall 0 -> 6` | Native variants plus spawn thunk specialization remove all entry-reachable actor yields. |
 | `30-pingpong` | `Yield 8 -> 0`; `ForeignCall 0 -> 8` | Same actor shape as `29`; all entry-reachable actor yields direct-call Erlang. |
 | `32-monitor` | `Yield 4 -> 0`; `ForeignCall 0 -> 4` | Monitor/send/spawn native ops direct-call Erlang on the entry path. |
-| `49-dynamic` | `Yield 0 -> 0`; `Bind 75 -> 27` | No residual monadic yield pressure; dynamic path is not the next optimization target. |
-| `54-choose-backtracking` | `Yield 4 -> 4`; `Bind 35 -> 16` | Multishot/abort behavior remains intentionally slow. |
-| `55-nqueens-solver` | `Yield 2 -> 2`; `Bind 48 -> 23` | Multishot/abort behavior remains intentionally slow. |
+| `49-dynamic` | `Yield 0 -> 0`; `Bind 75 -> 56` | No residual monadic yield pressure; dynamic path is not the next optimization target. |
+| `54-choose-backtracking` | `Yield 4 -> 4`; `Bind 35 -> 21` | Multishot/abort behavior remains intentionally slow. |
+| `55-nqueens-solver` | `Yield 2 -> 2`; `Bind 48 -> 36` | Multishot/abort behavior remains intentionally slow. |
 
 The actor-native hot path is now covered for these examples. The next optimizer
 target should come from a fresh stats sweep rather than from extending function
@@ -155,6 +155,10 @@ The stats report now splits total declarations into `source decls` and
 `generated decls`. This makes native variant growth visible as optimizer-created
 code: for example, `29-actors` whole-program `decls 7 -> 9` is
 `source decls 7 -> 7` plus `generated decls 0 -> 2`.
+
+`App` is intentionally not counted as pure in Bind-to-Let or dead-let cleanup.
+Saga effect rows track algebraic effects, not arbitrary builtin or external
+side effects, so call cleanup requires future explicit purity metadata.
 
 One-shot local timing smoke from `target/release/saga run --release` after
 warming the per-example script cache:
