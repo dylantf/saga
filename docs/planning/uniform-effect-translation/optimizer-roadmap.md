@@ -216,9 +216,12 @@ Cleanup checkpoint after the cross-module variant milestone:
 - optimizer unit tests live in `effect_opt/tests.rs` instead of the main
   optimizer module.
 
-`App` is intentionally not counted as pure in Bind-to-Let or dead-let cleanup.
-Saga effect rows track algebraic effects, not arbitrary builtin or external
-side effects, so call cleanup requires future explicit purity metadata.
+Arbitrary `App` is intentionally not counted as pure in Bind-to-Let or dead-let
+cleanup. Saga effect rows track algebraic effects, not arbitrary builtin or
+external side effects, so broad call cleanup requires future explicit purity
+metadata. The narrow exception is `App(DictRef(...), args)`, which the
+translator emits only for compiler-generated pure dictionary constructor
+materialization.
 
 One-shot local timing smoke from `target/release/saga run --release` after
 warming the per-example script cache:

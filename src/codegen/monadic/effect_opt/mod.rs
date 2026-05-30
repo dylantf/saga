@@ -1742,6 +1742,10 @@ fn expr_is_pure(expr: &MExpr) -> bool {
         | MExpr::BinOp { .. }
         | MExpr::UnaryMinus { .. }
         | MExpr::BitString { .. } => true,
+        MExpr::App {
+            head: Atom::DictRef { .. },
+            ..
+        } => true,
         MExpr::Yield { .. }
         | MExpr::Bind { .. }
         | MExpr::App { .. }

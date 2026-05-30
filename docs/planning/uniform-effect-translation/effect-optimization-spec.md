@@ -188,7 +188,8 @@ even when their Saga effect row is empty.
 | `Let { value, body, .. }` | `pure(value) && pure(body)` |
 | `Case { arms, .. }` | every arm body pure, every guard pure |
 | `If { then_branch, else_branch, .. }` | both branches pure |
-| `App { .. }` | no for now. An empty algebraic effect row is not a purity proof: builtins such as `dbg` and arbitrary `@external` wrappers can be side-effectful. |
+| `App { head: DictRef, .. }` | yes. Dictionary constructor materialization calls compiler-generated pure dictionary builders. |
+| other `App { .. }` | no for now. An empty algebraic effect row is not a purity proof: builtins such as `dbg` and arbitrary `@external` wrappers can be side-effectful. |
 | `FieldAccess { .. }`, `RecordUpdate { .. }`, `DictMethodAccess { .. }`, `BinOp { .. }`, `UnaryMinus { .. }`, `BitString { .. }` | yes (no side effects in IR semantics) |
 | `ForeignCall { .. }` | no in the first implementation (conservative default until the FFI signature carries an explicit purity bit) |
 | `Yield { .. }` | **no** |
@@ -203,8 +204,10 @@ even when their Saga effect row is empty.
 The typechecker tracks algebraic effects, not general referential
 transparency. Calls with an empty effect row can still print, read, call an
 arbitrary external function, or invoke a builtin with observable behavior.
-Until the IR carries explicit purity metadata, `App` is not promoted to `Let`
-and dead-let cleanup must not delete unused call results.
+Until the IR carries explicit purity metadata, arbitrary `App` is not promoted
+to `Let` and dead-let cleanup must not delete unused call results. The one
+current exception is `App(DictRef(...), args)`, which is generated only for pure
+dictionary constructor materialization.
 
 ### Termination
 

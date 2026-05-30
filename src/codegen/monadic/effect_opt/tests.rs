@@ -231,6 +231,33 @@ fn bind_to_let_keeps_foreign_call_conservative() {
 }
 
 #[test]
+fn bind_to_let_promotes_dict_constructor_app() {
+    let f = Fixture::new();
+    let info = f.info();
+    let value = MExpr::App {
+        head: Atom::DictRef {
+            name: "__dict_Show_Int".to_string(),
+            source: crate::ast::NodeId(61),
+        },
+        args: vec![],
+        source: crate::ast::NodeId(62),
+    };
+    let body = MExpr::Pure(var("x", 1));
+    let prog = val_program(bind_expr(mv("x", 1), value.clone(), body.clone()));
+
+    let out = run(prog, &f.h, &info);
+
+    assert_eq!(
+        out,
+        val_program(MExpr::Let {
+            var: mv("x", 1),
+            value: Box::new(value),
+            body: Box::new(body),
+        })
+    );
+}
+
+#[test]
 fn bind_to_let_keeps_with_conservative() {
     let f = Fixture::new();
     let info = f.info();
