@@ -343,38 +343,64 @@ impl<'a> Translator<'a> {
     }
 }
 
+pub(crate) struct BindSpec {
+    pub var: MVar,
+    pub value: MExpr,
+    pub destructure: Option<DestructureSpec>,
+}
+
+pub(crate) struct DestructureSpec {
+    pub pattern: crate::ast::Pat,
+    pub assert: bool,
+    pub span: crate::token::Span,
+}
+
 /// Wrap a sequence of `Bind`s around a tail expression. Each entry is a
-/// `(var, value, optional destructure_pat)` triple, applied from last to
+/// [`BindSpec`], applied from last to
 /// first (closest binder is at the front of `bindings` when iterated; we
 /// reverse internally so the first pushed binding is the outermost).
 /// Callers push in source order.
 ///
-/// When `destructure_pat` is `Some(p)`, the bound `var` is the synthetic
+/// When `destructure` is `Some`, the bound `var` is the synthetic
 /// `__pat` binder and the original source pattern needs to match against
 /// it. We wrap the body in a `Case` arm so the pattern's sub-vars come
-/// into scope for everything after this `Bind`. The `Case` has a single
-/// arm — the typechecker has already proven exhaustiveness for
-/// irrefutable let-patterns; any non-matching value would have been
-/// rejected upstream.
-pub(crate) fn wrap_binds(
-    bindings: Vec<(MVar, MExpr, Option<crate::ast::Pat>)>,
-    tail: MExpr,
-) -> MExpr {
+/// into scope for everything after this `Bind`. Non-assert destructures have
+/// a single arm — the typechecker has already proven exhaustiveness for
+/// irrefutable let-patterns. `let assert` keeps a wildcard fallback that emits
+/// Saga's structured assert-fail error.
+pub(crate) fn wrap_binds(bindings: Vec<BindSpec>, tail: MExpr) -> MExpr {
     let mut acc = tail;
-    for (var, value, destructure_pat) in bindings.into_iter().rev() {
+    for BindSpec {
+        var,
+        value,
+        destructure,
+    } in bindings.into_iter().rev()
+    {
         let mode = bind_mode_for(&var, &value);
-        let body = if let Some(pat) = destructure_pat {
+        let body = if let Some(spec) = destructure {
+            let mut arms = vec![crate::codegen::monadic::ir::MArm {
+                pattern: spec.pattern,
+                guard: None,
+                body: acc,
+                span: spec.span,
+            }];
+            if spec.assert {
+                arms.push(crate::codegen::monadic::ir::MArm {
+                    pattern: crate::ast::Pat::Wildcard {
+                        id: crate::ast::NodeId::fresh(),
+                        span: spec.span,
+                    },
+                    guard: None,
+                    body: assert_fail_expr(spec.span),
+                    span: spec.span,
+                });
+            }
             MExpr::Case {
                 scrutinee: crate::codegen::monadic::ir::Atom::Var {
                     name: var.clone(),
                     source: crate::ast::NodeId::fresh(),
                 },
-                arms: vec![crate::codegen::monadic::ir::MArm {
-                    pattern: pat,
-                    guard: None,
-                    body: acc,
-                    span: crate::token::Span { start: 0, end: 0 },
-                }],
+                arms,
                 source: crate::ast::NodeId::fresh(),
             }
         } else {
@@ -388,6 +414,51 @@ pub(crate) fn wrap_binds(
         };
     }
     acc
+}
+
+fn assert_fail_expr(_span: crate::token::Span) -> MExpr {
+    use crate::codegen::monadic::ir::Atom;
+
+    let source = crate::ast::NodeId::fresh();
+    let message = "Assertion failed: pattern did not match".to_string();
+    MExpr::ForeignCall {
+        module: "erlang".to_string(),
+        func: "error".to_string(),
+        args: vec![Atom::Tuple {
+            elements: vec![
+                Atom::BackendAtom {
+                    atom: "saga_error".to_string(),
+                    source,
+                },
+                Atom::BackendAtom {
+                    atom: "assert_fail".to_string(),
+                    source,
+                },
+                Atom::Lit {
+                    value: crate::ast::Lit::String(message, crate::token::StringKind::Normal),
+                    source,
+                },
+                Atom::Lit {
+                    value: crate::ast::Lit::String(String::new(), crate::token::StringKind::Normal),
+                    source,
+                },
+                Atom::Lit {
+                    value: crate::ast::Lit::String(String::new(), crate::token::StringKind::Normal),
+                    source,
+                },
+                Atom::Lit {
+                    value: crate::ast::Lit::String(String::new(), crate::token::StringKind::Normal),
+                    source,
+                },
+                Atom::Lit {
+                    value: crate::ast::Lit::Int("0".to_string(), 0),
+                    source,
+                },
+            ],
+            source,
+        }],
+        source,
+    }
 }
 
 fn bind_mode_for(var: &MVar, value: &MExpr) -> BindMode {

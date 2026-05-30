@@ -42,7 +42,13 @@ impl<'ctx> Lowerer<'ctx> {
     /// available by name). The return continuation is the ambient K name
     /// — `_ReturnK` at function entry, or a `_K{n}` if we are inside a
     /// `Bind`'s value position.
-    pub(super) fn lower_app(&mut self, head: &Atom, args: &[Atom], ctx: &LowerCtx) -> CExpr {
+    pub(super) fn lower_app(
+        &mut self,
+        head: &Atom,
+        args: &[Atom],
+        source: NodeId,
+        ctx: &LowerCtx,
+    ) -> CExpr {
         // Compiler special forms `panic msg` / `todo msg`: emit a structured
         // error term via `erlang:error` directly, matching the old lowerer's
         // behavior ([lower/mod.rs:3261-3273]). These aren't real functions —
@@ -96,7 +102,7 @@ impl<'ctx> Lowerer<'ctx> {
         let mut call_args: Vec<CExpr> = args.iter().map(|a| self.lower_atom(a, ctx)).collect();
         call_args.push(CExpr::Var(ctx.evidence.clone()));
         call_args.push(CExpr::Var(ctx.return_k.clone()));
-        CExpr::Apply(Box::new(head_ce), call_args)
+        self.annotate_node(CExpr::Apply(Box::new(head_ce), call_args), source)
     }
 
     fn lower_saturated_external_app(

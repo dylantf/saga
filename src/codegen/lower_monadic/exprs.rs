@@ -59,7 +59,7 @@ impl<'ctx> Lowerer<'ctx> {
                 else_branch,
                 ..
             } => self.lower_if(cond, then_branch, else_branch, ctx),
-            MExpr::App { head, args, .. } => self.lower_app(head, args, ctx),
+            MExpr::App { head, args, source } => self.lower_app(head, args, *source, ctx),
             MExpr::Yield { op, args, .. } => self.lower_yield(op, args, ctx),
             MExpr::With { handler, body, .. } => self.lower_with(handler, body, ctx),
             MExpr::Resume { value, .. } => self.lower_resume(value, ctx),
@@ -96,8 +96,11 @@ impl<'ctx> Lowerer<'ctx> {
                 module, func, args, ..
             } => self.lower_foreign_call(module, func, args, ctx),
             MExpr::BinOp {
-                op, left, right, ..
-            } => self.lower_binop(op, left, right, ctx),
+                op,
+                left,
+                right,
+                source,
+            } => self.lower_binop(op, left, right, *source, ctx),
             MExpr::UnaryMinus { value, .. } => self.lower_unary_minus(value, ctx),
             MExpr::BitString { segments, .. } => self.lower_bitstring(segments, ctx),
             MExpr::Receive { arms, after, .. } => self.lower_receive(arms, after.as_ref(), ctx),

@@ -360,13 +360,10 @@ delete/rename commit:
   `ResolvedCodegenKind::InlineVal`, `RuntimeFunctionShape::InlineVal`, and
   `ModuleCodegenInfo::inline_vals`.
 - Remove `CompiledModule::call_effects` once `call_effects.rs` is deleted.
-- Revisit ignored codegen tests before deleting the old lowerer. Current scan:
-  `src/codegen/tests.rs` is down to 3 ignored new-path TODOs after deleting
-  stale selective-CPS/Core-shape assertions and isolated-stdlib harness tests;
-  `tests/module_codegen_integration.rs` is now fully active after reviving the
-  dynamic-handler factory/record-field fixtures. The remaining ignored
-  lib-codegen follow-ups are structured `let assert` errors and source
-  annotations through ANF/monadic lowering.
+- Done: ignored codegen tests were either deleted as stale old-path shape
+  assertions or revived with new-path coverage. `src/codegen/tests.rs` and
+  `tests/module_codegen_integration.rs` are fully active; structured
+  `let assert` errors and source annotations now pass through the monadic path.
 
 After that prep, the delete/rename step below should be mechanical.
 

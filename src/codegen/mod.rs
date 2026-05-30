@@ -10,6 +10,7 @@ pub mod native_effects;
 pub mod normalize;
 pub mod resolve;
 pub mod runtime_shape;
+mod source_spans;
 #[cfg(test)]
 mod tests;
 pub mod type_shape;
@@ -153,7 +154,7 @@ pub fn emit_module_with_context(
     program: &ast::Program,
     ctx: &CodegenContext,
     check_result: &crate::typechecker::CheckResult,
-    _source_file: Option<&SourceFile>,
+    source_file: Option<&SourceFile>,
     entry_export: Option<&str>,
 ) -> String {
     // === OLD PATH (active) ===
@@ -201,7 +202,14 @@ pub fn emit_module_with_context(
     // `lower_monadic::Lowerer`. Bootstrap evidence emission is on only for
     // the entry-point module (`entry_export.is_some()`).
     //
-    emit_module_via_new_path(module_name, program, ctx, check_result, entry_export)
+    emit_module_via_new_path(
+        module_name,
+        program,
+        ctx,
+        check_result,
+        source_file,
+        entry_export,
+    )
 }
 
 // -------------------------------------------------------------------------
@@ -342,6 +350,7 @@ pub fn emit_module_via_new_path(
     program: &ast::Program,
     ctx: &CodegenContext,
     check_result: &crate::typechecker::CheckResult,
+    source_file: Option<&SourceFile>,
     entry_export: Option<&str>,
 ) -> String {
     let _ = entry_export; // currently consumed only via is_main below
@@ -456,15 +465,24 @@ pub fn emit_module_via_new_path(
     let optimized = monadic::effect_opt::run(monadic_prog, &handler_info, &effect_info);
 
     let is_main = entry_export.is_some();
-    let cmod = lower_monadic::Lowerer::new(
+    let mut lowerer = lower_monadic::Lowerer::new(
         &resolution_map,
         &constructor_atoms,
         ctx,
         &handler_info,
         &effect_info,
         &handler_value_map,
-    )
-    .with_bootstrap_emission(is_main)
-    .lower_module(module_name, &optimized);
+    );
+    if let Some(source_file) = source_file {
+        let source_spans = source_spans::for_program(&anf_program, &check_result.node_spans);
+        lowerer = lowerer.with_source_info(lower_monadic::SourceInfo::new(
+            source_file.path.clone(),
+            &source_file.source,
+            source_spans,
+        ));
+    }
+    let cmod = lowerer
+        .with_bootstrap_emission(is_main)
+        .lower_module(module_name, &optimized);
     cerl::print_module(&cmod)
 }

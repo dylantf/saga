@@ -57,11 +57,13 @@ pub(super) struct CounterSnapshot {
 
 use std::collections::HashMap;
 
+use crate::ast::NodeId;
 use crate::codegen::CodegenContext;
-use crate::codegen::cerl::CModule;
+use crate::codegen::cerl::{CExpr, CModule};
 use crate::codegen::handler_analysis::HandlerAnalysis;
 use crate::codegen::monadic::ir::{Atom, EffectInfo, MDecl, MExpr, MProgram};
 use crate::codegen::resolve::{ConstructorAtoms, ResolutionMap};
+use crate::token::Span;
 
 use decls::{dict_constructor_arity, fun_binding_arity, val_arity};
 
@@ -148,6 +150,40 @@ pub struct Lowerer<'ctx> {
     /// Current-module zero-parameter function bindings. These are uniform
     /// callables at arity 2 even though their source arity is 0.
     pub(super) zero_arg_fun_names: std::collections::HashSet<String>,
+    source_info: Option<SourceInfo>,
+}
+
+pub struct SourceInfo {
+    file: String,
+    line_starts: Vec<usize>,
+    node_spans: HashMap<NodeId, Span>,
+}
+
+impl SourceInfo {
+    pub fn new(file: String, source: &str, node_spans: HashMap<NodeId, Span>) -> Self {
+        let mut line_starts = vec![0];
+        for (i, b) in source.bytes().enumerate() {
+            if b == b'\n' {
+                line_starts.push(i + 1);
+            }
+        }
+        Self {
+            file,
+            line_starts,
+            node_spans,
+        }
+    }
+
+    fn line_number(&self, offset: usize) -> usize {
+        self.line_starts
+            .partition_point(|&start| start <= offset)
+            .max(1)
+    }
+
+    fn line_for_node(&self, node: NodeId) -> Option<usize> {
+        let span = self.node_spans.get(&node)?;
+        Some(self.line_number(span.start))
+    }
 }
 
 impl<'ctx> Lowerer<'ctx> {
@@ -188,6 +224,26 @@ impl<'ctx> Lowerer<'ctx> {
             handler_value_map,
             top_level_val_names: std::collections::HashSet::new(),
             zero_arg_fun_names: std::collections::HashSet::new(),
+            source_info: None,
+        }
+    }
+
+    pub fn with_source_info(mut self, source_info: SourceInfo) -> Self {
+        self.source_info = Some(source_info);
+        self
+    }
+
+    pub(super) fn annotate_node(&self, expr: CExpr, source: NodeId) -> CExpr {
+        let Some(source_info) = &self.source_info else {
+            return expr;
+        };
+        let Some(line) = source_info.line_for_node(source) else {
+            return expr;
+        };
+        CExpr::Annotated {
+            expr: Box::new(expr),
+            line,
+            file: source_info.file.clone(),
         }
     }
 

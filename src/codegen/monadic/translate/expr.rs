@@ -3,7 +3,7 @@
 //! Atomic positions (ANF-guaranteed) collapse into `Atom`; complex positions
 //! become structural `MExpr` variants. Every sequencing point is `Bind`.
 
-use super::{Translator, fresh_node_id, wrap_binds};
+use super::{BindSpec, DestructureSpec, Translator, fresh_node_id, wrap_binds};
 use crate::ast::{
     self, Annotated, Expr, ExprKind, Handler, HandlerBody, HandlerItem, Lit, NodeId, Pat, Stmt,
 };
@@ -672,25 +672,39 @@ impl<'a> Translator<'a> {
         // matches the pattern at the binding's body position. The
         // destructure is applied right at the binding site so subsequent
         // stmts see the pattern's sub-vars in scope.
-        let mut bindings: Vec<(MVar, MExpr, Option<Pat>)> = Vec::new();
+        let mut bindings: Vec<BindSpec> = Vec::new();
         let mut tail: Option<MExpr> = None;
 
         for (idx, ann) in stmts.iter().enumerate() {
             let is_last = idx + 1 == n;
             match &ann.node {
-                Stmt::Let { pattern, value, .. } => {
+                Stmt::Let {
+                    pattern,
+                    value,
+                    assert,
+                    span,
+                    ..
+                } => {
                     // Record handler-alias info before translating the body.
                     if let Pat::Var { name, id, .. } = pattern {
                         self.record_handler_alias(name, *id, value);
                     }
                     let translated = self.translate_expr(value);
                     let var = self.binder_from_pat(pattern);
-                    let pat = if matches!(pattern, Pat::Var { .. } | Pat::Wildcard { .. }) {
+                    let destructure = if matches!(pattern, Pat::Var { .. } | Pat::Wildcard { .. }) {
                         None
                     } else {
-                        Some(pattern.clone())
+                        Some(DestructureSpec {
+                            pattern: pattern.clone(),
+                            assert: *assert,
+                            span: *span,
+                        })
                     };
-                    bindings.push((var, translated, pat));
+                    bindings.push(BindSpec {
+                        var,
+                        value: translated,
+                        destructure,
+                    });
                     if is_last {
                         tail = Some(MExpr::Pure(Atom::Lit {
                             value: Lit::Unit,
@@ -745,7 +759,11 @@ impl<'a> Translator<'a> {
                             name: "_".to_string(),
                             id: self.next_mvar_id(),
                         };
-                        bindings.push((var, translated, None));
+                        bindings.push(BindSpec {
+                            var,
+                            value: translated,
+                            destructure: None,
+                        });
                     }
                 }
             }
@@ -814,10 +832,17 @@ impl<'a> Translator<'a> {
 
         let saved = self.local_static_handlers.clone();
         let saved_effects = self.local_handler_effects.clone();
-        let mut bindings: Vec<(MVar, MExpr, Option<Pat>)> = Vec::new();
+        let mut bindings: Vec<BindSpec> = Vec::new();
 
         for ann in &stmts[..split_idx] {
-            let Stmt::Let { pattern, value, .. } = &ann.node else {
+            let Stmt::Let {
+                pattern,
+                value,
+                assert,
+                span,
+                ..
+            } = &ann.node
+            else {
                 self.local_static_handlers = saved;
                 self.local_handler_effects = saved_effects;
                 return None;
@@ -827,12 +852,20 @@ impl<'a> Translator<'a> {
             }
             let translated = self.translate_expr(value);
             let var = self.binder_from_pat(pattern);
-            let pat = if matches!(pattern, Pat::Var { .. } | Pat::Wildcard { .. }) {
+            let destructure = if matches!(pattern, Pat::Var { .. } | Pat::Wildcard { .. }) {
                 None
             } else {
-                Some(pattern.clone())
+                Some(DestructureSpec {
+                    pattern: pattern.clone(),
+                    assert: *assert,
+                    span: *span,
+                })
             };
-            bindings.push((var, translated, pat));
+            bindings.push(BindSpec {
+                var,
+                value: translated,
+                destructure,
+            });
         }
 
         let handled_body = if split_idx < stmts.len() {

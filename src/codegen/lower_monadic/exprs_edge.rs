@@ -10,7 +10,7 @@
 //! `BinOp`, `UnaryMinus`, `BitString`, `Receive`. Also hosts the
 //! `binop_atoms` operator-dispatch helper.
 
-use crate::ast::{BinOp as AstBinOp, Pat};
+use crate::ast::{BinOp as AstBinOp, NodeId, Pat};
 use crate::codegen::cerl::{CArm, CBinSeg, CExpr, CLit, CPat};
 use crate::codegen::monadic::ir::{Atom, MArm, MBitSegment, MExpr};
 
@@ -190,11 +190,13 @@ impl<'ctx> Lowerer<'ctx> {
         op: &AstBinOp,
         left: &Atom,
         right: &Atom,
+        source: NodeId,
         ctx: &LowerCtx,
     ) -> CExpr {
         let l = self.lower_atom(left, ctx);
         let r = self.lower_atom(right, ctx);
-        self.apply_current_k(binop_atoms(op, l, r), ctx)
+        let call = self.annotate_node(binop_atoms(op, l, r), source);
+        self.apply_current_k(call, ctx)
     }
 
     /// Lower `UnaryMinus { value, .. }` to `0 - value` via the integer

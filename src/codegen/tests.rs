@@ -973,10 +973,7 @@ fn todo_emits_structured_error_term() {
     assert!(out.contains("'todo'"), "Expected todo kind atom in:\n{out}");
 }
 
-// New monadic path currently lowers `let assert` mismatch to plain
-// `case_clause`; structured assert-fail terms are a parity follow-up.
 #[test]
-#[ignore = "new-path TODO: let assert mismatch should emit structured saga_error/assert_fail"]
 fn let_assert_emits_structured_error_term() {
     let out = emit_full("main () = {\n  let assert 1 = 2\n  1\n}");
     assert!(
@@ -989,9 +986,7 @@ fn let_assert_emits_structured_error_term() {
     );
 }
 
-// Source annotations are not threaded through ANF/monadic lowering yet.
 #[test]
-#[ignore = "new-path TODO: thread source annotations through ANF/monadic lowering"]
 fn source_annotations_emitted_with_source_info() {
     let src = "fun add : Int -> Int -> Int\nadd x y = x + y\n\nmain () = add 1 2";
     let sf = super::SourceFile {
@@ -1006,9 +1001,7 @@ fn source_annotations_emitted_with_source_info() {
     );
 }
 
-// Source annotations are not threaded through ANF/monadic lowering yet.
 #[test]
-#[ignore = "new-path TODO: thread source annotations through ANF/monadic lowering"]
 fn binop_annotation_on_inner_call() {
     let src = "main () = 1 + 2";
     let sf = super::SourceFile {
@@ -1173,7 +1166,8 @@ fn new_path_smoke_hello_world() {
         let_effect_bindings: result.let_effect_bindings.clone(),
         prelude_imports: result.prelude_imports.clone(),
     };
-    let core = super::emit_module_via_new_path("_script", &elaborated, &ctx, &result, Some("main"));
+    let core =
+        super::emit_module_via_new_path("_script", &elaborated, &ctx, &result, None, Some("main"));
     assert!(
         core.contains("module '_script'"),
         "Core Erlang module header missing:\n{core}"
@@ -1229,7 +1223,8 @@ main () = ()
         let_effect_bindings: result.let_effect_bindings.clone(),
         prelude_imports: result.prelude_imports.clone(),
     };
-    let core = super::emit_module_via_new_path("_script", &elaborated, &ctx, &result, Some("main"));
+    let core =
+        super::emit_module_via_new_path("_script", &elaborated, &ctx, &result, None, Some("main"));
     assert!(
         core.contains("module '_script'"),
         "Core Erlang module header missing:\n{core}"
