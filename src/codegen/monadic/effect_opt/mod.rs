@@ -1693,7 +1693,7 @@ fn native_variant_name(name: &str, stack: &[HandlerFrame]) -> String {
     parts.join("__")
 }
 
-fn is_generated_variant_name(name: &str) -> bool {
+pub(crate) fn is_generated_variant_name(name: &str) -> bool {
     name.starts_with(NATIVE_VARIANT_PREFIX)
 }
 

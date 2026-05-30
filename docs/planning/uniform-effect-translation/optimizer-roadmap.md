@@ -59,7 +59,10 @@ or when it removes visible compiler complexity.
 - [ ] **Dead generated slow-path cleanup.**
   Remove original same-module functions when all entry-reachable calls route
   through generated variants and the original is not exported or otherwise
-  referenced. This is code-size work, not required for correctness.
+  referenced. This is code-size work, not required for correctness. Deferred
+  until monadic IR or the optimizer has reliable export/visibility metadata:
+  today `MFunBinding` visibility is recovered later by the lowerer from
+  `ModuleCodegenInfo`, so deleting originals in the optimizer would be unsafe.
 
 - [ ] **Static handler function variants for obvious cases.**
   Generate variants for same-module calls under static handlers only when the
@@ -109,6 +112,8 @@ optimizer change:
 For each candidate optimization, compare:
 
 - whole-program stats, to monitor emitted code growth;
+- `source decls` vs `generated decls`, to separate real source growth from
+  optimizer-created variants;
 - entry-reachable stats, to measure the hot path;
 - residual `Yield ops`, to decide whether the next rewrite has a real target;
 - new `ForeignCall` targets, to verify native direct-call movement.
@@ -145,6 +150,11 @@ Last sampled after dead pure-let cleanup:
 The actor-native hot path is now covered for these examples. The next optimizer
 target should come from a fresh stats sweep rather than from extending function
 variants by default.
+
+The stats report now splits total declarations into `source decls` and
+`generated decls`. This makes native variant growth visible as optimizer-created
+code: for example, `29-actors` whole-program `decls 7 -> 9` is
+`source decls 7 -> 7` plus `generated decls 0 -> 2`.
 
 One-shot local timing smoke from `target/release/saga run --release` after
 warming the per-example script cache:

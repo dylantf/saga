@@ -7,11 +7,14 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
+use crate::codegen::monadic::effect_opt::is_generated_variant_name;
 use crate::codegen::monadic::ir::{Atom, MArm, MDecl, MExpr, MHandler, MHandlerArm, MProgram};
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Stats {
     pub decls: usize,
+    pub source_decls: usize,
+    pub generated_decls: usize,
     pub exprs: usize,
     pub atoms: usize,
     pub pure: usize,
@@ -90,6 +93,11 @@ impl Stats {
 
     fn visit_decl(&mut self, decl: &MDecl) {
         self.decls += 1;
+        if decl_is_optimizer_generated(decl) {
+            self.generated_decls += 1;
+        } else {
+            self.source_decls += 1;
+        }
         match decl {
             MDecl::FunBinding(f) => {
                 if let Some(guard) = &f.guard {
@@ -600,9 +608,15 @@ fn write_breakdown(
     Ok(())
 }
 
-fn rows(before: &Stats, after: &Stats) -> [(&'static str, usize, usize); 24] {
+fn rows(before: &Stats, after: &Stats) -> [(&'static str, usize, usize); 26] {
     [
         ("decls", before.decls, after.decls),
+        ("source decls", before.source_decls, after.source_decls),
+        (
+            "generated decls",
+            before.generated_decls,
+            after.generated_decls,
+        ),
         ("exprs", before.exprs, after.exprs),
         ("atoms", before.atoms, after.atoms),
         ("Pure", before.pure, after.pure),
@@ -647,6 +661,17 @@ fn rows(before: &Stats, after: &Stats) -> [(&'static str, usize, usize); 24] {
             after.composite_handlers,
         ),
     ]
+}
+
+fn decl_is_optimizer_generated(decl: &MDecl) -> bool {
+    match decl {
+        MDecl::FunBinding(f) => is_optimizer_generated_decl_name(&f.name),
+        MDecl::Val(_) | MDecl::DictConstructor(_) | MDecl::Passthrough(_) => false,
+    }
+}
+
+fn is_optimizer_generated_decl_name(name: &str) -> bool {
+    is_generated_variant_name(name)
 }
 
 #[cfg(test)]
@@ -695,11 +720,47 @@ mod tests {
         let stats = Stats::collect_program(&program);
 
         assert_eq!(stats.decls, 1);
+        assert_eq!(stats.source_decls, 1);
+        assert_eq!(stats.generated_decls, 0);
         assert_eq!(stats.exprs, 3);
         assert_eq!(stats.bind, 1);
         assert_eq!(stats.yield_, 1);
         assert_eq!(stats.pure, 1);
         assert_eq!(stats.yield_ops.get("E::op"), Some(&1));
+    }
+
+    #[test]
+    fn counts_optimizer_generated_decls_separately() {
+        let source = MDecl::FunBinding(MFunBinding {
+            id: NodeId(40),
+            name: "worker".into(),
+            name_span: span(),
+            params: vec![],
+            guard: None,
+            body: MExpr::Pure(Atom::Lit {
+                value: Lit::Unit,
+                source: NodeId(41),
+            }),
+            span: span(),
+        });
+        let generated = MDecl::FunBinding(MFunBinding {
+            id: NodeId(42),
+            name: "__saga_native_variant__worker__native_beam_actor".into(),
+            name_span: span(),
+            params: vec![],
+            guard: None,
+            body: MExpr::Pure(Atom::Lit {
+                value: Lit::Unit,
+                source: NodeId(43),
+            }),
+            span: span(),
+        });
+
+        let stats = Stats::collect_program(&vec![source, generated]);
+
+        assert_eq!(stats.decls, 2);
+        assert_eq!(stats.source_decls, 1);
+        assert_eq!(stats.generated_decls, 1);
     }
 
     #[test]
