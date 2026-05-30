@@ -268,6 +268,7 @@ pub fn build_effect_info<'a>(
         type_at_node: &check_result.type_at_node,
         effect_ops: &ops_storage.map,
         handler_effects: handler_effects_storage,
+        handler_refs: &module_check_result.resolution.handlers,
         let_handler_effects: let_handler_effects_storage,
     }
 }
@@ -344,6 +345,7 @@ pub fn emit_module_via_new_path(
         .unwrap_or(check_result);
     let mut combined_effect_calls = mod_check_ref.resolution.effect_calls.clone();
     let mut combined_handler_arms = mod_check_ref.resolution.handler_arms.clone();
+    let combined_handler_refs = mod_check_ref.resolution.handlers.clone();
     let mut combined_constructors = mod_check_ref.resolution.constructors.clone();
     for compiled in ctx.modules.values() {
         combined_effect_calls.extend(
@@ -379,6 +381,7 @@ pub fn emit_module_via_new_path(
         type_at_node: &check_result.type_at_node,
         effect_ops: &ops_storage.map,
         handler_effects: &handler_effects_storage,
+        handler_refs: &combined_handler_refs,
         let_handler_effects: &let_handler_effects_storage,
     };
 
@@ -402,6 +405,13 @@ pub fn emit_module_via_new_path(
                 imported_handler_decls
                     .entry(name.clone())
                     .or_insert_with(|| body.clone());
+                for canonical in &compiled.codegen_info.handler_defs {
+                    if canonical.rsplit('.').next() == Some(name.as_str()) {
+                        imported_handler_decls
+                            .entry(canonical.clone())
+                            .or_insert_with(|| body.clone());
+                    }
+                }
             }
         }
     }

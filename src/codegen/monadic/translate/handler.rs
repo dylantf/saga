@@ -7,6 +7,7 @@ use super::Translator;
 use crate::ast::{self, EffectRef, Handler, HandlerArm, HandlerBody, HandlerItem, NodeId};
 use crate::codegen::monadic::ir::{Atom, EffectOpRef, MExpr, MHandler, MHandlerArm, MVar};
 use crate::token::Span;
+use crate::typechecker::ResolvedValue;
 
 impl<'a> Translator<'a> {
     /// Translate the handler expression in `with body handler`.
@@ -22,21 +23,22 @@ impl<'a> Translator<'a> {
     /// handler with the arms embedded. Otherwise fall back to a `Dynamic`
     /// handler whose op tuple is carried as a runtime value.
     fn handler_for_named(&mut self, name: &str, ref_id: NodeId, site_span: Span) -> MHandler {
-        if let Some(body) = self.handler_decls.get(name).cloned() {
-            return self.static_from_body(name, &body, ref_id);
+        let resolved_name = self.resolved_handler_name(ref_id, name);
+        if let Some((static_name, body)) = self.lookup_handler_body(name, &resolved_name) {
+            return self.static_from_body(&static_name, &body, ref_id);
         }
-        if let Some(Some(body)) = self.local_static_handlers.get(name).cloned() {
-            return self.static_from_body(name, &body, ref_id);
+        if let Some((static_name, body)) = self.lookup_local_static_handler(name, &resolved_name) {
+            return self.static_from_body(&static_name, &body, ref_id);
         }
         // Dynamic — runtime value held in `name`.
         // Extract the effect tag from the typechecker's handler registry so
         // the lowerer can install evidence under the correct tag.
-        let effects = self.resolve_dynamic_handler_effects(name);
+        let effects = self.resolve_dynamic_handler_effects(name, &resolved_name);
         MHandler::Dynamic {
             effects,
             op_tuple: Atom::Var {
                 name: MVar {
-                    name: name.to_string(),
+                    name: resolved_name,
                     id: self.next_mvar_id(),
                 },
                 source: ref_id,
@@ -78,8 +80,11 @@ impl<'a> Translator<'a> {
                     return_clause = Some(arm.clone());
                 }
                 HandlerItem::Named(named) => {
-                    if let Some(body) = self.handler_decls.get(&named.name).cloned() {
-                        if let Some(native) = self.native_from_body(&named.name, &body, named.id) {
+                    let resolved_name = self.resolved_handler_name(named.id, &named.name);
+                    if let Some((static_name, body)) =
+                        self.lookup_handler_body(&named.name, &resolved_name)
+                    {
+                        if let Some(native) = self.native_from_body(&static_name, &body, named.id) {
                             native_handlers.push(native);
                             merge_body_effects(&body, &mut effects);
                             continue;
@@ -93,10 +98,10 @@ impl<'a> Translator<'a> {
                         {
                             return_clause = Some((**r).clone());
                         }
-                    } else if let Some(Some(body)) =
-                        self.local_static_handlers.get(&named.name).cloned()
+                    } else if let Some((static_name, body)) =
+                        self.lookup_local_static_handler(&named.name, &resolved_name)
                     {
-                        if let Some(native) = self.native_from_body(&named.name, &body, named.id) {
+                        if let Some(native) = self.native_from_body(&static_name, &body, named.id) {
                             native_handlers.push(native);
                             merge_body_effects(&body, &mut effects);
                             continue;
@@ -111,14 +116,14 @@ impl<'a> Translator<'a> {
                             return_clause = Some((**r).clone());
                         }
                     } else if any_dynamic.is_none() {
-                        any_dynamic = Some((named.name.clone(), named.id));
+                        any_dynamic = Some((resolved_name, named.id));
                     }
                 }
             }
         }
 
         if let Some((name, ref_id)) = any_dynamic {
-            let effects = self.resolve_dynamic_handler_effects(&name);
+            let effects = self.resolve_dynamic_handler_effects(&name, &name);
             return MHandler::Dynamic {
                 effects,
                 op_tuple: Atom::Var {
@@ -292,17 +297,76 @@ impl<'a> Translator<'a> {
     /// up the handler name in `EffectInfo.handler_effects` (populated from
     /// the typechecker's handler registry). Returns canonicalized effect
     /// names so `insert_canonical` tags match `find_evidence` lookups.
-    fn resolve_dynamic_handler_effects(&self, name: &str) -> Vec<String> {
+    fn resolve_dynamic_handler_effects(&self, name: &str, resolved_name: &str) -> Vec<String> {
         if let Some(effects) = self.local_handler_effects.get(name) {
             return effects.clone();
         }
-        if let Some(effects) = self.effect_info.handler_effects.get(name) {
+        if let Some(effects) = self.local_handler_effects.get(resolved_name) {
+            return effects.clone();
+        }
+        if let Some(effects) = self
+            .effect_info
+            .handler_effects
+            .get(resolved_name)
+            .or_else(|| self.effect_info.handler_effects.get(name))
+            .or_else(|| {
+                resolved_name
+                    .rsplit('.')
+                    .next()
+                    .and_then(|bare| self.effect_info.handler_effects.get(bare))
+            })
+        {
             return effects
                 .iter()
                 .map(|e| self.canonical_effect_name(e))
                 .collect();
         }
         Vec::new()
+    }
+
+    fn resolved_handler_name(&self, ref_id: NodeId, source_name: &str) -> String {
+        match self.effect_info.handler_refs.get(&ref_id) {
+            Some(ResolvedValue::Local { name, .. }) => name.clone(),
+            Some(ResolvedValue::Global { lookup_name }) => lookup_name.clone(),
+            None => source_name.to_string(),
+        }
+    }
+
+    fn lookup_handler_body(
+        &self,
+        source_name: &str,
+        resolved_name: &str,
+    ) -> Option<(String, HandlerBody)> {
+        self.handler_decls
+            .get(source_name)
+            .map(|body| (source_name.to_string(), body.clone()))
+            .or_else(|| {
+                self.handler_decls
+                    .get(resolved_name)
+                    .map(|body| (resolved_name.to_string(), body.clone()))
+            })
+            .or_else(|| {
+                resolved_name.rsplit('.').next().and_then(|bare| {
+                    self.handler_decls
+                        .get(bare)
+                        .map(|body| (bare.to_string(), body.clone()))
+                })
+            })
+    }
+
+    fn lookup_local_static_handler(
+        &self,
+        source_name: &str,
+        resolved_name: &str,
+    ) -> Option<(String, HandlerBody)> {
+        self.local_static_handlers
+            .get(source_name)
+            .and_then(|body| body.clone().map(|body| (source_name.to_string(), body)))
+            .or_else(|| {
+                self.local_static_handlers
+                    .get(resolved_name)
+                    .and_then(|body| body.clone().map(|body| (resolved_name.to_string(), body)))
+            })
     }
 
     /// Map a bare effect name (e.g. `Stdio`) to its canonical form (e.g.

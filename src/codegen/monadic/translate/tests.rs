@@ -6,7 +6,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use super::translate;
+use super::{translate, translate_with_imports};
 use crate::ast::{
     Annotated, BinOp, CaseArm, Decl, EffectOp, EffectRef, Expr, ExprKind, Handler, HandlerArm,
     HandlerBody, HandlerItem, Lit, NamedHandlerRef, NodeId, Pat, Stmt, TypeExpr,
@@ -14,7 +14,7 @@ use crate::ast::{
 use crate::codegen::monadic::ir::{Atom, EffectInfo, MDecl, MExpr, MHandler};
 use crate::codegen::resolve::ResolutionMap;
 use crate::token::Span;
-use crate::typechecker::{ResolvedEffectOp, Type};
+use crate::typechecker::{ResolvedEffectOp, ResolvedValue, Type};
 
 // ----- builders --------------------------------------------------------------
 
@@ -116,6 +116,7 @@ struct EmptyInfo {
     type_at_node: HashMap<NodeId, Type>,
     effect_ops: HashMap<String, Vec<String>>,
     handler_effects: HashMap<String, Vec<String>>,
+    handler_refs: HashMap<NodeId, crate::typechecker::ResolvedValue>,
     let_handler_effects: HashMap<NodeId, Vec<String>>,
 }
 
@@ -130,6 +131,7 @@ impl EmptyInfo {
             type_at_node: &self.type_at_node,
             effect_ops: &self.effect_ops,
             handler_effects: &self.handler_effects,
+            handler_refs: &self.handler_refs,
             let_handler_effects: &self.let_handler_effects,
         }
     }
@@ -655,6 +657,81 @@ fn alias_chase_let_h_is_static() {
             "alias-chased Static handler must carry the original arm"
         ),
         other => panic!("expected Static handler from chased alias, got {other:?}"),
+    }
+}
+
+#[test]
+fn qualified_imported_named_handler_uses_resolved_effects() {
+    let arm = HandlerArm {
+        id: NodeId::fresh(),
+        qualifier: None,
+        op_name: "event".into(),
+        params: vec![Pat::Var {
+            id: NodeId::fresh(),
+            name: "_".into(),
+            span: sp(),
+        }],
+        body: Box::new(lit_unit()),
+        finally_block: None,
+        span: sp(),
+    };
+    let imported_body = HandlerBody {
+        effects: vec![EffectRef {
+            id: NodeId::fresh(),
+            name: "Server".into(),
+            type_args: Vec::new(),
+            span: sp(),
+        }],
+        needs: Vec::new(),
+        where_clause: Vec::new(),
+        arms: vec![Annotated::bare(arm)],
+        return_clause: None,
+    };
+
+    let handler_ref = NodeId::fresh();
+    let with_expr = Expr::synth(
+        sp(),
+        ExprKind::With {
+            expr: Box::new(lit_unit()),
+            handler: Box::new(Handler::Named(NamedHandlerRef {
+                id: handler_ref,
+                name: "Http.discard_events".into(),
+                span: sp(),
+            })),
+        },
+    );
+    let program = vec![fun_binding("f", with_expr)];
+
+    let mut info = empty_info();
+    info.effect_ops
+        .insert("SagaHttp.Http.Server".into(), vec!["event".into()]);
+    info.handler_effects.insert(
+        "SagaHttp.Http.discard_events".into(),
+        vec!["SagaHttp.Http.Server".into()],
+    );
+    info.handler_refs.insert(
+        handler_ref,
+        ResolvedValue::Global {
+            lookup_name: "SagaHttp.Http.discard_events".into(),
+        },
+    );
+
+    let mut imported = HashMap::new();
+    imported.insert("SagaHttp.Http.discard_events".into(), imported_body);
+    let (translated, _) =
+        translate_with_imports(&program, &ResolutionMap::new(), &info.as_view(), &imported);
+
+    let body = fun_body(translated.into_iter().next().unwrap());
+    match body {
+        MExpr::With {
+            handler: MHandler::Static { effects, arms, .. },
+            ..
+        } => {
+            assert_eq!(effects, vec!["SagaHttp.Http.Server".to_string()]);
+            assert_eq!(arms.len(), 1);
+            assert_eq!(arms[0].op.effect, "SagaHttp.Http.Server");
+        }
+        other => panic!("expected qualified imported handler to resolve statically, got {other:?}"),
     }
 }
 

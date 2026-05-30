@@ -15,7 +15,7 @@ use std::collections::{HashMap, HashSet};
 
 use crate::ast::{self, BinOp, BitSegSpec, Lit, NodeId, Pat};
 use crate::token::Span;
-use crate::typechecker::{self, ResolvedEffectOp, Type};
+use crate::typechecker::{self, ResolvedEffectOp, ResolvedValue, Type};
 
 // -------------------------------------------------------------------------
 // Core types
@@ -563,6 +563,12 @@ pub struct EffectInfo<'a> {
     /// `MHandler::Dynamic.effects` for let-bound / factory-produced
     /// handler values whose arms aren't statically visible.
     pub handler_effects: &'a HashMap<String, Vec<String>>,
+
+    /// Handler reference NodeId → resolved binding identity. Used to turn
+    /// qualified imported handler spellings such as `Http.discard_events`
+    /// into their canonical handler keys before looking up effects or
+    /// pre-translated handler bodies.
+    pub handler_refs: &'a HashMap<NodeId, ResolvedValue>,
 
     /// Let-binding pattern NodeId → effect names for handler-valued
     /// let bindings. Built from `CheckResult.let_binding_handlers`.

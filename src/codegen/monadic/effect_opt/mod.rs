@@ -56,6 +56,7 @@ mod tests {
         type_at_node: HashMap<crate::ast::NodeId, crate::typechecker::Type>,
         effect_ops: HashMap<String, Vec<String>>,
         handler_effects: HashMap<String, Vec<String>>,
+        handler_refs: HashMap<crate::ast::NodeId, crate::typechecker::ResolvedValue>,
         let_handler_effects: HashMap<crate::ast::NodeId, Vec<String>>,
     }
 
@@ -71,6 +72,7 @@ mod tests {
                 type_at_node: HashMap::new(),
                 effect_ops: HashMap::new(),
                 handler_effects: HashMap::new(),
+                handler_refs: HashMap::new(),
                 let_handler_effects: HashMap::new(),
             }
         }
@@ -85,6 +87,7 @@ mod tests {
                 type_at_node: &self.type_at_node,
                 effect_ops: &self.effect_ops,
                 handler_effects: &self.handler_effects,
+                handler_refs: &self.handler_refs,
                 let_handler_effects: &self.let_handler_effects,
             }
         }
