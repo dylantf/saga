@@ -2287,6 +2287,58 @@ fn let_bound_handler_factory_specializes_generic_dict_dispatch() {
 }
 
 #[test]
+fn effect_summary_generates_variant_for_call_hidden_erasable_yield() {
+    let mut f = Fixture::new();
+    let arm = tail_arm(2944, vec![pat_unit(2945)], resume(lit_int("42", 42)), None);
+    f.h.resumption
+        .insert(crate::ast::NodeId(2944), ResumptionKind::TailResumptive);
+    let handler = static_log_handler(vec![arm]);
+    let inner = helper_fun(
+        "inner",
+        2946,
+        vec![pat_unit(2947)],
+        yield_log(vec![unit_atom()], crate::ast::NodeId(2948)),
+    );
+    let outer = helper_fun(
+        "outer",
+        2949,
+        vec![pat_unit(2950)],
+        MExpr::App {
+            head: var("inner", 2951),
+            args: vec![unit_atom()],
+            source: crate::ast::NodeId(2952),
+        },
+    );
+    let caller = MDecl::Val(MVal {
+        id: crate::ast::NodeId(2953),
+        public: false,
+        name: "caller".to_string(),
+        value: with_expr(
+            handler,
+            MExpr::App {
+                head: var("outer", 2954),
+                args: vec![unit_atom()],
+                source: crate::ast::NodeId(2955),
+            },
+        ),
+        span: span(),
+    });
+    let info = f.info();
+
+    let out = run(vec![inner, outer, caller], &f.h, &info);
+    let variant = out
+        .iter()
+        .find_map(|decl| match decl {
+            MDecl::FunBinding(fun) if is_generated_variant_name(&fun.name) => Some(fun),
+            _ => None,
+        })
+        .expect("expected generated static variant");
+
+    assert_eq!(variant.body, MExpr::Pure(lit_int("42", 42)));
+    assert_eq!(expr_yield_count(&variant.body), 0);
+}
+
+#[test]
 fn helper_inline_skips_multi_clause_function() {
     let mut f = Fixture::new();
     let arm = tail_arm(290, vec![pat_unit(291)], resume(lit_int("42", 42)), None);

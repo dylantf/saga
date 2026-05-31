@@ -190,6 +190,27 @@ struct DictParamReplacement {
     key: String,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct EffectSummary {
+    erasable_yields: usize,
+    residual_yields: usize,
+    summarized_calls: usize,
+    blockers: usize,
+}
+
+impl EffectSummary {
+    fn add_assign(&mut self, other: Self) {
+        self.erasable_yields += other.erasable_yields;
+        self.residual_yields += other.residual_yields;
+        self.summarized_calls += other.summarized_calls;
+        self.blockers += other.blockers;
+    }
+
+    fn has_specialization_opportunity(&self) -> bool {
+        self.erasable_yields > 0 || self.summarized_calls > 0
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Change {
     Unchanged,
@@ -1437,9 +1458,7 @@ impl<'info> Optimizer<'info> {
             return (MExpr::App { head, args, source }, Change::Unchanged);
         }
         let dict_replacements = self.dict_param_replacements(&candidate.binding.params, &args);
-        if !self.expr_has_direct_call_opportunity(&candidate.binding.body)
-            && !expr_contains_dict_method_access(&candidate.binding.body)
-        {
+        if !self.expr_has_specialization_opportunity(&candidate.binding.body) {
             return (MExpr::App { head, args, source }, Change::Unchanged);
         }
 
@@ -1532,8 +1551,7 @@ impl<'info> Optimizer<'info> {
         }
         let dict_replacements = self.dict_param_replacements(&candidate.binding.params, &args);
         if !require_no_residual_yields
-            && !self.expr_has_direct_call_opportunity(&candidate.binding.body)
-            && !expr_contains_dict_method_access(&candidate.binding.body)
+            && !self.expr_has_specialization_opportunity(&candidate.binding.body)
         {
             return (MExpr::App { head, args, source }, Change::Unchanged);
         }
@@ -1907,9 +1925,7 @@ impl<'info> Optimizer<'info> {
                 return (MExpr::App { head, args, source }, Change::Unchanged);
             };
             if expr_node_count(&inlined) > FUNCTION_VARIANT_BODY_BUDGET
-                || (!self.expr_has_direct_call_opportunity(&inlined)
-                    && !expr_contains_dict_method_access(&inlined)
-                    && !expr_is_pure(&inlined))
+                || (!self.expr_has_specialization_opportunity(&inlined) && !expr_is_pure(&inlined))
             {
                 return (MExpr::App { head, args, source }, Change::Unchanged);
             }
@@ -1926,155 +1942,395 @@ impl<'info> Optimizer<'info> {
         let Some(inlined) = inline_helper_candidate(candidate, &args) else {
             return (MExpr::App { head, args, source }, Change::Unchanged);
         };
-        if !self.expr_has_direct_call_opportunity(&inlined) {
+        if !self.expr_has_specialization_opportunity(&inlined) {
             return (MExpr::App { head, args, source }, Change::Unchanged);
         }
 
         (inlined, Change::Changed)
     }
 
-    fn expr_has_direct_call_opportunity(&self, expr: &MExpr) -> bool {
+    fn expr_has_specialization_opportunity(&self, expr: &MExpr) -> bool {
+        self.effect_summary(expr).has_specialization_opportunity()
+            || expr_contains_dict_method_access(expr)
+    }
+
+    fn effect_summary(&self, expr: &MExpr) -> EffectSummary {
+        let mut call_stack = HashSet::new();
+        self.effect_summary_expr(expr, &mut call_stack, &self.handler_stack)
+    }
+
+    fn effect_summary_expr(
+        &self,
+        expr: &MExpr,
+        call_stack: &mut HashSet<String>,
+        handler_stack: &[HandlerFrame],
+    ) -> EffectSummary {
         match expr {
             MExpr::Yield { op, args, .. } => {
-                self.resolve_direct_call_arm(op)
-                    .is_some_and(|arm| inline_tail_resumptive_arm(arm, args).is_some())
-                    || self
-                        .resolve_native_direct_call_handler(op)
-                        .and_then(|handler| {
-                            native_direct_call_expr(handler, op, args, crate::ast::NodeId(0))
-                        })
-                        .is_some()
-            }
-            MExpr::Bind { value, body, .. } => {
-                if let MExpr::Yield { op, args, .. } = value.as_ref()
-                    && (self
-                        .resolve_direct_call_arm(op)
-                        .is_some_and(|arm| inline_tail_resumptive_arm(arm, args).is_some())
-                        || self.resolve_finally_direct_call_arm(op).is_some_and(|arm| {
-                            inline_tail_resumptive_arm(arm, args)
-                                .and_then(|inlined| inlined.finally_block)
-                                .is_some_and(|cleanup| {
-                                    cleanup_vars_are_available_at_perform_site(&cleanup, args)
-                                })
-                        }))
-                {
-                    return true;
+                let mut summary = EffectSummary::default();
+                if self.yield_is_erasable_under_stack(op, args, handler_stack) {
+                    summary.erasable_yields += 1;
+                } else {
+                    summary.residual_yields += 1;
                 }
-                self.expr_has_direct_call_opportunity(value)
-                    || self.expr_has_direct_call_opportunity(body)
+                for arg in args {
+                    summary.add_assign(Self::effect_summary_atom(arg));
+                }
+                summary
             }
-            MExpr::Let { value, body, .. } => {
-                self.expr_has_direct_call_opportunity(value)
-                    || self.expr_has_direct_call_opportunity(body)
+            MExpr::Pure(atom) | MExpr::Resume { value: atom, .. } => {
+                Self::effect_summary_atom(atom)
+            }
+            MExpr::Bind { value, body, .. } | MExpr::Let { value, body, .. } => {
+                let mut summary = self.effect_summary_expr(value, call_stack, handler_stack);
+                summary.add_assign(self.effect_summary_expr(body, call_stack, handler_stack));
+                summary
             }
             MExpr::Ensure { body, cleanup } => {
-                self.expr_has_direct_call_opportunity(body)
-                    || self.expr_has_direct_call_opportunity(cleanup)
+                let mut summary = self.effect_summary_expr(body, call_stack, handler_stack);
+                summary.add_assign(self.effect_summary_expr(cleanup, call_stack, handler_stack));
+                summary
             }
-            MExpr::Pure(atom) => self.atom_has_direct_call_opportunity(atom),
-            MExpr::Case { arms, .. } => arms.iter().any(|arm| {
-                arm.guard
-                    .as_ref()
-                    .is_some_and(|guard| self.expr_has_direct_call_opportunity(guard))
-                    || self.expr_has_direct_call_opportunity(&arm.body)
-            }),
+            MExpr::Case {
+                scrutinee, arms, ..
+            } => {
+                let mut summary = Self::effect_summary_atom(scrutinee);
+                for arm in arms {
+                    if let Some(guard) = &arm.guard {
+                        summary.add_assign(self.effect_summary_expr(
+                            guard,
+                            call_stack,
+                            handler_stack,
+                        ));
+                    }
+                    summary.add_assign(self.effect_summary_expr(
+                        &arm.body,
+                        call_stack,
+                        handler_stack,
+                    ));
+                }
+                summary
+            }
             MExpr::If {
+                cond,
                 then_branch,
                 else_branch,
                 ..
             } => {
-                self.expr_has_direct_call_opportunity(then_branch)
-                    || self.expr_has_direct_call_opportunity(else_branch)
+                let mut summary = Self::effect_summary_atom(cond);
+                summary.add_assign(self.effect_summary_expr(
+                    then_branch,
+                    call_stack,
+                    handler_stack,
+                ));
+                summary.add_assign(self.effect_summary_expr(
+                    else_branch,
+                    call_stack,
+                    handler_stack,
+                ));
+                summary
             }
             MExpr::App { head, args, .. } => {
-                self.atom_has_direct_call_opportunity(head)
-                    || args
-                        .iter()
-                        .any(|arg| self.atom_has_direct_call_opportunity(arg))
+                let mut summary = Self::effect_summary_atom(head);
+                for arg in args {
+                    summary.add_assign(Self::effect_summary_atom(arg));
+                }
+                if let Some((key, body)) = self.summary_callee_body(head, args)
+                    && call_stack.insert(key.clone())
+                {
+                    let callee_summary = self.effect_summary_expr(&body, call_stack, handler_stack);
+                    if callee_summary.has_specialization_opportunity() {
+                        summary.summarized_calls += 1;
+                    }
+                    summary.add_assign(callee_summary);
+                    call_stack.remove(&key);
+                }
+                summary
             }
-            MExpr::With { body, .. } => self.expr_has_direct_call_opportunity(body),
-            MExpr::Resume { value, .. }
-            | MExpr::FieldAccess { record: value, .. }
-            | MExpr::DictMethodAccess { dict: value, .. }
-            | MExpr::UnaryMinus { value, .. } => self.atom_has_direct_call_opportunity(value),
+            MExpr::With { handler, body, .. } => {
+                let mut summary = self.effect_summary_handler(handler, call_stack, handler_stack);
+                if let Some(frame) = handler_frame(handler) {
+                    let mut nested_stack = handler_stack.to_vec();
+                    nested_stack.push(frame);
+                    summary.add_assign(self.effect_summary_expr(body, call_stack, &nested_stack));
+                } else {
+                    summary.add_assign(self.effect_summary_expr(body, call_stack, handler_stack));
+                }
+                summary
+            }
+            MExpr::FieldAccess { record, .. } | MExpr::UnaryMinus { value: record, .. } => {
+                Self::effect_summary_atom(record)
+            }
+            MExpr::DictMethodAccess { dict, .. } => Self::effect_summary_atom(dict),
             MExpr::RecordUpdate { record, fields, .. } => {
-                self.atom_has_direct_call_opportunity(record)
-                    || fields
-                        .iter()
-                        .any(|(_, atom)| self.atom_has_direct_call_opportunity(atom))
+                let mut summary = Self::effect_summary_atom(record);
+                for (_, atom) in fields {
+                    summary.add_assign(Self::effect_summary_atom(atom));
+                }
+                summary
             }
-            MExpr::ForeignCall { args, .. } => args
-                .iter()
-                .any(|arg| self.atom_has_direct_call_opportunity(arg)),
+            MExpr::ForeignCall { args, .. } => {
+                let mut summary = EffectSummary::default();
+                for arg in args {
+                    summary.add_assign(Self::effect_summary_atom(arg));
+                }
+                summary
+            }
             MExpr::BinOp { left, right, .. } => {
-                self.atom_has_direct_call_opportunity(left)
-                    || self.atom_has_direct_call_opportunity(right)
+                let mut summary = Self::effect_summary_atom(left);
+                summary.add_assign(Self::effect_summary_atom(right));
+                summary
             }
-            MExpr::BitString { segments, .. } => segments.iter().any(|seg| {
-                self.atom_has_direct_call_opportunity(&seg.value)
-                    || seg
-                        .size
-                        .as_ref()
-                        .is_some_and(|size| self.atom_has_direct_call_opportunity(size))
-            }),
+            MExpr::BitString { segments, .. } => {
+                let mut summary = EffectSummary::default();
+                for segment in segments {
+                    summary.add_assign(Self::effect_summary_atom(&segment.value));
+                    if let Some(size) = &segment.size {
+                        summary.add_assign(Self::effect_summary_atom(size));
+                    }
+                }
+                summary
+            }
             MExpr::Receive { arms, after, .. } => {
-                arms.iter().any(|arm| {
-                    arm.guard
-                        .as_ref()
-                        .is_some_and(|guard| self.expr_has_direct_call_opportunity(guard))
-                        || self.expr_has_direct_call_opportunity(&arm.body)
-                }) || after
-                    .as_ref()
-                    .is_some_and(|(_, body)| self.expr_has_direct_call_opportunity(body))
+                let mut summary = EffectSummary::default();
+                for arm in arms {
+                    if let Some(guard) = &arm.guard {
+                        summary.add_assign(self.effect_summary_expr(
+                            guard,
+                            call_stack,
+                            handler_stack,
+                        ));
+                    }
+                    summary.add_assign(self.effect_summary_expr(
+                        &arm.body,
+                        call_stack,
+                        handler_stack,
+                    ));
+                }
+                if let Some((timeout, body)) = after {
+                    summary.add_assign(Self::effect_summary_atom(timeout));
+                    summary.add_assign(self.effect_summary_expr(body, call_stack, handler_stack));
+                }
+                summary
             }
             MExpr::LetFun { body, rest, .. } => {
-                self.expr_has_direct_call_opportunity(body)
-                    || self.expr_has_direct_call_opportunity(rest)
+                let mut summary = self.effect_summary_expr(body, call_stack, handler_stack);
+                summary.add_assign(self.effect_summary_expr(rest, call_stack, handler_stack));
+                summary
             }
             MExpr::HandlerValue {
                 arms,
                 return_clause,
                 ..
             } => {
-                arms.iter()
-                    .any(|arm| self.handler_arm_has_direct_call_opportunity(arm))
-                    || return_clause
-                        .as_ref()
-                        .is_some_and(|arm| self.handler_arm_has_direct_call_opportunity(arm))
+                let mut summary = EffectSummary::default();
+                for arm in arms {
+                    summary.add_assign(self.effect_summary_handler_arm(
+                        arm,
+                        call_stack,
+                        handler_stack,
+                    ));
+                }
+                if let Some(arm) = return_clause {
+                    summary.add_assign(self.effect_summary_handler_arm(
+                        arm,
+                        call_stack,
+                        handler_stack,
+                    ));
+                }
+                summary
             }
         }
     }
 
-    fn atom_has_direct_call_opportunity(&self, atom: &Atom) -> bool {
+    fn effect_summary_atom(atom: &Atom) -> EffectSummary {
         match atom {
-            Atom::Lambda { body, .. } => self.expr_has_direct_call_opportunity(body),
-            Atom::Ctor { args, .. } => args
-                .iter()
-                .any(|arg| self.atom_has_direct_call_opportunity(arg)),
-            Atom::Tuple { elements, .. } => elements
-                .iter()
-                .any(|arg| self.atom_has_direct_call_opportunity(arg)),
-            Atom::AnonRecord { fields, .. } | Atom::Record { fields, .. } => fields
-                .iter()
-                .any(|(_, atom)| self.atom_has_direct_call_opportunity(atom)),
-            Atom::BackendSpawnThunk { callback, .. } => {
-                self.atom_has_direct_call_opportunity(callback)
+            Atom::Ctor { args, .. } | Atom::Tuple { elements: args, .. } => {
+                let mut summary = EffectSummary::default();
+                for arg in args {
+                    summary.add_assign(Self::effect_summary_atom(arg));
+                }
+                summary
             }
+            Atom::AnonRecord { fields, .. } | Atom::Record { fields, .. } => {
+                let mut summary = EffectSummary::default();
+                for (_, atom) in fields {
+                    summary.add_assign(Self::effect_summary_atom(atom));
+                }
+                summary
+            }
+            Atom::Lambda { body, .. } => {
+                // Lambdas run under the handler stack at their eventual call
+                // site, not necessarily the stack where the closure value is
+                // created. Keep this summary about immediate call bodies.
+                if expr_contains_yield(body) {
+                    EffectSummary {
+                        blockers: 1,
+                        ..EffectSummary::default()
+                    }
+                } else {
+                    EffectSummary::default()
+                }
+            }
+            Atom::BackendSpawnThunk { callback, .. } => Self::effect_summary_atom(callback),
             Atom::Var { .. }
             | Atom::Lit { .. }
             | Atom::DictRef { .. }
             | Atom::QualifiedRef { .. }
             | Atom::Symbol { .. }
-            | Atom::BackendAtom { .. } => false,
+            | Atom::BackendAtom { .. } => EffectSummary::default(),
         }
     }
 
-    fn handler_arm_has_direct_call_opportunity(&self, arm: &MHandlerArm) -> bool {
-        self.expr_has_direct_call_opportunity(&arm.body)
-            || arm
-                .finally_block
-                .as_ref()
-                .is_some_and(|cleanup| self.expr_has_direct_call_opportunity(cleanup))
+    fn effect_summary_handler(
+        &self,
+        handler: &MHandler,
+        call_stack: &mut HashSet<String>,
+        handler_stack: &[HandlerFrame],
+    ) -> EffectSummary {
+        match handler {
+            MHandler::Static {
+                arms,
+                return_clause,
+                ..
+            } => {
+                let mut summary = EffectSummary::default();
+                for arm in arms {
+                    summary.add_assign(self.effect_summary_handler_arm(
+                        arm,
+                        call_stack,
+                        handler_stack,
+                    ));
+                }
+                if let Some(arm) = return_clause {
+                    summary.add_assign(self.effect_summary_handler_arm(
+                        arm,
+                        call_stack,
+                        handler_stack,
+                    ));
+                }
+                summary
+            }
+            MHandler::Composite { handlers, .. } => {
+                let mut summary = EffectSummary::default();
+                for handler in handlers {
+                    summary.add_assign(self.effect_summary_handler(
+                        handler,
+                        call_stack,
+                        handler_stack,
+                    ));
+                }
+                summary
+            }
+            MHandler::Dynamic {
+                op_tuple,
+                return_lambda,
+                ..
+            } => {
+                let mut summary = Self::effect_summary_atom(op_tuple);
+                if let Some(return_lambda) = return_lambda {
+                    summary.add_assign(Self::effect_summary_atom(return_lambda));
+                }
+                summary
+            }
+            MHandler::Native { .. } => EffectSummary::default(),
+        }
+    }
+
+    fn effect_summary_handler_arm(
+        &self,
+        arm: &MHandlerArm,
+        call_stack: &mut HashSet<String>,
+        handler_stack: &[HandlerFrame],
+    ) -> EffectSummary {
+        let mut summary = self.effect_summary_expr(&arm.body, call_stack, handler_stack);
+        if let Some(cleanup) = &arm.finally_block {
+            summary.add_assign(self.effect_summary_expr(cleanup, call_stack, handler_stack));
+        }
+        summary
+    }
+
+    fn yield_is_erasable_under_stack(
+        &self,
+        op: &crate::codegen::monadic::ir::EffectOpRef,
+        args: &[Atom],
+        handler_stack: &[HandlerFrame],
+    ) -> bool {
+        self.resolve_direct_call_arm_in_stack(handler_stack, op)
+            .is_some_and(|arm| inline_tail_resumptive_arm(arm, args).is_some())
+            || self
+                .resolve_finally_direct_call_arm_in_stack(handler_stack, op)
+                .is_some_and(|arm| {
+                    inline_tail_resumptive_arm(arm, args)
+                        .and_then(|inlined| inlined.finally_block)
+                        .is_some_and(|cleanup| {
+                            cleanup_vars_are_available_at_perform_site(&cleanup, args)
+                        })
+                })
+            || self
+                .resolve_native_direct_call_handler_in_stack(handler_stack, op)
+                .and_then(|handler| {
+                    native_direct_call_expr(handler, op, args, crate::ast::NodeId(0))
+                })
+                .is_some()
+    }
+
+    fn summary_callee_body(&self, head: &Atom, args: &[Atom]) -> Option<(String, MExpr)> {
+        let (head_name, _, head_source) = imported_variant_head_info(head)?;
+        if is_generated_variant_name(&head_name)
+            || self
+                .inline_blocked_names
+                .iter()
+                .any(|name| name == &head_name)
+        {
+            return None;
+        }
+
+        if let Some(candidate) = self.variant_candidates.get(&head_name)
+            && args.len() == candidate.binding.params.len()
+        {
+            let body = self.summary_body_with_dict_replacements(&candidate.binding, args)?;
+            return Some((format!("local:{}", candidate.binding.name), body));
+        }
+
+        let resolved = self.context.resolution.get(&head_source)?;
+        if !matches!(resolved.kind, ResolvedCodegenKind::BeamFunction { .. }) {
+            return None;
+        }
+        let candidate = self.lookup_imported_function_variant(resolved)?;
+        if args.len() != candidate.binding.params.len() {
+            return None;
+        }
+        let body = self.summary_body_with_dict_replacements(&candidate.binding, args)?;
+        Some((
+            format!(
+                "imported:{}.{}",
+                candidate.source_module, candidate.binding.name
+            ),
+            body,
+        ))
+    }
+
+    fn summary_body_with_dict_replacements(
+        &self,
+        binding: &MFunBinding,
+        args: &[Atom],
+    ) -> Option<MExpr> {
+        let mut body = binding.body.clone();
+        for replacement in self.dict_param_replacements(&binding.params, args) {
+            let free_names = free_atom_names(&replacement.replacement);
+            let substituted = subst_expr(
+                body,
+                &replacement.target,
+                &replacement.replacement,
+                &free_names,
+            );
+            if substituted.blocked {
+                return None;
+            }
+            body = substituted.value;
+        }
+        Some(body)
     }
 
     fn try_direct_call(&self, expr: MExpr) -> (MExpr, Change) {
@@ -2334,7 +2590,15 @@ impl<'info> Optimizer<'info> {
         &self,
         op: &crate::codegen::monadic::ir::EffectOpRef,
     ) -> Option<&MHandlerArm> {
-        let arms = self.innermost_static_arms_for_op(op)?;
+        self.resolve_direct_call_arm_in_stack(&self.handler_stack, op)
+    }
+
+    fn resolve_direct_call_arm_in_stack<'stack>(
+        &self,
+        handler_stack: &'stack [HandlerFrame],
+        op: &crate::codegen::monadic::ir::EffectOpRef,
+    ) -> Option<&'stack MHandlerArm> {
+        let arms = self.innermost_static_arms_for_op_in_stack(handler_stack, op)?;
         let arm = single_matching_arm(arms, op)?;
         if arm.finally_block.is_some() {
             return None;
@@ -2352,7 +2616,15 @@ impl<'info> Optimizer<'info> {
         &self,
         op: &crate::codegen::monadic::ir::EffectOpRef,
     ) -> Option<&MHandlerArm> {
-        let arms = self.innermost_static_arms_for_op(op)?;
+        self.resolve_finally_direct_call_arm_in_stack(&self.handler_stack, op)
+    }
+
+    fn resolve_finally_direct_call_arm_in_stack<'stack>(
+        &self,
+        handler_stack: &'stack [HandlerFrame],
+        op: &crate::codegen::monadic::ir::EffectOpRef,
+    ) -> Option<&'stack MHandlerArm> {
+        let arms = self.innermost_static_arms_for_op_in_stack(handler_stack, op)?;
         let arm = single_matching_arm(arms, op)?;
         let cleanup = arm.finally_block.as_ref()?;
         if cleanup.contains_resume() {
@@ -2367,11 +2639,12 @@ impl<'info> Optimizer<'info> {
         Some(arm)
     }
 
-    fn innermost_static_arms_for_op(
+    fn innermost_static_arms_for_op_in_stack<'stack>(
         &self,
+        handler_stack: &'stack [HandlerFrame],
         op: &crate::codegen::monadic::ir::EffectOpRef,
-    ) -> Option<&[MHandlerArm]> {
-        for frame in self.handler_stack.iter().rev() {
+    ) -> Option<&'stack [MHandlerArm]> {
+        for frame in handler_stack.iter().rev() {
             if !frame.handles_effect(&op.effect) {
                 continue;
             }
@@ -2424,7 +2697,15 @@ impl<'info> Optimizer<'info> {
         &self,
         op: &crate::codegen::monadic::ir::EffectOpRef,
     ) -> Option<&str> {
-        for frame in self.handler_stack.iter().rev() {
+        self.resolve_native_direct_call_handler_in_stack(&self.handler_stack, op)
+    }
+
+    fn resolve_native_direct_call_handler_in_stack<'stack>(
+        &self,
+        handler_stack: &'stack [HandlerFrame],
+        op: &crate::codegen::monadic::ir::EffectOpRef,
+    ) -> Option<&'stack str> {
+        for frame in handler_stack.iter().rev() {
             match frame {
                 HandlerFrame::Native { effects, handler }
                     if effects.iter().any(|e| e == &op.effect) =>

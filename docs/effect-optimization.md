@@ -129,6 +129,14 @@ boundary behavior is understood.
 Some yields are hidden behind helper calls. The optimizer can clone small
 functions under a known handler stack and optimize the clone.
 
+Before generating a variant, the optimizer asks a conservative effect summary
+whether the candidate body contains work that can be erased under the current
+handler stack. This summary can look through small known same-module and
+imported callees, so a wrapper whose body only calls another helper can still
+get a useful generated variant. This is deliberately only a gate for existing
+rewrites: it does not invent new semantics, and the optimized clone must still
+fall back safely if residual yields remain.
+
 Implemented variant shapes:
 
 - same-module helper inlining for small single-clause helpers;

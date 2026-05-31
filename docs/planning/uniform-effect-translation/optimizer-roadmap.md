@@ -303,6 +303,22 @@ reference; the safe version only substitutes known dictionary args and closed
 atoms. The next `saga_json`-specific pass should inspect the remaining
 constructor argument shape rather than broadening substitution blindly.
 
+Follow-up after adding a conservative effect-summary gate:
+
+- Same-module and imported function-variant candidates are now admitted when a
+  summary of the body can see erasable work through small known callees, even
+  if the immediate body has no visible `Yield`.
+- This fixes the wrapper-calls-helper shape and avoids encoding that case as
+  another one-off inliner.
+- `saga_json` remains unchanged at `Yield 4 -> 4`, `Bind 278 -> 93`; the
+  remaining `JsonOptions.get_json_options` yields are behind dictionary/method
+  chains rather than a plain helper-call boundary.
+
+Next `saga_json` work should extend the summary model to explain dictionary
+method chains before adding more rewrites. The target fact is "this trait
+method is fully handled under handler stack H", not "this source function is
+globally pure".
+
 The stats report now splits total declarations into `source decls` and
 `generated decls`. This makes native variant growth visible as optimizer-created
 code and shows when private slow paths are deleted: for example, `29-actors`

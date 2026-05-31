@@ -1151,8 +1151,10 @@ main () = risky () with {
 
 #[test]
 fn effect_propagation_threads_handler() {
-    // When an effectful function calls another effectful function,
-    // the handler param should be threaded through
+    // When an effectful function calls another effectful function, the uniform
+    // slow path threads evidence through. The optimizer may now replace the
+    // outer helper with a generated static variant, but the inner slow-path
+    // ABI remains visible.
     let src = r#"
 effect Log {
   fun log : (msg: String) -> Unit
@@ -1171,11 +1173,8 @@ handler silent for Log {
 main () = outer () with silent
 "#;
     let out = emit_elaborated(src);
-    // outer should pass its _HandleLog to inner
-    // inner/outer each take Unit + _HandleLog + _ReturnK
-    // outer calls inner with its own _HandleLog
     assert_contains(&out, "'inner'/3");
-    assert_contains(&out, "'outer'/3");
+    assert_contains(&out, "'__saga_static_variant__outer");
 }
 
 #[test]
