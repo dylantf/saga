@@ -95,3 +95,20 @@ conversion. The useful movement here is bind reduction without code growth.
 | Level | Project | Whole-App Entry-Reachable Stats | Output |
 | --- | --- | --- | --- |
 | 6 | `06-imported-derived-dict-chain` | `Yield 1 -> 1`, `Bind 22 -> 3`, `decls 8 -> 7`, generated `0 -> 1` | `"15"` |
+
+## After Constructor-Pattern Dictionary Method Inlining
+
+Captured after allowing dictionary-method helper inlining to wrap constructor
+and tuple parameters as one-arm `case` expressions. This lets the generated
+variant peel derived representation dictionaries such as
+`Rep__User -> Adt -> Variant -> Leaf -> Int`.
+
+The level-6 fixture now reaches the desired cross-module result: the imported
+generic dispatch specializes all the way down to the static `Options` handler
+without a residual perform. This did not move the larger `saga_json` package by
+itself; that package still has four reachable `JsonOptions.get_json_options`
+yields, so the next real-package pass needs another shape.
+
+| Level | Project | Whole-App Entry-Reachable Stats | Output |
+| --- | --- | --- | --- |
+| 6 | `06-imported-derived-dict-chain` | `Yield 1 -> 0`, `Bind 22 -> 2`, `decls 8 -> 2`, generated `0 -> 1` | `"15"` |

@@ -50,6 +50,12 @@ for derived-code paths where a pure representation conversion is emitted as a
 short chain of `Bind(Pure(...))` nodes before feeding an effectful dictionary
 method.
 
+Dictionary-method helper inlining supports simple binder parameters directly.
+For constructor and tuple parameters it wraps the inlined body in a one-arm
+`case` around the call argument. This preserves the match while letting derived
+representation dictionaries inline through shapes such as
+`Rep__User -> Adt -> Variant -> Leaf`.
+
 Dead pure lets are removed when the bound variable is unused.
 
 ## Handler Stack Model

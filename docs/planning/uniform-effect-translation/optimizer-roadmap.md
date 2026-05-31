@@ -249,6 +249,29 @@ fixture is
 `examples/optimization/cross-module-dict-specialization/06-imported-derived-dict-chain`,
 which still reports `Yield 1 -> 1` after this step.
 
+Follow-up measurement after constructor-pattern dictionary-method inlining:
+
+```text
+examples/optimization/cross-module-dict-specialization/06-imported-derived-dict-chain:
+  whole-app entry-reachable from Main.main:
+    Yield 1 -> 0
+    Bind 22 -> 2
+    decls 8 -> 2 (source 8 -> 1, generated 0 -> 1)
+
+~/projects/saga_json:
+  whole-app entry-reachable from Main.main:
+    Yield 4 -> 4
+    Bind 278 -> 93
+    decls 48 -> 43 (source 48 -> 39, generated 0 -> 4)
+    residual yields: SagaJson.JsonOptions::get_json_options=4
+```
+
+Constructor/tuple dictionary-method params are now inlined by wrapping the
+method body in a one-arm `case`, which is enough to finish the level-6 derived
+dictionary chain. The real package still has the same four `JsonOptions`
+residual yields, so level 6 is a fixture win rather than the final
+`saga_json` hot-path fix.
+
 The stats report now splits total declarations into `source decls` and
 `generated decls`. This makes native variant growth visible as optimizer-created
 code and shows when private slow paths are deleted: for example, `29-actors`

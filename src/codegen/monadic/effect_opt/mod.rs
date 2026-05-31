@@ -973,7 +973,7 @@ impl<'info> Optimizer<'info> {
         let Atom::Lambda { params, body, .. } = method else {
             return None;
         };
-        if !helper_params_are_supported(&params) {
+        if !dict_method_params_are_supported(&params) {
             return None;
         }
         Some(InlineCandidate {
@@ -3544,6 +3544,13 @@ fn helper_params_are_supported(params: &[Pat]) -> bool {
     params.iter().all(supported_inline_param)
 }
 
+fn dict_method_params_are_supported(params: &[Pat]) -> bool {
+    params.iter().all(|param| {
+        supported_inline_param(param)
+            || matches!(param, Pat::Constructor { .. } | Pat::Tuple { .. })
+    })
+}
+
 fn supported_inline_param(param: &Pat) -> bool {
     matches!(
         param,
@@ -3562,7 +3569,7 @@ fn inline_helper_candidate(candidate: &InlineCandidate, args: &[Atom]) -> Option
     }
 
     let mut body = candidate.body.clone();
-    for (param, arg) in candidate.params.iter().zip(args) {
+    for (param, arg) in candidate.params.iter().zip(args).rev() {
         match param {
             Pat::Var { name, id, .. } => {
                 let target = MVar {
@@ -3581,6 +3588,18 @@ fn inline_helper_candidate(candidate: &InlineCandidate, args: &[Atom]) -> Option
                 value: crate::ast::Lit::Unit,
                 ..
             } => {}
+            Pat::Constructor { .. } | Pat::Tuple { .. } => {
+                body = MExpr::Case {
+                    scrutinee: arg.clone(),
+                    arms: vec![MArm {
+                        pattern: param.clone(),
+                        guard: None,
+                        body,
+                        span: param.span(),
+                    }],
+                    source: param.id(),
+                };
+            }
             _ => return None,
         }
     }
@@ -5918,8 +5937,222 @@ fn subst_handler_arm(
 
 fn free_atom_names(atom: &Atom) -> HashSet<String> {
     let mut out = HashSet::new();
-    collect_atom_var_names(atom, &mut out);
+    collect_atom_free_names(atom, &mut out, &HashSet::new());
     out
+}
+
+fn collect_atom_free_names(atom: &Atom, out: &mut HashSet<String>, bound: &HashSet<String>) {
+    match atom {
+        Atom::Var { name, .. } => {
+            if !bound.contains(&name.name) {
+                out.insert(name.name.clone());
+            }
+        }
+        Atom::Ctor { args, .. } | Atom::Tuple { elements: args, .. } => {
+            for arg in args {
+                collect_atom_free_names(arg, out, bound);
+            }
+        }
+        Atom::AnonRecord { fields, .. } | Atom::Record { fields, .. } => {
+            for (_, atom) in fields {
+                collect_atom_free_names(atom, out, bound);
+            }
+        }
+        Atom::Lambda { params, body, .. } => {
+            let mut scoped = bound.clone();
+            scoped.extend(bound_names_in_pats(params));
+            collect_expr_free_names(body, out, &scoped);
+        }
+        Atom::BackendSpawnThunk { callback, .. } => {
+            collect_atom_free_names(callback, out, bound);
+        }
+        Atom::QualifiedRef { name, .. } => {
+            if !bound.contains(name) {
+                out.insert(name.clone());
+            }
+        }
+        Atom::Lit { .. }
+        | Atom::DictRef { .. }
+        | Atom::Symbol { .. }
+        | Atom::BackendAtom { .. } => {}
+    }
+}
+
+fn collect_atom_list_free_names(
+    atoms: &[Atom],
+    out: &mut HashSet<String>,
+    bound: &HashSet<String>,
+) {
+    for atom in atoms {
+        collect_atom_free_names(atom, out, bound);
+    }
+}
+
+fn collect_expr_free_names(expr: &MExpr, out: &mut HashSet<String>, bound: &HashSet<String>) {
+    match expr {
+        MExpr::Pure(atom) => collect_atom_free_names(atom, out, bound),
+        MExpr::Yield { args, .. } | MExpr::ForeignCall { args, .. } => {
+            collect_atom_list_free_names(args, out, bound);
+        }
+        MExpr::Bind {
+            var, value, body, ..
+        }
+        | MExpr::Let { var, value, body } => {
+            collect_expr_free_names(value, out, bound);
+            let mut scoped = bound.clone();
+            scoped.insert(var.name.clone());
+            collect_expr_free_names(body, out, &scoped);
+        }
+        MExpr::Ensure { body, cleanup } => {
+            collect_expr_free_names(body, out, bound);
+            collect_expr_free_names(cleanup, out, bound);
+        }
+        MExpr::Case {
+            scrutinee, arms, ..
+        } => {
+            collect_atom_free_names(scrutinee, out, bound);
+            for arm in arms {
+                let mut scoped = bound.clone();
+                scoped.extend(bound_names_in_pat(&arm.pattern));
+                if let Some(guard) = &arm.guard {
+                    collect_expr_free_names(guard, out, &scoped);
+                }
+                collect_expr_free_names(&arm.body, out, &scoped);
+            }
+        }
+        MExpr::If {
+            cond,
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            collect_atom_free_names(cond, out, bound);
+            collect_expr_free_names(then_branch, out, bound);
+            collect_expr_free_names(else_branch, out, bound);
+        }
+        MExpr::App { head, args, .. } => {
+            collect_atom_free_names(head, out, bound);
+            collect_atom_list_free_names(args, out, bound);
+        }
+        MExpr::With { handler, body, .. } => {
+            collect_handler_free_names(handler, out, bound);
+            collect_expr_free_names(body, out, bound);
+        }
+        MExpr::Resume { value, .. }
+        | MExpr::FieldAccess { record: value, .. }
+        | MExpr::DictMethodAccess { dict: value, .. }
+        | MExpr::UnaryMinus { value, .. } => collect_atom_free_names(value, out, bound),
+        MExpr::RecordUpdate { record, fields, .. } => {
+            collect_atom_free_names(record, out, bound);
+            for (_, atom) in fields {
+                collect_atom_free_names(atom, out, bound);
+            }
+        }
+        MExpr::BinOp { left, right, .. } => {
+            collect_atom_free_names(left, out, bound);
+            collect_atom_free_names(right, out, bound);
+        }
+        MExpr::BitString { segments, .. } => {
+            for seg in segments {
+                collect_atom_free_names(&seg.value, out, bound);
+                if let Some(size) = &seg.size {
+                    collect_atom_free_names(size, out, bound);
+                }
+            }
+        }
+        MExpr::Receive { arms, after, .. } => {
+            for arm in arms {
+                let mut scoped = bound.clone();
+                scoped.extend(bound_names_in_pat(&arm.pattern));
+                if let Some(guard) = &arm.guard {
+                    collect_expr_free_names(guard, out, &scoped);
+                }
+                collect_expr_free_names(&arm.body, out, &scoped);
+            }
+            if let Some((timeout, body)) = after {
+                collect_atom_free_names(timeout, out, bound);
+                collect_expr_free_names(body, out, bound);
+            }
+        }
+        MExpr::LetFun {
+            name,
+            params,
+            body,
+            rest,
+            ..
+        } => {
+            let mut body_scope = bound.clone();
+            body_scope.insert(name.clone());
+            body_scope.extend(bound_names_in_pats(params));
+            collect_expr_free_names(body, out, &body_scope);
+
+            let mut rest_scope = bound.clone();
+            rest_scope.insert(name.clone());
+            collect_expr_free_names(rest, out, &rest_scope);
+        }
+        MExpr::HandlerValue {
+            arms,
+            return_clause,
+            ..
+        } => {
+            for arm in arms {
+                collect_handler_arm_free_names(arm, out, bound);
+            }
+            if let Some(arm) = return_clause {
+                collect_handler_arm_free_names(arm, out, bound);
+            }
+        }
+    }
+}
+
+fn collect_handler_free_names(
+    handler: &MHandler,
+    out: &mut HashSet<String>,
+    bound: &HashSet<String>,
+) {
+    match handler {
+        MHandler::Static {
+            arms,
+            return_clause,
+            ..
+        } => {
+            for arm in arms {
+                collect_handler_arm_free_names(arm, out, bound);
+            }
+            if let Some(arm) = return_clause {
+                collect_handler_arm_free_names(arm, out, bound);
+            }
+        }
+        MHandler::Native { .. } => {}
+        MHandler::Composite { handlers, .. } => {
+            for handler in handlers {
+                collect_handler_free_names(handler, out, bound);
+            }
+        }
+        MHandler::Dynamic {
+            op_tuple,
+            return_lambda,
+            ..
+        } => {
+            collect_atom_free_names(op_tuple, out, bound);
+            if let Some(atom) = return_lambda {
+                collect_atom_free_names(atom, out, bound);
+            }
+        }
+    }
+}
+
+fn collect_handler_arm_free_names(
+    arm: &MHandlerArm,
+    out: &mut HashSet<String>,
+    bound: &HashSet<String>,
+) {
+    let mut scoped = bound.clone();
+    scoped.extend(bound_names_in_pats(&arm.params));
+    collect_expr_free_names(&arm.body, out, &scoped);
+    if let Some(finally_block) = &arm.finally_block {
+        collect_expr_free_names(finally_block, out, &scoped);
+    }
 }
 
 fn var_matches(actual: &MVar, target: &MVar) -> bool {
