@@ -77,6 +77,7 @@ pub struct OptimizerContext {
     pub imported_function_variants: HashMap<String, ImportedFunctionVariantCandidate>,
     pub imported_handler_factories: HashMap<String, ImportedHandlerFactoryCandidate>,
     pub imported_dict_constructors: HashMap<String, MDictConstructor>,
+    pub imported_private_helpers: HashMap<String, ImportedPrivateHelperCandidate>,
 }
 
 #[derive(Debug, Clone)]
@@ -93,6 +94,12 @@ pub struct ImportedHandlerFactoryCandidate {
     pub body: MExpr,
 }
 
+#[derive(Debug, Clone)]
+pub struct ImportedPrivateHelperCandidate {
+    pub source_module: String,
+    pub binding: MFunBinding,
+}
+
 struct Optimizer<'info> {
     opts: RunOptions,
     context: OptimizerContext,
@@ -101,11 +108,13 @@ struct Optimizer<'info> {
     handler_value_bindings: Vec<(String, Option<HandlerValueCandidate>)>,
     dict_value_bindings: Vec<(String, Option<DictValueCandidate>)>,
     dict_method_bindings: Vec<(String, Option<InlineCandidate>)>,
+    pure_atom_bindings: Vec<(String, Option<Atom>)>,
     inline_candidates: HashMap<String, InlineCandidate>,
     handler_factory_candidates: HashMap<String, InlineCandidate>,
     dict_constructors: HashMap<String, MDictConstructor>,
     variant_candidates: HashMap<String, VariantCandidate>,
     generated_variant_names: HashSet<String>,
+    in_progress_private_helpers: HashSet<String>,
     pending_variants: Vec<MDecl>,
     inline_blocked_names: Vec<String>,
 }
@@ -242,11 +251,13 @@ impl<'info> Optimizer<'info> {
             handler_value_bindings: Vec::new(),
             dict_value_bindings: Vec::new(),
             dict_method_bindings: Vec::new(),
+            pure_atom_bindings: Vec::new(),
             inline_candidates: HashMap::new(),
             handler_factory_candidates: HashMap::new(),
             dict_constructors: HashMap::new(),
             variant_candidates: HashMap::new(),
             generated_variant_names: HashSet::new(),
+            in_progress_private_helpers: HashSet::new(),
             pending_variants: Vec::new(),
             inline_blocked_names: Vec::new(),
         }
@@ -319,6 +330,7 @@ impl<'info> Optimizer<'info> {
 
     fn optimize_expr(&mut self, expr: MExpr) -> (MExpr, Change) {
         let (expr, child_change) = self.optimize_children(expr);
+        let (expr, private_helper_change) = self.try_imported_private_helper_call(expr);
         let (expr, variant_change) = self.try_native_function_variant_call(expr);
         let (expr, inline_change) = self.try_inline_helper_call(expr);
         let (expr, static_variant_change) = self.try_static_function_variant_call(expr);
@@ -333,6 +345,7 @@ impl<'info> Optimizer<'info> {
         let (expr, dead_let_change) = self.try_dead_pure_let(expr);
         let (expr, dead_with_change) = self.try_dead_pure_static_with(expr);
         let mut change = child_change;
+        change.mark_if(private_helper_change);
         change.mark_if(variant_change);
         change.mark_if(inline_change);
         change.mark_if(static_variant_change);
@@ -891,7 +904,14 @@ impl<'info> Optimizer<'info> {
         } else {
             self.dict_method_bindings.push((var.name.clone(), None));
         }
+        if let MExpr::Pure(atom) = value {
+            self.pure_atom_bindings
+                .push((var.name.clone(), closed_dict_constructor_arg(atom)));
+        } else {
+            self.pure_atom_bindings.push((var.name.clone(), None));
+        }
         let (body, change) = self.optimize_expr_with_blocked_names(vec![var.name.clone()], body);
+        self.pure_atom_bindings.pop();
         self.dict_method_bindings.pop();
         self.dict_value_bindings.pop();
         self.handler_value_bindings.pop();
@@ -902,13 +922,7 @@ impl<'info> Optimizer<'info> {
         let MExpr::App { head, args, .. } = value else {
             return None;
         };
-        let Atom::DictRef { name, .. } = head else {
-            return None;
-        };
-        let constructor = self
-            .dict_constructors
-            .get(name)
-            .or_else(|| self.context.imported_dict_constructors.get(name))?;
+        let constructor = self.dict_constructor_for_head(head)?;
         if constructor.dict_params.len() != args.len() {
             return None;
         }
@@ -916,18 +930,36 @@ impl<'info> Optimizer<'info> {
         let mut param_replacements = Vec::with_capacity(args.len());
         let mut arg_keys = Vec::with_capacity(args.len());
         for (param, arg) in constructor.dict_params.iter().zip(args) {
-            let Atom::Var { name: arg_var, .. } = arg else {
-                return None;
+            let (replacement, key) = match arg {
+                Atom::Var { name: arg_var, .. } => self
+                    .lookup_dict_value(&arg_var.name)
+                    .map(|arg_dict| (arg_dict.atom, arg_dict.key))
+                    .or_else(|| {
+                        self.lookup_pure_atom(&arg_var.name).map(|arg| {
+                            let key = atom_key(&arg);
+                            (arg, key)
+                        })
+                    })
+                    .or_else(|| {
+                        closed_dict_constructor_arg(arg).map(|arg| {
+                            let key = atom_key(&arg);
+                            (arg, key)
+                        })
+                    })?,
+                _ => {
+                    let arg = closed_dict_constructor_arg(arg)?;
+                    let key = atom_key(&arg);
+                    (arg, key)
+                }
             };
-            let arg_dict = self.lookup_dict_value(&arg_var.name)?;
             param_replacements.push((
                 MVar {
                     name: param.clone(),
                     id: 0,
                 },
-                arg_dict.atom,
+                replacement,
             ));
-            arg_keys.push(arg_dict.key);
+            arg_keys.push(key);
         }
 
         let mut methods = Vec::with_capacity(constructor.methods.len());
@@ -948,9 +980,9 @@ impl<'info> Optimizer<'info> {
         }
 
         let key = if arg_keys.is_empty() {
-            name.clone()
+            constructor.name.clone()
         } else {
-            format!("{}({})", name, arg_keys.join(","))
+            format!("{}({})", constructor.name, arg_keys.join(","))
         };
         Some(DictValueCandidate {
             atom: Atom::Tuple {
@@ -960,6 +992,26 @@ impl<'info> Optimizer<'info> {
             methods,
             key,
         })
+    }
+
+    fn dict_constructor_for_head(&self, head: &Atom) -> Option<&MDictConstructor> {
+        match head {
+            Atom::DictRef { name, .. } => self
+                .dict_constructors
+                .get(name)
+                .or_else(|| self.context.imported_dict_constructors.get(name)),
+            Atom::QualifiedRef { name, source, .. } => {
+                let canonical = self
+                    .context
+                    .resolution
+                    .get(source)
+                    .map(|resolved| resolved.canonical_name.as_str());
+                canonical
+                    .and_then(|name| self.context.imported_dict_constructors.get(name))
+                    .or_else(|| self.context.imported_dict_constructors.get(name))
+            }
+            _ => None,
+        }
     }
 
     fn dict_method_candidate(&self, value: &MExpr) -> Option<InlineCandidate> {
@@ -1003,6 +1055,15 @@ impl<'info> Optimizer<'info> {
 
     fn lookup_dict_method(&self, name: &str) -> Option<InlineCandidate> {
         self.dict_method_bindings
+            .iter()
+            .rev()
+            .find(|(bound_name, _)| bound_name == name)?
+            .1
+            .clone()
+    }
+
+    fn lookup_pure_atom(&self, name: &str) -> Option<Atom> {
+        self.pure_atom_bindings
             .iter()
             .rev()
             .find(|(bound_name, _)| bound_name == name)?
@@ -1527,6 +1588,70 @@ impl<'info> Optimizer<'info> {
         )
     }
 
+    fn try_imported_private_helper_call(&mut self, expr: MExpr) -> (MExpr, Change) {
+        let MExpr::App { head, args, source } = expr else {
+            return (expr, Change::Unchanged);
+        };
+
+        let Some((head_name, head_id, head_source)) = imported_variant_head_info(&head) else {
+            return (MExpr::App { head, args, source }, Change::Unchanged);
+        };
+        if is_generated_variant_name(&head_name)
+            || self.inline_blocked_names.iter().any(|n| n == &head_name)
+        {
+            return (MExpr::App { head, args, source }, Change::Unchanged);
+        }
+
+        let Some(resolved) = self.context.resolution.get(&head_source) else {
+            return (MExpr::App { head, args, source }, Change::Unchanged);
+        };
+        if !matches!(resolved.kind, ResolvedCodegenKind::BeamFunction { .. }) {
+            return (MExpr::App { head, args, source }, Change::Unchanged);
+        }
+
+        let Some(candidate) = self.lookup_imported_private_helper(resolved) else {
+            return (MExpr::App { head, args, source }, Change::Unchanged);
+        };
+        if args.len() != candidate.binding.params.len() {
+            return (MExpr::App { head, args, source }, Change::Unchanged);
+        }
+
+        let helper_name = imported_private_helper_variant_name(
+            &candidate.source_module,
+            &candidate.binding.name,
+            &self.handler_stack,
+        );
+        if !self.generated_variant_names.contains(&helper_name)
+            && !self.in_progress_private_helpers.contains(&helper_name)
+        {
+            self.in_progress_private_helpers.insert(helper_name.clone());
+            let body =
+                self.optimized_imported_private_helper_body(&candidate.binding, &helper_name);
+            self.in_progress_private_helpers.remove(&helper_name);
+            self.push_function_variant(
+                &helper_name,
+                body,
+                candidate.binding.clone(),
+                candidate.binding.params.clone(),
+            );
+        }
+
+        (
+            MExpr::App {
+                head: Atom::Var {
+                    name: MVar {
+                        name: helper_name,
+                        id: head_id,
+                    },
+                    source: candidate.binding.id,
+                },
+                args,
+                source,
+            },
+            Change::Changed,
+        )
+    }
+
     fn optimized_variant_body(
         &mut self,
         binding: &MFunBinding,
@@ -1573,6 +1698,31 @@ impl<'info> Optimizer<'info> {
         } else {
             Some(optimized_body)
         }
+    }
+
+    fn optimized_imported_private_helper_body(
+        &mut self,
+        binding: &MFunBinding,
+        helper_name: &str,
+    ) -> MExpr {
+        let old_blocked_len = self.inline_blocked_names.len();
+        self.inline_blocked_names
+            .extend(bound_names_in_pats(&binding.params));
+        let mut optimized_body = rewrite_direct_calls_to_name(
+            binding.body.clone(),
+            &binding.name,
+            helper_name,
+            binding.id,
+        );
+        loop {
+            let (next_body, change) = self.optimize_expr(optimized_body);
+            optimized_body = next_body;
+            if change == Change::Unchanged {
+                break;
+            }
+        }
+        self.inline_blocked_names.truncate(old_blocked_len);
+        optimized_body
     }
 
     fn push_function_variant(
@@ -1652,6 +1802,36 @@ impl<'info> Optimizer<'info> {
             .values()
             .filter(|candidate| {
                 head_name == resolved.name
+                    && resolved
+                        .source_module
+                        .as_deref()
+                        .is_none_or(|module| module == candidate.source_module)
+            });
+        let candidate = matching.next()?;
+        if matching.next().is_some() {
+            return None;
+        }
+        Some(candidate.clone())
+    }
+
+    fn lookup_imported_private_helper(
+        &self,
+        resolved: &crate::codegen::resolve::ResolvedSymbol,
+    ) -> Option<ImportedPrivateHelperCandidate> {
+        if let Some(candidate) = self
+            .context
+            .imported_private_helpers
+            .get(&resolved.canonical_name)
+        {
+            return Some(candidate.clone());
+        }
+
+        let mut matching = self
+            .context
+            .imported_private_helpers
+            .values()
+            .filter(|candidate| {
+                candidate.binding.name == resolved.name
                     && resolved
                         .source_module
                         .as_deref()
@@ -2888,6 +3068,7 @@ pub fn collect_imported_dict_constructors(
     program: &MProgram,
     resolution: &ResolutionMap,
     codegen_info: &ModuleCodegenInfo,
+    cloneable_private_helpers: &HashSet<String>,
 ) -> HashMap<String, MDictConstructor> {
     let public_names: HashSet<String> = codegen_info
         .exports
@@ -2903,24 +3084,112 @@ pub fn collect_imported_dict_constructors(
         // Dict constructors are compiler-generated implementation details.
         // The source export table is not a reliable visibility filter for
         // them, and imported optimized bodies may legitimately reference
-        // private impl dictionaries. We still reject method bodies that depend
-        // on private helper calls, since those would not lower safely from the
-        // caller module.
+        // private impl dictionaries. Private helper calls are admitted here:
+        // the optimizer rewrites them to caller-local generated helper clones
+        // before lowering, so the generated body never needs a remote call to
+        // an unexported function.
         if !imported_dict_constructor_supported(dc) {
             continue;
         }
         if dc.methods.iter().any(|method| {
-            expr_has_private_same_module_refs(
+            expr_has_private_same_module_refs_except(
                 method,
                 source_module,
                 &dc.name,
                 &public_names,
                 resolution,
+                cloneable_private_helpers,
             )
         }) {
             continue;
         }
         candidates.insert(dc.name.clone(), dc.clone());
+    }
+
+    candidates
+}
+
+pub fn collect_imported_private_helper_candidates(
+    source_module: &str,
+    program: &MProgram,
+    resolution: &ResolutionMap,
+    codegen_info: &ModuleCodegenInfo,
+) -> HashMap<String, ImportedPrivateHelperCandidate> {
+    let public_names: HashSet<String> = codegen_info
+        .exports
+        .iter()
+        .map(|(name, _)| name.clone())
+        .collect();
+    let external_names: HashSet<String> = codegen_info
+        .external_funs
+        .iter()
+        .map(|(name, _, _, _)| name.clone())
+        .collect();
+
+    let mut counts: HashMap<String, usize> = HashMap::new();
+    for decl in program {
+        if let MDecl::FunBinding(f) = decl
+            && !f.public
+            && !is_generated_variant_name(&f.name)
+        {
+            *counts.entry(f.name.clone()).or_default() += 1;
+        }
+    }
+
+    let mut raw_candidates: HashMap<String, MFunBinding> = HashMap::new();
+    for decl in program {
+        let MDecl::FunBinding(f) = decl else {
+            continue;
+        };
+        if f.public
+            || public_names.contains(&f.name)
+            || is_generated_variant_name(&f.name)
+            || counts.get(&f.name) != Some(&1)
+            || external_names.contains(&f.name)
+            || f.guard.is_some()
+            || expr_node_count(&f.body) > FUNCTION_VARIANT_BODY_BUDGET
+            || expr_contains_xmod_variant_forbidden_shape(&f.body)
+        {
+            continue;
+        }
+        raw_candidates.insert(f.name.clone(), f.clone());
+    }
+
+    let mut cloneable = HashSet::new();
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for (name, f) in &raw_candidates {
+            if cloneable.contains(name) {
+                continue;
+            }
+            if expr_has_private_same_module_refs_except(
+                &f.body,
+                source_module,
+                name,
+                &public_names,
+                resolution,
+                &cloneable,
+            ) {
+                continue;
+            }
+            cloneable.insert(name.clone());
+            changed = true;
+        }
+    }
+
+    let mut candidates = HashMap::new();
+    for name in cloneable {
+        let Some(binding) = raw_candidates.get(&name).cloned() else {
+            continue;
+        };
+        candidates.insert(
+            format!("{source_module}.{name}"),
+            ImportedPrivateHelperCandidate {
+                source_module: source_module.to_string(),
+                binding,
+            },
+        );
     }
 
     candidates
@@ -3097,6 +3366,14 @@ fn variant_name_for_imported_static(
     static_variant_name(&format!("xmod__{source_module}__{name}"), stack)
 }
 
+fn imported_private_helper_variant_name(
+    source_module: &str,
+    name: &str,
+    stack: &[HandlerFrame],
+) -> String {
+    static_variant_name(&format!("xmod_helper__{source_module}__{name}"), stack)
+}
+
 fn variant_name_with_dict_key(base: String, dict_replacements: &[DictParamReplacement]) -> String {
     if dict_replacements.is_empty() {
         return base;
@@ -3119,6 +3396,70 @@ fn stable_key_hash(value: &str) -> u64 {
         hash = hash.wrapping_mul(0x100000001b3);
     }
     hash
+}
+
+fn atom_key(atom: &Atom) -> String {
+    match atom {
+        Atom::Var { name, .. } => format!("var:{}", name.name),
+        Atom::Lit { value, .. } => format!("lit:{value:?}"),
+        Atom::Ctor { name, args, .. } => {
+            let args = args.iter().map(atom_key).collect::<Vec<_>>().join(",");
+            format!("ctor:{name}({args})")
+        }
+        Atom::Tuple { elements, .. } => {
+            let elements = elements.iter().map(atom_key).collect::<Vec<_>>().join(",");
+            format!("tuple:({elements})")
+        }
+        Atom::AnonRecord { fields, .. } | Atom::Record { fields, .. } => {
+            let fields = fields
+                .iter()
+                .map(|(name, value)| format!("{name}:{}", atom_key(value)))
+                .collect::<Vec<_>>()
+                .join(",");
+            format!("record:{{{fields}}}")
+        }
+        Atom::Lambda { source, .. } => format!("lambda:{}", source.0),
+        Atom::DictRef { name, .. } => format!("dict:{name}"),
+        Atom::QualifiedRef { module, name, .. } => format!("qualified:{module}.{name}"),
+        Atom::Symbol { symbol, .. } => format!("symbol:{symbol}"),
+        Atom::BackendAtom { atom, .. } => format!("backend_atom:{atom}"),
+        Atom::BackendSpawnThunk { source, .. } => format!("spawn_thunk:{}", source.0),
+    }
+}
+
+fn closed_dict_constructor_arg(atom: &Atom) -> Option<Atom> {
+    match atom {
+        Atom::Var { .. } | Atom::Lambda { .. } | Atom::QualifiedRef { .. } => None,
+        Atom::Lit { .. }
+        | Atom::Symbol { .. }
+        | Atom::BackendAtom { .. }
+        | Atom::DictRef { .. }
+        | Atom::BackendSpawnThunk { .. } => Some(atom.clone()),
+        Atom::Ctor { args, .. }
+            if args
+                .iter()
+                .all(|arg| closed_dict_constructor_arg(arg).is_some()) =>
+        {
+            Some(atom.clone())
+        }
+        Atom::Tuple { elements, .. }
+            if elements
+                .iter()
+                .all(|arg| closed_dict_constructor_arg(arg).is_some()) =>
+        {
+            Some(atom.clone())
+        }
+        Atom::AnonRecord { fields, .. } | Atom::Record { fields, .. }
+            if fields
+                .iter()
+                .all(|(_, arg)| closed_dict_constructor_arg(arg).is_some()) =>
+        {
+            Some(atom.clone())
+        }
+        Atom::Ctor { .. } | Atom::Tuple { .. } | Atom::AnonRecord { .. } | Atom::Record { .. } => {
+            None
+        }
+    }
 }
 
 fn prune_unused_dict_variant_args(
@@ -4695,6 +5036,24 @@ fn expr_has_private_same_module_refs(
     public_names: &HashSet<String>,
     resolution: &ResolutionMap,
 ) -> bool {
+    expr_has_private_same_module_refs_except(
+        expr,
+        source_module,
+        self_name,
+        public_names,
+        resolution,
+        &HashSet::new(),
+    )
+}
+
+fn expr_has_private_same_module_refs_except(
+    expr: &MExpr,
+    source_module: &str,
+    self_name: &str,
+    public_names: &HashSet<String>,
+    resolution: &ResolutionMap,
+    allowed_private_names: &HashSet<String>,
+) -> bool {
     let mut refs = Vec::new();
     collect_app_head_refs(expr, &mut refs);
     refs.into_iter().any(|(name, source)| {
@@ -4713,7 +5072,10 @@ fn expr_has_private_same_module_refs(
             .source_module
             .as_deref()
             .is_none_or(|module| module == source_module);
-        same_module && name != self_name && !public_names.contains(&name)
+        same_module
+            && name != self_name
+            && !public_names.contains(&name)
+            && !allowed_private_names.contains(&name)
     })
 }
 

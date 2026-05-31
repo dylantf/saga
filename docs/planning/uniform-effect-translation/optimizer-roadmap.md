@@ -272,6 +272,37 @@ dictionary chain. The real package still has the same four `JsonOptions`
 residual yields, so level 6 is a fixture win rather than the final
 `saga_json` hot-path fix.
 
+Follow-up measurement after imported private-helper cloning:
+
+```text
+examples/optimization/cross-module-dict-specialization/07-imported-dict-private-helper:
+  whole-app entry-reachable from Main.main:
+    Yield 1 -> 0
+    Bind 12 -> 2
+    decls 5 -> 3 (source 5 -> 1, generated 0 -> 2)
+
+examples/optimization/cross-module-dict-specialization/08-imported-derived-impl-ladder:
+  whole-app entry-reachable from Main.main:
+    Yield 1 -> 0
+    Bind 22 -> 2
+    decls 8 -> 2 (source 8 -> 1, generated 0 -> 1)
+
+~/projects/saga_json:
+  whole-app entry-reachable from Main.main:
+    Yield 4 -> 4
+    Bind 278 -> 93
+    decls 48 -> 43 (source 48 -> 32, generated 0 -> 11)
+    residual yields: SagaJson.JsonOptions::get_json_options=4
+```
+
+Imported private-helper cloning is a real correctness/coverage step for
+cross-module dictionaries, but it still does not reduce the current `saga_json`
+hot path. A brief experiment allowing arbitrary constructor-argument atoms
+reduced one residual yield but produced an out-of-scope generated variant
+reference; the safe version only substitutes known dictionary args and closed
+atoms. The next `saga_json`-specific pass should inspect the remaining
+constructor argument shape rather than broadening substitution blindly.
+
 The stats report now splits total declarations into `source decls` and
 `generated decls`. This makes native variant growth visible as optimizer-created
 code and shows when private slow paths are deleted: for example, `29-actors`

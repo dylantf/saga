@@ -156,8 +156,12 @@ Implemented variant shapes:
   continue through the inner method dispatch under the same handler stack.
 - conservative imported dictionary constructor specialization. Imported
   constructor method bodies are available to caller-local variants when the
-  constructor is structurally small, has supported lambda methods, and does not
-  depend on private same-module helper calls.
+  constructor is structurally small and has supported lambda methods. If an
+  imported method calls a small private same-module helper, that helper is
+  cloned into the caller as a generated private helper instead of emitted as an
+  invalid remote call to an unexported function. Helper collection is a
+  conservative dependency fixpoint; ambiguous or unsupported private helper
+  graphs still make the constructor ineligible.
 - generated-variant dictionary-argument pruning. When a known dictionary
   argument becomes unused after specialization, the generated variant drops
   that parameter and the rewritten call site drops the constructor argument.
@@ -165,8 +169,8 @@ Implemented variant shapes:
 Generated variants are private to the caller module. Cross-module variants do
 not change the callee module's exports or package cache behavior. Imported
 `@external` wrappers, private-helper dependencies, dynamic/composite
-specialization, and ambiguous closure/local-function shapes are skipped in the
-current implementation.
+specialization, and ambiguous closure/local-function shapes are still skipped
+outside the imported dictionary-helper clone path.
 
 Trait method specialization is deliberately narrow. It handles local dictionary
 constructors when their dictionary arguments are already known, which covers

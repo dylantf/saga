@@ -16,7 +16,7 @@ table for each optimizer milestone instead of editing earlier snapshots.
 
 Captured before implementing imported dictionary constructor specialization.
 Level 1 is a control: cross-module static function variants already work for a
-direct imported effectful function. Levels 2-6 are the dictionary shapes we want
+direct imported effectful function. Levels 2-8 are the dictionary shapes we want
 to improve.
 
 | Level | Project | Shape | Whole-App Entry-Reachable Stats | Output |
@@ -27,6 +27,8 @@ to improve.
 | 4 | `04-imported-parameterized-dict` | Imported parameterized dict uses an imported sub-dictionary | `Yield 1 -> 1`, `Bind 12 -> 4`, `decls 4 -> 4`, generated `0 -> 1` | `"16"` |
 | 5 | `05-imported-handler-factory` | Imported handler factory plus imported generic dispatch | `Yield 1 -> 1`, `Bind 9 -> 4`, `decls 4 -> 4`, generated `0 -> 0` | `"15"` |
 | 6 | `06-imported-derived-dict-chain` | Imported generic dispatch into caller-local derived dictionaries | `Yield 1 -> 1`, `Bind 22 -> 4`, `decls 8 -> 7`, generated `0 -> 1` | `"15"` |
+| 7 | `07-imported-dict-private-helper` | Imported parameterized dict method calls a private helper | `Yield 1 -> 1`, `Bind 12 -> 4`, `decls 5 -> 5`, generated `0 -> 1` | `"16"` |
+| 8 | `08-imported-derived-impl-ladder` | Caller-local derived dictionary uses imported generic representation impls | `Yield 1 -> 0`, `Bind 22 -> 2`, `decls 8 -> 2`, generated `0 -> 1` | `"15"` |
 
 ## Intended Rungs
 
@@ -49,6 +51,15 @@ specialization, mirroring the `saga_json` shape more closely.
 Level 6 adds the derived-codec chain from `saga_json`: an imported generic
 function receives a caller-local dictionary whose method performs a pure
 representation conversion before calling another effectful dictionary method.
+
+Level 7 adds imported dictionary methods that call private same-module helpers.
+The optimizer must clone safe private helpers into caller-local generated
+helpers; remote calls to private BEAM functions are not valid.
+
+Level 8 moves the generic representation impl ladder (`Leaf`, `Variant`,
+`Adt`) into the imported module while keeping the concrete derived type in the
+caller. This mirrors the common library shape where generic codec machinery
+lives in the package and user-derived dictionaries live in the application.
 
 ## After Imported Dictionary Constructor Collection
 
@@ -112,3 +123,24 @@ yields, so the next real-package pass needs another shape.
 | Level | Project | Whole-App Entry-Reachable Stats | Output |
 | --- | --- | --- | --- |
 | 6 | `06-imported-derived-dict-chain` | `Yield 1 -> 0`, `Bind 22 -> 2`, `decls 8 -> 2`, generated `0 -> 1` | `"15"` |
+
+## After Imported Private-Helper Cloning
+
+Captured after imported dictionary constructors were allowed to depend on
+cloneable private same-module helpers. Private helper collection is conservative:
+it admits single-clause helpers whose private dependencies are themselves
+cloneable, then rewrites calls to caller-local generated helper functions.
+
+Level 7 now reaches the same optimized shape as level 4 while preserving module
+privacy. Level 8 is unchanged because it was already covered by imported
+dictionary constructor collection plus constructor-pattern dictionary method
+inlining.
+
+The larger `saga_json` package did not move from this pass; its remaining
+`JsonOptions.get_json_options` yields involve dictionary constructor arguments
+that are not simple known dictionaries, not just private helper calls.
+
+| Level | Project | Whole-App Entry-Reachable Stats | Output |
+| --- | --- | --- | --- |
+| 7 | `07-imported-dict-private-helper` | `Yield 1 -> 0`, `Bind 12 -> 2`, `decls 5 -> 3`, generated `0 -> 2` | `"16"` |
+| 8 | `08-imported-derived-impl-ladder` | `Yield 1 -> 0`, `Bind 22 -> 2`, `decls 8 -> 2`, generated `0 -> 1` | `"15"` |

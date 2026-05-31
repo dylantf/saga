@@ -405,6 +405,7 @@ pub fn emit_module_via_new_path(
     let mut imported_function_variants = HashMap::new();
     let mut imported_handler_factories = HashMap::new();
     let mut imported_dict_constructors = HashMap::new();
+    let mut imported_private_helpers = HashMap::new();
     for (imported_module_name, compiled) in &ctx.modules {
         let anf_imported = anf::normalize(compiled.elaborated.clone(), Some(&compiled.resolution));
         for decl in &anf_imported {
@@ -427,6 +428,17 @@ pub fn emit_module_via_new_path(
                 .extend(handler_analysis::analyze(&compiled.elaborated).resumption);
             let (imported_monadic, _) =
                 monadic::translate::translate(&anf_imported, &compiled.resolution, &effect_info);
+            let imported_private = monadic::effect_opt::collect_imported_private_helper_candidates(
+                imported_module_name,
+                &imported_monadic,
+                &compiled.resolution,
+                &compiled.codegen_info,
+            );
+            let imported_private_names = imported_private
+                .values()
+                .map(|candidate| candidate.binding.name.clone())
+                .collect::<std::collections::HashSet<_>>();
+
             imported_function_variants.extend(
                 monadic::effect_opt::collect_imported_function_variant_candidates(
                     imported_module_name,
@@ -449,8 +461,10 @@ pub fn emit_module_via_new_path(
                     &imported_monadic,
                     &compiled.resolution,
                     &compiled.codegen_info,
+                    &imported_private_names,
                 ),
             );
+            imported_private_helpers.extend(imported_private);
         }
     }
     let (monadic_prog, handler_value_map) = monadic::translate::translate_with_imports(
@@ -473,6 +487,7 @@ pub fn emit_module_via_new_path(
             imported_function_variants,
             imported_handler_factories,
             imported_dict_constructors,
+            imported_private_helpers,
         },
     );
     let monadic_stats = before_stats.map(|before_program| {
