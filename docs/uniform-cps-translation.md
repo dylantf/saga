@@ -220,5 +220,8 @@ cargo run --bin saga -- inspect file.saga --stage monadic-stats
 cargo run --bin saga -- emit file.saga
 ```
 
+Normal build commands also accept `--monadic-stats` when you want optimizer
+stats for every compiled user module.
+
 Read `docs/effect-optimization.md` for the rewrites that remove uniform CPS
 overhead after translation.

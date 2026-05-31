@@ -145,6 +145,19 @@ The report compares pre- and post-optimization monadic IR, including
 entry-reachable counts, generated declaration counts, residual `Yield`s by
 effect operation, and direct `ForeignCall` targets.
 
+For normal build flows, pass `--monadic-stats` to print a compact summary while
+compiling:
+
+```bash
+cargo run --bin saga -- build file.saga --monadic-stats
+cargo run --bin saga -- run file.saga --monadic-stats
+cargo run --bin saga -- test --monadic-stats
+```
+
+This flag is backed by the general `CompileOptions` diagnostics struct, so it
+can later grow into project-level compiler diagnostics without changing the
+codegen API again.
+
 The standard sweep script is:
 
 ```bash

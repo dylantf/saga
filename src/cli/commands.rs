@@ -1,4 +1,7 @@
-use saga::{codegen, elaborate, project_config, project_config::ProjectConfig, typechecker};
+use saga::{
+    codegen, compiler_options::CompileOptions, elaborate, project_config,
+    project_config::ProjectConfig, typechecker,
+};
 
 use std::fs;
 use std::path::PathBuf;
@@ -16,11 +19,15 @@ fn test_timeout() -> Duration {
     Duration::from_secs(secs)
 }
 
-pub fn cmd_run(file: Option<&str>, release: bool) {
+pub fn cmd_run(file: Option<&str>, release: bool, options: &CompileOptions) {
     if release {
         // --release: use cached build if still valid, otherwise rebuild
         if let Some(f) = file {
-            let sb = check_script_cache(f, "release").unwrap_or_else(|| build_script(f, "release"));
+            let sb = if options.diagnostics.monadic_stats.is_enabled() {
+                build_script_with_options(f, "release", options)
+            } else {
+                check_script_cache(f, "release").unwrap_or_else(|| build_script(f, "release"))
+            };
             exec_erl(&sb.build_dir, &sb.stdlib_dir, &[], &sb.erlang_name);
         } else {
             let project_root = super::find_project_root().unwrap_or_else(|| {
@@ -33,17 +40,21 @@ pub fn cmd_run(file: Option<&str>, release: bool) {
                 std::process::exit(1);
             }
             let extra_dirs = project_config::extra_ebin_dirs(&project_root, config.deps.as_ref());
-            let (build_dir, stdlib_dir) = check_project_cache(&project_root, "release")
-                .unwrap_or_else(|| {
+            let (build_dir, stdlib_dir) = if options.diagnostics.monadic_stats.is_enabled() {
+                let pb = build_project_with_options("release", options);
+                (pb.build_dir, pb.stdlib_dir)
+            } else {
+                check_project_cache(&project_root, "release").unwrap_or_else(|| {
                     let pb = build_project("release");
                     (pb.build_dir, pb.stdlib_dir)
-                });
+                })
+            };
             exec_erl(&build_dir, &stdlib_dir, &extra_dirs, "main");
         }
     } else {
         // dev: always clean rebuild
         if let Some(f) = file {
-            let sb = build_script(f, "dev");
+            let sb = build_script_with_options(f, "dev", options);
             exec_erl(&sb.build_dir, &sb.stdlib_dir, &[], &sb.erlang_name);
         } else {
             let project_root = super::find_project_root().unwrap_or_else(|| {
@@ -55,19 +66,19 @@ pub fn cmd_run(file: Option<&str>, release: bool) {
                 eprintln!("This project is a library and cannot be run. Use `saga build` instead.");
                 std::process::exit(1);
             }
-            let pb = build_project("dev");
+            let pb = build_project_with_options("dev", options);
             exec_erl(&pb.build_dir, &pb.stdlib_dir, &pb.extra_ebin_dirs, "main");
         }
     }
 }
 
-pub fn cmd_build(file: Option<&str>, release: bool) {
+pub fn cmd_build(file: Option<&str>, release: bool, options: &CompileOptions) {
     let profile = if release { "release" } else { "dev" };
 
     if let Some(f) = file {
-        let _sb = build_script(f, profile);
+        let _sb = build_script_with_options(f, profile, options);
     } else {
-        let _pb = build_project(profile);
+        let _pb = build_project_with_options(profile, options);
     }
 }
 
@@ -491,7 +502,7 @@ pub fn cmd_fmt(file: &str, write_mode: bool, debug_mode: bool, cli_width: Option
     }
 }
 
-pub fn cmd_test(filter: Option<&str>) {
+pub fn cmd_test(filter: Option<&str>, options: &CompileOptions) {
     let project_root = super::find_project_root().unwrap_or_else(|| {
         eprintln!("No project.toml found. Tests require a project.");
         std::process::exit(1);
@@ -583,10 +594,11 @@ pub fn cmd_test(filter: Option<&str>) {
         .collect();
 
     let entry_source = generate_test_entry_source(&test_modules);
-    let pb = build_project_ext(
+    let pb = build_project_ext_with_options(
         "test",
         std::slice::from_ref(&tests_dir),
         Some(("_test_entry.saga", &entry_source)),
+        options,
     );
 
     exec_erl_with_timeout(

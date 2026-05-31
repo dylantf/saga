@@ -1,6 +1,7 @@
 mod cli;
 
 use clap::{Parser, Subcommand};
+use saga::compiler_options::{CompileOptions, MonadicStatsMode};
 
 #[derive(Parser)]
 #[command(name = "saga", about = "The saga compiler", version)]
@@ -21,6 +22,9 @@ enum Command {
         /// Show full erlc/erl output
         #[arg(short, long)]
         verbose: bool,
+        /// Print monadic optimizer stats while compiling
+        #[arg(long)]
+        monadic_stats: bool,
     },
     /// Build a project or single file
     Build {
@@ -32,6 +36,9 @@ enum Command {
         /// Show full erlc/erl output
         #[arg(short, long)]
         verbose: bool,
+        /// Print monadic optimizer stats while compiling
+        #[arg(long)]
+        monadic_stats: bool,
     },
     /// Typecheck without building
     Check {
@@ -58,6 +65,9 @@ enum Command {
         /// Show full erlc/erl output
         #[arg(short, long)]
         verbose: bool,
+        /// Print monadic optimizer stats while compiling
+        #[arg(long)]
+        monadic_stats: bool,
     },
     /// Create a new project
     New {
@@ -114,17 +124,21 @@ fn main() {
             file,
             release,
             verbose,
+            monadic_stats,
         } => {
             cli::set_verbose(verbose);
-            cli::commands::cmd_run(file.as_deref(), release);
+            let options = compile_options(monadic_stats);
+            cli::commands::cmd_run(file.as_deref(), release, &options);
         }
         Command::Build {
             file,
             release,
             verbose,
+            monadic_stats,
         } => {
             cli::set_verbose(verbose);
-            cli::commands::cmd_build(file.as_deref(), release);
+            let options = compile_options(monadic_stats);
+            cli::commands::cmd_build(file.as_deref(), release, &options);
         }
         Command::Check { file } => {
             cli::commands::cmd_check(file.as_deref());
@@ -135,9 +149,14 @@ fn main() {
         Command::Inspect { file, stage } => {
             cli::commands::cmd_inspect(&file, &stage);
         }
-        Command::Test { filter, verbose } => {
+        Command::Test {
+            filter,
+            verbose,
+            monadic_stats,
+        } => {
             cli::set_verbose(verbose);
-            cli::commands::cmd_test(filter.as_deref());
+            let options = compile_options(monadic_stats);
+            cli::commands::cmd_test(filter.as_deref(), &options);
         }
         Command::New { name, lib } => {
             cli::commands::cmd_new(&name, lib);
@@ -156,5 +175,13 @@ fn main() {
         Command::Docs { output, dir } => {
             cli::commands::cmd_docs(output.as_deref(), dir.as_deref());
         }
+    }
+}
+
+fn compile_options(monadic_stats: bool) -> CompileOptions {
+    if monadic_stats {
+        CompileOptions::default().with_monadic_stats(MonadicStatsMode::Summary)
+    } else {
+        CompileOptions::default()
     }
 }

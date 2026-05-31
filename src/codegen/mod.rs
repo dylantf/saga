@@ -13,6 +13,7 @@ mod tests;
 pub mod type_shape;
 
 use crate::ast;
+use crate::compiler_options::{CompileOptions, MonadicStatsMode};
 use crate::typechecker::{CheckResult, ModuleCodegenInfo};
 use std::collections::HashMap;
 
@@ -124,6 +125,11 @@ pub struct SourceFile {
     pub source: String,
 }
 
+pub struct EmitModuleOutput {
+    pub core_src: String,
+    pub monadic_stats: Option<monadic::stats::StatsReport>,
+}
+
 pub fn emit_module_with_context(
     module_name: &str,
     program: &ast::Program,
@@ -132,6 +138,27 @@ pub fn emit_module_with_context(
     source_file: Option<&SourceFile>,
     entry_export: Option<&str>,
 ) -> String {
+    emit_module_with_context_options(
+        module_name,
+        program,
+        ctx,
+        check_result,
+        source_file,
+        entry_export,
+        &CompileOptions::default(),
+    )
+    .core_src
+}
+
+pub fn emit_module_with_context_options(
+    module_name: &str,
+    program: &ast::Program,
+    ctx: &CodegenContext,
+    check_result: &crate::typechecker::CheckResult,
+    source_file: Option<&SourceFile>,
+    entry_export: Option<&str>,
+    options: &CompileOptions,
+) -> EmitModuleOutput {
     // The uniform path consumes the raw elaborated AST, runs ANF + monadic
     // translation + effect optimization, then lowers via
     // `lower::Lowerer`. Bootstrap evidence emission is on only for
@@ -143,6 +170,7 @@ pub fn emit_module_with_context(
         check_result,
         source_file,
         entry_export,
+        options,
     )
 }
 
@@ -286,7 +314,8 @@ pub fn emit_module_via_new_path(
     check_result: &crate::typechecker::CheckResult,
     source_file: Option<&SourceFile>,
     entry_export: Option<&str>,
-) -> String {
+    options: &CompileOptions,
+) -> EmitModuleOutput {
     let _ = entry_export; // currently consumed only via is_main below
     let codegen_info = ctx.codegen_info();
     let constructor_atoms =
@@ -409,6 +438,11 @@ pub fn emit_module_via_new_path(
         &effect_info,
         &imported_handler_decls,
     );
+    let before_stats = options
+        .diagnostics
+        .monadic_stats
+        .is_enabled()
+        .then(|| monadic_prog.clone());
     let optimized = monadic::effect_opt::run_with_context(
         monadic_prog,
         &handler_info,
@@ -418,6 +452,22 @@ pub fn emit_module_via_new_path(
             imported_function_variants,
         },
     );
+    let monadic_stats = before_stats.map(|before_program| {
+        let before = monadic::stats::Stats::collect_program(&before_program);
+        let after = monadic::stats::Stats::collect_program(&optimized);
+        let roots = entry_export.into_iter().collect::<Vec<_>>();
+        let reachable = if roots.is_empty() {
+            None
+        } else {
+            let before_reachable =
+                monadic::stats::Stats::collect_reachable_program(&before_program, &roots);
+            let after_reachable =
+                monadic::stats::Stats::collect_reachable_program(&optimized, &roots);
+            (before_reachable.decls > 0 || after_reachable.decls > 0)
+                .then(|| monadic::stats::StatsDiff::new(before_reachable, after_reachable))
+        };
+        monadic::stats::StatsReport::new(monadic::stats::StatsDiff::new(before, after), reachable)
+    });
 
     let is_main = entry_export.is_some();
     let mut lowerer = lower::Lowerer::new(
@@ -439,5 +489,15 @@ pub fn emit_module_via_new_path(
     let cmod = lowerer
         .with_bootstrap_emission(is_main)
         .lower_module(module_name, &optimized);
-    cerl::print_module(&cmod)
+    let core_src = cerl::print_module(&cmod);
+    match options.diagnostics.monadic_stats {
+        MonadicStatsMode::Off => EmitModuleOutput {
+            core_src,
+            monadic_stats: None,
+        },
+        MonadicStatsMode::Summary | MonadicStatsMode::Full => EmitModuleOutput {
+            core_src,
+            monadic_stats,
+        },
+    }
 }

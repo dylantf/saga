@@ -1,5 +1,8 @@
 use project_config::ProjectConfig;
-use saga::{ast, codegen, derive, desugar, elaborate, lexer, parser, project_config, typechecker};
+use saga::{
+    ast, codegen, compiler_options::CompileOptions, derive, desugar, elaborate, lexer, parser,
+    project_config, typechecker,
+};
 
 use std::collections::HashMap;
 use std::fs;
@@ -10,6 +13,12 @@ use super::color;
 use super::diagnostics::{byte_offset_to_line_col, print_tc_diagnostic};
 
 const BUILD_HASH: &str = env!("SAGA_BUILD_HASH");
+
+struct EmitModuleOptions<'a> {
+    source_file: Option<&'a codegen::SourceFile>,
+    entry_export: Option<&'a str>,
+    compile_options: &'a CompileOptions,
+}
 /// Compute a hash of the embedded stdlib sources and bridge files.
 fn stdlib_content_hash() -> String {
     use std::hash::{Hash, Hasher};
@@ -298,17 +307,51 @@ pub fn emit_module(
     source_file: Option<&codegen::SourceFile>,
     entry_export: Option<&str>,
 ) {
+    emit_module_with_options(
+        module_name,
+        elaborated,
+        ctx,
+        check_result,
+        build_dir,
+        EmitModuleOptions {
+            source_file,
+            entry_export,
+            compile_options: &CompileOptions::default(),
+        },
+    );
+}
+
+fn emit_module_with_options(
+    module_name: &str,
+    elaborated: &ast::Program,
+    ctx: &codegen::CodegenContext,
+    check_result: &typechecker::CheckResult,
+    build_dir: &Path,
+    options: EmitModuleOptions<'_>,
+) {
     let erlang_name = module_name.to_lowercase().replace('.', "_");
-    let core_src = codegen::emit_module_with_context(
+    let output = codegen::emit_module_with_context_options(
         &erlang_name,
         elaborated,
         ctx,
         check_result,
-        source_file,
-        entry_export,
+        options.source_file,
+        options.entry_export,
+        options.compile_options,
     );
+    if let Some(stats) = &output.monadic_stats {
+        match options.compile_options.diagnostics.monadic_stats {
+            saga::compiler_options::MonadicStatsMode::Off => {}
+            saga::compiler_options::MonadicStatsMode::Summary => {
+                eprintln!("{}", stats.summary(module_name));
+            }
+            saga::compiler_options::MonadicStatsMode::Full => {
+                eprintln!("{module_name}\n{stats}");
+            }
+        }
+    }
     let core_path = build_dir.join(format!("{}.core", erlang_name));
-    fs::write(&core_path, &core_src).unwrap_or_else(|e| {
+    fs::write(&core_path, &output.core_src).unwrap_or_else(|e| {
         eprintln!("Error writing {}: {}", core_path.display(), e);
         std::process::exit(1);
     });
@@ -788,11 +831,31 @@ pub fn build_project(profile: &str) -> ProjectBuild {
     build_project_ext(profile, &[], None)
 }
 
+pub fn build_project_with_options(profile: &str, options: &CompileOptions) -> ProjectBuild {
+    build_project_ext_with_options(profile, &[], None, options)
+}
+
 /// Build a project with optional extra source directories and a custom main.
 pub fn build_project_ext(
     profile: &str,
     extra_source_dirs: &[PathBuf],
     custom_main: Option<(&str, &str)>,
+) -> ProjectBuild {
+    build_project_ext_with_options(
+        profile,
+        extra_source_dirs,
+        custom_main,
+        &CompileOptions::default(),
+    )
+}
+
+/// Build a project with optional extra source directories, a custom main, and
+/// compiler diagnostics/options.
+pub fn build_project_ext_with_options(
+    profile: &str,
+    extra_source_dirs: &[PathBuf],
+    custom_main: Option<(&str, &str)>,
+    options: &CompileOptions,
 ) -> ProjectBuild {
     let build_start = Instant::now();
     let project_root = super::find_project_root().unwrap_or_else(|| {
@@ -1048,17 +1111,20 @@ pub fn build_project_ext(
                 } else {
                     None
                 });
-        emit_module(
+        emit_module_with_options(
             &erlang_name,
             &compiled.elaborated,
             &ctx,
             check_result.unwrap_or(&result),
             &build_dir,
-            sf,
-            if *module_name == "Main" {
-                Some("main")
-            } else {
-                None
+            EmitModuleOptions {
+                source_file: sf,
+                entry_export: if *module_name == "Main" {
+                    Some("main")
+                } else {
+                    None
+                },
+                compile_options: options,
             },
         );
     }
@@ -1111,6 +1177,14 @@ pub fn declared_module_name(program: &ast::Program) -> Option<String> {
 /// Build a single script file into the given build directory.
 /// Returns (build_dir, stdlib_cache_dir, erlang_name).
 pub fn build_script(file: &str, profile: &str) -> ScriptBuild {
+    build_script_with_options(file, profile, &CompileOptions::default())
+}
+
+pub fn build_script_with_options(
+    file: &str,
+    profile: &str,
+    options: &CompileOptions,
+) -> ScriptBuild {
     let build_start = Instant::now();
     let source = fs::read_to_string(file).unwrap_or_else(|e| {
         eprintln!("Error reading {}: {}", file, e);
@@ -1176,14 +1250,17 @@ pub fn build_script(file: &str, profile: &str) -> ScriptBuild {
         path: file.to_string(),
         source: source.clone(),
     };
-    emit_module(
+    emit_module_with_options(
         &module_name,
         &compiled_modules[&module_name].elaborated,
         &ctx,
         &result,
         &build_dir,
-        Some(&script_source),
-        Some("main"),
+        EmitModuleOptions {
+            source_file: Some(&script_source),
+            entry_export: Some("main"),
+            compile_options: options,
+        },
     );
 
     run_erlc(&build_dir, build_start);

@@ -335,6 +335,14 @@ impl StatsDiff {
         Self { before, after }
     }
 
+    pub fn before(&self) -> &Stats {
+        &self.before
+    }
+
+    pub fn after(&self) -> &Stats {
+        &self.after
+    }
+
     fn fmt_with_title(&self, f: &mut fmt::Formatter<'_>, title: &str) -> fmt::Result {
         writeln!(f, "{title}")?;
         writeln!(f, "metric                before    after    delta")?;
@@ -377,6 +385,28 @@ pub struct StatsReport {
 impl StatsReport {
     pub fn new(whole: StatsDiff, reachable: Option<StatsDiff>) -> Self {
         Self { whole, reachable }
+    }
+
+    pub fn whole(&self) -> &StatsDiff {
+        &self.whole
+    }
+
+    pub fn reachable(&self) -> Option<&StatsDiff> {
+        self.reachable.as_ref()
+    }
+
+    pub fn summary(&self, module_name: &str) -> String {
+        let mut lines = Vec::new();
+        lines.push(format!("{}: {}", module_name, summarize_diff(&self.whole)));
+        if let Some(reachable) = &self.reachable {
+            lines.push(format!("  entry-reachable: {}", summarize_diff(reachable)));
+            if let Some(residual) = residual_yield_summary(reachable.after(), 5) {
+                lines.push(format!("  residual yields: {residual}"));
+            }
+        } else if let Some(residual) = residual_yield_summary(self.whole.after(), 5) {
+            lines.push(format!("  residual yields: {residual}"));
+        }
+        lines.join("\n")
     }
 }
 
@@ -606,6 +636,45 @@ fn write_breakdown(
         )?;
     }
     Ok(())
+}
+
+fn summarize_diff(diff: &StatsDiff) -> String {
+    format!(
+        "Yield {} -> {}, Bind {} -> {}, decls {} -> {} (source {} -> {}, generated {} -> {})",
+        diff.before.yield_,
+        diff.after.yield_,
+        diff.before.bind,
+        diff.after.bind,
+        diff.before.decls,
+        diff.after.decls,
+        diff.before.source_decls,
+        diff.after.source_decls,
+        diff.before.generated_decls,
+        diff.after.generated_decls,
+    )
+}
+
+fn residual_yield_summary(stats: &Stats, limit: usize) -> Option<String> {
+    if stats.yield_ops.is_empty() {
+        return None;
+    }
+    let mut ops = stats
+        .yield_ops
+        .iter()
+        .map(|(op, count)| (op.as_str(), *count))
+        .collect::<Vec<_>>();
+    ops.sort_by(|(left_op, left_count), (right_op, right_count)| {
+        right_count
+            .cmp(left_count)
+            .then_with(|| left_op.cmp(right_op))
+    });
+    Some(
+        ops.into_iter()
+            .take(limit)
+            .map(|(op, count)| format!("{op}={count}"))
+            .collect::<Vec<_>>()
+            .join(", "),
+    )
 }
 
 fn rows(before: &Stats, after: &Stats) -> [(&'static str, usize, usize); 26] {

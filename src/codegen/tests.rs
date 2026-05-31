@@ -1166,8 +1166,16 @@ fn new_path_smoke_hello_world() {
         let_effect_bindings: result.let_effect_bindings.clone(),
         prelude_imports: result.prelude_imports.clone(),
     };
-    let core =
-        super::emit_module_via_new_path("_script", &elaborated, &ctx, &result, None, Some("main"));
+    let core = super::emit_module_via_new_path(
+        "_script",
+        &elaborated,
+        &ctx,
+        &result,
+        None,
+        Some("main"),
+        &crate::compiler_options::CompileOptions::default(),
+    )
+    .core_src;
     assert!(
         core.contains("module '_script'"),
         "Core Erlang module header missing:\n{core}"
@@ -1223,8 +1231,16 @@ main () = ()
         let_effect_bindings: result.let_effect_bindings.clone(),
         prelude_imports: result.prelude_imports.clone(),
     };
-    let core =
-        super::emit_module_via_new_path("_script", &elaborated, &ctx, &result, None, Some("main"));
+    let core = super::emit_module_via_new_path(
+        "_script",
+        &elaborated,
+        &ctx,
+        &result,
+        None,
+        Some("main"),
+        &crate::compiler_options::CompileOptions::default(),
+    )
+    .core_src;
     assert!(
         core.contains("module '_script'"),
         "Core Erlang module header missing:\n{core}"
