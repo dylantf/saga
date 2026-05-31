@@ -136,8 +136,8 @@ Implemented variant shapes:
   method under a known handler stack, the optimizer may inline the method lambda
   if doing so exposes an existing direct-call opportunity;
 - dictionary-keyed generated variants for the same nullary dictionaries passed
-  as arguments to generic functions. The generated variant keeps the original
-  uniform ABI but substitutes the known dictionary tuple into its cloned body.
+  as arguments to generic functions. The generated variant substitutes the
+  known dictionary tuple into its cloned body.
 - conservative parameterized dictionary specialization when every constructor
   dictionary argument is already known. This lets wrappers such as
   `__dict_Encodable_Box(__dict_Encodable_Int)` inline the outer method and then
@@ -146,6 +146,9 @@ Implemented variant shapes:
   constructor method bodies are available to caller-local variants when the
   constructor is structurally small, has supported lambda methods, and does not
   depend on private same-module helper calls.
+- generated-variant dictionary-argument pruning. When a known dictionary
+  argument becomes unused after specialization, the generated variant drops
+  that parameter and the rewritten call site drops the constructor argument.
 
 Generated variants are private to the caller module. Cross-module variants do
 not change the callee module's exports or package cache behavior. Imported
@@ -157,8 +160,9 @@ Trait method specialization is deliberately narrow. It handles local dictionary
 constructors when their dictionary arguments are already known, which covers
 concrete monomorphic impls, generic wrappers called with a concrete dictionary,
 simple parameterized impls, and let-bound handler factories once they are
-recovered into static handlers. It does not yet specialize imported dictionary
-constructors or unknown/dynamic dictionary values. Those remain follow-up work.
+recovered into static handlers. It also handles the same imported public
+dictionary constructors when they pass the conservative safety checks. Unknown
+or dynamic dictionary values remain slow paths.
 
 The let-bound handler factory case composes two separate rewrites: first the
 handler value or small factory result is recovered as a static handler, then the
@@ -167,10 +171,10 @@ handler stack. There is no separate trait-specific handler-factory rule. For
 imported factories, the caller optimizer also merges imported handler-arm
 analysis so tail-resumptive arms can participate in direct-call rewriting.
 
-Generated variants currently preserve the original function ABI. If a generic
-dictionary argument becomes unused after specialization, the call site still
-constructs and passes it. A later dictionary-argument pruning pass can remove
-that overhead.
+Generated variants preserve the source ABI except for known dictionary
+parameters that are proven unused after specialization. Only generated variants
+are rewritten this way; source functions and public APIs keep their original
+shape.
 
 The optimizer can remove private source functions once entry-reachable calls are
 fully covered by generated variants. Public functions are retained.

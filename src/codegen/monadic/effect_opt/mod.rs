@@ -1395,7 +1395,7 @@ impl<'info> Optimizer<'info> {
             &name.name,
             &variant_name,
             Vec::<String>::new(),
-            dict_replacements,
+            &dict_replacements,
         ) else {
             return (MExpr::App { head, args, source }, Change::Unchanged);
         };
@@ -1403,7 +1403,18 @@ impl<'info> Optimizer<'info> {
             return (MExpr::App { head, args, source }, Change::Unchanged);
         }
 
-        self.push_function_variant(&variant_name, variant_body, candidate.binding.clone());
+        let (variant_params, args) = prune_unused_dict_variant_args(
+            &candidate.binding.params,
+            args,
+            &variant_body,
+            &dict_replacements,
+        );
+        self.push_function_variant(
+            &variant_name,
+            variant_body,
+            candidate.binding.clone(),
+            variant_params,
+        );
 
         (
             MExpr::App {
@@ -1479,7 +1490,7 @@ impl<'info> Optimizer<'info> {
             &candidate.binding.name,
             &variant_name,
             candidate.public_names.iter().cloned(),
-            dict_replacements,
+            &dict_replacements,
         ) else {
             return (MExpr::App { head, args, source }, Change::Unchanged);
         };
@@ -1487,7 +1498,18 @@ impl<'info> Optimizer<'info> {
             return (MExpr::App { head, args, source }, Change::Unchanged);
         }
 
-        self.push_function_variant(&variant_name, variant_body, candidate.binding.clone());
+        let (variant_params, args) = prune_unused_dict_variant_args(
+            &candidate.binding.params,
+            args,
+            &variant_body,
+            &dict_replacements,
+        );
+        self.push_function_variant(
+            &variant_name,
+            variant_body,
+            candidate.binding.clone(),
+            variant_params,
+        );
 
         (
             MExpr::App {
@@ -1511,7 +1533,7 @@ impl<'info> Optimizer<'info> {
         old_name: &str,
         variant_name: &str,
         extra_blocked_names: impl IntoIterator<Item = String>,
-        param_replacements: Vec<DictParamReplacement>,
+        param_replacements: &[DictParamReplacement],
     ) -> Option<MExpr> {
         let mut variant_body =
             rewrite_direct_calls_to_name(binding.body.clone(), old_name, variant_name, binding.id);
@@ -1558,6 +1580,7 @@ impl<'info> Optimizer<'info> {
         variant_name: &str,
         variant_body: MExpr,
         source_binding: MFunBinding,
+        params: Vec<Pat>,
     ) {
         if self.generated_variant_names.contains(variant_name) {
             return;
@@ -1567,6 +1590,7 @@ impl<'info> Optimizer<'info> {
         self.pending_variants.push(MDecl::FunBinding(MFunBinding {
             name: variant_name.to_string(),
             public: false,
+            params,
             body: variant_body,
             ..source_binding
         }));
@@ -3093,6 +3117,54 @@ fn stable_key_hash(value: &str) -> u64 {
         hash = hash.wrapping_mul(0x100000001b3);
     }
     hash
+}
+
+fn prune_unused_dict_variant_args(
+    params: &[Pat],
+    args: Vec<Atom>,
+    body: &MExpr,
+    dict_replacements: &[DictParamReplacement],
+) -> (Vec<Pat>, Vec<Atom>) {
+    if dict_replacements.is_empty() {
+        return (params.to_vec(), args);
+    }
+
+    let prunable_targets = dict_replacements
+        .iter()
+        .map(|replacement| replacement.target.clone())
+        .collect::<Vec<_>>();
+    let mut params_out = Vec::with_capacity(params.len());
+    let mut args_out = Vec::with_capacity(args.len());
+    let mut pruned_any = false;
+
+    for (param, arg) in params.iter().cloned().zip(args) {
+        let target = match &param {
+            Pat::Var { name, id, .. } => Some(MVar {
+                name: name.clone(),
+                id: id.0,
+            }),
+            _ => None,
+        };
+        let should_prune = target.as_ref().is_some_and(|target| {
+            prunable_targets
+                .iter()
+                .any(|replacement_target| var_matches(target, replacement_target))
+                && !expr_contains_target(body, target)
+        });
+
+        if should_prune {
+            pruned_any = true;
+        } else {
+            params_out.push(param);
+            args_out.push(arg);
+        }
+    }
+
+    if pruned_any {
+        (params_out, args_out)
+    } else {
+        (params.to_vec(), args_out)
+    }
 }
 
 fn static_variant_name(name: &str, stack: &[HandlerFrame]) -> String {

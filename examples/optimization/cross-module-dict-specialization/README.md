@@ -62,5 +62,17 @@ argument because generated variants currently preserve the original generic ABI.
 | 4 | `04-imported-parameterized-dict` | `Yield 1 -> 1`, `Bind 12 -> 4`, `decls 4 -> 4`, generated `0 -> 1` | `"16"` |
 | 5 | `05-imported-handler-factory` | `Yield 1 -> 1`, `Bind 9 -> 3`, `decls 4 -> 3`, generated `0 -> 1` | `"15"` |
 
-The next likely optimization rung is dictionary-argument pruning for generated
-variants whose specialized bodies no longer read the dictionary parameter.
+## After Generated Variant Dictionary-Argument Pruning
+
+Captured after generated variants learned to drop known dictionary parameters
+that disappear from the optimized body. Levels 3-5 now erase the residual
+dictionary-constructor work in the caller instead of preserving the original
+generic ABI for the generated variant.
+
+| Level | Project | Whole-App Entry-Reachable Stats | Output |
+| --- | --- | --- | --- |
+| 1 | `01-imported-direct-effect` | `Yield 1 -> 0`, `Bind 6 -> 2`, `decls 2 -> 2`, generated `0 -> 1` | `"15"` |
+| 2 | `02-imported-concrete-method` | `Yield 1 -> 0`, `Bind 8 -> 2`, `decls 3 -> 2`, generated `0 -> 1` | `"15"` |
+| 3 | `03-imported-generic-wrapper` | `Yield 1 -> 0`, `Bind 8 -> 2`, `decls 3 -> 2`, generated `0 -> 1` | `"15"` |
+| 4 | `04-imported-parameterized-dict` | `Yield 1 -> 0`, `Bind 12 -> 2`, `decls 4 -> 2`, generated `0 -> 1` | `"16"` |
+| 5 | `05-imported-handler-factory` | `Yield 1 -> 0`, `Bind 9 -> 2`, `decls 4 -> 2`, generated `0 -> 1` | `"15"` |
