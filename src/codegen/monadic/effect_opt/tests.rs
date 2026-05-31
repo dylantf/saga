@@ -4103,6 +4103,58 @@ fn imported_native_candidate_collection_skips_external_wrapper() {
 }
 
 #[test]
+fn imported_function_variant_candidate_skips_same_module_external_dependency() {
+    let worker = public_helper_fun(
+        "worker",
+        4100,
+        MExpr::App {
+            head: var("sort_with", 4101),
+            args: vec![unit_atom(), unit_atom()],
+            source: crate::ast::NodeId(4102),
+        },
+    );
+    let mut resolution = ResolutionMap::new();
+    resolution.insert(
+        crate::ast::NodeId(4101),
+        resolved_external("sort_with", Some("Std.List"), "Std.List.sort_with"),
+    );
+    let mut info = module_info_with_exports(&["worker", "sort_with"]);
+    info.external_funs.push((
+        "sort_with".to_string(),
+        "std_list_bridge".to_string(),
+        "sort_with".to_string(),
+        2,
+    ));
+
+    let candidates =
+        collect_imported_function_variant_candidates("Std.List", &vec![worker], &resolution, &info);
+
+    assert!(!candidates.contains_key("Std.List.worker"));
+}
+
+#[test]
+fn generated_variant_names_are_capped_with_stable_hash_suffix() {
+    let long_effect = "Very.Long.Module.Name.With.Many.Segments.And.A.ReallyVerboseEffectName";
+    let long_handler = "Very.Long.Module.Name.With.Many.Segments.And.A.ReallyVerboseHandlerName";
+    let stack = vec![
+        HandlerFrame::Native {
+            effects: vec![long_effect.to_string(); 6],
+            handler: long_handler.to_string(),
+        },
+        HandlerFrame::Static {
+            effects: vec![long_effect.to_string(); 6],
+            arms: Vec::new(),
+        },
+    ];
+
+    let name = static_variant_name("function_with_a_reasonably_long_name", &stack);
+
+    assert!(name.len() <= 200);
+    assert!(name.starts_with(STATIC_VARIANT_PREFIX));
+    assert!(name.contains("__h_"));
+}
+
+#[test]
 fn static_function_variant_specializes_multi_yield_same_module_call() {
     let mut f = Fixture::new();
     let arm = tail_arm(360, vec![pat_unit(361)], resume(lit_int("42", 42)), None);
@@ -4484,6 +4536,28 @@ fn resolved_beam(
             name: name.to_string(),
             arity: 1,
             effects: vec!["Std.Actor.Timer".to_string()],
+        },
+    }
+}
+
+fn resolved_external(
+    name: &str,
+    source_module: Option<&str>,
+    canonical_name: &str,
+) -> crate::codegen::resolve::ResolvedSymbol {
+    crate::codegen::resolve::ResolvedSymbol {
+        name: name.to_string(),
+        source_module: source_module.map(str::to_string),
+        canonical_name: canonical_name.to_string(),
+        kind: ResolvedCodegenKind::ExternalFunction {
+            erlang_mod: source_module
+                .map(|module| module.to_lowercase().replace('.', "_"))
+                .unwrap_or_else(|| "lib".to_string()),
+            name: name.to_string(),
+            target_erlang_mod: "bridge".to_string(),
+            target_name: name.to_string(),
+            arity: 1,
+            effects: vec![],
         },
     }
 }

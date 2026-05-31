@@ -1946,10 +1946,10 @@ impl<'info, 'data> Optimizer<'info, 'data> {
             .values()
             .filter(|candidate| {
                 candidate.binding.name == resolved.name
-                    && resolved
-                        .source_module
-                        .as_deref()
-                        .is_none_or(|module| module == candidate.source_module)
+                    && source_module_matches(
+                        resolved.source_module.as_deref(),
+                        &candidate.source_module,
+                    )
             });
         let candidate = matching.next()?;
         if matching.next().is_some() {
@@ -1990,10 +1990,10 @@ impl<'info, 'data> Optimizer<'info, 'data> {
             .values()
             .filter(|candidate| {
                 head_name == resolved.name
-                    && resolved
-                        .source_module
-                        .as_deref()
-                        .is_none_or(|module| module == candidate.source_module)
+                    && source_module_matches(
+                        resolved.source_module.as_deref(),
+                        &candidate.source_module,
+                    )
             });
         let candidate = matching.next()?;
         if matching.next().is_some() {
@@ -2026,10 +2026,10 @@ impl<'info, 'data> Optimizer<'info, 'data> {
             .values()
             .filter(|candidate| {
                 candidate.binding.name == resolved.name
-                    && resolved
-                        .source_module
-                        .as_deref()
-                        .is_none_or(|module| module == candidate.source_module)
+                    && source_module_matches(
+                        resolved.source_module.as_deref(),
+                        &candidate.source_module,
+                    )
             });
         let candidate = matching.next()?;
         if matching.next().is_some() {
@@ -2045,7 +2045,7 @@ impl<'info, 'data> Optimizer<'info, 'data> {
         self.context
             .current_module
             .as_deref()
-            .is_some_and(|current| current == module)
+            .is_some_and(|current| modules_match(current, module))
     }
 
     fn handler_stack_capture_names(&self) -> Vec<String> {
@@ -2952,4 +2952,16 @@ impl<'info, 'data> Optimizer<'info, 'data> {
         }
         None
     }
+}
+
+fn source_module_matches(resolved: Option<&str>, candidate: &str) -> bool {
+    resolved.is_none_or(|module| modules_match(module, candidate))
+}
+
+fn modules_match(left: &str, right: &str) -> bool {
+    left == right || erlang_module_name(left) == erlang_module_name(right)
+}
+
+fn erlang_module_name(module: &str) -> String {
+    module.to_lowercase().replace('.', "_")
 }

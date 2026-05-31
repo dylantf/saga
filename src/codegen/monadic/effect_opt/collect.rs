@@ -263,12 +263,18 @@ pub fn collect_imported_function_variant_candidates(
             || f.guard.is_some()
             || !helper_params_are_supported(&f.params)
             || expr_node_count(&f.body) > FUNCTION_VARIANT_BODY_BUDGET
-            || expr_contains_xmod_variant_forbidden_shape_with_resolution(&f.body, resolution)
+            || xmod_forbidden_shape_reason(&f.body, "body", Some(resolution)).is_some()
             || expr_has_private_same_module_refs(
                 &f.body,
                 source_module,
                 &f.name,
                 &public_names,
+                resolution,
+            )
+            || expr_has_same_module_external_refs(
+                &f.body,
+                source_module,
+                &external_names,
                 resolution,
             )
         {
@@ -284,6 +290,28 @@ pub fn collect_imported_function_variant_candidates(
     }
 
     candidates
+}
+
+fn expr_has_same_module_external_refs(
+    expr: &MExpr,
+    source_module: &str,
+    external_names: &HashSet<String>,
+    resolution: &ResolutionMap,
+) -> bool {
+    let mut refs = Vec::new();
+    collect_app_head_refs(expr, &mut refs);
+    refs.into_iter().any(|(name, source)| {
+        let Some(resolved) = resolution.get(&source) else {
+            return false;
+        };
+        let same_module = resolved
+            .source_module
+            .as_deref()
+            .is_none_or(|module| module == source_module);
+        same_module
+            && (external_names.contains(&name)
+                || matches!(resolved.kind, ResolvedCodegenKind::ExternalFunction { .. }))
+    })
 }
 
 pub fn collect_imported_dict_constructors(

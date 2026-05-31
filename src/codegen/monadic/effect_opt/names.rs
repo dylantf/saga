@@ -20,7 +20,7 @@ pub(super) fn native_variant_name(name: &str, stack: &[HandlerFrame]) -> String 
             HandlerFrame::Static { .. } => {}
         }
     }
-    parts.join("__")
+    finish_variant_name(parts.join("__"))
 }
 
 pub(super) fn variant_name_for_imported(
@@ -62,7 +62,7 @@ pub(super) fn variant_name_with_dict_key(
         key.push_str(&replacement.key);
         key.push(';');
     }
-    format!("{base}__dict_{:016x}", stable_key_hash(&key))
+    finish_variant_name(format!("{base}__dict_{:016x}", stable_key_hash(&key)))
 }
 
 pub(super) fn variant_name_with_value_key(
@@ -80,7 +80,7 @@ pub(super) fn variant_name_with_value_key(
         key.push_str(&replacement.key);
         key.push(';');
     }
-    format!("{base}__value_{:016x}", stable_key_hash(&key))
+    finish_variant_name(format!("{base}__value_{:016x}", stable_key_hash(&key)))
 }
 
 pub(super) fn variant_name_with_callback_key(
@@ -98,14 +98,17 @@ pub(super) fn variant_name_with_callback_key(
         key.push_str(&replacement.key);
         key.push(';');
     }
-    format!("{base}__cb_{:016x}", stable_key_hash(&key))
+    finish_variant_name(format!("{base}__cb_{:016x}", stable_key_hash(&key)))
 }
 
 pub(super) fn variant_name_with_capture_key(base: String, captures: &[String]) -> String {
     if captures.is_empty() {
         return base;
     }
-    format!("{base}__caps_{:016x}", stable_key_hash(&captures.join(";")))
+    finish_variant_name(format!(
+        "{base}__caps_{:016x}",
+        stable_key_hash(&captures.join(";"))
+    ))
 }
 
 pub(super) fn stable_key_hash(value: &str) -> u64 {
@@ -434,7 +437,7 @@ pub(super) fn static_variant_name(name: &str, stack: &[HandlerFrame]) -> String 
             }
         }
     }
-    parts.join("__")
+    finish_variant_name(parts.join("__"))
 }
 
 pub(super) fn handler_arm_body_hash(arm: &MHandlerArm) -> u64 {
@@ -455,4 +458,15 @@ pub(super) fn sanitize_ident_part(value: &str) -> String {
         }
     }
     if out.is_empty() { "_".to_string() } else { out }
+}
+
+fn finish_variant_name(name: String) -> String {
+    const MAX_VARIANT_NAME_BYTES: usize = 200;
+    if name.len() <= MAX_VARIANT_NAME_BYTES {
+        return name;
+    }
+    let hash = stable_key_hash(&name);
+    let suffix = format!("__h_{hash:016x}");
+    let prefix_len = MAX_VARIANT_NAME_BYTES - suffix.len();
+    format!("{}{}", &name[..prefix_len], suffix)
 }
