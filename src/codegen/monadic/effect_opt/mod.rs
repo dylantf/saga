@@ -901,31 +901,60 @@ impl<'info> Optimizer<'info> {
         let MExpr::App { head, args, .. } = value else {
             return None;
         };
-        if !args.is_empty() {
-            return None;
-        }
         let Atom::DictRef { name, .. } = head else {
             return None;
         };
         let constructor = self.dict_constructors.get(name)?;
-        if !constructor.dict_params.is_empty() {
+        if constructor.dict_params.len() != args.len() {
             return None;
         }
-        let methods = constructor
-            .methods
-            .iter()
-            .map(|method| match method {
-                MExpr::Pure(atom @ Atom::Lambda { .. }) => Some(atom.clone()),
-                _ => None,
-            })
-            .collect::<Option<Vec<_>>>()?;
+
+        let mut param_replacements = Vec::with_capacity(args.len());
+        let mut arg_keys = Vec::with_capacity(args.len());
+        for (param, arg) in constructor.dict_params.iter().zip(args) {
+            let Atom::Var { name: arg_var, .. } = arg else {
+                return None;
+            };
+            let arg_dict = self.lookup_dict_value(&arg_var.name)?;
+            param_replacements.push((
+                MVar {
+                    name: param.clone(),
+                    id: 0,
+                },
+                arg_dict.atom,
+            ));
+            arg_keys.push(arg_dict.key);
+        }
+
+        let mut methods = Vec::with_capacity(constructor.methods.len());
+        for method in &constructor.methods {
+            let MExpr::Pure(atom @ Atom::Lambda { .. }) = method else {
+                return None;
+            };
+            let mut method = atom.clone();
+            for (target, replacement) in &param_replacements {
+                let free_names = free_atom_names(replacement);
+                let substituted = subst_atom(method, target, replacement, &free_names);
+                if substituted.blocked {
+                    return None;
+                }
+                method = substituted.value;
+            }
+            methods.push(method);
+        }
+
+        let key = if arg_keys.is_empty() {
+            name.clone()
+        } else {
+            format!("{}({})", name, arg_keys.join(","))
+        };
         Some(DictValueCandidate {
             atom: Atom::Tuple {
                 elements: methods.clone(),
                 source: constructor.id,
             },
             methods,
-            key: name.clone(),
+            key,
         })
     }
 
@@ -1669,7 +1698,10 @@ impl<'info> Optimizer<'info> {
             let Some(inlined) = inline_helper_candidate(&candidate, &args) else {
                 return (MExpr::App { head, args, source }, Change::Unchanged);
             };
-            if !self.expr_has_direct_call_opportunity(&inlined) {
+            if expr_node_count(&inlined) > FUNCTION_VARIANT_BODY_BUDGET
+                || (!self.expr_has_direct_call_opportunity(&inlined)
+                    && !expr_contains_dict_method_access(&inlined))
+            {
                 return (MExpr::App { head, args, source }, Change::Unchanged);
             }
             return (inlined, Change::Changed);

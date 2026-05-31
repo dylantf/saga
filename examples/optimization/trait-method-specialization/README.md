@@ -52,6 +52,22 @@ the level 3 generic wrapper erase the method dispatch inside the variant.
 | 4 | `04-parameterized-dict.saga` | `Yield 1 -> 1`, `Bind 12 -> 4`, `decls 8 -> 8`, generated `0 -> 1` | `Yield 0 -> 0`, `Bind 9 -> 2`, `decls 2 -> 2`, generated `0 -> 1` | `"16"` |
 | 5 | `05-let-bound-handler-factory.saga` | `Yield 1 -> 1`, `Bind 9 -> 3`, `decls 6 -> 6`, generated `0 -> 1` | `Yield 0 -> 0`, `Bind 8 -> 2`, `decls 3 -> 2`, generated `0 -> 1` | `"15"` |
 
+## After Level 4: Parameterized Dictionary Specialization
+
+Captured after recognizing parameterized dictionary constructors when every
+dictionary argument is already known. The optimizer can now materialize
+`__dict_Encodable_Box(__dict_Encodable_Int)` as a concrete dictionary tuple,
+substitute the inner dictionary into the outer method lambda, and continue
+through the nested `DictMethodAccess`.
+
+| Level | File | Module Stats | Entry-Reachable Stats | Output |
+| --- | --- | --- | --- | --- |
+| 1 | `01-direct-effect.saga` | `Yield 1 -> 1`, `Bind 6 -> 2`, `decls 5 -> 5`, generated `0 -> 0` | `Yield 1 -> 0`, `Bind 6 -> 1`, `decls 2 -> 1`, generated `0 -> 0` | `"15"` |
+| 2 | `02-concrete-trait-method.saga` | `Yield 1 -> 1`, `Bind 8 -> 3`, `decls 6 -> 6`, generated `0 -> 1` | `Yield 0 -> 0`, `Bind 7 -> 2`, `decls 2 -> 2`, generated `0 -> 1` | `"15"` |
+| 3 | `03-generic-wrapper.saga` | `Yield 1 -> 1`, `Bind 8 -> 3`, `decls 6 -> 6`, generated `0 -> 1` | `Yield 0 -> 0`, `Bind 7 -> 2`, `decls 2 -> 2`, generated `0 -> 1` | `"15"` |
+| 4 | `04-parameterized-dict.saga` | `Yield 1 -> 1`, `Bind 12 -> 4`, `decls 8 -> 8`, generated `0 -> 1` | `Yield 0 -> 0`, `Bind 9 -> 2`, `decls 2 -> 2`, generated `0 -> 1` | `"16"` |
+| 5 | `05-let-bound-handler-factory.saga` | `Yield 1 -> 1`, `Bind 9 -> 3`, `decls 6 -> 6`, generated `0 -> 1` | `Yield 0 -> 0`, `Bind 8 -> 2`, `decls 3 -> 2`, generated `0 -> 1` | `"15"` |
+
 ## Reading The Snapshots
 
 Level 1 proves the existing direct-call optimizer works for an ordinary static
@@ -93,9 +109,14 @@ fun __saga_static_variant__serialize...__dict_<hash> (__dict_Encodable_a, x) =
   BinOp(+, Var(x), Lit(10))
 ```
 
-Level 5 moves at the same time because handler-factory recovery already turns
-the let-bound factory result into the same static-handler shape before
-dictionary argument specialization runs.
+The level 4 pass extends dictionary-value recovery to parameterized dictionary
+constructors whose arguments are already known dictionaries. Level 4's generated
+`serialize` variant now removes both the outer `Box` method dispatch and the
+inner `Int` method dispatch from the hot body.
+
+Level 5 still moves because handler-factory recovery already turns the let-bound
+factory result into the same static-handler shape before dictionary argument
+specialization runs.
 
 The `entry-reachable` numbers currently report `Yield 0 -> 0` for levels 2-5.
 That is a stats reachability limitation: the reachability walker sees the
@@ -104,7 +125,6 @@ top-level functions reached from `main`, but it does not yet model
 Use `monadic-opt` inspection of the generated variant as the ground truth for
 this fixture set until stats learn that edge.
 
-Level 4 is now the next unspecialized rung. Its concrete dictionary is
-parameterized (`__dict_Encodable_Box(__dict_Encodable_Int)`), so the method body
-still sits behind a runtime dictionary value instead of a nullary dictionary
-tuple known to the optimizer.
+The next unspecialized rung is imported or otherwise unknown dictionary values:
+the current pass only follows parameterized constructors when every constructor
+argument is a dictionary binding already visible in the current optimizer scope.

@@ -138,6 +138,10 @@ Implemented variant shapes:
 - dictionary-keyed generated variants for the same nullary dictionaries passed
   as arguments to generic functions. The generated variant keeps the original
   uniform ABI but substitutes the known dictionary tuple into its cloned body.
+- conservative parameterized dictionary specialization when every constructor
+  dictionary argument is already known. This lets wrappers such as
+  `__dict_Encodable_Box(__dict_Encodable_Int)` inline the outer method and then
+  continue through the inner method dispatch under the same handler stack.
 
 Generated variants are private to the caller module. Cross-module variants do
 not change the callee module's exports or package cache behavior. Imported
@@ -145,12 +149,12 @@ not change the callee module's exports or package cache behavior. Imported
 specialization, and ambiguous closure/local-function shapes are skipped in the
 current implementation.
 
-Trait method specialization is deliberately narrow. It handles local nullary
-dict constructors first, which covers concrete monomorphic impls, generic
-wrappers called with a concrete nullary dictionary, and let-bound handler
-factories once they are recovered into static handlers. It does not yet
-recursively specialize dictionary constructors with dictionary parameters or
-specialize imported dictionary constructors. Those remain follow-up work.
+Trait method specialization is deliberately narrow. It handles local dictionary
+constructors when their dictionary arguments are already known, which covers
+concrete monomorphic impls, generic wrappers called with a concrete dictionary,
+simple parameterized impls, and let-bound handler factories once they are
+recovered into static handlers. It does not yet specialize imported dictionary
+constructors or unknown/dynamic dictionary values. Those remain follow-up work.
 
 The optimizer can remove private source functions once entry-reachable calls are
 fully covered by generated variants. Public functions are retained.
