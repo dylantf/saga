@@ -1897,6 +1897,136 @@ fn parameterized_dict_argument_specializes_nested_method_dispatch() {
 }
 
 #[test]
+fn let_bound_handler_factory_specializes_generic_dict_dispatch() {
+    let mut f = Fixture::new();
+    let arm = tail_arm(
+        2885,
+        vec![pat_unit(2886)],
+        resume(var("configured", 2887)),
+        None,
+    );
+    f.h.resumption
+        .insert(crate::ast::NodeId(2885), ResumptionKind::TailResumptive);
+    let factory = helper_fun(
+        "make_options",
+        2888,
+        vec![pat_var("configured", 2889)],
+        MExpr::HandlerValue {
+            effects: vec!["Log".to_string()],
+            arms: vec![arm],
+            return_clause: None,
+            source: crate::ast::NodeId(2890),
+        },
+    );
+    let dict = MDecl::DictConstructor(MDictConstructor {
+        id: crate::ast::NodeId(2891),
+        name: "__dict_Encodable_Int".to_string(),
+        dict_params: vec![],
+        methods: vec![MExpr::Pure(Atom::Lambda {
+            params: vec![pat_var("x", 2892)],
+            body: Box::new(bind_expr(
+                mv("opts", 2893),
+                yield_log(vec![unit_atom()], crate::ast::NodeId(2894)),
+                MExpr::BinOp {
+                    op: crate::ast::BinOp::Add,
+                    left: var("x", 2892),
+                    right: var("opts", 2893),
+                    source: crate::ast::NodeId(2895),
+                },
+            )),
+            source: crate::ast::NodeId(2896),
+        })],
+        method_effects: vec![],
+        method_open_rows: vec![],
+        impl_effects: vec![],
+        span: span(),
+    });
+    let serialize = helper_fun(
+        "serialize",
+        2897,
+        vec![pat_var("__dict_Encodable_a", 2898), pat_var("x", 2899)],
+        bind_expr(
+            mv("method", 2900),
+            MExpr::DictMethodAccess {
+                dict: var("__dict_Encodable_a", 2898),
+                trait_name: "Encodable".to_string(),
+                method_index: 0,
+                source: crate::ast::NodeId(2901),
+            },
+            MExpr::App {
+                head: var("method", 2900),
+                args: vec![var("x", 2899)],
+                source: crate::ast::NodeId(2902),
+            },
+        ),
+    );
+    let handler_var = mv("options", 2903);
+    let caller = MDecl::Val(MVal {
+        id: crate::ast::NodeId(2904),
+        public: false,
+        name: "caller".to_string(),
+        value: MExpr::Let {
+            var: handler_var.clone(),
+            value: Box::new(MExpr::App {
+                head: var("make_options", 2888),
+                args: vec![lit_int("10", 10)],
+                source: crate::ast::NodeId(2905),
+            }),
+            body: Box::new(with_expr(
+                MHandler::Dynamic {
+                    effects: vec!["Log".to_string()],
+                    op_tuple: Atom::Var {
+                        name: handler_var,
+                        source: crate::ast::NodeId(2906),
+                    },
+                    return_lambda: None,
+                    source: crate::ast::NodeId(2907),
+                },
+                bind_expr(
+                    mv("dict", 2908),
+                    MExpr::App {
+                        head: Atom::DictRef {
+                            name: "__dict_Encodable_Int".to_string(),
+                            source: crate::ast::NodeId(2909),
+                        },
+                        args: vec![],
+                        source: crate::ast::NodeId(2910),
+                    },
+                    MExpr::App {
+                        head: var("serialize", 2911),
+                        args: vec![var("dict", 2908), lit_int("5", 5)],
+                        source: crate::ast::NodeId(2912),
+                    },
+                ),
+            )),
+        },
+        span: span(),
+    });
+    let info = f.info();
+
+    let out = run(vec![factory, dict, serialize, caller], &f.h, &info);
+    let variant = out
+        .iter()
+        .find_map(|decl| match decl {
+            MDecl::FunBinding(fun) if is_generated_variant_name(&fun.name) => Some(fun),
+            _ => None,
+        })
+        .expect("expected generated static variant");
+
+    assert_eq!(
+        variant.body,
+        MExpr::BinOp {
+            op: crate::ast::BinOp::Add,
+            left: var("x", 2899),
+            right: lit_int("10", 10),
+            source: crate::ast::NodeId(2895),
+        }
+    );
+    assert_eq!(expr_yield_count(&variant.body), 0);
+    assert!(!expr_contains_dict_method_access(&variant.body));
+}
+
+#[test]
 fn helper_inline_skips_multi_clause_function() {
     let mut f = Fixture::new();
     let arm = tail_arm(290, vec![pat_unit(291)], resume(lit_int("42", 42)), None);

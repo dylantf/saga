@@ -156,6 +156,11 @@ simple parameterized impls, and let-bound handler factories once they are
 recovered into static handlers. It does not yet specialize imported dictionary
 constructors or unknown/dynamic dictionary values. Those remain follow-up work.
 
+The let-bound handler factory case composes two separate rewrites: first the
+handler value or small factory result is recovered as a static handler, then the
+ordinary generated-variant and dictionary-method passes run under that recovered
+handler stack. There is no separate trait-specific handler-factory rule.
+
 The optimizer can remove private source functions once entry-reachable calls are
 fully covered by generated variants. Public functions are retained.
 

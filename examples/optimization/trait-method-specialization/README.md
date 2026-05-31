@@ -68,6 +68,21 @@ through the nested `DictMethodAccess`.
 | 4 | `04-parameterized-dict.saga` | `Yield 1 -> 1`, `Bind 12 -> 4`, `decls 8 -> 8`, generated `0 -> 1` | `Yield 0 -> 0`, `Bind 9 -> 2`, `decls 2 -> 2`, generated `0 -> 1` | `"16"` |
 | 5 | `05-let-bound-handler-factory.saga` | `Yield 1 -> 1`, `Bind 9 -> 3`, `decls 6 -> 6`, generated `0 -> 1` | `Yield 0 -> 0`, `Bind 8 -> 2`, `decls 3 -> 2`, generated `0 -> 1` | `"15"` |
 
+## After Level 5: Let-Bound Handler Factory Composition
+
+Captured after adding a focused regression test for the combined shape rather
+than a new rewrite. Handler-factory recovery was already strong enough to turn
+the let-bound handler value into a static handler, and dictionary specialization
+then erases the trait method dispatch inside the generated variant.
+
+| Level | File | Module Stats | Entry-Reachable Stats | Output |
+| --- | --- | --- | --- | --- |
+| 1 | `01-direct-effect.saga` | `Yield 1 -> 1`, `Bind 6 -> 2`, `decls 5 -> 5`, generated `0 -> 0` | `Yield 1 -> 0`, `Bind 6 -> 1`, `decls 2 -> 1`, generated `0 -> 0` | `"15"` |
+| 2 | `02-concrete-trait-method.saga` | `Yield 1 -> 1`, `Bind 8 -> 3`, `decls 6 -> 6`, generated `0 -> 1` | `Yield 0 -> 0`, `Bind 7 -> 2`, `decls 2 -> 2`, generated `0 -> 1` | `"15"` |
+| 3 | `03-generic-wrapper.saga` | `Yield 1 -> 1`, `Bind 8 -> 3`, `decls 6 -> 6`, generated `0 -> 1` | `Yield 0 -> 0`, `Bind 7 -> 2`, `decls 2 -> 2`, generated `0 -> 1` | `"15"` |
+| 4 | `04-parameterized-dict.saga` | `Yield 1 -> 1`, `Bind 12 -> 4`, `decls 8 -> 8`, generated `0 -> 1` | `Yield 0 -> 0`, `Bind 9 -> 2`, `decls 2 -> 2`, generated `0 -> 1` | `"16"` |
+| 5 | `05-let-bound-handler-factory.saga` | `Yield 1 -> 1`, `Bind 9 -> 3`, `decls 6 -> 6`, generated `0 -> 1` | `Yield 0 -> 0`, `Bind 8 -> 2`, `decls 3 -> 2`, generated `0 -> 1` | `"15"` |
+
 ## Reading The Snapshots
 
 Level 1 proves the existing direct-call optimizer works for an ordinary static
