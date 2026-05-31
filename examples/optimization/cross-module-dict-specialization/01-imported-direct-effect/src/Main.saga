@@ -1,0 +1,12 @@
+module Main
+
+import Lib (Options)
+
+handler options for Options {
+  get_options () = resume 10
+}
+
+main () = {
+  let result = Lib.compute 5 with options
+  dbg (show result)
+}

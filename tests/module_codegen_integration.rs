@@ -391,7 +391,11 @@ main () = {
             let out = emit_from_program(program, "main", checker);
             assert_contains(&out, "call 'std_evidence_bridge':'insert_canonical'");
             assert_contains(&out, "'Db.Postgres'");
-            assert_contains(&out, "'db', 'run', 3");
+            assert_contains(&out, "__saga_static_variant__xmod__Db__run");
+            assert!(
+                !out.contains("'db', 'run', 3"),
+                "imported run should use the caller-local static variant:\n{out}"
+            );
             assert_erlc_compiles(&out, "main");
         },
     );
@@ -447,9 +451,17 @@ main () = {
         |checker, program| emit_from_program(program, "main", checker),
     );
 
+    for out in [&named_out, &inline_out] {
+        assert_contains(out, "__saga_static_variant__xmod__Db__run");
+        assert!(
+            !out.contains("'db', 'run', 3"),
+            "with db and with {{db}} should both use the caller-local static variant:\n{out}"
+        );
+    }
     assert_eq!(
-        named_out, inline_out,
-        "`with db` and `with {{db}}` should lower identically"
+        named_out.contains("call 'std_evidence_bridge':'insert_canonical'"),
+        inline_out.contains("call 'std_evidence_bridge':'insert_canonical'"),
+        "`with db` and `with {{db}}` should both install equivalent evidence"
     );
     assert_erlc_compiles(&inline_out, "main");
 }
@@ -493,7 +505,11 @@ main () = {
             assert_contains(&out, "'Db.Postgres'");
             assert_contains(&out, "'Std.IO.Stdio'");
             assert_contains(&out, "call 'erlang':'element'");
-            assert_contains(&out, "'std_io', 'println', 3");
+            assert_contains(&out, "__saga_static_variant__xmod__Std_IO__println");
+            assert!(
+                !out.contains("'std_io', 'println', 3"),
+                "imported println should use the caller-local static variant:\n{out}"
+            );
             assert_erlc_compiles(&out, "main");
         },
     );
@@ -559,7 +575,11 @@ main () = {
             assert_contains(&out, "'Db.Postgres'");
             assert_contains(&out, "'Db.Transaction'");
             assert_contains(&out, "call 'erlang':'element'");
-            assert_contains(&out, "'std_io', 'println', 3");
+            assert_contains(&out, "__saga_static_variant__xmod__Std_IO__println");
+            assert!(
+                !out.contains("'std_io', 'println', 3"),
+                "imported println should use the caller-local static variant:\n{out}"
+            );
             assert_erlc_compiles(&out, "main");
         },
     );
@@ -3286,6 +3306,92 @@ main () = worker () with collect
     assert!(
         !out.contains("call 'loglib':'worker'"),
         "caller should use its local generated static variant, not the imported slow path:\n{out}"
+    );
+    assert_erlc_compiles(&out, "main");
+}
+
+#[test]
+fn cross_module_static_variant_uses_imported_dict_constructor_body() {
+    let lib = r#"module Lib
+
+pub effect Options {
+  fun get_options : Unit -> Int
+}
+
+pub trait Encodable a {
+  fun encode : a -> Int needs {Options}
+}
+
+impl Encodable for Int needs {Options} {
+  encode x = x + get_options! ()
+}
+
+pub fun compute : Int -> Int needs {Options}
+compute x = encode x
+"#;
+    let main = r#"module Main
+
+import Lib (Options)
+
+handler options for Options {
+  get_options () = resume 10
+}
+
+main () = Lib.compute 5 with options
+"#;
+    let out = with_temp_project_files(&[("src/Lib.saga", lib)], main, |checker, program| {
+        emit_from_program(program, "main", checker)
+    });
+
+    assert_contains(&out, "__saga_static_variant__xmod__Lib__compute");
+    assert!(
+        !out.contains("call 'lib':'__dict_Lib_Encodable"),
+        "imported dict constructor should be inlined into the caller-local variant:\n{out}"
+    );
+    assert_erlc_compiles(&out, "main");
+}
+
+#[test]
+fn cross_module_qualified_handler_factory_variant_uses_imported_arm_analysis() {
+    let lib = r#"module Lib
+
+pub effect Options {
+  fun get_options : Unit -> Int
+}
+
+pub fun make_options : Int -> Handler Options
+make_options n = handler for Options {
+  get_options () = resume n
+}
+
+pub trait Encodable a {
+  fun encode : a -> Int needs {Options}
+}
+
+impl Encodable for Int needs {Options} {
+  encode x = x + get_options! ()
+}
+
+pub fun serialize : a -> Int needs {Options} where {a: Encodable}
+serialize x = encode x
+"#;
+    let main = r#"module Main
+
+import Lib (Options, Encodable)
+
+main () = {
+  let options = Lib.make_options 10
+  Lib.serialize 5 with options
+}
+"#;
+    let out = with_temp_project_files(&[("src/Lib.saga", lib)], main, |checker, program| {
+        emit_from_program(program, "main", checker)
+    });
+
+    assert_contains(&out, "__saga_static_variant__xmod__Lib__serialize");
+    assert!(
+        !out.contains("call 'lib':'make_options'"),
+        "qualified imported handler factory should be recovered into a static handler:\n{out}"
     );
     assert_erlc_compiles(&out, "main");
 }

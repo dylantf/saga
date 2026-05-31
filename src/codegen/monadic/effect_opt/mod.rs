@@ -76,6 +76,7 @@ pub struct OptimizerContext {
     pub resolution: ResolutionMap,
     pub imported_function_variants: HashMap<String, ImportedFunctionVariantCandidate>,
     pub imported_handler_factories: HashMap<String, ImportedHandlerFactoryCandidate>,
+    pub imported_dict_constructors: HashMap<String, MDictConstructor>,
 }
 
 #[derive(Debug, Clone)]
@@ -904,7 +905,10 @@ impl<'info> Optimizer<'info> {
         let Atom::DictRef { name, .. } = head else {
             return None;
         };
-        let constructor = self.dict_constructors.get(name)?;
+        let constructor = self
+            .dict_constructors
+            .get(name)
+            .or_else(|| self.context.imported_dict_constructors.get(name))?;
         if constructor.dict_params.len() != args.len() {
             return None;
         }
@@ -1993,15 +1997,13 @@ impl<'info> Optimizer<'info> {
             return (rebuild_binding(var, value, body, mode), Change::Unchanged);
         };
 
-        let Atom::Var { name, .. } = &head else {
-            return (
-                rebuild_binding(var, Box::new(MExpr::App { head, args, source }), body, mode),
-                Change::Unchanged,
-            );
+        let local_candidate = match &head {
+            Atom::Var { name, .. } => self.handler_factory_candidates.get(&name.name).cloned(),
+            _ => None,
         };
 
-        let candidate = if let Some(candidate) = self.handler_factory_candidates.get(&name.name) {
-            candidate.clone()
+        let candidate = if let Some(candidate) = local_candidate {
+            candidate
         } else if let Some(candidate) = self.lookup_imported_handler_factory(&head) {
             InlineCandidate {
                 params: candidate.params,
@@ -2853,6 +2855,63 @@ pub fn collect_imported_function_variant_candidates(
     }
 
     candidates
+}
+
+pub fn collect_imported_dict_constructors(
+    source_module: &str,
+    program: &MProgram,
+    resolution: &ResolutionMap,
+    codegen_info: &ModuleCodegenInfo,
+) -> HashMap<String, MDictConstructor> {
+    let public_names: HashSet<String> = codegen_info
+        .exports
+        .iter()
+        .map(|(name, _)| name.clone())
+        .collect();
+
+    let mut candidates = HashMap::new();
+    for decl in program {
+        let MDecl::DictConstructor(dc) = decl else {
+            continue;
+        };
+        // Dict constructors are compiler-generated implementation details.
+        // The source export table is not a reliable visibility filter for
+        // them, and imported optimized bodies may legitimately reference
+        // private impl dictionaries. We still reject method bodies that depend
+        // on private helper calls, since those would not lower safely from the
+        // caller module.
+        if !imported_dict_constructor_supported(dc) {
+            continue;
+        }
+        if dc.methods.iter().any(|method| {
+            expr_has_private_same_module_refs(
+                method,
+                source_module,
+                &dc.name,
+                &public_names,
+                resolution,
+            )
+        }) {
+            continue;
+        }
+        candidates.insert(dc.name.clone(), dc.clone());
+    }
+
+    candidates
+}
+
+fn imported_dict_constructor_supported(dc: &MDictConstructor) -> bool {
+    dc.methods.iter().all(|method| {
+        let MExpr::Pure(Atom::Lambda { body, .. }) = method else {
+            return false;
+        };
+        expr_node_count(body) <= FUNCTION_VARIANT_BODY_BUDGET
+            && !expr_contains_imported_dict_constructor_forbidden_shape(body)
+    })
+}
+
+fn expr_contains_imported_dict_constructor_forbidden_shape(expr: &MExpr) -> bool {
+    expr_contains_xmod_variant_forbidden_shape(expr)
 }
 
 fn imported_variant_head_info(atom: &Atom) -> Option<(String, u32, crate::ast::NodeId)> {

@@ -389,7 +389,7 @@ pub fn emit_module_via_new_path(
         let_handler_effects: &let_handler_effects_storage,
     };
 
-    let handler_info = handler_analysis::analyze(program);
+    let mut handler_info = handler_analysis::analyze(program);
     let anf_program = anf::normalize(program.clone(), Some(&resolution_map));
     // Collect imported handler bodies so `with <imported_handler>` translates
     // to `Static` (arms inlined) instead of falling back to `Dynamic` with an
@@ -404,6 +404,7 @@ pub fn emit_module_via_new_path(
     let mut imported_handler_decls: HashMap<String, ast::HandlerBody> = HashMap::new();
     let mut imported_function_variants = HashMap::new();
     let mut imported_handler_factories = HashMap::new();
+    let mut imported_dict_constructors = HashMap::new();
     for (imported_module_name, compiled) in &ctx.modules {
         let anf_imported = anf::normalize(compiled.elaborated.clone(), Some(&compiled.resolution));
         for decl in &anf_imported {
@@ -421,6 +422,9 @@ pub fn emit_module_via_new_path(
             }
         }
         if imported_module_name != module_name {
+            handler_info
+                .resumption
+                .extend(handler_analysis::analyze(&compiled.elaborated).resumption);
             let (imported_monadic, _) =
                 monadic::translate::translate(&anf_imported, &compiled.resolution, &effect_info);
             imported_function_variants.extend(
@@ -433,6 +437,14 @@ pub fn emit_module_via_new_path(
             );
             imported_handler_factories.extend(
                 monadic::effect_opt::collect_imported_handler_factory_candidates(
+                    imported_module_name,
+                    &imported_monadic,
+                    &compiled.resolution,
+                    &compiled.codegen_info,
+                ),
+            );
+            imported_dict_constructors.extend(
+                monadic::effect_opt::collect_imported_dict_constructors(
                     imported_module_name,
                     &imported_monadic,
                     &compiled.resolution,
@@ -460,6 +472,7 @@ pub fn emit_module_via_new_path(
             resolution: resolution_map.clone(),
             imported_function_variants,
             imported_handler_factories,
+            imported_dict_constructors,
         },
     );
     let monadic_stats = before_stats.map(|before_program| {

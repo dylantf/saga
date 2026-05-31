@@ -142,6 +142,10 @@ Implemented variant shapes:
   dictionary argument is already known. This lets wrappers such as
   `__dict_Encodable_Box(__dict_Encodable_Int)` inline the outer method and then
   continue through the inner method dispatch under the same handler stack.
+- conservative imported dictionary constructor specialization. Imported
+  constructor method bodies are available to caller-local variants when the
+  constructor is structurally small, has supported lambda methods, and does not
+  depend on private same-module helper calls.
 
 Generated variants are private to the caller module. Cross-module variants do
 not change the callee module's exports or package cache behavior. Imported
@@ -159,7 +163,14 @@ constructors or unknown/dynamic dictionary values. Those remain follow-up work.
 The let-bound handler factory case composes two separate rewrites: first the
 handler value or small factory result is recovered as a static handler, then the
 ordinary generated-variant and dictionary-method passes run under that recovered
-handler stack. There is no separate trait-specific handler-factory rule.
+handler stack. There is no separate trait-specific handler-factory rule. For
+imported factories, the caller optimizer also merges imported handler-arm
+analysis so tail-resumptive arms can participate in direct-call rewriting.
+
+Generated variants currently preserve the original function ABI. If a generic
+dictionary argument becomes unused after specialization, the call site still
+constructs and passes it. A later dictionary-argument pruning pass can remove
+that overhead.
 
 The optimizer can remove private source functions once entry-reachable calls are
 fully covered by generated variants. Public functions are retained.
