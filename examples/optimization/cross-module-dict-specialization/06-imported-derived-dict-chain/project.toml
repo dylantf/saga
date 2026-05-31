@@ -1,0 +1,5 @@
+[project]
+name = "xmod-dict-06"
+
+[bin]
+main = "src/Main.saga"

@@ -197,6 +197,58 @@ Do not add another semantic optimizer rewrite from this snapshot alone. The
 next expansion should either come from real-package stats that show a new hot
 path, or from a small cleanup pass over the optimizer structure.
 
+### Real-package target: `saga_json`
+
+Latest clean baseline from `~/projects/saga_json` after generated variant
+dictionary-argument pruning:
+
+```text
+whole-app entry-reachable from Main.main:
+  Yield 4 -> 4
+  Bind 278 -> 100
+  decls 48 -> 46 (source 48 -> 42, generated 0 -> 4)
+  residual yields: SagaJson.JsonOptions::get_json_options=4
+```
+
+This is the current measured hot path for custom derived encoding:
+`Main -> EncodeDeriveCustom -> SagaJson.Encode`. The residual yields are not
+from dynamic handlers; the caller-local generated `serialize_with` variants
+still materialize derived dictionaries and call methods whose bodies eventually
+read `JsonOptions`.
+
+Rejected probes, all reverted:
+
+- Raising the dictionary-method inline budget, including effectively disabling
+  it, did not move the `saga_json` stats.
+- Recognizing dictionary constructor calls by membership in the optimizer's
+  constructor tables, rather than only `Atom::DictRef`, did not move the stats.
+- Handler-specialized dictionary-constructor variants were not a good v1:
+  one ordering accidentally lowered binds to 94 while breaking dictionary-arg
+  pruning; the corrected ordering returned to `Bind 278 -> 100` and only added
+  code. Do not revive this shape without a stricter design.
+
+The next real `saga_json` optimizer attempt should beat this baseline, ideally
+by reducing the four residual `JsonOptions.get_json_options` yields. If it only
+trades residual yields for significant generated dictionary code, reject it.
+
+Follow-up measurement after pure ANF dictionary-method inlining:
+
+```text
+whole-app entry-reachable from Main.main:
+  Yield 4 -> 4
+  Bind 278 -> 93
+  decls 48 -> 46 (source 48 -> 42, generated 0 -> 4)
+  residual yields: SagaJson.JsonOptions::get_json_options=4
+```
+
+This rewrite is intentionally small: `Bind`/`Let` are considered pure when both
+their value and body are pure, which lets dictionary-method inlining cross
+derived `Generic.to` bodies that are ANF'd as `Bind(Pure(...))` chains. It is a
+bind-count win but not the final `JsonOptions` erasure. The next targeted
+fixture is
+`examples/optimization/cross-module-dict-specialization/06-imported-derived-dict-chain`,
+which still reports `Yield 1 -> 1` after this step.
+
 The stats report now splits total declarations into `source decls` and
 `generated decls`. This makes native variant growth visible as optimizer-created
 code and shows when private slow paths are deleted: for example, `29-actors`

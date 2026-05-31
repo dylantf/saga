@@ -16,7 +16,7 @@ table for each optimizer milestone instead of editing earlier snapshots.
 
 Captured before implementing imported dictionary constructor specialization.
 Level 1 is a control: cross-module static function variants already work for a
-direct imported effectful function. Levels 2-5 are the dictionary shapes we want
+direct imported effectful function. Levels 2-6 are the dictionary shapes we want
 to improve.
 
 | Level | Project | Shape | Whole-App Entry-Reachable Stats | Output |
@@ -26,6 +26,7 @@ to improve.
 | 3 | `03-imported-generic-wrapper` | Imported generic wrapper receives an imported concrete dict | `Yield 1 -> 1`, `Bind 8 -> 3`, `decls 3 -> 3`, generated `0 -> 1` | `"15"` |
 | 4 | `04-imported-parameterized-dict` | Imported parameterized dict uses an imported sub-dictionary | `Yield 1 -> 1`, `Bind 12 -> 4`, `decls 4 -> 4`, generated `0 -> 1` | `"16"` |
 | 5 | `05-imported-handler-factory` | Imported handler factory plus imported generic dispatch | `Yield 1 -> 1`, `Bind 9 -> 4`, `decls 4 -> 4`, generated `0 -> 0` | `"15"` |
+| 6 | `06-imported-derived-dict-chain` | Imported generic dispatch into caller-local derived dictionaries | `Yield 1 -> 1`, `Bind 22 -> 4`, `decls 8 -> 7`, generated `0 -> 1` | `"15"` |
 
 ## Intended Rungs
 
@@ -44,6 +45,10 @@ imported dictionary value.
 
 Level 5 composes imported handler-factory recovery with imported dictionary
 specialization, mirroring the `saga_json` shape more closely.
+
+Level 6 adds the derived-codec chain from `saga_json`: an imported generic
+function receives a caller-local dictionary whose method performs a pure
+representation conversion before calling another effectful dictionary method.
 
 ## After Imported Dictionary Constructor Collection
 
@@ -76,3 +81,17 @@ generic ABI for the generated variant.
 | 3 | `03-imported-generic-wrapper` | `Yield 1 -> 0`, `Bind 8 -> 2`, `decls 3 -> 2`, generated `0 -> 1` | `"15"` |
 | 4 | `04-imported-parameterized-dict` | `Yield 1 -> 0`, `Bind 12 -> 2`, `decls 4 -> 2`, generated `0 -> 1` | `"16"` |
 | 5 | `05-imported-handler-factory` | `Yield 1 -> 0`, `Bind 9 -> 2`, `decls 4 -> 2`, generated `0 -> 1` | `"15"` |
+
+## After Pure ANF Dictionary-Method Inlining
+
+Captured after treating `Bind`/`Let` expressions as pure when both their value
+and body are pure. This lets dictionary-method inlining cross ANF scaffolding
+inside pure derived representation conversions such as `Generic.to`.
+
+Level 6 still has the residual `Options.get_options` yield; the next optimizer
+step must make the following effectful dictionary method visible after the pure
+conversion. The useful movement here is bind reduction without code growth.
+
+| Level | Project | Whole-App Entry-Reachable Stats | Output |
+| --- | --- | --- | --- |
+| 6 | `06-imported-derived-dict-chain` | `Yield 1 -> 1`, `Bind 22 -> 3`, `decls 8 -> 7`, generated `0 -> 1` | `"15"` |

@@ -44,6 +44,12 @@ The purity predicate is deliberately conservative. Arbitrary `App` and
 current exception is compiler-generated dictionary constructor calls through
 `Atom::DictRef`, which are pure materialization.
 
+ANF scaffolding does not make a computation impure by itself: `Bind`/`Let`
+expressions whose value and body are both pure are treated as pure. This matters
+for derived-code paths where a pure representation conversion is emitted as a
+short chain of `Bind(Pure(...))` nodes before feeding an effectful dictionary
+method.
+
 Dead pure lets are removed when the bound variable is unused.
 
 ## Handler Stack Model

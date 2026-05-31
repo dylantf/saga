@@ -1,0 +1,39 @@
+module Main
+
+import Lib (Options, Encodable)
+
+handler options_10 for Options {
+  get_options () = resume 10
+}
+
+type User = User Int
+  deriving (Generic)
+
+impl Encodable for Int needs {Options} {
+  encode x = x + get_options! ()
+}
+
+impl Encodable for Leaf a where {a: Encodable} needs {Options} {
+  encode (Leaf x) = encode x
+}
+
+impl Encodable for Variant (n : Symbol) a where {a: Encodable} needs {Options} {
+  encode (Variant inner) = encode inner
+}
+
+impl Encodable for Adt a where {a: Encodable} needs {Options} {
+  encode (Adt _ inner) = encode inner
+}
+
+impl Encodable for Rep__User needs {Options} {
+  encode (Rep__User inner) = encode inner
+}
+
+impl Encodable for User where {Generic User r, Encodable r} needs {Options} {
+  encode user = encode (to user : Rep__User)
+}
+
+main () = {
+  let result = Lib.serialize (User 5) with options_10
+  dbg (show result)
+}

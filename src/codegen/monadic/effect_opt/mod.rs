@@ -1728,7 +1728,8 @@ impl<'info> Optimizer<'info> {
             };
             if expr_node_count(&inlined) > FUNCTION_VARIANT_BODY_BUDGET
                 || (!self.expr_has_direct_call_opportunity(&inlined)
-                    && !expr_contains_dict_method_access(&inlined))
+                    && !expr_contains_dict_method_access(&inlined)
+                    && !expr_is_pure(&inlined))
             {
                 return (MExpr::App { head, args, source }, Change::Unchanged);
             }
@@ -2365,7 +2366,9 @@ fn optimize_optional_atom_with(
 fn expr_is_pure(expr: &MExpr) -> bool {
     match expr {
         MExpr::Pure(_) => true,
-        MExpr::Let { value, body, .. } => expr_is_pure(value) && expr_is_pure(body),
+        MExpr::Bind { value, body, .. } | MExpr::Let { value, body, .. } => {
+            expr_is_pure(value) && expr_is_pure(body)
+        }
         MExpr::Ensure { .. } => false,
         MExpr::Case { arms, .. } => arms
             .iter()
@@ -2386,7 +2389,6 @@ fn expr_is_pure(expr: &MExpr) -> bool {
             ..
         } => true,
         MExpr::Yield { .. }
-        | MExpr::Bind { .. }
         | MExpr::App { .. }
         | MExpr::With { .. }
         | MExpr::Resume { .. }

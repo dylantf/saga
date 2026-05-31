@@ -77,6 +77,41 @@ fn run_with_skip_preserves_bind_pure() {
 }
 
 #[test]
+fn bind_of_pure_computations_counts_as_pure() {
+    let expr = bind_pure(
+        mv("x", 11),
+        Atom::Ctor {
+            name: "Box".to_string(),
+            args: vec![lit_int("1", 1)],
+            source: crate::ast::NodeId(12),
+        },
+        MExpr::Case {
+            scrutinee: var("x", 11),
+            arms: vec![MArm {
+                pattern: Pat::Wildcard {
+                    id: crate::ast::NodeId(13),
+                    span: span(),
+                },
+                guard: None,
+                body: bind_pure(
+                    mv("y", 14),
+                    Atom::Ctor {
+                        name: "Inner".to_string(),
+                        args: vec![var("x", 11)],
+                        source: crate::ast::NodeId(15),
+                    },
+                    MExpr::Pure(var("y", 14)),
+                ),
+                span: span(),
+            }],
+            source: crate::ast::NodeId(16),
+        },
+    );
+
+    assert!(expr_is_pure(&expr));
+}
+
+#[test]
 fn mprogram_default_smoke() {
     let prog: MProgram = MProgram::default();
     assert!(prog.is_empty());

@@ -133,6 +133,15 @@ Level 5 still moves because handler-factory recovery already turns the let-bound
 factory result into the same static-handler shape before dictionary argument
 specialization runs.
 
+Level 6 (`06-derived-dict-chain.saga`) is the same-module control for the
+derived-codec shape: a pure `Generic.to`-style dictionary method produces a
+representation value, then an effectful dictionary method consumes it. After
+pure ANF dictionary-method inlining its current stats are:
+
+| Level | File | Module Stats | Entry-Reachable Stats | Output |
+| --- | --- | --- | --- | --- |
+| 6 | `06-derived-dict-chain.saga` | `Yield 1 -> 1`, `Bind 24 -> 3`, `decls 13 -> 13`, generated `0 -> 1` | `Yield 0 -> 0`, `Bind 12 -> 2`, `decls 2 -> 2`, generated `0 -> 1` | `"15"` |
+
 The `entry-reachable` numbers currently report `Yield 0 -> 0` for levels 2-5.
 That is a stats reachability limitation: the reachability walker sees the
 top-level functions reached from `main`, but it does not yet model

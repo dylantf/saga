@@ -1,0 +1,46 @@
+# Derived-dictionary chain: a pure Generic.to-style method produces a
+# representation value, then an effectful ToJson-style method consumes it.
+# This mirrors the residual saga_json shape more closely than levels 1-5.
+
+effect Options {
+  fun get_options : Unit -> Int
+}
+
+handler options_10 for Options {
+  get_options () = resume 10
+}
+
+type User = User Int
+  deriving (Generic)
+
+trait Encodable a {
+  fun encode : a -> Int needs {Options}
+}
+
+impl Encodable for Int needs {Options} {
+  encode x = x + get_options! ()
+}
+
+impl Encodable for Leaf a where {a: Encodable} needs {Options} {
+  encode (Leaf x) = encode x
+}
+
+impl Encodable for Variant (n : Symbol) a where {a: Encodable} needs {Options} {
+  encode (Variant inner) = encode inner
+}
+
+impl Encodable for Adt a where {a: Encodable} needs {Options} {
+  encode (Adt _ inner) = encode inner
+}
+
+impl Encodable for Rep__User needs {Options} {
+  encode (Rep__User inner) = encode inner
+}
+
+fun serialize : (x: a) -> Int needs {Options} where {a: Generic r, r: Encodable}
+serialize x = encode (to x : Rep__User)
+
+main () = {
+  let result = serialize (User 5) with options_10
+  dbg (show result)
+}
