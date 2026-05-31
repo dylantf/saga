@@ -124,15 +124,24 @@ Implemented variant shapes:
 - same-module static handler variants when specialization removes all residual
   yields from the generated body;
 - caller-local cross-module variants for imported public Saga functions under
-  native or fully-erasing static handler stacks.
+  native or fully-erasing static handler stacks;
 - let-bound handler factory specialization for small same-module factories that
-  end in a `HandlerValue`, including simple configuration prefixes.
+  end in a `HandlerValue`, including simple configuration prefixes;
+- imported public handler factory specialization for the same let-bound shape,
+  including public pure values from the factory module such as default option
+  records.
 
 Generated variants are private to the caller module. Cross-module variants do
 not change the callee module's exports or package cache behavior. Imported
 `@external` wrappers, private-helper dependencies, dynamic/composite
 specialization, and ambiguous closure/local-function shapes are skipped in the
 current implementation.
+
+Generated static variants do not yet specialize dictionary-dispatched trait
+methods. A call such as `serialize_with x` can be cloned under a known handler,
+but if it reaches the actual encoder through `element(N, dict)` the residual
+effect operations in that trait method remain until a dictionary/trait-call
+specialization pass lands.
 
 The optimizer can remove private source functions once entry-reachable calls are
 fully covered by generated variants. Public functions are retained.

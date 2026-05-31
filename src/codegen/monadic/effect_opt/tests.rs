@@ -895,6 +895,90 @@ fn handler_factory_prefix_binding_is_computed_once_before_handler_install() {
 }
 
 #[test]
+fn imported_handler_factory_specializes_to_static_handler() {
+    let mut f = Fixture::new();
+    let arm = tail_arm(197, vec![pat_unit(198)], resume(var("defaults", 199)), None);
+    f.h.resumption
+        .insert(crate::ast::NodeId(197), ResumptionKind::TailResumptive);
+    let defaults = MDecl::Val(MVal {
+        id: crate::ast::NodeId(200),
+        public: true,
+        name: "defaults".to_string(),
+        value: MExpr::Pure(lit_int("42", 42)),
+        span: span(),
+    });
+    let factory = MDecl::FunBinding(MFunBinding {
+        id: crate::ast::NodeId(201),
+        public: true,
+        name: "make_handler".to_string(),
+        name_span: span(),
+        params: vec![pat_unit(202)],
+        guard: None,
+        body: MExpr::HandlerValue {
+            effects: vec!["Log".to_string()],
+            arms: vec![arm],
+            return_clause: None,
+            source: crate::ast::NodeId(203),
+        },
+        span: span(),
+    });
+    let imported_program = vec![defaults, factory];
+    let imported_candidates = collect_imported_handler_factory_candidates(
+        "Lib",
+        &imported_program,
+        &ResolutionMap::new(),
+        &module_info_with_exports(&["defaults", "make_handler"]),
+    );
+    let handler_var = mv("h", 204);
+    let caller = MDecl::Val(MVal {
+        id: crate::ast::NodeId(205),
+        public: false,
+        name: "caller".to_string(),
+        value: MExpr::Let {
+            var: handler_var.clone(),
+            value: Box::new(MExpr::App {
+                head: var("make_handler", 206),
+                args: vec![unit_atom()],
+                source: crate::ast::NodeId(207),
+            }),
+            body: Box::new(with_expr(
+                MHandler::Dynamic {
+                    effects: vec!["Log".to_string()],
+                    op_tuple: Atom::Var {
+                        name: handler_var,
+                        source: crate::ast::NodeId(208),
+                    },
+                    return_lambda: None,
+                    source: crate::ast::NodeId(209),
+                },
+                yield_log(vec![unit_atom()], crate::ast::NodeId(210)),
+            )),
+        },
+        span: span(),
+    });
+    let mut context = OptimizerContext::default();
+    context.resolution.insert(
+        crate::ast::NodeId(206),
+        resolved_beam("make_handler", Some("Lib"), "Lib.make_handler"),
+    );
+    context.imported_handler_factories = imported_candidates;
+    let info = f.info();
+
+    let out = run_with_context(vec![caller], &f.h, &info, context);
+
+    assert_eq!(
+        out,
+        vec![MDecl::Val(MVal {
+            id: crate::ast::NodeId(205),
+            public: false,
+            name: "caller".to_string(),
+            value: MExpr::Pure(lit_int("42", 42)),
+            span: span(),
+        })]
+    );
+}
+
+#[test]
 fn non_handler_binding_shadows_outer_handler_value_binding() {
     let mut f = Fixture::new();
     let arm = tail_arm(175, vec![pat_unit(176)], resume(lit_int("1", 1)), None);

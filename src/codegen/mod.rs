@@ -403,6 +403,7 @@ pub fn emit_module_via_new_path(
     // satisfy the ANF atomicity invariant.
     let mut imported_handler_decls: HashMap<String, ast::HandlerBody> = HashMap::new();
     let mut imported_function_variants = HashMap::new();
+    let mut imported_handler_factories = HashMap::new();
     for (imported_module_name, compiled) in &ctx.modules {
         let anf_imported = anf::normalize(compiled.elaborated.clone(), Some(&compiled.resolution));
         for decl in &anf_imported {
@@ -430,6 +431,14 @@ pub fn emit_module_via_new_path(
                     &compiled.codegen_info,
                 ),
             );
+            imported_handler_factories.extend(
+                monadic::effect_opt::collect_imported_handler_factory_candidates(
+                    imported_module_name,
+                    &imported_monadic,
+                    &compiled.resolution,
+                    &compiled.codegen_info,
+                ),
+            );
         }
     }
     let (monadic_prog, handler_value_map) = monadic::translate::translate_with_imports(
@@ -450,6 +459,7 @@ pub fn emit_module_via_new_path(
         monadic::effect_opt::OptimizerContext {
             resolution: resolution_map.clone(),
             imported_function_variants,
+            imported_handler_factories,
         },
     );
     let monadic_stats = before_stats.map(|before_program| {

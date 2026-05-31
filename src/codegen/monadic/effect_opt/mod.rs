@@ -75,6 +75,7 @@ pub struct RunOptions {
 pub struct OptimizerContext {
     pub resolution: ResolutionMap,
     pub imported_function_variants: HashMap<String, ImportedFunctionVariantCandidate>,
+    pub imported_handler_factories: HashMap<String, ImportedHandlerFactoryCandidate>,
 }
 
 #[derive(Debug, Clone)]
@@ -82,6 +83,13 @@ pub struct ImportedFunctionVariantCandidate {
     pub source_module: String,
     pub binding: MFunBinding,
     pub public_names: HashSet<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ImportedHandlerFactoryCandidate {
+    pub source_module: String,
+    pub params: Vec<Pat>,
+    pub body: MExpr,
 }
 
 struct Optimizer<'info> {
@@ -1271,7 +1279,9 @@ impl<'info> Optimizer<'info> {
         if args.len() != candidate.binding.params.len() {
             return (MExpr::App { head, args, source }, Change::Unchanged);
         }
-        if !self.expr_has_direct_call_opportunity(&candidate.binding.body) {
+        if !require_no_residual_yields
+            && !self.expr_has_direct_call_opportunity(&candidate.binding.body)
+        {
             return (MExpr::App { head, args, source }, Change::Unchanged);
         }
 
@@ -1371,6 +1381,44 @@ impl<'info> Optimizer<'info> {
             .values()
             .filter(|candidate| {
                 candidate.binding.name == resolved.name
+                    && resolved
+                        .source_module
+                        .as_deref()
+                        .is_none_or(|module| module == candidate.source_module)
+            });
+        let candidate = matching.next()?;
+        if matching.next().is_some() {
+            return None;
+        }
+        Some(candidate.clone())
+    }
+
+    fn lookup_imported_handler_factory(
+        &self,
+        head: &Atom,
+    ) -> Option<ImportedHandlerFactoryCandidate> {
+        let (head_name, _, head_source) = imported_variant_head_info(head)?;
+        if self.inline_blocked_names.iter().any(|n| n == &head_name) {
+            return None;
+        }
+        let resolved = self.context.resolution.get(&head_source)?;
+        if !matches!(resolved.kind, ResolvedCodegenKind::BeamFunction { .. }) {
+            return None;
+        }
+        if let Some(candidate) = self
+            .context
+            .imported_handler_factories
+            .get(&resolved.canonical_name)
+        {
+            return Some(candidate.clone());
+        }
+
+        let mut matching = self
+            .context
+            .imported_handler_factories
+            .values()
+            .filter(|candidate| {
+                head_name == resolved.name
                     && resolved
                         .source_module
                         .as_deref()
@@ -1734,13 +1782,20 @@ impl<'info> Optimizer<'info> {
             );
         };
 
-        let Some(candidate) = self.handler_factory_candidates.get(&name.name) else {
+        let candidate = if let Some(candidate) = self.handler_factory_candidates.get(&name.name) {
+            candidate.clone()
+        } else if let Some(candidate) = self.lookup_imported_handler_factory(&head) {
+            InlineCandidate {
+                params: candidate.params,
+                body: candidate.body,
+            }
+        } else {
             return (
                 rebuild_binding(var, Box::new(MExpr::App { head, args, source }), body, mode),
                 Change::Unchanged,
             );
         };
-        let Some(inlined) = inline_helper_candidate(candidate, &args) else {
+        let Some(inlined) = inline_helper_candidate(&candidate, &args) else {
             return (
                 rebuild_binding(var, Box::new(MExpr::App { head, args, source }), body, mode),
                 Change::Unchanged,
@@ -2229,6 +2284,112 @@ fn collect_handler_factory_candidates(program: &MProgram) -> HashMap<String, Inl
         );
     }
     candidates
+}
+
+pub fn collect_imported_handler_factory_candidates(
+    source_module: &str,
+    program: &MProgram,
+    resolution: &ResolutionMap,
+    codegen_info: &ModuleCodegenInfo,
+) -> HashMap<String, ImportedHandlerFactoryCandidate> {
+    let public_names: HashSet<String> = codegen_info
+        .exports
+        .iter()
+        .map(|(name, _)| name.clone())
+        .collect();
+    let external_names: HashSet<String> = codegen_info
+        .external_funs
+        .iter()
+        .map(|(name, _, _, _)| name.clone())
+        .collect();
+    let public_pure_vals = collect_public_pure_vals(program);
+
+    let mut counts: HashMap<String, usize> = HashMap::new();
+    for decl in program {
+        if let MDecl::FunBinding(f) = decl
+            && f.public
+            && !is_generated_variant_name(&f.name)
+        {
+            *counts.entry(f.name.clone()).or_default() += 1;
+        }
+    }
+
+    let mut candidates = HashMap::new();
+    for decl in program {
+        let MDecl::FunBinding(f) = decl else {
+            continue;
+        };
+        if !f.public
+            || is_generated_variant_name(&f.name)
+            || counts.get(&f.name) != Some(&1)
+            || external_names.contains(&f.name)
+            || f.guard.is_some()
+            || !helper_params_are_supported(&f.params)
+            || expr_node_count(&f.body) > INLINE_HELPER_BODY_BUDGET
+            || expr_contains_imported_handler_factory_forbidden_shape(&f.body)
+            || expr_has_private_same_module_refs(
+                &f.body,
+                source_module,
+                &f.name,
+                &public_names,
+                resolution,
+            )
+        {
+            continue;
+        }
+
+        let Some(body) = inline_public_pure_vals(f.body.clone(), &public_pure_vals) else {
+            continue;
+        };
+        if !expr_ends_in_handler_value(&body) {
+            continue;
+        }
+
+        candidates.insert(
+            format!("{source_module}.{}", f.name),
+            ImportedHandlerFactoryCandidate {
+                source_module: source_module.to_string(),
+                params: f.params.clone(),
+                body,
+            },
+        );
+    }
+
+    candidates
+}
+
+fn collect_public_pure_vals(program: &MProgram) -> HashMap<String, Atom> {
+    let mut vals = HashMap::new();
+    for decl in program {
+        let MDecl::Val(v) = decl else {
+            continue;
+        };
+        if !v.public {
+            continue;
+        }
+        let MExpr::Pure(atom) = &v.value else {
+            continue;
+        };
+        vals.insert(v.name.clone(), atom.clone());
+    }
+    vals
+}
+
+fn inline_public_pure_vals(expr: MExpr, vals: &HashMap<String, Atom>) -> Option<MExpr> {
+    let mut expr = expr;
+    for (name, atom) in vals {
+        let target = MVar {
+            name: name.clone(),
+            id: 0,
+        };
+        let free_names = free_atom_names(atom);
+        let substituted = subst_expr(expr, &target, atom, &free_names);
+        if substituted.blocked {
+            return None;
+        }
+        expr = substituted.value;
+    }
+    Some(expr)
 }
 
 fn collect_variant_candidates(program: &MProgram) -> HashMap<String, VariantCandidate> {
@@ -3735,6 +3896,87 @@ fn expr_contains_xmod_variant_forbidden_shape(expr: &MExpr) -> bool {
                     || expr_contains_xmod_variant_forbidden_shape(body)
             })
         }
+    }
+}
+
+fn expr_contains_imported_handler_factory_forbidden_shape(expr: &MExpr) -> bool {
+    match expr {
+        MExpr::With { .. } | MExpr::Receive { .. } | MExpr::LetFun { .. } => true,
+        MExpr::HandlerValue {
+            arms,
+            return_clause,
+            ..
+        } => {
+            arms.iter().any(|arm| {
+                expr_contains_imported_handler_factory_forbidden_shape(&arm.body)
+                    || arm.finally_block.as_ref().is_some_and(|cleanup| {
+                        expr_contains_imported_handler_factory_forbidden_shape(cleanup)
+                    })
+            }) || return_clause.as_ref().is_some_and(|arm| {
+                expr_contains_imported_handler_factory_forbidden_shape(&arm.body)
+                    || arm.finally_block.as_ref().is_some_and(|cleanup| {
+                        expr_contains_imported_handler_factory_forbidden_shape(cleanup)
+                    })
+            })
+        }
+        MExpr::Pure(atom) => atom_contains_xmod_variant_forbidden_shape(atom),
+        MExpr::Yield { args, .. } | MExpr::ForeignCall { args, .. } => {
+            args.iter().any(atom_contains_xmod_variant_forbidden_shape)
+        }
+        MExpr::Bind { value, body, .. } | MExpr::Let { value, body, .. } => {
+            expr_contains_imported_handler_factory_forbidden_shape(value)
+                || expr_contains_imported_handler_factory_forbidden_shape(body)
+        }
+        MExpr::Ensure { body, cleanup } => {
+            expr_contains_imported_handler_factory_forbidden_shape(body)
+                || expr_contains_imported_handler_factory_forbidden_shape(cleanup)
+        }
+        MExpr::Case {
+            scrutinee, arms, ..
+        } => {
+            atom_contains_xmod_variant_forbidden_shape(scrutinee)
+                || arms.iter().any(|arm| {
+                    arm.guard
+                        .as_ref()
+                        .is_some_and(expr_contains_imported_handler_factory_forbidden_shape)
+                        || expr_contains_imported_handler_factory_forbidden_shape(&arm.body)
+                })
+        }
+        MExpr::If {
+            cond,
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            atom_contains_xmod_variant_forbidden_shape(cond)
+                || expr_contains_imported_handler_factory_forbidden_shape(then_branch)
+                || expr_contains_imported_handler_factory_forbidden_shape(else_branch)
+        }
+        MExpr::App { head, args, .. } => {
+            atom_contains_xmod_variant_forbidden_shape(head)
+                || args.iter().any(atom_contains_xmod_variant_forbidden_shape)
+        }
+        MExpr::Resume { value, .. }
+        | MExpr::FieldAccess { record: value, .. }
+        | MExpr::DictMethodAccess { dict: value, .. }
+        | MExpr::UnaryMinus { value, .. } => atom_contains_xmod_variant_forbidden_shape(value),
+        MExpr::RecordUpdate { record, fields, .. } => {
+            atom_contains_xmod_variant_forbidden_shape(record)
+                || fields
+                    .iter()
+                    .any(|(_, atom)| atom_contains_xmod_variant_forbidden_shape(atom))
+        }
+        MExpr::BinOp { left, right, .. } => {
+            atom_contains_xmod_variant_forbidden_shape(left)
+                || atom_contains_xmod_variant_forbidden_shape(right)
+        }
+        MExpr::BitString { segments, .. } => segments.iter().any(|seg| {
+            atom_contains_xmod_variant_forbidden_shape(&seg.value)
+                || seg
+                    .size
+                    .as_ref()
+                    .is_some_and(atom_contains_xmod_variant_forbidden_shape)
+        }),
     }
 }
 
