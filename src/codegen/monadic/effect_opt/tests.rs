@@ -496,6 +496,44 @@ fn bind_to_let_does_not_treat_app_result_type_as_purity_evidence() {
 }
 
 #[test]
+fn immediate_lambda_app_inlines_when_params_are_supported() {
+    let f = Fixture::new();
+    let info = f.info();
+    let prog = val_program(MExpr::App {
+        head: Atom::Lambda {
+            params: vec![pat_var("x", 2956)],
+            body: Box::new(MExpr::Pure(var("x", 2956))),
+            source: crate::ast::NodeId(2957),
+        },
+        args: vec![lit_int("9", 9)],
+        source: crate::ast::NodeId(2958),
+    });
+
+    let out = run(prog, &f.h, &info);
+
+    assert_eq!(out, val_program(MExpr::Pure(lit_int("9", 9))));
+}
+
+#[test]
+fn lambda_argument_app_remains_conservative() {
+    let f = Fixture::new();
+    let info = f.info();
+    let prog = val_program(MExpr::App {
+        head: var("map", 2959),
+        args: vec![Atom::Lambda {
+            params: vec![pat_var("x", 2960)],
+            body: Box::new(MExpr::Pure(var("x", 2960))),
+            source: crate::ast::NodeId(2961),
+        }],
+        source: crate::ast::NodeId(2962),
+    });
+
+    let out = run(prog.clone(), &f.h, &info);
+
+    assert_eq!(out, prog);
+}
+
+#[test]
 fn direct_call_inlines_static_tail_resumptive_yield() {
     let mut f = Fixture::new();
     let arm = tail_arm(100, vec![pat_unit(101)], resume(lit_int("42", 42)), None);
@@ -2157,6 +2195,83 @@ fn imported_dict_constructor_argument_specializes_generated_static_variant() {
 }
 
 #[test]
+fn imported_dict_constructor_collection_allows_immediate_supported_lambda_app() {
+    let dict = MDecl::DictConstructor(MDictConstructor {
+        id: crate::ast::NodeId(2963),
+        name: "__dict_Encodable_Label".to_string(),
+        dict_params: vec![],
+        methods: vec![MExpr::Pure(Atom::Lambda {
+            params: vec![pat_var("value", 2964)],
+            body: Box::new(MExpr::App {
+                head: Atom::Lambda {
+                    params: vec![pat_var("_proxy", 2965)],
+                    body: Box::new(MExpr::Pure(var("value", 2964))),
+                    source: crate::ast::NodeId(2968),
+                },
+                args: vec![unit_atom()],
+                source: crate::ast::NodeId(2969),
+            }),
+            source: crate::ast::NodeId(2970),
+        })],
+        method_effects: vec![],
+        method_open_rows: vec![],
+        impl_effects: vec![],
+        span: span(),
+    });
+    let info = module_info_with_exports(&[]);
+
+    let candidates = collect_imported_dict_constructors(
+        "Lib",
+        &vec![dict],
+        &ResolutionMap::new(),
+        &info,
+        &HashSet::new(),
+    );
+
+    assert!(candidates.contains_key("__dict_Encodable_Label"));
+}
+
+#[test]
+fn imported_dict_constructor_collection_rejects_escaping_lambda_arg() {
+    let dict = MDecl::DictConstructor(MDictConstructor {
+        id: crate::ast::NodeId(2971),
+        name: "__dict_Encodable_List".to_string(),
+        dict_params: vec![],
+        methods: vec![MExpr::Pure(Atom::Lambda {
+            params: vec![pat_var("xs", 2972)],
+            body: Box::new(MExpr::App {
+                head: var("map", 2973),
+                args: vec![
+                    Atom::Lambda {
+                        params: vec![pat_var("x", 2974)],
+                        body: Box::new(MExpr::Pure(var("x", 2974))),
+                        source: crate::ast::NodeId(2975),
+                    },
+                    var("xs", 2972),
+                ],
+                source: crate::ast::NodeId(2976),
+            }),
+            source: crate::ast::NodeId(2977),
+        })],
+        method_effects: vec![],
+        method_open_rows: vec![],
+        impl_effects: vec![],
+        span: span(),
+    });
+    let info = module_info_with_exports(&[]);
+
+    let candidates = collect_imported_dict_constructors(
+        "Lib",
+        &vec![dict],
+        &ResolutionMap::new(),
+        &info,
+        &HashSet::new(),
+    );
+
+    assert!(!candidates.contains_key("__dict_Encodable_List"));
+}
+
+#[test]
 fn let_bound_handler_factory_specializes_generic_dict_dispatch() {
     let mut f = Fixture::new();
     let arm = tail_arm(
@@ -2988,6 +3103,70 @@ fn imported_static_function_variant_skips_when_residual_yield_remains() {
             span: span(),
         })]
     );
+}
+
+#[test]
+fn imported_static_function_variant_threads_handler_stack_captures_as_params() {
+    let mut f = Fixture::new();
+    let arm = tail_arm(
+        2978,
+        vec![pat_unit(2979)],
+        resume(var("configured", 2980)),
+        None,
+    );
+    f.h.resumption
+        .insert(crate::ast::NodeId(2978), ResumptionKind::TailResumptive);
+    let handler = static_log_handler(vec![arm]);
+    let imported = imported_candidate(
+        "Lib",
+        "worker",
+        2981,
+        yield_log(vec![unit_atom()], crate::ast::NodeId(2983)),
+    );
+    let caller = MDecl::Val(MVal {
+        id: crate::ast::NodeId(2984),
+        public: false,
+        name: "caller".to_string(),
+        value: MExpr::Let {
+            var: mv("configured", 2985),
+            value: Box::new(MExpr::Pure(lit_int("10", 10))),
+            body: Box::new(with_expr(
+                handler,
+                MExpr::App {
+                    head: var("worker", 2986),
+                    args: vec![unit_atom()],
+                    source: crate::ast::NodeId(2987),
+                },
+            )),
+        },
+        span: span(),
+    });
+    let mut context = OptimizerContext::default();
+    context.resolution.insert(
+        crate::ast::NodeId(2986),
+        resolved_beam("worker", Some("Lib"), "Lib.worker"),
+    );
+    context
+        .imported_function_variants
+        .insert("Lib.worker".to_string(), imported);
+    let info = f.info();
+
+    let out = run_with_context(vec![caller], &f.h, &info, context);
+    let variant = out
+        .iter()
+        .find_map(|decl| match decl {
+            MDecl::FunBinding(fun) if fun.name.starts_with(STATIC_VARIANT_PREFIX) => Some(fun),
+            _ => None,
+        })
+        .expect("expected generated static variant");
+
+    assert!(
+        variant
+            .params
+            .iter()
+            .any(|param| matches!(param, Pat::Var { name, .. } if name == "configured"))
+    );
+    assert_eq!(variant.body, MExpr::Pure(var("configured", 2980)));
 }
 
 #[test]

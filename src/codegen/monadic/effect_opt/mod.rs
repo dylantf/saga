@@ -351,6 +351,7 @@ impl<'info> Optimizer<'info> {
 
     fn optimize_expr(&mut self, expr: MExpr) -> (MExpr, Change) {
         let (expr, child_change) = self.optimize_children(expr);
+        let (expr, lambda_app_change) = self.try_inline_lambda_app(expr);
         let (expr, private_helper_change) = self.try_imported_private_helper_call(expr);
         let (expr, variant_change) = self.try_native_function_variant_call(expr);
         let (expr, inline_change) = self.try_inline_helper_call(expr);
@@ -366,6 +367,7 @@ impl<'info> Optimizer<'info> {
         let (expr, dead_let_change) = self.try_dead_pure_let(expr);
         let (expr, dead_with_change) = self.try_dead_pure_static_with(expr);
         let mut change = child_change;
+        change.mark_if(lambda_app_change);
         change.mark_if(private_helper_change);
         change.mark_if(variant_change);
         change.mark_if(inline_change);
@@ -889,6 +891,57 @@ impl<'info> Optimizer<'info> {
                 Change::Unchanged,
             ),
         }
+    }
+
+    fn try_inline_lambda_app(&self, expr: MExpr) -> (MExpr, Change) {
+        let MExpr::App {
+            head,
+            args,
+            source: app_source,
+        } = expr
+        else {
+            return (expr, Change::Unchanged);
+        };
+
+        let Atom::Lambda {
+            params,
+            body,
+            source: lambda_source,
+        } = head
+        else {
+            return (
+                MExpr::App {
+                    head,
+                    args,
+                    source: app_source,
+                },
+                Change::Unchanged,
+            );
+        };
+        if !immediate_lambda_app_is_supported(&params, &body, args.len()) {
+            return (
+                MExpr::App {
+                    head: Atom::Lambda {
+                        params,
+                        body,
+                        source: lambda_source,
+                    },
+                    args,
+                    source: app_source,
+                },
+                Change::Unchanged,
+            );
+        }
+
+        let inlined = inline_helper_candidate(
+            &InlineCandidate {
+                params,
+                body: *body,
+            },
+            &args,
+        )
+        .expect("supported lambda application should inline");
+        (inlined, Change::Changed)
     }
 
     fn optimize_arm(&mut self, arm: MArm) -> (MArm, Change) {
@@ -1461,10 +1514,17 @@ impl<'info> Optimizer<'info> {
         if !self.expr_has_specialization_opportunity(&candidate.binding.body) {
             return (MExpr::App { head, args, source }, Change::Unchanged);
         }
+        let capture_names = self.handler_stack_capture_names();
+        if captures_collide_with_params(&capture_names, &candidate.binding.params) {
+            return (MExpr::App { head, args, source }, Change::Unchanged);
+        }
 
-        let variant_name = variant_name_with_dict_key(
-            variant_name_for_stack(&candidate.binding.name, &self.handler_stack),
-            &dict_replacements,
+        let variant_name = variant_name_with_capture_key(
+            variant_name_with_dict_key(
+                variant_name_for_stack(&candidate.binding.name, &self.handler_stack),
+                &dict_replacements,
+            ),
+            &capture_names,
         );
         if variant_name == name.name {
             return (MExpr::App { head, args, source }, Change::Unchanged);
@@ -1474,7 +1534,7 @@ impl<'info> Optimizer<'info> {
             &candidate.binding,
             &name.name,
             &variant_name,
-            Vec::<String>::new(),
+            capture_names.iter().cloned(),
             &dict_replacements,
         ) else {
             return (MExpr::App { head, args, source }, Change::Unchanged);
@@ -1489,6 +1549,8 @@ impl<'info> Optimizer<'info> {
             &variant_body,
             &dict_replacements,
         );
+        let (variant_params, args) =
+            append_capture_variant_args(variant_params, args, &capture_names, source);
         self.push_function_variant(
             &variant_name,
             variant_body,
@@ -1555,20 +1617,32 @@ impl<'info> Optimizer<'info> {
         {
             return (MExpr::App { head, args, source }, Change::Unchanged);
         }
+        let capture_names = self.handler_stack_capture_names();
+        if captures_collide_with_params(&capture_names, &candidate.binding.params) {
+            return (MExpr::App { head, args, source }, Change::Unchanged);
+        }
 
-        let variant_name = variant_name_with_dict_key(
-            variant_name_for_imported(
-                &candidate.source_module,
-                &candidate.binding.name,
-                &self.handler_stack,
+        let variant_name = variant_name_with_capture_key(
+            variant_name_with_dict_key(
+                variant_name_for_imported(
+                    &candidate.source_module,
+                    &candidate.binding.name,
+                    &self.handler_stack,
+                ),
+                &dict_replacements,
             ),
-            &dict_replacements,
+            &capture_names,
         );
+        let extra_blocked_names = candidate
+            .public_names
+            .iter()
+            .cloned()
+            .chain(capture_names.iter().cloned());
         let Some(variant_body) = self.optimized_variant_body(
             &candidate.binding,
             &candidate.binding.name,
             &variant_name,
-            candidate.public_names.iter().cloned(),
+            extra_blocked_names,
             &dict_replacements,
         ) else {
             return (MExpr::App { head, args, source }, Change::Unchanged);
@@ -1583,6 +1657,8 @@ impl<'info> Optimizer<'info> {
             &variant_body,
             &dict_replacements,
         );
+        let (variant_params, args) =
+            append_capture_variant_args(variant_params, args, &capture_names, source);
         self.push_function_variant(
             &variant_name,
             variant_body,
@@ -1860,6 +1936,38 @@ impl<'info> Optimizer<'info> {
             return None;
         }
         Some(candidate.clone())
+    }
+
+    fn handler_stack_capture_names(&self) -> Vec<String> {
+        let mut in_scope = HashSet::new();
+        in_scope.extend(self.inline_blocked_names.iter().cloned());
+        for (name, _) in &self.handler_value_bindings {
+            in_scope.insert(name.clone());
+        }
+        for (name, _) in &self.dict_value_bindings {
+            in_scope.insert(name.clone());
+        }
+        for (name, _) in &self.dict_method_bindings {
+            in_scope.insert(name.clone());
+        }
+        for (name, _) in &self.pure_atom_bindings {
+            in_scope.insert(name.clone());
+        }
+
+        let mut captures = HashSet::new();
+        for frame in &self.handler_stack {
+            if let HandlerFrame::Static { arms, .. } = frame {
+                for arm in arms {
+                    collect_handler_arm_free_names(arm, &mut captures, &HashSet::new());
+                }
+            }
+        }
+        let mut captures = captures
+            .into_iter()
+            .filter(|name| in_scope.contains(name))
+            .collect::<Vec<_>>();
+        captures.sort();
+        captures
     }
 
     fn native_variant_stack_eligible(&self) -> bool {
@@ -3351,6 +3459,10 @@ pub fn collect_imported_dict_constructors(
     codegen_info: &ModuleCodegenInfo,
     cloneable_private_helpers: &HashSet<String>,
 ) -> HashMap<String, MDictConstructor> {
+    // Debugging cross-module dictionary admission is otherwise opaque: a
+    // skipped constructor just leaves residual effect calls later. Empty value
+    // logs every imported dict; a non-empty value filters by module/name.
+    let debug_filter = std::env::var("SAGA_DEBUG_IMPORTED_DICTS").ok();
     let public_names: HashSet<String> = codegen_info
         .exports
         .iter()
@@ -3369,7 +3481,13 @@ pub fn collect_imported_dict_constructors(
         // the optimizer rewrites them to caller-local generated helper clones
         // before lowering, so the generated body never needs a remote call to
         // an unexported function.
-        if !imported_dict_constructor_supported(dc) {
+        if let Some(reason) = imported_dict_constructor_unsupported_reason(dc) {
+            if debug_imported_dict_enabled(debug_filter.as_deref(), source_module, &dc.name) {
+                eprintln!(
+                    "xmod dict reject unsupported: {source_module}.{}: {reason}",
+                    dc.name
+                );
+            }
             continue;
         }
         if dc.methods.iter().any(|method| {
@@ -3382,7 +3500,13 @@ pub fn collect_imported_dict_constructors(
                 cloneable_private_helpers,
             )
         }) {
+            if debug_imported_dict_enabled(debug_filter.as_deref(), source_module, &dc.name) {
+                eprintln!("xmod dict reject private refs: {source_module}.{}", dc.name);
+            }
             continue;
+        }
+        if debug_imported_dict_enabled(debug_filter.as_deref(), source_module, &dc.name) {
+            eprintln!("xmod dict accept: {source_module}.{}", dc.name);
         }
         candidates.insert(dc.name.clone(), dc.clone());
     }
@@ -3476,18 +3600,170 @@ pub fn collect_imported_private_helper_candidates(
     candidates
 }
 
-fn imported_dict_constructor_supported(dc: &MDictConstructor) -> bool {
-    dc.methods.iter().all(|method| {
+fn imported_dict_constructor_unsupported_reason(dc: &MDictConstructor) -> Option<String> {
+    for (index, method) in dc.methods.iter().enumerate() {
         let MExpr::Pure(Atom::Lambda { body, .. }) = method else {
-            return false;
+            return Some(format!("method {index} is not a pure lambda"));
         };
-        expr_node_count(body) <= FUNCTION_VARIANT_BODY_BUDGET
-            && !expr_contains_imported_dict_constructor_forbidden_shape(body)
-    })
+        let node_count = expr_node_count(body);
+        if node_count > FUNCTION_VARIANT_BODY_BUDGET {
+            return Some(format!(
+                "method {index} body has {node_count} nodes, budget is {FUNCTION_VARIANT_BODY_BUDGET}"
+            ));
+        }
+        if let Some(reason) = imported_dict_constructor_forbidden_shape_reason(body) {
+            return Some(format!(
+                "method {index} contains a forbidden xmod shape: {reason}"
+            ));
+        }
+    }
+    None
 }
 
-fn expr_contains_imported_dict_constructor_forbidden_shape(expr: &MExpr) -> bool {
-    expr_contains_xmod_variant_forbidden_shape(expr)
+fn imported_dict_constructor_forbidden_shape_reason(expr: &MExpr) -> Option<String> {
+    xmod_forbidden_shape_reason(expr, "body")
+}
+
+fn xmod_forbidden_shape_reason(expr: &MExpr, path: &str) -> Option<String> {
+    match expr {
+        MExpr::With { .. } => Some(format!("{path}: with")),
+        MExpr::LetFun { .. } => Some(format!("{path}: let-fun")),
+        MExpr::HandlerValue { .. } => Some(format!("{path}: handler value")),
+        MExpr::Pure(atom) => xmod_forbidden_atom_reason(atom, &format!("{path}.pure")),
+        MExpr::Yield { args, .. } | MExpr::ForeignCall { args, .. } => args
+            .iter()
+            .enumerate()
+            .find_map(|(i, atom)| xmod_forbidden_atom_reason(atom, &format!("{path}.arg{i}"))),
+        MExpr::Bind { value, body, .. } | MExpr::Let { value, body, .. } => {
+            xmod_forbidden_shape_reason(value, &format!("{path}.value"))
+                .or_else(|| xmod_forbidden_shape_reason(body, &format!("{path}.body")))
+        }
+        MExpr::Ensure { body, cleanup } => {
+            xmod_forbidden_shape_reason(body, &format!("{path}.body"))
+                .or_else(|| xmod_forbidden_shape_reason(cleanup, &format!("{path}.cleanup")))
+        }
+        MExpr::Case {
+            scrutinee, arms, ..
+        } => xmod_forbidden_atom_reason(scrutinee, &format!("{path}.scrutinee")).or_else(|| {
+            arms.iter().enumerate().find_map(|(i, arm)| {
+                arm.guard
+                    .as_ref()
+                    .and_then(|guard| {
+                        xmod_forbidden_shape_reason(guard, &format!("{path}.arm{i}.guard"))
+                    })
+                    .or_else(|| {
+                        xmod_forbidden_shape_reason(&arm.body, &format!("{path}.arm{i}.body"))
+                    })
+            })
+        }),
+        MExpr::If {
+            cond,
+            then_branch,
+            else_branch,
+            ..
+        } => xmod_forbidden_atom_reason(cond, &format!("{path}.cond"))
+            .or_else(|| xmod_forbidden_shape_reason(then_branch, &format!("{path}.then")))
+            .or_else(|| xmod_forbidden_shape_reason(else_branch, &format!("{path}.else"))),
+        MExpr::App { head, args, .. } => match head {
+            Atom::Lambda { params, body, .. }
+                if immediate_lambda_app_is_supported(params, body, args.len()) =>
+            {
+                args.iter()
+                    .enumerate()
+                    .find_map(|(i, atom)| {
+                        xmod_forbidden_atom_reason(atom, &format!("{path}.arg{i}"))
+                    })
+                    .or_else(|| xmod_forbidden_shape_reason(body, &format!("{path}.lambda_body")))
+            }
+            _ => xmod_forbidden_atom_reason(head, &format!("{path}.head")).or_else(|| {
+                args.iter().enumerate().find_map(|(i, atom)| {
+                    xmod_forbidden_atom_reason(atom, &format!("{path}.arg{i}"))
+                })
+            }),
+        },
+        MExpr::Resume { value, .. }
+        | MExpr::FieldAccess { record: value, .. }
+        | MExpr::DictMethodAccess { dict: value, .. }
+        | MExpr::UnaryMinus { value, .. } => xmod_forbidden_atom_reason(value, path),
+        MExpr::RecordUpdate { record, fields, .. } => {
+            xmod_forbidden_atom_reason(record, &format!("{path}.record")).or_else(|| {
+                fields.iter().enumerate().find_map(|(i, (_, atom))| {
+                    xmod_forbidden_atom_reason(atom, &format!("{path}.field{i}"))
+                })
+            })
+        }
+        MExpr::BinOp { left, right, .. } => {
+            xmod_forbidden_atom_reason(left, &format!("{path}.left"))
+                .or_else(|| xmod_forbidden_atom_reason(right, &format!("{path}.right")))
+        }
+        MExpr::BitString { segments, .. } => segments.iter().enumerate().find_map(|(i, seg)| {
+            xmod_forbidden_atom_reason(&seg.value, &format!("{path}.segment{i}.value")).or_else(
+                || {
+                    seg.size.as_ref().and_then(|size| {
+                        xmod_forbidden_atom_reason(size, &format!("{path}.segment{i}.size"))
+                    })
+                },
+            )
+        }),
+        MExpr::Receive { arms, after, .. } => arms
+            .iter()
+            .enumerate()
+            .find_map(|(i, arm)| {
+                arm.guard
+                    .as_ref()
+                    .and_then(|guard| {
+                        xmod_forbidden_shape_reason(guard, &format!("{path}.arm{i}.guard"))
+                    })
+                    .or_else(|| {
+                        xmod_forbidden_shape_reason(&arm.body, &format!("{path}.arm{i}.body"))
+                    })
+            })
+            .or_else(|| {
+                after.as_ref().and_then(|(timeout, body)| {
+                    xmod_forbidden_atom_reason(timeout, &format!("{path}.after.timeout")).or_else(
+                        || xmod_forbidden_shape_reason(body, &format!("{path}.after.body")),
+                    )
+                })
+            }),
+    }
+}
+
+fn xmod_forbidden_atom_reason(atom: &Atom, path: &str) -> Option<String> {
+    match atom {
+        Atom::Lambda { .. } => Some(format!("{path}: lambda atom")),
+        Atom::Ctor { args, .. } => args
+            .iter()
+            .enumerate()
+            .find_map(|(i, arg)| xmod_forbidden_atom_reason(arg, &format!("{path}.ctor_arg{i}"))),
+        Atom::Tuple { elements, .. } => elements
+            .iter()
+            .enumerate()
+            .find_map(|(i, arg)| xmod_forbidden_atom_reason(arg, &format!("{path}.tuple_arg{i}"))),
+        Atom::AnonRecord { fields, .. } | Atom::Record { fields, .. } => {
+            fields.iter().enumerate().find_map(|(i, (_, atom))| {
+                xmod_forbidden_atom_reason(atom, &format!("{path}.field{i}"))
+            })
+        }
+        Atom::BackendSpawnThunk { callback, .. } => {
+            xmod_forbidden_atom_reason(callback, &format!("{path}.spawn_callback"))
+        }
+        Atom::Var { .. }
+        | Atom::Lit { .. }
+        | Atom::DictRef { .. }
+        | Atom::QualifiedRef { .. }
+        | Atom::Symbol { .. }
+        | Atom::BackendAtom { .. } => None,
+    }
+}
+
+fn debug_imported_dict_enabled(filter: Option<&str>, source_module: &str, name: &str) -> bool {
+    let Some(filter) = filter else {
+        return false;
+    };
+    filter.is_empty()
+        || source_module.contains(filter)
+        || name.contains(filter)
+        || format!("{source_module}.{name}").contains(filter)
 }
 
 fn imported_variant_head_info(atom: &Atom) -> Option<(String, u32, crate::ast::NodeId)> {
@@ -3670,6 +3946,13 @@ fn variant_name_with_dict_key(base: String, dict_replacements: &[DictParamReplac
     format!("{base}__dict_{:016x}", stable_key_hash(&key))
 }
 
+fn variant_name_with_capture_key(base: String, captures: &[String]) -> String {
+    if captures.is_empty() {
+        return base;
+    }
+    format!("{base}__caps_{:016x}", stable_key_hash(&captures.join(";")))
+}
+
 fn stable_key_hash(value: &str) -> u64 {
     let mut hash = 0xcbf29ce484222325_u64;
     for byte in value.as_bytes() {
@@ -3677,6 +3960,36 @@ fn stable_key_hash(value: &str) -> u64 {
         hash = hash.wrapping_mul(0x100000001b3);
     }
     hash
+}
+
+fn captures_collide_with_params(captures: &[String], params: &[Pat]) -> bool {
+    let param_names = bound_names_in_pats(params)
+        .into_iter()
+        .collect::<HashSet<_>>();
+    captures.iter().any(|capture| param_names.contains(capture))
+}
+
+fn append_capture_variant_args(
+    mut params: Vec<Pat>,
+    mut args: Vec<Atom>,
+    captures: &[String],
+    source: crate::ast::NodeId,
+) -> (Vec<Pat>, Vec<Atom>) {
+    for capture in captures {
+        params.push(Pat::Var {
+            name: capture.clone(),
+            id: source,
+            span: crate::token::Span { start: 0, end: 0 },
+        });
+        args.push(Atom::Var {
+            name: MVar {
+                name: capture.clone(),
+                id: source.0,
+            },
+            source,
+        });
+    }
+    (params, args)
 }
 
 fn atom_key(atom: &Atom) -> String {
@@ -4171,6 +4484,10 @@ fn dict_method_params_are_supported(params: &[Pat]) -> bool {
         supported_inline_param(param)
             || matches!(param, Pat::Constructor { .. } | Pat::Tuple { .. })
     })
+}
+
+fn immediate_lambda_app_is_supported(params: &[Pat], body: &MExpr, arg_len: usize) -> bool {
+    arg_len == params.len() && helper_params_are_supported(params) && expr_is_pure(body)
 }
 
 fn supported_inline_param(param: &Pat) -> bool {
@@ -4995,78 +5312,7 @@ fn atom_contains_inline_forbidden_shape(atom: &Atom) -> bool {
 }
 
 fn expr_contains_xmod_variant_forbidden_shape(expr: &MExpr) -> bool {
-    match expr {
-        MExpr::With { .. } | MExpr::LetFun { .. } | MExpr::HandlerValue { .. } => true,
-        MExpr::Pure(atom) => atom_contains_xmod_variant_forbidden_shape(atom),
-        MExpr::Yield { args, .. } | MExpr::ForeignCall { args, .. } => {
-            args.iter().any(atom_contains_xmod_variant_forbidden_shape)
-        }
-        MExpr::Bind { value, body, .. } | MExpr::Let { value, body, .. } => {
-            expr_contains_xmod_variant_forbidden_shape(value)
-                || expr_contains_xmod_variant_forbidden_shape(body)
-        }
-        MExpr::Ensure { body, cleanup } => {
-            expr_contains_xmod_variant_forbidden_shape(body)
-                || expr_contains_xmod_variant_forbidden_shape(cleanup)
-        }
-        MExpr::Case {
-            scrutinee, arms, ..
-        } => {
-            atom_contains_xmod_variant_forbidden_shape(scrutinee)
-                || arms.iter().any(|arm| {
-                    arm.guard
-                        .as_ref()
-                        .is_some_and(expr_contains_xmod_variant_forbidden_shape)
-                        || expr_contains_xmod_variant_forbidden_shape(&arm.body)
-                })
-        }
-        MExpr::If {
-            cond,
-            then_branch,
-            else_branch,
-            ..
-        } => {
-            atom_contains_xmod_variant_forbidden_shape(cond)
-                || expr_contains_xmod_variant_forbidden_shape(then_branch)
-                || expr_contains_xmod_variant_forbidden_shape(else_branch)
-        }
-        MExpr::App { head, args, .. } => {
-            atom_contains_xmod_variant_forbidden_shape(head)
-                || args.iter().any(atom_contains_xmod_variant_forbidden_shape)
-        }
-        MExpr::Resume { value, .. }
-        | MExpr::FieldAccess { record: value, .. }
-        | MExpr::DictMethodAccess { dict: value, .. }
-        | MExpr::UnaryMinus { value, .. } => atom_contains_xmod_variant_forbidden_shape(value),
-        MExpr::RecordUpdate { record, fields, .. } => {
-            atom_contains_xmod_variant_forbidden_shape(record)
-                || fields
-                    .iter()
-                    .any(|(_, atom)| atom_contains_xmod_variant_forbidden_shape(atom))
-        }
-        MExpr::BinOp { left, right, .. } => {
-            atom_contains_xmod_variant_forbidden_shape(left)
-                || atom_contains_xmod_variant_forbidden_shape(right)
-        }
-        MExpr::BitString { segments, .. } => segments.iter().any(|seg| {
-            atom_contains_xmod_variant_forbidden_shape(&seg.value)
-                || seg
-                    .size
-                    .as_ref()
-                    .is_some_and(atom_contains_xmod_variant_forbidden_shape)
-        }),
-        MExpr::Receive { arms, after, .. } => {
-            arms.iter().any(|arm| {
-                arm.guard
-                    .as_ref()
-                    .is_some_and(expr_contains_xmod_variant_forbidden_shape)
-                    || expr_contains_xmod_variant_forbidden_shape(&arm.body)
-            }) || after.as_ref().is_some_and(|(timeout, body)| {
-                atom_contains_xmod_variant_forbidden_shape(timeout)
-                    || expr_contains_xmod_variant_forbidden_shape(body)
-            })
-        }
-    }
+    xmod_forbidden_shape_reason(expr, "body").is_some()
 }
 
 fn expr_contains_imported_handler_factory_forbidden_shape(expr: &MExpr) -> bool {
@@ -5122,10 +5368,18 @@ fn expr_contains_imported_handler_factory_forbidden_shape(expr: &MExpr) -> bool 
                 || expr_contains_imported_handler_factory_forbidden_shape(then_branch)
                 || expr_contains_imported_handler_factory_forbidden_shape(else_branch)
         }
-        MExpr::App { head, args, .. } => {
-            atom_contains_xmod_variant_forbidden_shape(head)
-                || args.iter().any(atom_contains_xmod_variant_forbidden_shape)
-        }
+        MExpr::App { head, args, .. } => match head {
+            Atom::Lambda { params, body, .. }
+                if immediate_lambda_app_is_supported(params, body, args.len()) =>
+            {
+                args.iter().any(atom_contains_xmod_variant_forbidden_shape)
+                    || expr_contains_imported_handler_factory_forbidden_shape(body)
+            }
+            _ => {
+                atom_contains_xmod_variant_forbidden_shape(head)
+                    || args.iter().any(atom_contains_xmod_variant_forbidden_shape)
+            }
+        },
         MExpr::Resume { value, .. }
         | MExpr::FieldAccess { record: value, .. }
         | MExpr::DictMethodAccess { dict: value, .. }
@@ -5151,25 +5405,7 @@ fn expr_contains_imported_handler_factory_forbidden_shape(expr: &MExpr) -> bool 
 }
 
 fn atom_contains_xmod_variant_forbidden_shape(atom: &Atom) -> bool {
-    match atom {
-        Atom::Lambda { .. } => true,
-        Atom::Ctor { args, .. } => args.iter().any(atom_contains_xmod_variant_forbidden_shape),
-        Atom::Tuple { elements, .. } => elements
-            .iter()
-            .any(atom_contains_xmod_variant_forbidden_shape),
-        Atom::AnonRecord { fields, .. } | Atom::Record { fields, .. } => fields
-            .iter()
-            .any(|(_, atom)| atom_contains_xmod_variant_forbidden_shape(atom)),
-        Atom::BackendSpawnThunk { callback, .. } => {
-            atom_contains_xmod_variant_forbidden_shape(callback)
-        }
-        Atom::Var { .. }
-        | Atom::Lit { .. }
-        | Atom::DictRef { .. }
-        | Atom::QualifiedRef { .. }
-        | Atom::Symbol { .. }
-        | Atom::BackendAtom { .. } => false,
-    }
+    xmod_forbidden_atom_reason(atom, "atom").is_some()
 }
 
 fn expr_calls_any(expr: &MExpr, names: &HashSet<String>) -> bool {
