@@ -1294,11 +1294,10 @@ handler silent for Log {
 main () = outer () with silent
 "#;
     let out = emit_elaborated(src);
-    // Both should take Unit + _HandleLog + _ReturnK
+    // `inner` remains as the source function. `outer` may be replaced by a
+    // generated static variant once the optimizer proves the enclosing handler.
     assert_contains(&out, "'inner'/3");
-    assert_contains(&out, "'outer'/3");
-    // outer's body should call inner with _Evidence and _ReturnK passed through
-    assert_contains(&out, "apply 'inner'/3(");
+    assert_contains(&out, "'__saga_static_variant__outer");
 }
 
 #[test]

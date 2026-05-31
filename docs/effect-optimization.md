@@ -129,7 +129,12 @@ Implemented variant shapes:
   end in a `HandlerValue`, including simple configuration prefixes;
 - imported public handler factory specialization for the same let-bound shape,
   including public pure values from the factory module such as default option
-  records.
+  records;
+- conservative same-module trait method specialization for nullary dictionary
+  constructors: when a generated static variant constructs a known zero-arg
+  dictionary, extracts a method with `DictMethodAccess`, and applies that
+  method under a known handler stack, the optimizer may inline the method lambda
+  if doing so exposes an existing direct-call opportunity.
 
 Generated variants are private to the caller module. Cross-module variants do
 not change the callee module's exports or package cache behavior. Imported
@@ -137,11 +142,12 @@ not change the callee module's exports or package cache behavior. Imported
 specialization, and ambiguous closure/local-function shapes are skipped in the
 current implementation.
 
-Generated static variants do not yet specialize dictionary-dispatched trait
-methods. A call such as `serialize_with x` can be cloned under a known handler,
-but if it reaches the actual encoder through `element(N, dict)` the residual
-effect operations in that trait method remain until a dictionary/trait-call
-specialization pass lands.
+Trait method specialization is deliberately narrow. It handles local nullary
+dict constructors first, which covers concrete monomorphic impls and some
+already-concretized generic call sites. It does not yet recursively specialize
+dictionary constructors with dictionary parameters, compose with every dynamic
+handler-factory recovery shape, or specialize imported dictionary constructors.
+Those remain follow-up work.
 
 The optimizer can remove private source functions once entry-reachable calls are
 fully covered by generated variants. Public functions are retained.

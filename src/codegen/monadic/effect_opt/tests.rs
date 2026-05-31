@@ -1543,6 +1543,103 @@ fn helper_inline_exposes_yield_to_static_direct_call() {
 }
 
 #[test]
+fn dict_method_inline_exposes_yield_to_static_function_variant() {
+    let mut f = Fixture::new();
+    let arm = tail_arm(2810, vec![pat_unit(2811)], resume(lit_int("42", 42)), None);
+    f.h.resumption
+        .insert(crate::ast::NodeId(2810), ResumptionKind::TailResumptive);
+    let handler = static_log_handler(vec![arm]);
+    let dict = MDecl::DictConstructor(MDictConstructor {
+        id: crate::ast::NodeId(2812),
+        name: "__dict_Encodable_Int".to_string(),
+        dict_params: vec![],
+        methods: vec![MExpr::Pure(Atom::Lambda {
+            params: vec![pat_var("x", 2813)],
+            body: Box::new(bind_expr(
+                mv("opts", 2814),
+                yield_log(vec![unit_atom()], crate::ast::NodeId(2815)),
+                MExpr::BinOp {
+                    op: crate::ast::BinOp::Add,
+                    left: var("x", 2813),
+                    right: var("opts", 2814),
+                    source: crate::ast::NodeId(2816),
+                },
+            )),
+            source: crate::ast::NodeId(2817),
+        })],
+        method_effects: vec![],
+        method_open_rows: vec![],
+        impl_effects: vec![],
+        span: span(),
+    });
+    let compute = helper_fun(
+        "compute",
+        2818,
+        vec![pat_var("x", 2819)],
+        bind_expr(
+            mv("dict", 2820),
+            MExpr::App {
+                head: Atom::DictRef {
+                    name: "__dict_Encodable_Int".to_string(),
+                    source: crate::ast::NodeId(2821),
+                },
+                args: vec![],
+                source: crate::ast::NodeId(2822),
+            },
+            bind_expr(
+                mv("method", 2823),
+                MExpr::DictMethodAccess {
+                    dict: var("dict", 2820),
+                    trait_name: "Encodable".to_string(),
+                    method_index: 0,
+                    source: crate::ast::NodeId(2824),
+                },
+                MExpr::App {
+                    head: var("method", 2823),
+                    args: vec![var("x", 2819)],
+                    source: crate::ast::NodeId(2825),
+                },
+            ),
+        ),
+    );
+    let caller = MDecl::Val(MVal {
+        id: crate::ast::NodeId(2826),
+        public: false,
+        name: "caller".to_string(),
+        value: with_expr(
+            handler,
+            MExpr::App {
+                head: var("compute", 2827),
+                args: vec![lit_int("5", 5)],
+                source: crate::ast::NodeId(2828),
+            },
+        ),
+        span: span(),
+    });
+    let info = f.info();
+
+    let out = run(vec![dict, compute, caller], &f.h, &info);
+    let variant = out
+        .iter()
+        .find_map(|decl| match decl {
+            MDecl::FunBinding(fun) if is_generated_variant_name(&fun.name) => Some(fun),
+            _ => None,
+        })
+        .expect("expected generated static variant");
+
+    assert_eq!(
+        variant.body,
+        MExpr::BinOp {
+            op: crate::ast::BinOp::Add,
+            left: var("x", 2819),
+            right: lit_int("42", 42),
+            source: crate::ast::NodeId(2816),
+        }
+    );
+    assert_eq!(expr_yield_count(&variant.body), 0);
+}
+
+#[test]
 fn helper_inline_skips_multi_clause_function() {
     let mut f = Fixture::new();
     let arm = tail_arm(290, vec![pat_unit(291)], resume(lit_int("42", 42)), None);

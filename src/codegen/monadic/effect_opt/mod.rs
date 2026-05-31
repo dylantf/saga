@@ -98,8 +98,11 @@ struct Optimizer<'info> {
     handler_analysis: &'info HandlerAnalysis,
     handler_stack: Vec<HandlerFrame>,
     handler_value_bindings: Vec<(String, Option<HandlerValueCandidate>)>,
+    dict_value_bindings: Vec<(String, Option<DictValueCandidate>)>,
+    dict_method_bindings: Vec<(String, Option<InlineCandidate>)>,
     inline_candidates: HashMap<String, InlineCandidate>,
     handler_factory_candidates: HashMap<String, InlineCandidate>,
+    dict_constructors: HashMap<String, MDictConstructor>,
     variant_candidates: HashMap<String, VariantCandidate>,
     generated_variant_names: HashSet<String>,
     pending_variants: Vec<MDecl>,
@@ -163,6 +166,11 @@ struct VariantCandidate {
     binding: MFunBinding,
 }
 
+#[derive(Debug, Clone)]
+struct DictValueCandidate {
+    methods: Vec<Atom>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Change {
     Unchanged,
@@ -222,8 +230,11 @@ impl<'info> Optimizer<'info> {
             handler_analysis,
             handler_stack: Vec::new(),
             handler_value_bindings: Vec::new(),
+            dict_value_bindings: Vec::new(),
+            dict_method_bindings: Vec::new(),
             inline_candidates: HashMap::new(),
             handler_factory_candidates: HashMap::new(),
+            dict_constructors: HashMap::new(),
             variant_candidates: HashMap::new(),
             generated_variant_names: HashSet::new(),
             pending_variants: Vec::new(),
@@ -236,6 +247,7 @@ impl<'info> Optimizer<'info> {
         while changed {
             self.inline_candidates = collect_inline_candidates(&program);
             self.handler_factory_candidates = collect_handler_factory_candidates(&program);
+            self.dict_constructors = collect_dict_constructors(&program);
             self.variant_candidates = collect_variant_candidates(&program);
             self.pending_variants.clear();
             changed = false;
@@ -857,9 +869,90 @@ impl<'info> Optimizer<'info> {
         } else {
             self.handler_value_bindings.push((var.name.clone(), None));
         }
+        if let Some(candidate) = self.dict_value_candidate(value) {
+            self.dict_value_bindings
+                .push((var.name.clone(), Some(candidate)));
+        } else {
+            self.dict_value_bindings.push((var.name.clone(), None));
+        }
+        if let Some(candidate) = self.dict_method_candidate(value) {
+            self.dict_method_bindings
+                .push((var.name.clone(), Some(candidate)));
+        } else {
+            self.dict_method_bindings.push((var.name.clone(), None));
+        }
         let (body, change) = self.optimize_expr_with_blocked_names(vec![var.name.clone()], body);
+        self.dict_method_bindings.pop();
+        self.dict_value_bindings.pop();
         self.handler_value_bindings.pop();
         (body, change)
+    }
+
+    fn dict_value_candidate(&self, value: &MExpr) -> Option<DictValueCandidate> {
+        let MExpr::App { head, args, .. } = value else {
+            return None;
+        };
+        if !args.is_empty() {
+            return None;
+        }
+        let Atom::DictRef { name, .. } = head else {
+            return None;
+        };
+        let constructor = self.dict_constructors.get(name)?;
+        if !constructor.dict_params.is_empty() {
+            return None;
+        }
+        let methods = constructor
+            .methods
+            .iter()
+            .map(|method| match method {
+                MExpr::Pure(atom @ Atom::Lambda { .. }) => Some(atom.clone()),
+                _ => None,
+            })
+            .collect::<Option<Vec<_>>>()?;
+        Some(DictValueCandidate { methods })
+    }
+
+    fn dict_method_candidate(&self, value: &MExpr) -> Option<InlineCandidate> {
+        let MExpr::DictMethodAccess {
+            dict, method_index, ..
+        } = value
+        else {
+            return None;
+        };
+        let Atom::Var { name, .. } = dict else {
+            return None;
+        };
+        let dict = self.lookup_dict_value(&name.name)?;
+        let method = dict.methods.get(*method_index)?;
+        let Atom::Lambda { params, body, .. } = method else {
+            return None;
+        };
+        if !helper_params_are_supported(params) {
+            return None;
+        }
+        Some(InlineCandidate {
+            params: params.clone(),
+            body: body.as_ref().clone(),
+        })
+    }
+
+    fn lookup_dict_value(&self, name: &str) -> Option<DictValueCandidate> {
+        self.dict_value_bindings
+            .iter()
+            .rev()
+            .find(|(bound_name, _)| bound_name == name)?
+            .1
+            .clone()
+    }
+
+    fn lookup_dict_method(&self, name: &str) -> Option<InlineCandidate> {
+        self.dict_method_bindings
+            .iter()
+            .rev()
+            .find(|(bound_name, _)| bound_name == name)?
+            .1
+            .clone()
     }
 
     fn specialize_dynamic_handler_binding(&self, handler: MHandler) -> (MHandler, Change) {
@@ -1203,7 +1296,9 @@ impl<'info> Optimizer<'info> {
         if args.len() != candidate.binding.params.len() {
             return (MExpr::App { head, args, source }, Change::Unchanged);
         }
-        if !self.expr_has_direct_call_opportunity(&candidate.binding.body) {
+        if !self.expr_has_direct_call_opportunity(&candidate.binding.body)
+            && !expr_contains_dict_method_access(&candidate.binding.body)
+        {
             return (MExpr::App { head, args, source }, Change::Unchanged);
         }
 
@@ -1281,6 +1376,7 @@ impl<'info> Optimizer<'info> {
         }
         if !require_no_residual_yields
             && !self.expr_has_direct_call_opportunity(&candidate.binding.body)
+            && !expr_contains_dict_method_access(&candidate.binding.body)
         {
             return (MExpr::App { head, args, source }, Change::Unchanged);
         }
@@ -1334,7 +1430,17 @@ impl<'info> Optimizer<'info> {
         self.inline_blocked_names
             .extend(bound_names_in_pats(&binding.params));
         self.inline_blocked_names.extend(extra_blocked_names);
-        let (optimized_body, body_change) = self.optimize_expr(variant_body);
+        let mut optimized_body = variant_body;
+        let mut body_change = Change::Unchanged;
+        loop {
+            let (next_body, change) = self.optimize_expr(optimized_body);
+            if change == Change::Unchanged {
+                optimized_body = next_body;
+                break;
+            }
+            body_change = Change::Changed;
+            optimized_body = next_body;
+        }
         self.inline_blocked_names.truncate(old_blocked_len);
 
         if body_change == Change::Unchanged {
@@ -1489,6 +1595,16 @@ impl<'info> Optimizer<'info> {
         let Atom::Var { name, .. } = &head else {
             return (MExpr::App { head, args, source }, Change::Unchanged);
         };
+        if let Some(candidate) = self.lookup_dict_method(&name.name) {
+            let Some(inlined) = inline_helper_candidate(&candidate, &args) else {
+                return (MExpr::App { head, args, source }, Change::Unchanged);
+            };
+            if !self.expr_has_direct_call_opportunity(&inlined) {
+                return (MExpr::App { head, args, source }, Change::Unchanged);
+            }
+            return (inlined, Change::Changed);
+        }
+
         if self.inline_blocked_names.iter().any(|n| n == &name.name) {
             return (MExpr::App { head, args, source }, Change::Unchanged);
         }
@@ -2209,6 +2325,150 @@ fn atom_is_handler_independent_value(atom: &Atom) -> bool {
     }
 }
 
+fn expr_contains_dict_method_access(expr: &MExpr) -> bool {
+    match expr {
+        MExpr::DictMethodAccess { .. } => true,
+        MExpr::Pure(atom) | MExpr::Resume { value: atom, .. } => {
+            atom_contains_dict_method_access(atom)
+        }
+        MExpr::Yield { args, .. } | MExpr::ForeignCall { args, .. } => {
+            args.iter().any(atom_contains_dict_method_access)
+        }
+        MExpr::Bind { value, body, .. }
+        | MExpr::Let { value, body, .. }
+        | MExpr::Ensure {
+            body: value,
+            cleanup: body,
+        } => expr_contains_dict_method_access(value) || expr_contains_dict_method_access(body),
+        MExpr::Case {
+            scrutinee, arms, ..
+        } => {
+            atom_contains_dict_method_access(scrutinee)
+                || arms.iter().any(|arm| {
+                    arm.guard
+                        .as_ref()
+                        .is_some_and(expr_contains_dict_method_access)
+                        || expr_contains_dict_method_access(&arm.body)
+                })
+        }
+        MExpr::If {
+            cond,
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            atom_contains_dict_method_access(cond)
+                || expr_contains_dict_method_access(then_branch)
+                || expr_contains_dict_method_access(else_branch)
+        }
+        MExpr::App { head, args, .. } => {
+            atom_contains_dict_method_access(head)
+                || args.iter().any(atom_contains_dict_method_access)
+        }
+        MExpr::With { handler, body, .. } => {
+            handler_contains_dict_method_access(handler) || expr_contains_dict_method_access(body)
+        }
+        MExpr::FieldAccess { record, .. } | MExpr::UnaryMinus { value: record, .. } => {
+            atom_contains_dict_method_access(record)
+        }
+        MExpr::RecordUpdate { record, fields, .. } => {
+            atom_contains_dict_method_access(record)
+                || fields
+                    .iter()
+                    .any(|(_, atom)| atom_contains_dict_method_access(atom))
+        }
+        MExpr::BinOp { left, right, .. } => {
+            atom_contains_dict_method_access(left) || atom_contains_dict_method_access(right)
+        }
+        MExpr::BitString { segments, .. } => segments.iter().any(|seg| {
+            atom_contains_dict_method_access(&seg.value)
+                || seg
+                    .size
+                    .as_ref()
+                    .is_some_and(atom_contains_dict_method_access)
+        }),
+        MExpr::Receive { arms, after, .. } => {
+            arms.iter().any(|arm| {
+                arm.guard
+                    .as_ref()
+                    .is_some_and(expr_contains_dict_method_access)
+                    || expr_contains_dict_method_access(&arm.body)
+            }) || after.as_ref().is_some_and(|(timeout, body)| {
+                atom_contains_dict_method_access(timeout) || expr_contains_dict_method_access(body)
+            })
+        }
+        MExpr::LetFun { body, rest, .. } => {
+            expr_contains_dict_method_access(body) || expr_contains_dict_method_access(rest)
+        }
+        MExpr::HandlerValue {
+            arms,
+            return_clause,
+            ..
+        } => {
+            arms.iter().any(handler_arm_contains_dict_method_access)
+                || return_clause
+                    .as_ref()
+                    .is_some_and(|arm| handler_arm_contains_dict_method_access(arm))
+        }
+    }
+}
+
+fn handler_contains_dict_method_access(handler: &MHandler) -> bool {
+    match handler {
+        MHandler::Static {
+            arms,
+            return_clause,
+            ..
+        } => {
+            arms.iter().any(handler_arm_contains_dict_method_access)
+                || return_clause
+                    .as_ref()
+                    .is_some_and(handler_arm_contains_dict_method_access)
+        }
+        MHandler::Native { .. } => false,
+        MHandler::Composite { handlers, .. } => {
+            handlers.iter().any(handler_contains_dict_method_access)
+        }
+        MHandler::Dynamic {
+            op_tuple,
+            return_lambda,
+            ..
+        } => {
+            atom_contains_dict_method_access(op_tuple)
+                || return_lambda
+                    .as_ref()
+                    .is_some_and(atom_contains_dict_method_access)
+        }
+    }
+}
+
+fn handler_arm_contains_dict_method_access(arm: &MHandlerArm) -> bool {
+    expr_contains_dict_method_access(&arm.body)
+        || arm
+            .finally_block
+            .as_deref()
+            .is_some_and(expr_contains_dict_method_access)
+}
+
+fn atom_contains_dict_method_access(atom: &Atom) -> bool {
+    match atom {
+        Atom::Ctor { args, .. } | Atom::Tuple { elements: args, .. } => {
+            args.iter().any(atom_contains_dict_method_access)
+        }
+        Atom::AnonRecord { fields, .. } | Atom::Record { fields, .. } => fields
+            .iter()
+            .any(|(_, atom)| atom_contains_dict_method_access(atom)),
+        Atom::Lambda { body, .. } => expr_contains_dict_method_access(body),
+        Atom::BackendSpawnThunk { callback, .. } => atom_contains_dict_method_access(callback),
+        Atom::Var { .. }
+        | Atom::Lit { .. }
+        | Atom::DictRef { .. }
+        | Atom::QualifiedRef { .. }
+        | Atom::Symbol { .. }
+        | Atom::BackendAtom { .. } => false,
+    }
+}
+
 const INLINE_HELPER_BODY_BUDGET: usize = 30;
 const FUNCTION_VARIANT_BODY_BUDGET: usize = 220;
 const NATIVE_VARIANT_PREFIX: &str = "__saga_native_variant";
@@ -2284,6 +2544,16 @@ fn collect_handler_factory_candidates(program: &MProgram) -> HashMap<String, Inl
         );
     }
     candidates
+}
+
+fn collect_dict_constructors(program: &MProgram) -> HashMap<String, MDictConstructor> {
+    program
+        .iter()
+        .filter_map(|decl| match decl {
+            MDecl::DictConstructor(dc) => Some((dc.name.clone(), dc.clone())),
+            _ => None,
+        })
+        .collect()
 }
 
 pub fn collect_imported_handler_factory_candidates(
