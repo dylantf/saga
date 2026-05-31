@@ -132,49 +132,37 @@ Metadata for effect inference (not effect tracking):
 
 ---
 
-## CPS Transform (Codegen)
+## Uniform CPS Codegen
 
-### Core Idea
+Saga now uses a uniform monadic/CPS lowering path for algebraic effects. The
+stable end-to-end implementation note is `docs/uniform-cps-translation.md`; this
+section is the short version.
 
-All effects are implemented via CPS (Continuation-Passing Style) transform at compile time. There is **one mechanism** for all effects -- resumable, non-resumable, and multishot. No `throw`/`catch`, no process spawning for control flow.
+The backend pipeline is:
 
-Every effect call captures "everything after this point" as a closure (`K`) and passes it to the handler. The handler decides what to do:
-
-- **Resume:** call `K(value)` -- computation continues
-- **Abort:** don't call `K` -- computation is abandoned, handler's return value is the result
-- **Multishot:** call `K` multiple times -- each call runs an independent copy of the rest of the computation (free on BEAM since closures are immutable)
-
-### Effect Calls Become Continuation-Passing
-
-```
-fun do_work : Unit -> Int needs {Log}
-do_work () = {
-  log! "starting"
-  let x = 10 + 20
-  log! ("result: " <> show x)
-  x
-}
+```text
+Elaborated AST -> ANF -> Monadic IR -> effect optimizer -> Core Erlang
 ```
 
-Transforms to Core Erlang where the function takes an evidence vector and a return continuation. Each `op!` call indexes into the evidence to find its handler closure and passes a continuation:
+Ordinary Saga functions and compiler-generated dictionary constructors lower to
+functions with explicit evidence and return continuation parameters:
 
-```erlang
-'do_work'/3 = fun (_Unit, _Evidence, _ReturnK) ->
-  %% extract Log handler tuple from evidence (canonical position)
-  let {_Tag, LogOps} = call 'erlang':'element'(EvIdx, _Evidence) in
-  let LogOp = call 'erlang':'element'(1, LogOps) in
-  apply LogOp("starting",
-    fun (_) ->
-      let X = call 'erlang':'+'(10, 20) in
-      apply LogOp(<msg>,
-        fun (_) -> apply _ReturnK(X)))
+```text
+(user_args..., _Evidence, _ReturnK)
 ```
 
-`_Evidence` carries every effect handler in scope; `_ReturnK` runs on successful completion at the enclosing handler boundary. Both are explicit parameters — no thread-local state, no implicit context.
+`_Evidence` is the current runtime handler table. `_ReturnK` is the continuation
+for successful completion at the current boundary. Effects are not implemented
+with Erlang exceptions or process control flow; every operation is routed through
+this explicit evidence/continuation protocol.
 
-### Evidence Vector Representation
+The optimizer is optional. The unoptimized uniform CPS path is the correctness
+oracle, and optimization removes scaffolding only when a conservative local proof
+says it is safe. See `docs/effect-optimization.md` for the current optimizer.
 
-The evidence vector is a BEAM tuple of per-effect entries, sorted alphabetically by canonical effect tag:
+### Runtime Evidence
+
+Evidence is a BEAM tuple of tagged entries:
 
 ```erlang
 {
@@ -184,210 +172,109 @@ The evidence vector is a BEAM tuple of per-effect entries, sorted alphabetically
 }
 ```
 
-Each entry is `{EffectAtom, OpTuple}`. Within an `OpTuple`, op closures are sorted alphabetically by op name. The whole structure is canonical — index of an effect in the outer tuple, and index of an op in its inner tuple, are statically determined when the row is closed.
+Each entry is `{EffectAtom, OpTuple}`. Entries are stored in canonical effect
+atom order. Operations inside an `OpTuple` are stored in canonical operation name
+order.
 
-The vector is always tagged. Closed-row op calls technically don't need the tag (the static indices suffice), but tagging keeps cross-module ABI uniform and makes runtime panics self-describing.
+Installing a handler calls `std_evidence_bridge:insert_canonical/2`. If an
+entry for the same effect already exists, it is replaced, which implements
+innermost-wins shadowing.
 
-#### Op Call Lookup
+Performing an operation lowers to:
 
-- **Closed row (statically known indices):** `element(OpIdx, element(2, element(EffectIdx, Evidence)))`. Three constant-time element loads.
-- **Open row (`..e`, callee doesn't know full row):** call out to `std_evidence_bridge:find_evidence/2` (defined in `src/stdlib/evidence.bridge.erl`), which walks the tuple by atom comparison. O(n) where n is the number of effects in scope, typically ≤5.
+1. find the effect entry in `_Evidence`;
+2. select the operation closure from the entry's `OpTuple`;
+3. apply the operation closure to `(op_args..., EvidenceAtPerform, K)`.
 
-#### Extending Evidence at `with`
-
-`expr with handler` extends the inherited evidence vector by inserting a new entry in canonical position:
-
-```erlang
-NewEvidence = call 'std_evidence_bridge':'insert_canonical'(
-  OldEvidence,
-  {'Std.Fail.Fail', {FailHandler}}),
-apply Body(Args, NewEvidence, ReturnK)
-```
-
-`insert_canonical` finds the right position by tag compare, builds a new tuple, replaces an existing entry if the tag already exists (innermost-wins semantics fall out without explicit mask machinery). The inherited evidence is unchanged.
-
-#### Projection at Call Boundaries
-
-Effectful function calls thread evidence as a single argument followed by `_ReturnK`. When the callee declares a closed row that's a strict subset of the caller's row, the call site projects:
-
-```erlang
-NarrowedEvidence = call 'std_evidence_bridge':'project_evidence'(
-  Evidence, [<<"Std.Fail.Fail">>]),
-apply Callee(Args, NarrowedEvidence, ReturnK)
-```
-
-When the callee's row is open or matches the caller's exactly, evidence is forwarded unchanged. The projection cost is one tuple allocation per closed-row narrowing — comparable to today's per-op-arg appending but uniform across call shapes.
-
-#### What Saga Doesn't Use From Koka
-
-The convention is inspired by Koka's evidence passing (Xie & Leijen 2021), with deliberate simplifications enabled by Saga's effect semantics:
-
-- **No `hevv` per entry.** Saga has no non-scoped resumes, so each evidence entry doesn't need to carry the saved evidence at handler installation.
-- **No marker integers.** No prompt mechanism.
-- **No mask levels.** Saga has no surface syntax for accessing shadowed outer handlers; innermost-wins covers all cases.
-- **No yield checks.** Saga's CPS is user-level; there's no equivalent of Koka's `is_yielding` flag.
-- **Projection only at closed-row narrowing**, not at every cross-row boundary. Koka projects via `@open` wrappers everywhere; Saga forwards unchanged when the callee row is open.
-
-These reductions cut roughly half the runtime apparatus a Koka-faithful implementation would need.
+The runtime representation stays tagged even when the compiler knows the
+operation index. This keeps cross-module evidence layout uniform and makes
+runtime failures self-describing.
 
 ### Handler Representation
 
-Handler declarations are compiled to per-op handler functions at `with` sites and packaged as the `OpTuple` of an evidence entry. Each op closure has shape `fun(args..., EvidenceAtPerform, K) -> ...`:
+Source handler arms lower to operation closures:
 
-```erlang
-% handler console_log for Log { log msg -> { print msg; resume () } }
-% At the `with` site, the log arm becomes:
-fun (Msg, _EvidenceAtPerform, K) ->
-  call 'io':'format'("~s~n", [Msg]),
-  apply K('unit')
-
-% handler to_result for Fail { fail reason -> Err(reason) }
-fun (Reason, _EvidenceAtPerform, _K) ->
-  {'Err', Reason}       % don't call K = abort
+```text
+(op_args..., EvidenceAtPerform, K_arm)
 ```
 
-The perform-site evidence parameter is ignored by ordinary source-level
-handler arms because those closures are built at the `with` site and already
-capture their outer evidence lexically. It exists for runtime/native handler
-bodies that may invoke Saga callback values after crossing a BEAM boundary
-(for example `Process.spawn` adapting `fun(Unit, Evidence, K)` to Erlang's
-`fun()`). Those handlers must call callbacks with the evidence that was in
-scope at the original `Yield`, not a freshly-built default vector.
+A resuming arm calls `K_arm(value)`. A non-resuming arm ignores `K_arm`.
+Multishot arms call it more than once.
 
-### Handler Bindings (Dynamic Handlers)
+The handler forms in monadic IR are:
 
-When a handler can't be resolved statically — bound to a `let`, returned from a factory, chosen by a conditional, **or passed as a function parameter** — its runtime representation is a self-describing tuple the lowerer can decode at every `with` site:
+- `Static` - source arms are known at the `with` site;
+- `Dynamic` - a handler value is selected at runtime;
+- `Native` - compiler-provided BEAM-native handler bodies;
+- `Composite` - multiple handlers installed from one surface value.
+
+Dynamic handler values are self-describing tuples:
 
 ```text
 {__saga_handler_value, OpsByEffect, RuntimeReturn}
-  OpsByEffect = {{EffectAtom_1, OpTuple_1}, ..., {EffectAtom_n, OpTuple_n}}
-  RuntimeReturn = 'unit'  -- no return clause
-                | fun(value, _Evidence, _ReturnK) -> ...  -- uniform-CPS lambda
 ```
 
-A handler value handles `n ≥ 1` effects under one shared return clause. Both producer and consumer iterate effects in **canonical alphabetical order**, so the pair at position `i` always corresponds to the same effect at compile and run time — no runtime atom matching needed.
+`OpsByEffect` is a canonical tuple of `{EffectAtom, OpTuple}` pairs.
+`RuntimeReturn` is either `unit` or a Saga CPS function used as the handler's
+return clause.
 
-Static-handler `with` sites still inline everything (no handler value built). Handler values are only materialized when the lowerer can't see the arms — see the four sources below. The call site reads from evidence regardless of how the handler was obtained.
+### Return Clauses, Resume, And Control Markers
 
-1. **Static alias** (`let foo = console_log`): resolved at compile time to the original handler declaration; the `OpTuple` is constructed inline at `with`. No handler value built.
-2. **Handler expression** (`let foo = handler for Log { ... }`): emits a `{__saga_handler_value, ...}` value at the `let`; `with` extracts `OpsByEffect` and chains one `insert_canonical` per effect.
-3. **Conditional / factory / parameter**: the value reaches the `with` site as a runtime variable of type `Handler E_1 ... E_n`. The lowerer extracts `element(2, h)` (the `OpsByEffect` tuple), iterates the statically-known effect names in canonical order, and for each pulls `element(i+1, OpsByEffect)` → `{EffectAtom, OpTuple}` pair → `element(2, pair)` → `OpTuple`, then installs `{EffectAtom, OpTuple}` into evidence.
-4. **Return clause dispatch**: `element(3, h)` is checked at runtime — the `'unit'` atom skips the wrapper and applies the with-site's raw-result K directly; any other value is treated as a uniform-CPS lambda and applied as the with-result transformer.
+Handler return clauses are delimited prompts. Nested handlers compose by
+nesting: the inner return clause sees the raw body result first, then the outer
+return clause sees the inner handler's result.
 
-**ABI history note.** An earlier shape was `{__saga_handler_value, OpTuple, RuntimeReturn}` — a single `OpTuple` directly in element 2. This restricted dynamic handler values to exactly one effect: the dynamic-with lowerer panicked with "Dynamic handler must carry exactly one effect (spec invariant)" if a multi-effect `handler for E1, E2 { ... }` was bound to a let or passed as a parameter. The current shape generalizes element 2 to a self-describing tuple of `{EffectAtom, OpTuple}` pairs while keeping static-handler with-sites and the call-site read path unchanged.
+`resume v` applies the arm continuation captured at the perform site. That
+continuation must re-enter any handler delimiters that were between the perform
+site and the handler arm. The lowerer tracks this with `ResultDelimiter` in
+`LowerCtx` and routes marked control tuples:
 
-### `with` Attaches the Handler
-
-```
-do_work () with console_log
-```
-
-Becomes (sketch — Core Erlang elided for clarity):
-
-```erlang
-%% Build the handler's OpTuple from console_log's arms
-LogOps = {fun (Msg, K) -> ... end},
-%% Insert the new entry into the inherited evidence
-NewEv = call 'std_evidence_bridge':'insert_canonical'(
-  Ev, {'Std.IO.Log', LogOps}),
-%% Call the body with the extended evidence
-apply 'do_work'/3('unit', NewEv, ReturnK)
+```text
+{__saga_value_result, Marker, Value}
+{__saga_handler_abort, Marker, Value}
 ```
 
-The effectful function always takes `(user_args..., _Evidence, _ReturnK)`. Handler installation is a tuple insertion, not a parameter list extension.
+The owning delimiter consumes its marker. Foreign markers propagate outward.
+This is what makes value-producing resume, nested return clauses, and aborting
+handlers compose under uniform CPS.
 
-### Handler Stacking
+### Finally Blocks
 
-Handler stacking is modeled as nested handlers, not a merged handler table.
+`finally` cleanup is part of the continuation protocol, not an Erlang
+`try/catch` wrapper around `resume`. Saga aborts are handler-control values, not
+Erlang exceptions, so cleanup must be injected into the same control path that
+routes resumes and aborts.
 
-```dy
-run () with {console_log, to_result}
-```
+The optimizer can direct-call some cleanup-preserving handler arms when all
+cleanup inputs are available at the perform site. Other cases use the slow
+uniform CPS path.
 
-is treated like:
+### Native And External Boundaries
 
-```dy
-(run () with console_log) with to_result
-```
+BEAM-native effects are installed as native handlers in evidence. The slow path
+still calls their operation closures through evidence. Optimizer rewrites can
+replace common native operations with direct `ForeignCall`s when the active
+handler stack proves the native handler is the one that will run.
 
-The nearest enclosing handler gets the first chance to handle an operation. If
-it does not define that operation, the operation propagates outward to the next
-handler layer.
-
-When two `with` blocks handle the same effect (inner shadows outer), the canonical insertion at the inner `with` *replaces* the outer's entry at the same canonical position in the evidence vector. Innermost-wins falls out of the data structure without explicit mask handling.
-
-### The `return` Clause
-
-`return value -> Ok(value)` wraps the computation's final value on success for
-that handler boundary. Under nested semantics, `return` clauses compose by
-nesting.
-
-Given:
-
-```dy
-((expr with a) with b) with c
-```
-
-the success path flows through:
-
-1. `a.return`
-2. `b.return`
-3. `c.return`
-
-assuming each layer defines a `return` clause and completes normally. If an op
-handler aborts instead of resuming, outer `return` clauses still run only when
-their own surrounding handled expression completes.
-
-### Lowering Structure
-
-Per-call effect metadata is computed once by a pre-pass and stored in `CallEffectMap` (keyed by AST `NodeId`). The lowerer is a read-only consumer: at every effectful call site, it reads `CallEffectInfo` from the map to determine projection, evidence layout, and op-call indices. There is no inline call-shape recognition at lowering time — adding a new call shape (e.g. `DictMethodAccess`, lambda-headed call) means teaching the populator one new branch, not auditing every dispatcher.
-
-Continuation flow is threaded through explicit helpers:
-
-- value-position lowering — produces a value for the enclosing construct
-- terminal/tail lowering — routes successful completion through an explicit `_ReturnK`
-- handler-owned expression lowering — produces the handled result directly, doesn't inherit an enclosing return continuation
-
-This keeps handler delimiters and nested `with` boundaries explicit in the lowerer.
-
-### Non-Resumable Effects
-
-No special mechanism needed. A non-resumable handler simply doesn't call `K`. The continuation closure sits unreferenced on the heap and gets garbage collected. Same calling convention as resumable handlers.
-
-### Multishot Continuations
-
-On BEAM, multishot is essentially free. `K` is an immutable closure on the heap. Calling it multiple times is just calling a function multiple times -- no stack copying, no special machinery. The evidence vector at capture time is part of `K`'s closure environment, so each resume sees the same evidence that was in scope when the continuation was captured.
-
-### BEAM-Native Effects
-
-Some effects (for example Actor, Process, Monitor, Link, Timer, and Ref
-families) use custom BEAM-native op bodies in the lowerer, but they still flow
-through handler-owned CPS lambdas. They do not bypass handler delimitation or
-nested `with` semantics; the native interop happens inside the handler body.
+`@external` declarations get Saga-shaped wrappers. If an external function takes
+a function-typed parameter, the wrapper adapts the Saga CPS callback to the
+native callback arity using the evidence in scope at the boundary and an identity
+return continuation.
 
 ### Key Files
 
-- `codegen/call_effects.rs` -- `CallEffectInfo`, `CallEffectMap`, populator. The pre-pass that determines per-call evidence shape ahead of lowering.
-- `codegen/lower/evidence.rs` -- `EvidenceLayout`, `build_evidence_entry`, `insert_canonical`, `find_evidence`, `project_evidence`, `evidence_index_of`. Compile-time helpers for emitting the runtime evidence operations.
-- `codegen/lower/mod.rs` -- `Lowerer`, `FunInfo`, call-site emission. Single helper for effectful calls regardless of head shape (Var, QualifiedName, DictMethodAccess, lambda).
-- `codegen/lower/effects.rs` -- `lower_effect_call` (op call lookup against evidence), `lower_with` (extends evidence via `insert_canonical`), `build_op_handler_fun`, `build_beam_native_op_fun`, `lower_handler_def_to_tuple`.
-- `codegen/lower/exprs.rs` -- value/tail lowering helpers, `lower_handle_binding`, `is_handler_value`.
-- `codegen/lower/init.rs` -- populates `FunInfo` (with `EvidenceLayout`) from type schemes via `arity_and_effects_from_type`.
-- `stdlib/evidence.bridge.erl` -- runtime helpers `find_evidence/2`, `insert_canonical/2`, `project_evidence/2` for the operations that don't inline cleanly.
+- `codegen/monadic/ir.rs` -- monadic IR.
+- `codegen/monadic/translate/` -- translation into monadic IR.
+- `codegen/monadic/effect_opt/` -- optional effect optimizer.
+- `codegen/lower/ctx.rs` -- lowering context and result delimiter stack.
+- `codegen/lower/effects.rs` -- `Yield`, `With`, native handlers, dynamic handler values, and resume routing.
+- `codegen/lower/decls.rs` -- uniform CPS function wrappers and external wrappers.
+- `codegen/lower/app.rs` -- Saga calls, partial application, and direct external call boundaries.
+- `codegen/lower/util.rs` -- evidence/control tuple helpers.
+- `stdlib/evidence.bridge.erl` -- runtime evidence lookup and insertion.
 
-### Optimization Opportunities
+### Further Reading
 
-Already in place:
-
-- **Pure functions:** no CPS transform at all -- compiled as normal Core Erlang functions with zero overhead. Pure-vs-effectful detection is centralized in `CallEffectInfo`.
-- **Row polymorphism:** row variables are resolved before codegen. No runtime cost; rows that survive to lowering are forwarded through `_Evidence` unchanged.
-- **Canonical-ordered indices:** for closed rows, op call sites emit static `element/2` loads rather than runtime atom comparisons. The runtime `find_evidence` helper is only used for open rows.
-- **Innermost-wins via canonical insertion:** same-effect nesting handled by tuple replacement, not mask machinery.
-
-Future work:
-
-- **Direct-native fast path:** for BEAM-native ops (Process, Ref, Timer, etc.) called outside of user-defined handlers, fold the closure call into a direct native call. The `use_direct_native_fast_path` hook in `effects.rs` is currently a no-op stub.
-- **Closed-row specialization:** when the entire program is closed-row (common for top-level entry points), specialize op call emission to skip the runtime tag and use direct positional indexing without the `{Tag, OpTuple}` wrapping. Speculative perf — needs benchmarking to justify.
-- **Open-row lookup memoization:** for loops that repeatedly call the same op under an open row, cache the resolved handler closure once outside the loop. Probably not worth doing until a real workload shows it.
-- **Handler inlining:** when the handler is statically known and small, inline the handler body at the call site, eliminating closure allocation.
-- **Dead effect elimination:** if a handled effect is never called, strip the handler.
+- `docs/uniform-cps-translation.md` -- full current implementation model.
+- `docs/effect-optimization.md` -- optimizer rewrites and accepted slow paths.
+- `docs/planning/uniform-effect-translation.md` -- migration history and phase status.
