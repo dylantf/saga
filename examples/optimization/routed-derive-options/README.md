@@ -23,10 +23,10 @@ watch whether entry-reachable `Options::get_options` yields disappear.
 
 ## Current Reference Stats
 
-Recorded after value-keyed generated variants learned to specialize closed ADT
-constructor arguments. Level 09 mirrors the `saga_json` `as_tagged` shape: the
-selected constructor path no longer materializes the full generic ADT
-dictionary before encoding.
+Recorded after value-keyed generated variants learned to specialize direct and
+let-bound closed ADT constructor arguments. Level 09 mirrors the `saga_json`
+`as_tagged` shape: the selected constructor path no longer materializes the
+full generic ADT dictionary before encoding.
 
 | Level | Whole-app entry-reachable stats |
 | --- | --- |
@@ -47,7 +47,8 @@ dictionary shape: selected `Heartbeat`/`Login` calls built a full generic
 
 The fix is value-keyed generated variants for closed constructor arguments,
 plus a small case-on-known-constructor collapse. `override_options Heartbeat`
-and `override_options (Login 5)` now get separate caller-local variants, so the
+and `override_options (Login 5)` now get separate caller-local variants, even
+when ANF has first factored the constructor into a pure let binding. The
 derived representation branch is known before the oversized dictionary method
 inline budget check. The ordinary dictionary-method and direct-call rewrites
 then erase the option reads.

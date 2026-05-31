@@ -41,8 +41,9 @@ Bind(value, x, body) -> Let(value, x, body)
 
 The purity predicate is deliberately conservative. Arbitrary `App` and
 `ForeignCall` are not pure just because their Saga effect row is empty. The
-current exception is compiler-generated dictionary constructor calls through
-`Atom::DictRef`, which are pure materialization.
+current exception is compiler-generated dictionary constructor calls through a
+recognized local or imported dictionary constructor head, which are pure
+materialization.
 
 ANF scaffolding does not make a computation impure by itself: `Bind`/`Let`
 expressions whose value and body are both pure are treated as pure. This matters
@@ -178,10 +179,12 @@ Implemented variant shapes:
 - value-keyed generated variants for closed constructor arguments. When a call
   such as `worker (Login 5)` is optimized under a known handler stack, the
   generated variant can record the constructor value in its specialization key
-  and substitute it into the cloned body. A small case-on-known-constructor
-  rewrite then collapses derived `Generic` representation branches before
-  dictionary method inlining checks their size budget. This is deliberately
-  limited to closed constructor-shaped values, not arbitrary literals.
+  and substitute it into the cloned body. The same rewrite also looks through
+  ANF-style let-bound pure constructor values, so `let x = Login 5; worker x`
+  specializes like the direct call. A small case-on-known-constructor rewrite
+  then collapses derived `Generic` representation branches before dictionary
+  method inlining checks their size budget. This is deliberately limited to
+  closed constructor-shaped values, not arbitrary literals.
 - generated-variant dictionary-argument pruning. When a known dictionary
   argument becomes unused after specialization, the generated variant drops
   that parameter and the rewritten call site drops the constructor argument.

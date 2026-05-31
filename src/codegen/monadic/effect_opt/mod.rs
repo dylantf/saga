@@ -942,17 +942,28 @@ impl<'info> Optimizer<'info> {
             other => return (other, Change::Unchanged),
         };
 
-        if (expr_is_pure(&value)
-            || matches!(
-                &*value,
-                MExpr::HandlerValue { .. } | MExpr::DictMethodAccess { .. }
-            ))
-            && !expr_contains_target(&body, &var)
+        if self.binding_value_is_removable_when_unused(&value) && !expr_contains_target(&body, &var)
         {
             (*body, Change::Changed)
         } else {
             (rebuild_binding(var, value, body, mode), Change::Unchanged)
         }
+    }
+
+    fn binding_value_is_removable_when_unused(&self, value: &MExpr) -> bool {
+        expr_is_pure(value)
+            || matches!(
+                value,
+                MExpr::HandlerValue { .. } | MExpr::DictMethodAccess { .. }
+            )
+            || self.expr_is_dict_constructor_app(value)
+    }
+
+    fn expr_is_dict_constructor_app(&self, value: &MExpr) -> bool {
+        let MExpr::App { head, .. } = value else {
+            return false;
+        };
+        self.dict_constructor_for_head(head).is_some()
     }
 
     fn try_dead_pure_static_with(&self, expr: MExpr) -> (MExpr, Change) {
@@ -1295,7 +1306,13 @@ impl<'info> Optimizer<'info> {
                 let Pat::Var { name, id, .. } = param else {
                     return None;
                 };
-                let replacement = closed_constructor_variant_arg(arg)?;
+                let replacement = match arg {
+                    Atom::Var { name, .. } => self
+                        .lookup_pure_atom(&name.name)
+                        .and_then(|atom| closed_constructor_variant_arg(&atom))
+                        .or_else(|| closed_constructor_variant_arg(arg))?,
+                    _ => closed_constructor_variant_arg(arg)?,
+                };
                 Some(ValueParamReplacement {
                     target: MVar {
                         name: name.clone(),

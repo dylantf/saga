@@ -3419,6 +3419,202 @@ fn imported_static_function_variant_specializes_closed_constructor_args() {
 }
 
 #[test]
+fn imported_static_function_variant_specializes_let_bound_closed_constructor_args() {
+    let mut f = Fixture::new();
+    let arm = tail_arm(4180, vec![pat_unit(4181)], resume(lit_int("42", 42)), None);
+    f.h.resumption
+        .insert(crate::ast::NodeId(4180), ResumptionKind::TailResumptive);
+    let handler = static_log_handler(vec![arm]);
+    let imported = imported_candidate_with_params(
+        "Lib",
+        "worker",
+        4182,
+        vec![pat_var("x", 4183)],
+        MExpr::Case {
+            scrutinee: var("x", 4183),
+            arms: vec![MArm {
+                pattern: Pat::Constructor {
+                    id: crate::ast::NodeId(4184),
+                    name: "Box".to_string(),
+                    args: vec![pat_var("y", 4185)],
+                    span: span(),
+                },
+                guard: None,
+                body: yield_log(vec![unit_atom()], crate::ast::NodeId(4186)),
+                span: span(),
+            }],
+            source: crate::ast::NodeId(4187),
+        },
+    );
+    let caller = MDecl::Val(MVal {
+        id: crate::ast::NodeId(4188),
+        public: true,
+        name: "caller".to_string(),
+        value: MExpr::Let {
+            var: mv("boxed", 4189),
+            value: Box::new(MExpr::Pure(Atom::Ctor {
+                name: "Box".to_string(),
+                args: vec![lit_int("5", 5)],
+                source: crate::ast::NodeId(4190),
+            })),
+            body: Box::new(with_expr(
+                handler,
+                MExpr::App {
+                    head: var("worker", 4191),
+                    args: vec![var("boxed", 4189)],
+                    source: crate::ast::NodeId(4192),
+                },
+            )),
+        },
+        span: span(),
+    });
+    let mut context = OptimizerContext::default();
+    context.resolution.insert(
+        crate::ast::NodeId(4191),
+        resolved_beam("worker", Some("Lib"), "Lib.worker"),
+    );
+    context
+        .imported_function_variants
+        .insert("Lib.worker".to_string(), imported);
+    let info = f.info();
+
+    let out = run_with_context(vec![caller], &f.h, &info, context);
+
+    let variant = out
+        .iter()
+        .find_map(|decl| match decl {
+            MDecl::FunBinding(f) if f.name.starts_with(STATIC_VARIANT_PREFIX) => Some(f),
+            _ => None,
+        })
+        .expect("expected generated imported static function variant");
+    assert!(variant.name.contains("__value_"));
+    assert_eq!(variant.body, MExpr::Pure(lit_int("42", 42)));
+}
+
+#[test]
+fn imported_static_function_variant_specializes_dict_method_under_inner_handler() {
+    let mut f = Fixture::new();
+    let outer_arm = tail_arm(3910, vec![pat_unit(3911)], resume(lit_int("1", 1)), None);
+    let inner_arm = tail_arm(3912, vec![pat_unit(3913)], resume(lit_int("2", 2)), None);
+    f.h.resumption
+        .insert(crate::ast::NodeId(3910), ResumptionKind::TailResumptive);
+    f.h.resumption
+        .insert(crate::ast::NodeId(3912), ResumptionKind::TailResumptive);
+    let outer_handler = static_log_handler(vec![outer_arm]);
+    let inner_handler = static_log_handler(vec![inner_arm]);
+    let imported_int_dict = MDictConstructor {
+        id: crate::ast::NodeId(3914),
+        name: "__dict_Encodable_Int".to_string(),
+        dict_params: vec![],
+        methods: vec![MExpr::Pure(Atom::Lambda {
+            params: vec![pat_var("x", 3915)],
+            body: Box::new(bind_expr(
+                mv("opts", 3916),
+                yield_log(vec![unit_atom()], crate::ast::NodeId(3917)),
+                MExpr::BinOp {
+                    op: crate::ast::BinOp::Add,
+                    left: var("x", 3915),
+                    right: var("opts", 3916),
+                    source: crate::ast::NodeId(3918),
+                },
+            )),
+            source: crate::ast::NodeId(3919),
+        })],
+        method_effects: vec![],
+        method_open_rows: vec![],
+        impl_effects: vec![],
+        span: span(),
+    };
+    let worker_body = bind_expr(
+        mv("_snapshot", 3920),
+        yield_log(vec![unit_atom()], crate::ast::NodeId(3921)),
+        with_expr(
+            inner_handler,
+            bind_expr(
+                mv("dict", 3922),
+                MExpr::App {
+                    head: Atom::QualifiedRef {
+                        module: "Lib".to_string(),
+                        name: "__dict_Encodable_Int".to_string(),
+                        source: crate::ast::NodeId(3923),
+                    },
+                    args: vec![],
+                    source: crate::ast::NodeId(3924),
+                },
+                bind_expr(
+                    mv("method", 3925),
+                    MExpr::DictMethodAccess {
+                        dict: var("dict", 3922),
+                        trait_name: "Encodable".to_string(),
+                        method_index: 0,
+                        source: crate::ast::NodeId(3926),
+                    },
+                    MExpr::App {
+                        head: var("method", 3925),
+                        args: vec![var("x", 3927)],
+                        source: crate::ast::NodeId(3928),
+                    },
+                ),
+            ),
+        ),
+    );
+    let imported = imported_candidate_with_params(
+        "Lib",
+        "worker",
+        3929,
+        vec![pat_var("x", 3927)],
+        worker_body,
+    );
+    let caller = MDecl::Val(MVal {
+        id: crate::ast::NodeId(3930),
+        public: true,
+        name: "caller".to_string(),
+        value: with_expr(
+            outer_handler,
+            MExpr::App {
+                head: var("worker", 3931),
+                args: vec![lit_int("40", 40)],
+                source: crate::ast::NodeId(3932),
+            },
+        ),
+        span: span(),
+    });
+    let mut context = OptimizerContext::default();
+    context.resolution.insert(
+        crate::ast::NodeId(3931),
+        resolved_beam("worker", Some("Lib"), "Lib.worker"),
+    );
+    context
+        .imported_function_variants
+        .insert("Lib.worker".to_string(), imported);
+    context
+        .imported_dict_constructors
+        .insert(imported_int_dict.name.clone(), imported_int_dict);
+    let info = f.info();
+
+    let out = run_with_context(vec![caller], &f.h, &info, context);
+    let variant = out
+        .iter()
+        .find_map(|decl| match decl {
+            MDecl::FunBinding(fun) if fun.name.starts_with(STATIC_VARIANT_PREFIX) => Some(fun),
+            _ => None,
+        })
+        .expect("expected generated imported static function variant");
+
+    assert_eq!(expr_yield_count(&variant.body), 0, "{:?}", variant.body);
+    assert!(!expr_contains_dict_method_access(&variant.body));
+    assert_eq!(
+        variant.body,
+        MExpr::BinOp {
+            op: crate::ast::BinOp::Add,
+            left: var("x", 3927),
+            right: lit_int("2", 2),
+            source: crate::ast::NodeId(3918),
+        }
+    );
+}
+
+#[test]
 fn imported_static_function_variant_skips_when_residual_yield_remains() {
     let mut f = Fixture::new();
     let arm = tail_arm(400, vec![pat_unit(401)], resume(lit_int("42", 42)), None);
