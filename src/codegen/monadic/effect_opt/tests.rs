@@ -2191,7 +2191,188 @@ fn imported_dict_constructor_argument_specializes_generated_static_variant() {
         .expect("expected generated static variant");
 
     assert_eq!(expr_yield_count(&variant.body), 0);
+    assert!(
+        !expr_contains_dict_method_access(&variant.body),
+        "{:?}",
+        variant.body
+    );
+}
+
+#[test]
+fn imported_dict_constructor_var_head_specializes_generated_static_variant() {
+    let mut f = Fixture::new();
+    let arm = tail_arm(3020, vec![pat_unit(3021)], resume(lit_int("42", 42)), None);
+    f.h.resumption
+        .insert(crate::ast::NodeId(3020), ResumptionKind::TailResumptive);
+    let handler = static_log_handler(vec![arm]);
+    let imported_int_dict = MDictConstructor {
+        id: crate::ast::NodeId(3022),
+        name: "__dict_Encodable_Int".to_string(),
+        dict_params: vec![],
+        methods: vec![MExpr::Pure(Atom::Lambda {
+            params: vec![pat_var("x", 3023)],
+            body: Box::new(bind_expr(
+                mv("opts", 3024),
+                yield_log(vec![unit_atom()], crate::ast::NodeId(3025)),
+                MExpr::BinOp {
+                    op: crate::ast::BinOp::Add,
+                    left: var("x", 3023),
+                    right: var("opts", 3024),
+                    source: crate::ast::NodeId(3026),
+                },
+            )),
+            source: crate::ast::NodeId(3027),
+        })],
+        method_effects: vec![],
+        method_open_rows: vec![],
+        impl_effects: vec![],
+        span: span(),
+    };
+    let serialize = helper_fun(
+        "serialize",
+        3028,
+        vec![pat_var("__dict_Encodable_a", 3029), pat_var("x", 3030)],
+        bind_expr(
+            mv("method", 3031),
+            MExpr::DictMethodAccess {
+                dict: var("__dict_Encodable_a", 3029),
+                trait_name: "Encodable".to_string(),
+                method_index: 0,
+                source: crate::ast::NodeId(3032),
+            },
+            MExpr::App {
+                head: var("method", 3031),
+                args: vec![var("x", 3030)],
+                source: crate::ast::NodeId(3033),
+            },
+        ),
+    );
+    let caller = MDecl::Val(MVal {
+        id: crate::ast::NodeId(3034),
+        public: false,
+        name: "caller".to_string(),
+        value: with_expr(
+            handler,
+            bind_expr(
+                mv("dict", 3035),
+                MExpr::App {
+                    head: var("__dict_Encodable_Int", 3036),
+                    args: vec![],
+                    source: crate::ast::NodeId(3037),
+                },
+                MExpr::App {
+                    head: var("serialize", 3038),
+                    args: vec![var("dict", 3035), lit_int("5", 5)],
+                    source: crate::ast::NodeId(3039),
+                },
+            ),
+        ),
+        span: span(),
+    });
+    let mut context = OptimizerContext::default();
+    context
+        .imported_dict_constructors
+        .insert(imported_int_dict.name.clone(), imported_int_dict);
+    let info = f.info();
+
+    let out = run_with_context(vec![serialize, caller], &f.h, &info, context);
+    let variant = out
+        .iter()
+        .find_map(|decl| match decl {
+            MDecl::FunBinding(fun) if is_generated_variant_name(&fun.name) => Some(fun),
+            _ => None,
+        })
+        .expect("expected generated static variant");
+
+    assert_eq!(
+        variant.body,
+        MExpr::BinOp {
+            op: crate::ast::BinOp::Add,
+            left: var("x", 3030),
+            right: lit_int("42", 42),
+            source: crate::ast::NodeId(3026),
+        }
+    );
+    assert_eq!(expr_yield_count(&variant.body), 0);
     assert!(!expr_contains_dict_method_access(&variant.body));
+}
+
+#[test]
+fn dict_method_access_can_read_zero_arg_dict_ref() {
+    let mut f = Fixture::new();
+    let arm = tail_arm(3040, vec![pat_unit(3041)], resume(lit_int("7", 7)), None);
+    f.h.resumption
+        .insert(crate::ast::NodeId(3040), ResumptionKind::TailResumptive);
+    let handler = static_log_handler(vec![arm]);
+    let int_dict = MDecl::DictConstructor(MDictConstructor {
+        id: crate::ast::NodeId(3042),
+        name: "__dict_Encodable_Int".to_string(),
+        dict_params: vec![],
+        methods: vec![MExpr::Pure(Atom::Lambda {
+            params: vec![pat_var("x", 3043)],
+            body: Box::new(bind_expr(
+                mv("opts", 3044),
+                yield_log(vec![unit_atom()], crate::ast::NodeId(3045)),
+                MExpr::BinOp {
+                    op: crate::ast::BinOp::Add,
+                    left: var("x", 3043),
+                    right: var("opts", 3044),
+                    source: crate::ast::NodeId(3046),
+                },
+            )),
+            source: crate::ast::NodeId(3047),
+        })],
+        method_effects: vec![],
+        method_open_rows: vec![],
+        impl_effects: vec![],
+        span: span(),
+    });
+    let caller = MDecl::Val(MVal {
+        id: crate::ast::NodeId(3048),
+        public: false,
+        name: "caller".to_string(),
+        value: with_expr(
+            handler,
+            bind_expr(
+                mv("method", 3049),
+                MExpr::DictMethodAccess {
+                    dict: Atom::DictRef {
+                        name: "__dict_Encodable_Int".to_string(),
+                        source: crate::ast::NodeId(3050),
+                    },
+                    trait_name: "Encodable".to_string(),
+                    method_index: 0,
+                    source: crate::ast::NodeId(3051),
+                },
+                MExpr::App {
+                    head: var("method", 3049),
+                    args: vec![lit_int("5", 5)],
+                    source: crate::ast::NodeId(3052),
+                },
+            ),
+        ),
+        span: span(),
+    });
+    let info = f.info();
+
+    let out = run(vec![int_dict, caller], &f.h, &info);
+    let val = out
+        .iter()
+        .find_map(|decl| match decl {
+            MDecl::Val(val) if val.name == "caller" => Some(val),
+            _ => None,
+        })
+        .expect("expected caller val");
+
+    assert_eq!(
+        val.value,
+        MExpr::BinOp {
+            op: crate::ast::BinOp::Add,
+            left: lit_int("5", 5),
+            right: lit_int("7", 7),
+            source: crate::ast::NodeId(3046),
+        }
+    );
 }
 
 #[test]

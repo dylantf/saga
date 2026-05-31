@@ -861,7 +861,11 @@ impl<'info> Optimizer<'info> {
             other => return (other, Change::Unchanged),
         };
 
-        if (expr_is_pure(&value) || matches!(&*value, MExpr::HandlerValue { .. }))
+        if (expr_is_pure(&value)
+            || matches!(
+                &*value,
+                MExpr::HandlerValue { .. } | MExpr::DictMethodAccess { .. }
+            ))
             && !expr_contains_target(&body, &var)
         {
             (*body, Change::Changed)
@@ -1082,6 +1086,17 @@ impl<'info> Optimizer<'info> {
                 .dict_constructors
                 .get(name)
                 .or_else(|| self.context.imported_dict_constructors.get(name)),
+            Atom::Var { name, source } => {
+                let canonical = self
+                    .context
+                    .resolution
+                    .get(source)
+                    .map(|resolved| resolved.canonical_name.as_str());
+                canonical
+                    .and_then(|name| self.context.imported_dict_constructors.get(name))
+                    .or_else(|| self.context.imported_dict_constructors.get(&name.name))
+                    .or_else(|| self.dict_constructors.get(&name.name))
+            }
             Atom::QualifiedRef { name, source, .. } => {
                 let canonical = self
                     .context
@@ -1122,6 +1137,16 @@ impl<'info> Optimizer<'info> {
                 .lookup_dict_value(&name.name)
                 .and_then(|dict| dict.methods.get(method_index).cloned()),
             Atom::Tuple { elements, .. } => elements.get(method_index).cloned(),
+            Atom::DictRef { name, .. } => self
+                .dict_constructors
+                .get(name)
+                .or_else(|| self.context.imported_dict_constructors.get(name))
+                .filter(|constructor| constructor.dict_params.is_empty())
+                .and_then(|constructor| constructor.methods.get(method_index))
+                .and_then(|method| match method {
+                    MExpr::Pure(atom) => Some(atom.clone()),
+                    _ => None,
+                }),
             _ => None,
         }
     }

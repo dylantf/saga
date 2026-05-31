@@ -36,6 +36,21 @@ multi-payload dictionaries.
 | `08-cross-module-variant-options` | `Yield 2 -> 0`, `Bind 35 -> 3`, `decls 11 -> 2` |
 | `09-cross-module-inner-handler-adt` | `Yield 3 -> 2`, `Bind 49 -> 9`, `decls 13 -> 10` |
 
+## Level 09 Gap
+
+The remaining level 09 residuals are not a missing imported-dictionary lookup.
+The optimizer can resolve imported dict constructors through direct `DictRef`,
+qualified, and lowered `Var` heads. The residual `get_options` yields come from
+the derived ADT dictionary shape: the selected `Heartbeat`/`Login` calls still
+build a full generic `Event` dictionary, including latent method closures for
+the unused `Click Int Int` branch. Those closures are entry-reachable in the
+whole-app stats even though their option reads are not executed for this input.
+
+The next useful pass is therefore more specific than ordinary cross-module
+lookup: specialize derived dictionary construction or derived dictionary
+methods for known ADT constructors without eagerly materializing every generic
+branch dictionary.
+
 Run project fixtures from their directory:
 
 ```bash
