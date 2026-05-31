@@ -1,15 +1,17 @@
 use super::*;
 
-impl<'info> Optimizer<'info> {
+impl<'info, 'data> Optimizer<'info, 'data> {
     pub(super) fn new(
         opts: RunOptions,
         handler_analysis: &'info HandlerAnalysis,
+        effect_info: &'info EffectInfo<'data>,
         context: OptimizerContext,
     ) -> Self {
         Self {
             opts,
             context,
             handler_analysis,
+            effect_info,
             handler_stack: Vec::new(),
             handler_value_bindings: Vec::new(),
             dict_value_bindings: Vec::new(),
@@ -602,7 +604,7 @@ impl<'info> Optimizer<'info> {
             return (expr, Change::Unchanged);
         };
 
-        if expr_is_pure(&value) {
+        if self.expr_is_non_yielding(&value) {
             (MExpr::Let { var, value, body }, Change::Changed)
         } else {
             (
@@ -614,6 +616,66 @@ impl<'info> Optimizer<'info> {
                 },
                 Change::Unchanged,
             )
+        }
+    }
+
+    fn expr_is_non_yielding(&self, expr: &MExpr) -> bool {
+        if expr_is_pure(expr) {
+            return true;
+        }
+
+        match expr {
+            MExpr::Bind { value, body, .. } | MExpr::Let { value, body, .. } => {
+                self.expr_is_non_yielding(value) && self.expr_is_non_yielding(body)
+            }
+            MExpr::Case { arms, .. } => arms.iter().all(|arm| {
+                // Guard lowering has its own stricter subset; keep general
+                // app promotion out of guards until that path grows with it.
+                arm.guard.as_ref().is_none_or(expr_is_pure) && self.expr_is_non_yielding(&arm.body)
+            }),
+            MExpr::If {
+                then_branch,
+                else_branch,
+                ..
+            } => self.expr_is_non_yielding(then_branch) && self.expr_is_non_yielding(else_branch),
+            MExpr::FieldAccess { .. }
+            | MExpr::RecordUpdate { .. }
+            | MExpr::DictMethodAccess { .. }
+            | MExpr::BinOp { .. }
+            | MExpr::UnaryMinus { .. }
+            | MExpr::BitString { .. } => true,
+            MExpr::App { head, .. } => self.app_head_is_closed_empty_effect_row(head),
+            MExpr::Pure(_)
+            | MExpr::Yield { .. }
+            | MExpr::Ensure { .. }
+            | MExpr::With { .. }
+            | MExpr::Resume { .. }
+            | MExpr::ForeignCall { .. }
+            | MExpr::Receive { .. }
+            | MExpr::LetFun { .. }
+            | MExpr::HandlerValue { .. } => false,
+        }
+    }
+
+    fn app_head_is_closed_empty_effect_row(&self, head: &Atom) -> bool {
+        let source = atom_source(head);
+        if let Some(ty) = self.effect_info.type_at_node.get(&source) {
+            let (_, effects, has_open_row) = type_shape::arity_and_evidence_from_type(ty);
+            return effects.is_empty() && !has_open_row;
+        }
+
+        if let Some(resolved) = self.context.resolution.get(&source) {
+            return match &resolved.kind {
+                ResolvedCodegenKind::BeamFunction { effects, .. }
+                | ResolvedCodegenKind::ExternalFunction { effects, .. } => effects.is_empty(),
+                ResolvedCodegenKind::Intrinsic { .. } => true,
+            };
+        }
+
+        match head {
+            Atom::Lambda { body, .. } => self.expr_is_non_yielding(body),
+            Atom::DictRef { .. } => true,
+            _ => false,
         }
     }
 

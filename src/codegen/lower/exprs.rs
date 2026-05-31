@@ -528,7 +528,7 @@ impl<'ctx> Lowerer<'ctx> {
         self.bubble_abort_to_k(value_bind, &ctx.return_k)
     }
 
-    /// Lower `Let { var, value, body }` — a pure (non-yielding) binder
+    /// Lower `Let { var, value, body }` — a non-yielding binder
     /// produced by effect optimization's Bind→Let promotion rewrite.
     fn lower_let(&mut self, var: &MVar, value: &MExpr, body: &MExpr, ctx: &LowerCtx) -> CExpr {
         let value_ce = self.lower_pure_expr(value, ctx);
@@ -537,7 +537,7 @@ impl<'ctx> Lowerer<'ctx> {
         CExpr::Let(core_var(&var.name), Box::new(value_ce), Box::new(body_ce))
     }
 
-    /// Lower the recursively pure subset accepted by Bind→Let promotion to a
+    /// Lower the non-yielding subset accepted by Bind→Let promotion to a
     /// Core expression that returns its value directly, rather than applying
     /// the ambient continuation.
     fn lower_pure_expr(&mut self, expr: &MExpr, ctx: &LowerCtx) -> CExpr {

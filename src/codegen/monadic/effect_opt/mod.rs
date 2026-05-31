@@ -2,7 +2,7 @@
 //
 // Currently implements steps 9-11:
 //   - bind collapse — Bind(Pure(a), x, B) → B[x := a]
-//   - Bind→Let promotion — pure binders become direct lets
+//   - Bind→Let promotion — non-yielding binders become direct lets
 //   - dead pure-let cleanup — remove unused pure lets
 //   - step 11: direct_call.rs     — tail-resumptive Yield → inlined arm body
 //
@@ -19,6 +19,7 @@ use crate::codegen::monadic::ir::{
 };
 use crate::codegen::native_effects::{NativeArgTransform, native_op};
 use crate::codegen::resolve::{ResolutionMap, ResolvedCodegenKind};
+use crate::codegen::type_shape;
 use crate::typechecker::ModuleCodegenInfo;
 use std::collections::{HashMap, HashSet};
 
@@ -60,7 +61,7 @@ pub fn run_with_options_and_context(
         return m;
     }
 
-    let mut optimizer = Optimizer::new(opts, h, context);
+    let mut optimizer = Optimizer::new(opts, h, _e, context);
     optimizer.optimize_program(m)
 }
 
@@ -100,10 +101,11 @@ pub struct ImportedPrivateHelperCandidate {
     pub binding: MFunBinding,
 }
 
-struct Optimizer<'info> {
+struct Optimizer<'info, 'data> {
     opts: RunOptions,
     context: OptimizerContext,
     handler_analysis: &'info HandlerAnalysis,
+    effect_info: &'info EffectInfo<'data>,
     handler_stack: Vec<HandlerFrame>,
     handler_value_bindings: Vec<(String, Option<HandlerValueCandidate>)>,
     dict_value_bindings: Vec<(String, Option<DictValueCandidate>)>,

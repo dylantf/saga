@@ -315,7 +315,7 @@ fn dead_pure_static_with_removes_handler_around_plain_value() {
 }
 
 #[test]
-fn bind_to_let_keeps_app_with_closed_empty_effect_row_conservative() {
+fn bind_to_let_promotes_app_with_closed_empty_effect_row() {
     let mut f = Fixture::new();
     let source = crate::ast::NodeId(70);
     let head_source = crate::ast::NodeId(71);
@@ -327,11 +327,18 @@ fn bind_to_let_keeps_app_with_closed_empty_effect_row_conservative() {
         source,
     };
     let body = MExpr::Pure(var("x", 1));
-    let prog = val_program(bind_expr(mv("x", 1), value, body));
+    let prog = val_program(bind_expr(mv("x", 1), value.clone(), body.clone()));
 
-    let out = run(prog.clone(), &f.h, &info);
+    let out = run(prog, &f.h, &info);
 
-    assert_eq!(out, prog);
+    assert_eq!(
+        out,
+        val_program(MExpr::Let {
+            var: mv("x", 1),
+            value: Box::new(value),
+            body: Box::new(body),
+        })
+    );
 }
 
 #[test]
@@ -462,6 +469,26 @@ fn bind_to_let_keeps_app_with_effect_row() {
     let info = f.info();
     let value = MExpr::App {
         head: var("log_fun", 81),
+        args: vec![lit_int("1", 1)],
+        source,
+    };
+    let body = MExpr::Pure(var("x", 1));
+    let prog = val_program(bind_expr(mv("x", 1), value, body));
+
+    let out = run(prog.clone(), &f.h, &info);
+
+    assert_eq!(out, prog);
+}
+
+#[test]
+fn bind_to_let_keeps_app_with_open_effect_row() {
+    let mut f = Fixture::new();
+    let source = crate::ast::NodeId(82);
+    let head_source = crate::ast::NodeId(83);
+    f.type_at_node.insert(head_source, open_fun_type());
+    let info = f.info();
+    let value = MExpr::App {
+        head: var("poly_fun", 83),
         args: vec![lit_int("1", 1)],
         source,
     };
@@ -3913,7 +3940,8 @@ fn imported_variant_lookup_does_not_use_ambiguous_bare_name() {
             yield_native("Std.Actor.Timer", "sleep", vec![lit_int("20", 20)], 3863),
         ),
     );
-    let optimizer = Optimizer::new(RunOptions::default(), &f.h, context);
+    let info = f.info();
+    let optimizer = Optimizer::new(RunOptions::default(), &f.h, &info, context);
     let resolved = resolved_beam("worker", None, "worker");
 
     assert!(
@@ -4527,6 +4555,17 @@ fn effectful_fun_type(effect: &str) -> crate::typechecker::Type {
             effect.to_string(),
             vec![],
         )]),
+    )
+}
+
+fn open_fun_type() -> crate::typechecker::Type {
+    crate::typechecker::Type::Fun(
+        Box::new(crate::typechecker::Type::Con("Int".to_string(), vec![])),
+        Box::new(crate::typechecker::Type::Con("Int".to_string(), vec![])),
+        crate::typechecker::EffectRow {
+            effects: vec![],
+            tail: Some(Box::new(crate::typechecker::Type::Var(99))),
+        },
     )
 }
 

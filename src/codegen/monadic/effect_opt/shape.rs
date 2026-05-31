@@ -76,6 +76,23 @@ pub(super) fn expr_node_count(expr: &MExpr) -> usize {
     }
 }
 
+pub(super) fn atom_source(atom: &Atom) -> crate::ast::NodeId {
+    match atom {
+        Atom::Var { source, .. }
+        | Atom::Lit { source, .. }
+        | Atom::Ctor { source, .. }
+        | Atom::Tuple { source, .. }
+        | Atom::AnonRecord { source, .. }
+        | Atom::Record { source, .. }
+        | Atom::Lambda { source, .. }
+        | Atom::DictRef { source, .. }
+        | Atom::QualifiedRef { source, .. }
+        | Atom::Symbol { source, .. }
+        | Atom::BackendAtom { source, .. }
+        | Atom::BackendSpawnThunk { source, .. } => *source,
+    }
+}
+
 pub(super) fn atom_node_count(atom: &Atom) -> usize {
     match atom {
         Atom::Ctor { args, .. } => 1 + atoms_node_count(args),

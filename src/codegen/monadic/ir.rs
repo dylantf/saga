@@ -166,9 +166,10 @@ pub enum MExpr {
     },
 
     // --- structural: pure binder & control flow ---
-    /// Pure `let`. `value` is provably effect-free (recursively no `Yield`).
-    /// Produced by effect optimization's Bind→Let promotion rewrite. The
-    /// translator never emits this directly.
+    /// Non-yielding `let`. `value` is known not to escape to the ambient
+    /// algebraic effect protocol, though it is not necessarily removable or
+    /// observationally pure. Produced by effect optimization's Bind→Let
+    /// promotion rewrite. The translator never emits this directly.
     Let {
         var: MVar,
         value: Box<MExpr>,

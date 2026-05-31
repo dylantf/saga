@@ -60,7 +60,7 @@ The stage runs local correctness-safe rewrites in a shared bottom-up
 fixpoint:
 
 1. **Bind-collapse** — eliminate `Bind(Pure(a), x, body)` by substitution
-2. **Bind→Let promotion** — pure binders become Erlang lets
+2. **Bind→Let promotion** — non-yielding binders become Erlang lets
 3. **Dead pure-let cleanup** — eliminate `Let(x, pure_value, body)` when
    `x` is not used by `body`
 4. **Direct-call** — tail-resumptive `Yield` becomes inlined arm body
@@ -174,9 +174,11 @@ given their own local predicates.
 Bind { var, value, body }   ⟶   Let { var, value, body }
 ```
 
-iff `value` is **recursively pure**. This is stricter than "no algebraic
-effects": ordinary calls may still perform builtin or external side effects
-even when their Saga effect row is empty.
+iff `value` is **non-yielding**: evaluating it cannot yield to the ambient
+handler stack. This is deliberately weaker than observational purity. A call
+with a closed empty effect row may still perform internally handled work or
+call an effectful external, but its result can be obtained by an ordinary
+Core Erlang `let` instead of a CPS bind.
 
 ### Purity predicate
 
@@ -189,7 +191,7 @@ even when their Saga effect row is empty.
 | `Case { arms, .. }` | every arm body pure, every guard pure |
 | `If { then_branch, else_branch, .. }` | both branches pure |
 | `App { head: DictRef, .. }` | yes. Dictionary constructor materialization calls compiler-generated pure dictionary builders. |
-| other `App { .. }` | no for now. An empty algebraic effect row is not a purity proof: builtins such as `dbg` and arbitrary `@external` wrappers can be side-effectful. |
+| other `App { .. }` | yes for Bind→Let when the app head has a closed empty effect row; no for dead-code deletion unless separately known removable-pure. |
 | `FieldAccess { .. }`, `RecordUpdate { .. }`, `DictMethodAccess { .. }`, `BinOp { .. }`, `UnaryMinus { .. }`, `BitString { .. }` | yes (no side effects in IR semantics) |
 | `ForeignCall { .. }` | no in the first implementation (conservative default until the FFI signature carries an explicit purity bit) |
 | `Yield { .. }` | **no** |
@@ -199,15 +201,15 @@ even when their Saga effect row is empty.
 | `Receive { .. }` | no (mailbox interaction) |
 | `Lambda { .. }` body | does **not** affect purity at the use site — constructing a closure is pure |
 
-### Why calls are conservative
+### Why call deletion is conservative
 
 The typechecker tracks algebraic effects, not general referential
 transparency. Calls with an empty effect row can still print, read, call an
 arbitrary external function, or invoke a builtin with observable behavior.
-Until the IR carries explicit purity metadata, arbitrary `App` is not promoted
-to `Let` and dead-let cleanup must not delete unused call results. The one
-current exception is `App(DictRef(...), args)`, which is generated only for pure
-dictionary constructor materialization.
+Therefore a closed-empty-row `App` may be promoted to `Let`, preserving
+evaluation order, but dead-let cleanup must not delete its result when unused.
+The one current removable exception is `App(DictRef(...), args)`, which is
+generated only for pure dictionary constructor materialization.
 
 ### Termination
 

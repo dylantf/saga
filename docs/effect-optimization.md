@@ -33,15 +33,21 @@ The local simplifier runs to a fixpoint.
 `Bind(Pure(a), x, body)` beta-reduces to `body[x := a]` using
 capture-avoiding atom substitution.
 
-Recursively pure bind values can be promoted:
+Bind values that cannot yield to the ambient handler stack can be promoted:
 
 ```text
 Bind(value, x, body) -> Let(value, x, body)
 ```
 
-The purity predicate is deliberately conservative. Arbitrary `App` and
-`ForeignCall` are not pure just because their Saga effect row is empty. The
-current exception is compiler-generated dictionary constructor calls through a
+This is a sequencing optimization, not a dead-code optimization. A call whose
+callee has a closed empty effect row may still perform internally handled work
+or call an observationally effectful external, but it cannot escape through the
+ambient algebraic effect protocol. Lowering can therefore bind its result with
+an ordinary Core Erlang `let`.
+
+Dead-code deletion uses a stricter predicate. Arbitrary `App` and `ForeignCall`
+are not removable just because their Saga effect row is empty. The current
+exception is compiler-generated dictionary constructor calls through a
 recognized local or imported dictionary constructor head, which are pure
 materialization.
 
