@@ -191,11 +191,25 @@ struct DictParamReplacement {
 }
 
 #[derive(Debug, Clone)]
+struct ValueParamReplacement {
+    target: MVar,
+    replacement: Atom,
+    key: String,
+}
+
+#[derive(Debug, Clone)]
 struct CallbackParamReplacement {
     target: MVar,
     candidate: InlineCandidate,
     key: String,
     captures: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct VariantSpecializations<'a> {
+    dict: &'a [DictParamReplacement],
+    values: &'a [ValueParamReplacement],
+    callbacks: &'a [CallbackParamReplacement],
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -364,6 +378,7 @@ impl<'info> Optimizer<'info> {
         let (expr, variant_change) = self.try_native_function_variant_call(expr);
         let (expr, inline_change) = self.try_inline_helper_call(expr);
         let (expr, static_variant_change) = self.try_static_function_variant_call(expr);
+        let (expr, case_known_change) = self.try_case_known_scrutinee(expr);
         let (expr, native_change) = self.try_native_direct_call(expr);
         let (expr, finally_direct_change) = self.try_finally_direct_call(expr);
         let (expr, direct_change) = self.try_direct_call(expr);
@@ -380,6 +395,7 @@ impl<'info> Optimizer<'info> {
         change.mark_if(variant_change);
         change.mark_if(inline_change);
         change.mark_if(static_variant_change);
+        change.mark_if(case_known_change);
         change.mark_if(native_change);
         change.mark_if(finally_direct_change);
         change.mark_if(direct_change);
@@ -784,6 +800,71 @@ impl<'info> Optimizer<'info> {
         } else {
             (substituted.value, Change::Changed)
         }
+    }
+
+    fn try_case_known_scrutinee(&self, expr: MExpr) -> (MExpr, Change) {
+        let MExpr::Case {
+            scrutinee,
+            arms,
+            source,
+        } = expr
+        else {
+            return (expr, Change::Unchanged);
+        };
+
+        let Some(scrutinee) = closed_case_scrutinee(&scrutinee) else {
+            return (
+                MExpr::Case {
+                    scrutinee,
+                    arms,
+                    source,
+                },
+                Change::Unchanged,
+            );
+        };
+
+        for arm in &arms {
+            let Some(bindings) = match_pat_atom(&arm.pattern, &scrutinee) else {
+                continue;
+            };
+            if arm.guard.is_some() {
+                return (
+                    MExpr::Case {
+                        scrutinee,
+                        arms,
+                        source,
+                    },
+                    Change::Unchanged,
+                );
+            }
+
+            let mut body = arm.body.clone();
+            for (target, replacement) in bindings.into_iter().rev() {
+                let free_names = free_atom_names(&replacement);
+                let substituted = subst_expr(body, &target, &replacement, &free_names);
+                if substituted.blocked {
+                    return (
+                        MExpr::Case {
+                            scrutinee,
+                            arms,
+                            source,
+                        },
+                        Change::Unchanged,
+                    );
+                }
+                body = substituted.value;
+            }
+            return (body, Change::Changed);
+        }
+
+        (
+            MExpr::Case {
+                scrutinee,
+                arms,
+                source,
+            },
+            Change::Unchanged,
+        )
     }
 
     fn try_bind_to_let(&self, expr: MExpr) -> (MExpr, Change) {
@@ -1202,6 +1283,31 @@ impl<'info> Optimizer<'info> {
             .collect()
     }
 
+    fn value_param_replacements(
+        &self,
+        params: &[Pat],
+        args: &[Atom],
+    ) -> Vec<ValueParamReplacement> {
+        params
+            .iter()
+            .zip(args)
+            .filter_map(|(param, arg)| {
+                let Pat::Var { name, id, .. } = param else {
+                    return None;
+                };
+                let replacement = closed_constructor_variant_arg(arg)?;
+                Some(ValueParamReplacement {
+                    target: MVar {
+                        name: name.clone(),
+                        id: id.0,
+                    },
+                    key: atom_key(&replacement),
+                    replacement,
+                })
+            })
+            .collect()
+    }
+
     fn callback_param_replacements(
         &self,
         params: &[Pat],
@@ -1585,9 +1691,11 @@ impl<'info> Optimizer<'info> {
             return (MExpr::App { head, args, source }, Change::Unchanged);
         }
         let dict_replacements = self.dict_param_replacements(&candidate.binding.params, &args);
+        let value_replacements = self.value_param_replacements(&candidate.binding.params, &args);
         let callback_replacements =
             self.callback_param_replacements(&candidate.binding.params, &args);
         if callback_replacements.is_empty()
+            && value_replacements.is_empty()
             && !self.expr_has_specialization_opportunity(&candidate.binding.body)
         {
             return (MExpr::App { head, args, source }, Change::Unchanged);
@@ -1600,9 +1708,12 @@ impl<'info> Optimizer<'info> {
 
         let variant_name = variant_name_with_capture_key(
             variant_name_with_callback_key(
-                variant_name_with_dict_key(
-                    variant_name_for_stack(&candidate.binding.name, &self.handler_stack),
-                    &dict_replacements,
+                variant_name_with_value_key(
+                    variant_name_with_dict_key(
+                        variant_name_for_stack(&candidate.binding.name, &self.handler_stack),
+                        &dict_replacements,
+                    ),
+                    &value_replacements,
                 ),
                 &callback_replacements,
             ),
@@ -1617,8 +1728,11 @@ impl<'info> Optimizer<'info> {
             &name.name,
             &variant_name,
             capture_names.iter().cloned(),
-            &dict_replacements,
-            &callback_replacements,
+            VariantSpecializations {
+                dict: &dict_replacements,
+                values: &value_replacements,
+                callbacks: &callback_replacements,
+            },
         ) else {
             return (MExpr::App { head, args, source }, Change::Unchanged);
         };
@@ -1697,9 +1811,11 @@ impl<'info> Optimizer<'info> {
             return (MExpr::App { head, args, source }, Change::Unchanged);
         }
         let dict_replacements = self.dict_param_replacements(&candidate.binding.params, &args);
+        let value_replacements = self.value_param_replacements(&candidate.binding.params, &args);
         let callback_replacements =
             self.callback_param_replacements(&candidate.binding.params, &args);
         if callback_replacements.is_empty()
+            && value_replacements.is_empty()
             && !require_no_residual_yields
             && !self.expr_has_specialization_opportunity(&candidate.binding.body)
         {
@@ -1713,13 +1829,16 @@ impl<'info> Optimizer<'info> {
 
         let variant_name = variant_name_with_capture_key(
             variant_name_with_callback_key(
-                variant_name_with_dict_key(
-                    variant_name_for_imported(
-                        &candidate.source_module,
-                        &candidate.binding.name,
-                        &self.handler_stack,
+                variant_name_with_value_key(
+                    variant_name_with_dict_key(
+                        variant_name_for_imported(
+                            &candidate.source_module,
+                            &candidate.binding.name,
+                            &self.handler_stack,
+                        ),
+                        &dict_replacements,
                     ),
-                    &dict_replacements,
+                    &value_replacements,
                 ),
                 &callback_replacements,
             ),
@@ -1735,8 +1854,11 @@ impl<'info> Optimizer<'info> {
             &candidate.binding.name,
             &variant_name,
             extra_blocked_names,
-            &dict_replacements,
-            &callback_replacements,
+            VariantSpecializations {
+                dict: &dict_replacements,
+                values: &value_replacements,
+                callbacks: &callback_replacements,
+            },
         ) else {
             return (MExpr::App { head, args, source }, Change::Unchanged);
         };
@@ -1847,12 +1969,11 @@ impl<'info> Optimizer<'info> {
         old_name: &str,
         variant_name: &str,
         extra_blocked_names: impl IntoIterator<Item = String>,
-        param_replacements: &[DictParamReplacement],
-        callback_replacements: &[CallbackParamReplacement],
+        specializations: VariantSpecializations<'_>,
     ) -> Option<MExpr> {
         let mut variant_body =
             rewrite_direct_calls_to_name(binding.body.clone(), old_name, variant_name, binding.id);
-        for replacement in param_replacements {
+        for replacement in specializations.dict {
             let free_names = free_atom_names(&replacement.replacement);
             let substituted = subst_expr(
                 variant_body,
@@ -1865,7 +1986,20 @@ impl<'info> Optimizer<'info> {
             }
             variant_body = substituted.value;
         }
-        for replacement in callback_replacements {
+        for replacement in specializations.values {
+            let free_names = free_atom_names(&replacement.replacement);
+            let substituted = subst_expr(
+                variant_body,
+                &replacement.target,
+                &replacement.replacement,
+                &free_names,
+            );
+            if substituted.blocked {
+                return None;
+            }
+            variant_body = substituted.value;
+        }
+        for replacement in specializations.callbacks {
             variant_body = rewrite_direct_callback_calls(
                 variant_body,
                 &replacement.target,
@@ -2146,7 +2280,8 @@ impl<'info> Optimizer<'info> {
             let Some(inlined) = inline_helper_candidate(&candidate, &args) else {
                 return (MExpr::App { head, args, source }, Change::Unchanged);
             };
-            if expr_node_count(&inlined) > FUNCTION_VARIANT_BODY_BUDGET
+            let has_known_case_arg = args.iter().any(|arg| closed_case_scrutinee(arg).is_some());
+            if (!has_known_case_arg && expr_node_count(&inlined) > FUNCTION_VARIANT_BODY_BUDGET)
                 || (!self.expr_has_specialization_opportunity(&inlined) && !expr_is_pure(&inlined))
             {
                 return (MExpr::App { head, args, source }, Change::Unchanged);
@@ -4163,6 +4298,24 @@ fn variant_name_with_dict_key(base: String, dict_replacements: &[DictParamReplac
     format!("{base}__dict_{:016x}", stable_key_hash(&key))
 }
 
+fn variant_name_with_value_key(
+    base: String,
+    value_replacements: &[ValueParamReplacement],
+) -> String {
+    if value_replacements.is_empty() {
+        return base;
+    }
+
+    let mut key = String::new();
+    for replacement in value_replacements {
+        key.push_str(&replacement.target.name);
+        key.push('=');
+        key.push_str(&replacement.key);
+        key.push(';');
+    }
+    format!("{base}__value_{:016x}", stable_key_hash(&key))
+}
+
 fn variant_name_with_callback_key(
     base: String,
     callback_replacements: &[CallbackParamReplacement],
@@ -4309,6 +4462,114 @@ fn closed_dict_constructor_arg(atom: &Atom) -> Option<Atom> {
     }
 }
 
+fn closed_value_variant_arg(atom: &Atom) -> Option<Atom> {
+    match atom {
+        Atom::Ctor { args, .. }
+            if args
+                .iter()
+                .all(|arg| closed_value_variant_arg(arg).is_some()) =>
+        {
+            Some(atom.clone())
+        }
+        Atom::Tuple { elements, .. }
+            if elements
+                .iter()
+                .all(|arg| closed_value_variant_arg(arg).is_some()) =>
+        {
+            Some(atom.clone())
+        }
+        Atom::Lit { .. } | Atom::Symbol { .. } | Atom::BackendAtom { .. } => Some(atom.clone()),
+        Atom::Ctor { .. }
+        | Atom::Tuple { .. }
+        | Atom::Var { .. }
+        | Atom::Lambda { .. }
+        | Atom::DictRef { .. }
+        | Atom::QualifiedRef { .. }
+        | Atom::AnonRecord { .. }
+        | Atom::Record { .. }
+        | Atom::BackendSpawnThunk { .. } => None,
+    }
+}
+
+fn closed_constructor_variant_arg(atom: &Atom) -> Option<Atom> {
+    match atom {
+        Atom::Ctor { args, .. }
+            if args
+                .iter()
+                .all(|arg| closed_value_variant_arg(arg).is_some()) =>
+        {
+            Some(atom.clone())
+        }
+        _ => None,
+    }
+}
+
+fn closed_case_scrutinee(atom: &Atom) -> Option<Atom> {
+    match atom {
+        Atom::Lit { .. } | Atom::Ctor { .. } | Atom::Tuple { .. } => closed_value_variant_arg(atom),
+        _ => None,
+    }
+}
+
+fn match_pat_atom(pat: &Pat, atom: &Atom) -> Option<Vec<(MVar, Atom)>> {
+    let mut bindings = Vec::new();
+    match_pat_atom_into(pat, atom, &mut bindings).then_some(bindings)
+}
+
+fn match_pat_atom_into(pat: &Pat, atom: &Atom, bindings: &mut Vec<(MVar, Atom)>) -> bool {
+    match (pat, atom) {
+        (Pat::Wildcard { .. }, _) => true,
+        (Pat::Var { name, id, .. }, _) => {
+            bindings.push((
+                MVar {
+                    name: name.clone(),
+                    id: id.0,
+                },
+                atom.clone(),
+            ));
+            true
+        }
+        (Pat::Lit { value, .. }, Atom::Lit { value: atom, .. }) => value == atom,
+        (
+            Pat::Constructor {
+                name,
+                args: pat_args,
+                ..
+            },
+            Atom::Ctor {
+                name: atom_name,
+                args,
+                ..
+            },
+        ) if constructor_names_match(name, atom_name) && pat_args.len() == args.len() => pat_args
+            .iter()
+            .zip(args)
+            .all(|(pat, atom)| match_pat_atom_into(pat, atom, bindings)),
+        (
+            Pat::Tuple { elements, .. },
+            Atom::Tuple {
+                elements: atoms, ..
+            },
+        ) if elements.len() == atoms.len() => elements
+            .iter()
+            .zip(atoms)
+            .all(|(pat, atom)| match_pat_atom_into(pat, atom, bindings)),
+        _ => false,
+    }
+}
+
+fn constructor_names_match(a: &str, b: &str) -> bool {
+    if a == b {
+        return true;
+    }
+    let a_is_qualified = a.contains('.');
+    let b_is_qualified = b.contains('.');
+    if a_is_qualified && b_is_qualified {
+        return false;
+    }
+    a.rsplit('.').next() == b.rsplit('.').next()
+}
+
 fn prune_unused_dict_variant_args(
     params: &[Pat],
     args: Vec<Atom>,
@@ -4374,15 +4635,17 @@ fn static_variant_name(name: &str, stack: &[HandlerFrame]) -> String {
                             arm.op.op.as_str(),
                             arm.id.0,
                             arm.op.op_index,
+                            handler_arm_body_hash(arm),
                         )
                     })
                     .collect();
                 arm_keys.sort();
-                for (effect, op, id, op_index) in arm_keys {
+                for (effect, op, id, op_index, body_hash) in arm_keys {
                     parts.push(sanitize_ident_part(effect));
                     parts.push(sanitize_ident_part(op));
                     parts.push(id.to_string());
                     parts.push(op_index.to_string());
+                    parts.push(format!("{body_hash:016x}"));
                 }
             }
             HandlerFrame::Blocking { effects } => {
@@ -4401,6 +4664,10 @@ fn static_variant_name(name: &str, stack: &[HandlerFrame]) -> String {
         }
     }
     parts.join("__")
+}
+
+fn handler_arm_body_hash(arm: &MHandlerArm) -> u64 {
+    stable_key_hash(&format!("{:?}|{:?}", arm.body, arm.finally_block))
 }
 
 pub(crate) fn is_generated_variant_name(name: &str) -> bool {

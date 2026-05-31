@@ -58,6 +58,11 @@ representation dictionaries inline through shapes such as
 
 Dead pure lets are removed when the bound variable is unused.
 
+Cases whose scrutinee is a closed constructor, tuple, or literal can collapse to
+the first matching unguarded arm. The rewrite currently supports only simple
+patterns used by optimized derived code: variables, wildcards, literals,
+constructors, and tuples.
+
 ## Handler Stack Model
 
 Many rewrites depend on knowing which handler is lexically innermost for an
@@ -170,6 +175,13 @@ Implemented variant shapes:
   invalid remote call to an unexported function. Helper collection is a
   conservative dependency fixpoint; ambiguous or unsupported private helper
   graphs still make the constructor ineligible.
+- value-keyed generated variants for closed constructor arguments. When a call
+  such as `worker (Login 5)` is optimized under a known handler stack, the
+  generated variant can record the constructor value in its specialization key
+  and substitute it into the cloned body. A small case-on-known-constructor
+  rewrite then collapses derived `Generic` representation branches before
+  dictionary method inlining checks their size budget. This is deliberately
+  limited to closed constructor-shaped values, not arbitrary literals.
 - generated-variant dictionary-argument pruning. When a known dictionary
   argument becomes unused after specialization, the generated variant drops
   that parameter and the rewritten call site drops the constructor argument.
@@ -179,6 +191,11 @@ not change the callee module's exports or package cache behavior. Imported
 `@external` wrappers, private-helper dependencies, dynamic/composite
 specialization, and ambiguous closure/local-function shapes are still skipped
 outside the imported dictionary-helper clone path.
+
+Static handler stacks are keyed by the installed arm bodies, not just source arm
+ids. This matters for recovered handler factories: two `with` blocks can come
+from the same factory arm id while carrying different specialized handler
+bodies, and they must not share a generated variant.
 
 Trait method specialization is deliberately narrow. It handles local dictionary
 constructors when their dictionary arguments are already known, which covers

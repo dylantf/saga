@@ -23,33 +23,34 @@ watch whether entry-reachable `Options::get_options` yields disappear.
 
 ## Current Reference Stats
 
-Recorded after imported function variants learned to admit static nested
-`with` bodies. Level 09 intentionally mirrors the remaining `saga_json`
-`as_tagged` shape: it still exposes residual option reads through generated
-multi-payload dictionaries.
+Recorded after value-keyed generated variants learned to specialize closed ADT
+constructor arguments. Level 09 mirrors the `saga_json` `as_tagged` shape: the
+selected constructor path no longer materializes the full generic ADT
+dictionary before encoding.
 
 | Level | Whole-app entry-reachable stats |
 | --- | --- |
 | `05-cross-module-handler-factory` | `Yield 2 -> 0`, `Bind 32 -> 2`, `decls 10 -> 2` |
 | `06-cross-module-maybe-field` | `Yield 2 -> 0`, `Bind 35 -> 2`, `decls 11 -> 2` |
 | `07-cross-module-list-field` | `Yield 3 -> 0`, `Bind 31 -> 5`, `decls 10 -> 2` |
-| `08-cross-module-variant-options` | `Yield 2 -> 0`, `Bind 35 -> 3`, `decls 11 -> 2` |
-| `09-cross-module-inner-handler-adt` | `Yield 3 -> 2`, `Bind 49 -> 9`, `decls 13 -> 10` |
+| `08-cross-module-variant-options` | `Yield 2 -> 0`, `Bind 35 -> 3`, `decls 11 -> 3` |
+| `09-cross-module-inner-handler-adt` | `Yield 3 -> 0`, `Bind 49 -> 3`, `decls 13 -> 3` |
 
-## Level 09 Gap
+## Level 09 Resolution
 
-The remaining level 09 residuals are not a missing imported-dictionary lookup.
-The optimizer can resolve imported dict constructors through direct `DictRef`,
-qualified, and lowered `Var` heads. The residual `get_options` yields come from
-the derived ADT dictionary shape: the selected `Heartbeat`/`Login` calls still
-build a full generic `Event` dictionary, including latent method closures for
-the unused `Click Int Int` branch. Those closures are entry-reachable in the
-whole-app stats even though their option reads are not executed for this input.
+This was not a missing imported-dictionary lookup. The optimizer could already
+resolve imported dict constructors through direct `DictRef`, qualified, and
+lowered `Var` heads. The residual `get_options` yields came from the derived ADT
+dictionary shape: selected `Heartbeat`/`Login` calls built a full generic
+`Event` dictionary, including latent method closures for the unused
+`Click Int Int` branch.
 
-The next useful pass is therefore more specific than ordinary cross-module
-lookup: specialize derived dictionary construction or derived dictionary
-methods for known ADT constructors without eagerly materializing every generic
-branch dictionary.
+The fix is value-keyed generated variants for closed constructor arguments,
+plus a small case-on-known-constructor collapse. `override_options Heartbeat`
+and `override_options (Login 5)` now get separate caller-local variants, so the
+derived representation branch is known before the oversized dictionary method
+inline budget check. The ordinary dictionary-method and direct-call rewrites
+then erase the option reads.
 
 Run project fixtures from their directory:
 
