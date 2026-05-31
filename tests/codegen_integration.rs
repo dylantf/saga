@@ -243,34 +243,29 @@ fn assert_contains(out: &str, needle: &str) {
 }
 
 #[test]
-fn inner_dynamic_handler_is_kept_when_outer_static_handler_handles_same_effect() {
+fn let_bound_inner_handler_wins_over_outer_static_handler() {
     let src = r#"
-effect Log {
-  fun log : (msg: String) -> Unit
+effect Choose {
+  fun get : Unit -> Int
 }
 
-handler silent for Log {
-  log _ = resume ()
+handler outer for Choose {
+  get () = resume 1
 }
 
-make_logger () = handler for Log {
-  log _ = resume ()
+make_handler () = handler for Choose {
+  get () = resume 2
 }
 
 main () = {
-  let logger = make_logger ()
+  let h = make_handler ()
   {
-    log! "hello"
-  } with {logger, silent}
+    get! ()
+  } with {h, outer}
 }
 "#;
 
-    let out = emit_elaborated(src);
-    assert!(
-        out.contains("call 'erlang':'element'"),
-        "inner dynamic handler should remain when nested inside an outer static handler\n{out}"
-    );
-    assert_core_compiles(&out);
+    assert_runs_and_stdout_contains(src, &["2"]);
 }
 
 #[test]
@@ -501,30 +496,25 @@ main () = case 0 {
 }
 
 #[test]
-fn inner_dynamic_handler_is_kept_when_outer_inline_handler_handles_same_op() {
+fn let_bound_inner_handler_wins_over_outer_inline_handler() {
     let src = r#"
-effect Log {
-  fun log : (msg: String) -> Unit
+effect Choose {
+  fun get : Unit -> Int
 }
 
-make_logger () = handler for Log {
-  log _ = resume ()
+make_handler () = handler for Choose {
+  get () = resume 2
 }
 
 main () = {
-  let logger = make_logger ()
+  let h = make_handler ()
   {
-    log! "hello"
-  } with {logger, log _ = resume ()}
+    get! ()
+  } with {h, get () = resume 1}
 }
 "#;
 
-    let out = emit_elaborated(src);
-    assert!(
-        out.contains("call 'erlang':'element'"),
-        "inner dynamic handler should remain when nested inside an outer inline handler\n{out}"
-    );
-    assert_core_compiles(&out);
+    assert_runs_and_stdout_contains(src, &["2"]);
 }
 
 #[test]
@@ -1057,10 +1047,10 @@ do_work () = {
 main () = do_work () with silent
 "#;
     let out = emit_elaborated(src);
-    // main should install the named handler. The optimizer may then direct-call
-    // the tail-resumptive log operation instead of preserving the do_work call.
-    assert_contains(&out, "'std_evidence_bridge':'insert_canonical'");
+    // The optimizer can erase this simple handler install completely by
+    // specializing the call under the named handler.
     assert_contains(&out, "'Log'");
+    assert_contains(&out, "apply _ReturnK(42)");
     assert_core_compiles(&out);
 }
 
@@ -1094,7 +1084,10 @@ effect Log {
 }
 
 handler silent for Log {
-  log msg = resume ()
+  log msg = {
+    resume ()
+    resume ()
+  }
 }
 
 fun do_work : Unit -> Int needs {Log}

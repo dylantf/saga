@@ -258,7 +258,7 @@ fn bind_to_let_promotes_dict_constructor_app() {
 }
 
 #[test]
-fn bind_to_let_keeps_with_conservative() {
+fn dead_pure_static_with_removes_handler_around_plain_value() {
     let f = Fixture::new();
     let info = f.info();
     let value = MExpr::With {
@@ -274,9 +274,9 @@ fn bind_to_let_keeps_with_conservative() {
     let body = MExpr::Pure(var("x", 1));
     let prog = val_program(bind_expr(mv("x", 1), value, body));
 
-    let out = run(prog.clone(), &f.h, &info);
+    let out = run(prog, &f.h, &info);
 
-    assert_eq!(out, prog);
+    assert_eq!(out, val_program(MExpr::Pure(lit_int("1", 1))));
 }
 
 #[test]
@@ -475,10 +475,7 @@ fn direct_call_inlines_static_tail_resumptive_yield() {
 
     let out = run(prog, &f.h, &info);
 
-    assert_eq!(
-        out,
-        val_program(with_expr(handler, MExpr::Pure(lit_int("42", 42))))
-    );
+    assert_eq!(out, val_program(MExpr::Pure(lit_int("42", 42))));
 }
 
 #[test]
@@ -498,10 +495,7 @@ fn direct_call_exposes_bind_pure_collapse_in_same_fixpoint() {
 
     let out = run(prog, &f.h, &info);
 
-    assert_eq!(
-        out,
-        val_program(with_expr(handler, MExpr::Pure(lit_int("42", 42))))
-    );
+    assert_eq!(out, val_program(MExpr::Pure(lit_int("42", 42))));
 }
 
 #[test]
@@ -524,10 +518,7 @@ fn direct_call_substitutes_supported_var_params() {
 
     let out = run(prog, &f.h, &info);
 
-    assert_eq!(
-        out,
-        val_program(with_expr(handler, MExpr::Pure(lit_int("7", 7))))
-    );
+    assert_eq!(out, val_program(MExpr::Pure(lit_int("7", 7))));
 }
 
 #[test]
@@ -714,6 +705,244 @@ fn direct_call_dynamic_same_effect_blocks_outer_static_handler() {
     assert_eq!(
         out,
         val_program(with_expr(outer, with_expr(inner, yield_expr)))
+    );
+}
+
+#[test]
+fn let_bound_handler_value_specializes_to_static_handler() {
+    let mut f = Fixture::new();
+    let arm = tail_arm(156, vec![pat_unit(157)], resume(lit_int("1", 1)), None);
+    f.h.resumption
+        .insert(crate::ast::NodeId(156), ResumptionKind::TailResumptive);
+    let handler_value = MExpr::HandlerValue {
+        effects: vec!["Log".to_string()],
+        arms: vec![arm],
+        return_clause: None,
+        source: crate::ast::NodeId(158),
+    };
+    let handler_var = mv("h", 159);
+    let body = MExpr::Let {
+        var: handler_var.clone(),
+        value: Box::new(handler_value),
+        body: Box::new(with_expr(
+            MHandler::Dynamic {
+                effects: vec!["Log".to_string()],
+                op_tuple: Atom::Var {
+                    name: handler_var,
+                    source: crate::ast::NodeId(160),
+                },
+                return_lambda: None,
+                source: crate::ast::NodeId(161),
+            },
+            yield_log(vec![unit_atom()], crate::ast::NodeId(162)),
+        )),
+    };
+    let info = f.info();
+
+    let out = run(val_program(body), &f.h, &info);
+
+    assert_eq!(out, val_program(MExpr::Pure(lit_int("1", 1))));
+}
+
+#[test]
+fn let_bound_handler_factory_specializes_to_static_handler() {
+    let mut f = Fixture::new();
+    let arm = tail_arm(
+        163,
+        vec![pat_unit(164)],
+        resume(var("configured", 165)),
+        None,
+    );
+    f.h.resumption
+        .insert(crate::ast::NodeId(163), ResumptionKind::TailResumptive);
+    let factory = helper_fun(
+        "make_handler",
+        166,
+        vec![pat_var("configured", 167)],
+        MExpr::HandlerValue {
+            effects: vec!["Log".to_string()],
+            arms: vec![arm],
+            return_clause: None,
+            source: crate::ast::NodeId(168),
+        },
+    );
+    let handler_var = mv("h", 169);
+    let caller = MDecl::Val(MVal {
+        id: crate::ast::NodeId(170),
+        public: false,
+        name: "caller".to_string(),
+        value: MExpr::Let {
+            var: handler_var.clone(),
+            value: Box::new(MExpr::App {
+                head: var("make_handler", 166),
+                args: vec![lit_int("42", 42)],
+                source: crate::ast::NodeId(171),
+            }),
+            body: Box::new(with_expr(
+                MHandler::Dynamic {
+                    effects: vec!["Log".to_string()],
+                    op_tuple: Atom::Var {
+                        name: handler_var,
+                        source: crate::ast::NodeId(172),
+                    },
+                    return_lambda: None,
+                    source: crate::ast::NodeId(173),
+                },
+                yield_log(vec![unit_atom()], crate::ast::NodeId(174)),
+            )),
+        },
+        span: span(),
+    });
+    let info = f.info();
+
+    let out = run(vec![factory.clone(), caller], &f.h, &info);
+
+    assert_eq!(
+        out,
+        vec![
+            factory,
+            MDecl::Val(MVal {
+                id: crate::ast::NodeId(170),
+                public: false,
+                name: "caller".to_string(),
+                value: MExpr::Pure(lit_int("42", 42)),
+                span: span(),
+            })
+        ]
+    );
+}
+
+#[test]
+fn handler_factory_prefix_binding_is_computed_once_before_handler_install() {
+    let mut f = Fixture::new();
+    let opts = mv("opts", 185);
+    let arm = tail_arm(183, vec![pat_unit(184)], resume(var("opts", 185)), None);
+    f.h.resumption
+        .insert(crate::ast::NodeId(183), ResumptionKind::TailResumptive);
+    let factory = helper_fun(
+        "make_handler",
+        186,
+        vec![pat_var("configured", 187)],
+        MExpr::Bind {
+            var: opts.clone(),
+            value: Box::new(MExpr::App {
+                head: var("configure", 188),
+                args: vec![var("configured", 187)],
+                source: crate::ast::NodeId(189),
+            }),
+            body: Box::new(MExpr::HandlerValue {
+                effects: vec!["Log".to_string()],
+                arms: vec![arm],
+                return_clause: None,
+                source: crate::ast::NodeId(190),
+            }),
+            mode: crate::codegen::monadic::ir::BindMode::Sequence,
+        },
+    );
+    let handler_var = mv("h", 191);
+    let caller = MDecl::Val(MVal {
+        id: crate::ast::NodeId(192),
+        public: false,
+        name: "caller".to_string(),
+        value: MExpr::Let {
+            var: handler_var.clone(),
+            value: Box::new(MExpr::App {
+                head: var("make_handler", 186),
+                args: vec![lit_int("42", 42)],
+                source: crate::ast::NodeId(193),
+            }),
+            body: Box::new(with_expr(
+                MHandler::Dynamic {
+                    effects: vec!["Log".to_string()],
+                    op_tuple: Atom::Var {
+                        name: handler_var,
+                        source: crate::ast::NodeId(194),
+                    },
+                    return_lambda: None,
+                    source: crate::ast::NodeId(195),
+                },
+                yield_log(vec![unit_atom()], crate::ast::NodeId(196)),
+            )),
+        },
+        span: span(),
+    });
+    let info = f.info();
+
+    let out = run(vec![factory.clone(), caller], &f.h, &info);
+
+    assert_eq!(
+        out,
+        vec![
+            factory,
+            MDecl::Val(MVal {
+                id: crate::ast::NodeId(192),
+                public: false,
+                name: "caller".to_string(),
+                value: MExpr::Bind {
+                    var: opts,
+                    value: Box::new(MExpr::App {
+                        head: var("configure", 188),
+                        args: vec![lit_int("42", 42)],
+                        source: crate::ast::NodeId(189),
+                    }),
+                    body: Box::new(MExpr::Pure(var("opts", 185))),
+                    mode: crate::codegen::monadic::ir::BindMode::Sequence,
+                },
+                span: span(),
+            })
+        ]
+    );
+}
+
+#[test]
+fn non_handler_binding_shadows_outer_handler_value_binding() {
+    let mut f = Fixture::new();
+    let arm = tail_arm(175, vec![pat_unit(176)], resume(lit_int("1", 1)), None);
+    f.h.resumption
+        .insert(crate::ast::NodeId(175), ResumptionKind::TailResumptive);
+    let outer_handler = MExpr::HandlerValue {
+        effects: vec!["Log".to_string()],
+        arms: vec![arm],
+        return_clause: None,
+        source: crate::ast::NodeId(177),
+    };
+    let outer = mv("h", 178);
+    let inner = mv("h", 179);
+    let body = MExpr::Let {
+        var: outer.clone(),
+        value: Box::new(outer_handler),
+        body: Box::new(MExpr::Let {
+            var: inner.clone(),
+            value: Box::new(MExpr::Pure(lit_int("0", 0))),
+            body: Box::new(with_expr(
+                MHandler::Dynamic {
+                    effects: vec!["Log".to_string()],
+                    op_tuple: Atom::Var {
+                        name: inner,
+                        source: crate::ast::NodeId(180),
+                    },
+                    return_lambda: None,
+                    source: crate::ast::NodeId(181),
+                },
+                yield_log(vec![unit_atom()], crate::ast::NodeId(182)),
+            )),
+        }),
+    };
+    let info = f.info();
+
+    let out = run(val_program(body.clone()), &f.h, &info);
+
+    assert_eq!(
+        out,
+        val_program(with_expr(
+            MHandler::Dynamic {
+                effects: vec!["Log".to_string()],
+                op_tuple: lit_int("0", 0),
+                return_lambda: None,
+                source: crate::ast::NodeId(181),
+            },
+            yield_log(vec![unit_atom()], crate::ast::NodeId(182)),
+        ))
     );
 }
 
@@ -1222,7 +1451,7 @@ fn helper_inline_exposes_yield_to_static_direct_call() {
                 id: crate::ast::NodeId(285),
                 public: false,
                 name: "caller".to_string(),
-                value: with_expr(handler, MExpr::Pure(lit_int("42", 42))),
+                value: MExpr::Pure(lit_int("42", 42)),
                 span: span(),
             })
         ]

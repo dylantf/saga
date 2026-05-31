@@ -81,6 +81,22 @@ slow path.
 Cleanup-preserving direct-call exists for conservative `finally`/`Ensure` cases
 where cleanup variables are available at the perform site.
 
+Let-bound handler values can be specialized before this rewrite runs. When the
+optimizer sees a handler value or a small handler factory result bound to a
+local and a later `with h` uses that same binding, it can replace the dynamic
+handler with a static handler under the binding's lexical scope. This lets
+factory patterns such as `let h = json_opts config; body with h` reuse the
+ordinary static direct-call and function-variant machinery. The rewrite is
+scoped and shadowing-aware; if another binding with the same name appears before
+the `with`, specialization stops there.
+
+Handler factories may include a small prefix of `let`/`bind` computations before
+the returned handler value. The optimizer splices that prefix before the
+handler binding, so configuration such as `let opts = f default_options` is
+computed once at handler construction time instead of being duplicated inside
+each optimized operation arm. Factories that do not end in a handler value stay
+on the slow path.
+
 ## Native Direct-Call
 
 Native handlers model BEAM-specific effects such as actors, process operations,
@@ -109,6 +125,8 @@ Implemented variant shapes:
   yields from the generated body;
 - caller-local cross-module variants for imported public Saga functions under
   native or fully-erasing static handler stacks.
+- let-bound handler factory specialization for small same-module factories that
+  end in a `HandlerValue`, including simple configuration prefixes.
 
 Generated variants are private to the caller module. Cross-module variants do
 not change the callee module's exports or package cache behavior. Imported

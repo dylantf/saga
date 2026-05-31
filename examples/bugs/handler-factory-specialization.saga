@@ -1,0 +1,22 @@
+effect Opt {
+  fun get : Unit -> Int
+}
+
+fun mk_handler : (value: Int) -> Handler Opt
+mk_handler value = {
+  let configured = bump value
+  handler for Opt {
+    get () = resume configured
+  }
+}
+
+fun read_opt : Unit -> Int needs {Opt}
+read_opt () = get! ()
+
+fun bump : (value: Int) -> Int
+bump value = value + 1
+
+main () = {
+  let h = mk_handler 41
+  dbg (show ({ read_opt () } with h))
+}

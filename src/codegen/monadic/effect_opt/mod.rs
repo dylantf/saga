@@ -89,7 +89,9 @@ struct Optimizer<'info> {
     context: OptimizerContext,
     handler_analysis: &'info HandlerAnalysis,
     handler_stack: Vec<HandlerFrame>,
+    handler_value_bindings: Vec<(String, Option<HandlerValueCandidate>)>,
     inline_candidates: HashMap<String, InlineCandidate>,
+    handler_factory_candidates: HashMap<String, InlineCandidate>,
     variant_candidates: HashMap<String, VariantCandidate>,
     generated_variant_names: HashSet<String>,
     pending_variants: Vec<MDecl>,
@@ -131,6 +133,21 @@ impl HandlerFrame {
 struct InlineCandidate {
     params: Vec<Pat>,
     body: MExpr,
+}
+
+#[derive(Debug, Clone)]
+struct HandlerValueCandidate {
+    effects: Vec<String>,
+    arms: Vec<MHandlerArm>,
+    return_clause: Option<Box<MHandlerArm>>,
+    source: crate::ast::NodeId,
+}
+
+#[derive(Debug, Clone)]
+struct HandlerFactoryPrefixBinding {
+    var: MVar,
+    value: MExpr,
+    mode: Option<crate::codegen::monadic::ir::BindMode>,
 }
 
 #[derive(Debug, Clone)]
@@ -196,7 +213,9 @@ impl<'info> Optimizer<'info> {
             context,
             handler_analysis,
             handler_stack: Vec::new(),
+            handler_value_bindings: Vec::new(),
             inline_candidates: HashMap::new(),
+            handler_factory_candidates: HashMap::new(),
             variant_candidates: HashMap::new(),
             generated_variant_names: HashSet::new(),
             pending_variants: Vec::new(),
@@ -208,6 +227,7 @@ impl<'info> Optimizer<'info> {
         let mut changed = true;
         while changed {
             self.inline_candidates = collect_inline_candidates(&program);
+            self.handler_factory_candidates = collect_handler_factory_candidates(&program);
             self.variant_candidates = collect_variant_candidates(&program);
             self.pending_variants.clear();
             changed = false;
@@ -275,9 +295,13 @@ impl<'info> Optimizer<'info> {
         let (expr, native_change) = self.try_native_direct_call(expr);
         let (expr, finally_direct_change) = self.try_finally_direct_call(expr);
         let (expr, direct_change) = self.try_direct_call(expr);
+        let (expr, handler_factory_change) = self.try_inline_let_bound_handler_factory(expr);
+        let (expr, handler_value_change) = self.try_inline_let_bound_handler_value(expr);
         let (expr, collapse_change) = self.try_bind_collapse(expr);
+        let (expr, let_collapse_change) = self.try_let_pure_collapse(expr);
         let (expr, let_change) = self.try_bind_to_let(expr);
         let (expr, dead_let_change) = self.try_dead_pure_let(expr);
+        let (expr, dead_with_change) = self.try_dead_pure_static_with(expr);
         let mut change = child_change;
         change.mark_if(variant_change);
         change.mark_if(inline_change);
@@ -285,9 +309,13 @@ impl<'info> Optimizer<'info> {
         change.mark_if(native_change);
         change.mark_if(finally_direct_change);
         change.mark_if(direct_change);
+        change.mark_if(handler_factory_change);
+        change.mark_if(handler_value_change);
         change.mark_if(collapse_change);
+        change.mark_if(let_collapse_change);
         change.mark_if(let_change);
         change.mark_if(dead_let_change);
+        change.mark_if(dead_with_change);
         (expr, change)
     }
 
@@ -308,8 +336,7 @@ impl<'info> Optimizer<'info> {
                 mode,
             } => {
                 let (value, value_change) = self.optimize_expr(*value);
-                let (body, body_change) =
-                    self.optimize_expr_with_blocked_names(vec![var.name.clone()], *body);
+                let (body, body_change) = self.optimize_body_after_binding(&var, &value, *body);
                 let mut change = value_change;
                 change.mark_if(body_change);
                 (
@@ -324,8 +351,7 @@ impl<'info> Optimizer<'info> {
             }
             MExpr::Let { var, value, body } => {
                 let (value, value_change) = self.optimize_expr(*value);
-                let (body, body_change) =
-                    self.optimize_expr_with_blocked_names(vec![var.name.clone()], *body);
+                let (body, body_change) = self.optimize_body_after_binding(&var, &value, *body);
                 let mut change = value_change;
                 change.mark_if(body_change);
                 (
@@ -408,6 +434,7 @@ impl<'info> Optimizer<'info> {
                 source,
             } => {
                 let (handler, handler_change) = self.optimize_handler_with_cleared_stack(handler);
+                let (handler, dynamic_change) = self.specialize_dynamic_handler_binding(handler);
                 let frame = handler_frame(&handler);
                 let (body, body_change) = if let Some(frame) = frame {
                     self.optimize_expr_with_frame(*body, frame)
@@ -415,6 +442,7 @@ impl<'info> Optimizer<'info> {
                     self.optimize_expr(*body)
                 };
                 let mut change = handler_change;
+                change.mark_if(dynamic_change);
                 change.mark_if(body_change);
                 (
                     MExpr::With {
@@ -714,8 +742,8 @@ impl<'info> Optimizer<'info> {
         }
     }
 
-    fn try_dead_pure_let(&self, expr: MExpr) -> (MExpr, Change) {
-        if !self.opts.dead_pure_let() {
+    fn try_let_pure_collapse(&self, expr: MExpr) -> (MExpr, Change) {
+        if !self.opts.bind_collapse() {
             return (expr, Change::Unchanged);
         }
 
@@ -723,10 +751,79 @@ impl<'info> Optimizer<'info> {
             return (expr, Change::Unchanged);
         };
 
-        if expr_is_pure(&value) && !expr_contains_target(&body, &var) {
+        let MExpr::Pure(atom) = *value else {
+            return (MExpr::Let { var, value, body }, Change::Unchanged);
+        };
+
+        let free_names = free_atom_names(&atom);
+        let substituted = subst_expr(*body, &var, &atom, &free_names);
+        if substituted.blocked {
+            (
+                MExpr::Let {
+                    var,
+                    value: Box::new(MExpr::Pure(atom)),
+                    body: Box::new(substituted.value),
+                },
+                Change::Unchanged,
+            )
+        } else {
+            (substituted.value, Change::Changed)
+        }
+    }
+
+    fn try_dead_pure_let(&self, expr: MExpr) -> (MExpr, Change) {
+        if !self.opts.dead_pure_let() {
+            return (expr, Change::Unchanged);
+        }
+
+        let (var, value, body, mode) = match expr {
+            MExpr::Let { var, value, body } => (var, value, body, None),
+            MExpr::Bind {
+                var,
+                value,
+                body,
+                mode,
+            } => (var, value, body, Some(mode)),
+            other => return (other, Change::Unchanged),
+        };
+
+        if (expr_is_pure(&value) || matches!(&*value, MExpr::HandlerValue { .. }))
+            && !expr_contains_target(&body, &var)
+        {
             (*body, Change::Changed)
         } else {
-            (MExpr::Let { var, value, body }, Change::Unchanged)
+            (rebuild_binding(var, value, body, mode), Change::Unchanged)
+        }
+    }
+
+    fn try_dead_pure_static_with(&self, expr: MExpr) -> (MExpr, Change) {
+        if !self.opts.dead_pure_with() {
+            return (expr, Change::Unchanged);
+        }
+
+        let MExpr::With {
+            handler,
+            body,
+            source,
+        } = expr
+        else {
+            return (expr, Change::Unchanged);
+        };
+
+        match &handler {
+            MHandler::Static { return_clause, .. }
+                if return_clause.is_none() && expr_is_handler_independent_value(&body) =>
+            {
+                (*body, Change::Changed)
+            }
+            _ => (
+                MExpr::With {
+                    handler,
+                    body,
+                    source,
+                },
+                Change::Unchanged,
+            ),
         }
     }
 
@@ -738,6 +835,97 @@ impl<'info> Optimizer<'info> {
         let mut change = guard_change;
         change.mark_if(body_change);
         (MArm { guard, body, ..arm }, change)
+    }
+
+    fn optimize_body_after_binding(
+        &mut self,
+        var: &MVar,
+        value: &MExpr,
+        body: MExpr,
+    ) -> (MExpr, Change) {
+        if let Some(candidate) = handler_value_candidate(value) {
+            self.handler_value_bindings
+                .push((var.name.clone(), Some(candidate)));
+        } else {
+            self.handler_value_bindings.push((var.name.clone(), None));
+        }
+        let (body, change) = self.optimize_expr_with_blocked_names(vec![var.name.clone()], body);
+        self.handler_value_bindings.pop();
+        (body, change)
+    }
+
+    fn specialize_dynamic_handler_binding(&self, handler: MHandler) -> (MHandler, Change) {
+        let MHandler::Dynamic {
+            effects,
+            op_tuple,
+            return_lambda,
+            source,
+        } = handler
+        else {
+            return (handler, Change::Unchanged);
+        };
+
+        let Atom::Var { name, .. } = &op_tuple else {
+            return (
+                MHandler::Dynamic {
+                    effects,
+                    op_tuple,
+                    return_lambda,
+                    source,
+                },
+                Change::Unchanged,
+            );
+        };
+
+        let Some((_, maybe_candidate)) = self
+            .handler_value_bindings
+            .iter()
+            .rev()
+            .find(|(bound_name, _)| bound_name == &name.name)
+        else {
+            return (
+                MHandler::Dynamic {
+                    effects,
+                    op_tuple,
+                    return_lambda,
+                    source,
+                },
+                Change::Unchanged,
+            );
+        };
+        let Some(candidate) = maybe_candidate.as_ref() else {
+            return (
+                MHandler::Dynamic {
+                    effects,
+                    op_tuple,
+                    return_lambda,
+                    source,
+                },
+                Change::Unchanged,
+            );
+        };
+
+        if return_lambda.is_some() || !handler_effect_sets_match(&candidate.effects, &effects) {
+            return (
+                MHandler::Dynamic {
+                    effects,
+                    op_tuple,
+                    return_lambda,
+                    source,
+                },
+                Change::Unchanged,
+            );
+        }
+
+        (
+            MHandler::Static {
+                effects: candidate.effects.clone(),
+                arms: candidate.arms.clone(),
+                return_clause: candidate.return_clause.as_deref().cloned(),
+                source: candidate.source,
+            },
+            Change::Changed,
+        )
     }
 
     fn optimize_handler(&mut self, handler: MHandler) -> (MHandler, Change) {
@@ -1434,6 +1622,146 @@ impl<'info> Optimizer<'info> {
         (rewrite_resumes_to_pure(inlined.body), Change::Changed)
     }
 
+    fn try_inline_let_bound_handler_value(&self, expr: MExpr) -> (MExpr, Change) {
+        if !self.opts.handler_value_specialization() {
+            return (expr, Change::Unchanged);
+        }
+
+        let MExpr::Let { var, value, body } = expr else {
+            return (expr, Change::Unchanged);
+        };
+
+        let MExpr::HandlerValue {
+            effects,
+            arms,
+            return_clause,
+            source: handler_source,
+        } = *value
+        else {
+            return (MExpr::Let { var, value, body }, Change::Unchanged);
+        };
+
+        let handler_value = || MExpr::HandlerValue {
+            effects: effects.clone(),
+            arms: arms.clone(),
+            return_clause: return_clause.clone(),
+            source: handler_source,
+        };
+
+        let MExpr::With {
+            handler:
+                MHandler::Dynamic {
+                    effects: dynamic_effects,
+                    op_tuple,
+                    return_lambda,
+                    source: dynamic_source,
+                },
+            body: with_body,
+            source: with_source,
+        } = *body
+        else {
+            return (
+                MExpr::Let {
+                    var,
+                    value: Box::new(handler_value()),
+                    body,
+                },
+                Change::Unchanged,
+            );
+        };
+
+        let rebuild = |return_lambda| MExpr::Let {
+            var: var.clone(),
+            value: Box::new(handler_value()),
+            body: Box::new(MExpr::With {
+                handler: MHandler::Dynamic {
+                    effects: dynamic_effects.clone(),
+                    op_tuple: op_tuple.clone(),
+                    return_lambda,
+                    source: dynamic_source,
+                },
+                body: with_body.clone(),
+                source: with_source,
+            }),
+        };
+
+        if !atom_is_var_name(&op_tuple, &var) {
+            return (rebuild(return_lambda), Change::Unchanged);
+        }
+        if return_lambda.is_some() || !handler_effect_sets_match(&effects, &dynamic_effects) {
+            return (rebuild(return_lambda), Change::Unchanged);
+        }
+
+        (
+            MExpr::With {
+                handler: MHandler::Static {
+                    effects,
+                    arms,
+                    return_clause: return_clause.map(|arm| *arm),
+                    source: handler_source,
+                },
+                body: with_body,
+                source: with_source,
+            },
+            Change::Changed,
+        )
+    }
+
+    fn try_inline_let_bound_handler_factory(&self, expr: MExpr) -> (MExpr, Change) {
+        if !self.opts.handler_factory_inline() {
+            return (expr, Change::Unchanged);
+        }
+
+        let (var, value, body, mode) = match expr {
+            MExpr::Let { var, value, body } => (var, value, body, None),
+            MExpr::Bind {
+                var,
+                value,
+                body,
+                mode,
+            } => (var, value, body, Some(mode)),
+            other => return (other, Change::Unchanged),
+        };
+
+        let MExpr::App { head, args, source } = *value else {
+            return (rebuild_binding(var, value, body, mode), Change::Unchanged);
+        };
+
+        let Atom::Var { name, .. } = &head else {
+            return (
+                rebuild_binding(var, Box::new(MExpr::App { head, args, source }), body, mode),
+                Change::Unchanged,
+            );
+        };
+
+        let Some(candidate) = self.handler_factory_candidates.get(&name.name) else {
+            return (
+                rebuild_binding(var, Box::new(MExpr::App { head, args, source }), body, mode),
+                Change::Unchanged,
+            );
+        };
+        let Some(inlined) = inline_helper_candidate(candidate, &args) else {
+            return (
+                rebuild_binding(var, Box::new(MExpr::App { head, args, source }), body, mode),
+                Change::Unchanged,
+            );
+        };
+        let Some((prefix, handler_value)) = split_handler_factory_body(inlined) else {
+            return (
+                rebuild_binding(var, Box::new(MExpr::App { head, args, source }), body, mode),
+                Change::Unchanged,
+            );
+        };
+
+        (
+            splice_handler_factory_prefix(
+                prefix,
+                rebuild_binding(var, Box::new(handler_value), body, mode),
+            ),
+            Change::Changed,
+        )
+    }
+
     fn try_finally_direct_call(&self, expr: MExpr) -> (MExpr, Change) {
         if !self.opts.direct_call() {
             return (expr, Change::Unchanged);
@@ -1648,6 +1976,14 @@ impl RunOptions {
         !self.skip
     }
 
+    fn handler_value_specialization(self) -> bool {
+        !self.skip
+    }
+
+    fn handler_factory_inline(self) -> bool {
+        !self.skip
+    }
+
     fn native_direct_call(self) -> bool {
         !self.skip
     }
@@ -1665,6 +2001,10 @@ impl RunOptions {
     }
 
     fn dead_pure_let(self) -> bool {
+        !self.skip
+    }
+
+    fn dead_pure_with(self) -> bool {
         !self.skip
     }
 }
@@ -1758,6 +2098,62 @@ fn expr_is_pure(expr: &MExpr) -> bool {
     }
 }
 
+fn expr_is_handler_independent_value(expr: &MExpr) -> bool {
+    match expr {
+        MExpr::Pure(atom) => atom_is_handler_independent_value(atom),
+        MExpr::Let { value, body, .. } => {
+            expr_is_handler_independent_value(value) && expr_is_handler_independent_value(body)
+        }
+        MExpr::Case { arms, .. } => arms.iter().all(|arm| {
+            arm.guard
+                .as_ref()
+                .is_none_or(expr_is_handler_independent_value)
+                && expr_is_handler_independent_value(&arm.body)
+        }),
+        MExpr::If {
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            expr_is_handler_independent_value(then_branch)
+                && expr_is_handler_independent_value(else_branch)
+        }
+        MExpr::FieldAccess { .. }
+        | MExpr::RecordUpdate { .. }
+        | MExpr::DictMethodAccess { .. }
+        | MExpr::BinOp { .. }
+        | MExpr::UnaryMinus { .. }
+        | MExpr::BitString { .. } => true,
+        MExpr::App { .. }
+        | MExpr::Yield { .. }
+        | MExpr::Bind { .. }
+        | MExpr::Ensure { .. }
+        | MExpr::With { .. }
+        | MExpr::Resume { .. }
+        | MExpr::ForeignCall { .. }
+        | MExpr::Receive { .. }
+        | MExpr::LetFun { .. }
+        | MExpr::HandlerValue { .. } => false,
+    }
+}
+
+fn atom_is_handler_independent_value(atom: &Atom) -> bool {
+    match atom {
+        Atom::Ctor { args, .. } => args.iter().all(atom_is_handler_independent_value),
+        Atom::Tuple { elements, .. } => elements.iter().all(atom_is_handler_independent_value),
+        Atom::AnonRecord { fields, .. } | Atom::Record { fields, .. } => fields
+            .iter()
+            .all(|(_, atom)| atom_is_handler_independent_value(atom)),
+        Atom::Lambda { .. } | Atom::BackendSpawnThunk { .. } => false,
+        Atom::Var { .. }
+        | Atom::Lit { .. }
+        | Atom::DictRef { .. }
+        | Atom::QualifiedRef { .. }
+        | Atom::Symbol { .. }
+        | Atom::BackendAtom { .. } => true,
+    }
+}
+
 const INLINE_HELPER_BODY_BUDGET: usize = 30;
 const FUNCTION_VARIANT_BODY_BUDGET: usize = 220;
 const NATIVE_VARIANT_PREFIX: &str = "__saga_native_variant";
@@ -1787,6 +2183,40 @@ fn collect_inline_candidates(program: &MProgram) -> HashMap<String, InlineCandid
             || expr_yield_count(&f.body) != 1
             || expr_contains_inline_forbidden_shape(&f.body)
             || expr_calls_any(&f.body, &same_module_names)
+        {
+            continue;
+        }
+        candidates.insert(
+            f.name.clone(),
+            InlineCandidate {
+                params: f.params.clone(),
+                body: f.body.clone(),
+            },
+        );
+    }
+    candidates
+}
+
+fn collect_handler_factory_candidates(program: &MProgram) -> HashMap<String, InlineCandidate> {
+    let mut counts: HashMap<String, usize> = HashMap::new();
+    for decl in program {
+        if let MDecl::FunBinding(f) = decl {
+            *counts.entry(f.name.clone()).or_default() += 1;
+        }
+    }
+
+    let mut candidates = HashMap::new();
+    for decl in program {
+        let MDecl::FunBinding(f) = decl else {
+            continue;
+        };
+        if counts.get(&f.name) != Some(&1) {
+            continue;
+        }
+        if f.guard.is_some()
+            || !helper_params_are_supported(&f.params)
+            || expr_node_count(&f.body) > INLINE_HELPER_BODY_BUDGET
+            || !expr_ends_in_handler_value(&f.body)
         {
             continue;
         }
@@ -2805,6 +3235,112 @@ fn effect_names_match(a: &str, b: &str) -> bool {
         return false;
     }
     a.rsplit('.').next() == b.rsplit('.').next()
+}
+
+fn handler_effect_sets_match(left: &[String], right: &[String]) -> bool {
+    left.len() == right.len()
+        && left
+            .iter()
+            .all(|l| right.iter().any(|r| effect_names_match(l, r)))
+}
+
+fn handler_value_candidate(expr: &MExpr) -> Option<HandlerValueCandidate> {
+    let MExpr::HandlerValue {
+        effects,
+        arms,
+        return_clause,
+        source,
+    } = expr
+    else {
+        return None;
+    };
+
+    Some(HandlerValueCandidate {
+        effects: effects.clone(),
+        arms: arms.clone(),
+        return_clause: return_clause.clone(),
+        source: *source,
+    })
+}
+
+fn expr_ends_in_handler_value(expr: &MExpr) -> bool {
+    match expr {
+        MExpr::HandlerValue { .. } => true,
+        MExpr::Bind { body, .. } | MExpr::Let { body, .. } => expr_ends_in_handler_value(body),
+        _ => false,
+    }
+}
+
+fn split_handler_factory_body(expr: MExpr) -> Option<(Vec<HandlerFactoryPrefixBinding>, MExpr)> {
+    match expr {
+        MExpr::HandlerValue { .. } => Some((Vec::new(), expr)),
+        MExpr::Bind {
+            var,
+            value,
+            body,
+            mode,
+        } => {
+            let (mut prefix, handler_value) = split_handler_factory_body(*body)?;
+            prefix.insert(
+                0,
+                HandlerFactoryPrefixBinding {
+                    var,
+                    value: *value,
+                    mode: Some(mode),
+                },
+            );
+            Some((prefix, handler_value))
+        }
+        MExpr::Let { var, value, body } => {
+            let (mut prefix, handler_value) = split_handler_factory_body(*body)?;
+            prefix.insert(
+                0,
+                HandlerFactoryPrefixBinding {
+                    var,
+                    value: *value,
+                    mode: None,
+                },
+            );
+            Some((prefix, handler_value))
+        }
+        _ => None,
+    }
+}
+
+fn splice_handler_factory_prefix(prefix: Vec<HandlerFactoryPrefixBinding>, body: MExpr) -> MExpr {
+    prefix.into_iter().rev().fold(body, |body, binding| {
+        rebuild_binding(
+            binding.var,
+            Box::new(binding.value),
+            Box::new(body),
+            binding.mode,
+        )
+    })
+}
+
+fn rebuild_binding(
+    var: MVar,
+    value: Box<MExpr>,
+    body: Box<MExpr>,
+    mode: Option<crate::codegen::monadic::ir::BindMode>,
+) -> MExpr {
+    if let Some(mode) = mode {
+        MExpr::Bind {
+            var,
+            value,
+            body,
+            mode,
+        }
+    } else {
+        MExpr::Let { var, value, body }
+    }
+}
+
+fn atom_is_var_name(atom: &Atom, var: &MVar) -> bool {
+    matches!(
+        atom,
+        Atom::Var { name, .. } if name.name == var.name
+    )
 }
 
 fn single_matching_arm<'a>(
