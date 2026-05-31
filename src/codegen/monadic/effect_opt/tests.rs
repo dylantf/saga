@@ -1640,6 +1640,104 @@ fn dict_method_inline_exposes_yield_to_static_function_variant() {
 }
 
 #[test]
+fn dict_argument_specializes_generated_static_variant() {
+    let mut f = Fixture::new();
+    let arm = tail_arm(2830, vec![pat_unit(2831)], resume(lit_int("42", 42)), None);
+    f.h.resumption
+        .insert(crate::ast::NodeId(2830), ResumptionKind::TailResumptive);
+    let handler = static_log_handler(vec![arm]);
+    let dict = MDecl::DictConstructor(MDictConstructor {
+        id: crate::ast::NodeId(2832),
+        name: "__dict_Encodable_Int".to_string(),
+        dict_params: vec![],
+        methods: vec![MExpr::Pure(Atom::Lambda {
+            params: vec![pat_var("x", 2833)],
+            body: Box::new(bind_expr(
+                mv("opts", 2834),
+                yield_log(vec![unit_atom()], crate::ast::NodeId(2835)),
+                MExpr::BinOp {
+                    op: crate::ast::BinOp::Add,
+                    left: var("x", 2833),
+                    right: var("opts", 2834),
+                    source: crate::ast::NodeId(2836),
+                },
+            )),
+            source: crate::ast::NodeId(2837),
+        })],
+        method_effects: vec![],
+        method_open_rows: vec![],
+        impl_effects: vec![],
+        span: span(),
+    });
+    let serialize = helper_fun(
+        "serialize",
+        2838,
+        vec![pat_var("__dict_Encodable_a", 2839), pat_var("x", 2840)],
+        bind_expr(
+            mv("method", 2841),
+            MExpr::DictMethodAccess {
+                dict: var("__dict_Encodable_a", 2839),
+                trait_name: "Encodable".to_string(),
+                method_index: 0,
+                source: crate::ast::NodeId(2842),
+            },
+            MExpr::App {
+                head: var("method", 2841),
+                args: vec![var("x", 2840)],
+                source: crate::ast::NodeId(2843),
+            },
+        ),
+    );
+    let caller = MDecl::Val(MVal {
+        id: crate::ast::NodeId(2844),
+        public: false,
+        name: "caller".to_string(),
+        value: with_expr(
+            handler,
+            bind_expr(
+                mv("dict", 2845),
+                MExpr::App {
+                    head: Atom::DictRef {
+                        name: "__dict_Encodable_Int".to_string(),
+                        source: crate::ast::NodeId(2846),
+                    },
+                    args: vec![],
+                    source: crate::ast::NodeId(2847),
+                },
+                MExpr::App {
+                    head: var("serialize", 2848),
+                    args: vec![var("dict", 2845), lit_int("5", 5)],
+                    source: crate::ast::NodeId(2849),
+                },
+            ),
+        ),
+        span: span(),
+    });
+    let info = f.info();
+
+    let out = run(vec![dict, serialize, caller], &f.h, &info);
+    let variant = out
+        .iter()
+        .find_map(|decl| match decl {
+            MDecl::FunBinding(fun) if is_generated_variant_name(&fun.name) => Some(fun),
+            _ => None,
+        })
+        .expect("expected generated static variant");
+
+    assert!(variant.name.contains("__dict_"));
+    assert_eq!(
+        variant.body,
+        MExpr::BinOp {
+            op: crate::ast::BinOp::Add,
+            left: var("x", 2840),
+            right: lit_int("42", 42),
+            source: crate::ast::NodeId(2836),
+        }
+    );
+    assert_eq!(expr_yield_count(&variant.body), 0);
+}
+
+#[test]
 fn helper_inline_skips_multi_clause_function() {
     let mut f = Fixture::new();
     let arm = tail_arm(290, vec![pat_unit(291)], resume(lit_int("42", 42)), None);

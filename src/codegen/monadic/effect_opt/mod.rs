@@ -168,7 +168,16 @@ struct VariantCandidate {
 
 #[derive(Debug, Clone)]
 struct DictValueCandidate {
+    atom: Atom,
     methods: Vec<Atom>,
+    key: String,
+}
+
+#[derive(Debug, Clone)]
+struct DictParamReplacement {
+    target: MVar,
+    replacement: Atom,
+    key: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -910,7 +919,14 @@ impl<'info> Optimizer<'info> {
                 _ => None,
             })
             .collect::<Option<Vec<_>>>()?;
-        Some(DictValueCandidate { methods })
+        Some(DictValueCandidate {
+            atom: Atom::Tuple {
+                elements: methods.clone(),
+                source: constructor.id,
+            },
+            methods,
+            key: name.clone(),
+        })
     }
 
     fn dict_method_candidate(&self, value: &MExpr) -> Option<InlineCandidate> {
@@ -920,21 +936,27 @@ impl<'info> Optimizer<'info> {
         else {
             return None;
         };
-        let Atom::Var { name, .. } = dict else {
-            return None;
-        };
-        let dict = self.lookup_dict_value(&name.name)?;
-        let method = dict.methods.get(*method_index)?;
+        let method = self.dict_method_atom(dict, *method_index)?;
         let Atom::Lambda { params, body, .. } = method else {
             return None;
         };
-        if !helper_params_are_supported(params) {
+        if !helper_params_are_supported(&params) {
             return None;
         }
         Some(InlineCandidate {
             params: params.clone(),
             body: body.as_ref().clone(),
         })
+    }
+
+    fn dict_method_atom(&self, dict: &Atom, method_index: usize) -> Option<Atom> {
+        match dict {
+            Atom::Var { name, .. } => self
+                .lookup_dict_value(&name.name)
+                .and_then(|dict| dict.methods.get(method_index).cloned()),
+            Atom::Tuple { elements, .. } => elements.get(method_index).cloned(),
+            _ => None,
+        }
     }
 
     fn lookup_dict_value(&self, name: &str) -> Option<DictValueCandidate> {
@@ -953,6 +975,30 @@ impl<'info> Optimizer<'info> {
             .find(|(bound_name, _)| bound_name == name)?
             .1
             .clone()
+    }
+
+    fn dict_param_replacements(&self, params: &[Pat], args: &[Atom]) -> Vec<DictParamReplacement> {
+        params
+            .iter()
+            .zip(args)
+            .filter_map(|(param, arg)| {
+                let Pat::Var { name, id, .. } = param else {
+                    return None;
+                };
+                let Atom::Var { name: arg_var, .. } = arg else {
+                    return None;
+                };
+                let dict = self.lookup_dict_value(&arg_var.name)?;
+                Some(DictParamReplacement {
+                    target: MVar {
+                        name: name.clone(),
+                        id: id.0,
+                    },
+                    replacement: dict.atom,
+                    key: dict.key,
+                })
+            })
+            .collect()
     }
 
     fn specialize_dynamic_handler_binding(&self, handler: MHandler) -> (MHandler, Change) {
@@ -1296,13 +1342,17 @@ impl<'info> Optimizer<'info> {
         if args.len() != candidate.binding.params.len() {
             return (MExpr::App { head, args, source }, Change::Unchanged);
         }
+        let dict_replacements = self.dict_param_replacements(&candidate.binding.params, &args);
         if !self.expr_has_direct_call_opportunity(&candidate.binding.body)
             && !expr_contains_dict_method_access(&candidate.binding.body)
         {
             return (MExpr::App { head, args, source }, Change::Unchanged);
         }
 
-        let variant_name = variant_name_for_stack(&candidate.binding.name, &self.handler_stack);
+        let variant_name = variant_name_with_dict_key(
+            variant_name_for_stack(&candidate.binding.name, &self.handler_stack),
+            &dict_replacements,
+        );
         if variant_name == name.name {
             return (MExpr::App { head, args, source }, Change::Unchanged);
         }
@@ -1312,6 +1362,7 @@ impl<'info> Optimizer<'info> {
             &name.name,
             &variant_name,
             Vec::<String>::new(),
+            dict_replacements,
         ) else {
             return (MExpr::App { head, args, source }, Change::Unchanged);
         };
@@ -1374,6 +1425,7 @@ impl<'info> Optimizer<'info> {
         if args.len() != candidate.binding.params.len() {
             return (MExpr::App { head, args, source }, Change::Unchanged);
         }
+        let dict_replacements = self.dict_param_replacements(&candidate.binding.params, &args);
         if !require_no_residual_yields
             && !self.expr_has_direct_call_opportunity(&candidate.binding.body)
             && !expr_contains_dict_method_access(&candidate.binding.body)
@@ -1381,16 +1433,20 @@ impl<'info> Optimizer<'info> {
             return (MExpr::App { head, args, source }, Change::Unchanged);
         }
 
-        let variant_name = variant_name_for_imported(
-            &candidate.source_module,
-            &candidate.binding.name,
-            &self.handler_stack,
+        let variant_name = variant_name_with_dict_key(
+            variant_name_for_imported(
+                &candidate.source_module,
+                &candidate.binding.name,
+                &self.handler_stack,
+            ),
+            &dict_replacements,
         );
         let Some(variant_body) = self.optimized_variant_body(
             &candidate.binding,
             &candidate.binding.name,
             &variant_name,
             candidate.public_names.iter().cloned(),
+            dict_replacements,
         ) else {
             return (MExpr::App { head, args, source }, Change::Unchanged);
         };
@@ -1422,9 +1478,23 @@ impl<'info> Optimizer<'info> {
         old_name: &str,
         variant_name: &str,
         extra_blocked_names: impl IntoIterator<Item = String>,
+        param_replacements: Vec<DictParamReplacement>,
     ) -> Option<MExpr> {
-        let variant_body =
+        let mut variant_body =
             rewrite_direct_calls_to_name(binding.body.clone(), old_name, variant_name, binding.id);
+        for replacement in param_replacements {
+            let free_names = free_atom_names(&replacement.replacement);
+            let substituted = subst_expr(
+                variant_body,
+                &replacement.target,
+                &replacement.replacement,
+                &free_names,
+            );
+            if substituted.blocked {
+                return None;
+            }
+            variant_body = substituted.value;
+        }
 
         let old_blocked_len = self.inline_blocked_names.len();
         self.inline_blocked_names
@@ -2908,6 +2978,30 @@ fn variant_name_for_imported_static(
     stack: &[HandlerFrame],
 ) -> String {
     static_variant_name(&format!("xmod__{source_module}__{name}"), stack)
+}
+
+fn variant_name_with_dict_key(base: String, dict_replacements: &[DictParamReplacement]) -> String {
+    if dict_replacements.is_empty() {
+        return base;
+    }
+
+    let mut key = String::new();
+    for replacement in dict_replacements {
+        key.push_str(&replacement.target.name);
+        key.push('=');
+        key.push_str(&replacement.key);
+        key.push(';');
+    }
+    format!("{base}__dict_{:016x}", stable_key_hash(&key))
+}
+
+fn stable_key_hash(value: &str) -> u64 {
+    let mut hash = 0xcbf29ce484222325_u64;
+    for byte in value.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    hash
 }
 
 fn static_variant_name(name: &str, stack: &[HandlerFrame]) -> String {

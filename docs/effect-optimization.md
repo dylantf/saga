@@ -134,7 +134,10 @@ Implemented variant shapes:
   constructors: when a generated static variant constructs a known zero-arg
   dictionary, extracts a method with `DictMethodAccess`, and applies that
   method under a known handler stack, the optimizer may inline the method lambda
-  if doing so exposes an existing direct-call opportunity.
+  if doing so exposes an existing direct-call opportunity;
+- dictionary-keyed generated variants for the same nullary dictionaries passed
+  as arguments to generic functions. The generated variant keeps the original
+  uniform ABI but substitutes the known dictionary tuple into its cloned body.
 
 Generated variants are private to the caller module. Cross-module variants do
 not change the callee module's exports or package cache behavior. Imported
@@ -143,11 +146,11 @@ specialization, and ambiguous closure/local-function shapes are skipped in the
 current implementation.
 
 Trait method specialization is deliberately narrow. It handles local nullary
-dict constructors first, which covers concrete monomorphic impls and some
-already-concretized generic call sites. It does not yet recursively specialize
-dictionary constructors with dictionary parameters, compose with every dynamic
-handler-factory recovery shape, or specialize imported dictionary constructors.
-Those remain follow-up work.
+dict constructors first, which covers concrete monomorphic impls, generic
+wrappers called with a concrete nullary dictionary, and let-bound handler
+factories once they are recovered into static handlers. It does not yet
+recursively specialize dictionary constructors with dictionary parameters or
+specialize imported dictionary constructors. Those remain follow-up work.
 
 The optimizer can remove private source functions once entry-reachable calls are
 fully covered by generated variants. Public functions are retained.
