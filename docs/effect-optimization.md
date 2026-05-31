@@ -172,6 +172,13 @@ cargo run --bin saga -- run file.saga --monadic-stats
 cargo run --bin saga -- test --monadic-stats
 ```
 
+Project builds also print a `whole-app entry-reachable` line rooted at
+`Main.main`. Unlike per-module summaries, this follows static calls across
+compiled project/library modules, so it is the preferred number when evaluating
+library-heavy flows such as `Main -> Example -> SagaJson.Encode`. The graph is
+still conservative: dynamic callback targets and runtime trait dispatch that
+cannot be seen as a static declaration reference are not expanded.
+
 This flag is backed by the general `CompileOptions` diagnostics struct, so it
 can later grow into project-level compiler diagnostics without changing the
 codegen API again.

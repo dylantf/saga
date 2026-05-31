@@ -328,7 +328,7 @@ fn emit_module_with_options(
     check_result: &typechecker::CheckResult,
     build_dir: &Path,
     options: EmitModuleOptions<'_>,
-) {
+) -> Option<codegen::monadic::stats::StatsReport> {
     let erlang_name = module_name.to_lowercase().replace('.', "_");
     let output = codegen::emit_module_with_context_options(
         &erlang_name,
@@ -350,11 +350,13 @@ fn emit_module_with_options(
             }
         }
     }
+    let monadic_stats = output.monadic_stats.clone();
     let core_path = build_dir.join(format!("{}.core", erlang_name));
     fs::write(&core_path, &output.core_src).unwrap_or_else(|e| {
         eprintln!("Error writing {}: {}", core_path.display(), e);
         std::process::exit(1);
     });
+    monadic_stats
 }
 
 /// Typecheck and elaborate Std modules. Returns compiled module bundles.
@@ -1094,6 +1096,7 @@ pub fn build_project_ext_with_options(
         modules_to_emit.push("Main");
     }
 
+    let mut monadic_stats_reports = Vec::new();
     for module_name in &modules_to_emit {
         let compiled = &compiled_modules[*module_name];
         let erlang_name = if *module_name == "Main" {
@@ -1111,7 +1114,7 @@ pub fn build_project_ext_with_options(
                 } else {
                     None
                 });
-        emit_module_with_options(
+        if let Some(stats) = emit_module_with_options(
             &erlang_name,
             &compiled.elaborated,
             &ctx,
@@ -1126,7 +1129,20 @@ pub fn build_project_ext_with_options(
                 },
                 compile_options: options,
             },
-        );
+        ) {
+            monadic_stats_reports.push(((*module_name).to_string(), stats));
+        }
+    }
+
+    if options.diagnostics.monadic_stats.is_enabled()
+        && (has_bin || custom_main.is_some())
+        && let Some(summary) = codegen::monadic::stats::StatsReport::whole_app_summary(
+            &monadic_stats_reports,
+            "Main",
+            "main",
+        )
+    {
+        eprintln!("{summary}");
     }
 
     // Copy project-specific bridge (.erl) files into build dir.

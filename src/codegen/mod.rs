@@ -466,7 +466,13 @@ pub fn emit_module_via_new_path(
             (before_reachable.decls > 0 || after_reachable.decls > 0)
                 .then(|| monadic::stats::StatsDiff::new(before_reachable, after_reachable))
         };
-        monadic::stats::StatsReport::new(monadic::stats::StatsDiff::new(before, after), reachable)
+        monadic::stats::StatsReport::with_module_graph(
+            monadic::stats::StatsDiff::new(before, after),
+            reachable,
+            &before_program,
+            &optimized,
+            &resolution_map,
+        )
     });
 
     let is_main = entry_export.is_some();

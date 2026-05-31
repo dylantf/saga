@@ -9,6 +9,7 @@ use std::fmt;
 
 use crate::codegen::monadic::effect_opt::is_generated_variant_name;
 use crate::codegen::monadic::ir::{Atom, MArm, MDecl, MExpr, MHandler, MHandlerArm, MProgram};
+use crate::codegen::resolve::{ResolutionMap, ResolvedCodegenKind};
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Stats {
@@ -112,6 +113,41 @@ impl Stats {
                 }
             }
             MDecl::Passthrough(_) => {}
+        }
+    }
+
+    fn add_assign(&mut self, other: &Self) {
+        self.decls += other.decls;
+        self.source_decls += other.source_decls;
+        self.generated_decls += other.generated_decls;
+        self.exprs += other.exprs;
+        self.atoms += other.atoms;
+        self.pure += other.pure;
+        self.yield_ += other.yield_;
+        self.bind += other.bind;
+        self.let_ += other.let_;
+        self.ensure += other.ensure;
+        self.app += other.app;
+        self.foreign_call += other.foreign_call;
+        self.with += other.with;
+        self.resume += other.resume;
+        self.case += other.case;
+        self.if_ += other.if_;
+        self.receive += other.receive;
+        self.letfun += other.letfun;
+        self.handler_value += other.handler_value;
+        self.lambda_atoms += other.lambda_atoms;
+        self.handler_arms += other.handler_arms;
+        self.finally_blocks += other.finally_blocks;
+        self.static_handlers += other.static_handlers;
+        self.native_handlers += other.native_handlers;
+        self.dynamic_handlers += other.dynamic_handlers;
+        self.composite_handlers += other.composite_handlers;
+        for (op, count) in &other.yield_ops {
+            *self.yield_ops.entry(op.clone()).or_default() += count;
+        }
+        for (call, count) in &other.foreign_calls {
+            *self.foreign_calls.entry(call.clone()).or_default() += count;
         }
     }
 
@@ -376,15 +412,77 @@ impl fmt::Display for StatsDiff {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct CallRef {
+    module: Option<String>,
+    name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DeclGraphStats {
+    stats: Stats,
+    calls: BTreeSet<CallRef>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct ModuleGraphStats {
+    decls: BTreeMap<String, DeclGraphStats>,
+}
+
+impl ModuleGraphStats {
+    fn collect_program(program: &MProgram, resolution: &ResolutionMap) -> Self {
+        let mut decls = BTreeMap::new();
+        for decl in program {
+            let Some(name) = decl_name(decl) else {
+                continue;
+            };
+            let mut stats = Stats::default();
+            stats.visit_decl(decl);
+            let mut calls = BTreeSet::new();
+            collect_decl_call_refs(decl, resolution, &mut calls);
+            decls.insert(name.to_string(), DeclGraphStats { stats, calls });
+        }
+        Self { decls }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ModuleGraphStatsDiff {
+    before: ModuleGraphStats,
+    after: ModuleGraphStats,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StatsReport {
     whole: StatsDiff,
     reachable: Option<StatsDiff>,
+    graph: Option<ModuleGraphStatsDiff>,
 }
 
 impl StatsReport {
     pub fn new(whole: StatsDiff, reachable: Option<StatsDiff>) -> Self {
-        Self { whole, reachable }
+        Self {
+            whole,
+            reachable,
+            graph: None,
+        }
+    }
+
+    pub fn with_module_graph(
+        whole: StatsDiff,
+        reachable: Option<StatsDiff>,
+        before_program: &MProgram,
+        after_program: &MProgram,
+        resolution: &ResolutionMap,
+    ) -> Self {
+        Self {
+            whole,
+            reachable,
+            graph: Some(ModuleGraphStatsDiff {
+                before: ModuleGraphStats::collect_program(before_program, resolution),
+                after: ModuleGraphStats::collect_program(after_program, resolution),
+            }),
+        }
     }
 
     pub fn whole(&self) -> &StatsDiff {
@@ -407,6 +505,27 @@ impl StatsReport {
             lines.push(format!("  residual yields: {residual}"));
         }
         lines.join("\n")
+    }
+
+    pub fn whole_app_summary(
+        reports: &[(String, StatsReport)],
+        entry_module: &str,
+        entry_decl: &str,
+    ) -> Option<String> {
+        let before = collect_whole_app_reachable(reports, entry_module, entry_decl, false)?;
+        let after = collect_whole_app_reachable(reports, entry_module, entry_decl, true)?;
+        if before.decls == 0 && after.decls == 0 {
+            return None;
+        }
+        let diff = StatsDiff::new(before, after);
+        let mut lines = vec![format!(
+            "whole-app entry-reachable from {entry_module}.{entry_decl}: {}",
+            summarize_diff(&diff)
+        )];
+        if let Some(residual) = residual_yield_summary(diff.after(), 10) {
+            lines.push(format!("  residual yields: {residual}"));
+        }
+        Some(lines.join("\n"))
     }
 }
 
@@ -436,6 +555,309 @@ fn collect_decl_calls(decl: &MDecl, out: &mut BTreeSet<String>) {
             }
         }
         MDecl::Passthrough(_) => {}
+    }
+}
+
+fn decl_name(decl: &MDecl) -> Option<&str> {
+    match decl {
+        MDecl::FunBinding(f) => Some(&f.name),
+        MDecl::Val(v) => Some(&v.name),
+        MDecl::DictConstructor(d) => Some(&d.name),
+        MDecl::Passthrough(_) => None,
+    }
+}
+
+fn collect_whole_app_reachable(
+    reports: &[(String, StatsReport)],
+    entry_module: &str,
+    entry_decl: &str,
+    after: bool,
+) -> Option<Stats> {
+    let modules: BTreeMap<&str, &ModuleGraphStats> = reports
+        .iter()
+        .filter_map(|(module, report)| {
+            let graph = report.graph.as_ref()?;
+            Some((
+                module.as_str(),
+                if after { &graph.after } else { &graph.before },
+            ))
+        })
+        .collect();
+    if modules.is_empty() {
+        return None;
+    }
+
+    let mut stats = Stats::default();
+    let mut seen = BTreeSet::new();
+    let mut worklist = vec![(entry_module.to_string(), entry_decl.to_string())];
+
+    while let Some((module, name)) = worklist.pop() {
+        if !seen.insert((module.clone(), name.clone())) {
+            continue;
+        }
+        let Some(module_stats) = modules.get(module.as_str()) else {
+            continue;
+        };
+        let Some(decl) = module_stats.decls.get(name.as_str()) else {
+            continue;
+        };
+
+        stats.add_assign(&decl.stats);
+        for call in &decl.calls {
+            let target_module = call.module.as_deref().unwrap_or(module.as_str());
+            if modules
+                .get(target_module)
+                .is_some_and(|m| m.decls.contains_key(call.name.as_str()))
+            {
+                worklist.push((target_module.to_string(), call.name.clone()));
+            }
+        }
+    }
+
+    Some(stats)
+}
+
+fn collect_decl_call_refs(decl: &MDecl, resolution: &ResolutionMap, out: &mut BTreeSet<CallRef>) {
+    match decl {
+        MDecl::FunBinding(f) => {
+            if let Some(guard) = &f.guard {
+                collect_expr_call_refs(guard, resolution, out);
+            }
+            collect_expr_call_refs(&f.body, resolution, out);
+        }
+        MDecl::Val(v) => collect_expr_call_refs(&v.value, resolution, out),
+        MDecl::DictConstructor(d) => {
+            for method in &d.methods {
+                collect_expr_call_refs(method, resolution, out);
+            }
+        }
+        MDecl::Passthrough(_) => {}
+    }
+}
+
+fn collect_expr_call_refs(expr: &MExpr, resolution: &ResolutionMap, out: &mut BTreeSet<CallRef>) {
+    match expr {
+        MExpr::App { head, args, .. } => {
+            if let Some(call) = call_ref_for_head(head, resolution) {
+                out.insert(call);
+            }
+            collect_atom_call_refs(head, resolution, out);
+            for arg in args {
+                collect_atom_call_refs(arg, resolution, out);
+            }
+        }
+        MExpr::Pure(atom)
+        | MExpr::Resume { value: atom, .. }
+        | MExpr::FieldAccess { record: atom, .. }
+        | MExpr::DictMethodAccess { dict: atom, .. }
+        | MExpr::UnaryMinus { value: atom, .. } => collect_atom_call_refs(atom, resolution, out),
+        MExpr::Yield { args, .. } | MExpr::ForeignCall { args, .. } => {
+            for arg in args {
+                collect_atom_call_refs(arg, resolution, out);
+            }
+        }
+        MExpr::Bind { value, body, .. } | MExpr::Let { value, body, .. } => {
+            collect_expr_call_refs(value, resolution, out);
+            collect_expr_call_refs(body, resolution, out);
+        }
+        MExpr::Ensure { body, cleanup } => {
+            collect_expr_call_refs(body, resolution, out);
+            collect_expr_call_refs(cleanup, resolution, out);
+        }
+        MExpr::Case {
+            scrutinee, arms, ..
+        } => {
+            collect_atom_call_refs(scrutinee, resolution, out);
+            for arm in arms {
+                if let Some(guard) = &arm.guard {
+                    collect_expr_call_refs(guard, resolution, out);
+                }
+                collect_expr_call_refs(&arm.body, resolution, out);
+            }
+        }
+        MExpr::If {
+            cond,
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            collect_atom_call_refs(cond, resolution, out);
+            collect_expr_call_refs(then_branch, resolution, out);
+            collect_expr_call_refs(else_branch, resolution, out);
+        }
+        MExpr::With { handler, body, .. } => {
+            collect_handler_call_refs(handler, resolution, out);
+            collect_expr_call_refs(body, resolution, out);
+        }
+        MExpr::RecordUpdate { record, fields, .. } => {
+            collect_atom_call_refs(record, resolution, out);
+            for (_, atom) in fields {
+                collect_atom_call_refs(atom, resolution, out);
+            }
+        }
+        MExpr::BinOp { left, right, .. } => {
+            collect_atom_call_refs(left, resolution, out);
+            collect_atom_call_refs(right, resolution, out);
+        }
+        MExpr::BitString { segments, .. } => {
+            for segment in segments {
+                collect_atom_call_refs(&segment.value, resolution, out);
+                if let Some(size) = &segment.size {
+                    collect_atom_call_refs(size, resolution, out);
+                }
+            }
+        }
+        MExpr::Receive { arms, after, .. } => {
+            for arm in arms {
+                if let Some(guard) = &arm.guard {
+                    collect_expr_call_refs(guard, resolution, out);
+                }
+                collect_expr_call_refs(&arm.body, resolution, out);
+            }
+            if let Some((timeout, body)) = after {
+                collect_atom_call_refs(timeout, resolution, out);
+                collect_expr_call_refs(body, resolution, out);
+            }
+        }
+        MExpr::LetFun { body, rest, .. } => {
+            collect_expr_call_refs(body, resolution, out);
+            collect_expr_call_refs(rest, resolution, out);
+        }
+        MExpr::HandlerValue {
+            arms,
+            return_clause,
+            ..
+        } => {
+            for arm in arms {
+                collect_handler_arm_call_refs(arm, resolution, out);
+            }
+            if let Some(return_clause) = return_clause {
+                collect_handler_arm_call_refs(return_clause, resolution, out);
+            }
+        }
+    }
+}
+
+fn collect_atom_call_refs(atom: &Atom, resolution: &ResolutionMap, out: &mut BTreeSet<CallRef>) {
+    match atom {
+        Atom::Ctor { args, .. } | Atom::Tuple { elements: args, .. } => {
+            for arg in args {
+                collect_atom_call_refs(arg, resolution, out);
+            }
+        }
+        Atom::AnonRecord { fields, .. } | Atom::Record { fields, .. } => {
+            for (_, atom) in fields {
+                collect_atom_call_refs(atom, resolution, out);
+            }
+        }
+        Atom::Lambda { body, .. } => collect_expr_call_refs(body, resolution, out),
+        Atom::BackendSpawnThunk { callback, .. } => {
+            collect_atom_call_refs(callback, resolution, out)
+        }
+        Atom::DictRef { .. } => {
+            if let Some(call) = call_ref_for_atom(atom, resolution) {
+                out.insert(call);
+            }
+        }
+        Atom::Var { .. }
+        | Atom::Lit { .. }
+        | Atom::QualifiedRef { .. }
+        | Atom::Symbol { .. }
+        | Atom::BackendAtom { .. } => {}
+    }
+}
+
+fn collect_handler_call_refs(
+    handler: &MHandler,
+    resolution: &ResolutionMap,
+    out: &mut BTreeSet<CallRef>,
+) {
+    match handler {
+        MHandler::Static {
+            arms,
+            return_clause,
+            ..
+        } => {
+            for arm in arms {
+                collect_handler_arm_call_refs(arm, resolution, out);
+            }
+            if let Some(return_clause) = return_clause {
+                collect_handler_arm_call_refs(return_clause, resolution, out);
+            }
+        }
+        MHandler::Native { .. } => {}
+        MHandler::Composite { handlers, .. } => {
+            for handler in handlers {
+                collect_handler_call_refs(handler, resolution, out);
+            }
+        }
+        MHandler::Dynamic {
+            op_tuple,
+            return_lambda,
+            ..
+        } => {
+            collect_atom_call_refs(op_tuple, resolution, out);
+            if let Some(return_lambda) = return_lambda {
+                collect_atom_call_refs(return_lambda, resolution, out);
+            }
+        }
+    }
+}
+
+fn collect_handler_arm_call_refs(
+    arm: &MHandlerArm,
+    resolution: &ResolutionMap,
+    out: &mut BTreeSet<CallRef>,
+) {
+    collect_expr_call_refs(&arm.body, resolution, out);
+    if let Some(finally_block) = &arm.finally_block {
+        collect_expr_call_refs(finally_block, resolution, out);
+    }
+}
+
+fn call_ref_for_head(atom: &Atom, resolution: &ResolutionMap) -> Option<CallRef> {
+    call_ref_for_atom(atom, resolution)
+}
+
+fn call_ref_for_atom(atom: &Atom, resolution: &ResolutionMap) -> Option<CallRef> {
+    let source = match atom {
+        Atom::Var { source, .. }
+        | Atom::QualifiedRef { source, .. }
+        | Atom::DictRef { source, .. } => *source,
+        _ => return None,
+    };
+    if let Some(symbol) = resolution.get(&source) {
+        if !matches!(
+            symbol.kind,
+            ResolvedCodegenKind::BeamFunction { .. } | ResolvedCodegenKind::ExternalFunction { .. }
+        ) {
+            return None;
+        }
+        return Some(CallRef {
+            module: symbol.source_module.clone(),
+            name: symbol
+                .canonical_name
+                .rsplit('.')
+                .next()
+                .unwrap_or(&symbol.name)
+                .to_string(),
+        });
+    }
+
+    match atom {
+        Atom::Var { name, .. } => Some(CallRef {
+            module: None,
+            name: name.name.clone(),
+        }),
+        Atom::DictRef { name, .. } => Some(CallRef {
+            module: None,
+            name: name.clone(),
+        }),
+        Atom::QualifiedRef { module, name, .. } => Some(CallRef {
+            module: Some(module.clone()),
+            name: name.clone(),
+        }),
+        _ => None,
     }
 }
 
@@ -747,12 +1169,38 @@ fn is_optimizer_generated_decl_name(name: &str) -> bool {
 mod tests {
     use crate::ast::{Lit, NodeId};
     use crate::codegen::monadic::ir::{Atom, BindMode, MDecl, MExpr, MFunBinding, MVar};
+    use crate::codegen::resolve::ResolutionMap;
     use crate::token::Span;
 
-    use super::Stats;
+    use super::{Stats, StatsDiff, StatsReport};
 
     fn span() -> Span {
         Span { start: 0, end: 0 }
+    }
+
+    fn fun(name: &str, id: u32, body: MExpr) -> MDecl {
+        MDecl::FunBinding(MFunBinding {
+            id: NodeId(id),
+            public: false,
+            name: name.to_string(),
+            name_span: span(),
+            params: vec![],
+            guard: None,
+            body,
+            span: span(),
+        })
+    }
+
+    fn yield_expr(effect: &str, op: &str, source: u32) -> MExpr {
+        MExpr::Yield {
+            op: crate::codegen::monadic::ir::EffectOpRef {
+                effect: effect.to_string(),
+                op: op.to_string(),
+                op_index: 1,
+            },
+            args: vec![],
+            source: NodeId(source),
+        }
     }
 
     #[test]
@@ -837,50 +1285,12 @@ mod tests {
 
     #[test]
     fn reachable_stats_follow_calls_from_entry_roots() {
-        let helper = MDecl::FunBinding(MFunBinding {
-            id: NodeId(10),
-            public: false,
-            name: "helper".into(),
-            name_span: span(),
-            params: vec![],
-            guard: None,
-            body: MExpr::Yield {
-                op: crate::codegen::monadic::ir::EffectOpRef {
-                    effect: "E".into(),
-                    op: "op".into(),
-                    op_index: 1,
-                },
-                args: vec![],
-                source: NodeId(11),
-            },
-            span: span(),
-        });
-        let unused = MDecl::FunBinding(MFunBinding {
-            id: NodeId(20),
-            public: false,
-            name: "unused".into(),
-            name_span: span(),
-            params: vec![],
-            guard: None,
-            body: MExpr::Yield {
-                op: crate::codegen::monadic::ir::EffectOpRef {
-                    effect: "Unused".into(),
-                    op: "op".into(),
-                    op_index: 1,
-                },
-                args: vec![],
-                source: NodeId(21),
-            },
-            span: span(),
-        });
-        let main = MDecl::FunBinding(MFunBinding {
-            id: NodeId(30),
-            public: false,
-            name: "main".into(),
-            name_span: span(),
-            params: vec![],
-            guard: None,
-            body: MExpr::App {
+        let helper = fun("helper", 10, yield_expr("E", "op", 11));
+        let unused = fun("unused", 20, yield_expr("Unused", "op", 21));
+        let main = fun(
+            "main",
+            30,
+            MExpr::App {
                 head: Atom::Var {
                     name: MVar {
                         name: "helper".into(),
@@ -891,8 +1301,7 @@ mod tests {
                 args: vec![],
                 source: NodeId(32),
             },
-            span: span(),
-        });
+        );
         let program = vec![helper, unused, main];
 
         let stats = Stats::collect_reachable_program(&program, &["main"]);
@@ -901,5 +1310,63 @@ mod tests {
         assert_eq!(stats.yield_, 1);
         assert_eq!(stats.yield_ops.get("E::op"), Some(&1));
         assert_eq!(stats.yield_ops.get("Unused::op"), None);
+    }
+
+    #[test]
+    fn whole_app_summary_follows_cross_module_calls() {
+        let main_program = vec![fun(
+            "main",
+            1,
+            MExpr::App {
+                head: Atom::QualifiedRef {
+                    module: "Lib".to_string(),
+                    name: "worker".to_string(),
+                    source: NodeId(2),
+                },
+                args: vec![],
+                source: NodeId(3),
+            },
+        )];
+        let lib_program = vec![
+            fun("worker", 10, yield_expr("E", "op", 11)),
+            fun("unused", 20, yield_expr("Unused", "op", 21)),
+        ];
+        let resolution = ResolutionMap::new();
+        let reports = vec![
+            (
+                "Main".to_string(),
+                StatsReport::with_module_graph(
+                    StatsDiff::new(
+                        Stats::collect_program(&main_program),
+                        Stats::collect_program(&main_program),
+                    ),
+                    None,
+                    &main_program,
+                    &main_program,
+                    &resolution,
+                ),
+            ),
+            (
+                "Lib".to_string(),
+                StatsReport::with_module_graph(
+                    StatsDiff::new(
+                        Stats::collect_program(&lib_program),
+                        Stats::collect_program(&lib_program),
+                    ),
+                    None,
+                    &lib_program,
+                    &lib_program,
+                    &resolution,
+                ),
+            ),
+        ];
+
+        let summary = StatsReport::whole_app_summary(&reports, "Main", "main")
+            .expect("whole-app summary should be available");
+
+        assert!(summary.contains("whole-app entry-reachable from Main.main"));
+        assert!(summary.contains("Yield 1 -> 1"));
+        assert!(summary.contains("E::op=1"));
+        assert!(!summary.contains("Unused::op"));
     }
 }
