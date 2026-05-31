@@ -190,6 +190,14 @@ struct DictParamReplacement {
     key: String,
 }
 
+#[derive(Debug, Clone)]
+struct CallbackParamReplacement {
+    target: MVar,
+    candidate: InlineCandidate,
+    key: String,
+    captures: Vec<String>,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct EffectSummary {
     erasable_yields: usize,
@@ -1169,6 +1177,47 @@ impl<'info> Optimizer<'info> {
             .collect()
     }
 
+    fn callback_param_replacements(
+        &self,
+        params: &[Pat],
+        args: &[Atom],
+    ) -> Vec<CallbackParamReplacement> {
+        params
+            .iter()
+            .zip(args)
+            .filter_map(|(param, arg)| {
+                let Pat::Var { name, id, .. } = param else {
+                    return None;
+                };
+                let Atom::Lambda {
+                    params,
+                    body,
+                    source,
+                } = arg
+                else {
+                    return None;
+                };
+                if !helper_params_are_supported(params)
+                    || !self.expr_has_specialization_opportunity(body)
+                {
+                    return None;
+                }
+                Some(CallbackParamReplacement {
+                    target: MVar {
+                        name: name.clone(),
+                        id: id.0,
+                    },
+                    candidate: InlineCandidate {
+                        params: params.clone(),
+                        body: body.as_ref().clone(),
+                    },
+                    key: format!("{}:{}", name, source.0),
+                    captures: lambda_capture_names(arg),
+                })
+            })
+            .collect()
+    }
+
     fn specialize_dynamic_handler_binding(&self, handler: MHandler) -> (MHandler, Change) {
         let MHandler::Dynamic {
             effects,
@@ -1511,18 +1560,26 @@ impl<'info> Optimizer<'info> {
             return (MExpr::App { head, args, source }, Change::Unchanged);
         }
         let dict_replacements = self.dict_param_replacements(&candidate.binding.params, &args);
-        if !self.expr_has_specialization_opportunity(&candidate.binding.body) {
+        let callback_replacements =
+            self.callback_param_replacements(&candidate.binding.params, &args);
+        if callback_replacements.is_empty()
+            && !self.expr_has_specialization_opportunity(&candidate.binding.body)
+        {
             return (MExpr::App { head, args, source }, Change::Unchanged);
         }
-        let capture_names = self.handler_stack_capture_names();
+        let capture_names =
+            self.variant_capture_names(callback_replacements.iter().flat_map(|r| &r.captures));
         if captures_collide_with_params(&capture_names, &candidate.binding.params) {
             return (MExpr::App { head, args, source }, Change::Unchanged);
         }
 
         let variant_name = variant_name_with_capture_key(
-            variant_name_with_dict_key(
-                variant_name_for_stack(&candidate.binding.name, &self.handler_stack),
-                &dict_replacements,
+            variant_name_with_callback_key(
+                variant_name_with_dict_key(
+                    variant_name_for_stack(&candidate.binding.name, &self.handler_stack),
+                    &dict_replacements,
+                ),
+                &callback_replacements,
             ),
             &capture_names,
         );
@@ -1530,12 +1587,13 @@ impl<'info> Optimizer<'info> {
             return (MExpr::App { head, args, source }, Change::Unchanged);
         }
 
-        let Some(variant_body) = self.optimized_variant_body(
+        let Some(mut variant_body) = self.optimized_variant_body(
             &candidate.binding,
             &name.name,
             &variant_name,
             capture_names.iter().cloned(),
             &dict_replacements,
+            &callback_replacements,
         ) else {
             return (MExpr::App { head, args, source }, Change::Unchanged);
         };
@@ -1551,6 +1609,8 @@ impl<'info> Optimizer<'info> {
         );
         let (variant_params, args) =
             append_capture_variant_args(variant_params, args, &capture_names, source);
+        variant_body =
+            append_capture_args_to_self_calls(variant_body, &variant_name, &capture_names, source);
         self.push_function_variant(
             &variant_name,
             variant_body,
@@ -1612,24 +1672,31 @@ impl<'info> Optimizer<'info> {
             return (MExpr::App { head, args, source }, Change::Unchanged);
         }
         let dict_replacements = self.dict_param_replacements(&candidate.binding.params, &args);
-        if !require_no_residual_yields
+        let callback_replacements =
+            self.callback_param_replacements(&candidate.binding.params, &args);
+        if callback_replacements.is_empty()
+            && !require_no_residual_yields
             && !self.expr_has_specialization_opportunity(&candidate.binding.body)
         {
             return (MExpr::App { head, args, source }, Change::Unchanged);
         }
-        let capture_names = self.handler_stack_capture_names();
+        let capture_names =
+            self.variant_capture_names(callback_replacements.iter().flat_map(|r| &r.captures));
         if captures_collide_with_params(&capture_names, &candidate.binding.params) {
             return (MExpr::App { head, args, source }, Change::Unchanged);
         }
 
         let variant_name = variant_name_with_capture_key(
-            variant_name_with_dict_key(
-                variant_name_for_imported(
-                    &candidate.source_module,
-                    &candidate.binding.name,
-                    &self.handler_stack,
+            variant_name_with_callback_key(
+                variant_name_with_dict_key(
+                    variant_name_for_imported(
+                        &candidate.source_module,
+                        &candidate.binding.name,
+                        &self.handler_stack,
+                    ),
+                    &dict_replacements,
                 ),
-                &dict_replacements,
+                &callback_replacements,
             ),
             &capture_names,
         );
@@ -1638,12 +1705,13 @@ impl<'info> Optimizer<'info> {
             .iter()
             .cloned()
             .chain(capture_names.iter().cloned());
-        let Some(variant_body) = self.optimized_variant_body(
+        let Some(mut variant_body) = self.optimized_variant_body(
             &candidate.binding,
             &candidate.binding.name,
             &variant_name,
             extra_blocked_names,
             &dict_replacements,
+            &callback_replacements,
         ) else {
             return (MExpr::App { head, args, source }, Change::Unchanged);
         };
@@ -1659,6 +1727,8 @@ impl<'info> Optimizer<'info> {
         );
         let (variant_params, args) =
             append_capture_variant_args(variant_params, args, &capture_names, source);
+        variant_body =
+            append_capture_args_to_self_calls(variant_body, &variant_name, &capture_names, source);
         self.push_function_variant(
             &variant_name,
             variant_body,
@@ -1753,6 +1823,7 @@ impl<'info> Optimizer<'info> {
         variant_name: &str,
         extra_blocked_names: impl IntoIterator<Item = String>,
         param_replacements: &[DictParamReplacement],
+        callback_replacements: &[CallbackParamReplacement],
     ) -> Option<MExpr> {
         let mut variant_body =
             rewrite_direct_calls_to_name(binding.body.clone(), old_name, variant_name, binding.id);
@@ -1768,6 +1839,13 @@ impl<'info> Optimizer<'info> {
                 return None;
             }
             variant_body = substituted.value;
+        }
+        for replacement in callback_replacements {
+            variant_body = rewrite_direct_callback_calls(
+                variant_body,
+                &replacement.target,
+                &replacement.candidate,
+            )?;
         }
 
         let old_blocked_len = self.inline_blocked_names.len();
@@ -1967,6 +2045,17 @@ impl<'info> Optimizer<'info> {
             .filter(|name| in_scope.contains(name))
             .collect::<Vec<_>>();
         captures.sort();
+        captures
+    }
+
+    fn variant_capture_names<'a>(
+        &self,
+        extra_captures: impl IntoIterator<Item = &'a String>,
+    ) -> Vec<String> {
+        let mut captures = self.handler_stack_capture_names();
+        captures.extend(extra_captures.into_iter().cloned());
+        captures.sort();
+        captures.dedup();
         captures
     }
 
@@ -3481,7 +3570,7 @@ pub fn collect_imported_dict_constructors(
         // the optimizer rewrites them to caller-local generated helper clones
         // before lowering, so the generated body never needs a remote call to
         // an unexported function.
-        if let Some(reason) = imported_dict_constructor_unsupported_reason(dc) {
+        if let Some(reason) = imported_dict_constructor_unsupported_reason(dc, resolution) {
             if debug_imported_dict_enabled(debug_filter.as_deref(), source_module, &dc.name) {
                 eprintln!(
                     "xmod dict reject unsupported: {source_module}.{}: {reason}",
@@ -3600,7 +3689,10 @@ pub fn collect_imported_private_helper_candidates(
     candidates
 }
 
-fn imported_dict_constructor_unsupported_reason(dc: &MDictConstructor) -> Option<String> {
+fn imported_dict_constructor_unsupported_reason(
+    dc: &MDictConstructor,
+    resolution: &ResolutionMap,
+) -> Option<String> {
     for (index, method) in dc.methods.iter().enumerate() {
         let MExpr::Pure(Atom::Lambda { body, .. }) = method else {
             return Some(format!("method {index} is not a pure lambda"));
@@ -3611,7 +3703,7 @@ fn imported_dict_constructor_unsupported_reason(dc: &MDictConstructor) -> Option
                 "method {index} body has {node_count} nodes, budget is {FUNCTION_VARIANT_BODY_BUDGET}"
             ));
         }
-        if let Some(reason) = imported_dict_constructor_forbidden_shape_reason(body) {
+        if let Some(reason) = imported_dict_constructor_forbidden_shape_reason(body, resolution) {
             return Some(format!(
                 "method {index} contains a forbidden xmod shape: {reason}"
             ));
@@ -3620,11 +3712,18 @@ fn imported_dict_constructor_unsupported_reason(dc: &MDictConstructor) -> Option
     None
 }
 
-fn imported_dict_constructor_forbidden_shape_reason(expr: &MExpr) -> Option<String> {
-    xmod_forbidden_shape_reason(expr, "body")
+fn imported_dict_constructor_forbidden_shape_reason(
+    expr: &MExpr,
+    resolution: &ResolutionMap,
+) -> Option<String> {
+    xmod_forbidden_shape_reason(expr, "body", Some(resolution))
 }
 
-fn xmod_forbidden_shape_reason(expr: &MExpr, path: &str) -> Option<String> {
+fn xmod_forbidden_shape_reason(
+    expr: &MExpr,
+    path: &str,
+    resolution: Option<&ResolutionMap>,
+) -> Option<String> {
     match expr {
         MExpr::With { .. } => Some(format!("{path}: with")),
         MExpr::LetFun { .. } => Some(format!("{path}: let-fun")),
@@ -3635,12 +3734,13 @@ fn xmod_forbidden_shape_reason(expr: &MExpr, path: &str) -> Option<String> {
             .enumerate()
             .find_map(|(i, atom)| xmod_forbidden_atom_reason(atom, &format!("{path}.arg{i}"))),
         MExpr::Bind { value, body, .. } | MExpr::Let { value, body, .. } => {
-            xmod_forbidden_shape_reason(value, &format!("{path}.value"))
-                .or_else(|| xmod_forbidden_shape_reason(body, &format!("{path}.body")))
+            xmod_forbidden_shape_reason(value, &format!("{path}.value"), resolution)
+                .or_else(|| xmod_forbidden_shape_reason(body, &format!("{path}.body"), resolution))
         }
         MExpr::Ensure { body, cleanup } => {
-            xmod_forbidden_shape_reason(body, &format!("{path}.body"))
-                .or_else(|| xmod_forbidden_shape_reason(cleanup, &format!("{path}.cleanup")))
+            xmod_forbidden_shape_reason(body, &format!("{path}.body"), resolution).or_else(|| {
+                xmod_forbidden_shape_reason(cleanup, &format!("{path}.cleanup"), resolution)
+            })
         }
         MExpr::Case {
             scrutinee, arms, ..
@@ -3649,10 +3749,18 @@ fn xmod_forbidden_shape_reason(expr: &MExpr, path: &str) -> Option<String> {
                 arm.guard
                     .as_ref()
                     .and_then(|guard| {
-                        xmod_forbidden_shape_reason(guard, &format!("{path}.arm{i}.guard"))
+                        xmod_forbidden_shape_reason(
+                            guard,
+                            &format!("{path}.arm{i}.guard"),
+                            resolution,
+                        )
                     })
                     .or_else(|| {
-                        xmod_forbidden_shape_reason(&arm.body, &format!("{path}.arm{i}.body"))
+                        xmod_forbidden_shape_reason(
+                            &arm.body,
+                            &format!("{path}.arm{i}.body"),
+                            resolution,
+                        )
                     })
             })
         }),
@@ -3662,8 +3770,12 @@ fn xmod_forbidden_shape_reason(expr: &MExpr, path: &str) -> Option<String> {
             else_branch,
             ..
         } => xmod_forbidden_atom_reason(cond, &format!("{path}.cond"))
-            .or_else(|| xmod_forbidden_shape_reason(then_branch, &format!("{path}.then")))
-            .or_else(|| xmod_forbidden_shape_reason(else_branch, &format!("{path}.else"))),
+            .or_else(|| {
+                xmod_forbidden_shape_reason(then_branch, &format!("{path}.then"), resolution)
+            })
+            .or_else(|| {
+                xmod_forbidden_shape_reason(else_branch, &format!("{path}.else"), resolution)
+            }),
         MExpr::App { head, args, .. } => match head {
             Atom::Lambda { params, body, .. }
                 if immediate_lambda_app_is_supported(params, body, args.len()) =>
@@ -3673,11 +3785,23 @@ fn xmod_forbidden_shape_reason(expr: &MExpr, path: &str) -> Option<String> {
                     .find_map(|(i, atom)| {
                         xmod_forbidden_atom_reason(atom, &format!("{path}.arg{i}"))
                     })
-                    .or_else(|| xmod_forbidden_shape_reason(body, &format!("{path}.lambda_body")))
+                    .or_else(|| {
+                        xmod_forbidden_shape_reason(
+                            body,
+                            &format!("{path}.lambda_body"),
+                            resolution,
+                        )
+                    })
             }
             _ => xmod_forbidden_atom_reason(head, &format!("{path}.head")).or_else(|| {
                 args.iter().enumerate().find_map(|(i, atom)| {
-                    xmod_forbidden_atom_reason(atom, &format!("{path}.arg{i}"))
+                    if app_head_allows_lambda_arg(head, resolution)
+                        && matches!(atom, Atom::Lambda { .. })
+                    {
+                        None
+                    } else {
+                        xmod_forbidden_atom_reason(atom, &format!("{path}.arg{i}"))
+                    }
                 })
             }),
         },
@@ -3705,26 +3829,40 @@ fn xmod_forbidden_shape_reason(expr: &MExpr, path: &str) -> Option<String> {
                 },
             )
         }),
-        MExpr::Receive { arms, after, .. } => arms
-            .iter()
-            .enumerate()
-            .find_map(|(i, arm)| {
-                arm.guard
-                    .as_ref()
-                    .and_then(|guard| {
-                        xmod_forbidden_shape_reason(guard, &format!("{path}.arm{i}.guard"))
-                    })
-                    .or_else(|| {
-                        xmod_forbidden_shape_reason(&arm.body, &format!("{path}.arm{i}.body"))
-                    })
-            })
-            .or_else(|| {
-                after.as_ref().and_then(|(timeout, body)| {
-                    xmod_forbidden_atom_reason(timeout, &format!("{path}.after.timeout")).or_else(
-                        || xmod_forbidden_shape_reason(body, &format!("{path}.after.body")),
-                    )
+        MExpr::Receive { arms, after, .. } => {
+            arms.iter()
+                .enumerate()
+                .find_map(|(i, arm)| {
+                    arm.guard
+                        .as_ref()
+                        .and_then(|guard| {
+                            xmod_forbidden_shape_reason(
+                                guard,
+                                &format!("{path}.arm{i}.guard"),
+                                resolution,
+                            )
+                        })
+                        .or_else(|| {
+                            xmod_forbidden_shape_reason(
+                                &arm.body,
+                                &format!("{path}.arm{i}.body"),
+                                resolution,
+                            )
+                        })
                 })
-            }),
+                .or_else(|| {
+                    after.as_ref().and_then(|(timeout, body)| {
+                        xmod_forbidden_atom_reason(timeout, &format!("{path}.after.timeout"))
+                            .or_else(|| {
+                                xmod_forbidden_shape_reason(
+                                    body,
+                                    &format!("{path}.after.body"),
+                                    resolution,
+                                )
+                            })
+                    })
+                })
+        }
     }
 }
 
@@ -3754,6 +3892,19 @@ fn xmod_forbidden_atom_reason(atom: &Atom, path: &str) -> Option<String> {
         | Atom::Symbol { .. }
         | Atom::BackendAtom { .. } => None,
     }
+}
+
+fn app_head_allows_lambda_arg(head: &Atom, resolution: Option<&ResolutionMap>) -> bool {
+    let Some(resolution) = resolution else {
+        return false;
+    };
+    let source = match head {
+        Atom::Var { source, .. } | Atom::QualifiedRef { source, .. } => *source,
+        _ => return false,
+    };
+    resolution
+        .get(&source)
+        .is_some_and(|resolved| matches!(resolved.kind, ResolvedCodegenKind::BeamFunction { .. }))
 }
 
 fn debug_imported_dict_enabled(filter: Option<&str>, source_module: &str, name: &str) -> bool {
@@ -3946,6 +4097,24 @@ fn variant_name_with_dict_key(base: String, dict_replacements: &[DictParamReplac
     format!("{base}__dict_{:016x}", stable_key_hash(&key))
 }
 
+fn variant_name_with_callback_key(
+    base: String,
+    callback_replacements: &[CallbackParamReplacement],
+) -> String {
+    if callback_replacements.is_empty() {
+        return base;
+    }
+
+    let mut key = String::new();
+    for replacement in callback_replacements {
+        key.push_str(&replacement.target.name);
+        key.push('=');
+        key.push_str(&replacement.key);
+        key.push(';');
+    }
+    format!("{base}__cb_{:016x}", stable_key_hash(&key))
+}
+
 fn variant_name_with_capture_key(base: String, captures: &[String]) -> String {
     if captures.is_empty() {
         return base;
@@ -3990,6 +4159,24 @@ fn append_capture_variant_args(
         });
     }
     (params, args)
+}
+
+fn append_capture_args_to_self_calls(
+    expr: MExpr,
+    variant_name: &str,
+    captures: &[String],
+    source: crate::ast::NodeId,
+) -> MExpr {
+    if captures.is_empty() {
+        return expr;
+    }
+    append_args_to_direct_calls(expr, variant_name, captures, source)
+}
+
+fn lambda_capture_names(lambda: &Atom) -> Vec<String> {
+    let mut names = free_atom_names(lambda).into_iter().collect::<Vec<_>>();
+    names.sort();
+    names
 }
 
 fn atom_key(atom: &Atom) -> String {
@@ -4390,6 +4577,512 @@ fn rewrite_direct_calls_to_name(
     }
 }
 
+fn append_args_to_direct_calls(
+    expr: MExpr,
+    target_name: &str,
+    captures: &[String],
+    source: crate::ast::NodeId,
+) -> MExpr {
+    let capture_args = || {
+        captures
+            .iter()
+            .map(|capture| Atom::Var {
+                name: MVar {
+                    name: capture.clone(),
+                    id: source.0,
+                },
+                source,
+            })
+            .collect::<Vec<_>>()
+    };
+
+    match expr {
+        MExpr::App {
+            head:
+                Atom::Var {
+                    name,
+                    source: head_source,
+                },
+            mut args,
+            source: app_source,
+        } if name.name == target_name => {
+            args.extend(capture_args());
+            MExpr::App {
+                head: Atom::Var {
+                    name,
+                    source: head_source,
+                },
+                args,
+                source: app_source,
+            }
+        }
+        MExpr::App { head, args, source } => MExpr::App {
+            head: append_args_to_direct_call_atom(head, target_name, captures, source),
+            args: args
+                .into_iter()
+                .map(|arg| append_args_to_direct_call_atom(arg, target_name, captures, source))
+                .collect(),
+            source,
+        },
+        MExpr::Pure(atom) => MExpr::Pure(append_args_to_direct_call_atom(
+            atom,
+            target_name,
+            captures,
+            source,
+        )),
+        MExpr::Yield { op, args, source } => MExpr::Yield {
+            op,
+            args: args
+                .into_iter()
+                .map(|arg| append_args_to_direct_call_atom(arg, target_name, captures, source))
+                .collect(),
+            source,
+        },
+        MExpr::ForeignCall {
+            module,
+            func,
+            args,
+            source,
+        } => MExpr::ForeignCall {
+            module,
+            func,
+            args: args
+                .into_iter()
+                .map(|arg| append_args_to_direct_call_atom(arg, target_name, captures, source))
+                .collect(),
+            source,
+        },
+        MExpr::Bind {
+            var,
+            value,
+            body,
+            mode,
+        } => MExpr::Bind {
+            var,
+            value: Box::new(append_args_to_direct_calls(
+                *value,
+                target_name,
+                captures,
+                source,
+            )),
+            body: Box::new(append_args_to_direct_calls(
+                *body,
+                target_name,
+                captures,
+                source,
+            )),
+            mode,
+        },
+        MExpr::Let { var, value, body } => MExpr::Let {
+            var,
+            value: Box::new(append_args_to_direct_calls(
+                *value,
+                target_name,
+                captures,
+                source,
+            )),
+            body: Box::new(append_args_to_direct_calls(
+                *body,
+                target_name,
+                captures,
+                source,
+            )),
+        },
+        MExpr::Ensure { body, cleanup } => MExpr::Ensure {
+            body: Box::new(append_args_to_direct_calls(
+                *body,
+                target_name,
+                captures,
+                source,
+            )),
+            cleanup: Box::new(append_args_to_direct_calls(
+                *cleanup,
+                target_name,
+                captures,
+                source,
+            )),
+        },
+        MExpr::Case {
+            scrutinee,
+            arms,
+            source: case_source,
+        } => MExpr::Case {
+            scrutinee: append_args_to_direct_call_atom(scrutinee, target_name, captures, source),
+            arms: arms
+                .into_iter()
+                .map(|arm| MArm {
+                    guard: arm.guard.map(|guard| {
+                        append_args_to_direct_calls(guard, target_name, captures, source)
+                    }),
+                    body: append_args_to_direct_calls(arm.body, target_name, captures, source),
+                    ..arm
+                })
+                .collect(),
+            source: case_source,
+        },
+        MExpr::If {
+            cond,
+            then_branch,
+            else_branch,
+            source: if_source,
+        } => MExpr::If {
+            cond: append_args_to_direct_call_atom(cond, target_name, captures, source),
+            then_branch: Box::new(append_args_to_direct_calls(
+                *then_branch,
+                target_name,
+                captures,
+                source,
+            )),
+            else_branch: Box::new(append_args_to_direct_calls(
+                *else_branch,
+                target_name,
+                captures,
+                source,
+            )),
+            source: if_source,
+        },
+        MExpr::With {
+            handler,
+            body,
+            source: with_source,
+        } => MExpr::With {
+            handler: append_args_to_direct_call_handler(handler, target_name, captures, source),
+            body: Box::new(append_args_to_direct_calls(
+                *body,
+                target_name,
+                captures,
+                source,
+            )),
+            source: with_source,
+        },
+        MExpr::Resume {
+            value,
+            source: resume_source,
+        } => MExpr::Resume {
+            value: append_args_to_direct_call_atom(value, target_name, captures, source),
+            source: resume_source,
+        },
+        MExpr::FieldAccess {
+            record,
+            field,
+            record_name,
+            anon_fields,
+            source: field_source,
+        } => MExpr::FieldAccess {
+            record: append_args_to_direct_call_atom(record, target_name, captures, source),
+            field,
+            record_name,
+            anon_fields,
+            source: field_source,
+        },
+        MExpr::RecordUpdate {
+            record,
+            fields,
+            record_name,
+            anon_fields,
+            source: update_source,
+        } => MExpr::RecordUpdate {
+            record: append_args_to_direct_call_atom(record, target_name, captures, source),
+            fields: fields
+                .into_iter()
+                .map(|(field, atom)| {
+                    (
+                        field,
+                        append_args_to_direct_call_atom(atom, target_name, captures, source),
+                    )
+                })
+                .collect(),
+            record_name,
+            anon_fields,
+            source: update_source,
+        },
+        MExpr::DictMethodAccess {
+            dict,
+            trait_name,
+            method_index,
+            source: access_source,
+        } => MExpr::DictMethodAccess {
+            dict: append_args_to_direct_call_atom(dict, target_name, captures, source),
+            trait_name,
+            method_index,
+            source: access_source,
+        },
+        MExpr::BinOp {
+            op,
+            left,
+            right,
+            source: bin_source,
+        } => MExpr::BinOp {
+            op,
+            left: append_args_to_direct_call_atom(left, target_name, captures, source),
+            right: append_args_to_direct_call_atom(right, target_name, captures, source),
+            source: bin_source,
+        },
+        MExpr::UnaryMinus {
+            value,
+            source: unary_source,
+        } => MExpr::UnaryMinus {
+            value: append_args_to_direct_call_atom(value, target_name, captures, source),
+            source: unary_source,
+        },
+        MExpr::BitString {
+            segments,
+            source: bit_source,
+        } => MExpr::BitString {
+            segments: segments
+                .into_iter()
+                .map(|mut seg| {
+                    seg.value =
+                        append_args_to_direct_call_atom(seg.value, target_name, captures, source);
+                    seg.size = seg.size.map(|size| {
+                        append_args_to_direct_call_atom(size, target_name, captures, source)
+                    });
+                    seg
+                })
+                .collect(),
+            source: bit_source,
+        },
+        MExpr::Receive {
+            arms,
+            after,
+            source: receive_source,
+        } => MExpr::Receive {
+            arms: arms
+                .into_iter()
+                .map(|arm| MArm {
+                    guard: arm.guard.map(|guard| {
+                        append_args_to_direct_calls(guard, target_name, captures, source)
+                    }),
+                    body: append_args_to_direct_calls(arm.body, target_name, captures, source),
+                    ..arm
+                })
+                .collect(),
+            after: after.map(|(timeout, body)| {
+                (
+                    append_args_to_direct_call_atom(timeout, target_name, captures, source),
+                    Box::new(append_args_to_direct_calls(
+                        *body,
+                        target_name,
+                        captures,
+                        source,
+                    )),
+                )
+            }),
+            source: receive_source,
+        },
+        MExpr::LetFun {
+            name,
+            params,
+            body,
+            rest,
+            source: letfun_source,
+        } => {
+            let body = if name == target_name {
+                *body
+            } else {
+                append_args_to_direct_calls(*body, target_name, captures, source)
+            };
+            let rest = if name == target_name {
+                *rest
+            } else {
+                append_args_to_direct_calls(*rest, target_name, captures, source)
+            };
+            MExpr::LetFun {
+                name,
+                params,
+                body: Box::new(body),
+                rest: Box::new(rest),
+                source: letfun_source,
+            }
+        }
+        MExpr::HandlerValue {
+            effects,
+            arms,
+            return_clause,
+            source: handler_source,
+        } => MExpr::HandlerValue {
+            effects,
+            arms: arms
+                .into_iter()
+                .map(|arm| {
+                    append_args_to_direct_call_handler_arm(arm, target_name, captures, source)
+                })
+                .collect(),
+            return_clause: return_clause.map(|arm| {
+                Box::new(append_args_to_direct_call_handler_arm(
+                    *arm,
+                    target_name,
+                    captures,
+                    source,
+                ))
+            }),
+            source: handler_source,
+        },
+    }
+}
+
+#[allow(clippy::only_used_in_recursion)]
+fn append_args_to_direct_call_atom(
+    atom: Atom,
+    target_name: &str,
+    captures: &[String],
+    source: crate::ast::NodeId,
+) -> Atom {
+    match atom {
+        Atom::Ctor {
+            name,
+            args,
+            source: ctor_source,
+        } => Atom::Ctor {
+            name,
+            args: args
+                .into_iter()
+                .map(|arg| append_args_to_direct_call_atom(arg, target_name, captures, source))
+                .collect(),
+            source: ctor_source,
+        },
+        Atom::Tuple {
+            elements,
+            source: tuple_source,
+        } => Atom::Tuple {
+            elements: elements
+                .into_iter()
+                .map(|arg| append_args_to_direct_call_atom(arg, target_name, captures, source))
+                .collect(),
+            source: tuple_source,
+        },
+        Atom::AnonRecord {
+            fields,
+            source: record_source,
+        } => Atom::AnonRecord {
+            fields: fields
+                .into_iter()
+                .map(|(field, atom)| {
+                    (
+                        field,
+                        append_args_to_direct_call_atom(atom, target_name, captures, source),
+                    )
+                })
+                .collect(),
+            source: record_source,
+        },
+        Atom::Record {
+            name,
+            fields,
+            source: record_source,
+        } => Atom::Record {
+            name,
+            fields: fields
+                .into_iter()
+                .map(|(field, atom)| {
+                    (
+                        field,
+                        append_args_to_direct_call_atom(atom, target_name, captures, source),
+                    )
+                })
+                .collect(),
+            source: record_source,
+        },
+        Atom::BackendSpawnThunk {
+            callback,
+            source: thunk_source,
+        } => Atom::BackendSpawnThunk {
+            callback: Box::new(append_args_to_direct_call_atom(
+                *callback,
+                target_name,
+                captures,
+                source,
+            )),
+            source: thunk_source,
+        },
+        Atom::Lambda { .. }
+        | Atom::Var { .. }
+        | Atom::Lit { .. }
+        | Atom::DictRef { .. }
+        | Atom::QualifiedRef { .. }
+        | Atom::Symbol { .. }
+        | Atom::BackendAtom { .. } => atom,
+    }
+}
+
+fn append_args_to_direct_call_handler(
+    handler: MHandler,
+    target_name: &str,
+    captures: &[String],
+    source: crate::ast::NodeId,
+) -> MHandler {
+    match handler {
+        MHandler::Static {
+            effects,
+            arms,
+            return_clause,
+            source: handler_source,
+        } => MHandler::Static {
+            effects,
+            arms: arms
+                .into_iter()
+                .map(|arm| {
+                    append_args_to_direct_call_handler_arm(arm, target_name, captures, source)
+                })
+                .collect(),
+            return_clause: return_clause.map(|arm| {
+                append_args_to_direct_call_handler_arm(arm, target_name, captures, source)
+            }),
+            source: handler_source,
+        },
+        MHandler::Composite {
+            handlers,
+            source: handler_source,
+        } => MHandler::Composite {
+            handlers: handlers
+                .into_iter()
+                .map(|handler| {
+                    append_args_to_direct_call_handler(handler, target_name, captures, source)
+                })
+                .collect(),
+            source: handler_source,
+        },
+        MHandler::Dynamic {
+            effects,
+            op_tuple,
+            return_lambda,
+            source: handler_source,
+        } => MHandler::Dynamic {
+            effects,
+            op_tuple: append_args_to_direct_call_atom(op_tuple, target_name, captures, source),
+            return_lambda: return_lambda
+                .map(|atom| append_args_to_direct_call_atom(atom, target_name, captures, source)),
+            source: handler_source,
+        },
+        MHandler::Native { .. } => handler,
+    }
+}
+
+fn append_args_to_direct_call_handler_arm(
+    arm: MHandlerArm,
+    target_name: &str,
+    captures: &[String],
+    source: crate::ast::NodeId,
+) -> MHandlerArm {
+    MHandlerArm {
+        body: Box::new(append_args_to_direct_calls(
+            *arm.body,
+            target_name,
+            captures,
+            source,
+        )),
+        finally_block: arm.finally_block.map(|cleanup| {
+            Box::new(append_args_to_direct_calls(
+                *cleanup,
+                target_name,
+                captures,
+                source,
+            ))
+        }),
+        ..arm
+    }
+}
+
 fn rewrite_direct_call_atom_to_name(
     atom: Atom,
     old_name: &str,
@@ -4455,6 +5148,421 @@ fn rewrite_non_call_atom_refs(atom: Atom) -> Atom {
         | Atom::Symbol { .. }
         | Atom::BackendAtom { .. } => atom,
     }
+}
+
+fn rewrite_direct_callback_calls(
+    expr: MExpr,
+    target: &MVar,
+    candidate: &InlineCandidate,
+) -> Option<MExpr> {
+    match expr {
+        MExpr::App { head, args, source } => {
+            if matches!(&head, Atom::Var { name, .. } if var_matches(name, target)) {
+                return inline_helper_candidate(candidate, &args);
+            }
+            Some(MExpr::App {
+                head: rewrite_callback_atom_refs(head, target, candidate)?,
+                args: rewrite_callback_atoms(args, target, candidate)?,
+                source,
+            })
+        }
+        MExpr::Pure(atom) => Some(MExpr::Pure(rewrite_callback_atom_refs(
+            atom, target, candidate,
+        )?)),
+        MExpr::Yield { op, args, source } => Some(MExpr::Yield {
+            op,
+            args: rewrite_callback_atoms(args, target, candidate)?,
+            source,
+        }),
+        MExpr::ForeignCall {
+            module,
+            func,
+            args,
+            source,
+        } => Some(MExpr::ForeignCall {
+            module,
+            func,
+            args: rewrite_callback_atoms(args, target, candidate)?,
+            source,
+        }),
+        MExpr::Bind {
+            var,
+            value,
+            body,
+            mode,
+        } => {
+            let value = rewrite_direct_callback_calls(*value, target, candidate)?;
+            let body = if var_matches(&var, target) {
+                *body
+            } else {
+                rewrite_direct_callback_calls(*body, target, candidate)?
+            };
+            Some(MExpr::Bind {
+                var,
+                value: Box::new(value),
+                body: Box::new(body),
+                mode,
+            })
+        }
+        MExpr::Let { var, value, body } => {
+            let value = rewrite_direct_callback_calls(*value, target, candidate)?;
+            let body = if var_matches(&var, target) {
+                *body
+            } else {
+                rewrite_direct_callback_calls(*body, target, candidate)?
+            };
+            Some(MExpr::Let {
+                var,
+                value: Box::new(value),
+                body: Box::new(body),
+            })
+        }
+        MExpr::Ensure { body, cleanup } => Some(MExpr::Ensure {
+            body: Box::new(rewrite_direct_callback_calls(*body, target, candidate)?),
+            cleanup: Box::new(rewrite_direct_callback_calls(*cleanup, target, candidate)?),
+        }),
+        MExpr::Case {
+            scrutinee,
+            arms,
+            source,
+        } => Some(MExpr::Case {
+            scrutinee: rewrite_callback_atom_refs(scrutinee, target, candidate)?,
+            arms: arms
+                .into_iter()
+                .map(|arm| rewrite_callback_arm_refs(arm, target, candidate))
+                .collect::<Option<Vec<_>>>()?,
+            source,
+        }),
+        MExpr::If {
+            cond,
+            then_branch,
+            else_branch,
+            source,
+        } => Some(MExpr::If {
+            cond: rewrite_callback_atom_refs(cond, target, candidate)?,
+            then_branch: Box::new(rewrite_direct_callback_calls(
+                *then_branch,
+                target,
+                candidate,
+            )?),
+            else_branch: Box::new(rewrite_direct_callback_calls(
+                *else_branch,
+                target,
+                candidate,
+            )?),
+            source,
+        }),
+        MExpr::With {
+            handler,
+            body,
+            source,
+        } => Some(MExpr::With {
+            handler: rewrite_callback_handler_refs(handler, target, candidate)?,
+            body: Box::new(rewrite_direct_callback_calls(*body, target, candidate)?),
+            source,
+        }),
+        MExpr::Resume { value, source } => Some(MExpr::Resume {
+            value: rewrite_callback_atom_refs(value, target, candidate)?,
+            source,
+        }),
+        MExpr::FieldAccess {
+            record,
+            field,
+            record_name,
+            anon_fields,
+            source,
+        } => Some(MExpr::FieldAccess {
+            record: rewrite_callback_atom_refs(record, target, candidate)?,
+            field,
+            record_name,
+            anon_fields,
+            source,
+        }),
+        MExpr::RecordUpdate {
+            record,
+            fields,
+            record_name,
+            anon_fields,
+            source,
+        } => Some(MExpr::RecordUpdate {
+            record: rewrite_callback_atom_refs(record, target, candidate)?,
+            fields: fields
+                .into_iter()
+                .map(|(field, atom)| {
+                    Some((field, rewrite_callback_atom_refs(atom, target, candidate)?))
+                })
+                .collect::<Option<Vec<_>>>()?,
+            record_name,
+            anon_fields,
+            source,
+        }),
+        MExpr::DictMethodAccess {
+            dict,
+            trait_name,
+            method_index,
+            source,
+        } => Some(MExpr::DictMethodAccess {
+            dict: rewrite_callback_atom_refs(dict, target, candidate)?,
+            trait_name,
+            method_index,
+            source,
+        }),
+        MExpr::BinOp {
+            op,
+            left,
+            right,
+            source,
+        } => Some(MExpr::BinOp {
+            op,
+            left: rewrite_callback_atom_refs(left, target, candidate)?,
+            right: rewrite_callback_atom_refs(right, target, candidate)?,
+            source,
+        }),
+        MExpr::UnaryMinus { value, source } => Some(MExpr::UnaryMinus {
+            value: rewrite_callback_atom_refs(value, target, candidate)?,
+            source,
+        }),
+        MExpr::BitString { segments, source } => Some(MExpr::BitString {
+            segments: segments
+                .into_iter()
+                .map(|mut seg| {
+                    seg.value = rewrite_callback_atom_refs(seg.value, target, candidate)?;
+                    seg.size = match seg.size {
+                        Some(size) => Some(rewrite_callback_atom_refs(size, target, candidate)?),
+                        None => None,
+                    };
+                    Some(seg)
+                })
+                .collect::<Option<Vec<_>>>()?,
+            source,
+        }),
+        MExpr::Receive {
+            arms,
+            after,
+            source,
+        } => Some(MExpr::Receive {
+            arms: arms
+                .into_iter()
+                .map(|arm| rewrite_callback_arm_refs(arm, target, candidate))
+                .collect::<Option<Vec<_>>>()?,
+            after: match after {
+                Some((timeout, body)) => Some((
+                    rewrite_callback_atom_refs(timeout, target, candidate)?,
+                    Box::new(rewrite_direct_callback_calls(*body, target, candidate)?),
+                )),
+                None => None,
+            },
+            source,
+        }),
+        MExpr::LetFun {
+            name,
+            params,
+            body,
+            rest,
+            source,
+        } => {
+            let body = if name == target.name || pats_bind_name(&params, &target.name) {
+                *body
+            } else {
+                rewrite_direct_callback_calls(*body, target, candidate)?
+            };
+            let rest = if name == target.name {
+                *rest
+            } else {
+                rewrite_direct_callback_calls(*rest, target, candidate)?
+            };
+            Some(MExpr::LetFun {
+                name,
+                params,
+                body: Box::new(body),
+                rest: Box::new(rest),
+                source,
+            })
+        }
+        MExpr::HandlerValue {
+            effects,
+            arms,
+            return_clause,
+            source,
+        } => Some(MExpr::HandlerValue {
+            effects,
+            arms: arms
+                .into_iter()
+                .map(|arm| rewrite_callback_handler_arm_refs(arm, target, candidate))
+                .collect::<Option<Vec<_>>>()?,
+            return_clause: match return_clause {
+                Some(arm) => Some(Box::new(rewrite_callback_handler_arm_refs(
+                    *arm, target, candidate,
+                )?)),
+                None => None,
+            },
+            source,
+        }),
+    }
+}
+
+fn rewrite_callback_atoms(
+    atoms: Vec<Atom>,
+    target: &MVar,
+    candidate: &InlineCandidate,
+) -> Option<Vec<Atom>> {
+    atoms
+        .into_iter()
+        .map(|atom| rewrite_callback_atom_refs(atom, target, candidate))
+        .collect()
+}
+
+fn rewrite_callback_atom_refs(
+    atom: Atom,
+    target: &MVar,
+    candidate: &InlineCandidate,
+) -> Option<Atom> {
+    match atom {
+        Atom::Ctor { name, args, source } => Some(Atom::Ctor {
+            name,
+            args: rewrite_callback_atoms(args, target, candidate)?,
+            source,
+        }),
+        Atom::Tuple { elements, source } => Some(Atom::Tuple {
+            elements: rewrite_callback_atoms(elements, target, candidate)?,
+            source,
+        }),
+        Atom::AnonRecord { fields, source } => Some(Atom::AnonRecord {
+            fields: fields
+                .into_iter()
+                .map(|(field, atom)| {
+                    Some((field, rewrite_callback_atom_refs(atom, target, candidate)?))
+                })
+                .collect::<Option<Vec<_>>>()?,
+            source,
+        }),
+        Atom::Record {
+            name,
+            fields,
+            source,
+        } => Some(Atom::Record {
+            name,
+            fields: fields
+                .into_iter()
+                .map(|(field, atom)| {
+                    Some((field, rewrite_callback_atom_refs(atom, target, candidate)?))
+                })
+                .collect::<Option<Vec<_>>>()?,
+            source,
+        }),
+        Atom::Lambda {
+            params,
+            body,
+            source,
+        } => {
+            let body = if pats_bind_name(&params, &target.name) {
+                *body
+            } else {
+                rewrite_direct_callback_calls(*body, target, candidate)?
+            };
+            Some(Atom::Lambda {
+                params,
+                body: Box::new(body),
+                source,
+            })
+        }
+        Atom::BackendSpawnThunk { callback, source } => Some(Atom::BackendSpawnThunk {
+            callback: Box::new(rewrite_callback_atom_refs(*callback, target, candidate)?),
+            source,
+        }),
+        Atom::Var { .. }
+        | Atom::Lit { .. }
+        | Atom::DictRef { .. }
+        | Atom::QualifiedRef { .. }
+        | Atom::Symbol { .. }
+        | Atom::BackendAtom { .. } => Some(atom),
+    }
+}
+
+fn rewrite_callback_arm_refs(
+    arm: MArm,
+    target: &MVar,
+    candidate: &InlineCandidate,
+) -> Option<MArm> {
+    if pat_binds_name(&arm.pattern, &target.name) {
+        return Some(arm);
+    }
+    Some(MArm {
+        guard: match arm.guard {
+            Some(guard) => Some(rewrite_direct_callback_calls(guard, target, candidate)?),
+            None => None,
+        },
+        body: rewrite_direct_callback_calls(arm.body, target, candidate)?,
+        ..arm
+    })
+}
+
+fn rewrite_callback_handler_refs(
+    handler: MHandler,
+    target: &MVar,
+    candidate: &InlineCandidate,
+) -> Option<MHandler> {
+    match handler {
+        MHandler::Static {
+            effects,
+            arms,
+            return_clause,
+            source,
+        } => Some(MHandler::Static {
+            effects,
+            arms: arms
+                .into_iter()
+                .map(|arm| rewrite_callback_handler_arm_refs(arm, target, candidate))
+                .collect::<Option<Vec<_>>>()?,
+            return_clause: match return_clause {
+                Some(arm) => Some(rewrite_callback_handler_arm_refs(arm, target, candidate)?),
+                None => None,
+            },
+            source,
+        }),
+        MHandler::Composite { handlers, source } => Some(MHandler::Composite {
+            handlers: handlers
+                .into_iter()
+                .map(|handler| rewrite_callback_handler_refs(handler, target, candidate))
+                .collect::<Option<Vec<_>>>()?,
+            source,
+        }),
+        MHandler::Dynamic {
+            effects,
+            op_tuple,
+            return_lambda,
+            source,
+        } => Some(MHandler::Dynamic {
+            effects,
+            op_tuple: rewrite_callback_atom_refs(op_tuple, target, candidate)?,
+            return_lambda: match return_lambda {
+                Some(atom) => Some(rewrite_callback_atom_refs(atom, target, candidate)?),
+                None => None,
+            },
+            source,
+        }),
+        MHandler::Native { .. } => Some(handler),
+    }
+}
+
+fn rewrite_callback_handler_arm_refs(
+    arm: MHandlerArm,
+    target: &MVar,
+    candidate: &InlineCandidate,
+) -> Option<MHandlerArm> {
+    if pats_bind_name(&arm.params, &target.name) {
+        return Some(arm);
+    }
+    Some(MHandlerArm {
+        body: Box::new(rewrite_direct_callback_calls(*arm.body, target, candidate)?),
+        finally_block: match arm.finally_block {
+            Some(cleanup) => Some(Box::new(rewrite_direct_callback_calls(
+                *cleanup, target, candidate,
+            )?)),
+            None => None,
+        },
+        ..arm
+    })
 }
 
 fn rewrite_call_arm_refs(
@@ -5312,7 +6420,7 @@ fn atom_contains_inline_forbidden_shape(atom: &Atom) -> bool {
 }
 
 fn expr_contains_xmod_variant_forbidden_shape(expr: &MExpr) -> bool {
-    xmod_forbidden_shape_reason(expr, "body").is_some()
+    xmod_forbidden_shape_reason(expr, "body", None).is_some()
 }
 
 fn expr_contains_imported_handler_factory_forbidden_shape(expr: &MExpr) -> bool {

@@ -2272,6 +2272,50 @@ fn imported_dict_constructor_collection_rejects_escaping_lambda_arg() {
 }
 
 #[test]
+fn imported_dict_constructor_collection_allows_lambda_arg_to_resolved_saga_hof() {
+    let dict = MDecl::DictConstructor(MDictConstructor {
+        id: crate::ast::NodeId(3011),
+        name: "__dict_Encodable_List".to_string(),
+        dict_params: vec![],
+        methods: vec![MExpr::Pure(Atom::Lambda {
+            params: vec![pat_var("xs", 3012)],
+            body: Box::new(MExpr::App {
+                head: var("map", 3013),
+                args: vec![
+                    Atom::Lambda {
+                        params: vec![pat_var("x", 3014)],
+                        body: Box::new(bind_expr(
+                            mv("opts", 3015),
+                            yield_log(vec![unit_atom()], crate::ast::NodeId(3016)),
+                            MExpr::Pure(var("x", 3014)),
+                        )),
+                        source: crate::ast::NodeId(3017),
+                    },
+                    var("xs", 3012),
+                ],
+                source: crate::ast::NodeId(3018),
+            }),
+            source: crate::ast::NodeId(3019),
+        })],
+        method_effects: vec![],
+        method_open_rows: vec![],
+        impl_effects: vec![],
+        span: span(),
+    });
+    let mut resolution = ResolutionMap::new();
+    resolution.insert(
+        crate::ast::NodeId(3013),
+        resolved_beam("map", Some("Std.List"), "Std.List.map"),
+    );
+    let info = module_info_with_exports(&[]);
+
+    let candidates =
+        collect_imported_dict_constructors("Lib", &vec![dict], &resolution, &info, &HashSet::new());
+
+    assert!(candidates.contains_key("__dict_Encodable_List"));
+}
+
+#[test]
 fn let_bound_handler_factory_specializes_generic_dict_dispatch() {
     let mut f = Fixture::new();
     let arm = tail_arm(
@@ -3170,6 +3214,98 @@ fn imported_static_function_variant_threads_handler_stack_captures_as_params() {
 }
 
 #[test]
+fn imported_static_function_variant_inlines_callback_param_and_threads_captures() {
+    let mut f = Fixture::new();
+    let arm = tail_arm(2990, vec![pat_unit(2991)], resume(lit_int("1", 1)), None);
+    f.h.resumption
+        .insert(crate::ast::NodeId(2990), ResumptionKind::TailResumptive);
+    let handler = static_log_handler(vec![arm]);
+    let map_body = bind_expr(
+        mv("mapped", 2992),
+        MExpr::App {
+            head: var("f", 2993),
+            args: vec![unit_atom()],
+            source: crate::ast::NodeId(2994),
+        },
+        MExpr::App {
+            head: var("map", 2995),
+            args: vec![var("f", 2996), unit_atom()],
+            source: crate::ast::NodeId(2997),
+        },
+    );
+    let imported = imported_candidate_with_params(
+        "Std.List",
+        "map",
+        2998,
+        vec![pat_var("f", 2999), pat_unit(3000)],
+        map_body,
+    );
+    let callback = Atom::Lambda {
+        params: vec![pat_unit(3001)],
+        body: Box::new(bind_expr(
+            mv("opts", 3002),
+            yield_log(vec![unit_atom()], crate::ast::NodeId(3003)),
+            MExpr::BinOp {
+                op: crate::ast::BinOp::Add,
+                left: var("configured", 3004),
+                right: var("opts", 3002),
+                source: crate::ast::NodeId(3005),
+            },
+        )),
+        source: crate::ast::NodeId(3006),
+    };
+    let caller = MDecl::Val(MVal {
+        id: crate::ast::NodeId(3007),
+        public: false,
+        name: "caller".to_string(),
+        value: MExpr::Let {
+            var: mv("configured", 3008),
+            value: Box::new(MExpr::Pure(lit_int("10", 10))),
+            body: Box::new(with_expr(
+                handler,
+                MExpr::App {
+                    head: var("map", 3009),
+                    args: vec![callback, unit_atom()],
+                    source: crate::ast::NodeId(3010),
+                },
+            )),
+        },
+        span: span(),
+    });
+    let mut context = OptimizerContext::default();
+    context.resolution.insert(
+        crate::ast::NodeId(3009),
+        resolved_beam("map", Some("Std.List"), "Std.List.map"),
+    );
+    context
+        .imported_function_variants
+        .insert("Std.List.map".to_string(), imported);
+    let info = f.info();
+
+    let out = run_with_context(vec![caller], &f.h, &info, context);
+    let variant = out
+        .iter()
+        .find_map(|decl| match decl {
+            MDecl::FunBinding(fun) if fun.name.starts_with(STATIC_VARIANT_PREFIX) => Some(fun),
+            _ => None,
+        })
+        .expect("expected generated static variant");
+
+    assert_eq!(expr_yield_count(&variant.body), 0);
+    assert!(
+        variant
+            .params
+            .iter()
+            .any(|param| matches!(param, Pat::Var { name, .. } if name == "configured"))
+    );
+    assert!(expr_contains_app_with_arg_count(
+        &variant.body,
+        &variant.name,
+        3
+    ));
+}
+
+#[test]
 fn imported_native_candidate_collection_skips_private_helper_dependency() {
     let worker = public_helper_fun(
         "worker",
@@ -3486,12 +3622,22 @@ fn imported_candidate(
     id: u32,
     body: MExpr,
 ) -> ImportedFunctionVariantCandidate {
+    imported_candidate_with_params(source_module, name, id, vec![pat_unit(id + 1000)], body)
+}
+
+fn imported_candidate_with_params(
+    source_module: &str,
+    name: &str,
+    id: u32,
+    params: Vec<Pat>,
+    body: MExpr,
+) -> ImportedFunctionVariantCandidate {
     let binding = MFunBinding {
         id: crate::ast::NodeId(id),
         public: true,
         name: name.to_string(),
         name_span: span(),
-        params: vec![pat_unit(id + 1000)],
+        params,
         guard: None,
         body,
         span: span(),
@@ -3501,6 +3647,163 @@ fn imported_candidate(
         binding,
         public_names: HashSet::from([name.to_string()]),
     }
+}
+
+fn expr_contains_app_with_arg_count(expr: &MExpr, name: &str, arg_count: usize) -> bool {
+    match expr {
+        MExpr::App { head, args, .. } => {
+            matches!(head, Atom::Var { name: var, .. } if var.name == name)
+                && args.len() == arg_count
+        }
+        MExpr::Pure(atom) => atom_contains_app_with_arg_count(atom, name, arg_count),
+        MExpr::Yield { args, .. } | MExpr::ForeignCall { args, .. } => args
+            .iter()
+            .any(|atom| atom_contains_app_with_arg_count(atom, name, arg_count)),
+        MExpr::Bind { value, body, .. } | MExpr::Let { value, body, .. } => {
+            expr_contains_app_with_arg_count(value, name, arg_count)
+                || expr_contains_app_with_arg_count(body, name, arg_count)
+        }
+        MExpr::Ensure { body, cleanup } => {
+            expr_contains_app_with_arg_count(body, name, arg_count)
+                || expr_contains_app_with_arg_count(cleanup, name, arg_count)
+        }
+        MExpr::Case {
+            scrutinee, arms, ..
+        } => {
+            atom_contains_app_with_arg_count(scrutinee, name, arg_count)
+                || arms.iter().any(|arm| {
+                    arm.guard.as_ref().is_some_and(|guard| {
+                        expr_contains_app_with_arg_count(guard, name, arg_count)
+                    }) || expr_contains_app_with_arg_count(&arm.body, name, arg_count)
+                })
+        }
+        MExpr::If {
+            cond,
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            atom_contains_app_with_arg_count(cond, name, arg_count)
+                || expr_contains_app_with_arg_count(then_branch, name, arg_count)
+                || expr_contains_app_with_arg_count(else_branch, name, arg_count)
+        }
+        MExpr::With { handler, body, .. } => {
+            handler_contains_app_with_arg_count(handler, name, arg_count)
+                || expr_contains_app_with_arg_count(body, name, arg_count)
+        }
+        MExpr::Resume { value, .. }
+        | MExpr::FieldAccess { record: value, .. }
+        | MExpr::DictMethodAccess { dict: value, .. }
+        | MExpr::UnaryMinus { value, .. } => {
+            atom_contains_app_with_arg_count(value, name, arg_count)
+        }
+        MExpr::RecordUpdate { record, fields, .. } => {
+            atom_contains_app_with_arg_count(record, name, arg_count)
+                || fields
+                    .iter()
+                    .any(|(_, atom)| atom_contains_app_with_arg_count(atom, name, arg_count))
+        }
+        MExpr::BinOp { left, right, .. } => {
+            atom_contains_app_with_arg_count(left, name, arg_count)
+                || atom_contains_app_with_arg_count(right, name, arg_count)
+        }
+        MExpr::BitString { segments, .. } => segments.iter().any(|segment| {
+            atom_contains_app_with_arg_count(&segment.value, name, arg_count)
+                || segment
+                    .size
+                    .as_ref()
+                    .is_some_and(|size| atom_contains_app_with_arg_count(size, name, arg_count))
+        }),
+        MExpr::Receive { arms, after, .. } => {
+            arms.iter().any(|arm| {
+                arm.guard
+                    .as_ref()
+                    .is_some_and(|guard| expr_contains_app_with_arg_count(guard, name, arg_count))
+                    || expr_contains_app_with_arg_count(&arm.body, name, arg_count)
+            }) || after.as_ref().is_some_and(|(timeout, body)| {
+                atom_contains_app_with_arg_count(timeout, name, arg_count)
+                    || expr_contains_app_with_arg_count(body, name, arg_count)
+            })
+        }
+        MExpr::LetFun { body, rest, .. } => {
+            expr_contains_app_with_arg_count(body, name, arg_count)
+                || expr_contains_app_with_arg_count(rest, name, arg_count)
+        }
+        MExpr::HandlerValue {
+            arms,
+            return_clause,
+            ..
+        } => {
+            arms.iter()
+                .any(|arm| handler_arm_contains_app_with_arg_count(arm, name, arg_count))
+                || return_clause.as_ref().is_some_and(|arm| {
+                    handler_arm_contains_app_with_arg_count(arm, name, arg_count)
+                })
+        }
+    }
+}
+
+fn atom_contains_app_with_arg_count(atom: &Atom, name: &str, arg_count: usize) -> bool {
+    match atom {
+        Atom::Ctor { args, .. } | Atom::Tuple { elements: args, .. } => args
+            .iter()
+            .any(|atom| atom_contains_app_with_arg_count(atom, name, arg_count)),
+        Atom::AnonRecord { fields, .. } | Atom::Record { fields, .. } => fields
+            .iter()
+            .any(|(_, atom)| atom_contains_app_with_arg_count(atom, name, arg_count)),
+        Atom::Lambda { body, .. } => expr_contains_app_with_arg_count(body, name, arg_count),
+        Atom::BackendSpawnThunk { callback, .. } => {
+            atom_contains_app_with_arg_count(callback, name, arg_count)
+        }
+        Atom::Var { .. }
+        | Atom::Lit { .. }
+        | Atom::DictRef { .. }
+        | Atom::QualifiedRef { .. }
+        | Atom::Symbol { .. }
+        | Atom::BackendAtom { .. } => false,
+    }
+}
+
+fn handler_contains_app_with_arg_count(handler: &MHandler, name: &str, arg_count: usize) -> bool {
+    match handler {
+        MHandler::Static {
+            arms,
+            return_clause,
+            ..
+        } => {
+            arms.iter()
+                .any(|arm| handler_arm_contains_app_with_arg_count(arm, name, arg_count))
+                || return_clause.as_ref().is_some_and(|arm| {
+                    handler_arm_contains_app_with_arg_count(arm, name, arg_count)
+                })
+        }
+        MHandler::Dynamic {
+            op_tuple,
+            return_lambda,
+            ..
+        } => {
+            atom_contains_app_with_arg_count(op_tuple, name, arg_count)
+                || return_lambda
+                    .as_ref()
+                    .is_some_and(|atom| atom_contains_app_with_arg_count(atom, name, arg_count))
+        }
+        MHandler::Composite { handlers, .. } => handlers
+            .iter()
+            .any(|handler| handler_contains_app_with_arg_count(handler, name, arg_count)),
+        MHandler::Native { .. } => false,
+    }
+}
+
+fn handler_arm_contains_app_with_arg_count(
+    arm: &MHandlerArm,
+    name: &str,
+    arg_count: usize,
+) -> bool {
+    expr_contains_app_with_arg_count(&arm.body, name, arg_count)
+        || arm
+            .finally_block
+            .as_ref()
+            .is_some_and(|cleanup| expr_contains_app_with_arg_count(cleanup, name, arg_count))
 }
 
 fn resolved_beam(

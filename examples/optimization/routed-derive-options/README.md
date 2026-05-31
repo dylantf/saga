@@ -17,6 +17,7 @@ watch whether entry-reachable `Options::get_options` yields disappear.
 | `04-cross-module-split-trait/` | Cross-module record encoder routed through split traits. |
 | `05-cross-module-handler-factory/` | Cross-module split traits plus a let-bound handler factory. |
 | `06-cross-module-maybe-field/` | Handler factory plus a nested `Maybe` field. |
+| `07-cross-module-list-field/` | Handler factory plus a list field encoded through `Std.List.map`. |
 
 ## Current Reference Stats
 
@@ -27,10 +28,10 @@ lambda applications while still rejecting escaping lambda arguments.
 | --- | --- |
 | `05-cross-module-handler-factory` | `Yield 2 -> 0`, `Bind 32 -> 2`, `decls 10 -> 2` |
 | `06-cross-module-maybe-field` | `Yield 2 -> 0`, `Bind 35 -> 2`, `decls 11 -> 2` |
+| `07-cross-module-list-field` | `Yield 3 -> 0`, `Bind 31 -> 5`, `decls 10 -> 2` |
 
 Run project fixtures from their directory:
 
 ```bash
 cargo run --bin saga --quiet -- run --monadic-stats
 ```
-
