@@ -174,6 +174,13 @@ pub fn emit_module_with_context_options(
     )
 }
 
+fn declared_module_name(program: &ast::Program) -> Option<String> {
+    program.iter().find_map(|decl| match decl {
+        ast::Decl::ModuleDecl { path, .. } => Some(path.join(".")),
+        _ => None,
+    })
+}
+
 // -------------------------------------------------------------------------
 // New-path helpers (Phase 1, step 8)
 // -------------------------------------------------------------------------
@@ -317,6 +324,8 @@ pub fn emit_module_via_new_path(
     options: &CompileOptions,
 ) -> EmitModuleOutput {
     let _ = entry_export; // currently consumed only via is_main below
+    let source_module_name =
+        declared_module_name(program).unwrap_or_else(|| module_name.to_string());
     let codegen_info = ctx.codegen_info();
     let constructor_atoms =
         resolve::build_constructor_atoms(module_name, program, &codegen_info, &ctx.prelude_imports);
@@ -422,7 +431,7 @@ pub fn emit_module_via_new_path(
                 }
             }
         }
-        if imported_module_name != module_name {
+        if imported_module_name != &source_module_name {
             handler_info
                 .resumption
                 .extend(handler_analysis::analyze(&compiled.elaborated).resumption);
@@ -483,6 +492,7 @@ pub fn emit_module_via_new_path(
         &handler_info,
         &effect_info,
         monadic::effect_opt::OptimizerContext {
+            current_module: Some(source_module_name),
             resolution: resolution_map.clone(),
             imported_function_variants,
             imported_handler_factories,

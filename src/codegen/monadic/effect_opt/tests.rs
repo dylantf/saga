@@ -3304,6 +3304,50 @@ fn imported_static_function_variant_specializes_when_all_yields_are_removed() {
 }
 
 #[test]
+fn imported_static_function_variant_skips_pure_body_without_opportunity() {
+    let mut f = Fixture::new();
+    let arm = tail_arm(399, vec![pat_unit(400)], resume(lit_int("42", 42)), None);
+    f.h.resumption
+        .insert(crate::ast::NodeId(399), ResumptionKind::TailResumptive);
+    let handler = static_log_handler(vec![arm]);
+    let imported = imported_candidate("Lib", "worker", 401, MExpr::Pure(lit_int("7", 7)));
+    let call = MExpr::App {
+        head: var("worker", 402),
+        args: vec![unit_atom()],
+        source: crate::ast::NodeId(403),
+    };
+    let caller = MDecl::Val(MVal {
+        id: crate::ast::NodeId(404),
+        public: true,
+        name: "caller".to_string(),
+        value: with_expr(handler.clone(), call.clone()),
+        span: span(),
+    });
+    let mut context = OptimizerContext::default();
+    context.resolution.insert(
+        crate::ast::NodeId(402),
+        resolved_beam("worker", Some("Lib"), "Lib.worker"),
+    );
+    context
+        .imported_function_variants
+        .insert("Lib.worker".to_string(), imported);
+    let info = f.info();
+
+    let out = run_with_context(vec![caller], &f.h, &info, context);
+
+    assert_eq!(
+        out,
+        vec![MDecl::Val(MVal {
+            id: crate::ast::NodeId(404),
+            public: true,
+            name: "caller".to_string(),
+            value: with_expr(handler, call),
+            span: span(),
+        })]
+    );
+}
+
+#[test]
 fn static_function_variant_key_distinguishes_recovered_handler_bodies() {
     let mut f = Fixture::new();
     let arm_one = tail_arm(409, vec![pat_unit(410)], resume(lit_int("1", 1)), None);
@@ -3516,6 +3560,80 @@ fn imported_static_function_variant_specializes_let_bound_closed_constructor_arg
         .expect("expected generated imported static function variant");
     assert!(variant.name.contains("__value_"));
     assert_eq!(variant.body, MExpr::Pure(lit_int("42", 42)));
+}
+
+#[test]
+fn static_function_variant_does_not_specialize_loop_carried_value_arg() {
+    let mut f = Fixture::new();
+    let arm = tail_arm(4200, vec![pat_unit(4201)], resume(lit_int("42", 42)), None);
+    f.h.resumption
+        .insert(crate::ast::NodeId(4200), ResumptionKind::TailResumptive);
+    let handler = static_log_handler(vec![arm]);
+    let nil = Atom::Ctor {
+        name: "Nil".to_string(),
+        args: vec![],
+        source: crate::ast::NodeId(4202),
+    };
+    let loop_fun = helper_fun(
+        "loop",
+        4203,
+        vec![pat_var("k", 4204), pat_var("acc", 4205)],
+        MExpr::If {
+            cond: Atom::Lit {
+                value: crate::ast::Lit::Bool(false),
+                source: crate::ast::NodeId(4206),
+            },
+            then_branch: Box::new(MExpr::Pure(var("acc", 4205))),
+            else_branch: Box::new(bind_expr(
+                mv("tick", 4207),
+                yield_log(vec![unit_atom()], crate::ast::NodeId(4208)),
+                MExpr::App {
+                    head: var("loop", 4209),
+                    args: vec![
+                        var("k", 4204),
+                        Atom::Ctor {
+                            name: "Cons".to_string(),
+                            args: vec![var("tick", 4207), var("acc", 4205)],
+                            source: crate::ast::NodeId(4211),
+                        },
+                    ],
+                    source: crate::ast::NodeId(4212),
+                },
+            )),
+            source: crate::ast::NodeId(4213),
+        },
+    );
+    let caller = MDecl::Val(MVal {
+        id: crate::ast::NodeId(4214),
+        public: false,
+        name: "caller".to_string(),
+        value: with_expr(
+            handler,
+            MExpr::App {
+                head: var("loop", 4215),
+                args: vec![lit_int("2", 2), nil],
+                source: crate::ast::NodeId(4216),
+            },
+        ),
+        span: span(),
+    });
+    let info = f.info();
+
+    let out = run(vec![loop_fun, caller], &f.h, &info);
+    let variant = out
+        .iter()
+        .find_map(|decl| match decl {
+            MDecl::FunBinding(f) if f.name.starts_with(STATIC_VARIANT_PREFIX) => Some(f),
+            _ => None,
+        })
+        .expect("expected generated static function variant");
+
+    assert!(!variant.name.contains("__value_"));
+    assert!(expr_contains_app_with_arg_count(
+        &variant.body,
+        &variant.name,
+        2
+    ));
 }
 
 #[test]

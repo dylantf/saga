@@ -74,6 +74,7 @@ pub struct RunOptions {
 
 #[derive(Debug, Clone, Default)]
 pub struct OptimizerContext {
+    pub current_module: Option<String>,
     pub resolution: ResolutionMap,
     pub imported_function_variants: HashMap<String, ImportedFunctionVariantCandidate>,
     pub imported_handler_factories: HashMap<String, ImportedHandlerFactoryCandidate>,

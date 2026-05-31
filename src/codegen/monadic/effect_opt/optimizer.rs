@@ -1490,12 +1490,24 @@ impl<'info, 'data> Optimizer<'info, 'data> {
             return (MExpr::App { head, args, source }, Change::Unchanged);
         }
         let dict_replacements = self.dict_param_replacements(&candidate.binding.params, &args);
-        let value_replacements = self.value_param_replacements(&candidate.binding.params, &args);
+        let self_recursive = expr_calls_any(
+            &candidate.binding.body,
+            &HashSet::from([candidate.binding.name.clone()]),
+        );
+        let value_replacements = if self_recursive {
+            Vec::new()
+        } else {
+            self.value_param_replacements(&candidate.binding.params, &args)
+        };
         let callback_replacements =
             self.callback_param_replacements(&candidate.binding.params, &args);
+        let has_hidden_effect_specialization = self
+            .effect_summary(&candidate.binding.body)
+            .has_specialization_opportunity();
         if callback_replacements.is_empty()
             && value_replacements.is_empty()
-            && !self.expr_has_specialization_opportunity(&candidate.binding.body)
+            && !has_hidden_effect_specialization
+            && !expr_contains_dict_method_access(&candidate.binding.body)
         {
             return (MExpr::App { head, args, source }, Change::Unchanged);
         }
@@ -1522,6 +1534,8 @@ impl<'info, 'data> Optimizer<'info, 'data> {
             return (MExpr::App { head, args, source }, Change::Unchanged);
         }
 
+        let pending_len = self.pending_variants.len();
+        let generated_names_before = self.generated_variant_names.clone();
         let Some(mut variant_body) = self.optimized_variant_body(
             &candidate.binding,
             &name.name,
@@ -1535,7 +1549,18 @@ impl<'info, 'data> Optimizer<'info, 'data> {
         ) else {
             return (MExpr::App { head, args, source }, Change::Unchanged);
         };
-        if require_no_residual_yields && expr_yield_count(&variant_body) != 0 {
+        let has_arg_specialization = !dict_replacements.is_empty()
+            || !value_replacements.is_empty()
+            || !callback_replacements.is_empty();
+        if !variant_body_has_useful_specialization(
+            &candidate.binding.body,
+            &variant_body,
+            has_arg_specialization,
+            has_hidden_effect_specialization,
+        ) || (require_no_residual_yields && expr_yield_count(&variant_body) != 0)
+        {
+            self.pending_variants.truncate(pending_len);
+            self.generated_variant_names = generated_names_before;
             return (MExpr::App { head, args, source }, Change::Unchanged);
         }
 
@@ -1610,13 +1635,24 @@ impl<'info, 'data> Optimizer<'info, 'data> {
             return (MExpr::App { head, args, source }, Change::Unchanged);
         }
         let dict_replacements = self.dict_param_replacements(&candidate.binding.params, &args);
-        let value_replacements = self.value_param_replacements(&candidate.binding.params, &args);
+        let self_recursive = expr_calls_any(
+            &candidate.binding.body,
+            &HashSet::from([candidate.binding.name.clone()]),
+        );
+        let value_replacements = if self_recursive {
+            Vec::new()
+        } else {
+            self.value_param_replacements(&candidate.binding.params, &args)
+        };
         let callback_replacements =
             self.callback_param_replacements(&candidate.binding.params, &args);
+        let has_hidden_effect_specialization = self
+            .effect_summary(&candidate.binding.body)
+            .has_specialization_opportunity();
         if callback_replacements.is_empty()
             && value_replacements.is_empty()
-            && !require_no_residual_yields
-            && !self.expr_has_specialization_opportunity(&candidate.binding.body)
+            && !has_hidden_effect_specialization
+            && !expr_contains_dict_method_access(&candidate.binding.body)
         {
             return (MExpr::App { head, args, source }, Change::Unchanged);
         }
@@ -1648,6 +1684,8 @@ impl<'info, 'data> Optimizer<'info, 'data> {
             .iter()
             .cloned()
             .chain(capture_names.iter().cloned());
+        let pending_len = self.pending_variants.len();
+        let generated_names_before = self.generated_variant_names.clone();
         let Some(mut variant_body) = self.optimized_variant_body(
             &candidate.binding,
             &candidate.binding.name,
@@ -1661,7 +1699,18 @@ impl<'info, 'data> Optimizer<'info, 'data> {
         ) else {
             return (MExpr::App { head, args, source }, Change::Unchanged);
         };
-        if require_no_residual_yields && expr_yield_count(&variant_body) != 0 {
+        let has_arg_specialization = !dict_replacements.is_empty()
+            || !value_replacements.is_empty()
+            || !callback_replacements.is_empty();
+        if !variant_body_has_useful_specialization(
+            &candidate.binding.body,
+            &variant_body,
+            has_arg_specialization,
+            has_hidden_effect_specialization,
+        ) || (require_no_residual_yields && expr_yield_count(&variant_body) != 0)
+        {
+            self.pending_variants.truncate(pending_len);
+            self.generated_variant_names = generated_names_before;
             return (MExpr::App { head, args, source }, Change::Unchanged);
         }
 
@@ -1885,6 +1934,9 @@ impl<'info, 'data> Optimizer<'info, 'data> {
             .imported_function_variants
             .get(&resolved.canonical_name)
         {
+            if self.is_current_module(&candidate.source_module) {
+                return None;
+            }
             return Some(candidate.clone());
         }
 
@@ -1901,6 +1953,9 @@ impl<'info, 'data> Optimizer<'info, 'data> {
             });
         let candidate = matching.next()?;
         if matching.next().is_some() {
+            return None;
+        }
+        if self.is_current_module(&candidate.source_module) {
             return None;
         }
         Some(candidate.clone())
@@ -1923,6 +1978,9 @@ impl<'info, 'data> Optimizer<'info, 'data> {
             .imported_handler_factories
             .get(&resolved.canonical_name)
         {
+            if self.is_current_module(&candidate.source_module) {
+                return None;
+            }
             return Some(candidate.clone());
         }
 
@@ -1941,6 +1999,9 @@ impl<'info, 'data> Optimizer<'info, 'data> {
         if matching.next().is_some() {
             return None;
         }
+        if self.is_current_module(&candidate.source_module) {
+            return None;
+        }
         Some(candidate.clone())
     }
 
@@ -1953,6 +2014,9 @@ impl<'info, 'data> Optimizer<'info, 'data> {
             .imported_private_helpers
             .get(&resolved.canonical_name)
         {
+            if self.is_current_module(&candidate.source_module) {
+                return None;
+            }
             return Some(candidate.clone());
         }
 
@@ -1971,7 +2035,17 @@ impl<'info, 'data> Optimizer<'info, 'data> {
         if matching.next().is_some() {
             return None;
         }
+        if self.is_current_module(&candidate.source_module) {
+            return None;
+        }
         Some(candidate.clone())
+    }
+
+    fn is_current_module(&self, module: &str) -> bool {
+        self.context
+            .current_module
+            .as_deref()
+            .is_some_and(|current| current == module)
     }
 
     fn handler_stack_capture_names(&self) -> Vec<String> {

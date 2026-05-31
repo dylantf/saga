@@ -235,3 +235,16 @@ pub(super) fn atom_contains_dict_method_access(atom: &Atom) -> bool {
         | Atom::BackendAtom { .. } => false,
     }
 }
+
+pub(super) fn variant_body_has_useful_specialization(
+    original: &MExpr,
+    optimized: &MExpr,
+    has_arg_specialization: bool,
+    has_hidden_effect_specialization: bool,
+) -> bool {
+    has_arg_specialization
+        || has_hidden_effect_specialization
+        || expr_yield_count(original) > expr_yield_count(optimized)
+        || (expr_contains_dict_method_access(original)
+            && !expr_contains_dict_method_access(optimized))
+}
