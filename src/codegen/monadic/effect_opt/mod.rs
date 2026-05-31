@@ -3518,7 +3518,7 @@ pub fn collect_imported_function_variant_candidates(
             || f.guard.is_some()
             || !helper_params_are_supported(&f.params)
             || expr_node_count(&f.body) > FUNCTION_VARIANT_BODY_BUDGET
-            || expr_contains_xmod_variant_forbidden_shape(&f.body)
+            || expr_contains_xmod_variant_forbidden_shape_with_resolution(&f.body, resolution)
             || expr_has_private_same_module_refs(
                 &f.body,
                 source_module,
@@ -3642,7 +3642,7 @@ pub fn collect_imported_private_helper_candidates(
             || external_names.contains(&f.name)
             || f.guard.is_some()
             || expr_node_count(&f.body) > FUNCTION_VARIANT_BODY_BUDGET
-            || expr_contains_xmod_variant_forbidden_shape(&f.body)
+            || expr_contains_xmod_variant_forbidden_shape_with_resolution(&f.body, resolution)
         {
             continue;
         }
@@ -3725,7 +3725,6 @@ fn xmod_forbidden_shape_reason(
     resolution: Option<&ResolutionMap>,
 ) -> Option<String> {
     match expr {
-        MExpr::With { .. } => Some(format!("{path}: with")),
         MExpr::LetFun { .. } => Some(format!("{path}: let-fun")),
         MExpr::HandlerValue { .. } => Some(format!("{path}: handler value")),
         MExpr::Pure(atom) => xmod_forbidden_atom_reason(atom, &format!("{path}.pure")),
@@ -3863,7 +3862,49 @@ fn xmod_forbidden_shape_reason(
                     })
                 })
         }
+        MExpr::With { handler, body, .. } => {
+            xmod_forbidden_handler_reason(handler, &format!("{path}.handler"), resolution)
+                .or_else(|| xmod_forbidden_shape_reason(body, &format!("{path}.body"), resolution))
+        }
     }
+}
+
+fn xmod_forbidden_handler_reason(
+    handler: &MHandler,
+    path: &str,
+    resolution: Option<&ResolutionMap>,
+) -> Option<String> {
+    match handler {
+        MHandler::Static {
+            arms,
+            return_clause,
+            ..
+        } => arms
+            .iter()
+            .enumerate()
+            .find_map(|(i, arm)| {
+                xmod_forbidden_handler_arm_reason(arm, &format!("{path}.arm{i}"), resolution)
+            })
+            .or_else(|| {
+                return_clause.as_ref().and_then(|arm| {
+                    xmod_forbidden_handler_arm_reason(arm, &format!("{path}.return"), resolution)
+                })
+            }),
+        MHandler::Dynamic { .. } => Some(format!("{path}: dynamic handler")),
+        MHandler::Native { .. } => Some(format!("{path}: native handler")),
+        MHandler::Composite { .. } => Some(format!("{path}: composite handler")),
+    }
+}
+
+fn xmod_forbidden_handler_arm_reason(
+    arm: &MHandlerArm,
+    path: &str,
+    resolution: Option<&ResolutionMap>,
+) -> Option<String> {
+    if arm.finally_block.is_some() {
+        return Some(format!("{path}: finally"));
+    }
+    xmod_forbidden_shape_reason(&arm.body, &format!("{path}.body"), resolution)
 }
 
 fn xmod_forbidden_atom_reason(atom: &Atom, path: &str) -> Option<String> {
@@ -6419,8 +6460,11 @@ fn atom_contains_inline_forbidden_shape(atom: &Atom) -> bool {
     }
 }
 
-fn expr_contains_xmod_variant_forbidden_shape(expr: &MExpr) -> bool {
-    xmod_forbidden_shape_reason(expr, "body", None).is_some()
+fn expr_contains_xmod_variant_forbidden_shape_with_resolution(
+    expr: &MExpr,
+    resolution: &ResolutionMap,
+) -> bool {
+    xmod_forbidden_shape_reason(expr, "body", Some(resolution)).is_some()
 }
 
 fn expr_contains_imported_handler_factory_forbidden_shape(expr: &MExpr) -> bool {
