@@ -1,0 +1,8 @@
+fun add1 : Int -> Int
+add1 x = x + 1
+
+fun twice : Int -> Int
+twice x = add1 (add1 x)
+
+fun main : Unit -> Int
+main () = twice 40

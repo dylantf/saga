@@ -309,9 +309,8 @@ pub fn cmd_emit(file: &str) {
 
 /// Dump an intermediate IR stage for a single `.saga` file.
 ///
-/// Bypasses the codegen toggle for `anf` / `monadic` / `monadic-reader` /
-/// `monadic-reader-stats` / `monadic-opt` / `monadic-stats` /
-/// `selective-core`: those
+/// Bypasses the codegen toggle for `anf` / `monadic` / `monadic-opt` /
+/// `monadic-stats` / `selective-core`: those
 /// always run the new path (uniform-effect-translation), regardless of the
 /// active `emit_module_with_context` block. `elaborated` and `core` go through
 /// shared code and therefore observe the toggle.
@@ -336,12 +335,7 @@ pub fn cmd_inspect(file: &str, stage: &str) {
             let anf_program = codegen::anf::normalize(elaborated, None);
             println!("{:#?}", anf_program);
         }
-        "monadic"
-        | "monadic-reader"
-        | "monadic-reader-stats"
-        | "monadic-opt"
-        | "monadic-stats"
-        | "selective-core" => {
+        "monadic" | "monadic-opt" | "monadic-stats" | "selective-core" => {
             // Build a minimal CodegenContext (std modules + this user module)
             // so resolve/effect-info match what the new path sees in production.
             let module_name =
@@ -441,18 +435,15 @@ pub fn cmd_inspect(file: &str, stage: &str) {
                 return;
             }
 
-            if stage == "monadic-reader-stats" || stage == "monadic-stats" {
+            if stage == "monadic-stats" {
                 let before = monadic::stats::Stats::collect_program(&monadic_prog);
                 let before_reachable = monadic::stats::Stats::collect_reachable_program(
                     &monadic_prog,
                     &["main", "tests"],
                 );
-                let after_program = if stage == "monadic-stats" {
-                    let handler_info = codegen::handler_analysis::analyze(&elaborated);
-                    monadic::effect_opt::run(monadic_prog, &handler_info, &effect_info)
-                } else {
-                    monadic::reader_specialize::run(monadic_prog, &effect_info, &resolution_map)
-                };
+                let handler_info = codegen::handler_analysis::analyze(&elaborated);
+                let after_program =
+                    monadic::effect_opt::run(monadic_prog, &handler_info, &effect_info);
                 let after = monadic::stats::Stats::collect_program(&after_program);
                 let after_reachable = monadic::stats::Stats::collect_reachable_program(
                     &after_program,
@@ -470,13 +461,9 @@ pub fn cmd_inspect(file: &str, stage: &str) {
                 return;
             }
 
-            let to_print = if stage == "monadic-reader" || stage == "monadic-opt" {
-                if stage == "monadic-opt" {
-                    let handler_info = codegen::handler_analysis::analyze(&elaborated);
-                    monadic::effect_opt::run(monadic_prog, &handler_info, &effect_info)
-                } else {
-                    monadic::reader_specialize::run(monadic_prog, &effect_info, &resolution_map)
-                }
+            let to_print = if stage == "monadic-opt" {
+                let handler_info = codegen::handler_analysis::analyze(&elaborated);
+                monadic::effect_opt::run(monadic_prog, &handler_info, &effect_info)
             } else {
                 monadic_prog
             };
@@ -488,7 +475,7 @@ pub fn cmd_inspect(file: &str, stage: &str) {
         }
         other => {
             eprintln!(
-                "Unknown stage: '{}'. Expected one of: elaborated, anf, monadic, monadic-reader, monadic-reader-stats, monadic-opt, monadic-stats, selective-core, core",
+                "Unknown stage: '{}'. Expected one of: elaborated, anf, monadic, monadic-opt, monadic-stats, selective-core, core",
                 other
             );
             std::process::exit(1);

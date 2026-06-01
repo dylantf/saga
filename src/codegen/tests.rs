@@ -33,6 +33,66 @@ fn emit_full_with_source(src: &str, source_file: Option<&super::SourceFile>) -> 
     emit_module_with_context("_script", &elaborated, &ctx, &result, source_file, None)
 }
 
+fn emit_selective_core(src: &str) -> String {
+    let tokens = Lexer::new(src).lex().expect("lex error");
+    let mut program = Parser::new(tokens).parse_program().expect("parse error");
+    derive::expand_derives(&mut program, &derive::ImportedDecls::empty());
+    desugar::desugar_program(&mut program);
+
+    let mut checker = typechecker::Checker::with_prelude(None).expect("prelude error");
+    let result = checker.check_program(&mut program);
+    assert!(!result.has_errors(), "Type errors: {:?}", result.errors());
+
+    let module_name = "_script";
+    let elaborated = elaborate::elaborate(&program, &result);
+    let ctx = CodegenContext {
+        modules: std::collections::HashMap::new(),
+        let_effect_bindings: result.let_effect_bindings.clone(),
+        prelude_imports: result.prelude_imports.clone(),
+    };
+    let codegen_info = result.codegen_info();
+    let resolution_map = super::resolve::resolve_names(
+        module_name,
+        &elaborated,
+        codegen_info,
+        &ctx.prelude_imports,
+        &result.resolution,
+    );
+    let constructor_atoms = super::resolve::build_constructor_atoms(
+        module_name,
+        &elaborated,
+        codegen_info,
+        &ctx.prelude_imports,
+    );
+    let anf_program = super::anf::normalize(elaborated, Some(&resolution_map));
+    let ops_storage = super::build_effect_ops_table(&result);
+    let handler_effects_storage = super::build_handler_effects(&result);
+    let let_handler_effects_storage = super::build_let_handler_effects(&result);
+    let effect_info = super::build_effect_info(
+        &result,
+        &result,
+        &ops_storage,
+        &handler_effects_storage,
+        &let_handler_effects_storage,
+    );
+    let imported_handler_decls = std::collections::HashMap::new();
+    let (monadic_prog, _) = super::monadic::translate::translate_with_imports(
+        &anf_program,
+        &resolution_map,
+        &effect_info,
+        &imported_handler_decls,
+    );
+    let cmod = super::lower_selective::lower_module(
+        module_name,
+        &monadic_prog,
+        &resolution_map,
+        &constructor_atoms,
+        &ctx,
+        &effect_info,
+    );
+    super::cerl::print_module(&cmod)
+}
+
 /// Assert that `emit(src)` contains `needle` as a substring.
 /// On failure, prints the full output for easy debugging.
 fn assert_contains(src: &str, needle: &str) {
@@ -58,6 +118,169 @@ fn assert_contains_full(src: &str, needle: &str) {
 #[test]
 fn full_pipeline_smoke() {
     assert_contains_full("main () = 42", "42");
+}
+
+#[test]
+fn selective_core_lowers_pure_direct_calls() {
+    let out = emit_selective_core(
+        r#"
+fun add1 : Int -> Int
+add1 x = x + 1
+
+fun twice : Int -> Int
+twice x = add1 (add1 x)
+
+fun main : Unit -> Int
+main () = twice 40
+"#,
+    );
+    assert!(out.contains("'add1'/1"), "{out}");
+    assert!(out.contains("'twice'/1"), "{out}");
+    assert!(out.contains("'main'/1"), "{out}");
+    assert!(out.contains("apply 'twice'/1(40)"), "{out}");
+}
+
+#[test]
+fn selective_core_lowers_recursive_pure_if() {
+    let out = emit_selective_core(
+        r#"
+fun sum_to : Int -> Int
+sum_to n =
+  if n <= 0 then 0
+  else n + sum_to (n - 1)
+
+fun main : Unit -> Int
+main () = sum_to 10
+"#,
+    );
+    assert!(out.contains("'sum_to'/1"), "{out}");
+    assert!(out.contains("apply 'sum_to'/1"), "{out}");
+    assert!(out.contains("apply 'sum_to'/1(10)"), "{out}");
+}
+
+#[test]
+fn selective_core_lowers_pure_top_level_val() {
+    let out = emit_selective_core(
+        r#"
+val base = 20 + 1
+
+fun double : Int -> Int
+double x = x * 2
+
+fun main : Unit -> Int
+main () = double base
+"#,
+    );
+    assert!(out.contains("'base'/0"), "{out}");
+    assert!(out.contains("'double'/1"), "{out}");
+    assert!(out.contains("apply 'base'/0()"), "{out}");
+}
+
+#[test]
+fn selective_core_lowers_print_stdout_intrinsic_directly() {
+    let out = emit_selective_core(
+        r#"
+import Std.IO.Unsafe (print_stdout)
+
+fun main : Unit -> Unit
+main () = print_stdout "hello\n"
+"#,
+    );
+    assert!(out.contains("'main'/1"), "{out}");
+    assert!(out.contains("call 'io':'format'"), "{out}");
+    assert!(out.contains("'unit'"), "{out}");
+}
+
+#[test]
+fn selective_core_lowers_monomorphic_trait_method_call() {
+    let out = emit_selective_core(
+        r#"
+fun main : Unit -> String
+main () = show 42
+"#,
+    );
+    assert!(
+        out.contains("call 'std_int':'__dict_Std_Base_Show_std_int_Std_Int_Int'"),
+        "{out}"
+    );
+    assert!(out.contains("call 'erlang':'element'"), "{out}");
+    assert!(out.contains("apply ___anf_v1(42)"), "{out}");
+}
+
+#[test]
+fn selective_core_lowers_dbg_intrinsic_with_direct_dictionary() {
+    let out = emit_selective_core(
+        r#"
+fun main : Unit -> Unit
+main () = dbg 42
+"#,
+    );
+    assert!(
+        out.contains("call 'std_int':'__dict_Std_Base_Debug_std_int_Std_Int_Int'"),
+        "{out}"
+    );
+    assert!(out.contains("call 'erlang':'element'"), "{out}");
+    assert!(out.contains("apply _DebugFn(42)"), "{out}");
+    assert!(out.contains("call 'io':'format'"), "{out}");
+    assert!(out.contains("'standard_error'"), "{out}");
+}
+
+#[test]
+fn selective_core_lowers_named_record_field_access() {
+    let out = emit_selective_core(
+        r#"
+record Point {
+  x: Int,
+  y: Int,
+}
+
+fun main : Unit -> Int
+main () = {
+  let p = Point { x: 3, y: 4 }
+  p.x + p.y
+}
+"#,
+    );
+    assert!(out.contains("{'_script_Point', 3, 4}"), "{out}");
+    assert!(
+        out.contains("call 'erlang':'element'\n      (2, P)"),
+        "{out}"
+    );
+    assert!(
+        out.contains("call 'erlang':'element'\n      (3, P)"),
+        "{out}"
+    );
+}
+
+#[test]
+#[should_panic(expected = "direct function 'first' is outside the current direct subset")]
+fn selective_core_fails_loudly_for_unsupported_direct_function() {
+    let _ = emit_selective_core(
+        r#"
+fun first : (Int, Int) -> Int
+first (x, _) = x
+
+fun main : Unit -> Int
+main () = first (1, 2)
+"#,
+    );
+}
+
+#[test]
+#[should_panic(expected = "direct function 'apply_it' is outside the current direct subset")]
+fn selective_core_does_not_guess_shape_for_local_function_values() {
+    let _ = emit_selective_core(
+        r#"
+fun apply_it : (Int -> Int) -> Int
+apply_it f = f 1
+
+fun inc : Int -> Int
+inc x = x + 1
+
+fun main : Unit -> Int
+main () = apply_it inc
+"#,
+    );
 }
 
 #[test]

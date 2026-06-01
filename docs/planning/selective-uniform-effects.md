@@ -7,6 +7,9 @@ This document sketches the next backend experiment after the
 
 Working name: **selective-uniform**.
 
+Implementation state and session handoff notes live in
+`docs/planning/selective-uniform-implementation-log.md`.
+
 ## Thesis
 
 The old selective-CPS backend failed because runtime call-shape knowledge was

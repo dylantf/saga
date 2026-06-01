@@ -1,0 +1,7 @@
+val base = 20 + 1
+
+fun double : Int -> Int
+double x = x * 2
+
+fun main : Unit -> Int
+main () = double base

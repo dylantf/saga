@@ -14,6 +14,7 @@ use crate::codegen::lower::util::{core_var, lower_lit_atom, mangle_ctor_atom};
 use crate::codegen::monadic::ir::{Atom, EffectInfo, MArm, MDecl, MExpr, MFunBinding, MProgram};
 use crate::codegen::resolve::{ConstructorAtoms, ResolutionMap, ResolvedCodegenKind};
 use crate::codegen::runtime_shape::RuntimeFunctionShape;
+use crate::intrinsics::IntrinsicId;
 
 pub fn lower_module(
     module_name: &str,
@@ -38,6 +39,14 @@ struct DirectLowerer<'a, 'info> {
     direct_functions: HashSet<String>,
     supporting_fun: Option<String>,
     locals: Vec<HashSet<String>>,
+    method_values: Vec<HashSet<String>>,
+}
+
+#[derive(Clone)]
+struct DirectCallable {
+    module: Option<String>,
+    name: String,
+    arity: usize,
 }
 
 impl<'a, 'info> DirectLowerer<'a, 'info> {
@@ -58,6 +67,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             direct_functions: HashSet::new(),
             supporting_fun: None,
             locals: vec![HashSet::new()],
+            method_values: vec![HashSet::new()],
         }
     }
 
@@ -65,6 +75,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         self.current_module = module_name.to_string();
         self.classify_program(program);
         self.compute_direct_functions(program);
+        self.assert_no_unlowered_direct_functions(program);
 
         let pub_names: Option<HashSet<String>> =
             self.module_ctx.modules.get(module_name).map(|m| {
@@ -174,12 +185,30 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         }
     }
 
+    fn assert_no_unlowered_direct_functions(&self, program: &MProgram) {
+        for decl in program {
+            let MDecl::FunBinding(fb) = decl else {
+                continue;
+            };
+            if matches!(
+                self.direct_shapes.get(&fb.name),
+                Some(RuntimeFunctionShape::Pure)
+            ) && !self.direct_functions.contains(&fb.name)
+            {
+                self.unsupported(&format!(
+                    "direct function '{}' is outside the current direct subset",
+                    fb.name
+                ));
+            }
+        }
+    }
+
     fn can_lower_fun_binding(&mut self, fb: &MFunBinding) -> bool {
         if !matches!(
             self.direct_shapes.get(&fb.name),
             Some(RuntimeFunctionShape::Pure)
         ) || fb.guard.is_some()
-            || fb.params.iter().any(|p| !matches!(p, Pat::Var { .. }))
+            || fb.params.iter().any(|p| !direct_param_supported(p))
         {
             return false;
         }
@@ -217,9 +246,13 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             | MExpr::Bind {
                 var, value, body, ..
             } => {
+                let is_dict_method_value = matches!(value.as_ref(), MExpr::DictMethodAccess { .. });
                 let value = self.lower_expr(value);
                 self.push_scope();
                 self.current_scope_mut().insert(var.name.clone());
+                if is_dict_method_value {
+                    self.current_method_scope_mut().insert(var.name.clone());
+                }
                 let body = self.lower_expr(body);
                 self.pop_scope();
                 CExpr::Let(core_var(&var.name), Box::new(value), Box::new(body))
@@ -259,11 +292,26 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                 "-".to_string(),
                 vec![CExpr::Lit(CLit::Int(0)), self.lower_atom(value)],
             ),
-            MExpr::FieldAccess { .. }
-            | MExpr::RecordUpdate { .. }
-            | MExpr::DictMethodAccess { .. }
-            | MExpr::ForeignCall { .. }
-            | MExpr::BitString { .. } => self.unsupported_expr(expr),
+            MExpr::FieldAccess {
+                record,
+                field,
+                record_name,
+                anon_fields,
+                ..
+            } => self.lower_field_access(record, field, record_name.as_deref(), anon_fields),
+            MExpr::RecordUpdate { .. } | MExpr::ForeignCall { .. } | MExpr::BitString { .. } => {
+                self.unsupported_expr(expr)
+            }
+            MExpr::DictMethodAccess {
+                dict, method_index, ..
+            } => {
+                let dict = self.lower_atom(dict);
+                CExpr::Call(
+                    "erlang".to_string(),
+                    "element".to_string(),
+                    vec![CExpr::Lit(CLit::Int(*method_index as i64 + 1)), dict],
+                )
+            }
             MExpr::Yield { .. }
             | MExpr::With { .. }
             | MExpr::Resume { .. }
@@ -284,10 +332,89 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         CArm { pat, guard, body }
     }
 
+    fn lower_field_access(
+        &mut self,
+        record: &Atom,
+        field: &str,
+        record_name: Option<&str>,
+        anon_fields: &Option<Vec<String>>,
+    ) -> CExpr {
+        let order = self.record_field_order(record_name, anon_fields.as_deref());
+        let index = order
+            .iter()
+            .position(|candidate| candidate == field)
+            .unwrap_or_else(|| {
+                panic!(
+                    "selective-uniform direct lowerer TODO: field '{}' not found in {:?}",
+                    field, order
+                )
+            }) as i64
+            + 2;
+        CExpr::Call(
+            "erlang".to_string(),
+            "element".to_string(),
+            vec![CExpr::Lit(CLit::Int(index)), self.lower_atom(record)],
+        )
+    }
+
+    fn record_field_order(
+        &self,
+        record_name: Option<&str>,
+        anon_fields: Option<&[String]>,
+    ) -> Vec<String> {
+        if let Some(fields) = anon_fields {
+            return fields.to_vec();
+        }
+        let Some(name) = record_name else {
+            self.unsupported("field access without record field metadata");
+        };
+        self.effect_info
+            .records
+            .get(name)
+            .or_else(|| {
+                let bare = name.rsplit('.').next().unwrap_or(name);
+                self.effect_info.records.get(bare)
+            })
+            .map(|info| info.fields.iter().map(|(field, _)| field.clone()).collect())
+            .unwrap_or_else(|| {
+                panic!(
+                    "selective-uniform direct lowerer TODO: unknown record '{}'",
+                    name
+                )
+            })
+    }
+
     fn lower_app(&mut self, head: &Atom, args: &[Atom]) -> CExpr {
-        if let Some(name) = self.same_module_direct_function_name(head) {
+        if let Some(intrinsic) = self.direct_intrinsic(head) {
+            return self.lower_intrinsic_app(intrinsic, args);
+        }
+        if let Some(dict) = self.direct_dict_constructor(head) {
+            if args.len() != dict.arity {
+                self.unsupported(&format!(
+                    "partial/oversaturated dict constructor '{}' with {} args; expected {}",
+                    dict.name,
+                    args.len(),
+                    dict.arity
+                ));
+            }
+            return self.apply_direct_callable(dict, args);
+        }
+        if let Some(callable) = self.same_module_direct_callable(head) {
+            if args.len() != callable.arity {
+                self.unsupported(&format!(
+                    "partial/oversaturated direct call to '{}' with {} args; expected {}",
+                    callable.name,
+                    args.len(),
+                    callable.arity
+                ));
+            }
+            return self.apply_direct_callable(callable, args);
+        }
+        if let Atom::Var { name, .. } = head
+            && self.is_method_value(&name.name)
+        {
             return CExpr::Apply(
-                Box::new(CExpr::FunRef(name, args.len())),
+                Box::new(CExpr::Var(core_var(&name.name))),
                 args.iter().map(|arg| self.lower_atom(arg)).collect(),
             );
         }
@@ -298,7 +425,134 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         })
     }
 
-    fn same_module_direct_function_name(&self, head: &Atom) -> Option<String> {
+    fn apply_direct_callable(&mut self, callable: DirectCallable, args: &[Atom]) -> CExpr {
+        let lowered_args = args.iter().map(|arg| self.lower_atom(arg)).collect();
+        match callable.module {
+            Some(module) => CExpr::Call(module, callable.name, lowered_args),
+            None => CExpr::Apply(
+                Box::new(CExpr::FunRef(callable.name, callable.arity)),
+                lowered_args,
+            ),
+        }
+    }
+
+    fn direct_intrinsic(&self, head: &Atom) -> Option<IntrinsicId> {
+        let source = match head {
+            Atom::Var { source, .. } | Atom::QualifiedRef { source, .. } => *source,
+            _ => return None,
+        };
+        let resolved = self.resolution.get(&source)?;
+        let ResolvedCodegenKind::Intrinsic { id, .. } = resolved.kind else {
+            return None;
+        };
+        Some(id)
+    }
+
+    fn lower_intrinsic_app(&mut self, intrinsic: IntrinsicId, args: &[Atom]) -> CExpr {
+        match intrinsic {
+            IntrinsicId::PrintStdout => self.lower_print_intrinsic(args, false),
+            IntrinsicId::PrintStderr => self.lower_print_intrinsic(args, true),
+            IntrinsicId::Dbg => self.lower_dbg_intrinsic(args),
+            IntrinsicId::CatchPanic => {
+                self.unsupported("intrinsic outside the current direct subset")
+            }
+        }
+    }
+
+    fn lower_print_intrinsic(&mut self, args: &[Atom], stderr: bool) -> CExpr {
+        if args.len() != 1 {
+            self.unsupported(&format!(
+                "print intrinsic with {} args; expected 1",
+                args.len()
+            ));
+        }
+        let mut fmt_args = vec![
+            CExpr::Lit(CLit::Str("~ts".to_string())),
+            CExpr::Cons(Box::new(self.lower_atom(&args[0])), Box::new(CExpr::Nil)),
+        ];
+        if stderr {
+            fmt_args.insert(0, CExpr::Lit(CLit::Atom("standard_error".to_string())));
+        }
+        CExpr::Let(
+            "_PrintResult".to_string(),
+            Box::new(CExpr::Call(
+                "io".to_string(),
+                "format".to_string(),
+                fmt_args,
+            )),
+            Box::new(CExpr::Lit(CLit::Atom("unit".to_string()))),
+        )
+    }
+
+    fn lower_dbg_intrinsic(&mut self, args: &[Atom]) -> CExpr {
+        if args.len() != 2 {
+            self.unsupported(&format!(
+                "dbg intrinsic with {} args; expected 2",
+                args.len()
+            ));
+        }
+        let debug_fn_var = "_DebugFn".to_string();
+        let str_var = "_DebugStr".to_string();
+        let print_result_var = "_DebugPrintResult".to_string();
+        let extract = CExpr::Call(
+            "erlang".to_string(),
+            "element".to_string(),
+            vec![CExpr::Lit(CLit::Int(1)), self.lower_atom(&args[0])],
+        );
+        let debug_call = CExpr::Apply(
+            Box::new(CExpr::Var(debug_fn_var.clone())),
+            vec![self.lower_atom(&args[1])],
+        );
+        let print = CExpr::Call(
+            "io".to_string(),
+            "format".to_string(),
+            vec![
+                CExpr::Lit(CLit::Atom("standard_error".to_string())),
+                CExpr::Lit(CLit::Str("~ts~n".to_string())),
+                CExpr::Cons(Box::new(CExpr::Var(str_var.clone())), Box::new(CExpr::Nil)),
+            ],
+        );
+        CExpr::Let(
+            debug_fn_var,
+            Box::new(extract),
+            Box::new(CExpr::Let(
+                str_var,
+                Box::new(debug_call),
+                Box::new(CExpr::Let(
+                    print_result_var,
+                    Box::new(print),
+                    Box::new(CExpr::Lit(CLit::Atom("unit".to_string()))),
+                )),
+            )),
+        )
+    }
+
+    fn direct_dict_constructor(&self, head: &Atom) -> Option<DirectCallable> {
+        let source = match head {
+            Atom::DictRef { source, .. } => *source,
+            _ => return None,
+        };
+        let resolved = self.resolution.get(&source)?;
+        let ResolvedCodegenKind::BeamFunction {
+            erlang_mod,
+            name,
+            arity,
+            effects,
+        } = &resolved.kind
+        else {
+            return None;
+        };
+        if !effects.is_empty() {
+            return None;
+        }
+        Some(DirectCallable {
+            module: erlang_mod.clone(),
+            name: name.clone(),
+            arity: *arity,
+        })
+    }
+
+    fn same_module_direct_callable(&self, head: &Atom) -> Option<DirectCallable> {
         let source = match head {
             Atom::Var { source, .. } | Atom::QualifiedRef { source, .. } => *source,
             _ => return None,
@@ -307,8 +561,8 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         let ResolvedCodegenKind::BeamFunction {
             erlang_mod,
             name,
+            arity,
             effects,
-            ..
         } = &resolved.kind
         else {
             return None;
@@ -325,10 +579,21 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         if !self.direct_functions.contains(name) {
             return None;
         }
-        Some(name.clone())
+        let shape = self.direct_shapes.get(name)?;
+        if !matches!(shape, RuntimeFunctionShape::Pure) {
+            return None;
+        }
+        if shape.expanded_arity(*arity) != *arity {
+            return None;
+        }
+        Some(DirectCallable {
+            module: None,
+            name: name.clone(),
+            arity: *arity,
+        })
     }
 
-    fn same_module_function_ref_name(&self, head: &Atom) -> Option<String> {
+    fn same_module_function_ref(&self, head: &Atom) -> Option<DirectCallable> {
         let source = match head {
             Atom::Var { source, .. } | Atom::QualifiedRef { source, .. } => *source,
             _ => return None,
@@ -337,8 +602,8 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         let ResolvedCodegenKind::BeamFunction {
             erlang_mod,
             name,
+            arity,
             effects,
-            ..
         } = &resolved.kind
         else {
             return None;
@@ -352,17 +617,28 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         {
             return None;
         }
-        Some(name.clone())
+        let shape = self.direct_shapes.get(name)?;
+        if !matches!(shape, RuntimeFunctionShape::Pure) {
+            return None;
+        }
+        if shape.expanded_arity(*arity) != *arity {
+            return None;
+        }
+        Some(DirectCallable {
+            module: None,
+            name: name.clone(),
+            arity: *arity,
+        })
     }
 
-    fn supported_direct_call_name(&self, head: &Atom) -> Option<String> {
-        let name = self.same_module_function_ref_name(head)?;
+    fn supported_direct_call(&self, head: &Atom) -> Option<DirectCallable> {
+        let callable = self.same_module_function_ref(head)?;
         let recursive_self = self
             .supporting_fun
             .as_ref()
-            .is_some_and(|current| current == &name);
-        if recursive_self || self.direct_functions.contains(&name) {
-            Some(name)
+            .is_some_and(|current| current == &callable.name);
+        if recursive_self || self.direct_functions.contains(&callable.name) {
+            Some(callable)
         } else {
             None
         }
@@ -373,13 +649,13 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             Atom::Var { name, source } => {
                 if self.is_local(&name.name) {
                     CExpr::Var(core_var(&name.name))
-                } else if self.same_module_direct_function_name(atom).is_some() {
+                } else if let Some(callable) = self.same_module_direct_callable(atom) {
                     let resolved = self
                         .resolution
                         .get(source)
                         .expect("resolved direct function");
-                    let arity = resolved.kind.arity();
-                    CExpr::FunRef(resolved.name.clone(), arity)
+                    debug_assert_eq!(resolved.name, callable.name);
+                    CExpr::FunRef(callable.name, callable.arity)
                 } else if self.direct_values.contains(&name.name) {
                     CExpr::Apply(Box::new(CExpr::FunRef(name.name.clone(), 0)), vec![])
                 } else {
@@ -460,16 +736,31 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         self.locals.iter().rev().any(|scope| scope.contains(name))
     }
 
+    fn is_method_value(&self, name: &str) -> bool {
+        self.method_values
+            .iter()
+            .rev()
+            .any(|scope| scope.contains(name))
+    }
+
     fn push_scope(&mut self) {
         self.locals.push(HashSet::new());
+        self.method_values.push(HashSet::new());
     }
 
     fn pop_scope(&mut self) {
         self.locals.pop();
+        self.method_values.pop();
     }
 
     fn current_scope_mut(&mut self) -> &mut HashSet<String> {
         self.locals.last_mut().expect("direct lowerer has a scope")
+    }
+
+    fn current_method_scope_mut(&mut self) -> &mut HashSet<String> {
+        self.method_values
+            .last_mut()
+            .expect("direct lowerer has a method-value scope")
     }
 
     fn expr_is_direct_subset(&mut self, expr: &MExpr) -> bool {
@@ -479,11 +770,15 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             | MExpr::Bind {
                 var, value, body, ..
             } => {
+                let is_dict_method_value = matches!(value.as_ref(), MExpr::DictMethodAccess { .. });
                 if !self.expr_is_direct_subset(value) {
                     return false;
                 }
                 self.push_scope();
                 self.current_scope_mut().insert(var.name.clone());
+                if is_dict_method_value {
+                    self.current_method_scope_mut().insert(var.name.clone());
+                }
                 let supported = self.expr_is_direct_subset(body);
                 self.pop_scope();
                 supported
@@ -513,16 +808,28 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                 })
             }
             MExpr::App { head, args, .. } => {
-                self.supported_direct_call_name(head).is_some()
-                    && args.iter().all(|arg| self.atom_is_direct_subset(arg))
+                let direct_call_supported = self
+                    .supported_direct_call(head)
+                    .is_some_and(|callable| callable.arity == args.len())
+                    || self
+                        .direct_dict_constructor(head)
+                        .is_some_and(|callable| callable.arity == args.len())
+                    || self
+                        .direct_intrinsic(head)
+                        .is_some_and(|intrinsic| match intrinsic {
+                            IntrinsicId::PrintStdout | IntrinsicId::PrintStderr => args.len() == 1,
+                            IntrinsicId::Dbg => args.len() == 2,
+                            IntrinsicId::CatchPanic => false,
+                        })
+                    || matches!(head, Atom::Var { name, .. } if self.is_method_value(&name.name));
+                direct_call_supported && args.iter().all(|arg| self.atom_is_direct_subset(arg))
             }
             MExpr::BinOp { left, right, .. } => {
                 self.atom_is_direct_subset(left) && self.atom_is_direct_subset(right)
             }
             MExpr::UnaryMinus { value, .. } => self.atom_is_direct_subset(value),
-            MExpr::FieldAccess { .. }
-            | MExpr::RecordUpdate { .. }
-            | MExpr::DictMethodAccess { .. }
+            MExpr::FieldAccess { record, .. } => self.atom_is_direct_subset(record),
+            MExpr::RecordUpdate { .. }
             | MExpr::ForeignCall { .. }
             | MExpr::BitString { .. }
             | MExpr::Yield { .. }
@@ -532,6 +839,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             | MExpr::Receive { .. }
             | MExpr::LetFun { .. }
             | MExpr::HandlerValue { .. } => false,
+            MExpr::DictMethodAccess { dict, .. } => self.atom_is_direct_subset(dict),
         }
     }
 
@@ -540,7 +848,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             Atom::Var { name, .. } => {
                 self.is_local(&name.name)
                     || self.direct_values.contains(&name.name)
-                    || self.supported_direct_call_name(atom).is_some()
+                    || self.supported_direct_call(atom).is_some()
             }
             Atom::Lit { .. } | Atom::Symbol { .. } => true,
             Atom::Ctor { args, .. } => args.iter().all(|arg| self.atom_is_direct_subset(arg)),
@@ -551,10 +859,10 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                 .iter()
                 .all(|(_, arg)| self.atom_is_direct_subset(arg)),
             Atom::QualifiedRef { .. }
-            | Atom::DictRef { .. }
             | Atom::Lambda { .. }
             | Atom::BackendAtom { .. }
             | Atom::BackendSpawnThunk { .. } => false,
+            Atom::DictRef { .. } => self.direct_dict_constructor(atom).is_some(),
         }
     }
 
@@ -583,9 +891,23 @@ fn lower_param_names(params: &[Pat]) -> Vec<String> {
         .enumerate()
         .map(|(i, pat)| match pat {
             Pat::Var { name, .. } => core_var(name),
+            Pat::Lit {
+                value: Lit::Unit, ..
+            } => format!("_Arg{i}"),
             _ => format!("_Arg{i}"),
         })
         .collect()
+}
+
+fn direct_param_supported(pat: &Pat) -> bool {
+    matches!(
+        pat,
+        Pat::Var { .. }
+            | Pat::Lit {
+                value: Lit::Unit,
+                ..
+            }
+    )
 }
 
 fn collect_pat_binders(pat: &Pat, out: &mut HashSet<String>) {
