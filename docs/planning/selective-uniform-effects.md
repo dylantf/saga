@@ -269,6 +269,14 @@ Do not port the uniform optimizer for the first spike. The point is to measure
 whether direct-first lowering produces reasonable baseline code before
 interprocedural heroics.
 
+Current measurement note: while this experiment is still living on the
+`uniform-effect-translation` branch, the production codegen path may still run
+the older `effect_opt` pass after any new selective-uniform pass. Use
+`saga inspect --stage monadic-reader-stats` to measure the first reader
+specializer in isolation. `--stage monadic-stats` measures the combined
+pipeline and can credit existing function-variant machinery for wins that the
+new spike has not earned yet.
+
 ## Success Criteria
 
 Continue only if the spike shows clear promise:

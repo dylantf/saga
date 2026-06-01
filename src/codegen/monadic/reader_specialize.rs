@@ -5,11 +5,12 @@
 //! handled body to that value before the general handler protocol reaches Core
 //! lowering.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+use std::hash::{Hash, Hasher};
 
 use crate::ast::{Lit, NodeId, Pat};
 use crate::codegen::monadic::ir::{
-    Atom, EffectInfo, EffectOpRef, MArm, MDecl, MExpr, MHandler, MHandlerArm, MProgram,
+    Atom, EffectInfo, EffectOpRef, MArm, MDecl, MExpr, MFunBinding, MHandler, MHandlerArm, MProgram,
 };
 use crate::codegen::resolve::{ResolutionMap, ResolvedCodegenKind};
 use crate::codegen::type_shape;
@@ -44,26 +45,49 @@ pub fn run(
     effect_info: &EffectInfo<'_>,
     resolution: &ResolutionMap,
 ) -> MProgram {
+    let functions = program
+        .iter()
+        .filter_map(|decl| match decl {
+            MDecl::FunBinding(f) if !f.name.starts_with(STATIC_READER_VARIANT_PREFIX) => {
+                Some((f.name.clone(), f.clone()))
+            }
+            _ => None,
+        })
+        .collect();
     let mut pass = ReaderSpecializer {
         effect_info,
         resolution,
+        functions,
+        variant_cache: HashMap::new(),
+        generated_variants: Vec::new(),
     };
-    program
+    let mut out: MProgram = program
         .into_iter()
         .map(|decl| pass.optimize_decl(decl).0)
-        .collect()
+        .collect();
+    out.extend(pass.generated_variants.into_iter().map(MDecl::FunBinding));
+    out
 }
 
 struct ReaderSpecializer<'a, 'info> {
     effect_info: &'a EffectInfo<'info>,
     resolution: &'a ResolutionMap,
+    functions: HashMap<String, MFunBinding>,
+    variant_cache: HashMap<(String, String), String>,
+    generated_variants: Vec<MFunBinding>,
 }
+
+const STATIC_READER_VARIANT_PREFIX: &str = "__saga_static_variant__reader";
 
 impl ReaderSpecializer<'_, '_> {
     fn optimize_decl(&mut self, decl: MDecl) -> (MDecl, Change) {
         match decl {
             MDecl::FunBinding(mut fb) => {
-                let (body, change) = self.optimize_expr(fb.body, &[], &HashSet::new());
+                let mut scope = HashSet::new();
+                for param in &fb.params {
+                    collect_pat_binders(param, &mut scope);
+                }
+                let (body, change) = self.optimize_expr(fb.body, &[], &scope);
                 fb.body = body;
                 (MDecl::FunBinding(fb), change)
             }
@@ -130,6 +154,16 @@ impl ReaderSpecializer<'_, '_> {
                 let (body, body_change) = self.optimize_expr(*body, stack, &body_scope);
                 let mut change = value_change;
                 change.mark_if(body_change);
+                if self.expr_is_non_yielding(&value) {
+                    return (
+                        MExpr::Let {
+                            var,
+                            value: Box::new(value),
+                            body: Box::new(body),
+                        },
+                        Change::CHANGED,
+                    );
+                }
                 (
                     MExpr::Bind {
                         var,
@@ -228,6 +262,16 @@ impl ReaderSpecializer<'_, '_> {
                         arg
                     })
                     .collect();
+                if let Some(variant_head) = self.reader_variant_head(&head, stack) {
+                    return (
+                        MExpr::App {
+                            head: variant_head,
+                            args,
+                            source,
+                        },
+                        Change::CHANGED,
+                    );
+                }
                 (MExpr::App { head, args, source }, change)
             }
             MExpr::With {
@@ -843,6 +887,100 @@ impl ReaderSpecializer<'_, '_> {
 
         matches!(head, Atom::DictRef { .. })
     }
+
+    fn reader_variant_head(&mut self, head: &Atom, stack: &[HandlerFrame]) -> Option<Atom> {
+        if !stack
+            .iter()
+            .any(|frame| matches!(frame, HandlerFrame::Reader { .. }))
+        {
+            return None;
+        }
+
+        let Atom::Var { name, .. } = head else {
+            return None;
+        };
+        if name.name.starts_with(STATIC_READER_VARIANT_PREFIX) {
+            return None;
+        }
+        if !self.functions.contains_key(&name.name) {
+            return None;
+        }
+
+        let variant_name = self.ensure_reader_variant(&name.name, stack)?;
+        Some(Atom::Var {
+            name: crate::codegen::monadic::ir::MVar {
+                name: variant_name,
+                id: name.id,
+            },
+            source: NodeId::fresh(),
+        })
+    }
+
+    fn ensure_reader_variant(&mut self, name: &str, stack: &[HandlerFrame]) -> Option<String> {
+        let stack_key = reader_stack_key(stack);
+        let cache_key = (name.to_string(), stack_key.clone());
+        if let Some(existing) = self.variant_cache.get(&cache_key) {
+            return Some(existing.clone());
+        }
+
+        let original = self.functions.get(name)?.clone();
+        if original.guard.is_some() {
+            return None;
+        }
+
+        let variant_name = reader_variant_name(name, &stack_key);
+        self.variant_cache.insert(cache_key, variant_name.clone());
+
+        let mut scope = HashSet::new();
+        for param in &original.params {
+            collect_pat_binders(param, &mut scope);
+        }
+        let (body, _) = self.optimize_expr(original.body, stack, &scope);
+
+        self.generated_variants.push(MFunBinding {
+            id: NodeId::fresh(),
+            public: false,
+            name: variant_name.clone(),
+            name_span: original.name_span,
+            params: original.params,
+            guard: None,
+            body,
+            span: original.span,
+        });
+
+        Some(variant_name)
+    }
+}
+
+fn reader_stack_key(stack: &[HandlerFrame]) -> String {
+    format!("{:016x}", stable_hash(&format!("{stack:?}")))
+}
+
+fn reader_variant_name(name: &str, stack_key: &str) -> String {
+    format!(
+        "{}__{}__{}",
+        STATIC_READER_VARIANT_PREFIX,
+        sanitize_ident_part(name),
+        stack_key
+    )
+}
+
+fn stable_hash(value: &str) -> u64 {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    value.hash(&mut hasher);
+    hasher.finish()
+}
+
+fn sanitize_ident_part(value: &str) -> String {
+    let mut out = String::new();
+    for ch in value.chars() {
+        if ch.is_ascii_alphanumeric() || ch == '_' {
+            out.push(ch);
+        } else {
+            out.push('_');
+        }
+    }
+    if out.is_empty() { "_".to_string() } else { out }
 }
 
 fn handler_effects(handler: &MHandler) -> Vec<String> {
@@ -1158,7 +1296,7 @@ fn collect_pat_binders(pat: &Pat, out: &mut HashSet<String>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::codegen::monadic::ir::{MVal, MVar};
+    use crate::codegen::monadic::ir::{BindMode, MVal, MVar};
     use crate::typechecker::{RecordInfo, ResolvedEffectOp, ResolvedValue, Type};
     use std::collections::{HashMap, HashSet};
 
@@ -1374,6 +1512,46 @@ mod tests {
         assert!(matches!(value, MExpr::With { body, .. } if **body == other_yield));
     }
 
+    #[test]
+    fn non_yielding_bind_promotes_to_let() {
+        let fixture = Fixture::new();
+        let program = val_program(MExpr::Bind {
+            var: mv("x", 70),
+            value: Box::new(MExpr::Pure(lit_int("1", 71))),
+            body: Box::new(MExpr::Pure(var("x", 70))),
+            mode: BindMode::Sequence,
+        });
+
+        let out = run(program, &fixture.info(), &fixture.resolution);
+
+        let [MDecl::Val(MVal { value, .. })] = out.as_slice() else {
+            panic!("expected val program");
+        };
+        assert!(matches!(value, MExpr::Let { var: bound_var, value, body }
+            if bound_var.name == "x"
+                && **value == MExpr::Pure(lit_int("1", 71))
+                && **body == MExpr::Pure(var("x", 70))));
+    }
+
+    #[test]
+    fn yielding_bind_stays_bind() {
+        let fixture = Fixture::new();
+        let op = config_op();
+        let program = val_program(MExpr::Bind {
+            var: mv("x", 70),
+            value: Box::new(yield_expr(op)),
+            body: Box::new(MExpr::Pure(var("x", 70))),
+            mode: BindMode::Sequence,
+        });
+
+        let out = run(program, &fixture.info(), &fixture.resolution);
+
+        let [MDecl::Val(MVal { value, .. })] = out.as_slice() else {
+            panic!("expected val program");
+        };
+        assert!(matches!(value, MExpr::Bind { var, .. } if var.name == "x"));
+    }
+
     fn val_program(value: MExpr) -> MProgram {
         vec![MDecl::Val(MVal {
             id: id(1),
@@ -1444,6 +1622,13 @@ mod tests {
                 id: node,
             },
             source: id(node),
+        }
+    }
+
+    fn mv(name: &str, node: u32) -> MVar {
+        MVar {
+            name: name.to_string(),
+            id: node,
         }
     }
 

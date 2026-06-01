@@ -304,7 +304,7 @@ pub fn build_let_handler_effects(check_result: &CheckResult) -> HashMap<ast::Nod
 ///   c. handler_info = handler_analysis::analyze(raw_elaborated)
 ///   d. anf_program  = anf::normalize(raw_elaborated.clone())
 ///   e. monadic      = monadic::translate(&anf_program, &resolution_map, &effect_info)
-///   f. optimized    = monadic::effect_opt::run(monadic, &handler_info, &effect_info)
+///   f. optimized    = monadic::effect_opt::run_with_context(monadic, …)
 ///   g. cmod         = lower::Lowerer::new(…)
 ///                         .with_bootstrap_emission(entry_export.is_some())
 ///                         .lower_module(module_name, &optimized)
@@ -487,7 +487,6 @@ pub fn emit_module_via_new_path(
         .monadic_stats
         .is_enabled()
         .then(|| monadic_prog.clone());
-    let monadic_prog = monadic::reader_specialize::run(monadic_prog, &effect_info, &resolution_map);
     let optimized = monadic::effect_opt::run_with_context(
         monadic_prog,
         &handler_info,
