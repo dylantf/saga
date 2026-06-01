@@ -36,6 +36,20 @@ fn innermost_effect_row(ty: &Type) -> Option<EffectRow> {
     }
 }
 
+/// Effect names appearing on every arrow of a (possibly curried) type. Used to
+/// tell whether a function FORWARDS a declared effect via a value of effectful
+/// function type (e.g. point-free `greet = emit` where `emit`'s type carries
+/// {Log}) versus genuinely never using it. Forwarding ≠ performing, but it still
+/// discharges the declaration, so it must not count as "unused".
+fn collect_arrow_effects(ty: &Type, out: &mut std::collections::HashSet<String>) {
+    if let Type::Fun(_, ret, row) = ty {
+        for e in &row.effects {
+            out.insert(e.name.clone());
+        }
+        collect_arrow_effects(ret, out);
+    }
+}
+
 /// Annotations collected from FunAnnotation declarations:
 /// (name -> (type, span)) and (name -> where clause constraints).
 type Annotations = (
@@ -1319,12 +1333,18 @@ impl Checker {
                 Decl::FunBinding { span, .. } => *span,
                 _ => unreachable!(),
             };
-            self.check_effects_via_row(
-                &all_body_effs,
-                &declared_row,
-                &format!("function '{}'", name),
-                err_span,
-            )?;
+            // EXPERIMENT (infer-local-effects): only enforce the
+            // declared-vs-body effect check when the function is annotated.
+            // Unannotated functions are necessarily private (pub requires an
+            // annotation); let their inferred effect row stand and propagate.
+            if annotation.is_some() {
+                self.check_effects_via_row(
+                    &all_body_effs,
+                    &declared_row,
+                    &format!("function '{}'", name),
+                    err_span,
+                )?;
+            }
 
             // Check for effects declared but never used.
             // Effects that were absorbed during call-site HOF absorption (e.g. Actor
@@ -1340,8 +1360,26 @@ impl Checker {
                 .iter()
                 .map(|e| e.name.clone())
                 .collect();
+            // Effects forwarded via the body's result TYPE (i.e. the body
+            // returns a function whose arrows carry the effect: alias / eta /
+            // partial application / returning an effectful function) are
+            // discharged, not unused — `greet = emit` never *performs* {Log} but
+            // forwards it through `emit`'s type. This only fires when the result
+            // is itself a function (has arrows); a body that applies its args
+            // down to a concrete value (Unit/Int/record/…) has an arrow-free
+            // result type, so `forwarded` is empty and the warning behaves
+            // normally. Known (benign) limitation: after unification the body
+            // type carries the annotation's effects, so a bare alias of a PURE
+            // function under an effectful annotation (`greet = ignore`) is also
+            // suppressed. That's a no-op passthrough; over-declaring is sound;
+            // this is a style lint. Any function that does real work and returns
+            // a value still gets the warning.
+            let mut forwarded_effects: std::collections::HashSet<String> =
+                std::collections::HashSet::new();
+            collect_arrow_effects(&self.sub.apply(&result_ty), &mut forwarded_effects);
             let unused: Vec<_> = declared_effects
                 .difference(&body_effect_names)
+                .filter(|name| !forwarded_effects.contains(*name))
                 .filter(|name| !self.call_site_absorbed.contains(*name))
                 .collect();
             if !unused.is_empty() {
