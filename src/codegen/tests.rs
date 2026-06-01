@@ -401,15 +401,30 @@ fun main : Unit -> Unit
 main () = ()
 "#,
     );
-    assert!(out.contains("['may_log'/1, 'may_log'/3"), "{out}");
-    assert!(out.contains("'use_may_log'/1, 'use_may_log'/3"), "{out}");
-    assert!(out.contains("'may_log'/1"), "{out}");
+    assert!(
+        out.contains("['__saga_direct_may_log'/1, 'may_log'/3"),
+        "{out}"
+    );
+    assert!(
+        out.contains("'__saga_direct_use_may_log'/1, 'use_may_log'/3"),
+        "{out}"
+    );
+    assert!(out.contains("'__saga_direct_may_log'/1"), "{out}");
     assert!(out.contains("'may_log'/3"), "{out}");
-    assert!(out.contains("apply 'may_log'/1(_Arg0)"), "{out}");
-    assert!(out.contains("'use_may_log'/1"), "{out}");
+    assert!(
+        out.contains("apply '__saga_direct_may_log'/1(_Arg0)"),
+        "{out}"
+    );
+    assert!(out.contains("'__saga_direct_use_may_log'/1"), "{out}");
     assert!(out.contains("'use_may_log'/3"), "{out}");
-    assert!(out.contains("apply 'may_log'/1('unit')"), "{out}");
-    assert!(out.contains("apply 'use_may_log'/1(_Arg0)"), "{out}");
+    assert!(
+        out.contains("apply '__saga_direct_may_log'/1('unit')"),
+        "{out}"
+    );
+    assert!(
+        out.contains("apply '__saga_direct_use_may_log'/1(_Arg0)"),
+        "{out}"
+    );
     assert!(out.contains("apply _ReturnK"), "{out}");
     assert!(out.contains("42"), "{out}");
 }

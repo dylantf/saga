@@ -104,22 +104,25 @@ The first implementation slice is:
     `do_log` function because it is CPS-shaped and the CPS island path is not
     implemented yet.
 - `examples/optimization/selective-uniform/12-effect-row-direct-body.saga`
-  - Current result: emits direct `may_log/1` / `use_may_log/1` plus CPS
-    adapters `may_log/3` / `use_may_log/3` for functions whose types declare
+  - Current result: emits compiler-private direct entries
+    `__saga_direct_may_log/1` / `__saga_direct_use_may_log/1` plus source-name
+    CPS adapters `may_log/3` / `use_may_log/3` for functions whose types declare
     `needs {Log}` but whose implementations are operationally direct. Direct
-    code calls the direct entry (`may_log/1`), while CPS-compatible entries are
-    available for future island calls. Public direct-body CPS-typed functions
-    now export both the direct entry and adapter entry so future cross-module
-    direct code has a callable direct ABI. The typechecker correctly warns
-    when a declared effect is entirely unused.
+    code calls the compiler-private direct entry, while CPS-compatible entries
+    stay under the source name for future island calls. Public direct-body
+    CPS-typed functions currently export both entries so future cross-module
+    direct code has a callable direct ABI. The typechecker correctly warns when
+    a declared effect is entirely unused.
 - `examples/optimization/selective-uniform/imported-effect-row-project/`
   - Current result: inspecting `src/Effects.saga` emits a public CPS adapter
-    export (`may_log/3`) plus the public direct entry (`may_log/1`). Inspecting
-    `src/Main.saga` lowers `call_may_log/1` as a direct-body effect-row
-    function that calls the imported direct entry `effects:may_log/1`, plus its
-    own `call_may_log/3` adapter. This is still a shape check rather than a
-    cross-module BEAM check because `inspect` prints source module names for the
-    provider module while resolved remote calls use runtime Erlang module atoms.
+    export (`may_log/3`) plus the compiler-private direct entry
+    `__saga_direct_may_log/1`. Inspecting `src/Main.saga` lowers
+    `call_may_log/1` as a direct-body effect-row function that calls the
+    imported direct entry `effects:__saga_direct_may_log/1`, plus its own
+    `call_may_log/3` adapter. This is still a shape check rather than a
+    cross-module BEAM check because `inspect` prints source module names for
+    the provider module while resolved remote calls use runtime Erlang module
+    atoms.
 
 ## Active Design Decisions
 
@@ -180,9 +183,14 @@ The first implementation slice is:
 - `lower_selective` now builds explicit per-function entry metadata:
   source arity, declared runtime type shape, optional direct entry arity, and
   optional CPS adapter arity. This replaces some implicit reasoning over the
-  direct-function set plus type-shape map. Cross-module direct-entry metadata is
-  still not exported/consumed, but there is now a local representation to carry
-  across modules later.
+  direct-function set plus type-shape map. Imported user-module entry metadata
+  is now consumed by the inspect path; a durable serialized metadata format for
+  separately compiled dependencies still does not exist.
+- The main local classifier names are now intentionally split:
+  `callable_type_shapes` is declared/runtime type shape, `direct_body_functions`
+  is the set of bodies proven direct-lowerable, `local_function_entries` is the
+  emitted entry summary, and `direct_candidate_function` is the temporary
+  recursion allowance during direct-body fixed-point analysis.
 - `CallShape::Cps` carries both source arity and adapter arity. This keeps the
   N vs N+2 convention visible at the boundary where a future CPS island will
   choose an adapter call.
@@ -190,6 +198,10 @@ The first implementation slice is:
   direct entry and CPS adapter entry. The adapter is the source-level callable
   ABI; the direct entry is an optimization ABI needed for future cross-module
   direct calls once imported entry metadata exists.
+- Direct entries for CPS-typed functions use compiler-private names such as
+  `__saga_direct_may_log/1`. The source name is reserved for the CPS adapter
+  ABI (`may_log/3`), which avoids making `may_log/1` look like a source-level
+  public ABI.
 - `lower_selective` computes imported entry metadata for already-compiled
   non-stdlib user modules. Remote effect-row calls may lower to direct remote
   calls only when that imported metadata proves a direct entry exists; otherwise
@@ -340,8 +352,8 @@ The first implementation slice is:
   - public exports use the adapter arity for those CPS-shaped callable types.
 - Updated direct call classification so a local direct implementation is chosen
   before `CallShape::Cps`. Fixture `12-effect-row-direct-body.saga` now proves
-  `use_may_log/1` calls `may_log/1` directly while both functions still expose
-  `/3` adapters.
+  `__saga_direct_use_may_log/1` calls `__saga_direct_may_log/1` directly while
+  both source functions still expose `/3` adapters.
 - Tightened project-mode inspect plumbing:
   - imported user modules are compiled into `CodegenContext` with real
     elaborated ASTs and backend resolution when available, instead of always
@@ -352,18 +364,26 @@ The first implementation slice is:
   effect-row question: the provider module emits its adapter, while a consumer
   public wrapper still fails at the CPS boundary until imported direct-entry
   metadata exists.
-- Refactored `lower_selective` to compute explicit local `FunctionEntries`
+- Refactored `lower_selective` to compute explicit local `FunctionEntryInfo`
   after direct-body classification. Export arity, CPS adapter emission, and
   "unlowered direct/CPS" assertions now read from that entry metadata.
 - Made `CallShape::Cps` store `source_arity` and `adapter_arity` separately
   instead of a single ambiguous arity field.
 - Exported both arities for public direct-body CPS-typed functions, e.g.
-  `may_log/1` and `may_log/3`.
+  `__saga_direct_may_log/1` and `may_log/3`.
+- Renamed the main selective-lowering bookkeeping fields so they describe their
+  roles:
+  `direct_shapes` -> `callable_type_shapes`,
+  `direct_functions` -> `direct_body_functions`,
+  `function_entries` -> `local_function_entries`,
+  `supporting_fun` -> `direct_candidate_function`.
+- Moved CPS-typed direct implementations behind compiler-private
+  `__saga_direct_*` names. The source name now remains the adapter ABI.
 - Added an automated selective runtime smoke test that compiles selective Core
   with `erlc` and calls the CPS adapter on BEAM when `erlc`/`erl` are present.
 - Added imported user-module entry analysis in `lower_selective`. The
   `imported-effect-row-project` consumer now lowers:
-  `call 'effects':'may_log'('unit')`.
+  `call 'effects':'__saga_direct_may_log'('unit')`.
 - Corrected CPS resolved arity handling for imported effect-row functions:
   remote resolution can report the adapter arity (`N + 2`), so selective entry
   matching checks imported metadata against both the resolved arity and the
@@ -384,4 +404,4 @@ The first implementation slice is:
       `'_script':may_log(unit, [], fun(X) -> X end)` returns `42`.
     - `cargo run --bin saga -- inspect src/Main.saga --stage selective-core`
       from `imported-effect-row-project` emits a direct remote call to
-      `effects:may_log/1`.
+      `effects:__saga_direct_may_log/1`.
