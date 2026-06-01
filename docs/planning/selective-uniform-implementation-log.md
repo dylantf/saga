@@ -173,6 +173,15 @@ The first implementation slice is:
   program/result. The current direct lowerer does not consume imported body
   shape yet, but the context now has the real elaborated/resolved module data
   needed for cross-module entry metadata later.
+- `lower_selective` now builds explicit per-function entry metadata:
+  source arity, declared runtime type shape, optional direct entry arity, and
+  optional CPS adapter arity. This replaces some implicit reasoning over the
+  direct-function set plus type-shape map. Cross-module direct-entry metadata is
+  still not exported/consumed, but there is now a local representation to carry
+  across modules later.
+- `CallShape::Cps` carries both source arity and adapter arity. This keeps the
+  N vs N+2 convention visible at the boundary where a future CPS island will
+  choose an adapter call.
 
 ## Next Session Checklist
 
@@ -327,6 +336,11 @@ The first implementation slice is:
   effect-row question: the provider module emits its adapter, while a consumer
   public wrapper still fails at the CPS boundary until imported direct-entry
   metadata exists.
+- Refactored `lower_selective` to compute explicit local `FunctionEntries`
+  after direct-body classification. Export arity, CPS adapter emission, and
+  "unlowered direct/CPS" assertions now read from that entry metadata.
+- Made `CallShape::Cps` store `source_arity` and `adapter_arity` separately
+  instead of a single ambiguous arity field.
 - Verification:
   - `cargo run --bin saga -- inspect examples/optimization/selective-uniform/01-pure-direct.saga --stage selective-core`
     emits direct `add1/1`, `twice/1`, and `main/1`.
@@ -335,3 +349,9 @@ The first implementation slice is:
   - `cargo test -p saga runtime_shape` passed.
   - `cargo test -p saga selective_core` passed.
   - `cargo fmt` run.
+  - Manual BEAM smoke checks for selective output:
+    - `selective-core` output for `01-pure-direct.saga` compiles with `erlc`
+      when saved as `_script.core`;
+    - `selective-core` output for `12-effect-row-direct-body.saga` compiles
+      with `erlc`, and calling the exported adapter
+      `'_script':may_log(unit, [], fun(X) -> X end)` returns `42`.

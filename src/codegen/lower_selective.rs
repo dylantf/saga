@@ -38,9 +38,47 @@ struct DirectLowerer<'a, 'info> {
     direct_shapes: HashMap<String, RuntimeFunctionShape>,
     direct_values: HashSet<String>,
     direct_functions: HashSet<String>,
+    function_entries: HashMap<String, FunctionEntries>,
     supporting_fun: Option<String>,
     locals: Vec<HashSet<String>>,
     local_shapes: Vec<HashMap<String, LocalValueShape>>,
+}
+
+#[derive(Clone, Debug)]
+struct FunctionEntries {
+    source_arity: usize,
+    type_shape: RuntimeFunctionShape,
+    direct_arity: Option<usize>,
+    cps_adapter_arity: Option<usize>,
+}
+
+impl FunctionEntries {
+    fn from_fun_binding(
+        fb: &MFunBinding,
+        type_shape: RuntimeFunctionShape,
+        has_direct_body: bool,
+    ) -> Self {
+        let source_arity = fb.params.len();
+        let direct_arity = has_direct_body.then_some(source_arity);
+        let cps_adapter_arity =
+            matches!(type_shape, RuntimeFunctionShape::Cps(_)).then_some(source_arity + 2);
+        Self {
+            source_arity,
+            type_shape,
+            direct_arity,
+            cps_adapter_arity,
+        }
+    }
+
+    fn is_cps_typed(&self) -> bool {
+        matches!(self.type_shape, RuntimeFunctionShape::Cps(_))
+    }
+
+    fn export_arity(&self) -> usize {
+        self.cps_adapter_arity
+            .or(self.direct_arity)
+            .unwrap_or(self.source_arity)
+    }
 }
 
 #[derive(Clone)]
@@ -60,7 +98,8 @@ enum CallShape {
     },
     Cps {
         name: String,
-        arity: usize,
+        source_arity: usize,
+        adapter_arity: usize,
         effects: Vec<String>,
     },
 }
@@ -87,6 +126,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             direct_shapes: HashMap::new(),
             direct_values: HashSet::new(),
             direct_functions: HashSet::new(),
+            function_entries: HashMap::new(),
             supporting_fun: None,
             locals: vec![HashSet::new()],
             local_shapes: vec![HashMap::new()],
@@ -97,6 +137,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         self.current_module = module_name.to_string();
         self.classify_program(program);
         self.compute_direct_functions(program);
+        self.compute_function_entries(program);
 
         let pub_names: Option<HashSet<String>> =
             self.module_ctx.modules.get(module_name).map(|m| {
@@ -121,10 +162,10 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                         continue;
                     }
                     if fb.public || is_public(&fb.name) {
-                        exports.push((fb.name.clone(), self.export_arity(fb)));
+                        exports.push((fb.name.clone(), self.export_arity(&fb.name)));
                     }
                     funs.push(self.lower_fun_binding(fb));
-                    if self.needs_cps_adapter(fb) {
+                    if self.needs_cps_adapter(&fb.name) {
                         funs.push(self.lower_cps_adapter(fb));
                     }
                 }
@@ -212,16 +253,40 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         }
     }
 
+    fn compute_function_entries(&mut self, program: &MProgram) {
+        self.function_entries.clear();
+        for decl in program {
+            let MDecl::FunBinding(fb) = decl else {
+                continue;
+            };
+            let type_shape = self
+                .direct_shapes
+                .get(&fb.name)
+                .cloned()
+                .unwrap_or_else(|| {
+                    RuntimeFunctionShape::Cps(crate::codegen::runtime_shape::CpsShape {
+                        static_effects: vec![],
+                        is_open_row: true,
+                    })
+                });
+            let entries = FunctionEntries::from_fun_binding(
+                fb,
+                type_shape,
+                self.direct_functions.contains(&fb.name),
+            );
+            self.function_entries.insert(fb.name.clone(), entries);
+        }
+    }
+
     fn assert_no_unlowered_direct_functions(&self, program: &MProgram) {
         for decl in program {
             let MDecl::FunBinding(fb) = decl else {
                 continue;
             };
-            if matches!(
-                self.direct_shapes.get(&fb.name),
-                Some(RuntimeFunctionShape::Pure)
-            ) && !self.direct_functions.contains(&fb.name)
-            {
+            if self.function_entries.get(&fb.name).is_some_and(|entries| {
+                matches!(entries.type_shape, RuntimeFunctionShape::Pure)
+                    && entries.direct_arity.is_none()
+            }) {
                 self.unsupported(&format!(
                     "direct function '{}' is outside the current direct subset",
                     fb.name
@@ -240,11 +305,10 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                 continue;
             };
             if (fb.public || is_public(&fb.name))
-                && !self.direct_functions.contains(&fb.name)
-                && matches!(
-                    self.direct_shapes.get(&fb.name),
-                    Some(RuntimeFunctionShape::Cps(_))
-                )
+                && self
+                    .function_entries
+                    .get(&fb.name)
+                    .is_some_and(|entries| entries.is_cps_typed() && entries.direct_arity.is_none())
             {
                 self.unsupported(&format!(
                     "CPS-shaped function '{}' is not lowered by selective-core yet",
@@ -306,20 +370,17 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         }
     }
 
-    fn export_arity(&self, fb: &MFunBinding) -> usize {
-        if self.needs_cps_adapter(fb) {
-            fb.params.len() + 2
-        } else {
-            fb.params.len()
-        }
+    fn export_arity(&self, name: &str) -> usize {
+        self.function_entries
+            .get(name)
+            .map(FunctionEntries::export_arity)
+            .unwrap_or(0)
     }
 
-    fn needs_cps_adapter(&self, fb: &MFunBinding) -> bool {
-        self.direct_functions.contains(&fb.name)
-            && matches!(
-                self.direct_shapes.get(&fb.name),
-                Some(RuntimeFunctionShape::Cps(_))
-            )
+    fn needs_cps_adapter(&self, name: &str) -> bool {
+        self.function_entries.get(name).is_some_and(|entries| {
+            entries.direct_arity.is_some() && entries.cps_adapter_arity.is_some()
+        })
     }
 
     fn wrap_param_match(&self, pats: &[Pat], params: &[String], body: CExpr) -> CExpr {
@@ -499,11 +560,12 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             }
             Some(CallShape::Cps {
                 name,
-                arity,
+                source_arity,
+                adapter_arity,
                 effects,
             }) => self.unsupported(&format!(
-                "CPS-shaped call to '{}' with arity {} and effects {:?}",
-                name, arity, effects
+                "CPS-shaped call to '{}' with source arity {}, adapter arity {}, and effects {:?}",
+                name, source_arity, adapter_arity, effects
             )),
             None => self.unsupported_expr(&MExpr::App {
                 head: head.clone(),
@@ -566,7 +628,8 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         }
         Some(CallShape::Cps {
             name: name.clone(),
-            arity: *arity,
+            source_arity: *arity,
+            adapter_arity: *arity + 2,
             effects: effects.clone(),
         })
     }
