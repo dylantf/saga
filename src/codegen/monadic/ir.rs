@@ -581,6 +581,11 @@ pub struct EffectInfo<'a> {
     /// direct `type_at_node` entries.
     pub records: &'a HashMap<String, typechecker::RecordInfo>,
 
+    /// Trait definitions. Used by selective/direct lowering to recover method
+    /// callable shape when ANF synthesized `DictMethodAccess` NodeIds do not
+    /// have direct `type_at_node` entries.
+    pub traits: &'a HashMap<String, typechecker::TraitInfo>,
+
     /// Effect name → list of op names in canonical (alphabetical) order.
     /// Required for translation to compute `EffectOpRef.op_index` for
     /// **cross-module** effects — in-program effects can be derived

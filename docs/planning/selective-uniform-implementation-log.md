@@ -84,6 +84,13 @@ The first implementation slice is:
 - `examples/optimization/selective-uniform/07-record-field.saga`
   - Current result: emits direct Core Erlang for named record construction and
     field access via `erlang:element`.
+- `examples/optimization/selective-uniform/08-tuple-param.saga`
+  - Current result: emits a direct `/1` function whose non-variable source
+    parameter is checked with an internal `case`, preserving direct arity while
+    supporting tuple destructuring.
+- `examples/optimization/selective-uniform/09-constructor-case.saga`
+  - Current result: emits direct Core Erlang for local ADT construction and
+    constructor-pattern case arms.
 
 ## Active Design Decisions
 
@@ -97,9 +104,9 @@ The first implementation slice is:
 - The existing monadic IR can be reused later, but only after runtime shape
   classification decides a function or region is CPS-shaped.
 - Direct `Unit` parameters can lower as ignored Core Erlang variables for the
-  initial one-clause direct subset. This is enough for `main () = ...`; richer
-  non-variable parameter matching should get a deliberate wrapper/case design
-  later.
+  initial one-clause direct subset. Non-variable parameters in the currently
+  supported pattern subset lower as direct Core params plus an internal `case`
+  over the argument tuple.
 - A function classified as direct/pure must not silently disappear from
   `selective-core`. If it is outside the current direct subset, the experimental
   lowerer should fail loudly with the function name.
@@ -107,11 +114,11 @@ The first implementation slice is:
   intrinsic cases because they do not require trait dictionaries. `dbg` is not
   in this category because it takes an explicit `Debug` dictionary after
   elaboration.
-- Minimal monomorphic trait support now exists in `lower_selective`, but method
-  shapes are not first-class yet. Applying a local method closure extracted from
-  a dictionary is temporarily allowed only when the local binding is known to
-  come from `DictMethodAccess`. Replace this with shape-tagged
-  dictionary/method metadata before broadening trait specialization.
+- Minimal monomorphic trait support now exists in `lower_selective`, with a
+  narrow first-class method-local shape. A local method closure extracted from a
+  dictionary is tagged as a pure callable using typed node metadata when
+  present, trait method metadata when ANF synthesized an untyped node, or a
+  typed use-site fallback only for that already-tagged value.
 - Ordinary local function-valued variables are deliberately not callable in the
   direct subset yet. They need explicit function-value shape metadata instead
   of arity guessing.
@@ -208,6 +215,27 @@ The first implementation slice is:
   - field reads lower to `erlang:element(index, record)`.
 - Added `examples/optimization/selective-uniform/07-record-field.saga`.
 - Added a focused Rust test for named record field access.
+- Replaced the temporary `method_values` set with explicit local value shape
+  metadata:
+  - `DictMethodAccess` locals are tagged as pure callable values;
+  - arity/effect shape comes from typed node metadata when available, otherwise
+    from `TraitInfo` method metadata because ANF may synthesize untyped
+    `DictMethodAccess` NodeIds;
+  - the use-site type fallback is allowed only for those already-tagged
+    dict-method locals.
+- Added `TraitInfo` to the narrowed monadic `EffectInfo` view so selective
+  lowering can recover trait method shape without depending on source arity.
+- Added direct parameter pattern matching for the supported pattern subset
+  (`var`, wildcard, literals, tuples). The emitted function keeps source arity
+  and wraps the body in a Core `case` when any parameter needs destructuring or
+  literal checking.
+- Added `examples/optimization/selective-uniform/08-tuple-param.saga` and
+  changed the old tuple-parameter panic test into a success test.
+- Added constructor-pattern support for direct params and `case` arms, including
+  `Cons`/`Nil`/`True`/`False` special cases and normal tagged-tuple ADTs.
+- Added `examples/optimization/selective-uniform/09-constructor-case.saga` and
+  a focused test for direct ADT construction plus constructor-pattern case
+  matching.
 - Verification:
   - `cargo run --bin saga -- inspect examples/optimization/selective-uniform/01-pure-direct.saga --stage selective-core`
     emits direct `add1/1`, `twice/1`, and `main/1`.

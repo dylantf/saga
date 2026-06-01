@@ -15,6 +15,7 @@ use crate::codegen::monadic::ir::{Atom, EffectInfo, MArm, MDecl, MExpr, MFunBind
 use crate::codegen::resolve::{ConstructorAtoms, ResolutionMap, ResolvedCodegenKind};
 use crate::codegen::runtime_shape::RuntimeFunctionShape;
 use crate::intrinsics::IntrinsicId;
+use crate::typechecker::Type;
 
 pub fn lower_module(
     module_name: &str,
@@ -39,7 +40,7 @@ struct DirectLowerer<'a, 'info> {
     direct_functions: HashSet<String>,
     supporting_fun: Option<String>,
     locals: Vec<HashSet<String>>,
-    method_values: Vec<HashSet<String>>,
+    local_shapes: Vec<HashMap<String, LocalValueShape>>,
 }
 
 #[derive(Clone)]
@@ -47,6 +48,12 @@ struct DirectCallable {
     module: Option<String>,
     name: String,
     arity: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum LocalValueShape {
+    PureCallable { arity: usize },
+    PureCallableFromUseType,
 }
 
 impl<'a, 'info> DirectLowerer<'a, 'info> {
@@ -67,7 +74,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             direct_functions: HashSet::new(),
             supporting_fun: None,
             locals: vec![HashSet::new()],
-            method_values: vec![HashSet::new()],
+            local_shapes: vec![HashMap::new()],
         }
     }
 
@@ -230,13 +237,29 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         for pat in &fb.params {
             collect_pat_binders(pat, self.current_scope_mut());
         }
-        let body = self.lower_expr(&fb.body);
+        let lowered_body = self.lower_expr(&fb.body);
+        let body = self.wrap_param_match(&fb.params, &params, lowered_body);
         self.pop_scope();
         CFunDef {
             name: fb.name.clone(),
             arity: params.len(),
             body: CExpr::Fun(params, Box::new(body)),
         }
+    }
+
+    fn wrap_param_match(&self, pats: &[Pat], params: &[String], body: CExpr) -> CExpr {
+        if pats.iter().all(|pat| matches!(pat, Pat::Var { .. })) {
+            return body;
+        }
+        let scrutinee = CExpr::Tuple(params.iter().map(|name| CExpr::Var(name.clone())).collect());
+        CExpr::Case(
+            Box::new(scrutinee),
+            vec![CArm {
+                pat: CPat::Tuple(pats.iter().map(|pat| self.lower_pat(pat)).collect()),
+                guard: None,
+                body,
+            }],
+        )
     }
 
     fn lower_expr(&mut self, expr: &MExpr) -> CExpr {
@@ -246,12 +269,13 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             | MExpr::Bind {
                 var, value, body, ..
             } => {
-                let is_dict_method_value = matches!(value.as_ref(), MExpr::DictMethodAccess { .. });
+                let local_shape = self.direct_local_shape_for_expr(value);
                 let value = self.lower_expr(value);
                 self.push_scope();
                 self.current_scope_mut().insert(var.name.clone());
-                if is_dict_method_value {
-                    self.current_method_scope_mut().insert(var.name.clone());
+                if let Some(shape) = local_shape {
+                    self.current_shape_scope_mut()
+                        .insert(var.name.clone(), shape);
                 }
                 let body = self.lower_expr(body);
                 self.pop_scope();
@@ -411,8 +435,16 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             return self.apply_direct_callable(callable, args);
         }
         if let Atom::Var { name, .. } = head
-            && self.is_method_value(&name.name)
+            && let Some(arity) = self.local_callable_arity_for_head(head)
         {
+            if args.len() != arity {
+                self.unsupported(&format!(
+                    "local callable '{}' with {} args; expected {}",
+                    name.name,
+                    args.len(),
+                    arity
+                ));
+            }
             return CExpr::Apply(
                 Box::new(CExpr::Var(core_var(&name.name))),
                 args.iter().map(|arg| self.lower_atom(arg)).collect(),
@@ -728,39 +760,70 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             Pat::Tuple { elements, .. } => {
                 CPat::Tuple(elements.iter().map(|p| self.lower_pat(p)).collect())
             }
-            _ => self.unsupported("patterns beyond var/lit/tuple"),
+            Pat::Constructor { name, args, .. } => self.lower_ctor_pat(name, args),
+            _ => self.unsupported("patterns beyond var/lit/tuple/constructor"),
         }
+    }
+
+    fn lower_ctor_pat(&self, name: &str, args: &[Pat]) -> CPat {
+        let bare = name.rsplit('.').next().unwrap_or(name);
+        match bare {
+            "Nil" if args.is_empty() => return CPat::Nil,
+            "True" if args.is_empty() => return CPat::Lit(CLit::Atom("true".to_string())),
+            "False" if args.is_empty() => return CPat::Lit(CLit::Atom("false".to_string())),
+            _ => {}
+        }
+        if bare == "Cons" && args.len() == 2 {
+            return CPat::Cons(
+                Box::new(self.lower_pat(&args[0])),
+                Box::new(self.lower_pat(&args[1])),
+            );
+        }
+        let tag = mangle_ctor_atom(name, self.ctors);
+        let mut elems = vec![CPat::Lit(CLit::Atom(tag))];
+        elems.extend(args.iter().map(|pat| self.lower_pat(pat)));
+        CPat::Tuple(elems)
     }
 
     fn is_local(&self, name: &str) -> bool {
         self.locals.iter().rev().any(|scope| scope.contains(name))
     }
 
-    fn is_method_value(&self, name: &str) -> bool {
-        self.method_values
+    fn local_shape(&self, name: &str) -> Option<LocalValueShape> {
+        self.local_shapes
             .iter()
             .rev()
-            .any(|scope| scope.contains(name))
+            .find_map(|scope| scope.get(name).cloned())
+    }
+
+    fn local_callable_arity_for_head(&self, head: &Atom) -> Option<usize> {
+        let Atom::Var { name, source } = head else {
+            return None;
+        };
+        match self.local_shape(&name.name)? {
+            LocalValueShape::PureCallable { arity } => Some(arity),
+            LocalValueShape::PureCallableFromUseType => self.pure_function_arity_at(*source),
+        }
     }
 
     fn push_scope(&mut self) {
         self.locals.push(HashSet::new());
-        self.method_values.push(HashSet::new());
+        self.local_shapes.push(HashMap::new());
     }
 
     fn pop_scope(&mut self) {
         self.locals.pop();
-        self.method_values.pop();
+        self.local_shapes.pop();
     }
 
     fn current_scope_mut(&mut self) -> &mut HashSet<String> {
         self.locals.last_mut().expect("direct lowerer has a scope")
     }
 
-    fn current_method_scope_mut(&mut self) -> &mut HashSet<String> {
-        self.method_values
+    fn current_shape_scope_mut(&mut self) -> &mut HashMap<String, LocalValueShape> {
+        self.local_shapes
             .last_mut()
-            .expect("direct lowerer has a method-value scope")
+            .expect("direct lowerer has a local-shape scope")
     }
 
     fn expr_is_direct_subset(&mut self, expr: &MExpr) -> bool {
@@ -770,14 +833,15 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             | MExpr::Bind {
                 var, value, body, ..
             } => {
-                let is_dict_method_value = matches!(value.as_ref(), MExpr::DictMethodAccess { .. });
+                let local_shape = self.direct_local_shape_for_expr(value);
                 if !self.expr_is_direct_subset(value) {
                     return false;
                 }
                 self.push_scope();
                 self.current_scope_mut().insert(var.name.clone());
-                if is_dict_method_value {
-                    self.current_method_scope_mut().insert(var.name.clone());
+                if let Some(shape) = local_shape {
+                    self.current_shape_scope_mut()
+                        .insert(var.name.clone(), shape);
                 }
                 let supported = self.expr_is_direct_subset(body);
                 self.pop_scope();
@@ -800,9 +864,16 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                     return false;
                 }
                 arms.iter().all(|arm| {
+                    if !direct_pat_supported(&arm.pattern) {
+                        return false;
+                    }
                     self.push_scope();
                     collect_pat_binders(&arm.pattern, self.current_scope_mut());
-                    let supported = self.expr_is_direct_subset(&arm.body);
+                    let supported = arm
+                        .guard
+                        .as_ref()
+                        .is_none_or(|guard| self.expr_is_direct_subset(guard))
+                        && self.expr_is_direct_subset(&arm.body);
                     self.pop_scope();
                     supported
                 })
@@ -821,7 +892,9 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                             IntrinsicId::Dbg => args.len() == 2,
                             IntrinsicId::CatchPanic => false,
                         })
-                    || matches!(head, Atom::Var { name, .. } if self.is_method_value(&name.name));
+                    || self
+                        .local_callable_arity_for_head(head)
+                        .is_some_and(|arity| arity == args.len());
                 direct_call_supported && args.iter().all(|arg| self.atom_is_direct_subset(arg))
             }
             MExpr::BinOp { left, right, .. } => {
@@ -866,6 +939,48 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         }
     }
 
+    fn direct_local_shape_for_expr(&self, expr: &MExpr) -> Option<LocalValueShape> {
+        match expr {
+            MExpr::DictMethodAccess {
+                source,
+                trait_name,
+                method_index,
+                ..
+            } => Some(
+                self.pure_function_arity_at(*source)
+                    .or_else(|| self.pure_trait_method_arity(trait_name, *method_index))
+                    .map_or(LocalValueShape::PureCallableFromUseType, |arity| {
+                        LocalValueShape::PureCallable { arity }
+                    }),
+            ),
+            _ => None,
+        }
+    }
+
+    fn pure_trait_method_arity(&self, trait_name: &str, method_index: usize) -> Option<usize> {
+        let trait_info = self.effect_info.traits.get(trait_name).or_else(|| {
+            let bare = trait_name.rsplit('.').next().unwrap_or(trait_name);
+            self.effect_info.traits.get(bare)
+        })?;
+        let method = trait_info.methods.get(method_index)?;
+        method.effect_sig.effects.is_empty().then_some(())?;
+        (!method.effect_sig.is_open_row).then_some(())?;
+        Some(method.effect_sig.user_arity)
+    }
+
+    fn pure_function_arity_at(&self, source: NodeId) -> Option<usize> {
+        let mut current = self.effect_info.type_at_node.get(&source)?;
+        let mut arity = 0;
+        while let Type::Fun(_, ret, row) = current {
+            if !row.effects.is_empty() || row.tail.is_some() {
+                return None;
+            }
+            arity += 1;
+            current = ret;
+        }
+        (arity > 0).then_some(arity)
+    }
+
     fn unsupported(&self, what: &str) -> ! {
         panic!("selective-uniform direct lowerer TODO: {what}")
     }
@@ -900,14 +1015,16 @@ fn lower_param_names(params: &[Pat]) -> Vec<String> {
 }
 
 fn direct_param_supported(pat: &Pat) -> bool {
-    matches!(
-        pat,
-        Pat::Var { .. }
-            | Pat::Lit {
-                value: Lit::Unit,
-                ..
-            }
-    )
+    direct_pat_supported(pat)
+}
+
+fn direct_pat_supported(pat: &Pat) -> bool {
+    match pat {
+        Pat::Wildcard { .. } | Pat::Var { .. } | Pat::Lit { .. } => true,
+        Pat::Tuple { elements, .. } => elements.iter().all(direct_param_supported),
+        Pat::Constructor { args, .. } => args.iter().all(direct_param_supported),
+        _ => false,
+    }
 }
 
 fn collect_pat_binders(pat: &Pat, out: &mut HashSet<String>) {
@@ -917,6 +1034,11 @@ fn collect_pat_binders(pat: &Pat, out: &mut HashSet<String>) {
         }
         Pat::Tuple { elements, .. } => {
             for pat in elements {
+                collect_pat_binders(pat, out);
+            }
+        }
+        Pat::Constructor { args, .. } => {
+            for pat in args {
                 collect_pat_binders(pat, out);
             }
         }

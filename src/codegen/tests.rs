@@ -242,20 +242,13 @@ main () = {
 "#,
     );
     assert!(out.contains("{'_script_Point', 3, 4}"), "{out}");
-    assert!(
-        out.contains("call 'erlang':'element'\n      (2, P)"),
-        "{out}"
-    );
-    assert!(
-        out.contains("call 'erlang':'element'\n      (3, P)"),
-        "{out}"
-    );
+    assert!(out.contains("(2, P)"), "{out}");
+    assert!(out.contains("(3, P)"), "{out}");
 }
 
 #[test]
-#[should_panic(expected = "direct function 'first' is outside the current direct subset")]
-fn selective_core_fails_loudly_for_unsupported_direct_function() {
-    let _ = emit_selective_core(
+fn selective_core_lowers_tuple_param_match() {
+    let out = emit_selective_core(
         r#"
 fun first : (Int, Int) -> Int
 first (x, _) = x
@@ -264,6 +257,34 @@ fun main : Unit -> Int
 main () = first (1, 2)
 "#,
     );
+    assert!(out.contains("'first'/1"), "{out}");
+    assert!(out.contains("case {_Arg0} of"), "{out}");
+    assert!(out.contains("<{{X, _W0}}>"), "{out}");
+}
+
+#[test]
+fn selective_core_lowers_constructor_case_patterns() {
+    let out = emit_selective_core(
+        r#"
+type Pick =
+  | First Int
+  | Second Int
+
+fun score : Pick -> Int
+score p = case p {
+  First x -> x
+  Second y -> y + 1
+}
+
+fun main : Unit -> Int
+main () = score (Second 41)
+"#,
+    );
+    assert!(out.contains("'score'/1"), "{out}");
+    assert!(out.contains("'_script_First'"), "{out}");
+    assert!(out.contains("'_script_Second'"), "{out}");
+    assert!(out.contains("{'_script_Second', 41}"), "{out}");
+    assert!(out.contains("apply 'score'/1(___anf_v0)"), "{out}");
 }
 
 #[test]
@@ -1359,6 +1380,7 @@ fn build_effect_info_populates_all_fields_from_check_result() {
     // type_at_node and fun_effects come from check_result.
     assert!(std::ptr::eq(info.type_at_node, &result.type_at_node));
     assert!(std::ptr::eq(info.fun_effects, &result.fun_effects));
+    assert!(std::ptr::eq(info.traits, &result.traits));
     assert!(std::ptr::eq(
         info.let_effect_bindings,
         &result.let_effect_bindings
