@@ -93,6 +93,68 @@ fn emit_selective_core(src: &str) -> String {
     super::cerl::print_module(&cmod)
 }
 
+fn erlang_tool_available(tool: &str) -> bool {
+    std::process::Command::new(tool)
+        .arg("--help")
+        .output()
+        .is_ok()
+}
+
+fn assert_selective_core_eval_stdout_contains(src: &str, eval: &str, needle: &str) {
+    if !erlang_tool_available("erlc") || !erlang_tool_available("erl") {
+        return;
+    }
+
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    static COUNTER: AtomicUsize = AtomicUsize::new(0);
+
+    let core = emit_selective_core(src);
+    let id = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!(
+        "saga-selective-core-run-{}-{id}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let core_path = dir.join("_script.core");
+    std::fs::write(&core_path, &core).unwrap();
+
+    let erlc = std::process::Command::new("erlc")
+        .arg("+from_core")
+        .arg("-o")
+        .arg(&dir)
+        .arg(&core_path)
+        .output()
+        .expect("erlc spawn");
+    assert!(
+        erlc.status.success(),
+        "erlc rejected selective-core output:\nstdout: {}\nstderr: {}\ncore: {}",
+        String::from_utf8_lossy(&erlc.stdout),
+        String::from_utf8_lossy(&erlc.stderr),
+        core
+    );
+
+    let run = std::process::Command::new("erl")
+        .arg("-noshell")
+        .arg("-pa")
+        .arg(&dir)
+        .arg("-eval")
+        .arg(eval)
+        .output()
+        .expect("erl spawn");
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(
+        run.status.success(),
+        "erl rejected selective-core output:\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&run.stdout),
+        String::from_utf8_lossy(&run.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&run.stdout);
+    assert!(
+        stdout.contains(needle),
+        "expected '{needle}' in selective-core runtime output, got: {stdout}"
+    );
+}
+
 /// Assert that `emit(src)` contains `needle` as a substring.
 /// On failure, prints the full output for easy debugging.
 fn assert_contains(src: &str, needle: &str) {
@@ -339,6 +401,8 @@ fun main : Unit -> Unit
 main () = ()
 "#,
     );
+    assert!(out.contains("['may_log'/1, 'may_log'/3"), "{out}");
+    assert!(out.contains("'use_may_log'/1, 'use_may_log'/3"), "{out}");
     assert!(out.contains("'may_log'/1"), "{out}");
     assert!(out.contains("'may_log'/3"), "{out}");
     assert!(out.contains("apply 'may_log'/1(_Arg0)"), "{out}");
@@ -348,6 +412,25 @@ main () = ()
     assert!(out.contains("apply 'use_may_log'/1(_Arg0)"), "{out}");
     assert!(out.contains("apply _ReturnK"), "{out}");
     assert!(out.contains("42"), "{out}");
+}
+
+#[test]
+fn selective_core_effect_row_adapter_compiles_and_runs_on_beam() {
+    assert_selective_core_eval_stdout_contains(
+        r#"
+effect Log {
+  fun log : String -> Unit
+}
+
+pub fun may_log : Unit -> Int needs {Log}
+may_log () = 42
+
+fun main : Unit -> Unit
+main () = ()
+"#,
+        "io:format(\"~p~n\", ['_script':may_log(unit, [], fun(X) -> X end)]), init:stop().",
+        "42",
+    );
 }
 
 #[test]

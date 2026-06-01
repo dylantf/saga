@@ -39,6 +39,7 @@ struct DirectLowerer<'a, 'info> {
     direct_values: HashSet<String>,
     direct_functions: HashSet<String>,
     function_entries: HashMap<String, FunctionEntries>,
+    imported_function_entries: HashMap<(String, String), FunctionEntries>,
     supporting_fun: Option<String>,
     locals: Vec<HashSet<String>>,
     local_shapes: Vec<HashMap<String, LocalValueShape>>,
@@ -78,6 +79,13 @@ impl FunctionEntries {
         self.cps_adapter_arity
             .or(self.direct_arity)
             .unwrap_or(self.source_arity)
+    }
+
+    fn export_arities(&self) -> Vec<usize> {
+        match (self.direct_arity, self.cps_adapter_arity) {
+            (Some(direct), Some(adapter)) if direct != adapter => vec![direct, adapter],
+            _ => vec![self.export_arity()],
+        }
     }
 }
 
@@ -127,6 +135,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             direct_values: HashSet::new(),
             direct_functions: HashSet::new(),
             function_entries: HashMap::new(),
+            imported_function_entries: HashMap::new(),
             supporting_fun: None,
             locals: vec![HashSet::new()],
             local_shapes: vec![HashMap::new()],
@@ -136,6 +145,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
     fn lower_module(&mut self, module_name: &str, program: &MProgram) -> CModule {
         self.current_module = module_name.to_string();
         self.classify_program(program);
+        self.compute_imported_function_entries();
         self.compute_direct_functions(program);
         self.compute_function_entries(program);
 
@@ -162,7 +172,11 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                         continue;
                     }
                     if fb.public || is_public(&fb.name) {
-                        exports.push((fb.name.clone(), self.export_arity(&fb.name)));
+                        exports.extend(
+                            self.export_arities(&fb.name)
+                                .into_iter()
+                                .map(|arity| (fb.name.clone(), arity)),
+                        );
                     }
                     funs.push(self.lower_fun_binding(fb));
                     if self.needs_cps_adapter(&fb.name) {
@@ -278,6 +292,49 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         }
     }
 
+    fn compute_imported_function_entries(&mut self) {
+        self.imported_function_entries.clear();
+        for (source_module_name, compiled) in &self.module_ctx.modules {
+            if source_module_name == &self.current_module
+                || source_module_name.starts_with("Std.")
+                || compiled.elaborated.is_empty()
+            {
+                continue;
+            }
+
+            let anf_imported = crate::codegen::anf::normalize(
+                compiled.elaborated.clone(),
+                Some(&compiled.resolution),
+            );
+            let imported_handler_decls = HashMap::new();
+            let (monadic_imported, _) = crate::codegen::monadic::translate::translate_with_imports(
+                &anf_imported,
+                &compiled.resolution,
+                self.effect_info,
+                &imported_handler_decls,
+            );
+
+            let mut imported = DirectLowerer::new(
+                &compiled.resolution,
+                self.ctors,
+                self.module_ctx,
+                self.effect_info,
+            );
+            imported.current_module = source_module_name.clone();
+            imported.classify_program(&monadic_imported);
+            imported.compute_direct_functions(&monadic_imported);
+            imported.compute_function_entries(&monadic_imported);
+
+            let erlang_module = erlang_module_name(source_module_name);
+            for (name, entries) in imported.function_entries {
+                self.imported_function_entries
+                    .insert((erlang_module.clone(), name.clone()), entries.clone());
+                self.imported_function_entries
+                    .insert((source_module_name.clone(), name.clone()), entries);
+            }
+        }
+    }
+
     fn assert_no_unlowered_direct_functions(&self, program: &MProgram) {
         for decl in program {
             let MDecl::FunBinding(fb) = decl else {
@@ -370,11 +427,11 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         }
     }
 
-    fn export_arity(&self, name: &str) -> usize {
+    fn export_arities(&self, name: &str) -> Vec<usize> {
         self.function_entries
             .get(name)
-            .map(FunctionEntries::export_arity)
-            .unwrap_or(0)
+            .map(FunctionEntries::export_arities)
+            .unwrap_or_else(|| vec![0])
     }
 
     fn needs_cps_adapter(&self, name: &str) -> bool {
@@ -628,8 +685,8 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         }
         Some(CallShape::Cps {
             name: name.clone(),
-            source_arity: *arity,
-            adapter_arity: *arity + 2,
+            source_arity: source_arity_for_cps_resolved(*arity),
+            adapter_arity: *arity,
             effects: effects.clone(),
         })
     }
@@ -780,7 +837,16 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             .as_ref()
             .is_some_and(|module| module != &self.current_module);
         if !effects.is_empty() && is_remote {
-            return None;
+            let module = erlang_mod.as_ref()?;
+            let direct_arity = self
+                .imported_function_entries
+                .get(&(module.clone(), name.clone()))
+                .and_then(|entries| direct_arity_matching_resolved(*arity, entries))?;
+            return Some(DirectCallable {
+                module: erlang_mod.clone(),
+                name: name.clone(),
+                arity: direct_arity,
+            });
         }
         if is_remote {
             return Some(DirectCallable {
@@ -1195,6 +1261,32 @@ fn direct_intrinsic_arity(intrinsic: IntrinsicId) -> Option<usize> {
         IntrinsicId::Dbg => Some(2),
         IntrinsicId::CatchPanic => None,
     }
+}
+
+fn source_arity_for_cps_resolved(adapter_arity: usize) -> usize {
+    adapter_arity.saturating_sub(2)
+}
+
+fn direct_arity_matching_resolved(
+    resolved_arity: usize,
+    entries: &FunctionEntries,
+) -> Option<usize> {
+    let direct_arity = entries.direct_arity?;
+    if direct_arity == resolved_arity
+        || direct_arity == source_arity_for_cps_resolved(resolved_arity)
+    {
+        Some(direct_arity)
+    } else {
+        None
+    }
+}
+
+fn erlang_module_name(module_name: &str) -> String {
+    module_name
+        .split('.')
+        .map(str::to_lowercase)
+        .collect::<Vec<_>>()
+        .join("_")
 }
 
 fn collect_pat_binders(pat: &Pat, out: &mut HashSet<String>) {

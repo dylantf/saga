@@ -108,14 +108,18 @@ The first implementation slice is:
     adapters `may_log/3` / `use_may_log/3` for functions whose types declare
     `needs {Log}` but whose implementations are operationally direct. Direct
     code calls the direct entry (`may_log/1`), while CPS-compatible entries are
-    available for future island calls. The typechecker correctly warns when a
-    declared effect is entirely unused.
+    available for future island calls. Public direct-body CPS-typed functions
+    now export both the direct entry and adapter entry so future cross-module
+    direct code has a callable direct ABI. The typechecker correctly warns
+    when a declared effect is entirely unused.
 - `examples/optimization/selective-uniform/imported-effect-row-project/`
   - Current result: inspecting `src/Effects.saga` emits a public CPS adapter
-    export (`may_log/3`) plus the internal direct entry (`may_log/1`). Inspecting
-    `src/Main.saga` still fails loudly for the public cross-module effect-row
-    call because selective-core does not yet have cross-module direct-entry
-    metadata for imported effect-row functions.
+    export (`may_log/3`) plus the public direct entry (`may_log/1`). Inspecting
+    `src/Main.saga` lowers `call_may_log/1` as a direct-body effect-row
+    function that calls the imported direct entry `effects:may_log/1`, plus its
+    own `call_may_log/3` adapter. This is still a shape check rather than a
+    cross-module BEAM check because `inspect` prints source module names for the
+    provider module while resolved remote calls use runtime Erlang module atoms.
 
 ## Active Design Decisions
 
@@ -182,6 +186,18 @@ The first implementation slice is:
 - `CallShape::Cps` carries both source arity and adapter arity. This keeps the
   N vs N+2 convention visible at the boundary where a future CPS island will
   choose an adapter call.
+- Public direct-body functions with CPS-shaped callable types export both the
+  direct entry and CPS adapter entry. The adapter is the source-level callable
+  ABI; the direct entry is an optimization ABI needed for future cross-module
+  direct calls once imported entry metadata exists.
+- `lower_selective` computes imported entry metadata for already-compiled
+  non-stdlib user modules. Remote effect-row calls may lower to direct remote
+  calls only when that imported metadata proves a direct entry exists; otherwise
+  they remain `CallShape::Cps` boundaries.
+- Imported effect-row `BeamFunction` arity from backend resolution may be the
+  source arity or the adapter arity depending on where the resolved symbol came
+  from. Remote direct-entry matching accepts only imported metadata-proven
+  direct arities, checking both the resolved arity and `resolved_arity - 2`.
 
 ## Next Session Checklist
 
@@ -341,6 +357,17 @@ The first implementation slice is:
   "unlowered direct/CPS" assertions now read from that entry metadata.
 - Made `CallShape::Cps` store `source_arity` and `adapter_arity` separately
   instead of a single ambiguous arity field.
+- Exported both arities for public direct-body CPS-typed functions, e.g.
+  `may_log/1` and `may_log/3`.
+- Added an automated selective runtime smoke test that compiles selective Core
+  with `erlc` and calls the CPS adapter on BEAM when `erlc`/`erl` are present.
+- Added imported user-module entry analysis in `lower_selective`. The
+  `imported-effect-row-project` consumer now lowers:
+  `call 'effects':'may_log'('unit')`.
+- Corrected CPS resolved arity handling for imported effect-row functions:
+  remote resolution can report the adapter arity (`N + 2`), so selective entry
+  matching checks imported metadata against both the resolved arity and the
+  derived direct source arity.
 - Verification:
   - `cargo run --bin saga -- inspect examples/optimization/selective-uniform/01-pure-direct.saga --stage selective-core`
     emits direct `add1/1`, `twice/1`, and `main/1`.
@@ -355,3 +382,6 @@ The first implementation slice is:
     - `selective-core` output for `12-effect-row-direct-body.saga` compiles
       with `erlc`, and calling the exported adapter
       `'_script':may_log(unit, [], fun(X) -> X end)` returns `42`.
+    - `cargo run --bin saga -- inspect src/Main.saga --stage selective-core`
+      from `imported-effect-row-project` emits a direct remote call to
+      `effects:may_log/1`.
