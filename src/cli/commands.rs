@@ -370,14 +370,19 @@ pub fn cmd_inspect(file: &str, stage: &str) {
                 declared_module_name(&program).unwrap_or_else(|| "_script".to_string());
             let mut compiled_modules = compile_std_modules(&result);
             for (name, info) in result.codegen_info() {
-                compiled_modules
-                    .entry(name.clone())
-                    .or_insert_with(|| codegen::CompiledModule {
-                        codegen_info: info.clone(),
-                        elaborated: Vec::new(),
-                        resolution: codegen::resolve::ResolutionMap::new(),
-                        front_resolution: Default::default(),
+                if name == &module_name {
+                    continue;
+                }
+                let compiled =
+                    codegen::compile_module_from_result(name, &result).unwrap_or_else(|| {
+                        codegen::CompiledModule {
+                            codegen_info: info.clone(),
+                            elaborated: Vec::new(),
+                            resolution: codegen::resolve::ResolutionMap::new(),
+                            front_resolution: Default::default(),
+                        }
                     });
+                compiled_modules.entry(name.clone()).or_insert(compiled);
             }
             compiled_modules.insert(
                 module_name.clone(),

@@ -54,7 +54,15 @@ struct DirectCallable {
 enum CallShape {
     Intrinsic(IntrinsicId),
     Direct(DirectCallable),
-    LocalCallable { name: String, arity: usize },
+    LocalCallable {
+        name: String,
+        arity: usize,
+    },
+    Cps {
+        name: String,
+        arity: usize,
+        effects: Vec<String>,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -89,7 +97,6 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         self.current_module = module_name.to_string();
         self.classify_program(program);
         self.compute_direct_functions(program);
-        self.assert_no_unlowered_direct_functions(program);
 
         let pub_names: Option<HashSet<String>> =
             self.module_ctx.modules.get(module_name).map(|m| {
@@ -102,6 +109,9 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         let is_public =
             |name: &str| -> bool { pub_names.as_ref().is_none_or(|s| s.contains(name)) };
 
+        self.assert_no_unlowered_direct_functions(program);
+        self.assert_no_unlowered_public_cps_functions(program, &is_public);
+
         let mut exports = Vec::new();
         let mut funs = Vec::new();
         for decl in program {
@@ -110,10 +120,13 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                     if !self.direct_functions.contains(&fb.name) {
                         continue;
                     }
-                    if is_public(&fb.name) {
-                        exports.push((fb.name.clone(), fb.params.len()));
+                    if fb.public || is_public(&fb.name) {
+                        exports.push((fb.name.clone(), self.export_arity(fb)));
                     }
                     funs.push(self.lower_fun_binding(fb));
+                    if self.needs_cps_adapter(fb) {
+                        funs.push(self.lower_cps_adapter(fb));
+                    }
                 }
                 MDecl::Val(v) => {
                     if !self.direct_values.contains(&v.name) {
@@ -217,13 +230,32 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         }
     }
 
+    fn assert_no_unlowered_public_cps_functions(
+        &self,
+        program: &MProgram,
+        is_public: &impl Fn(&str) -> bool,
+    ) {
+        for decl in program {
+            let MDecl::FunBinding(fb) = decl else {
+                continue;
+            };
+            if (fb.public || is_public(&fb.name))
+                && !self.direct_functions.contains(&fb.name)
+                && matches!(
+                    self.direct_shapes.get(&fb.name),
+                    Some(RuntimeFunctionShape::Cps(_))
+                )
+            {
+                self.unsupported(&format!(
+                    "CPS-shaped function '{}' is not lowered by selective-core yet",
+                    fb.name
+                ));
+            }
+        }
+    }
+
     fn can_lower_fun_binding(&mut self, fb: &MFunBinding) -> bool {
-        if !matches!(
-            self.direct_shapes.get(&fb.name),
-            Some(RuntimeFunctionShape::Pure)
-        ) || fb.guard.is_some()
-            || fb.params.iter().any(|p| !direct_param_supported(p))
-        {
+        if fb.guard.is_some() || fb.params.iter().any(|p| !direct_param_supported(p)) {
             return false;
         }
 
@@ -252,6 +284,42 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             arity: params.len(),
             body: CExpr::Fun(params, Box::new(body)),
         }
+    }
+
+    fn lower_cps_adapter(&self, fb: &MFunBinding) -> CFunDef {
+        let direct_params = lower_param_names(&fb.params);
+        let mut params = direct_params.clone();
+        params.push("_Evidence".to_string());
+        params.push("_ReturnK".to_string());
+        let direct_call = CExpr::Apply(
+            Box::new(CExpr::FunRef(fb.name.clone(), direct_params.len())),
+            direct_params.into_iter().map(CExpr::Var).collect(),
+        );
+        let body = CExpr::Apply(
+            Box::new(CExpr::Var("_ReturnK".to_string())),
+            vec![direct_call],
+        );
+        CFunDef {
+            name: fb.name.clone(),
+            arity: params.len(),
+            body: CExpr::Fun(params, Box::new(body)),
+        }
+    }
+
+    fn export_arity(&self, fb: &MFunBinding) -> usize {
+        if self.needs_cps_adapter(fb) {
+            fb.params.len() + 2
+        } else {
+            fb.params.len()
+        }
+    }
+
+    fn needs_cps_adapter(&self, fb: &MFunBinding) -> bool {
+        self.direct_functions.contains(&fb.name)
+            && matches!(
+                self.direct_shapes.get(&fb.name),
+                Some(RuntimeFunctionShape::Cps(_))
+            )
     }
 
     fn wrap_param_match(&self, pats: &[Pat], params: &[String], body: CExpr) -> CExpr {
@@ -429,6 +497,14 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                     args.iter().map(|arg| self.lower_atom(arg)).collect(),
                 )
             }
+            Some(CallShape::Cps {
+                name,
+                arity,
+                effects,
+            }) => self.unsupported(&format!(
+                "CPS-shaped call to '{}' with arity {} and effects {:?}",
+                name, arity, effects
+            )),
             None => self.unsupported_expr(&MExpr::App {
                 head: head.clone(),
                 args: args.to_vec(),
@@ -456,6 +532,9 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         if let Some(callable) = self.direct_function_callable(head) {
             return Some(CallShape::Direct(callable));
         }
+        if let Some(cps) = self.cps_function_shape(head) {
+            return Some(cps);
+        }
         if let Atom::Var { name, .. } = head
             && let Some(arity) = self.local_callable_arity_for_head(head)
         {
@@ -465,6 +544,31 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             });
         }
         None
+    }
+
+    fn cps_function_shape(&self, head: &Atom) -> Option<CallShape> {
+        let source = match head {
+            Atom::Var { source, .. } | Atom::QualifiedRef { source, .. } => *source,
+            _ => return None,
+        };
+        let resolved = self.resolution.get(&source)?;
+        let ResolvedCodegenKind::BeamFunction {
+            name,
+            arity,
+            effects,
+            ..
+        } = &resolved.kind
+        else {
+            return None;
+        };
+        if effects.is_empty() {
+            return None;
+        }
+        Some(CallShape::Cps {
+            name: name.clone(),
+            arity: *arity,
+            effects: effects.clone(),
+        })
     }
 
     fn apply_direct_callable(&mut self, callable: DirectCallable, args: &[Atom]) -> CExpr {
@@ -609,12 +713,12 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         else {
             return None;
         };
-        if !effects.is_empty() {
-            return None;
-        }
         let is_remote = erlang_mod
             .as_ref()
             .is_some_and(|module| module != &self.current_module);
+        if !effects.is_empty() && is_remote {
+            return None;
+        }
         if is_remote {
             return Some(DirectCallable {
                 module: erlang_mod.clone(),
@@ -628,12 +732,6 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             .as_ref()
             .is_some_and(|current| current == name);
         if !recursive_self && !self.direct_functions.contains(name) {
-            return None;
-        }
-        if let Some(shape) = self.direct_shapes.get(name)
-            && (!matches!(shape, RuntimeFunctionShape::Pure)
-                || shape.expanded_arity(*arity) != *arity)
-        {
             return None;
         }
         Some(DirectCallable {
@@ -888,22 +986,14 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                 })
             }
             MExpr::App { head, args, .. } => {
-                let direct_call_supported = self
-                    .supported_direct_call(head)
-                    .is_some_and(|callable| callable.arity == args.len())
-                    || self
-                        .direct_dict_constructor(head)
-                        .is_some_and(|callable| callable.arity == args.len())
-                    || self
-                        .direct_intrinsic(head)
-                        .is_some_and(|intrinsic| match intrinsic {
-                            IntrinsicId::PrintStdout | IntrinsicId::PrintStderr => args.len() == 1,
-                            IntrinsicId::Dbg => args.len() == 2,
-                            IntrinsicId::CatchPanic => false,
-                        })
-                    || self
-                        .local_callable_arity_for_head(head)
-                        .is_some_and(|arity| arity == args.len());
+                let direct_call_supported = match self.call_shape(head) {
+                    Some(CallShape::Intrinsic(intrinsic)) => {
+                        direct_intrinsic_arity(intrinsic).is_some_and(|arity| arity == args.len())
+                    }
+                    Some(CallShape::Direct(callable)) => callable.arity == args.len(),
+                    Some(CallShape::LocalCallable { arity, .. }) => arity == args.len(),
+                    Some(CallShape::Cps { .. }) | None => false,
+                };
                 direct_call_supported && args.iter().all(|arg| self.atom_is_direct_subset(arg))
             }
             MExpr::BinOp { left, right, .. } => {
@@ -1033,6 +1123,14 @@ fn direct_pat_supported(pat: &Pat) -> bool {
         Pat::Tuple { elements, .. } => elements.iter().all(direct_param_supported),
         Pat::Constructor { args, .. } => args.iter().all(direct_param_supported),
         _ => false,
+    }
+}
+
+fn direct_intrinsic_arity(intrinsic: IntrinsicId) -> Option<usize> {
+    match intrinsic {
+        IntrinsicId::PrintStdout | IntrinsicId::PrintStderr => Some(1),
+        IntrinsicId::Dbg => Some(2),
+        IntrinsicId::CatchPanic => None,
     }
 }
 

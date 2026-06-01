@@ -304,6 +304,53 @@ main () = Maybe.is_just (Just 1)
 }
 
 #[test]
+#[should_panic(expected = "CPS-shaped function 'do_log' is not lowered by selective-core yet")]
+fn selective_core_fails_loudly_for_cps_entry_function() {
+    let _ = emit_selective_core(
+        r#"
+effect Log {
+  fun log : String -> Unit
+}
+
+pub fun do_log : Unit -> Unit needs {Log}
+do_log () = log! "hello"
+
+fun main : Unit -> Unit
+main () = ()
+"#,
+    );
+}
+
+#[test]
+fn selective_core_lowers_effect_row_function_with_direct_body() {
+    let out = emit_selective_core(
+        r#"
+effect Log {
+  fun log : String -> Unit
+}
+
+pub fun may_log : Unit -> Int needs {Log}
+may_log () = 42
+
+pub fun use_may_log : Unit -> Int needs {Log}
+use_may_log () = may_log ()
+
+fun main : Unit -> Unit
+main () = ()
+"#,
+    );
+    assert!(out.contains("'may_log'/1"), "{out}");
+    assert!(out.contains("'may_log'/3"), "{out}");
+    assert!(out.contains("apply 'may_log'/1(_Arg0)"), "{out}");
+    assert!(out.contains("'use_may_log'/1"), "{out}");
+    assert!(out.contains("'use_may_log'/3"), "{out}");
+    assert!(out.contains("apply 'may_log'/1('unit')"), "{out}");
+    assert!(out.contains("apply 'use_may_log'/1(_Arg0)"), "{out}");
+    assert!(out.contains("apply _ReturnK"), "{out}");
+    assert!(out.contains("42"), "{out}");
+}
+
+#[test]
 #[should_panic(expected = "direct function 'apply_it' is outside the current direct subset")]
 fn selective_core_does_not_guess_shape_for_local_function_values() {
     let _ = emit_selective_core(

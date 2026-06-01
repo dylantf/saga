@@ -99,6 +99,23 @@ The first implementation slice is:
   - Current result: running `saga inspect src/Main.saga --stage selective-core`
     from the project root typechecks a user-module import and emits remote
     direct calls to `helper:inc/1` and `helper:pick/1`.
+- `examples/optimization/selective-uniform/11-effect-boundary.saga`
+  - Current result: `selective-core` fails loudly on the public effectful
+    `do_log` function because it is CPS-shaped and the CPS island path is not
+    implemented yet.
+- `examples/optimization/selective-uniform/12-effect-row-direct-body.saga`
+  - Current result: emits direct `may_log/1` / `use_may_log/1` plus CPS
+    adapters `may_log/3` / `use_may_log/3` for functions whose types declare
+    `needs {Log}` but whose implementations are operationally direct. Direct
+    code calls the direct entry (`may_log/1`), while CPS-compatible entries are
+    available for future island calls. The typechecker correctly warns when a
+    declared effect is entirely unused.
+- `examples/optimization/selective-uniform/imported-effect-row-project/`
+  - Current result: inspecting `src/Effects.saga` emits a public CPS adapter
+    export (`may_log/3`) plus the internal direct entry (`may_log/1`). Inspecting
+    `src/Main.saga` still fails loudly for the public cross-module effect-row
+    call because selective-core does not yet have cross-module direct-entry
+    metadata for imported effect-row functions.
 
 ## Active Design Decisions
 
@@ -136,6 +153,26 @@ The first implementation slice is:
 - Imported pure `BeamFunction`s may lower as remote direct calls when backend
   resolution reports an empty effect row. Local functions still require the
   direct subset/fixed-point classification before they can be called directly.
+- `CallShape` now has an explicit `Cps` case for resolved function heads with
+  non-empty effect rows. Public/source-`pub` CPS-shaped functions fail loudly in
+  `selective-core` only when their implementation body cannot lower direct;
+  private CPS helpers may be skipped until the selective CPS island path exists.
+- Function type shape and implementation body shape are separate. A function
+  whose annotation carries an effect row can still lower to a direct
+  implementation if its body is operationally direct. If its callable type is
+  CPS-shaped, `selective-core` emits a direct body plus a CPS adapter entry with
+  arity `N + 2`.
+- Within direct-lowered code, local direct implementations win over their
+  CPS-shaped callable type. This lets one direct-lowerable effect-row function
+  call another through the direct entry; CPS islands will use the adapter entry.
+- Source-level `pub` is honored by `lower_selective` even when `inspect` has a
+  partial/empty `ModuleCodegenInfo` for the current file. This keeps adapter
+  exports visible in project fixtures.
+- `inspect --stage selective-core` now fills imported user modules from
+  `compile_module_from_result` when the typechecker has their cached
+  program/result. The current direct lowerer does not consume imported body
+  shape yet, but the context now has the real elaborated/resolved module data
+  needed for cross-module entry metadata later.
 
 ## Next Session Checklist
 
@@ -260,6 +297,36 @@ The first implementation slice is:
 - Made `inspect` project-aware for file stages by passing the discovered
   `project.toml` root into `make_checker` and preserving `CodegenContext`
   codegen metadata for all typechecked modules, not only stdlib/current module.
+- Added the first explicit CPS boundary:
+  - resolved call heads with non-empty effect rows classify as `CallShape::Cps`;
+  - public/source-`pub` CPS-shaped functions whose bodies are not direct-lowerable
+    fail with a targeted TODO instead of disappearing from the emitted module;
+  - fixture `11-effect-boundary.saga` proves the current behavior.
+- Split type shape from implementation shape for direct-lowerable bodies:
+  - `can_lower_fun_binding` now asks whether the body fits the direct subset,
+    regardless of whether the declared function type has an effect row;
+  - fixture `12-effect-row-direct-body.saga` proves `needs {Log}` plus a pure
+    body emits direct Core Erlang while retaining the future CPS-call shape.
+- Added the first CPS adapter:
+  - direct-lowerable functions with CPS-shaped callable types emit a direct
+    implementation at arity `N`;
+  - the same name also gets an adapter at arity `N + 2`:
+    `fun(args..., _Evidence, _ReturnK) -> apply _ReturnK(apply f/N(args...))`;
+  - public exports use the adapter arity for those CPS-shaped callable types.
+- Updated direct call classification so a local direct implementation is chosen
+  before `CallShape::Cps`. Fixture `12-effect-row-direct-body.saga` now proves
+  `use_may_log/1` calls `may_log/1` directly while both functions still expose
+  `/3` adapters.
+- Tightened project-mode inspect plumbing:
+  - imported user modules are compiled into `CodegenContext` with real
+    elaborated ASTs and backend resolution when available, instead of always
+    being placeholder metadata-only modules;
+  - source-level `pub` functions in `lower_selective` export even when the
+    current file has no useful `ModuleCodegenInfo` in the inspect context.
+- Added `imported-effect-row-project` fixture to pin the next cross-module
+  effect-row question: the provider module emits its adapter, while a consumer
+  public wrapper still fails at the CPS boundary until imported direct-entry
+  metadata exists.
 - Verification:
   - `cargo run --bin saga -- inspect examples/optimization/selective-uniform/01-pure-direct.saga --stage selective-core`
     emits direct `add1/1`, `twice/1`, and `main/1`.
