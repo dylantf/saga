@@ -1,0 +1,29 @@
+# Realistic reader effect shape: install the handler around the whole loop
+# while the effect read happens inside a helper.
+#
+# This is intentionally the shape the first local reader pass does not solve.
+# It needs function-boundary specialization: `loop` runs under `config_7`,
+# calls `step`, and `step` contains the actual `get_config! ()`.
+
+val iterations = 100000
+
+effect Config {
+  fun get_config : Unit -> Int
+}
+
+handler config_7 for Config {
+  get_config () = resume 7
+}
+
+fun step : (x: Int) -> Int needs {Config}
+step x = x * 3 + get_config! ()
+
+fun loop : (n: Int) -> (acc: Int) -> Int needs {Config}
+loop n acc =
+  if n == 0 then acc
+  else loop (n - 1) (acc + step n)
+
+main () = {
+  let result = loop iterations 0 with config_7
+  dbg (show result)
+}

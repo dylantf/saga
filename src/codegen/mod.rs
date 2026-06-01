@@ -487,6 +487,7 @@ pub fn emit_module_via_new_path(
         .monadic_stats
         .is_enabled()
         .then(|| monadic_prog.clone());
+    let monadic_prog = monadic::reader_specialize::run(monadic_prog, &effect_info, &resolution_map);
     let optimized = monadic::effect_opt::run_with_context(
         monadic_prog,
         &handler_info,

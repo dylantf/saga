@@ -11,5 +11,6 @@
 pub mod effect_opt;
 pub mod ir;
 pub mod print;
+pub mod reader_specialize;
 pub mod stats;
 pub mod translate;

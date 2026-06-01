@@ -1,0 +1,17 @@
+# Explicit argument-passing baseline for the reader-config optimization spike.
+
+val iterations = 100000
+val config = 7
+
+fun step : (cfg: Int) -> (x: Int) -> Int
+step cfg x = x * 3 + cfg
+
+fun loop : (cfg: Int) -> (n: Int) -> (acc: Int) -> Int
+loop cfg n acc =
+  if n == 0 then acc
+  else loop cfg (n - 1) (acc + step cfg n)
+
+main () = {
+  let result = loop config iterations 0
+  dbg (show result)
+}
