@@ -1,8 +1,11 @@
 //! Experimental direct-first lowerer for the selective-uniform spike.
 //!
-//! This module is intentionally incomplete. It lowers only the closed,
-//! operationally-direct subset needed to inspect direct `/N` function shape.
-//! Effect operations, handlers, lambdas, general dictionaries, and partial
+//! This module is intentionally incomplete. It lowers the closed,
+//! operationally-direct subset needed to inspect direct `/N` function shape,
+//! plus the first tiny CPS island shape: a CPS-typed function body made of one
+//! effect operation `Yield`.
+//!
+//! Handlers, binds, resumes, lambdas, general dictionaries, and partial
 //! application should fail loudly here until they are deliberately
 //! reintroduced.
 
@@ -12,7 +15,9 @@ use crate::ast::{BinOp as AstBinOp, Lit, NodeId, Pat};
 use crate::codegen::CodegenContext;
 use crate::codegen::cerl::{CArm, CExpr, CFunDef, CLit, CModule, CPat};
 use crate::codegen::lower::util::{core_var, lower_lit_atom, mangle_ctor_atom};
-use crate::codegen::monadic::ir::{Atom, EffectInfo, MArm, MDecl, MExpr, MFunBinding, MProgram};
+use crate::codegen::monadic::ir::{
+    Atom, EffectInfo, EffectOpRef, MArm, MDecl, MExpr, MFunBinding, MProgram,
+};
 use crate::codegen::resolve::{ConstructorAtoms, ResolutionMap, ResolvedCodegenKind};
 use crate::codegen::runtime_shape::RuntimeFunctionShape;
 use crate::intrinsics::IntrinsicId;
@@ -43,6 +48,8 @@ struct DirectLowerer<'a, 'info> {
     direct_values: HashSet<String>,
     /// Functions whose implementation body fits the current direct subset.
     direct_body_functions: HashSet<String>,
+    /// Functions whose implementation body fits the current CPS island subset.
+    cps_body_functions: HashSet<String>,
     /// Emitted entries for functions in the module currently being lowered.
     local_function_entries: HashMap<String, FunctionEntryInfo>,
     /// Emitted entries discovered for already-compiled imported user modules.
@@ -69,11 +76,14 @@ impl FunctionEntryInfo {
         fb: &MFunBinding,
         callable_type_shape: RuntimeFunctionShape,
         has_direct_body: bool,
+        has_cps_body: bool,
     ) -> Self {
         let source_arity = fb.params.len();
         let direct_entry_arity = has_direct_body.then_some(source_arity);
-        let cps_adapter_entry_arity =
-            matches!(callable_type_shape, RuntimeFunctionShape::Cps(_)).then_some(source_arity + 2);
+        let cps_adapter_entry_arity = (has_direct_body || has_cps_body)
+            .then_some(())
+            .filter(|_| matches!(callable_type_shape, RuntimeFunctionShape::Cps(_)))
+            .map(|_| source_arity + 2);
         Self {
             source_arity,
             callable_type_shape,
@@ -132,6 +142,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             callable_type_shapes: HashMap::new(),
             direct_values: HashSet::new(),
             direct_body_functions: HashSet::new(),
+            cps_body_functions: HashSet::new(),
             local_function_entries: HashMap::new(),
             imported_function_entries: HashMap::new(),
             direct_candidate_function: None,
@@ -145,6 +156,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         self.classify_program(program);
         self.compute_imported_function_entries();
         self.compute_direct_body_functions(program);
+        self.compute_cps_body_functions(program);
         self.compute_local_function_entries(program);
 
         let pub_names: Option<HashSet<String>> =
@@ -166,15 +178,21 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         for decl in program {
             match decl {
                 MDecl::FunBinding(fb) => {
-                    if !self.direct_body_functions.contains(&fb.name) {
+                    if self.direct_body_functions.contains(&fb.name) {
+                        if fb.public || is_public(&fb.name) {
+                            exports.extend(self.export_entries(&fb.name));
+                        }
+                        funs.push(self.lower_fun_binding(fb));
+                        if self.needs_cps_adapter(&fb.name) {
+                            funs.push(self.lower_cps_adapter(fb));
+                        }
                         continue;
                     }
-                    if fb.public || is_public(&fb.name) {
-                        exports.extend(self.export_entries(&fb.name));
-                    }
-                    funs.push(self.lower_fun_binding(fb));
-                    if self.needs_cps_adapter(&fb.name) {
-                        funs.push(self.lower_cps_adapter(fb));
+                    if self.cps_body_functions.contains(&fb.name) {
+                        if fb.public || is_public(&fb.name) {
+                            exports.extend(self.export_entries(&fb.name));
+                        }
+                        funs.push(self.lower_cps_fun_binding(fb));
                     }
                 }
                 MDecl::Val(v) => {
@@ -207,6 +225,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         self.callable_type_shapes.clear();
         self.direct_values.clear();
         self.direct_body_functions.clear();
+        self.cps_body_functions.clear();
         for decl in program {
             match decl {
                 MDecl::FunBinding(fb) => {
@@ -261,6 +280,22 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         }
     }
 
+    fn compute_cps_body_functions(&mut self, program: &MProgram) {
+        for decl in program {
+            let MDecl::FunBinding(fb) = decl else {
+                continue;
+            };
+            if self.direct_body_functions.contains(&fb.name)
+                || self.cps_body_functions.contains(&fb.name)
+            {
+                continue;
+            }
+            if self.can_lower_cps_fun_binding(fb) {
+                self.cps_body_functions.insert(fb.name.clone());
+            }
+        }
+    }
+
     fn compute_local_function_entries(&mut self, program: &MProgram) {
         self.local_function_entries.clear();
         for decl in program {
@@ -281,6 +316,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                 fb,
                 callable_type_shape,
                 self.direct_body_functions.contains(&fb.name),
+                self.cps_body_functions.contains(&fb.name),
             );
             self.local_function_entries.insert(fb.name.clone(), entries);
         }
@@ -317,6 +353,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             imported.current_module = source_module_name.clone();
             imported.classify_program(&monadic_imported);
             imported.compute_direct_body_functions(&monadic_imported);
+            imported.compute_cps_body_functions(&monadic_imported);
             imported.compute_local_function_entries(&monadic_imported);
 
             let erlang_module = erlang_module_name(source_module_name);
@@ -364,7 +401,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                     .local_function_entries
                     .get(&fb.name)
                     .is_some_and(|entries| {
-                        entries.is_cps_typed() && entries.direct_entry_arity.is_none()
+                        entries.is_cps_typed() && entries.cps_adapter_entry_arity.is_none()
                     })
             {
                 self.unsupported(&format!(
@@ -389,6 +426,16 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         self.pop_scope();
         self.direct_candidate_function = prev_direct_candidate;
         supported
+    }
+
+    fn can_lower_cps_fun_binding(&self, fb: &MFunBinding) -> bool {
+        if fb.guard.is_some() || fb.params.iter().any(|p| !direct_param_supported(p)) {
+            return false;
+        }
+        matches!(
+            self.callable_type_shapes.get(&fb.name),
+            Some(RuntimeFunctionShape::Cps(_))
+        ) && self.expr_is_cps_island_subset(&fb.body)
     }
 
     fn lower_fun_binding(&mut self, fb: &MFunBinding) -> CFunDef {
@@ -423,6 +470,27 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             Box::new(CExpr::Var("_ReturnK".to_string())),
             vec![direct_call],
         );
+        CFunDef {
+            name: fb.name.clone(),
+            arity: params.len(),
+            body: CExpr::Fun(params, Box::new(body)),
+        }
+    }
+
+    fn lower_cps_fun_binding(&mut self, fb: &MFunBinding) -> CFunDef {
+        let direct_params = lower_param_names(&fb.params);
+        let mut params = direct_params.clone();
+        params.push("_Evidence".to_string());
+        params.push("_ReturnK".to_string());
+
+        self.push_scope();
+        for pat in &fb.params {
+            collect_pat_binders(pat, self.current_scope_mut());
+        }
+        let lowered_body = self.lower_cps_expr(&fb.body);
+        let body = self.wrap_param_match(&fb.params, &direct_params, lowered_body);
+        self.pop_scope();
+
         CFunDef {
             name: fb.name.clone(),
             arity: params.len(),
@@ -566,6 +634,34 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             | MExpr::LetFun { .. }
             | MExpr::HandlerValue { .. } => self.unsupported_expr(expr),
         }
+    }
+
+    fn lower_cps_expr(&mut self, expr: &MExpr) -> CExpr {
+        match expr {
+            MExpr::Yield { op, args, .. } => self.lower_cps_yield(op, args),
+            _ => self.unsupported_expr(expr),
+        }
+    }
+
+    fn lower_cps_yield(&mut self, op: &EffectOpRef, args: &[Atom]) -> CExpr {
+        let find_call = CExpr::Call(
+            "std_evidence_bridge".to_string(),
+            "find_evidence".to_string(),
+            vec![
+                CExpr::Var("_Evidence".to_string()),
+                CExpr::Lit(CLit::Atom(op.effect.clone())),
+            ],
+        );
+        let op_closure = CExpr::Call(
+            "erlang".to_string(),
+            "element".to_string(),
+            vec![CExpr::Lit(CLit::Int(op.op_index as i64)), find_call],
+        );
+
+        let mut apply_args: Vec<CExpr> = args.iter().map(|arg| self.lower_atom(arg)).collect();
+        apply_args.push(CExpr::Var("_Evidence".to_string()));
+        apply_args.push(CExpr::Var("_ReturnK".to_string()));
+        CExpr::Apply(Box::new(op_closure), apply_args)
     }
 
     fn lower_arm(&mut self, arm: &MArm) -> CArm {
@@ -1175,6 +1271,13 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             | MExpr::LetFun { .. }
             | MExpr::HandlerValue { .. } => false,
             MExpr::DictMethodAccess { dict, .. } => self.atom_is_direct_subset(dict),
+        }
+    }
+
+    fn expr_is_cps_island_subset(&self, expr: &MExpr) -> bool {
+        match expr {
+            MExpr::Yield { args, .. } => args.iter().all(|arg| self.atom_is_direct_subset(arg)),
+            _ => false,
         }
     }
 

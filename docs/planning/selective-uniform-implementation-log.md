@@ -100,9 +100,10 @@ The first implementation slice is:
     from the project root typechecks a user-module import and emits remote
     direct calls to `helper:inc/1` and `helper:pick/1`.
 - `examples/optimization/selective-uniform/11-effect-boundary.saga`
-  - Current result: `selective-core` fails loudly on the public effectful
-    `do_log` function because it is CPS-shaped and the CPS island path is not
-    implemented yet.
+  - Current result: emits the first tiny CPS island shape for public
+    `do_log/3`: source params plus `_Evidence` and `_ReturnK`, evidence lookup
+    through `std_evidence_bridge:find_evidence`, operation selection through
+    `erlang:element`, and a tail call to the selected operation closure.
 - `examples/optimization/selective-uniform/12-effect-row-direct-body.saga`
   - Current result: emits compiler-private direct entries
     `__saga_direct_may_log/1` / `__saga_direct_use_may_log/1` plus source-name
@@ -123,6 +124,11 @@ The first implementation slice is:
     cross-module BEAM check because `inspect` prints source module names for
     the provider module while resolved remote calls use runtime Erlang module
     atoms.
+- `examples/optimization/selective-uniform/13-simple-yield-cps-island.saga`
+  - Current result: pins the same minimal effect-operation island in a focused
+    fixture. `do_log/3` is emitted under the source name with no
+    `__saga_direct_do_log` entry because its body is operationally CPS, not
+    direct.
 
 ## Active Design Decisions
 
@@ -202,6 +208,11 @@ The first implementation slice is:
   `__saga_direct_may_log/1`. The source name is reserved for the CPS adapter
   ABI (`may_log/3`), which avoids making `may_log/1` look like a source-level
   public ABI.
+- The first CPS island subset exists, but it is intentionally tiny: a
+  CPS-typed function may lower directly to its source-name adapter entry only
+  when its body is a bare `MExpr::Yield` and all operation arguments are
+  direct-lowerable atoms. It has no `Bind`, `With`, `Resume`, handler runtime,
+  or nested sequencing yet.
 - `lower_selective` computes imported entry metadata for already-compiled
   non-stdlib user modules. Remote effect-row calls may lower to direct remote
   calls only when that imported metadata proves a direct entry exists; otherwise
@@ -216,12 +227,11 @@ The first implementation slice is:
 1. Read this log and `docs/planning/selective-uniform-effects.md`.
 2. Check `git status --short`.
 3. Decide the next vertical slice:
-   - move pure direct lowering earlier than monadic IR, or
-   - add the first explicit trait/dictionary direct slice.
-4. If taking the trait slice, start from the observed `show 42` shape:
-   `DictRef(__dict_Std_Base_Show_std_int_Std_Int_Int)` ->
-   `DictMethodAccess(..., Std.Base.Show[0])` -> method call.
-5. Keep updating focused fixtures/tests as each tiny subset starts working.
+   - add `Bind` around the new simple `Yield` island, or
+   - add the first handler/evidence installation slice so a trivial handled
+     operation can run, or
+   - start moving the proven direct path into the real build path.
+4. Keep updating focused fixtures/tests as each tiny subset starts working.
 
 ## Session Notes
 
@@ -338,7 +348,8 @@ The first implementation slice is:
   - resolved call heads with non-empty effect rows classify as `CallShape::Cps`;
   - public/source-`pub` CPS-shaped functions whose bodies are not direct-lowerable
     fail with a targeted TODO instead of disappearing from the emitted module;
-  - fixture `11-effect-boundary.saga` proves the current behavior.
+  - fixture `11-effect-boundary.saga` originally proved that boundary before
+    the simple-yield island existed.
 - Split type shape from implementation shape for direct-lowerable bodies:
   - `can_lower_fun_binding` now asks whether the body fits the direct subset,
     regardless of whether the declared function type has an effect row;
@@ -388,6 +399,21 @@ The first implementation slice is:
   remote resolution can report the adapter arity (`N + 2`), so selective entry
   matching checks imported metadata against both the resolved arity and the
   derived direct source arity.
+- Added the first tiny selective CPS island:
+  - `cps_body_functions` tracks CPS-typed bodies that match the current island
+    subset;
+  - the subset currently accepts only a bare `MExpr::Yield` with direct atom
+    arguments;
+  - `lower_cps_fun_binding` emits the source-name adapter ABI directly:
+    `fun(args..., _Evidence, _ReturnK) -> ...`;
+  - `lower_cps_yield` emits the open-row uniform evidence lookup through
+    `std_evidence_bridge:find_evidence`, selects the operation closure with
+    `erlang:element`, then tail-applies it to source args plus `_Evidence` and
+    `_ReturnK`.
+- Added `examples/optimization/selective-uniform/13-simple-yield-cps-island.saga`
+  and changed the simple-yield `selective_core` test from expected panic to
+  successful Core emission plus `erlc +from_core` compilation when Erlang is
+  available.
 - Verification:
   - `cargo run --bin saga -- inspect examples/optimization/selective-uniform/01-pure-direct.saga --stage selective-core`
     emits direct `add1/1`, `twice/1`, and `main/1`.
@@ -405,3 +431,6 @@ The first implementation slice is:
     - `cargo run --bin saga -- inspect src/Main.saga --stage selective-core`
       from `imported-effect-row-project` emits a direct remote call to
       `effects:__saga_direct_may_log/1`.
+    - `cargo run --bin saga --quiet -- inspect examples/optimization/selective-uniform/13-simple-yield-cps-island.saga --stage selective-core`
+      emits `do_log/3` with `_Evidence`, `_ReturnK`, `find_evidence`, and
+      `erlang:element`.

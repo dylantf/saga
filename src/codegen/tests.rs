@@ -155,6 +155,41 @@ fn assert_selective_core_eval_stdout_contains(src: &str, eval: &str, needle: &st
     );
 }
 
+fn assert_selective_core_compiles(src: &str) {
+    if !erlang_tool_available("erlc") {
+        return;
+    }
+
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    static COUNTER: AtomicUsize = AtomicUsize::new(0);
+
+    let core = emit_selective_core(src);
+    let id = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!(
+        "saga-selective-core-compile-{}-{id}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let core_path = dir.join("_script.core");
+    std::fs::write(&core_path, &core).unwrap();
+
+    let erlc = std::process::Command::new("erlc")
+        .arg("+from_core")
+        .arg("-o")
+        .arg(&dir)
+        .arg(&core_path)
+        .output()
+        .expect("erlc spawn");
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(
+        erlc.status.success(),
+        "erlc rejected selective-core output:\nstdout: {}\nstderr: {}\ncore: {}",
+        String::from_utf8_lossy(&erlc.stdout),
+        String::from_utf8_lossy(&erlc.stderr),
+        core
+    );
+}
+
 /// Assert that `emit(src)` contains `needle` as a substring.
 /// On failure, prints the full output for easy debugging.
 fn assert_contains(src: &str, needle: &str) {
@@ -366,10 +401,8 @@ main () = Maybe.is_just (Just 1)
 }
 
 #[test]
-#[should_panic(expected = "CPS-shaped function 'do_log' is not lowered by selective-core yet")]
-fn selective_core_fails_loudly_for_cps_entry_function() {
-    let _ = emit_selective_core(
-        r#"
+fn selective_core_lowers_simple_yield_cps_island() {
+    let src = r#"
 effect Log {
   fun log : String -> Unit
 }
@@ -379,8 +412,18 @@ do_log () = log! "hello"
 
 fun main : Unit -> Unit
 main () = ()
-"#,
+"#;
+    let out = emit_selective_core(src);
+    assert!(out.contains("module '_script' ['do_log'/3"), "{out}");
+    assert!(out.contains("'do_log'/3"), "{out}");
+    assert!(!out.contains("__saga_direct_do_log"), "{out}");
+    assert!(
+        out.contains("call 'std_evidence_bridge':'find_evidence'"),
+        "{out}"
     );
+    assert!(out.contains("call 'erlang':'element'"), "{out}");
+    assert!(out.contains("_Evidence, _ReturnK"), "{out}");
+    assert_selective_core_compiles(src);
 }
 
 #[test]
