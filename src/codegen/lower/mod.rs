@@ -39,7 +39,7 @@ mod effects;
 mod exprs;
 mod exprs_edge;
 mod pats;
-mod util;
+pub(crate) mod util;
 
 pub(super) use ctx::LowerCtx;
 

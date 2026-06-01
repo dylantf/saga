@@ -249,6 +249,12 @@ Possible roles:
 The experiment should explicitly test whether pure/direct functions can bypass
 monadic lowering entirely or lower through a direct subset.
 
+The next concrete spike is documented in
+`docs/planning/selective-uniform-direct-shape.md`. Its main correction is
+ordering: classify direct vs CPS function shape first, lower closed
+non-effectful calls directly second, and only then revisit reader/config handler
+specialization.
+
 ## Initial Spike Scope
 
 This is a timeboxed experiment, not a second full rewrite.

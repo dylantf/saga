@@ -3,6 +3,7 @@ pub mod cerl;
 pub mod external;
 pub mod handler_analysis;
 pub mod lower;
+pub mod lower_selective;
 pub mod monadic;
 pub mod native_effects;
 pub mod resolve;

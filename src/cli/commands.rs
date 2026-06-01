@@ -310,7 +310,8 @@ pub fn cmd_emit(file: &str) {
 /// Dump an intermediate IR stage for a single `.saga` file.
 ///
 /// Bypasses the codegen toggle for `anf` / `monadic` / `monadic-reader` /
-/// `monadic-reader-stats` / `monadic-opt` / `monadic-stats`: those
+/// `monadic-reader-stats` / `monadic-opt` / `monadic-stats` /
+/// `selective-core`: those
 /// always run the new path (uniform-effect-translation), regardless of the
 /// active `emit_module_with_context` block. `elaborated` and `core` go through
 /// shared code and therefore observe the toggle.
@@ -335,7 +336,12 @@ pub fn cmd_inspect(file: &str, stage: &str) {
             let anf_program = codegen::anf::normalize(elaborated, None);
             println!("{:#?}", anf_program);
         }
-        "monadic" | "monadic-reader" | "monadic-reader-stats" | "monadic-opt" | "monadic-stats" => {
+        "monadic"
+        | "monadic-reader"
+        | "monadic-reader-stats"
+        | "monadic-opt"
+        | "monadic-stats"
+        | "selective-core" => {
             // Build a minimal CodegenContext (std modules + this user module)
             // so resolve/effect-info match what the new path sees in production.
             let module_name =
@@ -416,6 +422,25 @@ pub fn cmd_inspect(file: &str, stage: &str) {
                 &imported_handler_decls,
             );
 
+            if stage == "selective-core" {
+                let constructor_atoms = codegen::resolve::build_constructor_atoms(
+                    &module_name,
+                    &elaborated,
+                    &codegen_info,
+                    &ctx.prelude_imports,
+                );
+                let cmod = codegen::lower_selective::lower_module(
+                    &module_name,
+                    &monadic_prog,
+                    &resolution_map,
+                    &constructor_atoms,
+                    &ctx,
+                    &effect_info,
+                );
+                println!("{}", codegen::cerl::print_module(&cmod));
+                return;
+            }
+
             if stage == "monadic-reader-stats" || stage == "monadic-stats" {
                 let before = monadic::stats::Stats::collect_program(&monadic_prog);
                 let before_reachable = monadic::stats::Stats::collect_reachable_program(
@@ -463,7 +488,7 @@ pub fn cmd_inspect(file: &str, stage: &str) {
         }
         other => {
             eprintln!(
-                "Unknown stage: '{}'. Expected one of: elaborated, anf, monadic, monadic-reader, monadic-reader-stats, monadic-opt, monadic-stats, core",
+                "Unknown stage: '{}'. Expected one of: elaborated, anf, monadic, monadic-reader, monadic-reader-stats, monadic-opt, monadic-stats, selective-core, core",
                 other
             );
             std::process::exit(1);

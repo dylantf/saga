@@ -19,7 +19,7 @@ pub(super) const VALUE_RESULT_TAG: &str = "__saga_value_result";
 /// Core Erlang variables must start with an uppercase letter or underscore.
 /// Source-lowercase names get capitalized; anything else (already-uppercase,
 /// digits, symbols) is prefixed with `_`.
-pub(super) fn core_var(name: &str) -> String {
+pub(crate) fn core_var(name: &str) -> String {
     let mut chars = name.chars();
     match chars.next() {
         None => "_".to_string(),
@@ -180,7 +180,7 @@ pub(super) fn lower_lit(lit: &Lit) -> CLit {
 /// become bare `CExpr::Lit`s; strings expand to a `CExpr::Binary` (Saga
 /// strings are byte-binary at runtime, not Erlang list-of-codepoints).
 /// Multiline strings get escape-processed before expansion.
-pub(super) fn lower_lit_atom(lit: &Lit) -> CExpr {
+pub(crate) fn lower_lit_atom(lit: &Lit) -> CExpr {
     match lit {
         Lit::String(s, kind) => {
             let resolved = if kind.is_multiline() {
@@ -195,7 +195,7 @@ pub(super) fn lower_lit_atom(lit: &Lit) -> CExpr {
 }
 
 /// Lower a string value to a `CExpr::Binary` of per-byte segments.
-pub(super) fn lower_string_to_binary(s: &str) -> CExpr {
+pub(crate) fn lower_string_to_binary(s: &str) -> CExpr {
     CExpr::Binary(s.as_bytes().iter().map(|&b| CBinSeg::Byte(b)).collect())
 }
 
@@ -282,7 +282,7 @@ pub(super) fn resolve_bit_segment_size(
 /// The new path does not yet thread an "origin module" (the old lowerer
 /// needs it for imported-handler bodies); when a sub-step requires that
 /// behavior, extend this helper rather than reaching into the old code.
-pub(super) fn mangle_ctor_atom(name: &str, ctors: &HashMap<String, String>) -> String {
+pub(crate) fn mangle_ctor_atom(name: &str, ctors: &HashMap<String, String>) -> String {
     if matches!(name, "Ok" | "Err")
         && let Some(atom) = beam_ctor_override(name)
     {
