@@ -268,7 +268,21 @@ pub fn cmd_emit(file: &str) {
         eprintln!("Error reading {}: {}", file, e);
         std::process::exit(1);
     });
-    let mut checker = make_checker(None);
+    let project_root = super::find_project_root();
+    let mut checker = make_checker(project_root.clone());
+    if let Some(root) = &project_root {
+        let config = ProjectConfig::load(root);
+        if let Err(e) = config.validate() {
+            eprintln!("Error in project.toml: {}", e);
+            std::process::exit(1);
+        }
+        if let Some(deps) = &config.deps
+            && let Err(e) = saga::project_config::resolve_deps(&mut checker, root, deps)
+        {
+            eprintln!("Error resolving dependencies: {}", e);
+            std::process::exit(1);
+        }
+    }
     let (program, _) = parse_and_typecheck(&source, file, &mut checker);
     let result = checker.to_result();
 
@@ -321,7 +335,21 @@ pub fn cmd_inspect(file: &str, stage: &str) {
         eprintln!("Error reading {}: {}", file, e);
         std::process::exit(1);
     });
-    let mut checker = make_checker(None);
+    let project_root = super::find_project_root();
+    let mut checker = make_checker(project_root.clone());
+    if let Some(root) = &project_root {
+        let config = ProjectConfig::load(root);
+        if let Err(e) = config.validate() {
+            eprintln!("Error in project.toml: {}", e);
+            std::process::exit(1);
+        }
+        if let Some(deps) = &config.deps
+            && let Err(e) = saga::project_config::resolve_deps(&mut checker, root, deps)
+        {
+            eprintln!("Error resolving dependencies: {}", e);
+            std::process::exit(1);
+        }
+    }
     let (program, _) = parse_and_typecheck(&source, file, &mut checker);
     let result = checker.to_result();
 
@@ -341,10 +369,24 @@ pub fn cmd_inspect(file: &str, stage: &str) {
             let module_name =
                 declared_module_name(&program).unwrap_or_else(|| "_script".to_string());
             let mut compiled_modules = compile_std_modules(&result);
+            for (name, info) in result.codegen_info() {
+                compiled_modules
+                    .entry(name.clone())
+                    .or_insert_with(|| codegen::CompiledModule {
+                        codegen_info: info.clone(),
+                        elaborated: Vec::new(),
+                        resolution: codegen::resolve::ResolutionMap::new(),
+                        front_resolution: Default::default(),
+                    });
+            }
             compiled_modules.insert(
                 module_name.clone(),
                 codegen::CompiledModule {
-                    codegen_info: Default::default(),
+                    codegen_info: result
+                        .codegen_info()
+                        .get(&module_name)
+                        .cloned()
+                        .unwrap_or_default(),
                     elaborated: elaborated.clone(),
                     resolution: codegen::resolve::ResolutionMap::new(),
                     front_resolution: result.resolution.clone(),

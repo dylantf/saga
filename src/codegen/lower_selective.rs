@@ -50,6 +50,13 @@ struct DirectCallable {
     arity: usize,
 }
 
+#[derive(Clone)]
+enum CallShape {
+    Intrinsic(IntrinsicId),
+    Direct(DirectCallable),
+    LocalCallable { name: String, arity: usize },
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum LocalValueShape {
     PureCallable { arity: usize },
@@ -409,52 +416,55 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
     }
 
     fn lower_app(&mut self, head: &Atom, args: &[Atom]) -> CExpr {
+        match self.call_shape(head) {
+            Some(CallShape::Intrinsic(intrinsic)) => self.lower_intrinsic_app(intrinsic, args),
+            Some(CallShape::Direct(callable)) => {
+                self.assert_app_arity(&callable.name, args.len(), callable.arity);
+                self.apply_direct_callable(callable, args)
+            }
+            Some(CallShape::LocalCallable { name, arity }) => {
+                self.assert_app_arity(&name, args.len(), arity);
+                CExpr::Apply(
+                    Box::new(CExpr::Var(core_var(&name))),
+                    args.iter().map(|arg| self.lower_atom(arg)).collect(),
+                )
+            }
+            None => self.unsupported_expr(&MExpr::App {
+                head: head.clone(),
+                args: args.to_vec(),
+                source: NodeId::fresh(),
+            }),
+        }
+    }
+
+    fn assert_app_arity(&self, name: &str, actual: usize, expected: usize) {
+        if actual != expected {
+            self.unsupported(&format!(
+                "call to '{}' with {} args; expected {}",
+                name, actual, expected
+            ));
+        }
+    }
+
+    fn call_shape(&self, head: &Atom) -> Option<CallShape> {
         if let Some(intrinsic) = self.direct_intrinsic(head) {
-            return self.lower_intrinsic_app(intrinsic, args);
+            return Some(CallShape::Intrinsic(intrinsic));
         }
-        if let Some(dict) = self.direct_dict_constructor(head) {
-            if args.len() != dict.arity {
-                self.unsupported(&format!(
-                    "partial/oversaturated dict constructor '{}' with {} args; expected {}",
-                    dict.name,
-                    args.len(),
-                    dict.arity
-                ));
-            }
-            return self.apply_direct_callable(dict, args);
+        if let Some(callable) = self.direct_dict_constructor(head) {
+            return Some(CallShape::Direct(callable));
         }
-        if let Some(callable) = self.same_module_direct_callable(head) {
-            if args.len() != callable.arity {
-                self.unsupported(&format!(
-                    "partial/oversaturated direct call to '{}' with {} args; expected {}",
-                    callable.name,
-                    args.len(),
-                    callable.arity
-                ));
-            }
-            return self.apply_direct_callable(callable, args);
+        if let Some(callable) = self.direct_function_callable(head) {
+            return Some(CallShape::Direct(callable));
         }
         if let Atom::Var { name, .. } = head
             && let Some(arity) = self.local_callable_arity_for_head(head)
         {
-            if args.len() != arity {
-                self.unsupported(&format!(
-                    "local callable '{}' with {} args; expected {}",
-                    name.name,
-                    args.len(),
-                    arity
-                ));
-            }
-            return CExpr::Apply(
-                Box::new(CExpr::Var(core_var(&name.name))),
-                args.iter().map(|arg| self.lower_atom(arg)).collect(),
-            );
+            return Some(CallShape::LocalCallable {
+                name: name.name.clone(),
+                arity,
+            });
         }
-        self.unsupported_expr(&MExpr::App {
-            head: head.clone(),
-            args: args.to_vec(),
-            source: NodeId::fresh(),
-        })
+        None
     }
 
     fn apply_direct_callable(&mut self, callable: DirectCallable, args: &[Atom]) -> CExpr {
@@ -584,7 +594,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         })
     }
 
-    fn same_module_direct_callable(&self, head: &Atom) -> Option<DirectCallable> {
+    fn direct_function_callable(&self, head: &Atom) -> Option<DirectCallable> {
         let source = match head {
             Atom::Var { source, .. } | Atom::QualifiedRef { source, .. } => *source,
             _ => return None,
@@ -602,20 +612,28 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         if !effects.is_empty() {
             return None;
         }
-        if erlang_mod
+        let is_remote = erlang_mod
             .as_ref()
-            .is_some_and(|module| module != &self.current_module)
+            .is_some_and(|module| module != &self.current_module);
+        if is_remote {
+            return Some(DirectCallable {
+                module: erlang_mod.clone(),
+                name: name.clone(),
+                arity: *arity,
+            });
+        }
+
+        let recursive_self = self
+            .supporting_fun
+            .as_ref()
+            .is_some_and(|current| current == name);
+        if !recursive_self && !self.direct_functions.contains(name) {
+            return None;
+        }
+        if let Some(shape) = self.direct_shapes.get(name)
+            && (!matches!(shape, RuntimeFunctionShape::Pure)
+                || shape.expanded_arity(*arity) != *arity)
         {
-            return None;
-        }
-        if !self.direct_functions.contains(name) {
-            return None;
-        }
-        let shape = self.direct_shapes.get(name)?;
-        if !matches!(shape, RuntimeFunctionShape::Pure) {
-            return None;
-        }
-        if shape.expanded_arity(*arity) != *arity {
             return None;
         }
         Some(DirectCallable {
@@ -664,16 +682,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
     }
 
     fn supported_direct_call(&self, head: &Atom) -> Option<DirectCallable> {
-        let callable = self.same_module_function_ref(head)?;
-        let recursive_self = self
-            .supporting_fun
-            .as_ref()
-            .is_some_and(|current| current == &callable.name);
-        if recursive_self || self.direct_functions.contains(&callable.name) {
-            Some(callable)
-        } else {
-            None
-        }
+        self.direct_function_callable(head)
     }
 
     fn lower_atom(&mut self, atom: &Atom) -> CExpr {
@@ -681,7 +690,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             Atom::Var { name, source } => {
                 if self.is_local(&name.name) {
                     CExpr::Var(core_var(&name.name))
-                } else if let Some(callable) = self.same_module_direct_callable(atom) {
+                } else if let Some(callable) = self.same_module_function_ref(atom) {
                     let resolved = self
                         .resolution
                         .get(source)

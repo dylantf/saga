@@ -1,0 +1,4 @@
+import Std.Maybe as Maybe
+
+fun main : Unit -> Bool
+main () = Maybe.is_just (Just 1)

@@ -91,6 +91,14 @@ The first implementation slice is:
 - `examples/optimization/selective-uniform/09-constructor-case.saga`
   - Current result: emits direct Core Erlang for local ADT construction and
     constructor-pattern case arms.
+- `examples/optimization/selective-uniform/10-imported-pure.saga`
+  - Current result: emits a remote direct call to imported pure stdlib
+    functions such as `Std.Maybe.is_just`.
+- `examples/optimization/selective-uniform/imported-pure-project/`
+  - Created with `saga new` and stripped of its nested `.git`.
+  - Current result: running `saga inspect src/Main.saga --stage selective-core`
+    from the project root typechecks a user-module import and emits remote
+    direct calls to `helper:inc/1` and `helper:pick/1`.
 
 ## Active Design Decisions
 
@@ -122,6 +130,12 @@ The first implementation slice is:
 - Ordinary local function-valued variables are deliberately not callable in the
   direct subset yet. They need explicit function-value shape metadata instead
   of arity guessing.
+- Direct app lowering now goes through a single `CallShape` classifier in
+  `lower_selective`: intrinsic, direct BEAM callable, or tagged local callable.
+  Adding new app shapes should go through that classifier.
+- Imported pure `BeamFunction`s may lower as remote direct calls when backend
+  resolution reports an empty effect row. Local functions still require the
+  direct subset/fixed-point classification before they can be called directly.
 
 ## Next Session Checklist
 
@@ -236,6 +250,16 @@ The first implementation slice is:
 - Added `examples/optimization/selective-uniform/09-constructor-case.saga` and
   a focused test for direct ADT construction plus constructor-pattern case
   matching.
+- Centralized `lower_selective` app dispatch behind `CallShape` and routed
+  intrinsics, direct BEAM calls, and tagged local callables through it.
+- Added imported pure direct calls:
+  - stdlib fixture `10-imported-pure.saga` lowers `Maybe.is_just (Just 1)` to
+    `call 'std_maybe':'is_just'(...)`;
+  - generated project fixture `imported-pure-project` lowers cross-user-module
+    calls to `helper:inc/1` and `helper:pick/1`.
+- Made `inspect` project-aware for file stages by passing the discovered
+  `project.toml` root into `make_checker` and preserving `CodegenContext`
+  codegen metadata for all typechecked modules, not only stdlib/current module.
 - Verification:
   - `cargo run --bin saga -- inspect examples/optimization/selective-uniform/01-pure-direct.saga --stage selective-core`
     emits direct `add1/1`, `twice/1`, and `main/1`.

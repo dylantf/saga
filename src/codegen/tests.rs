@@ -288,6 +288,22 @@ main () = score (Second 41)
 }
 
 #[test]
+fn selective_core_lowers_imported_pure_direct_call() {
+    let out = emit_selective_core(
+        r#"
+import Std.Maybe as Maybe
+
+fun main : Unit -> Bool
+main () = Maybe.is_just (Just 1)
+"#,
+    );
+    assert!(out.contains("'main'/1"), "{out}");
+    assert!(out.contains("{'std_maybe_Just', 1}"), "{out}");
+    assert!(out.contains("call 'std_maybe':'is_just'"), "{out}");
+    assert!(!out.contains("apply 'is_just'/1"), "{out}");
+}
+
+#[test]
 #[should_panic(expected = "direct function 'apply_it' is outside the current direct subset")]
 fn selective_core_does_not_guess_shape_for_local_function_values() {
     let _ = emit_selective_core(
