@@ -1409,31 +1409,42 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
     }
 
     fn known_dict_value_for_expr(&mut self, expr: &MExpr) -> Option<KnownDictValue> {
-        let MExpr::App { head, args, .. } = expr else {
-            return None;
-        };
-        let Atom::DictRef { name, .. } = head else {
-            return None;
-        };
-        let constructor = self.local_dict_constructors.get(name)?.clone();
-        if constructor.dict_params.len() != args.len()
-            || args.iter().any(|arg| !self.atom_is_direct_subset(arg))
-        {
-            return None;
-        }
+        match expr {
+            MExpr::App { head, args, .. } => {
+                let Atom::DictRef { name, .. } = head else {
+                    return None;
+                };
+                let constructor = self.local_dict_constructors.get(name)?.clone();
+                if constructor.dict_params.len() != args.len()
+                    || args.iter().any(|arg| !self.atom_is_direct_subset(arg))
+                {
+                    return None;
+                }
 
-        let mut methods = Vec::with_capacity(constructor.methods.len());
-        for method in &constructor.methods {
-            let MExpr::Pure(atom @ Atom::Lambda { .. }) = method else {
-                return None;
-            };
-            methods.push(atom.clone());
+                let mut methods = Vec::with_capacity(constructor.methods.len());
+                for method in &constructor.methods {
+                    let MExpr::Pure(atom @ Atom::Lambda { .. }) = method else {
+                        return None;
+                    };
+                    methods.push(atom.clone());
+                }
+                Some(KnownDictValue {
+                    dict_params: constructor.dict_params.clone(),
+                    dict_args: args.to_vec(),
+                    methods,
+                })
+            }
+            MExpr::If {
+                then_branch,
+                else_branch,
+                ..
+            } => {
+                let then_dict = self.known_dict_value_for_expr(then_branch)?;
+                let else_dict = self.known_dict_value_for_expr(else_branch)?;
+                (then_dict == else_dict).then_some(then_dict)
+            }
+            _ => None,
         }
-        Some(KnownDictValue {
-            dict_params: constructor.dict_params.clone(),
-            dict_args: args.to_vec(),
-            methods,
-        })
     }
 
     fn known_cps_lambda_for_expr(&self, expr: &MExpr) -> Option<KnownCpsLambda> {
@@ -1911,5 +1922,142 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             "selective-uniform direct lowerer TODO: unsupported Atom {:?}",
             std::mem::discriminant(atom)
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::token::Span;
+
+    fn test_span() -> Span {
+        Span { start: 0, end: 0 }
+    }
+
+    fn test_node() -> NodeId {
+        NodeId::fresh()
+    }
+
+    fn test_effect_info<'a>(
+        effect_calls: &'a HashMap<NodeId, crate::typechecker::ResolvedEffectOp>,
+        handler_arms: &'a HashMap<NodeId, crate::typechecker::ResolvedEffectOp>,
+        constructors: &'a HashMap<NodeId, String>,
+        fun_effects: &'a HashMap<String, HashSet<String>>,
+        let_effect_bindings: &'a HashMap<String, Vec<String>>,
+        type_at_node: &'a HashMap<NodeId, Type>,
+        records: &'a HashMap<String, crate::typechecker::RecordInfo>,
+        traits: &'a HashMap<String, crate::typechecker::TraitInfo>,
+        effect_ops: &'a HashMap<String, Vec<String>>,
+        handler_effects: &'a HashMap<String, Vec<String>>,
+        handler_refs: &'a HashMap<NodeId, crate::typechecker::ResolvedValue>,
+        let_handler_effects: &'a HashMap<NodeId, Vec<String>>,
+    ) -> EffectInfo<'a> {
+        EffectInfo {
+            effect_calls,
+            handler_arms,
+            constructors,
+            fun_effects,
+            let_effect_bindings,
+            type_at_node,
+            records,
+            traits,
+            effect_ops,
+            handler_effects,
+            handler_refs,
+            let_handler_effects,
+        }
+    }
+
+    fn dict_app(name: &str) -> MExpr {
+        MExpr::App {
+            head: Atom::DictRef {
+                name: name.to_string(),
+                source: test_node(),
+            },
+            args: vec![],
+            source: test_node(),
+        }
+    }
+
+    #[test]
+    fn known_dict_values_compose_through_identical_if_branches() {
+        let effect_calls = HashMap::new();
+        let handler_arms = HashMap::new();
+        let constructors = HashMap::new();
+        let fun_effects = HashMap::new();
+        let let_effect_bindings = HashMap::new();
+        let type_at_node = HashMap::new();
+        let records = HashMap::new();
+        let traits = HashMap::new();
+        let effect_ops = HashMap::new();
+        let handler_effects = HashMap::new();
+        let handler_refs = HashMap::new();
+        let let_handler_effects = HashMap::new();
+        let effect_info = test_effect_info(
+            &effect_calls,
+            &handler_arms,
+            &constructors,
+            &fun_effects,
+            &let_effect_bindings,
+            &type_at_node,
+            &records,
+            &traits,
+            &effect_ops,
+            &handler_effects,
+            &handler_refs,
+            &let_handler_effects,
+        );
+        let resolution = ResolutionMap::new();
+        let ctors = ConstructorAtoms::new();
+        let module_ctx = CodegenContext::default();
+        let handler_info = HandlerAnalysis::default();
+        let mut lowerer = DirectLowerer::new(
+            &resolution,
+            &ctors,
+            &module_ctx,
+            &handler_info,
+            &effect_info,
+            LoweringOptions::default(),
+        );
+
+        let dict_name = "__dict_Readable_Std_Int_Int";
+        let program = vec![MDecl::DictConstructor(MDictConstructor {
+            id: test_node(),
+            name: dict_name.to_string(),
+            dict_params: vec![],
+            methods: vec![MExpr::Pure(Atom::Lambda {
+                params: vec![Pat::Wildcard {
+                    id: test_node(),
+                    span: test_span(),
+                }],
+                body: Box::new(MExpr::Pure(Atom::Lit {
+                    value: Lit::Int("41".to_string(), 41),
+                    source: test_node(),
+                })),
+                source: test_node(),
+            })],
+            method_effects: vec![vec![]],
+            method_open_rows: vec![false],
+            impl_effects: vec![],
+            span: test_span(),
+        })];
+        lowerer.classify_program(&program);
+
+        let expr = MExpr::If {
+            cond: Atom::Lit {
+                value: Lit::Bool(true),
+                source: test_node(),
+            },
+            then_branch: Box::new(dict_app(dict_name)),
+            else_branch: Box::new(dict_app(dict_name)),
+            source: test_node(),
+        };
+
+        let known = lowerer
+            .known_dict_value_for_expr(&expr)
+            .expect("identical dict branches should preserve the known dict fact");
+        assert_eq!(known.dict_params, Vec::<String>::new());
+        assert_eq!(known.dict_args, Vec::<Atom>::new());
+        assert_eq!(known.methods.len(), 1);
     }
 }

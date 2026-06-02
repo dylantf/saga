@@ -459,6 +459,10 @@ main () = ()
         !out.contains("let <___anf_v1> =\n                fun"),
         "{out}"
     );
+    assert!(
+        !out.contains("call 'std_evidence_bridge':'insert_canonical'"),
+        "{out}"
+    );
     assert_selective_core_eval_stdout_contains(
         src,
         "io:format(\"~p~n\", ['_script':run_generic_trait_method(unit)]), init:stop().",

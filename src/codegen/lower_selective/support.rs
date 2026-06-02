@@ -46,14 +46,14 @@ pub(super) struct HofCallbackParam {
     pub(super) source_arity: usize,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub(super) struct KnownCpsLambda {
     pub(super) dict_bindings: Vec<(String, Atom)>,
     pub(super) params: Vec<Pat>,
     pub(super) body: Box<MExpr>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub(super) struct KnownDictValue {
     pub(super) dict_params: Vec<String>,
     pub(super) dict_args: Vec<Atom>,

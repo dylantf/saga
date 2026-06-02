@@ -1141,3 +1141,30 @@ boundaries exist.
     otherwise used as a value, the fallback closure is still emitted;
   - the parameterized `Box a` canary no longer emits direct-path method-closure
     lets before immediately inlining through the known method call.
+- Extended parameterized trait facts into handler-install elision:
+  - the elision dry-run now records known dict values and known method lambdas
+    for supported binds, not only during final lowering;
+  - local static-handler helper elision aliases known dict arguments onto the
+    helper's parameters, matching the final static-handler specialization path;
+  - this lets the generic `Box a -> Int` trait canary prove that a static
+    handler install is unnecessary on the optimized path, because the concrete
+    inner `read!` operation is visible during the elision proof;
+  - fallback dict constructor definitions may still mention `find_evidence` and
+    the effect name. The optimized handler body avoids `insert_canonical`;
+    deleting unused fallback definitions remains a separate cleanup.
+- Added the narrow branch-shaped known-dict canary:
+  - `known_dict_value_for_expr` now composes through `if` only when both branches
+    produce the same known dict value;
+  - this covers the internal shape `let d = if cond then int_dict else int_dict`
+    without introducing a runtime conditional-dict representation;
+  - different branch dictionaries still fall back to the normal dynamic/CPS
+    path until the fallback ABI is wired.
+- Imported concrete dict specialization was intentionally left for the ABI
+  cutover:
+  - existing imported effectful trait coverage already proves remote dict
+    constructors are exported and callable in selective Core;
+  - specializing through a remote concrete dict would require importing or
+    re-translating the remote dict constructor body for selective facts;
+  - that overlaps the unresolved module-boundary fallback ABI, especially for
+    stdlib dictionaries, so it should be done after the monadic fallback and
+    public adapter story are connected.

@@ -1727,6 +1727,8 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             MExpr::Bind {
                 var, value, body, ..
             } => {
+                let known_lambda = self.known_cps_lambda_for_expr(value);
+                let known_dict = self.known_dict_value_for_expr(value);
                 let value_supported = self
                     .expr_can_run_with_elided_static_handler(value, handled_effects)
                     || self.cps_bind_value_expr_is_supported(value);
@@ -1743,11 +1745,24 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                     self.current_shape_scope_mut()
                         .insert(var.name.clone(), shape);
                 }
+                if let Some(lambda) = known_lambda {
+                    self.current_known_cps_lambda_scope_mut()
+                        .insert(var.name.clone(), lambda);
+                }
+                if let Some(dict) = known_dict {
+                    self.current_known_dict_value_scope_mut()
+                        .insert(var.name.clone(), dict);
+                }
                 let supported = self.expr_can_run_with_elided_static_handler(body, handled_effects);
                 self.pop_scope();
                 supported
             }
             MExpr::App { head, args, .. } => {
+                if let Atom::Var { name, .. } = head
+                    && self.known_cps_lambda(&name.name).is_some()
+                {
+                    return args.iter().all(|arg| self.atom_is_direct_subset(arg));
+                }
                 if self.cps_call_effects_intersect_elided_static_handler(head, handled_effects) {
                     self.can_static_handler_specialize_local_cps_call_without_evidence(
                         head,
@@ -1888,10 +1903,14 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         if fb.guard.is_some() || fb.params.iter().any(|p| !direct_param_supported(p)) {
             return false;
         }
+        let known_dict_aliases = self.known_dict_aliases_for_params(&fb.params, args);
 
         self.static_handler_inline_stack.push(local_name);
         self.push_scope();
         self.bind_fun_param_locals(&fb);
+        for (name, dict) in known_dict_aliases {
+            self.current_known_dict_value_scope_mut().insert(name, dict);
+        }
         let supported = self.expr_can_run_with_elided_static_handler(&fb.body, handled_effects);
         self.pop_scope();
         self.static_handler_inline_stack.pop();
