@@ -67,7 +67,7 @@ These are expression/value shapes that can produce a callable value.
 | `if` returning CPS callables | `let f = if c then read_a else read_b` | Supported | Materialize Core `case` whose arms return adapter closures; result is `RuntimeCpsCallable` | Keep |
 | `case` returning CPS callables | `let f = case c { True -> read_a; False -> read_b }` | Supported | Same as `if`, with direct patterns/guards only | Keep |
 | Mixed CPS and pure branch/case | `if c then read_value else pure_value` | Supported via CPS fallback | Common representation is CPS; pure branch uses explicit pure-to-CPS adapter | Later direct-specialize when branch is statically pure |
-| Pure function where effectful callback is expected | `apply_eff pure_value` | Supported via CPS fallback | First prefer direct HOF specialization when the whole call is net pure; otherwise use explicit pure-to-CPS adapter | Add direct-specialization pass later |
+| Pure function where effectful callback is expected | `apply_eff pure_value` | Supported with local direct HOF specialization when the callee body becomes direct under pure callbacks; CPS fallback remains | First prefer direct HOF specialization when the whole call is net pure; otherwise use explicit pure-to-CPS adapter | Broaden to aliases/imported HOFs later |
 | Handled callback where effectful callback is expected | `apply_eff (fun x -> leaky x with h)` | Open/risk | If exposed callback type is pure, use direct HOF specialization or pure-to-CPS adapter fallback | Add fixture with local handler |
 | CPS lambda value | `let f = fun () -> read! ()` | Supported in CPS islands | Materialize runtime closure with user args plus evidence/continuation | Keep |
 | Lambda-headed CPS call | `(fun x -> read! ()) ()` | Supported in CPS islands | Materialize/apply runtime CPS closure; no source-arity guessing | Keep |
@@ -95,7 +95,7 @@ These are places that consume a callable value or call shape.
 | CPS function value as argument | `apply_eff read_value` / aliased variant | Supported for named CPS values | Materialize CPS adapter closure as argument | Keep |
 | Runtime CPS closure as argument | `apply_outer f` | Supported for direct alias/arg cases | Pass Core variable; callee applies with `Ev,K` | Keep |
 | Pure callable as direct callback argument | `apply_it inc` | Supported | Direct fun value, source arity | Keep |
-| Pure callable as CPS callback argument | `apply_eff inc` | Supported via CPS fallback | Prefer direct HOF specialization if the selected HOF call can stay pure; otherwise explicit pure-to-CPS adapter | Add direct-specialization pass later |
+| Pure callable as CPS callback argument | `apply_eff inc` | Supported with local direct HOF specialization for statically pure callback args; CPS fallback remains | Prefer direct HOF specialization if the selected HOF call can stay pure; otherwise explicit pure-to-CPS adapter | Broaden to aliases/imported HOFs later |
 | Effectful argument inside effectful outer call | `outer (read! ())` or `outer (decode x)` | Partially represented by monadic `Bind` sequencing | Old lowerer had `effectful_arg_idxs` chaining; selective should rely on monadic sequencing inside islands | Add fixtures when app args become non-trivial |
 | Effectful callback argument inside effectful outer call | `outer read_value (effect_arg!)` | Open | Need both adapter closure and effectful-arg sequencing | Later |
 | Return continuation value | final result of CPS island | Supported for direct atoms; CPS callable result supported for `if`/`case` bound values | Returning CPS callable out of island needs representation policy | Add guardrail |
@@ -166,12 +166,14 @@ static.
 ## Suggested Next Chunks
 
 1. **Direct HOF specialization for net-pure callbacks**
-   - The pure-to-CPS fallback now handles `apply_eff pure_value` correctly.
-   - Add a handled-callback fixture whose exposed callback type is pure.
-   - Implement direct HOF specialization so statically net-pure callback calls
-     can avoid the fallback wrapper and CPS callback ABI.
-   - Keep the fallback wrapper for dynamic/mixed cases where the selected ABI is
-     still CPS.
+   - Local named CPS HOFs whose body becomes direct when callback params are
+     treated as pure now get a private `__saga_direct_hof_*` entry.
+   - Calls like `apply_eff pure_value` select that entry when the callback args
+     are statically pure, avoiding the pure-to-CPS wrapper and CPS callback ABI.
+   - The pure-to-CPS fallback still handles dynamic/mixed cases where the
+     selected ABI is CPS.
+   - Next: broaden to aliases/imported HOFs and handled callbacks whose exposed
+     type is pure.
 
 2. **Effectful trait method calls and values**
    - Local and imported dict constructors plus effectful method calls/values

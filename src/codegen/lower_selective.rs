@@ -130,6 +130,9 @@ struct DirectLowerer<'a, 'info> {
     /// Local dictionary constructors that the selective lowerer can emit as
     /// direct tuple-producing functions.
     local_dict_constructor_arities: HashMap<String, usize>,
+    /// Private direct specializations of CPS-typed higher-order functions when
+    /// selected callback parameters are statically pure at a call site.
+    local_hof_direct_specializations: HashMap<String, HofDirectSpecialization>,
     /// Emitted entries discovered for already-compiled imported user modules.
     imported_function_entries: HashMap<(String, String), FunctionEntryInfo>,
     /// Function currently being tested as a direct-body candidate.
@@ -162,6 +165,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             function_plans: HashMap::new(),
             local_function_entries: HashMap::new(),
             local_dict_constructor_arities: HashMap::new(),
+            local_hof_direct_specializations: HashMap::new(),
             imported_function_entries: HashMap::new(),
             direct_candidate_function: None,
             cps_temp_counter: 0,
@@ -241,6 +245,13 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                             funs.push(self.lower_cps_fun_binding(fb));
                         }
                     }
+                    if let Some(specialization) =
+                        self.local_hof_direct_specializations.get(&fb.name).cloned()
+                    {
+                        funs.push(
+                            self.lower_hof_direct_specialized_fun_binding(fb, &specialization),
+                        );
+                    }
                 }
                 MDecl::Val(v) => {
                     if !self.direct_values.contains(&v.name) {
@@ -280,6 +291,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         self.direct_values.clear();
         self.function_plans.clear();
         self.local_dict_constructor_arities.clear();
+        self.local_hof_direct_specializations.clear();
         for decl in program {
             match decl {
                 MDecl::FunBinding(fb) => {
@@ -320,6 +332,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         self.compute_direct_body_plans(program);
         self.compute_direct_cps_island_body_plans(program);
         self.compute_cps_body_plans(program);
+        self.compute_hof_direct_specializations(program);
     }
 
     fn compute_direct_body_plans(&mut self, program: &MProgram) {
@@ -358,6 +371,24 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             if self.can_lower_cps_fun_binding(fb) {
                 self.function_plans
                     .insert(fb.name.clone(), FunctionLoweringPlan::CpsBody);
+            }
+        }
+    }
+
+    fn compute_hof_direct_specializations(&mut self, program: &MProgram) {
+        for decl in program {
+            let MDecl::FunBinding(fb) = decl else {
+                continue;
+            };
+            if !matches!(
+                self.function_plans.get(&fb.name),
+                Some(FunctionLoweringPlan::CpsBody)
+            ) {
+                continue;
+            }
+            if let Some(specialization) = self.hof_direct_specialization_for_fun_binding(fb) {
+                self.local_hof_direct_specializations
+                    .insert(fb.name.clone(), specialization);
             }
         }
     }
@@ -609,6 +640,151 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         supported
     }
 
+    fn hof_direct_specialization_for_fun_binding(
+        &mut self,
+        fb: &MFunBinding,
+    ) -> Option<HofDirectSpecialization> {
+        if fb.guard.is_some() || fb.params.iter().any(|p| !direct_param_supported(p)) {
+            return None;
+        }
+        if !matches!(
+            self.callable_type_shapes.get(&fb.name),
+            Some(RuntimeFunctionShape::Cps(_))
+        ) {
+            return None;
+        }
+
+        let (param_shapes, callback_params) = self.hof_direct_specialized_param_shapes(fb)?;
+        if callback_params.is_empty() {
+            return None;
+        }
+
+        self.push_scope();
+        for (index, pat) in fb.params.iter().enumerate() {
+            self.bind_pat_locals_with_shape(pat, param_shapes.get(index).cloned().flatten());
+        }
+        let supported = self.expr_is_direct_subset(&fb.body);
+        self.pop_scope();
+        supported.then(|| HofDirectSpecialization {
+            entry_name: format!("__saga_direct_hof_{}", fb.name),
+            source_arity: fb.params.len(),
+            callback_params,
+        })
+    }
+
+    fn hof_direct_specialized_param_shapes(
+        &self,
+        fb: &MFunBinding,
+    ) -> Option<(Vec<Option<LocalValueShape>>, Vec<HofCallbackParam>)> {
+        let mut shapes = self.param_shapes_for_fun(fb);
+        let mut callback_params = self.cps_callback_params_called_in_body(fb);
+        for (index, pat) in fb.params.iter().enumerate() {
+            let Pat::Var { id, .. } = pat else {
+                continue;
+            };
+            if let Some((source_arity, _adapter_arity, _effects)) = self.cps_function_arity_at(*id)
+            {
+                if !callback_params.iter().any(|param| param.index == index) {
+                    callback_params.push(HofCallbackParam {
+                        index,
+                        source_arity,
+                    });
+                }
+                shapes[index] = Some(LocalValueShape::PureCallable {
+                    arity: source_arity,
+                });
+            }
+        }
+        for callback in &callback_params {
+            shapes[callback.index] = Some(LocalValueShape::PureCallable {
+                arity: callback.source_arity,
+            });
+        }
+        Some((shapes, callback_params))
+    }
+
+    fn cps_callback_params_called_in_body(&self, fb: &MFunBinding) -> Vec<HofCallbackParam> {
+        let param_indices: HashMap<String, usize> = fb
+            .params
+            .iter()
+            .enumerate()
+            .filter_map(|(index, pat)| match pat {
+                Pat::Var { name, .. } => Some((name.clone(), index)),
+                _ => None,
+            })
+            .collect();
+        let mut callbacks = HashMap::new();
+        self.collect_cps_callback_param_calls(&fb.body, &param_indices, &mut callbacks);
+        let mut callbacks: Vec<HofCallbackParam> = callbacks
+            .into_iter()
+            .map(|(index, source_arity)| HofCallbackParam {
+                index,
+                source_arity,
+            })
+            .collect();
+        callbacks.sort_by_key(|param| param.index);
+        callbacks
+    }
+
+    fn collect_cps_callback_param_calls(
+        &self,
+        expr: &MExpr,
+        param_indices: &HashMap<String, usize>,
+        callbacks: &mut HashMap<usize, usize>,
+    ) {
+        match expr {
+            MExpr::App { head, .. } => {
+                if let Atom::Var { name, source } = head
+                    && let Some(index) = param_indices.get(&name.name)
+                    && let Some((source_arity, _adapter_arity, _effects)) =
+                        self.cps_function_arity_at(*source)
+                {
+                    callbacks.entry(*index).or_insert(source_arity);
+                }
+            }
+            MExpr::Bind { value, body, .. } | MExpr::Let { value, body, .. } => {
+                self.collect_cps_callback_param_calls(value, param_indices, callbacks);
+                self.collect_cps_callback_param_calls(body, param_indices, callbacks);
+            }
+            MExpr::If {
+                then_branch,
+                else_branch,
+                ..
+            } => {
+                self.collect_cps_callback_param_calls(then_branch, param_indices, callbacks);
+                self.collect_cps_callback_param_calls(else_branch, param_indices, callbacks);
+            }
+            MExpr::Case { arms, .. } => {
+                for arm in arms {
+                    self.collect_cps_callback_param_calls(&arm.body, param_indices, callbacks);
+                    if let Some(guard) = &arm.guard {
+                        self.collect_cps_callback_param_calls(guard, param_indices, callbacks);
+                    }
+                }
+            }
+            MExpr::With { body, .. } => {
+                self.collect_cps_callback_param_calls(body, param_indices, callbacks);
+            }
+            MExpr::Ensure { body, cleanup } => {
+                self.collect_cps_callback_param_calls(body, param_indices, callbacks);
+                self.collect_cps_callback_param_calls(cleanup, param_indices, callbacks);
+            }
+            MExpr::Pure(_)
+            | MExpr::Yield { .. }
+            | MExpr::Resume { .. }
+            | MExpr::FieldAccess { .. }
+            | MExpr::RecordUpdate { .. }
+            | MExpr::DictMethodAccess { .. }
+            | MExpr::ForeignCall { .. }
+            | MExpr::BinOp { .. }
+            | MExpr::UnaryMinus { .. }
+            | MExpr::BitString { .. }
+            | MExpr::Receive { .. }
+            | MExpr::LetFun { .. }
+            | MExpr::HandlerValue { .. } => {}
+        }
+    }
+
     fn lower_fun_binding(&mut self, fb: &MFunBinding) -> CFunDef {
         let params = lower_param_names(&fb.params);
         self.push_scope();
@@ -618,6 +794,29 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         self.pop_scope();
         CFunDef {
             name: self.direct_entry_name(&fb.name),
+            arity: params.len(),
+            body: CExpr::Fun(params, Box::new(body)),
+        }
+    }
+
+    fn lower_hof_direct_specialized_fun_binding(
+        &mut self,
+        fb: &MFunBinding,
+        specialization: &HofDirectSpecialization,
+    ) -> CFunDef {
+        let params = lower_param_names(&fb.params);
+        let (param_shapes, _callback_params) = self
+            .hof_direct_specialized_param_shapes(fb)
+            .unwrap_or_else(|| (vec![None; fb.params.len()], Vec::new()));
+        self.push_scope();
+        for (index, pat) in fb.params.iter().enumerate() {
+            self.bind_pat_locals_with_shape(pat, param_shapes.get(index).cloned().flatten());
+        }
+        let lowered_body = self.lower_expr(&fb.body);
+        let body = self.wrap_param_match(&fb.params, &params, lowered_body);
+        self.pop_scope();
+        CFunDef {
+            name: specialization.entry_name.clone(),
             arity: params.len(),
             body: CExpr::Fun(params, Box::new(body)),
         }

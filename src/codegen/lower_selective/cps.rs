@@ -181,6 +181,11 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         evidence: CExpr,
         return_k: CExpr,
     ) -> CExpr {
+        if let Some(specialization) = self.hof_direct_specialization_for_cps_call(head, args) {
+            let value = self.lower_hof_direct_specialized_call(&specialization, args);
+            return CExpr::Apply(Box::new(return_k), vec![value]);
+        }
+
         if let Some((source_arity, adapter_arity, _effects)) = self.cps_lambda_arity_for_atom(head)
             && let Atom::Lambda { params, body, .. } = head
         {
@@ -274,6 +279,72 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                 });
             }
         }
+    }
+
+    fn hof_direct_specialization_for_cps_call(
+        &mut self,
+        head: &Atom,
+        args: &[Atom],
+    ) -> Option<HofDirectSpecialization> {
+        let Atom::Var { name, .. } = head else {
+            return None;
+        };
+        let specialization = self
+            .local_hof_direct_specializations
+            .get(&name.name)?
+            .clone();
+        if specialization.source_arity != args.len() {
+            return None;
+        }
+
+        let callback_indices: std::collections::HashSet<usize> = specialization
+            .callback_params
+            .iter()
+            .map(|param| param.index)
+            .collect();
+        for callback in &specialization.callback_params {
+            let arg = args.get(callback.index)?;
+            if self.pure_hof_callback_arg_arity(arg)? != callback.source_arity {
+                return None;
+            }
+        }
+        for (index, arg) in args.iter().enumerate() {
+            if callback_indices.contains(&index) {
+                continue;
+            }
+            if !self.atom_is_direct_subset(arg) {
+                return None;
+            }
+        }
+        Some(specialization)
+    }
+
+    fn pure_hof_callback_arg_arity(&mut self, atom: &Atom) -> Option<usize> {
+        if let Atom::Lambda { params, body, .. } = atom
+            && self.lambda_is_direct_subset(params, body)
+        {
+            return Some(params.len());
+        }
+        match self.pure_value_atom_shape(atom)? {
+            LocalValueShape::PureCallable { arity } => Some(arity),
+            LocalValueShape::PureCallableFromUseType
+            | LocalValueShape::CpsCallable { .. }
+            | LocalValueShape::RuntimeCpsCallable { .. } => None,
+        }
+    }
+
+    fn lower_hof_direct_specialized_call(
+        &mut self,
+        specialization: &HofDirectSpecialization,
+        args: &[Atom],
+    ) -> CExpr {
+        CExpr::Apply(
+            Box::new(CExpr::FunRef(
+                specialization.entry_name.clone(),
+                specialization.source_arity,
+            )),
+            args.iter().map(|arg| self.lower_atom(arg)).collect(),
+        )
     }
 
     fn lower_cps_arg_atom(

@@ -1013,15 +1013,20 @@ main () = apply_eff pure_value with forty_one
 "#;
     let out = emit_selective_core(src);
     assert!(out.contains("'apply_eff'/3"), "{out}");
-    assert!(out.contains("fun (_PureCpsArg"), "{out}");
-    assert!(out.contains("apply 'pure_value'/1"), "{out}");
-    assert!(out.contains("apply _PureCpsK"), "{out}");
+    assert!(out.contains("'__saga_direct_hof_apply_eff'/1"), "{out}");
+    assert!(out.contains("apply F('unit')"), "{out}");
     assert!(
-        out.contains("apply 'apply_eff'/3(fun (_PureCpsArg"),
+        out.contains("apply '__saga_direct_hof_apply_eff'/1('pure_value'/1)"),
         "{out}"
     );
+    assert!(!out.contains("fun (_PureCpsArg"), "{out}");
+    assert!(!out.contains("apply _PureCpsK"), "{out}");
     assert!(!out.contains("make_fun"), "{out}");
-    assert_selective_core_compiles(src);
+    assert_selective_core_eval_stdout_contains(
+        src,
+        "io:format(\"~p~n\", ['_script':main(unit)]), init:stop().",
+        "41",
+    );
 }
 
 #[test]

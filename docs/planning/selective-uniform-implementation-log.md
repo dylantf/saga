@@ -922,3 +922,18 @@ boundaries exist.
   parameters. The next trait work should be specialization, not more ABI
   plumbing: monomorphic call-site specialization, net-pure trait dispatch, and
   known constructor/output-shape specialization.
+- Started the specialization track with local direct HOF specialization:
+  - CPS-bodied higher-order functions can now get a private
+    `__saga_direct_hof_*` entry when their body becomes direct if selected
+    callback parameters are treated as pure callables;
+  - the generic CPS entry remains emitted and remains the correctness fallback;
+  - CPS call lowering selects the private direct entry only when the actual
+    callback arguments are statically pure and match the expected source arity;
+  - `apply_eff pure_value with handler` now calls
+    `__saga_direct_hof_apply_eff/1` with `'pure_value'/1` instead of allocating
+    a `fun (_PureCpsArg, _Ev, _K) -> ...` adapter;
+  - mixed/dynamic callback cases still use the CPS runtime representation and
+    pure-to-CPS wrapper.
+- Current specialization limits: this first slice is local named HOFs only.
+  Alias-shaped HOF values, imported HOFs, and handled callbacks whose exposed
+  type is pure are next specialization candidates.

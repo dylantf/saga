@@ -33,6 +33,19 @@ pub(super) struct FunctionEntryInfo {
     pub(super) cps_adapter_entry_arity: Option<usize>,
 }
 
+#[derive(Clone, Debug)]
+pub(super) struct HofDirectSpecialization {
+    pub(super) entry_name: String,
+    pub(super) source_arity: usize,
+    pub(super) callback_params: Vec<HofCallbackParam>,
+}
+
+#[derive(Clone, Debug)]
+pub(super) struct HofCallbackParam {
+    pub(super) index: usize,
+    pub(super) source_arity: usize,
+}
+
 impl FunctionEntryInfo {
     pub(super) fn from_fun_binding(
         fb: &MFunBinding,
