@@ -412,9 +412,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
 
         let prev_direct_candidate = self.direct_candidate_function.replace(fb.name.clone());
         self.push_scope();
-        for pat in &fb.params {
-            self.bind_pat_locals(pat);
-        }
+        self.bind_fun_param_locals(fb);
         let supported = self.expr_is_direct_subset(&fb.body);
         self.pop_scope();
         self.direct_candidate_function = prev_direct_candidate;
@@ -433,9 +431,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         }
 
         self.push_scope();
-        for pat in &fb.params {
-            self.bind_pat_locals(pat);
-        }
+        self.bind_fun_param_locals(fb);
         let supported = self.expr_is_cps_island_subset(&fb.body);
         self.pop_scope();
         supported
@@ -453,9 +449,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         }
 
         self.push_scope();
-        for pat in &fb.params {
-            self.bind_pat_locals(pat);
-        }
+        self.bind_fun_param_locals(fb);
         let supported = self.expr_is_cps_island_subset(&fb.body);
         self.pop_scope();
         supported
@@ -464,9 +458,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
     fn lower_fun_binding(&mut self, fb: &MFunBinding) -> CFunDef {
         let params = lower_param_names(&fb.params);
         self.push_scope();
-        for pat in &fb.params {
-            self.bind_pat_locals(pat);
-        }
+        self.bind_fun_param_locals(fb);
         let lowered_body = self.lower_expr(&fb.body);
         let body = self.wrap_param_match(&fb.params, &params, lowered_body);
         self.pop_scope();
@@ -504,9 +496,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         let params = lower_param_names(&fb.params);
 
         self.push_scope();
-        for pat in &fb.params {
-            self.bind_pat_locals(pat);
-        }
+        self.bind_fun_param_locals(fb);
         let return_k = self.identity_cps_continuation();
         let lowered_body = self.lower_cps_expr(&fb.body, CExpr::Tuple(vec![]), return_k);
         let body = self.wrap_param_match(&fb.params, &params, lowered_body);
@@ -531,9 +521,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         params.push("_ReturnK".to_string());
 
         self.push_scope();
-        for pat in &fb.params {
-            self.bind_pat_locals(pat);
-        }
+        self.bind_fun_param_locals(fb);
         let lowered_body = self.lower_cps_expr(
             &fb.body,
             CExpr::Var("_Evidence".to_string()),
@@ -631,6 +619,23 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                 source_arity,
                 adapter_arity,
                 effects,
+            });
+        }
+        if let Atom::Var { name, source } = head
+            && matches!(
+                self.local_shape(&name.name),
+                Some(
+                    LocalValueShape::CpsCallableFromUseType
+                        | LocalValueShape::PureCallableFromUseType
+                )
+            )
+            && let Some((source_arity, adapter_arity, _effects)) =
+                self.cps_function_arity_at(*source)
+        {
+            return Some(CallShape::LocalCpsCallable {
+                name: name.name.clone(),
+                source_arity,
+                adapter_arity,
             });
         }
         if let Atom::Var { name, .. } = head
@@ -864,7 +869,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         match self.local_shape(&name.name)? {
             LocalValueShape::PureCallable { arity } => Some(arity),
             LocalValueShape::PureCallableFromUseType => self.pure_function_arity_at(*source),
-            LocalValueShape::CpsCallable { .. } => None,
+            LocalValueShape::CpsCallable { .. } | LocalValueShape::CpsCallableFromUseType => None,
         }
     }
 
@@ -888,21 +893,63 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             .expect("direct lowerer has a local-shape scope")
     }
 
+    fn bind_fun_param_locals(&mut self, fb: &MFunBinding) {
+        let param_shapes = self.param_shapes_for_fun(fb);
+        for (index, pat) in fb.params.iter().enumerate() {
+            self.bind_pat_locals_with_shape(pat, param_shapes.get(index).cloned().flatten());
+        }
+    }
+
+    fn param_shapes_for_fun(&self, fb: &MFunBinding) -> Vec<Option<LocalValueShape>> {
+        let Some(mut current) = self.effect_info.type_at_node.get(&fb.id) else {
+            return vec![None; fb.params.len()];
+        };
+        let mut shapes = Vec::with_capacity(fb.params.len());
+        while let Type::Fun(param, ret, _) = current {
+            shapes.push(self.local_shape_for_param_type(param));
+            current = ret;
+        }
+        shapes.resize(fb.params.len(), None);
+        shapes
+    }
+
+    fn local_shape_for_param_type(&self, ty: &Type) -> Option<LocalValueShape> {
+        if self.pure_function_arity_from_type(ty).is_some() {
+            Some(LocalValueShape::PureCallableFromUseType)
+        } else if self.cps_function_arity_from_type(ty).is_some() {
+            Some(LocalValueShape::CpsCallableFromUseType)
+        } else {
+            None
+        }
+    }
+
     fn bind_pat_locals(&mut self, pat: &Pat) {
+        self.bind_pat_locals_with_shape(pat, None);
+    }
+
+    fn bind_pat_locals_with_shape(&mut self, pat: &Pat, explicit_shape: Option<LocalValueShape>) {
         match pat {
-            Pat::Var { name, .. } => {
+            Pat::Var { id, name, .. } => {
                 self.current_scope_mut().insert(name.clone());
-                self.current_shape_scope_mut()
-                    .insert(name.clone(), LocalValueShape::PureCallableFromUseType);
+                let shape = explicit_shape.unwrap_or_else(|| {
+                    if self.pure_function_arity_at(*id).is_some() {
+                        LocalValueShape::PureCallableFromUseType
+                    } else if self.cps_function_arity_at(*id).is_some() {
+                        LocalValueShape::CpsCallableFromUseType
+                    } else {
+                        LocalValueShape::PureCallableFromUseType
+                    }
+                });
+                self.current_shape_scope_mut().insert(name.clone(), shape);
             }
             Pat::Tuple { elements, .. } => {
                 for pat in elements {
-                    self.bind_pat_locals(pat);
+                    self.bind_pat_locals_with_shape(pat, None);
                 }
             }
             Pat::Constructor { args, .. } => {
                 for pat in args {
-                    self.bind_pat_locals(pat);
+                    self.bind_pat_locals_with_shape(pat, None);
                 }
             }
             _ => {}
@@ -968,7 +1015,9 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                     }
                     Some(CallShape::Direct(callable)) => callable.arity == args.len(),
                     Some(CallShape::LocalCallable { arity, .. }) => arity == args.len(),
-                    Some(CallShape::Cps { .. }) | None => false,
+                    Some(CallShape::Cps { .. })
+                    | Some(CallShape::LocalCpsCallable { .. })
+                    | None => false,
                 };
                 direct_call_supported && args.iter().all(|arg| self.atom_is_direct_subset(arg))
             }
@@ -993,7 +1042,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
 
     fn expr_is_cps_island_subset(&mut self, expr: &MExpr) -> bool {
         match expr {
-            MExpr::Yield { args, .. } => args.iter().all(|arg| self.atom_is_direct_subset(arg)),
+            MExpr::Yield { args, .. } => args.iter().all(|arg| self.atom_is_cps_value_subset(arg)),
             MExpr::Bind {
                 var, value, body, ..
             } => {
@@ -1019,14 +1068,20 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                 supported
             }
             MExpr::App { head, args, .. } => {
-                matches!(
-                    self.call_shape(head),
+                let call_supported = match self.call_shape(head) {
                     Some(CallShape::Cps {
                         source_arity,
                         adapter_arity,
                         ..
-                    }) if source_arity == args.len() && adapter_arity == args.len() + 2
-                ) && args.iter().all(|arg| self.atom_is_direct_subset(arg))
+                    })
+                    | Some(CallShape::LocalCpsCallable {
+                        source_arity,
+                        adapter_arity,
+                        ..
+                    }) => source_arity == args.len() && adapter_arity == args.len() + 2,
+                    _ => false,
+                };
+                call_supported && args.iter().all(|arg| self.atom_is_cps_value_subset(arg))
             }
             MExpr::If {
                 cond,
@@ -1212,6 +1267,10 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         }
     }
 
+    fn atom_is_cps_value_subset(&mut self, atom: &Atom) -> bool {
+        self.cps_value_atom_shape(atom).is_some() || self.atom_is_direct_subset(atom)
+    }
+
     fn lambda_is_direct_subset(&mut self, params: &[Pat], body: &MExpr) -> bool {
         if params.iter().any(|p| !direct_param_supported(p)) {
             return false;
@@ -1272,6 +1331,27 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         }
     }
 
+    fn cps_value_atom_shape(&self, atom: &Atom) -> Option<LocalValueShape> {
+        if let Atom::Var { name, source } = atom {
+            match self.local_shape(&name.name) {
+                Some(shape @ LocalValueShape::CpsCallable { .. }) => return Some(shape),
+                Some(LocalValueShape::CpsCallableFromUseType) => {
+                    let (source_arity, adapter_arity, effects) =
+                        self.cps_function_arity_at(*source)?;
+                    return Some(LocalValueShape::CpsCallable {
+                        module: None,
+                        name: name.name.clone(),
+                        source_arity,
+                        adapter_arity,
+                        effects,
+                    });
+                }
+                _ => {}
+            }
+        }
+        self.cps_local_shape_for_expr(&MExpr::Pure(atom.clone()))
+    }
+
     fn pure_trait_method_arity(&self, trait_name: &str, method_index: usize) -> Option<usize> {
         let trait_info = self.effect_info.traits.get(trait_name).or_else(|| {
             let bare = trait_name.rsplit('.').next().unwrap_or(trait_name);
@@ -1284,7 +1364,11 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
     }
 
     fn pure_function_arity_at(&self, source: NodeId) -> Option<usize> {
-        let mut current = self.effect_info.type_at_node.get(&source)?;
+        self.pure_function_arity_from_type(self.effect_info.type_at_node.get(&source)?)
+    }
+
+    fn pure_function_arity_from_type(&self, ty: &Type) -> Option<usize> {
+        let mut current = ty;
         let mut arity = 0;
         while let Type::Fun(_, ret, row) = current {
             if !row.effects.is_empty() || row.tail.is_some() {
@@ -1294,6 +1378,30 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             current = ret;
         }
         (arity > 0).then_some(arity)
+    }
+
+    fn cps_function_arity_at(&self, source: NodeId) -> Option<(usize, usize, Vec<String>)> {
+        self.cps_function_arity_from_type(self.effect_info.type_at_node.get(&source)?)
+    }
+
+    fn cps_function_arity_from_type(&self, ty: &Type) -> Option<(usize, usize, Vec<String>)> {
+        let mut current = ty;
+        let mut arity = 0;
+        let mut effects = Vec::new();
+        let mut is_cps = false;
+        while let Type::Fun(_, ret, row) = current {
+            if !row.effects.is_empty() || row.tail.is_some() {
+                is_cps = true;
+                for effect in &row.effects {
+                    if !effects.contains(&effect.name) {
+                        effects.push(effect.name.clone());
+                    }
+                }
+            }
+            arity += 1;
+            current = ret;
+        }
+        (is_cps && arity > 0).then_some((arity, arity + 2, effects))
     }
 
     fn unsupported(&self, what: &str) -> ! {

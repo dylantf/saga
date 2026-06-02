@@ -121,7 +121,10 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             vec![CExpr::Lit(CLit::Int(op.op_index as i64)), find_call],
         );
 
-        let mut apply_args: Vec<CExpr> = args.iter().map(|arg| self.lower_atom(arg)).collect();
+        let mut apply_args: Vec<CExpr> = args
+            .iter()
+            .map(|arg| self.lower_cps_value_atom(arg))
+            .collect();
         apply_args.push(evidence);
         apply_args.push(return_k);
         CExpr::Apply(Box::new(op_closure), apply_args)
@@ -134,40 +137,120 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         evidence: CExpr,
         return_k: CExpr,
     ) -> CExpr {
-        let Some(CallShape::Cps {
-            module,
-            name,
-            source_arity,
-            adapter_arity,
-            ..
-        }) = self.call_shape(head)
-        else {
-            if self.expr_is_direct_subset(&MExpr::App {
-                head: head.clone(),
-                args: args.to_vec(),
-                source: NodeId::fresh(),
-            }) {
-                let value = self.lower_app(head, args);
-                return CExpr::Apply(Box::new(return_k), vec![value]);
+        match self.call_shape(head) {
+            Some(CallShape::Cps {
+                module,
+                name,
+                source_arity,
+                adapter_arity,
+                ..
+            }) => {
+                self.assert_app_arity(&name, args.len(), source_arity);
+                self.assert_app_arity(&name, args.len() + 2, adapter_arity);
+
+                let mut lowered_args: Vec<CExpr> = args
+                    .iter()
+                    .map(|arg| self.lower_cps_value_atom(arg))
+                    .collect();
+                lowered_args.push(evidence);
+                lowered_args.push(return_k);
+
+                match module {
+                    Some(module) => CExpr::Call(module, name, lowered_args),
+                    None => {
+                        CExpr::Apply(Box::new(CExpr::FunRef(name, adapter_arity)), lowered_args)
+                    }
+                }
             }
-            self.unsupported_expr(&MExpr::App {
-                head: head.clone(),
-                args: args.to_vec(),
-                source: NodeId::fresh(),
-            });
-        };
-
-        self.assert_app_arity(&name, args.len(), source_arity);
-        self.assert_app_arity(&name, args.len() + 2, adapter_arity);
-
-        let mut lowered_args: Vec<CExpr> = args.iter().map(|arg| self.lower_atom(arg)).collect();
-        lowered_args.push(evidence);
-        lowered_args.push(return_k);
-
-        match module {
-            Some(module) => CExpr::Call(module, name, lowered_args),
-            None => CExpr::Apply(Box::new(CExpr::FunRef(name, adapter_arity)), lowered_args),
+            Some(CallShape::LocalCpsCallable {
+                name,
+                source_arity,
+                adapter_arity,
+                ..
+            }) => {
+                self.assert_app_arity(&name, args.len(), source_arity);
+                self.assert_app_arity(&name, args.len() + 2, adapter_arity);
+                let mut lowered_args: Vec<CExpr> = args
+                    .iter()
+                    .map(|arg| self.lower_cps_value_atom(arg))
+                    .collect();
+                lowered_args.push(evidence);
+                lowered_args.push(return_k);
+                CExpr::Apply(Box::new(CExpr::Var(core_var(&name))), lowered_args)
+            }
+            _ => {
+                if self.expr_is_direct_subset(&MExpr::App {
+                    head: head.clone(),
+                    args: args.to_vec(),
+                    source: NodeId::fresh(),
+                }) {
+                    let value = self.lower_app(head, args);
+                    return CExpr::Apply(Box::new(return_k), vec![value]);
+                }
+                self.unsupported_expr(&MExpr::App {
+                    head: head.clone(),
+                    args: args.to_vec(),
+                    source: NodeId::fresh(),
+                });
+            }
         }
+    }
+
+    fn lower_cps_value_atom(&mut self, atom: &Atom) -> CExpr {
+        match self.cps_value_atom_shape(atom) {
+            Some(LocalValueShape::CpsCallable {
+                module: None,
+                name,
+                source_arity: _,
+                adapter_arity: _,
+                ..
+            }) if matches!(atom, Atom::Var { .. })
+                && matches!(
+                    self.local_shape(match atom {
+                        Atom::Var { name, .. } => &name.name,
+                        _ => unreachable!(),
+                    }),
+                    Some(LocalValueShape::CpsCallableFromUseType)
+                ) =>
+            {
+                CExpr::Var(core_var(&name))
+            }
+            Some(LocalValueShape::CpsCallable {
+                module,
+                name,
+                source_arity,
+                adapter_arity,
+                ..
+            }) => self.cps_adapter_value_closure(module, name, source_arity, adapter_arity),
+            _ => self.lower_atom(atom),
+        }
+    }
+
+    fn cps_adapter_value_closure(
+        &mut self,
+        module: Option<String>,
+        name: String,
+        source_arity: usize,
+        adapter_arity: usize,
+    ) -> CExpr {
+        self.assert_app_arity(&name, source_arity + 2, adapter_arity);
+        let arg_names: Vec<String> = (0..source_arity)
+            .map(|_| self.fresh_cps_temp("_CpsFnArg"))
+            .collect();
+        let evidence_name = self.fresh_cps_temp("_CpsFnEvidence");
+        let return_k_name = self.fresh_cps_temp("_CpsFnK");
+        let mut params = arg_names.clone();
+        params.push(evidence_name.clone());
+        params.push(return_k_name.clone());
+
+        let mut call_args: Vec<CExpr> = arg_names.into_iter().map(CExpr::Var).collect();
+        call_args.push(CExpr::Var(evidence_name));
+        call_args.push(CExpr::Var(return_k_name));
+        let body = match module {
+            Some(module) => CExpr::Call(module, name, call_args),
+            None => CExpr::Apply(Box::new(CExpr::FunRef(name, adapter_arity)), call_args),
+        };
+        CExpr::Fun(params, Box::new(body))
     }
 
     fn lower_cps_with(

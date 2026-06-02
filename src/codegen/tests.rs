@@ -726,24 +726,38 @@ main () = apply_it inc
 }
 
 #[test]
-#[should_panic(expected = "CPS-shaped function 'apply_eff' is not lowered by selective-core yet")]
-fn selective_core_does_not_eta_expand_effectful_callback_values_yet() {
-    let _ = emit_selective_core(
-        r#"
+fn selective_core_lowers_effectful_callback_value_adapter() {
+    let src = r#"
 effect ReadInt {
   fun read : Unit -> Int
 }
 
-pub fun apply_eff : (Unit -> Int needs {ReadInt}) -> Int needs {ReadInt}
-apply_eff f = f ()
-
 fun read_value : Unit -> Int needs {ReadInt}
 read_value () = read! ()
 
-fun main : Unit -> Unit
-main () = ()
-"#,
+fun apply_eff : (Unit -> Int needs {ReadInt}) -> Int needs {ReadInt}
+apply_eff f = f ()
+
+handler forty_one for ReadInt {
+  read () = resume 41
+}
+
+fun main : Unit -> Int
+main () = {
+  let f = read_value
+  apply_eff f
+} with forty_one
+"#;
+    let out = emit_selective_core(src);
+    assert!(out.contains("'apply_eff'/3"), "{out}");
+    assert!(
+        out.contains("apply F('unit', _Evidence, _ReturnK)"),
+        "{out}"
     );
+    assert!(out.contains("apply 'apply_eff'/3(fun (_CpsFnArg"), "{out}");
+    assert!(out.contains("apply 'read_value'/3"), "{out}");
+    assert!(!out.contains("make_fun"), "{out}");
+    assert_selective_core_compiles(src);
 }
 
 #[test]

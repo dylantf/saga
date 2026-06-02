@@ -214,11 +214,12 @@ The first implementation slice is:
 - `examples/optimization/selective-uniform/imported-cps-callback-project/`
   - Current result: project-mode runtime fixture for imported CPS/effectful
     callback values inside a handled CPS island. The monadic IR contains
-    `let f = read_value; f ()`; selective lowering binds `f` as shape metadata
-    only and lowers the call to `effects:read_value/3` with the current
-    evidence and continuation. No raw `make_fun`/BEAM fun value is emitted for
-    the effectful imported function. Runtime output under `--selective-codegen`
-    is `ok`.
+    `let f = read_value; apply_eff f`; selective lowering binds `f` as shape
+    metadata only, passes an explicit CPS adapter closure to
+    `effects:apply_eff/3`, and the imported `apply_eff/3` applies its runtime
+    closure parameter with the current evidence and continuation. No raw
+    `make_fun`/BEAM fun value is emitted for the effectful imported function.
+    Runtime output under `--selective-codegen` is `ok`.
 - `examples/optimization/selective-uniform/23-local-pure-lambda-call.saga`
   - Current result: emits a direct local lambda value as a Core `fun`, records
     its proven source arity in local shape metadata, and applies it via
@@ -799,10 +800,14 @@ boundaries exist.
 - Added the first CPS callable-value slice inside CPS islands:
   - `LocalValueShape::CpsCallable` carries module/name/source arity/adapter
     arity/effects;
-  - `let f = read_value; f ()` in a handled island records `f` as shape
-    metadata and lowers the application to the CPS adapter with current
-    evidence/continuation;
+  - `let f = read_value; apply_eff f` in a handled island records `f` as
+    shape metadata and lowers the value use to an explicit CPS adapter closure
+    that calls `effects:read_value/3` with the closure's evidence and
+    continuation;
+  - runtime CPS closure parameters are call-supported in CPS islands, so
+    `apply_eff f = f ()` lowers to `apply F('unit', _Evidence, _ReturnK)`;
   - effectful imported functions still never lower as raw BEAM fun refs.
 - Added `examples/optimization/selective-uniform/imported-cps-callback-project/`
-  and CLI coverage that checks the monadic bind/app shape, the selective Core
-  adapter call, and project runtime output.
+  and CLI coverage that checks the monadic bind/app shape, the generated
+  selective Core adapter closure, the imported `apply_eff/3` runtime closure
+  application, and project runtime output.

@@ -75,6 +75,11 @@ pub(super) enum CallShape {
         name: String,
         arity: usize,
     },
+    LocalCpsCallable {
+        name: String,
+        source_arity: usize,
+        adapter_arity: usize,
+    },
     Cps {
         module: Option<String>,
         name: String,
@@ -97,6 +102,7 @@ pub(super) enum LocalValueShape {
         adapter_arity: usize,
         effects: Vec<String>,
     },
+    CpsCallableFromUseType,
 }
 
 pub(super) fn lower_param_names(params: &[Pat]) -> Vec<String> {

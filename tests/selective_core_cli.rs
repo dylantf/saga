@@ -173,7 +173,11 @@ fn selective_core_codegen_runs_imported_cps_callback_project() {
         monadic_stdout.contains("Pure(Var(read_value))"),
         "{monadic_stdout}"
     );
-    assert!(monadic_stdout.contains("App(Var(f#"), "{monadic_stdout}");
+    assert!(
+        monadic_stdout.contains("App(Var(apply_eff#"),
+        "{monadic_stdout}"
+    );
+    assert!(monadic_stdout.contains("[Var(f#"), "{monadic_stdout}");
 
     let inspect = std::process::Command::new(binary)
         .current_dir(&project_dir)
@@ -188,10 +192,36 @@ fn selective_core_codegen_runs_imported_cps_callback_project() {
     );
     let inspect_stdout = String::from_utf8_lossy(&inspect.stdout);
     assert!(
-        inspect_stdout.contains("call 'effects':'read_value'\n          ('unit', _CpsEvidence"),
+        inspect_stdout.contains("call 'effects':'apply_eff'"),
+        "{inspect_stdout}"
+    );
+    assert!(
+        inspect_stdout.contains("fun (_CpsFnArg"),
+        "{inspect_stdout}"
+    );
+    assert!(
+        inspect_stdout.contains("call 'effects':'read_value'"),
         "{inspect_stdout}"
     );
     assert!(!inspect_stdout.contains("make_fun"), "{inspect_stdout}");
+
+    let effects_inspect = std::process::Command::new(binary)
+        .current_dir(&project_dir)
+        .args(["inspect", "src/Effects.saga", "--stage", "selective-core"])
+        .output()
+        .expect("inspect imported CPS callback effects module selective Core");
+    assert!(
+        effects_inspect.status.success(),
+        "saga inspect Effects selective-core failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&effects_inspect.stdout),
+        String::from_utf8_lossy(&effects_inspect.stderr)
+    );
+    let effects_stdout = String::from_utf8_lossy(&effects_inspect.stdout);
+    assert!(
+        effects_stdout.contains("'apply_eff'/3")
+            && effects_stdout.contains("apply F('unit', _Evidence, _ReturnK)"),
+        "{effects_stdout}"
+    );
 
     let run = std::process::Command::new(binary)
         .current_dir(&project_dir)

@@ -1,13 +1,13 @@
 module Main
 
 import Std.IO.Unsafe (print_stdout)
-import Effects (read_value, forty_one)
+import Effects (read_value, apply_eff, forty_one)
 
 fun main : Unit -> Unit
 main () = {
   let value = {
     let f = read_value
-    f ()
+    apply_eff f
   } with forty_one
 
   if value == 41 then print_stdout "ok\n"

@@ -161,6 +161,10 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                     args.iter().map(|arg| self.lower_atom(arg)).collect(),
                 )
             }
+            Some(CallShape::LocalCpsCallable { name, .. }) => self.unsupported(&format!(
+                "CPS callable local '{}' used in direct call position",
+                name
+            )),
             Some(CallShape::Cps {
                 module: _,
                 name,
