@@ -7,6 +7,21 @@ struct ImportedStaticHandlerCall {
     program: MProgram,
 }
 
+enum CpsCallDecision {
+    HofDirect {
+        module: Option<String>,
+        specialization: HofDirectSpecialization,
+    },
+    StaticHandlerLocal {
+        function_name: String,
+    },
+    StaticHandlerImported(ImportedStaticHandlerCall),
+    Lambda,
+    Normal(CallShape),
+    Direct,
+    Unsupported,
+}
+
 impl<'a, 'info> DirectLowerer<'a, 'info> {
     pub(super) fn lower_cps_expr(
         &mut self,
@@ -345,61 +360,139 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         evidence: CExpr,
         return_k: CExpr,
     ) -> CExpr {
+        match self.classify_cps_call(head, args) {
+            CpsCallDecision::HofDirect {
+                module,
+                specialization,
+            } => {
+                let value = self.lower_hof_direct_specialized_call(module, &specialization, args);
+                CExpr::Apply(Box::new(return_k), vec![value])
+            }
+            CpsCallDecision::StaticHandlerLocal { function_name } => self
+                .lower_static_handler_specialized_local_cps_call(
+                    &function_name,
+                    args,
+                    evidence,
+                    return_k,
+                )
+                .unwrap_or_else(|| {
+                    self.unsupported("classified local static-handler CPS call did not lower")
+                }),
+            CpsCallDecision::StaticHandlerImported(candidate) => self
+                .lower_static_handler_specialized_imported_cps_call(
+                    candidate, args, evidence, return_k,
+                )
+                .unwrap_or_else(|| {
+                    self.unsupported("classified imported static-handler CPS call did not lower")
+                }),
+            CpsCallDecision::Lambda => self.lower_cps_lambda_app(head, args, evidence, return_k),
+            CpsCallDecision::Normal(shape) => {
+                self.lower_normal_cps_call(head, args, evidence, return_k, shape)
+            }
+            CpsCallDecision::Direct => {
+                let value = self.lower_app(head, args);
+                CExpr::Apply(Box::new(return_k), vec![value])
+            }
+            CpsCallDecision::Unsupported => self.unsupported_expr(&MExpr::App {
+                head: head.clone(),
+                args: args.to_vec(),
+                source: NodeId::fresh(),
+            }),
+        }
+    }
+
+    fn classify_cps_call(&mut self, head: &Atom, args: &[Atom]) -> CpsCallDecision {
+        // Keep this order explicit: specializations are optional fast paths,
+        // and the normal CPS/direct decisions remain the correctness fallback.
         if let Some((module, specialization)) =
             self.hof_direct_specialization_for_cps_call(head, args)
         {
-            let value = self.lower_hof_direct_specialized_call(module, &specialization, args);
-            return CExpr::Apply(Box::new(return_k), vec![value]);
+            return CpsCallDecision::HofDirect {
+                module,
+                specialization,
+            };
         }
 
-        if let Some(lowered) = self.lower_static_handler_specialized_local_cps_call(
-            head,
-            args,
-            evidence.clone(),
-            return_k.clone(),
-        ) {
-            return lowered;
-        }
-
-        if let Some(lowered) = self.lower_static_handler_specialized_imported_cps_call(
-            head,
-            args,
-            evidence.clone(),
-            return_k.clone(),
-        ) {
-            return lowered;
-        }
-
-        if let Some((source_arity, adapter_arity, _effects)) = self.cps_lambda_arity_for_atom(head)
-            && let Atom::Lambda { params, body, .. } = head
+        if let Some(function_name) =
+            self.static_handler_specialized_local_cps_call_candidate(head, args)
         {
-            self.assert_app_arity("CPS lambda", args.len(), source_arity);
-            self.assert_app_arity("CPS lambda", args.len() + 2, adapter_arity);
-
-            let expected_arg_shapes = self.cps_callback_param_shapes(head);
-            let mut lowered_args: Vec<CExpr> = args
-                .iter()
-                .enumerate()
-                .map(|(index, arg)| {
-                    self.lower_cps_arg_atom(arg, expected_arg_shapes.get(index).copied().flatten())
-                })
-                .collect();
-            lowered_args.push(evidence);
-            lowered_args.push(return_k);
-            return CExpr::Apply(
-                Box::new(self.lower_cps_lambda_atom(params, body)),
-                lowered_args,
-            );
+            return CpsCallDecision::StaticHandlerLocal { function_name };
         }
 
-        match self.call_shape(head) {
-            Some(CallShape::Cps {
+        if let Some(candidate) = self.imported_static_handler_call_candidate(head, args) {
+            return CpsCallDecision::StaticHandlerImported(candidate);
+        }
+
+        if self.cps_lambda_arity_for_atom(head).is_some() && matches!(head, Atom::Lambda { .. }) {
+            return CpsCallDecision::Lambda;
+        }
+
+        if let Some(shape @ (CallShape::Cps { .. } | CallShape::LocalCpsCallable { .. })) =
+            self.call_shape(head)
+        {
+            return CpsCallDecision::Normal(shape);
+        }
+
+        if self.expr_is_direct_subset(&MExpr::App {
+            head: head.clone(),
+            args: args.to_vec(),
+            source: NodeId::fresh(),
+        }) {
+            return CpsCallDecision::Direct;
+        }
+
+        CpsCallDecision::Unsupported
+    }
+
+    fn lower_cps_lambda_app(
+        &mut self,
+        head: &Atom,
+        args: &[Atom],
+        evidence: CExpr,
+        return_k: CExpr,
+    ) -> CExpr {
+        let Some((source_arity, adapter_arity, _effects)) = self.cps_lambda_arity_for_atom(head)
+        else {
+            self.unsupported_atom(head);
+        };
+        let Atom::Lambda { params, body, .. } = head else {
+            self.unsupported_atom(head);
+        };
+        self.assert_app_arity("CPS lambda", args.len(), source_arity);
+        self.assert_app_arity("CPS lambda", args.len() + 2, adapter_arity);
+
+        let expected_arg_shapes = self.cps_callback_param_shapes(head);
+        let mut lowered_args: Vec<CExpr> = args
+            .iter()
+            .enumerate()
+            .map(|(index, arg)| {
+                self.lower_cps_arg_atom(arg, expected_arg_shapes.get(index).copied().flatten())
+            })
+            .collect();
+        lowered_args.push(evidence);
+        lowered_args.push(return_k);
+        CExpr::Apply(
+            Box::new(self.lower_cps_lambda_atom(params, body)),
+            lowered_args,
+        )
+    }
+
+    fn lower_normal_cps_call(
+        &mut self,
+        head: &Atom,
+        args: &[Atom],
+        evidence: CExpr,
+        return_k: CExpr,
+        shape: CallShape,
+    ) -> CExpr {
+        match shape {
+            CallShape::Cps {
                 module,
                 name,
                 source_arity,
                 adapter_arity,
                 ..
-            }) => {
+            } => {
                 self.assert_app_arity(&name, args.len(), source_arity);
                 self.assert_app_arity(&name, args.len() + 2, adapter_arity);
 
@@ -424,12 +517,12 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                     }
                 }
             }
-            Some(CallShape::LocalCpsCallable {
+            CallShape::LocalCpsCallable {
                 name,
                 source_arity,
                 adapter_arity,
                 ..
-            }) => {
+            } => {
                 self.assert_app_arity(&name, args.len(), source_arity);
                 self.assert_app_arity(&name, args.len() + 2, adapter_arity);
                 let expected_arg_shapes = self.cps_callback_param_shapes(head);
@@ -447,31 +540,47 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                 lowered_args.push(return_k);
                 CExpr::Apply(Box::new(CExpr::Var(core_var(&name))), lowered_args)
             }
-            _ => {
-                if self.expr_is_direct_subset(&MExpr::App {
-                    head: head.clone(),
-                    args: args.to_vec(),
-                    source: NodeId::fresh(),
-                }) {
-                    let value = self.lower_app(head, args);
-                    return CExpr::Apply(Box::new(return_k), vec![value]);
-                }
-                self.unsupported_expr(&MExpr::App {
-                    head: head.clone(),
-                    args: args.to_vec(),
-                    source: NodeId::fresh(),
-                });
-            }
+            _ => self.unsupported("classified non-CPS call as normal CPS call"),
         }
     }
 
     fn lower_static_handler_specialized_local_cps_call(
         &mut self,
-        head: &Atom,
+        function_name: &str,
         args: &[Atom],
         evidence: CExpr,
         return_k: CExpr,
     ) -> Option<CExpr> {
+        let fb = self.local_fun_bindings.get(function_name)?.clone();
+        if fb.guard.is_some() || fb.params.iter().any(|p| !direct_param_supported(p)) {
+            return None;
+        }
+        let bindings = self.direct_call_param_bindings(&fb.params, args)?;
+
+        self.static_handler_inline_stack
+            .push(function_name.to_string());
+        self.push_scope();
+        self.bind_fun_param_locals(&fb);
+        let supported = self.expr_is_cps_island_subset(&fb.body);
+        let lowered_body = supported.then(|| self.lower_cps_expr(&fb.body, evidence, return_k));
+        self.pop_scope();
+        self.static_handler_inline_stack.pop();
+
+        lowered_body.map(|body| {
+            bindings
+                .into_iter()
+                .rev()
+                .fold(body, |body, (name, value)| {
+                    CExpr::Let(name, Box::new(value), Box::new(body))
+                })
+        })
+    }
+
+    fn static_handler_specialized_local_cps_call_candidate(
+        &mut self,
+        head: &Atom,
+        args: &[Atom],
+    ) -> Option<String> {
         if self.static_handler_stack.is_empty() {
             return None;
         }
@@ -503,33 +612,16 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             return None;
         }
 
-        let fb = self.local_fun_bindings.get(&local_name)?.clone();
+        let fb = self.local_fun_bindings.get(&local_name)?;
         if fb.guard.is_some() || fb.params.iter().any(|p| !direct_param_supported(p)) {
             return None;
         }
-        let bindings = self.direct_call_param_bindings(&fb.params, args)?;
-
-        self.static_handler_inline_stack.push(local_name);
-        self.push_scope();
-        self.bind_fun_param_locals(&fb);
-        let supported = self.expr_is_cps_island_subset(&fb.body);
-        let lowered_body = supported.then(|| self.lower_cps_expr(&fb.body, evidence, return_k));
-        self.pop_scope();
-        self.static_handler_inline_stack.pop();
-
-        lowered_body.map(|body| {
-            bindings
-                .into_iter()
-                .rev()
-                .fold(body, |body, (name, value)| {
-                    CExpr::Let(name, Box::new(value), Box::new(body))
-                })
-        })
+        Some(local_name)
     }
 
     fn lower_static_handler_specialized_imported_cps_call(
         &mut self,
-        head: &Atom,
+        candidate: ImportedStaticHandlerCall,
         args: &[Atom],
         evidence: CExpr,
         return_k: CExpr,
@@ -539,7 +631,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             erlang_module,
             function_name,
             program,
-        } = self.imported_static_handler_call_candidate(head, args)?;
+        } = candidate;
         let key = format!("{erlang_module}:{function_name}");
         if self.static_handler_inline_stack.contains(&key) {
             return None;

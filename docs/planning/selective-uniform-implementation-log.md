@@ -1083,3 +1083,12 @@ boundaries exist.
   - this currently targets the simplest `resume atom` shape. Handler arm bodies
     with direct lets/cases still use the existing direct-call path and can be
     specialized further later.
+- Started the proof/decision cleanup without introducing a separate proof
+  framework:
+  - `lower_cps_app` now classifies call lowering through a `CpsCallDecision`
+    enum before emitting Core;
+  - the explicit decision order is HOF direct specialization, local static
+    handler specialization, imported static handler specialization, CPS lambda,
+    normal CPS call, direct fallback, unsupported;
+  - this keeps the current behavior but makes the priority order visible and
+    gives future trace/proof records a natural insertion point.
