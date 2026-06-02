@@ -1,5 +1,5 @@
 use saga::{
-    codegen, compiler_options::CompileOptions, elaborate, project_config,
+    ast, codegen, compiler_options::CompileOptions, elaborate, project_config,
     project_config::ProjectConfig, typechecker,
 };
 
@@ -17,6 +17,55 @@ fn test_timeout() -> Duration {
         .filter(|&s| s > 0)
         .unwrap_or(30);
     Duration::from_secs(secs)
+}
+
+fn codegen_context_for_checked_module(
+    result: &typechecker::CheckResult,
+    module_name: &str,
+    elaborated: &ast::Program,
+) -> codegen::CodegenContext {
+    let mut compiled_modules = compile_std_modules(result);
+
+    for (name, info) in result.codegen_info() {
+        if name == module_name {
+            continue;
+        }
+        let compiled = codegen::compile_module_from_result(name, result).unwrap_or_else(|| {
+            codegen::CompiledModule {
+                codegen_info: info.clone(),
+                elaborated: Vec::new(),
+                resolution: codegen::resolve::ResolutionMap::new(),
+                front_resolution: Default::default(),
+            }
+        });
+        compiled_modules.entry(name.clone()).or_insert(compiled);
+    }
+
+    let front_resolution = result
+        .module_check_results()
+        .get(module_name)
+        .map(|module_result| module_result.resolution.clone())
+        .unwrap_or_else(|| result.resolution.clone());
+
+    compiled_modules.insert(
+        module_name.to_string(),
+        codegen::CompiledModule {
+            codegen_info: result
+                .codegen_info()
+                .get(module_name)
+                .cloned()
+                .unwrap_or_default(),
+            elaborated: elaborated.clone(),
+            resolution: codegen::resolve::ResolutionMap::new(),
+            front_resolution,
+        },
+    );
+
+    codegen::CodegenContext {
+        modules: compiled_modules,
+        let_effect_bindings: result.let_effect_bindings.clone(),
+        prelude_imports: result.prelude_imports.clone(),
+    }
 }
 
 pub fn cmd_run(file: Option<&str>, release: bool, options: &CompileOptions) {
@@ -289,23 +338,8 @@ pub fn cmd_emit(file: &str, options: &CompileOptions) {
     let module_name = declared_module_name(&program).unwrap_or_else(|| "_script".to_string());
     let erlang_name = module_name.to_lowercase().replace('.', "_");
 
-    // Full pipeline: compile Std modules + elaborate user code
-    let mut compiled_modules = compile_std_modules(&result);
     let elaborated = elaborate::elaborate(&program, &result);
-    compiled_modules.insert(
-        module_name,
-        codegen::CompiledModule {
-            codegen_info: Default::default(),
-            elaborated: elaborated.clone(),
-            resolution: codegen::resolve::ResolutionMap::new(),
-            front_resolution: result.resolution.clone(),
-        },
-    );
-    let ctx = codegen::CodegenContext {
-        modules: compiled_modules,
-        let_effect_bindings: result.let_effect_bindings.clone(),
-        prelude_imports: result.prelude_imports.clone(),
-    };
+    let ctx = codegen_context_for_checked_module(&result, &module_name, &elaborated);
     let source_file = codegen::SourceFile {
         path: file.to_string(),
         source: source.clone(),
@@ -365,44 +399,11 @@ pub fn cmd_inspect(file: &str, stage: &str) {
             println!("{:#?}", anf_program);
         }
         "monadic" | "monadic-opt" | "monadic-stats" | "selective-core" => {
-            // Build a minimal CodegenContext (std modules + this user module)
-            // so resolve/effect-info match what the new path sees in production.
+            // Build a CodegenContext (std modules + checked user modules) so
+            // resolve/effect-info match what the emit/build paths see.
             let module_name =
                 declared_module_name(&program).unwrap_or_else(|| "_script".to_string());
-            let mut compiled_modules = compile_std_modules(&result);
-            for (name, info) in result.codegen_info() {
-                if name == &module_name {
-                    continue;
-                }
-                let compiled =
-                    codegen::compile_module_from_result(name, &result).unwrap_or_else(|| {
-                        codegen::CompiledModule {
-                            codegen_info: info.clone(),
-                            elaborated: Vec::new(),
-                            resolution: codegen::resolve::ResolutionMap::new(),
-                            front_resolution: Default::default(),
-                        }
-                    });
-                compiled_modules.entry(name.clone()).or_insert(compiled);
-            }
-            compiled_modules.insert(
-                module_name.clone(),
-                codegen::CompiledModule {
-                    codegen_info: result
-                        .codegen_info()
-                        .get(&module_name)
-                        .cloned()
-                        .unwrap_or_default(),
-                    elaborated: elaborated.clone(),
-                    resolution: codegen::resolve::ResolutionMap::new(),
-                    front_resolution: result.resolution.clone(),
-                },
-            );
-            let ctx = codegen::CodegenContext {
-                modules: compiled_modules,
-                let_effect_bindings: result.let_effect_bindings.clone(),
-                prelude_imports: result.prelude_imports.clone(),
-            };
+            let ctx = codegen_context_for_checked_module(&result, &module_name, &elaborated);
 
             let codegen_info = ctx.codegen_info();
             let front_resolution = result

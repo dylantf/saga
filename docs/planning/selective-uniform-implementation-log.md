@@ -200,6 +200,22 @@ The first implementation slice is:
   - Command:
     `cargo run --bin saga -- run examples/optimization/selective-uniform/25-handled-effect-e2e.saga --selective-codegen`
   - Current runtime result: prints `ok`.
+- `examples/optimization/selective-uniform/27-cps-island-main-e2e.saga`
+  - Current result: a direct `main/1` contains a handled CPS island directly,
+    proving the selective entry export can bootstrap a supported island inside
+    the entrypoint body.
+  - Command:
+    `cargo run --bin saga -- run examples/optimization/selective-uniform/27-cps-island-main-e2e.saga --selective-codegen`
+  - Current runtime result: prints `ok`.
+- `examples/optimization/selective-uniform/imported-handled-effect-project/`
+  - Current result: project-mode selective backend run with imported user
+    effect definition, imported effectful helper, and imported static handler.
+    `Main.answer/1` installs `Effects.forty_one`, calls the remote CPS adapter
+    `effects:read_value/3`, resumes through the generated continuation, and
+    `main/1` prints `ok`.
+  - Command:
+    `cargo run --bin saga -- run --selective-codegen` from the project root.
+  - Current runtime result: prints `ok`.
 
 ## Active Design Decisions
 
@@ -315,6 +331,11 @@ The first implementation slice is:
   source arity or the adapter arity depending on where the resolved symbol came
   from. Remote direct-entry matching accepts only imported metadata-proven
   direct arities, checking both the resolved arity and `resolved_arity - 2`.
+- `emit`, `inspect`, `build`, and `run` should all build comparable
+  cross-module `CodegenContext`s. Single-file `emit` inside a project used to
+  carry only stdlib plus the current file, which made imported handlers/effect
+  helpers look missing to the selective path even though project build/run
+  worked.
 
 ## Pipeline Integration Milestones
 
@@ -366,8 +387,11 @@ Planned integration sequence:
    --selective-codegen`.
 5. **First handled-effect end-to-end run.** Run a trivial handled effect, e.g.
    `read! () with forty_two`, through the same parse -> emit -> erlc -> erl
-   path. Status: `25-handled-effect-e2e.saga` runs and prints `ok` with
-   `saga run --selective-codegen`.
+   path. Status: single-file handled-effect fixtures
+   `25-handled-effect-e2e.saga` and `27-cps-island-main-e2e.saga` run and print
+   `ok` with `saga run --selective-codegen`. The project fixture
+   `imported-handled-effect-project/` also runs and prints `ok`, proving the
+   first imported handler/effect-helper E2E path.
 6. **Move direct lowering earlier.** Once runtime integration is real, start
    moving proven pure/direct lowering before whole-module monadic translation
    so monadic IR is only built for CPS-shaped regions.
@@ -650,3 +674,32 @@ boundaries exist.
     - `cargo run --bin saga --quiet -- inspect src/Main.saga --stage selective-core`
       from `imported-cps-island-project` emits
       `call 'effects':'read_value'('unit', _Evidence, fun (_CpsBindArg0) -> ...)`.
+
+### 2026-06-02
+
+- Added `examples/optimization/selective-uniform/27-cps-island-main-e2e.saga`.
+  This pins a direct `main/1` whose body contains the handled `ReadInt` CPS
+  island itself, instead of delegating to a separate `answer/1` helper.
+- Added
+  `examples/optimization/selective-uniform/imported-handled-effect-project/`.
+  This is the first project-mode selective runtime fixture with:
+  - imported user effect definition;
+  - imported effectful helper that exports/uses the CPS adapter ABI;
+  - imported static handler installed in the consumer module;
+  - direct `Main.answer/1` and `Main.main/1` entries.
+- Fixed `cmd_emit` to build the same kind of cross-module `CodegenContext`
+  used by `inspect`/project build paths. Before this, `saga emit
+  src/Main.saga --selective-codegen` from the imported handled-effect project
+  panicked in selective lowering because the imported handler/helper module was
+  absent from the context even though `saga run --selective-codegen` worked.
+- Shared the checked-module context construction between `emit` and `inspect`
+  so single-file/project diagnostics do not quietly drift apart again.
+- Verification:
+  - `cargo run --bin saga --quiet -- emit src/Main.saga --selective-codegen`
+    from `imported-handled-effect-project` now emits Core successfully and
+    includes the remote CPS adapter call `effects:read_value/3`.
+  - `cargo run --bin saga --quiet -- run --selective-codegen` from
+    `imported-handled-effect-project` builds `Effects` and `Main` and prints
+    `ok`.
+  - `cargo run --bin saga --quiet -- run examples/optimization/selective-uniform/27-cps-island-main-e2e.saga --selective-codegen`
+    prints `ok`.
