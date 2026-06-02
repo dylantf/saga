@@ -184,6 +184,15 @@ The first implementation slice is:
     contains `let value = fail! (); value + 1` and a `return value = value +
     100` clause, but the abort arm returns `0` without invoking `_ArmK`, so the
     body continuation and return clause are both skipped.
+- `examples/optimization/selective-uniform/23-local-pure-lambda-call.saga`
+  - Current result: emits a direct local lambda value as a Core `fun`, records
+    its proven source arity in local shape metadata, and applies it via
+    `CallShape::LocalCallable`.
+- `examples/optimization/selective-uniform/24-cps-island-local-pure-lambda.saga`
+  - Current result: emits a CPS island that binds a direct local lambda before
+    `read! ()`; the resumed continuation applies the lambda to the operation
+    result and then calls `_ReturnK`. This pins that proven direct callable
+    values can survive inside CPS island continuations without guessing arity.
 
 ## Active Design Decisions
 
@@ -212,9 +221,10 @@ The first implementation slice is:
   dictionary is tagged as a pure callable using typed node metadata when
   present, trait method metadata when ANF synthesized an untyped node, or a
   typed use-site fallback only for that already-tagged value.
-- Ordinary local function-valued variables are deliberately not callable in the
-  direct subset yet. They need explicit function-value shape metadata instead
-  of arity guessing.
+- Local pure lambda values are callable only after shape classification proves
+  their parameter count and direct-lowerable body. Callback parameters and
+  other untagged function-valued locals remain uncallable until they get
+  explicit function-value shape metadata; no arity guessing.
 - Direct app lowering now goes through a single `CallShape` classifier in
   `lower_selective`: intrinsic, direct BEAM callable, or tagged local callable.
   Adding new app shapes should go through that classifier.
@@ -288,7 +298,8 @@ The first implementation slice is:
   closure and ignoring the captured continuation. `finally`, full
   abort/result-marker routing, dynamic/native/composite handlers, and handler
   values remain unsupported in `lower_selective`.
-- CPS islands still do not support higher-order CPS callable values.
+- CPS islands support proven direct local lambda values. They still do not
+  support higher-order CPS callable values or unknown callback parameters.
 - `lower_selective` computes imported entry metadata for already-compiled
   non-stdlib user modules. Remote effect-row calls may lower to direct remote
   calls only when that imported metadata proves a direct entry exists; otherwise

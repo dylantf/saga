@@ -303,15 +303,30 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             }
             Atom::AnonRecord { fields, .. } => self.lower_anon_record_atom(fields),
             Atom::Record { name, fields, .. } => self.lower_record_atom(name, fields),
+            Atom::Lambda { params, body, .. } => self.lower_lambda_atom(params, body),
             Atom::Symbol { symbol, .. } => {
                 crate::codegen::lower::util::lower_string_to_binary(symbol)
             }
             Atom::QualifiedRef { .. }
             | Atom::DictRef { .. }
-            | Atom::Lambda { .. }
             | Atom::BackendAtom { .. }
             | Atom::BackendSpawnThunk { .. } => self.unsupported_atom(atom),
         }
+    }
+
+    fn lower_lambda_atom(&mut self, params: &[Pat], body: &MExpr) -> CExpr {
+        if params.iter().any(|p| !direct_param_supported(p)) {
+            self.unsupported("direct lambda with unsupported parameter pattern");
+        }
+        let param_names = lower_param_names(params);
+        self.push_scope();
+        for pat in params {
+            collect_pat_binders(pat, self.current_scope_mut());
+        }
+        let lowered_body = self.lower_expr(body);
+        let lowered_body = self.wrap_param_match(params, &param_names, lowered_body);
+        self.pop_scope();
+        CExpr::Fun(param_names, Box::new(lowered_body))
     }
 
     fn lower_ctor_atom(&mut self, name: &str, args: &[Atom]) -> CExpr {

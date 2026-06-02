@@ -1112,7 +1112,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         format!("{prefix}{id}")
     }
 
-    fn atom_is_direct_subset(&self, atom: &Atom) -> bool {
+    fn atom_is_direct_subset(&mut self, atom: &Atom) -> bool {
         match atom {
             Atom::Var { name, .. } => {
                 self.is_local(&name.name)
@@ -1127,16 +1127,36 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             Atom::AnonRecord { fields, .. } | Atom::Record { fields, .. } => fields
                 .iter()
                 .all(|(_, arg)| self.atom_is_direct_subset(arg)),
+            Atom::Lambda { params, body, .. } => self.lambda_is_direct_subset(params, body),
             Atom::QualifiedRef { .. }
-            | Atom::Lambda { .. }
             | Atom::BackendAtom { .. }
             | Atom::BackendSpawnThunk { .. } => false,
             Atom::DictRef { .. } => self.direct_dict_constructor(atom).is_some(),
         }
     }
 
-    fn direct_local_shape_for_expr(&self, expr: &MExpr) -> Option<LocalValueShape> {
+    fn lambda_is_direct_subset(&mut self, params: &[Pat], body: &MExpr) -> bool {
+        if params.iter().any(|p| !direct_param_supported(p)) {
+            return false;
+        }
+        self.push_scope();
+        for pat in params {
+            collect_pat_binders(pat, self.current_scope_mut());
+        }
+        let supported = self.expr_is_direct_subset(body);
+        self.pop_scope();
+        supported
+    }
+
+    fn direct_local_shape_for_expr(&mut self, expr: &MExpr) -> Option<LocalValueShape> {
         match expr {
+            MExpr::Pure(Atom::Lambda { params, body, .. })
+                if self.lambda_is_direct_subset(params, body) =>
+            {
+                Some(LocalValueShape::PureCallable {
+                    arity: params.len(),
+                })
+            }
             MExpr::DictMethodAccess {
                 source,
                 trait_name,
