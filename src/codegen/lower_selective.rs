@@ -1069,7 +1069,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             } => {
                 let value_supported = self.expr_is_direct_subset(value)
                     || self.expr_is_cps_island_subset(value)
-                    || self.cps_bind_shape_for_expr(value).is_some();
+                    || self.cps_bind_value_expr_is_supported(value);
                 if !value_supported {
                     return false;
                 }
@@ -1356,27 +1356,86 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
     }
 
     fn cps_bind_shape_for_expr(&self, expr: &MExpr) -> Option<LocalValueShape> {
-        let MExpr::Pure(atom) = expr else {
-            return None;
-        };
-        if let Atom::Var { name, source } = atom {
-            match self.local_shape(&name.name) {
-                Some(
-                    shape @ (LocalValueShape::CpsCallable { .. }
-                    | LocalValueShape::RuntimeCpsCallable { .. }),
-                ) => return Some(shape),
-                Some(LocalValueShape::PureCallableFromUseType) => {
-                    let (source_arity, adapter_arity, _effects) =
-                        self.cps_function_arity_at(*source)?;
-                    return Some(LocalValueShape::RuntimeCpsCallable {
-                        source_arity,
-                        adapter_arity,
-                    });
+        match expr {
+            MExpr::Pure(atom) => {
+                if let Atom::Var { name, source } = atom {
+                    match self.local_shape(&name.name) {
+                        Some(
+                            shape @ (LocalValueShape::CpsCallable { .. }
+                            | LocalValueShape::RuntimeCpsCallable { .. }),
+                        ) => return Some(shape),
+                        Some(LocalValueShape::PureCallableFromUseType) => {
+                            let (source_arity, adapter_arity, _effects) =
+                                self.cps_function_arity_at(*source)?;
+                            return Some(LocalValueShape::RuntimeCpsCallable {
+                                source_arity,
+                                adapter_arity,
+                            });
+                        }
+                        _ => {}
+                    }
                 }
-                _ => {}
+                self.cps_local_shape_for_expr(expr)
             }
+            MExpr::If {
+                then_branch,
+                else_branch,
+                ..
+            } => {
+                let then_shape = self.cps_bind_shape_for_expr(then_branch)?;
+                let else_shape = self.cps_bind_shape_for_expr(else_branch)?;
+                self.compatible_runtime_cps_shape(&then_shape, &else_shape)
+            }
+            _ => None,
         }
-        self.cps_local_shape_for_expr(expr)
+    }
+
+    fn cps_bind_value_expr_is_supported(&mut self, expr: &MExpr) -> bool {
+        match expr {
+            MExpr::Pure(_) => self.cps_bind_shape_for_expr(expr).is_some(),
+            MExpr::If {
+                cond,
+                then_branch,
+                else_branch,
+                ..
+            } => {
+                self.atom_is_direct_subset(cond)
+                    && self.cps_bind_value_expr_is_supported(then_branch)
+                    && self.cps_bind_value_expr_is_supported(else_branch)
+                    && self.cps_bind_shape_for_expr(expr).is_some()
+            }
+            _ => false,
+        }
+    }
+
+    fn compatible_runtime_cps_shape(
+        &self,
+        left: &LocalValueShape,
+        right: &LocalValueShape,
+    ) -> Option<LocalValueShape> {
+        let (left_source, left_adapter) = self.runtime_cps_arities(left)?;
+        let (right_source, right_adapter) = self.runtime_cps_arities(right)?;
+        (left_source == right_source && left_adapter == right_adapter).then_some(
+            LocalValueShape::RuntimeCpsCallable {
+                source_arity: left_source,
+                adapter_arity: left_adapter,
+            },
+        )
+    }
+
+    fn runtime_cps_arities(&self, shape: &LocalValueShape) -> Option<(usize, usize)> {
+        match shape {
+            LocalValueShape::CpsCallable {
+                source_arity,
+                adapter_arity,
+                ..
+            }
+            | LocalValueShape::RuntimeCpsCallable {
+                source_arity,
+                adapter_arity,
+            } => Some((*source_arity, *adapter_arity)),
+            LocalValueShape::PureCallable { .. } | LocalValueShape::PureCallableFromUseType => None,
+        }
     }
 
     fn cps_value_atom_shape(&self, atom: &Atom) -> Option<LocalValueShape> {

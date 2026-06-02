@@ -811,6 +811,10 @@ boundaries exist.
     `effects:read_value/3` with the closure's evidence and continuation;
   - `apply_eff f = { let g = f; g () }` lowers to a real `let <G> = F` followed
     by `apply G('unit', _Evidence, _ReturnK)`;
+  - branch-shaped CPS callable values now materialize runtime closures:
+    `let f = if choose then read_value else read_again` lowers to a Core
+    `case` whose arms each return an explicit CPS adapter closure, and the
+    bound `f` is tracked as `RuntimeCpsCallable`;
   - effectful imported functions still never lower as raw BEAM fun refs.
 - Added `examples/optimization/selective-uniform/imported-cps-callback-project/`
   and CLI coverage that checks the monadic bind/app shape, the generated

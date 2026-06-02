@@ -71,10 +71,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                     return lowered_body;
                 }
                 LocalValueShape::RuntimeCpsCallable { .. } => {
-                    let lowered_value = match value {
-                        MExpr::Pure(Atom::Var { name, .. }) => CExpr::Var(core_var(&name.name)),
-                        _ => self.unsupported_expr(value),
-                    };
+                    let lowered_value = self.lower_cps_runtime_value_expr(value);
                     self.push_scope();
                     self.current_scope_mut().insert(var.name.clone());
                     self.current_shape_scope_mut()
@@ -235,6 +232,33 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                 ..
             }) => self.cps_adapter_value_closure(module, name, source_arity, adapter_arity),
             _ => self.lower_atom(atom),
+        }
+    }
+
+    fn lower_cps_runtime_value_expr(&mut self, expr: &MExpr) -> CExpr {
+        match expr {
+            MExpr::Pure(atom) => self.lower_cps_value_atom(atom),
+            MExpr::If {
+                cond,
+                then_branch,
+                else_branch,
+                ..
+            } => CExpr::Case(
+                Box::new(self.lower_atom(cond)),
+                vec![
+                    CArm {
+                        pat: CPat::Lit(CLit::Atom("true".to_string())),
+                        guard: None,
+                        body: self.lower_cps_runtime_value_expr(then_branch),
+                    },
+                    CArm {
+                        pat: CPat::Lit(CLit::Atom("false".to_string())),
+                        guard: None,
+                        body: self.lower_cps_runtime_value_expr(else_branch),
+                    },
+                ],
+            ),
+            _ => self.unsupported_expr(expr),
         }
     }
 
