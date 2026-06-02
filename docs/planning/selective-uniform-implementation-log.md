@@ -1132,3 +1132,12 @@ boundaries exist.
   - we backed out the partial backend-aware stdlib-cache experiment for now.
     The final fallback/module-boundary design needs one consistent ABI or
     explicit adapters for fallback/public dict constructors and functions.
+- Reduced known trait specialization artifact lets:
+  - known method extraction now scans the continuation to distinguish
+    call-head-only uses from value uses;
+  - if the method local is only used as a call head, selective lowering records
+    the known lambda fact but skips materializing the fallback CPS closure;
+  - if the method local is passed as a callback, stored, captured, returned, or
+    otherwise used as a value, the fallback closure is still emitted;
+  - the parameterized `Box a` canary no longer emits direct-path method-closure
+    lets before immediately inlining through the known method call.

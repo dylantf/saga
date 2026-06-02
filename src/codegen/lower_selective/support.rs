@@ -165,6 +165,35 @@ pub(super) fn direct_pat_supported(pat: &Pat) -> bool {
     }
 }
 
+pub(super) fn pat_binds_name(pat: &Pat, target: &str) -> bool {
+    match pat {
+        Pat::Var { name, .. } => name == target,
+        Pat::Constructor { args, .. } => args.iter().any(|pat| pat_binds_name(pat, target)),
+        Pat::Record {
+            fields, as_name, ..
+        } => {
+            as_name.as_ref().is_some_and(|name| name == target)
+                || fields
+                    .iter()
+                    .any(|(_, pat)| pat.as_ref().is_some_and(|pat| pat_binds_name(pat, target)))
+        }
+        Pat::AnonRecord { fields, .. } => fields
+            .iter()
+            .any(|(_, pat)| pat.as_ref().is_some_and(|pat| pat_binds_name(pat, target))),
+        Pat::Tuple { elements, .. } => elements.iter().any(|pat| pat_binds_name(pat, target)),
+        Pat::StringPrefix { rest, .. } => pat_binds_name(rest, target),
+        Pat::BitStringPat { segments, .. } => segments
+            .iter()
+            .any(|segment| pat_binds_name(&segment.value, target)),
+        Pat::ListPat { elements, .. } => elements.iter().any(|pat| pat_binds_name(pat, target)),
+        Pat::ConsPat { head, tail, .. } => {
+            pat_binds_name(head, target) || pat_binds_name(tail, target)
+        }
+        Pat::Or { patterns, .. } => patterns.iter().any(|pat| pat_binds_name(pat, target)),
+        Pat::Wildcard { .. } | Pat::Lit { .. } => false,
+    }
+}
+
 pub(super) fn direct_intrinsic_arity(intrinsic: IntrinsicId) -> Option<usize> {
     match intrinsic {
         IntrinsicId::PrintStdout | IntrinsicId::PrintStderr => Some(1),

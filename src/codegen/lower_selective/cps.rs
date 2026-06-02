@@ -127,7 +127,9 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         if let Some(known_lambda) = self.known_cps_lambda_for_expr(value)
             && let Some(local_shape) = self.cps_bind_shape_for_expr(value)
         {
-            let lowered_value = self.lower_known_cps_lambda_value(&known_lambda);
+            let needs_value = self.known_cps_lambda_value_needed_in_expr(&var.name, body);
+            let lowered_value =
+                needs_value.then(|| self.lower_known_cps_lambda_value(&known_lambda));
             self.push_scope();
             self.current_scope_mut().insert(var.name.clone());
             self.current_shape_scope_mut()
@@ -136,11 +138,15 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                 .insert(var.name.clone(), known_lambda);
             let lowered_body = self.lower_cps_expr(body, evidence, return_k);
             self.pop_scope();
-            return CExpr::Let(
-                core_var(&var.name),
-                Box::new(lowered_value),
-                Box::new(lowered_body),
-            );
+            return if let Some(lowered_value) = lowered_value {
+                CExpr::Let(
+                    core_var(&var.name),
+                    Box::new(lowered_value),
+                    Box::new(lowered_body),
+                )
+            } else {
+                lowered_body
+            };
         }
 
         if let Some(local_shape) = self.cps_bind_shape_for_expr(value) {
@@ -515,6 +521,191 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             Box::new(self.lower_cps_lambda_atom(params, body)),
             lowered_args,
         )
+    }
+
+    fn known_cps_lambda_value_needed_in_expr(&self, name: &str, expr: &MExpr) -> bool {
+        match expr {
+            MExpr::Pure(atom) => self.known_cps_lambda_value_needed_in_atom(name, atom),
+            MExpr::Yield { args, .. } => args
+                .iter()
+                .any(|arg| self.known_cps_lambda_value_needed_in_atom(name, arg)),
+            MExpr::Bind {
+                var, value, body, ..
+            }
+            | MExpr::Let { var, value, body } => {
+                self.known_cps_lambda_value_needed_in_expr(name, value)
+                    || (var.name != name && self.known_cps_lambda_value_needed_in_expr(name, body))
+            }
+            MExpr::Ensure { body, cleanup } => {
+                self.known_cps_lambda_value_needed_in_expr(name, body)
+                    || self.known_cps_lambda_value_needed_in_expr(name, cleanup)
+            }
+            MExpr::Case {
+                scrutinee, arms, ..
+            } => {
+                self.known_cps_lambda_value_needed_in_atom(name, scrutinee)
+                    || arms
+                        .iter()
+                        .any(|arm| self.known_cps_lambda_value_needed_in_arm(name, arm))
+            }
+            MExpr::If {
+                cond,
+                then_branch,
+                else_branch,
+                ..
+            } => {
+                self.known_cps_lambda_value_needed_in_atom(name, cond)
+                    || self.known_cps_lambda_value_needed_in_expr(name, then_branch)
+                    || self.known_cps_lambda_value_needed_in_expr(name, else_branch)
+            }
+            MExpr::App { head, args, .. } => {
+                let head_needs_value = !matches!(head, Atom::Var { name: var, .. } if var.name == name)
+                    && self.known_cps_lambda_value_needed_in_atom(name, head);
+                head_needs_value
+                    || args
+                        .iter()
+                        .any(|arg| self.known_cps_lambda_value_needed_in_atom(name, arg))
+            }
+            MExpr::With { handler, body, .. } => {
+                self.known_cps_lambda_value_needed_in_handler(name, handler)
+                    || self.known_cps_lambda_value_needed_in_expr(name, body)
+            }
+            MExpr::Resume { value, .. } => self.known_cps_lambda_value_needed_in_atom(name, value),
+            MExpr::FieldAccess { record, .. } => {
+                self.known_cps_lambda_value_needed_in_atom(name, record)
+            }
+            MExpr::RecordUpdate { record, fields, .. } => {
+                self.known_cps_lambda_value_needed_in_atom(name, record)
+                    || fields
+                        .iter()
+                        .any(|(_, atom)| self.known_cps_lambda_value_needed_in_atom(name, atom))
+            }
+            MExpr::DictMethodAccess { dict, .. } => {
+                self.known_cps_lambda_value_needed_in_atom(name, dict)
+            }
+            MExpr::ForeignCall { args, .. } => args
+                .iter()
+                .any(|arg| self.known_cps_lambda_value_needed_in_atom(name, arg)),
+            MExpr::BinOp { left, right, .. } => {
+                self.known_cps_lambda_value_needed_in_atom(name, left)
+                    || self.known_cps_lambda_value_needed_in_atom(name, right)
+            }
+            MExpr::UnaryMinus { value, .. } => {
+                self.known_cps_lambda_value_needed_in_atom(name, value)
+            }
+            MExpr::BitString { segments, .. } => segments.iter().any(|segment| {
+                self.known_cps_lambda_value_needed_in_atom(name, &segment.value)
+                    || segment
+                        .size
+                        .as_ref()
+                        .is_some_and(|size| self.known_cps_lambda_value_needed_in_atom(name, size))
+            }),
+            MExpr::Receive { arms, after, .. } => {
+                arms.iter()
+                    .any(|arm| self.known_cps_lambda_value_needed_in_arm(name, arm))
+                    || after.as_ref().is_some_and(|(timeout, body)| {
+                        self.known_cps_lambda_value_needed_in_atom(name, timeout)
+                            || self.known_cps_lambda_value_needed_in_expr(name, body)
+                    })
+            }
+            MExpr::LetFun {
+                name: fun_name,
+                params,
+                body,
+                rest,
+                ..
+            } => {
+                fun_name != name
+                    && ((!params.iter().any(|param| pat_binds_name(param, name))
+                        && self.known_cps_lambda_value_needed_in_expr(name, body))
+                        || self.known_cps_lambda_value_needed_in_expr(name, rest))
+            }
+            MExpr::HandlerValue {
+                arms,
+                return_clause,
+                ..
+            } => {
+                arms.iter()
+                    .any(|arm| self.known_cps_lambda_value_needed_in_handler_arm(name, arm))
+                    || return_clause.as_ref().is_some_and(|arm| {
+                        self.known_cps_lambda_value_needed_in_handler_arm(name, arm)
+                    })
+            }
+        }
+    }
+
+    fn known_cps_lambda_value_needed_in_atom(&self, name: &str, atom: &Atom) -> bool {
+        match atom {
+            Atom::Var { name: var, .. } => var.name == name,
+            Atom::Lit { .. }
+            | Atom::DictRef { .. }
+            | Atom::QualifiedRef { .. }
+            | Atom::Symbol { .. }
+            | Atom::BackendAtom { .. } => false,
+            Atom::Ctor { args, .. } => args
+                .iter()
+                .any(|arg| self.known_cps_lambda_value_needed_in_atom(name, arg)),
+            Atom::Tuple { elements, .. } => elements
+                .iter()
+                .any(|arg| self.known_cps_lambda_value_needed_in_atom(name, arg)),
+            Atom::AnonRecord { fields, .. } | Atom::Record { fields, .. } => fields
+                .iter()
+                .any(|(_, atom)| self.known_cps_lambda_value_needed_in_atom(name, atom)),
+            Atom::Lambda { params, body, .. } => {
+                !params.iter().any(|param| pat_binds_name(param, name))
+                    && self.known_cps_lambda_value_needed_in_expr(name, body)
+            }
+            Atom::BackendSpawnThunk { callback, .. } => {
+                self.known_cps_lambda_value_needed_in_atom(name, callback)
+            }
+        }
+    }
+
+    fn known_cps_lambda_value_needed_in_arm(&self, name: &str, arm: &MArm) -> bool {
+        arm.guard
+            .as_ref()
+            .is_some_and(|guard| self.known_cps_lambda_value_needed_in_expr(name, guard))
+            || (!pat_binds_name(&arm.pattern, name)
+                && self.known_cps_lambda_value_needed_in_expr(name, &arm.body))
+    }
+
+    fn known_cps_lambda_value_needed_in_handler(&self, name: &str, handler: &MHandler) -> bool {
+        match handler {
+            MHandler::Static {
+                arms,
+                return_clause,
+                ..
+            } => {
+                arms.iter()
+                    .any(|arm| self.known_cps_lambda_value_needed_in_handler_arm(name, arm))
+                    || return_clause.as_ref().is_some_and(|arm| {
+                        self.known_cps_lambda_value_needed_in_handler_arm(name, arm)
+                    })
+            }
+            MHandler::Native { .. } => false,
+            MHandler::Composite { handlers, .. } => handlers
+                .iter()
+                .any(|handler| self.known_cps_lambda_value_needed_in_handler(name, handler)),
+            MHandler::Dynamic {
+                op_tuple,
+                return_lambda,
+                ..
+            } => {
+                self.known_cps_lambda_value_needed_in_atom(name, op_tuple)
+                    || return_lambda.as_ref().is_some_and(|lambda| {
+                        self.known_cps_lambda_value_needed_in_atom(name, lambda)
+                    })
+            }
+        }
+    }
+
+    fn known_cps_lambda_value_needed_in_handler_arm(&self, name: &str, arm: &MHandlerArm) -> bool {
+        let params_bind_name = arm.params.iter().any(|param| pat_binds_name(param, name));
+        (!params_bind_name && self.known_cps_lambda_value_needed_in_expr(name, &arm.body))
+            || arm
+                .finally_block
+                .as_ref()
+                .is_some_and(|block| self.known_cps_lambda_value_needed_in_expr(name, block))
     }
 
     fn lower_known_local_cps_lambda_call(

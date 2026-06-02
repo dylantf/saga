@@ -452,7 +452,11 @@ main () = ()
     assert!(out.contains("'__dict_Readable_Std_Int_Int'/0"), "{out}");
     assert!(out.contains("call 'erlang':'element'"), "{out}");
     assert!(
-        out.contains("let <___anf_v0> =\n                        41"),
+        out.contains("let <___anf_v0> =\n                    41"),
+        "{out}"
+    );
+    assert!(
+        !out.contains("let <___anf_v1> =\n                fun"),
         "{out}"
     );
     assert_selective_core_eval_stdout_contains(
