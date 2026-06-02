@@ -288,7 +288,10 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                 if self.is_local(&name.name) {
                     if matches!(
                         self.local_shape(&name.name),
-                        Some(LocalValueShape::CpsCallable { .. })
+                        Some(
+                            LocalValueShape::CpsCallable { .. }
+                                | LocalValueShape::RuntimeCpsCallable { .. }
+                        )
                     ) {
                         self.unsupported(&format!(
                             "CPS callable value '{}' used outside a CPS call",

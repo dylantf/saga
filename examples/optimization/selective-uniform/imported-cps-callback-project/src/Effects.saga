@@ -8,7 +8,10 @@ pub fun read_value : Unit -> Int needs {ReadInt}
 read_value () = read! ()
 
 pub fun apply_eff : (Unit -> Int needs {ReadInt}) -> Int needs {ReadInt}
-apply_eff f = f ()
+apply_eff f = {
+  let g = f
+  g ()
+}
 
 pub handler forty_one for ReadInt {
   read () = resume 41

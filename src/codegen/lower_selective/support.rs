@@ -102,7 +102,10 @@ pub(super) enum LocalValueShape {
         adapter_arity: usize,
         effects: Vec<String>,
     },
-    CpsCallableFromUseType,
+    RuntimeCpsCallable {
+        source_arity: usize,
+        adapter_arity: usize,
+    },
 }
 
 pub(super) fn lower_param_names(params: &[Pat]) -> Vec<String> {

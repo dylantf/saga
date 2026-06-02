@@ -169,6 +169,7 @@ fn selective_core_codegen_runs_imported_cps_callback_project() {
     );
     let monadic_stdout = String::from_utf8_lossy(&monadic.stdout);
     assert!(monadic_stdout.contains("bind f#"), "{monadic_stdout}");
+    assert!(monadic_stdout.contains("bind g#"), "{monadic_stdout}");
     assert!(
         monadic_stdout.contains("Pure(Var(read_value))"),
         "{monadic_stdout}"
@@ -177,7 +178,7 @@ fn selective_core_codegen_runs_imported_cps_callback_project() {
         monadic_stdout.contains("App(Var(apply_eff#"),
         "{monadic_stdout}"
     );
-    assert!(monadic_stdout.contains("[Var(f#"), "{monadic_stdout}");
+    assert!(monadic_stdout.contains("[Var(g#"), "{monadic_stdout}");
 
     let inspect = std::process::Command::new(binary)
         .current_dir(&project_dir)
@@ -219,7 +220,8 @@ fn selective_core_codegen_runs_imported_cps_callback_project() {
     let effects_stdout = String::from_utf8_lossy(&effects_inspect.stdout);
     assert!(
         effects_stdout.contains("'apply_eff'/3")
-            && effects_stdout.contains("apply F('unit', _Evidence, _ReturnK)"),
+            && effects_stdout.contains("let <G>")
+            && effects_stdout.contains("apply G('unit', _Evidence, _ReturnK)"),
         "{effects_stdout}"
     );
 

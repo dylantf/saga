@@ -736,7 +736,10 @@ fun read_value : Unit -> Int needs {ReadInt}
 read_value () = read! ()
 
 fun apply_eff : (Unit -> Int needs {ReadInt}) -> Int needs {ReadInt}
-apply_eff f = f ()
+apply_eff f = {
+  let g = f
+  g ()
+}
 
 handler forty_one for ReadInt {
   read () = resume 41
@@ -745,15 +748,17 @@ handler forty_one for ReadInt {
 fun main : Unit -> Int
 main () = {
   let f = read_value
-  apply_eff f
+  let g = f
+  apply_eff g
 } with forty_one
 "#;
     let out = emit_selective_core(src);
     assert!(out.contains("'apply_eff'/3"), "{out}");
     assert!(
-        out.contains("apply F('unit', _Evidence, _ReturnK)"),
+        out.contains("apply G('unit', _Evidence, _ReturnK)"),
         "{out}"
     );
+    assert!(out.contains("let <G>"), "{out}");
     assert!(out.contains("apply 'apply_eff'/3(fun (_CpsFnArg"), "{out}");
     assert!(out.contains("apply 'read_value'/3"), "{out}");
     assert!(!out.contains("make_fun"), "{out}");

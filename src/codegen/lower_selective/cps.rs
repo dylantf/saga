@@ -59,16 +59,37 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         evidence: CExpr,
         return_k: CExpr,
     ) -> CExpr {
-        if let Some(local_shape @ LocalValueShape::CpsCallable { .. }) =
-            self.cps_local_shape_for_expr(value)
-        {
-            self.push_scope();
-            self.current_scope_mut().insert(var.name.clone());
-            self.current_shape_scope_mut()
-                .insert(var.name.clone(), local_shape);
-            let lowered_body = self.lower_cps_expr(body, evidence, return_k);
-            self.pop_scope();
-            return lowered_body;
+        if let Some(local_shape) = self.cps_bind_shape_for_expr(value) {
+            match local_shape {
+                LocalValueShape::CpsCallable { .. } => {
+                    self.push_scope();
+                    self.current_scope_mut().insert(var.name.clone());
+                    self.current_shape_scope_mut()
+                        .insert(var.name.clone(), local_shape);
+                    let lowered_body = self.lower_cps_expr(body, evidence, return_k);
+                    self.pop_scope();
+                    return lowered_body;
+                }
+                LocalValueShape::RuntimeCpsCallable { .. } => {
+                    let lowered_value = match value {
+                        MExpr::Pure(Atom::Var { name, .. }) => CExpr::Var(core_var(&name.name)),
+                        _ => self.unsupported_expr(value),
+                    };
+                    self.push_scope();
+                    self.current_scope_mut().insert(var.name.clone());
+                    self.current_shape_scope_mut()
+                        .insert(var.name.clone(), local_shape);
+                    let lowered_body = self.lower_cps_expr(body, evidence, return_k);
+                    self.pop_scope();
+                    return CExpr::Let(
+                        core_var(&var.name),
+                        Box::new(lowered_value),
+                        Box::new(lowered_body),
+                    );
+                }
+                LocalValueShape::PureCallable { .. } | LocalValueShape::PureCallableFromUseType => {
+                }
+            }
         }
 
         if self.expr_is_direct_subset(value) {
@@ -198,22 +219,13 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
 
     fn lower_cps_value_atom(&mut self, atom: &Atom) -> CExpr {
         match self.cps_value_atom_shape(atom) {
-            Some(LocalValueShape::CpsCallable {
-                module: None,
-                name,
-                source_arity: _,
-                adapter_arity: _,
-                ..
-            }) if matches!(atom, Atom::Var { .. })
-                && matches!(
-                    self.local_shape(match atom {
-                        Atom::Var { name, .. } => &name.name,
-                        _ => unreachable!(),
-                    }),
-                    Some(LocalValueShape::CpsCallableFromUseType)
-                ) =>
+            Some(LocalValueShape::RuntimeCpsCallable { .. })
+                if matches!(atom, Atom::Var { .. }) =>
             {
-                CExpr::Var(core_var(&name))
+                let Atom::Var { name, .. } = atom else {
+                    unreachable!();
+                };
+                CExpr::Var(core_var(&name.name))
             }
             Some(LocalValueShape::CpsCallable {
                 module,
