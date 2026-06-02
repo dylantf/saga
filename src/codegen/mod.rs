@@ -14,7 +14,7 @@ mod tests;
 pub mod type_shape;
 
 use crate::ast;
-use crate::compiler_options::{CompileOptions, MonadicStatsMode};
+use crate::compiler_options::{CodegenBackend, CompileOptions, MonadicStatsMode};
 use crate::typechecker::{CheckResult, ModuleCodegenInfo};
 use std::collections::HashMap;
 
@@ -485,6 +485,22 @@ pub fn emit_module_via_new_path(
         &effect_info,
         &imported_handler_decls,
     );
+    if matches!(options.codegen_backend, CodegenBackend::Selective) {
+        let cmod = lower_selective::lower_module_with_entry_export(
+            module_name,
+            &monadic_prog,
+            &resolution_map,
+            &constructor_atoms,
+            ctx,
+            &effect_info,
+            entry_export,
+        );
+        return EmitModuleOutput {
+            core_src: cerl::print_module(&cmod),
+            monadic_stats: None,
+        };
+    }
+
     let before_stats = options
         .diagnostics
         .monadic_stats

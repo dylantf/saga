@@ -263,7 +263,7 @@ pub fn cmd_install() {
     }
 }
 
-pub fn cmd_emit(file: &str) {
+pub fn cmd_emit(file: &str, options: &CompileOptions) {
     let source = fs::read_to_string(file).unwrap_or_else(|e| {
         eprintln!("Error reading {}: {}", file, e);
         std::process::exit(1);
@@ -310,15 +310,16 @@ pub fn cmd_emit(file: &str) {
         path: file.to_string(),
         source: source.clone(),
     };
-    let core_src = codegen::emit_module_with_context(
+    let output = codegen::emit_module_with_context_options(
         &erlang_name,
         &elaborated,
         &ctx,
         &result,
         Some(&source_file),
         Some("main"),
+        options,
     );
-    print!("{}", core_src);
+    print!("{}", output.core_src);
 }
 
 /// Dump an intermediate IR stage for a single `.saga` file.
@@ -518,7 +519,7 @@ pub fn cmd_inspect(file: &str, stage: &str) {
             println!("{}", monadic::print::print_program(&to_print));
         }
         "core" => {
-            cmd_emit(file);
+            cmd_emit(file, &CompileOptions::default());
         }
         other => {
             eprintln!(

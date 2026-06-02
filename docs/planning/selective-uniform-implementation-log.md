@@ -311,7 +311,8 @@ The first implementation slice is:
 
 ## Pipeline Integration Milestones
 
-Current mode is **inspect-driven Core shape work**:
+Current mode is **inspect-driven Core shape work plus an experimental
+build/run toggle**:
 
 ```text
 parse/typecheck/elaborate
@@ -319,12 +320,14 @@ parse/typecheck/elaborate
 -> whole-module monadic translation
 -> lower_selective
 -> print Core via inspect --stage selective-core
+   or emit/build/run with --selective-codegen
 ```
 
 This is intentionally not the final architecture. It lets us prove direct/CPS
-entry shapes without yet replacing the production build pipeline. Normal
-`saga build` / `saga run` still go through `emit_module_with_context` and the
-existing monadic/uniform lowerer unless an explicit integration point is added.
+entry shapes without replacing the production build pipeline. Normal `saga
+build` / `saga run` still go through the existing monadic/uniform lowerer.
+Only commands passed `--selective-codegen` route `emit_module_with_context`
+through `lower_selective`.
 
 Temporary monadic-IR use:
 
@@ -343,13 +346,17 @@ Planned integration sequence:
    working; broader handler semantics are still open.
 2. **Selective entrypoint/bootstrap slice.** Add the minimal wrapper/evidence
    setup needed for a normal `main` entry to call direct or CPS-shaped code
-   correctly.
+   correctly. Status: supported direct-ABI entrypoints can now be exported for
+   opt-in selective builds; CPS-ABI entrypoint bootstrap is still open.
 3. **Experimental build/run toggle.** Add an explicit compiler option or flag
    that routes normal `emit_module_with_context` through `lower_selective` for
-   supported modules. Keep the default production path unchanged.
+   supported modules. Keep the default production path unchanged. Status:
+   `--selective-codegen` is wired for `emit`, `build`, `run`, and `test`.
 4. **First pure/direct end-to-end run.** Use the experimental toggle to run a
    boring direct program through parse -> emit -> erlc -> erl, e.g.
-   `main () = 42` or `main () = { print_stdout "ok"; () }`.
+   `main () = 42` or `main () = { print_stdout "ok"; () }`. Status:
+   `04-print-stdout.saga` runs and prints `hello` with `saga run
+   --selective-codegen`.
 5. **First handled-effect end-to-end run.** Run a trivial handled effect, e.g.
    `read! () with forty_two`, through the same parse -> emit -> erlc -> erl
    path.

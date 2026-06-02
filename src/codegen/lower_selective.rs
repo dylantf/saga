@@ -38,8 +38,28 @@ pub fn lower_module(
     module_ctx: &CodegenContext,
     effect_info: &EffectInfo<'_>,
 ) -> CModule {
+    lower_module_with_entry_export(
+        module_name,
+        program,
+        resolution,
+        ctors,
+        module_ctx,
+        effect_info,
+        None,
+    )
+}
+
+pub fn lower_module_with_entry_export(
+    module_name: &str,
+    program: &MProgram,
+    resolution: &ResolutionMap,
+    ctors: &ConstructorAtoms,
+    module_ctx: &CodegenContext,
+    effect_info: &EffectInfo<'_>,
+    entry_export: Option<&str>,
+) -> CModule {
     let mut lowerer = DirectLowerer::new(resolution, ctors, module_ctx, effect_info);
-    lowerer.lower_module(module_name, program)
+    lowerer.lower_module(module_name, program, entry_export)
 }
 
 struct DirectLowerer<'a, 'info> {
@@ -94,7 +114,12 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         }
     }
 
-    fn lower_module(&mut self, module_name: &str, program: &MProgram) -> CModule {
+    fn lower_module(
+        &mut self,
+        module_name: &str,
+        program: &MProgram,
+        entry_export: Option<&str>,
+    ) -> CModule {
         self.current_module = module_name.to_string();
         self.classify_program(program);
         self.compute_imported_function_entries();
@@ -111,9 +136,10 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             });
         let is_public =
             |name: &str| -> bool { pub_names.as_ref().is_none_or(|s| s.contains(name)) };
+        let is_entry = |name: &str| -> bool { entry_export.is_some_and(|entry| entry == name) };
 
         self.assert_no_unlowered_direct_body_functions(program);
-        self.assert_no_unlowered_public_cps_functions(program, &is_public);
+        self.assert_no_unlowered_public_cps_functions(program, &is_public, &is_entry);
 
         let mut exports = Vec::new();
         let mut funs = Vec::new();
@@ -123,7 +149,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                     let Some(plan) = self.function_plans.get(&fb.name).copied() else {
                         continue;
                     };
-                    if fb.public || is_public(&fb.name) {
+                    if fb.public || is_public(&fb.name) || is_entry(&fb.name) {
                         exports.extend(self.export_entries(&fb.name));
                     }
                     match plan {
@@ -357,12 +383,13 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         &self,
         program: &MProgram,
         is_public: &impl Fn(&str) -> bool,
+        is_entry: &impl Fn(&str) -> bool,
     ) {
         for decl in program {
             let MDecl::FunBinding(fb) = decl else {
                 continue;
             };
-            if (fb.public || is_public(&fb.name))
+            if (fb.public || is_public(&fb.name) || is_entry(&fb.name))
                 && self
                     .local_function_entries
                     .get(&fb.name)

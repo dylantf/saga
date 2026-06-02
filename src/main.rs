@@ -1,7 +1,7 @@
 mod cli;
 
 use clap::{Parser, Subcommand};
-use saga::compiler_options::{CompileOptions, MonadicStatsMode};
+use saga::compiler_options::{CodegenBackend, CompileOptions, MonadicStatsMode};
 
 #[derive(Parser)]
 #[command(name = "saga", about = "The saga compiler", version)]
@@ -25,6 +25,9 @@ enum Command {
         /// Print monadic optimizer stats while compiling
         #[arg(long)]
         monadic_stats: bool,
+        /// Use the experimental selective direct/codegen backend
+        #[arg(long)]
+        selective_codegen: bool,
     },
     /// Build a project or single file
     Build {
@@ -39,6 +42,9 @@ enum Command {
         /// Print monadic optimizer stats while compiling
         #[arg(long)]
         monadic_stats: bool,
+        /// Use the experimental selective direct/codegen backend
+        #[arg(long)]
+        selective_codegen: bool,
     },
     /// Typecheck without building
     Check {
@@ -49,6 +55,9 @@ enum Command {
     Emit {
         /// The .saga source file
         file: String,
+        /// Use the experimental selective direct/codegen backend
+        #[arg(long)]
+        selective_codegen: bool,
     },
     /// Dump an intermediate IR stage for a single .saga file (new-path debugging)
     Inspect {
@@ -68,6 +77,9 @@ enum Command {
         /// Print monadic optimizer stats while compiling
         #[arg(long)]
         monadic_stats: bool,
+        /// Use the experimental selective direct/codegen backend
+        #[arg(long)]
+        selective_codegen: bool,
     },
     /// Create a new project
     New {
@@ -125,9 +137,10 @@ fn main() {
             release,
             verbose,
             monadic_stats,
+            selective_codegen,
         } => {
             cli::set_verbose(verbose);
-            let options = compile_options(monadic_stats);
+            let options = compile_options(monadic_stats, selective_codegen);
             cli::commands::cmd_run(file.as_deref(), release, &options);
         }
         Command::Build {
@@ -135,16 +148,21 @@ fn main() {
             release,
             verbose,
             monadic_stats,
+            selective_codegen,
         } => {
             cli::set_verbose(verbose);
-            let options = compile_options(monadic_stats);
+            let options = compile_options(monadic_stats, selective_codegen);
             cli::commands::cmd_build(file.as_deref(), release, &options);
         }
         Command::Check { file } => {
             cli::commands::cmd_check(file.as_deref());
         }
-        Command::Emit { file } => {
-            cli::commands::cmd_emit(&file);
+        Command::Emit {
+            file,
+            selective_codegen,
+        } => {
+            let options = compile_options(false, selective_codegen);
+            cli::commands::cmd_emit(&file, &options);
         }
         Command::Inspect { file, stage } => {
             cli::commands::cmd_inspect(&file, &stage);
@@ -153,9 +171,10 @@ fn main() {
             filter,
             verbose,
             monadic_stats,
+            selective_codegen,
         } => {
             cli::set_verbose(verbose);
-            let options = compile_options(monadic_stats);
+            let options = compile_options(monadic_stats, selective_codegen);
             cli::commands::cmd_test(filter.as_deref(), &options);
         }
         Command::New { name, lib } => {
@@ -178,10 +197,13 @@ fn main() {
     }
 }
 
-fn compile_options(monadic_stats: bool) -> CompileOptions {
+fn compile_options(monadic_stats: bool, selective_codegen: bool) -> CompileOptions {
+    let mut options = CompileOptions::default();
     if monadic_stats {
-        CompileOptions::default().with_monadic_stats(MonadicStatsMode::Summary)
-    } else {
-        CompileOptions::default()
+        options = options.with_monadic_stats(MonadicStatsMode::Summary);
     }
+    if selective_codegen {
+        options = options.with_codegen_backend(CodegenBackend::Selective);
+    }
+    options
 }
