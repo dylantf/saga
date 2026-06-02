@@ -860,3 +860,14 @@ boundaries exist.
   and CLI coverage proving normal `selective-core` inspection can ignore the
   private unsupported helper, while `--selective-no-fallback` reports the
   missing selective plan.
+- Added CPS callable-value guardrail coverage for storage and handler value
+  positions:
+  - tuples containing CPS callable values;
+  - records containing CPS callable values;
+  - constructors containing CPS callable values;
+  - handler arm `resume read_value`;
+  - handler return clauses whose result is a CPS callable value.
+- These remain intentionally unsupported until we choose a concrete runtime
+  representation. The important property is that they fail during selective
+  planning/lowering instead of emitting a raw BEAM function reference with the
+  wrong arity.

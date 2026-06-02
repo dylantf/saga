@@ -76,7 +76,7 @@ These are expression/value shapes that can produce a callable value.
 | Trait method value, pure | `let f = show` after dict elaboration | Partially supported for direct monomorphic method calls | Direct dict method extraction only in narrow subset | Broaden when trait specialization starts |
 | Trait method value, CPS/effectful | `let f = someEffectfulMethod` | Open | Needs dict method CPS shape from trait metadata and explicit adapter closure | High priority before trait specialization |
 | Dict method call, CPS/effectful | `x.effectfulMethod arg` after elaboration | Open | Old lowerer had effectful `DictMethodAccess` dispatch | High priority for traits |
-| Constructor/tuple/list/record containing CPS callable | `(read_value, other)` | Open/reject | Storing CPS values in data needs representation policy; avoid accidental BEAM funs | Add negative tests before support |
+| Constructor/tuple/list/record containing CPS callable | `(read_value, other)` | Explicitly rejected for tuple/record/constructor | Storing CPS values in data needs representation policy; avoid accidental BEAM funs | Add list fixture when list literals are in this path |
 | Handler expression value | `handler for E { ... }` | Open in selective | Build runtime handler tuple/return clause closure | Separate handler-value matrix |
 | Named handler alias | `let h = my_handler` | Static handler support narrow | Static aliases can stay metadata; conditional/dynamic need runtime tuple | Extend handler path separately |
 | Handler chosen by `if`/`case` | `let h = if c then h1 else h2` | Open in selective | Old lowerer has conditional handler item | Separate handler-value matrix |
@@ -100,9 +100,9 @@ These are places that consume a callable value or call shape.
 | Effectful callback argument inside effectful outer call | `outer read_value (effect_arg!)` | Open | Need both adapter closure and effectful-arg sequencing | Later |
 | Return continuation value | final result of CPS island | Supported for direct atoms; CPS callable result supported for `if`/`case` bound values | Returning CPS callable out of island needs representation policy | Add guardrail |
 | Yield argument | `op!(read_value)` | Explicitly rejected | Operation args stay direct-only until op parameter callback metadata can drive adapters | Later |
-| Handler arm `resume` value | `resume read_value` | Open/risk | Resuming CPS callable value needs adapter/materialized representation | Later |
-| Handler return clause value | `return _ = read_value` | Open/risk | Same as return continuation value | Later |
-| Direct data storage | `(read_value, 1)` | Open/reject | Needs representation policy before support | Add negative tests |
+| Handler arm `resume` value | `resume read_value` | Explicitly rejected | Resuming CPS callable value needs adapter/materialized representation | Later |
+| Handler return clause value | `return _ = read_value` | Explicitly rejected | Same as return continuation value | Later |
+| Direct data storage | `(read_value, 1)` | Explicitly rejected for tuple/record/constructor | Needs representation policy before support | Add list fixture when list literals are in this path |
 | Exported/public function returning CPS callable | `pub fun choose : ... -> Unit -> Int needs {E}` | Open | Cross-module ABI for returned CPS closure must be explicit | Later |
 
 ## MExpr Coverage Matrix
@@ -120,7 +120,7 @@ This is the selective lowerer's practical checklist over monadic IR.
 | `Case` | Supported direct | Supported in CPS islands | Supported for compatible CPS callable arms | Direct patterns/guards only for now |
 | `App` | Supported for direct call shapes | Supported for named/runtime CPS and direct fallback | Consumer, not producer | Pure-to-CPS callback args still open |
 | `With` | Rejected direct | Supported for static handler subset | Not a callable producer yet | Handler values separate |
-| `Resume` | Rejected direct | Supported inside handler arm subset | Open for CPS callable resume value | Needs adapter policy |
+| `Resume` | Rejected direct | Supported inside handler arm subset for direct values | CPS callable resume values explicitly rejected | Needs adapter policy before support |
 | `FieldAccess` | Supported direct | Via direct fallback | Not supported for CPS callable storage | Records containing callbacks open |
 | `RecordUpdate` | Rejected | Rejected | Open/reject | Same storage policy |
 | `DictMethodAccess` | Supported narrowly for pure trait method call/value shape | Open for CPS/effectful methods | Open | Key trait-specialization dependency |
@@ -183,8 +183,8 @@ static.
    - Then lambda-headed CPS calls can reuse the same closure/call path.
 
 4. **Storage guardrails**
-   - Add negative tests for tuples/records/constructors/lists containing CPS
-     callable values.
+   - Tuple/record/constructor negative tests are covered.
+   - Add list-literal coverage once list literals hit this selective path.
    - Support later only if we choose a representation.
 
 5. **Handler value matrix**

@@ -914,6 +914,136 @@ main () = ()
 }
 
 #[test]
+#[should_panic(expected = "direct function 'store_tuple' is outside the current direct subset")]
+fn selective_core_rejects_cps_callback_value_in_tuple_storage() {
+    let _ = emit_selective_core(
+        r#"
+effect ReadInt {
+  fun read : Unit -> Int
+}
+
+fun read_value : Unit -> Int needs {ReadInt}
+read_value () = read! ()
+
+pub fun store_tuple : Unit -> (Unit -> Int needs {ReadInt}, Int)
+store_tuple () = (read_value, 1)
+
+fun main : Unit -> Unit
+main () = ()
+"#,
+    );
+}
+
+#[test]
+#[should_panic(expected = "direct function 'store_record' is outside the current direct subset")]
+fn selective_core_rejects_cps_callback_value_in_record_storage() {
+    let _ = emit_selective_core(
+        r#"
+effect ReadInt {
+  fun read : Unit -> Int
+}
+
+record CallbackBox {
+  cb: Unit -> Int needs {ReadInt},
+  n: Int,
+}
+
+fun read_value : Unit -> Int needs {ReadInt}
+read_value () = read! ()
+
+pub fun store_record : Unit -> CallbackBox
+store_record () = CallbackBox { cb: read_value, n: 1 }
+
+fun main : Unit -> Unit
+main () = ()
+"#,
+    );
+}
+
+#[test]
+#[should_panic(
+    expected = "direct function 'store_constructor' is outside the current direct subset"
+)]
+fn selective_core_rejects_cps_callback_value_in_constructor_storage() {
+    let _ = emit_selective_core(
+        r#"
+effect ReadInt {
+  fun read : Unit -> Int
+}
+
+type CallbackBox = CallbackBox(Unit -> Int needs {ReadInt})
+
+fun read_value : Unit -> Int needs {ReadInt}
+read_value () = read! ()
+
+pub fun store_constructor : Unit -> CallbackBox
+store_constructor () = CallbackBox(read_value)
+
+fun main : Unit -> Unit
+main () = ()
+"#,
+    );
+}
+
+#[test]
+#[should_panic(
+    expected = "CPS-shaped function 'resume_callback' is not lowered by selective-core yet"
+)]
+fn selective_core_rejects_cps_callback_value_as_resume_value() {
+    let _ = emit_selective_core(
+        r#"
+effect ReadInt {
+  fun read : Unit -> Int
+}
+
+effect AskCallback {
+  fun ask : Unit -> (Unit -> Int needs {ReadInt})
+}
+
+fun read_value : Unit -> Int needs {ReadInt}
+read_value () = read! ()
+
+pub fun resume_callback : Unit -> Unit -> Int needs {ReadInt}
+resume_callback () = ask! () with {
+  ask () = resume read_value
+}
+
+fun main : Unit -> Unit
+main () = ()
+"#,
+    );
+}
+
+#[test]
+#[should_panic(
+    expected = "CPS-shaped function 'return_callback' is not lowered by selective-core yet"
+)]
+fn selective_core_rejects_cps_callback_value_in_handler_return_clause() {
+    let _ = emit_selective_core(
+        r#"
+effect ReadInt {
+  fun read : Unit -> Int
+}
+
+fun read_value : Unit -> Int needs {ReadInt}
+read_value () = read! ()
+
+pub fun return_callback : Unit -> (Unit -> Int needs {ReadInt})
+return_callback () = {
+  let _ = read! ()
+  read_value
+} with {
+  read () = resume 1
+  return value = value
+}
+
+fun main : Unit -> Unit
+main () = ()
+"#,
+    );
+}
+
+#[test]
 fn selective_core_lowers_case_shaped_effectful_callback_value() {
     let src = r#"
 effect ReadInt {
