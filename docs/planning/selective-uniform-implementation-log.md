@@ -971,3 +971,13 @@ boundaries exist.
     back to runtime CPS callable values;
   - this keeps the correctness fallback intact while avoiding a performance
     cliff for ordinary `let hof = SomeModule.apply_eff` code.
+- Finished inline handled callback specialization without adding a separate
+  escaping-yield analysis:
+  - deferred lambda arguments in function application now record their inferred
+    type in `type_at_node`, so selective lowering can see when an inline
+    callback is net-pure even if it appears in an effect-capable HOF slot;
+  - inline handled callbacks such as
+    `apply_eff (fun () -> read! () with handler)` now call the direct HOF
+    specialization with a direct lambda whose body is lowered as a CPS island;
+  - leaking inline callbacks such as `fun () -> read! () + 1` remain CPS-shaped
+    and do not select the direct HOF specialization.

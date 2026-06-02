@@ -342,6 +342,26 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         CExpr::Fun(param_names, Box::new(lowered_body))
     }
 
+    pub(super) fn lower_direct_cps_island_lambda_atom(
+        &mut self,
+        params: &[Pat],
+        body: &MExpr,
+    ) -> CExpr {
+        if params.iter().any(|p| !direct_param_supported(p)) {
+            self.unsupported("direct CPS-island lambda with unsupported parameter pattern");
+        }
+        let param_names = lower_param_names(params);
+        self.push_scope();
+        for pat in params {
+            self.bind_pat_locals(pat);
+        }
+        let return_k = self.identity_cps_continuation();
+        let lowered_body = self.lower_cps_expr(body, CExpr::Tuple(vec![]), return_k);
+        let lowered_body = self.wrap_param_match(params, &param_names, lowered_body);
+        self.pop_scope();
+        CExpr::Fun(param_names, Box::new(lowered_body))
+    }
+
     pub(super) fn lower_dict_constructor(&mut self, dc: &MDictConstructor) -> CFunDef {
         let mut methods = Vec::with_capacity(dc.methods.len());
         self.push_scope();

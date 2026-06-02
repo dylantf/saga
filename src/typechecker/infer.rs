@@ -820,6 +820,7 @@ impl Checker {
                 Some(ty) => ty,
                 None => self.infer_expr(deferred_lambda.arg_expr)?,
             };
+            self.record_type(deferred_lambda.arg_expr.id, &arg_ty);
             let arg_ty_pre = arg_ty.clone();
             self.unify_arg_with_param(
                 &arg_ty,

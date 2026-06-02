@@ -1194,6 +1194,19 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         supported
     }
 
+    fn lambda_is_direct_cps_island_subset(&mut self, params: &[Pat], body: &MExpr) -> bool {
+        if params.iter().any(|p| !direct_param_supported(p)) {
+            return false;
+        }
+        self.push_scope();
+        for pat in params {
+            self.bind_pat_locals(pat);
+        }
+        let supported = self.expr_is_cps_island_subset(body);
+        self.pop_scope();
+        supported
+    }
+
     fn lambda_is_cps_subset(&mut self, atom: &Atom) -> bool {
         let Atom::Lambda { params, body, .. } = atom else {
             return false;

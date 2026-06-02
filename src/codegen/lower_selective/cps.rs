@@ -360,10 +360,16 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
     }
 
     fn pure_hof_callback_arg_arity(&mut self, atom: &Atom) -> Option<usize> {
-        if let Atom::Lambda { params, body, .. } = atom
-            && self.lambda_is_direct_subset(params, body)
-        {
-            return Some(params.len());
+        if let Atom::Lambda { params, body, .. } = atom {
+            if self.lambda_is_direct_subset(params, body) {
+                return Some(params.len());
+            }
+            if self.pure_callback_arity_for_atom(atom) == Some(params.len())
+                && self.lambda_is_direct_cps_island_subset(params, body)
+            {
+                return Some(params.len());
+            }
+            return None;
         }
         match self.pure_value_atom_shape(atom)? {
             LocalValueShape::PureCallable { arity } => Some(arity),
@@ -379,7 +385,18 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         specialization: &HofDirectSpecialization,
         args: &[Atom],
     ) -> CExpr {
-        let lowered_args = args.iter().map(|arg| self.lower_atom(arg)).collect();
+        let callback_indices: std::collections::HashSet<usize> = specialization
+            .callback_params
+            .iter()
+            .map(|param| param.index)
+            .collect();
+        let lowered_args = args
+            .iter()
+            .enumerate()
+            .map(|(index, arg)| {
+                self.lower_hof_direct_specialized_arg(arg, callback_indices.contains(&index))
+            })
+            .collect();
         match module {
             Some(module) => CExpr::Call(module, specialization.entry_name.clone(), lowered_args),
             None => CExpr::Apply(
@@ -390,6 +407,17 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                 lowered_args,
             ),
         }
+    }
+
+    fn lower_hof_direct_specialized_arg(&mut self, atom: &Atom, callback_arg: bool) -> CExpr {
+        if callback_arg
+            && let Atom::Lambda { params, body, .. } = atom
+            && !self.lambda_is_direct_subset(params, body)
+            && self.lambda_is_direct_cps_island_subset(params, body)
+        {
+            return self.lower_direct_cps_island_lambda_atom(params, body);
+        }
+        self.lower_atom(atom)
     }
 
     fn lower_cps_arg_atom(

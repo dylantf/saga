@@ -1068,6 +1068,39 @@ main () = {
 }
 
 #[test]
+fn selective_core_specializes_inline_handled_callback_in_effectful_callback_slot() {
+    let src = r#"
+effect ReadInt {
+  fun read : Unit -> Int
+}
+
+fun apply_eff : (Unit -> Int needs {ReadInt}) -> Int needs {ReadInt}
+apply_eff f = f ()
+
+handler forty_one for ReadInt {
+  read () = resume 41
+}
+
+fun main : Unit -> Int
+main () =
+  apply_eff (fun () -> read! () with forty_one) with forty_one
+"#;
+    let out = emit_selective_core(src);
+    assert!(out.contains("'__saga_direct_hof_apply_eff'/1"), "{out}");
+    assert!(
+        out.contains("apply '__saga_direct_hof_apply_eff'/1(fun (_Arg0) ->"),
+        "{out}"
+    );
+    assert!(!out.contains("fun (_PureCpsArg"), "{out}");
+    assert!(!out.contains("apply _PureCpsK"), "{out}");
+    assert_selective_core_eval_stdout_contains(
+        src,
+        "io:format(\"~p~n\", ['_script':main(unit)]), init:stop().",
+        "41",
+    );
+}
+
+#[test]
 fn selective_core_specializes_handled_callback_in_effectful_callback_slot() {
     let src = r#"
 effect ReadInt {
@@ -1128,6 +1161,10 @@ main () = ()
     assert!(out.contains("_LambdaEvidence"), "{out}");
     assert!(out.contains("_LambdaK"), "{out}");
     assert!(out.contains("call 'erlang':'+'"), "{out}");
+    assert!(
+        !out.contains("apply '__saga_direct_hof_apply_eff'/1(fun (_Arg0) ->"),
+        "{out}"
+    );
     assert_selective_core_eval_stdout_contains(
         src,
         "io:format(\"~p~n\", ['_script':run_lambda_arg(unit)]), init:stop().",
