@@ -1,0 +1,27 @@
+type Box a = Box a
+
+effect ReadInt {
+  fun read : Unit -> Int
+}
+
+handler forty_one for ReadInt {
+  read () = resume 41
+}
+
+trait Readable a {
+  fun read_it : a -> Int needs {ReadInt}
+}
+
+impl Readable for Int needs {ReadInt} {
+  read_it _ = read! () + 1
+}
+
+impl Readable for Box a where {a: Readable} needs {ReadInt} {
+  read_it (Box x) = read_it x + 1
+}
+
+pub fun run_generic_trait_method : Unit -> Int
+run_generic_trait_method () = read_it (Box 0) with forty_one
+
+fun main : Unit -> Unit
+main () = ()

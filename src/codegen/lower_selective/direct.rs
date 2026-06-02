@@ -343,14 +343,11 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
     }
 
     pub(super) fn lower_dict_constructor(&mut self, dc: &MDictConstructor) -> CFunDef {
-        if !dc.dict_params.is_empty() {
-            self.unsupported(&format!(
-                "dict constructor '{}' with dictionary parameters",
-                dc.name
-            ));
-        }
-
         let mut methods = Vec::with_capacity(dc.methods.len());
+        self.push_scope();
+        for dict_param in &dc.dict_params {
+            self.current_scope_mut().insert(dict_param.clone());
+        }
         for (index, method) in dc.methods.iter().enumerate() {
             let MExpr::Pure(Atom::Lambda { params, body, .. }) = method else {
                 self.unsupported(&format!(
@@ -370,11 +367,15 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             };
             methods.push(lowered);
         }
+        self.pop_scope();
 
         CFunDef {
             name: dc.name.clone(),
-            arity: 0,
-            body: CExpr::Fun(vec![], Box::new(CExpr::Tuple(methods))),
+            arity: dc.dict_params.len(),
+            body: CExpr::Fun(
+                dc.dict_params.iter().map(|param| core_var(param)).collect(),
+                Box::new(CExpr::Tuple(methods)),
+            ),
         }
     }
 

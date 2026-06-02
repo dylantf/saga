@@ -891,8 +891,21 @@ boundaries exist.
   - effectful trait method calls in CPS islands apply the extracted method
     closure with evidence/continuation;
   - effectful trait method values can flow into CPS callback positions.
-- Current trait limits: dictionary constructors with dictionary parameters
-  remain unsupported in the selective path, and imported effectful dict
-  constructors still need a separate cross-module slice.
 - Added `examples/optimization/selective-uniform/34-effectful-trait-method.saga`
   as a manual fixture for the new local monomorphic trait path.
+- Extended the effectful trait method slice to local generic dictionary
+  constructors:
+  - `MDictConstructor`s with `dict_params` now lower as direct tuple-producing
+    functions whose arity is the number of sub-dictionaries;
+  - the constructor itself stays direct, while effectful methods inside the
+    tuple still lower as CPS closures;
+  - method closures can close over constructor dictionary parameters, so nested
+    dispatch like `impl Readable for Box a where {a: Readable}` can extract the
+    inner method from `__dict_Readable_a` and apply it with the current evidence
+    and continuation;
+  - `examples/optimization/selective-uniform/35-generic-effectful-trait-method.saga`
+    covers the manual fixture, and the unit test evaluates the nested dispatch
+    path to `43`.
+- Current trait limit: imported effectful dict constructors still need a
+  separate cross-module slice, especially imported generic constructors whose
+  sub-dictionaries are supplied by the importing module.

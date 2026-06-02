@@ -74,8 +74,8 @@ These are expression/value shapes that can produce a callable value.
 | Partial application of CPS function | `let f = read_with_prefix p` | Open | Must materialize closure with remaining args plus `Ev,K`; do not use source arity | Later |
 | Eta-reduced effect op ref | `let f = read` / operation callback | Open | Old lowerer had eta-reduced effect-op handling; selective needs explicit op adapter design | Later |
 | Trait method value, pure | `let f = show` after dict elaboration | Supported for direct monomorphic method calls | Direct dict method extraction only in narrow subset | Broaden when trait specialization starts |
-| Trait method value, CPS/effectful | `let f = someEffectfulMethod` | Supported for local monomorphic dicts in CPS callback positions | Extract method closure as `RuntimeCpsCallable` using method/access type metadata | Generic dict-parameter constructors later |
-| Dict method call, CPS/effectful | `x.effectfulMethod arg` after elaboration | Supported for local monomorphic dicts in CPS islands | Extract method closure and apply with evidence/continuation | Generic dict-parameter constructors later |
+| Trait method value, CPS/effectful | `let f = someEffectfulMethod` | Supported for local same-module dicts, including generic constructors with dictionary parameters | Extract method closure as `RuntimeCpsCallable` using method/access type metadata | Imported dict constructors later |
+| Dict method call, CPS/effectful | `x.effectfulMethod arg` after elaboration | Supported for local same-module dicts, including nested dispatch through dictionary parameters | Extract method closure and apply with evidence/continuation | Imported dict constructors later |
 | Constructor/tuple/list/record containing CPS callable | `(read_value, other)` | Explicitly rejected for tuple/record/constructor | Storing CPS values in data needs representation policy; avoid accidental BEAM funs | Add list fixture when list literals are in this path |
 | Handler expression value | `handler for E { ... }` | Open in selective | Build runtime handler tuple/return clause closure | Separate handler-value matrix |
 | Named handler alias | `let h = my_handler` | Static handler support narrow | Static aliases can stay metadata; conditional/dynamic need runtime tuple | Extend handler path separately |
@@ -123,7 +123,7 @@ This is the selective lowerer's practical checklist over monadic IR.
 | `Resume` | Rejected direct | Supported inside handler arm subset for direct values | CPS callable resume values explicitly rejected | Needs adapter policy before support |
 | `FieldAccess` | Supported direct | Via direct fallback | Not supported for CPS callable storage | Records containing callbacks open |
 | `RecordUpdate` | Rejected | Rejected | Open/reject | Same storage policy |
-| `DictMethodAccess` | Supported narrowly for pure trait method call/value shape | Supported for local monomorphic CPS/effectful methods | Produces `RuntimeCpsCallable` for effectful methods | Generic dict-parameter constructors still future |
+| `DictMethodAccess` | Supported narrowly for pure trait method call/value shape | Supported for local same-module CPS/effectful methods, including generic dictionary-parameter constructors | Produces `RuntimeCpsCallable` for effectful methods | Imported dict constructors still future |
 | `ForeignCall` | Rejected/direct external via intrinsics only | Rejected | Not callable producer | Later external functions need explicit shape metadata |
 | `BinOp` / `UnaryMinus` | Supported | Direct fallback | No | Keep |
 | `BitString` | Rejected | Rejected | No | Later |
@@ -141,7 +141,7 @@ not port the implementation:
 | Per-call effect classification | `call_effects.rs` comments list `Var`, `QualifiedName`, `DictMethodAccess`, `Lambda`; docs say one `CallEffectMap` per `App` | Selective currently does local `CallShape`; may want a selective call-shape prepass later |
 | Effectful variable call | `lower_effectful_var_call` | Supported for runtime CPS callback vars in islands |
 | Effectful named/qualified call | effectful call emission in `lower/mod.rs`, qualified call handling | Supported for local/imported CPS adapters |
-| Effectful dict method call | `lower_effectful_method_call`, `DictMethodAccess` classification | Supported for local monomorphic dicts |
+| Effectful dict method call | `lower_effectful_method_call`, `DictMethodAccess` classification | Supported for local same-module dicts, including generic dictionary-parameter constructors |
 | Lambda-headed effectful call | `lower_lambda_head_call` | Supported for selective CPS islands |
 | Eta-reduced effectful value | `lower_eta_reduced_effect_expr` | Partially covered for named CPS functions; op refs/partial apps open |
 | Effectful argument CPS chaining | `effectful_arg_idxs` paths | Mostly delegated to monadic `Bind`; needs fixtures for nested call arguments |
@@ -174,10 +174,10 @@ static.
      still CPS.
 
 2. **Effectful trait method calls and values**
-   - Local monomorphic dict constructors and effectful method calls/values are
-     covered.
-   - Next trait slice: imported effectful dict constructors and generic
-     constructors with dictionary parameters.
+   - Local same-module dict constructors and effectful method calls/values are
+     covered, including generic constructors with dictionary parameters.
+   - Next trait slice: imported effectful dict constructors and cross-module
+     generic dictionary boundaries.
    - Trait specialization can now target a clearer generic dictionary boundary.
 
 3. **CPS lambdas**

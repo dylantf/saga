@@ -412,6 +412,48 @@ main () = ()
 }
 
 #[test]
+fn selective_core_lowers_generic_effectful_trait_method_dispatch() {
+    let src = r#"
+type Box a = Box a
+
+effect ReadInt {
+  fun read : Unit -> Int
+}
+
+handler forty_one for ReadInt {
+  read () = resume 41
+}
+
+trait Readable a {
+  fun read_it : a -> Int needs {ReadInt}
+}
+
+impl Readable for Int needs {ReadInt} {
+  read_it _ = read! () + 1
+}
+
+impl Readable for Box a where {a: Readable} needs {ReadInt} {
+  read_it (Box x) = read_it x + 1
+}
+
+pub fun run_generic_trait_method : Unit -> Int
+run_generic_trait_method () = read_it (Box 0) with forty_one
+
+fun main : Unit -> Unit
+main () = ()
+"#;
+    let out = emit_selective_core(src);
+    assert!(out.contains("'__dict_Readable_Box'/1"), "{out}");
+    assert!(out.contains("'__dict_Readable_Std_Int_Int'/0"), "{out}");
+    assert!(out.contains("call 'erlang':'element'"), "{out}");
+    assert_selective_core_eval_stdout_contains(
+        src,
+        "io:format(\"~p~n\", ['_script':run_generic_trait_method(unit)]), init:stop().",
+        "43",
+    );
+}
+
+#[test]
 fn selective_core_lowers_dbg_intrinsic_with_direct_dictionary() {
     let out = emit_selective_core(
         r#"

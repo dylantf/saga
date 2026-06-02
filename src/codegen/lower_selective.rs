@@ -509,10 +509,11 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
     }
 
     fn can_lower_dict_constructor(&mut self, dc: &MDictConstructor) -> bool {
-        if !dc.dict_params.is_empty() {
-            return false;
+        self.push_scope();
+        for dict_param in &dc.dict_params {
+            self.current_scope_mut().insert(dict_param.clone());
         }
-        dc.methods.iter().enumerate().all(|(index, method)| {
+        let supported = dc.methods.iter().enumerate().all(|(index, method)| {
             let MExpr::Pure(Atom::Lambda { params, body, .. }) = method else {
                 return false;
             };
@@ -535,7 +536,9 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             };
             self.pop_scope();
             supported
-        })
+        });
+        self.pop_scope();
+        supported
     }
 
     fn can_lower_fun_binding(&mut self, fb: &MFunBinding) -> bool {
