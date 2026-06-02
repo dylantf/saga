@@ -20,8 +20,8 @@ use crate::codegen::CodegenContext;
 use crate::codegen::cerl::{CArm, CExpr, CFunDef, CLit, CModule, CPat};
 use crate::codegen::lower::util::{core_var, lower_lit_atom, mangle_ctor_atom};
 use crate::codegen::monadic::ir::{
-    Atom, EffectInfo, EffectOpRef, MArm, MDecl, MExpr, MFunBinding, MHandler, MHandlerArm,
-    MProgram, MVar,
+    Atom, EffectInfo, EffectOpRef, MArm, MDecl, MDictConstructor, MExpr, MFunBinding, MHandler,
+    MHandlerArm, MProgram, MVar,
 };
 use crate::codegen::resolve::{ConstructorAtoms, ResolutionMap, ResolvedCodegenKind};
 use crate::codegen::runtime_shape::RuntimeFunctionShape;
@@ -127,6 +127,9 @@ struct DirectLowerer<'a, 'info> {
     function_plans: HashMap<String, FunctionLoweringPlan>,
     /// Emitted entries for functions in the module currently being lowered.
     local_function_entries: HashMap<String, FunctionEntryInfo>,
+    /// Local dictionary constructors that the selective lowerer can emit as
+    /// direct tuple-producing functions.
+    local_dict_constructor_arities: HashMap<String, usize>,
     /// Emitted entries discovered for already-compiled imported user modules.
     imported_function_entries: HashMap<(String, String), FunctionEntryInfo>,
     /// Function currently being tested as a direct-body candidate.
@@ -158,6 +161,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             direct_values: HashSet::new(),
             function_plans: HashMap::new(),
             local_function_entries: HashMap::new(),
+            local_dict_constructor_arities: HashMap::new(),
             imported_function_entries: HashMap::new(),
             direct_candidate_function: None,
             cps_temp_counter: 0,
@@ -237,7 +241,11 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                         body: CExpr::Fun(vec![], Box::new(body)),
                     });
                 }
-                MDecl::DictConstructor(_) => self.unsupported("dict constructors"),
+                MDecl::DictConstructor(dc) => {
+                    if self.local_dict_constructor_arities.contains_key(&dc.name) {
+                        funs.push(self.lower_dict_constructor(dc));
+                    }
+                }
                 MDecl::Passthrough(_) => {}
             }
         }
@@ -253,6 +261,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         self.callable_type_shapes.clear();
         self.direct_values.clear();
         self.function_plans.clear();
+        self.local_dict_constructor_arities.clear();
         for decl in program {
             match decl {
                 MDecl::FunBinding(fb) => {
@@ -278,7 +287,13 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                         self.direct_values.insert(v.name.clone());
                     }
                 }
-                MDecl::DictConstructor(_) | MDecl::Passthrough(_) => {}
+                MDecl::DictConstructor(dc) => {
+                    if self.can_lower_dict_constructor(dc) {
+                        self.local_dict_constructor_arities
+                            .insert(dc.name.clone(), dc.dict_params.len());
+                    }
+                }
+                MDecl::Passthrough(_) => {}
             }
         }
     }
@@ -477,12 +492,50 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                         v.name
                     ));
                 }
-                MDecl::DictConstructor(_) => {
-                    self.unsupported("dict constructor with fallback disabled");
+                MDecl::DictConstructor(dc)
+                    if !self.local_dict_constructor_arities.contains_key(&dc.name) =>
+                {
+                    self.unsupported(&format!(
+                        "dict constructor '{}' has no selective lowering plan with fallback disabled",
+                        dc.name
+                    ));
                 }
-                MDecl::FunBinding(_) | MDecl::Val(_) | MDecl::Passthrough(_) => {}
+                MDecl::FunBinding(_)
+                | MDecl::Val(_)
+                | MDecl::DictConstructor(_)
+                | MDecl::Passthrough(_) => {}
             }
         }
+    }
+
+    fn can_lower_dict_constructor(&mut self, dc: &MDictConstructor) -> bool {
+        if !dc.dict_params.is_empty() {
+            return false;
+        }
+        dc.methods.iter().enumerate().all(|(index, method)| {
+            let MExpr::Pure(Atom::Lambda { params, body, .. }) = method else {
+                return false;
+            };
+            if params.iter().any(|p| !direct_param_supported(p)) {
+                return false;
+            }
+            let effectful = dc
+                .method_effects
+                .get(index)
+                .is_some_and(|effects| !effects.is_empty())
+                || dc.method_open_rows.get(index).copied().unwrap_or(false);
+            self.push_scope();
+            for pat in params {
+                self.bind_pat_locals(pat);
+            }
+            let supported = if effectful {
+                self.expr_is_cps_island_subset(body) || self.expr_is_direct_subset(body)
+            } else {
+                self.expr_is_direct_subset(body)
+            };
+            self.pop_scope();
+            supported
+        })
     }
 
     fn can_lower_fun_binding(&mut self, fb: &MFunBinding) -> bool {
@@ -813,10 +866,17 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
     }
 
     fn direct_dict_constructor(&self, head: &Atom) -> Option<DirectCallable> {
-        let source = match head {
-            Atom::DictRef { source, .. } => *source,
+        let (name, source) = match head {
+            Atom::DictRef { name, source } => (name, *source),
             _ => return None,
         };
+        if let Some(arity) = self.local_dict_constructor_arities.get(name) {
+            return Some(DirectCallable {
+                module: None,
+                name: name.clone(),
+                arity: *arity,
+            });
+        }
         let resolved = self.resolution.get(&source)?;
         let ResolvedCodegenKind::BeamFunction {
             erlang_mod,
@@ -1433,15 +1493,31 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                 trait_name,
                 method_index,
                 ..
-            } => Some(
-                self.pure_function_arity_at(*source)
-                    .or_else(|| self.pure_trait_method_arity(trait_name, *method_index))
-                    .map_or(LocalValueShape::PureCallableFromUseType, |arity| {
-                        LocalValueShape::PureCallable { arity }
-                    }),
-            ),
+            } => self
+                .pure_function_arity_at(*source)
+                .or_else(|| self.pure_trait_method_arity(trait_name, *method_index))
+                .map(|arity| LocalValueShape::PureCallable { arity }),
             _ => None,
         }
+    }
+
+    fn cps_dict_method_shape_for_expr(&self, expr: &MExpr) -> Option<LocalValueShape> {
+        let MExpr::DictMethodAccess {
+            source,
+            trait_name,
+            method_index,
+            ..
+        } = expr
+        else {
+            return None;
+        };
+        let (source_arity, adapter_arity, _effects) = self
+            .cps_function_arity_at(*source)
+            .or_else(|| self.cps_trait_method_arity(trait_name, *method_index))?;
+        Some(LocalValueShape::RuntimeCpsCallable {
+            source_arity,
+            adapter_arity,
+        })
     }
 
     fn cps_local_shape_for_expr(&self, expr: &MExpr) -> Option<LocalValueShape> {
@@ -1497,6 +1573,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                 self.cps_local_shape_for_expr(expr)
                     .or_else(|| self.pure_value_atom_shape(atom))
             }
+            MExpr::DictMethodAccess { .. } => self.cps_dict_method_shape_for_expr(expr),
             MExpr::If {
                 then_branch,
                 else_branch,
@@ -1515,6 +1592,10 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         match expr {
             MExpr::Pure(atom @ Atom::Lambda { .. }) => self.lambda_is_cps_subset(atom),
             MExpr::Pure(_) => self.cps_bind_shape_for_expr(expr).is_some(),
+            MExpr::DictMethodAccess { dict, .. } => {
+                self.atom_is_direct_subset(dict)
+                    && self.cps_dict_method_shape_for_expr(expr).is_some()
+            }
             MExpr::If {
                 cond,
                 then_branch,
@@ -1717,14 +1798,44 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
     }
 
     fn pure_trait_method_arity(&self, trait_name: &str, method_index: usize) -> Option<usize> {
-        let trait_info = self.effect_info.traits.get(trait_name).or_else(|| {
-            let bare = trait_name.rsplit('.').next().unwrap_or(trait_name);
-            self.effect_info.traits.get(bare)
-        })?;
+        let trait_info = self.trait_info(trait_name)?;
         let method = trait_info.methods.get(method_index)?;
         method.effect_sig.effects.is_empty().then_some(())?;
         (!method.effect_sig.is_open_row).then_some(())?;
         Some(method.effect_sig.user_arity)
+    }
+
+    fn cps_trait_method_arity(
+        &self,
+        trait_name: &str,
+        method_index: usize,
+    ) -> Option<(usize, usize, Vec<String>)> {
+        let trait_info = self.trait_info(trait_name)?;
+        let method = trait_info.methods.get(method_index)?;
+        if method.effect_sig.effects.is_empty() && !method.effect_sig.is_open_row {
+            return None;
+        }
+        let source_arity = method.effect_sig.user_arity;
+        Some((
+            source_arity,
+            source_arity + 2,
+            method.effect_sig.effects.clone(),
+        ))
+    }
+
+    fn trait_info(&self, trait_name: &str) -> Option<&crate::typechecker::TraitInfo> {
+        self.effect_info
+            .traits
+            .get(trait_name)
+            .or_else(|| {
+                let bare = trait_name.rsplit('.').next().unwrap_or(trait_name);
+                self.effect_info.traits.get(bare)
+            })
+            .or_else(|| {
+                let bare = trait_name.rsplit('.').next().unwrap_or(trait_name);
+                let canonical = format!("{}.{}", self.current_module, bare);
+                self.effect_info.traits.get(&canonical)
+            })
     }
 
     fn pure_function_arity_at(&self, source: NodeId) -> Option<usize> {

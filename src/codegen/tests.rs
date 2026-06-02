@@ -334,6 +334,84 @@ main () = show 42
 }
 
 #[test]
+fn selective_core_lowers_effectful_trait_method_call() {
+    let src = r#"
+effect ReadInt {
+  fun read : Unit -> Int
+}
+
+handler forty_one for ReadInt {
+  read () = resume 41
+}
+
+trait Readable a {
+  fun read_it : a -> Int needs {ReadInt}
+}
+
+impl Readable for Unit needs {ReadInt} {
+  read_it _ = read! () + 1
+}
+
+pub fun run_trait_method : Unit -> Int
+run_trait_method () = read_it () with forty_one
+
+fun main : Unit -> Unit
+main () = ()
+"#;
+    let out = emit_selective_core(src);
+    assert!(out.contains("'__dict_Readable_Std_Base_Unit'/0"), "{out}");
+    assert!(out.contains("_LambdaEvidence"), "{out}");
+    assert!(
+        out.contains("apply ___anf_v2('unit', _CpsEvidence"),
+        "{out}"
+    );
+    assert_selective_core_eval_stdout_contains(
+        src,
+        "io:format(\"~p~n\", ['_script':run_trait_method(unit)]), init:stop().",
+        "42",
+    );
+}
+
+#[test]
+fn selective_core_lowers_effectful_trait_method_value_as_cps_callback() {
+    let src = r#"
+effect ReadInt {
+  fun read : Unit -> Int
+}
+
+handler forty_one for ReadInt {
+  read () = resume 41
+}
+
+trait Readable a {
+  fun read_it : a -> Int needs {ReadInt}
+}
+
+impl Readable for Unit needs {ReadInt} {
+  read_it _ = read! () + 1
+}
+
+fun apply_eff : (Unit -> Int needs {ReadInt}) -> Int needs {ReadInt}
+apply_eff f = f ()
+
+pub fun run_trait_method_value : Unit -> Int
+run_trait_method_value () = apply_eff read_it with forty_one
+
+fun main : Unit -> Unit
+main () = ()
+"#;
+    let out = emit_selective_core(src);
+    assert!(out.contains("'apply_eff'/3"), "{out}");
+    assert!(out.contains("call 'erlang':'element'"), "{out}");
+    assert!(out.contains("apply 'apply_eff'/3(___anf_v2"), "{out}");
+    assert_selective_core_eval_stdout_contains(
+        src,
+        "io:format(\"~p~n\", ['_script':run_trait_method_value(unit)]), init:stop().",
+        "42",
+    );
+}
+
+#[test]
 fn selective_core_lowers_dbg_intrinsic_with_direct_dictionary() {
     let out = emit_selective_core(
         r#"

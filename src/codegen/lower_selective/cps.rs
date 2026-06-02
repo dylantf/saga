@@ -363,7 +363,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         }
     }
 
-    fn lower_cps_lambda_atom(&mut self, params: &[Pat], body: &MExpr) -> CExpr {
+    pub(super) fn lower_cps_lambda_atom(&mut self, params: &[Pat], body: &MExpr) -> CExpr {
         if params.iter().any(|p| !direct_param_supported(p)) {
             self.unsupported("CPS lambda with unsupported parameter pattern");
         }
@@ -396,6 +396,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             MExpr::Pure(atom) => {
                 self.lower_cps_runtime_value_atom(atom, source_arity, adapter_arity)
             }
+            MExpr::DictMethodAccess { .. } => self.lower_expr(expr),
             MExpr::If {
                 cond,
                 then_branch,

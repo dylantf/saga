@@ -342,6 +342,42 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         CExpr::Fun(param_names, Box::new(lowered_body))
     }
 
+    pub(super) fn lower_dict_constructor(&mut self, dc: &MDictConstructor) -> CFunDef {
+        if !dc.dict_params.is_empty() {
+            self.unsupported(&format!(
+                "dict constructor '{}' with dictionary parameters",
+                dc.name
+            ));
+        }
+
+        let mut methods = Vec::with_capacity(dc.methods.len());
+        for (index, method) in dc.methods.iter().enumerate() {
+            let MExpr::Pure(Atom::Lambda { params, body, .. }) = method else {
+                self.unsupported(&format!(
+                    "dict constructor '{}' method {} is not a lambda",
+                    dc.name, index
+                ));
+            };
+            let effectful = dc
+                .method_effects
+                .get(index)
+                .is_some_and(|effects| !effects.is_empty())
+                || dc.method_open_rows.get(index).copied().unwrap_or(false);
+            let lowered = if effectful {
+                self.lower_cps_lambda_atom(params, body)
+            } else {
+                self.lower_lambda_atom(params, body)
+            };
+            methods.push(lowered);
+        }
+
+        CFunDef {
+            name: dc.name.clone(),
+            arity: 0,
+            body: CExpr::Fun(vec![], Box::new(CExpr::Tuple(methods))),
+        }
+    }
+
     fn lower_ctor_atom(&mut self, name: &str, args: &[Atom]) -> CExpr {
         let bare = name.rsplit('.').next().unwrap_or(name);
         match bare {

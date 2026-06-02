@@ -881,3 +881,18 @@ boundaries exist.
     the generated runtime CPS closure immediately;
   - the selective runtime test helper now compiles `std_evidence_bridge` when
     generated Core uses handler evidence.
+- Added the first effectful trait method slice:
+  - local monomorphic `MDictConstructor`s lower as direct tuple-producing
+    functions;
+  - effectful dict methods lower their method lambdas with the CPS callback
+    ABI, while pure methods stay direct;
+  - effectful `DictMethodAccess` is classified as `RuntimeCpsCallable` using
+    the method-access type first and trait metadata as fallback;
+  - effectful trait method calls in CPS islands apply the extracted method
+    closure with evidence/continuation;
+  - effectful trait method values can flow into CPS callback positions.
+- Current trait limits: dictionary constructors with dictionary parameters
+  remain unsupported in the selective path, and imported effectful dict
+  constructors still need a separate cross-module slice.
+- Added `examples/optimization/selective-uniform/34-effectful-trait-method.saga`
+  as a manual fixture for the new local monomorphic trait path.
