@@ -444,6 +444,7 @@ pub fn cmd_inspect_with_options(file: &str, stage: &str, options: &CompileOption
                 String,
                 saga::ast::HandlerBody,
             > = std::collections::HashMap::new();
+            let mut handler_info = codegen::handler_analysis::analyze(&elaborated);
             for compiled in ctx.modules.values() {
                 let anf_imported = codegen::anf::normalize(
                     compiled.elaborated.clone(),
@@ -456,6 +457,9 @@ pub fn cmd_inspect_with_options(file: &str, stage: &str, options: &CompileOption
                             .or_insert_with(|| body.clone());
                     }
                 }
+                handler_info
+                    .resumption
+                    .extend(codegen::handler_analysis::analyze(&compiled.elaborated).resumption);
             }
 
             let (monadic_prog, _handler_value_map) = monadic::translate::translate_with_imports(
@@ -478,6 +482,7 @@ pub fn cmd_inspect_with_options(file: &str, stage: &str, options: &CompileOption
                     &resolution_map,
                     &constructor_atoms,
                     &ctx,
+                    &handler_info,
                     &effect_info,
                     codegen::lower_selective::LoweringOptions {
                         require_all_functions: options.selective_no_fallback,

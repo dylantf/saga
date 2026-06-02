@@ -492,6 +492,7 @@ pub fn emit_module_via_new_path(
             &resolution_map,
             &constructor_atoms,
             ctx,
+            &handler_info,
             &effect_info,
             entry_export,
             lower_selective::LoweringOptions {

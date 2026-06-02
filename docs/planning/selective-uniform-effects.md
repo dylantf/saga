@@ -307,6 +307,62 @@ value to the current continuation" node inside CPS-shaped lowering.
 The first monadic path can be slow. It is a correctness baseline for genuinely
 effectful code, not the performance story for pure code.
 
+## Final Pipeline Shape: Analysis Facts, Then Selective Lowering
+
+The finished architecture should separate **analysis order** from **rewrite
+order**.
+
+Trait specialization wants effect facts: a dictionary method body may become
+direct only after known handlers erase its effects. Static handler
+specialization wants ordinary call/dictionary facts: an effect operation may be
+inside a known impl method or helper. If either phase must globally rewrite the
+program before the other can run, the pipeline becomes circular.
+
+The intended shape is:
+
+```text
+elaborated / ANF program
+  |
+  |-- monadic/effect analysis side-chain
+  |     - handler-arm resume classification
+  |     - static tail-resumptive operation facts
+  |     - net-direct / net-pure function facts under known handlers
+  |     - handler factory / config-handler facts where bounded and static
+  |     - optional stats/debug snapshots
+  |
+  `-- selective lowering and specialization
+        - direct lowering for closed pure code
+        - trait/dictionary specialization at known call sites
+        - CPS islands only where effect control is actually required
+        - local static-handler direct-call inside those islands
+        - explicit adapters at direct/CPS boundaries
+```
+
+In this model, monadic IR is allowed to exist as an **analysis substrate** even
+when it is not the final program being lowered wholesale. The compiler can
+translate a body or region to monadic form, run bounded analyses or rewrites on
+a clone, and cache facts for the selective lowerer.
+
+Examples of facts the selective lowerer can consume:
+
+```text
+Function f is operationally direct under handler set H.
+Effect op E.read is statically handled by tail-resumptive arm A at this site.
+Dictionary method ToJson.to_json for concrete impl I is net-direct here.
+Handler factory make_options_handler arg produces static handler H.
+```
+
+Those facts guide call-site choices, but the slow/correct fallback remains the
+runtime shape classification. If no fact exists, the lowerer emits the generic
+direct or CPS shape dictated by the type and runtime-shape metadata.
+
+For the first implementation, do not build the full fact engine. Start with a
+local version inside selective CPS islands: when lowering `With`, keep a static
+handler frame stack; when lowering `Yield`, use the existing handler analysis to
+direct-call a matching tail-resumptive arm if the rewrite is conservative. This
+proves the effect-specialization path without committing to whole-program
+trait specialization yet.
+
 ## Static Handler Specialization Comes After Baseline
 
 Static tail-resumptive handlers are important, especially Reader/config-style

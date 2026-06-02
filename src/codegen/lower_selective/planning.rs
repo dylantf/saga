@@ -177,6 +177,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                 &compiled.resolution,
                 self.ctors,
                 self.module_ctx,
+                self.handler_info,
                 self.effect_info,
                 LoweringOptions::default(),
             );

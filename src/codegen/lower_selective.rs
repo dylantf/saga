@@ -20,6 +20,7 @@ mod support;
 use crate::ast::{Lit, NodeId, Pat};
 use crate::codegen::CodegenContext;
 use crate::codegen::cerl::{CArm, CExpr, CFunDef, CLit, CModule, CPat};
+use crate::codegen::handler_analysis::{HandlerAnalysis, ResumptionKind};
 use crate::codegen::lower::util::{core_var, lower_lit_atom, mangle_ctor_atom};
 use crate::codegen::monadic::ir::{
     Atom, EffectInfo, EffectOpRef, MArm, MDecl, MDictConstructor, MExpr, MFunBinding, MHandler,
@@ -45,24 +46,28 @@ pub fn lower_module(
     module_ctx: &CodegenContext,
     effect_info: &EffectInfo<'_>,
 ) -> CModule {
+    let handler_info = HandlerAnalysis::default();
     lower_module_with_entry_export_options(
         module_name,
         program,
         resolution,
         ctors,
         module_ctx,
+        &handler_info,
         effect_info,
         None,
         LoweringOptions::default(),
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn lower_module_with_options(
     module_name: &str,
     program: &MProgram,
     resolution: &ResolutionMap,
     ctors: &ConstructorAtoms,
     module_ctx: &CodegenContext,
+    handler_info: &HandlerAnalysis,
     effect_info: &EffectInfo<'_>,
     options: LoweringOptions,
 ) -> CModule {
@@ -72,18 +77,21 @@ pub fn lower_module_with_options(
         resolution,
         ctors,
         module_ctx,
+        handler_info,
         effect_info,
         None,
         options,
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn lower_module_with_entry_export(
     module_name: &str,
     program: &MProgram,
     resolution: &ResolutionMap,
     ctors: &ConstructorAtoms,
     module_ctx: &CodegenContext,
+    handler_info: &HandlerAnalysis,
     effect_info: &EffectInfo<'_>,
     entry_export: Option<&str>,
 ) -> CModule {
@@ -93,6 +101,7 @@ pub fn lower_module_with_entry_export(
         resolution,
         ctors,
         module_ctx,
+        handler_info,
         effect_info,
         entry_export,
         LoweringOptions::default(),
@@ -106,11 +115,19 @@ pub fn lower_module_with_entry_export_options(
     resolution: &ResolutionMap,
     ctors: &ConstructorAtoms,
     module_ctx: &CodegenContext,
+    handler_info: &HandlerAnalysis,
     effect_info: &EffectInfo<'_>,
     entry_export: Option<&str>,
     options: LoweringOptions,
 ) -> CModule {
-    let mut lowerer = DirectLowerer::new(resolution, ctors, module_ctx, effect_info, options);
+    let mut lowerer = DirectLowerer::new(
+        resolution,
+        ctors,
+        module_ctx,
+        handler_info,
+        effect_info,
+        options,
+    );
     lowerer.lower_module(module_name, program, entry_export)
 }
 
@@ -118,6 +135,7 @@ struct DirectLowerer<'a, 'info> {
     resolution: &'a ResolutionMap,
     ctors: &'a ConstructorAtoms,
     module_ctx: &'a CodegenContext,
+    handler_info: &'a HandlerAnalysis,
     effect_info: &'a EffectInfo<'info>,
     current_module: String,
     /// Declared callable shape from type/effect metadata.
@@ -145,6 +163,7 @@ struct DirectLowerer<'a, 'info> {
     /// During fixed-point classification this permits recursive self-calls
     /// before the function has been added to `function_plans`.
     direct_candidate_function: Option<String>,
+    static_handler_stack: Vec<Vec<MHandlerArm>>,
     cps_temp_counter: usize,
     locals: Vec<HashSet<String>>,
     local_shapes: Vec<HashMap<String, LocalValueShape>>,
@@ -156,6 +175,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         resolution: &'a ResolutionMap,
         ctors: &'a ConstructorAtoms,
         module_ctx: &'a CodegenContext,
+        handler_info: &'a HandlerAnalysis,
         effect_info: &'a EffectInfo<'info>,
         options: LoweringOptions,
     ) -> Self {
@@ -163,6 +183,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             resolution,
             ctors,
             module_ctx,
+            handler_info,
             effect_info,
             current_module: String::new(),
             callable_type_shapes: HashMap::new(),
@@ -174,6 +195,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             imported_function_entries: HashMap::new(),
             imported_hof_direct_specializations: HashMap::new(),
             direct_candidate_function: None,
+            static_handler_stack: Vec::new(),
             cps_temp_counter: 0,
             locals: vec![HashSet::new()],
             local_shapes: vec![HashMap::new()],
@@ -1634,6 +1656,124 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             current = ret;
         }
         (is_cps && arity > 0).then_some((arity, arity + 2, effects))
+    }
+
+    fn expr_contains_yield(&self, expr: &MExpr) -> bool {
+        match expr {
+            MExpr::Yield { .. } => true,
+            MExpr::Pure(atom) | MExpr::Resume { value: atom, .. } => self.atom_contains_yield(atom),
+            MExpr::Bind { value, body, .. } | MExpr::Let { value, body, .. } => {
+                self.expr_contains_yield(value) || self.expr_contains_yield(body)
+            }
+            MExpr::Ensure { body, cleanup } => {
+                self.expr_contains_yield(body) || self.expr_contains_yield(cleanup)
+            }
+            MExpr::Case {
+                scrutinee, arms, ..
+            } => {
+                self.atom_contains_yield(scrutinee)
+                    || arms.iter().any(|arm| {
+                        arm.guard
+                            .as_ref()
+                            .is_some_and(|guard| self.expr_contains_yield(guard))
+                            || self.expr_contains_yield(&arm.body)
+                    })
+            }
+            MExpr::If {
+                cond,
+                then_branch,
+                else_branch,
+                ..
+            } => {
+                self.atom_contains_yield(cond)
+                    || self.expr_contains_yield(then_branch)
+                    || self.expr_contains_yield(else_branch)
+            }
+            MExpr::App { head, args, .. } => {
+                self.atom_contains_yield(head)
+                    || args.iter().any(|arg| self.atom_contains_yield(arg))
+            }
+            MExpr::With { handler, body, .. } => {
+                self.handler_contains_yield(handler) || self.expr_contains_yield(body)
+            }
+            MExpr::FieldAccess { record, .. }
+            | MExpr::DictMethodAccess { dict: record, .. }
+            | MExpr::RecordUpdate { record, .. } => self.atom_contains_yield(record),
+            MExpr::ForeignCall { args, .. } => args.iter().any(|arg| self.atom_contains_yield(arg)),
+            MExpr::BitString { segments, .. } => segments
+                .iter()
+                .any(|segment| self.atom_contains_yield(&segment.value)),
+            MExpr::BinOp { left, right, .. } => {
+                self.atom_contains_yield(left) || self.atom_contains_yield(right)
+            }
+            MExpr::UnaryMinus { value, .. } => self.atom_contains_yield(value),
+            MExpr::Receive { .. } | MExpr::LetFun { .. } | MExpr::HandlerValue { .. } => true,
+        }
+    }
+
+    fn handler_contains_yield(&self, handler: &MHandler) -> bool {
+        match handler {
+            MHandler::Static {
+                arms,
+                return_clause,
+                ..
+            } => {
+                arms.iter().any(|arm| {
+                    self.expr_contains_yield(&arm.body)
+                        || arm
+                            .finally_block
+                            .as_ref()
+                            .is_some_and(|cleanup| self.expr_contains_yield(cleanup))
+                }) || return_clause
+                    .as_ref()
+                    .is_some_and(|arm| self.expr_contains_yield(&arm.body))
+            }
+            MHandler::Composite { handlers, .. } => handlers
+                .iter()
+                .any(|handler| self.handler_contains_yield(handler)),
+            MHandler::Dynamic {
+                op_tuple,
+                return_lambda,
+                ..
+            } => {
+                self.atom_contains_yield(op_tuple)
+                    || return_lambda
+                        .as_ref()
+                        .is_some_and(|atom| self.atom_contains_yield(atom))
+            }
+            MHandler::Native { .. } => false,
+        }
+    }
+
+    fn atom_contains_yield(&self, atom: &Atom) -> bool {
+        match atom {
+            Atom::Lambda { body, .. } => self.expr_contains_yield(body),
+            Atom::Ctor { args, .. } | Atom::Tuple { elements: args, .. } => {
+                args.iter().any(|atom| self.atom_contains_yield(atom))
+            }
+            Atom::AnonRecord { fields, .. } | Atom::Record { fields, .. } => fields
+                .iter()
+                .any(|(_, atom)| self.atom_contains_yield(atom)),
+            Atom::BackendSpawnThunk { callback, .. } => self.atom_contains_yield(callback),
+            Atom::Var { .. }
+            | Atom::Lit { .. }
+            | Atom::Symbol { .. }
+            | Atom::QualifiedRef { .. }
+            | Atom::DictRef { .. }
+            | Atom::BackendAtom { .. } => false,
+        }
+    }
+
+    fn effect_names_match(left: &str, right: &str) -> bool {
+        if left == right {
+            return true;
+        }
+        let left_qualified = left.contains('.');
+        let right_qualified = right.contains('.');
+        if left_qualified && right_qualified {
+            return false;
+        }
+        left.rsplit('.').next() == right.rsplit('.').next()
     }
 
     fn unsupported(&self, what: &str) -> ! {

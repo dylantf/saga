@@ -981,3 +981,26 @@ boundaries exist.
     specialization with a direct lambda whose body is lowered as a CPS island;
   - leaking inline callbacks such as `fun () -> read! () + 1` remain CPS-shaped
     and do not select the direct HOF specialization.
+- Added the first local static-handler direct-call slice inside selective CPS
+  islands:
+  - selective lowering now receives `HandlerAnalysis` and carries a static
+    handler-frame stack while lowering `With` bodies;
+  - `Yield` lowering first tries an innermost matching static arm before falling
+    back to evidence lookup;
+  - the rewrite is deliberately conservative: exactly one matching arm,
+    `TailResumptive`, no `finally`, supported op param patterns only, and no
+    nested `Yield` in the inlined arm body;
+  - `read! () with { read () = resume 41 }` now direct-calls the arm and avoids
+    `std_evidence_bridge:find_evidence` for the operation;
+  - captured lexical values are supported in this local shape too:
+    compute a value first, then use `db_url () = resume config` in an inline
+    handler around a body that performs `db_url! ()`; the direct call sees the
+    outer local and still avoids evidence lookup;
+  - this does not yet optimize through a separate helper body like
+    `Postgres.query ... with { db_url () = resume config }`, because the
+    `db_url!` operation is lowered inside `Postgres.query` rather than in the
+    caller's current static-handler frame. That needs static-handler facts plus
+    function/HOF specialization, not just the local direct-call rewrite;
+  - static handler evidence/closure construction is still emitted around the
+    `With` for now. Removing unused handler installation is the next
+    measurement-driven cleanup, not part of this first direct-call slice.

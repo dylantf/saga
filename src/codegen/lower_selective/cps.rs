@@ -157,6 +157,12 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         evidence: CExpr,
         return_k: CExpr,
     ) -> CExpr {
+        if let Some(lowered) =
+            self.lower_static_direct_call_yield(op, args, evidence.clone(), return_k.clone())
+        {
+            return lowered;
+        }
+
         let find_call = CExpr::Call(
             "std_evidence_bridge".to_string(),
             "find_evidence".to_string(),
@@ -172,6 +178,113 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         apply_args.push(evidence);
         apply_args.push(return_k);
         CExpr::Apply(Box::new(op_closure), apply_args)
+    }
+
+    fn lower_static_direct_call_yield(
+        &mut self,
+        op: &EffectOpRef,
+        args: &[Atom],
+        evidence: CExpr,
+        return_k: CExpr,
+    ) -> Option<CExpr> {
+        let arm = self.static_direct_call_arm_for_yield(op, args)?;
+        let bindings = self.direct_call_param_bindings(&arm.params, args)?;
+
+        self.push_scope();
+        for pat in &arm.params {
+            self.bind_pat_locals(pat);
+        }
+        let lowered_body = self.lower_cps_handler_arm_expr(&arm.body, evidence, return_k, None);
+        self.pop_scope();
+
+        Some(
+            bindings
+                .into_iter()
+                .rev()
+                .fold(lowered_body, |body, (name, value)| {
+                    CExpr::Let(name, Box::new(value), Box::new(body))
+                }),
+        )
+    }
+
+    fn static_direct_call_arm_for_yield(
+        &mut self,
+        op: &EffectOpRef,
+        args: &[Atom],
+    ) -> Option<MHandlerArm> {
+        let mut candidate = None;
+        for frame in self.static_handler_stack.iter().rev() {
+            let handles_effect = frame
+                .iter()
+                .any(|arm| Self::effect_names_match(&arm.op.effect, &op.effect));
+            if !handles_effect {
+                continue;
+            }
+
+            let mut matching = frame.iter().filter(|arm| {
+                Self::effect_names_match(&arm.op.effect, &op.effect) && arm.op.op == op.op
+            });
+            let arm = matching.next()?;
+            if matching.next().is_some() {
+                return None;
+            }
+            candidate = Some(arm.clone());
+            break;
+        }
+
+        let arm: MHandlerArm = candidate?;
+        if arm.finally_block.is_some()
+            || args.len() != arm.params.len()
+            || self.handler_info.resumption.get(&arm.id) != Some(&ResumptionKind::TailResumptive)
+            || self.expr_contains_yield(&arm.body)
+        {
+            return None;
+        }
+        if !self.direct_call_params_supported(&arm.params)
+            || !self.handler_arm_expr_is_cps_island_subset(&arm.body)
+        {
+            return None;
+        }
+        Some(arm)
+    }
+
+    fn direct_call_param_bindings(
+        &mut self,
+        params: &[Pat],
+        args: &[Atom],
+    ) -> Option<Vec<(String, CExpr)>> {
+        if params.len() != args.len() {
+            return None;
+        }
+        let mut bindings = Vec::new();
+        for (param, arg) in params.iter().zip(args) {
+            match param {
+                Pat::Var { name, .. } => {
+                    bindings.push((core_var(name), self.lower_atom(arg)));
+                }
+                Pat::Wildcard { .. }
+                | Pat::Lit {
+                    value: crate::ast::Lit::Unit,
+                    ..
+                } => {}
+                _ => return None,
+            }
+        }
+        Some(bindings)
+    }
+
+    fn direct_call_params_supported(&self, params: &[Pat]) -> bool {
+        params.iter().all(|param| {
+            matches!(
+                param,
+                Pat::Var { .. }
+                    | Pat::Wildcard { .. }
+                    | Pat::Lit {
+                        value: crate::ast::Lit::Unit,
+                        ..
+                    }
+            )
+        })
     }
 
     fn lower_cps_app(
@@ -727,7 +840,9 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             .map(|(name, _)| CExpr::Var(name.clone()))
             .unwrap_or_else(|| self.identity_cps_continuation());
 
+        self.static_handler_stack.push(arms.clone());
         let lowered_body = self.lower_cps_expr(body, current_evidence, body_return_k);
+        self.static_handler_stack.pop();
         let with_evidence = bindings
             .into_iter()
             .rev()

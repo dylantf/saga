@@ -71,6 +71,7 @@ fn emit_selective_core_with_options(
         codegen_info,
         &ctx.prelude_imports,
     );
+    let handler_info = super::handler_analysis::analyze(&elaborated);
     let anf_program = super::anf::normalize(elaborated, Some(&resolution_map));
     let ops_storage = super::build_effect_ops_table(&result);
     let handler_effects_storage = super::build_handler_effects(&result);
@@ -95,6 +96,7 @@ fn emit_selective_core_with_options(
         &resolution_map,
         &constructor_atoms,
         &ctx,
+        &handler_info,
         &effect_info,
         options,
     );
@@ -722,6 +724,79 @@ main () = ()
 }
 
 #[test]
+fn selective_core_direct_calls_static_tail_resumptive_handler_op() {
+    let src = r#"
+effect ReadInt {
+  fun read : Unit -> Int
+}
+
+handler forty_one for ReadInt {
+  read () = resume 41
+}
+
+fun main : Unit -> Int
+main () = {
+  let value = read! ()
+  value + 1
+} with forty_one
+"#;
+    let out = emit_selective_core(src);
+    assert!(
+        !out.contains("call 'std_evidence_bridge':'find_evidence'"),
+        "{out}"
+    );
+    assert!(out.contains("let <Value>"), "{out}");
+    assert!(out.contains("apply fun (_CpsResult"), "{out}");
+    assert!(out.contains("call 'erlang':'+'"), "{out}");
+    assert_selective_core_eval_stdout_contains(
+        src,
+        "io:format(\"~p~n\", ['_script':main(unit)]), init:stop().",
+        "42",
+    );
+}
+
+#[test]
+fn selective_core_direct_calls_static_handler_with_captured_runtime_value() {
+    let src = r#"
+effect SystemConfig {
+  fun read_config : Unit -> Int
+}
+
+effect DbConfig {
+  fun db_url : Unit -> Int
+}
+
+handler system_config for SystemConfig {
+  read_config () = resume 41
+}
+
+fun main : Unit -> Int
+main () = {
+  let config = read_config! () with system_config
+  {
+    let value = db_url! ()
+    value + 1
+  } with {
+    db_url () = resume config
+  }
+}
+"#;
+    let out = emit_selective_core(src);
+    assert!(
+        !out.contains("call 'std_evidence_bridge':'find_evidence'"),
+        "{out}"
+    );
+    assert!(out.contains("let <Config>"), "{out}");
+    assert!(out.contains("let <Value>"), "{out}");
+    assert!(out.contains("call 'erlang':'+'"), "{out}");
+    assert_selective_core_eval_stdout_contains(
+        src,
+        "io:format(\"~p~n\", ['_script':main(unit)]), init:stop().",
+        "42",
+    );
+}
+
+#[test]
 fn selective_core_lowers_effect_row_function_with_direct_body() {
     let out = emit_selective_core(
         r#"
@@ -814,6 +889,10 @@ main () = {
 }
 "#;
     let out = emit_selective_core(src);
+    assert!(
+        out.contains("call 'std_evidence_bridge':'find_evidence'"),
+        "{out}"
+    );
     assert!(out.contains("_FinallyValue"), "{out}");
     assert!(out.contains("_FinallyCleanup"), "{out}");
     assert!(out.contains("_WithResult"), "{out}");
