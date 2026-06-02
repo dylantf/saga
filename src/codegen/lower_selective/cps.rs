@@ -69,12 +69,13 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         if let MExpr::Pure(atom @ Atom::Lambda { .. }) = value
             && self.lambda_is_cps_subset(atom)
         {
-            let (source_arity, adapter_arity, _effects) = self
+            let (source_arity, adapter_arity, effects) = self
                 .cps_lambda_arity_for_atom(atom)
                 .unwrap_or_else(|| self.unsupported_atom(atom));
             let local_shape = LocalValueShape::RuntimeCpsCallable {
                 source_arity,
                 adapter_arity,
+                effects,
             };
             let lowered_value =
                 self.lower_cps_runtime_value_expr(value, source_arity, adapter_arity);
@@ -82,6 +83,20 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             self.current_scope_mut().insert(var.name.clone());
             self.current_shape_scope_mut()
                 .insert(var.name.clone(), local_shape);
+            let lowered_body = self.lower_cps_expr(body, evidence, return_k);
+            self.pop_scope();
+            return CExpr::Let(
+                core_var(&var.name),
+                Box::new(lowered_value),
+                Box::new(lowered_body),
+            );
+        }
+
+        if let MExpr::Yield { op, args, .. } = value
+            && let Some(lowered_value) = self.lower_static_direct_call_yield_result(op, args)
+        {
+            self.push_scope();
+            self.current_scope_mut().insert(var.name.clone());
             let lowered_body = self.lower_cps_expr(body, evidence, return_k);
             self.pop_scope();
             return CExpr::Let(
@@ -105,6 +120,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                 LocalValueShape::RuntimeCpsCallable {
                     source_arity,
                     adapter_arity,
+                    ..
                 } => {
                     let lowered_value =
                         self.lower_cps_runtime_value_expr(value, source_arity, adapter_arity);
@@ -209,6 +225,34 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                 .into_iter()
                 .rev()
                 .fold(lowered_body, |body, (name, value)| {
+                    CExpr::Let(name, Box::new(value), Box::new(body))
+                }),
+        )
+    }
+
+    fn lower_static_direct_call_yield_result(
+        &mut self,
+        op: &EffectOpRef,
+        args: &[Atom],
+    ) -> Option<CExpr> {
+        let arm = self.static_direct_call_arm_for_yield(op, args)?;
+        let bindings = self.direct_call_param_bindings(&arm.params, args)?;
+        let MExpr::Resume { value, .. } = &*arm.body else {
+            return None;
+        };
+
+        self.push_scope();
+        for pat in &arm.params {
+            self.bind_pat_locals(pat);
+        }
+        let lowered_value = self.lower_atom(value);
+        self.pop_scope();
+
+        Some(
+            bindings
+                .into_iter()
+                .rev()
+                .fold(lowered_value, |body, (name, value)| {
                     CExpr::Let(name, Box::new(value), Box::new(body))
                 }),
         )
@@ -789,6 +833,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             Some(LocalValueShape::RuntimeCpsCallable {
                 source_arity,
                 adapter_arity,
+                ..
             }) if matches!(atom, Atom::Lambda { .. }) => {
                 let Atom::Lambda { params, body, .. } = atom else {
                     unreachable!();
@@ -833,6 +878,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             Some(LocalValueShape::RuntimeCpsCallable {
                 source_arity: actual_source_arity,
                 adapter_arity: actual_adapter_arity,
+                ..
             }) => {
                 self.assert_app_arity("CPS lambda/value", actual_source_arity, source_arity);
                 self.assert_app_arity("CPS lambda/value", actual_adapter_arity, adapter_arity);
@@ -1301,7 +1347,9 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             Some(CallShape::Cps { effects, .. }) => effects.iter().any(|effect| {
                 self.effect_is_handled_by_elided_static_handler(effect, handled_effects)
             }),
-            Some(CallShape::LocalCpsCallable { .. }) => true,
+            Some(CallShape::LocalCpsCallable { effects, .. }) => effects.iter().any(|effect| {
+                self.effect_is_handled_by_elided_static_handler(effect, handled_effects)
+            }),
             _ => false,
         }
     }

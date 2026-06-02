@@ -518,12 +518,14 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             && let Some(LocalValueShape::RuntimeCpsCallable {
                 source_arity,
                 adapter_arity,
+                effects,
             }) = self.local_shape(&name.name)
         {
             return Some(CallShape::LocalCpsCallable {
                 name: name.name.clone(),
                 source_arity,
                 adapter_arity,
+                effects,
             });
         }
         if let Atom::Var { name, source } = head
@@ -531,13 +533,14 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                 self.local_shape(&name.name),
                 Some(LocalValueShape::PureCallableFromUseType)
             )
-            && let Some((source_arity, adapter_arity, _effects)) =
+            && let Some((source_arity, adapter_arity, effects)) =
                 self.cps_function_arity_at(*source)
         {
             return Some(CallShape::LocalCpsCallable {
                 name: name.name.clone(),
                 source_arity,
                 adapter_arity,
+                effects,
             });
         }
         if let Atom::Var { name, .. } = head
@@ -827,12 +830,13 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
     fn local_shape_for_param_type(&self, ty: &Type) -> Option<LocalValueShape> {
         if self.pure_function_arity_from_type(ty).is_some() {
             Some(LocalValueShape::PureCallableFromUseType)
-        } else if let Some((source_arity, adapter_arity, _effects)) =
+        } else if let Some((source_arity, adapter_arity, effects)) =
             self.cps_function_arity_from_type(ty)
         {
             Some(LocalValueShape::RuntimeCpsCallable {
                 source_arity,
                 adapter_arity,
+                effects,
             })
         } else {
             None
@@ -850,12 +854,13 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                 let shape = explicit_shape.unwrap_or_else(|| {
                     if self.pure_function_arity_at(*id).is_some() {
                         LocalValueShape::PureCallableFromUseType
-                    } else if let Some((source_arity, adapter_arity, _effects)) =
+                    } else if let Some((source_arity, adapter_arity, effects)) =
                         self.cps_function_arity_at(*id)
                     {
                         LocalValueShape::RuntimeCpsCallable {
                             source_arity,
                             adapter_arity,
+                            effects,
                         }
                     } else {
                         LocalValueShape::PureCallableFromUseType
@@ -1284,12 +1289,13 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         else {
             return None;
         };
-        let (source_arity, adapter_arity, _effects) = self
+        let (source_arity, adapter_arity, effects) = self
             .cps_function_arity_at(*source)
             .or_else(|| self.cps_trait_method_arity(trait_name, *method_index))?;
         Some(LocalValueShape::RuntimeCpsCallable {
             source_arity,
             adapter_arity,
+            effects,
         })
     }
 
@@ -1322,11 +1328,12 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         match expr {
             MExpr::Pure(atom) => {
                 if self.lambda_is_cps_atom(atom) {
-                    let (source_arity, adapter_arity, _effects) =
+                    let (source_arity, adapter_arity, effects) =
                         self.cps_lambda_arity_for_atom(atom)?;
                     return Some(LocalValueShape::RuntimeCpsCallable {
                         source_arity,
                         adapter_arity,
+                        effects,
                     });
                 }
                 if let Atom::Var { name, source } = atom {
@@ -1336,11 +1343,12 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                             | LocalValueShape::RuntimeCpsCallable { .. }),
                         ) => return Some(shape),
                         Some(LocalValueShape::PureCallableFromUseType) => {
-                            let (source_arity, adapter_arity, _effects) =
+                            let (source_arity, adapter_arity, effects) =
                                 self.cps_function_arity_at(*source)?;
                             return Some(LocalValueShape::RuntimeCpsCallable {
                                 source_arity,
                                 adapter_arity,
+                                effects,
                             });
                         }
                         _ => {}
@@ -1430,50 +1438,61 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         }
 
         match (
-            self.runtime_cps_arities(left),
-            self.runtime_cps_arities(right),
+            self.runtime_cps_shape_parts(left),
+            self.runtime_cps_shape_parts(right),
             self.pure_callable_shape_arity(left),
             self.pure_callable_shape_arity(right),
         ) {
-            (Some((left_source, left_adapter)), Some((right_source, right_adapter)), _, _)
-                if left_source == right_source && left_adapter == right_adapter =>
-            {
+            (
+                Some((left_source, left_adapter, left_effects)),
+                Some((right_source, right_adapter, right_effects)),
+                _,
+                _,
+            ) if left_source == right_source && left_adapter == right_adapter => {
                 Some(LocalValueShape::RuntimeCpsCallable {
                     source_arity: left_source,
                     adapter_arity: left_adapter,
+                    effects: merge_effect_rows(left_effects, right_effects),
                 })
             }
-            (Some((source_arity, adapter_arity)), None, _, Some(pure_arity))
+            (Some((source_arity, adapter_arity, effects)), None, _, Some(pure_arity))
                 if source_arity == pure_arity =>
             {
                 Some(LocalValueShape::RuntimeCpsCallable {
                     source_arity,
                     adapter_arity,
+                    effects,
                 })
             }
-            (None, Some((source_arity, adapter_arity)), Some(pure_arity), _)
+            (None, Some((source_arity, adapter_arity, effects)), Some(pure_arity), _)
                 if source_arity == pure_arity =>
             {
                 Some(LocalValueShape::RuntimeCpsCallable {
                     source_arity,
                     adapter_arity,
+                    effects,
                 })
             }
             _ => None,
         }
     }
 
-    fn runtime_cps_arities(&self, shape: &LocalValueShape) -> Option<(usize, usize)> {
+    fn runtime_cps_shape_parts(
+        &self,
+        shape: &LocalValueShape,
+    ) -> Option<(usize, usize, Vec<String>)> {
         match shape {
             LocalValueShape::CpsCallable {
                 source_arity,
                 adapter_arity,
+                effects,
                 ..
             }
             | LocalValueShape::RuntimeCpsCallable {
                 source_arity,
                 adapter_arity,
-            } => Some((*source_arity, *adapter_arity)),
+                effects,
+            } => Some((*source_arity, *adapter_arity, effects.clone())),
             LocalValueShape::PureCallable { .. } | LocalValueShape::PureCallableFromUseType => None,
         }
     }
@@ -1490,10 +1509,11 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
 
     fn cps_value_atom_shape(&self, atom: &Atom) -> Option<LocalValueShape> {
         if self.lambda_is_cps_atom(atom) {
-            let (source_arity, adapter_arity, _effects) = self.cps_lambda_arity_for_atom(atom)?;
+            let (source_arity, adapter_arity, effects) = self.cps_lambda_arity_for_atom(atom)?;
             return Some(LocalValueShape::RuntimeCpsCallable {
                 source_arity,
                 adapter_arity,
+                effects,
             });
         }
         if let Atom::Var { name, source } = atom {
@@ -1501,11 +1521,12 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                 Some(shape @ LocalValueShape::CpsCallable { .. }) => return Some(shape),
                 Some(shape @ LocalValueShape::RuntimeCpsCallable { .. }) => return Some(shape),
                 Some(LocalValueShape::PureCallableFromUseType) => {
-                    let (source_arity, adapter_arity, _effects) =
+                    let (source_arity, adapter_arity, effects) =
                         self.cps_function_arity_at(*source)?;
                     return Some(LocalValueShape::RuntimeCpsCallable {
                         source_arity,
                         adapter_arity,
+                        effects,
                     });
                 }
                 _ => {}

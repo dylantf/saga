@@ -342,6 +342,10 @@ fn selective_core_specializes_imported_static_handler_project() {
     assert!(inspect_stdout.contains("let <Config>"), "{inspect_stdout}");
     assert!(inspect_stdout.contains("let <Value>"), "{inspect_stdout}");
     assert!(
+        inspect_stdout.contains("let <Value> =\n              Config"),
+        "{inspect_stdout}"
+    );
+    assert!(
         inspect_stdout.contains("call 'erlang':'+'"),
         "{inspect_stdout}"
     );

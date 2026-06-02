@@ -456,6 +456,57 @@ main () = ()
 }
 
 #[test]
+fn selective_core_elides_static_handler_around_non_intersecting_trait_method_call() {
+    let src = r#"
+effect ReadInt {
+  fun read : Unit -> Int
+}
+
+effect DbConfig {
+  fun db_url : Unit -> Int
+}
+
+handler forty_one for ReadInt {
+  read () = resume 41
+}
+
+trait Readable a {
+  fun read_it : a -> Int needs {ReadInt}
+}
+
+impl Readable for Unit needs {ReadInt} {
+  read_it _ = read! () + 1
+}
+
+pub fun run_nested_trait_and_config : Unit -> Int
+run_nested_trait_and_config () = {
+  {
+    let trait_value = read_it ()
+    let db = db_url! ()
+    trait_value + db
+  } with {
+    db_url () = resume 1
+  }
+} with forty_one
+
+fun main : Unit -> Unit
+main () = ()
+"#;
+    let out = emit_selective_core(src);
+    assert!(out.contains("'ReadInt'"), "{out}");
+    assert!(!out.contains("'DbConfig'"), "{out}");
+    assert!(
+        !out.contains("call 'std_evidence_bridge':'insert_canonical'\n              (_CpsEvidence"),
+        "{out}"
+    );
+    assert_selective_core_eval_stdout_contains(
+        src,
+        "io:format(\"~p~n\", ['_script':run_nested_trait_and_config(unit)]), init:stop().",
+        "43",
+    );
+}
+
+#[test]
 fn selective_core_lowers_dbg_intrinsic_with_direct_dictionary() {
     let out = emit_selective_core(
         r#"

@@ -1063,3 +1063,23 @@ boundaries exist.
     modules with the wrong per-entry `EffectInfo` table during project builds;
   - `examples/optimization/selective-uniform/imported-static-handler-specialization-project/`
     covers the full project path and prints `ok`.
+- Added the first trait/dict effect-fact cleanup for selective decisions:
+  - `LocalValueShape::RuntimeCpsCallable` and `CallShape::LocalCpsCallable`
+    now carry known static effects when type metadata or trait method metadata
+    provides them;
+  - branch-shaped runtime CPS callable values merge their effect rows
+    conservatively;
+  - handler-install elision now treats local runtime CPS callables as blockers
+    only when their known effects intersect the handler being elided;
+  - this lets a `DbConfig` static handler elide around a trait method call that
+    needs only an outer `ReadInt` handler, while still preserving evidence for
+    trait calls whose effects intersect the elided handler.
+- Added the first Reader/config direct-result bind optimization:
+  - a bind whose value is a statically direct-called `Yield` with a simple
+    `resume atom` arm lowers as an ordinary `let` of the resumed value;
+  - `let value = db_url! ()` under `db_url () = resume config` now emits
+    `let <Value> = Config` instead of allocating/applying a one-shot
+    continuation closure;
+  - this currently targets the simplest `resume atom` shape. Handler arm bodies
+    with direct lets/cases still use the existing direct-call path and can be
+    specialized further later.

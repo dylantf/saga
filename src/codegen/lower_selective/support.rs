@@ -92,6 +92,7 @@ pub(super) enum CallShape {
         name: String,
         source_arity: usize,
         adapter_arity: usize,
+        effects: Vec<String>,
     },
     Cps {
         module: Option<String>,
@@ -119,6 +120,7 @@ pub(super) enum LocalValueShape {
     RuntimeCpsCallable {
         source_arity: usize,
         adapter_arity: usize,
+        effects: Vec<String>,
     },
 }
 
@@ -199,6 +201,15 @@ pub(super) fn erlang_module_name(module_name: &str) -> String {
         .map(str::to_lowercase)
         .collect::<Vec<_>>()
         .join("_")
+}
+
+pub(super) fn merge_effect_rows(mut left: Vec<String>, right: Vec<String>) -> Vec<String> {
+    for effect in right {
+        if !left.contains(&effect) {
+            left.push(effect);
+        }
+    }
+    left
 }
 
 pub(super) fn remote_fun_value(module: String, name: String, arity: usize) -> CExpr {
