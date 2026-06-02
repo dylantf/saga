@@ -28,6 +28,9 @@ enum Command {
         /// Use the experimental selective direct/codegen backend
         #[arg(long)]
         selective_codegen: bool,
+        /// Require every lowered function to use the selective backend
+        #[arg(long)]
+        selective_no_fallback: bool,
     },
     /// Build a project or single file
     Build {
@@ -45,6 +48,9 @@ enum Command {
         /// Use the experimental selective direct/codegen backend
         #[arg(long)]
         selective_codegen: bool,
+        /// Require every lowered function to use the selective backend
+        #[arg(long)]
+        selective_no_fallback: bool,
     },
     /// Typecheck without building
     Check {
@@ -58,6 +64,9 @@ enum Command {
         /// Use the experimental selective direct/codegen backend
         #[arg(long)]
         selective_codegen: bool,
+        /// Require every lowered function to use the selective backend
+        #[arg(long)]
+        selective_no_fallback: bool,
     },
     /// Dump an intermediate IR stage for a single .saga file (new-path debugging)
     Inspect {
@@ -66,6 +75,9 @@ enum Command {
         /// Stage to dump: elaborated | anf | monadic | monadic-opt | monadic-stats | core
         #[arg(long)]
         stage: String,
+        /// Require every lowered function to use the selective backend for selective-core
+        #[arg(long)]
+        selective_no_fallback: bool,
     },
     /// Run tests
     Test {
@@ -80,6 +92,9 @@ enum Command {
         /// Use the experimental selective direct/codegen backend
         #[arg(long)]
         selective_codegen: bool,
+        /// Require every lowered function to use the selective backend
+        #[arg(long)]
+        selective_no_fallback: bool,
     },
     /// Create a new project
     New {
@@ -138,9 +153,10 @@ fn main() {
             verbose,
             monadic_stats,
             selective_codegen,
+            selective_no_fallback,
         } => {
             cli::set_verbose(verbose);
-            let options = compile_options(monadic_stats, selective_codegen);
+            let options = compile_options(monadic_stats, selective_codegen, selective_no_fallback);
             cli::commands::cmd_run(file.as_deref(), release, &options);
         }
         Command::Build {
@@ -149,9 +165,10 @@ fn main() {
             verbose,
             monadic_stats,
             selective_codegen,
+            selective_no_fallback,
         } => {
             cli::set_verbose(verbose);
-            let options = compile_options(monadic_stats, selective_codegen);
+            let options = compile_options(monadic_stats, selective_codegen, selective_no_fallback);
             cli::commands::cmd_build(file.as_deref(), release, &options);
         }
         Command::Check { file } => {
@@ -160,21 +177,28 @@ fn main() {
         Command::Emit {
             file,
             selective_codegen,
+            selective_no_fallback,
         } => {
-            let options = compile_options(false, selective_codegen);
+            let options = compile_options(false, selective_codegen, selective_no_fallback);
             cli::commands::cmd_emit(&file, &options);
         }
-        Command::Inspect { file, stage } => {
-            cli::commands::cmd_inspect(&file, &stage);
+        Command::Inspect {
+            file,
+            stage,
+            selective_no_fallback,
+        } => {
+            let options = compile_options(false, false, selective_no_fallback);
+            cli::commands::cmd_inspect_with_options(&file, &stage, &options);
         }
         Command::Test {
             filter,
             verbose,
             monadic_stats,
             selective_codegen,
+            selective_no_fallback,
         } => {
             cli::set_verbose(verbose);
-            let options = compile_options(monadic_stats, selective_codegen);
+            let options = compile_options(monadic_stats, selective_codegen, selective_no_fallback);
             cli::commands::cmd_test(filter.as_deref(), &options);
         }
         Command::New { name, lib } => {
@@ -197,13 +221,20 @@ fn main() {
     }
 }
 
-fn compile_options(monadic_stats: bool, selective_codegen: bool) -> CompileOptions {
+fn compile_options(
+    monadic_stats: bool,
+    selective_codegen: bool,
+    selective_no_fallback: bool,
+) -> CompileOptions {
     let mut options = CompileOptions::default();
     if monadic_stats {
         options = options.with_monadic_stats(MonadicStatsMode::Summary);
     }
     if selective_codegen {
         options = options.with_codegen_backend(CodegenBackend::Selective);
+    }
+    if selective_no_fallback {
+        options = options.with_selective_no_fallback(true);
     }
     options
 }

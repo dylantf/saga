@@ -486,7 +486,7 @@ pub fn emit_module_via_new_path(
         &imported_handler_decls,
     );
     if matches!(options.codegen_backend, CodegenBackend::Selective) {
-        let cmod = lower_selective::lower_module_with_entry_export(
+        let cmod = lower_selective::lower_module_with_entry_export_options(
             module_name,
             &monadic_prog,
             &resolution_map,
@@ -494,6 +494,9 @@ pub fn emit_module_via_new_path(
             ctx,
             &effect_info,
             entry_export,
+            lower_selective::LoweringOptions {
+                require_all_functions: options.selective_no_fallback,
+            },
         );
         return EmitModuleOutput {
             core_src: cerl::print_module(&cmod),

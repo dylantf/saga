@@ -363,7 +363,7 @@ pub fn cmd_emit(file: &str, options: &CompileOptions) {
 /// always run the new path (uniform-effect-translation), regardless of the
 /// active `emit_module_with_context` block. `elaborated` and `core` go through
 /// shared code and therefore observe the toggle.
-pub fn cmd_inspect(file: &str, stage: &str) {
+pub fn cmd_inspect_with_options(file: &str, stage: &str, options: &CompileOptions) {
     use saga::codegen::monadic;
 
     let source = fs::read_to_string(file).unwrap_or_else(|e| {
@@ -472,13 +472,16 @@ pub fn cmd_inspect(file: &str, stage: &str) {
                     &codegen_info,
                     &ctx.prelude_imports,
                 );
-                let cmod = codegen::lower_selective::lower_module(
+                let cmod = codegen::lower_selective::lower_module_with_options(
                     &module_name,
                     &monadic_prog,
                     &resolution_map,
                     &constructor_atoms,
                     &ctx,
                     &effect_info,
+                    codegen::lower_selective::LoweringOptions {
+                        require_all_functions: options.selective_no_fallback,
+                    },
                 );
                 println!("{}", codegen::cerl::print_module(&cmod));
                 return;

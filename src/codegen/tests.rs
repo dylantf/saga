@@ -34,6 +34,13 @@ fn emit_full_with_source(src: &str, source_file: Option<&super::SourceFile>) -> 
 }
 
 fn emit_selective_core(src: &str) -> String {
+    emit_selective_core_with_options(src, super::lower_selective::LoweringOptions::default())
+}
+
+fn emit_selective_core_with_options(
+    src: &str,
+    options: super::lower_selective::LoweringOptions,
+) -> String {
     let tokens = Lexer::new(src).lex().expect("lex error");
     let mut program = Parser::new(tokens).parse_program().expect("parse error");
     derive::expand_derives(&mut program, &derive::ImportedDecls::empty());
@@ -82,13 +89,14 @@ fn emit_selective_core(src: &str) -> String {
         &effect_info,
         &imported_handler_decls,
     );
-    let cmod = super::lower_selective::lower_module(
+    let cmod = super::lower_selective::lower_module_with_options(
         module_name,
         &monadic_prog,
         &resolution_map,
         &constructor_atoms,
         &ctx,
         &effect_info,
+        options,
     );
     super::cerl::print_module(&cmod)
 }

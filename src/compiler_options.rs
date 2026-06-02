@@ -2,6 +2,7 @@
 pub struct CompileOptions {
     pub diagnostics: DiagnosticOptions,
     pub codegen_backend: CodegenBackend,
+    pub selective_no_fallback: bool,
 }
 
 impl CompileOptions {
@@ -12,6 +13,14 @@ impl CompileOptions {
 
     pub fn with_codegen_backend(mut self, backend: CodegenBackend) -> Self {
         self.codegen_backend = backend;
+        self
+    }
+
+    pub fn with_selective_no_fallback(mut self, enabled: bool) -> Self {
+        self.selective_no_fallback = enabled;
+        if enabled {
+            self.codegen_backend = CodegenBackend::Selective;
+        }
         self
     }
 }

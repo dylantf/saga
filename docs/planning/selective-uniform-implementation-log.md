@@ -843,3 +843,20 @@ boundaries exist.
   selective Core adapter closures for imported effectful and pure functions,
   the imported `apply_eff/3` runtime closure alias/application, and project
   runtime output.
+- Added `--selective-no-fallback` plumbing for compile commands:
+  - the flag implies `--selective-codegen`;
+  - `run`, `build`, `emit`, `test`, and `inspect --stage selective-core`
+    all thread it through `CompileOptions`;
+  - the selective lowerer exposes `LoweringOptions::require_all_functions`;
+  - when enabled, every function/value declaration in the lowered module must
+    have a selective lowering plan instead of being skipped as private or left
+    for a future generic fallback.
+- Current meaning: this is a matrix-audit/debug flag. It does **not** yet route
+  unsupported shapes to the old uniform monadic backend, because that whole
+  fallback handoff has not been connected. Once that exists, this flag should
+  become the switch that disables the handoff and makes the missing selective
+  cells fail loudly.
+- Added `examples/optimization/selective-uniform/33-no-fallback-private-unplanned.saga`
+  and CLI coverage proving normal `selective-core` inspection can ignore the
+  private unsupported helper, while `--selective-no-fallback` reports the
+  missing selective plan.

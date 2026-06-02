@@ -109,6 +109,54 @@ fn selective_core_codegen_runs_higher_order_direct_callback_fixture() {
 }
 
 #[test]
+fn selective_core_no_fallback_cli_rejects_private_unplanned_function() {
+    let binary = env!("CARGO_BIN_EXE_saga");
+    let manifest_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let fixture = manifest_dir
+        .join("examples/optimization/selective-uniform/33-no-fallback-private-unplanned.saga");
+
+    let permissive = std::process::Command::new(binary)
+        .current_dir(&manifest_dir)
+        .args([
+            "inspect",
+            fixture.to_str().expect("utf-8 fixture path"),
+            "--stage",
+            "selective-core",
+        ])
+        .output()
+        .expect("inspect permissive selective-core fixture");
+    assert!(
+        permissive.status.success(),
+        "saga inspect failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&permissive.stdout),
+        String::from_utf8_lossy(&permissive.stderr)
+    );
+
+    let strict = std::process::Command::new(binary)
+        .current_dir(&manifest_dir)
+        .args([
+            "inspect",
+            fixture.to_str().expect("utf-8 fixture path"),
+            "--stage",
+            "selective-core",
+            "--selective-no-fallback",
+        ])
+        .output()
+        .expect("inspect strict selective-core fixture");
+    assert!(
+        !strict.status.success(),
+        "strict saga inspect should fail\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&strict.stdout),
+        String::from_utf8_lossy(&strict.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&strict.stderr);
+    assert!(
+        stderr.contains("function 'hidden' has no selective lowering plan with fallback disabled"),
+        "{stderr}"
+    );
+}
+
+#[test]
 fn selective_core_codegen_runs_imported_higher_order_direct_callback_project() {
     let binary = env!("CARGO_BIN_EXE_saga");
     let project_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))

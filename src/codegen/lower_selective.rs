@@ -30,6 +30,11 @@ use crate::typechecker::Type;
 
 use support::*;
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct LoweringOptions {
+    pub require_all_functions: bool,
+}
+
 pub fn lower_module(
     module_name: &str,
     program: &MProgram,
@@ -38,7 +43,7 @@ pub fn lower_module(
     module_ctx: &CodegenContext,
     effect_info: &EffectInfo<'_>,
 ) -> CModule {
-    lower_module_with_entry_export(
+    lower_module_with_entry_export_options(
         module_name,
         program,
         resolution,
@@ -46,6 +51,28 @@ pub fn lower_module(
         module_ctx,
         effect_info,
         None,
+        LoweringOptions::default(),
+    )
+}
+
+pub fn lower_module_with_options(
+    module_name: &str,
+    program: &MProgram,
+    resolution: &ResolutionMap,
+    ctors: &ConstructorAtoms,
+    module_ctx: &CodegenContext,
+    effect_info: &EffectInfo<'_>,
+    options: LoweringOptions,
+) -> CModule {
+    lower_module_with_entry_export_options(
+        module_name,
+        program,
+        resolution,
+        ctors,
+        module_ctx,
+        effect_info,
+        None,
+        options,
     )
 }
 
@@ -58,7 +85,30 @@ pub fn lower_module_with_entry_export(
     effect_info: &EffectInfo<'_>,
     entry_export: Option<&str>,
 ) -> CModule {
-    let mut lowerer = DirectLowerer::new(resolution, ctors, module_ctx, effect_info);
+    lower_module_with_entry_export_options(
+        module_name,
+        program,
+        resolution,
+        ctors,
+        module_ctx,
+        effect_info,
+        entry_export,
+        LoweringOptions::default(),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn lower_module_with_entry_export_options(
+    module_name: &str,
+    program: &MProgram,
+    resolution: &ResolutionMap,
+    ctors: &ConstructorAtoms,
+    module_ctx: &CodegenContext,
+    effect_info: &EffectInfo<'_>,
+    entry_export: Option<&str>,
+    options: LoweringOptions,
+) -> CModule {
+    let mut lowerer = DirectLowerer::new(resolution, ctors, module_ctx, effect_info, options);
     lowerer.lower_module(module_name, program, entry_export)
 }
 
@@ -87,6 +137,7 @@ struct DirectLowerer<'a, 'info> {
     cps_temp_counter: usize,
     locals: Vec<HashSet<String>>,
     local_shapes: Vec<HashMap<String, LocalValueShape>>,
+    options: LoweringOptions,
 }
 
 impl<'a, 'info> DirectLowerer<'a, 'info> {
@@ -95,6 +146,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         ctors: &'a ConstructorAtoms,
         module_ctx: &'a CodegenContext,
         effect_info: &'a EffectInfo<'info>,
+        options: LoweringOptions,
     ) -> Self {
         Self {
             resolution,
@@ -111,6 +163,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             cps_temp_counter: 0,
             locals: vec![HashSet::new()],
             local_shapes: vec![HashMap::new()],
+            options,
         }
     }
 
@@ -140,6 +193,9 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
 
         self.assert_no_unlowered_direct_body_functions(program);
         self.assert_no_unlowered_public_cps_functions(program, &is_public, &is_entry);
+        if self.options.require_all_functions {
+            self.assert_all_declarations_have_selective_plans(program);
+        }
 
         let mut exports = Vec::new();
         let mut funs = Vec::new();
@@ -342,6 +398,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                 self.ctors,
                 self.module_ctx,
                 self.effect_info,
+                LoweringOptions::default(),
             );
             imported.current_module = source_module_name.clone();
             imported.classify_program(&monadic_imported);
@@ -401,6 +458,29 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                     "CPS-shaped function '{}' is not lowered by selective-core yet",
                     fb.name
                 ));
+            }
+        }
+    }
+
+    fn assert_all_declarations_have_selective_plans(&self, program: &MProgram) {
+        for decl in program {
+            match decl {
+                MDecl::FunBinding(fb) if !self.function_plans.contains_key(&fb.name) => {
+                    self.unsupported(&format!(
+                        "function '{}' has no selective lowering plan with fallback disabled",
+                        fb.name
+                    ));
+                }
+                MDecl::Val(v) if !self.direct_values.contains(&v.name) => {
+                    self.unsupported(&format!(
+                        "value '{}' has no selective lowering plan with fallback disabled",
+                        v.name
+                    ));
+                }
+                MDecl::DictConstructor(_) => {
+                    self.unsupported("dict constructor with fallback disabled");
+                }
+                MDecl::FunBinding(_) | MDecl::Val(_) | MDecl::Passthrough(_) => {}
             }
         }
     }
