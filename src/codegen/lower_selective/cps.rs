@@ -16,6 +16,9 @@ enum CpsCallDecision {
         function_name: String,
     },
     StaticHandlerImported(ImportedStaticHandlerCall),
+    KnownLocalLambda {
+        name: String,
+    },
     Lambda,
     Normal(CallShape),
     Direct,
@@ -121,6 +124,26 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             );
         }
 
+        if let Some(known_lambda) = self.known_cps_lambda_for_expr(value)
+            && let Some(local_shape) = self.cps_bind_shape_for_expr(value)
+        {
+            let lowered_value =
+                self.lower_cps_lambda_atom(&known_lambda.params, &known_lambda.body);
+            self.push_scope();
+            self.current_scope_mut().insert(var.name.clone());
+            self.current_shape_scope_mut()
+                .insert(var.name.clone(), local_shape);
+            self.current_known_cps_lambda_scope_mut()
+                .insert(var.name.clone(), known_lambda);
+            let lowered_body = self.lower_cps_expr(body, evidence, return_k);
+            self.pop_scope();
+            return CExpr::Let(
+                core_var(&var.name),
+                Box::new(lowered_value),
+                Box::new(lowered_body),
+            );
+        }
+
         if let Some(local_shape) = self.cps_bind_shape_for_expr(value) {
             match local_shape {
                 LocalValueShape::CpsCallable { .. } => {
@@ -158,12 +181,17 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
 
         if self.expr_is_direct_subset(value) {
             let local_shape = self.direct_local_shape_for_expr(value);
+            let known_dict = self.known_dict_value_for_expr(value);
             let lowered_value = self.lower_expr(value);
             self.push_scope();
             self.current_scope_mut().insert(var.name.clone());
             if let Some(shape) = local_shape {
                 self.current_shape_scope_mut()
                     .insert(var.name.clone(), shape);
+            }
+            if let Some(dict) = known_dict {
+                self.current_known_dict_value_scope_mut()
+                    .insert(var.name.clone(), dict);
             }
             let lowered_body = self.lower_cps_expr(body, evidence, return_k);
             self.pop_scope();
@@ -385,6 +413,11 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                 .unwrap_or_else(|| {
                     self.unsupported("classified imported static-handler CPS call did not lower")
                 }),
+            CpsCallDecision::KnownLocalLambda { name } => self
+                .lower_known_local_cps_lambda_call(&name, args, evidence, return_k)
+                .unwrap_or_else(|| {
+                    self.unsupported("classified known local CPS lambda did not lower")
+                }),
             CpsCallDecision::Lambda => self.lower_cps_lambda_app(head, args, evidence, return_k),
             CpsCallDecision::Normal(shape) => {
                 self.lower_normal_cps_call(head, args, evidence, return_k, shape)
@@ -421,6 +454,14 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
 
         if let Some(candidate) = self.imported_static_handler_call_candidate(head, args) {
             return CpsCallDecision::StaticHandlerImported(candidate);
+        }
+
+        if let Atom::Var { name, .. } = head
+            && self.known_cps_lambda(&name.name).is_some()
+        {
+            return CpsCallDecision::KnownLocalLambda {
+                name: name.name.clone(),
+            };
         }
 
         if self.cps_lambda_arity_for_atom(head).is_some() && matches!(head, Atom::Lambda { .. }) {
@@ -474,6 +515,44 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         CExpr::Apply(
             Box::new(self.lower_cps_lambda_atom(params, body)),
             lowered_args,
+        )
+    }
+
+    fn lower_known_local_cps_lambda_call(
+        &mut self,
+        name: &str,
+        args: &[Atom],
+        evidence: CExpr,
+        return_k: CExpr,
+    ) -> Option<CExpr> {
+        let KnownCpsLambda { params, body } = self.known_cps_lambda(name)?;
+        if params.iter().any(|p| !direct_param_supported(p)) {
+            return None;
+        }
+        self.assert_app_arity(name, args.len(), params.len());
+
+        let arg_names = lower_param_names(&params);
+        let lowered_args: Vec<CExpr> = args
+            .iter()
+            .map(|arg| self.lower_cps_arg_atom(arg, None))
+            .collect();
+
+        self.push_scope();
+        for pat in &params {
+            self.bind_pat_locals(pat);
+        }
+        let lowered_body = self.lower_cps_expr(&body, evidence, return_k);
+        let lowered_body = self.wrap_param_match(&params, &arg_names, lowered_body);
+        self.pop_scope();
+
+        Some(
+            arg_names
+                .into_iter()
+                .zip(lowered_args)
+                .rev()
+                .fold(lowered_body, |body, (name, value)| {
+                    CExpr::Let(name, Box::new(value), Box::new(body))
+                }),
         )
     }
 

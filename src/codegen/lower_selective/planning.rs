@@ -8,6 +8,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         self.function_plans.clear();
         self.local_dict_constructor_arities.clear();
         self.local_hof_direct_specializations.clear();
+        self.local_dict_constructors.clear();
         for decl in program {
             match decl {
                 MDecl::FunBinding(fb) => {
@@ -38,6 +39,8 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                     if self.can_lower_dict_constructor(dc) {
                         self.local_dict_constructor_arities
                             .insert(dc.name.clone(), dc.dict_params.len());
+                        self.local_dict_constructors
+                            .insert(dc.name.clone(), dc.clone());
                     }
                 }
                 MDecl::Passthrough(_) => {}

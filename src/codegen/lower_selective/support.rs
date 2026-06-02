@@ -1,7 +1,7 @@
 use crate::ast::{BinOp as AstBinOp, Lit, Pat};
 use crate::codegen::cerl::{CBinSeg, CExpr, CLit};
 use crate::codegen::lower::util::core_var;
-use crate::codegen::monadic::ir::MFunBinding;
+use crate::codegen::monadic::ir::{Atom, MExpr, MFunBinding};
 use crate::codegen::runtime_shape::RuntimeFunctionShape;
 use crate::intrinsics::IntrinsicId;
 
@@ -44,6 +44,17 @@ pub(super) struct HofDirectSpecialization {
 pub(super) struct HofCallbackParam {
     pub(super) index: usize,
     pub(super) source_arity: usize,
+}
+
+#[derive(Clone, Debug)]
+pub(super) struct KnownCpsLambda {
+    pub(super) params: Vec<Pat>,
+    pub(super) body: Box<MExpr>,
+}
+
+#[derive(Clone, Debug)]
+pub(super) struct KnownDictValue {
+    pub(super) methods: Vec<Atom>,
 }
 
 impl FunctionEntryInfo {

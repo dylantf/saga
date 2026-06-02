@@ -1092,3 +1092,18 @@ boundaries exist.
     normal CPS call, direct fallback, unsupported;
   - this keeps the current behavior but makes the priority order visible and
     gives future trace/proof records a natural insertion point.
+- Started trait/dict specialization in selective lowering:
+  - local nullary dict constructors are recorded as known dict values when the
+    constructor body is a tuple of method lambdas;
+  - a bind that extracts a method from such a known dict records the concrete
+    method lambda and also binds a normal CPS lambda value, preserving callback
+    value use;
+  - calling that known local CPS lambda now inlines the method body at the call
+    site, so existing static-handler direct-call and Reader/config bind
+    specializations can see through concrete trait methods;
+  - direct calls can therefore leave an unused method-closure binding on the
+    optimized path; removing that is a later dead-let cleanup or a more precise
+    call-head-only bind analysis;
+  - the generic dict constructor fallback is still emitted, and parameterized,
+    imported, and branch-shaped dictionaries still use the normal dict-passing
+    path for now.

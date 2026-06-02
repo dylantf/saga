@@ -154,6 +154,7 @@ struct DirectLowerer<'a, 'info> {
     /// Private direct specializations of CPS-typed higher-order functions when
     /// selected callback parameters are statically pure at a call site.
     local_hof_direct_specializations: HashMap<String, HofDirectSpecialization>,
+    local_dict_constructors: HashMap<String, MDictConstructor>,
     /// Emitted entries discovered for already-compiled imported user modules.
     imported_function_entries: HashMap<(String, String), FunctionEntryInfo>,
     /// Direct HOF specializations discovered for already-compiled imported
@@ -169,6 +170,8 @@ struct DirectLowerer<'a, 'info> {
     cps_temp_counter: usize,
     locals: Vec<HashSet<String>>,
     local_shapes: Vec<HashMap<String, LocalValueShape>>,
+    local_known_cps_lambdas: Vec<HashMap<String, KnownCpsLambda>>,
+    local_known_dict_values: Vec<HashMap<String, KnownDictValue>>,
     options: LoweringOptions,
 }
 
@@ -195,6 +198,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             local_function_entries: HashMap::new(),
             local_dict_constructor_arities: HashMap::new(),
             local_hof_direct_specializations: HashMap::new(),
+            local_dict_constructors: HashMap::new(),
             imported_function_entries: HashMap::new(),
             imported_hof_direct_specializations: HashMap::new(),
             direct_candidate_function: None,
@@ -203,6 +207,8 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             cps_temp_counter: 0,
             locals: vec![HashSet::new()],
             local_shapes: vec![HashMap::new()],
+            local_known_cps_lambdas: vec![HashMap::new()],
+            local_known_dict_values: vec![HashMap::new()],
             options,
         }
     }
@@ -790,11 +796,15 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
     fn push_scope(&mut self) {
         self.locals.push(HashSet::new());
         self.local_shapes.push(HashMap::new());
+        self.local_known_cps_lambdas.push(HashMap::new());
+        self.local_known_dict_values.push(HashMap::new());
     }
 
     fn pop_scope(&mut self) {
         self.locals.pop();
         self.local_shapes.pop();
+        self.local_known_cps_lambdas.pop();
+        self.local_known_dict_values.pop();
     }
 
     fn current_scope_mut(&mut self) -> &mut HashSet<String> {
@@ -805,6 +815,32 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         self.local_shapes
             .last_mut()
             .expect("direct lowerer has a local-shape scope")
+    }
+
+    fn current_known_cps_lambda_scope_mut(&mut self) -> &mut HashMap<String, KnownCpsLambda> {
+        self.local_known_cps_lambdas
+            .last_mut()
+            .expect("direct lowerer has a known-CPS-lambda scope")
+    }
+
+    fn current_known_dict_value_scope_mut(&mut self) -> &mut HashMap<String, KnownDictValue> {
+        self.local_known_dict_values
+            .last_mut()
+            .expect("direct lowerer has a known-dict-value scope")
+    }
+
+    fn known_cps_lambda(&self, name: &str) -> Option<KnownCpsLambda> {
+        self.local_known_cps_lambdas
+            .iter()
+            .rev()
+            .find_map(|scope| scope.get(name).cloned())
+    }
+
+    fn known_dict_value(&self, name: &str) -> Option<KnownDictValue> {
+        self.local_known_dict_values
+            .iter()
+            .rev()
+            .find_map(|scope| scope.get(name).cloned())
     }
 
     fn bind_fun_param_locals(&mut self, fb: &MFunBinding) {
@@ -1370,6 +1406,52 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             MExpr::Case { arms, .. } => self.compatible_case_runtime_cps_shape(arms),
             _ => None,
         }
+    }
+
+    fn known_dict_value_for_expr(&self, expr: &MExpr) -> Option<KnownDictValue> {
+        let MExpr::App { head, args, .. } = expr else {
+            return None;
+        };
+        let Atom::DictRef { name, .. } = head else {
+            return None;
+        };
+        let constructor = self.local_dict_constructors.get(name)?;
+        if !constructor.dict_params.is_empty() || !args.is_empty() {
+            return None;
+        }
+
+        let mut methods = Vec::with_capacity(constructor.methods.len());
+        for method in &constructor.methods {
+            let MExpr::Pure(atom @ Atom::Lambda { .. }) = method else {
+                return None;
+            };
+            methods.push(atom.clone());
+        }
+        Some(KnownDictValue { methods })
+    }
+
+    fn known_cps_lambda_for_expr(&self, expr: &MExpr) -> Option<KnownCpsLambda> {
+        let MExpr::DictMethodAccess {
+            dict, method_index, ..
+        } = expr
+        else {
+            return None;
+        };
+        let Atom::Var { name, .. } = dict else {
+            return None;
+        };
+        let method = self
+            .known_dict_value(&name.name)?
+            .methods
+            .get(*method_index)?
+            .clone();
+        let Atom::Lambda { params, body, .. } = method else {
+            return None;
+        };
+        if params.iter().any(|param| !direct_param_supported(param)) {
+            return None;
+        }
+        Some(KnownCpsLambda { params, body })
     }
 
     fn cps_bind_value_expr_is_supported(&mut self, expr: &MExpr) -> bool {

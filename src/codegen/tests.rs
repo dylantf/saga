@@ -362,9 +362,12 @@ main () = ()
 "#;
     let out = emit_selective_core(src);
     assert!(out.contains("'__dict_Readable_Std_Base_Unit'/0"), "{out}");
-    assert!(out.contains("_LambdaEvidence"), "{out}");
     assert!(
-        out.contains("apply ___anf_v2('unit', _CpsEvidence"),
+        !out.contains("apply ___anf_v2('unit', _CpsEvidence"),
+        "{out}"
+    );
+    assert!(
+        out.contains("let <___anf_v0> =\n                41"),
         "{out}"
     );
     assert_selective_core_eval_stdout_contains(
