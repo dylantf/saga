@@ -252,9 +252,9 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             exported_dict_names.is_empty() || exported_dict_names.contains(name)
         };
 
-        self.assert_no_unlowered_direct_body_functions(program);
-        self.assert_no_unlowered_public_cps_functions(program, &is_public, &is_entry);
         if self.options.require_all_functions {
+            self.assert_no_unlowered_direct_body_functions(program);
+            self.assert_no_unlowered_public_cps_functions(program, &is_public, &is_entry);
             self.assert_all_declarations_have_selective_plans(program);
         }
 

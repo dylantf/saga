@@ -1168,3 +1168,24 @@ boundaries exist.
   - that overlaps the unresolved module-boundary fallback ABI, especially for
     stdlib dictionaries, so it should be done after the monadic fallback and
     public adapter story are connected.
+- Started the selective ABI cutover behind `--selective-codegen`:
+  - selective mode now builds the old optimized monadic Core module as a
+    fallback, builds the direct-first selective Core module as an overlay, and
+    merges them by `(name, arity)` with selective definitions winning;
+  - permissive selective lowering may now skip unsupported declarations because
+    fallback definitions remain available. `--selective-no-fallback` keeps the
+    old strict behavior and still reports missing selective plans;
+  - fallback-only pure functions get direct `name/N` adapters over their old
+    uniform `name/(N+2)` definitions, which lets selective HOF/direct code call
+    pure fallback helpers by the selective direct ABI;
+  - fallback-only dict constructors get direct `dict/N` adapters that rebuild a
+    selective-shaped dict tuple: pure methods are wrapped as direct closures,
+    while effectful/open-row methods keep their CPS closures;
+  - stdlib cache fingerprints now include the backend, and selective builds
+    compile stdlib modules through the same selective/fallback merge instead of
+    reusing uniform-only stdlib beams;
+  - added isolated project fixtures for stdlib dict use and local HOF direct
+    callback so CLI tests do not race on a shared single-file `_build/dev`;
+  - status: `cargo test -p saga selective_core --no-default-features` and
+    `cargo test -p saga --test selective_core_cli` pass with the merged flagged
+    backend.

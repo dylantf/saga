@@ -16,7 +16,7 @@ pub mod type_shape;
 use crate::ast;
 use crate::compiler_options::{CodegenBackend, CompileOptions, MonadicStatsMode};
 use crate::typechecker::{CheckResult, ModuleCodegenInfo};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 /// Result of compiling a single module: codegen metadata, elaborated AST,
 /// and pre-computed name resolution.
@@ -497,25 +497,8 @@ pub fn emit_module_via_new_path(
         &effect_info,
         &imported_handler_decls,
     );
-    if matches!(options.codegen_backend, CodegenBackend::Selective) {
-        let cmod = lower_selective::lower_module_with_entry_export_options(
-            module_name,
-            &monadic_prog,
-            &resolution_map,
-            &constructor_atoms,
-            ctx,
-            &handler_info,
-            &effect_info,
-            entry_export,
-            lower_selective::LoweringOptions {
-                require_all_functions: options.selective_no_fallback,
-            },
-        );
-        return EmitModuleOutput {
-            core_src: cerl::print_module(&cmod),
-            monadic_stats: None,
-        };
-    }
+    let selective_program =
+        matches!(options.codegen_backend, CodegenBackend::Selective).then(|| monadic_prog.clone());
 
     let before_stats = options
         .diagnostics
@@ -559,6 +542,52 @@ pub fn emit_module_via_new_path(
     });
 
     let is_main = entry_export.is_some();
+    if let Some(selective_program) = selective_program {
+        let mut fallback_lowerer = lower::Lowerer::new(
+            &resolution_map,
+            &constructor_atoms,
+            ctx,
+            &handler_info,
+            &effect_info,
+            &handler_value_map,
+        );
+        if let Some(source_file) = source_file {
+            let source_spans = source_spans::for_program(&anf_program, &check_result.node_spans);
+            fallback_lowerer = fallback_lowerer.with_source_info(lower::SourceInfo::new(
+                source_file.path.clone(),
+                &source_file.source,
+                source_spans,
+            ));
+        }
+        let fallback_cmod = fallback_lowerer
+            .with_bootstrap_emission(is_main)
+            .lower_module(module_name, &optimized);
+        let selective_cmod = lower_selective::lower_module_with_entry_export_options(
+            module_name,
+            &selective_program,
+            &resolution_map,
+            &constructor_atoms,
+            ctx,
+            &handler_info,
+            &effect_info,
+            entry_export,
+            lower_selective::LoweringOptions {
+                require_all_functions: options.selective_no_fallback,
+            },
+        );
+        let fallback_direct_adapters =
+            selective_fallback_direct_adapters(&selective_program, &effect_info);
+        let cmod = if options.selective_no_fallback {
+            selective_cmod
+        } else {
+            merge_selective_core_modules(fallback_cmod, selective_cmod, &fallback_direct_adapters)
+        };
+        return EmitModuleOutput {
+            core_src: cerl::print_module(&cmod),
+            monadic_stats: None,
+        };
+    }
+
     let mut lowerer = lower::Lowerer::new(
         &resolution_map,
         &constructor_atoms,
@@ -589,4 +618,234 @@ pub fn emit_module_via_new_path(
             monadic_stats,
         },
     }
+}
+
+fn merge_selective_core_modules(
+    fallback: cerl::CModule,
+    selective: cerl::CModule,
+    direct_adapters: &HashMap<String, DirectFallbackAdapter>,
+) -> cerl::CModule {
+    let adapter_uniform_exports: HashSet<(String, usize)> = direct_adapters
+        .iter()
+        .map(|(name, adapter)| (name.clone(), adapter.uniform_arity()))
+        .collect();
+    let fallback_exports: HashSet<(String, usize)> = fallback.exports.iter().cloned().collect();
+
+    let mut funs = fallback.funs;
+    let mut fun_indexes: HashMap<(String, usize), usize> = funs
+        .iter()
+        .enumerate()
+        .map(|(index, fun)| ((fun.name.clone(), fun.arity), index))
+        .collect();
+
+    for fun in selective.funs {
+        let key = (fun.name.clone(), fun.arity);
+        if let Some(index) = fun_indexes.get(&key).copied() {
+            funs[index] = fun;
+        } else {
+            fun_indexes.insert(key, funs.len());
+            funs.push(fun);
+        }
+    }
+
+    let mut exports = Vec::new();
+    let mut export_seen = HashSet::new();
+    for export in fallback.exports {
+        if adapter_uniform_exports.contains(&export) {
+            continue;
+        }
+        push_export(&mut exports, &mut export_seen, export);
+    }
+    for export in selective.exports {
+        push_export(&mut exports, &mut export_seen, export);
+    }
+
+    for (name, adapter) in direct_adapters {
+        let direct_key = (name.clone(), adapter.direct_arity());
+        let fallback_key = (name.clone(), adapter.uniform_arity());
+        if !fallback_exports.contains(&fallback_key) || fun_indexes.contains_key(&direct_key) {
+            continue;
+        }
+        let adapter = build_direct_fallback_adapter(name, adapter);
+        fun_indexes.insert(direct_key.clone(), funs.len());
+        funs.push(adapter);
+        push_export(&mut exports, &mut export_seen, direct_key);
+    }
+
+    cerl::CModule {
+        name: selective.name,
+        exports,
+        funs,
+    }
+}
+
+#[derive(Clone)]
+enum DirectFallbackAdapter {
+    Function {
+        source_arity: usize,
+    },
+    Dict {
+        constructor: monadic::ir::MDictConstructor,
+    },
+}
+
+impl DirectFallbackAdapter {
+    fn direct_arity(&self) -> usize {
+        match self {
+            Self::Function { source_arity } => *source_arity,
+            Self::Dict { constructor } => constructor.dict_params.len(),
+        }
+    }
+
+    fn uniform_arity(&self) -> usize {
+        self.direct_arity() + 2
+    }
+}
+
+fn selective_fallback_direct_adapters(
+    program: &monadic::ir::MProgram,
+    effect_info: &monadic::ir::EffectInfo<'_>,
+) -> HashMap<String, DirectFallbackAdapter> {
+    let mut adapters = HashMap::new();
+    for decl in program {
+        match decl {
+            monadic::ir::MDecl::FunBinding(fb)
+                if effect_info
+                    .fun_effects
+                    .get(&fb.name)
+                    .is_some_and(|effects| effects.is_empty()) =>
+            {
+                adapters
+                    .entry(fb.name.clone())
+                    .or_insert(DirectFallbackAdapter::Function {
+                        source_arity: fb.params.len(),
+                    });
+            }
+            monadic::ir::MDecl::DictConstructor(dc) => {
+                adapters.insert(
+                    dc.name.clone(),
+                    DirectFallbackAdapter::Dict {
+                        constructor: dc.clone(),
+                    },
+                );
+            }
+            monadic::ir::MDecl::FunBinding(_)
+            | monadic::ir::MDecl::Val(_)
+            | monadic::ir::MDecl::Passthrough(_) => {}
+        }
+    }
+    adapters
+}
+
+fn push_export(
+    exports: &mut Vec<(String, usize)>,
+    seen: &mut HashSet<(String, usize)>,
+    export: (String, usize),
+) {
+    if seen.insert(export.clone()) {
+        exports.push(export);
+    }
+}
+
+fn build_direct_fallback_adapter(name: &str, adapter: &DirectFallbackAdapter) -> cerl::CFunDef {
+    match adapter {
+        DirectFallbackAdapter::Function { source_arity } => {
+            build_direct_function_fallback_adapter(name, *source_arity)
+        }
+        DirectFallbackAdapter::Dict { constructor } => {
+            build_direct_dict_fallback_adapter(constructor)
+        }
+    }
+}
+
+fn build_direct_function_fallback_adapter(name: &str, direct_arity: usize) -> cerl::CFunDef {
+    let params: Vec<String> = (0..direct_arity)
+        .map(|index| format!("_DictArg{index}"))
+        .collect();
+    let mut args: Vec<cerl::CExpr> = params.iter().cloned().map(cerl::CExpr::Var).collect();
+    args.push(cerl::CExpr::Tuple(vec![]));
+    args.push(identity_continuation("_DictResult"));
+    let body = cerl::CExpr::Apply(
+        Box::new(cerl::CExpr::FunRef(name.to_string(), direct_arity + 2)),
+        args,
+    );
+    cerl::CFunDef {
+        name: name.to_string(),
+        arity: direct_arity,
+        body: cerl::CExpr::Fun(params, Box::new(body)),
+    }
+}
+
+fn build_direct_dict_fallback_adapter(dc: &monadic::ir::MDictConstructor) -> cerl::CFunDef {
+    let params = dc.dict_params.clone();
+    let mut fallback_args: Vec<cerl::CExpr> =
+        params.iter().cloned().map(cerl::CExpr::Var).collect();
+    fallback_args.push(cerl::CExpr::Tuple(vec![]));
+    fallback_args.push(identity_continuation("_DictResult"));
+    let fallback_var = "_FallbackDict".to_string();
+    let fallback_dict = cerl::CExpr::Apply(
+        Box::new(cerl::CExpr::FunRef(
+            dc.name.clone(),
+            dc.dict_params.len() + 2,
+        )),
+        fallback_args,
+    );
+    let methods = dc
+        .methods
+        .iter()
+        .enumerate()
+        .map(|(index, method)| {
+            let old_method = cerl::CExpr::Call(
+                "erlang".to_string(),
+                "element".to_string(),
+                vec![
+                    cerl::CExpr::Lit(cerl::CLit::Int((index + 1) as i64)),
+                    cerl::CExpr::Var(fallback_var.clone()),
+                ],
+            );
+            if dc
+                .method_effects
+                .get(index)
+                .is_some_and(|effects| !effects.is_empty())
+                || dc.method_open_rows.get(index).copied().unwrap_or(false)
+            {
+                return old_method;
+            }
+
+            let monadic::ir::MExpr::Pure(monadic::ir::Atom::Lambda { params, .. }) = method else {
+                panic!("dict fallback adapter expected lambda method");
+            };
+            let method_params: Vec<String> = (0..params.len())
+                .map(|arg_index| format!("_Method{index}Arg{arg_index}"))
+                .collect();
+            let mut args: Vec<cerl::CExpr> = method_params
+                .iter()
+                .cloned()
+                .map(cerl::CExpr::Var)
+                .collect();
+            args.push(cerl::CExpr::Tuple(vec![]));
+            args.push(identity_continuation("_MethodResult"));
+            cerl::CExpr::Fun(
+                method_params,
+                Box::new(cerl::CExpr::Apply(Box::new(old_method), args)),
+            )
+        })
+        .collect();
+    let body = cerl::CExpr::Let(
+        fallback_var,
+        Box::new(fallback_dict),
+        Box::new(cerl::CExpr::Tuple(methods)),
+    );
+    cerl::CFunDef {
+        name: dc.name.clone(),
+        arity: dc.dict_params.len(),
+        body: cerl::CExpr::Fun(params, Box::new(body)),
+    }
+}
+
+fn identity_continuation(param: &str) -> cerl::CExpr {
+    cerl::CExpr::Fun(
+        vec![param.to_string()],
+        Box::new(cerl::CExpr::Var(param.to_string())),
+    )
 }

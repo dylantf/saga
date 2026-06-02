@@ -75,7 +75,8 @@ pub fn cmd_run(file: Option<&str>, release: bool, options: &CompileOptions) {
             let sb = if options.diagnostics.monadic_stats.is_enabled() {
                 build_script_with_options(f, "release", options)
             } else {
-                check_script_cache(f, "release").unwrap_or_else(|| build_script(f, "release"))
+                check_script_cache_with_options(f, "release", options)
+                    .unwrap_or_else(|| build_script_with_options(f, "release", options))
             };
             exec_erl(&sb.build_dir, &sb.stdlib_dir, &[], &sb.erlang_name);
         } else {
@@ -93,10 +94,12 @@ pub fn cmd_run(file: Option<&str>, release: bool, options: &CompileOptions) {
                 let pb = build_project_with_options("release", options);
                 (pb.build_dir, pb.stdlib_dir)
             } else {
-                check_project_cache(&project_root, "release").unwrap_or_else(|| {
-                    let pb = build_project("release");
-                    (pb.build_dir, pb.stdlib_dir)
-                })
+                check_project_cache_with_options(&project_root, "release", options).unwrap_or_else(
+                    || {
+                        let pb = build_project_with_options("release", options);
+                        (pb.build_dir, pb.stdlib_dir)
+                    },
+                )
             };
             exec_erl(&build_dir, &stdlib_dir, &extra_dirs, "main");
         }

@@ -85,19 +85,35 @@ fn selective_core_codegen_runs_handler_finally_fixtures() {
 #[test]
 fn selective_core_codegen_runs_higher_order_direct_callback_fixture() {
     let binary = env!("CARGO_BIN_EXE_saga");
-    let manifest_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let fixture = manifest_dir
-        .join("examples/optimization/selective-uniform/32-higher-order-direct-callback-e2e.saga");
+    let project_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("examples/optimization/selective-uniform/higher-order-direct-callback-project");
 
     let output = std::process::Command::new(binary)
-        .current_dir(&manifest_dir)
-        .args([
-            "run",
-            fixture.to_str().expect("utf-8 fixture path"),
-            "--selective-codegen",
-        ])
+        .current_dir(&project_dir)
+        .args(["run", "--selective-codegen"])
         .output()
         .expect("run selective higher-order direct callback fixture");
+    assert!(
+        output.status.success(),
+        "saga run failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("ok\n"), "{stdout}");
+}
+
+#[test]
+fn selective_core_codegen_runs_stdlib_dict_fixture() {
+    let binary = env!("CARGO_BIN_EXE_saga");
+    let project_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("examples/optimization/selective-uniform/stdlib-dict-project");
+
+    let output = std::process::Command::new(binary)
+        .current_dir(&project_dir)
+        .args(["run", "--selective-codegen"])
+        .output()
+        .expect("run selective stdlib dict fixture");
     assert!(
         output.status.success(),
         "saga run failed\nstdout:\n{}\nstderr:\n{}",
@@ -456,10 +472,10 @@ fn selective_core_codegen_specializes_imported_pure_callback_project() {
 
     let effects_core =
         std::fs::read_to_string(project_dir.join("_build/dev/effects.core")).unwrap();
+    assert!(effects_core.contains("'pure_value'/1"), "{effects_core}");
+    assert!(effects_core.contains("'apply_eff'/3"), "{effects_core}");
     assert!(
-        effects_core.contains(
-            "module 'effects' ['pure_value'/1, 'apply_eff'/3, '__saga_direct_hof_apply_eff'/1]"
-        ),
+        effects_core.contains("'__saga_direct_hof_apply_eff'/1"),
         "{effects_core}"
     );
 

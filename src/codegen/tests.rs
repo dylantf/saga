@@ -1,7 +1,12 @@
 use super::{CodegenContext, emit_module_with_context};
+use crate::ast::{Lit, NodeId, Pat};
+use crate::codegen::cerl::{CExpr, CFunDef, CLit, CModule};
+use crate::codegen::monadic::ir::{Atom, MDictConstructor, MExpr};
 use crate::lexer::Lexer;
 use crate::parser::Parser;
+use crate::token::Span;
 use crate::{derive, desugar, elaborate, typechecker};
+use std::collections::HashMap;
 
 /// Parse, typecheck, elaborate, and emit Core Erlang for a single-file script module.
 fn emit(src: &str) -> String {
@@ -101,6 +106,160 @@ fn emit_selective_core_with_options(
         options,
     );
     super::cerl::print_module(&cmod)
+}
+
+fn test_core_fun(name: &str, arity: usize, marker: &str) -> CFunDef {
+    let params: Vec<String> = (0..arity).map(|index| format!("_P{index}")).collect();
+    CFunDef {
+        name: name.to_string(),
+        arity,
+        body: CExpr::Fun(params, Box::new(CExpr::Lit(CLit::Atom(marker.to_string())))),
+    }
+}
+
+fn test_core_module(name: &str, exports: Vec<(&str, usize)>, funs: Vec<CFunDef>) -> CModule {
+    CModule {
+        name: name.to_string(),
+        exports: exports
+            .into_iter()
+            .map(|(name, arity)| (name.to_string(), arity))
+            .collect(),
+        funs,
+    }
+}
+
+fn test_span() -> Span {
+    Span { start: 0, end: 0 }
+}
+
+fn test_dict_constructor(name: &str, dict_params: Vec<&str>) -> MDictConstructor {
+    MDictConstructor {
+        id: NodeId::fresh(),
+        name: name.to_string(),
+        dict_params: dict_params.into_iter().map(str::to_string).collect(),
+        methods: vec![MExpr::Pure(Atom::Lambda {
+            params: vec![Pat::Wildcard {
+                id: NodeId::fresh(),
+                span: test_span(),
+            }],
+            body: Box::new(MExpr::Pure(Atom::Lit {
+                value: Lit::Unit,
+                source: NodeId::fresh(),
+            })),
+            source: NodeId::fresh(),
+        })],
+        method_effects: vec![vec![]],
+        method_open_rows: vec![false],
+        impl_effects: vec![],
+        span: test_span(),
+    }
+}
+
+#[test]
+fn selective_core_merge_prefers_selective_definition_on_collision() {
+    let fallback = test_core_module("m", vec![("foo", 0)], vec![test_core_fun("foo", 0, "old")]);
+    let selective = test_core_module("m", vec![("foo", 0)], vec![test_core_fun("foo", 0, "new")]);
+
+    let merged = super::merge_selective_core_modules(fallback, selective, &HashMap::new());
+    let foo = merged
+        .funs
+        .iter()
+        .find(|fun| fun.name == "foo" && fun.arity == 0)
+        .expect("merged foo/0");
+    let CExpr::Fun(_, body) = &foo.body else {
+        panic!("expected fun body");
+    };
+    assert!(matches!(body.as_ref(), CExpr::Lit(CLit::Atom(atom)) if atom == "new"));
+    assert_eq!(merged.exports, vec![("foo".to_string(), 0)]);
+}
+
+#[test]
+fn selective_core_merge_preserves_fallback_only_definition() {
+    let fallback = test_core_module("m", vec![("foo", 0)], vec![test_core_fun("foo", 0, "old")]);
+    let selective = test_core_module("m", vec![], vec![]);
+
+    let merged = super::merge_selective_core_modules(fallback, selective, &HashMap::new());
+    assert!(
+        merged
+            .funs
+            .iter()
+            .any(|fun| fun.name == "foo" && fun.arity == 0)
+    );
+    assert_eq!(merged.exports, vec![("foo".to_string(), 0)]);
+}
+
+#[test]
+fn selective_core_merge_adds_direct_dict_adapter_over_uniform_fallback() {
+    let fallback = test_core_module(
+        "m",
+        vec![("__dict_Readable_Int", 2)],
+        vec![test_core_fun("__dict_Readable_Int", 2, "dict")],
+    );
+    let selective = test_core_module("m", vec![], vec![]);
+    let mut adapters = HashMap::new();
+    adapters.insert(
+        "__dict_Readable_Int".to_string(),
+        super::DirectFallbackAdapter::Dict {
+            constructor: test_dict_constructor("__dict_Readable_Int", vec![]),
+        },
+    );
+
+    let merged = super::merge_selective_core_modules(fallback, selective, &adapters);
+    assert!(
+        merged
+            .funs
+            .iter()
+            .any(|fun| fun.name == "__dict_Readable_Int" && fun.arity == 2)
+    );
+    let adapter = merged
+        .funs
+        .iter()
+        .find(|fun| fun.name == "__dict_Readable_Int" && fun.arity == 0)
+        .expect("direct dict adapter");
+    let CExpr::Fun(params, body) = &adapter.body else {
+        panic!("expected adapter function");
+    };
+    assert!(params.is_empty());
+    let CExpr::Let(_, fallback_dict, dict_tuple) = body.as_ref() else {
+        panic!("expected adapter to bind fallback dict constructor");
+    };
+    assert!(
+        matches!(fallback_dict.as_ref(), CExpr::Apply(callee, args) if matches!(callee.as_ref(), CExpr::FunRef(name, 2) if name == "__dict_Readable_Int") && matches!(args.as_slice(), [CExpr::Tuple(entries), CExpr::Fun(k_params, _)] if entries.is_empty() && k_params.len() == 1))
+    );
+    assert!(
+        matches!(dict_tuple.as_ref(), CExpr::Tuple(methods) if matches!(methods.as_slice(), [CExpr::Fun(params, _)] if params.len() == 1))
+    );
+    assert_eq!(merged.exports, vec![("__dict_Readable_Int".to_string(), 0)]);
+}
+
+#[test]
+fn selective_core_merge_adds_direct_pure_adapter_over_uniform_fallback() {
+    let fallback = test_core_module(
+        "m",
+        vec![("mark_skip_entry", 3)],
+        vec![test_core_fun("mark_skip_entry", 3, "fallback")],
+    );
+    let selective = test_core_module("m", vec![], vec![]);
+    let mut adapters = HashMap::new();
+    adapters.insert(
+        "mark_skip_entry".to_string(),
+        super::DirectFallbackAdapter::Function { source_arity: 1 },
+    );
+
+    let merged = super::merge_selective_core_modules(fallback, selective, &adapters);
+    assert!(
+        merged
+            .funs
+            .iter()
+            .any(|fun| fun.name == "mark_skip_entry" && fun.arity == 3)
+    );
+    assert!(
+        merged
+            .funs
+            .iter()
+            .any(|fun| fun.name == "mark_skip_entry" && fun.arity == 1)
+    );
+    assert_eq!(merged.exports, vec![("mark_skip_entry".to_string(), 1)]);
 }
 
 fn erlang_tool_available(tool: &str) -> bool {
@@ -1447,7 +1606,7 @@ main () = ()
     expected = "CPS-shaped function 'send_callback' is not lowered by selective-core yet"
 )]
 fn selective_core_rejects_cps_callback_value_as_yield_argument() {
-    let _ = emit_selective_core(
+    let _ = emit_selective_core_with_options(
         r#"
 effect ReadInt {
   fun read : Unit -> Int
@@ -1469,13 +1628,16 @@ send_callback () = {
 fun main : Unit -> Unit
 main () = ()
 "#,
+        super::lower_selective::LoweringOptions {
+            require_all_functions: true,
+        },
     );
 }
 
 #[test]
 #[should_panic(expected = "direct function 'store_tuple' is outside the current direct subset")]
 fn selective_core_rejects_cps_callback_value_in_tuple_storage() {
-    let _ = emit_selective_core(
+    let _ = emit_selective_core_with_options(
         r#"
 effect ReadInt {
   fun read : Unit -> Int
@@ -1490,13 +1652,16 @@ store_tuple () = (read_value, 1)
 fun main : Unit -> Unit
 main () = ()
 "#,
+        super::lower_selective::LoweringOptions {
+            require_all_functions: true,
+        },
     );
 }
 
 #[test]
 #[should_panic(expected = "direct function 'store_record' is outside the current direct subset")]
 fn selective_core_rejects_cps_callback_value_in_record_storage() {
-    let _ = emit_selective_core(
+    let _ = emit_selective_core_with_options(
         r#"
 effect ReadInt {
   fun read : Unit -> Int
@@ -1516,6 +1681,9 @@ store_record () = CallbackBox { cb: read_value, n: 1 }
 fun main : Unit -> Unit
 main () = ()
 "#,
+        super::lower_selective::LoweringOptions {
+            require_all_functions: true,
+        },
     );
 }
 
@@ -1524,7 +1692,7 @@ main () = ()
     expected = "direct function 'store_constructor' is outside the current direct subset"
 )]
 fn selective_core_rejects_cps_callback_value_in_constructor_storage() {
-    let _ = emit_selective_core(
+    let _ = emit_selective_core_with_options(
         r#"
 effect ReadInt {
   fun read : Unit -> Int
@@ -1541,6 +1709,9 @@ store_constructor () = CallbackBox(read_value)
 fun main : Unit -> Unit
 main () = ()
 "#,
+        super::lower_selective::LoweringOptions {
+            require_all_functions: true,
+        },
     );
 }
 
@@ -1549,7 +1720,7 @@ main () = ()
     expected = "CPS-shaped function 'resume_callback' is not lowered by selective-core yet"
 )]
 fn selective_core_rejects_cps_callback_value_as_resume_value() {
-    let _ = emit_selective_core(
+    let _ = emit_selective_core_with_options(
         r#"
 effect ReadInt {
   fun read : Unit -> Int
@@ -1570,6 +1741,9 @@ resume_callback () = ask! () with {
 fun main : Unit -> Unit
 main () = ()
 "#,
+        super::lower_selective::LoweringOptions {
+            require_all_functions: true,
+        },
     );
 }
 
@@ -1578,7 +1752,7 @@ main () = ()
     expected = "CPS-shaped function 'return_callback' is not lowered by selective-core yet"
 )]
 fn selective_core_rejects_cps_callback_value_in_handler_return_clause() {
-    let _ = emit_selective_core(
+    let _ = emit_selective_core_with_options(
         r#"
 effect ReadInt {
   fun read : Unit -> Int
@@ -1599,6 +1773,9 @@ return_callback () = {
 fun main : Unit -> Unit
 main () = ()
 "#,
+        super::lower_selective::LoweringOptions {
+            require_all_functions: true,
+        },
     );
 }
 
