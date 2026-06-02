@@ -169,6 +169,22 @@ pub(super) fn erlang_module_name(module_name: &str) -> String {
         .join("_")
 }
 
+pub(super) fn remote_fun_value(module: String, name: String, arity: usize) -> CExpr {
+    if arity == 0 {
+        CExpr::Call(module, name, vec![])
+    } else {
+        CExpr::Call(
+            "erlang".to_string(),
+            "make_fun".to_string(),
+            vec![
+                CExpr::Lit(CLit::Atom(module)),
+                CExpr::Lit(CLit::Atom(name)),
+                CExpr::Lit(CLit::Int(arity as i64)),
+            ],
+        )
+    }
+}
+
 pub(super) fn binop_atoms(op: &AstBinOp, l: CExpr, r: CExpr) -> CExpr {
     use AstBinOp::*;
     let call = |name: &str| {

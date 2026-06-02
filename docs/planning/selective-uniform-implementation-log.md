@@ -206,6 +206,11 @@ The first implementation slice is:
 - `examples/optimization/selective-uniform/32-higher-order-direct-callback-e2e.saga`
   - Current result: runtime fixture for the direct callback slice. It calls
     `apply_it inc` under `--selective-codegen` and prints `ok`.
+- `examples/optimization/selective-uniform/imported-direct-callback-project/`
+  - Current result: project-mode runtime fixture for imported direct callback
+    values. `Main` passes imported `Helper.inc` through `apply_it`; value
+    lowering emits `erlang:make_fun('helper', 'inc', 1)`, and the project
+    prints `ok` under `--selective-codegen`.
 - `examples/optimization/selective-uniform/23-local-pure-lambda-call.saga`
   - Current result: emits a direct local lambda value as a Core `fun`, records
     its proven source arity in local shape metadata, and applies it via
@@ -353,8 +358,9 @@ The first implementation slice is:
   marked as callable-from-use-type, but a call only succeeds if typed metadata
   proves the source arity and empty effect row. Named same-module pure
   functions passed as values lower as direct Core function references such as
-  `'inc'/1`. CPS/effectful callback values still require an explicit adapter
-  design and remain unsupported.
+  `'inc'/1`. Imported pure function values lower through `erlang:make_fun/3`
+  using the resolved remote BEAM module/name/arity. CPS/effectful callback
+  values still require an explicit adapter design and remain unsupported.
 - `lower_selective` computes imported entry metadata for already-compiled
   non-stdlib user modules. Remote effect-row calls may lower to direct remote
   calls only when that imported metadata proves a direct entry exists; otherwise
@@ -767,3 +773,12 @@ boundaries exist.
   - `examples/optimization/selective-uniform/32-higher-order-direct-callback-e2e.saga`.
 - Added selective tests for higher-order direct callbacks, including a negative
   effectful-callback test and a CLI runtime check for the E2E fixture.
+- Extended the higher-order direct callback slice to imported pure function
+  values:
+  - same-module pure function values still lower as local `FunRef`s;
+  - imported pure function values lower as `erlang:make_fun(Module, Name,
+    Arity)`;
+  - effectful/CPS function values still do not get eta-expanded or adapted.
+- Added `examples/optimization/selective-uniform/imported-direct-callback-project/`
+  and CLI coverage that checks both the emitted `make_fun` shape and the
+  project runtime output under `--selective-codegen`.

@@ -788,7 +788,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         })
     }
 
-    fn same_module_function_ref(&self, head: &Atom) -> Option<DirectCallable> {
+    fn direct_function_value_ref(&self, head: &Atom) -> Option<CExpr> {
         let source = match head {
             Atom::Var { source, .. } | Atom::QualifiedRef { source, .. } => *source,
             _ => return None,
@@ -806,23 +806,22 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         if !effects.is_empty() {
             return None;
         }
-        if erlang_mod
+        let is_remote = erlang_mod
             .as_ref()
-            .is_some_and(|module| module != &self.current_module)
-        {
-            return None;
+            .is_some_and(|module| module != &self.current_module);
+        if is_remote {
+            return erlang_mod
+                .as_ref()
+                .map(|module| remote_fun_value(module.clone(), name.clone(), *arity));
         }
         let shape = self.callable_type_shapes.get(name)?;
-        if !matches!(shape, RuntimeFunctionShape::Pure) {
+        if !matches!(shape, RuntimeFunctionShape::Pure) || shape.expanded_arity(*arity) != *arity {
             return None;
         }
-        if shape.expanded_arity(*arity) != *arity {
-            return None;
-        }
-        Some(DirectCallable {
-            module: None,
-            name: name.clone(),
-            arity: *arity,
+        Some(if *arity == 0 {
+            CExpr::Apply(Box::new(CExpr::FunRef(name.clone(), 0)), vec![])
+        } else {
+            CExpr::FunRef(name.clone(), *arity)
         })
     }
 
@@ -1171,6 +1170,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                 self.is_local(&name.name)
                     || self.direct_values.contains(&name.name)
                     || self.supported_direct_call(atom).is_some()
+                    || self.direct_function_value_ref(atom).is_some()
             }
             Atom::Lit { .. } | Atom::Symbol { .. } => true,
             Atom::Ctor { args, .. } => args.iter().all(|arg| self.atom_is_direct_subset(arg)),
@@ -1181,9 +1181,8 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                 .iter()
                 .all(|(_, arg)| self.atom_is_direct_subset(arg)),
             Atom::Lambda { params, body, .. } => self.lambda_is_direct_subset(params, body),
-            Atom::QualifiedRef { .. }
-            | Atom::BackendAtom { .. }
-            | Atom::BackendSpawnThunk { .. } => false,
+            Atom::QualifiedRef { .. } => self.direct_function_value_ref(atom).is_some(),
+            Atom::BackendAtom { .. } | Atom::BackendSpawnThunk { .. } => false,
             Atom::DictRef { .. } => self.direct_dict_constructor(atom).is_some(),
         }
     }

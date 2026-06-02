@@ -280,16 +280,11 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
 
     pub(super) fn lower_atom(&mut self, atom: &Atom) -> CExpr {
         match atom {
-            Atom::Var { name, source } => {
+            Atom::Var { name, .. } => {
                 if self.is_local(&name.name) {
                     CExpr::Var(core_var(&name.name))
-                } else if let Some(callable) = self.same_module_function_ref(atom) {
-                    let resolved = self
-                        .resolution
-                        .get(source)
-                        .expect("resolved direct function");
-                    debug_assert_eq!(resolved.name, callable.name);
-                    CExpr::FunRef(callable.name, callable.arity)
+                } else if let Some(value_ref) = self.direct_function_value_ref(atom) {
+                    value_ref
                 } else if self.direct_values.contains(&name.name) {
                     CExpr::Apply(Box::new(CExpr::FunRef(name.name.clone(), 0)), vec![])
                 } else {
@@ -307,10 +302,12 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             Atom::Symbol { symbol, .. } => {
                 crate::codegen::lower::util::lower_string_to_binary(symbol)
             }
-            Atom::QualifiedRef { .. }
-            | Atom::DictRef { .. }
-            | Atom::BackendAtom { .. }
-            | Atom::BackendSpawnThunk { .. } => self.unsupported_atom(atom),
+            Atom::QualifiedRef { .. } => self
+                .direct_function_value_ref(atom)
+                .unwrap_or_else(|| self.unsupported_atom(atom)),
+            Atom::DictRef { .. } | Atom::BackendAtom { .. } | Atom::BackendSpawnThunk { .. } => {
+                self.unsupported_atom(atom)
+            }
         }
     }
 

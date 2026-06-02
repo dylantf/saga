@@ -107,3 +107,45 @@ fn selective_core_codegen_runs_higher_order_direct_callback_fixture() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("ok\n"), "{stdout}");
 }
+
+#[test]
+fn selective_core_codegen_runs_imported_higher_order_direct_callback_project() {
+    let binary = env!("CARGO_BIN_EXE_saga");
+    let project_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("examples/optimization/selective-uniform/imported-direct-callback-project");
+
+    let inspect = std::process::Command::new(binary)
+        .current_dir(&project_dir)
+        .args(["inspect", "src/Main.saga", "--stage", "selective-core"])
+        .output()
+        .expect("inspect imported higher-order direct callback project");
+    assert!(
+        inspect.status.success(),
+        "saga inspect failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&inspect.stdout),
+        String::from_utf8_lossy(&inspect.stderr)
+    );
+    let inspect_stdout = String::from_utf8_lossy(&inspect.stdout);
+    assert!(
+        inspect_stdout.contains("call 'erlang':'make_fun'\n          ('helper', 'inc', 1)"),
+        "{inspect_stdout}"
+    );
+    assert!(
+        inspect_stdout.contains("apply 'apply_it'/1(call 'erlang':'make_fun'"),
+        "{inspect_stdout}"
+    );
+
+    let run = std::process::Command::new(binary)
+        .current_dir(&project_dir)
+        .args(["run", "--selective-codegen"])
+        .output()
+        .expect("run imported higher-order direct callback project");
+    assert!(
+        run.status.success(),
+        "saga run failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&run.stdout),
+        String::from_utf8_lossy(&run.stderr)
+    );
+    let run_stdout = String::from_utf8_lossy(&run.stdout);
+    assert!(run_stdout.contains("ok\n"), "{run_stdout}");
+}
