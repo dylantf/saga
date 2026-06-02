@@ -3,9 +3,9 @@
 
 parse(S) ->
     case string:to_integer(S) of
-        {N, <<>>} -> {just, N};
-        {N, []} -> {just, N};
-        _ -> {nothing}
+        {N, <<>>} -> {std_maybe_Just, N};
+        {N, []} -> {std_maybe_Just, N};
+        _ -> {std_maybe_Nothing}
     end.
 
 shift_left(Bits, N) ->
@@ -21,11 +21,11 @@ to_hex(N) ->
 
 parse_hex(<<"-", Rest/binary>>) ->
     case parse_hex(Rest) of
-        {just, N} -> {just, -N};
+        {std_maybe_Just, N} -> {std_maybe_Just, -N};
         Nothing -> Nothing
     end;
 parse_hex(S) when is_binary(S), byte_size(S) > 0 ->
-    try {just, binary_to_integer(S, 16)}
-    catch _:_ -> {nothing}
+    try {std_maybe_Just, binary_to_integer(S, 16)}
+    catch _:_ -> {std_maybe_Nothing}
     end;
-parse_hex(_) -> {nothing}.
+parse_hex(_) -> {std_maybe_Nothing}.

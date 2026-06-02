@@ -1,0 +1,19 @@
+# Eta-reduced reference to a 1-arg (Unit -> a) effect op.
+# `beep!` without an arg should produce a callable lambda, not perform now.
+
+effect Beep {
+  fun beep : Unit -> Int
+}
+
+fun use_op : Unit -> Int needs {Beep}
+use_op () = {
+  let f = beep!     # reference, do not perform yet
+  f () + f ()       # perform twice through the alias
+}
+
+main () = {
+  let r = use_op () with {
+    beep _ = resume 7
+  }
+  dbg r
+}

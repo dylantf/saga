@@ -1,4 +1,7 @@
-use saga::{codegen, elaborate, project_config, project_config::ProjectConfig, typechecker};
+use saga::{
+    codegen, compiler_options::CompileOptions, elaborate, project_config,
+    project_config::ProjectConfig, typechecker,
+};
 
 use std::fs;
 use std::path::PathBuf;
@@ -16,11 +19,15 @@ fn test_timeout() -> Duration {
     Duration::from_secs(secs)
 }
 
-pub fn cmd_run(file: Option<&str>, release: bool) {
+pub fn cmd_run(file: Option<&str>, release: bool, options: &CompileOptions) {
     if release {
         // --release: use cached build if still valid, otherwise rebuild
         if let Some(f) = file {
-            let sb = check_script_cache(f, "release").unwrap_or_else(|| build_script(f, "release"));
+            let sb = if options.diagnostics.monadic_stats.is_enabled() {
+                build_script_with_options(f, "release", options)
+            } else {
+                check_script_cache(f, "release").unwrap_or_else(|| build_script(f, "release"))
+            };
             exec_erl(&sb.build_dir, &sb.stdlib_dir, &[], &sb.erlang_name);
         } else {
             let project_root = super::find_project_root().unwrap_or_else(|| {
@@ -33,17 +40,21 @@ pub fn cmd_run(file: Option<&str>, release: bool) {
                 std::process::exit(1);
             }
             let extra_dirs = project_config::extra_ebin_dirs(&project_root, config.deps.as_ref());
-            let (build_dir, stdlib_dir) = check_project_cache(&project_root, "release")
-                .unwrap_or_else(|| {
+            let (build_dir, stdlib_dir) = if options.diagnostics.monadic_stats.is_enabled() {
+                let pb = build_project_with_options("release", options);
+                (pb.build_dir, pb.stdlib_dir)
+            } else {
+                check_project_cache(&project_root, "release").unwrap_or_else(|| {
                     let pb = build_project("release");
                     (pb.build_dir, pb.stdlib_dir)
-                });
+                })
+            };
             exec_erl(&build_dir, &stdlib_dir, &extra_dirs, "main");
         }
     } else {
         // dev: always clean rebuild
         if let Some(f) = file {
-            let sb = build_script(f, "dev");
+            let sb = build_script_with_options(f, "dev", options);
             exec_erl(&sb.build_dir, &sb.stdlib_dir, &[], &sb.erlang_name);
         } else {
             let project_root = super::find_project_root().unwrap_or_else(|| {
@@ -55,19 +66,19 @@ pub fn cmd_run(file: Option<&str>, release: bool) {
                 eprintln!("This project is a library and cannot be run. Use `saga build` instead.");
                 std::process::exit(1);
             }
-            let pb = build_project("dev");
+            let pb = build_project_with_options("dev", options);
             exec_erl(&pb.build_dir, &pb.stdlib_dir, &pb.extra_ebin_dirs, "main");
         }
     }
 }
 
-pub fn cmd_build(file: Option<&str>, release: bool) {
+pub fn cmd_build(file: Option<&str>, release: bool, options: &CompileOptions) {
     let profile = if release { "release" } else { "dev" };
 
     if let Some(f) = file {
-        let _sb = build_script(f, profile);
+        let _sb = build_script_with_options(f, profile, options);
     } else {
-        let _pb = build_project(profile);
+        let _pb = build_project_with_options(profile, options);
     }
 }
 
@@ -274,7 +285,6 @@ pub fn cmd_emit(file: &str) {
             elaborated: elaborated.clone(),
             resolution: codegen::resolve::ResolutionMap::new(),
             front_resolution: result.resolution.clone(),
-            call_effects: codegen::call_effects::CallEffectMap::new(),
         },
     );
     let ctx = codegen::CodegenContext {
@@ -295,6 +305,162 @@ pub fn cmd_emit(file: &str) {
         Some("main"),
     );
     print!("{}", core_src);
+}
+
+/// Dump an intermediate IR stage for a single `.saga` file.
+///
+/// Bypasses the codegen toggle for `anf` / `monadic` / `monadic-opt` /
+/// `monadic-stats`: those
+/// always run the new path (uniform-effect-translation), regardless of the
+/// active `emit_module_with_context` block. `elaborated` and `core` go through
+/// shared code and therefore observe the toggle.
+pub fn cmd_inspect(file: &str, stage: &str) {
+    use saga::codegen::monadic;
+
+    let source = fs::read_to_string(file).unwrap_or_else(|e| {
+        eprintln!("Error reading {}: {}", file, e);
+        std::process::exit(1);
+    });
+    let mut checker = make_checker(None);
+    let (program, _) = parse_and_typecheck(&source, file, &mut checker);
+    let result = checker.to_result();
+
+    let elaborated = elaborate::elaborate(&program, &result);
+
+    match stage {
+        "elaborated" => {
+            println!("{:#?}", elaborated);
+        }
+        "anf" => {
+            let anf_program = codegen::anf::normalize(elaborated, None);
+            println!("{:#?}", anf_program);
+        }
+        "monadic" | "monadic-opt" | "monadic-stats" => {
+            // Build a minimal CodegenContext (std modules + this user module)
+            // so resolve/effect-info match what the new path sees in production.
+            let module_name =
+                declared_module_name(&program).unwrap_or_else(|| "_script".to_string());
+            let mut compiled_modules = compile_std_modules(&result);
+            compiled_modules.insert(
+                module_name.clone(),
+                codegen::CompiledModule {
+                    codegen_info: Default::default(),
+                    elaborated: elaborated.clone(),
+                    resolution: codegen::resolve::ResolutionMap::new(),
+                    front_resolution: result.resolution.clone(),
+                },
+            );
+            let ctx = codegen::CodegenContext {
+                modules: compiled_modules,
+                let_effect_bindings: result.let_effect_bindings.clone(),
+                prelude_imports: result.prelude_imports.clone(),
+            };
+
+            let codegen_info = ctx.codegen_info();
+            let front_resolution = result
+                .module_check_results()
+                .get(&module_name)
+                .map(|m| &m.resolution)
+                .unwrap_or(&result.resolution);
+            let mut resolution_map = codegen::resolve::resolve_names(
+                &module_name,
+                &elaborated,
+                &codegen_info,
+                &ctx.prelude_imports,
+                front_resolution,
+            );
+            for compiled in ctx.modules.values() {
+                resolution_map.extend(compiled.resolution.iter().map(|(k, v)| (*k, v.clone())));
+            }
+
+            let anf_program = codegen::anf::normalize(elaborated.clone(), Some(&resolution_map));
+
+            let ops_storage = codegen::build_effect_ops_table(&result);
+            let mod_check_ref = result
+                .module_check_results()
+                .get(&module_name)
+                .unwrap_or(&result);
+            let handler_effects_storage = codegen::build_handler_effects(&result);
+            let let_handler_effects_storage = codegen::build_let_handler_effects(&result);
+            let effect_info = codegen::build_effect_info(
+                &result,
+                mod_check_ref,
+                &ops_storage,
+                &handler_effects_storage,
+                &let_handler_effects_storage,
+            );
+
+            // Collect imported handler bodies (matches new-path emit behavior).
+            let mut imported_handler_decls: std::collections::HashMap<
+                String,
+                saga::ast::HandlerBody,
+            > = std::collections::HashMap::new();
+            for compiled in ctx.modules.values() {
+                let anf_imported = codegen::anf::normalize(
+                    compiled.elaborated.clone(),
+                    Some(&compiled.resolution),
+                );
+                for decl in &anf_imported {
+                    if let saga::ast::Decl::HandlerDef { name, body, .. } = decl {
+                        imported_handler_decls
+                            .entry(name.clone())
+                            .or_insert_with(|| body.clone());
+                    }
+                }
+            }
+
+            let (monadic_prog, _handler_value_map) = monadic::translate::translate_with_imports(
+                &anf_program,
+                &resolution_map,
+                &effect_info,
+                &imported_handler_decls,
+            );
+
+            if stage == "monadic-stats" {
+                let before = monadic::stats::Stats::collect_program(&monadic_prog);
+                let before_reachable = monadic::stats::Stats::collect_reachable_program(
+                    &monadic_prog,
+                    &["main", "tests"],
+                );
+                let handler_info = codegen::handler_analysis::analyze(&elaborated);
+                let optimized = monadic::effect_opt::run(monadic_prog, &handler_info, &effect_info);
+                let after = monadic::stats::Stats::collect_program(&optimized);
+                let after_reachable = monadic::stats::Stats::collect_reachable_program(
+                    &optimized,
+                    &["main", "tests"],
+                );
+                let reachable = (before_reachable.decls > 0 || after_reachable.decls > 0)
+                    .then(|| monadic::stats::StatsDiff::new(before_reachable, after_reachable));
+                println!(
+                    "{}",
+                    monadic::stats::StatsReport::new(
+                        monadic::stats::StatsDiff::new(before, after),
+                        reachable,
+                    )
+                );
+                return;
+            }
+
+            let to_print = if stage == "monadic-opt" {
+                let handler_info = codegen::handler_analysis::analyze(&elaborated);
+                monadic::effect_opt::run(monadic_prog, &handler_info, &effect_info)
+            } else {
+                monadic_prog
+            };
+
+            println!("{}", monadic::print::print_program(&to_print));
+        }
+        "core" => {
+            cmd_emit(file);
+        }
+        other => {
+            eprintln!(
+                "Unknown stage: '{}'. Expected one of: elaborated, anf, monadic, monadic-opt, monadic-stats, core",
+                other
+            );
+            std::process::exit(1);
+        }
+    }
 }
 
 pub fn cmd_fmt(file: &str, write_mode: bool, debug_mode: bool, cli_width: Option<usize>) {
@@ -336,7 +502,7 @@ pub fn cmd_fmt(file: &str, write_mode: bool, debug_mode: bool, cli_width: Option
     }
 }
 
-pub fn cmd_test(filter: Option<&str>) {
+pub fn cmd_test(filter: Option<&str>, options: &CompileOptions) {
     let project_root = super::find_project_root().unwrap_or_else(|| {
         eprintln!("No project.toml found. Tests require a project.");
         std::process::exit(1);
@@ -428,10 +594,11 @@ pub fn cmd_test(filter: Option<&str>) {
         .collect();
 
     let entry_source = generate_test_entry_source(&test_modules);
-    let pb = build_project_ext(
+    let pb = build_project_ext_with_options(
         "test",
         std::slice::from_ref(&tests_dir),
         Some(("_test_entry.saga", &entry_source)),
+        options,
     );
 
     exec_erl_with_timeout(

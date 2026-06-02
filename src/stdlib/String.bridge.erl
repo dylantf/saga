@@ -7,14 +7,14 @@ append(A, B) ->
 
 find(Sub, S) ->
     case string:find(S, Sub) of
-        nomatch -> {nothing};
-        V -> {just, V}
+        nomatch -> {std_maybe_Nothing};
+        V -> {std_maybe_Just, V}
     end.
 
 strip_prefix(Prefix, S) ->
     case string:prefix(S, Prefix) of
-        nomatch -> {nothing};
-        V -> {just, V}
+        nomatch -> {std_maybe_Nothing};
+        V -> {std_maybe_Just, V}
     end.
 
 contains(Sub, S) ->

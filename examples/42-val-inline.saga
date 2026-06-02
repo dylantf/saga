@@ -1,12 +1,9 @@
-# @inline val - compile-time inlined constants
+# val constants
 
-@inline
 val pi = 3.14159
 
-@inline
 val app_name = "saga"
 
-@inline
 val numbers = [1, 2, 3]
 
 val computed = List.map (fun x -> x * 2) [1, 2, 3]

@@ -6,8 +6,8 @@ new() ->
 
 get(Index, Arr) ->
     case Index >= 0 andalso Index < array:size(Arr) of
-        true -> {just, array:get(Index, Arr)};
-        false -> {nothing}
+        true -> {std_maybe_Just, array:get(Index, Arr)};
+        false -> {std_maybe_Nothing}
     end.
 
 map(Fun, Arr) ->

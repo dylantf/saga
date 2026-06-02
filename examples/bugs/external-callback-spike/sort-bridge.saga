@@ -1,0 +1,6 @@
+import Std.List as L
+
+main () = {
+  let r = L.sort_by (fun x -> x) [3, 1, 2]
+  dbg r
+}

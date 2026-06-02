@@ -7,5 +7,5 @@ main () = {
 
   println "Hello, world!"
 
-  println $"The inlined val is {Lib.bar}"
+  println $"The val is {Lib.bar}"
 } with console

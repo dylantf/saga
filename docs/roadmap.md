@@ -46,6 +46,15 @@ Checkbox = implemented and working. Unchecked = not yet done.
 - [x] Effect subtyping (pure function accepted where effectful callback expected)
 - [x] Directional callback effect checking (`check_callback_effect_subtype`)
 - [x] Disallow effect invocations in guard expressions
+- [ ] Positional/contextual checking for context-only keywords. `resume` is only
+      valid lexically inside a handler arm; `receive` only valid where a `Process`
+      mailbox capability is in scope. Neither is currently checked — the
+      typechecker accepts them free-floating and codegen panics instead of
+      diagnosing (`resume` outside a handler -> `panic!` "resume used outside
+      handler" at lower/mod.rs; same shape for stray `receive`). Model the
+      requirement as a contextual capability that flows in the type/effect env,
+      same family as the guard-effect check above. Turns a compiler crash into a
+      proper type error.
 - [x] Prelude substitution leak: module checkers started at `next_var: 0`, causing var ID
       collisions with the parent checker. Imported scheme types resolved through the parent's
       substitution, creating phantom dependencies that blocked generalization of polymorphic

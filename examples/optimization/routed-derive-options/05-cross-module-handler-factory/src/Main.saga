@@ -1,0 +1,14 @@
+module Main
+
+import Lib (Options, Encodable)
+
+record User {
+  first: Int,
+  second: Int,
+} deriving (Encodable)
+
+main () = {
+  let h = Lib.options 10
+  let result = Lib.serialize (User { first: 1, second: 2 }) with h
+  dbg (show result)
+}

@@ -3,6 +3,6 @@
 
 get(Key) ->
     case os:getenv(binary_to_list(Key)) of
-        false -> {nothing};
-        Value -> {just, list_to_binary(Value)}
+        false -> {std_maybe_Nothing};
+        Value -> {std_maybe_Just, list_to_binary(Value)}
     end.

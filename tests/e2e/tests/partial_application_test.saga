@@ -1,0 +1,120 @@
+module PartialApplicationTest
+
+# Partial application of curried functions across various supply patterns.
+# The lowerer's `eta_expand_partial_app` produces a `missing+2`-arity lambda
+# (single layer), and the type-based fallback in `head_atom_expected_user_args`
+# detects under-saturated calls on opaque heads (let-bound intermediates) and
+# partial-eta-expands again. Each binding's runtime arity matches its inferred
+# type's user-arg arity.
+#
+# Regression bug: split partial-app `let one = three_args 1; let one_two = one
+# 2; one_two 3` panicked with "function called with 3 args, but expects 4"
+# because the lowerer fell through to a saturated multi-arg apply on an opaque
+# head without a type-based partial-app check. Repro:
+# `examples/bugs/partial-app-multi-step/`.
+
+import Std.Test (Testing, describe, test, assert_eq)
+
+# --- 2-arg curried fn ---
+fun add2 : Int -> Int -> Int
+add2 a b = a + b
+
+# --- 3-arg curried fn ---
+fun add3 : Int -> Int -> Int -> Int
+add3 a b c = a + b + c
+
+# --- 4-arg curried fn ---
+fun add4 : Int -> Int -> Int -> Int -> Int
+add4 a b c d = a + b + c + d
+
+pub fun tests : Unit -> Unit needs {Testing}
+tests () = {
+  describe "partial application" (fun () -> {
+
+    describe "saturated calls (baseline)" (fun () -> {
+      test "2-arg fn with both args" (fun () -> {
+        assert_eq (add2 3 4) 7
+      })
+      test "3-arg fn with all args" (fun () -> {
+        assert_eq (add3 1 2 3) 6
+      })
+      test "4-arg fn with all args" (fun () -> {
+        assert_eq (add4 1 2 3 4) 10
+      })
+    })
+
+    describe "2-arg curry split" (fun () -> {
+      test "first arg only, call with second later" (fun () -> {
+        let add5 = add2 5
+        assert_eq (add5 7) 12
+      })
+    })
+
+    describe "3-arg curry split" (fun () -> {
+      test "first arg only, then both remaining at once" (fun () -> {
+        # `(add3 1) 2 3` — split bound, call with 2 args at once.
+        let one = add3 1
+        assert_eq (one 2 3) 6
+      })
+
+      test "first arg only, then one at a time" (fun () -> {
+        # `((add3 1) 2) 3` — split twice, each call supplies 1 arg.
+        let one = add3 1
+        let one_two = one 2
+        assert_eq (one_two 3) 6
+      })
+
+      test "two args supplied, call with last alone" (fun () -> {
+        let one_two = add3 1 2
+        assert_eq (one_two 3) 6
+      })
+    })
+
+    describe "4-arg curry split (every split pattern)" (fun () -> {
+      test "1 + 3" (fun () -> {
+        let one = add4 1
+        assert_eq (one 2 3 4) 10
+      })
+      test "2 + 2" (fun () -> {
+        let one_two = add4 1 2
+        assert_eq (one_two 3 4) 10
+      })
+      test "3 + 1" (fun () -> {
+        let one_two_three = add4 1 2 3
+        assert_eq (one_two_three 4) 10
+      })
+      test "1 + 1 + 2" (fun () -> {
+        let a = add4 1
+        let ab = a 2
+        assert_eq (ab 3 4) 10
+      })
+      test "1 + 2 + 1" (fun () -> {
+        let a = add4 1
+        let abc = a 2 3
+        assert_eq (abc 4) 10
+      })
+      test "1 + 1 + 1 + 1" (fun () -> {
+        let a = add4 1
+        let ab = a 2
+        let abc = ab 3
+        assert_eq (abc 4) 10
+      })
+    })
+
+    describe "partial-app as a first-class value" (fun () -> {
+      test "passed to a HOF expecting a unary function" (fun () -> {
+        # `add2 10` is a unary `Int -> Int`; pass it into `apply_to_5`.
+        let apply_to_5 = fun f -> f 5
+        assert_eq (apply_to_5 (add2 10)) 15
+      })
+
+      test "partial-app stored in a list, applied later" (fun () -> {
+        let fns = [add2 1, add2 10, add2 100]
+        case fns {
+          [f, g, h] -> assert_eq ((f 0) + (g 0) + (h 0)) 111
+          _ -> assert_eq "unexpected" "list shape"
+        }
+      })
+    })
+  })
+}

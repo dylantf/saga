@@ -17,9 +17,9 @@ to_string(Bs) ->
     end.
 
 at(Index, Bs) when Index >= 0, Index < byte_size(Bs) ->
-    {just, binary:at(Bs, Index)};
+    {std_maybe_Just, binary:at(Bs, Index)};
 at(_, _) ->
-    {nothing}.
+    {std_maybe_Nothing}.
 
 slice(Start, Len, Bs) ->
     binary:part(Bs, Start, Len).

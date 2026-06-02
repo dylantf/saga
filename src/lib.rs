@@ -1,6 +1,7 @@
 pub mod ast;
 pub mod codegen;
 pub mod color;
+pub mod compiler_options;
 pub mod derive;
 pub mod desugar;
 pub mod elaborate;

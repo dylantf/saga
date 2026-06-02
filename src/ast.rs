@@ -198,11 +198,23 @@ pub fn set_decl_doc(decl: &mut Decl, doc: Vec<String>) {
 }
 
 /// Compute the canonical tag for an anonymous record given its field names.
-/// The fields are sorted to produce a stable key regardless of declaration order.
+/// The fields are sorted to produce a stable key regardless of declaration
+/// order. Each name is length-prefixed (`_<len>_<name>`) so the encoding is
+/// injective over field-name sets: a plain `_`-join is ambiguous (`{a_b, c}`
+/// and `{a, b_c}` would collide), which corrupts runtime record identity and
+/// pattern matching. The tag is used only as an opaque key/runtime atom; field
+/// order for lowering comes from structural metadata, not by decoding this.
 pub fn anon_record_tag(field_names: &[&str]) -> String {
     let mut sorted: Vec<&str> = field_names.to_vec();
     sorted.sort();
-    format!("__anon_{}", sorted.join("_"))
+    let mut tag = String::from("__anon");
+    for name in &sorted {
+        tag.push('_');
+        tag.push_str(&name.len().to_string());
+        tag.push('_');
+        tag.push_str(name);
+    }
+    tag
 }
 
 static NEXT_NODE_ID: AtomicU32 = AtomicU32::new(1);
@@ -593,8 +605,14 @@ pub enum ExprKind {
     FieldAccess {
         expr: Box<Expr>,
         field: String,
-        /// Resolved record type name (filled in by elaboration).
+        /// Resolved record type name (filled in by elaboration). For anonymous
+        /// records this is the (opaque) `anon_record_tag`.
         record_name: Option<String>,
+        /// Canonical sorted field order when the record is anonymous (filled in
+        /// by elaboration from `Type::Record`). Lets lowering read field
+        /// positions structurally instead of decoding the runtime tag. `None`
+        /// for named records.
+        anon_fields: Option<Vec<String>>,
     },
 
     /// `User { name: "Dylan", age: 30 }`
@@ -610,8 +628,12 @@ pub enum ExprKind {
     RecordUpdate {
         record: Box<Expr>,
         fields: Vec<(String, Span, Expr)>,
-        /// Resolved record type name (filled in by elaboration).
+        /// Resolved record type name (filled in by elaboration). For anonymous
+        /// records this is the (opaque) `anon_record_tag`.
         record_name: Option<String>,
+        /// Canonical sorted field order when the record is anonymous (filled in
+        /// by elaboration from `Type::Record`). `None` for named records.
+        anon_fields: Option<Vec<String>>,
     },
 
     /// `log! "hello"`, `Cache.get! key`
@@ -1452,4 +1474,17 @@ pub struct TraitDefaultBody {
     pub params: Vec<Pat>,
     pub body: Expr,
     pub name_span: Span,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::anon_record_tag;
+
+    #[test]
+    fn anonymous_record_tags_are_injective_for_underscore_fields() {
+        assert_ne!(
+            anon_record_tag(&["a_b", "c"]),
+            anon_record_tag(&["a", "b_c"])
+        );
+    }
 }

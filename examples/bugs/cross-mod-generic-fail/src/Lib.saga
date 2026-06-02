@@ -1,0 +1,16 @@
+module Lib
+
+import Std.Fail (Fail)
+
+pub type Error =
+  | Boom String
+  deriving (Eq, Debug)
+
+handler to_result for Fail a {
+  fail e = Err e
+  return v = Ok v
+}
+
+# first-class decoder param, runs it under the generic handler (cross-module)
+pub fun run : (Int -> b needs {Fail a}) -> Int -> Result b a
+run decoder j = decoder j with to_result

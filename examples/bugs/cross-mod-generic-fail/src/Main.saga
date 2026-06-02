@@ -1,0 +1,17 @@
+module Main
+
+import Lib (Error)
+import Lib as L
+import Decode
+
+# mirror assert_eq: compares with == and would debug on mismatch
+fun check : x -> x -> Unit where {x: Debug + Eq}
+check a b =
+  if a == b then dbg "ok"
+  else dbg $"Expected {debug b}, got {debug a}"
+
+fun main : Unit -> Unit
+main () = {
+  let bad = Lib.run Decode.leaf 0
+  check bad (Err (L.Boom "zero"))
+}

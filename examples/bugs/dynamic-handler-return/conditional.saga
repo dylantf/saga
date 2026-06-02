@@ -1,0 +1,25 @@
+# Scenario 1: conditional handler binding where both branches have return clauses
+# with different shapes. Tests the runtime element-3 dispatch.
+
+effect Tag {
+  fun emit : String -> Unit
+}
+
+main () = {
+  let pick = True
+  let h = if pick then
+    handler for Tag {
+      emit _ = resume ()
+      return _ = "A:done"
+    }
+  else
+    handler for Tag {
+      emit _ = resume ()
+      return _ = "B:done"
+    }
+  let r = {
+    emit! "x"
+    "ignored"
+  } with h
+  dbg r
+}

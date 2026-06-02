@@ -401,10 +401,6 @@ pub struct ModuleCodegenInfo {
     pub external_funs: Vec<(String, String, String, usize)>,
     /// Compiler intrinsic exports: source name -> intrinsic id.
     pub intrinsic_exports: Vec<(String, crate::intrinsics::IntrinsicId)>,
-    /// Public `@inline val` declarations: name -> RHS expression.
-    /// Cross-module references substitute the expression at the use site
-    /// rather than calling a BEAM function (none is emitted for inline vals).
-    pub inline_vals: Vec<(String, crate::ast::Expr)>,
 }
 
 fn collect_effects_from_fun_type(ty: &Type) -> Vec<String> {
@@ -1664,8 +1660,6 @@ fn collect_codegen_info(
     let mut trait_impl_dicts = Vec::new();
     let mut external_funs = Vec::new();
     let mut intrinsic_exports = Vec::new();
-    let mut inline_vals = Vec::new();
-
     // Erlang module name: "Foo.Bar" -> "foo_bar"
     let erlang_module = module_name
         .split('.')
@@ -1900,15 +1894,6 @@ fn collect_codegen_info(
                     impl_effects,
                 });
             }
-            Decl::Val {
-                public: true,
-                name,
-                annotations,
-                value,
-                ..
-            } if annotations.iter().any(|a| a.name == "inline") => {
-                inline_vals.push((name.clone(), value.clone()));
-            }
             _ => {}
         }
     }
@@ -1923,7 +1908,6 @@ fn collect_codegen_info(
         trait_impl_dicts,
         external_funs,
         intrinsic_exports,
-        inline_vals,
     }
 }
 

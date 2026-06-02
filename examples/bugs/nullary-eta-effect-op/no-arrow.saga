@@ -1,0 +1,10 @@
+# Effect op declared with a non-function type. Would the param_count == 0
+# path even be reachable from valid source?
+
+effect Const {
+  fun ping : Int
+}
+
+main () = {
+  dbg "test"
+}

@@ -1,0 +1,10 @@
+module Decode
+
+import Std.Fail (Fail)
+import Lib (Error)
+
+pub fun leaf : Int -> Int needs {Fail Error}
+leaf n = case n {
+  0 -> fail! (Boom "zero")
+  _ -> n
+}

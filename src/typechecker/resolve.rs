@@ -806,6 +806,15 @@ impl<'a> Resolver<'a> {
             }
             ExprKind::QualifiedName { module, name, .. } => {
                 let qualified = format!("{}.{}", module, name);
+                // A qualified name may name a constructor (e.g.
+                // `Json.InvalidShape`). Tag it as a constructor so codegen
+                // builds a tagged tuple instead of a uniform-CPS call to a
+                // nonexistent `Module:Ctor/(n+2)`. The value binding below is
+                // still recorded: type inference types a constructor reference
+                // via its scheme in `env`, keyed by that value resolution.
+                if let Some(resolved) = self.resolve_constructor_name(&qualified) {
+                    self.result.constructors.insert(expr.id, resolved);
+                }
                 if let Some(resolved) = self.scope.resolve_value(&qualified) {
                     let canonical = resolved.to_string();
                     if let Some(trait_method) = self.qualified_trait_method(&canonical) {

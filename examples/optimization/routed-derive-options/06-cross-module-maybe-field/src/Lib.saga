@@ -1,0 +1,52 @@
+module Lib
+
+pub effect Options {
+  fun get_options : Unit -> Int
+}
+
+pub trait Encodable a {
+  fun encode : a -> Int needs {Options}
+}
+
+trait Fields a {
+  fun fields : a -> Int needs {Options}
+}
+
+pub fun options : Int -> Handler Options
+options n = handler for Options {
+  get_options () = resume n
+}
+
+pub fun serialize : a -> Int needs {Options} where {a: Encodable}
+serialize x = encode x
+
+impl Encodable for Int needs {Options} {
+  encode x = x + get_options! ()
+}
+
+impl Encodable for Maybe a where {a: Encodable} needs {Options} {
+  encode m = case m {
+    Nothing -> 0
+    Just x -> encode x
+  }
+}
+
+impl Encodable for Leaf a where {a: Encodable} needs {Options} {
+  encode (Leaf x) = encode x
+}
+
+impl Encodable for Record a where {a: Fields} needs {Options} {
+  encode (Record _ inner) = {
+    let opts = get_options! ()
+    opts + fields inner
+  }
+}
+
+impl Fields for Labeled (n : Symbol) a where {n: KnownSymbol, a: Encodable} needs {Options} {
+  fields (Labeled x) = encode x
+}
+
+impl Fields for And l r where {l: Fields, r: Fields} needs {Options} {
+  fields (And l r) = fields l + fields r
+}
+

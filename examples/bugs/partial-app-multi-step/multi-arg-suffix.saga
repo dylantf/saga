@@ -1,0 +1,13 @@
+# Partial-app, then call the result with MULTIPLE args at once
+# (`(plus_one 1) 2 3` — supplies 2 args to a 2-arg-missing partial).
+# This is the same operation as `(((plus_one 1) 2) 3)` semantically, but
+# the translator flattens nested Apps into one multi-arg App, so the
+# lowerer sees args=[2, 3] supplied to an opaque head.
+
+fun three_args : Int -> Int -> Int -> Int
+three_args a b c = a + b + c
+
+main () = {
+  let plus_one = three_args 1
+  dbg (plus_one 2 3)
+}

@@ -1,0 +1,30 @@
+# Empirical test for Pure-in-arm-tail abort semantics.
+#
+# An abort-style handler arm (`fail x = Err x`) returns a Pure value.
+# Correct semantics: Pure in the arm tail must escape to the with-site K,
+# NOT resume the perform-site K. If the code AFTER `fail!` in the
+# handled body runs, then Pure was incorrectly threaded as Resume.
+
+effect Fail {
+  fun fail : (msg: String) -> a
+}
+
+handler to_result for Fail {
+  fail x = Err x
+  return v = Ok v
+}
+
+fun aborts_then_continues : Unit -> Result Int String needs {Fail}
+aborts_then_continues () = {
+  let _ = fail! "ABORTED"
+  # If we ever reach this line, escape failed and resume happened
+  Ok 999
+}
+
+main () = {
+  let r = aborts_then_continues () with to_result
+  case r {
+    Err msg -> dbg $"ESCAPE OK: got Err {msg}"
+    Ok n    -> dbg $"RESUME BUG: post-fail code ran, got Ok {debug n}"
+  }
+}

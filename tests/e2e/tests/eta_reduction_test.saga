@@ -1,0 +1,101 @@
+module EtaReductionTest
+
+# Eta-reduced top-level bindings — `fun f : T -> U; f = g` where `g` has
+# type `T -> U`. The LHS has arity 0 but the type declares arity 1; the
+# elaborator must eta-expand so the producer emits the function at the
+# type-implied arity (otherwise cross-module callers find `/N` does not
+# exist at runtime).
+#
+# Regression bug surfaced in saga_pgo's `pg_text = coerce_value`. See also
+# `examples/bugs/eta-reduced-fun-binding/`.
+
+import Std.Test (Testing, describe, test, assert_eq)
+import EtaLib as E
+
+pub fun tests : Unit -> Unit needs {Testing}
+tests () = {
+  describe "eta-reduced top-level bindings" (fun () -> {
+
+    describe "alias of an @external function" (fun () -> {
+      test "called cross-module" (fun () -> {
+        # `aliased_ext_abs = ext_abs` — saga_pgo `pg_text` shape.
+        assert_eq (E.aliased_ext_abs (-7)) 7
+      })
+    })
+
+    describe "alias of a local Saga function" (fun () -> {
+      test "1-arg alias called cross-module" (fun () -> {
+        assert_eq (E.aliased_id 42) 42
+      })
+
+      test "2-arg alias called cross-module" (fun () -> {
+        # Both args supplied at the cross-module call site.
+        assert_eq (E.aliased_add 3 4) 7
+      })
+
+      test "2-arg alias partially applied (first arg only)" (fun () -> {
+        # Partial application of an eta-reduced binding — exercises both the
+        # eta-expansion AND the partial-app eta wrapper at the call site.
+        let add5 = E.aliased_add 5
+        assert_eq (add5 6) 11
+      })
+
+      test "3-arg alias called cross-module" (fun () -> {
+        assert_eq (E.aliased_curried3 1 2 3) 6
+      })
+
+      test "3-arg alias partially applied at each split" (fun () -> {
+        # Was previously broken: `eta_expand_partial_app` built a single
+        # multi-arg lambda, so a 1-arg follow-up call on the result
+        # hit an arity mismatch. Fixed by emitting a curried chain
+        # (one uniform-CPS layer per missing user param).
+        let plus_one = E.aliased_curried3 1
+        let plus_one_two = plus_one 2
+        assert_eq (plus_one_two 3) 6
+        let plus_two = E.aliased_curried3 2
+        assert_eq (plus_two 3 4) 9
+      })
+    })
+
+    describe "polymorphic alias" (fun () -> {
+      test "monomorphizes at Int" (fun () -> {
+        assert_eq (E.aliased_poly_id 99) 99
+      })
+
+      test "monomorphizes at String" (fun () -> {
+        assert_eq (E.aliased_poly_id "hello") "hello"
+      })
+
+      test "monomorphizes at List" (fun () -> {
+        assert_eq (E.aliased_poly_id [1, 2, 3]) [1, 2, 3]
+      })
+    })
+
+    describe "eta-reduced alias passed as a first-class value" (fun () -> {
+      test "HOF receives the aliased function" (fun () -> {
+        # `apply_via_aliased` inside EtaLib calls a HOF passing `aliased_id`
+        # — the HOF must be able to apply it at the right arity.
+        assert_eq (E.apply_via_aliased ()) 7
+      })
+    })
+
+    describe "chained eta-reduction" (fun () -> {
+      test "alias of an alias" (fun () -> {
+        # `aliased_id_a = aliased_id; aliased_id = raw_id`. Each layer is
+        # eta-expanded independently — call passes through both wrappers.
+        assert_eq (E.aliased_id_a 123) 123
+      })
+    })
+
+    describe "in-module call to an eta-reduced binding" (fun () -> {
+      test "intra-module caller resolves at the right arity" (fun () -> {
+        # `in_module_caller n = aliased_id n + aliased_add 10 20 +
+        #                       aliased_curried3 1 2 3`
+        # The expanded function arities must agree between the in-module
+        # resolution path and the producer's emitted arity, or the caller
+        # crashes with `undef`.
+        assert_eq (E.in_module_caller 100) (100 + 30 + 6)
+      })
+    })
+  })
+}

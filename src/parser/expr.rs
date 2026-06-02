@@ -571,6 +571,7 @@ impl Parser {
                     expr: Box::new(expr),
                     field,
                     record_name: None,
+                    anon_fields: None,
                 },
             };
         }
@@ -654,12 +655,6 @@ impl Parser {
         // Inline arm: op params = body
         let mut params = Vec::new();
         while !matches!(self.peek(), Token::Eq | Token::Eof) {
-            // Skip `()` unit params (zero-param effect ops)
-            if matches!(self.peek(), Token::LParen) && matches!(self.peek_at(1), Token::RParen) {
-                self.advance(); // consume '('
-                self.advance(); // consume ')'
-                continue;
-            }
             params.push(self.parse_pattern()?);
         }
         self.expect(Token::Eq)?;
@@ -1064,6 +1059,7 @@ impl Parser {
                                 record: Box::new(record),
                                 fields,
                                 record_name: None,
+                                anon_fields: None,
                             },
                         });
                     }

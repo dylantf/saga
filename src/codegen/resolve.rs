@@ -15,7 +15,7 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::ast::{self, ComprehensionQualifier, Decl, Expr, ExprKind, NodeId, Pat, Program, Stmt};
-use crate::codegen::lower::init::extract_external;
+use crate::codegen::external::extract_external;
 use crate::typechecker::{ModuleCodegenInfo, ResolutionResult as FrontResolutionResult};
 
 /// Map from constructor name -> mangled Erlang atom.
@@ -28,8 +28,6 @@ fn beam_override(name: &str) -> Option<&'static str> {
     match name {
         "Ok" => Some("ok"),
         "Err" => Some("error"),
-        "Just" => Some("just"),
-        "Nothing" => Some("nothing"),
         "True" => Some("true"),
         "False" => Some("false"),
         "Normal" => Some("normal"),
@@ -55,7 +53,7 @@ pub fn build_constructor_atoms(
 
     // Register BEAM overrides (these win over any module-prefixed version)
     for name in &[
-        "Ok", "Err", "Just", "Nothing", "True", "False", "Normal", "Shutdown", "Killed", "Noproc",
+        "Ok", "Err", "True", "False", "Normal", "Shutdown", "Killed", "Noproc",
     ] {
         if let Some(atom) = beam_override(name) {
             atoms.insert(name.to_string(), atom.to_string());
@@ -194,8 +192,6 @@ pub enum ResolvedCodegenKind {
         id: crate::intrinsics::IntrinsicId,
         arity: usize,
     },
-    /// An `@inline val`; lowering clones the canonical lowered RHS.
-    InlineVal,
 }
 
 impl ResolvedCodegenKind {
@@ -204,7 +200,6 @@ impl ResolvedCodegenKind {
             ResolvedCodegenKind::BeamFunction { arity, .. }
             | ResolvedCodegenKind::ExternalFunction { arity, .. }
             | ResolvedCodegenKind::Intrinsic { arity, .. } => *arity,
-            ResolvedCodegenKind::InlineVal => 0,
         }
     }
 
@@ -212,7 +207,7 @@ impl ResolvedCodegenKind {
         match self {
             ResolvedCodegenKind::BeamFunction { effects, .. }
             | ResolvedCodegenKind::ExternalFunction { effects, .. } => effects,
-            ResolvedCodegenKind::Intrinsic { .. } | ResolvedCodegenKind::InlineVal => &[],
+            ResolvedCodegenKind::Intrinsic { .. } => &[],
         }
     }
 }
@@ -919,11 +914,25 @@ fn scoped_to_resolved(scoped: &ScopedName) -> ResolvedSymbol {
 
 fn collect_local_fun_arities(program: &Program) -> HashMap<String, usize> {
     let mut local_funs: HashMap<String, usize> = HashMap::new();
+    // First pass: prefer `FunBinding.params.len()` — after elaboration this
+    // includes dict params prepended for `where {T: Trait}` constraints, so
+    // the value matches the actually-exported function arity. `FunSignature`
+    // alone (e.g. `@external` decls with no binding) carries only the source
+    // user-param count.
+    for decl in program {
+        if let Decl::FunBinding { name, params, .. } = decl {
+            local_funs.insert(name.clone(), params.len());
+        }
+    }
+    // Second pass: fill in entries not seen in the first pass. `Val` is
+    // always arity-0; `FunSignature` is the source arity (used when there
+    // is no FunBinding to refine it — e.g. `@external` wrappers).
+    // `DictConstructor` exposes the dict tuple at `dict_params.len()` user
+    // args; under the new path the uniform calling convention adds the
+    // `_Evidence`/`_ReturnK` pair at the call site via the `__dict_…`
+    // branch of `uniform_value_arity`.
     for decl in program {
         match decl {
-            Decl::FunBinding { name, params, .. } => {
-                local_funs.entry(name.clone()).or_insert(params.len());
-            }
             Decl::Val { name, .. } => {
                 local_funs.entry(name.clone()).or_insert(0);
             }
@@ -936,6 +945,11 @@ fn collect_local_fun_arities(program: &Program) -> HashMap<String, usize> {
                 let _ = extract_external(annotations);
                 local_funs.entry(name.clone()).or_insert(params.len());
             }
+            Decl::DictConstructor {
+                name, dict_params, ..
+            } => {
+                local_funs.entry(name.clone()).or_insert(dict_params.len());
+            }
             _ => {}
         }
     }
@@ -943,7 +957,7 @@ fn collect_local_fun_arities(program: &Program) -> HashMap<String, usize> {
 }
 
 /// Classify a declaration into its codegen kind by consulting the module's
-/// `intrinsic_exports` / `inline_vals` / `external_funs` tables. Shared by
+/// `intrinsic_exports` / `external_funs` tables. Shared by
 /// local-scope registration (`erlang_mod_for_beam = None`) and imported-scope
 /// registration (`erlang_mod_for_beam = Some(...)`).
 ///
@@ -965,9 +979,6 @@ fn classify_codegen_kind(
             id: *intrinsic,
             arity,
         };
-    }
-    if info.is_some_and(|info| info.inline_vals.iter().any(|(n, _)| n == name)) {
-        return ResolvedCodegenKind::InlineVal;
     }
     if let Some((_, target_mod, target_fun, _)) = info.and_then(|info| {
         info.external_funs
@@ -1051,8 +1062,8 @@ fn build_imported_fun_scoped(
     fun_effects_map: &HashMap<&str, &Vec<String>>,
     effect_op_counts: &HashMap<String, usize>,
 ) -> ScopedName {
-    let (arity, mut effects) = crate::codegen::lower::util::arity_and_effects_from_type(&scheme.ty);
-    let dict_params = crate::codegen::lower::util::dict_param_count(&scheme.constraints);
+    let (arity, mut effects) = crate::codegen::type_shape::arity_and_effects_from_type(&scheme.ty);
+    let dict_params = crate::codegen::type_shape::dict_param_count(&scheme.constraints);
     // Merge with fun_effects (which strips beam-native effects in
     // check_module.rs but is otherwise the authoritative annotation list).
     // Effects from the type include beam-native ones; the lowered function

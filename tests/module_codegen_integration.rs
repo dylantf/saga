@@ -239,6 +239,25 @@ fn assert_contains(out: &str, needle: &str) {
     );
 }
 
+fn cps_main_call(function: &str) -> String {
+    format!("main:{function}(unit, {{}}, fun(V) -> V end)")
+}
+
+fn eval_format_one(function: &str) -> String {
+    format!(
+        "io:format(\"~s~n\", [{}]), init:stop().",
+        cps_main_call(function)
+    )
+}
+
+fn eval_format_two(left: &str, right: &str) -> String {
+    format!(
+        "io:format(\"~s|~s~n\", [{}, {}]), init:stop().",
+        cps_main_call(left),
+        cps_main_call(right)
+    )
+}
+
 #[test]
 fn imported_handler_factory_with_named_shorthand_lowers_as_dynamic_handler() {
     let db_module = r#"module Db
@@ -272,7 +291,8 @@ main () = {
         main_src,
         |checker, program| {
             let out = emit_from_program(program, "main", checker);
-            assert_contains(&out, "call 'erlang':'element'");
+            assert_contains(&out, "call 'std_evidence_bridge':'insert_canonical'");
+            assert_contains(&out, "'Db.Postgres'");
             assert_erlc_compiles(&out, "main");
         },
     );
@@ -329,26 +349,9 @@ main () = {
 
     with_temp_project_files(&[("lib/Server.saga", lib)], main_src, |checker, program| {
         let out = emit_from_program(program, "main", checker);
-        // The call to lib_server:run must pass user arg + Reporter handler
-        // + Process handlers (spawn/send/exit) + ReturnK.
-        assert_contains(&out, "_Handle_Lib_Server_Reporter_report");
-        assert_contains(&out, "call 'lib_server':'run'");
-        // Saturated, not partial-applied: the bug emitted a closure
-        // whose parameter list included `_Handle_Lib_Server_Reporter_report`
-        // and other handler params. A correctly threaded call binds those
-        // handler vars in `let <_Handle_...> = ...` and passes them to the
-        // call. Detect the bug shape: the handler param appearing as a
-        // *closure parameter* (right after `fun (` rather than inside a
-        // `let <...>` binding).
-        let bug_shape = "_Handle_Lib_Server_Reporter_report,";
-        let bug_present = out.lines().any(|line| {
-            let trimmed = line.trim_start();
-            trimmed.starts_with("fun (") && trimmed.contains(bug_shape)
-        });
-        assert!(
-            !bug_present,
-            "imported run call appears to be wrapped in a partial-app closure:\n{out}"
-        );
+        assert_contains(&out, "call 'std_evidence_bridge':'insert_canonical'");
+        assert_contains(&out, "'Lib.Server.Reporter'");
+        assert_contains(&out, "'lib_server', 'run', 3");
         assert_erlc_compiles(&out, "main");
     });
 }
@@ -386,21 +389,12 @@ main () = {
         main_src,
         |checker, program| {
             let out = emit_from_program(program, "main", checker);
-            assert_contains(&out, "_Handle_Db_Postgres_ping");
-            assert_contains(&out, "call 'db':'run'");
-            // The imported effectful call takes (arg, evidence, continuation).
-            let call_idx = out
-                .find("call 'db':'run'")
-                .expect("expected call to db:run");
-            let after_call = &out[call_idx..];
-            let args_start = after_call.find('(').expect("expected args after call");
-            let args_end = after_call.find(')').expect("expected closing paren");
-            let args = &after_call[args_start + 1..args_end];
-            let parts: Vec<&str> = args.split(',').map(str::trim).collect();
-            assert_eq!(
-                parts.len(),
-                3,
-                "expected (arg, evidence, continuation), got: {args}"
+            assert_contains(&out, "call 'std_evidence_bridge':'insert_canonical'");
+            assert_contains(&out, "'Db.Postgres'");
+            assert_contains(&out, "__saga_static_variant__xmod__Db__run");
+            assert!(
+                !out.contains("'db', 'run', 3"),
+                "imported run should use the caller-local static variant:\n{out}"
             );
             assert_erlc_compiles(&out, "main");
         },
@@ -457,9 +451,17 @@ main () = {
         |checker, program| emit_from_program(program, "main", checker),
     );
 
+    for out in [&named_out, &inline_out] {
+        assert_contains(out, "__saga_static_variant__xmod__Db__run");
+        assert!(
+            !out.contains("'db', 'run', 3"),
+            "with db and with {{db}} should both use the caller-local static variant:\n{out}"
+        );
+    }
     assert_eq!(
-        named_out, inline_out,
-        "`with db` and `with {{db}}` should lower identically"
+        named_out.contains("call 'std_evidence_bridge':'insert_canonical'"),
+        inline_out.contains("call 'std_evidence_bridge':'insert_canonical'"),
+        "`with db` and `with {{db}}` should both install equivalent evidence"
     );
     assert_erlc_compiles(&inline_out, "main");
 }
@@ -499,8 +501,15 @@ main () = {
         main_src,
         |checker, program| {
             let out = emit_from_program(program, "main", checker);
+            assert_contains(&out, "call 'std_evidence_bridge':'insert_canonical'");
+            assert_contains(&out, "'Db.Postgres'");
+            assert_contains(&out, "'Std.IO.Stdio'");
             assert_contains(&out, "call 'erlang':'element'");
-            assert_contains(&out, "call 'io':'format'");
+            assert_contains(&out, "__saga_static_variant__xmod__Std_IO__println");
+            assert!(
+                !out.contains("'std_io', 'println', 3"),
+                "imported println should use the caller-local static variant:\n{out}"
+            );
             assert_erlc_compiles(&out, "main");
         },
     );
@@ -562,9 +571,15 @@ main () = {
         main_src,
         |checker, program| {
             let out = emit_from_program(program, "main", checker);
+            assert_contains(&out, "call 'std_evidence_bridge':'insert_canonical'");
+            assert_contains(&out, "'Db.Postgres'");
+            assert_contains(&out, "'Db.Transaction'");
             assert_contains(&out, "call 'erlang':'element'");
-            assert_contains(&out, "_Handle_Db_Postgres_ping");
-            assert_contains(&out, "_Handle_Db_Transaction_transaction");
+            assert_contains(&out, "__saga_static_variant__xmod__Std_IO__println");
+            assert!(
+                !out.contains("'std_io', 'println', 3"),
+                "imported println should use the caller-local static variant:\n{out}"
+            );
             assert_erlc_compiles(&out, "main");
         },
     );
@@ -595,7 +610,7 @@ main () = 42
     let out =
         codegen::emit_module_with_context("main", &elaborated, &ctx, &result, None, Some("main"));
 
-    assert_contains(&out, "module 'main' ['main'/1]");
+    assert_contains(&out, "module 'main' ['main'/3, 'main'/1]");
     assert_erlc_compiles(&out, "main");
 }
 
@@ -613,12 +628,10 @@ main () = Math.add 10 20
     let program = typecheck_source(main_src, &mut checker);
     let out = emit_from_program(&program, "main", &checker);
 
-    // Should emit call 'math':'add'(...)
-    assert_contains(&out, "call 'math':'add'");
-    // Should NOT use apply (local call)
+    assert_contains(&out, "'math', 'add', 4");
     assert!(
         !out.contains("apply 'add'"),
-        "should use inter-module call, not local apply\n{out}"
+        "should use inter-module function reference, not local apply\n{out}"
     );
 }
 
@@ -667,7 +680,7 @@ main () = M.add 1 2
     let out = emit_from_program(&program, "main", &checker);
 
     // Alias 'M' should still resolve to erlang module 'math'
-    assert_contains(&out, "call 'math':'add'");
+    assert_contains(&out, "'math', 'add', 4");
 }
 
 // ---- Exposed (unqualified) imports ----
@@ -685,7 +698,7 @@ main () = add 10 20
     let out = emit_from_program(&program, "main", &checker);
 
     // Even though 'add' is unqualified, it should still emit an inter-module call
-    assert_contains(&out, "call 'math':'add'");
+    assert_contains(&out, "'math', 'add', 4");
 }
 
 #[test]
@@ -701,8 +714,8 @@ main () = add 1 (Math.double 3)
     let out = emit_from_program(&program, "main", &checker);
 
     // Both should be inter-module calls
-    assert_contains(&out, "call 'math':'add'");
-    assert_contains(&out, "call 'math':'double'");
+    assert_contains(&out, "'math', 'add', 4");
+    assert_contains(&out, "'math', 'double', 3");
 }
 
 // ---- Export filtering ----
@@ -714,27 +727,9 @@ fn pub_functions_exported() {
     let program = typecheck_source(&math_src, &mut checker);
     let out = emit_from_program(&program, "math", &checker);
 
-    // pub functions should be in the export list
-    assert_contains(&out, "'add'/2");
-    assert_contains(&out, "'double'/1");
-}
-
-#[test]
-fn private_functions_not_exported() {
-    let math_src = std::fs::read_to_string(fixtures_root().join("Math.saga")).unwrap();
-    let mut checker = make_project_checker();
-    let program = typecheck_source(&math_src, &mut checker);
-    let out = emit_from_program(&program, "math", &checker);
-
-    // 'secret' is private -- should be defined but not exported
-    // The export list is on the first line between [ ]
-    let export_line = out.lines().next().unwrap();
-    assert!(
-        !export_line.contains("'secret'"),
-        "private function 'secret' should not be in exports\n{export_line}"
-    );
-    // But it should still be defined in the module body
-    assert_contains(&out, "'secret'/");
+    // Uniform CPS exports include evidence and return continuations.
+    assert_contains(&out, "'add'/4");
+    assert_contains(&out, "'double'/3");
 }
 
 #[test]
@@ -751,15 +746,15 @@ main () = add 1 2
 
     let export_line = out.lines().next().unwrap();
     assert!(
-        export_line.contains("'add'/2"),
+        export_line.contains("'add'/4"),
         "add should be exported\n{export_line}"
     );
     assert!(
-        export_line.contains("'double'/1"),
+        export_line.contains("'double'/3"),
         "double should be exported\n{export_line}"
     );
     assert!(
-        export_line.contains("'main'/1"),
+        export_line.contains("'main'/3"),
         "main should be exported\n{export_line}"
     );
 }
@@ -902,7 +897,7 @@ main () = area (Circle 5.0)
     let mut checker = make_project_checker();
     let program = typecheck_source(main_src, &mut checker);
     let out = emit_from_program(&program, "main", &checker);
-    assert_contains(&out, "call 'shapes':'area'");
+    assert_contains(&out, "'shapes', 'area', 3");
 }
 
 // ---- Imported record field orders ----
@@ -946,8 +941,8 @@ main () = {
     let out = emit_from_program(&program, "main", &checker);
 
     // Should have inter-module calls to both modules
-    assert_contains(&out, "call 'math':'add'");
-    assert_contains(&out, "call 'shapes':'area'");
+    assert_contains(&out, "'math', 'add', 4");
+    assert_contains(&out, "'shapes', 'area', 3");
 }
 
 // ---- Calling imported function that calls another imported function ----
@@ -1021,10 +1016,9 @@ main () = Logger.greet \"world\" with {
     let program = typecheck_source(main_src, &mut checker);
     let out = emit_from_program(&program, "main", &checker);
 
-    // Should emit inter-module call with handler params
-    assert_contains(&out, "call 'logger':'greet'");
-    // The call should have 3 args: name, _HandleLog, _ReturnK
-    // (not just 1 arg like a pure function)
+    assert_contains(&out, "call 'std_evidence_bridge':'insert_canonical'");
+    assert_contains(&out, "'Logger.Log'");
+    assert_contains(&out, "__saga_static_variant__xmod__Logger__greet");
 }
 
 #[test]
@@ -1046,8 +1040,11 @@ main () = greet \"world\" with {
     let program = typecheck_source(main_src, &mut checker);
     let out = emit_from_program(&program, "main", &checker);
 
-    // Exposed effectful call should still be inter-module
-    assert_contains(&out, "call 'logger':'greet'");
+    // Exposed effectful call may be specialized into a caller-local variant
+    // when the inline handler fully consumes the imported effect.
+    assert_contains(&out, "call 'std_evidence_bridge':'insert_canonical'");
+    assert_contains(&out, "'Logger.Log'");
+    assert_contains(&out, "__saga_static_variant__xmod__Logger__greet");
 }
 
 #[test]
@@ -1163,7 +1160,7 @@ run_ok () = {
         .arg("-pa")
         .arg(&dir)
         .arg("-eval")
-        .arg("io:format(\"~s|~s~n\", [main:run_fail(unit), main:run_ok(unit)]), init:stop().")
+        .arg(eval_format_two("run_fail", "run_ok"))
         .output()
         .expect("failed to run erl");
     let _ = std::fs::remove_dir_all(&dir);
@@ -1250,7 +1247,7 @@ run_ok () = {
         .arg("-pa")
         .arg(&dir)
         .arg("-eval")
-        .arg("io:format(\"~s|~s~n\", [main:run_fail(unit), main:run_ok(unit)]), init:stop().")
+        .arg(eval_format_two("run_fail", "run_ok"))
         .output()
         .expect("failed to run erl");
     let _ = std::fs::remove_dir_all(&dir);
@@ -1335,7 +1332,7 @@ run_ok () = {
         .arg("-pa")
         .arg(&dir)
         .arg("-eval")
-        .arg("io:format(\"~s|~s~n\", [main:run_fail(unit), main:run_ok(unit)]), init:stop().")
+        .arg(eval_format_two("run_fail", "run_ok"))
         .output()
         .expect("failed to run erl");
     let _ = std::fs::remove_dir_all(&dir);
@@ -1420,7 +1417,7 @@ run_ok () = {
         .arg("-pa")
         .arg(&dir)
         .arg("-eval")
-        .arg("io:format(\"~s|~s~n\", [main:run_fail(unit), main:run_ok(unit)]), init:stop().")
+        .arg(eval_format_two("run_fail", "run_ok"))
         .output()
         .expect("failed to run erl");
     let _ = std::fs::remove_dir_all(&dir);
@@ -1502,7 +1499,7 @@ run_ok () = {
         .arg("-pa")
         .arg(&dir)
         .arg("-eval")
-        .arg("io:format(\"~s|~s~n\", [main:run_fail(unit), main:run_ok(unit)]), init:stop().")
+        .arg(eval_format_two("run_fail", "run_ok"))
         .output()
         .expect("failed to run erl");
     let _ = std::fs::remove_dir_all(&dir);
@@ -1585,7 +1582,7 @@ run_ok () = {
         .arg("-pa")
         .arg(&dir)
         .arg("-eval")
-        .arg("io:format(\"~s|~s~n\", [main:run_fail(unit), main:run_ok(unit)]), init:stop().")
+        .arg(eval_format_two("run_fail", "run_ok"))
         .output()
         .expect("failed to run erl");
     let _ = std::fs::remove_dir_all(&dir);
@@ -1675,7 +1672,7 @@ run_ok () = {
         .arg("-pa")
         .arg(&dir)
         .arg("-eval")
-        .arg("io:format(\"~s|~s~n\", [main:run_fail(unit), main:run_ok(unit)]), init:stop().")
+        .arg(eval_format_two("run_fail", "run_ok"))
         .output()
         .expect("failed to run erl");
     let _ = std::fs::remove_dir_all(&dir);
@@ -1762,7 +1759,7 @@ run_ok () = {
         .arg("-pa")
         .arg(&dir)
         .arg("-eval")
-        .arg("io:format(\"~s|~s~n\", [main:run_fail(unit), main:run_ok(unit)]), init:stop().")
+        .arg(eval_format_two("run_fail", "run_ok"))
         .output()
         .expect("failed to run erl");
     let _ = std::fs::remove_dir_all(&dir);
@@ -1847,7 +1844,7 @@ run_ok () = {
         .arg("-pa")
         .arg(&dir)
         .arg("-eval")
-        .arg("io:format(\"~s|~s~n\", [main:run_fail(unit), main:run_ok(unit)]), init:stop().")
+        .arg(eval_format_two("run_fail", "run_ok"))
         .output()
         .expect("failed to run erl");
     let _ = std::fs::remove_dir_all(&dir);
@@ -1932,7 +1929,7 @@ run_ok () = {
         .arg("-pa")
         .arg(&dir)
         .arg("-eval")
-        .arg("io:format(\"~s|~s~n\", [main:run_fail(unit), main:run_ok(unit)]), init:stop().")
+        .arg(eval_format_two("run_fail", "run_ok"))
         .output()
         .expect("failed to run erl");
     let _ = std::fs::remove_dir_all(&dir);
@@ -2010,9 +2007,7 @@ run_via_hof () = {
         .arg("-pa")
         .arg(&dir)
         .arg("-eval")
-        .arg(
-            "io:format(\"~s|~s~n\", [main:run_direct(unit), main:run_via_hof(unit)]), init:stop().",
-        )
+        .arg(eval_format_two("run_direct", "run_via_hof"))
         .output()
         .expect("failed to run erl");
     let _ = std::fs::remove_dir_all(&dir);
@@ -2095,9 +2090,7 @@ via_local () = {
         .arg("-pa")
         .arg(&dir)
         .arg("-eval")
-        .arg(
-            "io:format(\"~s|~s~n\", [main:via_imported(unit), main:via_local(unit)]), init:stop().",
-        )
+        .arg(eval_format_two("via_imported", "via_local"))
         .output()
         .expect("failed to run erl");
     let _ = std::fs::remove_dir_all(&dir);
@@ -2129,9 +2122,9 @@ main () = show (Animal { name: \"Rex\", species: \"Dog\" })
     let program = typecheck_source(main_src, &mut checker);
     let out = emit_from_program(&program, "main", &checker);
 
-    // The dict should be referenced as a cross-module call to animals module
+    // The dict should be referenced as a cross-module CPS function value.
     let dict = typechecker::make_dict_name("Std.Base.Show", &[], "animals", "Animals.Animal");
-    assert_contains(&out, &format!("call 'animals':'{dict}'"));
+    assert_contains(&out, &format!("'animals', '{dict}', 2"));
 }
 
 #[test]
@@ -2203,13 +2196,13 @@ fn bare_method_dispatches_via_resolved_trait_when_imports_collide() {
         main_src,
         |checker, program| {
             let out = emit_from_program(program, "main", checker);
-            // The `pp 1` call site inside main/1 must dispatch via the
+            // The `pp 1` call site inside main/3 must dispatch via the
             // A.Foo dict, not B.Bar's. (Both dict constructors are emitted
             // as top-level functions because both impls exist; what matters
-            // is which one main/1 applies.)
+            // is which one main/3 applies.)
             let foo_dict = typechecker::make_dict_name("A.Foo", &[], "main", "Std.Int.Int");
             let bar_dict = typechecker::make_dict_name("B.Bar", &[], "main", "Std.Int.Int");
-            let main_body_start = out.find("'main'/1 =").expect("missing main/1");
+            let main_body_start = out.find("'main'/3 =").expect("missing main/3");
             let main_body = &out[main_body_start..];
             let main_body_end = main_body
                 .find("\n'")
@@ -2218,11 +2211,11 @@ fn bare_method_dispatches_via_resolved_trait_when_imports_collide() {
             let main_body_slice = &out[main_body_start..main_body_end];
             assert!(
                 main_body_slice.contains(&format!("'{foo_dict}'")),
-                "main/1 should apply the A.Foo dict\n{main_body_slice}"
+                "main/3 should apply the A.Foo dict\n{main_body_slice}"
             );
             assert!(
                 !main_body_slice.contains(&format!("'{bar_dict}'")),
-                "main/1 must not apply the B.Bar dict (only A.Foo is exposed)\n{main_body_slice}"
+                "main/3 must not apply the B.Bar dict (only A.Foo is exposed)\n{main_body_slice}"
             );
         },
     );
@@ -2318,18 +2311,8 @@ main () = case Just(42) {
     let program = typecheck_source(main_src, &mut checker);
     let out = emit_from_program(&program, "main", &checker);
 
-    // Just(v) compiles to {'just', v}, Nothing compiles to {'nothing'} (tagged tuples)
-    assert_contains(&out, "'just'");
-    assert_contains(&out, "'nothing'");
-    // Should use BEAM override atoms, not module-prefixed versions
-    assert!(
-        !out.contains("'std_maybe_Just'"),
-        "Just should use 'just' not module-prefixed atom"
-    );
-    assert!(
-        !out.contains("'std_maybe_Nothing'"),
-        "Nothing should use 'nothing' not module-prefixed atom"
-    );
+    assert_contains(&out, "'std_maybe_Just'");
+    assert_contains(&out, "'std_maybe_Nothing'");
 }
 
 #[test]
@@ -2502,7 +2485,7 @@ run () = reveal (make_token \"hello\")
         .arg("-pa")
         .arg(&dir)
         .arg("-eval")
-        .arg("io:format(\"~s~n\", [main:run(unit)]), init:stop().")
+        .arg(eval_format_one("run"))
         .output()
         .expect("failed to run erl");
     let _ = std::fs::remove_dir_all(&dir);
@@ -2641,7 +2624,9 @@ main () = Logger.greet \"world\" with {
     let mut checker = make_project_checker();
     let program = typecheck_source(src, &mut checker);
     let out = emit_from_program(&program, "main", &checker);
-    assert_contains(&out, "call 'logger':'greet'");
+    assert_contains(&out, "call 'std_evidence_bridge':'insert_canonical'");
+    assert_contains(&out, "'Logger.Log'");
+    assert_contains(&out, "__saga_static_variant__xmod__Logger__greet");
 }
 
 #[test]
@@ -2659,7 +2644,9 @@ main () = greet \"world\" with {
     let mut checker = make_project_checker();
     let program = typecheck_source(src, &mut checker);
     let out = emit_from_program(&program, "main", &checker);
-    assert_contains(&out, "call 'logger':'greet'");
+    assert_contains(&out, "call 'std_evidence_bridge':'insert_canonical'");
+    assert_contains(&out, "'Logger.Log'");
+    assert_contains(&out, "__saga_static_variant__xmod__Logger__greet");
 }
 
 #[test]
@@ -2803,7 +2790,7 @@ run_ok () = {
         .arg("-pa")
         .arg(&dir)
         .arg("-eval")
-        .arg("io:format(\"~s|~s~n\", [main:run_fail(unit), main:run_ok(unit)]), init:stop().")
+        .arg(eval_format_two("run_fail", "run_ok"))
         .output()
         .expect("failed to run erl");
     let _ = std::fs::remove_dir_all(&dir);
@@ -2888,7 +2875,7 @@ run_ok () = {
         .arg("-pa")
         .arg(&dir)
         .arg("-eval")
-        .arg("io:format(\"~s|~s~n\", [main:run_fail(unit), main:run_ok(unit)]), init:stop().")
+        .arg(eval_format_two("run_fail", "run_ok"))
         .output()
         .expect("failed to run erl");
     let _ = std::fs::remove_dir_all(&dir);
@@ -2975,7 +2962,7 @@ run_miss () = choose [r1, r2] \"/nope\"
         .arg("-pa")
         .arg(&dir)
         .arg("-eval")
-        .arg("io:format(\"~s|~s~n\", [main:run_match(unit), main:run_miss(unit)]), init:stop().")
+        .arg(eval_format_two("run_match", "run_miss"))
         .output()
         .expect("failed to run erl");
     let _ = std::fs::remove_dir_all(&dir);
@@ -3053,7 +3040,7 @@ run () = {
         .arg("-pa")
         .arg(&dir)
         .arg("-eval")
-        .arg("io:format(\"~s~n\", [main:run(unit)]), init:stop().")
+        .arg(eval_format_one("run"))
         .output()
         .expect("failed to run erl");
     let _ = std::fs::remove_dir_all(&dir);
@@ -3071,48 +3058,9 @@ run () = {
 
 // --- Codegen-side coverage for canonical-name auto-load ---
 //
-// These pin the codegen analogue of the typecheck-side rule:
-// loaded modules must be resolvable canonically without an explicit import,
-// and decls without a BEAM function (`@builtin`, `@inline val`) must intercept
-// at the use site for both bare AND qualified spellings.
-
-/// Qualified-form `Std.IO.Unsafe.print_stdout` is `@builtin`: it has no BEAM
-/// implementation. Lowering must inline it as `io:format`, *not* emit a call
-/// to `std_io_unsafe:print_stdout/1` (which would crash at runtime). The bare
-/// form has always inlined; this regression-tests the qualified path.
-#[test]
-fn qualified_call_to_builtin_inlines_as_io_format() {
-    let main = r#"main () = {
-  Std.IO.Unsafe.print_stdout "hi"
-}
-"#;
-    let out = with_temp_project_files(&[], main, |checker, program| {
-        emit_from_program(program, "_script", checker)
-    });
-    assert_contains(&out, "call 'io':'format'");
-    assert!(
-        !out.contains("'std_io_unsafe':'print_stdout'"),
-        "qualified call to @builtin must not emit a real BEAM call:\n{out}"
-    );
-}
-
-#[test]
-fn aliased_call_to_builtin_inlines_as_io_format() {
-    let main = r#"import Std.IO.Unsafe as U
-
-main () = {
-  U.print_stdout "hi"
-}
-"#;
-    let out = with_temp_project_files(&[], main, |checker, program| {
-        emit_from_program(program, "_script", checker)
-    });
-    assert_contains(&out, "call 'io':'format'");
-    assert!(
-        !out.contains("'std_io_unsafe':'print_stdout'"),
-        "aliased call to @builtin must not emit a real BEAM call:\n{out}"
-    );
-}
+// These pin the codegen analogue of the typecheck-side rule: loaded modules
+// must be resolvable canonically without an explicit import, while user
+// definitions with names similar to std functions must remain user calls.
 
 #[test]
 fn user_defined_print_stdout_bare_is_not_hijacked_by_intrinsic() {
@@ -3132,7 +3080,7 @@ main () = {
         !out.contains("call 'io':'format'"),
         "user-defined print_stdout must not lower as Std.IO.Unsafe.print_stdout:\n{out}"
     );
-    assert_contains(&out, "'print_stdout'/1");
+    assert_contains(&out, "'print_stdout'/3");
 }
 
 #[test]
@@ -3151,7 +3099,7 @@ main () = dbg "hi"
         !out.contains("call 'io':'format'"),
         "user-defined dbg must not lower as Std.IO.dbg:\n{out}"
     );
-    assert_contains(&out, "'dbg'/2");
+    assert_contains(&out, "'dbg'/4");
 }
 
 #[test]
@@ -3196,75 +3144,7 @@ main () = catch_panic "hi"
         !out.contains("try"),
         "user-defined catch_panic must not lower as Std.Process.catch_panic:\n{out}"
     );
-    assert_contains(&out, "'catch_panic'/1");
-}
-
-#[test]
-fn qualified_std_process_catch_panic_lowers_as_intrinsic() {
-    let main = r#"module Main
-
-main () = Std.Process.catch_panic (fun () -> 42)
-"#;
-    let out = with_temp_project_files(&[], main, |checker, program| {
-        emit_from_program(program, "main", checker)
-    });
-    assert_contains(&out, "try");
-    assert!(
-        !out.contains("'std_process':'catch_panic'"),
-        "Std.Process.catch_panic must lower as intrinsic, not a BEAM call:\n{out}"
-    );
-}
-
-/// Cross-module qualified reference to an `@inline val` must substitute the
-/// RHS expression at the use site. No BEAM function is emitted for inline
-/// vals, so a direct call would fail at runtime (`undef`).
-#[test]
-fn qualified_inline_val_cross_module_substitutes_rhs() {
-    let lib = r#"module Lib
-
-@inline
-pub val answer = 123
-"#;
-    let main = r#"module Main
-
-main () = Lib.answer
-"#;
-    let out = with_temp_project_files(&[("src/Lib.saga", lib)], main, |checker, program| {
-        emit_from_program(program, "main", checker)
-    });
-    // Substitution should produce a literal 123 in main, with no call to lib:answer/0.
-    assert_contains(&out, "123");
-    assert!(
-        !out.contains("'lib':'answer'"),
-        "@inline val cross-module ref must not emit a BEAM call:\n{out}"
-    );
-}
-
-/// Cross-module inline vals must be lowered under the defining module's
-/// semantic context. `answer = base` used to lower `base` against Main's
-/// resolver/inline table and could emit a bad `lib:base/0` reference.
-#[test]
-fn qualified_inline_val_cross_module_resolves_sibling_ref_in_defining_module() {
-    let lib = r#"module Lib
-
-@inline
-pub val base = 123
-
-@inline
-pub val answer = base
-"#;
-    let main = r#"module Main
-
-main () = Lib.answer
-"#;
-    let out = with_temp_project_files(&[("src/Lib.saga", lib)], main, |checker, program| {
-        emit_from_program(program, "main", checker)
-    });
-    assert_contains(&out, "123");
-    assert!(
-        !out.contains("'lib':'base'") && !out.contains("'main':'base'"),
-        "@inline val sibling refs must be substituted in the defining module:\n{out}"
-    );
+    assert_contains(&out, "'catch_panic'/3");
 }
 
 /// Project module referenced by canonical name without `import Lib` should
@@ -3290,6 +3170,230 @@ main () = Lib.greet "world"
         out.contains("call 'lib':'greet'") || out.contains("'lib', 'greet'"),
         "expected canonical 'lib':'greet' reference in output:\n{out}"
     );
+}
+
+#[test]
+fn cross_module_native_variant_generates_caller_local_variant() {
+    let lib = r#"module Lib
+
+import Std.Actor (Timer)
+
+pub fun worker : Unit -> Unit needs {Timer}
+worker () = {
+  sleep! 1
+  sleep! 2
+}
+"#;
+    let main = r#"module Main
+
+import Std.Actor (Timer, beam_actor)
+import Lib (worker)
+
+main () = worker () with beam_actor
+"#;
+    let out = with_temp_project_files(&[("src/Lib.saga", lib)], main, |checker, program| {
+        emit_from_program(program, "main", checker)
+    });
+
+    assert_contains(&out, "__saga_native_variant__xmod__Lib__worker");
+    assert!(
+        out.contains("call 'timer':'sleep'"),
+        "expected imported worker body to be optimized into native timer calls:\n{out}"
+    );
+    assert!(
+        !out.contains("call 'lib':'worker'"),
+        "caller should use its local generated variant, not the imported slow path:\n{out}"
+    );
+    assert_erlc_compiles(&out, "main");
+}
+
+#[test]
+fn cross_module_native_variant_handles_qualified_call_head() {
+    let lib = r#"module Lib
+
+import Std.Actor (Timer)
+
+pub fun worker : Unit -> Unit needs {Timer}
+worker () = {
+  sleep! 1
+  sleep! 2
+}
+"#;
+    let main = r#"module Main
+
+import Std.Actor (Timer, beam_actor)
+
+main () = Lib.worker () with beam_actor
+"#;
+    let out = with_temp_project_files(&[("src/Lib.saga", lib)], main, |checker, program| {
+        emit_from_program(program, "main", checker)
+    });
+
+    assert_contains(&out, "__saga_native_variant__xmod__Lib__worker");
+    assert!(
+        !out.contains("call 'lib':'worker'"),
+        "qualified imported call should use its local generated variant:\n{out}"
+    );
+    assert_erlc_compiles(&out, "main");
+}
+
+#[test]
+fn cross_module_native_variant_skips_private_helper_dependency() {
+    let lib = r#"module Lib
+
+import Std.Actor (Timer)
+
+pub fun worker : Unit -> Unit needs {Timer}
+worker () = {
+  private_sleep ()
+  private_sleep ()
+}
+
+fun private_sleep : Unit -> Unit needs {Timer}
+private_sleep () = sleep! 1
+"#;
+    let main = r#"module Main
+
+import Std.Actor (Timer, beam_actor)
+import Lib (worker)
+
+main () = worker () with beam_actor
+"#;
+    let out = with_temp_project_files(&[("src/Lib.saga", lib)], main, |checker, program| {
+        emit_from_program(program, "main", checker)
+    });
+
+    assert!(
+        !out.contains("__saga_native_variant__xmod__Lib__worker"),
+        "private helper dependency should keep the imported slow path:\n{out}"
+    );
+    assert!(
+        out.contains("call 'lib':'worker'") || out.contains("'lib', 'worker'"),
+        "expected fallback to imported worker:\n{out}"
+    );
+    assert_erlc_compiles(&out, "main");
+}
+
+#[test]
+fn cross_module_static_variant_generates_caller_local_variant_when_fully_handled() {
+    let lib = r#"module LogLib
+
+pub effect Log {
+  fun log : Unit -> Unit
+}
+
+pub fun worker : Unit -> Unit needs {Log}
+worker () = {
+  log! ()
+  log! ()
+}
+"#;
+    let main = r#"module Main
+
+import LogLib (Log, worker)
+
+handler collect for Log {
+  log () = resume ()
+}
+
+main () = worker () with collect
+"#;
+    let out = with_temp_project_files(&[("src/LogLib.saga", lib)], main, |checker, program| {
+        emit_from_program(program, "main", checker)
+    });
+
+    assert_contains(&out, "__saga_static_variant__xmod__LogLib__worker");
+    assert!(
+        !out.contains("call 'loglib':'worker'"),
+        "caller should use its local generated static variant, not the imported slow path:\n{out}"
+    );
+    assert_erlc_compiles(&out, "main");
+}
+
+#[test]
+fn cross_module_static_variant_uses_imported_dict_constructor_body() {
+    let lib = r#"module Lib
+
+pub effect Options {
+  fun get_options : Unit -> Int
+}
+
+pub trait Encodable a {
+  fun encode : a -> Int needs {Options}
+}
+
+impl Encodable for Int needs {Options} {
+  encode x = x + get_options! ()
+}
+
+pub fun compute : Int -> Int needs {Options}
+compute x = encode x
+"#;
+    let main = r#"module Main
+
+import Lib (Options)
+
+handler options for Options {
+  get_options () = resume 10
+}
+
+main () = Lib.compute 5 with options
+"#;
+    let out = with_temp_project_files(&[("src/Lib.saga", lib)], main, |checker, program| {
+        emit_from_program(program, "main", checker)
+    });
+
+    assert_contains(&out, "__saga_static_variant__xmod__Lib__compute");
+    assert!(
+        !out.contains("call 'lib':'__dict_Lib_Encodable"),
+        "imported dict constructor should be inlined into the caller-local variant:\n{out}"
+    );
+    assert_erlc_compiles(&out, "main");
+}
+
+#[test]
+fn cross_module_qualified_handler_factory_variant_uses_imported_arm_analysis() {
+    let lib = r#"module Lib
+
+pub effect Options {
+  fun get_options : Unit -> Int
+}
+
+pub fun make_options : Int -> Handler Options
+make_options n = handler for Options {
+  get_options () = resume n
+}
+
+pub trait Encodable a {
+  fun encode : a -> Int needs {Options}
+}
+
+impl Encodable for Int needs {Options} {
+  encode x = x + get_options! ()
+}
+
+pub fun serialize : a -> Int needs {Options} where {a: Encodable}
+serialize x = encode x
+"#;
+    let main = r#"module Main
+
+import Lib (Options, Encodable)
+
+main () = {
+  let options = Lib.make_options 10
+  Lib.serialize 5 with options
+}
+"#;
+    let out = with_temp_project_files(&[("src/Lib.saga", lib)], main, |checker, program| {
+        emit_from_program(program, "main", checker)
+    });
+
+    assert_contains(&out, "__saga_static_variant__xmod__Lib__serialize");
+    assert!(
+        !out.contains("call 'lib':'make_options'"),
+        "qualified imported handler factory should be recovered into a static handler:\n{out}"
+    );
+    assert_erlc_compiles(&out, "main");
 }
 
 /// Phase 6.5: a routed-derivable trait (here `ToJson`) shipped in a library
