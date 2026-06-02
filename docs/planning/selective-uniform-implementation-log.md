@@ -1046,3 +1046,20 @@ boundaries exist.
   - fallback helper definitions can still be emitted and may still contain
     `find_evidence`; removing unused fallback definitions is a later Core
     cleanup/dead-code problem, not part of this elision pass.
+- Added the first imported static-handler helper specialization:
+  - remote CPS calls under an active static handler can now be specialized by
+    re-lowering the imported callee body with its own resolution metadata while
+    carrying the caller's local scopes and static-handler facts;
+  - this covers the `Postgres.query ... with { db_url () = resume config }`
+    shape for direct imported helpers: the caller path avoids both the remote
+    `query/3` call and handler evidence installation when the imported body is
+    proven safe;
+  - the implementation remains call-site-only and fallback-preserving: if the
+    imported body is unavailable, unsupported, recursive through the same
+    specialization key, or has effects not covered by active static handlers,
+    lowering keeps the normal remote CPS call;
+  - imported monadic candidate collection is now scoped to modules explicitly
+    imported by the current source module. This avoids translating unrelated
+    modules with the wrong per-entry `EffectInfo` table during project builds;
+  - `examples/optimization/selective-uniform/imported-static-handler-specialization-project/`
+    covers the full project path and prints `ok`.

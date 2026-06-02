@@ -1,5 +1,12 @@
 use super::*;
 
+struct ImportedStaticHandlerCall {
+    source_module_name: String,
+    erlang_module: String,
+    function_name: String,
+    program: MProgram,
+}
+
 impl<'a, 'info> DirectLowerer<'a, 'info> {
     pub(super) fn lower_cps_expr(
         &mut self,
@@ -310,6 +317,15 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             return lowered;
         }
 
+        if let Some(lowered) = self.lower_static_handler_specialized_imported_cps_call(
+            head,
+            args,
+            evidence.clone(),
+            return_k.clone(),
+        ) {
+            return lowered;
+        }
+
         if let Some((source_arity, adapter_arity, _effects)) = self.cps_lambda_arity_for_atom(head)
             && let Atom::Lambda { params, body, .. } = head
         {
@@ -465,6 +481,145 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                     CExpr::Let(name, Box::new(value), Box::new(body))
                 })
         })
+    }
+
+    fn lower_static_handler_specialized_imported_cps_call(
+        &mut self,
+        head: &Atom,
+        args: &[Atom],
+        evidence: CExpr,
+        return_k: CExpr,
+    ) -> Option<CExpr> {
+        let ImportedStaticHandlerCall {
+            source_module_name,
+            erlang_module,
+            function_name,
+            program,
+        } = self.imported_static_handler_call_candidate(head, args)?;
+        let key = format!("{erlang_module}:{function_name}");
+        if self.static_handler_inline_stack.contains(&key) {
+            return None;
+        }
+
+        let fb = program.iter().find_map(|decl| match decl {
+            MDecl::FunBinding(fb) if fb.name == function_name => Some(fb.clone()),
+            _ => None,
+        })?;
+        if fb.guard.is_some() || fb.params.iter().any(|p| !direct_param_supported(p)) {
+            return None;
+        }
+        let bindings = self.direct_call_param_bindings(&fb.params, args)?;
+
+        let compiled = self.module_ctx.modules.get(&source_module_name)?;
+        let mut imported = DirectLowerer::new(
+            &compiled.resolution,
+            self.ctors,
+            self.module_ctx,
+            self.handler_info,
+            self.effect_info,
+            self.options,
+        );
+        imported.current_module = source_module_name;
+        imported.classify_program(&program);
+        imported.apply_codegen_info_function_shapes(&compiled.codegen_info);
+        imported.compute_function_lowering_plans(&program);
+        imported.compute_local_function_entries(&program);
+        imported.locals = self.locals.clone();
+        imported.local_shapes = self.local_shapes.clone();
+        imported.static_handler_stack = self.static_handler_stack.clone();
+        imported.static_handler_inline_stack = self.static_handler_inline_stack.clone();
+        imported.static_handler_inline_stack.push(key);
+        imported.cps_temp_counter = self.cps_temp_counter;
+
+        imported.push_scope();
+        imported.bind_fun_param_locals(&fb);
+        let lowered_body = imported
+            .expr_is_cps_island_subset(&fb.body)
+            .then(|| imported.lower_cps_expr(&fb.body, evidence, return_k));
+        imported.pop_scope();
+
+        self.cps_temp_counter = imported.cps_temp_counter;
+        lowered_body.map(|body| {
+            bindings
+                .into_iter()
+                .rev()
+                .fold(body, |body, (name, value)| {
+                    CExpr::Let(name, Box::new(value), Box::new(body))
+                })
+        })
+    }
+
+    fn imported_static_handler_call_candidate(
+        &mut self,
+        head: &Atom,
+        args: &[Atom],
+    ) -> Option<ImportedStaticHandlerCall> {
+        if self.static_handler_stack.is_empty() {
+            return None;
+        }
+        let CallShape::Cps {
+            module: Some(erlang_module),
+            name,
+            source_arity,
+            adapter_arity,
+            effects,
+        } = self.call_shape(head)?
+        else {
+            return None;
+        };
+        if effects.is_empty()
+            || source_arity != args.len()
+            || adapter_arity != args.len() + 2
+            || !self.active_static_handlers_cover_effects(&effects)
+            || !args.iter().all(|arg| self.atom_is_direct_subset(arg))
+        {
+            return None;
+        }
+
+        let (source_module_name, compiled) =
+            self.compiled_module_for_erlang_module(&erlang_module)?;
+        let program = self.monadic_program_for_compiled_module(compiled);
+        if !program
+            .iter()
+            .any(|decl| matches!(decl, MDecl::FunBinding(fb) if fb.name == name))
+        {
+            return None;
+        }
+        Some(ImportedStaticHandlerCall {
+            source_module_name,
+            erlang_module,
+            function_name: name,
+            program,
+        })
+    }
+
+    fn compiled_module_for_erlang_module(
+        &self,
+        erlang_module: &str,
+    ) -> Option<(String, &crate::codegen::CompiledModule)> {
+        self.module_ctx
+            .modules
+            .iter()
+            .find_map(|(module_name, compiled)| {
+                (erlang_module_name(module_name) == erlang_module)
+                    .then(|| (module_name.clone(), compiled))
+            })
+    }
+
+    fn monadic_program_for_compiled_module(
+        &self,
+        compiled: &crate::codegen::CompiledModule,
+    ) -> MProgram {
+        let anf_imported =
+            crate::codegen::anf::normalize(compiled.elaborated.clone(), Some(&compiled.resolution));
+        let imported_handler_decls = HashMap::new();
+        let (program, _) = crate::codegen::monadic::translate::translate_with_imports(
+            &anf_imported,
+            &compiled.resolution,
+            self.effect_info,
+            &imported_handler_decls,
+        );
+        program
     }
 
     fn active_static_handlers_cover_effects(&self, effects: &[String]) -> bool {
@@ -1067,6 +1222,10 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                         head,
                         args,
                         handled_effects,
+                    ) || self.can_static_handler_specialize_imported_cps_call_without_evidence(
+                        head,
+                        args,
+                        handled_effects,
                     )
                 } else {
                     self.cps_app_is_supported_without_elided_effects(head, args)
@@ -1203,6 +1362,65 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         let supported = self.expr_can_run_with_elided_static_handler(&fb.body, handled_effects);
         self.pop_scope();
         self.static_handler_inline_stack.pop();
+        supported
+    }
+
+    fn can_static_handler_specialize_imported_cps_call_without_evidence(
+        &mut self,
+        head: &Atom,
+        args: &[Atom],
+        handled_effects: &[String],
+    ) -> bool {
+        let Some(ImportedStaticHandlerCall {
+            source_module_name,
+            erlang_module,
+            function_name,
+            program,
+        }) = self.imported_static_handler_call_candidate(head, args)
+        else {
+            return false;
+        };
+        let key = format!("{erlang_module}:{function_name}");
+        if self.static_handler_inline_stack.contains(&key) {
+            return false;
+        }
+
+        let Some(fb) = program.iter().find_map(|decl| match decl {
+            MDecl::FunBinding(fb) if fb.name == function_name => Some(fb.clone()),
+            _ => None,
+        }) else {
+            return false;
+        };
+        if fb.guard.is_some() || fb.params.iter().any(|p| !direct_param_supported(p)) {
+            return false;
+        }
+
+        let Some(compiled) = self.module_ctx.modules.get(&source_module_name) else {
+            return false;
+        };
+        let mut imported = DirectLowerer::new(
+            &compiled.resolution,
+            self.ctors,
+            self.module_ctx,
+            self.handler_info,
+            self.effect_info,
+            self.options,
+        );
+        imported.current_module = source_module_name;
+        imported.classify_program(&program);
+        imported.apply_codegen_info_function_shapes(&compiled.codegen_info);
+        imported.compute_function_lowering_plans(&program);
+        imported.compute_local_function_entries(&program);
+        imported.locals = self.locals.clone();
+        imported.local_shapes = self.local_shapes.clone();
+        imported.static_handler_stack = self.static_handler_stack.clone();
+        imported.static_handler_inline_stack = self.static_handler_inline_stack.clone();
+        imported.static_handler_inline_stack.push(key);
+
+        imported.push_scope();
+        imported.bind_fun_param_locals(&fb);
+        let supported = imported.expr_can_run_with_elided_static_handler(&fb.body, handled_effects);
+        imported.pop_scope();
         supported
     }
 

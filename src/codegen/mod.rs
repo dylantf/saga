@@ -182,6 +182,16 @@ fn declared_module_name(program: &ast::Program) -> Option<String> {
     })
 }
 
+fn program_imports_module(program: &ast::Program, module_name: &str) -> bool {
+    program.iter().any(|decl| {
+        matches!(
+            decl,
+            ast::Decl::Import { module_path, .. }
+                if module_path.join(".") == module_name
+        )
+    })
+}
+
 // -------------------------------------------------------------------------
 // New-path helpers (Phase 1, step 8)
 // -------------------------------------------------------------------------
@@ -434,7 +444,9 @@ pub fn emit_module_via_new_path(
                 }
             }
         }
-        if imported_module_name != &source_module_name {
+        if imported_module_name != &source_module_name
+            && program_imports_module(program, imported_module_name)
+        {
             handler_info
                 .resumption
                 .extend(handler_analysis::analyze(&compiled.elaborated).resumption);

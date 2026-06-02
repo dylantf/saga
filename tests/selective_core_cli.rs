@@ -313,6 +313,55 @@ fn selective_core_codegen_runs_imported_cps_callback_project() {
 }
 
 #[test]
+fn selective_core_specializes_imported_static_handler_project() {
+    let binary = env!("CARGO_BIN_EXE_saga");
+    let project_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(
+        "examples/optimization/selective-uniform/imported-static-handler-specialization-project",
+    );
+
+    let inspect = std::process::Command::new(binary)
+        .current_dir(&project_dir)
+        .args(["inspect", "src/Main.saga", "--stage", "selective-core"])
+        .output()
+        .expect("inspect imported static handler specialization project");
+    assert!(
+        inspect.status.success(),
+        "saga inspect failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&inspect.stdout),
+        String::from_utf8_lossy(&inspect.stderr)
+    );
+    let inspect_stdout = String::from_utf8_lossy(&inspect.stdout);
+    assert!(
+        !inspect_stdout.contains("call 'effects':'query'"),
+        "{inspect_stdout}"
+    );
+    assert!(
+        !inspect_stdout.contains("call 'std_evidence_bridge':'insert_canonical'"),
+        "{inspect_stdout}"
+    );
+    assert!(inspect_stdout.contains("let <Config>"), "{inspect_stdout}");
+    assert!(inspect_stdout.contains("let <Value>"), "{inspect_stdout}");
+    assert!(
+        inspect_stdout.contains("call 'erlang':'+'"),
+        "{inspect_stdout}"
+    );
+
+    let run = std::process::Command::new(binary)
+        .current_dir(&project_dir)
+        .args(["run", "--selective-codegen"])
+        .output()
+        .expect("run imported static handler specialization project");
+    assert!(
+        run.status.success(),
+        "saga run failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&run.stdout),
+        String::from_utf8_lossy(&run.stderr)
+    );
+    let run_stdout = String::from_utf8_lossy(&run.stdout);
+    assert!(run_stdout.contains("ok\n"), "{run_stdout}");
+}
+
+#[test]
 fn selective_core_codegen_runs_imported_effectful_trait_project() {
     let binary = env!("CARGO_BIN_EXE_saga");
     let project_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))

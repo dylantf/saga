@@ -159,6 +159,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             if source_module_name == &self.current_module
                 || source_module_name.starts_with("Std.")
                 || compiled.elaborated.is_empty()
+                || !self.current_module_references_module(source_module_name)
             {
                 continue;
             }
@@ -209,7 +210,33 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         }
     }
 
-    fn apply_codegen_info_function_shapes(&mut self, info: &crate::typechecker::ModuleCodegenInfo) {
+    fn current_module_references_module(&self, source_module_name: &str) -> bool {
+        if let Some(current) = self.module_ctx.modules.get(&self.current_module) {
+            return current.elaborated.iter().any(|decl| {
+                matches!(
+                    decl,
+                    crate::ast::Decl::Import { module_path, .. }
+                        if module_path.join(".") == source_module_name
+                )
+            });
+        }
+
+        let erlang_module = erlang_module_name(source_module_name);
+        self.resolution.values().any(|resolved| {
+            matches!(
+                &resolved.kind,
+                ResolvedCodegenKind::BeamFunction {
+                    erlang_mod: Some(module),
+                    ..
+                } if module == &erlang_module
+            )
+        })
+    }
+
+    pub(super) fn apply_codegen_info_function_shapes(
+        &mut self,
+        info: &crate::typechecker::ModuleCodegenInfo,
+    ) {
         for (name, effects) in &info.fun_effects {
             let shape = if effects.is_empty() {
                 RuntimeFunctionShape::Pure
