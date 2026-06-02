@@ -311,3 +311,71 @@ fn selective_core_codegen_runs_imported_cps_callback_project() {
     let run_stdout = String::from_utf8_lossy(&run.stdout);
     assert!(run_stdout.contains("ok\n"), "{run_stdout}");
 }
+
+#[test]
+fn selective_core_codegen_runs_imported_effectful_trait_project() {
+    let binary = env!("CARGO_BIN_EXE_saga");
+    let project_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("examples/optimization/selective-uniform/imported-effectful-trait-project");
+
+    let lib_inspect = std::process::Command::new(binary)
+        .current_dir(&project_dir)
+        .args(["inspect", "src/Lib.saga", "--stage", "selective-core"])
+        .output()
+        .expect("inspect imported effectful trait lib selective Core");
+    assert!(
+        lib_inspect.status.success(),
+        "saga inspect Lib selective-core failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&lib_inspect.stdout),
+        String::from_utf8_lossy(&lib_inspect.stderr)
+    );
+    let lib_stdout = String::from_utf8_lossy(&lib_inspect.stdout);
+    assert!(
+        lib_stdout
+            .contains("'__dict_Lib_Encodable_Std_Int_Int'/0, '__dict_Lib_Encodable_Lib_Boxed'/1"),
+        "{lib_stdout}"
+    );
+    assert!(
+        lib_stdout.contains("apply ___anf_v1(Value, _LambdaEvidence"),
+        "{lib_stdout}"
+    );
+
+    let main_inspect = std::process::Command::new(binary)
+        .current_dir(&project_dir)
+        .args(["inspect", "src/Main.saga", "--stage", "selective-core"])
+        .output()
+        .expect("inspect imported effectful trait main selective Core");
+    assert!(
+        main_inspect.status.success(),
+        "saga inspect Main selective-core failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&main_inspect.stdout),
+        String::from_utf8_lossy(&main_inspect.stderr)
+    );
+    let main_stdout = String::from_utf8_lossy(&main_inspect.stdout);
+    assert!(
+        main_stdout.contains("call 'lib':'__dict_Lib_Encodable_lib_Std_Int_Int'"),
+        "{main_stdout}"
+    );
+    assert!(
+        main_stdout.contains("call 'lib':'__dict_Lib_Encodable_lib_Lib_Boxed'"),
+        "{main_stdout}"
+    );
+    assert!(
+        main_stdout.contains("apply ___anf_v2(___anf_v3, _CpsEvidence"),
+        "{main_stdout}"
+    );
+
+    let run = std::process::Command::new(binary)
+        .current_dir(&project_dir)
+        .args(["run", "--selective-codegen"])
+        .output()
+        .expect("run imported effectful trait project");
+    assert!(
+        run.status.success(),
+        "saga run failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&run.stdout),
+        String::from_utf8_lossy(&run.stderr)
+    );
+    let run_stdout = String::from_utf8_lossy(&run.stdout);
+    assert!(run_stdout.contains("ok\n"), "{run_stdout}");
+}

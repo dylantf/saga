@@ -906,6 +906,19 @@ boundaries exist.
   - `examples/optimization/selective-uniform/35-generic-effectful-trait-method.saga`
     covers the manual fixture, and the unit test evaluates the nested dispatch
     path to `43`.
-- Current trait limit: imported effectful dict constructors still need a
-  separate cross-module slice, especially imported generic constructors whose
-  sub-dictionaries are supplied by the importing module.
+- Extended the effectful trait method slice to imported dictionary
+  constructors:
+  - selective-emitted dict constructors are exported at their direct
+    constructor arity when the module's codegen info exposes the trait impl;
+  - imported `DictRef`s already resolve through `trait_impl_dicts` to remote
+    `BeamFunction`s with no effect extras, so the existing direct-call path can
+    call remote dict constructors without a new ABI;
+  - `Main` can now call an imported effectful trait method whose concrete impl
+    and generic wrapper impl both live in `Lib`;
+  - `examples/optimization/selective-uniform/imported-effectful-trait-project/`
+    covers this path end to end and prints `ok`.
+- Current trait status: the local/imported effectful trait method ABI is now
+  covered for direct dict constructors, including generic dictionary
+  parameters. The next trait work should be specialization, not more ABI
+  plumbing: monomorphic call-site specialization, net-pure trait dispatch, and
+  known constructor/output-shape specialization.

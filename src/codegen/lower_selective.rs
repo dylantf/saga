@@ -194,6 +194,21 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         let is_public =
             |name: &str| -> bool { pub_names.as_ref().is_none_or(|s| s.contains(name)) };
         let is_entry = |name: &str| -> bool { entry_export.is_some_and(|entry| entry == name) };
+        let exported_dict_names: HashSet<String> = self
+            .module_ctx
+            .modules
+            .get(module_name)
+            .map(|m| {
+                m.codegen_info
+                    .trait_impl_dicts
+                    .iter()
+                    .map(|dict| dict.dict_name.clone())
+                    .collect()
+            })
+            .unwrap_or_default();
+        let is_exported_dict = |name: &str| -> bool {
+            exported_dict_names.is_empty() || exported_dict_names.contains(name)
+        };
 
         self.assert_no_unlowered_direct_body_functions(program);
         self.assert_no_unlowered_public_cps_functions(program, &is_public, &is_entry);
@@ -243,6 +258,9 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                 }
                 MDecl::DictConstructor(dc) => {
                     if self.local_dict_constructor_arities.contains_key(&dc.name) {
+                        if is_exported_dict(&dc.name) {
+                            exports.push((dc.name.clone(), dc.dict_params.len()));
+                        }
                         funs.push(self.lower_dict_constructor(dc));
                     }
                 }

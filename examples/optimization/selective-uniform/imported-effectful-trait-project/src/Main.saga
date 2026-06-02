@@ -1,0 +1,13 @@
+module Main
+
+import Lib (Options, Encodable, Boxed)
+import Std.IO.Unsafe (print_stdout)
+
+handler options for Options {
+  get_options () = resume 10
+}
+
+fun main : Unit -> Unit
+main () =
+  if (encode (Boxed 5) with options) == 16 then print_stdout "ok\n"
+  else print_stdout "bad\n"
