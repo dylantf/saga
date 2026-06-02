@@ -617,6 +617,23 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             return Some(cps);
         }
         if let Atom::Var { name, .. } = head
+            && let Some(LocalValueShape::CpsCallable {
+                module,
+                name: adapter_name,
+                source_arity,
+                adapter_arity,
+                effects,
+            }) = self.local_shape(&name.name)
+        {
+            return Some(CallShape::Cps {
+                module,
+                name: adapter_name,
+                source_arity,
+                adapter_arity,
+                effects,
+            });
+        }
+        if let Atom::Var { name, .. } = head
             && let Some(arity) = self.local_callable_arity_for_head(head)
         {
             return Some(CallShape::LocalCallable {
@@ -847,6 +864,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         match self.local_shape(&name.name)? {
             LocalValueShape::PureCallable { arity } => Some(arity),
             LocalValueShape::PureCallableFromUseType => self.pure_function_arity_at(*source),
+            LocalValueShape::CpsCallable { .. } => None,
         }
     }
 
@@ -979,13 +997,16 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             MExpr::Bind {
                 var, value, body, ..
             } => {
-                let value_supported =
-                    self.expr_is_direct_subset(value) || self.expr_is_cps_island_subset(value);
+                let value_supported = self.expr_is_direct_subset(value)
+                    || self.expr_is_cps_island_subset(value)
+                    || self.cps_local_shape_for_expr(value).is_some();
                 if !value_supported {
                     return false;
                 }
 
-                let local_shape = self.direct_local_shape_for_expr(value);
+                let local_shape = self
+                    .direct_local_shape_for_expr(value)
+                    .or_else(|| self.cps_local_shape_for_expr(value));
                 self.push_scope();
                 self.current_scope_mut().insert(var.name.clone());
                 if let Some(shape) = local_shape {
@@ -1167,7 +1188,11 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
     fn atom_is_direct_subset(&mut self, atom: &Atom) -> bool {
         match atom {
             Atom::Var { name, .. } => {
-                self.is_local(&name.name)
+                let cps_callable_local = matches!(
+                    self.local_shape(&name.name),
+                    Some(LocalValueShape::CpsCallable { .. })
+                );
+                (self.is_local(&name.name) && !cps_callable_local)
                     || self.direct_values.contains(&name.name)
                     || self.supported_direct_call(atom).is_some()
                     || self.direct_function_value_ref(atom).is_some()
@@ -1221,6 +1246,28 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                         LocalValueShape::PureCallable { arity }
                     }),
             ),
+            _ => None,
+        }
+    }
+
+    fn cps_local_shape_for_expr(&self, expr: &MExpr) -> Option<LocalValueShape> {
+        let MExpr::Pure(atom) = expr else {
+            return None;
+        };
+        match self.cps_function_shape(atom)? {
+            CallShape::Cps {
+                module,
+                name,
+                source_arity,
+                adapter_arity,
+                effects,
+            } => Some(LocalValueShape::CpsCallable {
+                module,
+                name,
+                source_arity,
+                adapter_arity,
+                effects,
+            }),
             _ => None,
         }
     }

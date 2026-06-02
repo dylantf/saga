@@ -282,6 +282,15 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         match atom {
             Atom::Var { name, .. } => {
                 if self.is_local(&name.name) {
+                    if matches!(
+                        self.local_shape(&name.name),
+                        Some(LocalValueShape::CpsCallable { .. })
+                    ) {
+                        self.unsupported(&format!(
+                            "CPS callable value '{}' used outside a CPS call",
+                            name.name
+                        ));
+                    }
                     CExpr::Var(core_var(&name.name))
                 } else if let Some(value_ref) = self.direct_function_value_ref(atom) {
                     value_ref

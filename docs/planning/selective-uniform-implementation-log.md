@@ -211,6 +211,14 @@ The first implementation slice is:
     values. `Main` passes imported `Helper.inc` through `apply_it`; value
     lowering emits `erlang:make_fun('helper', 'inc', 1)`, and the project
     prints `ok` under `--selective-codegen`.
+- `examples/optimization/selective-uniform/imported-cps-callback-project/`
+  - Current result: project-mode runtime fixture for imported CPS/effectful
+    callback values inside a handled CPS island. The monadic IR contains
+    `let f = read_value; f ()`; selective lowering binds `f` as shape metadata
+    only and lowers the call to `effects:read_value/3` with the current
+    evidence and continuation. No raw `make_fun`/BEAM fun value is emitted for
+    the effectful imported function. Runtime output under `--selective-codegen`
+    is `ok`.
 - `examples/optimization/selective-uniform/23-local-pure-lambda-call.saga`
   - Current result: emits a direct local lambda value as a Core `fun`, records
     its proven source arity in local shape metadata, and applies it via
@@ -361,6 +369,12 @@ The first implementation slice is:
   `'inc'/1`. Imported pure function values lower through `erlang:make_fun/3`
   using the resolved remote BEAM module/name/arity. CPS/effectful callback
   values still require an explicit adapter design and remain unsupported.
+- CPS/effectful callable values are supported only inside CPS islands, and only
+  as local call heads whose adapter metadata is known. Binding
+  `let f = imported_effectful_fun` records `LocalValueShape::CpsCallable`
+  instead of emitting a raw runtime function value; `f(args...)` lowers to the
+  local/remote CPS adapter with current `_Evidence` and current continuation.
+  Using that local as an ordinary direct atom/value remains unsupported.
 - `lower_selective` computes imported entry metadata for already-compiled
   non-stdlib user modules. Remote effect-row calls may lower to direct remote
   calls only when that imported metadata proves a direct entry exists; otherwise
@@ -782,3 +796,13 @@ boundaries exist.
 - Added `examples/optimization/selective-uniform/imported-direct-callback-project/`
   and CLI coverage that checks both the emitted `make_fun` shape and the
   project runtime output under `--selective-codegen`.
+- Added the first CPS callable-value slice inside CPS islands:
+  - `LocalValueShape::CpsCallable` carries module/name/source arity/adapter
+    arity/effects;
+  - `let f = read_value; f ()` in a handled island records `f` as shape
+    metadata and lowers the application to the CPS adapter with current
+    evidence/continuation;
+  - effectful imported functions still never lower as raw BEAM fun refs.
+- Added `examples/optimization/selective-uniform/imported-cps-callback-project/`
+  and CLI coverage that checks the monadic bind/app shape, the selective Core
+  adapter call, and project runtime output.

@@ -86,8 +86,17 @@ pub(super) enum CallShape {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) enum LocalValueShape {
-    PureCallable { arity: usize },
+    PureCallable {
+        arity: usize,
+    },
     PureCallableFromUseType,
+    CpsCallable {
+        module: Option<String>,
+        name: String,
+        source_arity: usize,
+        adapter_arity: usize,
+        effects: Vec<String>,
+    },
 }
 
 pub(super) fn lower_param_names(params: &[Pat]) -> Vec<String> {

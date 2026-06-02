@@ -59,6 +59,18 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         evidence: CExpr,
         return_k: CExpr,
     ) -> CExpr {
+        if let Some(local_shape @ LocalValueShape::CpsCallable { .. }) =
+            self.cps_local_shape_for_expr(value)
+        {
+            self.push_scope();
+            self.current_scope_mut().insert(var.name.clone());
+            self.current_shape_scope_mut()
+                .insert(var.name.clone(), local_shape);
+            let lowered_body = self.lower_cps_expr(body, evidence, return_k);
+            self.pop_scope();
+            return lowered_body;
+        }
+
         if self.expr_is_direct_subset(value) {
             let local_shape = self.direct_local_shape_for_expr(value);
             let lowered_value = self.lower_expr(value);
