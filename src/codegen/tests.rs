@@ -876,6 +876,36 @@ main () = apply_eff pure_value with forty_one
 }
 
 #[test]
+#[should_panic(
+    expected = "CPS-shaped function 'send_callback' is not lowered by selective-core yet"
+)]
+fn selective_core_rejects_cps_callback_value_as_yield_argument() {
+    let _ = emit_selective_core(
+        r#"
+effect ReadInt {
+  fun read : Unit -> Int
+}
+
+effect Sink {
+  fun send : (Unit -> Int needs {ReadInt}) -> Unit
+}
+
+fun read_value : Unit -> Int needs {ReadInt}
+read_value () = read! ()
+
+pub fun send_callback : Unit -> Unit needs {ReadInt, Sink}
+send_callback () = {
+  let f = read_value
+  send! f
+}
+
+fun main : Unit -> Unit
+main () = ()
+"#,
+    );
+}
+
+#[test]
 fn selective_core_lowers_case_shaped_effectful_callback_value() {
     let src = r#"
 effect ReadInt {

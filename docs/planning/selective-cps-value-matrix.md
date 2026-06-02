@@ -99,7 +99,7 @@ These are places that consume a callable value or call shape.
 | Effectful argument inside effectful outer call | `outer (read! ())` or `outer (decode x)` | Partially represented by monadic `Bind` sequencing | Old lowerer had `effectful_arg_idxs` chaining; selective should rely on monadic sequencing inside islands | Add fixtures when app args become non-trivial |
 | Effectful callback argument inside effectful outer call | `outer read_value (effect_arg!)` | Open | Need both adapter closure and effectful-arg sequencing | Later |
 | Return continuation value | final result of CPS island | Supported for direct atoms; CPS callable result supported for `if`/`case` bound values | Returning CPS callable out of island needs representation policy | Add guardrail |
-| Yield argument | `op!(read_value)` | Open/risk | If op expects CPS callback, needs adapter; otherwise reject/store policy | Later |
+| Yield argument | `op!(read_value)` | Explicitly rejected | Operation args stay direct-only until op parameter callback metadata can drive adapters | Later |
 | Handler arm `resume` value | `resume read_value` | Open/risk | Resuming CPS callable value needs adapter/materialized representation | Later |
 | Handler return clause value | `return _ = read_value` | Open/risk | Same as return continuation value | Later |
 | Direct data storage | `(read_value, 1)` | Open/reject | Needs representation policy before support | Add negative tests |
@@ -112,7 +112,7 @@ This is the selective lowerer's practical checklist over monadic IR.
 | `MExpr` Form | Direct Subset | CPS Island Computation | CPS Callable Value Producer | Notes |
 | --- | --- | --- | --- | --- |
 | `Pure(Atom)` | Supported for direct atoms | Supported as direct result | Supported for named CPS and runtime CPS vars | Atomic values are the main shape-entry point |
-| `Yield` | Rejected | Supported | Not a callable producer yet | Yield args use `atom_is_cps_value_subset`; callback args need policy |
+| `Yield` | Rejected | Supported with direct args only | Not a callable producer yet | CPS callable args are explicitly rejected until op parameter callback metadata exists |
 | `Bind` | Supported for direct values | Supported | Supported for CPS metadata/runtime aliases and branch/case materialization | Core sequencing boundary |
 | `Let` | Rejected/optimizer-only currently | Not primary path | Open | If optimizer emits it, mirror `Bind` discipline |
 | `Ensure` | Rejected direct | Static finally paths supported in handlers | Open | Cleanup result should not create callable values yet |

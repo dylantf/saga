@@ -143,10 +143,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             vec![CExpr::Lit(CLit::Int(op.op_index as i64)), find_call],
         );
 
-        let mut apply_args: Vec<CExpr> = args
-            .iter()
-            .map(|arg| self.lower_cps_value_atom(arg))
-            .collect();
+        let mut apply_args: Vec<CExpr> = args.iter().map(|arg| self.lower_atom(arg)).collect();
         apply_args.push(evidence);
         apply_args.push(return_k);
         CExpr::Apply(Box::new(op_closure), apply_args)

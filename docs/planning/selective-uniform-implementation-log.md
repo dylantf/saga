@@ -834,6 +834,9 @@ boundaries exist.
   - mixed CPS/pure callback branches/cases now materialize CPS runtime
     closures for both arms: effectful arms use the CPS adapter closure, pure
     arms use the pure-to-CPS fallback adapter;
+  - CPS callable values are now explicitly rejected as raw effect-operation
+    arguments until operation parameter metadata can choose the correct adapter
+    representation;
   - effectful imported functions still never lower as raw BEAM fun refs.
 - Added `examples/optimization/selective-uniform/imported-cps-callback-project/`
   and CLI coverage that checks the monadic case/bind/app shape, the generated

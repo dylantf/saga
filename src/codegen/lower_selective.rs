@@ -1063,7 +1063,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
 
     fn expr_is_cps_island_subset(&mut self, expr: &MExpr) -> bool {
         match expr {
-            MExpr::Yield { args, .. } => args.iter().all(|arg| self.atom_is_cps_value_subset(arg)),
+            MExpr::Yield { args, .. } => args.iter().all(|arg| self.atom_is_direct_subset(arg)),
             MExpr::Bind {
                 var, value, body, ..
             } => {
