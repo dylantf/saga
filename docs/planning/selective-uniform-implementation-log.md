@@ -162,9 +162,8 @@ The first implementation slice is:
     and calls the handler arm closure. The arm supports the narrow
     tail-resume shape `resume 41`, applying the captured operation
     continuation so the surrounding `let value = ...; value + 1` still runs.
-  - Current limits: static handlers only, no return clause, no `finally`, no
-    aborting/non-resuming arms, no dynamic/native/composite handlers, and no
-    higher-order handler values in the selective lowerer.
+  - This is the focused tail-resumptive fixture; broader handler limits are
+    tracked in the active design decisions below.
 - `examples/optimization/selective-uniform/20-static-handler-return-clause.saga`
   - Current result: emits a pure direct entry `read_with_return/1` whose
     internal CPS island binds a generated return continuation before installing
@@ -173,8 +172,18 @@ The first implementation slice is:
     `return value = value + 1` under the outer evidence and outer continuation.
   - Current limits: return clauses support zero or one direct-supported
     pattern parameter and a body in the existing direct/CPS-island subset.
-    They still do not support `finally`, abort/result delimiter semantics, or
+    They still do not support `finally`, full abort/result marker routing, or
     broader handler forms.
+- `examples/optimization/selective-uniform/21-static-handler-abort-arm.saga`
+  - Current result: emits a pure direct entry `abort_to_zero/1` whose handler
+    operation arm returns `0` directly from the op closure instead of applying
+    the captured `_ArmK`. This skips the return-clause continuation and models
+    the narrow `Fail`-style abort path.
+- `examples/optimization/selective-uniform/22-static-handler-abort-skips-body.saga`
+  - Current result: pins the key abort-control property. The handled body
+    contains `let value = fail! (); value + 1` and a `return value = value +
+    100` clause, but the abort arm returns `0` without invoking `_ArmK`, so the
+    body continuation and return clause are both skipped.
 
 ## Active Design Decisions
 
@@ -232,17 +241,18 @@ The first implementation slice is:
   program/result. The current direct lowerer does not consume imported body
   shape yet, but the context now has the real elaborated/resolved module data
   needed for cross-module entry metadata later.
-- `lower_selective` now builds explicit per-function entry metadata:
-  source arity, declared runtime type shape, optional direct entry arity, and
-  optional CPS adapter arity. This replaces some implicit reasoning over the
-  direct-function set plus type-shape map. Imported user-module entry metadata
-  is now consumed by the inspect path; a durable serialized metadata format for
+- `lower_selective` now uses a single `FunctionLoweringPlan` per function body:
+  `DirectBody`, `DirectBodyWithCpsIsland`, or `CpsBody`. Entry metadata is
+  derived from that plan plus the declared callable type shape. This keeps the
+  implementation-body decision separate from emitted ABI details such as direct
+  entry arity and CPS adapter arity. Imported user-module entry metadata is
+  now consumed by the inspect path; a durable serialized metadata format for
   separately compiled dependencies still does not exist.
 - The main local classifier names are now intentionally split:
-  `callable_type_shapes` is declared/runtime type shape, `direct_body_functions`
-  is the set of bodies proven direct-lowerable, `local_function_entries` is the
-  emitted entry summary, and `direct_candidate_function` is the temporary
-  recursion allowance during direct-body fixed-point analysis.
+  `callable_type_shapes` is declared/runtime type shape, `function_plans` is
+  the per-function implementation lowering decision, `local_function_entries`
+  is the emitted entry summary, and `direct_candidate_function` is the
+  temporary recursion allowance during direct-body fixed-point analysis.
 - `CallShape::Cps` carries both source arity and adapter arity. This keeps the
   N vs N+2 convention visible at the boundary where a future CPS island will
   choose an adapter call.
@@ -262,11 +272,10 @@ The first implementation slice is:
   `_Evidence` and the current continuation. They also support `if` and `case`
   control flow over the currently supported direct atom/pattern subset.
 - Pure functions can now have a direct ABI even when their body contains a
-  supported CPS island. `lower_selective` tracks these separately as
-  `direct_cps_island_body_functions`: they emit a direct source-arity entry
-  whose body runs the island with empty evidence plus an identity continuation.
-  This is the first explicit island boundary inside an otherwise direct
-  function.
+  supported CPS island. `FunctionLoweringPlan::DirectBodyWithCpsIsland` emits a
+  direct source-arity entry whose body runs the island with empty evidence plus
+  an identity continuation. This is the first explicit island boundary inside
+  an otherwise direct function.
 - The first handler/evidence slice supports `MExpr::With` for narrow static
   handlers whose operation arms are tail-resumptive. `With` extends the current
   evidence vector for the handled body, while handler arm closures close over
@@ -274,9 +283,11 @@ The first implementation slice is:
   handler. Handler arm `Resume` applies the captured operation continuation.
   Static return clauses are supported as generated continuation closures: the
   handled body returns through the return-clause K, and the return-clause body
-  lowers under the outer evidence/continuation. `finally`, abort arms,
-  dynamic/native/composite handlers, and handler values remain unsupported in
-  `lower_selective`.
+  lowers under the outer evidence/continuation. Direct abort arms are supported
+  in the narrow `Fail` shape by returning the arm body directly from the op
+  closure and ignoring the captured continuation. `finally`, full
+  abort/result-marker routing, dynamic/native/composite handlers, and handler
+  values remain unsupported in `lower_selective`.
 - CPS islands still do not support higher-order CPS callable values.
 - `lower_selective` computes imported entry metadata for already-compiled
   non-stdlib user modules. Remote effect-row calls may lower to direct remote
@@ -317,8 +328,8 @@ Planned integration sequence:
 1. **Handler/evidence slice.** Add the first `With` lowering for a simple
    static handler so an operation can run under installed evidence in
    `selective-core`. Status: first narrow static tail-resume case and static
-   return-clause continuation case are working; broader handler semantics are
-   still open.
+   return-clause continuation case are working; narrow direct abort arms are
+   working; broader handler semantics are still open.
 2. **Selective entrypoint/bootstrap slice.** Add the minimal wrapper/evidence
    setup needed for a normal `main` entry to call direct or CPS-shaped code
    correctly.

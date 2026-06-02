@@ -7,6 +7,26 @@ use crate::codegen::monadic::ir::MFunBinding;
 use crate::codegen::runtime_shape::RuntimeFunctionShape;
 use crate::intrinsics::IntrinsicId;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum FunctionLoweringPlan {
+    DirectBody,
+    DirectBodyWithCpsIsland,
+    CpsBody,
+}
+
+impl FunctionLoweringPlan {
+    pub(super) fn has_direct_entry(self) -> bool {
+        matches!(
+            self,
+            FunctionLoweringPlan::DirectBody | FunctionLoweringPlan::DirectBodyWithCpsIsland
+        )
+    }
+
+    pub(super) fn has_cps_body(self) -> bool {
+        matches!(self, FunctionLoweringPlan::CpsBody)
+    }
+}
+
 #[derive(Clone, Debug)]
 pub(super) struct FunctionEntryInfo {
     pub(super) source_arity: usize,
@@ -19,12 +39,13 @@ impl FunctionEntryInfo {
     pub(super) fn from_fun_binding(
         fb: &MFunBinding,
         callable_type_shape: RuntimeFunctionShape,
-        has_direct_body: bool,
-        has_cps_body: bool,
+        plan: Option<FunctionLoweringPlan>,
     ) -> Self {
         let source_arity = fb.params.len();
-        let direct_entry_arity = has_direct_body.then_some(source_arity);
-        let cps_adapter_entry_arity = (has_direct_body || has_cps_body)
+        let has_direct_entry = plan.is_some_and(FunctionLoweringPlan::has_direct_entry);
+        let has_cps_body = plan.is_some_and(FunctionLoweringPlan::has_cps_body);
+        let direct_entry_arity = has_direct_entry.then_some(source_arity);
+        let cps_adapter_entry_arity = (has_direct_entry || has_cps_body)
             .then_some(())
             .filter(|_| matches!(callable_type_shape, RuntimeFunctionShape::Cps(_)))
             .map(|_| source_arity + 2);

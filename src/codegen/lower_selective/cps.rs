@@ -314,6 +314,9 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         outer_evidence: CExpr,
         arm_k: CExpr,
     ) -> CExpr {
+        if self.expr_is_direct_subset(expr) {
+            return self.lower_expr(expr);
+        }
         match expr {
             MExpr::Resume { value, .. } => {
                 CExpr::Apply(Box::new(arm_k), vec![self.lower_atom(value)])

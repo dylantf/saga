@@ -53,13 +53,8 @@ struct DirectLowerer<'a, 'info> {
     /// This can be CPS even when the implementation body is direct-lowerable.
     callable_type_shapes: HashMap<String, RuntimeFunctionShape>,
     direct_values: HashSet<String>,
-    /// Functions whose implementation body fits the current direct subset.
-    direct_body_functions: HashSet<String>,
-    /// Pure functions whose ABI stays direct, but whose body contains a
-    /// supported CPS island that runs internally with an identity continuation.
-    direct_cps_island_body_functions: HashSet<String>,
-    /// Functions whose implementation body fits the current CPS island subset.
-    cps_body_functions: HashSet<String>,
+    /// Per-function lowering decision for the implementation body.
+    function_plans: HashMap<String, FunctionLoweringPlan>,
     /// Emitted entries for functions in the module currently being lowered.
     local_function_entries: HashMap<String, FunctionEntryInfo>,
     /// Emitted entries discovered for already-compiled imported user modules.
@@ -67,7 +62,7 @@ struct DirectLowerer<'a, 'info> {
     /// Function currently being tested as a direct-body candidate.
     ///
     /// During fixed-point classification this permits recursive self-calls
-    /// before the function has been added to `direct_body_functions`.
+    /// before the function has been added to `function_plans`.
     direct_candidate_function: Option<String>,
     cps_temp_counter: usize,
     locals: Vec<HashSet<String>>,
@@ -89,9 +84,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             current_module: String::new(),
             callable_type_shapes: HashMap::new(),
             direct_values: HashSet::new(),
-            direct_body_functions: HashSet::new(),
-            direct_cps_island_body_functions: HashSet::new(),
-            cps_body_functions: HashSet::new(),
+            function_plans: HashMap::new(),
             local_function_entries: HashMap::new(),
             imported_function_entries: HashMap::new(),
             direct_candidate_function: None,
@@ -105,9 +98,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         self.current_module = module_name.to_string();
         self.classify_program(program);
         self.compute_imported_function_entries();
-        self.compute_direct_body_functions(program);
-        self.compute_direct_cps_island_body_functions(program);
-        self.compute_cps_body_functions(program);
+        self.compute_function_lowering_plans(program);
         self.compute_local_function_entries(program);
 
         let pub_names: Option<HashSet<String>> =
@@ -129,28 +120,25 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         for decl in program {
             match decl {
                 MDecl::FunBinding(fb) => {
-                    if self.direct_body_functions.contains(&fb.name) {
-                        if fb.public || is_public(&fb.name) {
-                            exports.extend(self.export_entries(&fb.name));
-                        }
-                        funs.push(self.lower_fun_binding(fb));
-                        if self.needs_cps_adapter(&fb.name) {
-                            funs.push(self.lower_cps_adapter(fb));
-                        }
+                    let Some(plan) = self.function_plans.get(&fb.name).copied() else {
                         continue;
+                    };
+                    if fb.public || is_public(&fb.name) {
+                        exports.extend(self.export_entries(&fb.name));
                     }
-                    if self.direct_cps_island_body_functions.contains(&fb.name) {
-                        if fb.public || is_public(&fb.name) {
-                            exports.extend(self.export_entries(&fb.name));
+                    match plan {
+                        FunctionLoweringPlan::DirectBody => {
+                            funs.push(self.lower_fun_binding(fb));
+                            if self.needs_cps_adapter(&fb.name) {
+                                funs.push(self.lower_cps_adapter(fb));
+                            }
                         }
-                        funs.push(self.lower_direct_cps_island_fun_binding(fb));
-                        continue;
-                    }
-                    if self.cps_body_functions.contains(&fb.name) {
-                        if fb.public || is_public(&fb.name) {
-                            exports.extend(self.export_entries(&fb.name));
+                        FunctionLoweringPlan::DirectBodyWithCpsIsland => {
+                            funs.push(self.lower_direct_cps_island_fun_binding(fb));
                         }
-                        funs.push(self.lower_cps_fun_binding(fb));
+                        FunctionLoweringPlan::CpsBody => {
+                            funs.push(self.lower_cps_fun_binding(fb));
+                        }
                     }
                 }
                 MDecl::Val(v) => {
@@ -182,9 +170,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
     fn classify_program(&mut self, program: &MProgram) {
         self.callable_type_shapes.clear();
         self.direct_values.clear();
-        self.direct_body_functions.clear();
-        self.direct_cps_island_body_functions.clear();
-        self.cps_body_functions.clear();
+        self.function_plans.clear();
         for decl in program {
             match decl {
                 MDecl::FunBinding(fb) => {
@@ -215,7 +201,13 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         }
     }
 
-    fn compute_direct_body_functions(&mut self, program: &MProgram) {
+    fn compute_function_lowering_plans(&mut self, program: &MProgram) {
+        self.compute_direct_body_plans(program);
+        self.compute_direct_cps_island_body_plans(program);
+        self.compute_cps_body_plans(program);
+    }
+
+    fn compute_direct_body_plans(&mut self, program: &MProgram) {
         let funs: Vec<&MFunBinding> = program
             .iter()
             .filter_map(|decl| match decl {
@@ -228,47 +220,46 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         while changed {
             changed = false;
             for fb in &funs {
-                if self.direct_body_functions.contains(&fb.name) {
+                if self.function_plans.contains_key(&fb.name) {
                     continue;
                 }
                 if self.can_lower_fun_binding(fb) {
-                    self.direct_body_functions.insert(fb.name.clone());
+                    self.function_plans
+                        .insert(fb.name.clone(), FunctionLoweringPlan::DirectBody);
                     changed = true;
                 }
             }
         }
     }
 
-    fn compute_cps_body_functions(&mut self, program: &MProgram) {
+    fn compute_cps_body_plans(&mut self, program: &MProgram) {
         for decl in program {
             let MDecl::FunBinding(fb) = decl else {
                 continue;
             };
-            if self.direct_body_functions.contains(&fb.name)
-                || self.direct_cps_island_body_functions.contains(&fb.name)
-                || self.cps_body_functions.contains(&fb.name)
-            {
+            if self.function_plans.contains_key(&fb.name) {
                 continue;
             }
             if self.can_lower_cps_fun_binding(fb) {
-                self.cps_body_functions.insert(fb.name.clone());
+                self.function_plans
+                    .insert(fb.name.clone(), FunctionLoweringPlan::CpsBody);
             }
         }
     }
 
-    fn compute_direct_cps_island_body_functions(&mut self, program: &MProgram) {
+    fn compute_direct_cps_island_body_plans(&mut self, program: &MProgram) {
         for decl in program {
             let MDecl::FunBinding(fb) = decl else {
                 continue;
             };
-            if self.direct_body_functions.contains(&fb.name)
-                || self.direct_cps_island_body_functions.contains(&fb.name)
-            {
+            if self.function_plans.contains_key(&fb.name) {
                 continue;
             }
             if self.can_lower_direct_cps_island_fun_binding(fb) {
-                self.direct_cps_island_body_functions
-                    .insert(fb.name.clone());
+                self.function_plans.insert(
+                    fb.name.clone(),
+                    FunctionLoweringPlan::DirectBodyWithCpsIsland,
+                );
             }
         }
     }
@@ -292,9 +283,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             let entries = FunctionEntryInfo::from_fun_binding(
                 fb,
                 callable_type_shape,
-                self.direct_body_functions.contains(&fb.name)
-                    || self.direct_cps_island_body_functions.contains(&fb.name),
-                self.cps_body_functions.contains(&fb.name),
+                self.function_plans.get(&fb.name).copied(),
             );
             self.local_function_entries.insert(fb.name.clone(), entries);
         }
@@ -330,9 +319,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             );
             imported.current_module = source_module_name.clone();
             imported.classify_program(&monadic_imported);
-            imported.compute_direct_body_functions(&monadic_imported);
-            imported.compute_direct_cps_island_body_functions(&monadic_imported);
-            imported.compute_cps_body_functions(&monadic_imported);
+            imported.compute_function_lowering_plans(&monadic_imported);
             imported.compute_local_function_entries(&monadic_imported);
 
             let erlang_module = erlang_module_name(source_module_name);
@@ -754,8 +741,11 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             .direct_candidate_function
             .as_ref()
             .is_some_and(|current| current == name);
-        let has_direct_entry = self.direct_body_functions.contains(name)
-            || self.direct_cps_island_body_functions.contains(name);
+        let has_direct_entry = self
+            .function_plans
+            .get(name)
+            .copied()
+            .is_some_and(FunctionLoweringPlan::has_direct_entry);
         if !recursive_self && !has_direct_entry {
             return None;
         }
@@ -1058,6 +1048,9 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
     }
 
     fn handler_arm_expr_is_cps_island_subset(&mut self, expr: &MExpr) -> bool {
+        if self.expr_is_direct_subset(expr) {
+            return true;
+        }
         match expr {
             MExpr::Resume { value, .. } => self.atom_is_direct_subset(value),
             MExpr::Bind {
