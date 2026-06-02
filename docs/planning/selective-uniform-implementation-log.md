@@ -1004,3 +1004,23 @@ boundaries exist.
   - static handler evidence/closure construction is still emitted around the
     `With` for now. Removing unused handler installation is the next
     measurement-driven cleanup, not part of this first direct-call slice.
+- Added the first cross-function static-handler specialization slice for local
+  helpers:
+  - while a static handler frame is active, a call to a known local CPS helper
+    can be inline-specialized under that frame instead of calling the helper's
+    normal `arity + 2` CPS entry;
+  - this is deliberately a call-site optimization, not a new ABI: if the callee
+    is unsupported, recursive, has unsupported parameter patterns, has effects
+    not covered by the active static handlers, or has a body outside the current
+    CPS-island subset, lowering falls back to the normal CPS call;
+  - captured handler-arm values keep working because the callee body is lowered
+    in the caller's lexical/static-handler context;
+  - the local `query () needs {DbConfig}` pattern now specializes under
+    `query () with { db_url () = resume config }`, so the caller path avoids
+    applying `query/3` and direct-calls the static arm;
+  - the emitted fallback helper definition still exists and may still contain
+    `find_evidence`; dead-code cleanup and handler-install elision are separate
+    follow-up optimizations;
+  - imported `Postgres.query`-style specialization remains future work because
+    imported bodies must be lowered with their own resolution metadata while
+    still seeing caller-provided static-handler facts.

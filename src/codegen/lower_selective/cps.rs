@@ -301,6 +301,15 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             return CExpr::Apply(Box::new(return_k), vec![value]);
         }
 
+        if let Some(lowered) = self.lower_static_handler_specialized_local_cps_call(
+            head,
+            args,
+            evidence.clone(),
+            return_k.clone(),
+        ) {
+            return lowered;
+        }
+
         if let Some((source_arity, adapter_arity, _effects)) = self.cps_lambda_arity_for_atom(head)
             && let Atom::Lambda { params, body, .. } = head
         {
@@ -394,6 +403,82 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                 });
             }
         }
+    }
+
+    fn lower_static_handler_specialized_local_cps_call(
+        &mut self,
+        head: &Atom,
+        args: &[Atom],
+        evidence: CExpr,
+        return_k: CExpr,
+    ) -> Option<CExpr> {
+        if self.static_handler_stack.is_empty() {
+            return None;
+        }
+
+        let local_name = match head {
+            Atom::Var { name, .. } => name.name.clone(),
+            _ => return None,
+        };
+        if self.static_handler_inline_stack.contains(&local_name) {
+            return None;
+        }
+
+        let CallShape::Cps {
+            module: None,
+            source_arity,
+            adapter_arity,
+            effects,
+            ..
+        } = self.call_shape(head)?
+        else {
+            return None;
+        };
+        if effects.is_empty()
+            || source_arity != args.len()
+            || adapter_arity != args.len() + 2
+            || !self.active_static_handlers_cover_effects(&effects)
+            || !args.iter().all(|arg| self.atom_is_direct_subset(arg))
+        {
+            return None;
+        }
+
+        let fb = self.local_fun_bindings.get(&local_name)?.clone();
+        if fb.guard.is_some() || fb.params.iter().any(|p| !direct_param_supported(p)) {
+            return None;
+        }
+        let bindings = self.direct_call_param_bindings(&fb.params, args)?;
+
+        self.static_handler_inline_stack.push(local_name);
+        self.push_scope();
+        self.bind_fun_param_locals(&fb);
+        let supported = self.expr_is_cps_island_subset(&fb.body);
+        let lowered_body = supported.then(|| self.lower_cps_expr(&fb.body, evidence, return_k));
+        self.pop_scope();
+        self.static_handler_inline_stack.pop();
+
+        lowered_body.map(|body| {
+            bindings
+                .into_iter()
+                .rev()
+                .fold(body, |body, (name, value)| {
+                    CExpr::Let(name, Box::new(value), Box::new(body))
+                })
+        })
+    }
+
+    fn active_static_handlers_cover_effects(&self, effects: &[String]) -> bool {
+        effects
+            .iter()
+            .all(|effect| self.active_static_handler_handles_effect(effect))
+    }
+
+    fn active_static_handler_handles_effect(&self, effect: &str) -> bool {
+        self.static_handler_stack.iter().rev().any(|frame| {
+            frame
+                .iter()
+                .any(|arm| Self::effect_names_match(&arm.op.effect, effect))
+        })
     }
 
     fn hof_direct_specialization_for_cps_call(

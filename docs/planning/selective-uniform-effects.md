@@ -363,6 +363,167 @@ direct-call a matching tail-resumptive arm if the rewrite is conservative. This
 proves the effect-specialization path without committing to whole-program
 trait specialization yet.
 
+## Effect Lowering Optimization Architecture
+
+The effect optimizer should not become a second pass that walks already-emitted
+monadic control plumbing and tries to recover the source-level shape. That was
+the expensive part of the uniform branch: optimization happened after the
+compiler had already committed to the most general representation.
+
+The intended architecture is:
+
+```text
+ANF / monadic side-chain
+  -> effect facts
+  -> selective decision planning
+  -> Core lowering
+       direct/specialized where proven
+       generic CPS/evidence where not proven
+```
+
+Monadic IR has two jobs:
+
+1. **Fact source.** It exposes effect-control structure in a normalized form:
+   `Yield`, `With`, `Resume`, handler arms, callback calls, dictionary method
+   calls, and CPS islands.
+2. **Fallback backend.** For a region that selective lowering cannot prove
+   direct or specializable, monadic/CPS lowering remains the correctness path.
+
+It should not be the mandatory whole-program output language.
+
+### Facts, Not Global Rewrites
+
+Effect analysis should produce explicit facts that later phases can query:
+
+```text
+Handler arm A is tail-resumptive.
+Handler arm A is aborting.
+Handler H has finally cleanup.
+Function f performs effects {E1, E2}.
+Function f is direct under static handler facts S.
+Operation E.read is provided by static arm A in scope S.
+Callback argument p leaks effects from HOF h.
+Trait method M for known impl I is direct under facts S.
+```
+
+Facts may be local at first. For example, the current selective lowerer keeps a
+static handler stack while lowering one `With` body. Later, the same concept can
+be lifted into cached interprocedural facts:
+
+```text
+callee query/1 under handler fact DbConfig.db_url -> config is direct.
+```
+
+The important distinction is that facts guide lowering decisions. They do not
+force the compiler to rewrite the whole program before it knows which emitted
+shape is needed.
+
+### Decision Classifiers
+
+Selective lowering should move toward explicit classifiers instead of a long
+chain of opportunistic cases. The implementation can still have many small
+recognizers, but they should feed named decisions:
+
+```rust
+enum EffectOpLowering {
+    DirectStaticArm,
+    EvidenceLookup,
+    MonadicFallback,
+    Unsupported,
+}
+
+enum CpsCallLowering {
+    DirectHofSpecialization,
+    StaticHandlerInlineSpecialization,
+    NormalCpsCall,
+    MonadicFallback,
+    Unsupported,
+}
+
+enum WithLowering {
+    ElideHandlerInstall,
+    InstallEvidence,
+    MonadicFallback,
+    Unsupported,
+}
+```
+
+This gives the backend a place to explain why a direct path did or did not
+apply:
+
+```text
+static-handler-inline query/1: covered by DbConfig handler
+normal-cps-call query/3: imported body unavailable
+install-evidence DbConfig: helper call may perform unhandled operation
+direct-static-arm db_url: tail-resumptive arm, no finally
+```
+
+Those explanations should eventually power a `--selective-trace` style debug
+mode. That trace is a guardrail against the optimizer becoming an invisible
+priority list where the first matching case wins.
+
+### Fallback Rule
+
+Every optimization has the same contract:
+
+```text
+If the direct/specialized shape is proven, emit it.
+Otherwise, emit the runtime shape dictated by authoritative call-shape metadata.
+```
+
+The fallback should be boring and correct:
+
+- direct functions call direct functions normally;
+- CPS functions call CPS functions with evidence and return continuation;
+- static handlers install evidence when specialization is not proven;
+- unknown imported bodies use their exported direct/CPS entries;
+- unsupported dynamic handler or resume shapes stay on the general path.
+
+This is the correctness blanket that replaces "CPS the whole world." The
+blanket is not a clever optimizer; it is a reliable runtime-shape classifier and
+a generic CPS/evidence path.
+
+### First Optimization Families
+
+Effect lowering optimization should grow in this order:
+
+1. **Local operation rewrite.** Inside one `With`, direct-call a matching
+   tail-resumptive static arm instead of doing evidence lookup.
+2. **Local helper specialization.** Under an active static handler frame,
+   inline-specialize a known local CPS helper whose effect row is covered by the
+   active handlers.
+3. **Handler-install elision.** If every operation handled by a `With` is proven
+   direct-called and no helper can observe the evidence, skip constructing the
+   handler evidence.
+4. **Imported helper specialization.** Re-lower an imported body under
+   caller-provided static handler facts using the imported module's resolution
+   metadata.
+5. **Trait/dictionary specialization.** At a call site with known dictionaries
+   and effect facts, choose direct impl calls, CPS impl calls, or dict dispatch.
+6. **Reader/config-style inlining.** Recognize small tail-resumptive handlers
+   whose body is just `resume value` or a simple direct expression, and treat
+   the operation as that expression under the handler fact.
+
+These families should remain optional. If any family cannot prove safety for a
+site, it falls back to the generic shape.
+
+### Red Flags
+
+Revisit the architecture if any of these become common:
+
+- optimization order changes whether code is correct;
+- trait specialization must run after effect rewriting, while effect rewriting
+  also needs trait specialization;
+- generated specialized functions need ad hoc runtime arities not represented
+  in call-shape metadata;
+- direct lowering must scan emitted Core or optimized monadic trees to recover
+  whether a source-level call was simple;
+- a missing optimization causes runtime arity errors instead of falling back to
+  CPS/evidence.
+
+The desired failure mode for a missed optimization is slower Core, not wrong
+Core.
+
 ## Static Handler Specialization Comes After Baseline
 
 Static tail-resumptive handlers are important, especially Reader/config-style

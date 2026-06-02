@@ -142,6 +142,7 @@ struct DirectLowerer<'a, 'info> {
     ///
     /// This can be CPS even when the implementation body is direct-lowerable.
     callable_type_shapes: HashMap<String, RuntimeFunctionShape>,
+    local_fun_bindings: HashMap<String, MFunBinding>,
     direct_values: HashSet<String>,
     /// Per-function lowering decision for the implementation body.
     function_plans: HashMap<String, FunctionLoweringPlan>,
@@ -163,6 +164,7 @@ struct DirectLowerer<'a, 'info> {
     /// During fixed-point classification this permits recursive self-calls
     /// before the function has been added to `function_plans`.
     direct_candidate_function: Option<String>,
+    static_handler_inline_stack: Vec<String>,
     static_handler_stack: Vec<Vec<MHandlerArm>>,
     cps_temp_counter: usize,
     locals: Vec<HashSet<String>>,
@@ -187,6 +189,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             effect_info,
             current_module: String::new(),
             callable_type_shapes: HashMap::new(),
+            local_fun_bindings: HashMap::new(),
             direct_values: HashSet::new(),
             function_plans: HashMap::new(),
             local_function_entries: HashMap::new(),
@@ -195,6 +198,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             imported_function_entries: HashMap::new(),
             imported_hof_direct_specializations: HashMap::new(),
             direct_candidate_function: None,
+            static_handler_inline_stack: Vec::new(),
             static_handler_stack: Vec::new(),
             cps_temp_counter: 0,
             locals: vec![HashSet::new()],

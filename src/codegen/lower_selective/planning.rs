@@ -3,6 +3,7 @@ use super::*;
 impl<'a, 'info> DirectLowerer<'a, 'info> {
     pub(super) fn classify_program(&mut self, program: &MProgram) {
         self.callable_type_shapes.clear();
+        self.local_fun_bindings.clear();
         self.direct_values.clear();
         self.function_plans.clear();
         self.local_dict_constructor_arities.clear();
@@ -10,6 +11,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         for decl in program {
             match decl {
                 MDecl::FunBinding(fb) => {
+                    self.local_fun_bindings.insert(fb.name.clone(), fb.clone());
                     let shape = match self.effect_info.fun_effects.get(&fb.name) {
                         Some(effects) if effects.is_empty() => RuntimeFunctionShape::Pure,
                         Some(effects) => {

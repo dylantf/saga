@@ -797,6 +797,47 @@ main () = {
 }
 
 #[test]
+fn selective_core_specializes_local_cps_helper_under_static_handler() {
+    let src = r#"
+effect SystemConfig {
+  fun read_config : Unit -> Int
+}
+
+effect DbConfig {
+  fun db_url : Unit -> Int
+}
+
+handler system_config for SystemConfig {
+  read_config () = resume 41
+}
+
+fun query : Unit -> Int needs {DbConfig}
+query () = {
+  let value = db_url! ()
+  value + 1
+}
+
+fun main : Unit -> Int
+main () = {
+  let config = read_config! () with system_config
+  query () with {
+    db_url () = resume config
+  }
+}
+"#;
+    let out = emit_selective_core(src);
+    assert!(!out.contains("apply 'query'/3"), "{out}");
+    assert!(out.contains("let <Config>"), "{out}");
+    assert!(out.contains("let <Value>"), "{out}");
+    assert!(out.contains("call 'erlang':'+'"), "{out}");
+    assert_selective_core_eval_stdout_contains(
+        src,
+        "io:format(\"~p~n\", ['_script':main(unit)]), init:stop().",
+        "42",
+    );
+}
+
+#[test]
 fn selective_core_lowers_effect_row_function_with_direct_body() {
     let out = emit_selective_core(
         r#"
