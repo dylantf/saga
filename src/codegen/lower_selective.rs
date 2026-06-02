@@ -114,6 +114,7 @@ enum CallShape {
         arity: usize,
     },
     Cps {
+        module: Option<String>,
         name: String,
         source_arity: usize,
         adapter_arity: usize,
@@ -654,6 +655,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             MExpr::Bind {
                 var, value, body, ..
             } => self.lower_cps_bind(var, value, body, return_k),
+            MExpr::App { head, args, .. } => self.lower_cps_app(head, args, return_k),
             _ if self.expr_is_direct_subset(expr) => {
                 CExpr::Apply(Box::new(return_k), vec![self.lower_expr(expr)])
             }
@@ -719,6 +721,43 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         apply_args.push(CExpr::Var("_Evidence".to_string()));
         apply_args.push(return_k);
         CExpr::Apply(Box::new(op_closure), apply_args)
+    }
+
+    fn lower_cps_app(&mut self, head: &Atom, args: &[Atom], return_k: CExpr) -> CExpr {
+        let Some(CallShape::Cps {
+            module,
+            name,
+            source_arity,
+            adapter_arity,
+            ..
+        }) = self.call_shape(head)
+        else {
+            if self.expr_is_direct_subset(&MExpr::App {
+                head: head.clone(),
+                args: args.to_vec(),
+                source: NodeId::fresh(),
+            }) {
+                let value = self.lower_app(head, args);
+                return CExpr::Apply(Box::new(return_k), vec![value]);
+            }
+            self.unsupported_expr(&MExpr::App {
+                head: head.clone(),
+                args: args.to_vec(),
+                source: NodeId::fresh(),
+            });
+        };
+
+        self.assert_app_arity(&name, args.len(), source_arity);
+        self.assert_app_arity(&name, args.len() + 2, adapter_arity);
+
+        let mut lowered_args: Vec<CExpr> = args.iter().map(|arg| self.lower_atom(arg)).collect();
+        lowered_args.push(CExpr::Var("_Evidence".to_string()));
+        lowered_args.push(return_k);
+
+        match module {
+            Some(module) => CExpr::Call(module, name, lowered_args),
+            None => CExpr::Apply(Box::new(CExpr::FunRef(name, adapter_arity)), lowered_args),
+        }
     }
 
     fn lower_arm(&mut self, arm: &MArm) -> CArm {
@@ -798,6 +837,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                 )
             }
             Some(CallShape::Cps {
+                module: _,
                 name,
                 source_arity,
                 adapter_arity,
@@ -854,18 +894,54 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         };
         let resolved = self.resolution.get(&source)?;
         let ResolvedCodegenKind::BeamFunction {
+            erlang_mod,
             name,
             arity,
             effects,
-            ..
         } = &resolved.kind
         else {
             return None;
         };
+        let module = resolved_erlang_module_for_call(erlang_mod, &self.current_module);
+        if module.is_none()
+            && let Some(RuntimeFunctionShape::Cps(shape)) = self.callable_type_shapes.get(name)
+        {
+            return Some(CallShape::Cps {
+                module,
+                name: name.clone(),
+                source_arity: *arity,
+                adapter_arity: *arity + 2,
+                effects: shape.static_effects.clone(),
+            });
+        }
         if effects.is_empty() {
             return None;
         }
+        let metadata = module
+            .as_ref()
+            .and_then(|module| {
+                self.imported_function_entries
+                    .get(&(module.clone(), name.clone()))
+            })
+            .or_else(|| {
+                module
+                    .is_none()
+                    .then(|| self.local_function_entries.get(name))
+                    .flatten()
+            });
+        if let Some(entries) = metadata
+            && let Some(adapter_arity) = entries.cps_adapter_entry_arity
+        {
+            return Some(CallShape::Cps {
+                module,
+                name: name.clone(),
+                source_arity: entries.source_arity,
+                adapter_arity,
+                effects: effects.clone(),
+            });
+        }
         Some(CallShape::Cps {
+            module,
             name: name.clone(),
             source_arity: source_arity_for_cps_resolved(*arity),
             adapter_arity: *arity,
@@ -1355,6 +1431,16 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                 self.pop_scope();
                 supported
             }
+            MExpr::App { head, args, .. } => {
+                matches!(
+                    self.call_shape(head),
+                    Some(CallShape::Cps {
+                        source_arity,
+                        adapter_arity,
+                        ..
+                    }) if source_arity == args.len() && adapter_arity == args.len() + 2
+                ) && args.iter().all(|arg| self.atom_is_direct_subset(arg))
+            }
             _ => self.expr_is_direct_subset(expr),
         }
     }
@@ -1508,6 +1594,16 @@ fn direct_entry_name_for(name: &str, entries: &FunctionEntryInfo) -> String {
     } else {
         name.to_string()
     }
+}
+
+fn resolved_erlang_module_for_call(
+    erlang_mod: &Option<String>,
+    current_module: &str,
+) -> Option<String> {
+    erlang_mod
+        .as_ref()
+        .filter(|module| module.as_str() != current_module)
+        .cloned()
 }
 
 fn erlang_module_name(module_name: &str) -> String {

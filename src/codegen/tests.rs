@@ -485,6 +485,37 @@ main () = ()
 }
 
 #[test]
+fn selective_core_lowers_local_cps_helper_call_in_cps_island() {
+    let src = r#"
+effect ReadInt {
+  fun read : Unit -> Int
+}
+
+fun read_value : Unit -> Int needs {ReadInt}
+read_value () = read! ()
+
+pub fun read_plus_two : Unit -> Int needs {ReadInt}
+read_plus_two () = {
+  let value = read_value ()
+  value + 2
+}
+
+fun main : Unit -> Unit
+main () = ()
+"#;
+    let out = emit_selective_core(src);
+    assert!(out.contains("'read_value'/3"), "{out}");
+    assert!(out.contains("'read_plus_two'/3"), "{out}");
+    assert!(
+        out.contains("apply 'read_value'/3('unit', _Evidence, fun (_CpsBindArg0) ->"),
+        "{out}"
+    );
+    assert!(out.contains("let <Value>"), "{out}");
+    assert!(out.contains("apply _ReturnK(call 'erlang':'+'"), "{out}");
+    assert_selective_core_compiles(src);
+}
+
+#[test]
 fn selective_core_lowers_effect_row_function_with_direct_body() {
     let out = emit_selective_core(
         r#"

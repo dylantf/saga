@@ -137,6 +137,14 @@ The first implementation slice is:
   - Current result: emits a CPS island where the operation result is bound and
     used in direct computation before returning:
     `read! ()` resumes into `value + 1`, then `_ReturnK(...)`.
+- `examples/optimization/selective-uniform/16-cps-helper-call-island.saga`
+  - Current result: emits a local CPS helper `read_value/3` and a public CPS
+    island `read_plus_two/3` that calls the helper's adapter with source args
+    plus `_Evidence` and a generated continuation.
+- `examples/optimization/selective-uniform/imported-cps-island-project/`
+  - Current result: inspecting `src/Main.saga` emits a remote CPS adapter call
+    to `effects:read_value/3`, passing `_Evidence` and a generated
+    continuation that binds the result and returns `value + 2`.
 
 ## Active Design Decisions
 
@@ -219,9 +227,10 @@ The first implementation slice is:
 - The first CPS island subset now supports `MExpr::Yield`, `MExpr::Bind`, and
   direct-return expressions. `Yield` receives the current continuation, `Bind`
   builds a generated continuation closure that binds the resumed value, and a
-  direct expression returns by applying the current `_ReturnK`. It still has no
-  `With`, `Resume`, handler runtime, or direct calls to CPS adapters from
-  inside islands.
+  direct expression returns by applying the current `_ReturnK`. CPS islands can
+  now call local and imported CPS adapter entries by passing source args plus
+  `_Evidence` and the current continuation. They still have no `With`,
+  `Resume`, handler runtime, or higher-order CPS callable values.
 - `lower_selective` computes imported entry metadata for already-compiled
   non-stdlib user modules. Remote effect-row calls may lower to direct remote
   calls only when that imported metadata proves a direct entry exists; otherwise
@@ -238,7 +247,7 @@ The first implementation slice is:
 3. Decide the next vertical slice:
    - add the first handler/evidence installation slice so a trivial handled
      operation can run, or
-   - allow CPS islands to call CPS adapter entries, or
+   - support direct conditionals/cases inside CPS islands, or
    - start moving the proven direct path into the real build path.
 4. Keep updating focused fixtures/tests as each tiny subset starts working.
 
@@ -437,6 +446,18 @@ The first implementation slice is:
 - Added focused `selective_core` tests for effect-then-return and
   effect-result-used islands, both with `erlc +from_core` compilation checks
   when Erlang is available.
+- Added CPS adapter calls from inside CPS islands:
+  - `CallShape::Cps` now carries the optional remote module;
+  - local CPS calls use explicit local runtime-shape metadata during
+    classification, because resolution may not carry the effect row there yet;
+  - imported CPS calls use imported entry metadata when available;
+  - `lower_cps_app` appends `_Evidence` and the current continuation and emits
+    either local `apply 'name'/N(...)` or remote `call 'module':'name'(...)`.
+- Added:
+  - `examples/optimization/selective-uniform/16-cps-helper-call-island.saga`;
+  - `examples/optimization/selective-uniform/imported-cps-island-project/`.
+- Added a same-module `selective_core` unit test for calling a local CPS helper
+  and a CLI integration test for project-mode imported CPS adapter calls.
 - Verification:
   - `cargo run --bin saga -- inspect examples/optimization/selective-uniform/01-pure-direct.saga --stage selective-core`
     emits direct `add1/1`, `twice/1`, and `main/1`.
@@ -463,3 +484,8 @@ The first implementation slice is:
     - `cargo run --bin saga --quiet -- inspect examples/optimization/selective-uniform/15-yield-result-used-cps-island.saga --stage selective-core`
       emits a generated `_CpsBindArg0` continuation that binds `Value` and
       returns `Value + 1`.
+    - `cargo run --bin saga --quiet -- inspect examples/optimization/selective-uniform/16-cps-helper-call-island.saga --stage selective-core`
+      emits `apply 'read_value'/3('unit', _Evidence, fun (_CpsBindArg0) -> ...)`.
+    - `cargo run --bin saga --quiet -- inspect src/Main.saga --stage selective-core`
+      from `imported-cps-island-project` emits
+      `call 'effects':'read_value'('unit', _Evidence, fun (_CpsBindArg0) -> ...)`.
