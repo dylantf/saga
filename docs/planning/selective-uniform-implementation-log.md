@@ -6,6 +6,9 @@ code, tests, or known state.
 
 The charter is `docs/planning/selective-uniform-effects.md`.
 
+The CPS callable value checklist is
+`docs/planning/selective-cps-value-matrix.md`.
+
 ## Current Frontier
 
 Re-establish a direct-first lowerer without trusting the old uniform CPS ABI as
@@ -38,6 +41,14 @@ The first implementation slice is:
   The eventual split should point monadic IR only at CPS-shaped bodies/regions.
 - Static tail-resumptive handler specialization is a later performance rewrite,
   tested against a slow correctness path.
+- Direct HOF specialization should run before pure-to-CPS adapter fallback:
+  an effectful callback parameter is a capability bound, not a demand that the
+  actual callback leaks effects. Pure or fully-handled callbacks should be able
+  to pick a direct/pure specialization when the call is statically net-pure.
+- Reader/config-like effects are the same specialization family. A static
+  handler such as `read_options () = resume options` should eventually lower to
+  an explicit config argument or be inlined, rather than permanently paying the
+  generic CPS/evidence path.
 
 ## Salvage Candidates
 
@@ -200,9 +211,9 @@ The first implementation slice is:
     typed use site, so `apply_it f = f 1` lowers to `apply F(1)` and
     `main` passes the direct function ref `'inc'/1`.
 - `examples/optimization/selective-uniform/31-higher-order-effectful-callback-unsupported.saga`
-  - Current result: documents the current boundary. CPS/effectful callback
-    values are not eta-expanded/adapted yet; the selective lowerer fails loudly
-    for public `apply_eff/3`.
+  - Historical boundary fixture name. This was originally negative; later CPS
+    callable-value slices now support `apply_eff/3` and explicit CPS/pure
+    callback adapters in CPS islands.
 - `examples/optimization/selective-uniform/32-higher-order-direct-callback-e2e.saga`
   - Current result: runtime fixture for the direct callback slice. It calls
     `apply_it inc` under `--selective-codegen` and prints `ok`.
@@ -361,8 +372,8 @@ The first implementation slice is:
   bodies. Full abort/result-marker routing, dynamic/native/composite handlers,
   effectful cleanup, and handler values remain unsupported in
   `lower_selective`.
-- CPS islands support proven direct local lambda values. They still do not
-  support higher-order CPS callable values or unknown callback parameters.
+- CPS islands support proven direct local lambda values, CPS callable values,
+  runtime CPS callback parameters, and pure-to-CPS callback fallback adapters.
 - Higher-order direct callbacks are supported when the call-head value has a
   closed pure function type at the use site. Variable-pattern binders are
   marked as callable-from-use-type, but a call only succeeds if typed metadata
@@ -370,7 +381,7 @@ The first implementation slice is:
   functions passed as values lower as direct Core function references such as
   `'inc'/1`. Imported pure function values lower through `erlang:make_fun/3`
   using the resolved remote BEAM module/name/arity. CPS/effectful callback
-  values still require an explicit adapter design and remain unsupported.
+  values are handled by the later CPS callable-value slice inside CPS islands.
 - CPS/effectful callable values are supported only inside CPS islands, and only
   as local call heads whose adapter metadata is known. Binding
   `let f = imported_effectful_fun` records `LocalValueShape::CpsCallable`
@@ -818,10 +829,14 @@ boundaries exist.
   - case-shaped CPS callable values follow the same rule:
     `let f = case choose { True -> read_value; False -> read_again }`
     materializes a Core `case` of CPS adapter closures;
-  - mixed CPS/pure callback cases are rejected by the selective subset for now,
-    so we do not silently invent a pure-to-CPS callback adapter policy;
+  - pure callbacks in CPS callback slots now use an explicit fallback adapter:
+    `fun args _Ev K -> K(pure(args...))`;
+  - mixed CPS/pure callback branches/cases now materialize CPS runtime
+    closures for both arms: effectful arms use the CPS adapter closure, pure
+    arms use the pure-to-CPS fallback adapter;
   - effectful imported functions still never lower as raw BEAM fun refs.
 - Added `examples/optimization/selective-uniform/imported-cps-callback-project/`
   and CLI coverage that checks the monadic case/bind/app shape, the generated
-  selective Core adapter closures for both imported functions, the imported
-  `apply_eff/3` runtime closure alias/application, and project runtime output.
+  selective Core adapter closures for imported effectful and pure functions,
+  the imported `apply_eff/3` runtime closure alias/application, and project
+  runtime output.

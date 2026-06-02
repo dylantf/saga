@@ -1376,6 +1376,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                     }
                 }
                 self.cps_local_shape_for_expr(expr)
+                    .or_else(|| self.pure_value_atom_shape(atom))
             }
             MExpr::If {
                 then_branch,
@@ -1444,14 +1445,38 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         left: &LocalValueShape,
         right: &LocalValueShape,
     ) -> Option<LocalValueShape> {
-        let (left_source, left_adapter) = self.runtime_cps_arities(left)?;
-        let (right_source, right_adapter) = self.runtime_cps_arities(right)?;
-        (left_source == right_source && left_adapter == right_adapter).then_some(
-            LocalValueShape::RuntimeCpsCallable {
-                source_arity: left_source,
-                adapter_arity: left_adapter,
-            },
-        )
+        match (
+            self.runtime_cps_arities(left),
+            self.runtime_cps_arities(right),
+            self.pure_callable_shape_arity(left),
+            self.pure_callable_shape_arity(right),
+        ) {
+            (Some((left_source, left_adapter)), Some((right_source, right_adapter)), _, _)
+                if left_source == right_source && left_adapter == right_adapter =>
+            {
+                Some(LocalValueShape::RuntimeCpsCallable {
+                    source_arity: left_source,
+                    adapter_arity: left_adapter,
+                })
+            }
+            (Some((source_arity, adapter_arity)), None, _, Some(pure_arity))
+                if source_arity == pure_arity =>
+            {
+                Some(LocalValueShape::RuntimeCpsCallable {
+                    source_arity,
+                    adapter_arity,
+                })
+            }
+            (None, Some((source_arity, adapter_arity)), Some(pure_arity), _)
+                if source_arity == pure_arity =>
+            {
+                Some(LocalValueShape::RuntimeCpsCallable {
+                    source_arity,
+                    adapter_arity,
+                })
+            }
+            _ => None,
+        }
     }
 
     fn runtime_cps_arities(&self, shape: &LocalValueShape) -> Option<(usize, usize)> {
@@ -1466,6 +1491,16 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                 adapter_arity,
             } => Some((*source_arity, *adapter_arity)),
             LocalValueShape::PureCallable { .. } | LocalValueShape::PureCallableFromUseType => None,
+        }
+    }
+
+    fn pure_callable_shape_arity(&self, shape: &LocalValueShape) -> Option<usize> {
+        match shape {
+            LocalValueShape::PureCallable { arity } => Some(*arity),
+            LocalValueShape::PureCallableFromUseType => None,
+            LocalValueShape::CpsCallable { .. } | LocalValueShape::RuntimeCpsCallable { .. } => {
+                None
+            }
         }
     }
 
@@ -1486,6 +1521,51 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             }
         }
         self.cps_local_shape_for_expr(&MExpr::Pure(atom.clone()))
+    }
+
+    fn pure_value_atom_shape(&self, atom: &Atom) -> Option<LocalValueShape> {
+        if let Atom::Var { name, source } = atom {
+            match self.local_shape(&name.name) {
+                Some(shape @ LocalValueShape::PureCallable { .. }) => return Some(shape),
+                Some(LocalValueShape::PureCallableFromUseType) => {
+                    return self
+                        .pure_function_arity_at(*source)
+                        .map(|arity| LocalValueShape::PureCallable { arity });
+                }
+                _ => {}
+            }
+        }
+        self.pure_callback_arity_for_atom(atom)
+            .map(|arity| LocalValueShape::PureCallable { arity })
+    }
+
+    fn pure_callback_arity_for_atom(&self, atom: &Atom) -> Option<usize> {
+        let source = match atom {
+            Atom::Var { source, .. }
+            | Atom::QualifiedRef { source, .. }
+            | Atom::Lambda { source, .. } => *source,
+            _ => return None,
+        };
+        self.pure_function_arity_at(source)
+    }
+
+    fn cps_callback_param_shapes(&self, head: &Atom) -> Vec<Option<(usize, usize)>> {
+        let source = match head {
+            Atom::Var { source, .. } | Atom::QualifiedRef { source, .. } => *source,
+            _ => return Vec::new(),
+        };
+        let Some(mut current) = self.effect_info.type_at_node.get(&source) else {
+            return Vec::new();
+        };
+        let mut shapes = Vec::new();
+        while let Type::Fun(param, ret, _) = current {
+            shapes.push(
+                self.cps_function_arity_from_type(param)
+                    .map(|(source_arity, adapter_arity, _effects)| (source_arity, adapter_arity)),
+            );
+            current = ret;
+        }
+        shapes
     }
 
     fn pure_trait_method_arity(&self, trait_name: &str, method_index: usize) -> Option<usize> {

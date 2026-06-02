@@ -175,7 +175,7 @@ fn selective_core_codegen_runs_imported_cps_callback_project() {
         "{monadic_stdout}"
     );
     assert!(
-        monadic_stdout.contains("Pure(Var(read_again"),
+        monadic_stdout.contains("Pure(Var(pure_value"),
         "{monadic_stdout}"
     );
     assert!(
@@ -213,7 +213,15 @@ fn selective_core_codegen_runs_imported_cps_callback_project() {
         "{inspect_stdout}"
     );
     assert!(
-        inspect_stdout.contains("call 'effects':'read_again'"),
+        inspect_stdout.contains("call 'effects':'pure_value'"),
+        "{inspect_stdout}"
+    );
+    assert!(
+        inspect_stdout.contains("fun (_PureCpsArg"),
+        "{inspect_stdout}"
+    );
+    assert!(
+        inspect_stdout.contains("apply _PureCpsK"),
         "{inspect_stdout}"
     );
     assert!(

@@ -10,6 +10,9 @@ read_value () = read! ()
 pub fun read_again : Unit -> Int needs {ReadInt}
 read_again () = read! ()
 
+pub fun pure_value : Unit -> Int
+pure_value () = 41
+
 pub fun apply_eff : (Unit -> Int needs {ReadInt}) -> Int needs {ReadInt}
 apply_eff f = {
   let g = f

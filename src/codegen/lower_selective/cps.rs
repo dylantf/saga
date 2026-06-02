@@ -70,8 +70,12 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                     self.pop_scope();
                     return lowered_body;
                 }
-                LocalValueShape::RuntimeCpsCallable { .. } => {
-                    let lowered_value = self.lower_cps_runtime_value_expr(value);
+                LocalValueShape::RuntimeCpsCallable {
+                    source_arity,
+                    adapter_arity,
+                } => {
+                    let lowered_value =
+                        self.lower_cps_runtime_value_expr(value, source_arity, adapter_arity);
                     self.push_scope();
                     self.current_scope_mut().insert(var.name.clone());
                     self.current_shape_scope_mut()
@@ -166,9 +170,16 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                 self.assert_app_arity(&name, args.len(), source_arity);
                 self.assert_app_arity(&name, args.len() + 2, adapter_arity);
 
+                let expected_arg_shapes = self.cps_callback_param_shapes(head);
                 let mut lowered_args: Vec<CExpr> = args
                     .iter()
-                    .map(|arg| self.lower_cps_value_atom(arg))
+                    .enumerate()
+                    .map(|(index, arg)| {
+                        self.lower_cps_arg_atom(
+                            arg,
+                            expected_arg_shapes.get(index).copied().flatten(),
+                        )
+                    })
                     .collect();
                 lowered_args.push(evidence);
                 lowered_args.push(return_k);
@@ -188,9 +199,16 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             }) => {
                 self.assert_app_arity(&name, args.len(), source_arity);
                 self.assert_app_arity(&name, args.len() + 2, adapter_arity);
+                let expected_arg_shapes = self.cps_callback_param_shapes(head);
                 let mut lowered_args: Vec<CExpr> = args
                     .iter()
-                    .map(|arg| self.lower_cps_value_atom(arg))
+                    .enumerate()
+                    .map(|(index, arg)| {
+                        self.lower_cps_arg_atom(
+                            arg,
+                            expected_arg_shapes.get(index).copied().flatten(),
+                        )
+                    })
                     .collect();
                 lowered_args.push(evidence);
                 lowered_args.push(return_k);
@@ -214,6 +232,17 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         }
     }
 
+    fn lower_cps_arg_atom(
+        &mut self,
+        atom: &Atom,
+        expected_cps_callback: Option<(usize, usize)>,
+    ) -> CExpr {
+        if let Some((source_arity, adapter_arity)) = expected_cps_callback {
+            return self.lower_cps_runtime_value_atom(atom, source_arity, adapter_arity);
+        }
+        self.lower_cps_value_atom(atom)
+    }
+
     fn lower_cps_value_atom(&mut self, atom: &Atom) -> CExpr {
         match self.cps_value_atom_shape(atom) {
             Some(LocalValueShape::RuntimeCpsCallable { .. })
@@ -235,9 +264,47 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         }
     }
 
-    fn lower_cps_runtime_value_expr(&mut self, expr: &MExpr) -> CExpr {
+    fn lower_cps_runtime_value_atom(
+        &mut self,
+        atom: &Atom,
+        source_arity: usize,
+        adapter_arity: usize,
+    ) -> CExpr {
+        match self.cps_value_atom_shape(atom) {
+            Some(LocalValueShape::RuntimeCpsCallable { .. }) => {
+                let Atom::Var { name, .. } = atom else {
+                    self.unsupported_atom(atom);
+                };
+                CExpr::Var(core_var(&name.name))
+            }
+            Some(LocalValueShape::CpsCallable {
+                module,
+                name,
+                source_arity: actual_source_arity,
+                adapter_arity: actual_adapter_arity,
+                ..
+            }) => {
+                self.assert_app_arity(&name, actual_source_arity, source_arity);
+                self.assert_app_arity(&name, actual_adapter_arity, adapter_arity);
+                self.cps_adapter_value_closure(module, name, source_arity, adapter_arity)
+            }
+            _ if self.pure_value_atom_shape(atom).is_some() => {
+                self.pure_to_cps_adapter_value_closure(atom, source_arity, adapter_arity)
+            }
+            _ => self.lower_atom(atom),
+        }
+    }
+
+    fn lower_cps_runtime_value_expr(
+        &mut self,
+        expr: &MExpr,
+        source_arity: usize,
+        adapter_arity: usize,
+    ) -> CExpr {
         match expr {
-            MExpr::Pure(atom) => self.lower_cps_value_atom(atom),
+            MExpr::Pure(atom) => {
+                self.lower_cps_runtime_value_atom(atom, source_arity, adapter_arity)
+            }
             MExpr::If {
                 cond,
                 then_branch,
@@ -249,12 +316,20 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                     CArm {
                         pat: CPat::Lit(CLit::Atom("true".to_string())),
                         guard: None,
-                        body: self.lower_cps_runtime_value_expr(then_branch),
+                        body: self.lower_cps_runtime_value_expr(
+                            then_branch,
+                            source_arity,
+                            adapter_arity,
+                        ),
                     },
                     CArm {
                         pat: CPat::Lit(CLit::Atom("false".to_string())),
                         guard: None,
-                        body: self.lower_cps_runtime_value_expr(else_branch),
+                        body: self.lower_cps_runtime_value_expr(
+                            else_branch,
+                            source_arity,
+                            adapter_arity,
+                        ),
                     },
                 ],
             ),
@@ -263,21 +338,69 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             } => CExpr::Case(
                 Box::new(self.lower_atom(scrutinee)),
                 arms.iter()
-                    .map(|arm| self.lower_cps_runtime_value_arm(arm))
+                    .map(|arm| self.lower_cps_runtime_value_arm(arm, source_arity, adapter_arity))
                     .collect(),
             ),
             _ => self.unsupported_expr(expr),
         }
     }
 
-    fn lower_cps_runtime_value_arm(&mut self, arm: &MArm) -> CArm {
+    fn lower_cps_runtime_value_arm(
+        &mut self,
+        arm: &MArm,
+        source_arity: usize,
+        adapter_arity: usize,
+    ) -> CArm {
         self.push_scope();
         self.bind_pat_locals(&arm.pattern);
-        let body = self.lower_cps_runtime_value_expr(&arm.body);
+        let body = self.lower_cps_runtime_value_expr(&arm.body, source_arity, adapter_arity);
         let guard = arm.guard.as_ref().map(|g| self.lower_expr(g));
         let pat = self.lower_pat(&arm.pattern);
         self.pop_scope();
         CArm { pat, guard, body }
+    }
+
+    fn pure_to_cps_adapter_value_closure(
+        &mut self,
+        atom: &Atom,
+        source_arity: usize,
+        adapter_arity: usize,
+    ) -> CExpr {
+        self.assert_app_arity("pure CPS callback adapter", source_arity + 2, adapter_arity);
+        let pure_arity = self
+            .pure_callback_arity_for_atom(atom)
+            .unwrap_or_else(|| self.unsupported_atom(atom));
+        self.assert_app_arity("pure CPS callback adapter", pure_arity, source_arity);
+
+        let arg_names: Vec<String> = (0..source_arity)
+            .map(|_| self.fresh_cps_temp("_PureCpsArg"))
+            .collect();
+        let evidence_name = self.fresh_cps_temp("_PureCpsEvidence");
+        let return_k_name = self.fresh_cps_temp("_PureCpsK");
+        let mut params = arg_names.clone();
+        params.push(evidence_name);
+        params.push(return_k_name.clone());
+
+        let pure_call_args: Vec<CExpr> = arg_names.into_iter().map(CExpr::Var).collect();
+        let pure_call = if let Some(callable) = self.direct_function_callable(atom) {
+            self.assert_app_arity(&callable.name, pure_call_args.len(), callable.arity);
+            match callable.module {
+                Some(module) => CExpr::Call(module, callable.name, pure_call_args),
+                None => CExpr::Apply(
+                    Box::new(CExpr::FunRef(callable.name, callable.arity)),
+                    pure_call_args,
+                ),
+            }
+        } else {
+            CExpr::Apply(Box::new(self.lower_atom(atom)), pure_call_args)
+        };
+        CExpr::Fun(
+            params,
+            Box::new(CExpr::Apply(
+                Box::new(CExpr::Var(return_k_name)),
+                vec![pure_call],
+            )),
+        )
     }
 
     fn cps_adapter_value_closure(
