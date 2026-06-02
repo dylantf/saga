@@ -7,6 +7,9 @@ pub effect ReadInt {
 pub fun read_value : Unit -> Int needs {ReadInt}
 read_value () = read! ()
 
+pub fun read_again : Unit -> Int needs {ReadInt}
+read_again () = read! ()
+
 pub fun apply_eff : (Unit -> Int needs {ReadInt}) -> Int needs {ReadInt}
 apply_eff f = {
   let g = f

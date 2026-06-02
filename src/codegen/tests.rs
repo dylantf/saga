@@ -804,6 +804,82 @@ main () = {
 }
 
 #[test]
+fn selective_core_lowers_case_shaped_effectful_callback_value() {
+    let src = r#"
+effect ReadInt {
+  fun read : Unit -> Int
+}
+
+fun read_value : Unit -> Int needs {ReadInt}
+read_value () = read! ()
+
+fun read_again : Unit -> Int needs {ReadInt}
+read_again () = read! ()
+
+fun apply_eff : (Unit -> Int needs {ReadInt}) -> Int needs {ReadInt}
+apply_eff f = f ()
+
+handler forty_one for ReadInt {
+  read () = resume 41
+}
+
+fun main : Unit -> Int
+main () = {
+  let choose = 1 == 1
+  let f = case choose {
+    True -> read_value
+    False -> read_again
+  }
+  apply_eff f
+} with forty_one
+"#;
+    let out = emit_selective_core(src);
+    assert!(out.contains("'apply_eff'/3"), "{out}");
+    assert!(out.contains("let <F> =\n"), "{out}");
+    assert!(out.contains("case Choose of"), "{out}");
+    assert!(out.contains("apply 'read_value'/3"), "{out}");
+    assert!(out.contains("apply 'read_again'/3"), "{out}");
+    assert!(out.contains("apply 'apply_eff'/3(F"), "{out}");
+    assert!(!out.contains("make_fun"), "{out}");
+    assert_selective_core_compiles(src);
+}
+
+#[test]
+#[should_panic(expected = "direct function 'main' is outside the current direct subset")]
+fn selective_core_rejects_mixed_pure_and_effectful_case_callback_value() {
+    let _ = emit_selective_core(
+        r#"
+effect ReadInt {
+  fun read : Unit -> Int
+}
+
+fun read_value : Unit -> Int needs {ReadInt}
+read_value () = read! ()
+
+fun pure_value : Unit -> Int
+pure_value () = 41
+
+fun apply_eff : (Unit -> Int needs {ReadInt}) -> Int needs {ReadInt}
+apply_eff f = f ()
+
+handler forty_one for ReadInt {
+  read () = resume 41
+}
+
+fun main : Unit -> Int
+main () = {
+  let choose = 1 == 1
+  let f = case choose {
+    True -> read_value
+    False -> pure_value
+  }
+  apply_eff f
+} with forty_one
+"#,
+    );
+}
+
+#[test]
 fn eta_reduced_effectful_callback_uses_lowered_fun_arity() {
     let src = r#"
 effect State s {

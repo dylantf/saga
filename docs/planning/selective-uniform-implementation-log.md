@@ -815,8 +815,13 @@ boundaries exist.
     `let f = if choose then read_value else read_again` lowers to a Core
     `case` whose arms each return an explicit CPS adapter closure, and the
     bound `f` is tracked as `RuntimeCpsCallable`;
+  - case-shaped CPS callable values follow the same rule:
+    `let f = case choose { True -> read_value; False -> read_again }`
+    materializes a Core `case` of CPS adapter closures;
+  - mixed CPS/pure callback cases are rejected by the selective subset for now,
+    so we do not silently invent a pure-to-CPS callback adapter policy;
   - effectful imported functions still never lower as raw BEAM fun refs.
 - Added `examples/optimization/selective-uniform/imported-cps-callback-project/`
-  and CLI coverage that checks the monadic bind/app shape, the generated
-  selective Core adapter closure, the imported `apply_eff/3` runtime closure
-  alias/application, and project runtime output.
+  and CLI coverage that checks the monadic case/bind/app shape, the generated
+  selective Core adapter closures for both imported functions, the imported
+  `apply_eff/3` runtime closure alias/application, and project runtime output.

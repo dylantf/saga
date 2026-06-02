@@ -1386,6 +1386,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                 let else_shape = self.cps_bind_shape_for_expr(else_branch)?;
                 self.compatible_runtime_cps_shape(&then_shape, &else_shape)
             }
+            MExpr::Case { arms, .. } => self.compatible_case_runtime_cps_shape(arms),
             _ => None,
         }
     }
@@ -1404,8 +1405,38 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                     && self.cps_bind_value_expr_is_supported(else_branch)
                     && self.cps_bind_shape_for_expr(expr).is_some()
             }
+            MExpr::Case {
+                scrutinee, arms, ..
+            } => {
+                self.atom_is_direct_subset(scrutinee)
+                    && arms.iter().all(|arm| {
+                        if !direct_pat_supported(&arm.pattern) {
+                            return false;
+                        }
+                        self.push_scope();
+                        self.bind_pat_locals(&arm.pattern);
+                        let supported = arm
+                            .guard
+                            .as_ref()
+                            .is_none_or(|guard| self.expr_is_direct_subset(guard))
+                            && self.cps_bind_value_expr_is_supported(&arm.body);
+                        self.pop_scope();
+                        supported
+                    })
+                    && self.cps_bind_shape_for_expr(expr).is_some()
+            }
             _ => false,
         }
+    }
+
+    fn compatible_case_runtime_cps_shape(&self, arms: &[MArm]) -> Option<LocalValueShape> {
+        let mut shapes = arms
+            .iter()
+            .map(|arm| self.cps_bind_shape_for_expr(&arm.body));
+        let first = shapes.next()??;
+        shapes.try_fold(first, |acc, shape| {
+            self.compatible_runtime_cps_shape(&acc, &shape?)
+        })
     }
 
     fn compatible_runtime_cps_shape(

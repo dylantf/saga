@@ -258,8 +258,26 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                     },
                 ],
             ),
+            MExpr::Case {
+                scrutinee, arms, ..
+            } => CExpr::Case(
+                Box::new(self.lower_atom(scrutinee)),
+                arms.iter()
+                    .map(|arm| self.lower_cps_runtime_value_arm(arm))
+                    .collect(),
+            ),
             _ => self.unsupported_expr(expr),
         }
+    }
+
+    fn lower_cps_runtime_value_arm(&mut self, arm: &MArm) -> CArm {
+        self.push_scope();
+        self.bind_pat_locals(&arm.pattern);
+        let body = self.lower_cps_runtime_value_expr(&arm.body);
+        let guard = arm.guard.as_ref().map(|g| self.lower_expr(g));
+        let pat = self.lower_pat(&arm.pattern);
+        self.pop_scope();
+        CArm { pat, guard, body }
     }
 
     fn cps_adapter_value_closure(

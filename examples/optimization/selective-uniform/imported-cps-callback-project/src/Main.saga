@@ -1,12 +1,16 @@
 module Main
 
 import Std.IO.Unsafe (print_stdout)
-import Effects (read_value, apply_eff, forty_one)
+import Effects (read_value, read_again, apply_eff, forty_one)
 
 fun main : Unit -> Unit
 main () = {
   let value = {
-    let f = read_value
+    let choose = 1 == 1
+    let f = case choose {
+      True -> read_value
+      False -> read_again
+    }
     let g = f
     apply_eff g
   } with forty_one

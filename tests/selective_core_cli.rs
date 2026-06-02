@@ -171,7 +171,15 @@ fn selective_core_codegen_runs_imported_cps_callback_project() {
     assert!(monadic_stdout.contains("bind f#"), "{monadic_stdout}");
     assert!(monadic_stdout.contains("bind g#"), "{monadic_stdout}");
     assert!(
-        monadic_stdout.contains("Pure(Var(read_value))"),
+        monadic_stdout.contains("Pure(Var(read_value"),
+        "{monadic_stdout}"
+    );
+    assert!(
+        monadic_stdout.contains("Pure(Var(read_again"),
+        "{monadic_stdout}"
+    );
+    assert!(
+        monadic_stdout.contains("case Var(choose#"),
         "{monadic_stdout}"
     );
     assert!(
@@ -202,6 +210,14 @@ fn selective_core_codegen_runs_imported_cps_callback_project() {
     );
     assert!(
         inspect_stdout.contains("call 'effects':'read_value'"),
+        "{inspect_stdout}"
+    );
+    assert!(
+        inspect_stdout.contains("call 'effects':'read_again'"),
+        "{inspect_stdout}"
+    );
+    assert!(
+        inspect_stdout.contains("case Choose of"),
         "{inspect_stdout}"
     );
     assert!(!inspect_stdout.contains("make_fun"), "{inspect_stdout}");
