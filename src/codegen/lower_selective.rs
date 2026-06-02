@@ -1017,11 +1017,31 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         else {
             return false;
         };
-        if return_clause.is_some() {
+        let return_supported = return_clause
+            .as_ref()
+            .is_none_or(|arm| self.return_clause_is_cps_island_subset(arm));
+        if !return_supported {
             return false;
         }
         arms.iter()
             .all(|arm| self.handler_arm_is_cps_island_subset(arm))
+    }
+
+    fn return_clause_is_cps_island_subset(&mut self, arm: &MHandlerArm) -> bool {
+        if arm.finally_block.is_some()
+            || arm.params.len() > 1
+            || arm.params.iter().any(|p| !direct_param_supported(p))
+        {
+            return false;
+        }
+        self.push_scope();
+        for pat in &arm.params {
+            collect_pat_binders(pat, self.current_scope_mut());
+        }
+        let supported =
+            self.expr_is_direct_subset(&arm.body) || self.expr_is_cps_island_subset(&arm.body);
+        self.pop_scope();
+        supported
     }
 
     fn handler_arm_is_cps_island_subset(&mut self, arm: &MHandlerArm) -> bool {

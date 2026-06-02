@@ -1,0 +1,15 @@
+effect ReadInt {
+  fun read : Unit -> Int
+}
+
+handler add_one_return for ReadInt {
+  read () = resume 41
+  return value = value + 1
+}
+
+pub fun read_with_return : Unit -> Int
+read_with_return () =
+  read! () with add_one_return
+
+fun main : Unit -> Unit
+main () = ()

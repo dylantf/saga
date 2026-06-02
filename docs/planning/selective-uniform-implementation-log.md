@@ -165,6 +165,16 @@ The first implementation slice is:
   - Current limits: static handlers only, no return clause, no `finally`, no
     aborting/non-resuming arms, no dynamic/native/composite handlers, and no
     higher-order handler values in the selective lowerer.
+- `examples/optimization/selective-uniform/20-static-handler-return-clause.saga`
+  - Current result: emits a pure direct entry `read_with_return/1` whose
+    internal CPS island binds a generated return continuation before installing
+    handler evidence. The operation arm resumes with `41`; the handled body
+    returns through `_ReturnClauseK`, whose closure runs
+    `return value = value + 1` under the outer evidence and outer continuation.
+  - Current limits: return clauses support zero or one direct-supported
+    pattern parameter and a body in the existing direct/CPS-island subset.
+    They still do not support `finally`, abort/result delimiter semantics, or
+    broader handler forms.
 
 ## Active Design Decisions
 
@@ -258,12 +268,15 @@ The first implementation slice is:
   This is the first explicit island boundary inside an otherwise direct
   function.
 - The first handler/evidence slice supports `MExpr::With` for narrow static
-  handlers whose arms are tail-resumptive. `With` extends the current evidence
-  vector for the handled body, while handler arm closures close over the outer
-  evidence so re-performs do not recurse into the just-installed handler.
-  Handler arm `Resume` applies the captured operation continuation. Return
-  clauses, `finally`, abort arms, dynamic/native/composite handlers, and
-  handler values remain unsupported in `lower_selective`.
+  handlers whose operation arms are tail-resumptive. `With` extends the current
+  evidence vector for the handled body, while handler arm closures close over
+  the outer evidence so re-performs do not recurse into the just-installed
+  handler. Handler arm `Resume` applies the captured operation continuation.
+  Static return clauses are supported as generated continuation closures: the
+  handled body returns through the return-clause K, and the return-clause body
+  lowers under the outer evidence/continuation. `finally`, abort arms,
+  dynamic/native/composite handlers, and handler values remain unsupported in
+  `lower_selective`.
 - CPS islands still do not support higher-order CPS callable values.
 - `lower_selective` computes imported entry metadata for already-compiled
   non-stdlib user modules. Remote effect-row calls may lower to direct remote
@@ -303,8 +316,9 @@ Planned integration sequence:
 
 1. **Handler/evidence slice.** Add the first `With` lowering for a simple
    static handler so an operation can run under installed evidence in
-   `selective-core`. Status: first narrow static tail-resume case is working;
-   broader handler semantics are still open.
+   `selective-core`. Status: first narrow static tail-resume case and static
+   return-clause continuation case are working; broader handler semantics are
+   still open.
 2. **Selective entrypoint/bootstrap slice.** Add the minimal wrapper/evidence
    setup needed for a normal `main` entry to call direct or CPS-shaped code
    correctly.

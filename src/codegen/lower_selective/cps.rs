@@ -173,10 +173,6 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         else {
             self.unsupported("selective CPS with currently supports static handlers only");
         };
-        if return_clause.is_some() {
-            self.unsupported("selective CPS with return clauses");
-        }
-
         let mut canonical_effects = Vec::new();
         for arm in arms {
             if !canonical_effects.contains(&arm.op.effect) {
@@ -211,13 +207,62 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             bindings.push((evidence_var, insert));
         }
 
-        let lowered_body = self.lower_cps_expr(body, current_evidence, return_k);
-        bindings
+        let return_binding = return_clause.as_ref().map(|arm| {
+            let return_k_name = self.fresh_cps_temp("_ReturnClauseK");
+            let closure =
+                self.lower_cps_return_clause_closure(arm, evidence.clone(), return_k.clone());
+            (return_k_name, closure)
+        });
+        let body_return_k = return_binding
+            .as_ref()
+            .map(|(name, _)| CExpr::Var(name.clone()))
+            .unwrap_or(return_k);
+
+        let lowered_body = self.lower_cps_expr(body, current_evidence, body_return_k);
+        let with_evidence = bindings
             .into_iter()
             .rev()
             .fold(lowered_body, |inner, (name, value)| {
                 CExpr::Let(name, Box::new(value), Box::new(inner))
-            })
+            });
+        match return_binding {
+            Some((name, value)) => CExpr::Let(name, Box::new(value), Box::new(with_evidence)),
+            None => with_evidence,
+        }
+    }
+
+    fn lower_cps_return_clause_closure(
+        &mut self,
+        arm: &MHandlerArm,
+        outer_evidence: CExpr,
+        outer_return_k: CExpr,
+    ) -> CExpr {
+        if arm.finally_block.is_some() {
+            self.unsupported("selective CPS return-clause finally blocks");
+        }
+        if arm.params.len() > 1 {
+            self.unsupported("selective CPS return clauses with multiple params");
+        }
+
+        let params = match arm.params.as_slice() {
+            [] => vec![self.fresh_cps_temp("_ReturnValue")],
+            [pat] => lower_param_names(std::slice::from_ref(pat)),
+            _ => unreachable!(),
+        };
+
+        self.push_scope();
+        for pat in &arm.params {
+            collect_pat_binders(pat, self.current_scope_mut());
+        }
+        let body = self.lower_cps_expr(&arm.body, outer_evidence, outer_return_k);
+        let body = if arm.params.is_empty() {
+            body
+        } else {
+            self.wrap_param_match(&arm.params, &params, body)
+        };
+        self.pop_scope();
+
+        CExpr::Fun(params, Box::new(body))
     }
 
     fn lower_cps_static_handler_op_tuple(
