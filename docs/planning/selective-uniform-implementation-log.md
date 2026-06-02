@@ -141,6 +141,14 @@ The first implementation slice is:
   - Current result: emits a local CPS helper `read_value/3` and a public CPS
     island `read_plus_two/3` that calls the helper's adapter with source args
     plus `_Evidence` and a generated continuation.
+- `examples/optimization/selective-uniform/17-cps-if-island.saga`
+  - Current result: emits CPS island `if` control flow. Each branch lowers with
+    the same current continuation; effectful branches pass `_ReturnK` to the
+    operation while direct branches apply `_ReturnK` to their value.
+- `examples/optimization/selective-uniform/18-cps-case-island.saga`
+  - Current result: emits CPS island `case` control flow over the supported
+    direct pattern subset. Arms lower with the current continuation and may mix
+    effectful and direct-return bodies.
 - `examples/optimization/selective-uniform/imported-cps-island-project/`
   - Current result: inspecting `src/Main.saga` emits a remote CPS adapter call
     to `effects:read_value/3`, passing `_Evidence` and a generated
@@ -229,8 +237,10 @@ The first implementation slice is:
   builds a generated continuation closure that binds the resumed value, and a
   direct expression returns by applying the current `_ReturnK`. CPS islands can
   now call local and imported CPS adapter entries by passing source args plus
-  `_Evidence` and the current continuation. They still have no `With`,
-  `Resume`, handler runtime, or higher-order CPS callable values.
+  `_Evidence` and the current continuation. They also support `if` and `case`
+  control flow over the currently supported direct atom/pattern subset. They
+  still have no `With`, `Resume`, handler runtime, or higher-order CPS
+  callable values.
 - `lower_selective` computes imported entry metadata for already-compiled
   non-stdlib user modules. Remote effect-row calls may lower to direct remote
   calls only when that imported metadata proves a direct entry exists; otherwise
@@ -247,7 +257,7 @@ The first implementation slice is:
 3. Decide the next vertical slice:
    - add the first handler/evidence installation slice so a trivial handled
      operation can run, or
-   - support direct conditionals/cases inside CPS islands, or
+   - support higher-order CPS callable values at island boundaries, or
    - start moving the proven direct path into the real build path.
 4. Keep updating focused fixtures/tests as each tiny subset starts working.
 
@@ -463,6 +473,20 @@ The first implementation slice is:
   The main file still owns classification and lowering behavior; future splits
   should move whole responsibility groups such as classification, direct
   lowering, and CPS island lowering.
+- Added CPS island `if` and `case` support:
+  - `if` lowers to a Core `case` over the direct condition atom, with both
+    branches lowered under the current continuation;
+  - `case` lowers each arm under the current continuation, preserving direct
+    guard lowering and supported pattern scopes;
+  - added fixtures `17-cps-if-island.saga` and `18-cps-case-island.saga` plus
+    focused `selective_core` tests.
+- Split `lower_selective` into responsibility modules:
+  - root `lower_selective.rs`: orchestration, classification, entry metadata
+    computation, call-shape resolution, subset analysis, and shared state;
+  - `lower_selective/direct.rs`: direct expression/app/intrinsic/atom/pattern
+    lowering;
+  - `lower_selective/cps.rs`: CPS island lowering;
+  - `lower_selective/support.rs`: small data types and helper functions.
 - Verification:
   - `cargo run --bin saga -- inspect examples/optimization/selective-uniform/01-pure-direct.saga --stage selective-core`
     emits direct `add1/1`, `twice/1`, and `main/1`.
@@ -491,6 +515,12 @@ The first implementation slice is:
       returns `Value + 1`.
     - `cargo run --bin saga --quiet -- inspect examples/optimization/selective-uniform/16-cps-helper-call-island.saga --stage selective-core`
       emits `apply 'read_value'/3('unit', _Evidence, fun (_CpsBindArg0) -> ...)`.
+    - `cargo run --bin saga --quiet -- inspect examples/optimization/selective-uniform/17-cps-if-island.saga --stage selective-core`
+      emits `if` as a Core `case` whose effect branch passes `_ReturnK` and
+      whose direct branch applies `_ReturnK(0)`.
+    - `cargo run --bin saga --quiet -- inspect examples/optimization/selective-uniform/18-cps-case-island.saga --stage selective-core`
+      emits `case` arms that mix an effectful arm with a direct `_ReturnK(0)`
+      arm.
     - `cargo run --bin saga --quiet -- inspect src/Main.saga --stage selective-core`
       from `imported-cps-island-project` emits
       `call 'effects':'read_value'('unit', _Evidence, fun (_CpsBindArg0) -> ...)`.

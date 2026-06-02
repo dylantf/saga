@@ -516,6 +516,63 @@ main () = ()
 }
 
 #[test]
+fn selective_core_lowers_if_in_cps_island() {
+    let src = r#"
+effect ReadInt {
+  fun read : Unit -> Int
+}
+
+pub fun maybe_read : Bool -> Int needs {ReadInt}
+maybe_read use_read =
+  if use_read then read! () else 0
+
+fun main : Unit -> Unit
+main () = ()
+"#;
+    let out = emit_selective_core(src);
+    assert!(out.contains("'maybe_read'/3"), "{out}");
+    assert!(out.contains("case Use_read of"), "{out}");
+    assert!(
+        out.contains("call 'std_evidence_bridge':'find_evidence'"),
+        "{out}"
+    );
+    assert!(out.contains("('unit', _Evidence, _ReturnK)"), "{out}");
+    assert!(out.contains("apply _ReturnK(0)"), "{out}");
+    assert_selective_core_compiles(src);
+}
+
+#[test]
+fn selective_core_lowers_case_in_cps_island() {
+    let src = r#"
+effect ReadInt {
+  fun read : Unit -> Int
+}
+
+type Choice = UseEffect | UseDefault
+
+pub fun choose_read : Choice -> Int needs {ReadInt}
+choose_read choice = case choice {
+  UseEffect -> read! ()
+  UseDefault -> 0
+}
+
+fun main : Unit -> Unit
+main () = ()
+"#;
+    let out = emit_selective_core(src);
+    assert!(out.contains("'choose_read'/3"), "{out}");
+    assert!(out.contains("case Choice of"), "{out}");
+    assert!(out.contains("'_script_UseEffect'"), "{out}");
+    assert!(out.contains("'_script_UseDefault'"), "{out}");
+    assert!(
+        out.contains("call 'std_evidence_bridge':'find_evidence'"),
+        "{out}"
+    );
+    assert!(out.contains("apply _ReturnK(0)"), "{out}");
+    assert_selective_core_compiles(src);
+}
+
+#[test]
 fn selective_core_lowers_effect_row_function_with_direct_body() {
     let out = emit_selective_core(
         r#"
