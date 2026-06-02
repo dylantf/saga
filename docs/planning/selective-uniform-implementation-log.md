@@ -1024,3 +1024,25 @@ boundaries exist.
   - imported `Postgres.query`-style specialization remains future work because
     imported bodies must be lowered with their own resolution metadata while
     still seeing caller-provided static-handler facts.
+- Added conservative handler-install elision for the local static-handler
+  slices:
+  - if a static `With` has no return clause, no `finally`, only
+    tail-resumptive arms in the current direct-call subset, and the body can run
+    without any CPS call observing the newly-installed evidence, selective
+    lowering skips `std_evidence_bridge:insert_canonical`;
+  - the elision scanner allows direct-called `Yield`s for handled operations and
+    local CPS helper calls only when those helpers can also be inline-specialized
+    under the same static handler facts;
+  - direct `read () = resume 41`, captured-value
+    `db_url () = resume config`, and local `query () with { db_url () = ... }`
+    now avoid both evidence lookup on the optimized path and handler evidence
+    installation;
+  - handlers with `finally` still install evidence and use the generic handler
+    path, preserving cleanup semantics;
+  - opaque local CPS callables, including current trait method closures, are
+    treated as possibly observing the elided handler evidence. They force the
+    generic install path until trait/dict specialization can provide concrete
+    method-effect facts;
+  - fallback helper definitions can still be emitted and may still contain
+    `find_evidence`; removing unused fallback definitions is a later Core
+    cleanup/dead-code problem, not part of this elision pass.

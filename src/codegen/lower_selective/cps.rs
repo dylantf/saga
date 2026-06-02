@@ -879,6 +879,11 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         else {
             self.unsupported("selective CPS with currently supports static handlers only");
         };
+
+        if self.can_elide_static_handler_install(arms, return_clause.as_ref(), body) {
+            return self.lower_cps_with_elided_static_handler(arms, body, evidence, return_k);
+        }
+
         let mut canonical_effects = Vec::new();
         for arm in arms {
             if !canonical_effects.contains(&arm.op.effect) {
@@ -947,6 +952,258 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             Some((name, value)) => CExpr::Let(name, Box::new(value), Box::new(apply_outer_return)),
             None => apply_outer_return,
         }
+    }
+
+    fn lower_cps_with_elided_static_handler(
+        &mut self,
+        arms: &[MHandlerArm],
+        body: &MExpr,
+        evidence: CExpr,
+        return_k: CExpr,
+    ) -> CExpr {
+        self.static_handler_stack.push(arms.to_vec());
+        let body_return_k = self.identity_cps_continuation();
+        let lowered_body = self.lower_cps_expr(body, evidence, body_return_k);
+        self.static_handler_stack.pop();
+
+        let with_result = self.fresh_cps_temp("_WithResult");
+        CExpr::Let(
+            with_result.clone(),
+            Box::new(lowered_body),
+            Box::new(CExpr::Apply(
+                Box::new(return_k),
+                vec![CExpr::Var(with_result)],
+            )),
+        )
+    }
+
+    fn can_elide_static_handler_install(
+        &mut self,
+        arms: &[MHandlerArm],
+        return_clause: Option<&MHandlerArm>,
+        body: &MExpr,
+    ) -> bool {
+        if return_clause.is_some() || arms.is_empty() {
+            return false;
+        }
+        if !arms
+            .iter()
+            .all(|arm| self.static_handler_arm_can_direct_call(arm))
+        {
+            return false;
+        }
+
+        let handled_effects = self.static_handler_effects(arms);
+        self.static_handler_stack.push(arms.to_vec());
+        let can_elide = self.expr_can_run_with_elided_static_handler(body, &handled_effects);
+        self.static_handler_stack.pop();
+        can_elide
+    }
+
+    fn static_handler_arm_can_direct_call(&mut self, arm: &MHandlerArm) -> bool {
+        arm.finally_block.is_none()
+            && self.handler_info.resumption.get(&arm.id) == Some(&ResumptionKind::TailResumptive)
+            && !self.expr_contains_yield(&arm.body)
+            && self.direct_call_params_supported(&arm.params)
+            && self.handler_arm_expr_is_cps_island_subset(&arm.body)
+    }
+
+    fn static_handler_effects(&self, arms: &[MHandlerArm]) -> Vec<String> {
+        let mut effects: Vec<String> = Vec::new();
+        for arm in arms {
+            if !effects
+                .iter()
+                .any(|effect| Self::effect_names_match(effect, &arm.op.effect))
+            {
+                effects.push(arm.op.effect.clone());
+            }
+        }
+        effects
+    }
+
+    fn expr_can_run_with_elided_static_handler(
+        &mut self,
+        expr: &MExpr,
+        handled_effects: &[String],
+    ) -> bool {
+        if self.expr_is_direct_subset(expr) {
+            return true;
+        }
+
+        match expr {
+            MExpr::Yield { op, args, .. } => {
+                if self.effect_is_handled_by_elided_static_handler(&op.effect, handled_effects) {
+                    self.static_direct_call_arm_for_yield(op, args).is_some()
+                } else {
+                    args.iter().all(|arg| self.atom_is_direct_subset(arg))
+                }
+            }
+            MExpr::Bind {
+                var, value, body, ..
+            } => {
+                let value_supported = self
+                    .expr_can_run_with_elided_static_handler(value, handled_effects)
+                    || self.cps_bind_value_expr_is_supported(value);
+                if !value_supported {
+                    return false;
+                }
+
+                let local_shape = self
+                    .direct_local_shape_for_expr(value)
+                    .or_else(|| self.cps_bind_shape_for_expr(value));
+                self.push_scope();
+                self.current_scope_mut().insert(var.name.clone());
+                if let Some(shape) = local_shape {
+                    self.current_shape_scope_mut()
+                        .insert(var.name.clone(), shape);
+                }
+                let supported = self.expr_can_run_with_elided_static_handler(body, handled_effects);
+                self.pop_scope();
+                supported
+            }
+            MExpr::App { head, args, .. } => {
+                if self.cps_call_effects_intersect_elided_static_handler(head, handled_effects) {
+                    self.can_static_handler_specialize_local_cps_call_without_evidence(
+                        head,
+                        args,
+                        handled_effects,
+                    )
+                } else {
+                    self.cps_app_is_supported_without_elided_effects(head, args)
+                }
+            }
+            MExpr::If {
+                cond,
+                then_branch,
+                else_branch,
+                ..
+            } => {
+                self.atom_is_direct_subset(cond)
+                    && self.expr_can_run_with_elided_static_handler(then_branch, handled_effects)
+                    && self.expr_can_run_with_elided_static_handler(else_branch, handled_effects)
+            }
+            MExpr::Case {
+                scrutinee, arms, ..
+            } => {
+                if !self.atom_is_direct_subset(scrutinee) {
+                    return false;
+                }
+                arms.iter().all(|arm| {
+                    if !direct_pat_supported(&arm.pattern) {
+                        return false;
+                    }
+                    self.push_scope();
+                    self.bind_pat_locals(&arm.pattern);
+                    let supported = arm
+                        .guard
+                        .as_ref()
+                        .is_none_or(|guard| self.expr_is_direct_subset(guard))
+                        && self.expr_can_run_with_elided_static_handler(&arm.body, handled_effects);
+                    self.pop_scope();
+                    supported
+                })
+            }
+            MExpr::With { .. } => false,
+            _ => false,
+        }
+    }
+
+    fn cps_app_is_supported_without_elided_effects(&mut self, head: &Atom, args: &[Atom]) -> bool {
+        if let Some((source_arity, adapter_arity, _effects)) = self.cps_lambda_arity_for_atom(head)
+            && self.lambda_is_cps_subset(head)
+        {
+            return source_arity == args.len()
+                && adapter_arity == args.len() + 2
+                && args.iter().all(|arg| self.atom_is_cps_value_subset(arg));
+        }
+
+        let call_supported = match self.call_shape(head) {
+            Some(CallShape::Cps {
+                source_arity,
+                adapter_arity,
+                ..
+            })
+            | Some(CallShape::LocalCpsCallable {
+                source_arity,
+                adapter_arity,
+                ..
+            }) => source_arity == args.len() && adapter_arity == args.len() + 2,
+            _ => false,
+        };
+        call_supported && args.iter().all(|arg| self.atom_is_cps_value_subset(arg))
+    }
+
+    fn cps_call_effects_intersect_elided_static_handler(
+        &mut self,
+        head: &Atom,
+        handled_effects: &[String],
+    ) -> bool {
+        match self.call_shape(head) {
+            Some(CallShape::Cps { effects, .. }) => effects.iter().any(|effect| {
+                self.effect_is_handled_by_elided_static_handler(effect, handled_effects)
+            }),
+            Some(CallShape::LocalCpsCallable { .. }) => true,
+            _ => false,
+        }
+    }
+
+    fn effect_is_handled_by_elided_static_handler(
+        &self,
+        effect: &str,
+        handled_effects: &[String],
+    ) -> bool {
+        handled_effects
+            .iter()
+            .any(|handled| Self::effect_names_match(handled, effect))
+    }
+
+    fn can_static_handler_specialize_local_cps_call_without_evidence(
+        &mut self,
+        head: &Atom,
+        args: &[Atom],
+        handled_effects: &[String],
+    ) -> bool {
+        let local_name = match head {
+            Atom::Var { name, .. } => name.name.clone(),
+            _ => return false,
+        };
+        if self.static_handler_inline_stack.contains(&local_name) {
+            return false;
+        }
+
+        let Some(CallShape::Cps {
+            module: None,
+            source_arity,
+            adapter_arity,
+            effects,
+            ..
+        }) = self.call_shape(head)
+        else {
+            return false;
+        };
+        if effects.is_empty()
+            || source_arity != args.len()
+            || adapter_arity != args.len() + 2
+            || !self.active_static_handlers_cover_effects(&effects)
+            || !args.iter().all(|arg| self.atom_is_direct_subset(arg))
+        {
+            return false;
+        }
+
+        let Some(fb) = self.local_fun_bindings.get(&local_name).cloned() else {
+            return false;
+        };
+        if fb.guard.is_some() || fb.params.iter().any(|p| !direct_param_supported(p)) {
+            return false;
+        }
+
+        self.static_handler_inline_stack.push(local_name);
+        self.push_scope();
+        self.bind_fun_param_locals(&fb);
+        let supported = self.expr_can_run_with_elided_static_handler(&fb.body, handled_effects);
+        self.pop_scope();
+        self.static_handler_inline_stack.pop();
+        supported
     }
 
     fn lower_cps_return_clause_closure(

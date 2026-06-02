@@ -745,6 +745,10 @@ main () = {
         !out.contains("call 'std_evidence_bridge':'find_evidence'"),
         "{out}"
     );
+    assert!(
+        !out.contains("call 'std_evidence_bridge':'insert_canonical'"),
+        "{out}"
+    );
     assert!(out.contains("let <Value>"), "{out}");
     assert!(out.contains("apply fun (_CpsResult"), "{out}");
     assert!(out.contains("call 'erlang':'+'"), "{out}");
@@ -784,6 +788,10 @@ main () = {
     let out = emit_selective_core(src);
     assert!(
         !out.contains("call 'std_evidence_bridge':'find_evidence'"),
+        "{out}"
+    );
+    assert!(
+        !out.contains("call 'std_evidence_bridge':'insert_canonical'"),
         "{out}"
     );
     assert!(out.contains("let <Config>"), "{out}");
@@ -827,6 +835,10 @@ main () = {
 "#;
     let out = emit_selective_core(src);
     assert!(!out.contains("apply 'query'/3"), "{out}");
+    assert!(
+        !out.contains("call 'std_evidence_bridge':'insert_canonical'"),
+        "{out}"
+    );
     assert!(out.contains("let <Config>"), "{out}");
     assert!(out.contains("let <Value>"), "{out}");
     assert!(out.contains("call 'erlang':'+'"), "{out}");
@@ -934,6 +946,10 @@ main () = {
         out.contains("call 'std_evidence_bridge':'find_evidence'"),
         "{out}"
     );
+    assert!(
+        out.contains("call 'std_evidence_bridge':'insert_canonical'"),
+        "{out}"
+    );
     assert!(out.contains("_FinallyValue"), "{out}");
     assert!(out.contains("_FinallyCleanup"), "{out}");
     assert!(out.contains("_WithResult"), "{out}");
@@ -968,6 +984,10 @@ main () = {
 }
 "#;
     let out = emit_selective_core(src);
+    assert!(
+        out.contains("call 'std_evidence_bridge':'insert_canonical'"),
+        "{out}"
+    );
     assert!(out.contains("_FinallyValue"), "{out}");
     assert!(out.contains("_FinallyCleanup"), "{out}");
     assert!(out.contains("_WithResult"), "{out}");
