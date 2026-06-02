@@ -451,6 +451,10 @@ main () = ()
     assert!(out.contains("'__dict_Readable_Box'/1"), "{out}");
     assert!(out.contains("'__dict_Readable_Std_Int_Int'/0"), "{out}");
     assert!(out.contains("call 'erlang':'element'"), "{out}");
+    assert!(
+        out.contains("let <___anf_v0> =\n                        41"),
+        "{out}"
+    );
     assert_selective_core_eval_stdout_contains(
         src,
         "io:format(\"~p~n\", ['_script':run_generic_trait_method(unit)]), init:stop().",

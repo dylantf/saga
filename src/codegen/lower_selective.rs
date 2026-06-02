@@ -1408,15 +1408,17 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         }
     }
 
-    fn known_dict_value_for_expr(&self, expr: &MExpr) -> Option<KnownDictValue> {
+    fn known_dict_value_for_expr(&mut self, expr: &MExpr) -> Option<KnownDictValue> {
         let MExpr::App { head, args, .. } = expr else {
             return None;
         };
         let Atom::DictRef { name, .. } = head else {
             return None;
         };
-        let constructor = self.local_dict_constructors.get(name)?;
-        if !constructor.dict_params.is_empty() || !args.is_empty() {
+        let constructor = self.local_dict_constructors.get(name)?.clone();
+        if constructor.dict_params.len() != args.len()
+            || args.iter().any(|arg| !self.atom_is_direct_subset(arg))
+        {
             return None;
         }
 
@@ -1427,7 +1429,11 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             };
             methods.push(atom.clone());
         }
-        Some(KnownDictValue { methods })
+        Some(KnownDictValue {
+            dict_params: constructor.dict_params.clone(),
+            dict_args: args.to_vec(),
+            methods,
+        })
     }
 
     fn known_cps_lambda_for_expr(&self, expr: &MExpr) -> Option<KnownCpsLambda> {
@@ -1440,18 +1446,24 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         let Atom::Var { name, .. } = dict else {
             return None;
         };
-        let method = self
-            .known_dict_value(&name.name)?
-            .methods
-            .get(*method_index)?
-            .clone();
+        let known_dict = self.known_dict_value(&name.name)?;
+        let method = known_dict.methods.get(*method_index)?.clone();
         let Atom::Lambda { params, body, .. } = method else {
             return None;
         };
         if params.iter().any(|param| !direct_param_supported(param)) {
             return None;
         }
-        Some(KnownCpsLambda { params, body })
+        let dict_bindings = known_dict
+            .dict_params
+            .into_iter()
+            .zip(known_dict.dict_args)
+            .collect();
+        Some(KnownCpsLambda {
+            dict_bindings,
+            params,
+            body,
+        })
     }
 
     fn cps_bind_value_expr_is_supported(&mut self, expr: &MExpr) -> bool {

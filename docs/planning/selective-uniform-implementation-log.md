@@ -1107,3 +1107,28 @@ boundaries exist.
   - the generic dict constructor fallback is still emitted, and parameterized,
     imported, and branch-shaped dictionaries still use the normal dict-passing
     path for now.
+- Added the parameterized-dict specialization canary:
+  - known dict values now carry constructor dict params and the actual dict
+    arguments used to build them;
+  - known method lambdas carry those captured dict bindings, so inlining a
+    parameterized method body can bind `__dict_Trait_a` to the concrete dict
+    argument from the call site;
+  - local static-handler helper specialization now aliases known dict arguments
+    onto helper parameters, which lets a generic helper like `serialize` expose
+    the concrete dict it was called with;
+  - the `Box a` over `Int` shape now specializes through the outer dict method
+    and then through the inner dict method, allowing the inner effect operation
+    to use the existing direct Reader/config-style optimization;
+  - this is intentionally still a canary: it does not handle imported dict
+    constructors, branch-shaped dict values, dead closure lets, or handler
+    install elision for the new parameterized facts yet.
+- Runtime ABI note from trying the selective backend end-to-end:
+  - selective app code currently expects selectively lowered stdlib dict
+    constructors, e.g. a nullary `std_string:__dict_Debug_String/0`;
+  - the stdlib cache is still built with the uniform/monadic backend, which
+    exports the same dict constructor with the uniform CPS ABI, e.g. `/2`;
+  - this mixed-backend boundary causes runtime missing-function errors for
+    selective app code that calls imported stdlib dictionaries directly;
+  - we backed out the partial backend-aware stdlib-cache experiment for now.
+    The final fallback/module-boundary design needs one consistent ABI or
+    explicit adapters for fallback/public dict constructors and functions.

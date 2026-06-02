@@ -127,8 +127,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         if let Some(known_lambda) = self.known_cps_lambda_for_expr(value)
             && let Some(local_shape) = self.cps_bind_shape_for_expr(value)
         {
-            let lowered_value =
-                self.lower_cps_lambda_atom(&known_lambda.params, &known_lambda.body);
+            let lowered_value = self.lower_known_cps_lambda_value(&known_lambda);
             self.push_scope();
             self.current_scope_mut().insert(var.name.clone());
             self.current_shape_scope_mut()
@@ -525,19 +524,31 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         evidence: CExpr,
         return_k: CExpr,
     ) -> Option<CExpr> {
-        let KnownCpsLambda { params, body } = self.known_cps_lambda(name)?;
+        let KnownCpsLambda {
+            dict_bindings: atom_dict_bindings,
+            params,
+            body,
+        } = self.known_cps_lambda(name)?;
         if params.iter().any(|p| !direct_param_supported(p)) {
             return None;
         }
         self.assert_app_arity(name, args.len(), params.len());
 
+        let dict_bindings = self.lower_known_cps_lambda_dict_bindings(&atom_dict_bindings)?;
         let arg_names = lower_param_names(&params);
         let lowered_args: Vec<CExpr> = args
             .iter()
             .map(|arg| self.lower_cps_arg_atom(arg, None))
             .collect();
+        let known_dict_aliases = self.known_dict_aliases_for_bindings(&atom_dict_bindings);
 
         self.push_scope();
+        for (name, _) in &dict_bindings {
+            self.current_scope_mut().insert(name.clone());
+        }
+        for (name, dict) in known_dict_aliases {
+            self.current_known_dict_value_scope_mut().insert(name, dict);
+        }
         for pat in &params {
             self.bind_pat_locals(pat);
         }
@@ -545,15 +556,123 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         let lowered_body = self.wrap_param_match(&params, &arg_names, lowered_body);
         self.pop_scope();
 
+        let lowered_body = arg_names
+            .into_iter()
+            .zip(lowered_args)
+            .rev()
+            .fold(lowered_body, |body, (name, value)| {
+                CExpr::Let(name, Box::new(value), Box::new(body))
+            });
         Some(
-            arg_names
+            dict_bindings
                 .into_iter()
-                .zip(lowered_args)
                 .rev()
                 .fold(lowered_body, |body, (name, value)| {
-                    CExpr::Let(name, Box::new(value), Box::new(body))
+                    CExpr::Let(core_var(&name), Box::new(value), Box::new(body))
                 }),
         )
+    }
+
+    fn lower_known_cps_lambda_value(&mut self, known_lambda: &KnownCpsLambda) -> CExpr {
+        if known_lambda
+            .params
+            .iter()
+            .any(|p| !direct_param_supported(p))
+        {
+            self.unsupported("known CPS lambda with unsupported parameter pattern");
+        }
+
+        let dict_bindings = self
+            .lower_known_cps_lambda_dict_bindings(&known_lambda.dict_bindings)
+            .unwrap_or_else(|| self.unsupported("known CPS lambda with unsupported dict binding"));
+        let known_dict_aliases = self.known_dict_aliases_for_bindings(&known_lambda.dict_bindings);
+        let direct_params = lower_param_names(&known_lambda.params);
+        let evidence_name = self.fresh_cps_temp("_LambdaEvidence");
+        let return_k_name = self.fresh_cps_temp("_LambdaK");
+        let mut lambda_params = direct_params.clone();
+        lambda_params.push(evidence_name.clone());
+        lambda_params.push(return_k_name.clone());
+
+        self.push_scope();
+        for (name, _) in &dict_bindings {
+            self.current_scope_mut().insert(name.clone());
+        }
+        for (name, dict) in known_dict_aliases {
+            self.current_known_dict_value_scope_mut().insert(name, dict);
+        }
+        for pat in &known_lambda.params {
+            self.bind_pat_locals(pat);
+        }
+        let lowered_body = self.lower_cps_expr(
+            &known_lambda.body,
+            CExpr::Var(evidence_name),
+            CExpr::Var(return_k_name),
+        );
+        let lowered_body =
+            self.wrap_param_match(&known_lambda.params, &direct_params, lowered_body);
+        self.pop_scope();
+
+        let lowered_body = dict_bindings
+            .into_iter()
+            .rev()
+            .fold(lowered_body, |body, (name, value)| {
+                CExpr::Let(core_var(&name), Box::new(value), Box::new(body))
+            });
+        CExpr::Fun(lambda_params, Box::new(lowered_body))
+    }
+
+    fn lower_known_cps_lambda_dict_bindings(
+        &mut self,
+        dict_bindings: &[(String, Atom)],
+    ) -> Option<Vec<(String, CExpr)>> {
+        let mut lowered = Vec::with_capacity(dict_bindings.len());
+        for (name, atom) in dict_bindings {
+            if !self.atom_is_direct_subset(atom) {
+                return None;
+            }
+            lowered.push((name.clone(), self.lower_atom(atom)));
+        }
+        Some(lowered)
+    }
+
+    fn known_dict_aliases_for_bindings(
+        &self,
+        dict_bindings: &[(String, Atom)],
+    ) -> Vec<(String, KnownDictValue)> {
+        dict_bindings
+            .iter()
+            .filter_map(|(binding_name, value)| {
+                let Atom::Var { name, .. } = value else {
+                    return None;
+                };
+                self.known_dict_value(&name.name)
+                    .map(|dict| (binding_name.clone(), dict))
+            })
+            .collect()
+    }
+
+    fn known_dict_aliases_for_params(
+        &self,
+        params: &[Pat],
+        args: &[Atom],
+    ) -> Vec<(String, KnownDictValue)> {
+        params
+            .iter()
+            .zip(args)
+            .filter_map(|(param, arg)| {
+                let Pat::Var {
+                    name: param_name, ..
+                } = param
+                else {
+                    return None;
+                };
+                let Atom::Var { name: arg_name, .. } = arg else {
+                    return None;
+                };
+                self.known_dict_value(&arg_name.name)
+                    .map(|dict| (param_name.clone(), dict))
+            })
+            .collect()
     }
 
     fn lower_normal_cps_call(
@@ -635,11 +754,15 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             return None;
         }
         let bindings = self.direct_call_param_bindings(&fb.params, args)?;
+        let known_dict_aliases = self.known_dict_aliases_for_params(&fb.params, args);
 
         self.static_handler_inline_stack
             .push(function_name.to_string());
         self.push_scope();
         self.bind_fun_param_locals(&fb);
+        for (name, dict) in known_dict_aliases {
+            self.current_known_dict_value_scope_mut().insert(name, dict);
+        }
         let supported = self.expr_is_cps_island_subset(&fb.body);
         let lowered_body = supported.then(|| self.lower_cps_expr(&fb.body, evidence, return_k));
         self.pop_scope();
