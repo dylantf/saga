@@ -33,14 +33,14 @@ pub(super) struct FunctionEntryInfo {
     pub(super) cps_adapter_entry_arity: Option<usize>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct HofDirectSpecialization {
     pub(super) entry_name: String,
     pub(super) source_arity: usize,
     pub(super) callback_params: Vec<HofCallbackParam>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct HofCallbackParam {
     pub(super) index: usize,
     pub(super) source_arity: usize,
@@ -114,6 +114,7 @@ pub(super) enum LocalValueShape {
         source_arity: usize,
         adapter_arity: usize,
         effects: Vec<String>,
+        hof_direct_specialization: Option<HofDirectSpecialization>,
     },
     RuntimeCpsCallable {
         source_arity: usize,

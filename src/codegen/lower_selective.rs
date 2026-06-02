@@ -477,6 +477,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                 source_arity,
                 adapter_arity,
                 effects,
+                ..
             }) = self.local_shape(&name.name)
         {
             return Some(CallShape::Cps {
@@ -1270,6 +1271,9 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                 source_arity,
                 adapter_arity,
                 effects,
+                hof_direct_specialization: self
+                    .hof_direct_specialization_for_head(atom)
+                    .map(|(_, specialization)| specialization),
             }),
             _ => None,
         }
@@ -1379,6 +1383,13 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         left: &LocalValueShape,
         right: &LocalValueShape,
     ) -> Option<LocalValueShape> {
+        if let (LocalValueShape::CpsCallable { .. }, LocalValueShape::CpsCallable { .. }) =
+            (left, right)
+            && left == right
+        {
+            return Some(left.clone());
+        }
+
         match (
             self.runtime_cps_arities(left),
             self.runtime_cps_arities(right),

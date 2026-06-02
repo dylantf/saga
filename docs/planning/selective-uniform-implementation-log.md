@@ -959,3 +959,15 @@ boundaries exist.
   selective-core` can still have incomplete imported bodies in its convenience
   context, so this optimization is asserted through project `run/build` output.
   The production project build path has the full imported body and specializes.
+- Finished the first HOF specialization cleanup by preserving direct-HOF
+  specialization metadata on `LocalValueShape::CpsCallable`:
+  - `let hof = apply_eff; hof pure_value` now selects
+    `__saga_direct_hof_apply_eff/1` instead of losing the optimization when the
+    HOF is used as a local value;
+  - imported HOF aliases follow the same path, so the imported pure-callback
+    specialization project now aliases `apply_eff` before calling it;
+  - if a branch/case produces the exact same known CPS callable shape on every
+    arm, the known shape is preserved; genuinely dynamic choices still fall
+    back to runtime CPS callable values;
+  - this keeps the correctness fallback intact while avoiding a performance
+    cliff for ordinary `let hof = SomeModule.apply_eff` code.

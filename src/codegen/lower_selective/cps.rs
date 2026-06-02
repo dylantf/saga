@@ -315,7 +315,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         Some((module, specialization))
     }
 
-    fn hof_direct_specialization_for_head(
+    pub(super) fn hof_direct_specialization_for_head(
         &self,
         head: &Atom,
     ) -> Option<(Option<String>, HofDirectSpecialization)> {
@@ -324,6 +324,15 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             Atom::QualifiedRef { source, .. } => (None, *source),
             _ => return None,
         };
+        if let Some(local_name) = local_name
+            && let Some(LocalValueShape::CpsCallable {
+                module,
+                hof_direct_specialization: Some(specialization),
+                ..
+            }) = self.local_shape(local_name)
+        {
+            return Some((module, specialization));
+        }
         if let Some(local_name) = local_name
             && let Some(specialization) = self.local_hof_direct_specializations.get(local_name)
         {
