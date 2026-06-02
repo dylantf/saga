@@ -16,7 +16,7 @@ use crate::codegen::CodegenContext;
 use crate::codegen::cerl::{CArm, CExpr, CFunDef, CLit, CModule, CPat};
 use crate::codegen::lower::util::{core_var, lower_lit_atom, mangle_ctor_atom};
 use crate::codegen::monadic::ir::{
-    Atom, EffectInfo, EffectOpRef, MArm, MDecl, MExpr, MFunBinding, MProgram,
+    Atom, EffectInfo, EffectOpRef, MArm, MDecl, MExpr, MFunBinding, MProgram, MVar,
 };
 use crate::codegen::resolve::{ConstructorAtoms, ResolutionMap, ResolvedCodegenKind};
 use crate::codegen::runtime_shape::RuntimeFunctionShape;
@@ -59,6 +59,7 @@ struct DirectLowerer<'a, 'info> {
     /// During fixed-point classification this permits recursive self-calls
     /// before the function has been added to `direct_body_functions`.
     direct_candidate_function: Option<String>,
+    cps_temp_counter: usize,
     locals: Vec<HashSet<String>>,
     local_shapes: Vec<HashMap<String, LocalValueShape>>,
 }
@@ -146,6 +147,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             local_function_entries: HashMap::new(),
             imported_function_entries: HashMap::new(),
             direct_candidate_function: None,
+            cps_temp_counter: 0,
             locals: vec![HashSet::new()],
             local_shapes: vec![HashMap::new()],
         }
@@ -428,14 +430,24 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         supported
     }
 
-    fn can_lower_cps_fun_binding(&self, fb: &MFunBinding) -> bool {
+    fn can_lower_cps_fun_binding(&mut self, fb: &MFunBinding) -> bool {
         if fb.guard.is_some() || fb.params.iter().any(|p| !direct_param_supported(p)) {
             return false;
         }
-        matches!(
+        if !matches!(
             self.callable_type_shapes.get(&fb.name),
             Some(RuntimeFunctionShape::Cps(_))
-        ) && self.expr_is_cps_island_subset(&fb.body)
+        ) {
+            return false;
+        }
+
+        self.push_scope();
+        for pat in &fb.params {
+            collect_pat_binders(pat, self.current_scope_mut());
+        }
+        let supported = self.expr_is_cps_island_subset(&fb.body);
+        self.pop_scope();
+        supported
     }
 
     fn lower_fun_binding(&mut self, fb: &MFunBinding) -> CFunDef {
@@ -487,7 +499,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         for pat in &fb.params {
             collect_pat_binders(pat, self.current_scope_mut());
         }
-        let lowered_body = self.lower_cps_expr(&fb.body);
+        let lowered_body = self.lower_cps_expr(&fb.body, CExpr::Var("_ReturnK".to_string()));
         let body = self.wrap_param_match(&fb.params, &direct_params, lowered_body);
         self.pop_scope();
 
@@ -636,14 +648,59 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         }
     }
 
-    fn lower_cps_expr(&mut self, expr: &MExpr) -> CExpr {
+    fn lower_cps_expr(&mut self, expr: &MExpr, return_k: CExpr) -> CExpr {
         match expr {
-            MExpr::Yield { op, args, .. } => self.lower_cps_yield(op, args),
+            MExpr::Yield { op, args, .. } => self.lower_cps_yield(op, args, return_k),
+            MExpr::Bind {
+                var, value, body, ..
+            } => self.lower_cps_bind(var, value, body, return_k),
+            _ if self.expr_is_direct_subset(expr) => {
+                CExpr::Apply(Box::new(return_k), vec![self.lower_expr(expr)])
+            }
             _ => self.unsupported_expr(expr),
         }
     }
 
-    fn lower_cps_yield(&mut self, op: &EffectOpRef, args: &[Atom]) -> CExpr {
+    fn lower_cps_bind(
+        &mut self,
+        var: &MVar,
+        value: &MExpr,
+        body: &MExpr,
+        return_k: CExpr,
+    ) -> CExpr {
+        if self.expr_is_direct_subset(value) {
+            let local_shape = self.direct_local_shape_for_expr(value);
+            let lowered_value = self.lower_expr(value);
+            self.push_scope();
+            self.current_scope_mut().insert(var.name.clone());
+            if let Some(shape) = local_shape {
+                self.current_shape_scope_mut()
+                    .insert(var.name.clone(), shape);
+            }
+            let lowered_body = self.lower_cps_expr(body, return_k);
+            self.pop_scope();
+            return CExpr::Let(
+                core_var(&var.name),
+                Box::new(lowered_value),
+                Box::new(lowered_body),
+            );
+        }
+
+        let k_arg = self.fresh_cps_temp("_CpsBindArg");
+        self.push_scope();
+        self.current_scope_mut().insert(var.name.clone());
+        let lowered_body = self.lower_cps_expr(body, return_k);
+        self.pop_scope();
+        let k_body = CExpr::Let(
+            core_var(&var.name),
+            Box::new(CExpr::Var(k_arg.clone())),
+            Box::new(lowered_body),
+        );
+        let k_fun = CExpr::Fun(vec![k_arg], Box::new(k_body));
+        self.lower_cps_expr(value, k_fun)
+    }
+
+    fn lower_cps_yield(&mut self, op: &EffectOpRef, args: &[Atom], return_k: CExpr) -> CExpr {
         let find_call = CExpr::Call(
             "std_evidence_bridge".to_string(),
             "find_evidence".to_string(),
@@ -660,7 +717,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
 
         let mut apply_args: Vec<CExpr> = args.iter().map(|arg| self.lower_atom(arg)).collect();
         apply_args.push(CExpr::Var("_Evidence".to_string()));
-        apply_args.push(CExpr::Var("_ReturnK".to_string()));
+        apply_args.push(return_k);
         CExpr::Apply(Box::new(op_closure), apply_args)
     }
 
@@ -1274,11 +1331,38 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         }
     }
 
-    fn expr_is_cps_island_subset(&self, expr: &MExpr) -> bool {
+    fn expr_is_cps_island_subset(&mut self, expr: &MExpr) -> bool {
         match expr {
             MExpr::Yield { args, .. } => args.iter().all(|arg| self.atom_is_direct_subset(arg)),
-            _ => false,
+            MExpr::Bind {
+                var, value, body, ..
+            } => {
+                let value_supported =
+                    self.expr_is_direct_subset(value) || self.expr_is_cps_island_subset(value);
+                if !value_supported {
+                    return false;
+                }
+
+                let local_shape = self.direct_local_shape_for_expr(value);
+                self.push_scope();
+                self.current_scope_mut().insert(var.name.clone());
+                if let Some(shape) = local_shape {
+                    self.current_shape_scope_mut()
+                        .insert(var.name.clone(), shape);
+                }
+                let supported =
+                    self.expr_is_cps_island_subset(body) || self.expr_is_direct_subset(body);
+                self.pop_scope();
+                supported
+            }
+            _ => self.expr_is_direct_subset(expr),
         }
+    }
+
+    fn fresh_cps_temp(&mut self, prefix: &str) -> String {
+        let id = self.cps_temp_counter;
+        self.cps_temp_counter += 1;
+        format!("{prefix}{id}")
     }
 
     fn atom_is_direct_subset(&self, atom: &Atom) -> bool {

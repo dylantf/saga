@@ -129,6 +129,14 @@ The first implementation slice is:
     fixture. `do_log/3` is emitted under the source name with no
     `__saga_direct_do_log` entry because its body is operationally CPS, not
     direct.
+- `examples/optimization/selective-uniform/14-yield-then-return-cps-island.saga`
+  - Current result: emits a CPS island that performs `log! "hello"`, passes a
+    generated continuation closure to the operation, binds the resumed result,
+    and then calls `_ReturnK(42)`.
+- `examples/optimization/selective-uniform/15-yield-result-used-cps-island.saga`
+  - Current result: emits a CPS island where the operation result is bound and
+    used in direct computation before returning:
+    `read! ()` resumes into `value + 1`, then `_ReturnK(...)`.
 
 ## Active Design Decisions
 
@@ -208,11 +216,12 @@ The first implementation slice is:
   `__saga_direct_may_log/1`. The source name is reserved for the CPS adapter
   ABI (`may_log/3`), which avoids making `may_log/1` look like a source-level
   public ABI.
-- The first CPS island subset exists, but it is intentionally tiny: a
-  CPS-typed function may lower directly to its source-name adapter entry only
-  when its body is a bare `MExpr::Yield` and all operation arguments are
-  direct-lowerable atoms. It has no `Bind`, `With`, `Resume`, handler runtime,
-  or nested sequencing yet.
+- The first CPS island subset now supports `MExpr::Yield`, `MExpr::Bind`, and
+  direct-return expressions. `Yield` receives the current continuation, `Bind`
+  builds a generated continuation closure that binds the resumed value, and a
+  direct expression returns by applying the current `_ReturnK`. It still has no
+  `With`, `Resume`, handler runtime, or direct calls to CPS adapters from
+  inside islands.
 - `lower_selective` computes imported entry metadata for already-compiled
   non-stdlib user modules. Remote effect-row calls may lower to direct remote
   calls only when that imported metadata proves a direct entry exists; otherwise
@@ -227,9 +236,9 @@ The first implementation slice is:
 1. Read this log and `docs/planning/selective-uniform-effects.md`.
 2. Check `git status --short`.
 3. Decide the next vertical slice:
-   - add `Bind` around the new simple `Yield` island, or
    - add the first handler/evidence installation slice so a trivial handled
      operation can run, or
+   - allow CPS islands to call CPS adapter entries, or
    - start moving the proven direct path into the real build path.
 4. Keep updating focused fixtures/tests as each tiny subset starts working.
 
@@ -414,6 +423,20 @@ The first implementation slice is:
   and changed the simple-yield `selective_core` test from expected panic to
   successful Core emission plus `erlc +from_core` compilation when Erlang is
   available.
+- Extended selective CPS islands from bare `Yield` to continuation-driven
+  `Bind`/`Yield`/direct-return sequencing:
+  - `lower_cps_expr` now receives an explicit current continuation expression;
+  - direct leaf expressions lower by applying that continuation;
+  - `Yield` tail-applies the selected operation closure with the current
+    continuation;
+  - `Bind` either lowers direct values as Core `let`s or passes a generated
+    continuation closure into the nested CPS value.
+- Added:
+  - `examples/optimization/selective-uniform/14-yield-then-return-cps-island.saga`;
+  - `examples/optimization/selective-uniform/15-yield-result-used-cps-island.saga`.
+- Added focused `selective_core` tests for effect-then-return and
+  effect-result-used islands, both with `erlc +from_core` compilation checks
+  when Erlang is available.
 - Verification:
   - `cargo run --bin saga -- inspect examples/optimization/selective-uniform/01-pure-direct.saga --stage selective-core`
     emits direct `add1/1`, `twice/1`, and `main/1`.
@@ -434,3 +457,9 @@ The first implementation slice is:
     - `cargo run --bin saga --quiet -- inspect examples/optimization/selective-uniform/13-simple-yield-cps-island.saga --stage selective-core`
       emits `do_log/3` with `_Evidence`, `_ReturnK`, `find_evidence`, and
       `erlang:element`.
+    - `cargo run --bin saga --quiet -- inspect examples/optimization/selective-uniform/14-yield-then-return-cps-island.saga --stage selective-core`
+      emits a generated `_CpsBindArg0` continuation ending in
+      `apply _ReturnK(42)`.
+    - `cargo run --bin saga --quiet -- inspect examples/optimization/selective-uniform/15-yield-result-used-cps-island.saga --stage selective-core`
+      emits a generated `_CpsBindArg0` continuation that binds `Value` and
+      returns `Value + 1`.

@@ -427,6 +427,64 @@ main () = ()
 }
 
 #[test]
+fn selective_core_lowers_yield_then_return_cps_island() {
+    let src = r#"
+effect Log {
+  fun log : String -> Unit
+}
+
+pub fun log_then_answer : Unit -> Int needs {Log}
+log_then_answer () = {
+  let _ignored = log! "hello"
+  42
+}
+
+fun main : Unit -> Unit
+main () = ()
+"#;
+    let out = emit_selective_core(src);
+    assert!(out.contains("'log_then_answer'/3"), "{out}");
+    assert!(!out.contains("__saga_direct_log_then_answer"), "{out}");
+    assert!(
+        out.contains("call 'std_evidence_bridge':'find_evidence'"),
+        "{out}"
+    );
+    assert!(out.contains("fun (_CpsBindArg0) ->"), "{out}");
+    assert!(out.contains("let <__ignored>"), "{out}");
+    assert!(out.contains("apply _ReturnK(42)"), "{out}");
+    assert_selective_core_compiles(src);
+}
+
+#[test]
+fn selective_core_lowers_yield_result_used_cps_island() {
+    let src = r#"
+effect ReadInt {
+  fun read : Unit -> Int
+}
+
+pub fun read_plus_one : Unit -> Int needs {ReadInt}
+read_plus_one () = {
+  let value = read! ()
+  value + 1
+}
+
+fun main : Unit -> Unit
+main () = ()
+"#;
+    let out = emit_selective_core(src);
+    assert!(out.contains("'read_plus_one'/3"), "{out}");
+    assert!(!out.contains("__saga_direct_read_plus_one"), "{out}");
+    assert!(
+        out.contains("call 'std_evidence_bridge':'find_evidence'"),
+        "{out}"
+    );
+    assert!(out.contains("fun (_CpsBindArg0) ->"), "{out}");
+    assert!(out.contains("let <Value>"), "{out}");
+    assert!(out.contains("apply _ReturnK(call 'erlang':'+'"), "{out}");
+    assert_selective_core_compiles(src);
+}
+
+#[test]
 fn selective_core_lowers_effect_row_function_with_direct_body() {
     let out = emit_selective_core(
         r#"
