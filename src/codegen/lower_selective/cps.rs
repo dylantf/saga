@@ -181,8 +181,10 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         evidence: CExpr,
         return_k: CExpr,
     ) -> CExpr {
-        if let Some(specialization) = self.hof_direct_specialization_for_cps_call(head, args) {
-            let value = self.lower_hof_direct_specialized_call(&specialization, args);
+        if let Some((module, specialization)) =
+            self.hof_direct_specialization_for_cps_call(head, args)
+        {
+            let value = self.lower_hof_direct_specialized_call(module, &specialization, args);
             return CExpr::Apply(Box::new(return_k), vec![value]);
         }
 
@@ -285,14 +287,8 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         &mut self,
         head: &Atom,
         args: &[Atom],
-    ) -> Option<HofDirectSpecialization> {
-        let Atom::Var { name, .. } = head else {
-            return None;
-        };
-        let specialization = self
-            .local_hof_direct_specializations
-            .get(&name.name)?
-            .clone();
+    ) -> Option<(Option<String>, HofDirectSpecialization)> {
+        let (module, specialization) = self.hof_direct_specialization_for_head(head)?;
         if specialization.source_arity != args.len() {
             return None;
         }
@@ -316,7 +312,42 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                 return None;
             }
         }
-        Some(specialization)
+        Some((module, specialization))
+    }
+
+    fn hof_direct_specialization_for_head(
+        &self,
+        head: &Atom,
+    ) -> Option<(Option<String>, HofDirectSpecialization)> {
+        let (local_name, source) = match head {
+            Atom::Var { name, source } => (Some(name.name.as_str()), *source),
+            Atom::QualifiedRef { source, .. } => (None, *source),
+            _ => return None,
+        };
+        if let Some(local_name) = local_name
+            && let Some(specialization) = self.local_hof_direct_specializations.get(local_name)
+        {
+            return Some((None, specialization.clone()));
+        }
+        let resolved = self.resolution.get(&source)?;
+        let ResolvedCodegenKind::BeamFunction {
+            erlang_mod,
+            name,
+            effects,
+            ..
+        } = &resolved.kind
+        else {
+            return None;
+        };
+        if effects.is_empty() {
+            return None;
+        }
+        let module = resolved_erlang_module_for_call(erlang_mod, &self.current_module)?;
+        let specialization = self
+            .imported_hof_direct_specializations
+            .get(&(module.clone(), name.clone()))?
+            .clone();
+        Some((Some(module), specialization))
     }
 
     fn pure_hof_callback_arg_arity(&mut self, atom: &Atom) -> Option<usize> {
@@ -335,16 +366,21 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
 
     fn lower_hof_direct_specialized_call(
         &mut self,
+        module: Option<String>,
         specialization: &HofDirectSpecialization,
         args: &[Atom],
     ) -> CExpr {
-        CExpr::Apply(
-            Box::new(CExpr::FunRef(
-                specialization.entry_name.clone(),
-                specialization.source_arity,
-            )),
-            args.iter().map(|arg| self.lower_atom(arg)).collect(),
-        )
+        let lowered_args = args.iter().map(|arg| self.lower_atom(arg)).collect();
+        match module {
+            Some(module) => CExpr::Call(module, specialization.entry_name.clone(), lowered_args),
+            None => CExpr::Apply(
+                Box::new(CExpr::FunRef(
+                    specialization.entry_name.clone(),
+                    specialization.source_arity,
+                )),
+                lowered_args,
+            ),
+        }
     }
 
     fn lower_cps_arg_atom(

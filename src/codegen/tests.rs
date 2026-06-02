@@ -1030,6 +1030,41 @@ main () = apply_eff pure_value with forty_one
 }
 
 #[test]
+fn selective_core_specializes_handled_callback_in_effectful_callback_slot() {
+    let src = r#"
+effect ReadInt {
+  fun read : Unit -> Int
+}
+
+handler forty_one for ReadInt {
+  read () = resume 41
+}
+
+fun handled_value : Unit -> Int
+handled_value () = read! () with forty_one
+
+fun apply_eff : (Unit -> Int needs {ReadInt}) -> Int needs {ReadInt}
+apply_eff f = f ()
+
+fun main : Unit -> Int
+main () = apply_eff handled_value with forty_one
+"#;
+    let out = emit_selective_core(src);
+    assert!(out.contains("'handled_value'/1"), "{out}");
+    assert!(out.contains("'__saga_direct_hof_apply_eff'/1"), "{out}");
+    assert!(
+        out.contains("apply '__saga_direct_hof_apply_eff'/1('handled_value'/1)"),
+        "{out}"
+    );
+    assert!(!out.contains("fun (_PureCpsArg"), "{out}");
+    assert_selective_core_eval_stdout_contains(
+        src,
+        "io:format(\"~p~n\", ['_script':main(unit)]), init:stop().",
+        "41",
+    );
+}
+
+#[test]
 fn selective_core_lowers_effectful_lambda_as_cps_callback_arg() {
     let src = r#"
 effect ReadInt {

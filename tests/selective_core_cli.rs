@@ -379,3 +379,49 @@ fn selective_core_codegen_runs_imported_effectful_trait_project() {
     let run_stdout = String::from_utf8_lossy(&run.stdout);
     assert!(run_stdout.contains("ok\n"), "{run_stdout}");
 }
+
+#[test]
+fn selective_core_codegen_specializes_imported_pure_callback_project() {
+    let binary = env!("CARGO_BIN_EXE_saga");
+    let project_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(
+        "examples/optimization/selective-uniform/imported-pure-callback-specialization-project",
+    );
+
+    let run = std::process::Command::new(binary)
+        .current_dir(&project_dir)
+        .args(["run", "--selective-codegen"])
+        .output()
+        .expect("run imported pure callback specialization project");
+    assert!(
+        run.status.success(),
+        "saga run failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&run.stdout),
+        String::from_utf8_lossy(&run.stderr)
+    );
+    let run_stdout = String::from_utf8_lossy(&run.stdout);
+    assert!(run_stdout.contains("ok\n"), "{run_stdout}");
+
+    let effects_core =
+        std::fs::read_to_string(project_dir.join("_build/dev/effects.core")).unwrap();
+    assert!(
+        effects_core.contains(
+            "module 'effects' ['pure_value'/1, 'apply_eff'/3, '__saga_direct_hof_apply_eff'/1]"
+        ),
+        "{effects_core}"
+    );
+
+    let main_core = std::fs::read_to_string(project_dir.join("_build/dev/main.core")).unwrap();
+    assert!(
+        main_core.contains("call 'effects':'__saga_direct_hof_apply_eff'"),
+        "{main_core}"
+    );
+    assert!(
+        main_core.contains("call 'erlang':'make_fun'\n            ('effects', 'pure_value', 1)"),
+        "{main_core}"
+    );
+    assert!(!main_core.contains("_PureCpsArg"), "{main_core}");
+    assert!(
+        !main_core.contains("call 'effects':'apply_eff'"),
+        "{main_core}"
+    );
+}

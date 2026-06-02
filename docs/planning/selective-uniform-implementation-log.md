@@ -932,8 +932,30 @@ boundaries exist.
   - `apply_eff pure_value with handler` now calls
     `__saga_direct_hof_apply_eff/1` with `'pure_value'/1` instead of allocating
     a `fun (_PureCpsArg, _Ev, _K) -> ...` adapter;
+  - named callbacks whose bodies use effects internally but expose a pure type
+    follow the same path: `apply_eff handled_value with handler` calls the
+    direct HOF specialization with `'handled_value'/1`;
   - mixed/dynamic callback cases still use the CPS runtime representation and
     pure-to-CPS wrapper.
-- Current specialization limits: this first slice is local named HOFs only.
-  Alias-shaped HOF values, imported HOFs, and handled callbacks whose exposed
-  type is pure are next specialization candidates.
+- At this point the local named-HOF path is covered for statically pure
+  callbacks, including named callbacks that handle their own effects internally.
+  Alias-shaped HOF values and inline handled callback expressions remain future
+  specialization candidates.
+- Extended direct HOF specialization to imported named HOFs in full project
+  builds:
+  - imported re-analysis now overlays exported function effect metadata from
+    `ModuleCodegenInfo`, so public CPS HOFs can be recognized even when the
+    caller's `EffectInfo` is for another module;
+  - when the imported body is present, the lowerer computes the same
+    `__saga_direct_hof_*` specialization metadata and caches it under the
+    imported BEAM module name;
+  - public HOF specializations are exported from the defining module;
+  - calls like `Effects.apply_eff Effects.pure_value` lower to
+    `effects:__saga_direct_hof_apply_eff(make_fun(effects, pure_value, 1))`
+    instead of `effects:apply_eff/3` with a pure-to-CPS wrapper;
+  - `examples/optimization/selective-uniform/imported-pure-callback-specialization-project/`
+    covers the full project build and emitted Core shape.
+- Current imported-HOF caveat: single-module `inspect src/Main.saga --stage
+  selective-core` can still have incomplete imported bodies in its convenience
+  context, so this optimization is asserted through project `run/build` output.
+  The production project build path has the full imported body and specializes.

@@ -135,6 +135,9 @@ struct DirectLowerer<'a, 'info> {
     local_hof_direct_specializations: HashMap<String, HofDirectSpecialization>,
     /// Emitted entries discovered for already-compiled imported user modules.
     imported_function_entries: HashMap<(String, String), FunctionEntryInfo>,
+    /// Direct HOF specializations discovered for already-compiled imported
+    /// user modules.
+    imported_hof_direct_specializations: HashMap<(String, String), HofDirectSpecialization>,
     /// Function currently being tested as a direct-body candidate.
     ///
     /// During fixed-point classification this permits recursive self-calls
@@ -167,6 +170,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             local_dict_constructor_arities: HashMap::new(),
             local_hof_direct_specializations: HashMap::new(),
             imported_function_entries: HashMap::new(),
+            imported_hof_direct_specializations: HashMap::new(),
             direct_candidate_function: None,
             cps_temp_counter: 0,
             locals: vec![HashSet::new()],
@@ -248,6 +252,12 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                     if let Some(specialization) =
                         self.local_hof_direct_specializations.get(&fb.name).cloned()
                     {
+                        if fb.public || is_public(&fb.name) || is_entry(&fb.name) {
+                            exports.push((
+                                specialization.entry_name.clone(),
+                                specialization.source_arity,
+                            ));
+                        }
                         funs.push(
                             self.lower_hof_direct_specialized_fun_binding(fb, &specialization),
                         );
@@ -437,6 +447,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
 
     fn compute_imported_function_entries(&mut self) {
         self.imported_function_entries.clear();
+        self.imported_hof_direct_specializations.clear();
         for (source_module_name, compiled) in &self.module_ctx.modules {
             if source_module_name == &self.current_module
                 || source_module_name.starts_with("Std.")
@@ -466,10 +477,21 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             );
             imported.current_module = source_module_name.clone();
             imported.classify_program(&monadic_imported);
+            imported.apply_codegen_info_function_shapes(&compiled.codegen_info);
             imported.compute_function_lowering_plans(&monadic_imported);
             imported.compute_local_function_entries(&monadic_imported);
 
             let erlang_module = erlang_module_name(source_module_name);
+            for (name, specialization) in
+                imported.import_metadata_hof_direct_specializations(&monadic_imported)
+            {
+                self.imported_hof_direct_specializations.insert(
+                    (erlang_module.clone(), name.clone()),
+                    specialization.clone(),
+                );
+                self.imported_hof_direct_specializations
+                    .insert((source_module_name.clone(), name.clone()), specialization);
+            }
             for (name, entries) in imported.local_function_entries {
                 self.imported_function_entries
                     .insert((erlang_module.clone(), name.clone()), entries.clone());
@@ -477,6 +499,36 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                     .insert((source_module_name.clone(), name.clone()), entries);
             }
         }
+    }
+
+    fn apply_codegen_info_function_shapes(&mut self, info: &crate::typechecker::ModuleCodegenInfo) {
+        for (name, effects) in &info.fun_effects {
+            let shape = if effects.is_empty() {
+                RuntimeFunctionShape::Pure
+            } else {
+                RuntimeFunctionShape::Cps(crate::codegen::runtime_shape::CpsShape {
+                    static_effects: effects.clone(),
+                    is_open_row: false,
+                })
+            };
+            self.callable_type_shapes.insert(name.clone(), shape);
+        }
+    }
+
+    fn import_metadata_hof_direct_specializations(
+        &mut self,
+        program: &MProgram,
+    ) -> Vec<(String, HofDirectSpecialization)> {
+        program
+            .iter()
+            .filter_map(|decl| {
+                let MDecl::FunBinding(fb) = decl else {
+                    return None;
+                };
+                self.hof_direct_specialization_for_fun_binding(fb)
+                    .map(|specialization| (fb.name.clone(), specialization))
+            })
+            .collect()
     }
 
     fn assert_no_unlowered_direct_body_functions(&self, program: &MProgram) {
@@ -733,12 +785,14 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         callbacks: &mut HashMap<usize, usize>,
     ) {
         match expr {
-            MExpr::App { head, .. } => {
+            MExpr::App { head, args, .. } => {
                 if let Atom::Var { name, source } = head
                     && let Some(index) = param_indices.get(&name.name)
-                    && let Some((source_arity, _adapter_arity, _effects)) =
-                        self.cps_function_arity_at(*source)
                 {
+                    let source_arity = self
+                        .cps_function_arity_at(*source)
+                        .map(|(source_arity, _adapter_arity, _effects)| source_arity)
+                        .unwrap_or(args.len());
                     callbacks.entry(*index).or_insert(source_arity);
                 }
             }
