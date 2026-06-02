@@ -1,3 +1,5 @@
+module HandlerFinallyResumeE2e
+
 import Std.IO.Unsafe (print_stdout)
 
 effect ReadInt {

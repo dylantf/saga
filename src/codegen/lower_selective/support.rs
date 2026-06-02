@@ -1,5 +1,3 @@
-use std::collections::HashSet;
-
 use crate::ast::{BinOp as AstBinOp, Lit, Pat};
 use crate::codegen::cerl::{CBinSeg, CExpr, CLit};
 use crate::codegen::lower::util::core_var;
@@ -169,25 +167,6 @@ pub(super) fn erlang_module_name(module_name: &str) -> String {
         .map(str::to_lowercase)
         .collect::<Vec<_>>()
         .join("_")
-}
-
-pub(super) fn collect_pat_binders(pat: &Pat, out: &mut HashSet<String>) {
-    match pat {
-        Pat::Var { name, .. } => {
-            out.insert(name.clone());
-        }
-        Pat::Tuple { elements, .. } => {
-            for pat in elements {
-                collect_pat_binders(pat, out);
-            }
-        }
-        Pat::Constructor { args, .. } => {
-            for pat in args {
-                collect_pat_binders(pat, out);
-            }
-        }
-        _ => {}
-    }
 }
 
 pub(super) fn binop_atoms(op: &AstBinOp, l: CExpr, r: CExpr) -> CExpr {

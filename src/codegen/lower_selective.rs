@@ -413,7 +413,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         let prev_direct_candidate = self.direct_candidate_function.replace(fb.name.clone());
         self.push_scope();
         for pat in &fb.params {
-            collect_pat_binders(pat, self.current_scope_mut());
+            self.bind_pat_locals(pat);
         }
         let supported = self.expr_is_direct_subset(&fb.body);
         self.pop_scope();
@@ -434,7 +434,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
 
         self.push_scope();
         for pat in &fb.params {
-            collect_pat_binders(pat, self.current_scope_mut());
+            self.bind_pat_locals(pat);
         }
         let supported = self.expr_is_cps_island_subset(&fb.body);
         self.pop_scope();
@@ -454,7 +454,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
 
         self.push_scope();
         for pat in &fb.params {
-            collect_pat_binders(pat, self.current_scope_mut());
+            self.bind_pat_locals(pat);
         }
         let supported = self.expr_is_cps_island_subset(&fb.body);
         self.pop_scope();
@@ -465,7 +465,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         let params = lower_param_names(&fb.params);
         self.push_scope();
         for pat in &fb.params {
-            collect_pat_binders(pat, self.current_scope_mut());
+            self.bind_pat_locals(pat);
         }
         let lowered_body = self.lower_expr(&fb.body);
         let body = self.wrap_param_match(&fb.params, &params, lowered_body);
@@ -505,7 +505,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
 
         self.push_scope();
         for pat in &fb.params {
-            collect_pat_binders(pat, self.current_scope_mut());
+            self.bind_pat_locals(pat);
         }
         let return_k = self.identity_cps_continuation();
         let lowered_body = self.lower_cps_expr(&fb.body, CExpr::Tuple(vec![]), return_k);
@@ -532,7 +532,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
 
         self.push_scope();
         for pat in &fb.params {
-            collect_pat_binders(pat, self.current_scope_mut());
+            self.bind_pat_locals(pat);
         }
         let lowered_body = self.lower_cps_expr(
             &fb.body,
@@ -871,6 +871,27 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             .expect("direct lowerer has a local-shape scope")
     }
 
+    fn bind_pat_locals(&mut self, pat: &Pat) {
+        match pat {
+            Pat::Var { name, .. } => {
+                self.current_scope_mut().insert(name.clone());
+                self.current_shape_scope_mut()
+                    .insert(name.clone(), LocalValueShape::PureCallableFromUseType);
+            }
+            Pat::Tuple { elements, .. } => {
+                for pat in elements {
+                    self.bind_pat_locals(pat);
+                }
+            }
+            Pat::Constructor { args, .. } => {
+                for pat in args {
+                    self.bind_pat_locals(pat);
+                }
+            }
+            _ => {}
+        }
+    }
+
     fn expr_is_direct_subset(&mut self, expr: &MExpr) -> bool {
         match expr {
             MExpr::Pure(atom) => self.atom_is_direct_subset(atom),
@@ -913,7 +934,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                         return false;
                     }
                     self.push_scope();
-                    collect_pat_binders(&arm.pattern, self.current_scope_mut());
+                    self.bind_pat_locals(&arm.pattern);
                     let supported = arm
                         .guard
                         .as_ref()
@@ -1008,7 +1029,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                         return false;
                     }
                     self.push_scope();
-                    collect_pat_binders(&arm.pattern, self.current_scope_mut());
+                    self.bind_pat_locals(&arm.pattern);
                     let supported = arm
                         .guard
                         .as_ref()
@@ -1053,7 +1074,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         }
         self.push_scope();
         for pat in &arm.params {
-            collect_pat_binders(pat, self.current_scope_mut());
+            self.bind_pat_locals(pat);
         }
         let supported =
             self.expr_is_direct_subset(&arm.body) || self.expr_is_cps_island_subset(&arm.body);
@@ -1072,7 +1093,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         }
         self.push_scope();
         for pat in &arm.params {
-            collect_pat_binders(pat, self.current_scope_mut());
+            self.bind_pat_locals(pat);
         }
         let supported = self.handler_arm_expr_is_cps_island_subset(&arm.body);
         self.pop_scope();
@@ -1124,7 +1145,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                         return false;
                     }
                     self.push_scope();
-                    collect_pat_binders(&arm.pattern, self.current_scope_mut());
+                    self.bind_pat_locals(&arm.pattern);
                     let supported = arm
                         .guard
                         .as_ref()
@@ -1173,7 +1194,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         }
         self.push_scope();
         for pat in params {
-            collect_pat_binders(pat, self.current_scope_mut());
+            self.bind_pat_locals(pat);
         }
         let supported = self.expr_is_direct_subset(body);
         self.pop_scope();

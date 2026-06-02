@@ -1,3 +1,5 @@
+module HandlerFinallyAbortE2e
+
 import Std.IO.Unsafe (print_stdout)
 
 effect Fail {

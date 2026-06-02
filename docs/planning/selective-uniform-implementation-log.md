@@ -194,6 +194,18 @@ The first implementation slice is:
     direct abort-style arm body and the skipped handled-body continuation does
     not run. Runtime output under `--selective-codegen` is:
     `cleanup`, `after`.
+- `examples/optimization/selective-uniform/30-higher-order-direct-callback.saga`
+  - Current result: emits a higher-order direct callback call without arity
+    guessing. Function-typed parameters are tagged as callable only from their
+    typed use site, so `apply_it f = f 1` lowers to `apply F(1)` and
+    `main` passes the direct function ref `'inc'/1`.
+- `examples/optimization/selective-uniform/31-higher-order-effectful-callback-unsupported.saga`
+  - Current result: documents the current boundary. CPS/effectful callback
+    values are not eta-expanded/adapted yet; the selective lowerer fails loudly
+    for public `apply_eff/3`.
+- `examples/optimization/selective-uniform/32-higher-order-direct-callback-e2e.saga`
+  - Current result: runtime fixture for the direct callback slice. It calls
+    `apply_it inc` under `--selective-codegen` and prints `ok`.
 - `examples/optimization/selective-uniform/23-local-pure-lambda-call.saga`
   - Current result: emits a direct local lambda value as a Core `fun`, records
     its proven source arity in local shape metadata, and applies it via
@@ -336,6 +348,13 @@ The first implementation slice is:
   `lower_selective`.
 - CPS islands support proven direct local lambda values. They still do not
   support higher-order CPS callable values or unknown callback parameters.
+- Higher-order direct callbacks are supported when the call-head value has a
+  closed pure function type at the use site. Variable-pattern binders are
+  marked as callable-from-use-type, but a call only succeeds if typed metadata
+  proves the source arity and empty effect row. Named same-module pure
+  functions passed as values lower as direct Core function references such as
+  `'inc'/1`. CPS/effectful callback values still require an explicit adapter
+  design and remain unsupported.
 - `lower_selective` computes imported entry metadata for already-compiled
   non-stdlib user modules. Remote effect-row calls may lower to direct remote
   calls only when that imported metadata proves a direct entry exists; otherwise
@@ -735,3 +754,16 @@ boundaries exist.
   - unit-level Core shape/compile checks for resume cleanup and abort cleanup;
   - CLI runtime integration coverage that runs both fixtures with
     `--selective-codegen` and checks output order.
+- Added the first higher-order direct callback slice:
+  - variable-pattern binders are now marked as `PureCallableFromUseType`;
+  - `LocalCallable` classification still requires the call-head NodeId to have
+    a closed pure function type, so non-function locals and effectful function
+    values do not become callable by guesswork;
+  - same-module pure function values can flow to direct callback parameters as
+    Core function references.
+- Added:
+  - `examples/optimization/selective-uniform/30-higher-order-direct-callback.saga`;
+  - `examples/optimization/selective-uniform/31-higher-order-effectful-callback-unsupported.saga`;
+  - `examples/optimization/selective-uniform/32-higher-order-direct-callback-e2e.saga`.
+- Added selective tests for higher-order direct callbacks, including a negative
+  effectful-callback test and a CLI runtime check for the E2E fixture.

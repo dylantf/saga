@@ -262,7 +262,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
 
         self.push_scope();
         for pat in &arm.params {
-            collect_pat_binders(pat, self.current_scope_mut());
+            self.bind_pat_locals(pat);
         }
         let body = self.lower_cps_expr(&arm.body, outer_evidence, outer_return_k);
         let body = if arm.params.is_empty() {
@@ -304,7 +304,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
 
         self.push_scope();
         for pat in &arm.params {
-            collect_pat_binders(pat, self.current_scope_mut());
+            self.bind_pat_locals(pat);
         }
         let body = self.lower_cps_handler_arm_expr(
             &arm.body,
@@ -507,7 +507,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         finally_block: &MExpr,
     ) -> CArm {
         self.push_scope();
-        collect_pat_binders(&arm.pattern, self.current_scope_mut());
+        self.bind_pat_locals(&arm.pattern);
         let body = self.lower_direct_handler_result_with_finally(&arm.body, finally_block);
         let guard = arm.guard.as_ref().map(|g| self.lower_expr(g));
         let pat = self.lower_pat(&arm.pattern);
@@ -532,7 +532,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         finally_block: Option<&MExpr>,
     ) -> CArm {
         self.push_scope();
-        collect_pat_binders(&arm.pattern, self.current_scope_mut());
+        self.bind_pat_locals(&arm.pattern);
         let body = self.lower_cps_handler_arm_expr(&arm.body, outer_evidence, arm_k, finally_block);
         let guard = arm.guard.as_ref().map(|g| self.lower_expr(g));
         let pat = self.lower_pat(&arm.pattern);
@@ -542,7 +542,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
 
     fn lower_cps_arm(&mut self, arm: &MArm, evidence: CExpr, return_k: CExpr) -> CArm {
         self.push_scope();
-        collect_pat_binders(&arm.pattern, self.current_scope_mut());
+        self.bind_pat_locals(&arm.pattern);
         let body = self.lower_cps_expr(&arm.body, evidence, return_k);
         let guard = arm.guard.as_ref().map(|g| self.lower_expr(g));
         let pat = self.lower_pat(&arm.pattern);

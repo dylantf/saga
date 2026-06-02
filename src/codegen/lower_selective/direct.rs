@@ -87,7 +87,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
 
     fn lower_arm(&mut self, arm: &MArm) -> CArm {
         self.push_scope();
-        collect_pat_binders(&arm.pattern, self.current_scope_mut());
+        self.bind_pat_locals(&arm.pattern);
         let body = self.lower_expr(&arm.body);
         let guard = arm.guard.as_ref().map(|g| self.lower_expr(g));
         let pat = self.lower_pat(&arm.pattern);
@@ -321,7 +321,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         let param_names = lower_param_names(params);
         self.push_scope();
         for pat in params {
-            collect_pat_binders(pat, self.current_scope_mut());
+            self.bind_pat_locals(pat);
         }
         let lowered_body = self.lower_expr(body);
         let lowered_body = self.wrap_param_match(params, &param_names, lowered_body);

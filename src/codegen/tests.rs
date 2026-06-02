@@ -706,10 +706,8 @@ main () = {
 }
 
 #[test]
-#[should_panic(expected = "direct function 'apply_it' is outside the current direct subset")]
-fn selective_core_does_not_guess_shape_for_local_function_values() {
-    let _ = emit_selective_core(
-        r#"
+fn selective_core_lowers_higher_order_direct_callback() {
+    let src = r#"
 fun apply_it : (Int -> Int) -> Int
 apply_it f = f 1
 
@@ -718,6 +716,32 @@ inc x = x + 1
 
 fun main : Unit -> Int
 main () = apply_it inc
+"#;
+    let out = emit_selective_core(src);
+    assert!(out.contains("'apply_it'/1"), "{out}");
+    assert!(out.contains("'inc'/1"), "{out}");
+    assert!(out.contains("apply F(1)"), "{out}");
+    assert!(out.contains("apply 'apply_it'/1('inc'/1)"), "{out}");
+    assert_selective_core_compiles(src);
+}
+
+#[test]
+#[should_panic(expected = "CPS-shaped function 'apply_eff' is not lowered by selective-core yet")]
+fn selective_core_does_not_eta_expand_effectful_callback_values_yet() {
+    let _ = emit_selective_core(
+        r#"
+effect ReadInt {
+  fun read : Unit -> Int
+}
+
+pub fun apply_eff : (Unit -> Int needs {ReadInt}) -> Int needs {ReadInt}
+apply_eff f = f ()
+
+fun read_value : Unit -> Int needs {ReadInt}
+read_value () = read! ()
+
+fun main : Unit -> Unit
+main () = ()
 "#,
     );
 }
