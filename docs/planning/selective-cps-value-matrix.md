@@ -69,8 +69,8 @@ These are expression/value shapes that can produce a callable value.
 | Mixed CPS and pure branch/case | `if c then read_value else pure_value` | Supported via CPS fallback | Common representation is CPS; pure branch uses explicit pure-to-CPS adapter | Later direct-specialize when branch is statically pure |
 | Pure function where effectful callback is expected | `apply_eff pure_value` | Supported via CPS fallback | First prefer direct HOF specialization when the whole call is net pure; otherwise use explicit pure-to-CPS adapter | Add direct-specialization pass later |
 | Handled callback where effectful callback is expected | `apply_eff (fun x -> leaky x with h)` | Open/risk | If exposed callback type is pure, use direct HOF specialization or pure-to-CPS adapter fallback | Add fixture with local handler |
-| CPS lambda value | `let f = fun () -> read! ()` | Open | Needs CPS lambda compilation as runtime closure | Later, after pure-to-CPS policy |
-| Lambda-headed CPS call | `(fun x -> read! ()) ()` | Open | Old lowerer had `lower_lambda_head_call`; selective needs island-local CPS lambda path | Later |
+| CPS lambda value | `let f = fun () -> read! ()` | Supported in CPS islands | Materialize runtime closure with user args plus evidence/continuation | Keep |
+| Lambda-headed CPS call | `(fun x -> read! ()) ()` | Supported in CPS islands | Materialize/apply runtime CPS closure; no source-arity guessing | Keep |
 | Partial application of CPS function | `let f = read_with_prefix p` | Open | Must materialize closure with remaining args plus `Ev,K`; do not use source arity | Later |
 | Eta-reduced effect op ref | `let f = read` / operation callback | Open | Old lowerer had eta-reduced effect-op handling; selective needs explicit op adapter design | Later |
 | Trait method value, pure | `let f = show` after dict elaboration | Partially supported for direct monomorphic method calls | Direct dict method extraction only in narrow subset | Broaden when trait specialization starts |
@@ -118,7 +118,7 @@ This is the selective lowerer's practical checklist over monadic IR.
 | `Ensure` | Rejected direct | Static finally paths supported in handlers | Open | Cleanup result should not create callable values yet |
 | `If` | Supported direct | Supported in CPS islands | Supported for compatible CPS callable branches | Emits Core `case` |
 | `Case` | Supported direct | Supported in CPS islands | Supported for compatible CPS callable arms | Direct patterns/guards only for now |
-| `App` | Supported for direct call shapes | Supported for named/runtime CPS and direct fallback | Consumer, not producer | Pure-to-CPS callback args still open |
+| `App` | Supported for direct call shapes | Supported for named/runtime CPS, CPS lambda heads, and direct fallback | Consumer, not producer | Direct HOF specialization still future |
 | `With` | Rejected direct | Supported for static handler subset | Not a callable producer yet | Handler values separate |
 | `Resume` | Rejected direct | Supported inside handler arm subset for direct values | CPS callable resume values explicitly rejected | Needs adapter policy before support |
 | `FieldAccess` | Supported direct | Via direct fallback | Not supported for CPS callable storage | Records containing callbacks open |
@@ -142,7 +142,7 @@ not port the implementation:
 | Effectful variable call | `lower_effectful_var_call` | Supported for runtime CPS callback vars in islands |
 | Effectful named/qualified call | effectful call emission in `lower/mod.rs`, qualified call handling | Supported for local/imported CPS adapters |
 | Effectful dict method call | `lower_effectful_method_call`, `DictMethodAccess` classification | Open/high priority |
-| Lambda-headed effectful call | `lower_lambda_head_call` | Open |
+| Lambda-headed effectful call | `lower_lambda_head_call` | Supported for selective CPS islands |
 | Eta-reduced effectful value | `lower_eta_reduced_effect_expr` | Partially covered for named CPS functions; op refs/partial apps open |
 | Effectful argument CPS chaining | `effectful_arg_idxs` paths | Mostly delegated to monadic `Bind`; needs fixtures for nested call arguments |
 | Partial application | old lowerer handles supplied args vs total arity | Open for CPS callables |
@@ -179,8 +179,10 @@ static.
      clean call/value boundaries.
 
 3. **CPS lambdas**
-   - Support runtime CPS closure generation for `fun ... -> effectful body`.
-   - Then lambda-headed CPS calls can reuse the same closure/call path.
+   - Basic runtime CPS closure generation is covered for callback arguments,
+     let-bound aliases, and lambda-headed calls.
+   - Next lambda work is partial application/captured callback parameter
+     stress-testing, not the base closure ABI.
 
 4. **Storage guardrails**
    - Tuple/record/constructor negative tests are covered.

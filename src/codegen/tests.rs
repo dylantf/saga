@@ -108,6 +108,24 @@ fn erlang_tool_available(tool: &str) -> bool {
         .is_ok()
 }
 
+fn compile_evidence_bridge_into(dir: &std::path::Path) {
+    let bridge_src = include_str!("../stdlib/evidence.bridge.erl");
+    let bridge_path = dir.join("std_evidence_bridge.erl");
+    std::fs::write(&bridge_path, bridge_src).unwrap();
+    let erlc = std::process::Command::new("erlc")
+        .arg("-o")
+        .arg(dir)
+        .arg(&bridge_path)
+        .output()
+        .expect("erlc evidence bridge spawn");
+    assert!(
+        erlc.status.success(),
+        "erlc rejected evidence bridge:\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&erlc.stdout),
+        String::from_utf8_lossy(&erlc.stderr)
+    );
+}
+
 fn assert_selective_core_eval_stdout_contains(src: &str, eval: &str, needle: &str) {
     if !erlang_tool_available("erlc") || !erlang_tool_available("erl") {
         return;
@@ -140,6 +158,9 @@ fn assert_selective_core_eval_stdout_contains(src: &str, eval: &str, needle: &st
         String::from_utf8_lossy(&erlc.stderr),
         core
     );
+    if core.contains("std_evidence_bridge") {
+        compile_evidence_bridge_into(&dir);
+    }
 
     let run = std::process::Command::new("erl")
         .arg("-noshell")
@@ -881,6 +902,103 @@ main () = apply_eff pure_value with forty_one
     );
     assert!(!out.contains("make_fun"), "{out}");
     assert_selective_core_compiles(src);
+}
+
+#[test]
+fn selective_core_lowers_effectful_lambda_as_cps_callback_arg() {
+    let src = r#"
+effect ReadInt {
+  fun read : Unit -> Int
+}
+
+handler forty_one for ReadInt {
+  read () = resume 41
+}
+
+fun apply_eff : (Unit -> Int needs {ReadInt}) -> Int needs {ReadInt}
+apply_eff f = f ()
+
+pub fun run_lambda_arg : Unit -> Int
+run_lambda_arg () =
+  apply_eff (fun () -> read! () + 1) with forty_one
+
+fun main : Unit -> Unit
+main () = ()
+"#;
+
+    let out = emit_selective_core(src);
+    assert!(out.contains("_LambdaEvidence"), "{out}");
+    assert!(out.contains("_LambdaK"), "{out}");
+    assert!(out.contains("call 'erlang':'+'"), "{out}");
+    assert_selective_core_eval_stdout_contains(
+        src,
+        "io:format(\"~p~n\", ['_script':run_lambda_arg(unit)]), init:stop().",
+        "42",
+    );
+}
+
+#[test]
+fn selective_core_lowers_let_bound_effectful_lambda_cps_value() {
+    let src = r#"
+effect ReadInt {
+  fun read : Unit -> Int
+}
+
+handler forty_one for ReadInt {
+  read () = resume 41
+}
+
+fun apply_eff : (Unit -> Int needs {ReadInt}) -> Int needs {ReadInt}
+apply_eff f = f ()
+
+pub fun run_bound_lambda : Unit -> Int
+run_bound_lambda () = {
+  let f = fun () -> read! () + 1
+  apply_eff f
+} with forty_one
+
+fun main : Unit -> Unit
+main () = ()
+"#;
+
+    let out = emit_selective_core(src);
+    assert!(out.contains("let <F>"), "{out}");
+    assert!(out.contains("_LambdaEvidence"), "{out}");
+    assert!(out.contains("apply F('unit', _Evidence"), "{out}");
+    assert_selective_core_eval_stdout_contains(
+        src,
+        "io:format(\"~p~n\", ['_script':run_bound_lambda(unit)]), init:stop().",
+        "42",
+    );
+}
+
+#[test]
+fn selective_core_lowers_lambda_headed_cps_call() {
+    let src = r#"
+effect ReadInt {
+  fun read : Unit -> Int
+}
+
+handler forty_one for ReadInt {
+  read () = resume 41
+}
+
+pub fun run_lambda_head : Unit -> Int
+run_lambda_head () =
+  (fun () -> read! () + 1) () with forty_one
+
+fun main : Unit -> Unit
+main () = ()
+"#;
+
+    let out = emit_selective_core(src);
+    assert!(out.contains("_LambdaEvidence"), "{out}");
+    assert!(out.contains("apply _LambdaK"), "{out}");
+    assert_selective_core_eval_stdout_contains(
+        src,
+        "io:format(\"~p~n\", ['_script':run_lambda_head(unit)]), init:stop().",
+        "42",
+    );
 }
 
 #[test]

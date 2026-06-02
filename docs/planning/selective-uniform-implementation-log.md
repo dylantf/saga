@@ -871,3 +871,13 @@ boundaries exist.
   representation. The important property is that they fail during selective
   planning/lowering instead of emitting a raw BEAM function reference with the
   wrong arity.
+- Added the first CPS lambda slice:
+  - `fun ... -> effectful body` can lower as a runtime CPS closure with user
+    args followed by evidence and continuation;
+  - effectful lambdas can be passed directly to CPS callback parameters;
+  - let-bound effectful lambdas materialize once and are tracked as
+    `RuntimeCpsCallable`;
+  - lambda-headed CPS calls such as `(fun () -> read! ()) ()` lower by applying
+    the generated runtime CPS closure immediately;
+  - the selective runtime test helper now compiles `std_evidence_bridge` when
+    generated Core uses handler evidence.

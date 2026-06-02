@@ -59,6 +59,31 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         evidence: CExpr,
         return_k: CExpr,
     ) -> CExpr {
+        if let MExpr::Pure(atom @ Atom::Lambda { .. }) = value
+            && self.lambda_is_cps_subset(atom)
+        {
+            let (source_arity, adapter_arity, _effects) = self
+                .cps_lambda_arity_for_atom(atom)
+                .unwrap_or_else(|| self.unsupported_atom(atom));
+            let local_shape = LocalValueShape::RuntimeCpsCallable {
+                source_arity,
+                adapter_arity,
+            };
+            let lowered_value =
+                self.lower_cps_runtime_value_expr(value, source_arity, adapter_arity);
+            self.push_scope();
+            self.current_scope_mut().insert(var.name.clone());
+            self.current_shape_scope_mut()
+                .insert(var.name.clone(), local_shape);
+            let lowered_body = self.lower_cps_expr(body, evidence, return_k);
+            self.pop_scope();
+            return CExpr::Let(
+                core_var(&var.name),
+                Box::new(lowered_value),
+                Box::new(lowered_body),
+            );
+        }
+
         if let Some(local_shape) = self.cps_bind_shape_for_expr(value) {
             match local_shape {
                 LocalValueShape::CpsCallable { .. } => {
@@ -156,6 +181,28 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         evidence: CExpr,
         return_k: CExpr,
     ) -> CExpr {
+        if let Some((source_arity, adapter_arity, _effects)) = self.cps_lambda_arity_for_atom(head)
+            && let Atom::Lambda { params, body, .. } = head
+        {
+            self.assert_app_arity("CPS lambda", args.len(), source_arity);
+            self.assert_app_arity("CPS lambda", args.len() + 2, adapter_arity);
+
+            let expected_arg_shapes = self.cps_callback_param_shapes(head);
+            let mut lowered_args: Vec<CExpr> = args
+                .iter()
+                .enumerate()
+                .map(|(index, arg)| {
+                    self.lower_cps_arg_atom(arg, expected_arg_shapes.get(index).copied().flatten())
+                })
+                .collect();
+            lowered_args.push(evidence);
+            lowered_args.push(return_k);
+            return CExpr::Apply(
+                Box::new(self.lower_cps_lambda_atom(params, body)),
+                lowered_args,
+            );
+        }
+
         match self.call_shape(head) {
             Some(CallShape::Cps {
                 module,
@@ -242,6 +289,16 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
 
     fn lower_cps_value_atom(&mut self, atom: &Atom) -> CExpr {
         match self.cps_value_atom_shape(atom) {
+            Some(LocalValueShape::RuntimeCpsCallable {
+                source_arity,
+                adapter_arity,
+            }) if matches!(atom, Atom::Lambda { .. }) => {
+                let Atom::Lambda { params, body, .. } = atom else {
+                    unreachable!();
+                };
+                self.assert_app_arity("CPS lambda", source_arity + 2, adapter_arity);
+                self.lower_cps_lambda_atom(params, body)
+            }
             Some(LocalValueShape::RuntimeCpsCallable { .. })
                 if matches!(atom, Atom::Var { .. }) =>
             {
@@ -267,12 +324,26 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         source_arity: usize,
         adapter_arity: usize,
     ) -> CExpr {
+        if let Atom::Lambda { params, body, .. } = atom
+            && self.lambda_is_cps_subset(atom)
+        {
+            self.assert_app_arity("CPS lambda", params.len(), source_arity);
+            self.assert_app_arity("CPS lambda", params.len() + 2, adapter_arity);
+            return self.lower_cps_lambda_atom(params, body);
+        }
+
         match self.cps_value_atom_shape(atom) {
-            Some(LocalValueShape::RuntimeCpsCallable { .. }) => {
-                let Atom::Var { name, .. } = atom else {
-                    self.unsupported_atom(atom);
-                };
-                CExpr::Var(core_var(&name.name))
+            Some(LocalValueShape::RuntimeCpsCallable {
+                source_arity: actual_source_arity,
+                adapter_arity: actual_adapter_arity,
+            }) => {
+                self.assert_app_arity("CPS lambda/value", actual_source_arity, source_arity);
+                self.assert_app_arity("CPS lambda/value", actual_adapter_arity, adapter_arity);
+                match atom {
+                    Atom::Var { name, .. } => CExpr::Var(core_var(&name.name)),
+                    Atom::Lambda { params, body, .. } => self.lower_cps_lambda_atom(params, body),
+                    _ => self.unsupported_atom(atom),
+                }
             }
             Some(LocalValueShape::CpsCallable {
                 module,
@@ -290,6 +361,29 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             }
             _ => self.lower_atom(atom),
         }
+    }
+
+    fn lower_cps_lambda_atom(&mut self, params: &[Pat], body: &MExpr) -> CExpr {
+        if params.iter().any(|p| !direct_param_supported(p)) {
+            self.unsupported("CPS lambda with unsupported parameter pattern");
+        }
+        let direct_params = lower_param_names(params);
+        let evidence_name = self.fresh_cps_temp("_LambdaEvidence");
+        let return_k_name = self.fresh_cps_temp("_LambdaK");
+        let mut lambda_params = direct_params.clone();
+        lambda_params.push(evidence_name.clone());
+        lambda_params.push(return_k_name.clone());
+
+        self.push_scope();
+        for pat in params {
+            self.bind_pat_locals(pat);
+        }
+        let lowered_body =
+            self.lower_cps_expr(body, CExpr::Var(evidence_name), CExpr::Var(return_k_name));
+        let lowered_body = self.wrap_param_match(params, &direct_params, lowered_body);
+        self.pop_scope();
+
+        CExpr::Fun(lambda_params, Box::new(lowered_body))
     }
 
     fn lower_cps_runtime_value_expr(

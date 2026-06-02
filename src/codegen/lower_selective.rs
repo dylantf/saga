@@ -1169,6 +1169,15 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                 supported
             }
             MExpr::App { head, args, .. } => {
+                if let Some((source_arity, adapter_arity, _effects)) =
+                    self.cps_lambda_arity_for_atom(head)
+                    && self.lambda_is_cps_subset(head)
+                {
+                    return source_arity == args.len()
+                        && adapter_arity == args.len() + 2
+                        && args.iter().all(|arg| self.atom_is_cps_value_subset(arg));
+                }
+
                 let call_supported = match self.call_shape(head) {
                     Some(CallShape::Cps {
                         source_arity,
@@ -1372,6 +1381,9 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
     }
 
     fn atom_is_cps_value_subset(&mut self, atom: &Atom) -> bool {
+        if matches!(atom, Atom::Lambda { .. }) {
+            return self.lambda_is_cps_subset(atom) || self.atom_is_direct_subset(atom);
+        }
         self.cps_value_atom_shape(atom).is_some() || self.atom_is_direct_subset(atom)
     }
 
@@ -1384,6 +1396,25 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             self.bind_pat_locals(pat);
         }
         let supported = self.expr_is_direct_subset(body);
+        self.pop_scope();
+        supported
+    }
+
+    fn lambda_is_cps_subset(&mut self, atom: &Atom) -> bool {
+        let Atom::Lambda { params, body, .. } = atom else {
+            return false;
+        };
+        if self.cps_lambda_arity_for_atom(atom).is_none()
+            || params.iter().any(|p| !direct_param_supported(p))
+        {
+            return false;
+        }
+        self.push_scope();
+        for pat in params {
+            self.bind_pat_locals(pat);
+        }
+        let direct = self.expr_is_direct_subset(body);
+        let supported = !direct && self.expr_is_cps_island_subset(body);
         self.pop_scope();
         supported
     }
@@ -1438,6 +1469,14 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
     fn cps_bind_shape_for_expr(&self, expr: &MExpr) -> Option<LocalValueShape> {
         match expr {
             MExpr::Pure(atom) => {
+                if self.lambda_is_cps_atom(atom) {
+                    let (source_arity, adapter_arity, _effects) =
+                        self.cps_lambda_arity_for_atom(atom)?;
+                    return Some(LocalValueShape::RuntimeCpsCallable {
+                        source_arity,
+                        adapter_arity,
+                    });
+                }
                 if let Atom::Var { name, source } = atom {
                     match self.local_shape(&name.name) {
                         Some(
@@ -1474,6 +1513,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
 
     fn cps_bind_value_expr_is_supported(&mut self, expr: &MExpr) -> bool {
         match expr {
+            MExpr::Pure(atom @ Atom::Lambda { .. }) => self.lambda_is_cps_subset(atom),
             MExpr::Pure(_) => self.cps_bind_shape_for_expr(expr).is_some(),
             MExpr::If {
                 cond,
@@ -1585,6 +1625,13 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
     }
 
     fn cps_value_atom_shape(&self, atom: &Atom) -> Option<LocalValueShape> {
+        if self.lambda_is_cps_atom(atom) {
+            let (source_arity, adapter_arity, _effects) = self.cps_lambda_arity_for_atom(atom)?;
+            return Some(LocalValueShape::RuntimeCpsCallable {
+                source_arity,
+                adapter_arity,
+            });
+        }
         if let Atom::Var { name, source } = atom {
             match self.local_shape(&name.name) {
                 Some(shape @ LocalValueShape::CpsCallable { .. }) => return Some(shape),
@@ -1601,6 +1648,25 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             }
         }
         self.cps_local_shape_for_expr(&MExpr::Pure(atom.clone()))
+    }
+
+    fn lambda_is_cps_atom(&self, atom: &Atom) -> bool {
+        matches!(atom, Atom::Lambda { .. }) && self.cps_lambda_type_arity_for_atom(atom).is_some()
+    }
+
+    fn cps_lambda_arity_for_atom(&self, atom: &Atom) -> Option<(usize, usize, Vec<String>)> {
+        self.cps_lambda_type_arity_for_atom(atom)
+            .or_else(|| match atom {
+                Atom::Lambda { params, .. } => Some((params.len(), params.len() + 2, Vec::new())),
+                _ => None,
+            })
+    }
+
+    fn cps_lambda_type_arity_for_atom(&self, atom: &Atom) -> Option<(usize, usize, Vec<String>)> {
+        let Atom::Lambda { source, .. } = atom else {
+            return None;
+        };
+        self.cps_function_arity_at(*source)
     }
 
     fn pure_value_atom_shape(&self, atom: &Atom) -> Option<LocalValueShape> {
@@ -1631,7 +1697,9 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
 
     fn cps_callback_param_shapes(&self, head: &Atom) -> Vec<Option<(usize, usize)>> {
         let source = match head {
-            Atom::Var { source, .. } | Atom::QualifiedRef { source, .. } => *source,
+            Atom::Var { source, .. }
+            | Atom::QualifiedRef { source, .. }
+            | Atom::Lambda { source, .. } => *source,
             _ => return Vec::new(),
         };
         let Some(mut current) = self.effect_info.type_at_node.get(&source) else {
