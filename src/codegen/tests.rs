@@ -638,6 +638,74 @@ main () = ()
 }
 
 #[test]
+fn selective_core_handler_finally_runs_after_resume_continuation() {
+    let src = r#"
+import Std.IO.Unsafe (print_stdout)
+
+effect ReadInt {
+  fun read : Unit -> Int
+}
+
+handler read_with_cleanup for ReadInt {
+  read () = resume 41 finally {
+    print_stdout "cleanup\n"
+  }
+}
+
+fun main : Unit -> Unit
+main () = {
+  let value = {
+    let read_value = read! ()
+    print_stdout "body\n"
+    read_value + 1
+  } with read_with_cleanup
+
+  if value == 42 then print_stdout "after\n"
+  else print_stdout "bad\n"
+}
+"#;
+    let out = emit_selective_core(src);
+    assert!(out.contains("_FinallyValue"), "{out}");
+    assert!(out.contains("_FinallyCleanup"), "{out}");
+    assert!(out.contains("_WithResult"), "{out}");
+    assert_selective_core_compiles(src);
+}
+
+#[test]
+fn selective_core_handler_finally_runs_after_abort_arm() {
+    let src = r#"
+import Std.IO.Unsafe (print_stdout)
+
+effect Fail {
+  fun fail : Unit -> Int
+}
+
+handler abort_with_cleanup for Fail {
+  fail () = 0 finally {
+    print_stdout "cleanup\n"
+  }
+}
+
+fun main : Unit -> Unit
+main () = {
+  let value = {
+    let unreachable = fail! ()
+    print_stdout "body\n"
+    unreachable + 1
+  } with abort_with_cleanup
+
+  if value == 0 then print_stdout "after\n"
+  else print_stdout "bad\n"
+}
+"#;
+    let out = emit_selective_core(src);
+    assert!(out.contains("_FinallyValue"), "{out}");
+    assert!(out.contains("_FinallyCleanup"), "{out}");
+    assert!(out.contains("_WithResult"), "{out}");
+    assert_selective_core_compiles(src);
+}
+
+#[test]
 #[should_panic(expected = "direct function 'apply_it' is outside the current direct subset")]
 fn selective_core_does_not_guess_shape_for_local_function_values() {
     let _ = emit_selective_core(

@@ -184,6 +184,16 @@ The first implementation slice is:
     contains `let value = fail! (); value + 1` and a `return value = value +
     100` clause, but the abort arm returns `0` without invoking `_ArmK`, so the
     body continuation and return clause are both skipped.
+- `examples/optimization/selective-uniform/28-handler-finally-resume-e2e.saga`
+  - Current result: static handler operation-arm `finally` cleanup runs after a
+    resumed continuation but before the outer continuation of the `with`
+    expression. Runtime output under `--selective-codegen` is:
+    `body`, `cleanup`, `after`.
+- `examples/optimization/selective-uniform/29-handler-finally-abort-e2e.saga`
+  - Current result: static handler operation-arm `finally` cleanup runs after a
+    direct abort-style arm body and the skipped handled-body continuation does
+    not run. Runtime output under `--selective-codegen` is:
+    `cleanup`, `after`.
 - `examples/optimization/selective-uniform/23-local-pure-lambda-call.saga`
   - Current result: emits a direct local lambda value as a Core `fun`, records
     its proven source arity in local shape metadata, and applies it via
@@ -318,9 +328,12 @@ The first implementation slice is:
   handled body returns through the return-clause K, and the return-clause body
   lowers under the outer evidence/continuation. Direct abort arms are supported
   in the narrow `Fail` shape by returning the arm body directly from the op
-  closure and ignoring the captured continuation. `finally`, full
-  abort/result-marker routing, dynamic/native/composite handlers, and handler
-  values remain unsupported in `lower_selective`.
+  closure and ignoring the captured continuation. Static operation-arm
+  `finally` is supported only when the cleanup is in the direct subset; cleanup
+  is sequenced after resumed continuations and after direct abort-style arm
+  bodies. Full abort/result-marker routing, dynamic/native/composite handlers,
+  effectful cleanup, and handler values remain unsupported in
+  `lower_selective`.
 - CPS islands support proven direct local lambda values. They still do not
   support higher-order CPS callable values or unknown callback parameters.
 - `lower_selective` computes imported entry metadata for already-compiled
@@ -370,8 +383,9 @@ Planned integration sequence:
 1. **Handler/evidence slice.** Add the first `With` lowering for a simple
    static handler so an operation can run under installed evidence in
    `selective-core`. Status: first narrow static tail-resume case and static
-   return-clause continuation case are working; narrow direct abort arms are
-   working; broader handler semantics are still open.
+   return-clause continuation case are working; narrow direct abort arms and
+   direct-cleanup `finally` arms are working; broader handler semantics are
+   still open.
 2. **Selective entrypoint/bootstrap slice.** Add the minimal wrapper/evidence
    setup needed for a normal `main` entry to call direct or CPS-shaped code
    correctly. Status: supported direct-ABI entrypoints can now be exported for
@@ -703,3 +717,21 @@ boundaries exist.
     `ok`.
   - `cargo run --bin saga --quiet -- run examples/optimization/selective-uniform/27-cps-island-main-e2e.saga --selective-codegen`
     prints `ok`.
+- Added narrow selective support for static operation-arm `finally` cleanup:
+  - the cleanup expression must be direct-lowerable;
+  - resume arms sequence cleanup after the captured operation continuation;
+  - direct abort-style arms sequence cleanup after the arm body result;
+  - return-clause `finally` remains unsupported/unreachable for current syntax.
+- The first `finally` fixture exposed a real delimiter bug in the selective
+  `with` lowering. Before the fix, the handler body used the outer continuation
+  directly, so cleanup after `resume` ran after the continuation outside the
+  `with`. `lower_cps_with` now lowers the handled body to a local
+  `_WithResult` first and applies the outer continuation only after handler
+  return/finally processing.
+- Added:
+  - `examples/optimization/selective-uniform/28-handler-finally-resume-e2e.saga`;
+  - `examples/optimization/selective-uniform/29-handler-finally-abort-e2e.saga`.
+- Added selective tests for the new cleanup shapes:
+  - unit-level Core shape/compile checks for resume cleanup and abort cleanup;
+  - CLI runtime integration coverage that runs both fixtures with
+    `--selective-codegen` and checks output order.

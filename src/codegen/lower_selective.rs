@@ -1062,7 +1062,12 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
     }
 
     fn handler_arm_is_cps_island_subset(&mut self, arm: &MHandlerArm) -> bool {
-        if arm.finally_block.is_some() || arm.params.iter().any(|p| !direct_param_supported(p)) {
+        if arm.params.iter().any(|p| !direct_param_supported(p)) {
+            return false;
+        }
+        if let Some(finally_block) = &arm.finally_block
+            && !self.expr_is_direct_subset(finally_block)
+        {
             return false;
         }
         self.push_scope();
