@@ -9,7 +9,7 @@
 //! application should fail loudly here until they are deliberately
 //! reintroduced.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 mod cps;
 mod direct;
@@ -20,7 +20,8 @@ use crate::codegen::CodegenContext;
 use crate::codegen::cerl::{CArm, CExpr, CFunDef, CLit, CModule, CPat};
 use crate::codegen::lower::util::{core_var, lower_lit_atom, mangle_ctor_atom};
 use crate::codegen::monadic::ir::{
-    Atom, EffectInfo, EffectOpRef, MArm, MDecl, MExpr, MFunBinding, MProgram, MVar,
+    Atom, EffectInfo, EffectOpRef, MArm, MDecl, MExpr, MFunBinding, MHandler, MHandlerArm,
+    MProgram, MVar,
 };
 use crate::codegen::resolve::{ConstructorAtoms, ResolutionMap, ResolvedCodegenKind};
 use crate::codegen::runtime_shape::RuntimeFunctionShape;
@@ -54,6 +55,9 @@ struct DirectLowerer<'a, 'info> {
     direct_values: HashSet<String>,
     /// Functions whose implementation body fits the current direct subset.
     direct_body_functions: HashSet<String>,
+    /// Pure functions whose ABI stays direct, but whose body contains a
+    /// supported CPS island that runs internally with an identity continuation.
+    direct_cps_island_body_functions: HashSet<String>,
     /// Functions whose implementation body fits the current CPS island subset.
     cps_body_functions: HashSet<String>,
     /// Emitted entries for functions in the module currently being lowered.
@@ -86,6 +90,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             callable_type_shapes: HashMap::new(),
             direct_values: HashSet::new(),
             direct_body_functions: HashSet::new(),
+            direct_cps_island_body_functions: HashSet::new(),
             cps_body_functions: HashSet::new(),
             local_function_entries: HashMap::new(),
             imported_function_entries: HashMap::new(),
@@ -101,6 +106,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         self.classify_program(program);
         self.compute_imported_function_entries();
         self.compute_direct_body_functions(program);
+        self.compute_direct_cps_island_body_functions(program);
         self.compute_cps_body_functions(program);
         self.compute_local_function_entries(program);
 
@@ -131,6 +137,13 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                         if self.needs_cps_adapter(&fb.name) {
                             funs.push(self.lower_cps_adapter(fb));
                         }
+                        continue;
+                    }
+                    if self.direct_cps_island_body_functions.contains(&fb.name) {
+                        if fb.public || is_public(&fb.name) {
+                            exports.extend(self.export_entries(&fb.name));
+                        }
+                        funs.push(self.lower_direct_cps_island_fun_binding(fb));
                         continue;
                     }
                     if self.cps_body_functions.contains(&fb.name) {
@@ -170,6 +183,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         self.callable_type_shapes.clear();
         self.direct_values.clear();
         self.direct_body_functions.clear();
+        self.direct_cps_island_body_functions.clear();
         self.cps_body_functions.clear();
         for decl in program {
             match decl {
@@ -231,12 +245,30 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                 continue;
             };
             if self.direct_body_functions.contains(&fb.name)
+                || self.direct_cps_island_body_functions.contains(&fb.name)
                 || self.cps_body_functions.contains(&fb.name)
             {
                 continue;
             }
             if self.can_lower_cps_fun_binding(fb) {
                 self.cps_body_functions.insert(fb.name.clone());
+            }
+        }
+    }
+
+    fn compute_direct_cps_island_body_functions(&mut self, program: &MProgram) {
+        for decl in program {
+            let MDecl::FunBinding(fb) = decl else {
+                continue;
+            };
+            if self.direct_body_functions.contains(&fb.name)
+                || self.direct_cps_island_body_functions.contains(&fb.name)
+            {
+                continue;
+            }
+            if self.can_lower_direct_cps_island_fun_binding(fb) {
+                self.direct_cps_island_body_functions
+                    .insert(fb.name.clone());
             }
         }
     }
@@ -260,7 +292,8 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             let entries = FunctionEntryInfo::from_fun_binding(
                 fb,
                 callable_type_shape,
-                self.direct_body_functions.contains(&fb.name),
+                self.direct_body_functions.contains(&fb.name)
+                    || self.direct_cps_island_body_functions.contains(&fb.name),
                 self.cps_body_functions.contains(&fb.name),
             );
             self.local_function_entries.insert(fb.name.clone(), entries);
@@ -298,6 +331,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             imported.current_module = source_module_name.clone();
             imported.classify_program(&monadic_imported);
             imported.compute_direct_body_functions(&monadic_imported);
+            imported.compute_direct_cps_island_body_functions(&monadic_imported);
             imported.compute_cps_body_functions(&monadic_imported);
             imported.compute_local_function_entries(&monadic_imported);
 
@@ -393,6 +427,26 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         supported
     }
 
+    fn can_lower_direct_cps_island_fun_binding(&mut self, fb: &MFunBinding) -> bool {
+        if fb.guard.is_some() || fb.params.iter().any(|p| !direct_param_supported(p)) {
+            return false;
+        }
+        if !matches!(
+            self.callable_type_shapes.get(&fb.name),
+            Some(RuntimeFunctionShape::Pure)
+        ) {
+            return false;
+        }
+
+        self.push_scope();
+        for pat in &fb.params {
+            collect_pat_binders(pat, self.current_scope_mut());
+        }
+        let supported = self.expr_is_cps_island_subset(&fb.body);
+        self.pop_scope();
+        supported
+    }
+
     fn lower_fun_binding(&mut self, fb: &MFunBinding) -> CFunDef {
         let params = lower_param_names(&fb.params);
         self.push_scope();
@@ -432,6 +486,30 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         }
     }
 
+    fn lower_direct_cps_island_fun_binding(&mut self, fb: &MFunBinding) -> CFunDef {
+        let params = lower_param_names(&fb.params);
+
+        self.push_scope();
+        for pat in &fb.params {
+            collect_pat_binders(pat, self.current_scope_mut());
+        }
+        let return_k = self.identity_cps_continuation();
+        let lowered_body = self.lower_cps_expr(&fb.body, CExpr::Tuple(vec![]), return_k);
+        let body = self.wrap_param_match(&fb.params, &params, lowered_body);
+        self.pop_scope();
+
+        CFunDef {
+            name: self.direct_entry_name(&fb.name),
+            arity: params.len(),
+            body: CExpr::Fun(params, Box::new(body)),
+        }
+    }
+
+    fn identity_cps_continuation(&mut self) -> CExpr {
+        let result = self.fresh_cps_temp("_CpsResult");
+        CExpr::Fun(vec![result.clone()], Box::new(CExpr::Var(result)))
+    }
+
     fn lower_cps_fun_binding(&mut self, fb: &MFunBinding) -> CFunDef {
         let direct_params = lower_param_names(&fb.params);
         let mut params = direct_params.clone();
@@ -442,7 +520,11 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         for pat in &fb.params {
             collect_pat_binders(pat, self.current_scope_mut());
         }
-        let lowered_body = self.lower_cps_expr(&fb.body, CExpr::Var("_ReturnK".to_string()));
+        let lowered_body = self.lower_cps_expr(
+            &fb.body,
+            CExpr::Var("_Evidence".to_string()),
+            CExpr::Var("_ReturnK".to_string()),
+        );
         let body = self.wrap_param_match(&fb.params, &direct_params, lowered_body);
         self.pop_scope();
 
@@ -672,7 +754,9 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             .direct_candidate_function
             .as_ref()
             .is_some_and(|current| current == name);
-        if !recursive_self && !self.direct_body_functions.contains(name) {
+        let has_direct_entry = self.direct_body_functions.contains(name)
+            || self.direct_cps_island_body_functions.contains(name);
+        if !recursive_self && !has_direct_entry {
             return None;
         }
         let direct_name = self
@@ -917,7 +1001,95 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                     supported
                 })
             }
+            MExpr::With { handler, body, .. } => {
+                self.handler_is_cps_island_subset(handler) && self.expr_is_cps_island_subset(body)
+            }
             _ => self.expr_is_direct_subset(expr),
+        }
+    }
+
+    fn handler_is_cps_island_subset(&mut self, handler: &MHandler) -> bool {
+        let MHandler::Static {
+            arms,
+            return_clause,
+            ..
+        } = handler
+        else {
+            return false;
+        };
+        if return_clause.is_some() {
+            return false;
+        }
+        arms.iter()
+            .all(|arm| self.handler_arm_is_cps_island_subset(arm))
+    }
+
+    fn handler_arm_is_cps_island_subset(&mut self, arm: &MHandlerArm) -> bool {
+        if arm.finally_block.is_some() || arm.params.iter().any(|p| !direct_param_supported(p)) {
+            return false;
+        }
+        self.push_scope();
+        for pat in &arm.params {
+            collect_pat_binders(pat, self.current_scope_mut());
+        }
+        let supported = self.handler_arm_expr_is_cps_island_subset(&arm.body);
+        self.pop_scope();
+        supported
+    }
+
+    fn handler_arm_expr_is_cps_island_subset(&mut self, expr: &MExpr) -> bool {
+        match expr {
+            MExpr::Resume { value, .. } => self.atom_is_direct_subset(value),
+            MExpr::Bind {
+                var, value, body, ..
+            }
+            | MExpr::Let { var, value, body } => {
+                if !self.expr_is_direct_subset(value) {
+                    return false;
+                }
+                let local_shape = self.direct_local_shape_for_expr(value);
+                self.push_scope();
+                self.current_scope_mut().insert(var.name.clone());
+                if let Some(shape) = local_shape {
+                    self.current_shape_scope_mut()
+                        .insert(var.name.clone(), shape);
+                }
+                let supported = self.handler_arm_expr_is_cps_island_subset(body);
+                self.pop_scope();
+                supported
+            }
+            MExpr::If {
+                cond,
+                then_branch,
+                else_branch,
+                ..
+            } => {
+                self.atom_is_direct_subset(cond)
+                    && self.handler_arm_expr_is_cps_island_subset(then_branch)
+                    && self.handler_arm_expr_is_cps_island_subset(else_branch)
+            }
+            MExpr::Case {
+                scrutinee, arms, ..
+            } => {
+                if !self.atom_is_direct_subset(scrutinee) {
+                    return false;
+                }
+                arms.iter().all(|arm| {
+                    if !direct_pat_supported(&arm.pattern) {
+                        return false;
+                    }
+                    self.push_scope();
+                    collect_pat_binders(&arm.pattern, self.current_scope_mut());
+                    let supported = arm
+                        .guard
+                        .as_ref()
+                        .is_none_or(|guard| self.expr_is_direct_subset(guard))
+                        && self.handler_arm_expr_is_cps_island_subset(&arm.body);
+                    self.pop_scope();
+                    supported
+                })
+            }
+            _ => false,
         }
     }
 

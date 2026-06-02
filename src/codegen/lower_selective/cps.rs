@@ -1,12 +1,17 @@
 use super::*;
 
 impl<'a, 'info> DirectLowerer<'a, 'info> {
-    pub(super) fn lower_cps_expr(&mut self, expr: &MExpr, return_k: CExpr) -> CExpr {
+    pub(super) fn lower_cps_expr(
+        &mut self,
+        expr: &MExpr,
+        evidence: CExpr,
+        return_k: CExpr,
+    ) -> CExpr {
         match expr {
-            MExpr::Yield { op, args, .. } => self.lower_cps_yield(op, args, return_k),
+            MExpr::Yield { op, args, .. } => self.lower_cps_yield(op, args, evidence, return_k),
             MExpr::Bind {
                 var, value, body, ..
-            } => self.lower_cps_bind(var, value, body, return_k),
+            } => self.lower_cps_bind(var, value, body, evidence, return_k),
             MExpr::If {
                 cond,
                 then_branch,
@@ -18,12 +23,12 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                     CArm {
                         pat: CPat::Lit(CLit::Atom("true".to_string())),
                         guard: None,
-                        body: self.lower_cps_expr(then_branch, return_k.clone()),
+                        body: self.lower_cps_expr(then_branch, evidence.clone(), return_k.clone()),
                     },
                     CArm {
                         pat: CPat::Lit(CLit::Atom("false".to_string())),
                         guard: None,
-                        body: self.lower_cps_expr(else_branch, return_k),
+                        body: self.lower_cps_expr(else_branch, evidence, return_k),
                     },
                 ],
             ),
@@ -32,10 +37,13 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             } => CExpr::Case(
                 Box::new(self.lower_atom(scrutinee)),
                 arms.iter()
-                    .map(|arm| self.lower_cps_arm(arm, return_k.clone()))
+                    .map(|arm| self.lower_cps_arm(arm, evidence.clone(), return_k.clone()))
                     .collect(),
             ),
-            MExpr::App { head, args, .. } => self.lower_cps_app(head, args, return_k),
+            MExpr::App { head, args, .. } => self.lower_cps_app(head, args, evidence, return_k),
+            MExpr::With { handler, body, .. } => {
+                self.lower_cps_with(handler, body, evidence, return_k)
+            }
             _ if self.expr_is_direct_subset(expr) => {
                 CExpr::Apply(Box::new(return_k), vec![self.lower_expr(expr)])
             }
@@ -48,6 +56,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         var: &MVar,
         value: &MExpr,
         body: &MExpr,
+        evidence: CExpr,
         return_k: CExpr,
     ) -> CExpr {
         if self.expr_is_direct_subset(value) {
@@ -59,7 +68,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                 self.current_shape_scope_mut()
                     .insert(var.name.clone(), shape);
             }
-            let lowered_body = self.lower_cps_expr(body, return_k);
+            let lowered_body = self.lower_cps_expr(body, evidence, return_k);
             self.pop_scope();
             return CExpr::Let(
                 core_var(&var.name),
@@ -71,7 +80,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         let k_arg = self.fresh_cps_temp("_CpsBindArg");
         self.push_scope();
         self.current_scope_mut().insert(var.name.clone());
-        let lowered_body = self.lower_cps_expr(body, return_k);
+        let lowered_body = self.lower_cps_expr(body, evidence.clone(), return_k);
         self.pop_scope();
         let k_body = CExpr::Let(
             core_var(&var.name),
@@ -79,17 +88,20 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             Box::new(lowered_body),
         );
         let k_fun = CExpr::Fun(vec![k_arg], Box::new(k_body));
-        self.lower_cps_expr(value, k_fun)
+        self.lower_cps_expr(value, evidence, k_fun)
     }
 
-    fn lower_cps_yield(&mut self, op: &EffectOpRef, args: &[Atom], return_k: CExpr) -> CExpr {
+    fn lower_cps_yield(
+        &mut self,
+        op: &EffectOpRef,
+        args: &[Atom],
+        evidence: CExpr,
+        return_k: CExpr,
+    ) -> CExpr {
         let find_call = CExpr::Call(
             "std_evidence_bridge".to_string(),
             "find_evidence".to_string(),
-            vec![
-                CExpr::Var("_Evidence".to_string()),
-                CExpr::Lit(CLit::Atom(op.effect.clone())),
-            ],
+            vec![evidence.clone(), CExpr::Lit(CLit::Atom(op.effect.clone()))],
         );
         let op_closure = CExpr::Call(
             "erlang".to_string(),
@@ -98,12 +110,18 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         );
 
         let mut apply_args: Vec<CExpr> = args.iter().map(|arg| self.lower_atom(arg)).collect();
-        apply_args.push(CExpr::Var("_Evidence".to_string()));
+        apply_args.push(evidence);
         apply_args.push(return_k);
         CExpr::Apply(Box::new(op_closure), apply_args)
     }
 
-    fn lower_cps_app(&mut self, head: &Atom, args: &[Atom], return_k: CExpr) -> CExpr {
+    fn lower_cps_app(
+        &mut self,
+        head: &Atom,
+        args: &[Atom],
+        evidence: CExpr,
+        return_k: CExpr,
+    ) -> CExpr {
         let Some(CallShape::Cps {
             module,
             name,
@@ -131,7 +149,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         self.assert_app_arity(&name, args.len() + 2, adapter_arity);
 
         let mut lowered_args: Vec<CExpr> = args.iter().map(|arg| self.lower_atom(arg)).collect();
-        lowered_args.push(CExpr::Var("_Evidence".to_string()));
+        lowered_args.push(evidence);
         lowered_args.push(return_k);
 
         match module {
@@ -140,10 +158,200 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         }
     }
 
-    fn lower_cps_arm(&mut self, arm: &MArm, return_k: CExpr) -> CArm {
+    fn lower_cps_with(
+        &mut self,
+        handler: &MHandler,
+        body: &MExpr,
+        evidence: CExpr,
+        return_k: CExpr,
+    ) -> CExpr {
+        let MHandler::Static {
+            arms,
+            return_clause,
+            ..
+        } = handler
+        else {
+            self.unsupported("selective CPS with currently supports static handlers only");
+        };
+        if return_clause.is_some() {
+            self.unsupported("selective CPS with return clauses");
+        }
+
+        let mut canonical_effects = Vec::new();
+        for arm in arms {
+            if !canonical_effects.contains(&arm.op.effect) {
+                canonical_effects.push(arm.op.effect.clone());
+            }
+        }
+
+        let mut by_effect: BTreeMap<String, Vec<&MHandlerArm>> = BTreeMap::new();
+        for arm in arms {
+            by_effect
+                .entry(arm.op.effect.clone())
+                .or_default()
+                .push(arm);
+        }
+
+        let mut current_evidence = evidence.clone();
+        let mut bindings = Vec::with_capacity(canonical_effects.len());
+        for effect in canonical_effects {
+            let effect_arms = by_effect
+                .get_mut(&effect)
+                .unwrap_or_else(|| self.unsupported("static handler effect without arms"));
+            effect_arms.sort_by_key(|arm| arm.op.op_index);
+            let op_tuple = self.lower_cps_static_handler_op_tuple(&effect, effect_arms, &evidence);
+            let entry = CExpr::Tuple(vec![CExpr::Lit(CLit::Atom(effect)), op_tuple]);
+            let insert = CExpr::Call(
+                "std_evidence_bridge".to_string(),
+                "insert_canonical".to_string(),
+                vec![current_evidence, entry],
+            );
+            let evidence_var = self.fresh_cps_temp("_CpsEvidence");
+            current_evidence = CExpr::Var(evidence_var.clone());
+            bindings.push((evidence_var, insert));
+        }
+
+        let lowered_body = self.lower_cps_expr(body, current_evidence, return_k);
+        bindings
+            .into_iter()
+            .rev()
+            .fold(lowered_body, |inner, (name, value)| {
+                CExpr::Let(name, Box::new(value), Box::new(inner))
+            })
+    }
+
+    fn lower_cps_static_handler_op_tuple(
+        &mut self,
+        effect: &str,
+        arms: &[&MHandlerArm],
+        outer_evidence: &CExpr,
+    ) -> CExpr {
+        let mut closures = Vec::with_capacity(arms.len());
+        for (i, arm) in arms.iter().enumerate() {
+            let expected = i as u32 + 1;
+            if arm.op.op_index != expected {
+                self.unsupported(&format!(
+                    "static handler for effect '{effect}' is missing op_index {expected}"
+                ));
+            }
+            closures.push(self.lower_cps_static_handler_arm(arm, outer_evidence.clone()));
+        }
+        CExpr::Tuple(closures)
+    }
+
+    fn lower_cps_static_handler_arm(&mut self, arm: &MHandlerArm, outer_evidence: CExpr) -> CExpr {
+        if arm.finally_block.is_some() {
+            self.unsupported("selective CPS handler finally blocks");
+        }
+
+        let source_params = lower_param_names(&arm.params);
+        let perform_evidence = self.fresh_cps_temp("_ArmEvidence");
+        let arm_k = self.fresh_cps_temp("_ArmK");
+        let mut params = source_params.clone();
+        params.push(perform_evidence);
+        params.push(arm_k.clone());
+
+        self.push_scope();
+        for pat in &arm.params {
+            collect_pat_binders(pat, self.current_scope_mut());
+        }
+        let body =
+            self.lower_cps_handler_arm_expr(&arm.body, outer_evidence, CExpr::Var(arm_k.clone()));
+        let body = self.wrap_param_match(&arm.params, &source_params, body);
+        self.pop_scope();
+
+        CExpr::Fun(params, Box::new(body))
+    }
+
+    fn lower_cps_handler_arm_expr(
+        &mut self,
+        expr: &MExpr,
+        outer_evidence: CExpr,
+        arm_k: CExpr,
+    ) -> CExpr {
+        match expr {
+            MExpr::Resume { value, .. } => {
+                CExpr::Apply(Box::new(arm_k), vec![self.lower_atom(value)])
+            }
+            MExpr::Bind {
+                var, value, body, ..
+            }
+            | MExpr::Let { var, value, body }
+                if self.expr_is_direct_subset(value) =>
+            {
+                let local_shape = self.direct_local_shape_for_expr(value);
+                let lowered_value = self.lower_expr(value);
+                self.push_scope();
+                self.current_scope_mut().insert(var.name.clone());
+                if let Some(shape) = local_shape {
+                    self.current_shape_scope_mut()
+                        .insert(var.name.clone(), shape);
+                }
+                let lowered_body = self.lower_cps_handler_arm_expr(body, outer_evidence, arm_k);
+                self.pop_scope();
+                CExpr::Let(
+                    core_var(&var.name),
+                    Box::new(lowered_value),
+                    Box::new(lowered_body),
+                )
+            }
+            MExpr::If {
+                cond,
+                then_branch,
+                else_branch,
+                ..
+            } => CExpr::Case(
+                Box::new(self.lower_atom(cond)),
+                vec![
+                    CArm {
+                        pat: CPat::Lit(CLit::Atom("true".to_string())),
+                        guard: None,
+                        body: self.lower_cps_handler_arm_expr(
+                            then_branch,
+                            outer_evidence.clone(),
+                            arm_k.clone(),
+                        ),
+                    },
+                    CArm {
+                        pat: CPat::Lit(CLit::Atom("false".to_string())),
+                        guard: None,
+                        body: self.lower_cps_handler_arm_expr(else_branch, outer_evidence, arm_k),
+                    },
+                ],
+            ),
+            MExpr::Case {
+                scrutinee, arms, ..
+            } => CExpr::Case(
+                Box::new(self.lower_atom(scrutinee)),
+                arms.iter()
+                    .map(|arm| {
+                        self.lower_cps_handler_case_arm(arm, outer_evidence.clone(), arm_k.clone())
+                    })
+                    .collect(),
+            ),
+            _ => self.unsupported_expr(expr),
+        }
+    }
+
+    fn lower_cps_handler_case_arm(
+        &mut self,
+        arm: &MArm,
+        outer_evidence: CExpr,
+        arm_k: CExpr,
+    ) -> CArm {
         self.push_scope();
         collect_pat_binders(&arm.pattern, self.current_scope_mut());
-        let body = self.lower_cps_expr(&arm.body, return_k);
+        let body = self.lower_cps_handler_arm_expr(&arm.body, outer_evidence, arm_k);
+        let guard = arm.guard.as_ref().map(|g| self.lower_expr(g));
+        let pat = self.lower_pat(&arm.pattern);
+        self.pop_scope();
+        CArm { pat, guard, body }
+    }
+
+    fn lower_cps_arm(&mut self, arm: &MArm, evidence: CExpr, return_k: CExpr) -> CArm {
+        self.push_scope();
+        collect_pat_binders(&arm.pattern, self.current_scope_mut());
+        let body = self.lower_cps_expr(&arm.body, evidence, return_k);
         let guard = arm.guard.as_ref().map(|g| self.lower_expr(g));
         let pat = self.lower_pat(&arm.pattern);
         self.pop_scope();

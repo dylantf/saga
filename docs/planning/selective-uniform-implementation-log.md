@@ -153,6 +153,18 @@ The first implementation slice is:
   - Current result: inspecting `src/Main.saga` emits a remote CPS adapter call
     to `effects:read_value/3`, passing `_Evidence` and a generated
     continuation that binds the result and returns `value + 2`.
+- `examples/optimization/selective-uniform/19-static-handler-with-cps-island.saga`
+  - Current result: emits a pure direct entry `read_plus_one_handled/1` whose
+    body contains an internal CPS island. The direct wrapper starts with empty
+    evidence and an identity continuation, `with forty_one` installs a
+    canonical `ReadInt` evidence entry via
+    `std_evidence_bridge:insert_canonical/2`, and `read! ()` finds that entry
+    and calls the handler arm closure. The arm supports the narrow
+    tail-resume shape `resume 41`, applying the captured operation
+    continuation so the surrounding `let value = ...; value + 1` still runs.
+  - Current limits: static handlers only, no return clause, no `finally`, no
+    aborting/non-resuming arms, no dynamic/native/composite handlers, and no
+    higher-order handler values in the selective lowerer.
 
 ## Active Design Decisions
 
@@ -238,9 +250,21 @@ The first implementation slice is:
   direct expression returns by applying the current `_ReturnK`. CPS islands can
   now call local and imported CPS adapter entries by passing source args plus
   `_Evidence` and the current continuation. They also support `if` and `case`
-  control flow over the currently supported direct atom/pattern subset. They
-  still have no `With`, `Resume`, handler runtime, or higher-order CPS
-  callable values.
+  control flow over the currently supported direct atom/pattern subset.
+- Pure functions can now have a direct ABI even when their body contains a
+  supported CPS island. `lower_selective` tracks these separately as
+  `direct_cps_island_body_functions`: they emit a direct source-arity entry
+  whose body runs the island with empty evidence plus an identity continuation.
+  This is the first explicit island boundary inside an otherwise direct
+  function.
+- The first handler/evidence slice supports `MExpr::With` for narrow static
+  handlers whose arms are tail-resumptive. `With` extends the current evidence
+  vector for the handled body, while handler arm closures close over the outer
+  evidence so re-performs do not recurse into the just-installed handler.
+  Handler arm `Resume` applies the captured operation continuation. Return
+  clauses, `finally`, abort arms, dynamic/native/composite handlers, and
+  handler values remain unsupported in `lower_selective`.
+- CPS islands still do not support higher-order CPS callable values.
 - `lower_selective` computes imported entry metadata for already-compiled
   non-stdlib user modules. Remote effect-row calls may lower to direct remote
   calls only when that imported metadata proves a direct entry exists; otherwise
@@ -250,15 +274,66 @@ The first implementation slice is:
   from. Remote direct-entry matching accepts only imported metadata-proven
   direct arities, checking both the resolved arity and `resolved_arity - 2`.
 
+## Pipeline Integration Milestones
+
+Current mode is **inspect-driven Core shape work**:
+
+```text
+parse/typecheck/elaborate
+-> ANF
+-> whole-module monadic translation
+-> lower_selective
+-> print Core via inspect --stage selective-core
+```
+
+This is intentionally not the final architecture. It lets us prove direct/CPS
+entry shapes without yet replacing the production build pipeline. Normal
+`saga build` / `saga run` still go through `emit_module_with_context` and the
+existing monadic/uniform lowerer unless an explicit integration point is added.
+
+Temporary monadic-IR use:
+
+- It is acceptable for `selective-core` inspect/tests to build monadic IR for
+  the whole module while the selective lowerer is being proven.
+- Do not mistake that scaffold for the target architecture. The final split
+  should build/use monadic IR only for bodies or regions classified as
+  CPS-shaped.
+
+Planned integration sequence:
+
+1. **Handler/evidence slice.** Add the first `With` lowering for a simple
+   static handler so an operation can run under installed evidence in
+   `selective-core`. Status: first narrow static tail-resume case is working;
+   broader handler semantics are still open.
+2. **Selective entrypoint/bootstrap slice.** Add the minimal wrapper/evidence
+   setup needed for a normal `main` entry to call direct or CPS-shaped code
+   correctly.
+3. **Experimental build/run toggle.** Add an explicit compiler option or flag
+   that routes normal `emit_module_with_context` through `lower_selective` for
+   supported modules. Keep the default production path unchanged.
+4. **First pure/direct end-to-end run.** Use the experimental toggle to run a
+   boring direct program through parse -> emit -> erlc -> erl, e.g.
+   `main () = 42` or `main () = { print_stdout "ok"; () }`.
+5. **First handled-effect end-to-end run.** Run a trivial handled effect, e.g.
+   `read! () with forty_two`, through the same parse -> emit -> erlc -> erl
+   path.
+6. **Move direct lowering earlier.** Once runtime integration is real, start
+   moving proven pure/direct lowering before whole-module monadic translation
+   so monadic IR is only built for CPS-shaped regions.
+
+E2E should be tracked explicitly after milestone 3, but it should not become
+the main development workflow before the handler/evidence and entrypoint
+boundaries exist.
+
 ## Next Session Checklist
 
 1. Read this log and `docs/planning/selective-uniform-effects.md`.
 2. Check `git status --short`.
 3. Decide the next vertical slice:
-   - add the first handler/evidence installation slice so a trivial handled
-     operation can run, or
-   - support higher-order CPS callable values at island boundaries, or
-   - start moving the proven direct path into the real build path.
+   - continue milestone 1 beyond the first static tail-resume handler slice,
+     or
+   - if blocked on handlers, support higher-order CPS callable values at
+     island boundaries.
 4. Keep updating focused fixtures/tests as each tiny subset starts working.
 
 ## Session Notes
