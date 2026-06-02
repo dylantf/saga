@@ -458,6 +458,11 @@ The first implementation slice is:
   - `examples/optimization/selective-uniform/imported-cps-island-project/`.
 - Added a same-module `selective_core` unit test for calling a local CPS helper
   and a CLI integration test for project-mode imported CPS adapter calls.
+- Started module discipline for `lower_selective` by moving entry/call-shape
+  metadata and leaf helper functions into `src/codegen/lower_selective/support.rs`.
+  The main file still owns classification and lowering behavior; future splits
+  should move whole responsibility groups such as classification, direct
+  lowering, and CPS island lowering.
 - Verification:
   - `cargo run --bin saga -- inspect examples/optimization/selective-uniform/01-pure-direct.saga --stage selective-core`
     emits direct `add1/1`, `twice/1`, and `main/1`.
