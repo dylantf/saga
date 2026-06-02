@@ -193,6 +193,13 @@ The first implementation slice is:
     `read! ()`; the resumed continuation applies the lambda to the operation
     result and then calls `_ReturnK`. This pins that proven direct callable
     values can survive inside CPS island continuations without guessing arity.
+- `examples/optimization/selective-uniform/25-handled-effect-e2e.saga`
+  - Current result: first handled-effect selective backend end-to-end run.
+    `answer/1` is a direct-ABI function with an internal handled `ReadInt`
+    island; `main/1` calls it, checks for `42`, and prints `ok`.
+  - Command:
+    `cargo run --bin saga -- run examples/optimization/selective-uniform/25-handled-effect-e2e.saga --selective-codegen`
+  - Current runtime result: prints `ok`.
 
 ## Active Design Decisions
 
@@ -359,7 +366,8 @@ Planned integration sequence:
    --selective-codegen`.
 5. **First handled-effect end-to-end run.** Run a trivial handled effect, e.g.
    `read! () with forty_two`, through the same parse -> emit -> erlc -> erl
-   path.
+   path. Status: `25-handled-effect-e2e.saga` runs and prints `ok` with
+   `saga run --selective-codegen`.
 6. **Move direct lowering earlier.** Once runtime integration is real, start
    moving proven pure/direct lowering before whole-module monadic translation
    so monadic IR is only built for CPS-shaped regions.
