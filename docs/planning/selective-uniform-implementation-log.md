@@ -1212,3 +1212,61 @@ boundaries exist.
   - status: `cargo test -p saga selective_core --no-default-features` and
     `cargo test -p saga --test selective_core_cli` pass with the merged flagged
     backend.
+- No-fallback e2e audit progress:
+  - `saga test --selective-no-fallback base_test` now passes
+    `25 passed, 0 failed`;
+  - `saga test --selective-no-fallback pattern_matching_test` now passes
+    `61 passed, 0 failed`;
+  - direct pattern coverage now includes named/anonymous record patterns,
+    punned fields, `as` aliases, string-prefix patterns, and binary string
+    literal patterns;
+  - grouped direct functions now support guarded clauses by lowering through
+    value-level case chains instead of emitting ANF `let` expressions in Core
+    guard position;
+  - CPS case lowering also uses safe fallthrough chains, fixing the erlc
+    `core_to_ssa` failure around synthetic `fail` in deep test lambdas;
+  - handler-arm CPS lowering recognizes the important multishot shape
+    `List.flat_map (fun x -> resume x) options` and lowers the callback as a
+    direct closure that applies the current handler-arm continuation;
+  - full `saga test --selective-no-fallback` now advances to dynamic
+    multi-effect handler values:
+    `let h = handler for Log, Validate { ... }; body with h`.
+- Updated `docs/planning/selective-cps-value-matrix.md` to reflect the current
+  state:
+  - HOF direct specialization is no longer future work;
+  - `RecordUpdate`, direct external calls, guarded case/function lowering, and
+    handler-arm `flat_map` resume are marked supported in their current narrow
+    forms;
+  - handler values are promoted from a vague separate matrix to the next active
+    producer/consumer discipline chunk.
+- Implemented the first handler-value producer/consumer discipline slice:
+  - selective lowering now threads the monadic translator's `HandlerValueMap`
+    into the direct-first lowerer;
+  - inline `handler for ...` values and named handler references lower to the
+    same runtime shape as the uniform lowerer:
+    `{__saga_handler_value, OpsByEffect, RuntimeReturn}`;
+  - `OpsByEffect` groups arms by canonical effect name and installs dynamic
+    handlers by extracting each per-effect op tuple into evidence;
+  - return clauses lower as runtime return lambdas with `(value, evidence, k)`;
+  - `if`-selected handler values now produce a common runtime handler tuple in
+    each branch, covering `let logger = if dev then console_log else silent_log`;
+  - dynamic `with h` can consume the runtime tuple and compose the handler
+    return with the outer selective continuation.
+- Tightened selective callback planning:
+  - `--selective-no-fallback` is now correctly threaded into the selective
+    lowerer from `emit_module_via_new_path`; strict mode no longer emits
+    partial modules and waits for `erlc` to find missing definitions;
+  - CPS callback arguments are now checked against the callee's expected
+    callback shapes before lowering, so unsupported effectful callback bodies
+    fall back/stop during planning instead of panicking while materializing the
+    runtime CPS lambda.
+- Current audit frontier after this slice:
+  - `saga test --selective-no-fallback effects_test` now stops in stdlib at
+    `run_writer`, before the EffectsTest module itself;
+  - fallback-enabled `saga test --selective-codegen effects_test` currently
+    reaches the old fallback lowerer and hits the known
+    `lower_pure_expr: MExpr variant is not in Bind→Let's pure subset` panic
+    once selective declines the unsupported `run_state`/effectful-callback
+    shape. The next architecture decision is whether writer/state-style HOFs
+    should be direct-specialized, adapted over fallback-only pure functions, or
+    routed through a monadic fallback island.

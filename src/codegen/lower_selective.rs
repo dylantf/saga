@@ -23,8 +23,8 @@ use crate::codegen::cerl::{CArm, CBinSeg, CExpr, CFunDef, CLit, CModule, CPat};
 use crate::codegen::handler_analysis::{HandlerAnalysis, ResumptionKind};
 use crate::codegen::lower::util::{core_var, lower_lit_atom, mangle_ctor_atom};
 use crate::codegen::monadic::ir::{
-    Atom, EffectInfo, EffectOpRef, MArm, MDecl, MDictConstructor, MExpr, MFunBinding, MHandler,
-    MHandlerArm, MProgram, MVar,
+    Atom, EffectInfo, EffectOpRef, HandlerValueInfo, HandlerValueMap, MArm, MDecl,
+    MDictConstructor, MExpr, MFunBinding, MHandler, MHandlerArm, MProgram, MVar,
 };
 use crate::codegen::resolve::{ConstructorAtoms, ResolutionMap, ResolvedCodegenKind};
 use crate::codegen::runtime_shape::RuntimeFunctionShape;
@@ -47,6 +47,7 @@ pub fn lower_module(
     effect_info: &EffectInfo<'_>,
 ) -> CModule {
     let handler_info = HandlerAnalysis::default();
+    let handler_value_map = HandlerValueMap::new();
     lower_module_with_entry_export_options(
         module_name,
         program,
@@ -56,6 +57,7 @@ pub fn lower_module(
         &handler_info,
         effect_info,
         None,
+        &handler_value_map,
         LoweringOptions::default(),
     )
 }
@@ -80,6 +82,7 @@ pub fn lower_module_with_options(
         handler_info,
         effect_info,
         None,
+        &HandlerValueMap::new(),
         options,
     )
 }
@@ -104,6 +107,7 @@ pub fn lower_module_with_entry_export(
         handler_info,
         effect_info,
         entry_export,
+        &HandlerValueMap::new(),
         LoweringOptions::default(),
     )
 }
@@ -118,6 +122,7 @@ pub fn lower_module_with_entry_export_options(
     handler_info: &HandlerAnalysis,
     effect_info: &EffectInfo<'_>,
     entry_export: Option<&str>,
+    handler_value_map: &HandlerValueMap,
     options: LoweringOptions,
 ) -> CModule {
     let mut lowerer = DirectLowerer::new(
@@ -126,6 +131,7 @@ pub fn lower_module_with_entry_export_options(
         module_ctx,
         handler_info,
         effect_info,
+        handler_value_map,
         options,
     );
     lowerer.lower_module(module_name, program, entry_export)
@@ -137,6 +143,7 @@ struct DirectLowerer<'a, 'info> {
     module_ctx: &'a CodegenContext,
     handler_info: &'a HandlerAnalysis,
     effect_info: &'a EffectInfo<'info>,
+    handler_value_map: &'a HandlerValueMap,
     current_module: String,
     /// Declared callable shape from type/effect metadata.
     ///
@@ -182,6 +189,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         module_ctx: &'a CodegenContext,
         handler_info: &'a HandlerAnalysis,
         effect_info: &'a EffectInfo<'info>,
+        handler_value_map: &'a HandlerValueMap,
         options: LoweringOptions,
     ) -> Self {
         Self {
@@ -190,6 +198,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             module_ctx,
             handler_info,
             effect_info,
+            handler_value_map,
             current_module: String::new(),
             callable_type_shapes: HashMap::new(),
             local_fun_bindings: HashMap::new(),
@@ -685,6 +694,9 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         if let Some(cps) = self.cps_function_shape(head) {
             return Some(cps);
         }
+        if let Some(local) = self.local_top_level_function_shape(head) {
+            return Some(local);
+        }
         if let Atom::Var { name, .. } = head
             && let Some(LocalValueShape::CpsCallable {
                 module,
@@ -741,6 +753,37 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             });
         }
         None
+    }
+
+    fn local_top_level_function_shape(&self, head: &Atom) -> Option<CallShape> {
+        let Atom::Var { name, .. } = head else {
+            return None;
+        };
+        if self.is_local(&name.name) {
+            return None;
+        }
+        let entries = self.local_function_entries.get(&name.name)?;
+        match self.callable_type_shapes.get(&name.name)? {
+            RuntimeFunctionShape::Pure => {
+                let arity = entries.direct_entry_arity?;
+                Some(CallShape::Direct(DirectCallable {
+                    module: None,
+                    name: self.direct_entry_name_for(&name.name, entries),
+                    arity,
+                }))
+            }
+            RuntimeFunctionShape::Cps(shape) => {
+                let adapter_arity = entries.cps_adapter_entry_arity?;
+                Some(CallShape::Cps {
+                    module: None,
+                    name: name.name.clone(),
+                    source_arity: entries.source_arity,
+                    adapter_arity,
+                    effects: shape.static_effects.clone(),
+                })
+            }
+            RuntimeFunctionShape::Intrinsic => None,
+        }
     }
 
     fn is_panic_or_todo_call(&self, head: &Atom, args: &[Atom]) -> bool {
@@ -1415,7 +1458,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                     }) => source_arity == args.len() && adapter_arity == args.len() + 2,
                     _ => false,
                 };
-                call_supported && args.iter().all(|arg| self.atom_is_cps_value_subset(arg))
+                call_supported && self.cps_call_args_are_supported(head, args)
             }
             MExpr::If {
                 cond,
@@ -1451,23 +1494,35 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             MExpr::With { handler, body, .. } => {
                 self.handler_is_cps_island_subset(handler) && self.expr_is_cps_island_subset(body)
             }
+            MExpr::HandlerValue {
+                arms,
+                return_clause,
+                ..
+            } => self.handler_value_is_cps_island_subset(arms, return_clause.as_deref()),
             _ => self.expr_is_direct_subset(expr),
         }
     }
 
     fn handler_is_cps_island_subset(&mut self, handler: &MHandler) -> bool {
-        let MHandler::Static {
-            arms,
-            return_clause,
-            ..
-        } = handler
-        else {
-            return false;
+        let (arms, return_clause) = match handler {
+            MHandler::Static {
+                arms,
+                return_clause,
+                ..
+            } => (arms, return_clause.as_ref()),
+            MHandler::Dynamic {
+                op_tuple,
+                return_lambda,
+                ..
+            } => {
+                return self.atom_is_direct_subset(op_tuple)
+                    && return_lambda
+                        .as_ref()
+                        .is_none_or(|lambda| self.atom_is_cps_value_subset(lambda));
+            }
+            _ => return false,
         };
-        let return_supported = return_clause
-            .as_ref()
-            .is_none_or(|arm| self.return_clause_is_cps_island_subset(arm));
-        if !return_supported {
+        if !return_clause.is_none_or(|arm| self.return_clause_is_cps_island_subset(arm)) {
             return false;
         }
         arms.iter()
@@ -1623,8 +1678,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                             | LocalValueShape::RuntimeCpsCallable { .. }
                     )
                 );
-                self.cps_value_atom_shape(atom).is_some()
-                    || (self.is_local(&name.name) && !cps_callable_local)
+                (self.is_local(&name.name) && !cps_callable_local)
                     || self.direct_values.contains(&name.name)
                     || self.supported_direct_call(atom).is_some()
                     || self.direct_function_value_ref(atom).is_some()
@@ -1637,15 +1691,8 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             Atom::AnonRecord { fields, .. } | Atom::Record { fields, .. } => fields
                 .iter()
                 .all(|(_, arg)| self.atom_is_direct_subset(arg)),
-            Atom::Lambda { params, body, .. } => {
-                self.cps_value_atom_shape(atom).is_some()
-                    || self.lambda_is_direct_subset(params, body)
-                    || self.lambda_is_direct_cps_island_subset(params, body)
-            }
-            Atom::QualifiedRef { .. } => {
-                self.cps_value_atom_shape(atom).is_some()
-                    || self.direct_function_value_ref(atom).is_some()
-            }
+            Atom::Lambda { params, body, .. } => self.lambda_is_direct_subset(params, body),
+            Atom::QualifiedRef { .. } => self.direct_function_value_ref(atom).is_some(),
             Atom::BackendAtom { .. } | Atom::BackendSpawnThunk { .. } => false,
             Atom::DictRef { .. } => self.direct_dict_constructor(atom).is_some(),
         }
@@ -1656,6 +1703,25 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             return self.lambda_is_cps_subset(atom) || self.atom_is_direct_subset(atom);
         }
         self.cps_value_atom_shape(atom).is_some() || self.atom_is_direct_subset(atom)
+    }
+
+    fn cps_call_args_are_supported(&mut self, head: &Atom, args: &[Atom]) -> bool {
+        let expected_arg_shapes = self.cps_callback_param_shapes(head);
+        args.iter().enumerate().all(|(index, arg)| {
+            match expected_arg_shapes.get(index).copied().flatten() {
+                Some((_source_arity, _adapter_arity)) => self.cps_callback_arg_is_supported(arg),
+                None => self.atom_is_cps_value_subset(arg),
+            }
+        })
+    }
+
+    fn cps_callback_arg_is_supported(&mut self, atom: &Atom) -> bool {
+        if let Atom::Lambda { params, body, .. } = atom {
+            return self.lambda_is_cps_subset(atom) || self.lambda_is_direct_subset(params, body);
+        }
+        self.cps_value_atom_shape(atom).is_some()
+            || self.pure_value_atom_shape(atom).is_some()
+            || self.atom_is_direct_subset(atom)
     }
 
     fn lambda_is_direct_subset(&mut self, params: &[Pat], body: &MExpr) -> bool {
@@ -2117,6 +2183,9 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
     }
 
     fn cps_bind_value_expr_is_supported(&mut self, expr: &MExpr) -> bool {
+        if self.handler_value_expr_is_cps_island_subset(expr) {
+            return true;
+        }
         match expr {
             MExpr::Pure(atom @ Atom::Lambda { .. }) => self.lambda_is_cps_subset(atom),
             MExpr::Pure(_) => self.cps_bind_shape_for_expr(expr).is_some(),
@@ -2124,6 +2193,11 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                 self.atom_is_direct_subset(dict)
                     && self.cps_dict_method_shape_for_expr(expr).is_some()
             }
+            MExpr::HandlerValue {
+                arms,
+                return_clause,
+                ..
+            } => self.handler_value_is_cps_island_subset(arms, return_clause.as_deref()),
             MExpr::If {
                 cond,
                 then_branch,
@@ -2157,6 +2231,48 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             }
             _ => false,
         }
+    }
+
+    fn handler_value_expr_is_cps_island_subset(&mut self, expr: &MExpr) -> bool {
+        match expr {
+            MExpr::Pure(atom) => self.handler_value_info_for_atom(atom).is_some(),
+            MExpr::HandlerValue {
+                arms,
+                return_clause,
+                ..
+            } => self.handler_value_is_cps_island_subset(arms, return_clause.as_deref()),
+            MExpr::If {
+                cond,
+                then_branch,
+                else_branch,
+                ..
+            } => {
+                self.atom_is_direct_subset(cond)
+                    && self.handler_value_expr_is_cps_island_subset(then_branch)
+                    && self.handler_value_expr_is_cps_island_subset(else_branch)
+            }
+            _ => false,
+        }
+    }
+
+    fn handler_value_info_for_atom(&self, atom: &Atom) -> Option<&HandlerValueInfo> {
+        let Atom::Var { name, .. } = atom else {
+            return None;
+        };
+        if self.is_local(&name.name) {
+            return None;
+        }
+        self.handler_value_map.get(&name.name)
+    }
+
+    fn handler_value_is_cps_island_subset(
+        &mut self,
+        arms: &[MHandlerArm],
+        return_clause: Option<&MHandlerArm>,
+    ) -> bool {
+        arms.iter()
+            .all(|arm| self.handler_arm_is_cps_island_subset(arm))
+            && return_clause.is_none_or(|arm| self.return_clause_is_cps_island_subset(arm))
     }
 
     fn compatible_case_runtime_cps_shape(&self, arms: &[MArm]) -> Option<LocalValueShape> {
@@ -2642,12 +2758,14 @@ mod tests {
         let ctors = ConstructorAtoms::new();
         let module_ctx = CodegenContext::default();
         let handler_info = HandlerAnalysis::default();
+        let handler_value_map = HandlerValueMap::new();
         let mut lowerer = DirectLowerer::new(
             &resolution,
             &ctors,
             &module_ctx,
             &handler_info,
             &effect_info,
+            &handler_value_map,
             LoweringOptions::default(),
         );
 

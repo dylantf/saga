@@ -552,8 +552,9 @@ pub fn emit_module_via_new_path(
             &handler_info,
             &effect_info,
             entry_export,
+            &handler_value_map,
             lower_selective::LoweringOptions {
-                require_all_functions: false,
+                require_all_functions: options.selective_no_fallback,
             },
         );
         let cmod = if options.selective_no_fallback {

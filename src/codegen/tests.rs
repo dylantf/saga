@@ -89,13 +89,13 @@ fn emit_selective_core_with_options(
         &let_handler_effects_storage,
     );
     let imported_handler_decls = std::collections::HashMap::new();
-    let (monadic_prog, _) = super::monadic::translate::translate_with_imports(
+    let (monadic_prog, handler_value_map) = super::monadic::translate::translate_with_imports(
         &anf_program,
         &resolution_map,
         &effect_info,
         &imported_handler_decls,
     );
-    let cmod = super::lower_selective::lower_module_with_options(
+    let cmod = super::lower_selective::lower_module_with_entry_export_options(
         module_name,
         &monadic_prog,
         &resolution_map,
@@ -103,6 +103,8 @@ fn emit_selective_core_with_options(
         &ctx,
         &handler_info,
         &effect_info,
+        None,
+        &handler_value_map,
         options,
     );
     super::cerl::print_module(&cmod)
@@ -975,7 +977,7 @@ main () = ()
 "#;
     let out = emit_selective_core(src);
     assert!(out.contains("'choose_read'/3"), "{out}");
-    assert!(out.contains("case Choice of"), "{out}");
+    assert!(out.contains("case _CpsCaseScrut"), "{out}");
     assert!(out.contains("'_script_UseEffect'"), "{out}");
     assert!(out.contains("'_script_UseDefault'"), "{out}");
     assert!(

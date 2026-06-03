@@ -222,12 +222,13 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                 Some(&compiled.resolution),
             );
             let imported_handler_decls = HashMap::new();
-            let (monadic_imported, _) = crate::codegen::monadic::translate::translate_with_imports(
-                &anf_imported,
-                &compiled.resolution,
-                self.effect_info,
-                &imported_handler_decls,
-            );
+            let (monadic_imported, imported_handler_value_map) =
+                crate::codegen::monadic::translate::translate_with_imports(
+                    &anf_imported,
+                    &compiled.resolution,
+                    self.effect_info,
+                    &imported_handler_decls,
+                );
 
             let mut imported = DirectLowerer::new(
                 &compiled.resolution,
@@ -235,6 +236,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                 self.module_ctx,
                 self.handler_info,
                 self.effect_info,
+                &imported_handler_value_map,
                 LoweringOptions::default(),
             );
             imported.current_module = source_module_name.clone();

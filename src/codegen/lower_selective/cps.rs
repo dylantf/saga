@@ -64,6 +64,14 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             MExpr::With { handler, body, .. } => {
                 self.lower_cps_with(handler, body, evidence, return_k)
             }
+            MExpr::HandlerValue {
+                arms,
+                return_clause,
+                ..
+            } => CExpr::Apply(
+                Box::new(return_k),
+                vec![self.lower_cps_handler_value(arms, return_clause.as_deref(), evidence)],
+            ),
             _ if self.expr_is_direct_subset(expr) => {
                 CExpr::Apply(Box::new(return_k), vec![self.lower_expr(expr)])
             }
@@ -108,6 +116,19 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         if let MExpr::Yield { op, args, .. } = value
             && let Some(lowered_value) = self.lower_static_direct_call_yield_result(op, args)
         {
+            self.push_scope();
+            self.current_scope_mut().insert(var.name.clone());
+            let lowered_body = self.lower_cps_expr(body, evidence, return_k);
+            self.pop_scope();
+            return CExpr::Let(
+                core_var(&var.name),
+                Box::new(lowered_value),
+                Box::new(lowered_body),
+            );
+        }
+
+        if self.handler_value_expr_is_cps_island_subset(value) {
+            let lowered_value = self.lower_cps_handler_value_expr(value, evidence.clone());
             self.push_scope();
             self.current_scope_mut().insert(var.name.clone());
             let lowered_body = self.lower_cps_expr(body, evidence, return_k);
@@ -1063,6 +1084,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             self.module_ctx,
             self.handler_info,
             self.effect_info,
+            self.handler_value_map,
             self.options,
         );
         imported.current_module = source_module_name;
@@ -1388,7 +1410,10 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                 source_arity: actual_source_arity,
                 adapter_arity: actual_adapter_arity,
                 ..
-            }) => {
+            }) if !matches!(atom, Atom::Lambda { .. })
+                || self.lambda_is_cps_subset(atom)
+                || matches!(atom, Atom::Lambda { params, body, .. } if self.lambda_is_direct_subset(params, body)) =>
+            {
                 self.assert_app_arity("CPS lambda/value", actual_source_arity, source_arity);
                 self.assert_app_arity("CPS lambda/value", actual_adapter_arity, adapter_arity);
                 match atom {
@@ -1587,7 +1612,24 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             ..
         } = handler
         else {
-            self.unsupported("selective CPS with currently supports static handlers only");
+            return match handler {
+                MHandler::Dynamic {
+                    effects,
+                    op_tuple,
+                    return_lambda,
+                    ..
+                } => self.lower_cps_with_dynamic(
+                    effects,
+                    op_tuple,
+                    return_lambda.as_ref(),
+                    body,
+                    evidence,
+                    return_k,
+                ),
+                _ => self.unsupported(
+                    "selective CPS with currently supports static or dynamic handlers only",
+                ),
+            };
         };
 
         if self.can_elide_static_handler_install(arms, return_clause.as_ref(), body) {
@@ -1662,6 +1704,178 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             Some((name, value)) => CExpr::Let(name, Box::new(value), Box::new(apply_outer_return)),
             None => apply_outer_return,
         }
+    }
+
+    fn lower_cps_with_dynamic(
+        &mut self,
+        effects: &[String],
+        handler_value: &Atom,
+        return_lambda: Option<&Atom>,
+        body: &MExpr,
+        evidence: CExpr,
+        return_k: CExpr,
+    ) -> CExpr {
+        let mut sorted_effects = effects.to_vec();
+        sorted_effects.sort();
+
+        let handler_value_var = self.fresh_cps_temp("_HandlerValue");
+        let ops_by_effect_var = self.fresh_cps_temp("_HandlerOpsByEffect");
+        let runtime_return_var = self.fresh_cps_temp("_HandlerReturn");
+        let runtime_ret_k = self.fresh_cps_temp("_HandlerReturnK");
+        let runtime_ret_param = self.fresh_cps_temp("_HandlerReturnValue");
+        let raw_result_k = self.fresh_cps_temp("_HandlerRawResultK");
+        let raw_result_k_binding = self.identity_cps_continuation();
+
+        let handler_value_expr = self.lower_atom(handler_value);
+        let ops_by_effect_value = CExpr::Call(
+            "erlang".to_string(),
+            "element".to_string(),
+            vec![
+                CExpr::Lit(CLit::Int(2)),
+                CExpr::Var(handler_value_var.clone()),
+            ],
+        );
+        let runtime_return_value = CExpr::Call(
+            "erlang".to_string(),
+            "element".to_string(),
+            vec![
+                CExpr::Lit(CLit::Int(3)),
+                CExpr::Var(handler_value_var.clone()),
+            ],
+        );
+
+        let ret_binding: Option<(String, CExpr)> = return_lambda.map(|atom| {
+            let lowered_return = self.lower_atom(atom);
+            let param = self.fresh_cps_temp("_ReturnLambdaValue");
+            let wrapper = CExpr::Fun(
+                vec![param.clone()],
+                Box::new(CExpr::Apply(
+                    Box::new(lowered_return),
+                    vec![
+                        CExpr::Var(param),
+                        evidence.clone(),
+                        CExpr::Var(raw_result_k.clone()),
+                    ],
+                )),
+            );
+            (self.fresh_cps_temp("_ReturnLambdaK"), wrapper)
+        });
+
+        let runtime_ret_binding = CExpr::Fun(
+            vec![runtime_ret_param.clone()],
+            Box::new(CExpr::Case(
+                Box::new(CExpr::Var(runtime_return_var.clone())),
+                vec![
+                    CArm {
+                        pat: CPat::Lit(CLit::Atom("unit".to_string())),
+                        guard: None,
+                        body: CExpr::Apply(
+                            Box::new(CExpr::Var(raw_result_k.clone())),
+                            vec![CExpr::Var(runtime_ret_param.clone())],
+                        ),
+                    },
+                    CArm {
+                        pat: CPat::Var("_RuntimeReturn".to_string()),
+                        guard: None,
+                        body: CExpr::Apply(
+                            Box::new(CExpr::Var("_RuntimeReturn".to_string())),
+                            vec![
+                                CExpr::Var(runtime_ret_param),
+                                evidence.clone(),
+                                CExpr::Var(raw_result_k.clone()),
+                            ],
+                        ),
+                    },
+                ],
+            )),
+        );
+        let body_return_k = ret_binding
+            .as_ref()
+            .map(|(name, _)| CExpr::Var(name.clone()))
+            .unwrap_or_else(|| CExpr::Var(runtime_ret_k.clone()));
+
+        let mut install_bindings = Vec::new();
+        let mut current_evidence = evidence.clone();
+        for (index, effect) in sorted_effects.into_iter().enumerate() {
+            let pair_var = self.fresh_cps_temp("_HandlerEffectPair");
+            let pair_value = CExpr::Call(
+                "erlang".to_string(),
+                "element".to_string(),
+                vec![
+                    CExpr::Lit(CLit::Int(index as i64 + 1)),
+                    CExpr::Var(ops_by_effect_var.clone()),
+                ],
+            );
+            install_bindings.push((pair_var.clone(), pair_value));
+
+            let op_tuple_var = self.fresh_cps_temp("_HandlerOpTuple");
+            let op_tuple_value = CExpr::Call(
+                "erlang".to_string(),
+                "element".to_string(),
+                vec![CExpr::Lit(CLit::Int(2)), CExpr::Var(pair_var)],
+            );
+            install_bindings.push((op_tuple_var.clone(), op_tuple_value));
+
+            let entry = CExpr::Tuple(vec![
+                CExpr::Lit(CLit::Atom(effect)),
+                CExpr::Var(op_tuple_var),
+            ]);
+            let insert = CExpr::Call(
+                "std_evidence_bridge".to_string(),
+                "insert_canonical".to_string(),
+                vec![current_evidence, entry],
+            );
+            let evidence_var = self.fresh_cps_temp("_CpsEvidence");
+            current_evidence = CExpr::Var(evidence_var.clone());
+            install_bindings.push((evidence_var, insert));
+        }
+
+        let lowered_body = self.lower_cps_expr(body, current_evidence, body_return_k);
+        let with_evidence = install_bindings
+            .into_iter()
+            .rev()
+            .fold(lowered_body, |inner, (name, value)| {
+                CExpr::Let(name, Box::new(value), Box::new(inner))
+            });
+        let with_runtime_return = CExpr::Let(
+            runtime_ret_k,
+            Box::new(runtime_ret_binding),
+            Box::new(with_evidence),
+        );
+        let with_return_lambda = match ret_binding {
+            Some((name, value)) => CExpr::Let(name, Box::new(value), Box::new(with_runtime_return)),
+            None => with_runtime_return,
+        };
+        let with_runtime_return_value = CExpr::Let(
+            runtime_return_var,
+            Box::new(runtime_return_value),
+            Box::new(with_return_lambda),
+        );
+        let with_ops_by_effect = CExpr::Let(
+            ops_by_effect_var,
+            Box::new(ops_by_effect_value),
+            Box::new(with_runtime_return_value),
+        );
+        let with_handler_value = CExpr::Let(
+            handler_value_var,
+            Box::new(handler_value_expr),
+            Box::new(with_ops_by_effect),
+        );
+
+        let with_result = self.fresh_cps_temp("_WithResult");
+        let apply_outer_return = CExpr::Let(
+            with_result.clone(),
+            Box::new(with_handler_value),
+            Box::new(CExpr::Apply(
+                Box::new(return_k),
+                vec![CExpr::Var(with_result)],
+            )),
+        );
+        CExpr::Let(
+            raw_result_k,
+            Box::new(raw_result_k_binding),
+            Box::new(apply_outer_return),
+        )
     }
 
     fn lower_cps_with_elided_static_handler(
@@ -1980,6 +2194,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             self.module_ctx,
             self.handler_info,
             self.effect_info,
+            self.handler_value_map,
             self.options,
         );
         imported.current_module = source_module_name;
@@ -2057,6 +2272,129 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             closures.push(self.lower_cps_static_handler_arm_group(op_arms, outer_evidence.clone()));
         }
         CExpr::Tuple(closures)
+    }
+
+    fn lower_cps_handler_value(
+        &mut self,
+        arms: &[MHandlerArm],
+        return_clause: Option<&MHandlerArm>,
+        outer_evidence: CExpr,
+    ) -> CExpr {
+        let ops_by_effect =
+            self.lower_cps_handler_value_ops_by_effect(arms, outer_evidence.clone());
+        let return_value = return_clause
+            .map(|arm| self.lower_cps_handler_value_return_lambda(arm))
+            .unwrap_or_else(|| CExpr::Lit(CLit::Atom("unit".to_string())));
+        CExpr::Tuple(vec![
+            CExpr::Lit(CLit::Atom("__saga_handler_value".to_string())),
+            ops_by_effect,
+            return_value,
+        ])
+    }
+
+    fn lower_cps_handler_value_expr(&mut self, expr: &MExpr, outer_evidence: CExpr) -> CExpr {
+        match expr {
+            MExpr::Pure(atom) => {
+                let Some(info) = self.handler_value_info_for_atom(atom).cloned() else {
+                    self.unsupported_expr(expr);
+                };
+                self.lower_cps_handler_value(
+                    &info.arms,
+                    info.return_clause.as_ref(),
+                    outer_evidence,
+                )
+            }
+            MExpr::HandlerValue {
+                arms,
+                return_clause,
+                ..
+            } => self.lower_cps_handler_value(arms, return_clause.as_deref(), outer_evidence),
+            MExpr::If {
+                cond,
+                then_branch,
+                else_branch,
+                ..
+            } => CExpr::Case(
+                Box::new(self.lower_atom(cond)),
+                vec![
+                    CArm {
+                        pat: CPat::Lit(CLit::Atom("true".to_string())),
+                        guard: None,
+                        body: self
+                            .lower_cps_handler_value_expr(then_branch, outer_evidence.clone()),
+                    },
+                    CArm {
+                        pat: CPat::Lit(CLit::Atom("false".to_string())),
+                        guard: None,
+                        body: self.lower_cps_handler_value_expr(else_branch, outer_evidence),
+                    },
+                ],
+            ),
+            _ => self.unsupported_expr(expr),
+        }
+    }
+
+    fn lower_cps_handler_value_ops_by_effect(
+        &mut self,
+        arms: &[MHandlerArm],
+        outer_evidence: CExpr,
+    ) -> CExpr {
+        let mut by_effect: BTreeMap<String, Vec<&MHandlerArm>> = BTreeMap::new();
+        for arm in arms {
+            by_effect
+                .entry(arm.op.effect.clone())
+                .or_default()
+                .push(arm);
+        }
+
+        let pairs = by_effect
+            .into_iter()
+            .map(|(effect, mut effect_arms)| {
+                effect_arms.sort_by_key(|arm| arm.op.op_index);
+                let op_tuple =
+                    self.lower_cps_static_handler_op_tuple(&effect, &effect_arms, &outer_evidence);
+                CExpr::Tuple(vec![CExpr::Lit(CLit::Atom(effect)), op_tuple])
+            })
+            .collect();
+        CExpr::Tuple(pairs)
+    }
+
+    fn lower_cps_handler_value_return_lambda(&mut self, arm: &MHandlerArm) -> CExpr {
+        let value_param = self.fresh_cps_temp("_HandlerReturnValue");
+        let evidence_param = self.fresh_cps_temp("_HandlerReturnEvidence");
+        let return_k_param = self.fresh_cps_temp("_HandlerReturnK");
+
+        if arm.params.len() > 1 {
+            self.unsupported("handler value return clauses with multiple params");
+        }
+
+        self.push_scope();
+        for pat in &arm.params {
+            self.bind_pat_locals(pat);
+        }
+        let body = self.lower_cps_expr(
+            &arm.body,
+            CExpr::Var(evidence_param.clone()),
+            CExpr::Var(return_k_param.clone()),
+        );
+        let body = match arm.params.as_slice() {
+            [] => body,
+            [pat] => CExpr::Case(
+                Box::new(CExpr::Var(value_param.clone())),
+                vec![CArm {
+                    pat: self.lower_pat(pat),
+                    guard: None,
+                    body,
+                }],
+            ),
+            _ => unreachable!(),
+        };
+        self.pop_scope();
+
+        CExpr::Fun(
+            vec![value_param, evidence_param, return_k_param],
+            Box::new(body),
+        )
     }
 
     fn lower_cps_static_handler_arm_group(

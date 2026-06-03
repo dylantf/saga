@@ -67,7 +67,7 @@ These are expression/value shapes that can produce a callable value.
 | `if` returning CPS callables | `let f = if c then read_a else read_b` | Supported | Materialize Core `case` whose arms return adapter closures; result is `RuntimeCpsCallable` | Keep |
 | `case` returning CPS callables | `let f = case c { True -> read_a; False -> read_b }` | Supported | Same as `if`, with direct patterns/guards only | Keep |
 | Mixed CPS and pure branch/case | `if c then read_value else pure_value` | Supported via CPS fallback | Common representation is CPS; pure branch uses explicit pure-to-CPS adapter | Later direct-specialize when branch is statically pure |
-| Pure function where effectful callback is expected | `apply_eff pure_value` | Supported with local/imported direct HOF specialization when the callee body becomes direct under pure callbacks; CPS fallback remains | First prefer direct HOF specialization when the whole call is net pure; otherwise use explicit pure-to-CPS adapter | Broaden to aliases later |
+| Pure function where effectful callback is expected | `apply_eff pure_value` | Supported with local/imported direct HOF specialization when the callee body becomes direct under pure callbacks; CPS fallback remains | First prefer direct HOF specialization when the whole call is net pure; otherwise use explicit pure-to-CPS adapter | Keep; broaden only when new HOF value shapes appear |
 | Handled callback where effectful callback is expected | `apply_eff handled_value` where `handled_value` uses an internal handler | Supported for named same-module callbacks whose exposed type is pure | If exposed callback type is pure, use direct HOF specialization or pure-to-CPS adapter fallback | Inline handled callback expressions later |
 | CPS lambda value | `let f = fun () -> read! ()` | Supported in CPS islands | Materialize runtime closure with user args plus evidence/continuation | Keep |
 | Lambda-headed CPS call | `(fun x -> read! ()) ()` | Supported in CPS islands | Materialize/apply runtime CPS closure; no source-arity guessing | Keep |
@@ -77,9 +77,9 @@ These are expression/value shapes that can produce a callable value.
 | Trait method value, CPS/effectful | `let f = someEffectfulMethod` | Supported for local and imported dicts, including generic constructors with dictionary parameters | Extract method closure as `RuntimeCpsCallable` using method/access type metadata | Trait specialization later |
 | Dict method call, CPS/effectful | `x.effectfulMethod arg` after elaboration | Supported for local and imported dicts, including nested dispatch through dictionary parameters | Extract method closure and apply with evidence/continuation | Trait specialization later |
 | Constructor/tuple/list/record containing CPS callable | `(read_value, other)` | Explicitly rejected for tuple/record/constructor | Storing CPS values in data needs representation policy; avoid accidental BEAM funs | Add list fixture when list literals are in this path |
-| Handler expression value | `handler for E { ... }` | Open in selective | Build runtime handler tuple/return clause closure | Separate handler-value matrix |
-| Named handler alias | `let h = my_handler` | Static handler support narrow | Static aliases can stay metadata; conditional/dynamic need runtime tuple | Extend handler path separately |
-| Handler chosen by `if`/`case` | `let h = if c then h1 else h2` | Open in selective | Old lowerer has conditional handler item | Separate handler-value matrix |
+| Handler expression value | `handler for E { ... }` | Supported for the current dynamic-handler e2e shapes, including multi-effect values | Build runtime `{__saga_handler_value, OpsByEffect, RuntimeReturn}` tuple with canonical per-effect op tuples | Broaden for abort/finally stress later |
+| Named handler alias | `let h = my_handler` | Supported for local/imported names present in the translator's handler-value map | Static aliases can stay metadata; escaped/dynamic handlers materialize the runtime tuple | Keep |
+| Handler chosen by `if`/`case` | `let h = if c then h1 else h2` | `if` supported for named/inline handler values; `case` still open | Branches produce the common runtime handler-value representation | Add `case` if examples need it |
 | Let-rec/local function | `let fun f x = ...` | Open in selective for CPS values | Needs entry metadata and `LetRec` lowering with direct/CPS plan | Later |
 
 ## Consumer Matrix
@@ -96,6 +96,7 @@ These are places that consume a callable value or call shape.
 | Runtime CPS closure as argument | `apply_outer f` | Supported for direct alias/arg cases | Pass Core variable; callee applies with `Ev,K` | Keep |
 | Pure callable as direct callback argument | `apply_it inc` | Supported | Direct fun value, source arity | Keep |
 | Pure callable as CPS callback argument | `apply_eff inc` | Supported with local/imported direct HOF specialization for statically pure callback args; CPS fallback remains | Prefer direct HOF specialization if the selected HOF call can stay pure; otherwise explicit pure-to-CPS adapter | Broaden to aliases later |
+| Handler-arm HOF resume | `List.flat_map (fun x -> resume x) xs` inside an operation arm | Supported for imported/direct `flat_map` identity-resume shape | Lower callback as a direct closure that applies the current handler-arm continuation; preserves multishot list semantics | Generalize only after more handler-arm HOF shapes appear |
 | Effectful argument inside effectful outer call | `outer (read! ())` or `outer (decode x)` | Partially represented by monadic `Bind` sequencing | Old lowerer had `effectful_arg_idxs` chaining; selective should rely on monadic sequencing inside islands | Add fixtures when app args become non-trivial |
 | Effectful callback argument inside effectful outer call | `outer read_value (effect_arg!)` | Open | Need both adapter closure and effectful-arg sequencing | Later |
 | Return continuation value | final result of CPS island | Supported for direct atoms; CPS callable result supported for `if`/`case` bound values | Returning CPS callable out of island needs representation policy | Add guardrail |
@@ -114,22 +115,22 @@ This is the selective lowerer's practical checklist over monadic IR.
 | `Pure(Atom)` | Supported for direct atoms | Supported as direct result | Supported for named CPS and runtime CPS vars | Atomic values are the main shape-entry point |
 | `Yield` | Rejected | Supported with direct args only | Not a callable producer yet | CPS callable args are explicitly rejected until op parameter callback metadata exists |
 | `Bind` | Supported for direct values | Supported | Supported for CPS metadata/runtime aliases and branch/case materialization | Core sequencing boundary |
-| `Let` | Rejected/optimizer-only currently | Not primary path | Open | If optimizer emits it, mirror `Bind` discipline |
+| `Let` | Supported where it appears like `Bind` in selective paths | Supported like `Bind` in the active CPS/direct subsets | Same alias/value rules as `Bind` | Keep watching optimizer-emitted shapes |
 | `Ensure` | Rejected direct | Static finally paths supported in handlers | Open | Cleanup result should not create callable values yet |
 | `If` | Supported direct | Supported in CPS islands | Supported for compatible CPS callable branches | Emits Core `case` |
-| `Case` | Supported direct | Supported in CPS islands | Supported for compatible CPS callable arms | Direct patterns/guards only for now |
-| `App` | Supported for direct call shapes | Supported for named/runtime CPS, CPS lambda heads, and direct fallback | Consumer, not producer | Direct HOF specialization still future |
+| `Case` | Supported direct, including record/string patterns and guarded arms via value-level chains | Supported in CPS islands with safe fallthrough chains | Supported for compatible CPS callable arms | Keep; add bitstring/receive later |
+| `App` | Supported for direct call shapes, direct external calls, HOF specialization, and selected handler-arm HOF resume shapes | Supported for named/runtime CPS, CPS lambda heads, direct fallback, and direct HOF specialization | Consumer, not producer | Remaining app work is partial application / effectful argument stress |
 | `With` | Rejected direct | Supported for static handler subset | Not a callable producer yet | Handler values separate |
 | `Resume` | Rejected direct | Supported inside handler arm subset for direct values | CPS callable resume values explicitly rejected | Needs adapter policy before support |
 | `FieldAccess` | Supported direct | Via direct fallback | Not supported for CPS callable storage | Records containing callbacks open |
-| `RecordUpdate` | Rejected | Rejected | Open/reject | Same storage policy |
+| `RecordUpdate` | Supported direct for direct fields | Via direct fallback where expression stays direct | Open/reject for CPS callable storage | Same storage policy |
 | `DictMethodAccess` | Supported narrowly for pure trait method call/value shape | Supported for local/imported CPS/effectful methods, including generic dictionary-parameter constructors | Produces `RuntimeCpsCallable` for effectful methods | Trait specialization later |
-| `ForeignCall` | Rejected/direct external via intrinsics only | Rejected | Not callable producer | Later external functions need explicit shape metadata |
+| `ForeignCall` | Supported in direct subset for direct args; direct external apps filter Saga `Unit` for niladic native calls | Via direct fallback when direct-safe | Not callable producer | Effectful externals still need explicit shape metadata |
 | `BinOp` / `UnaryMinus` | Supported | Direct fallback | No | Keep |
 | `BitString` | Rejected | Rejected | No | Later |
 | `Receive` | Rejected | Rejected | Open | Actor/native effects later |
 | `LetFun` | Rejected | Rejected | Open | Needed for local recursive helpers |
-| `HandlerValue` | Rejected | Rejected/open | Handler-value producer | Separate matrix |
+| `HandlerValue` | Rejected in direct subset today | Supported as a CPS-island value producer | Handler-value producer | Broaden for abort/finally stress later |
 
 ## Old Lowerer Cross-Check
 
@@ -146,7 +147,7 @@ not port the implementation:
 | Eta-reduced effectful value | `lower_eta_reduced_effect_expr` | Partially covered for named CPS functions; op refs/partial apps open |
 | Effectful argument CPS chaining | `effectful_arg_idxs` paths | Mostly delegated to monadic `Bind`; needs fixtures for nested call arguments |
 | Partial application | old lowerer handles supplied args vs total arity | Open for CPS callables |
-| Handler values | static/conditional/dynamic handler item code in `effects.rs` | Static with narrow handler bodies supported; dynamic/conditional handler values open |
+| Handler values | static/conditional/dynamic handler item code in `effects.rs` | Inline, named, and `if`-selected dynamic handler values are supported for current e2e shapes; `case`/abort/finally stress remains |
 | `finally` / cleanup | old handler finalization paths | Narrow static resume/abort finally supported |
 
 ## Related Specialization Track
@@ -165,15 +166,17 @@ static.
 
 ## Suggested Next Chunks
 
-1. **Direct HOF specialization for net-pure callbacks**
-   - Local/imported named CPS HOFs whose body becomes direct when callback
-     params are treated as pure now get a `__saga_direct_hof_*` entry.
-   - Calls like `apply_eff pure_value` select that entry when the callback args
-     are statically pure, avoiding the pure-to-CPS wrapper and CPS callback ABI.
-   - The pure-to-CPS fallback still handles dynamic/mixed cases where the
-     selected ABI is CPS.
-   - Next: broaden to HOF aliases/values and inline handled callback
-     expressions.
+1. **Stdlib writer / effectful callback HOF frontier**
+   - Current strict blocker:
+     `saga test --selective-no-fallback effects_test` stops while compiling
+     stdlib at direct function `run_writer`.
+   - The next Saga-level shape after handler values is an effectful callback
+     passed to a function whose exposed result is pure because it handles the
+     callback's effects internally (`run_state 0 (fun () -> put! 99; get! ())`
+     is the user-test analogue).
+   - Decide whether this becomes a direct HOF specialization, a selective
+     direct adapter over a fallback-only pure function, or a monadic fallback
+     island before adding more ad hoc callback cases.
 
 2. **Effectful trait method calls and values**
    - Local and imported dict constructors plus effectful method calls/values
@@ -182,11 +185,11 @@ static.
      monomorphic call-site specialization, known constructor/output-shape
      specialization, and direct handling of net-pure trait dispatch.
 
-3. **CPS lambdas**
+3. **CPS lambdas and partial application**
    - Basic runtime CPS closure generation is covered for callback arguments,
      let-bound aliases, and lambda-headed calls.
-   - Next lambda work is partial application/captured callback parameter
-     stress-testing, not the base closure ABI.
+   - Remaining lambda work is CPS partial application/captured callback
+     parameter stress-testing, not the base closure ABI.
 
 4. **Storage guardrails**
    - Tuple/record/constructor negative tests are covered.
@@ -195,5 +198,7 @@ static.
 
 5. **Handler value matrix**
    - Split handler values from callable values.
-   - Cover static alias, conditional handler, dynamic handler expression,
-     return clause, resume, finally, and imported handler modules.
+   - Inline, named, and `if`-selected dynamic handler values are covered for
+     current e2e shapes.
+   - Remaining stress: `case`-selected handlers, abort arms, `finally`, and
+     imported handler modules if examples expose new shapes.
