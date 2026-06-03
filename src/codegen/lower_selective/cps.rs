@@ -245,7 +245,10 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             vec![CExpr::Lit(CLit::Int(op.op_index as i64)), find_call],
         );
 
-        let mut apply_args: Vec<CExpr> = args.iter().map(|arg| self.lower_atom(arg)).collect();
+        let mut apply_args: Vec<CExpr> = args
+            .iter()
+            .map(|arg| self.lower_effect_protocol_arg_atom(arg))
+            .collect();
         apply_args.push(evidence);
         apply_args.push(return_k);
         CExpr::Apply(Box::new(op_closure), apply_args)
@@ -1309,6 +1312,13 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
     ) -> CExpr {
         if let Some((source_arity, adapter_arity)) = expected_cps_callback {
             return self.lower_cps_runtime_value_atom(atom, source_arity, adapter_arity);
+        }
+        self.lower_cps_value_atom(atom)
+    }
+
+    fn lower_effect_protocol_arg_atom(&mut self, atom: &Atom) -> CExpr {
+        if let Some(LocalValueShape::PureCallable { arity }) = self.pure_value_atom_shape(atom) {
+            return self.pure_to_cps_adapter_value_closure(atom, arity, arity + 2);
         }
         self.lower_cps_value_atom(atom)
     }

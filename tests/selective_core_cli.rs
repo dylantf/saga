@@ -103,6 +103,31 @@ fn selective_core_codegen_runs_deriving_example() {
 }
 
 #[test]
+fn selective_core_codegen_adapts_pure_effect_callback_args() {
+    let binary = env!("CARGO_BIN_EXE_saga");
+    let project_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("examples/optimization/selective-uniform/async-project");
+
+    let output = std::process::Command::new(binary)
+        .current_dir(&project_dir)
+        .args(["run", "--selective-codegen"])
+        .output()
+        .expect("run selective async fixture");
+    assert!(
+        output.status.success(),
+        "saga run failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let output_text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output_text.contains("[1, 2, 3]"), "{output_text}");
+}
+
+#[test]
 fn selective_core_codegen_runs_handler_finally_fixtures() {
     let binary = env!("CARGO_BIN_EXE_saga");
     let manifest_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
