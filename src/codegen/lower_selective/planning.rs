@@ -56,32 +56,27 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
     }
 
     fn compute_direct_body_plans(&mut self, program: &MProgram) {
-        let single_clause_funs = single_clause_function_names(program);
-        let funs: Vec<&MFunBinding> = program
-            .iter()
-            .filter_map(|decl| match decl {
-                MDecl::FunBinding(fb) => Some(fb),
-                _ => None,
-            })
-            .collect();
+        let groups = function_binding_groups(program);
 
         let mut changed = true;
         while changed {
             changed = false;
-            for fb in &funs {
-                if !single_clause_funs.contains(&fb.name) {
+            for group in &groups {
+                let name = &group[0].name;
+                if self.function_plans.contains_key(name) {
                     continue;
                 }
-                if self.function_plans.contains_key(&fb.name) {
-                    continue;
-                }
-                if self.can_lower_fun_binding(fb) {
+                if self.can_lower_fun_binding_group(group) {
                     self.function_plans
-                        .insert(fb.name.clone(), FunctionLoweringPlan::DirectBody);
+                        .insert(name.clone(), FunctionLoweringPlan::DirectBody);
                     changed = true;
                 }
             }
         }
+    }
+
+    fn can_lower_fun_binding_group(&mut self, group: &[&MFunBinding]) -> bool {
+        group.iter().all(|fb| self.can_lower_fun_binding(fb))
     }
 
     fn compute_cps_body_plans(&mut self, program: &MProgram) {
@@ -605,4 +600,30 @@ fn single_clause_function_names(program: &MProgram) -> HashSet<String> {
         .into_iter()
         .filter_map(|(name, count)| (count == 1).then_some(name))
         .collect()
+}
+
+fn function_binding_groups(program: &MProgram) -> Vec<Vec<&MFunBinding>> {
+    let mut groups = Vec::new();
+    let mut index = 0;
+    while index < program.len() {
+        let MDecl::FunBinding(first) = &program[index] else {
+            index += 1;
+            continue;
+        };
+        let mut group = vec![first];
+        let mut next_index = index + 1;
+        while next_index < program.len() {
+            let MDecl::FunBinding(next) = &program[next_index] else {
+                break;
+            };
+            if next.name != first.name {
+                break;
+            }
+            group.push(next);
+            next_index += 1;
+        }
+        groups.push(group);
+        index = next_index;
+    }
+    groups
 }

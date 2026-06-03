@@ -33,11 +33,31 @@ fn selective_core_lowers_imported_cps_adapter_call() {
 }
 
 #[test]
-fn selective_core_codegen_falls_back_for_multi_clause_functions() {
+fn selective_core_codegen_handles_multi_clause_functions() {
     let binary = env!("CARGO_BIN_EXE_saga");
     let manifest_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
 
     let fibonacci = manifest_dir.join("examples/02-fibonacci.saga");
+    let fibonacci_inspect = std::process::Command::new(binary)
+        .current_dir(&manifest_dir)
+        .args([
+            "inspect",
+            fibonacci.to_str().expect("utf-8 fixture path"),
+            "--stage",
+            "selective-core",
+        ])
+        .output()
+        .expect("inspect selective fibonacci fixture");
+    assert!(
+        fibonacci_inspect.status.success(),
+        "saga inspect failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&fibonacci_inspect.stdout),
+        String::from_utf8_lossy(&fibonacci_inspect.stderr)
+    );
+    let fibonacci_core = String::from_utf8_lossy(&fibonacci_inspect.stdout);
+    assert!(fibonacci_core.contains("'fib'/1"), "{fibonacci_core}");
+    assert!(fibonacci_core.contains("case {_Arg0}"), "{fibonacci_core}");
+
     let fibonacci_output = std::process::Command::new(binary)
         .current_dir(&manifest_dir)
         .args([

@@ -260,10 +260,25 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
 
         let mut exports = Vec::new();
         let mut funs = Vec::new();
-        for decl in program {
-            match decl {
+        let mut index = 0;
+        while index < program.len() {
+            match &program[index] {
                 MDecl::FunBinding(fb) => {
+                    let mut group = vec![fb];
+                    let mut next_index = index + 1;
+                    while next_index < program.len() {
+                        let MDecl::FunBinding(next) = &program[next_index] else {
+                            break;
+                        };
+                        if next.name != fb.name {
+                            break;
+                        }
+                        group.push(next);
+                        next_index += 1;
+                    }
+
                     let Some(plan) = self.function_plans.get(&fb.name).copied() else {
+                        index = next_index;
                         continue;
                     };
                     if fb.public || is_public(&fb.name) || is_entry(&fb.name) {
@@ -271,20 +286,29 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                     }
                     match plan {
                         FunctionLoweringPlan::DirectBody => {
-                            funs.push(self.lower_fun_binding(fb));
+                            funs.push(self.lower_direct_fun_binding_group(&group));
                             if self.needs_cps_adapter(&fb.name) {
-                                funs.push(self.lower_cps_adapter(fb));
+                                funs.push(self.lower_cps_adapter_for(&fb.name, &fb.params));
                             }
                         }
                         FunctionLoweringPlan::DirectBodyWithCpsIsland => {
+                            if group.len() != 1 {
+                                index = next_index;
+                                continue;
+                            }
                             funs.push(self.lower_direct_cps_island_fun_binding(fb));
                         }
                         FunctionLoweringPlan::CpsBody => {
+                            if group.len() != 1 {
+                                index = next_index;
+                                continue;
+                            }
                             funs.push(self.lower_cps_fun_binding(fb));
                         }
                     }
-                    if let Some(specialization) =
-                        self.local_hof_direct_specializations.get(&fb.name).cloned()
+                    if group.len() == 1
+                        && let Some(specialization) =
+                            self.local_hof_direct_specializations.get(&fb.name).cloned()
                     {
                         if fb.public || is_public(&fb.name) || is_entry(&fb.name) {
                             exports.push((
@@ -296,9 +320,11 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                             self.lower_hof_direct_specialized_fun_binding(fb, &specialization),
                         );
                     }
+                    index = next_index;
                 }
                 MDecl::Val(v) => {
                     if !self.direct_values.contains(&v.name) {
+                        index += 1;
                         continue;
                     }
                     if v.public {
@@ -310,6 +336,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                         arity: 0,
                         body: CExpr::Fun(vec![], Box::new(body)),
                     });
+                    index += 1;
                 }
                 MDecl::DictConstructor(dc) => {
                     if self.local_dict_constructor_arities.contains_key(&dc.name) {
@@ -318,8 +345,11 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                         }
                         funs.push(self.lower_dict_constructor(dc));
                     }
+                    index += 1;
                 }
-                MDecl::Passthrough(_) => {}
+                MDecl::Passthrough(_) => {
+                    index += 1;
+                }
             }
         }
 
@@ -341,6 +371,49 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             name: self.direct_entry_name(&fb.name),
             arity: params.len(),
             body: CExpr::Fun(params, Box::new(body)),
+        }
+    }
+
+    fn lower_direct_fun_binding_group(&mut self, group: &[&MFunBinding]) -> CFunDef {
+        assert!(
+            !group.is_empty(),
+            "lower_direct_fun_binding_group: empty group is impossible"
+        );
+        if group.len() == 1 {
+            return self.lower_fun_binding(group[0]);
+        }
+
+        let name = &group[0].name;
+        let source_arity = group[0].params.len();
+        for fb in group {
+            assert_eq!(
+                fb.params.len(),
+                source_arity,
+                "lower_direct_fun_binding_group: clause arity mismatch for '{}'",
+                name
+            );
+        }
+
+        let params: Vec<String> = (0..source_arity)
+            .map(|arg_index| format!("_Arg{arg_index}"))
+            .collect();
+        let scrutinee = CExpr::Tuple(params.iter().cloned().map(CExpr::Var).collect());
+        let arms = group
+            .iter()
+            .map(|fb| {
+                self.push_scope();
+                self.bind_fun_param_locals(fb);
+                let guard = fb.guard.as_ref().map(|guard| self.lower_expr(guard));
+                let body = self.lower_expr(&fb.body);
+                let pat = CPat::Tuple(fb.params.iter().map(|pat| self.lower_pat(pat)).collect());
+                self.pop_scope();
+                CArm { pat, guard, body }
+            })
+            .collect();
+        CFunDef {
+            name: self.direct_entry_name(name),
+            arity: params.len(),
+            body: CExpr::Fun(params, Box::new(CExpr::Case(Box::new(scrutinee), arms))),
         }
     }
 
@@ -367,14 +440,14 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         }
     }
 
-    fn lower_cps_adapter(&self, fb: &MFunBinding) -> CFunDef {
-        let direct_params = lower_param_names(&fb.params);
+    fn lower_cps_adapter_for(&self, name: &str, source_params: &[Pat]) -> CFunDef {
+        let direct_params = lower_param_names(source_params);
         let mut params = direct_params.clone();
         params.push("_Evidence".to_string());
         params.push("_ReturnK".to_string());
         let direct_call = CExpr::Apply(
             Box::new(CExpr::FunRef(
-                self.direct_entry_name(&fb.name),
+                self.direct_entry_name(name),
                 direct_params.len(),
             )),
             direct_params.into_iter().map(CExpr::Var).collect(),
@@ -384,7 +457,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             vec![direct_call],
         );
         CFunDef {
-            name: fb.name.clone(),
+            name: name.to_string(),
             arity: params.len(),
             body: CExpr::Fun(params, Box::new(body)),
         }

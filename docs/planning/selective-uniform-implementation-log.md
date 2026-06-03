@@ -1192,11 +1192,12 @@ boundaries exist.
   - private fallback dict constructors also get local direct adapters when the
     selective overlay needs them, but those adapters are not exported unless the
     old uniform constructor was exported;
-  - multi-clause functions are intentionally left to fallback for now. The old
-    lowerer groups same-name clauses into one Core function; the selective
-    planner used to key only by function name and could incorrectly plan one
-    direct clause while another clause still yielded. Examples `02-fibonacci`
-    and `15-typechecking-errors` now cover this fallback behavior;
+  - direct multi-clause functions now lower as one grouped selective Core
+    function: synthetic positional args feed a `case` over the argument tuple,
+    with one arm per source clause. The planner proves the whole same-name
+    group, not a single clause. Mixed/effectful multi-clause groups still fall
+    back; examples `02-fibonacci` and `15-typechecking-errors` cover both
+    paths;
   - stdlib cache fingerprints now include the backend, and selective builds
     compile stdlib modules through the same selective/fallback merge instead of
     reusing uniform-only stdlib beams;
