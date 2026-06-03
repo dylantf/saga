@@ -1474,6 +1474,82 @@ main () = apply_eff pure_value with forty_one
 }
 
 #[test]
+fn selective_core_inlines_recursive_effectful_callback_hof_with_pure_callback() {
+    let src = r#"
+effect Tick {
+  fun tick : Int -> Unit
+}
+
+fun iter : (Int -> Unit needs {Tick}) -> List Int -> Unit needs {Tick}
+iter f xs = case xs {
+  [] -> ()
+  h :: t -> {
+    f h
+    iter f t
+  }
+}
+
+fun pure_tick : Int -> Unit
+pure_tick _ = ()
+
+handler ignore_tick for Tick {
+  tick _ = resume ()
+}
+
+fun main : Unit -> Unit
+main () = iter pure_tick [1, 2] with ignore_tick
+"#;
+    let out = emit_selective_core_with_options(
+        src,
+        super::lower_selective::LoweringOptions {
+            require_all_functions: true,
+        },
+    );
+    assert!(out.contains("apply F(H)"), "{out}");
+    assert!(out.contains("apply 'iter'/4(fun (_PureCpsArg"), "{out}");
+    assert!(!out.contains("apply F(H, _CpsEvidence"), "{out}");
+    assert_selective_core_compiles(src);
+}
+
+#[test]
+fn selective_core_lowers_grouped_direct_cps_island_function() {
+    let src = r#"
+effect Fail e {
+  fun fail : e -> a
+}
+
+type Result a e = Ok a | Err e
+
+fun supervised : Int -> (Unit -> a needs {Fail e}) -> Result a e
+supervised 0 f = {
+  f () with {
+    fail reason = Err reason
+    return value = Ok value
+  }
+}
+supervised n f = {
+  f () with {
+    fail _reason = supervised (n - 1) f
+    return value = Ok value
+  }
+}
+
+fun main : Unit -> Result Int String
+main () = supervised 1 (fun () -> 42)
+"#;
+    let out = emit_selective_core_with_options(
+        src,
+        super::lower_selective::LoweringOptions {
+            require_all_functions: true,
+        },
+    );
+    assert!(out.contains("'supervised'/2"), "{out}");
+    assert!(out.contains("case _FunScrut"), "{out}");
+    assert!(out.contains("apply F('unit'"), "{out}");
+    assert_selective_core_compiles(src);
+}
+
+#[test]
 fn selective_core_specializes_aliased_hof_in_effectful_callback_slot() {
     let src = r#"
 effect ReadInt {

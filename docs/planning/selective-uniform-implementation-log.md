@@ -1305,3 +1305,23 @@ boundaries exist.
     `Std.DateTime.parse_loop`, a large direct parser with nested string-prefix
     cases and pure setter function values. `Std.AtomicRef.lock_server` /
     `Receive` remains a later native-effect frontier.
+- Implemented the stdlib direct recursion frontier:
+  - direct-CPS-island functions can now lower grouped/multi-clause definitions,
+    covering `Std.Supervisor.supervised`-style retry handlers where a handler
+    arm tail-calls the same direct-CPS-island function;
+  - static handler inlining now binds parameter shapes from actual arguments,
+    so recursive HOF bodies can inline a pure callback once and still adapt it
+    back to CPS shape for the recursive call;
+  - direct-body planning now has a mutual-recursion candidate fixed point:
+    remaining pure functions are proven as a shrinking candidate set, then only
+    the stable supported set is committed. This clears
+    `Std.DateTime.parse_loop` / `parse_digits` / parser-helper cycles without
+    treating fallback-only callees as available;
+  - added selective regressions for recursive effect-capable HOFs receiving
+    pure callbacks and for grouped direct-CPS-island functions;
+  - focused regression
+    `cargo test -p saga selective_core_lowers_grouped_direct_cps_island_function`
+    passes;
+  - `saga test --selective-no-fallback` in `tests/e2e` now gets through
+    `Std.DateTime.parse_loop` and stops at `Std.AtomicRef.lock_server`, a
+    CPS-shaped native `Receive`/actor-effect frontier.

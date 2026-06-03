@@ -172,6 +172,9 @@ struct DirectLowerer<'a, 'info> {
     /// During fixed-point classification this permits recursive self-calls
     /// before the function has been added to `function_plans`.
     direct_candidate_function: Option<String>,
+    /// Functions currently being tested as a mutually-recursive direct-body
+    /// candidate set.
+    direct_candidate_functions: HashSet<String>,
     static_handler_inline_stack: Vec<String>,
     static_handler_stack: Vec<Vec<MHandlerArm>>,
     cps_temp_counter: usize,
@@ -211,6 +214,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             imported_function_entries: HashMap::new(),
             imported_hof_direct_specializations: HashMap::new(),
             direct_candidate_function: None,
+            direct_candidate_functions: HashSet::new(),
             static_handler_inline_stack: Vec::new(),
             static_handler_stack: Vec::new(),
             cps_temp_counter: 0,
@@ -301,11 +305,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                             }
                         }
                         FunctionLoweringPlan::DirectBodyWithCpsIsland => {
-                            if group.len() != 1 {
-                                index = next_index;
-                                continue;
-                            }
-                            funs.push(self.lower_direct_cps_island_fun_binding(fb));
+                            funs.push(self.lower_direct_cps_island_fun_binding_group(&group));
                         }
                         FunctionLoweringPlan::CpsBody => {
                             if group.len() != 1 {
@@ -577,15 +577,103 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
     fn lower_direct_cps_island_fun_binding(&mut self, fb: &MFunBinding) -> CFunDef {
         let params = lower_param_names(&fb.params);
 
+        let prev_direct_candidate = self.direct_candidate_function.replace(fb.name.clone());
         self.push_scope();
         self.bind_fun_param_locals(fb);
         let return_k = self.identity_cps_continuation();
         let lowered_body = self.lower_cps_expr(&fb.body, CExpr::Tuple(vec![]), return_k);
         let body = self.wrap_param_match(&fb.params, &params, lowered_body);
         self.pop_scope();
+        self.direct_candidate_function = prev_direct_candidate;
 
         CFunDef {
             name: self.direct_entry_name(&fb.name),
+            arity: params.len(),
+            body: CExpr::Fun(params, Box::new(body)),
+        }
+    }
+
+    fn lower_direct_cps_island_fun_binding_group(&mut self, group: &[&MFunBinding]) -> CFunDef {
+        assert!(
+            !group.is_empty(),
+            "lower_direct_cps_island_fun_binding_group: empty group is impossible"
+        );
+        if group.len() == 1 && group[0].guard.is_none() {
+            return self.lower_direct_cps_island_fun_binding(group[0]);
+        }
+
+        let name = &group[0].name;
+        let source_arity = group[0].params.len();
+        for fb in group {
+            assert_eq!(
+                fb.params.len(),
+                source_arity,
+                "lower_direct_cps_island_fun_binding_group: clause arity mismatch for '{}'",
+                name
+            );
+        }
+
+        let params: Vec<String> = (0..source_arity)
+            .map(|arg_index| format!("_Arg{arg_index}"))
+            .collect();
+        let scrutinee = CExpr::Tuple(params.iter().cloned().map(CExpr::Var).collect());
+        let scrut_var = self.fresh_cps_temp("_FunScrut");
+        let mut rest = self.case_clause_error();
+
+        let prev_direct_candidate = self.direct_candidate_function.replace(name.clone());
+        for fb in group.iter().rev() {
+            let rest_var = self.fresh_cps_temp("_FunRest");
+            let rest_ref = || CExpr::Apply(Box::new(CExpr::Var(rest_var.clone())), vec![]);
+            self.push_scope();
+            self.bind_fun_param_locals(fb);
+            let return_k = self.identity_cps_continuation();
+            let body = self.lower_cps_expr(&fb.body, CExpr::Tuple(vec![]), return_k);
+            let body = match fb.guard.as_ref() {
+                Some(guard) => CExpr::Case(
+                    Box::new(self.lower_expr(guard)),
+                    vec![
+                        CArm {
+                            pat: CPat::Lit(CLit::Atom("true".to_string())),
+                            guard: None,
+                            body,
+                        },
+                        CArm {
+                            pat: CPat::Wildcard,
+                            guard: None,
+                            body: rest_ref(),
+                        },
+                    ],
+                ),
+                None => body,
+            };
+            let pat = CPat::Tuple(fb.params.iter().map(|pat| self.lower_pat(pat)).collect());
+            self.pop_scope();
+            let current = CExpr::Case(
+                Box::new(CExpr::Var(scrut_var.clone())),
+                vec![
+                    CArm {
+                        pat,
+                        guard: None,
+                        body,
+                    },
+                    CArm {
+                        pat: CPat::Wildcard,
+                        guard: None,
+                        body: rest_ref(),
+                    },
+                ],
+            );
+            rest = CExpr::Let(
+                rest_var,
+                Box::new(CExpr::Fun(vec![], Box::new(rest))),
+                Box::new(current),
+            );
+        }
+        self.direct_candidate_function = prev_direct_candidate;
+
+        let body = CExpr::Let(scrut_var, Box::new(scrutinee), Box::new(rest));
+        CFunDef {
+            name: self.direct_entry_name(name),
             arity: params.len(),
             body: CExpr::Fun(params, Box::new(body)),
         }
@@ -959,7 +1047,8 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         let recursive_self = self
             .direct_candidate_function
             .as_ref()
-            .is_some_and(|current| current == name);
+            .is_some_and(|current| current == name)
+            || self.direct_candidate_functions.contains(name);
         let has_direct_entry = self
             .function_plans
             .get(name)
@@ -1143,6 +1232,26 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                 });
             self.bind_pat_locals_with_shape(pat, shape);
         }
+    }
+
+    pub(super) fn bind_fun_param_locals_with_arg_shapes(
+        &mut self,
+        fb: &MFunBinding,
+        args: &[Atom],
+    ) {
+        let param_shapes = self.param_shapes_for_fun(fb);
+        for (index, pat) in fb.params.iter().enumerate() {
+            let shape = args
+                .get(index)
+                .and_then(|arg| self.specialized_param_shape_for_arg(arg))
+                .or_else(|| param_shapes.get(index).cloned().flatten());
+            self.bind_pat_locals_with_shape(pat, shape);
+        }
+    }
+
+    fn specialized_param_shape_for_arg(&mut self, arg: &Atom) -> Option<LocalValueShape> {
+        self.pure_value_atom_shape(arg)
+            .or_else(|| self.cps_value_atom_shape(arg))
     }
 
     fn param_shapes_for_fun(&self, fb: &MFunBinding) -> Vec<Option<LocalValueShape>> {

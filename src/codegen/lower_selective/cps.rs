@@ -988,7 +988,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         self.static_handler_inline_stack
             .push(function_name.to_string());
         self.push_scope();
-        self.bind_fun_param_locals(&fb);
+        self.bind_fun_param_locals_with_arg_shapes(&fb, args);
         for (name, dict) in known_dict_aliases {
             self.current_known_dict_value_scope_mut().insert(name, dict);
         }
@@ -1538,6 +1538,13 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         self.assert_app_arity("pure CPS callback adapter", source_arity + 2, adapter_arity);
         let pure_arity = self
             .pure_callback_arity_for_atom(atom)
+            .or_else(|| match self.pure_value_atom_shape(atom) {
+                Some(LocalValueShape::PureCallable { arity }) => Some(arity),
+                Some(LocalValueShape::PureCallableFromUseType)
+                | Some(LocalValueShape::CpsCallable { .. })
+                | Some(LocalValueShape::RuntimeCpsCallable { .. })
+                | None => None,
+            })
             .unwrap_or_else(|| self.unsupported_atom(atom));
         self.assert_app_arity("pure CPS callback adapter", pure_arity, source_arity);
 
@@ -2145,7 +2152,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
 
         self.static_handler_inline_stack.push(local_name);
         self.push_scope();
-        self.bind_fun_param_locals(&fb);
+        self.bind_fun_param_locals_with_arg_shapes(&fb, args);
         for (name, dict) in known_dict_aliases {
             self.current_known_dict_value_scope_mut().insert(name, dict);
         }

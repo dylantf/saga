@@ -169,20 +169,17 @@ static.
 
 ## Suggested Next Chunks
 
-1. **`Std.DateTime.parse_loop` / large direct parser frontier**
+1. **Receive / native actor-effect frontier**
    - Current strict blocker:
-     `saga test --selective-no-fallback effects_test` stops while compiling
-     stdlib at direct function `Std.DateTime.parse_loop`.
-   - Monadic shape is a large direct nested `case` over string-prefix
-     patterns, with recursive calls and pure setter function values passed to
-     helpers like `parse_digits`.
-   - This likely wants a focused direct-subset audit around string-prefix case
-     arms, recursive direct calls, and pure function values in direct argument
-     position.
+     `saga test --selective-no-fallback` stops while compiling stdlib at
+     CPS-shaped function `Std.AtomicRef.lock_server`.
+   - Monadic shape uses BEAM-native receive/actor operations, so this is a
+     native-effect lowering frontier rather than another direct parser or HOF
+     specialization case.
 
-2. **Receive / native actor-effect frontier**
-   - Earlier spot checks exposed `Std.AtomicRef.lock_server`; it remains a
-     later unsupported shape once the direct parser frontier is cleared.
+2. **Fallback-off audit after native receive**
+   - Once `Std.AtomicRef.lock_server` is handled or intentionally routed, rerun
+     the strict audit to find the next unsupported stdlib/test-suite shape.
    - Monadic shape is `Receive` with native actor/process/monitor yields and
      recursive calls.
    - Decide whether selective should support `Receive` in CPS islands, whether
