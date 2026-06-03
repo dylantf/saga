@@ -275,15 +275,23 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         match self.call_shape(head) {
             Some(CallShape::Intrinsic(intrinsic)) => self.lower_intrinsic_app(intrinsic, args),
             Some(CallShape::Direct(callable)) => {
-                self.assert_app_arity(&callable.name, args.len(), callable.arity);
-                self.apply_direct_callable(callable, head, args)
+                if args.len() < callable.arity {
+                    self.lower_partial_direct_callable(callable, head, args)
+                } else {
+                    self.assert_app_arity(&callable.name, args.len(), callable.arity);
+                    self.apply_direct_callable(callable, head, args)
+                }
             }
             Some(CallShape::LocalCallable { name, arity }) => {
-                self.assert_app_arity(&name, args.len(), arity);
-                CExpr::Apply(
-                    Box::new(CExpr::Var(core_var(&name))),
-                    self.lower_direct_call_args(head, args),
-                )
+                if args.len() < arity {
+                    self.lower_partial_local_callable(&name, arity, head, args)
+                } else {
+                    self.assert_app_arity(&name, args.len(), arity);
+                    CExpr::Apply(
+                        Box::new(CExpr::Var(core_var(&name))),
+                        self.lower_direct_call_args(head, args),
+                    )
+                }
             }
             Some(CallShape::LocalCpsCallable { name, .. }) => self.unsupported(&format!(
                 "CPS callable local '{}' used in direct call position",
@@ -324,6 +332,9 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             return None;
         };
         if !effects.is_empty() {
+            return None;
+        }
+        if args.len() != *arity {
             return None;
         }
         self.assert_app_arity(target_name, args.len(), *arity);
@@ -370,6 +381,50 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                 lowered_args,
             ),
         }
+    }
+
+    fn lower_partial_direct_callable(
+        &mut self,
+        callable: DirectCallable,
+        head: &Atom,
+        args: &[Atom],
+    ) -> CExpr {
+        let missing = callable.arity.saturating_sub(args.len());
+        let params: Vec<String> = (0..missing)
+            .map(|index| self.fresh_cps_temp(&format!("_PartialArg{index}")))
+            .collect();
+        let mut lowered_args = self.lower_direct_call_args(head, args);
+        lowered_args.extend(params.iter().cloned().map(CExpr::Var));
+        let body = match callable.module {
+            Some(module) => CExpr::Call(module, callable.name, lowered_args),
+            None => CExpr::Apply(
+                Box::new(CExpr::FunRef(callable.name, callable.arity)),
+                lowered_args,
+            ),
+        };
+        CExpr::Fun(params, Box::new(body))
+    }
+
+    fn lower_partial_local_callable(
+        &mut self,
+        name: &str,
+        arity: usize,
+        head: &Atom,
+        args: &[Atom],
+    ) -> CExpr {
+        let missing = arity.saturating_sub(args.len());
+        let params: Vec<String> = (0..missing)
+            .map(|index| self.fresh_cps_temp(&format!("_PartialArg{index}")))
+            .collect();
+        let mut lowered_args = self.lower_direct_call_args(head, args);
+        lowered_args.extend(params.iter().cloned().map(CExpr::Var));
+        CExpr::Fun(
+            params,
+            Box::new(CExpr::Apply(
+                Box::new(CExpr::Var(core_var(name))),
+                lowered_args,
+            )),
+        )
     }
 
     fn lower_direct_call_args(&mut self, head: &Atom, args: &[Atom]) -> Vec<CExpr> {

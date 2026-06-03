@@ -1325,3 +1325,23 @@ boundaries exist.
   - `saga test --selective-no-fallback` in `tests/e2e` now gets through
     `Std.DateTime.parse_loop` and stops at `Std.AtomicRef.lock_server`, a
     CPS-shaped native `Receive`/actor-effect frontier.
+- Implemented the native receive / stdlib compile slice:
+  - CPS islands now accept and lower `MExpr::Receive`, including `after`
+    clauses, arm guards, arm bodies under the ambient CPS continuation, and
+    BEAM system-message patterns for `Down`/`Exit` with raw Erlang reason
+    conversion;
+  - local CPS-shaped functions no longer masquerade as direct callables during
+    direct planning, which keeps recursive CPS calls such as
+    `Std.AtomicRef.lock_server ()` on the CPS ABI instead of the direct ABI;
+  - direct partial application now lowers fewer-than-arity direct calls to
+    Core lambdas over the missing arguments. This clears stdlib shapes like
+    `Std.Dynamic.list_of` / `optional`, where a decoder constructor stores
+    `decode_list_raw f` as a function value;
+  - added selective regressions for CPS receive lowering and direct partial
+    application;
+  - `cargo test -p saga selective_core` passes with the new cases included;
+  - `saga test --selective-no-fallback` from `tests/e2e` now compiles stdlib
+    and all test modules, then stops in generated `Main` at CPS-shaped
+    `test_echo` from `tests/e2e/tests/actor_test.saga`. A previous strict pass
+    also exposed `count_bytes` in `advanced_test.saga` as the next direct
+    bitstring-pattern frontier once actor tests move forward.

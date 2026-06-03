@@ -169,23 +169,25 @@ static.
 
 ## Suggested Next Chunks
 
-1. **Receive / native actor-effect frontier**
+1. **E2E actor test runner frontier**
    - Current strict blocker:
-     `saga test --selective-no-fallback` stops while compiling stdlib at
-     CPS-shaped function `Std.AtomicRef.lock_server`.
-   - Monadic shape uses BEAM-native receive/actor operations, so this is a
-     native-effect lowering frontier rather than another direct parser or HOF
-     specialization case.
+     `saga test --selective-no-fallback` now compiles stdlib and all test
+     modules, then stops in generated `Main` at CPS-shaped function
+     `test_echo`.
+   - Source shape is `tests/e2e/tests/actor_test.saga:test_echo`, an actor
+     workflow using `spawn`, `send`, and `receive` under `beam_actor`.
+   - This is no longer a stdlib compile blocker; it is the next native
+     actor-effect shape that appears when the e2e test aggregator tries to run
+     all tests without fallback.
 
-2. **Fallback-off audit after native receive**
-   - Once `Std.AtomicRef.lock_server` is handled or intentionally routed, rerun
-     the strict audit to find the next unsupported stdlib/test-suite shape.
-   - Monadic shape is `Receive` with native actor/process/monitor yields and
-     recursive calls.
-   - Decide whether selective should support `Receive` in CPS islands, whether
-     native actor effects should stay fallback-only until the old fallback
-     lowerer is removed, or whether `AtomicRef` should be temporarily skipped
-     under strict audit.
+2. **Bitstring pattern frontier**
+   - A previous strict pass reached `tests/e2e/tests/advanced_test.saga`
+     function `count_bytes`, a direct recursive bitstring-pattern function.
+   - After module ordering shifts, `test_echo` appears first, but
+     `count_bytes` remains a known next direct-subset gap once actor tests
+     clear.
+   - This likely needs direct lowering/proof support for bitstring patterns in
+     `case` arms, not CPS-specific machinery.
 
 3. **Effectful trait method calls and values**
    - Local and imported dict constructors plus effectful method calls/values

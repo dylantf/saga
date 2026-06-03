@@ -1175,24 +1175,15 @@ main () = ()
         out.contains("['__saga_direct_may_log'/1, 'may_log'/3"),
         "{out}"
     );
-    assert!(
-        out.contains("'__saga_direct_use_may_log'/1, 'use_may_log'/3"),
-        "{out}"
-    );
+    assert!(out.contains("'use_may_log'/3"), "{out}");
     assert!(out.contains("'__saga_direct_may_log'/1"), "{out}");
     assert!(out.contains("'may_log'/3"), "{out}");
     assert!(
         out.contains("apply '__saga_direct_may_log'/1(_Arg0)"),
         "{out}"
     );
-    assert!(out.contains("'__saga_direct_use_may_log'/1"), "{out}");
-    assert!(out.contains("'use_may_log'/3"), "{out}");
     assert!(
-        out.contains("apply '__saga_direct_may_log'/1('unit')"),
-        "{out}"
-    );
-    assert!(
-        out.contains("apply '__saga_direct_use_may_log'/1(_Arg0)"),
+        out.contains("apply 'may_log'/3('unit', _Evidence, _ReturnK)"),
         "{out}"
     );
     assert!(out.contains("apply _ReturnK"), "{out}");
@@ -1546,6 +1537,58 @@ main () = supervised 1 (fun () -> 42)
     assert!(out.contains("'supervised'/2"), "{out}");
     assert!(out.contains("case _FunScrut"), "{out}");
     assert!(out.contains("apply F('unit'"), "{out}");
+    assert_selective_core_compiles(src);
+}
+
+#[test]
+fn selective_core_lowers_cps_receive_function() {
+    let src = r#"
+import Std.Actor (Actor)
+
+type Msg = Ping | Stop
+
+fun loop : Unit -> Unit needs {Actor Msg}
+loop () = receive {
+  Ping -> loop ()
+  Stop -> ()
+}
+
+fun main : Unit -> Unit
+main () = ()
+"#;
+    let out = emit_selective_core_with_options(
+        src,
+        super::lower_selective::LoweringOptions {
+            require_all_functions: true,
+        },
+    );
+    assert!(out.contains("'loop'/3"), "{out}");
+    assert!(out.contains("receive"), "{out}");
+    assert_selective_core_compiles(src);
+}
+
+#[test]
+fn selective_core_lowers_direct_partial_application() {
+    let src = r#"
+fun append_raw : List Int -> List Int -> List Int
+append_raw xs _ys = xs
+
+type Appender = Appender (List Int -> List Int)
+
+fun appender : List Int -> Appender
+appender xs = Appender (append_raw xs)
+
+fun main : Unit -> Unit
+main () = ()
+"#;
+    let out = emit_selective_core_with_options(
+        src,
+        super::lower_selective::LoweringOptions {
+            require_all_functions: true,
+        },
+    );
+    assert!(out.contains("fun (_PartialArg0"), "{out}");
+    assert!(out.contains("apply 'append_raw'/2"), "{out}");
     assert_selective_core_compiles(src);
 }
 

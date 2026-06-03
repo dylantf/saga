@@ -902,12 +902,18 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         if module.is_none()
             && let Some(RuntimeFunctionShape::Cps(shape)) = self.callable_type_shapes.get(name)
         {
+            let (source_arity, adapter_arity, effects) = self
+                .cps_function_arity_at(source)
+                .unwrap_or_else(|| {
+                    let source_arity = source_arity_for_cps_resolved(*arity);
+                    (source_arity, source_arity + 2, shape.static_effects.clone())
+                });
             return Some(CallShape::Cps {
                 module,
                 name: name.clone(),
-                source_arity: *arity,
-                adapter_arity: *arity + 2,
-                effects: shape.static_effects.clone(),
+                source_arity,
+                adapter_arity,
+                effects,
             });
         }
         if effects.is_empty() {
@@ -1042,6 +1048,12 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                 name: name.clone(),
                 arity: *arity,
             });
+        }
+        if matches!(
+            self.callable_type_shapes.get(name),
+            Some(RuntimeFunctionShape::Cps(_))
+        ) {
+            return None;
         }
 
         let recursive_self = self
@@ -1484,11 +1496,11 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                             && self.direct_intrinsic_args_are_supported(intrinsic, args)
                     }
                     Some(CallShape::Direct(callable)) => {
-                        callable.arity == args.len()
+                        args.len() <= callable.arity
                             && self.direct_call_args_are_supported(head, args)
                     }
                     Some(CallShape::LocalCallable { arity, .. }) => {
-                        arity == args.len() && self.direct_call_args_are_supported(head, args)
+                        args.len() <= arity && self.direct_call_args_are_supported(head, args)
                     }
                     Some(CallShape::Cps { .. })
                     | Some(CallShape::LocalCpsCallable { .. })
@@ -1603,6 +1615,24 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                         && self.expr_is_cps_island_subset(&arm.body);
                     self.pop_scope();
                     supported
+                })
+            }
+            MExpr::Receive { arms, after, .. } => {
+                arms.iter().all(|arm| {
+                    if !direct_pat_supported(&arm.pattern) {
+                        return false;
+                    }
+                    self.push_scope();
+                    self.bind_pat_locals(&arm.pattern);
+                    let supported = arm
+                        .guard
+                        .as_ref()
+                        .is_none_or(|guard| self.expr_is_direct_subset(guard))
+                        && self.expr_is_cps_island_subset(&arm.body);
+                    self.pop_scope();
+                    supported
+                }) && after.as_ref().is_none_or(|(timeout, body)| {
+                    self.atom_is_direct_subset(timeout) && self.expr_is_cps_island_subset(body)
                 })
             }
             MExpr::With { handler, body, .. } => {
@@ -2010,6 +2040,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                 .pure_function_arity_at(*source)
                 .or_else(|| self.pure_trait_method_arity(trait_name, *method_index))
                 .map(|arity| LocalValueShape::PureCallable { arity }),
+            MExpr::App { source, .. } => self.local_shape_for_expr_result_type(*source),
             MExpr::Resume { source, .. } | MExpr::With { source, .. } => {
                 self.local_shape_for_expr_result_type(*source)
             }
