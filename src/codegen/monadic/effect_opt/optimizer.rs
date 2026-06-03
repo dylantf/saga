@@ -1,5 +1,11 @@
 use super::*;
 
+struct BindingFrame {
+    var: MVar,
+    value: MExpr,
+    mode: Option<crate::codegen::monadic::ir::BindMode>,
+}
+
 impl<'info, 'data> Optimizer<'info, 'data> {
     pub(super) fn new(
         opts: RunOptions,
@@ -141,40 +147,7 @@ impl<'info, 'data> Optimizer<'info, 'data> {
                 let (args, change) = self.optimize_atoms(args);
                 (MExpr::Yield { op, args, source }, change)
             }
-            MExpr::Bind {
-                var,
-                value,
-                body,
-                mode,
-            } => {
-                let (value, value_change) = self.optimize_expr(*value);
-                let (body, body_change) = self.optimize_body_after_binding(&var, &value, *body);
-                let mut change = value_change;
-                change.mark_if(body_change);
-                (
-                    MExpr::Bind {
-                        var,
-                        value: Box::new(value),
-                        body: Box::new(body),
-                        mode,
-                    },
-                    change,
-                )
-            }
-            MExpr::Let { var, value, body } => {
-                let (value, value_change) = self.optimize_expr(*value);
-                let (body, body_change) = self.optimize_body_after_binding(&var, &value, *body);
-                let mut change = value_change;
-                change.mark_if(body_change);
-                (
-                    MExpr::Let {
-                        var,
-                        value: Box::new(value),
-                        body: Box::new(body),
-                    },
-                    change,
-                )
-            }
+            expr @ (MExpr::Bind { .. } | MExpr::Let { .. }) => self.optimize_binding_spine(expr),
             MExpr::Ensure { body, cleanup } => {
                 let (body, body_change) = self.optimize_expr(*body);
                 let (cleanup, cleanup_change) = self.optimize_expr(*cleanup);
@@ -840,12 +813,65 @@ impl<'info, 'data> Optimizer<'info, 'data> {
         (MArm { guard, body, ..arm }, change)
     }
 
-    fn optimize_body_after_binding(
-        &mut self,
-        var: &MVar,
-        value: &MExpr,
-        body: MExpr,
-    ) -> (MExpr, Change) {
+    fn optimize_binding_spine(&mut self, expr: MExpr) -> (MExpr, Change) {
+        let mut frames = Vec::new();
+        let mut tail = expr;
+        loop {
+            match tail {
+                MExpr::Bind {
+                    var,
+                    value,
+                    body,
+                    mode,
+                } => {
+                    frames.push(BindingFrame {
+                        var,
+                        value: *value,
+                        mode: Some(mode),
+                    });
+                    tail = *body;
+                }
+                MExpr::Let { var, value, body } => {
+                    frames.push(BindingFrame {
+                        var,
+                        value: *value,
+                        mode: None,
+                    });
+                    tail = *body;
+                }
+                _ => break,
+            }
+        }
+
+        let old_blocked_len = self.inline_blocked_names.len();
+        let mut optimized_frames = Vec::with_capacity(frames.len());
+        let mut change = Change::Unchanged;
+        for frame in frames {
+            let (value, value_change) = self.optimize_expr(frame.value);
+            change.mark_if(value_change);
+            self.push_binding_optimization_context(&frame.var, &value);
+            self.inline_blocked_names.push(frame.var.name.clone());
+            optimized_frames.push(BindingFrame { value, ..frame });
+        }
+
+        let (tail, tail_change) = self.optimize_expr(tail);
+        change.mark_if(tail_change);
+
+        for _ in 0..optimized_frames.len() {
+            self.pop_binding_optimization_context();
+        }
+        self.inline_blocked_names.truncate(old_blocked_len);
+
+        let expr = optimized_frames
+            .into_iter()
+            .rev()
+            .fold(tail, |body, frame| {
+                rebuild_binding(frame.var, Box::new(frame.value), Box::new(body), frame.mode)
+            });
+        (expr, change)
+    }
+
+    fn push_binding_optimization_context(&mut self, var: &MVar, value: &MExpr) {
         if let Some(candidate) = handler_value_candidate(value) {
             self.handler_value_bindings
                 .push((var.name.clone(), Some(candidate)));
@@ -870,12 +896,13 @@ impl<'info, 'data> Optimizer<'info, 'data> {
         } else {
             self.pure_atom_bindings.push((var.name.clone(), None));
         }
-        let (body, change) = self.optimize_expr_with_blocked_names(vec![var.name.clone()], body);
+    }
+
+    fn pop_binding_optimization_context(&mut self) {
         self.pure_atom_bindings.pop();
         self.dict_method_bindings.pop();
         self.dict_value_bindings.pop();
         self.handler_value_bindings.pop();
-        (body, change)
     }
 
     fn dict_value_candidate(&self, value: &MExpr) -> Option<DictValueCandidate> {

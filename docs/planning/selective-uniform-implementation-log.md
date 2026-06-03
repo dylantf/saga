@@ -1198,6 +1198,12 @@ boundaries exist.
     group, not a single clause. Mixed/effectful multi-clause groups still fall
     back; examples `02-fibonacci` and `15-typechecking-errors` cover both
     paths;
+  - `examples/28-deriving.saga` exposed a deep-but-finite compiler traversal in
+    the old monadic optimizer/fallback path: raw monadic and raw selective Core
+    could print, but `monadic-opt` overflowed the default Rust main-thread
+    stack. The optimizer now walks linear `Bind`/`Let` spines iteratively while
+    preserving binding-context state, so derived/generated code with deeply
+    nested optimized `let` chains no longer needs a larger CLI stack;
   - stdlib cache fingerprints now include the backend, and selective builds
     compile stdlib modules through the same selective/fallback merge instead of
     reusing uniform-only stdlib beams;

@@ -35,19 +35,14 @@ fn selective_core_lowers_imported_cps_adapter_call() {
 #[test]
 fn selective_core_codegen_handles_multi_clause_functions() {
     let binary = env!("CARGO_BIN_EXE_saga");
-    let manifest_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let project_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("examples/optimization/selective-uniform/multi-clause-project");
 
-    let fibonacci = manifest_dir.join("examples/02-fibonacci.saga");
     let fibonacci_inspect = std::process::Command::new(binary)
-        .current_dir(&manifest_dir)
-        .args([
-            "inspect",
-            fibonacci.to_str().expect("utf-8 fixture path"),
-            "--stage",
-            "selective-core",
-        ])
+        .current_dir(&project_dir)
+        .args(["inspect", "src/Main.saga", "--stage", "selective-core"])
         .output()
-        .expect("inspect selective fibonacci fixture");
+        .expect("inspect selective multi-clause fixture");
     assert!(
         fibonacci_inspect.status.success(),
         "saga inspect failed\nstdout:\n{}\nstderr:\n{}",
@@ -58,55 +53,52 @@ fn selective_core_codegen_handles_multi_clause_functions() {
     assert!(fibonacci_core.contains("'fib'/1"), "{fibonacci_core}");
     assert!(fibonacci_core.contains("case {_Arg0}"), "{fibonacci_core}");
 
-    let fibonacci_output = std::process::Command::new(binary)
-        .current_dir(&manifest_dir)
-        .args([
-            "run",
-            fibonacci.to_str().expect("utf-8 fixture path"),
-            "--selective-codegen",
-        ])
+    let output = std::process::Command::new(binary)
+        .current_dir(&project_dir)
+        .args(["run", "--selective-codegen"])
         .output()
-        .expect("run selective fibonacci fixture");
+        .expect("run selective multi-clause fixture");
     assert!(
-        fibonacci_output.status.success(),
+        output.status.success(),
         "saga run failed\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&fibonacci_output.stdout),
-        String::from_utf8_lossy(&fibonacci_output.stderr)
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
     );
-    let fibonacci_output_text = format!(
+    let output_text = format!(
         "{}{}",
-        String::from_utf8_lossy(&fibonacci_output.stdout),
-        String::from_utf8_lossy(&fibonacci_output.stderr)
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
     );
-    assert!(
-        fibonacci_output_text.contains("55"),
-        "{fibonacci_output_text}"
-    );
+    assert!(output_text.contains("55"), "{output_text}");
+    assert!(output_text.contains("safe_div result: 25"), "{output_text}");
+}
 
-    let typechecking_demo = manifest_dir.join("examples/15-typechecking-errors.saga");
-    let typechecking_output = std::process::Command::new(binary)
-        .current_dir(&manifest_dir)
-        .args([
-            "run",
-            typechecking_demo.to_str().expect("utf-8 fixture path"),
-            "--selective-codegen",
-        ])
+#[test]
+fn selective_core_codegen_runs_deriving_example() {
+    let binary = env!("CARGO_BIN_EXE_saga");
+    let project_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("examples/optimization/selective-uniform/deriving-project");
+
+    let output = std::process::Command::new(binary)
+        .current_dir(&project_dir)
+        .args(["run", "--selective-codegen"])
         .output()
-        .expect("run selective typechecking demo fixture");
+        .expect("run selective deriving example");
     assert!(
-        typechecking_output.status.success(),
+        output.status.success(),
         "saga run failed\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&typechecking_output.stdout),
-        String::from_utf8_lossy(&typechecking_output.stderr)
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
     );
-    let typechecking_stdout = format!(
+    let output_text = format!(
         "{}{}",
-        String::from_utf8_lossy(&typechecking_output.stdout),
-        String::from_utf8_lossy(&typechecking_output.stderr)
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
     );
     assert!(
-        typechecking_stdout.contains("\"safe_div result: 25\"\n"),
-        "{typechecking_stdout}"
+        output_text
+            .contains("\"Scored(score: 10, value: first) vs Scored(score: 20, value: third): Lt\""),
+        "{output_text}"
     );
 }
 
