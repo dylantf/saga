@@ -1624,6 +1624,11 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             Pat::StringPrefix { rest, .. } => {
                 self.bind_pat_locals_with_shape(rest, None);
             }
+            Pat::BitStringPat { segments, .. } => {
+                for segment in segments {
+                    self.bind_pat_locals_with_shape(&segment.value, None);
+                }
+            }
             _ => {}
         }
     }
@@ -1825,6 +1830,10 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                 supported
             }
             MExpr::App { head, args, .. } => {
+                if self.expr_is_direct_subset(expr) {
+                    return true;
+                }
+
                 if let Some((source_arity, adapter_arity, _effects)) =
                     self.cps_lambda_arity_for_atom(head)
                     && self.lambda_is_cps_subset(head)
@@ -1901,6 +1910,13 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             MExpr::With { handler, body, .. } => {
                 self.handler_is_cps_island_subset(handler) && self.expr_is_cps_island_subset(body)
             }
+            MExpr::BitString { segments, .. } => segments.iter().all(|segment| {
+                self.atom_is_direct_subset(&segment.value)
+                    && segment
+                        .size
+                        .as_ref()
+                        .is_none_or(|size| self.atom_is_direct_subset(size))
+            }),
             MExpr::HandlerValue {
                 arms,
                 return_clause,
@@ -1971,6 +1987,9 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         {
             return false;
         }
+        if arm.finally_block.is_some() && Self::handler_arm_expr_contains_yield(&arm.body) {
+            return false;
+        }
         self.push_scope();
         for pat in &arm.params {
             self.bind_pat_locals(pat);
@@ -1988,6 +2007,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             return true;
         }
         match expr {
+            MExpr::Yield { op, args, .. } => self.yield_args_are_cps_island_subset(op, args),
             MExpr::Resume { value, .. } => self.atom_is_direct_subset(value),
             MExpr::Bind {
                 var, value, body, ..
@@ -2044,7 +2064,36 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                     supported
                 })
             }
+            MExpr::BitString { segments, .. } => segments.iter().all(|segment| {
+                self.handler_arm_atom_is_cps_island_subset(&segment.value)
+                    && segment
+                        .size
+                        .as_ref()
+                        .is_none_or(|size| self.handler_arm_atom_is_cps_island_subset(size))
+            }),
             MExpr::App { head, args, .. } => self.is_flat_map_identity_resume_app(head, args),
+            _ => false,
+        }
+    }
+
+    fn handler_arm_expr_contains_yield(expr: &MExpr) -> bool {
+        match expr {
+            MExpr::Yield { .. } => true,
+            MExpr::Let { value, body, .. } | MExpr::Bind { value, body, .. } => {
+                Self::handler_arm_expr_contains_yield(value)
+                    || Self::handler_arm_expr_contains_yield(body)
+            }
+            MExpr::If {
+                then_branch,
+                else_branch,
+                ..
+            } => {
+                Self::handler_arm_expr_contains_yield(then_branch)
+                    || Self::handler_arm_expr_contains_yield(else_branch)
+            }
+            MExpr::Case { arms, .. } => arms
+                .iter()
+                .any(|arm| Self::handler_arm_expr_contains_yield(&arm.body)),
             _ => false,
         }
     }
@@ -2191,31 +2240,101 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
 
     fn cps_call_args_are_supported(&mut self, head: &Atom, args: &[Atom]) -> bool {
         let expected_arg_shapes = self.cps_callback_param_shapes(head);
+        let expected_arg_types = self.direct_call_param_types(head);
         args.iter().enumerate().all(|(index, arg)| {
             match expected_arg_shapes.get(index).copied().flatten() {
                 Some((_source_arity, _adapter_arity)) => self.cps_callback_arg_is_supported(arg),
-                None => self.atom_is_cps_value_subset(arg),
+                None => {
+                    expected_arg_types
+                        .get(index)
+                        .and_then(Option::as_ref)
+                        .cloned()
+                        .is_some_and(|ty| self.atom_is_supported_for_expected_type(arg, &ty))
+                        || self.atom_is_cps_value_subset(arg)
+                }
             }
         })
     }
 
     fn cps_callback_arg_is_supported(&mut self, atom: &Atom) -> bool {
         if let Atom::Lambda { params, body, .. } = atom {
-            return self.lambda_is_cps_subset(atom) || self.lambda_is_direct_subset(params, body);
+            self.lambda_is_cps_subset(atom) || self.lambda_is_direct_subset(params, body)
+        } else {
+            self.cps_value_atom_shape(atom).is_some()
+                || self.pure_value_atom_shape(atom).is_some()
+                || self.atom_is_direct_subset(atom)
         }
-        self.cps_value_atom_shape(atom).is_some()
-            || self.pure_value_atom_shape(atom).is_some()
-            || self.atom_is_direct_subset(atom)
     }
 
     fn direct_call_args_are_supported(&mut self, head: &Atom, args: &[Atom]) -> bool {
         let expected_arg_shapes = self.direct_call_effectful_callback_param_shapes(head);
+        let expected_arg_types = self.direct_call_param_types(head);
         args.iter().enumerate().all(|(index, arg)| {
             match expected_arg_shapes.get(index).copied().flatten() {
                 Some((_source_arity, _adapter_arity)) => self.cps_callback_arg_is_supported(arg),
-                None => self.atom_is_direct_subset(arg),
+                None => {
+                    expected_arg_types
+                        .get(index)
+                        .and_then(Option::as_ref)
+                        .cloned()
+                        .is_some_and(|ty| self.atom_is_supported_for_expected_type(arg, &ty))
+                        || self.atom_is_direct_subset(arg)
+                }
             }
         })
+    }
+
+    fn direct_call_param_types(&self, head: &Atom) -> Vec<Option<Type>> {
+        let source = match head {
+            Atom::Var { source, .. }
+            | Atom::QualifiedRef { source, .. }
+            | Atom::Lambda { source, .. } => *source,
+            _ => return Vec::new(),
+        };
+        let Some(mut current) = self.effect_info.type_at_node.get(&source) else {
+            return Vec::new();
+        };
+        let mut params = Vec::new();
+        while let Type::Fun(param, ret, _) = current {
+            params.push(Some((**param).clone()));
+            current = ret;
+        }
+        params
+    }
+
+    fn atom_is_supported_for_expected_type(&mut self, atom: &Atom, expected: &Type) -> bool {
+        if self.atom_is_direct_subset(atom) {
+            return true;
+        }
+
+        if self.cps_function_arity_from_type(expected).is_some() {
+            return self.cps_callback_arg_is_supported(atom);
+        }
+
+        match (atom, expected) {
+            (Atom::Ctor { name, args, .. }, Type::Con(type_name, type_args))
+                if type_name == crate::typechecker::canonicalize_type_name("List")
+                    && type_args.len() == 1 =>
+            {
+                match (name.as_str(), args.as_slice()) {
+                    ("Nil", []) => true,
+                    ("Cons", [head, tail]) => {
+                        self.atom_is_supported_for_expected_type(head, &type_args[0])
+                            && self.atom_is_supported_for_expected_type(tail, expected)
+                    }
+                    _ => false,
+                }
+            }
+            (Atom::Tuple { elements, .. }, Type::Con(type_name, type_args))
+                if type_name == crate::typechecker::canonicalize_type_name("Tuple")
+                    && elements.len() == type_args.len() =>
+            {
+                elements.iter().zip(type_args).all(|(element, expected)| {
+                    self.atom_is_supported_for_expected_type(element, expected)
+                })
+            }
+            _ => false,
+        }
     }
 
     fn direct_call_effectful_callback_param_shapes(

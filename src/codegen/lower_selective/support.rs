@@ -1,5 +1,5 @@
-use crate::ast::{BinOp as AstBinOp, Lit, Pat};
-use crate::codegen::cerl::{CBinSeg, CExpr, CLit};
+use crate::ast::{BinOp as AstBinOp, BitSegSpec, Expr, ExprKind, Lit, Pat};
+use crate::codegen::cerl::{BinSegFlags, BinSegSize, BinSegType, CBinSeg, CExpr, CLit, Endianness};
 use crate::codegen::lower::util::core_var;
 use crate::codegen::monadic::ir::{Atom, MExpr, MFunBinding};
 use crate::codegen::runtime_shape::RuntimeFunctionShape;
@@ -165,6 +165,9 @@ pub(super) fn direct_pat_supported(pat: &Pat) -> bool {
             .iter()
             .all(|(_, pat)| pat.as_ref().is_none_or(direct_param_supported)),
         Pat::StringPrefix { rest, .. } => direct_param_supported(rest),
+        Pat::BitStringPat { segments, .. } => segments
+            .iter()
+            .all(|segment| direct_param_supported(&segment.value)),
         _ => false,
     }
 }
@@ -313,5 +316,87 @@ pub(super) fn lower_lit_pat(lit: &Lit) -> CLit {
         Lit::String(value, _) => CLit::Str(value.clone()),
         Lit::Bool(value) => CLit::Atom(value.to_string()),
         Lit::Unit => CLit::Atom("unit".to_string()),
+    }
+}
+
+pub(super) fn process_string_escapes(s: &str) -> String {
+    let mut out = String::new();
+    let mut chars = s.chars();
+    while let Some(ch) = chars.next() {
+        if ch == '\\' {
+            match chars.next() {
+                Some('n') => out.push('\n'),
+                Some('r') => out.push('\r'),
+                Some('t') => out.push('\t'),
+                Some('0') => out.push('\0'),
+                Some('\\') => out.push('\\'),
+                Some('"') => out.push('"'),
+                Some('x') => {
+                    let hi = chars.next().and_then(|c| c.to_digit(16));
+                    let lo = chars.next().and_then(|c| c.to_digit(16));
+                    if let (Some(h), Some(l)) = (hi, lo) {
+                        out.push((h * 16 + l) as u8 as char);
+                    }
+                }
+                Some(ch) => out.push(ch),
+                None => {}
+            }
+        } else {
+            out.push(ch);
+        }
+    }
+    out
+}
+
+pub(super) fn resolve_bit_segment_meta(specs: &[BitSegSpec]) -> (BinSegType, i64, u8) {
+    let has = |s: &BitSegSpec| specs.contains(s);
+    if has(&BitSegSpec::Float) {
+        (BinSegType::Float, 64, 1)
+    } else if has(&BitSegSpec::Binary) {
+        (BinSegType::Binary, 8, 8)
+    } else if has(&BitSegSpec::Utf8) {
+        (BinSegType::Utf8, 0, 0)
+    } else {
+        (BinSegType::Integer, 8, 1)
+    }
+}
+
+pub(super) fn resolve_bit_segment_flags(specs: &[BitSegSpec]) -> BinSegFlags {
+    let has = |s: &BitSegSpec| specs.contains(s);
+    BinSegFlags {
+        signed: has(&BitSegSpec::Signed),
+        endianness: if has(&BitSegSpec::Little) {
+            Endianness::Little
+        } else if has(&BitSegSpec::Native) {
+            Endianness::Native
+        } else {
+            Endianness::Big
+        },
+    }
+}
+
+pub(super) fn resolve_bit_segment_size(
+    size: Option<CExpr>,
+    type_name: &BinSegType,
+    default_size: i64,
+) -> BinSegSize {
+    if matches!(type_name, BinSegType::Utf8) {
+        BinSegSize::Utf8
+    } else {
+        match size {
+            Some(size) => BinSegSize::Expr(size),
+            None => BinSegSize::Expr(CExpr::Lit(CLit::Int(default_size))),
+        }
+    }
+}
+
+pub(super) fn lower_pat_size_expr(expr: &Expr) -> CExpr {
+    match &expr.kind {
+        ExprKind::Lit {
+            value: Lit::Int(_, value),
+            ..
+        } => CExpr::Lit(CLit::Int(*value)),
+        ExprKind::Var { name, .. } => CExpr::Var(core_var(name)),
+        _ => unreachable!("bitstring segment size must be an integer literal or variable"),
     }
 }

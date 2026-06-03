@@ -909,6 +909,48 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         CExpr::Tuple(elems)
     }
 
+    pub(super) fn lower_bitstring_value(
+        &mut self,
+        segments: &[crate::codegen::monadic::ir::MBitSegment],
+    ) -> CExpr {
+        let mut lowered_segments: Vec<CBinSeg<CExpr>> = Vec::with_capacity(segments.len());
+        for segment in segments {
+            if let Atom::Lit {
+                value: Lit::String(s, kind),
+                ..
+            } = &segment.value
+            {
+                let resolved = if kind.is_multiline() {
+                    process_string_escapes(s)
+                } else {
+                    s.clone()
+                };
+                lowered_segments.extend(resolved.as_bytes().iter().copied().map(CBinSeg::Byte));
+                continue;
+            }
+
+            let is_binary = segment.specs.contains(&crate::ast::BitSegSpec::Binary);
+            let value = self.lower_atom(&segment.value);
+            if is_binary && segment.size.is_none() {
+                lowered_segments.push(CBinSeg::BinaryAll(value));
+                continue;
+            }
+
+            let (type_name, default_size, unit) = resolve_bit_segment_meta(&segment.specs);
+            let flags = resolve_bit_segment_flags(&segment.specs);
+            let size = segment.size.as_ref().map(|size| self.lower_atom(size));
+            let size = resolve_bit_segment_size(size, &type_name, default_size);
+            lowered_segments.push(CBinSeg::Segment {
+                value,
+                size,
+                unit,
+                type_name,
+                flags,
+            });
+        }
+        CExpr::Binary(lowered_segments)
+    }
+
     pub(super) fn lower_pat(&self, pat: &Pat) -> CPat {
         match pat {
             Pat::Wildcard { .. } => CPat::Wildcard,
@@ -942,7 +984,51 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                 segs.push(CBinSeg::BinaryAll(self.lower_pat(rest)));
                 CPat::Binary(segs)
             }
-            _ => self.unsupported("patterns beyond var/lit/tuple/constructor/record/string-prefix"),
+            Pat::BitStringPat { segments, .. } => {
+                let mut segs = Vec::with_capacity(segments.len());
+                for segment in segments {
+                    if let Pat::Lit {
+                        value: Lit::String(s, kind),
+                        ..
+                    } = &segment.value
+                    {
+                        let resolved = if kind.is_multiline() {
+                            process_string_escapes(s)
+                        } else {
+                            s.clone()
+                        };
+                        segs.extend(resolved.as_bytes().iter().copied().map(CBinSeg::Byte));
+                        continue;
+                    }
+                    segs.push(self.lower_bit_segment_pat(segment));
+                }
+                CPat::Binary(segs)
+            }
+            Pat::ListPat { .. } | Pat::ConsPat { .. } | Pat::Or { .. } => {
+                unreachable!("surface syntax should be desugared before codegen")
+            }
+        }
+    }
+
+    fn lower_bit_segment_pat(&self, segment: &crate::ast::BitSegment<Pat>) -> CBinSeg<CPat> {
+        let is_binary = segment.specs.contains(&crate::ast::BitSegSpec::Binary);
+        let pat = self.lower_pat(&segment.value);
+
+        if is_binary && segment.size.is_none() {
+            return CBinSeg::BinaryAll(pat);
+        }
+
+        let (type_name, default_size, unit) = resolve_bit_segment_meta(&segment.specs);
+        let flags = resolve_bit_segment_flags(&segment.specs);
+        let size = segment.size.as_deref().map(lower_pat_size_expr);
+        let size = resolve_bit_segment_size(size, &type_name, default_size);
+
+        CBinSeg::Segment {
+            value: pat,
+            size,
+            unit,
+            type_name,
+            flags,
         }
     }
 

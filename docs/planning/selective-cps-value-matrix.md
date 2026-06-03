@@ -202,13 +202,18 @@ static.
      methods and decide whether to cover the generated pure/effectful dict
      method shape directly or leave full generic dict specialization for later.
 
-3. **Bitstring pattern frontier**
-   - A previous strict pass reached `tests/e2e/tests/advanced_test.saga`
-     function `count_bytes`, a direct recursive bitstring-pattern function.
-   - `count_bytes` remains a known direct-subset gap if module/test ordering
-     exposes it before or after the generic dict frontier.
-   - This likely needs direct lowering/proof support for bitstring patterns in
-     `case` arms, not CPS-specific machinery.
+3. **EffectsTest `tests` / finally frontier**
+   - Current strict blocker:
+     `saga test --selective-no-fallback effects_test` clears
+     `reabort_wrapped`, then stops at the public CPS-shaped `tests` function.
+   - The remaining stable frontier is in the `finally`/scoped-resource test
+     tree: static handler arms that bind a local resource, `resume resource`,
+     then run cleanup that references the bound local.
+   - This should stay narrower than a blanket static-handler admit. Handler-arm
+     re-yield is now supported by yielding through the outer evidence with the
+     arm continuation; cleanup sequencing still needs a scoped design for arms
+     whose `finally` block depends on arm-local bindings and whose resumed
+     continuation may itself abort.
 
 4. **Effectful trait method calls and values**
    - Local and imported dict constructors plus effectful method calls/values
@@ -243,3 +248,10 @@ static.
 - **AtomicRef recursive receive frontier:** `Std.AtomicRef.lock_server` now
   lowers as a CPS recursive receive loop with nested receive and actor
   evidence lookup.
+- **Bitstring direct/CPS island frontier:** direct lowering now supports
+  bitstring patterns in `case` arms, and CPS islands can construct bitstrings
+  and sequence direct helper calls before CPS-relevant work. `advanced_test`
+  now passes under `--selective-no-fallback`.
+- **Handler re-yield frontier:** handler arms can now re-yield through the
+  outer evidence using the arm continuation, covering
+  `EffectsTest.reabort_wrapped`.

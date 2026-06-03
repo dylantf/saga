@@ -64,6 +64,9 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             MExpr::Receive { arms, after, .. } => {
                 self.lower_cps_receive(arms, after.as_ref(), evidence, return_k)
             }
+            MExpr::App { head, args, .. } if self.expr_is_direct_subset(expr) => {
+                CExpr::Apply(Box::new(return_k), vec![self.lower_app(head, args)])
+            }
             MExpr::App { head, args, .. } => self.lower_cps_app(head, args, evidence, return_k),
             MExpr::With { handler, body, .. } => {
                 self.lower_cps_with(handler, body, evidence, return_k)
@@ -85,6 +88,10 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                     "-".to_string(),
                     vec![CExpr::Lit(CLit::Int(0)), self.lower_atom(value)],
                 )],
+            ),
+            MExpr::BitString { segments, .. } => CExpr::Apply(
+                Box::new(return_k),
+                vec![self.lower_bitstring_value(segments)],
             ),
             MExpr::HandlerValue {
                 arms,
@@ -2536,6 +2543,12 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             };
         }
         match expr {
+            MExpr::Yield { op, args, .. } => {
+                if finally_block.is_some() {
+                    self.unsupported_expr(expr);
+                }
+                self.lower_cps_yield(op, args, outer_evidence, arm_k)
+            }
             MExpr::Resume { value, .. } => {
                 self.lower_resume_with_finally(value, arm_k, finally_block)
             }
@@ -2583,7 +2596,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                     value,
                     outer_evidence.clone(),
                     arm_k.clone(),
-                    finally_block,
+                    None,
                 );
                 self.push_scope();
                 self.current_scope_mut().insert(var.name.clone());

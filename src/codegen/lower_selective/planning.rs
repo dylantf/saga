@@ -61,12 +61,12 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         loop {
             let planned = self.function_plans.len();
             self.compute_direct_body_plans(program);
+            self.compute_cps_body_plans(program);
             self.compute_direct_cps_island_body_plans(program);
             if self.function_plans.len() == planned {
                 break;
             }
         }
-        self.compute_cps_body_plans(program);
         self.compute_hof_direct_specializations(program);
         self.compute_dict_constructor_plans(program);
     }
