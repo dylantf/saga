@@ -68,7 +68,7 @@ These are expression/value shapes that can produce a callable value.
 | `case` returning CPS callables | `let f = case c { True -> read_a; False -> read_b }` | Supported | Same as `if`, with direct patterns/guards only | Keep |
 | Mixed CPS and pure branch/case | `if c then read_value else pure_value` | Supported via CPS fallback | Common representation is CPS; pure branch uses explicit pure-to-CPS adapter | Later direct-specialize when branch is statically pure |
 | Pure function where effectful callback is expected | `apply_eff pure_value` | Supported with local/imported direct HOF specialization when the callee body becomes direct under pure callbacks; CPS fallback remains | First prefer direct HOF specialization when the whole call is net pure; otherwise use explicit pure-to-CPS adapter | Keep; broaden only when new HOF value shapes appear |
-| Handled callback where effectful callback is expected | `apply_eff handled_value` where `handled_value` uses an internal handler | Supported for named same-module callbacks whose exposed type is pure | If exposed callback type is pure, use direct HOF specialization or pure-to-CPS adapter fallback | Inline handled callback expressions later |
+| Handled callback where effectful callback is expected | `apply_eff handled_value` where `handled_value` uses an internal handler | Supported for named same-module callbacks and accumulator-style handler bodies whose exposed type is pure | If exposed callback type is pure, use direct HOF specialization, direct CPS island lowering, or pure-to-CPS adapter fallback | Broaden only when new handled callback shapes appear |
 | CPS lambda value | `let f = fun () -> read! ()` | Supported in CPS islands | Materialize runtime closure with user args plus evidence/continuation | Keep |
 | Lambda-headed CPS call | `(fun x -> read! ()) ()` | Supported in CPS islands | Materialize/apply runtime CPS closure; no source-arity guessing | Keep |
 | Partial application of CPS function | `let f = read_with_prefix p` | Open | Must materialize closure with remaining args plus `Ev,K`; do not use source arity | Later |
@@ -97,6 +97,7 @@ These are places that consume a callable value or call shape.
 | Pure callable as direct callback argument | `apply_it inc` | Supported | Direct fun value, source arity | Keep |
 | Pure callable as CPS callback argument | `apply_eff inc` | Supported with local/imported direct HOF specialization for statically pure callback args; CPS fallback remains | Prefer direct HOF specialization if the selected HOF call can stay pure; otherwise explicit pure-to-CPS adapter | Broaden to aliases later |
 | Handler-arm HOF resume | `List.flat_map (fun x -> resume x) xs` inside an operation arm | Supported for imported/direct `flat_map` identity-resume shape | Lower callback as a direct closure that applies the current handler-arm continuation; preserves multishot list semantics | Generalize only after more handler-arm HOF shapes appear |
+| Handler arm returning delayed-resume lambda | `tell x = fun acc -> (resume ()) (x :: acc)` | Supported for writer/state-style accumulator handlers | Return a direct Core lambda, but lower its body under the handler arm continuation so resume runs when the accumulator function is applied | Keep; stress with finally/abort later |
 | Effectful argument inside effectful outer call | `outer (read! ())` or `outer (decode x)` | Partially represented by monadic `Bind` sequencing | Old lowerer had `effectful_arg_idxs` chaining; selective should rely on monadic sequencing inside islands | Add fixtures when app args become non-trivial |
 | Effectful callback argument inside effectful outer call | `outer read_value (effect_arg!)` | Open | Need both adapter closure and effectful-arg sequencing | Later |
 | Return continuation value | final result of CPS island | Supported for direct atoms; CPS callable result supported for `if`/`case` bound values | Returning CPS callable out of island needs representation policy | Add guardrail |
@@ -128,7 +129,7 @@ This is the selective lowerer's practical checklist over monadic IR.
 | `ForeignCall` | Supported in direct subset for direct args; direct external apps filter Saga `Unit` for niladic native calls | Via direct fallback when direct-safe | Not callable producer | Effectful externals still need explicit shape metadata |
 | `BinOp` / `UnaryMinus` | Supported | Direct fallback | No | Keep |
 | `BitString` | Rejected | Rejected | No | Later |
-| `Receive` | Rejected | Rejected | Open | Actor/native effects later |
+| `Receive` | Rejected | Rejected | Open | Later native-effect frontier via `Std.AtomicRef.lock_server` |
 | `LetFun` | Rejected | Rejected | Open | Needed for local recursive helpers |
 | `HandlerValue` | Rejected in direct subset today | Supported as a CPS-island value producer | Handler-value producer | Broaden for abort/finally stress later |
 
@@ -166,37 +167,44 @@ static.
 
 ## Suggested Next Chunks
 
-1. **Stdlib writer / effectful callback HOF frontier**
+1. **`Std.Test.run_single` / panic-catching handled callback frontier**
    - Current strict blocker:
      `saga test --selective-no-fallback effects_test` stops while compiling
-     stdlib at direct function `run_writer`.
-   - The next Saga-level shape after handler values is an effectful callback
-     passed to a function whose exposed result is pure because it handles the
-     callback's effects internally (`run_state 0 (fun () -> put! 99; get! ())`
-     is the user-test analogue).
-   - Decide whether this becomes a direct HOF specialization, a selective
-     direct adapter over a fallback-only pure function, or a monadic fallback
-     island before adding more ad hoc callback cases.
+     stdlib at direct function `Std.Test.run_single`.
+   - Monadic shape is a direct `case` with a `Process.catch_panic (fun () ->
+     body () with test handler...)` callback.
+   - This likely wants another direct HOF/callback specialization rule before
+     touching `Receive`, because it is part of the test runner's core path.
 
-2. **Effectful trait method calls and values**
+2. **Receive / native actor-effect frontier**
+   - Spot checks exposed `Std.AtomicRef.lock_server` as a later unsupported
+     shape.
+   - Monadic shape is `Receive` with native actor/process/monitor yields and
+     recursive calls.
+   - Decide whether selective should support `Receive` in CPS islands, whether
+     native actor effects should stay fallback-only until the old fallback
+     lowerer is removed, or whether `AtomicRef` should be temporarily skipped
+     under strict audit.
+
+3. **Effectful trait method calls and values**
    - Local and imported dict constructors plus effectful method calls/values
      are covered, including generic constructors with dictionary parameters.
    - Next trait work can move from ABI correctness to specialization:
      monomorphic call-site specialization, known constructor/output-shape
      specialization, and direct handling of net-pure trait dispatch.
 
-3. **CPS lambdas and partial application**
+4. **CPS lambdas and partial application**
    - Basic runtime CPS closure generation is covered for callback arguments,
      let-bound aliases, and lambda-headed calls.
    - Remaining lambda work is CPS partial application/captured callback
      parameter stress-testing, not the base closure ABI.
 
-4. **Storage guardrails**
+5. **Storage guardrails**
    - Tuple/record/constructor negative tests are covered.
    - Add list-literal coverage once list literals hit this selective path.
    - Support later only if we choose a representation.
 
-5. **Handler value matrix**
+6. **Handler value matrix**
    - Split handler values from callable values.
    - Inline, named, and `if`-selected dynamic handler values are covered for
      current e2e shapes.

@@ -1569,6 +1569,9 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             return true;
         }
         match expr {
+            MExpr::Pure(Atom::Lambda { params, body, .. }) => {
+                self.handler_arm_lambda_is_cps_island_subset(params, body)
+            }
             MExpr::Resume { value, .. } => self.atom_is_direct_subset(value),
             MExpr::Bind {
                 var, value, body, ..
@@ -1628,6 +1631,19 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             MExpr::App { head, args, .. } => self.is_flat_map_identity_resume_app(head, args),
             _ => false,
         }
+    }
+
+    fn handler_arm_lambda_is_cps_island_subset(&mut self, params: &[Pat], body: &MExpr) -> bool {
+        if params.iter().any(|p| !direct_param_supported(p)) {
+            return false;
+        }
+        self.push_scope();
+        for pat in params {
+            self.bind_pat_locals(pat);
+        }
+        let supported = self.handler_arm_expr_is_cps_island_subset(body);
+        self.pop_scope();
+        supported
     }
 
     fn is_flat_map_identity_resume_app(&mut self, head: &Atom, args: &[Atom]) -> bool {

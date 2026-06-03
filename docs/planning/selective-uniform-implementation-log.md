@@ -1270,3 +1270,20 @@ boundaries exist.
     shape. The next architecture decision is whether writer/state-style HOFs
     should be direct-specialized, adapted over fallback-only pure functions, or
     routed through a monadic fallback island.
+- Implemented the writer/state accumulator-handler slice:
+  - handler arms may now return direct lambdas whose bodies contain delayed
+    `resume` calls, e.g. `tell event = fun acc -> (resume ()) (event :: acc)`
+    and `get () = fun s -> (resume s) s`;
+  - the returned lambda is direct Core, but its body is lowered with the
+    handler arm continuation so resumption happens when the accumulator
+    function is applied;
+  - this lets pure-outward HOFs like `Std.Control.run_writer` and local
+    `run_state` compile selectively without naming those functions specially;
+  - added a selective regression for `run_state 0 (fun () -> put! 99; get! ())`
+    and verified it compiles as selective Core;
+  - `cargo test -p saga selective_core` passes with this case included;
+  - `saga test --selective-no-fallback effects_test` now gets past
+    `run_writer` and stops at `Std.Test.run_single`, whose monadic shape is a
+    direct `case` with a `Process.catch_panic (fun () -> body () with test
+    handler...)` callback. `Std.AtomicRef.lock_server` / `Receive` remains a
+    later native-effect frontier discovered during spot checks.

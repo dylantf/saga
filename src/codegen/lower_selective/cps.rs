@@ -2497,6 +2497,17 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             };
         }
         match expr {
+            MExpr::Pure(Atom::Lambda { params, body, .. })
+                if self.handler_arm_lambda_is_cps_island_subset(params, body) =>
+            {
+                self.lower_cps_handler_arm_lambda(
+                    params,
+                    body,
+                    outer_evidence,
+                    arm_k,
+                    finally_block,
+                )
+            }
             MExpr::Resume { value, .. } => {
                 self.lower_resume_with_finally(value, arm_k, finally_block)
             }
@@ -2612,6 +2623,26 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                 }),
             _ => self.unsupported_expr(expr),
         }
+    }
+
+    fn lower_cps_handler_arm_lambda(
+        &mut self,
+        params: &[Pat],
+        body: &MExpr,
+        outer_evidence: CExpr,
+        arm_k: CExpr,
+        finally_block: Option<&MExpr>,
+    ) -> CExpr {
+        let param_names = lower_param_names(params);
+        self.push_scope();
+        for pat in params {
+            self.bind_pat_locals(pat);
+        }
+        let lowered_body =
+            self.lower_cps_handler_arm_expr(body, outer_evidence, arm_k, finally_block);
+        let lowered_body = self.wrap_param_match(params, &param_names, lowered_body);
+        self.pop_scope();
+        CExpr::Fun(param_names, Box::new(lowered_body))
     }
 
     fn lower_flat_map_identity_resume_handler_arm(

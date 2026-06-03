@@ -1903,6 +1903,36 @@ main () = {
 }
 
 #[test]
+fn selective_core_lowers_handler_arm_accumulator_lambda() {
+    let src = r#"
+effect State s {
+  fun get : Unit -> s
+  fun put : s -> Unit
+}
+
+fun run_state : s -> (Unit -> a needs {State s}) -> (a, s)
+run_state init f = {
+  let state_fn = f () with {
+    get () = fun s -> (resume s) s
+    put new_s = fun _ -> (resume ()) new_s
+    return value = fun s -> (value, s)
+  }
+  state_fn init
+}
+
+fun run_accumulator_test : Unit -> (Int, Int)
+run_accumulator_test () = run_state 0 (fun () -> {
+  put! 99
+  get! ()
+})
+"#;
+    let out = emit_selective_core(src);
+    assert!(out.contains("'run_state'/2"), "{out}");
+    assert!(out.contains("apply _ArmK"), "{out}");
+    assert_selective_core_compiles(src);
+}
+
+#[test]
 fn eta_reduced_effectful_callback_uses_lowered_fun_arity() {
     let src = r#"
 effect State s {
