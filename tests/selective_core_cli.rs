@@ -266,6 +266,37 @@ fn selective_core_codegen_runs_handler_finally_fixtures() {
 }
 
 #[test]
+fn selective_core_codegen_runs_multiarm_handler_finally_bug_fixture() {
+    let binary = env!("CARGO_BIN_EXE_saga");
+    let manifest_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let fixture = manifest_dir.join("examples/bugs/multiarm-finally/inline.saga");
+
+    let output = std::process::Command::new(binary)
+        .current_dir(&manifest_dir)
+        .args([
+            "run",
+            fixture.to_str().expect("utf-8 fixture path"),
+            "--selective-codegen",
+        ])
+        .output()
+        .expect("run selective multiarm finally fixture");
+    assert!(
+        output.status.success(),
+        "saga run failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let output_text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output_text.contains("\"  cleanup n\""), "{output_text}");
+    assert!(output_text.contains("\"  cleanup 0\""), "{output_text}");
+    assert!(output_text.contains("\"result: 110\""), "{output_text}");
+}
+
+#[test]
 fn selective_core_codegen_runs_higher_order_direct_callback_fixture() {
     let binary = env!("CARGO_BIN_EXE_saga");
     let project_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))

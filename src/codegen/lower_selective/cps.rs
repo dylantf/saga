@@ -2037,17 +2037,85 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         arms: &[&MHandlerArm],
         outer_evidence: &CExpr,
     ) -> CExpr {
-        let mut closures = Vec::with_capacity(arms.len());
-        for (i, arm) in arms.iter().enumerate() {
-            let expected = i as u32 + 1;
-            if arm.op.op_index != expected {
+        let mut by_op_index: std::collections::BTreeMap<u32, Vec<&MHandlerArm>> =
+            std::collections::BTreeMap::new();
+        for arm in arms {
+            by_op_index.entry(arm.op.op_index).or_default().push(*arm);
+        }
+
+        let max_op_index = by_op_index.keys().next_back().copied().unwrap_or(0);
+        let mut closures = Vec::with_capacity(max_op_index as usize);
+        for expected in 1..=max_op_index {
+            let Some(op_arms) = by_op_index.get(&expected) else {
                 self.unsupported(&format!(
                     "static handler for effect '{effect}' is missing op_index {expected}"
                 ));
-            }
-            closures.push(self.lower_cps_static_handler_arm(arm, outer_evidence.clone()));
+            };
+            closures.push(self.lower_cps_static_handler_arm_group(op_arms, outer_evidence.clone()));
         }
         CExpr::Tuple(closures)
+    }
+
+    fn lower_cps_static_handler_arm_group(
+        &mut self,
+        arms: &[&MHandlerArm],
+        outer_evidence: CExpr,
+    ) -> CExpr {
+        match arms {
+            [] => self.unsupported("static handler operation group has no arms"),
+            [arm] => self.lower_cps_static_handler_arm(arm, outer_evidence),
+            [first, rest @ ..] => {
+                let source_params = lower_param_names(&first.params);
+                let perform_evidence = self.fresh_cps_temp("_ArmEvidence");
+                let arm_k = self.fresh_cps_temp("_ArmK");
+                let mut params = source_params.clone();
+                params.push(perform_evidence);
+                params.push(arm_k.clone());
+
+                for arm in rest {
+                    if arm.params.len() != first.params.len() {
+                        self.unsupported(
+                            "static handler operation arms have inconsistent parameter counts",
+                        );
+                    }
+                }
+
+                let scrutinee = CExpr::Tuple(
+                    source_params
+                        .iter()
+                        .map(|param| CExpr::Var(param.clone()))
+                        .collect(),
+                );
+                let case_arms = arms
+                    .iter()
+                    .map(|arm| {
+                        self.push_scope();
+                        for pat in &arm.params {
+                            self.bind_pat_locals(pat);
+                        }
+                        let body = self.lower_cps_handler_arm_expr(
+                            &arm.body,
+                            outer_evidence.clone(),
+                            CExpr::Var(arm_k.clone()),
+                            arm.finally_block.as_deref(),
+                        );
+                        let pat =
+                            CPat::Tuple(arm.params.iter().map(|pat| self.lower_pat(pat)).collect());
+                        self.pop_scope();
+                        CArm {
+                            pat,
+                            guard: None,
+                            body,
+                        }
+                    })
+                    .collect();
+
+                CExpr::Fun(
+                    params,
+                    Box::new(CExpr::Case(Box::new(scrutinee), case_arms)),
+                )
+            }
+        }
     }
 
     fn lower_cps_static_handler_arm(&mut self, arm: &MHandlerArm, outer_evidence: CExpr) -> CExpr {
