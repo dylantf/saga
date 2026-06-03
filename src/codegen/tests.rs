@@ -1568,6 +1568,70 @@ main () = ()
 }
 
 #[test]
+fn selective_core_lowers_actor_spawn_callback_yield_argument() {
+    let src = r#"
+import Std.Actor (Process, Actor, beam_actor)
+
+type EchoMsg = Echo String (Pid String)
+
+fun echo_server : Unit -> Unit needs {Process, Actor EchoMsg}
+echo_server () = receive {
+  Echo msg caller -> {
+    send! caller msg
+    echo_server ()
+  }
+}
+
+fun test_echo : Unit -> String needs {Process, Actor String}
+test_echo () = {
+  let pid = spawn! (fun () -> echo_server ())
+  send! pid (Echo "hello" (self! ()))
+  receive {
+    msg -> msg
+  }
+}
+
+fun main : Unit -> Unit
+main () = ()
+"#;
+    let out = emit_selective_core_with_options(
+        src,
+        super::lower_selective::LoweringOptions {
+            require_all_functions: true,
+        },
+    );
+    assert!(out.contains("'test_echo'/3"), "{out}");
+    assert!(out.contains("'echo_server'/3"), "{out}");
+    assert!(out.contains("receive"), "{out}");
+    assert_selective_core_compiles(src);
+}
+
+#[test]
+fn selective_core_lowers_multi_clause_cps_function_group() {
+    let src = r#"
+effect Abort {
+  fun abort : String -> Int
+}
+
+pub fun safe_div : Int -> Int -> Int needs {Abort}
+safe_div _ 0 = abort! "division by zero"
+safe_div x y = x / y
+
+fun main : Unit -> Unit
+main () = ()
+"#;
+    let out = emit_selective_core_with_options(
+        src,
+        super::lower_selective::LoweringOptions {
+            require_all_functions: true,
+        },
+    );
+    assert!(out.contains("'safe_div'/4"), "{out}");
+    assert!(out.contains("case _FunScrut"), "{out}");
+    assert_selective_core_compiles(src);
+}
+
+#[test]
 fn selective_core_lowers_direct_partial_application() {
     let src = r#"
 fun append_raw : List Int -> List Int -> List Int
@@ -1800,12 +1864,8 @@ main () = ()
 }
 
 #[test]
-#[should_panic(
-    expected = "CPS-shaped function 'send_callback' is not lowered by selective-core yet"
-)]
-fn selective_core_rejects_cps_callback_value_as_yield_argument() {
-    let _ = emit_selective_core_with_options(
-        r#"
+fn selective_core_lowers_effectful_callback_value_as_yield_argument() {
+    let src = r#"
 effect ReadInt {
   fun read : Unit -> Int
 }
@@ -1825,11 +1885,16 @@ send_callback () = {
 
 fun main : Unit -> Unit
 main () = ()
-"#,
+"#;
+    let out = emit_selective_core_with_options(
+        src,
         super::lower_selective::LoweringOptions {
             require_all_functions: true,
         },
     );
+    assert!(out.contains("'send_callback'/3"), "{out}");
+    assert!(out.contains("'read_value'/3"), "{out}");
+    assert_selective_core_compiles(src);
 }
 
 #[test]

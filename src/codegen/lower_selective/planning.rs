@@ -169,20 +169,14 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
     }
 
     fn compute_cps_body_plans(&mut self, program: &MProgram) {
-        let single_clause_funs = single_clause_function_names(program);
-        for decl in program {
-            let MDecl::FunBinding(fb) = decl else {
-                continue;
-            };
-            if !single_clause_funs.contains(&fb.name) {
+        for group in function_binding_groups(program) {
+            let name = &group[0].name;
+            if self.function_plans.contains_key(name) {
                 continue;
             }
-            if self.function_plans.contains_key(&fb.name) {
-                continue;
-            }
-            if self.can_lower_cps_fun_binding(fb) {
+            if self.can_lower_cps_fun_binding_group(&group) {
                 self.function_plans
-                    .insert(fb.name.clone(), FunctionLoweringPlan::CpsBody);
+                    .insert(name.clone(), FunctionLoweringPlan::CpsBody);
             }
         }
     }
@@ -513,6 +507,10 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         self.pop_scope();
         self.direct_candidate_function = prev_direct_candidate;
         supported
+    }
+
+    fn can_lower_cps_fun_binding_group(&mut self, group: &[&MFunBinding]) -> bool {
+        group.iter().all(|fb| self.can_lower_cps_fun_binding(fb))
     }
 
     fn can_lower_direct_cps_island_fun_binding(&mut self, fb: &MFunBinding) -> bool {

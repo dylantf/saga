@@ -103,7 +103,7 @@ These are places that consume a callable value or call shape.
 | Effectful argument inside effectful outer call | `outer (read! ())` or `outer (decode x)` | Partially represented by monadic `Bind` sequencing | Old lowerer had `effectful_arg_idxs` chaining; selective should rely on monadic sequencing inside islands | Add fixtures when app args become non-trivial |
 | Effectful callback argument inside effectful outer call | `outer read_value (effect_arg!)` | Open | Need both adapter closure and effectful-arg sequencing | Later |
 | Return continuation value | final result of CPS island | Supported for direct atoms; CPS callable result supported for `if`/`case` bound values | Returning CPS callable out of island needs representation policy | Add guardrail |
-| Yield argument | `op!(read_value)` | Explicitly rejected | Operation args stay direct-only until op parameter callback metadata can drive adapters | Later |
+| Yield argument | `op!(read_value)` where the op parameter is callback-shaped | Supported for direct args and proven CPS callable args | Effect protocol boundaries may carry runtime CPS closures; arbitrary data storage of CPS values is still rejected | Keep; type/op-param metadata could make diagnostics sharper later |
 | Handler arm `resume` value | `resume read_value` | Explicitly rejected | Resuming CPS callable value needs adapter/materialized representation | Later |
 | Handler return clause value | `return _ = read_value` | Explicitly rejected | Same as return continuation value | Later |
 | Direct data storage | `(read_value, 1)` | Explicitly rejected for tuple/record/constructor | Needs representation policy before support | Add list fixture when list literals are in this path |
@@ -116,14 +116,14 @@ This is the selective lowerer's practical checklist over monadic IR.
 | `MExpr` Form | Direct Subset | CPS Island Computation | CPS Callable Value Producer | Notes |
 | --- | --- | --- | --- | --- |
 | `Pure(Atom)` | Supported for direct atoms | Supported as direct result | Supported for named CPS and runtime CPS vars | Atomic values are the main shape-entry point |
-| `Yield` | Rejected | Supported with direct args only | Not a callable producer yet | CPS callable args are explicitly rejected until op parameter callback metadata exists |
+| `Yield` | Rejected | Supported with direct args or proven CPS callable protocol args | Not a callable producer | Protocol args mirror lowering: direct atoms lower normally, pure callables adapt to CPS closures, CPS callable values materialize runtime closures |
 | `Bind` | Supported for direct values | Supported | Supported for CPS metadata/runtime aliases and branch/case materialization | Core sequencing boundary |
 | `Let` | Supported where it appears like `Bind` in selective paths | Supported like `Bind` in the active CPS/direct subsets | Same alias/value rules as `Bind` | Keep watching optimizer-emitted shapes |
 | `Ensure` | Rejected direct | Static finally paths supported in handlers | Open | Cleanup result should not create callable values yet |
 | `If` | Supported direct | Supported in CPS islands | Supported for compatible CPS callable branches | Emits Core `case` |
 | `Case` | Supported direct, including record/string patterns and guarded arms via value-level chains | Supported in CPS islands with safe fallthrough chains | Supported for compatible CPS callable arms | Keep; add bitstring/receive later |
 | `App` | Supported for direct call shapes, direct external calls, HOF specialization, and selected handler-arm HOF resume shapes | Supported for named/runtime CPS, CPS lambda heads, direct fallback, and direct HOF specialization | Consumer, not producer | Remaining app work is partial application / effectful argument stress |
-| `With` | Rejected direct | Supported for static handler subset | Not a callable producer yet | Handler values separate |
+| `With` | Supported only for return-only static handlers over direct bodies | Supported for static handler subset | Not a callable producer yet | Handler values separate |
 | `Resume` | Rejected direct | Supported inside handler arm subset for direct values | CPS callable resume values explicitly rejected | Needs adapter policy before support |
 | `FieldAccess` | Supported direct | Via direct fallback | Not supported for CPS callable storage | Records containing callbacks open |
 | `RecordUpdate` | Supported direct for direct fields | Via direct fallback where expression stays direct | Open/reject for CPS callable storage | Same storage policy |
@@ -131,7 +131,7 @@ This is the selective lowerer's practical checklist over monadic IR.
 | `ForeignCall` | Supported in direct subset for direct args; direct external apps filter Saga `Unit` for niladic native calls | Via direct fallback when direct-safe | Not callable producer | Effectful externals still need explicit shape metadata |
 | `BinOp` / `UnaryMinus` | Supported | Direct fallback | No | Keep |
 | `BitString` | Rejected | Rejected | No | Later |
-| `Receive` | Rejected | Rejected | Open | Later native-effect frontier via `Std.AtomicRef.lock_server` |
+| `Receive` | Rejected | Supported in CPS islands, including `after` and BEAM system-message patterns | Open | Native actor/atomic-ref receive frontier cleared for current stdlib shapes |
 | `LetFun` | Rejected | Rejected | Open | Needed for local recursive helpers |
 | `HandlerValue` | Rejected in direct subset today | Supported as a CPS-island value producer | Handler-value producer | Broaden for abort/finally stress later |
 
@@ -169,23 +169,25 @@ static.
 
 ## Suggested Next Chunks
 
-1. **E2E actor test runner frontier**
+1. **Derived generic dict constructor frontier**
    - Current strict blocker:
      `saga test --selective-no-fallback` now compiles stdlib and all test
-     modules, then stops in generated `Main` at CPS-shaped function
-     `test_echo`.
-   - Source shape is `tests/e2e/tests/actor_test.saga:test_echo`, an actor
-     workflow using `spawn`, `send`, and `receive` under `beam_actor`.
-   - This is no longer a stdlib compile blocker; it is the next native
-     actor-effect shape that appears when the e2e test aggregator tries to run
-     all tests without fallback.
+     modules, clears actor `test_echo`, clears grouped `safe_div`-style CPS
+     functions, and stops at
+     `__dict_GenericFromjsonTest_FromJson_genericfromjsontest_Std_Generic_Variant`.
+   - This is the trait/deriving frontier we expected before JSON-library work:
+     generic derived constructors need either a selective lowering plan or a
+     deliberate fallback boundary policy.
+   - Likely next investigation: inspect the derived `FromJson` constructor
+     methods and decide whether to cover the generated pure/effectful dict
+     method shape directly or leave full generic dict specialization for later.
 
 2. **Bitstring pattern frontier**
    - A previous strict pass reached `tests/e2e/tests/advanced_test.saga`
      function `count_bytes`, a direct recursive bitstring-pattern function.
    - After module ordering shifts, `test_echo` appears first, but
-     `count_bytes` remains a known next direct-subset gap once actor tests
-     clear.
+     `count_bytes` remains a known direct-subset gap if module/test ordering
+     exposes it before the generic dict frontier.
    - This likely needs direct lowering/proof support for bitstring patterns in
      `case` arms, not CPS-specific machinery.
 
@@ -198,7 +200,7 @@ static.
 
 4. **CPS lambdas and partial application**
    - Basic runtime CPS closure generation is covered for callback arguments,
-     let-bound aliases, and lambda-headed calls.
+     effect protocol arguments, let-bound aliases, and lambda-headed calls.
    - Remaining lambda work is CPS partial application/captured callback
      parameter stress-testing, not the base closure ABI.
 

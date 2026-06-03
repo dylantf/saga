@@ -2,17 +2,13 @@ effect ReadInt {
   fun read : Unit -> Int
 }
 
-effect Sink {
-  fun send : (Unit -> Int needs {ReadInt}) -> Unit
-}
-
 fun read_value : Unit -> Int needs {ReadInt}
 read_value () = read! ()
 
-fun hidden : Unit -> Unit needs {ReadInt, Sink}
+fun hidden : Unit -> (Unit -> Int needs {ReadInt}, Int)
 hidden () = {
   let f = read_value
-  send! f
+  (f, 1)
 }
 
 pub fun main : Unit -> Int

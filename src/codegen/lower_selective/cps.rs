@@ -3048,12 +3048,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         CExpr::Receive(arms, Box::new(timeout), Box::new(timeout_body))
     }
 
-    fn lower_cps_receive_arm(
-        &mut self,
-        arm: &MArm,
-        evidence: CExpr,
-        return_k: CExpr,
-    ) -> CArm {
+    fn lower_cps_receive_arm(&mut self, arm: &MArm, evidence: CExpr, return_k: CExpr) -> CArm {
         self.push_scope();
         self.bind_pat_locals(&arm.pattern);
         let raw_body = self.lower_cps_expr(&arm.body, evidence, return_k);

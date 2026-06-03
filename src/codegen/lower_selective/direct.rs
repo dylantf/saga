@@ -69,6 +69,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             MExpr::ForeignCall {
                 module, func, args, ..
             } => self.lower_foreign_call(module, func, args),
+            MExpr::With { handler, body, .. } => self.lower_direct_with(handler, body),
             MExpr::BitString { .. } => self.unsupported_expr(expr),
             MExpr::DictMethodAccess {
                 dict, method_index, ..
@@ -81,13 +82,64 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                 )
             }
             MExpr::Yield { .. }
-            | MExpr::With { .. }
             | MExpr::Resume { .. }
             | MExpr::Ensure { .. }
             | MExpr::Receive { .. }
             | MExpr::LetFun { .. }
             | MExpr::HandlerValue { .. } => self.unsupported_expr(expr),
         }
+    }
+
+    fn lower_direct_with(&mut self, handler: &MHandler, body: &MExpr) -> CExpr {
+        let MHandler::Static {
+            effects,
+            arms,
+            return_clause,
+            ..
+        } = handler
+        else {
+            self.unsupported("direct lowering for non-static handlers");
+        };
+        if !effects.is_empty() || !arms.is_empty() {
+            self.unsupported("direct lowering for effect handlers with operation arms");
+        }
+
+        let body = self.lower_expr(body);
+        let Some(return_clause) = return_clause else {
+            return body;
+        };
+        self.lower_direct_return_clause(body, return_clause)
+    }
+
+    fn lower_direct_return_clause(&mut self, value: CExpr, arm: &MHandlerArm) -> CExpr {
+        if arm.finally_block.is_some() {
+            self.unsupported("direct return clauses with finally blocks");
+        }
+        if arm.params.len() > 1 {
+            self.unsupported("direct return clauses with multiple params");
+        }
+
+        let return_value = self.fresh_cps_temp("_HandlerReturnValue");
+        self.push_scope();
+        for param in &arm.params {
+            self.bind_pat_locals(param);
+        }
+        let return_body = self.lower_expr(&arm.body);
+        let return_body = match arm.params.as_slice() {
+            [] => return_body,
+            [pat] => CExpr::Case(
+                Box::new(CExpr::Var(return_value.clone())),
+                vec![CArm {
+                    pat: self.lower_pat(pat),
+                    guard: None,
+                    body: return_body,
+                }],
+            ),
+            _ => unreachable!(),
+        };
+        self.pop_scope();
+
+        CExpr::Let(return_value, Box::new(value), Box::new(return_body))
     }
 
     fn lower_case_chain(&mut self, scrutinee: &Atom, arms: &[MArm]) -> CExpr {

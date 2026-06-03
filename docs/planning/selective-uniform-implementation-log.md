@@ -1345,3 +1345,27 @@ boundaries exist.
     `test_echo` from `tests/e2e/tests/actor_test.saga`. A previous strict pass
     also exposed `count_bytes` in `advanced_test.saga` as the next direct
     bitstring-pattern frontier once actor tests move forward.
+- Implemented the protocol-callback / return-only direct handler / grouped CPS
+  slice:
+  - effect protocol arguments now accept either direct atoms or proven CPS
+    callable values. This generalizes the actor `spawn! (fun () -> ...)`
+    shape without hardcoding `Std.Actor.Process/spawn`; the payload lowering
+    mirrors the existing protocol lowering that adapts pure callables and
+    materializes CPS runtime closures;
+  - the old strict negative fixture that sent an effectful callback through an
+    effect op was changed to use tuple storage instead, because protocol
+    callback args are now supported while storing CPS values in data remains
+    intentionally unsupported;
+  - direct lowering now handles return-only static handlers over direct bodies,
+    e.g. `counter_outer_wraps () = counter_middle_handles () with { return v =
+    v - 2 }`, by evaluating the direct body and applying the return clause;
+  - CPS-body planning and lowering now operate on grouped/multi-clause
+    functions, covering `safe_div _ 0 = fail! ...` plus a direct arithmetic
+    clause under the same `/N+2` CPS entry;
+  - added regressions for actor spawn callback protocol args, generic
+    effectful callback protocol args, and grouped CPS functions;
+  - `cargo test -p saga selective_core` passes;
+  - `saga test --selective-no-fallback` from `tests/e2e` now clears `test_echo`,
+    `counter_outer_wraps`, and `safe_div`/`safe_div_g`-style grouped CPS
+    functions, then stops at the derived generic dict constructor
+    `__dict_GenericFromjsonTest_FromJson_genericfromjsontest_Std_Generic_Variant`.

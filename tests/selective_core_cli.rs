@@ -381,7 +381,7 @@ fn selective_core_no_fallback_cli_rejects_private_unplanned_function() {
     );
     let stderr = String::from_utf8_lossy(&strict.stderr);
     assert!(
-        stderr.contains("function 'hidden' has no selective lowering plan with fallback disabled"),
+        stderr.contains("direct function 'hidden' is outside the current direct subset"),
         "{stderr}"
     );
 }

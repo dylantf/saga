@@ -308,11 +308,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                             funs.push(self.lower_direct_cps_island_fun_binding_group(&group));
                         }
                         FunctionLoweringPlan::CpsBody => {
-                            if group.len() != 1 {
-                                index = next_index;
-                                continue;
-                            }
-                            funs.push(self.lower_cps_fun_binding(fb));
+                            funs.push(self.lower_cps_fun_binding_group(&group));
                         }
                     }
                     if group.len() == 1
@@ -707,6 +703,99 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         }
     }
 
+    fn lower_cps_fun_binding_group(&mut self, group: &[&MFunBinding]) -> CFunDef {
+        assert!(
+            !group.is_empty(),
+            "lower_cps_fun_binding_group: empty group is impossible"
+        );
+        if group.len() == 1 && group[0].guard.is_none() {
+            return self.lower_cps_fun_binding(group[0]);
+        }
+
+        let name = &group[0].name;
+        let source_arity = group[0].params.len();
+        for fb in group {
+            assert_eq!(
+                fb.params.len(),
+                source_arity,
+                "lower_cps_fun_binding_group: clause arity mismatch for '{}'",
+                name
+            );
+        }
+
+        let direct_params: Vec<String> = (0..source_arity)
+            .map(|arg_index| format!("_Arg{arg_index}"))
+            .collect();
+        let mut params = direct_params.clone();
+        params.push("_Evidence".to_string());
+        params.push("_ReturnK".to_string());
+
+        let scrutinee = CExpr::Tuple(direct_params.iter().cloned().map(CExpr::Var).collect());
+        let scrut_var = self.fresh_cps_temp("_FunScrut");
+        let mut rest = self.case_clause_error();
+
+        let prev_direct_candidate = self.direct_candidate_function.replace(name.clone());
+        for fb in group.iter().rev() {
+            let rest_var = self.fresh_cps_temp("_FunRest");
+            let rest_ref = || CExpr::Apply(Box::new(CExpr::Var(rest_var.clone())), vec![]);
+            self.push_scope();
+            self.bind_cps_entry_param_locals(fb);
+            let body = self.lower_cps_expr(
+                &fb.body,
+                CExpr::Var("_Evidence".to_string()),
+                CExpr::Var("_ReturnK".to_string()),
+            );
+            let body = match fb.guard.as_ref() {
+                Some(guard) => CExpr::Case(
+                    Box::new(self.lower_expr(guard)),
+                    vec![
+                        CArm {
+                            pat: CPat::Lit(CLit::Atom("true".to_string())),
+                            guard: None,
+                            body,
+                        },
+                        CArm {
+                            pat: CPat::Wildcard,
+                            guard: None,
+                            body: rest_ref(),
+                        },
+                    ],
+                ),
+                None => body,
+            };
+            let pat = CPat::Tuple(fb.params.iter().map(|pat| self.lower_pat(pat)).collect());
+            self.pop_scope();
+            let current = CExpr::Case(
+                Box::new(CExpr::Var(scrut_var.clone())),
+                vec![
+                    CArm {
+                        pat,
+                        guard: None,
+                        body,
+                    },
+                    CArm {
+                        pat: CPat::Wildcard,
+                        guard: None,
+                        body: rest_ref(),
+                    },
+                ],
+            );
+            rest = CExpr::Let(
+                rest_var,
+                Box::new(CExpr::Fun(vec![], Box::new(rest))),
+                Box::new(current),
+            );
+        }
+        self.direct_candidate_function = prev_direct_candidate;
+
+        let body = CExpr::Let(scrut_var, Box::new(scrutinee), Box::new(rest));
+        CFunDef {
+            name: name.clone(),
+            arity: params.len(),
+            body: CExpr::Fun(params, Box::new(body)),
+        }
+    }
+
     fn export_entries(&self, name: &str) -> Vec<(String, usize)> {
         let Some(entries) = self.local_function_entries.get(name) else {
             return vec![(name.to_string(), 0)];
@@ -902,9 +991,8 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         if module.is_none()
             && let Some(RuntimeFunctionShape::Cps(shape)) = self.callable_type_shapes.get(name)
         {
-            let (source_arity, adapter_arity, effects) = self
-                .cps_function_arity_at(source)
-                .unwrap_or_else(|| {
+            let (source_arity, adapter_arity, effects) =
+                self.cps_function_arity_at(source).unwrap_or_else(|| {
                     let source_arity = source_arity_for_cps_resolved(*arity);
                     (source_arity, source_arity + 2, shape.static_effects.clone())
                 });
@@ -1521,9 +1609,12 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             MExpr::ForeignCall { args, .. } => {
                 args.iter().all(|arg| self.atom_is_direct_subset(arg))
             }
+            MExpr::With { handler, body, .. } => {
+                self.static_handler_is_direct_return_only(handler)
+                    && self.expr_is_direct_subset(body)
+            }
             MExpr::BitString { .. }
             | MExpr::Yield { .. }
-            | MExpr::With { .. }
             | MExpr::Resume { .. }
             | MExpr::Ensure { .. }
             | MExpr::Receive { .. }
@@ -1533,9 +1624,43 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         }
     }
 
+    fn static_handler_is_direct_return_only(&mut self, handler: &MHandler) -> bool {
+        let MHandler::Static {
+            effects,
+            arms,
+            return_clause,
+            ..
+        } = handler
+        else {
+            return false;
+        };
+        if !effects.is_empty() || !arms.is_empty() {
+            return false;
+        }
+        let Some(arm) = return_clause else {
+            return true;
+        };
+        if arm.finally_block.is_some()
+            || arm.params.len() > 1
+            || arm
+                .params
+                .iter()
+                .any(|param| !direct_param_supported(param))
+        {
+            return false;
+        }
+        self.push_scope();
+        for param in &arm.params {
+            self.bind_pat_locals(param);
+        }
+        let supported = self.expr_is_direct_subset(&arm.body);
+        self.pop_scope();
+        supported
+    }
+
     fn expr_is_cps_island_subset(&mut self, expr: &MExpr) -> bool {
         match expr {
-            MExpr::Yield { args, .. } => args.iter().all(|arg| self.atom_is_direct_subset(arg)),
+            MExpr::Yield { op, args, .. } => self.yield_args_are_cps_island_subset(op, args),
             MExpr::Bind {
                 var, value, body, ..
             } => {
@@ -1645,6 +1770,15 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             } => self.handler_value_is_cps_island_subset(arms, return_clause.as_deref()),
             _ => self.expr_is_direct_subset(expr),
         }
+    }
+
+    fn yield_args_are_cps_island_subset(&mut self, _op: &EffectOpRef, args: &[Atom]) -> bool {
+        args.iter()
+            .all(|arg| self.effect_protocol_arg_atom_is_cps_island_subset(arg))
+    }
+
+    fn effect_protocol_arg_atom_is_cps_island_subset(&mut self, arg: &Atom) -> bool {
+        self.atom_is_direct_subset(arg) || self.atom_is_cps_value_subset(arg)
     }
 
     fn handler_is_cps_island_subset(&mut self, handler: &MHandler) -> bool {
