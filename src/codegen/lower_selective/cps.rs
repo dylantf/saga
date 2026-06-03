@@ -404,23 +404,34 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                 let value = self.lower_hof_direct_specialized_call(module, &specialization, args);
                 CExpr::Apply(Box::new(return_k), vec![value])
             }
-            CpsCallDecision::StaticHandlerLocal { function_name } => self
-                .lower_static_handler_specialized_local_cps_call(
+            CpsCallDecision::StaticHandlerLocal { function_name } => {
+                if let Some(lowered) = self.lower_static_handler_specialized_local_cps_call(
                     &function_name,
                     args,
-                    evidence,
-                    return_k,
-                )
-                .unwrap_or_else(|| {
+                    evidence.clone(),
+                    return_k.clone(),
+                ) {
+                    lowered
+                } else if let Some(shape) = self.call_shape(head) {
+                    self.lower_normal_cps_call(head, args, evidence, return_k, shape)
+                } else {
                     self.unsupported("classified local static-handler CPS call did not lower")
-                }),
-            CpsCallDecision::StaticHandlerImported(candidate) => self
-                .lower_static_handler_specialized_imported_cps_call(
-                    candidate, args, evidence, return_k,
-                )
-                .unwrap_or_else(|| {
+                }
+            }
+            CpsCallDecision::StaticHandlerImported(candidate) => {
+                if let Some(lowered) = self.lower_static_handler_specialized_imported_cps_call(
+                    candidate,
+                    args,
+                    evidence.clone(),
+                    return_k.clone(),
+                ) {
+                    lowered
+                } else if let Some(shape) = self.call_shape(head) {
+                    self.lower_normal_cps_call(head, args, evidence, return_k, shape)
+                } else {
                     self.unsupported("classified imported static-handler CPS call did not lower")
-                }),
+                }
+            }
             CpsCallDecision::KnownLocalLambda { name } => self
                 .lower_known_local_cps_lambda_call(&name, args, evidence, return_k)
                 .unwrap_or_else(|| {
