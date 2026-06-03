@@ -68,7 +68,7 @@ These are expression/value shapes that can produce a callable value.
 | `case` returning CPS callables | `let f = case c { True -> read_a; False -> read_b }` | Supported | Same as `if`, with direct patterns/guards only | Keep |
 | Mixed CPS and pure branch/case | `if c then read_value else pure_value` | Supported via CPS fallback | Common representation is CPS; pure branch uses explicit pure-to-CPS adapter | Later direct-specialize when branch is statically pure |
 | Pure function where effectful callback is expected | `apply_eff pure_value` | Supported with local/imported direct HOF specialization when the callee body becomes direct under pure callbacks; CPS fallback remains | First prefer direct HOF specialization when the whole call is net pure; otherwise use explicit pure-to-CPS adapter | Keep; broaden only when new HOF value shapes appear |
-| Handled callback where effectful callback is expected | `apply_eff handled_value` where `handled_value` uses an internal handler | Supported for named same-module callbacks and accumulator-style handler bodies whose exposed type is pure | If exposed callback type is pure, use direct HOF specialization, direct CPS island lowering, or pure-to-CPS adapter fallback | Broaden only when new handled callback shapes appear |
+| Handled callback where effectful callback is expected | `apply_eff handled_value` where `handled_value` uses an internal handler | Supported for named same-module callbacks, accumulator-style handler bodies, and direct pure wrappers such as `catch_panic (fun () -> body () with h)` | If exposed callback type is pure, use direct HOF specialization, direct CPS island lowering, or pure-to-CPS adapter fallback | Broaden only when new handled callback shapes appear |
 | CPS lambda value | `let f = fun () -> read! ()` | Supported in CPS islands | Materialize runtime closure with user args plus evidence/continuation | Keep |
 | Lambda-headed CPS call | `(fun x -> read! ()) ()` | Supported in CPS islands | Materialize/apply runtime CPS closure; no source-arity guessing | Keep |
 | Partial application of CPS function | `let f = read_with_prefix p` | Open | Must materialize closure with remaining args plus `Ev,K`; do not use source arity | Later |
@@ -80,6 +80,7 @@ These are expression/value shapes that can produce a callable value.
 | Handler expression value | `handler for E { ... }` | Supported for the current dynamic-handler e2e shapes, including multi-effect values | Build runtime `{__saga_handler_value, OpsByEffect, RuntimeReturn}` tuple with canonical per-effect op tuples | Broaden for abort/finally stress later |
 | Named handler alias | `let h = my_handler` | Supported for local/imported names present in the translator's handler-value map | Static aliases can stay metadata; escaped/dynamic handlers materialize the runtime tuple | Keep |
 | Handler chosen by `if`/`case` | `let h = if c then h1 else h2` | `if` supported for named/inline handler values; `case` still open | Branches produce the common runtime handler-value representation | Add `case` if examples need it |
+| Constructor-stored handled thunk | `Stream (fun () -> producer () with stream_of)` | Supported for net-pure direct CPS-island lambdas; handler-arm delayed resume may be nested in constructors | Store the direct thunk, but lower its body through the CPS island/handler-arm machinery | Keep; stress with imported stream tests |
 | Let-rec/local function | `let fun f x = ...` | Open in selective for CPS values | Needs entry metadata and `LetRec` lowering with direct/CPS plan | Later |
 
 ## Consumer Matrix
@@ -96,6 +97,7 @@ These are places that consume a callable value or call shape.
 | Runtime CPS closure as argument | `apply_outer f` | Supported for direct alias/arg cases | Pass Core variable; callee applies with `Ev,K` | Keep |
 | Pure callable as direct callback argument | `apply_it inc` | Supported | Direct fun value, source arity | Keep |
 | Pure callable as CPS callback argument | `apply_eff inc` | Supported with local/imported direct HOF specialization for statically pure callback args; CPS fallback remains | Prefer direct HOF specialization if the selected HOF call can stay pure; otherwise explicit pure-to-CPS adapter | Broaden to aliases later |
+| Effectful callback argument to pure direct wrapper | `Stream.from_gen (fun () -> count_down 3)` | Supported for direct callees whose parameter type is effectful callback-shaped | Direct call sites lower effectful callback slots as CPS runtime closures while leaving pure callback slots direct | Keep; stress with imported stream tests |
 | Handler-arm HOF resume | `List.flat_map (fun x -> resume x) xs` inside an operation arm | Supported for imported/direct `flat_map` identity-resume shape | Lower callback as a direct closure that applies the current handler-arm continuation; preserves multishot list semantics | Generalize only after more handler-arm HOF shapes appear |
 | Handler arm returning delayed-resume lambda | `tell x = fun acc -> (resume ()) (x :: acc)` | Supported for writer/state-style accumulator handlers | Return a direct Core lambda, but lower its body under the handler arm continuation so resume runs when the accumulator function is applied | Keep; stress with finally/abort later |
 | Effectful argument inside effectful outer call | `outer (read! ())` or `outer (decode x)` | Partially represented by monadic `Bind` sequencing | Old lowerer had `effectful_arg_idxs` chaining; selective should rely on monadic sequencing inside islands | Add fixtures when app args become non-trivial |
@@ -167,18 +169,20 @@ static.
 
 ## Suggested Next Chunks
 
-1. **`Std.Test.run_single` / panic-catching handled callback frontier**
+1. **`Std.DateTime.parse_loop` / large direct parser frontier**
    - Current strict blocker:
      `saga test --selective-no-fallback effects_test` stops while compiling
-     stdlib at direct function `Std.Test.run_single`.
-   - Monadic shape is a direct `case` with a `Process.catch_panic (fun () ->
-     body () with test handler...)` callback.
-   - This likely wants another direct HOF/callback specialization rule before
-     touching `Receive`, because it is part of the test runner's core path.
+     stdlib at direct function `Std.DateTime.parse_loop`.
+   - Monadic shape is a large direct nested `case` over string-prefix
+     patterns, with recursive calls and pure setter function values passed to
+     helpers like `parse_digits`.
+   - This likely wants a focused direct-subset audit around string-prefix case
+     arms, recursive direct calls, and pure function values in direct argument
+     position.
 
 2. **Receive / native actor-effect frontier**
-   - Spot checks exposed `Std.AtomicRef.lock_server` as a later unsupported
-     shape.
+   - Earlier spot checks exposed `Std.AtomicRef.lock_server`; it remains a
+     later unsupported shape once the direct parser frontier is cleared.
    - Monadic shape is `Receive` with native actor/process/monitor yields and
      recursive calls.
    - Decide whether selective should support `Receive` in CPS islands, whether

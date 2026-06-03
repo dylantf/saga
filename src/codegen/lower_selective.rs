@@ -1369,17 +1369,22 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                 if self.is_panic_or_todo_call(head, args) {
                     return self.atom_is_direct_subset(&args[0]);
                 }
-                let direct_call_supported = match self.call_shape(head) {
+                match self.call_shape(head) {
                     Some(CallShape::Intrinsic(intrinsic)) => {
                         direct_intrinsic_arity(intrinsic).is_some_and(|arity| arity == args.len())
+                            && self.direct_intrinsic_args_are_supported(intrinsic, args)
                     }
-                    Some(CallShape::Direct(callable)) => callable.arity == args.len(),
-                    Some(CallShape::LocalCallable { arity, .. }) => arity == args.len(),
+                    Some(CallShape::Direct(callable)) => {
+                        callable.arity == args.len()
+                            && self.direct_call_args_are_supported(head, args)
+                    }
+                    Some(CallShape::LocalCallable { arity, .. }) => {
+                        arity == args.len() && self.direct_call_args_are_supported(head, args)
+                    }
                     Some(CallShape::Cps { .. })
                     | Some(CallShape::LocalCpsCallable { .. })
                     | None => false,
-                };
-                direct_call_supported && args.iter().all(|arg| self.atom_is_direct_subset(arg))
+                }
             }
             MExpr::BinOp { left, right, .. } => {
                 self.atom_is_direct_subset(left) && self.atom_is_direct_subset(right)
@@ -1565,19 +1570,19 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
     }
 
     fn handler_arm_expr_is_cps_island_subset(&mut self, expr: &MExpr) -> bool {
+        if let MExpr::Pure(atom) = expr {
+            return self.handler_arm_atom_is_cps_island_subset(atom);
+        }
         if self.expr_is_direct_subset(expr) {
             return true;
         }
         match expr {
-            MExpr::Pure(Atom::Lambda { params, body, .. }) => {
-                self.handler_arm_lambda_is_cps_island_subset(params, body)
-            }
             MExpr::Resume { value, .. } => self.atom_is_direct_subset(value),
             MExpr::Bind {
                 var, value, body, ..
             }
             | MExpr::Let { var, value, body } => {
-                let value_supported = self.expr_is_direct_subset(value)
+                let value_supported = self.handler_arm_expr_is_cps_island_subset(value)
                     || matches!(&**value, MExpr::Resume { value, .. } if self.atom_is_direct_subset(value));
                 if !value_supported {
                     return false;
@@ -1633,6 +1638,32 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         }
     }
 
+    fn handler_arm_atom_is_cps_island_subset(&mut self, atom: &Atom) -> bool {
+        match atom {
+            Atom::Lambda { params, body, .. } => {
+                self.handler_arm_lambda_is_cps_island_subset(params, body)
+            }
+            Atom::Ctor { args, .. } => args
+                .iter()
+                .all(|arg| self.handler_arm_atom_is_cps_island_subset(arg)),
+            Atom::Tuple { elements, .. } => elements
+                .iter()
+                .all(|arg| self.handler_arm_atom_is_cps_island_subset(arg)),
+            Atom::AnonRecord { fields, .. } | Atom::Record { fields, .. } => fields
+                .iter()
+                .all(|(_, arg)| self.handler_arm_atom_is_cps_island_subset(arg)),
+            Atom::BackendSpawnThunk { callback, .. } => {
+                self.handler_arm_atom_is_cps_island_subset(callback)
+            }
+            Atom::Var { .. }
+            | Atom::Lit { .. }
+            | Atom::Symbol { .. }
+            | Atom::QualifiedRef { .. }
+            | Atom::DictRef { .. } => self.atom_is_direct_subset(atom),
+            Atom::BackendAtom { .. } => false,
+        }
+    }
+
     fn handler_arm_lambda_is_cps_island_subset(&mut self, params: &[Pat], body: &MExpr) -> bool {
         if params.iter().any(|p| !direct_param_supported(p)) {
             return false;
@@ -1678,6 +1709,26 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         )
     }
 
+    fn direct_intrinsic_args_are_supported(
+        &mut self,
+        intrinsic: IntrinsicId,
+        args: &[Atom],
+    ) -> bool {
+        match intrinsic {
+            IntrinsicId::CatchPanic => {
+                matches!(
+                    args,
+                    [Atom::Lambda { params, body, .. }]
+                        if self.lambda_is_direct_subset(params, body)
+                            || self.lambda_is_pure_direct_cps_island_subset(&args[0], params, body)
+                ) || args.iter().all(|arg| self.atom_is_direct_subset(arg))
+            }
+            IntrinsicId::PrintStdout | IntrinsicId::PrintStderr | IntrinsicId::Dbg => {
+                args.iter().all(|arg| self.atom_is_direct_subset(arg))
+            }
+        }
+    }
+
     fn fresh_cps_temp(&mut self, prefix: &str) -> String {
         let id = self.cps_temp_counter;
         self.cps_temp_counter += 1;
@@ -1707,7 +1758,10 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             Atom::AnonRecord { fields, .. } | Atom::Record { fields, .. } => fields
                 .iter()
                 .all(|(_, arg)| self.atom_is_direct_subset(arg)),
-            Atom::Lambda { params, body, .. } => self.lambda_is_direct_subset(params, body),
+            Atom::Lambda { params, body, .. } => {
+                self.lambda_is_direct_subset(params, body)
+                    || self.lambda_is_pure_direct_cps_island_subset(atom, params, body)
+            }
             Atom::QualifiedRef { .. } => self.direct_function_value_ref(atom).is_some(),
             Atom::BackendAtom { .. } | Atom::BackendSpawnThunk { .. } => false,
             Atom::DictRef { .. } => self.direct_dict_constructor(atom).is_some(),
@@ -1740,6 +1794,40 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             || self.atom_is_direct_subset(atom)
     }
 
+    fn direct_call_args_are_supported(&mut self, head: &Atom, args: &[Atom]) -> bool {
+        let expected_arg_shapes = self.direct_call_effectful_callback_param_shapes(head);
+        args.iter().enumerate().all(|(index, arg)| {
+            match expected_arg_shapes.get(index).copied().flatten() {
+                Some((_source_arity, _adapter_arity)) => self.cps_callback_arg_is_supported(arg),
+                None => self.atom_is_direct_subset(arg),
+            }
+        })
+    }
+
+    fn direct_call_effectful_callback_param_shapes(
+        &self,
+        head: &Atom,
+    ) -> Vec<Option<(usize, usize)>> {
+        let source = match head {
+            Atom::Var { source, .. }
+            | Atom::QualifiedRef { source, .. }
+            | Atom::Lambda { source, .. } => *source,
+            _ => return Vec::new(),
+        };
+        let Some(mut current) = self.effect_info.type_at_node.get(&source) else {
+            return Vec::new();
+        };
+        let mut shapes = Vec::new();
+        while let Type::Fun(param, ret, _) = current {
+            shapes.push(
+                self.cps_function_arity_from_type(param)
+                    .map(|(source_arity, adapter_arity, _effects)| (source_arity, adapter_arity)),
+            );
+            current = ret;
+        }
+        shapes
+    }
+
     fn lambda_is_direct_subset(&mut self, params: &[Pat], body: &MExpr) -> bool {
         if params.iter().any(|p| !direct_param_supported(p)) {
             return false;
@@ -1764,6 +1852,16 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         let supported = self.expr_is_cps_island_subset(body);
         self.pop_scope();
         supported
+    }
+
+    fn lambda_is_pure_direct_cps_island_subset(
+        &mut self,
+        atom: &Atom,
+        params: &[Pat],
+        body: &MExpr,
+    ) -> bool {
+        self.pure_callback_arity_for_atom(atom) == Some(params.len())
+            && self.lambda_is_direct_cps_island_subset(params, body)
     }
 
     fn lambda_is_cps_subset(&mut self, atom: &Atom) -> bool {
@@ -2676,6 +2774,115 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             | Atom::QualifiedRef { .. }
             | Atom::DictRef { .. }
             | Atom::BackendAtom { .. } => false,
+        }
+    }
+
+    pub(super) fn atom_contains_resume(&self, atom: &Atom) -> bool {
+        match atom {
+            Atom::Lambda { body, .. } => self.expr_contains_resume(body),
+            Atom::Ctor { args, .. } | Atom::Tuple { elements: args, .. } => {
+                args.iter().any(|atom| self.atom_contains_resume(atom))
+            }
+            Atom::AnonRecord { fields, .. } | Atom::Record { fields, .. } => fields
+                .iter()
+                .any(|(_, atom)| self.atom_contains_resume(atom)),
+            Atom::BackendSpawnThunk { callback, .. } => self.atom_contains_resume(callback),
+            Atom::Var { .. }
+            | Atom::Lit { .. }
+            | Atom::Symbol { .. }
+            | Atom::QualifiedRef { .. }
+            | Atom::DictRef { .. }
+            | Atom::BackendAtom { .. } => false,
+        }
+    }
+
+    fn expr_contains_resume(&self, expr: &MExpr) -> bool {
+        match expr {
+            MExpr::Resume { .. } => true,
+            MExpr::Pure(atom) => self.atom_contains_resume(atom),
+            MExpr::Yield { args, .. } => args.iter().any(|arg| self.atom_contains_resume(arg)),
+            MExpr::Bind { value, body, .. } | MExpr::Let { value, body, .. } => {
+                self.expr_contains_resume(value) || self.expr_contains_resume(body)
+            }
+            MExpr::Ensure { body, cleanup } => {
+                self.expr_contains_resume(body) || self.expr_contains_resume(cleanup)
+            }
+            MExpr::Case {
+                scrutinee, arms, ..
+            } => {
+                self.atom_contains_resume(scrutinee)
+                    || arms.iter().any(|arm| {
+                        arm.guard
+                            .as_ref()
+                            .is_some_and(|guard| self.expr_contains_resume(guard))
+                            || self.expr_contains_resume(&arm.body)
+                    })
+            }
+            MExpr::If {
+                cond,
+                then_branch,
+                else_branch,
+                ..
+            } => {
+                self.atom_contains_resume(cond)
+                    || self.expr_contains_resume(then_branch)
+                    || self.expr_contains_resume(else_branch)
+            }
+            MExpr::App { head, args, .. } => {
+                self.atom_contains_resume(head)
+                    || args.iter().any(|arg| self.atom_contains_resume(arg))
+            }
+            MExpr::With { handler, body, .. } => {
+                self.handler_contains_resume(handler) || self.expr_contains_resume(body)
+            }
+            MExpr::FieldAccess { record, .. }
+            | MExpr::DictMethodAccess { dict: record, .. }
+            | MExpr::RecordUpdate { record, .. } => self.atom_contains_resume(record),
+            MExpr::ForeignCall { args, .. } => {
+                args.iter().any(|arg| self.atom_contains_resume(arg))
+            }
+            MExpr::BitString { segments, .. } => segments
+                .iter()
+                .any(|segment| self.atom_contains_resume(&segment.value)),
+            MExpr::BinOp { left, right, .. } => {
+                self.atom_contains_resume(left) || self.atom_contains_resume(right)
+            }
+            MExpr::UnaryMinus { value, .. } => self.atom_contains_resume(value),
+            MExpr::Receive { .. } | MExpr::LetFun { .. } | MExpr::HandlerValue { .. } => true,
+        }
+    }
+
+    fn handler_contains_resume(&self, handler: &MHandler) -> bool {
+        match handler {
+            MHandler::Static {
+                arms,
+                return_clause,
+                ..
+            } => {
+                arms.iter().any(|arm| {
+                    self.expr_contains_resume(&arm.body)
+                        || arm
+                            .finally_block
+                            .as_ref()
+                            .is_some_and(|cleanup| self.expr_contains_resume(cleanup))
+                }) || return_clause
+                    .as_ref()
+                    .is_some_and(|arm| self.expr_contains_resume(&arm.body))
+            }
+            MHandler::Composite { handlers, .. } => handlers
+                .iter()
+                .any(|handler| self.handler_contains_resume(handler)),
+            MHandler::Dynamic {
+                op_tuple,
+                return_lambda,
+                ..
+            } => {
+                self.atom_contains_resume(op_tuple)
+                    || return_lambda
+                        .as_ref()
+                        .is_some_and(|atom| self.atom_contains_resume(atom))
+            }
+            MHandler::Native { .. } => false,
         }
     }
 

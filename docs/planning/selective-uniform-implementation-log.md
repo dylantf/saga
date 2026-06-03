@@ -1287,3 +1287,21 @@ boundaries exist.
     direct `case` with a `Process.catch_panic (fun () -> body () with test
     handler...)` callback. `Std.AtomicRef.lock_server` / `Receive` remains a
     later native-effect frontier discovered during spot checks.
+- Implemented the direct-wrapper/effectful-callback slice:
+  - `Std.Process.catch_panic` now accepts a net-pure callback whose body is a
+    direct CPS island, covering the `Std.Test.run_single` shape where the test
+    effect is handled inside the panic boundary;
+  - direct calls now inspect effectful callback parameter slots and lower those
+    arguments as CPS runtime closures, while pure callback slots stay ordinary
+    direct values. This covers pure direct wrappers such as
+    `Std.Stream.from_gen (fun () -> count_down 3)`;
+  - handler-arm delayed-resume values can now be nested inside direct data
+    constructors, covering `stream_of`'s
+    `yield v = More v (Stream (fun () -> resume ()))`;
+  - added selective regressions for both the `catch_panic` handled callback and
+    the constructor-stored stream thunk;
+  - `saga test --selective-no-fallback effects_test` now gets through
+    `Std.Test.run_single` and `Std.Stream.from_gen`, and stops at
+    `Std.DateTime.parse_loop`, a large direct parser with nested string-prefix
+    cases and pure setter function values. `Std.AtomicRef.lock_server` /
+    `Receive` remains a later native-effect frontier.

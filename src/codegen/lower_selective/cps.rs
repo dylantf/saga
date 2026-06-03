@@ -1391,7 +1391,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         }
     }
 
-    fn lower_cps_runtime_value_atom(
+    pub(super) fn lower_cps_runtime_value_atom(
         &mut self,
         atom: &Atom,
         source_arity: usize,
@@ -2490,6 +2490,16 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         arm_k: CExpr,
         finally_block: Option<&MExpr>,
     ) -> CExpr {
+        if let MExpr::Pure(atom) = expr
+            && self.handler_arm_atom_is_cps_island_subset(atom)
+        {
+            if let Some(cleanup) = finally_block
+                && !self.atom_contains_resume(atom)
+            {
+                return self.lower_direct_handler_result_with_finally(expr, cleanup);
+            }
+            return self.lower_cps_handler_arm_atom(atom, outer_evidence, arm_k, finally_block);
+        }
         if self.expr_is_direct_subset(expr) {
             return match finally_block {
                 Some(cleanup) => self.lower_direct_handler_result_with_finally(expr, cleanup),
@@ -2497,17 +2507,6 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             };
         }
         match expr {
-            MExpr::Pure(Atom::Lambda { params, body, .. })
-                if self.handler_arm_lambda_is_cps_island_subset(params, body) =>
-            {
-                self.lower_cps_handler_arm_lambda(
-                    params,
-                    body,
-                    outer_evidence,
-                    arm_k,
-                    finally_block,
-                )
-            }
             MExpr::Resume { value, .. } => {
                 self.lower_resume_with_finally(value, arm_k, finally_block)
             }
@@ -2548,10 +2547,15 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                 var, value, body, ..
             }
             | MExpr::Let { var, value, body }
-                if self.expr_is_direct_subset(value) =>
+                if self.handler_arm_expr_is_cps_island_subset(value) =>
             {
                 let local_shape = self.direct_local_shape_for_expr(value);
-                let lowered_value = self.lower_expr(value);
+                let lowered_value = self.lower_cps_handler_arm_expr(
+                    value,
+                    outer_evidence.clone(),
+                    arm_k.clone(),
+                    finally_block,
+                );
                 self.push_scope();
                 self.current_scope_mut().insert(var.name.clone());
                 if let Some(shape) = local_shape {
@@ -2643,6 +2647,133 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         let lowered_body = self.wrap_param_match(params, &param_names, lowered_body);
         self.pop_scope();
         CExpr::Fun(param_names, Box::new(lowered_body))
+    }
+
+    fn lower_cps_handler_arm_atom(
+        &mut self,
+        atom: &Atom,
+        outer_evidence: CExpr,
+        arm_k: CExpr,
+        finally_block: Option<&MExpr>,
+    ) -> CExpr {
+        match atom {
+            Atom::Lambda { params, body, .. }
+                if self.handler_arm_lambda_is_cps_island_subset(params, body) =>
+            {
+                self.lower_cps_handler_arm_lambda(
+                    params,
+                    body,
+                    outer_evidence,
+                    arm_k,
+                    finally_block,
+                )
+            }
+            Atom::Ctor { name, args, .. } => self.lower_cps_handler_arm_ctor_atom(
+                name,
+                args,
+                outer_evidence,
+                arm_k,
+                finally_block,
+            ),
+            Atom::Tuple { elements, .. } => CExpr::Tuple(
+                elements
+                    .iter()
+                    .map(|arg| {
+                        self.lower_cps_handler_arm_atom(
+                            arg,
+                            outer_evidence.clone(),
+                            arm_k.clone(),
+                            finally_block,
+                        )
+                    })
+                    .collect(),
+            ),
+            Atom::AnonRecord { fields, .. } => {
+                let names: Vec<&str> = fields.iter().map(|(name, _)| name.as_str()).collect();
+                let tag = crate::ast::anon_record_tag(&names);
+                let mut sorted: Vec<&(String, Atom)> = fields.iter().collect();
+                sorted.sort_by(|a, b| a.0.cmp(&b.0));
+                let mut elems = vec![CExpr::Lit(CLit::Atom(tag))];
+                elems.extend(sorted.into_iter().map(|(_, atom)| {
+                    self.lower_cps_handler_arm_atom(
+                        atom,
+                        outer_evidence.clone(),
+                        arm_k.clone(),
+                        finally_block,
+                    )
+                }));
+                CExpr::Tuple(elems)
+            }
+            Atom::Record { name, fields, .. } => {
+                let mut elems = vec![CExpr::Lit(CLit::Atom(mangle_ctor_atom(name, self.ctors)))];
+                elems.extend(fields.iter().map(|(_, atom)| {
+                    self.lower_cps_handler_arm_atom(
+                        atom,
+                        outer_evidence.clone(),
+                        arm_k.clone(),
+                        finally_block,
+                    )
+                }));
+                CExpr::Tuple(elems)
+            }
+            Atom::Lit { value, .. } => lower_lit_atom(value),
+            Atom::Symbol { symbol, .. } => {
+                crate::codegen::lower::util::lower_string_to_binary(symbol)
+            }
+            Atom::Var { .. } | Atom::QualifiedRef { .. } | Atom::DictRef { .. }
+                if self.atom_is_direct_subset(atom) =>
+            {
+                self.lower_atom(atom)
+            }
+            Atom::BackendAtom { .. } | Atom::BackendSpawnThunk { .. } | Atom::DictRef { .. } => {
+                self.unsupported_atom(atom)
+            }
+            Atom::Var { .. } | Atom::QualifiedRef { .. } => self.unsupported_atom(atom),
+            Atom::Lambda { .. } => self.unsupported_atom(atom),
+        }
+    }
+
+    fn lower_cps_handler_arm_ctor_atom(
+        &mut self,
+        name: &str,
+        args: &[Atom],
+        outer_evidence: CExpr,
+        arm_k: CExpr,
+        finally_block: Option<&MExpr>,
+    ) -> CExpr {
+        let bare = name.rsplit('.').next().unwrap_or(name);
+        match bare {
+            "Nil" if args.is_empty() => return CExpr::Nil,
+            "True" if args.is_empty() => return CExpr::Lit(CLit::Atom("true".to_string())),
+            "False" if args.is_empty() => return CExpr::Lit(CLit::Atom("false".to_string())),
+            _ => {}
+        }
+        if name == "Cons" && args.len() == 2 {
+            return CExpr::Cons(
+                Box::new(self.lower_cps_handler_arm_atom(
+                    &args[0],
+                    outer_evidence.clone(),
+                    arm_k.clone(),
+                    finally_block,
+                )),
+                Box::new(self.lower_cps_handler_arm_atom(
+                    &args[1],
+                    outer_evidence,
+                    arm_k,
+                    finally_block,
+                )),
+            );
+        }
+        let mut elems = vec![CExpr::Lit(CLit::Atom(mangle_ctor_atom(name, self.ctors)))];
+        elems.extend(args.iter().map(|arg| {
+            self.lower_cps_handler_arm_atom(
+                arg,
+                outer_evidence.clone(),
+                arm_k.clone(),
+                finally_block,
+            )
+        }));
+        CExpr::Tuple(elems)
     }
 
     fn lower_flat_map_identity_resume_handler_arm(

@@ -276,13 +276,13 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             Some(CallShape::Intrinsic(intrinsic)) => self.lower_intrinsic_app(intrinsic, args),
             Some(CallShape::Direct(callable)) => {
                 self.assert_app_arity(&callable.name, args.len(), callable.arity);
-                self.apply_direct_callable(callable, args)
+                self.apply_direct_callable(callable, head, args)
             }
             Some(CallShape::LocalCallable { name, arity }) => {
                 self.assert_app_arity(&name, args.len(), arity);
                 CExpr::Apply(
                     Box::new(CExpr::Var(core_var(&name))),
-                    args.iter().map(|arg| self.lower_atom(arg)).collect(),
+                    self.lower_direct_call_args(head, args),
                 )
             }
             Some(CallShape::LocalCpsCallable { name, .. }) => self.unsupported(&format!(
@@ -356,8 +356,13 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         }
     }
 
-    fn apply_direct_callable(&mut self, callable: DirectCallable, args: &[Atom]) -> CExpr {
-        let lowered_args = args.iter().map(|arg| self.lower_atom(arg)).collect();
+    fn apply_direct_callable(
+        &mut self,
+        callable: DirectCallable,
+        head: &Atom,
+        args: &[Atom],
+    ) -> CExpr {
+        let lowered_args = self.lower_direct_call_args(head, args);
         match callable.module {
             Some(module) => CExpr::Call(module, callable.name, lowered_args),
             None => CExpr::Apply(
@@ -365,6 +370,21 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                 lowered_args,
             ),
         }
+    }
+
+    fn lower_direct_call_args(&mut self, head: &Atom, args: &[Atom]) -> Vec<CExpr> {
+        let expected_arg_shapes = self.direct_call_effectful_callback_param_shapes(head);
+        args.iter()
+            .enumerate()
+            .map(
+                |(index, arg)| match expected_arg_shapes.get(index).copied().flatten() {
+                    Some((source_arity, adapter_arity)) => {
+                        self.lower_cps_runtime_value_atom(arg, source_arity, adapter_arity)
+                    }
+                    None => self.lower_atom(arg),
+                },
+            )
+            .collect()
     }
 
     fn lower_intrinsic_app(&mut self, intrinsic: IntrinsicId, args: &[Atom]) -> CExpr {

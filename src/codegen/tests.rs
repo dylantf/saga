@@ -519,6 +519,45 @@ main () = print_stdout "hello\n"
 }
 
 #[test]
+fn selective_core_lowers_catch_panic_with_handled_callback() {
+    let src = r#"
+import Std.Process
+
+effect Test {
+  fun assert : (ok: Bool) -> (msg: String) -> Unit
+}
+
+type TestStatus = Passed | Failed String
+
+fun run_single : (Unit -> Unit needs {Test}) -> TestStatus
+run_single body = case Process.catch_panic (fun () -> {
+  body () with {
+    assert ok msg =
+      if ok then resume ()
+      else Failed msg
+    return _ = Passed
+  }
+}) {
+  Ok status -> status
+  Err msg -> Failed msg
+}
+
+fun main : Unit -> TestStatus
+main () = run_single (fun () -> assert! True "")
+"#;
+    let out = emit_selective_core_with_options(
+        src,
+        super::lower_selective::LoweringOptions {
+            require_all_functions: true,
+        },
+    );
+    assert!(out.contains("'run_single'/1"), "{out}");
+    assert!(out.contains("try"), "{out}");
+    assert!(out.contains("apply Body"), "{out}");
+    assert_selective_core_compiles(src);
+}
+
+#[test]
 fn selective_core_lowers_monomorphic_trait_method_call() {
     let out = emit_selective_core(
         r#"
@@ -1929,6 +1968,47 @@ run_accumulator_test () = run_state 0 (fun () -> {
     let out = emit_selective_core(src);
     assert!(out.contains("'run_state'/2"), "{out}");
     assert!(out.contains("apply _ArmK"), "{out}");
+    assert_selective_core_compiles(src);
+}
+
+#[test]
+fn selective_core_lowers_constructor_stored_handled_thunk() {
+    let src = r#"
+type Step a = Done | More a (Stream a)
+type Stream a = Stream (Unit -> Step a)
+
+effect Gen a {
+  fun yield : a -> Unit
+}
+
+handler stream_of for Gen a {
+  yield v = More v (Stream (fun () -> resume ()))
+  return _ = Done
+}
+
+fun from_gen : (Unit -> Unit needs {Gen a}) -> Stream a
+from_gen producer = Stream (fun () -> producer () with stream_of)
+
+fun count_down : Int -> Unit needs {Gen Int}
+count_down n =
+  if n <= 0 then ()
+  else {
+    yield! n
+    count_down (n - 1)
+  }
+
+fun main : Unit -> Stream Int
+main () = from_gen (fun () -> count_down 2)
+"#;
+    let out = emit_selective_core_with_options(
+        src,
+        super::lower_selective::LoweringOptions {
+            require_all_functions: true,
+        },
+    );
+    assert!(out.contains("'from_gen'/1"), "{out}");
+    assert!(out.contains("'_script_Stream'"), "{out}");
+    assert!(out.contains("apply Producer"), "{out}");
     assert_selective_core_compiles(src);
 }
 
