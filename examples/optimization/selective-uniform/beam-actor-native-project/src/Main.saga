@@ -1,0 +1,63 @@
+module Main
+
+import Std.Actor (Actor, Process, Monitor, Link, Timer, Shutdown, beam_actor)
+import Std.IO.Unsafe (print_stdout)
+
+type Msg =
+  | Pong
+  | Stop
+  | Tick
+
+fun process_actor_ops : Unit -> String needs {Process, Actor Msg}
+process_actor_ops () = {
+  let me = self! ()
+  let _pid = spawn! (fun () -> send! me Pong)
+  receive {
+    Pong -> "process"
+    after 1000 -> "process-timeout"
+  }
+}
+
+fun monitor_ops : Unit -> String needs {Process, Actor Msg, Monitor}
+monitor_ops () = {
+  let pid = spawn! (fun () -> ())
+  let _ref = monitor! pid
+  receive {
+    Down _pid _reason -> "monitor"
+    after 1000 -> "monitor-timeout"
+  }
+}
+
+fun link_ops : Unit -> String needs {Process, Actor Msg, Link}
+link_ops () = {
+  let pid = spawn! (fun () -> receive {
+    Stop -> ()
+  })
+  link! pid
+  unlink! pid
+  exit! pid Shutdown
+  "link"
+}
+
+fun timer_ops : Unit -> String needs {Actor Msg, Timer}
+timer_ops () = {
+  let me = self! ()
+  sleep! 0
+  let timer = send_after! me 1000 Tick
+  cancel_timer! timer
+  "timer"
+}
+
+fun run : Unit -> String needs {Process, Actor Msg, Monitor, Link, Timer}
+run () = {
+  let a = process_actor_ops ()
+  let b = monitor_ops ()
+  let c = link_ops ()
+  let d = timer_ops ()
+  a <> ":" <> b <> ":" <> c <> ":" <> d
+}
+
+main () = {
+  let result = run () with beam_actor
+  print_stdout (result <> "\n")
+}

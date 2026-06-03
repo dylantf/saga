@@ -1084,6 +1084,10 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
     }
 
     fn direct_function_callable(&self, head: &Atom) -> Option<DirectCallable> {
+        if let Some(callable) = self.local_direct_function_callable_by_name(head) {
+            return Some(callable);
+        }
+
         let source = match head {
             Atom::Var { source, .. } | Atom::QualifiedRef { source, .. } => *source,
             _ => return None,
@@ -1166,6 +1170,42 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             module: None,
             name: direct_name,
             arity: *arity,
+        })
+    }
+
+    fn local_direct_function_callable_by_name(&self, head: &Atom) -> Option<DirectCallable> {
+        let Atom::Var { name, .. } = head else {
+            return None;
+        };
+        if self.is_local(&name.name) {
+            return None;
+        }
+        if let Some(entries) = self.local_function_entries.get(&name.name) {
+            let arity = entries.direct_entry_arity?;
+            return Some(DirectCallable {
+                module: None,
+                name: self.direct_entry_name_for(&name.name, entries),
+                arity,
+            });
+        }
+        let recursive_self = self
+            .direct_candidate_function
+            .as_ref()
+            .is_some_and(|current| current == &name.name)
+            || self.direct_candidate_functions.contains(&name.name);
+        let has_direct_plan = self
+            .function_plans
+            .get(&name.name)
+            .copied()
+            .is_some_and(FunctionLoweringPlan::has_direct_entry);
+        if !recursive_self && !has_direct_plan {
+            return None;
+        }
+        let binding = self.local_fun_bindings.get(&name.name)?;
+        Some(DirectCallable {
+            module: None,
+            name: name.name.clone(),
+            arity: binding.params.len(),
         })
     }
 
@@ -1609,15 +1649,35 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             MExpr::ForeignCall { args, .. } => {
                 args.iter().all(|arg| self.atom_is_direct_subset(arg))
             }
+            MExpr::Receive { arms, after, .. } => {
+                let arms_supported = arms.iter().all(|arm| {
+                    if !direct_pat_supported(&arm.pattern) {
+                        return false;
+                    }
+                    self.push_scope();
+                    self.bind_pat_locals(&arm.pattern);
+                    let supported = arm
+                        .guard
+                        .as_ref()
+                        .is_none_or(|guard| self.expr_is_direct_subset(guard))
+                        && self.expr_is_direct_subset(&arm.body);
+                    self.pop_scope();
+                    supported
+                });
+                arms_supported
+                    && after.as_ref().is_none_or(|(timeout, body)| {
+                        self.atom_is_direct_subset(timeout) && self.expr_is_direct_subset(body)
+                    })
+            }
             MExpr::With { handler, body, .. } => {
-                self.static_handler_is_direct_return_only(handler)
+                (self.static_handler_is_direct_return_only(handler)
+                    || self.native_handler_is_direct_noop(handler))
                     && self.expr_is_direct_subset(body)
             }
             MExpr::BitString { .. }
             | MExpr::Yield { .. }
             | MExpr::Resume { .. }
             | MExpr::Ensure { .. }
-            | MExpr::Receive { .. }
             | MExpr::LetFun { .. }
             | MExpr::HandlerValue { .. } => false,
             MExpr::DictMethodAccess { dict, .. } => self.atom_is_direct_subset(dict),
@@ -1656,6 +1716,10 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         let supported = self.expr_is_direct_subset(&arm.body);
         self.pop_scope();
         supported
+    }
+
+    fn native_handler_is_direct_noop(&self, handler: &MHandler) -> bool {
+        matches!(handler, MHandler::Native { .. })
     }
 
     fn expr_is_cps_island_subset(&mut self, expr: &MExpr) -> bool {
@@ -1933,7 +1997,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             | Atom::Symbol { .. }
             | Atom::QualifiedRef { .. }
             | Atom::DictRef { .. } => self.atom_is_direct_subset(atom),
-            Atom::BackendAtom { .. } => false,
+            Atom::BackendAtom { .. } => true,
         }
     }
 
@@ -2036,7 +2100,10 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                     || self.lambda_is_pure_direct_cps_island_subset(atom, params, body)
             }
             Atom::QualifiedRef { .. } => self.direct_function_value_ref(atom).is_some(),
-            Atom::BackendAtom { .. } | Atom::BackendSpawnThunk { .. } => false,
+            Atom::BackendAtom { .. } => true,
+            Atom::BackendSpawnThunk { callback, .. } => {
+                self.effect_protocol_arg_atom_is_cps_island_subset(callback)
+            }
             Atom::DictRef { .. } => self.direct_dict_constructor(atom).is_some(),
         }
     }

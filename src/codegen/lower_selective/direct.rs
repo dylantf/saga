@@ -70,6 +70,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                 module, func, args, ..
             } => self.lower_foreign_call(module, func, args),
             MExpr::With { handler, body, .. } => self.lower_direct_with(handler, body),
+            MExpr::Receive { arms, after, .. } => self.lower_direct_receive(arms, after.as_ref()),
             MExpr::BitString { .. } => self.unsupported_expr(expr),
             MExpr::DictMethodAccess {
                 dict, method_index, ..
@@ -84,13 +85,16 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             MExpr::Yield { .. }
             | MExpr::Resume { .. }
             | MExpr::Ensure { .. }
-            | MExpr::Receive { .. }
             | MExpr::LetFun { .. }
             | MExpr::HandlerValue { .. } => self.unsupported_expr(expr),
         }
     }
 
     fn lower_direct_with(&mut self, handler: &MHandler, body: &MExpr) -> CExpr {
+        if matches!(handler, MHandler::Native { .. }) {
+            return self.lower_expr(body);
+        }
+
         let MHandler::Static {
             effects,
             arms,
@@ -140,6 +144,38 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         self.pop_scope();
 
         CExpr::Let(return_value, Box::new(value), Box::new(return_body))
+    }
+
+    fn lower_direct_receive(&mut self, arms: &[MArm], after: Option<&(Atom, Box<MExpr>)>) -> CExpr {
+        let arms = arms
+            .iter()
+            .map(|arm| self.lower_direct_receive_arm(arm))
+            .collect();
+        let (timeout, timeout_body) = match after {
+            Some((timeout, body)) => (self.lower_atom(timeout), self.lower_expr(body)),
+            None => (
+                CExpr::Lit(CLit::Atom("infinity".to_string())),
+                CExpr::Lit(CLit::Atom("true".to_string())),
+            ),
+        };
+        CExpr::Receive(arms, Box::new(timeout), Box::new(timeout_body))
+    }
+
+    fn lower_direct_receive_arm(&mut self, arm: &MArm) -> CArm {
+        self.push_scope();
+        self.bind_pat_locals(&arm.pattern);
+        let raw_body = self.lower_expr(&arm.body);
+        let guard = arm.guard.as_ref().map(|guard| self.lower_expr(guard));
+        let (pat, reason_wrapper) = self.lower_receive_pat(&arm.pattern);
+        let body = match reason_wrapper {
+            Some((user_var, raw_var)) => {
+                let conversion = self.exit_reason_from_erlang(&raw_var);
+                CExpr::Let(user_var, Box::new(conversion), Box::new(raw_body))
+            }
+            None => raw_body,
+        };
+        self.pop_scope();
+        CArm { pat, guard, body }
     }
 
     fn lower_case_chain(&mut self, scrutinee: &Atom, arms: &[MArm]) -> CExpr {
@@ -730,10 +766,35 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                         .unwrap_or_else(|| self.unsupported_atom(atom))
                 }
             }
-            Atom::DictRef { .. } | Atom::BackendAtom { .. } | Atom::BackendSpawnThunk { .. } => {
-                self.unsupported_atom(atom)
+            Atom::BackendAtom { atom, .. } => CExpr::Lit(CLit::Atom(atom.clone())),
+            Atom::BackendSpawnThunk { callback, source } => {
+                self.lower_backend_spawn_thunk(callback, *source)
             }
+            Atom::DictRef { .. } => self.unsupported_atom(atom),
         }
+    }
+
+    fn lower_backend_spawn_thunk(&mut self, callback: &Atom, source: NodeId) -> CExpr {
+        let callback_expr = self.lower_effect_protocol_arg_atom(callback);
+        let k_var = format!("_SpawnK{}", source.0);
+        let v_var = format!("_SpawnV{}", source.0);
+        let identity_k = CExpr::Fun(vec![v_var.clone()], Box::new(CExpr::Var(v_var)));
+        let apply_callback = CExpr::Apply(
+            Box::new(callback_expr),
+            vec![
+                CExpr::Lit(CLit::Atom("unit".to_string())),
+                CExpr::Tuple(vec![]),
+                CExpr::Var(k_var.clone()),
+            ],
+        );
+        CExpr::Fun(
+            vec![],
+            Box::new(CExpr::Let(
+                k_var,
+                Box::new(identity_k),
+                Box::new(apply_callback),
+            )),
+        )
     }
 
     fn lower_lambda_atom(&mut self, params: &[Pat], body: &MExpr) -> CExpr {

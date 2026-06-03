@@ -14,37 +14,40 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             match decl {
                 MDecl::FunBinding(fb) => {
                     self.local_fun_bindings.insert(fb.name.clone(), fb.clone());
-                    let shape = self
-                        .effect_info
-                        .type_at_node
-                        .get(&fb.id)
-                        .and_then(|ty| {
-                            self.cps_function_arity_from_type(ty).map(
-                                |(_source_arity, _adapter_arity, effects)| {
-                                    RuntimeFunctionShape::Cps(
-                                        crate::codegen::runtime_shape::CpsShape {
-                                            static_effects: effects,
-                                            is_open_row: self.function_type_has_open_row(ty),
-                                        },
-                                    )
-                                },
-                            )
-                        })
-                        .unwrap_or_else(|| match self.effect_info.fun_effects.get(&fb.name) {
-                            Some(effects) if effects.is_empty() => RuntimeFunctionShape::Pure,
-                            Some(effects) => {
-                                RuntimeFunctionShape::Cps(crate::codegen::runtime_shape::CpsShape {
-                                    static_effects: effects.iter().cloned().collect(),
-                                    is_open_row: false,
-                                })
-                            }
-                            None => {
-                                RuntimeFunctionShape::Cps(crate::codegen::runtime_shape::CpsShape {
-                                    static_effects: vec![],
-                                    is_open_row: true,
-                                })
-                            }
-                        });
+                    let shape = if is_native_variant_name(&fb.name) {
+                        RuntimeFunctionShape::Pure
+                    } else {
+                        self.effect_info
+                            .type_at_node
+                            .get(&fb.id)
+                            .and_then(|ty| {
+                                self.cps_function_arity_from_type(ty).map(
+                                    |(_source_arity, _adapter_arity, effects)| {
+                                        RuntimeFunctionShape::Cps(
+                                            crate::codegen::runtime_shape::CpsShape {
+                                                static_effects: effects,
+                                                is_open_row: self.function_type_has_open_row(ty),
+                                            },
+                                        )
+                                    },
+                                )
+                            })
+                            .unwrap_or_else(|| match self.effect_info.fun_effects.get(&fb.name) {
+                                Some(effects) if effects.is_empty() => RuntimeFunctionShape::Pure,
+                                Some(effects) => RuntimeFunctionShape::Cps(
+                                    crate::codegen::runtime_shape::CpsShape {
+                                        static_effects: effects.iter().cloned().collect(),
+                                        is_open_row: false,
+                                    },
+                                ),
+                                None => RuntimeFunctionShape::Cps(
+                                    crate::codegen::runtime_shape::CpsShape {
+                                        static_effects: vec![],
+                                        is_open_row: true,
+                                    },
+                                ),
+                            })
+                    };
                     self.callable_type_shapes.insert(fb.name.clone(), shape);
                 }
                 MDecl::Val(v) => {
@@ -701,6 +704,10 @@ fn single_clause_function_names(program: &MProgram) -> HashSet<String> {
         .into_iter()
         .filter_map(|(name, count)| (count == 1).then_some(name))
         .collect()
+}
+
+fn is_native_variant_name(name: &str) -> bool {
+    name.starts_with("__saga_native_variant__")
 }
 
 fn function_binding_groups(program: &MProgram) -> Vec<Vec<&MFunBinding>> {

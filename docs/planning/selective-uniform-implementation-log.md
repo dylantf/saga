@@ -1369,3 +1369,31 @@ boundaries exist.
     `counter_outer_wraps`, and `safe_div`/`safe_div_g`-style grouped CPS
     functions, then stops at the derived generic dict constructor
     `__dict_GenericFromjsonTest_FromJson_genericfromjsontest_Std_Generic_Variant`.
+- Implemented the beam-native handler audit slice:
+  - selective lowering now consumes the optimized monadic program in the build
+    path, matching the fallback path and making `effect_opt`-generated native
+    variants visible to the selective planner;
+  - `inspect --stage selective-core` now also runs the monadic effect
+    optimizer before selective lowering, so inspection and builds agree for
+    native/static variants;
+  - generated `__saga_native_variant__...` functions are classified as direct
+    shaped for selective planning, and name-based local call lookup now handles
+    in-flight candidate functions plus already-planned direct functions before
+    local function entries have been computed;
+  - direct lowering now supports Core Erlang `receive`, including `after`
+    clauses and BEAM system-message patterns, because Saga `receive` is a
+    language construct that maps directly to Core Erlang rather than an actor
+    effect op;
+  - direct/native atom lowering now supports optimizer-emitted `BackendAtom`
+    and `BackendSpawnThunk`. Spawn thunks lower to zero-arity BEAM callbacks
+    that invoke the adapted Saga callback with `unit`, empty evidence, and an
+    identity continuation;
+  - added `beam-actor-native-project`, covering `self`, `spawn`, `send`,
+    `monitor`, `link`, `unlink`, `exit`, `sleep`, `send_after`,
+    `cancel_timer`, and `receive`;
+  - isolated strict check
+    `saga inspect src/Main.saga --stage selective-core --selective-no-fallback`
+    passes for the beam actor fixture, and
+    `saga run --selective-codegen` prints `process:monitor:link:timer`.
+    Full project `run --selective-no-fallback` still audits the whole stdlib
+    first and currently exposes unrelated strict-mode frontiers.

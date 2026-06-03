@@ -1183,7 +1183,11 @@ main () = ()
         "{out}"
     );
     assert!(
-        out.contains("apply 'may_log'/3('unit', _Evidence, _ReturnK)"),
+        out.contains("apply '__saga_direct_may_log'/1('unit')"),
+        "{out}"
+    );
+    assert!(
+        out.contains("apply _ReturnK(apply '__saga_direct_use_may_log'/1(_Arg0))"),
         "{out}"
     );
     assert!(out.contains("apply _ReturnK"), "{out}");

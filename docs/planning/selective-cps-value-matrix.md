@@ -131,9 +131,20 @@ This is the selective lowerer's practical checklist over monadic IR.
 | `ForeignCall` | Supported in direct subset for direct args; direct external apps filter Saga `Unit` for niladic native calls | Via direct fallback when direct-safe | Not callable producer | Effectful externals still need explicit shape metadata |
 | `BinOp` / `UnaryMinus` | Supported | Direct fallback | No | Keep |
 | `BitString` | Rejected | Rejected | No | Later |
-| `Receive` | Rejected | Supported in CPS islands, including `after` and BEAM system-message patterns | Open | Native actor/atomic-ref receive frontier cleared for current stdlib shapes |
+| `Receive` | Supported, including `after` and BEAM system-message patterns | Supported in CPS islands, including `after` and BEAM system-message patterns | Open | Direct support exists because `receive` maps to a Core Erlang keyword; it is not an actor effect op |
 | `LetFun` | Rejected | Rejected | Open | Needed for local recursive helpers |
 | `HandlerValue` | Rejected in direct subset today | Supported as a CPS-island value producer | Handler-value producer | Broaden for abort/finally stress later |
+
+## Native Handler Matrix
+
+Native handlers are not selected by effect name alone. The user chooses a
+handler, and only known backend-native handlers get this lowering category.
+Other handlers for the same effects continue through the ordinary
+direct/CPS/static-handler rules.
+
+| Handler | Effects / Ops Covered | Current Status | Correct Rule | Next Action |
+| --- | --- | --- | --- | --- |
+| `Std.Actor.beam_actor` | `Actor.self`, `Process.spawn/send/exit`, `Monitor.monitor`, `Link.link/unlink`, `Timer.sleep/send_after/cancel_timer`; plus direct `receive` syntax used by actor code | Covered by `beam-actor-native-project`, including strict `selective-core --selective-no-fallback` inspection and runtime `--selective-codegen` run | Run `effect_opt` before selective lowering so generated `__saga_native_variant__...` functions are visible; classify native variants as direct-shaped; lower `MHandler::Native` wrappers as no-ops only after their bodies are direct; lower `BackendAtom` and `BackendSpawnThunk` in direct/native code | Keep; add new rows only for future backend-native handlers |
 
 ## Old Lowerer Cross-Check
 

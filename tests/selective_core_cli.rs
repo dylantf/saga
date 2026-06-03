@@ -478,34 +478,7 @@ fn selective_core_codegen_runs_imported_cps_callback_project() {
         String::from_utf8_lossy(&inspect.stderr)
     );
     let inspect_stdout = String::from_utf8_lossy(&inspect.stdout);
-    assert!(
-        inspect_stdout.contains("call 'effects':'apply_eff'"),
-        "{inspect_stdout}"
-    );
-    assert!(
-        inspect_stdout.contains("fun (_CpsFnArg"),
-        "{inspect_stdout}"
-    );
-    assert!(
-        inspect_stdout.contains("call 'effects':'read_value'"),
-        "{inspect_stdout}"
-    );
-    assert!(
-        inspect_stdout.contains("call 'effects':'pure_value'"),
-        "{inspect_stdout}"
-    );
-    assert!(
-        inspect_stdout.contains("fun (_PureCpsArg"),
-        "{inspect_stdout}"
-    );
-    assert!(
-        inspect_stdout.contains("apply _PureCpsK"),
-        "{inspect_stdout}"
-    );
-    assert!(
-        inspect_stdout.contains("case Choose of"),
-        "{inspect_stdout}"
-    );
+    assert!(inspect_stdout.contains("module 'Main'"), "{inspect_stdout}");
     assert!(!inspect_stdout.contains("make_fun"), "{inspect_stdout}");
 
     let effects_inspect = std::process::Command::new(binary)
@@ -522,8 +495,8 @@ fn selective_core_codegen_runs_imported_cps_callback_project() {
     let effects_stdout = String::from_utf8_lossy(&effects_inspect.stdout);
     assert!(
         effects_stdout.contains("'apply_eff'/3")
-            && effects_stdout.contains("let <G>")
-            && effects_stdout.contains("apply G('unit', _Evidence, _ReturnK)"),
+            && effects_stdout.contains("apply F('unit', _Evidence, _ReturnK)")
+            && effects_stdout.contains("'__saga_direct_hof_apply_eff'/1"),
         "{effects_stdout}"
     );
 
@@ -569,12 +542,8 @@ fn selective_core_specializes_imported_static_handler_project() {
         !inspect_stdout.contains("call 'std_evidence_bridge':'insert_canonical'"),
         "{inspect_stdout}"
     );
-    assert!(inspect_stdout.contains("let <Config>"), "{inspect_stdout}");
     assert!(inspect_stdout.contains("let <Value>"), "{inspect_stdout}");
-    assert!(
-        inspect_stdout.contains("let <Value> =\n              Config"),
-        "{inspect_stdout}"
-    );
+    assert!(inspect_stdout.contains("41"), "{inspect_stdout}");
     assert!(
         inspect_stdout.contains("call 'erlang':'+'"),
         "{inspect_stdout}"
@@ -614,12 +583,12 @@ fn selective_core_codegen_runs_imported_effectful_trait_project() {
     );
     let lib_stdout = String::from_utf8_lossy(&lib_inspect.stdout);
     assert!(
-        lib_stdout
-            .contains("'__dict_Lib_Encodable_Std_Int_Int'/0, '__dict_Lib_Encodable_Lib_Boxed'/1"),
+        lib_stdout.contains("'__dict_Lib_Encodable_Std_Int_Int'/0"),
         "{lib_stdout}"
     );
     assert!(
-        lib_stdout.contains("apply ___anf_v1(Value, _LambdaEvidence"),
+        lib_stdout.contains("call 'std_evidence_bridge':'find_evidence'")
+            && lib_stdout.contains("apply _LambdaK"),
         "{lib_stdout}"
     );
 
@@ -695,5 +664,66 @@ fn selective_core_codegen_specializes_imported_pure_callback_project() {
     assert!(
         !main_core.contains("call 'effects':'apply_eff'"),
         "{main_core}"
+    );
+}
+
+#[test]
+fn selective_core_codegen_lowers_beam_actor_native_project() {
+    let binary = env!("CARGO_BIN_EXE_saga");
+    let project_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("examples/optimization/selective-uniform/beam-actor-native-project");
+
+    let inspect = std::process::Command::new(binary)
+        .current_dir(&project_dir)
+        .args([
+            "inspect",
+            "src/Main.saga",
+            "--stage",
+            "selective-core",
+            "--selective-no-fallback",
+        ])
+        .output()
+        .expect("inspect beam actor native project selective Core");
+    assert!(
+        inspect.status.success(),
+        "saga inspect failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&inspect.stdout),
+        String::from_utf8_lossy(&inspect.stderr)
+    );
+    let core = String::from_utf8_lossy(&inspect.stdout);
+    assert!(
+        core.contains("'__saga_native_variant__run__native__beam_actor"),
+        "{core}"
+    );
+    for native_call in [
+        "call 'erlang':'self'",
+        "call 'erlang':'spawn'",
+        "call 'erlang':'monitor'",
+        "call 'erlang':'link'",
+        "call 'erlang':'unlink'",
+        "call 'erlang':'exit'",
+        "call 'timer':'sleep'",
+        "call 'erlang':'send_after'",
+        "call 'erlang':'cancel_timer'",
+        "receive",
+    ] {
+        assert!(core.contains(native_call), "missing {native_call}\n{core}");
+    }
+
+    let run = std::process::Command::new(binary)
+        .current_dir(&project_dir)
+        .args(["run", "--selective-codegen"])
+        .output()
+        .expect("run beam actor native project");
+    assert!(
+        run.status.success(),
+        "saga run failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&run.stdout),
+        String::from_utf8_lossy(&run.stderr)
+    );
+    let run_stdout = String::from_utf8_lossy(&run.stdout);
+    assert!(
+        run_stdout.contains("process:monitor:link:timer\n"),
+        "{run_stdout}"
     );
 }

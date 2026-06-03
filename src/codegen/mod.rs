@@ -497,9 +497,8 @@ pub fn emit_module_via_new_path(
         &effect_info,
         &imported_handler_decls,
     );
-    let selective_program =
+    let original_selective_program =
         matches!(options.codegen_backend, CodegenBackend::Selective).then(|| monadic_prog.clone());
-
     let before_stats = options
         .diagnostics
         .monadic_stats
@@ -542,7 +541,10 @@ pub fn emit_module_via_new_path(
     });
 
     let is_main = entry_export.is_some();
-    if let Some(selective_program) = selective_program {
+    if matches!(options.codegen_backend, CodegenBackend::Selective) {
+        let selective_program =
+            selective_program_with_preserved_abi_decls(&original_selective_program, &optimized)
+                .unwrap_or_else(|| optimized.clone());
         let selective_cmod = lower_selective::lower_module_with_entry_export_options(
             module_name,
             &selective_program,
@@ -619,6 +621,57 @@ pub fn emit_module_via_new_path(
             core_src,
             monadic_stats,
         },
+    }
+}
+
+fn selective_program_with_preserved_abi_decls(
+    before_stats: &Option<monadic::ir::MProgram>,
+    optimized: &monadic::ir::MProgram,
+) -> Option<monadic::ir::MProgram> {
+    let original = before_stats.as_ref()?;
+    Some(merge_optimized_program_with_preserved_abi_decls(
+        original, optimized,
+    ))
+}
+
+fn merge_optimized_program_with_preserved_abi_decls(
+    original: &monadic::ir::MProgram,
+    optimized: &monadic::ir::MProgram,
+) -> monadic::ir::MProgram {
+    let mut merged = optimized.clone();
+    let optimized_keys: HashSet<String> = optimized
+        .iter()
+        .filter_map(selective_abi_decl_key)
+        .collect();
+
+    for decl in original {
+        let Some(key) = selective_abi_decl_key(decl) else {
+            continue;
+        };
+        if optimized_keys.contains(&key) || !preserve_removed_selective_abi_decl(decl) {
+            continue;
+        }
+        merged.push(decl.clone());
+    }
+
+    merged
+}
+
+fn selective_abi_decl_key(decl: &monadic::ir::MDecl) -> Option<String> {
+    match decl {
+        monadic::ir::MDecl::FunBinding(fb) => Some(format!("fun:{}", fb.name)),
+        monadic::ir::MDecl::Val(val) => Some(format!("val:{}", val.name)),
+        monadic::ir::MDecl::DictConstructor(dict) => Some(format!("dict:{}", dict.name)),
+        monadic::ir::MDecl::Passthrough(_) => None,
+    }
+}
+
+fn preserve_removed_selective_abi_decl(decl: &monadic::ir::MDecl) -> bool {
+    match decl {
+        monadic::ir::MDecl::FunBinding(fb) => fb.public,
+        monadic::ir::MDecl::Val(val) => val.public,
+        monadic::ir::MDecl::DictConstructor(_) => true,
+        monadic::ir::MDecl::Passthrough(_) => false,
     }
 }
 
@@ -719,7 +772,7 @@ fn selective_fallback_direct_adapters(
                         source_arity: fb.params.len(),
                     });
             }
-            monadic::ir::MDecl::DictConstructor(dc) if dc.dict_params.is_empty() => {
+            monadic::ir::MDecl::DictConstructor(dc) => {
                 adapters.insert(
                     dc.name.clone(),
                     DirectFallbackAdapter::Dict {
@@ -727,7 +780,6 @@ fn selective_fallback_direct_adapters(
                     },
                 );
             }
-            monadic::ir::MDecl::DictConstructor(_) => {}
             monadic::ir::MDecl::FunBinding(_)
             | monadic::ir::MDecl::Val(_)
             | monadic::ir::MDecl::Passthrough(_) => {}

@@ -479,6 +479,8 @@ pub fn cmd_inspect_with_options(file: &str, stage: &str, options: &CompileOption
                     &codegen_info,
                     &ctx.prelude_imports,
                 );
+                let monadic_prog =
+                    monadic::effect_opt::run(monadic_prog, &handler_info, &effect_info);
                 let cmod = codegen::lower_selective::lower_module_with_options(
                     &module_name,
                     &monadic_prog,

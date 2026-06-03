@@ -1355,7 +1355,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         self.lower_atom(atom)
     }
 
-    fn lower_effect_protocol_arg_atom(&mut self, atom: &Atom) -> CExpr {
+    pub(super) fn lower_effect_protocol_arg_atom(&mut self, atom: &Atom) -> CExpr {
         if let Some(LocalValueShape::PureCallable { arity }) = self.pure_value_atom_shape(atom) {
             return self.pure_to_cps_adapter_value_closure(atom, arity, arity + 2);
         }
@@ -3065,7 +3065,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         CArm { pat, guard, body }
     }
 
-    fn lower_receive_pat(&mut self, pat: &Pat) -> (CPat, Option<(String, String)>) {
+    pub(super) fn lower_receive_pat(&mut self, pat: &Pat) -> (CPat, Option<(String, String)>) {
         match pat {
             Pat::Constructor { name, args, .. } if is_system_msg(name) && args.len() == 2 => {
                 let pid_pat = self.lower_pat(&args[0]);
@@ -3082,7 +3082,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         }
     }
 
-    fn exit_reason_from_erlang(&mut self, raw_var: &str) -> CExpr {
+    pub(super) fn exit_reason_from_erlang(&mut self, raw_var: &str) -> CExpr {
         let normal = mangle_ctor_atom("Normal", self.ctors);
         let shutdown = mangle_ctor_atom("Shutdown", self.ctors);
         let killed = mangle_ctor_atom("Killed", self.ctors);
