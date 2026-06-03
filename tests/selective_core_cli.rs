@@ -128,6 +128,61 @@ fn selective_core_codegen_adapts_pure_effect_callback_args() {
 }
 
 #[test]
+fn selective_core_codegen_preserves_cps_callback_abi_for_public_entries() {
+    let binary = env!("CARGO_BIN_EXE_saga");
+    let project_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("examples/optimization/selective-uniform/atomic-ref-project");
+
+    let output = std::process::Command::new(binary)
+        .current_dir(&project_dir)
+        .args(["run", "--selective-codegen"])
+        .output()
+        .expect("run selective atomic-ref fixture");
+    assert!(
+        output.status.success(),
+        "saga run failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let output_text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        output_text.contains("\"after modify: 10\""),
+        "{output_text}"
+    );
+    assert!(output_text.contains("\"after set: 42\""), "{output_text}");
+}
+
+#[test]
+fn selective_core_codegen_adapts_pure_callbacks_for_local_cps_calls() {
+    let binary = env!("CARGO_BIN_EXE_saga");
+    let project_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("examples/optimization/selective-uniform/state-effect-project");
+
+    let output = std::process::Command::new(binary)
+        .current_dir(&project_dir)
+        .args(["run", "--selective-codegen"])
+        .output()
+        .expect("run selective state-effect fixture");
+    assert!(
+        output.status.success(),
+        "saga run failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let output_text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output_text.contains("\"5\""), "{output_text}");
+    assert!(output_text.contains("\"hello world\""), "{output_text}");
+}
+
+#[test]
 fn selective_core_codegen_falls_back_when_static_handler_specialization_cannot_inline() {
     let binary = env!("CARGO_BIN_EXE_saga");
     let project_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))

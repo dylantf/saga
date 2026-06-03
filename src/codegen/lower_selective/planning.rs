@@ -504,7 +504,10 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         Some((shapes, callback_params))
     }
 
-    fn cps_callback_params_called_in_body(&self, fb: &MFunBinding) -> Vec<HofCallbackParam> {
+    pub(super) fn cps_callback_params_called_in_body(
+        &self,
+        fb: &MFunBinding,
+    ) -> Vec<HofCallbackParam> {
         let param_indices: HashMap<String, usize> = fb
             .params
             .iter()
@@ -527,7 +530,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         callbacks
     }
 
-    fn collect_cps_callback_param_calls(
+    pub(super) fn collect_cps_callback_param_calls(
         &self,
         expr: &MExpr,
         param_indices: &HashMap<String, usize>,

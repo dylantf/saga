@@ -288,7 +288,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                         FunctionLoweringPlan::DirectBody => {
                             funs.push(self.lower_direct_fun_binding_group(&group));
                             if self.needs_cps_adapter(&fb.name) {
-                                funs.push(self.lower_cps_adapter_for(&fb.name, &fb.params));
+                                funs.push(self.lower_cps_adapter_for(fb));
                             }
                         }
                         FunctionLoweringPlan::DirectBodyWithCpsIsland => {
@@ -440,27 +440,89 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         }
     }
 
-    fn lower_cps_adapter_for(&self, name: &str, source_params: &[Pat]) -> CFunDef {
-        let direct_params = lower_param_names(source_params);
+    fn lower_cps_adapter_for(&self, fb: &MFunBinding) -> CFunDef {
+        let direct_params = lower_param_names(&fb.params);
         let mut params = direct_params.clone();
         params.push("_Evidence".to_string());
         params.push("_ReturnK".to_string());
+        let direct_call_args = self.cps_adapter_direct_call_args(fb, &direct_params);
         let direct_call = CExpr::Apply(
             Box::new(CExpr::FunRef(
-                self.direct_entry_name(name),
+                self.direct_entry_name(&fb.name),
                 direct_params.len(),
             )),
-            direct_params.into_iter().map(CExpr::Var).collect(),
+            direct_call_args,
         );
         let body = CExpr::Apply(
             Box::new(CExpr::Var("_ReturnK".to_string())),
             vec![direct_call],
         );
         CFunDef {
-            name: name.to_string(),
+            name: fb.name.clone(),
             arity: params.len(),
             body: CExpr::Fun(params, Box::new(body)),
         }
+    }
+
+    fn cps_adapter_direct_call_args(
+        &self,
+        fb: &MFunBinding,
+        direct_params: &[String],
+    ) -> Vec<CExpr> {
+        let param_shapes = self.param_shapes_for_fun(fb);
+        direct_params
+            .iter()
+            .enumerate()
+            .map(
+                |(index, name)| match param_shapes.get(index).and_then(|shape| shape.as_ref()) {
+                    Some(LocalValueShape::PureCallableFromUseType) => {
+                        let arity = self
+                            .pure_callable_param_arity(fb, index)
+                            .expect("pure callable param shape must have an arity");
+                        self.cps_param_to_direct_closure(name, arity, index)
+                    }
+                    Some(LocalValueShape::PureCallable { arity }) => {
+                        self.cps_param_to_direct_closure(name, *arity, index)
+                    }
+                    _ => CExpr::Var(name.clone()),
+                },
+            )
+            .collect()
+    }
+
+    fn pure_callable_param_arity(&self, fb: &MFunBinding, index: usize) -> Option<usize> {
+        let mut current = self.effect_info.type_at_node.get(&fb.id)?;
+        for current_index in 0..=index {
+            let Type::Fun(param, ret, _) = current else {
+                return None;
+            };
+            if current_index == index {
+                return self.pure_function_arity_from_type(param);
+            }
+            current = ret;
+        }
+        None
+    }
+
+    fn cps_param_to_direct_closure(&self, param_name: &str, arity: usize, index: usize) -> CExpr {
+        let arg_names: Vec<String> = (0..arity)
+            .map(|arg_index| format!("_CpsAdapterArg{index}_{arg_index}"))
+            .collect();
+        let k_name = format!("_CpsAdapterK{index}");
+        let k_arg = format!("_CpsAdapterV{index}");
+        let mut cps_args: Vec<CExpr> = arg_names.iter().cloned().map(CExpr::Var).collect();
+        cps_args.push(CExpr::Var("_Evidence".to_string()));
+        cps_args.push(CExpr::Var(k_name.clone()));
+        let apply_cps = CExpr::Apply(Box::new(CExpr::Var(param_name.to_string())), cps_args);
+        let identity_k = CExpr::Fun(vec![k_arg.clone()], Box::new(CExpr::Var(k_arg)));
+        CExpr::Fun(
+            arg_names,
+            Box::new(CExpr::Let(
+                k_name,
+                Box::new(identity_k),
+                Box::new(apply_cps),
+            )),
+        )
     }
 
     fn lower_direct_cps_island_fun_binding(&mut self, fb: &MFunBinding) -> CFunDef {
@@ -492,7 +554,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         params.push("_ReturnK".to_string());
 
         self.push_scope();
-        self.bind_fun_param_locals(fb);
+        self.bind_cps_entry_param_locals(fb);
         let lowered_body = self.lower_cps_expr(
             &fb.body,
             CExpr::Var("_Evidence".to_string()),
@@ -926,6 +988,32 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         }
     }
 
+    fn bind_cps_entry_param_locals(&mut self, fb: &MFunBinding) {
+        let param_shapes = self.param_shapes_for_cps_entry(fb);
+        let callback_params: HashMap<usize, usize> = self
+            .cps_callback_params_called_in_body(fb)
+            .into_iter()
+            .map(|callback| (callback.index, callback.source_arity))
+            .collect();
+        for (index, pat) in fb.params.iter().enumerate() {
+            let shape = param_shapes
+                .get(index)
+                .cloned()
+                .flatten()
+                .or_else(|| self.local_shape_for_cps_entry_pat(pat))
+                .or_else(|| {
+                    callback_params.get(&index).copied().map(|source_arity| {
+                        LocalValueShape::RuntimeCpsCallable {
+                            source_arity,
+                            adapter_arity: source_arity + 2,
+                            effects: Vec::new(),
+                        }
+                    })
+                });
+            self.bind_pat_locals_with_shape(pat, shape);
+        }
+    }
+
     fn param_shapes_for_fun(&self, fb: &MFunBinding) -> Vec<Option<LocalValueShape>> {
         let Some(mut current) = self.effect_info.type_at_node.get(&fb.id) else {
             return vec![None; fb.params.len()];
@@ -944,6 +1032,61 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             Some(LocalValueShape::PureCallableFromUseType)
         } else if let Some((source_arity, adapter_arity, effects)) =
             self.cps_function_arity_from_type(ty)
+        {
+            Some(LocalValueShape::RuntimeCpsCallable {
+                source_arity,
+                adapter_arity,
+                effects,
+            })
+        } else {
+            None
+        }
+    }
+
+    fn param_shapes_for_cps_entry(&self, fb: &MFunBinding) -> Vec<Option<LocalValueShape>> {
+        let Some(mut current) = self.effect_info.type_at_node.get(&fb.id) else {
+            return vec![None; fb.params.len()];
+        };
+        let mut shapes = Vec::with_capacity(fb.params.len());
+        while let Type::Fun(param, ret, _) = current {
+            shapes.push(self.local_shape_for_cps_entry_param_type(param));
+            current = ret;
+        }
+        shapes.resize(fb.params.len(), None);
+        shapes
+    }
+
+    fn local_shape_for_cps_entry_param_type(&self, ty: &Type) -> Option<LocalValueShape> {
+        if let Some(source_arity) = self.pure_function_arity_from_type(ty) {
+            Some(LocalValueShape::RuntimeCpsCallable {
+                source_arity,
+                adapter_arity: source_arity + 2,
+                effects: Vec::new(),
+            })
+        } else if let Some((source_arity, adapter_arity, effects)) =
+            self.cps_function_arity_from_type(ty)
+        {
+            Some(LocalValueShape::RuntimeCpsCallable {
+                source_arity,
+                adapter_arity,
+                effects,
+            })
+        } else {
+            None
+        }
+    }
+
+    fn local_shape_for_cps_entry_pat(&self, pat: &Pat) -> Option<LocalValueShape> {
+        let Pat::Var { id, .. } = pat else {
+            return None;
+        };
+        if let Some(source_arity) = self.pure_function_arity_at(*id) {
+            Some(LocalValueShape::RuntimeCpsCallable {
+                source_arity,
+                adapter_arity: source_arity + 2,
+                effects: Vec::new(),
+            })
+        } else if let Some((source_arity, adapter_arity, effects)) = self.cps_function_arity_at(*id)
         {
             Some(LocalValueShape::RuntimeCpsCallable {
                 source_arity,
@@ -1773,10 +1916,13 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         };
         let mut shapes = Vec::new();
         while let Type::Fun(param, ret, _) = current {
-            shapes.push(
+            let shape = if let Some(source_arity) = self.pure_function_arity_from_type(param) {
+                Some((source_arity, source_arity + 2))
+            } else {
                 self.cps_function_arity_from_type(param)
-                    .map(|(source_arity, adapter_arity, _effects)| (source_arity, adapter_arity)),
-            );
+                    .map(|(source_arity, adapter_arity, _effects)| (source_arity, adapter_arity))
+            };
+            shapes.push(shape);
             current = ret;
         }
         shapes
@@ -2014,33 +2160,38 @@ mod tests {
         NodeId::fresh()
     }
 
-    fn test_effect_info<'a>(
-        effect_calls: &'a HashMap<NodeId, crate::typechecker::ResolvedEffectOp>,
-        handler_arms: &'a HashMap<NodeId, crate::typechecker::ResolvedEffectOp>,
-        constructors: &'a HashMap<NodeId, String>,
-        fun_effects: &'a HashMap<String, HashSet<String>>,
-        let_effect_bindings: &'a HashMap<String, Vec<String>>,
-        type_at_node: &'a HashMap<NodeId, Type>,
-        records: &'a HashMap<String, crate::typechecker::RecordInfo>,
-        traits: &'a HashMap<String, crate::typechecker::TraitInfo>,
-        effect_ops: &'a HashMap<String, Vec<String>>,
-        handler_effects: &'a HashMap<String, Vec<String>>,
-        handler_refs: &'a HashMap<NodeId, crate::typechecker::ResolvedValue>,
-        let_handler_effects: &'a HashMap<NodeId, Vec<String>>,
-    ) -> EffectInfo<'a> {
-        EffectInfo {
-            effect_calls,
-            handler_arms,
-            constructors,
-            fun_effects,
-            let_effect_bindings,
-            type_at_node,
-            records,
-            traits,
-            effect_ops,
-            handler_effects,
-            handler_refs,
-            let_handler_effects,
+    #[derive(Default)]
+    struct TestEffectInfo {
+        effect_calls: HashMap<NodeId, crate::typechecker::ResolvedEffectOp>,
+        handler_arms: HashMap<NodeId, crate::typechecker::ResolvedEffectOp>,
+        constructors: HashMap<NodeId, String>,
+        fun_effects: HashMap<String, HashSet<String>>,
+        let_effect_bindings: HashMap<String, Vec<String>>,
+        type_at_node: HashMap<NodeId, Type>,
+        records: HashMap<String, crate::typechecker::RecordInfo>,
+        traits: HashMap<String, crate::typechecker::TraitInfo>,
+        effect_ops: HashMap<String, Vec<String>>,
+        handler_effects: HashMap<String, Vec<String>>,
+        handler_refs: HashMap<NodeId, crate::typechecker::ResolvedValue>,
+        let_handler_effects: HashMap<NodeId, Vec<String>>,
+    }
+
+    impl TestEffectInfo {
+        fn as_effect_info(&self) -> EffectInfo<'_> {
+            EffectInfo {
+                effect_calls: &self.effect_calls,
+                handler_arms: &self.handler_arms,
+                constructors: &self.constructors,
+                fun_effects: &self.fun_effects,
+                let_effect_bindings: &self.let_effect_bindings,
+                type_at_node: &self.type_at_node,
+                records: &self.records,
+                traits: &self.traits,
+                effect_ops: &self.effect_ops,
+                handler_effects: &self.handler_effects,
+                handler_refs: &self.handler_refs,
+                let_handler_effects: &self.let_handler_effects,
+            }
         }
     }
 
@@ -2057,32 +2208,8 @@ mod tests {
 
     #[test]
     fn known_dict_values_compose_through_identical_if_branches() {
-        let effect_calls = HashMap::new();
-        let handler_arms = HashMap::new();
-        let constructors = HashMap::new();
-        let fun_effects = HashMap::new();
-        let let_effect_bindings = HashMap::new();
-        let type_at_node = HashMap::new();
-        let records = HashMap::new();
-        let traits = HashMap::new();
-        let effect_ops = HashMap::new();
-        let handler_effects = HashMap::new();
-        let handler_refs = HashMap::new();
-        let let_handler_effects = HashMap::new();
-        let effect_info = test_effect_info(
-            &effect_calls,
-            &handler_arms,
-            &constructors,
-            &fun_effects,
-            &let_effect_bindings,
-            &type_at_node,
-            &records,
-            &traits,
-            &effect_ops,
-            &handler_effects,
-            &handler_refs,
-            &let_handler_effects,
-        );
+        let effect_info_fixture = TestEffectInfo::default();
+        let effect_info = effect_info_fixture.as_effect_info();
         let resolution = ResolutionMap::new();
         let ctors = ConstructorAtoms::new();
         let module_ctx = CodegenContext::default();

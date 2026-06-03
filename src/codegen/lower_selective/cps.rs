@@ -1324,7 +1324,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         if let Some((source_arity, adapter_arity)) = expected_cps_callback {
             return self.lower_cps_runtime_value_atom(atom, source_arity, adapter_arity);
         }
-        self.lower_cps_value_atom(atom)
+        self.lower_atom(atom)
     }
 
     fn lower_effect_protocol_arg_atom(&mut self, atom: &Atom) -> CExpr {
