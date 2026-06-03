@@ -543,25 +543,6 @@ pub fn emit_module_via_new_path(
 
     let is_main = entry_export.is_some();
     if let Some(selective_program) = selective_program {
-        let mut fallback_lowerer = lower::Lowerer::new(
-            &resolution_map,
-            &constructor_atoms,
-            ctx,
-            &handler_info,
-            &effect_info,
-            &handler_value_map,
-        );
-        if let Some(source_file) = source_file {
-            let source_spans = source_spans::for_program(&anf_program, &check_result.node_spans);
-            fallback_lowerer = fallback_lowerer.with_source_info(lower::SourceInfo::new(
-                source_file.path.clone(),
-                &source_file.source,
-                source_spans,
-            ));
-        }
-        let fallback_cmod = fallback_lowerer
-            .with_bootstrap_emission(is_main)
-            .lower_module(module_name, &optimized);
         let selective_cmod = lower_selective::lower_module_with_entry_export_options(
             module_name,
             &selective_program,
@@ -575,11 +556,31 @@ pub fn emit_module_via_new_path(
                 require_all_functions: options.selective_no_fallback,
             },
         );
-        let fallback_direct_adapters =
-            selective_fallback_direct_adapters(&selective_program, &effect_info);
         let cmod = if options.selective_no_fallback {
             selective_cmod
         } else {
+            let mut fallback_lowerer = lower::Lowerer::new(
+                &resolution_map,
+                &constructor_atoms,
+                ctx,
+                &handler_info,
+                &effect_info,
+                &handler_value_map,
+            );
+            if let Some(source_file) = source_file {
+                let source_spans =
+                    source_spans::for_program(&anf_program, &check_result.node_spans);
+                fallback_lowerer = fallback_lowerer.with_source_info(lower::SourceInfo::new(
+                    source_file.path.clone(),
+                    &source_file.source,
+                    source_spans,
+                ));
+            }
+            let fallback_cmod = fallback_lowerer
+                .with_bootstrap_emission(is_main)
+                .lower_module(module_name, &optimized);
+            let fallback_direct_adapters =
+                selective_fallback_direct_adapters(&selective_program, &effect_info);
             merge_selective_core_modules(fallback_cmod, selective_cmod, &fallback_direct_adapters)
         };
         return EmitModuleOutput {
