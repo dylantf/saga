@@ -56,6 +56,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
     }
 
     fn compute_direct_body_plans(&mut self, program: &MProgram) {
+        let single_clause_funs = single_clause_function_names(program);
         let funs: Vec<&MFunBinding> = program
             .iter()
             .filter_map(|decl| match decl {
@@ -68,6 +69,9 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         while changed {
             changed = false;
             for fb in &funs {
+                if !single_clause_funs.contains(&fb.name) {
+                    continue;
+                }
                 if self.function_plans.contains_key(&fb.name) {
                     continue;
                 }
@@ -81,10 +85,14 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
     }
 
     fn compute_cps_body_plans(&mut self, program: &MProgram) {
+        let single_clause_funs = single_clause_function_names(program);
         for decl in program {
             let MDecl::FunBinding(fb) = decl else {
                 continue;
             };
+            if !single_clause_funs.contains(&fb.name) {
+                continue;
+            }
             if self.function_plans.contains_key(&fb.name) {
                 continue;
             }
@@ -96,10 +104,14 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
     }
 
     fn compute_hof_direct_specializations(&mut self, program: &MProgram) {
+        let single_clause_funs = single_clause_function_names(program);
         for decl in program {
             let MDecl::FunBinding(fb) = decl else {
                 continue;
             };
+            if !single_clause_funs.contains(&fb.name) {
+                continue;
+            }
             if !matches!(
                 self.function_plans.get(&fb.name),
                 Some(FunctionLoweringPlan::CpsBody)
@@ -114,10 +126,14 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
     }
 
     fn compute_direct_cps_island_body_plans(&mut self, program: &MProgram) {
+        let single_clause_funs = single_clause_function_names(program);
         for decl in program {
             let MDecl::FunBinding(fb) = decl else {
                 continue;
             };
+            if !single_clause_funs.contains(&fb.name) {
+                continue;
+            }
             if self.function_plans.contains_key(&fb.name) {
                 continue;
             }
@@ -576,4 +592,17 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             | MExpr::HandlerValue { .. } => {}
         }
     }
+}
+
+fn single_clause_function_names(program: &MProgram) -> HashSet<String> {
+    let mut counts: HashMap<String, usize> = HashMap::new();
+    for decl in program {
+        if let MDecl::FunBinding(fb) = decl {
+            *counts.entry(fb.name.clone()).or_default() += 1;
+        }
+    }
+    counts
+        .into_iter()
+        .filter_map(|(name, count)| (count == 1).then_some(name))
+        .collect()
 }

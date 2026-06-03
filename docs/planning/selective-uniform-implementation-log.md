@@ -1178,9 +1178,25 @@ boundaries exist.
   - fallback-only pure functions get direct `name/N` adapters over their old
     uniform `name/(N+2)` definitions, which lets selective HOF/direct code call
     pure fallback helpers by the selective direct ABI;
-  - fallback-only dict constructors get direct `dict/N` adapters that rebuild a
-    selective-shaped dict tuple: pure methods are wrapped as direct closures,
-    while effectful/open-row methods keep their CPS closures;
+  - fallback-only nullary dict constructors get direct `dict/0` adapters that
+    rebuild a selective-shaped dict tuple: pure methods are wrapped as direct
+    closures, while effectful/open-row methods keep their CPS closures;
+  - parameterized fallback dict constructors are intentionally not adapted yet:
+    their direct ABI parameters are selective-shaped dictionaries, but their old
+    fallback bodies expect uniform-shaped dependency dictionaries. Bridging
+    those safely needs trait-method shape metadata for each dict parameter;
+  - fallback uniform exports are intentionally preserved during the cutover:
+    fallback definitions in other modules may still call remote uniform
+    `name/(N+2)` or `dict/(N+2)` entries, so the merged module temporarily
+    dual-exports the old fallback ABI and the new selective direct adapters;
+  - private fallback dict constructors also get local direct adapters when the
+    selective overlay needs them, but those adapters are not exported unless the
+    old uniform constructor was exported;
+  - multi-clause functions are intentionally left to fallback for now. The old
+    lowerer groups same-name clauses into one Core function; the selective
+    planner used to key only by function name and could incorrectly plan one
+    direct clause while another clause still yielded. Examples `02-fibonacci`
+    and `15-typechecking-errors` now cover this fallback behavior;
   - stdlib cache fingerprints now include the backend, and selective builds
     compile stdlib modules through the same selective/fallback merge instead of
     reusing uniform-only stdlib beams;

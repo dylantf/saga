@@ -625,10 +625,6 @@ fn merge_selective_core_modules(
     selective: cerl::CModule,
     direct_adapters: &HashMap<String, DirectFallbackAdapter>,
 ) -> cerl::CModule {
-    let adapter_uniform_exports: HashSet<(String, usize)> = direct_adapters
-        .iter()
-        .map(|(name, adapter)| (name.clone(), adapter.uniform_arity()))
-        .collect();
     let fallback_exports: HashSet<(String, usize)> = fallback.exports.iter().cloned().collect();
 
     let mut funs = fallback.funs;
@@ -637,6 +633,7 @@ fn merge_selective_core_modules(
         .enumerate()
         .map(|(index, fun)| ((fun.name.clone(), fun.arity), index))
         .collect();
+    let fallback_fun_keys: HashSet<(String, usize)> = fun_indexes.keys().cloned().collect();
 
     for fun in selective.funs {
         let key = (fun.name.clone(), fun.arity);
@@ -651,9 +648,6 @@ fn merge_selective_core_modules(
     let mut exports = Vec::new();
     let mut export_seen = HashSet::new();
     for export in fallback.exports {
-        if adapter_uniform_exports.contains(&export) {
-            continue;
-        }
         push_export(&mut exports, &mut export_seen, export);
     }
     for export in selective.exports {
@@ -663,13 +657,15 @@ fn merge_selective_core_modules(
     for (name, adapter) in direct_adapters {
         let direct_key = (name.clone(), adapter.direct_arity());
         let fallback_key = (name.clone(), adapter.uniform_arity());
-        if !fallback_exports.contains(&fallback_key) || fun_indexes.contains_key(&direct_key) {
+        if !fallback_fun_keys.contains(&fallback_key) || fun_indexes.contains_key(&direct_key) {
             continue;
         }
         let adapter = build_direct_fallback_adapter(name, adapter);
         fun_indexes.insert(direct_key.clone(), funs.len());
         funs.push(adapter);
-        push_export(&mut exports, &mut export_seen, direct_key);
+        if fallback_exports.contains(&fallback_key) {
+            push_export(&mut exports, &mut export_seen, direct_key);
+        }
     }
 
     cerl::CModule {
@@ -721,7 +717,7 @@ fn selective_fallback_direct_adapters(
                         source_arity: fb.params.len(),
                     });
             }
-            monadic::ir::MDecl::DictConstructor(dc) => {
+            monadic::ir::MDecl::DictConstructor(dc) if dc.dict_params.is_empty() => {
                 adapters.insert(
                     dc.name.clone(),
                     DirectFallbackAdapter::Dict {
@@ -729,6 +725,7 @@ fn selective_fallback_direct_adapters(
                     },
                 );
             }
+            monadic::ir::MDecl::DictConstructor(_) => {}
             monadic::ir::MDecl::FunBinding(_)
             | monadic::ir::MDecl::Val(_)
             | monadic::ir::MDecl::Passthrough(_) => {}

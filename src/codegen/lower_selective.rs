@@ -659,6 +659,9 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         if !effects.is_empty() {
             return None;
         }
+        if *arity > 0 {
+            return None;
+        }
         Some(DirectCallable {
             module: erlang_mod.clone(),
             name: name.clone(),

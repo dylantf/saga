@@ -229,7 +229,39 @@ fn selective_core_merge_adds_direct_dict_adapter_over_uniform_fallback() {
     assert!(
         matches!(dict_tuple.as_ref(), CExpr::Tuple(methods) if matches!(methods.as_slice(), [CExpr::Fun(params, _)] if params.len() == 1))
     );
-    assert_eq!(merged.exports, vec![("__dict_Readable_Int".to_string(), 0)]);
+    assert_eq!(
+        merged.exports,
+        vec![
+            ("__dict_Readable_Int".to_string(), 2),
+            ("__dict_Readable_Int".to_string(), 0)
+        ]
+    );
+}
+
+#[test]
+fn selective_core_merge_adds_private_direct_dict_adapter() {
+    let fallback = test_core_module(
+        "m",
+        vec![],
+        vec![test_core_fun("__dict_Private_Int", 2, "dict")],
+    );
+    let selective = test_core_module("m", vec![], vec![]);
+    let mut adapters = HashMap::new();
+    adapters.insert(
+        "__dict_Private_Int".to_string(),
+        super::DirectFallbackAdapter::Dict {
+            constructor: test_dict_constructor("__dict_Private_Int", vec![]),
+        },
+    );
+
+    let merged = super::merge_selective_core_modules(fallback, selective, &adapters);
+    assert!(
+        merged
+            .funs
+            .iter()
+            .any(|fun| fun.name == "__dict_Private_Int" && fun.arity == 0)
+    );
+    assert!(merged.exports.is_empty(), "{:?}", merged.exports);
 }
 
 #[test]
@@ -259,7 +291,13 @@ fn selective_core_merge_adds_direct_pure_adapter_over_uniform_fallback() {
             .iter()
             .any(|fun| fun.name == "mark_skip_entry" && fun.arity == 1)
     );
-    assert_eq!(merged.exports, vec![("mark_skip_entry".to_string(), 1)]);
+    assert_eq!(
+        merged.exports,
+        vec![
+            ("mark_skip_entry".to_string(), 3),
+            ("mark_skip_entry".to_string(), 1)
+        ]
+    );
 }
 
 fn erlang_tool_available(tool: &str) -> bool {

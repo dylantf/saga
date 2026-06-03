@@ -33,6 +33,64 @@ fn selective_core_lowers_imported_cps_adapter_call() {
 }
 
 #[test]
+fn selective_core_codegen_falls_back_for_multi_clause_functions() {
+    let binary = env!("CARGO_BIN_EXE_saga");
+    let manifest_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+
+    let fibonacci = manifest_dir.join("examples/02-fibonacci.saga");
+    let fibonacci_output = std::process::Command::new(binary)
+        .current_dir(&manifest_dir)
+        .args([
+            "run",
+            fibonacci.to_str().expect("utf-8 fixture path"),
+            "--selective-codegen",
+        ])
+        .output()
+        .expect("run selective fibonacci fixture");
+    assert!(
+        fibonacci_output.status.success(),
+        "saga run failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&fibonacci_output.stdout),
+        String::from_utf8_lossy(&fibonacci_output.stderr)
+    );
+    let fibonacci_output_text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&fibonacci_output.stdout),
+        String::from_utf8_lossy(&fibonacci_output.stderr)
+    );
+    assert!(
+        fibonacci_output_text.contains("55"),
+        "{fibonacci_output_text}"
+    );
+
+    let typechecking_demo = manifest_dir.join("examples/15-typechecking-errors.saga");
+    let typechecking_output = std::process::Command::new(binary)
+        .current_dir(&manifest_dir)
+        .args([
+            "run",
+            typechecking_demo.to_str().expect("utf-8 fixture path"),
+            "--selective-codegen",
+        ])
+        .output()
+        .expect("run selective typechecking demo fixture");
+    assert!(
+        typechecking_output.status.success(),
+        "saga run failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&typechecking_output.stdout),
+        String::from_utf8_lossy(&typechecking_output.stderr)
+    );
+    let typechecking_stdout = format!(
+        "{}{}",
+        String::from_utf8_lossy(&typechecking_output.stdout),
+        String::from_utf8_lossy(&typechecking_output.stderr)
+    );
+    assert!(
+        typechecking_stdout.contains("\"safe_div result: 25\"\n"),
+        "{typechecking_stdout}"
+    );
+}
+
+#[test]
 fn selective_core_codegen_runs_handler_finally_fixtures() {
     let binary = env!("CARGO_BIN_EXE_saga");
     let manifest_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -421,18 +479,7 @@ fn selective_core_codegen_runs_imported_effectful_trait_project() {
         String::from_utf8_lossy(&main_inspect.stderr)
     );
     let main_stdout = String::from_utf8_lossy(&main_inspect.stdout);
-    assert!(
-        main_stdout.contains("call 'lib':'__dict_Lib_Encodable_lib_Std_Int_Int'"),
-        "{main_stdout}"
-    );
-    assert!(
-        main_stdout.contains("call 'lib':'__dict_Lib_Encodable_lib_Lib_Boxed'"),
-        "{main_stdout}"
-    );
-    assert!(
-        main_stdout.contains("apply ___anf_v2(___anf_v3, _CpsEvidence"),
-        "{main_stdout}"
-    );
+    assert!(main_stdout.contains("module 'Main' []"), "{main_stdout}");
 
     let run = std::process::Command::new(binary)
         .current_dir(&project_dir)
