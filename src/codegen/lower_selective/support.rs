@@ -161,6 +161,10 @@ pub(super) fn direct_pat_supported(pat: &Pat) -> bool {
         Pat::Wildcard { .. } | Pat::Var { .. } | Pat::Lit { .. } => true,
         Pat::Tuple { elements, .. } => elements.iter().all(direct_param_supported),
         Pat::Constructor { args, .. } => args.iter().all(direct_param_supported),
+        Pat::Record { fields, .. } | Pat::AnonRecord { fields, .. } => fields
+            .iter()
+            .all(|(_, pat)| pat.as_ref().is_none_or(direct_param_supported)),
+        Pat::StringPrefix { rest, .. } => direct_param_supported(rest),
         _ => false,
     }
 }
@@ -173,13 +177,15 @@ pub(super) fn pat_binds_name(pat: &Pat, target: &str) -> bool {
             fields, as_name, ..
         } => {
             as_name.as_ref().is_some_and(|name| name == target)
-                || fields
-                    .iter()
-                    .any(|(_, pat)| pat.as_ref().is_some_and(|pat| pat_binds_name(pat, target)))
+                || fields.iter().any(|(field_name, pat)| match pat {
+                    Some(pat) => pat_binds_name(pat, target),
+                    None => field_name == target,
+                })
         }
-        Pat::AnonRecord { fields, .. } => fields
-            .iter()
-            .any(|(_, pat)| pat.as_ref().is_some_and(|pat| pat_binds_name(pat, target))),
+        Pat::AnonRecord { fields, .. } => fields.iter().any(|(field_name, pat)| match pat {
+            Some(pat) => pat_binds_name(pat, target),
+            None => field_name == target,
+        }),
         Pat::Tuple { elements, .. } => elements.iter().any(|pat| pat_binds_name(pat, target)),
         Pat::StringPrefix { rest, .. } => pat_binds_name(rest, target),
         Pat::BitStringPat { segments, .. } => segments
@@ -198,7 +204,7 @@ pub(super) fn direct_intrinsic_arity(intrinsic: IntrinsicId) -> Option<usize> {
     match intrinsic {
         IntrinsicId::PrintStdout | IntrinsicId::PrintStderr => Some(1),
         IntrinsicId::Dbg => Some(2),
-        IntrinsicId::CatchPanic => None,
+        IntrinsicId::CatchPanic => Some(1),
     }
 }
 

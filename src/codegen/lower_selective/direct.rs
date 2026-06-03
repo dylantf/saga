@@ -42,10 +42,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             ),
             MExpr::Case {
                 scrutinee, arms, ..
-            } => CExpr::Case(
-                Box::new(self.lower_atom(scrutinee)),
-                arms.iter().map(|arm| self.lower_arm(arm)).collect(),
-            ),
+            } => self.lower_case_chain(scrutinee, arms),
             MExpr::App { head, args, .. } => self.lower_app(head, args),
             MExpr::BinOp {
                 op, left, right, ..
@@ -62,9 +59,17 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                 anon_fields,
                 ..
             } => self.lower_field_access(record, field, record_name.as_deref(), anon_fields),
-            MExpr::RecordUpdate { .. } | MExpr::ForeignCall { .. } | MExpr::BitString { .. } => {
-                self.unsupported_expr(expr)
-            }
+            MExpr::RecordUpdate {
+                record,
+                fields,
+                record_name,
+                anon_fields,
+                ..
+            } => self.lower_record_update(record, fields, record_name.as_deref(), anon_fields),
+            MExpr::ForeignCall {
+                module, func, args, ..
+            } => self.lower_foreign_call(module, func, args),
+            MExpr::BitString { .. } => self.unsupported_expr(expr),
             MExpr::DictMethodAccess {
                 dict, method_index, ..
             } => {
@@ -85,14 +90,61 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         }
     }
 
-    fn lower_arm(&mut self, arm: &MArm) -> CArm {
-        self.push_scope();
-        self.bind_pat_locals(&arm.pattern);
-        let body = self.lower_expr(&arm.body);
-        let guard = arm.guard.as_ref().map(|g| self.lower_expr(g));
-        let pat = self.lower_pat(&arm.pattern);
-        self.pop_scope();
-        CArm { pat, guard, body }
+    fn lower_case_chain(&mut self, scrutinee: &Atom, arms: &[MArm]) -> CExpr {
+        let scrutinee = self.lower_atom(scrutinee);
+        let scrut_var = self.fresh_cps_temp("_CaseScrut");
+        let mut rest = self.case_clause_error();
+
+        for arm in arms.iter().rev() {
+            let rest_var = self.fresh_cps_temp("_CaseRest");
+            let rest_ref = || CExpr::Apply(Box::new(CExpr::Var(rest_var.clone())), vec![]);
+            self.push_scope();
+            self.bind_pat_locals(&arm.pattern);
+            let body = self.lower_expr(&arm.body);
+            let body = match arm.guard.as_ref() {
+                Some(guard) => CExpr::Case(
+                    Box::new(self.lower_expr(guard)),
+                    vec![
+                        CArm {
+                            pat: CPat::Lit(CLit::Atom("true".to_string())),
+                            guard: None,
+                            body,
+                        },
+                        CArm {
+                            pat: CPat::Wildcard,
+                            guard: None,
+                            body: rest_ref(),
+                        },
+                    ],
+                ),
+                None => body,
+            };
+            let pat = self.lower_pat(&arm.pattern);
+            self.pop_scope();
+
+            let current = CExpr::Case(
+                Box::new(CExpr::Var(scrut_var.clone())),
+                vec![
+                    CArm {
+                        pat,
+                        guard: None,
+                        body,
+                    },
+                    CArm {
+                        pat: CPat::Wildcard,
+                        guard: None,
+                        body: rest_ref(),
+                    },
+                ],
+            );
+            rest = CExpr::Let(
+                rest_var,
+                Box::new(CExpr::Fun(vec![], Box::new(rest))),
+                Box::new(current),
+            );
+        }
+
+        CExpr::Let(scrut_var, Box::new(scrutinee), Box::new(rest))
     }
 
     fn lower_field_access(
@@ -138,6 +190,19 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                 let bare = name.rsplit('.').next().unwrap_or(name);
                 self.effect_info.records.get(bare)
             })
+            .or_else(|| {
+                let bare = name.rsplit('.').next().unwrap_or(name);
+                self.effect_info
+                    .records
+                    .iter()
+                    .find(|(candidate, _)| {
+                        candidate
+                            .rsplit('.')
+                            .next()
+                            .is_some_and(|last| last == bare)
+                    })
+                    .map(|(_, info)| info)
+            })
             .map(|info| info.fields.iter().map(|(field, _)| field.clone()).collect())
             .unwrap_or_else(|| {
                 panic!(
@@ -147,7 +212,66 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             })
     }
 
+    fn lower_record_update(
+        &mut self,
+        record: &Atom,
+        fields: &[(String, Atom)],
+        record_name: Option<&str>,
+        anon_fields: &Option<Vec<String>>,
+    ) -> CExpr {
+        let order = self.record_field_order(record_name, anon_fields.as_deref());
+        let rec_var = self.fresh_cps_temp("_RecordUpdate");
+        let field_map: HashMap<&str, &Atom> = fields
+            .iter()
+            .map(|(name, atom)| (name.as_str(), atom))
+            .collect();
+
+        let mut elems = Vec::with_capacity(order.len() + 1);
+        elems.push(CExpr::Call(
+            "erlang".to_string(),
+            "element".to_string(),
+            vec![CExpr::Lit(CLit::Int(1)), CExpr::Var(rec_var.clone())],
+        ));
+        for (index, field_name) in order.iter().enumerate() {
+            elems.push(match field_map.get(field_name.as_str()) {
+                Some(atom) => self.lower_atom(atom),
+                None => CExpr::Call(
+                    "erlang".to_string(),
+                    "element".to_string(),
+                    vec![
+                        CExpr::Lit(CLit::Int(index as i64 + 2)),
+                        CExpr::Var(rec_var.clone()),
+                    ],
+                ),
+            });
+        }
+
+        CExpr::Let(
+            rec_var,
+            Box::new(self.lower_atom(record)),
+            Box::new(CExpr::Tuple(elems)),
+        )
+    }
+
+    fn lower_foreign_call(&mut self, module: &str, func: &str, args: &[Atom]) -> CExpr {
+        CExpr::Call(
+            module.to_string(),
+            func.to_string(),
+            args.iter().map(|arg| self.lower_atom(arg)).collect(),
+        )
+    }
+
     pub(super) fn lower_app(&mut self, head: &Atom, args: &[Atom]) -> CExpr {
+        if self.is_panic_or_todo_call(head, args) {
+            let Atom::Var { name, .. } = head else {
+                unreachable!("is_panic_or_todo_call only matches variable heads");
+            };
+            return self.lower_panic_or_todo(&name.name, &args[0]);
+        }
+        if let Some(call) = self.lower_direct_external_app(head, args) {
+            return call;
+        }
+
         match self.call_shape(head) {
             Some(CallShape::Intrinsic(intrinsic)) => self.lower_intrinsic_app(intrinsic, args),
             Some(CallShape::Direct(callable)) => {
@@ -183,6 +307,46 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         }
     }
 
+    fn lower_direct_external_app(&mut self, head: &Atom, args: &[Atom]) -> Option<CExpr> {
+        let source = match head {
+            Atom::Var { source, .. } | Atom::QualifiedRef { source, .. } => *source,
+            _ => return None,
+        };
+        let resolved = self.resolution.get(&source)?;
+        let ResolvedCodegenKind::ExternalFunction {
+            target_erlang_mod,
+            target_name,
+            arity,
+            effects,
+            ..
+        } = &resolved.kind
+        else {
+            return None;
+        };
+        if !effects.is_empty() {
+            return None;
+        }
+        self.assert_app_arity(target_name, args.len(), *arity);
+        let call_args = args
+            .iter()
+            .filter(|arg| {
+                !matches!(
+                    arg,
+                    Atom::Lit {
+                        value: Lit::Unit,
+                        ..
+                    }
+                )
+            })
+            .map(|arg| self.lower_atom(arg))
+            .collect();
+        Some(CExpr::Call(
+            target_erlang_mod.clone(),
+            target_name.clone(),
+            call_args,
+        ))
+    }
+
     pub(super) fn assert_app_arity(&self, name: &str, actual: usize, expected: usize) {
         if actual != expected {
             self.unsupported(&format!(
@@ -208,9 +372,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             IntrinsicId::PrintStdout => self.lower_print_intrinsic(args, false),
             IntrinsicId::PrintStderr => self.lower_print_intrinsic(args, true),
             IntrinsicId::Dbg => self.lower_dbg_intrinsic(args),
-            IntrinsicId::CatchPanic => {
-                self.unsupported("intrinsic outside the current direct subset")
-            }
+            IntrinsicId::CatchPanic => self.lower_catch_panic_intrinsic(args),
         }
     }
 
@@ -282,6 +444,113 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         )
     }
 
+    fn lower_catch_panic_intrinsic(&mut self, args: &[Atom]) -> CExpr {
+        if args.len() != 1 {
+            self.unsupported(&format!(
+                "catch_panic intrinsic with {} args; expected 1",
+                args.len()
+            ));
+        }
+
+        let f_var = self.fresh_cps_temp("_CatchPanicF");
+        let result_var = self.fresh_cps_temp("_CatchPanicResult");
+        let ok_var = self.fresh_cps_temp("_CatchPanicOk");
+        let class_var = self.fresh_cps_temp("_CatchPanicClass");
+        let reason_var = self.fresh_cps_temp("_CatchPanicReason");
+        let trace_var = self.fresh_cps_temp("_CatchPanicTrace");
+        let msg_var = self.fresh_cps_temp("_CatchPanicMsg");
+
+        let apply_thunk = CExpr::Apply(
+            Box::new(CExpr::Var(f_var.clone())),
+            vec![CExpr::Lit(CLit::Atom("unit".to_string()))],
+        );
+        let ok_body = CExpr::Tuple(vec![
+            CExpr::Lit(CLit::Atom("ok".to_string())),
+            CExpr::Var(ok_var.clone()),
+        ]);
+        let catch_body = CExpr::Case(
+            Box::new(CExpr::Var(reason_var.clone())),
+            vec![
+                CArm {
+                    pat: CPat::Tuple(vec![
+                        CPat::Lit(CLit::Atom("saga_error".to_string())),
+                        CPat::Wildcard,
+                        CPat::Var(msg_var.clone()),
+                        CPat::Wildcard,
+                        CPat::Wildcard,
+                        CPat::Wildcard,
+                        CPat::Wildcard,
+                    ]),
+                    guard: None,
+                    body: CExpr::Tuple(vec![
+                        CExpr::Lit(CLit::Atom("error".to_string())),
+                        CExpr::Var(msg_var),
+                    ]),
+                },
+                CArm {
+                    pat: CPat::Wildcard,
+                    guard: None,
+                    body: CExpr::Tuple(vec![
+                        CExpr::Lit(CLit::Atom("error".to_string())),
+                        CExpr::Call(
+                            "saga_runtime".to_string(),
+                            "format_caught_panic".to_string(),
+                            vec![
+                                CExpr::Var(class_var.clone()),
+                                CExpr::Var(reason_var.clone()),
+                            ],
+                        ),
+                    ]),
+                },
+            ],
+        );
+        let try_expr = CExpr::Try {
+            expr: Box::new(apply_thunk),
+            ok_var,
+            ok_body: Box::new(ok_body),
+            catch_vars: (class_var, reason_var, trace_var),
+            catch_body: Box::new(catch_body),
+        };
+
+        CExpr::Let(
+            f_var,
+            Box::new(self.lower_atom(&args[0])),
+            Box::new(CExpr::Let(
+                result_var.clone(),
+                Box::new(try_expr),
+                Box::new(CExpr::Var(result_var)),
+            )),
+        )
+    }
+
+    fn lower_panic_or_todo(&mut self, name: &str, msg_atom: &Atom) -> CExpr {
+        let kind_atom = if name == "todo" { "todo" } else { "panic" };
+        let msg = if name == "todo" {
+            crate::codegen::lower::util::lower_string_to_binary("not implemented")
+        } else {
+            self.lower_atom(msg_atom)
+        };
+        let msg_var = self.fresh_cps_temp("_PanicMsg");
+        let err_term = CExpr::Tuple(vec![
+            CExpr::Lit(CLit::Atom("saga_error".to_string())),
+            CExpr::Lit(CLit::Atom(kind_atom.to_string())),
+            CExpr::Var(msg_var.clone()),
+            crate::codegen::lower::util::lower_string_to_binary(""),
+            crate::codegen::lower::util::lower_string_to_binary(""),
+            crate::codegen::lower::util::lower_string_to_binary(""),
+            CExpr::Lit(CLit::Int(0)),
+        ]);
+        CExpr::Let(
+            msg_var,
+            Box::new(msg),
+            Box::new(CExpr::Call(
+                "erlang".to_string(),
+                "error".to_string(),
+                vec![err_term],
+            )),
+        )
+    }
+
     pub(super) fn lower_atom(&mut self, atom: &Atom) -> CExpr {
         match atom {
             Atom::Var { name, .. } => {
@@ -293,12 +562,11 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                                 | LocalValueShape::RuntimeCpsCallable { .. }
                         )
                     ) {
-                        self.unsupported(&format!(
-                            "CPS callable value '{}' used outside a CPS call",
-                            name.name
-                        ));
+                        return self.lower_cps_value_atom(atom);
                     }
                     CExpr::Var(core_var(&name.name))
+                } else if self.cps_value_atom_shape(atom).is_some() {
+                    self.lower_cps_value_atom(atom)
                 } else if let Some(value_ref) = self.direct_function_value_ref(atom) {
                     value_ref
                 } else if self.direct_values.contains(&name.name) {
@@ -314,13 +582,27 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             }
             Atom::AnonRecord { fields, .. } => self.lower_anon_record_atom(fields),
             Atom::Record { name, fields, .. } => self.lower_record_atom(name, fields),
-            Atom::Lambda { params, body, .. } => self.lower_lambda_atom(params, body),
+            Atom::Lambda { params, body, .. } => {
+                if self.cps_value_atom_shape(atom).is_some() {
+                    return self.lower_cps_value_atom(atom);
+                }
+                if self.lambda_is_direct_cps_island_subset(params, body) {
+                    self.lower_direct_cps_island_lambda_atom(params, body)
+                } else {
+                    self.lower_lambda_atom(params, body)
+                }
+            }
             Atom::Symbol { symbol, .. } => {
                 crate::codegen::lower::util::lower_string_to_binary(symbol)
             }
-            Atom::QualifiedRef { .. } => self
-                .direct_function_value_ref(atom)
-                .unwrap_or_else(|| self.unsupported_atom(atom)),
+            Atom::QualifiedRef { .. } => {
+                if self.cps_value_atom_shape(atom).is_some() {
+                    self.lower_cps_value_atom(atom)
+                } else {
+                    self.direct_function_value_ref(atom)
+                        .unwrap_or_else(|| self.unsupported_atom(atom))
+                }
+            }
             Atom::DictRef { .. } | Atom::BackendAtom { .. } | Atom::BackendSpawnThunk { .. } => {
                 self.unsupported_atom(atom)
             }
@@ -369,21 +651,24 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             self.current_scope_mut().insert(dict_param.clone());
         }
         for (index, method) in dc.methods.iter().enumerate() {
-            let MExpr::Pure(Atom::Lambda { params, body, .. }) = method else {
-                self.unsupported(&format!(
-                    "dict constructor '{}' method {} is not a lambda",
-                    dc.name, index
-                ));
-            };
             let effectful = dc
                 .method_effects
                 .get(index)
                 .is_some_and(|effects| !effects.is_empty())
                 || dc.method_open_rows.get(index).copied().unwrap_or(false);
-            let lowered = if effectful {
-                self.lower_cps_lambda_atom(params, body)
-            } else {
-                self.lower_lambda_atom(params, body)
+
+            let lowered = match method {
+                MExpr::Pure(Atom::Lambda { params, body, .. }) if effectful => {
+                    self.lower_cps_lambda_atom(params, body)
+                }
+                MExpr::Pure(Atom::Lambda { params, body, .. }) => {
+                    self.lower_lambda_atom(params, body)
+                }
+                _ if !effectful => self.lower_expr(method),
+                _ => self.unsupported(&format!(
+                    "dict constructor '{}' method {} is not a lowerable method value",
+                    dc.name, index
+                )),
             };
             methods.push(lowered);
         }
@@ -441,15 +726,121 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             Pat::Wildcard { .. } => CPat::Wildcard,
             Pat::Var { name, .. } => CPat::Var(core_var(name)),
             Pat::Lit { value, .. } => match value {
-                Lit::String(s, _) => CPat::Lit(CLit::Str(s.clone())),
+                Lit::String(s, _) => CPat::Binary(
+                    s.as_bytes()
+                        .iter()
+                        .map(|&byte| CBinSeg::Byte(byte))
+                        .collect(),
+                ),
                 _ => CPat::Lit(lower_lit_pat(value)),
             },
             Pat::Tuple { elements, .. } => {
                 CPat::Tuple(elements.iter().map(|p| self.lower_pat(p)).collect())
             }
             Pat::Constructor { name, args, .. } => self.lower_ctor_pat(name, args),
-            _ => self.unsupported("patterns beyond var/lit/tuple/constructor"),
+            Pat::Record {
+                name,
+                fields,
+                as_name,
+                ..
+            } => self.lower_record_pat(name, fields, as_name.as_deref()),
+            Pat::AnonRecord { fields, .. } => self.lower_anon_record_pat(fields),
+            Pat::StringPrefix { prefix, rest, .. } => {
+                let mut segs: Vec<CBinSeg<CPat>> = prefix
+                    .as_bytes()
+                    .iter()
+                    .map(|&b| CBinSeg::Byte(b))
+                    .collect();
+                segs.push(CBinSeg::BinaryAll(self.lower_pat(rest)));
+                CPat::Binary(segs)
+            }
+            _ => self.unsupported("patterns beyond var/lit/tuple/constructor/record/string-prefix"),
         }
+    }
+
+    fn lower_record_pat(
+        &self,
+        name: &str,
+        fields: &[(String, Option<Pat>)],
+        as_name: Option<&str>,
+    ) -> CPat {
+        let tag = mangle_ctor_atom(name, self.ctors);
+        let mut elems = vec![CPat::Lit(CLit::Atom(tag))];
+        let field_map: HashMap<&str, Option<&Pat>> = fields
+            .iter()
+            .map(|(field_name, pat)| (field_name.as_str(), pat.as_ref()))
+            .collect();
+
+        match self.record_pat_field_order(name) {
+            Some(order) => {
+                for field_name in order {
+                    match field_map.get(field_name.as_str()) {
+                        Some(Some(pat)) => elems.push(self.lower_pat(pat)),
+                        Some(None) => elems.push(CPat::Var(core_var(&field_name))),
+                        None => elems.push(CPat::Wildcard),
+                    }
+                }
+            }
+            None => {
+                for (field_name, pat) in fields {
+                    match pat {
+                        Some(pat) => elems.push(self.lower_pat(pat)),
+                        None => elems.push(CPat::Var(core_var(field_name))),
+                    }
+                }
+            }
+        }
+
+        let tuple_pat = CPat::Tuple(elems);
+        match as_name {
+            Some(var) => CPat::Alias(core_var(var), Box::new(tuple_pat)),
+            None => tuple_pat,
+        }
+    }
+
+    fn record_pat_field_order(&self, name: &str) -> Option<Vec<String>> {
+        self.effect_info
+            .records
+            .get(name)
+            .or_else(|| {
+                let bare = name.rsplit('.').next().unwrap_or(name);
+                self.effect_info.records.get(bare)
+            })
+            .or_else(|| {
+                let bare = name.rsplit('.').next().unwrap_or(name);
+                self.effect_info
+                    .records
+                    .iter()
+                    .find(|(candidate, _)| {
+                        candidate
+                            .rsplit('.')
+                            .next()
+                            .is_some_and(|last| last == bare)
+                    })
+                    .map(|(_, info)| info)
+            })
+            .map(|info| info.fields.iter().map(|(field, _)| field.clone()).collect())
+    }
+
+    fn lower_anon_record_pat(&self, fields: &[(String, Option<Pat>)]) -> CPat {
+        let field_names: Vec<&str> = fields.iter().map(|(name, _)| name.as_str()).collect();
+        let tag = crate::ast::anon_record_tag(&field_names);
+        let mut sorted_names = field_names;
+        sorted_names.sort();
+        let field_map: HashMap<&str, Option<&Pat>> = fields
+            .iter()
+            .map(|(field_name, pat)| (field_name.as_str(), pat.as_ref()))
+            .collect();
+
+        let mut elems = vec![CPat::Lit(CLit::Atom(tag))];
+        for field_name in sorted_names {
+            match field_map.get(field_name) {
+                Some(Some(pat)) => elems.push(self.lower_pat(pat)),
+                Some(None) => elems.push(CPat::Var(core_var(field_name))),
+                None => elems.push(CPat::Wildcard),
+            }
+        }
+        CPat::Tuple(elems)
     }
 
     fn lower_ctor_pat(&self, name: &str, args: &[Pat]) -> CPat {

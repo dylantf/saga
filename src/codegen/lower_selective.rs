@@ -19,7 +19,7 @@ mod support;
 
 use crate::ast::{Lit, NodeId, Pat};
 use crate::codegen::CodegenContext;
-use crate::codegen::cerl::{CArm, CExpr, CFunDef, CLit, CModule, CPat};
+use crate::codegen::cerl::{CArm, CBinSeg, CExpr, CFunDef, CLit, CModule, CPat};
 use crate::codegen::handler_analysis::{HandlerAnalysis, ResumptionKind};
 use crate::codegen::lower::util::{core_var, lower_lit_atom, mangle_ctor_atom};
 use crate::codegen::monadic::ir::{
@@ -379,7 +379,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             !group.is_empty(),
             "lower_direct_fun_binding_group: empty group is impossible"
         );
-        if group.len() == 1 {
+        if group.len() == 1 && group[0].guard.is_none() {
             return self.lower_fun_binding(group[0]);
         }
 
@@ -398,22 +398,62 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             .map(|arg_index| format!("_Arg{arg_index}"))
             .collect();
         let scrutinee = CExpr::Tuple(params.iter().cloned().map(CExpr::Var).collect());
-        let arms = group
-            .iter()
-            .map(|fb| {
-                self.push_scope();
-                self.bind_fun_param_locals(fb);
-                let guard = fb.guard.as_ref().map(|guard| self.lower_expr(guard));
-                let body = self.lower_expr(&fb.body);
-                let pat = CPat::Tuple(fb.params.iter().map(|pat| self.lower_pat(pat)).collect());
-                self.pop_scope();
-                CArm { pat, guard, body }
-            })
-            .collect();
+        let scrut_var = self.fresh_cps_temp("_FunScrut");
+        let mut rest = self.case_clause_error();
+
+        for fb in group.iter().rev() {
+            let rest_var = self.fresh_cps_temp("_FunRest");
+            let rest_ref = || CExpr::Apply(Box::new(CExpr::Var(rest_var.clone())), vec![]);
+            self.push_scope();
+            self.bind_fun_param_locals(fb);
+            let body = self.lower_expr(&fb.body);
+            let body = match fb.guard.as_ref() {
+                Some(guard) => CExpr::Case(
+                    Box::new(self.lower_expr(guard)),
+                    vec![
+                        CArm {
+                            pat: CPat::Lit(CLit::Atom("true".to_string())),
+                            guard: None,
+                            body,
+                        },
+                        CArm {
+                            pat: CPat::Wildcard,
+                            guard: None,
+                            body: rest_ref(),
+                        },
+                    ],
+                ),
+                None => body,
+            };
+            let pat = CPat::Tuple(fb.params.iter().map(|pat| self.lower_pat(pat)).collect());
+            self.pop_scope();
+            let current = CExpr::Case(
+                Box::new(CExpr::Var(scrut_var.clone())),
+                vec![
+                    CArm {
+                        pat,
+                        guard: None,
+                        body,
+                    },
+                    CArm {
+                        pat: CPat::Wildcard,
+                        guard: None,
+                        body: rest_ref(),
+                    },
+                ],
+            );
+            rest = CExpr::Let(
+                rest_var,
+                Box::new(CExpr::Fun(vec![], Box::new(rest))),
+                Box::new(current),
+            );
+        }
+
+        let body = CExpr::Let(scrut_var, Box::new(scrutinee), Box::new(rest));
         CFunDef {
             name: self.direct_entry_name(name),
             arity: params.len(),
-            body: CExpr::Fun(params, Box::new(CExpr::Case(Box::new(scrutinee), arms))),
+            body: CExpr::Fun(params, Box::new(body)),
         }
     }
 
@@ -624,6 +664,14 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         )
     }
 
+    fn case_clause_error(&self) -> CExpr {
+        CExpr::Call(
+            "erlang".to_string(),
+            "error".to_string(),
+            vec![CExpr::Lit(CLit::Atom("case_clause".to_string()))],
+        )
+    }
+
     fn call_shape(&self, head: &Atom) -> Option<CallShape> {
         if let Some(intrinsic) = self.direct_intrinsic(head) {
             return Some(CallShape::Intrinsic(intrinsic));
@@ -693,6 +741,15 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             });
         }
         None
+    }
+
+    fn is_panic_or_todo_call(&self, head: &Atom, args: &[Atom]) -> bool {
+        let Atom::Var { name, source } = head else {
+            return false;
+        };
+        args.len() == 1
+            && self.resolution.get(source).is_none()
+            && matches!(name.name.as_str(), "panic" | "todo")
     }
 
     fn cps_function_shape(&self, head: &Atom) -> Option<CallShape> {
@@ -794,9 +851,6 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         if !effects.is_empty() {
             return None;
         }
-        if *arity > 0 {
-            return None;
-        }
         Some(DirectCallable {
             module: erlang_mod.clone(),
             name: name.clone(),
@@ -810,6 +864,23 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             _ => return None,
         };
         let resolved = self.resolution.get(&source)?;
+        if let ResolvedCodegenKind::ExternalFunction {
+            target_erlang_mod,
+            target_name,
+            arity,
+            effects,
+            ..
+        } = &resolved.kind
+        {
+            if !effects.is_empty() {
+                return None;
+            }
+            return Some(DirectCallable {
+                module: Some(target_erlang_mod.clone()),
+                name: target_name.clone(),
+                arity: *arity,
+            });
+        }
         let ResolvedCodegenKind::BeamFunction {
             erlang_mod,
             name,
@@ -872,6 +943,23 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             _ => return None,
         };
         let resolved = self.resolution.get(&source)?;
+        if let ResolvedCodegenKind::ExternalFunction {
+            target_erlang_mod,
+            target_name,
+            arity,
+            effects,
+            ..
+        } = &resolved.kind
+        {
+            if !effects.is_empty() {
+                return None;
+            }
+            return Some(remote_fun_value(
+                target_erlang_mod.clone(),
+                target_name.clone(),
+                *arity,
+            ));
+        }
         let ResolvedCodegenKind::BeamFunction {
             erlang_mod,
             name,
@@ -1133,6 +1221,44 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                     self.bind_pat_locals_with_shape(pat, None);
                 }
             }
+            Pat::Record {
+                fields, as_name, ..
+            } => {
+                if let Some(name) = as_name {
+                    self.current_scope_mut().insert(name.clone());
+                    self.current_shape_scope_mut()
+                        .insert(name.clone(), LocalValueShape::PureCallableFromUseType);
+                }
+                for (field_name, pat) in fields {
+                    match pat {
+                        Some(pat) => self.bind_pat_locals_with_shape(pat, None),
+                        None => {
+                            self.current_scope_mut().insert(field_name.clone());
+                            self.current_shape_scope_mut().insert(
+                                field_name.clone(),
+                                LocalValueShape::PureCallableFromUseType,
+                            );
+                        }
+                    }
+                }
+            }
+            Pat::AnonRecord { fields, .. } => {
+                for (field_name, pat) in fields {
+                    match pat {
+                        Some(pat) => self.bind_pat_locals_with_shape(pat, None),
+                        None => {
+                            self.current_scope_mut().insert(field_name.clone());
+                            self.current_shape_scope_mut().insert(
+                                field_name.clone(),
+                                LocalValueShape::PureCallableFromUseType,
+                            );
+                        }
+                    }
+                }
+            }
+            Pat::StringPrefix { rest, .. } => {
+                self.bind_pat_locals_with_shape(rest, None);
+            }
             _ => {}
         }
     }
@@ -1144,7 +1270,14 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             | MExpr::Bind {
                 var, value, body, ..
             } => {
-                let local_shape = self.direct_local_shape_for_expr(value);
+                let local_shape = self.direct_local_shape_for_expr(value).or_else(|| {
+                    if matches!(&**value, MExpr::Resume { .. }) {
+                        self.direct_call_shape_for_local_use_in_expr(&var.name, body)
+                            .or(Some(LocalValueShape::PureCallableFromUseType))
+                    } else {
+                        None
+                    }
+                });
                 if !self.expr_is_direct_subset(value) {
                     return false;
                 }
@@ -1190,6 +1323,9 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                 })
             }
             MExpr::App { head, args, .. } => {
+                if self.is_panic_or_todo_call(head, args) {
+                    return self.atom_is_direct_subset(&args[0]);
+                }
                 let direct_call_supported = match self.call_shape(head) {
                     Some(CallShape::Intrinsic(intrinsic)) => {
                         direct_intrinsic_arity(intrinsic).is_some_and(|arity| arity == args.len())
@@ -1207,9 +1343,16 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             }
             MExpr::UnaryMinus { value, .. } => self.atom_is_direct_subset(value),
             MExpr::FieldAccess { record, .. } => self.atom_is_direct_subset(record),
-            MExpr::RecordUpdate { .. }
-            | MExpr::ForeignCall { .. }
-            | MExpr::BitString { .. }
+            MExpr::RecordUpdate { record, fields, .. } => {
+                self.atom_is_direct_subset(record)
+                    && fields
+                        .iter()
+                        .all(|(_, atom)| self.atom_is_direct_subset(atom))
+            }
+            MExpr::ForeignCall { args, .. } => {
+                args.iter().all(|arg| self.atom_is_direct_subset(arg))
+            }
+            MExpr::BitString { .. }
             | MExpr::Yield { .. }
             | MExpr::With { .. }
             | MExpr::Resume { .. }
@@ -1236,7 +1379,8 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
 
                 let local_shape = self
                     .direct_local_shape_for_expr(value)
-                    .or_else(|| self.cps_bind_shape_for_expr(value));
+                    .or_else(|| self.cps_bind_shape_for_expr(value))
+                    .or_else(|| self.direct_call_shape_for_local_use_in_expr(&var.name, body));
                 self.push_scope();
                 self.current_scope_mut().insert(var.name.clone());
                 if let Some(shape) = local_shape {
@@ -1375,10 +1519,16 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                 var, value, body, ..
             }
             | MExpr::Let { var, value, body } => {
-                if !self.expr_is_direct_subset(value) {
+                let value_supported = self.expr_is_direct_subset(value)
+                    || matches!(&**value, MExpr::Resume { value, .. } if self.atom_is_direct_subset(value));
+                if !value_supported {
                     return false;
                 }
-                let local_shape = self.direct_local_shape_for_expr(value);
+                let local_shape = self.direct_local_shape_for_expr(value).or_else(|| {
+                    matches!(&**value, MExpr::Resume { .. })
+                        .then(|| self.direct_call_shape_for_local_use_in_expr(&var.name, body))
+                        .flatten()
+                });
                 self.push_scope();
                 self.current_scope_mut().insert(var.name.clone());
                 if let Some(shape) = local_shape {
@@ -1420,8 +1570,41 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                     supported
                 })
             }
+            MExpr::App { head, args, .. } => self.is_flat_map_identity_resume_app(head, args),
             _ => false,
         }
+    }
+
+    fn is_flat_map_identity_resume_app(&mut self, head: &Atom, args: &[Atom]) -> bool {
+        if args.len() != 2 {
+            return false;
+        }
+        let Some(CallShape::Direct(callable)) = self.call_shape(head) else {
+            return false;
+        };
+        if callable.arity != 2 || callable.name != "flat_map" {
+            return false;
+        }
+        if !self.atom_is_direct_subset(&args[1]) {
+            return false;
+        }
+        let Atom::Lambda { params, body, .. } = &args[0] else {
+            return false;
+        };
+        self.lambda_is_identity_resume(params, body)
+    }
+
+    fn lambda_is_identity_resume(&self, params: &[Pat], body: &MExpr) -> bool {
+        let [Pat::Var { name, .. }] = params else {
+            return false;
+        };
+        matches!(
+            body,
+            MExpr::Resume {
+                value: Atom::Var { name: var, .. },
+                ..
+            } if var.name == *name
+        )
     }
 
     fn fresh_cps_temp(&mut self, prefix: &str) -> String {
@@ -1440,7 +1623,8 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                             | LocalValueShape::RuntimeCpsCallable { .. }
                     )
                 );
-                (self.is_local(&name.name) && !cps_callable_local)
+                self.cps_value_atom_shape(atom).is_some()
+                    || (self.is_local(&name.name) && !cps_callable_local)
                     || self.direct_values.contains(&name.name)
                     || self.supported_direct_call(atom).is_some()
                     || self.direct_function_value_ref(atom).is_some()
@@ -1453,8 +1637,15 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             Atom::AnonRecord { fields, .. } | Atom::Record { fields, .. } => fields
                 .iter()
                 .all(|(_, arg)| self.atom_is_direct_subset(arg)),
-            Atom::Lambda { params, body, .. } => self.lambda_is_direct_subset(params, body),
-            Atom::QualifiedRef { .. } => self.direct_function_value_ref(atom).is_some(),
+            Atom::Lambda { params, body, .. } => {
+                self.cps_value_atom_shape(atom).is_some()
+                    || self.lambda_is_direct_subset(params, body)
+                    || self.lambda_is_direct_cps_island_subset(params, body)
+            }
+            Atom::QualifiedRef { .. } => {
+                self.cps_value_atom_shape(atom).is_some()
+                    || self.direct_function_value_ref(atom).is_some()
+            }
             Atom::BackendAtom { .. } | Atom::BackendSpawnThunk { .. } => false,
             Atom::DictRef { .. } => self.direct_dict_constructor(atom).is_some(),
         }
@@ -1530,7 +1721,236 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                 .pure_function_arity_at(*source)
                 .or_else(|| self.pure_trait_method_arity(trait_name, *method_index))
                 .map(|arity| LocalValueShape::PureCallable { arity }),
+            MExpr::Resume { source, .. } | MExpr::With { source, .. } => {
+                self.local_shape_for_expr_result_type(*source)
+            }
             _ => None,
+        }
+    }
+
+    fn local_shape_for_expr_result_type(&self, source: NodeId) -> Option<LocalValueShape> {
+        let ty = self.effect_info.type_at_node.get(&source)?;
+        self.local_shape_for_param_type(ty)
+    }
+
+    fn direct_call_shape_for_local_use_in_expr(
+        &self,
+        local: &str,
+        expr: &MExpr,
+    ) -> Option<LocalValueShape> {
+        let mut arity = None;
+        Self::collect_direct_call_arity_for_local_in_expr(local, expr, &mut arity);
+        arity.map(|arity| LocalValueShape::PureCallable { arity })
+    }
+
+    fn collect_direct_call_arity_for_local_in_expr(
+        local: &str,
+        expr: &MExpr,
+        arity: &mut Option<usize>,
+    ) -> bool {
+        match expr {
+            MExpr::Pure(atom) => {
+                Self::collect_direct_call_arity_for_local_in_atom(local, atom, arity)
+            }
+            MExpr::Yield { args, .. } | MExpr::ForeignCall { args, .. } => args
+                .iter()
+                .all(|arg| Self::collect_direct_call_arity_for_local_in_atom(local, arg, arity)),
+            MExpr::Bind {
+                var, value, body, ..
+            }
+            | MExpr::Let { var, value, body } => {
+                Self::collect_direct_call_arity_for_local_in_expr(local, value, arity)
+                    && (var.name == local
+                        || Self::collect_direct_call_arity_for_local_in_expr(local, body, arity))
+            }
+            MExpr::Ensure { body, cleanup } => {
+                Self::collect_direct_call_arity_for_local_in_expr(local, body, arity)
+                    && Self::collect_direct_call_arity_for_local_in_expr(local, cleanup, arity)
+            }
+            MExpr::Case {
+                scrutinee, arms, ..
+            } => {
+                Self::collect_direct_call_arity_for_local_in_atom(local, scrutinee, arity)
+                    && arms.iter().all(|arm| {
+                        arm.guard.as_ref().is_none_or(|guard| {
+                            Self::collect_direct_call_arity_for_local_in_expr(local, guard, arity)
+                        }) && (pat_binds_name(&arm.pattern, local)
+                            || Self::collect_direct_call_arity_for_local_in_expr(
+                                local, &arm.body, arity,
+                            ))
+                    })
+            }
+            MExpr::If {
+                cond,
+                then_branch,
+                else_branch,
+                ..
+            } => {
+                Self::collect_direct_call_arity_for_local_in_atom(local, cond, arity)
+                    && Self::collect_direct_call_arity_for_local_in_expr(local, then_branch, arity)
+                    && Self::collect_direct_call_arity_for_local_in_expr(local, else_branch, arity)
+            }
+            MExpr::App { head, args, .. } => {
+                if let Atom::Var { name, .. } = head
+                    && name.name == local
+                    && !Self::record_local_call_arity(arity, args.len())
+                {
+                    return false;
+                }
+                Self::collect_direct_call_arity_for_local_in_atom(local, head, arity)
+                    && args.iter().all(|arg| {
+                        Self::collect_direct_call_arity_for_local_in_atom(local, arg, arity)
+                    })
+            }
+            MExpr::With { handler, body, .. } => {
+                Self::collect_direct_call_arity_for_local_in_handler(local, handler, arity)
+                    && Self::collect_direct_call_arity_for_local_in_expr(local, body, arity)
+            }
+            MExpr::Resume { value, .. }
+            | MExpr::FieldAccess { record: value, .. }
+            | MExpr::UnaryMinus { value, .. } => {
+                Self::collect_direct_call_arity_for_local_in_atom(local, value, arity)
+            }
+            MExpr::RecordUpdate { record, fields, .. } => {
+                Self::collect_direct_call_arity_for_local_in_atom(local, record, arity)
+                    && fields.iter().all(|(_, atom)| {
+                        Self::collect_direct_call_arity_for_local_in_atom(local, atom, arity)
+                    })
+            }
+            MExpr::DictMethodAccess { dict, .. } => {
+                Self::collect_direct_call_arity_for_local_in_atom(local, dict, arity)
+            }
+            MExpr::BinOp { left, right, .. } => {
+                Self::collect_direct_call_arity_for_local_in_atom(local, left, arity)
+                    && Self::collect_direct_call_arity_for_local_in_atom(local, right, arity)
+            }
+            MExpr::BitString { segments, .. } => segments.iter().all(|segment| {
+                Self::collect_direct_call_arity_for_local_in_atom(local, &segment.value, arity)
+            }),
+            MExpr::Receive { arms, after, .. } => {
+                arms.iter().all(|arm| {
+                    arm.guard.as_ref().is_none_or(|guard| {
+                        Self::collect_direct_call_arity_for_local_in_expr(local, guard, arity)
+                    }) && (pat_binds_name(&arm.pattern, local)
+                        || Self::collect_direct_call_arity_for_local_in_expr(
+                            local, &arm.body, arity,
+                        ))
+                }) && after.as_ref().is_none_or(|(timeout, body)| {
+                    Self::collect_direct_call_arity_for_local_in_atom(local, timeout, arity)
+                        && Self::collect_direct_call_arity_for_local_in_expr(local, body, arity)
+                })
+            }
+            MExpr::LetFun {
+                name, body, rest, ..
+            } => {
+                let body_ok = name == local
+                    || Self::collect_direct_call_arity_for_local_in_expr(local, body, arity);
+                body_ok && Self::collect_direct_call_arity_for_local_in_expr(local, rest, arity)
+            }
+            MExpr::HandlerValue {
+                arms,
+                return_clause,
+                ..
+            } => {
+                arms.iter().all(|arm| {
+                    Self::collect_direct_call_arity_for_local_in_handler_arm(local, arm, arity)
+                }) && return_clause.as_ref().is_none_or(|arm| {
+                    Self::collect_direct_call_arity_for_local_in_handler_arm(local, arm, arity)
+                })
+            }
+        }
+    }
+
+    fn collect_direct_call_arity_for_local_in_atom(
+        local: &str,
+        atom: &Atom,
+        arity: &mut Option<usize>,
+    ) -> bool {
+        match atom {
+            Atom::Var { .. }
+            | Atom::Lit { .. }
+            | Atom::DictRef { .. }
+            | Atom::QualifiedRef { .. }
+            | Atom::Symbol { .. }
+            | Atom::BackendAtom { .. } => true,
+            Atom::Ctor { args, .. } => args
+                .iter()
+                .all(|arg| Self::collect_direct_call_arity_for_local_in_atom(local, arg, arity)),
+            Atom::Tuple { elements, .. } => elements
+                .iter()
+                .all(|arg| Self::collect_direct_call_arity_for_local_in_atom(local, arg, arity)),
+            Atom::AnonRecord { fields, .. } | Atom::Record { fields, .. } => {
+                fields.iter().all(|(_, atom)| {
+                    Self::collect_direct_call_arity_for_local_in_atom(local, atom, arity)
+                })
+            }
+            Atom::Lambda { params, body, .. } => {
+                params.iter().any(|param| pat_binds_name(param, local))
+                    || Self::collect_direct_call_arity_for_local_in_expr(local, body, arity)
+            }
+            Atom::BackendSpawnThunk { callback, .. } => {
+                Self::collect_direct_call_arity_for_local_in_atom(local, callback, arity)
+            }
+        }
+    }
+
+    fn collect_direct_call_arity_for_local_in_handler(
+        local: &str,
+        handler: &MHandler,
+        arity: &mut Option<usize>,
+    ) -> bool {
+        match handler {
+            MHandler::Static {
+                arms,
+                return_clause,
+                ..
+            } => {
+                arms.iter().all(|arm| {
+                    Self::collect_direct_call_arity_for_local_in_handler_arm(local, arm, arity)
+                }) && return_clause.as_ref().is_none_or(|arm| {
+                    Self::collect_direct_call_arity_for_local_in_handler_arm(local, arm, arity)
+                })
+            }
+            MHandler::Composite { handlers, .. } => handlers.iter().all(|handler| {
+                Self::collect_direct_call_arity_for_local_in_handler(local, handler, arity)
+            }),
+            MHandler::Dynamic {
+                op_tuple,
+                return_lambda,
+                ..
+            } => {
+                Self::collect_direct_call_arity_for_local_in_atom(local, op_tuple, arity)
+                    && return_lambda.as_ref().is_none_or(|return_lambda| {
+                        Self::collect_direct_call_arity_for_local_in_atom(
+                            local,
+                            return_lambda,
+                            arity,
+                        )
+                    })
+            }
+            MHandler::Native { .. } => true,
+        }
+    }
+
+    fn collect_direct_call_arity_for_local_in_handler_arm(
+        local: &str,
+        arm: &MHandlerArm,
+        arity: &mut Option<usize>,
+    ) -> bool {
+        arm.params.iter().any(|param| pat_binds_name(param, local))
+            || (Self::collect_direct_call_arity_for_local_in_expr(local, &arm.body, arity)
+                && arm.finally_block.as_ref().is_none_or(|finally_block| {
+                    Self::collect_direct_call_arity_for_local_in_expr(local, finally_block, arity)
+                }))
+    }
+
+    fn record_local_call_arity(arity: &mut Option<usize>, next: usize) -> bool {
+        match *arity {
+            Some(existing) => existing == next,
+            None => {
+                *arity = Some(next);
+                true
+            }
         }
     }
 
@@ -2010,6 +2430,17 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         (is_cps && arity > 0).then_some((arity, arity + 2, effects))
     }
 
+    fn function_type_has_open_row(&self, ty: &Type) -> bool {
+        let mut current = ty;
+        while let Type::Fun(_, ret, row) = current {
+            if row.tail.is_some() {
+                return true;
+            }
+            current = ret;
+        }
+        false
+    }
+
     fn expr_contains_yield(&self, expr: &MExpr) -> bool {
         match expr {
             MExpr::Yield { .. } => true,
@@ -2133,10 +2564,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
     }
 
     fn unsupported_expr(&self, expr: &MExpr) -> ! {
-        panic!(
-            "selective-uniform direct lowerer TODO: unsupported MExpr {:?}",
-            std::mem::discriminant(expr)
-        )
+        panic!("selective-uniform direct lowerer TODO: unsupported MExpr {expr:?}",)
     }
 
     fn unsupported_atom(&self, atom: &Atom) -> ! {

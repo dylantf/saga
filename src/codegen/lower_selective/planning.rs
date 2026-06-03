@@ -13,21 +13,37 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             match decl {
                 MDecl::FunBinding(fb) => {
                     self.local_fun_bindings.insert(fb.name.clone(), fb.clone());
-                    let shape = match self.effect_info.fun_effects.get(&fb.name) {
-                        Some(effects) if effects.is_empty() => RuntimeFunctionShape::Pure,
-                        Some(effects) => {
-                            RuntimeFunctionShape::Cps(crate::codegen::runtime_shape::CpsShape {
-                                static_effects: effects.iter().cloned().collect(),
-                                is_open_row: false,
-                            })
-                        }
-                        None => {
-                            RuntimeFunctionShape::Cps(crate::codegen::runtime_shape::CpsShape {
-                                static_effects: vec![],
-                                is_open_row: true,
-                            })
-                        }
-                    };
+                    let shape = self
+                        .effect_info
+                        .type_at_node
+                        .get(&fb.id)
+                        .and_then(|ty| {
+                            self.cps_function_arity_from_type(ty).map(
+                                |(_source_arity, _adapter_arity, effects)| {
+                                    RuntimeFunctionShape::Cps(
+                                        crate::codegen::runtime_shape::CpsShape {
+                                            static_effects: effects,
+                                            is_open_row: self.function_type_has_open_row(ty),
+                                        },
+                                    )
+                                },
+                            )
+                        })
+                        .unwrap_or_else(|| match self.effect_info.fun_effects.get(&fb.name) {
+                            Some(effects) if effects.is_empty() => RuntimeFunctionShape::Pure,
+                            Some(effects) => {
+                                RuntimeFunctionShape::Cps(crate::codegen::runtime_shape::CpsShape {
+                                    static_effects: effects.iter().cloned().collect(),
+                                    is_open_row: false,
+                                })
+                            }
+                            None => {
+                                RuntimeFunctionShape::Cps(crate::codegen::runtime_shape::CpsShape {
+                                    static_effects: vec![],
+                                    is_open_row: true,
+                                })
+                            }
+                        });
                     self.callable_type_shapes.insert(fb.name.clone(), shape);
                 }
                 MDecl::Val(v) => {
@@ -49,10 +65,33 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
     }
 
     pub(super) fn compute_function_lowering_plans(&mut self, program: &MProgram) {
-        self.compute_direct_body_plans(program);
-        self.compute_direct_cps_island_body_plans(program);
+        loop {
+            let planned = self.function_plans.len();
+            self.compute_direct_body_plans(program);
+            self.compute_direct_cps_island_body_plans(program);
+            if self.function_plans.len() == planned {
+                break;
+            }
+        }
         self.compute_cps_body_plans(program);
         self.compute_hof_direct_specializations(program);
+        self.compute_dict_constructor_plans(program);
+    }
+
+    fn compute_dict_constructor_plans(&mut self, program: &MProgram) {
+        self.local_dict_constructor_arities.clear();
+        self.local_dict_constructors.clear();
+        for decl in program {
+            let MDecl::DictConstructor(dc) = decl else {
+                continue;
+            };
+            if self.can_lower_dict_constructor(dc) {
+                self.local_dict_constructor_arities
+                    .insert(dc.name.clone(), dc.dict_params.len());
+                self.local_dict_constructors
+                    .insert(dc.name.clone(), dc.clone());
+            }
+        }
     }
 
     fn compute_direct_body_plans(&mut self, program: &MProgram) {
@@ -364,17 +403,19 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             self.current_scope_mut().insert(dict_param.clone());
         }
         let supported = dc.methods.iter().enumerate().all(|(index, method)| {
-            let MExpr::Pure(Atom::Lambda { params, body, .. }) = method else {
-                return false;
-            };
-            if params.iter().any(|p| !direct_param_supported(p)) {
-                return false;
-            }
             let effectful = dc
                 .method_effects
                 .get(index)
                 .is_some_and(|effects| !effects.is_empty())
                 || dc.method_open_rows.get(index).copied().unwrap_or(false);
+
+            let MExpr::Pure(Atom::Lambda { params, body, .. }) = method else {
+                return !effectful && self.expr_is_direct_subset(method);
+            };
+            if params.iter().any(|p| !direct_param_supported(p)) {
+                return false;
+            }
+
             self.push_scope();
             for pat in params {
                 self.bind_pat_locals(pat);
@@ -392,14 +433,18 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
     }
 
     fn can_lower_fun_binding(&mut self, fb: &MFunBinding) -> bool {
-        if fb.guard.is_some() || fb.params.iter().any(|p| !direct_param_supported(p)) {
+        if fb.params.iter().any(|p| !direct_param_supported(p)) {
             return false;
         }
 
         let prev_direct_candidate = self.direct_candidate_function.replace(fb.name.clone());
         self.push_scope();
         self.bind_fun_param_locals(fb);
-        let supported = self.expr_is_direct_subset(&fb.body);
+        let supported = fb
+            .guard
+            .as_ref()
+            .is_none_or(|guard| self.expr_is_direct_subset(guard))
+            && self.expr_is_direct_subset(&fb.body);
         self.pop_scope();
         self.direct_candidate_function = prev_direct_candidate;
         supported

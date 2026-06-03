@@ -59,12 +59,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             ),
             MExpr::Case {
                 scrutinee, arms, ..
-            } => CExpr::Case(
-                Box::new(self.lower_atom(scrutinee)),
-                arms.iter()
-                    .map(|arm| self.lower_cps_arm(arm, evidence.clone(), return_k.clone()))
-                    .collect(),
-            ),
+            } => self.lower_cps_case_chain(scrutinee, arms, evidence, return_k),
             MExpr::App { head, args, .. } => self.lower_cps_app(head, args, evidence, return_k),
             MExpr::With { handler, body, .. } => {
                 self.lower_cps_with(handler, body, evidence, return_k)
@@ -207,9 +202,17 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             );
         }
 
+        let local_shape = self
+            .direct_local_shape_for_expr(value)
+            .or_else(|| self.cps_bind_shape_for_expr(value))
+            .or_else(|| self.direct_call_shape_for_local_use_in_expr(&var.name, body));
         let k_arg = self.fresh_cps_temp("_CpsBindArg");
         self.push_scope();
         self.current_scope_mut().insert(var.name.clone());
+        if let Some(shape) = local_shape {
+            self.current_shape_scope_mut()
+                .insert(var.name.clone(), shape);
+        }
         let lowered_body = self.lower_cps_expr(body, evidence.clone(), return_k);
         self.pop_scope();
         let k_body = CExpr::Let(
@@ -1334,7 +1337,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         self.lower_cps_value_atom(atom)
     }
 
-    fn lower_cps_value_atom(&mut self, atom: &Atom) -> CExpr {
+    pub(super) fn lower_cps_value_atom(&mut self, atom: &Atom) -> CExpr {
         match self.cps_value_atom_shape(atom) {
             Some(LocalValueShape::RuntimeCpsCallable {
                 source_arity,
@@ -2163,6 +2166,39 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                 var, value, body, ..
             }
             | MExpr::Let { var, value, body }
+                if matches!(&**value, MExpr::Resume { .. }) =>
+            {
+                let MExpr::Resume {
+                    value: resume_value,
+                    ..
+                } = &**value
+                else {
+                    unreachable!();
+                };
+                let local_shape = self
+                    .direct_local_shape_for_expr(value)
+                    .or_else(|| self.direct_call_shape_for_local_use_in_expr(&var.name, body));
+                let lowered_value =
+                    self.lower_resume_with_finally(resume_value, arm_k.clone(), finally_block);
+                self.push_scope();
+                self.current_scope_mut().insert(var.name.clone());
+                if let Some(shape) = local_shape {
+                    self.current_shape_scope_mut()
+                        .insert(var.name.clone(), shape);
+                }
+                let lowered_body =
+                    self.lower_cps_handler_arm_expr(body, outer_evidence, arm_k, finally_block);
+                self.pop_scope();
+                CExpr::Let(
+                    core_var(&var.name),
+                    Box::new(lowered_value),
+                    Box::new(lowered_body),
+                )
+            }
+            MExpr::Bind {
+                var, value, body, ..
+            }
+            | MExpr::Let { var, value, body }
                 if self.expr_is_direct_subset(value) =>
             {
                 let local_shape = self.direct_local_shape_for_expr(value);
@@ -2227,8 +2263,59 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                     })
                     .collect(),
             ),
+            MExpr::App { head, args, .. } => self
+                .lower_flat_map_identity_resume_handler_arm(head, args, arm_k, finally_block)
+                .unwrap_or_else(|| {
+                    self.unsupported_expr(&MExpr::App {
+                        head: head.clone(),
+                        args: args.clone(),
+                        source: NodeId::fresh(),
+                    })
+                }),
             _ => self.unsupported_expr(expr),
         }
+    }
+
+    fn lower_flat_map_identity_resume_handler_arm(
+        &mut self,
+        head: &Atom,
+        args: &[Atom],
+        arm_k: CExpr,
+        finally_block: Option<&MExpr>,
+    ) -> Option<CExpr> {
+        if !self.is_flat_map_identity_resume_app(head, args) {
+            return None;
+        }
+        let CallShape::Direct(callable) = self.call_shape(head)? else {
+            return None;
+        };
+        let Atom::Lambda { params, body, .. } = &args[0] else {
+            return None;
+        };
+        let MExpr::Resume { value, .. } = &**body else {
+            return None;
+        };
+
+        let callback_params = lower_param_names(params);
+        self.push_scope();
+        for param in params {
+            self.bind_pat_locals(param);
+        }
+        let callback_body = self.lower_resume_with_finally(value, arm_k, finally_block);
+        let callback_body = self.wrap_param_match(params, &callback_params, callback_body);
+        self.pop_scope();
+
+        let lowered_args = vec![
+            CExpr::Fun(callback_params, Box::new(callback_body)),
+            self.lower_atom(&args[1]),
+        ];
+        Some(match callable.module {
+            Some(module) => CExpr::Call(module, callable.name, lowered_args),
+            None => CExpr::Apply(
+                Box::new(CExpr::FunRef(callable.name, callable.arity)),
+                lowered_args,
+            ),
+        })
     }
 
     fn lower_resume_with_finally(
@@ -2364,13 +2451,66 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         CArm { pat, guard, body }
     }
 
-    fn lower_cps_arm(&mut self, arm: &MArm, evidence: CExpr, return_k: CExpr) -> CArm {
-        self.push_scope();
-        self.bind_pat_locals(&arm.pattern);
-        let body = self.lower_cps_expr(&arm.body, evidence, return_k);
-        let guard = arm.guard.as_ref().map(|g| self.lower_expr(g));
-        let pat = self.lower_pat(&arm.pattern);
-        self.pop_scope();
-        CArm { pat, guard, body }
+    fn lower_cps_case_chain(
+        &mut self,
+        scrutinee: &Atom,
+        arms: &[MArm],
+        evidence: CExpr,
+        return_k: CExpr,
+    ) -> CExpr {
+        let scrutinee = self.lower_atom(scrutinee);
+        let scrut_var = self.fresh_cps_temp("_CpsCaseScrut");
+        let mut rest = self.case_clause_error();
+
+        for arm in arms.iter().rev() {
+            let rest_var = self.fresh_cps_temp("_CpsCaseRest");
+            let rest_ref = || CExpr::Apply(Box::new(CExpr::Var(rest_var.clone())), vec![]);
+            self.push_scope();
+            self.bind_pat_locals(&arm.pattern);
+            let body = self.lower_cps_expr(&arm.body, evidence.clone(), return_k.clone());
+            let body = match arm.guard.as_ref() {
+                Some(guard) => CExpr::Case(
+                    Box::new(self.lower_expr(guard)),
+                    vec![
+                        CArm {
+                            pat: CPat::Lit(CLit::Atom("true".to_string())),
+                            guard: None,
+                            body,
+                        },
+                        CArm {
+                            pat: CPat::Wildcard,
+                            guard: None,
+                            body: rest_ref(),
+                        },
+                    ],
+                ),
+                None => body,
+            };
+            let pat = self.lower_pat(&arm.pattern);
+            self.pop_scope();
+
+            let current = CExpr::Case(
+                Box::new(CExpr::Var(scrut_var.clone())),
+                vec![
+                    CArm {
+                        pat,
+                        guard: None,
+                        body,
+                    },
+                    CArm {
+                        pat: CPat::Wildcard,
+                        guard: None,
+                        body: rest_ref(),
+                    },
+                ],
+            );
+            rest = CExpr::Let(
+                rest_var,
+                Box::new(CExpr::Fun(vec![], Box::new(rest))),
+                Box::new(current),
+            );
+        }
+
+        CExpr::Let(scrut_var, Box::new(scrutinee), Box::new(rest))
     }
 }

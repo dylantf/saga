@@ -553,7 +553,7 @@ pub fn emit_module_via_new_path(
             &effect_info,
             entry_export,
             lower_selective::LoweringOptions {
-                require_all_functions: options.selective_no_fallback,
+                require_all_functions: false,
             },
         );
         let cmod = if options.selective_no_fallback {
