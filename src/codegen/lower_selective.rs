@@ -868,6 +868,9 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         if let Some(callable) = self.direct_function_callable(head) {
             return Some(CallShape::Direct(callable));
         }
+        if let Some(cps) = self.local_cps_function_shape_by_name(head) {
+            return Some(cps);
+        }
         if let Some(cps) = self.cps_function_shape(head) {
             return Some(cps);
         }
@@ -930,6 +933,50 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             });
         }
         None
+    }
+
+    fn local_cps_function_shape_by_name(&self, head: &Atom) -> Option<CallShape> {
+        let Atom::Var { name, .. } = head else {
+            return None;
+        };
+        if self.is_local(&name.name) {
+            return None;
+        }
+        let RuntimeFunctionShape::Cps(shape) = self.callable_type_shapes.get(&name.name)? else {
+            return None;
+        };
+        if let Some(entries) = self.local_function_entries.get(&name.name) {
+            let adapter_arity = entries.cps_adapter_entry_arity?;
+            return Some(CallShape::Cps {
+                module: None,
+                name: name.name.clone(),
+                source_arity: entries.source_arity,
+                adapter_arity,
+                effects: shape.static_effects.clone(),
+            });
+        }
+        let recursive_self = self
+            .direct_candidate_function
+            .as_ref()
+            .is_some_and(|current| current == &name.name)
+            || self.direct_candidate_functions.contains(&name.name);
+        let has_cps_plan = self
+            .function_plans
+            .get(&name.name)
+            .copied()
+            .is_some_and(FunctionLoweringPlan::has_cps_body);
+        if !recursive_self && !has_cps_plan {
+            return None;
+        }
+        let binding = self.local_fun_bindings.get(&name.name)?;
+        let source_arity = binding.params.len();
+        Some(CallShape::Cps {
+            module: None,
+            name: name.name.clone(),
+            source_arity,
+            adapter_arity: source_arity + 2,
+            effects: shape.static_effects.clone(),
+        })
     }
 
     fn local_top_level_function_shape(&self, head: &Atom) -> Option<CallShape> {
@@ -1198,6 +1245,15 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             .get(&name.name)
             .copied()
             .is_some_and(FunctionLoweringPlan::has_direct_entry);
+        if recursive_self
+            && !has_direct_plan
+            && !matches!(
+                self.callable_type_shapes.get(&name.name),
+                Some(RuntimeFunctionShape::Pure)
+            )
+        {
+            return None;
+        }
         if !recursive_self && !has_direct_plan {
             return None;
         }
@@ -1394,8 +1450,25 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             .or_else(|| self.cps_value_atom_shape(arg))
     }
 
+    fn function_type_for_binding(&self, fb: &MFunBinding) -> Option<&Type> {
+        self.effect_info
+            .type_at_node
+            .get(&fb.id)
+            .or_else(|| self.exported_function_type(&fb.name))
+    }
+
+    fn exported_function_type(&self, name: &str) -> Option<&Type> {
+        self.module_ctx
+            .modules
+            .get(&self.current_module)?
+            .codegen_info
+            .exports
+            .iter()
+            .find_map(|(export_name, scheme)| (export_name == name).then_some(&scheme.ty))
+    }
+
     fn param_shapes_for_fun(&self, fb: &MFunBinding) -> Vec<Option<LocalValueShape>> {
-        let Some(mut current) = self.effect_info.type_at_node.get(&fb.id) else {
+        let Some(mut current) = self.function_type_for_binding(fb) else {
             return vec![None; fb.params.len()];
         };
         let mut shapes = Vec::with_capacity(fb.params.len());
@@ -1424,7 +1497,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
     }
 
     fn param_shapes_for_cps_entry(&self, fb: &MFunBinding) -> Vec<Option<LocalValueShape>> {
-        let Some(mut current) = self.effect_info.type_at_node.get(&fb.id) else {
+        let Some(mut current) = self.function_type_for_binding(fb) else {
             return vec![None; fb.params.len()];
         };
         let mut shapes = Vec::with_capacity(fb.params.len());
@@ -1725,7 +1798,8 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
     fn expr_is_cps_island_subset(&mut self, expr: &MExpr) -> bool {
         match expr {
             MExpr::Yield { op, args, .. } => self.yield_args_are_cps_island_subset(op, args),
-            MExpr::Bind {
+            MExpr::Let { var, value, body }
+            | MExpr::Bind {
                 var, value, body, ..
             } => {
                 let value_supported = self.expr_is_direct_subset(value)
@@ -2999,17 +3073,6 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             current = ret;
         }
         (is_cps && arity > 0).then_some((arity, arity + 2, effects))
-    }
-
-    fn function_type_has_open_row(&self, ty: &Type) -> bool {
-        let mut current = ty;
-        while let Type::Fun(_, ret, row) = current {
-            if row.tail.is_some() {
-                return true;
-            }
-            current = ret;
-        }
-        false
     }
 
     fn expr_contains_yield(&self, expr: &MExpr) -> bool {

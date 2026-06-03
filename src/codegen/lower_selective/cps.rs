@@ -34,7 +34,8 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
     ) -> CExpr {
         match expr {
             MExpr::Yield { op, args, .. } => self.lower_cps_yield(op, args, evidence, return_k),
-            MExpr::Bind {
+            MExpr::Let { var, value, body }
+            | MExpr::Bind {
                 var, value, body, ..
             } => self.lower_cps_bind(var, value, body, evidence, return_k),
             MExpr::If {
@@ -67,6 +68,24 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             MExpr::With { handler, body, .. } => {
                 self.lower_cps_with(handler, body, evidence, return_k)
             }
+            MExpr::BinOp {
+                op, left, right, ..
+            } => CExpr::Apply(
+                Box::new(return_k),
+                vec![binop_atoms(
+                    op,
+                    self.lower_atom(left),
+                    self.lower_atom(right),
+                )],
+            ),
+            MExpr::UnaryMinus { value, .. } => CExpr::Apply(
+                Box::new(return_k),
+                vec![CExpr::Call(
+                    "erlang".to_string(),
+                    "-".to_string(),
+                    vec![CExpr::Lit(CLit::Int(0)), self.lower_atom(value)],
+                )],
+            ),
             MExpr::HandlerValue {
                 arms,
                 return_clause,

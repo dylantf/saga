@@ -180,11 +180,20 @@ static.
 
 ## Suggested Next Chunks
 
-1. **Derived generic dict constructor frontier**
+1. **Std.Test runner strict frontier**
    - Current strict blocker:
-     `saga test --selective-no-fallback` now compiles stdlib and all test
-     modules, clears actor `test_echo`, clears grouped `safe_div`-style CPS
-     functions, and stops at
+     `saga test --selective-no-fallback` stops during stdlib compilation at
+     `Std.Test.run_modules`.
+   - This is likely a direct runner/control-flow shape in the test harness,
+     not a new effect ABI category.
+   - Likely next investigation: inspect optimized monadic `Std.Test.run_modules`
+     and decide whether it needs another direct subset case or a classification
+     correction.
+
+2. **Derived generic dict constructor frontier**
+   - Known strict blocker after stdlib/HOF frontiers:
+     `saga test --selective-no-fallback` has previously compiled stdlib and
+     all test modules, then stopped at
      `__dict_GenericFromjsonTest_FromJson_genericfromjsontest_Std_Generic_Variant`.
    - This is the trait/deriving frontier we expected before JSON-library work:
      generic derived constructors need either a selective lowering plan or a
@@ -193,36 +202,44 @@ static.
      methods and decide whether to cover the generated pure/effectful dict
      method shape directly or leave full generic dict specialization for later.
 
-2. **Bitstring pattern frontier**
+3. **Bitstring pattern frontier**
    - A previous strict pass reached `tests/e2e/tests/advanced_test.saga`
      function `count_bytes`, a direct recursive bitstring-pattern function.
-   - After module ordering shifts, `test_echo` appears first, but
-     `count_bytes` remains a known direct-subset gap if module/test ordering
-     exposes it before the generic dict frontier.
+   - `count_bytes` remains a known direct-subset gap if module/test ordering
+     exposes it before or after the generic dict frontier.
    - This likely needs direct lowering/proof support for bitstring patterns in
      `case` arms, not CPS-specific machinery.
 
-3. **Effectful trait method calls and values**
+4. **Effectful trait method calls and values**
    - Local and imported dict constructors plus effectful method calls/values
      are covered, including generic constructors with dictionary parameters.
    - Next trait work can move from ABI correctness to specialization:
      monomorphic call-site specialization, known constructor/output-shape
      specialization, and direct handling of net-pure trait dispatch.
 
-4. **CPS lambdas and partial application**
+5. **CPS lambdas and partial application**
    - Basic runtime CPS closure generation is covered for callback arguments,
      effect protocol arguments, let-bound aliases, and lambda-headed calls.
    - Remaining lambda work is CPS partial application/captured callback
      parameter stress-testing, not the base closure ABI.
 
-5. **Storage guardrails**
+6. **Storage guardrails**
    - Tuple/record/constructor negative tests are covered.
    - Add list-literal coverage once list literals hit this selective path.
    - Support later only if we choose a representation.
 
-6. **Handler value matrix**
+7. **Handler value matrix**
    - Split handler values from callable values.
    - Inline, named, and `if`-selected dynamic handler values are covered for
      current e2e shapes.
    - Remaining stress: `case`-selected handlers, abort arms, `finally`, and
      imported handler modules if examples expose new shapes.
+
+## Recently Cleared Frontiers
+
+- **Stream HOF strict frontier:** `Std.Stream.for_each` now lowers as an
+  open-row CPS HOF (`for_each/4`) that calls its callback with
+  evidence/continuation and recurs on the CPS ABI.
+- **AtomicRef recursive receive frontier:** `Std.AtomicRef.lock_server` now
+  lowers as a CPS recursive receive loop with nested receive and actor
+  evidence lookup.

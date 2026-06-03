@@ -727,3 +727,73 @@ fn selective_core_codegen_lowers_beam_actor_native_project() {
         "{run_stdout}"
     );
 }
+
+#[test]
+fn selective_core_codegen_lowers_stdlib_stream_strict_frontier() {
+    let binary = env!("CARGO_BIN_EXE_saga");
+    let repo_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+
+    let inspect = std::process::Command::new(binary)
+        .current_dir(&repo_dir)
+        .args([
+            "inspect",
+            "src/stdlib/Stream.saga",
+            "--stage",
+            "selective-core",
+            "--selective-no-fallback",
+        ])
+        .output()
+        .expect("inspect stdlib Stream selective Core");
+    assert!(
+        inspect.status.success(),
+        "saga inspect failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&inspect.stdout),
+        String::from_utf8_lossy(&inspect.stderr)
+    );
+    let core = String::from_utf8_lossy(&inspect.stdout);
+    assert!(core.contains("'for_each'/4"), "{core}");
+    assert!(
+        core.contains("apply F(V, _Evidence, fun (_CpsBindArg"),
+        "{core}"
+    );
+    assert!(
+        core.contains("apply 'for_each'/4(F, Rest, _Evidence, _ReturnK)"),
+        "{core}"
+    );
+}
+
+#[test]
+fn selective_core_codegen_lowers_stdlib_atomic_ref_strict_frontier() {
+    let binary = env!("CARGO_BIN_EXE_saga");
+    let repo_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+
+    let inspect = std::process::Command::new(binary)
+        .current_dir(&repo_dir)
+        .args([
+            "inspect",
+            "src/stdlib/AtomicRef.saga",
+            "--stage",
+            "selective-core",
+            "--selective-no-fallback",
+        ])
+        .output()
+        .expect("inspect stdlib AtomicRef selective Core");
+    assert!(
+        inspect.status.success(),
+        "saga inspect failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&inspect.stdout),
+        String::from_utf8_lossy(&inspect.stderr)
+    );
+    let core = String::from_utf8_lossy(&inspect.stdout);
+    assert!(core.contains("'lock_server'/3"), "{core}");
+    assert!(
+        core.contains("call 'std_evidence_bridge':'find_evidence'")
+            && core.contains("'Std.Actor.Monitor'")
+            && core.contains("'Std.Actor.Process'"),
+        "{core}"
+    );
+    assert!(
+        core.contains("apply 'lock_server'/3('unit', _Evidence, _ReturnK)"),
+        "{core}"
+    );
+}

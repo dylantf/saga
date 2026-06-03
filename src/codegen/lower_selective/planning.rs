@@ -10,6 +10,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         self.local_hof_direct_specializations.clear();
         self.local_dict_constructors.clear();
         self.direct_candidate_functions.clear();
+        let signature_shapes = self.signature_function_shapes(program);
         for decl in program {
             match decl {
                 MDecl::FunBinding(fb) => {
@@ -17,21 +18,9 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                     let shape = if is_native_variant_name(&fb.name) {
                         RuntimeFunctionShape::Pure
                     } else {
-                        self.effect_info
-                            .type_at_node
-                            .get(&fb.id)
-                            .and_then(|ty| {
-                                self.cps_function_arity_from_type(ty).map(
-                                    |(_source_arity, _adapter_arity, effects)| {
-                                        RuntimeFunctionShape::Cps(
-                                            crate::codegen::runtime_shape::CpsShape {
-                                                static_effects: effects,
-                                                is_open_row: self.function_type_has_open_row(ty),
-                                            },
-                                        )
-                                    },
-                                )
-                            })
+                        self.function_type_for_binding(fb)
+                            .map(|ty| RuntimeFunctionShape::from_type(ty, |effects| effects))
+                            .or_else(|| signature_shapes.get(&fb.name).cloned())
                             .unwrap_or_else(|| match self.effect_info.fun_effects.get(&fb.name) {
                                 Some(effects) if effects.is_empty() => RuntimeFunctionShape::Pure,
                                 Some(effects) => RuntimeFunctionShape::Cps(
@@ -80,6 +69,42 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         self.compute_cps_body_plans(program);
         self.compute_hof_direct_specializations(program);
         self.compute_dict_constructor_plans(program);
+    }
+
+    fn signature_function_shapes(
+        &self,
+        program: &MProgram,
+    ) -> HashMap<String, RuntimeFunctionShape> {
+        program
+            .iter()
+            .filter_map(|decl| {
+                let MDecl::Passthrough(crate::ast::Decl::FunSignature {
+                    name,
+                    effects,
+                    effect_row_var,
+                    ..
+                }) = decl
+                else {
+                    return None;
+                };
+                if effects.is_empty() && effect_row_var.is_none() {
+                    return None;
+                }
+                let static_effects = self
+                    .effect_info
+                    .fun_effects
+                    .get(name)
+                    .map(|effects| effects.iter().cloned().collect())
+                    .unwrap_or_else(|| effects.iter().map(|effect| effect.name.clone()).collect());
+                Some((
+                    name.clone(),
+                    RuntimeFunctionShape::Cps(crate::codegen::runtime_shape::CpsShape {
+                        static_effects,
+                        is_open_row: effect_row_var.is_some(),
+                    }),
+                ))
+            })
+            .collect()
     }
 
     fn compute_dict_constructor_plans(&mut self, program: &MProgram) {
@@ -505,7 +530,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
 
         let prev_direct_candidate = self.direct_candidate_function.replace(fb.name.clone());
         self.push_scope();
-        self.bind_fun_param_locals(fb);
+        self.bind_cps_entry_param_locals(fb);
         let supported = self.expr_is_cps_island_subset(&fb.body);
         self.pop_scope();
         self.direct_candidate_function = prev_direct_candidate;

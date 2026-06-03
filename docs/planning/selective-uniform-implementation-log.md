@@ -1397,3 +1397,26 @@ boundaries exist.
     `saga run --selective-codegen` prints `process:monitor:link:timer`.
     Full project `run --selective-no-fallback` still audits the whole stdlib
     first and currently exposes unrelated strict-mode frontiers.
+- Implemented the stdlib open-row HOF / recursive CPS receive slice:
+  - selective classification now uses preserved `FunSignature` passthroughs
+    when optimized/generated monadic function ids do not have `type_at_node`
+    entries. This preserves `needs {..e}` open-row information instead of
+    collapsing functions such as `Std.Stream.for_each` to pure/direct;
+  - CPS entry planning now binds parameter shapes with the CPS-entry binder,
+    so open-row callback parameters can be inferred from body calls when type
+    metadata is missing;
+  - CPS islands now accept `Let` sequencing the same way they already accepted
+    `Bind`, covering optimizer-emitted direct lets before a CPS-relevant case;
+  - same-module CPS candidate lookup now has a name-based path before local
+    function entries exist, and the direct name-based path no longer steals
+    in-flight CPS candidates as direct calls;
+  - `Std.Stream.for_each` now strict-lowers as `for_each/4`, calling callback
+    `F(V, _Evidence, K)` and recursively calling
+    `for_each/4(F, Rest, _Evidence, _ReturnK)`;
+  - `Std.AtomicRef.lock_server` now strict-lowers as `lock_server/3`, including
+    nested `receive`, actor evidence lookup, and recursive CPS calls;
+  - added CLI regressions for strict selective-core inspection of
+    `src/stdlib/Stream.saga` and `src/stdlib/AtomicRef.saga`;
+  - `saga test --selective-no-fallback` from `tests/e2e` now gets through
+    these stdlib frontiers and stops at `Std.Test.run_modules`, a direct test
+    runner shape.
