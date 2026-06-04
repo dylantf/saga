@@ -2467,9 +2467,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                     .iter()
                     .map(|arm| {
                         self.push_scope();
-                        for pat in &arm.params {
-                            self.bind_pat_locals(pat);
-                        }
+                        self.bind_cps_handler_arm_param_locals(arm);
                         let body = self.lower_cps_handler_arm_expr(
                             &arm.body,
                             outer_evidence.clone(),
@@ -2504,9 +2502,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         params.push(arm_k.clone());
 
         self.push_scope();
-        for pat in &arm.params {
-            self.bind_pat_locals(pat);
-        }
+        self.bind_cps_handler_arm_param_locals(arm);
         let body = self.lower_cps_handler_arm_expr(
             &arm.body,
             outer_evidence,
@@ -2532,13 +2528,19 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             if let Some(cleanup) = finally_block
                 && !self.atom_contains_resume(atom)
             {
-                return self.lower_direct_handler_result_with_finally(expr, cleanup);
+                return self.lower_direct_handler_result_with_finally(
+                    expr,
+                    cleanup,
+                    outer_evidence,
+                );
             }
             return self.lower_cps_handler_arm_atom(atom, outer_evidence, arm_k, finally_block);
         }
         if self.expr_is_direct_subset(expr) {
             return match finally_block {
-                Some(cleanup) => self.lower_direct_handler_result_with_finally(expr, cleanup),
+                Some(cleanup) => {
+                    self.lower_direct_handler_result_with_finally(expr, cleanup, outer_evidence)
+                }
                 None => self.lower_expr(expr),
             };
         }
@@ -2550,7 +2552,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                 self.lower_cps_yield(op, args, outer_evidence, arm_k)
             }
             MExpr::Resume { value, .. } => {
-                self.lower_resume_with_finally(value, arm_k, finally_block)
+                self.lower_resume_with_finally(value, arm_k, finally_block, outer_evidence)
             }
             MExpr::Bind {
                 var, value, body, ..
@@ -2568,8 +2570,39 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                 let local_shape = self
                     .direct_local_shape_for_expr(value)
                     .or_else(|| self.direct_call_shape_for_local_use_in_expr(&var.name, body));
+                let lowered_value = self.lower_resume_with_finally(
+                    resume_value,
+                    arm_k.clone(),
+                    finally_block,
+                    outer_evidence.clone(),
+                );
+                self.push_scope();
+                self.current_scope_mut().insert(var.name.clone());
+                if let Some(shape) = local_shape {
+                    self.current_shape_scope_mut()
+                        .insert(var.name.clone(), shape);
+                }
+                let lowered_body =
+                    self.lower_cps_handler_arm_expr(body, outer_evidence, arm_k, finally_block);
+                self.pop_scope();
+                CExpr::Let(
+                    core_var(&var.name),
+                    Box::new(lowered_value),
+                    Box::new(lowered_body),
+                )
+            }
+            MExpr::Bind {
+                var, value, body, ..
+            }
+            | MExpr::Let { var, value, body }
+                if self.handler_arm_expr_is_cps_callback_call_subset(value) =>
+            {
+                let MExpr::App { head, args, .. } = &**value else {
+                    unreachable!();
+                };
+                let local_shape = self.direct_local_shape_for_expr(value);
                 let lowered_value =
-                    self.lower_resume_with_finally(resume_value, arm_k.clone(), finally_block);
+                    self.lower_cps_callback_call_result_value(head, args, outer_evidence.clone());
                 self.push_scope();
                 self.current_scope_mut().insert(var.name.clone());
                 if let Some(shape) = local_shape {
@@ -2658,8 +2691,19 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                     })
                     .collect(),
             ),
+            MExpr::App { head, args, .. }
+                if self.handler_arm_expr_is_cps_callback_call_subset(expr) =>
+            {
+                self.lower_cps_app(head, args, outer_evidence, arm_k)
+            }
             MExpr::App { head, args, .. } => self
-                .lower_flat_map_identity_resume_handler_arm(head, args, arm_k, finally_block)
+                .lower_flat_map_identity_resume_handler_arm(
+                    head,
+                    args,
+                    arm_k,
+                    finally_block,
+                    outer_evidence,
+                )
                 .unwrap_or_else(|| {
                     self.unsupported_expr(&MExpr::App {
                         head: head.clone(),
@@ -2824,6 +2868,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         args: &[Atom],
         arm_k: CExpr,
         finally_block: Option<&MExpr>,
+        outer_evidence: CExpr,
     ) -> Option<CExpr> {
         if !self.is_flat_map_identity_resume_app(head, args) {
             return None;
@@ -2843,7 +2888,8 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         for param in params {
             self.bind_pat_locals(param);
         }
-        let callback_body = self.lower_resume_with_finally(value, arm_k, finally_block);
+        let callback_body =
+            self.lower_resume_with_finally(value, arm_k, finally_block, outer_evidence);
         let callback_body = self.wrap_param_match(params, &callback_params, callback_body);
         self.pop_scope();
 
@@ -2865,6 +2911,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         value: &Atom,
         arm_k: CExpr,
         finally_block: Option<&MExpr>,
+        outer_evidence: CExpr,
     ) -> CExpr {
         let resumed = CExpr::Apply(Box::new(arm_k), vec![self.lower_atom(value)]);
         match finally_block {
@@ -2873,7 +2920,11 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                 CExpr::Let(
                     result_var.clone(),
                     Box::new(resumed),
-                    Box::new(self.sequence_direct_finally_then(cleanup, CExpr::Var(result_var))),
+                    Box::new(self.sequence_direct_finally_then(
+                        cleanup,
+                        CExpr::Var(result_var),
+                        outer_evidence,
+                    )),
                 )
             }
             None => resumed,
@@ -2884,6 +2935,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         &mut self,
         expr: &MExpr,
         finally_block: &MExpr,
+        outer_evidence: CExpr,
     ) -> CExpr {
         match expr {
             MExpr::Bind {
@@ -2900,8 +2952,11 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                     self.current_shape_scope_mut()
                         .insert(var.name.clone(), shape);
                 }
-                let lowered_body =
-                    self.lower_direct_handler_result_with_finally(body, finally_block);
+                let lowered_body = self.lower_direct_handler_result_with_finally(
+                    body,
+                    finally_block,
+                    outer_evidence,
+                );
                 self.pop_scope();
                 CExpr::Let(
                     core_var(&var.name),
@@ -2920,14 +2975,20 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                     CArm {
                         pat: CPat::Lit(CLit::Atom("true".to_string())),
                         guard: None,
-                        body: self
-                            .lower_direct_handler_result_with_finally(then_branch, finally_block),
+                        body: self.lower_direct_handler_result_with_finally(
+                            then_branch,
+                            finally_block,
+                            outer_evidence.clone(),
+                        ),
                     },
                     CArm {
                         pat: CPat::Lit(CLit::Atom("false".to_string())),
                         guard: None,
-                        body: self
-                            .lower_direct_handler_result_with_finally(else_branch, finally_block),
+                        body: self.lower_direct_handler_result_with_finally(
+                            else_branch,
+                            finally_block,
+                            outer_evidence,
+                        ),
                     },
                 ],
             ),
@@ -2937,7 +2998,11 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                 Box::new(self.lower_atom(scrutinee)),
                 arms.iter()
                     .map(|arm| {
-                        self.lower_direct_handler_result_case_arm_with_finally(arm, finally_block)
+                        self.lower_direct_handler_result_case_arm_with_finally(
+                            arm,
+                            finally_block,
+                            outer_evidence.clone(),
+                        )
                     })
                     .collect(),
             ),
@@ -2946,9 +3011,11 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                 CExpr::Let(
                     result_var.clone(),
                     Box::new(self.lower_expr(expr)),
-                    Box::new(
-                        self.sequence_direct_finally_then(finally_block, CExpr::Var(result_var)),
-                    ),
+                    Box::new(self.sequence_direct_finally_then(
+                        finally_block,
+                        CExpr::Var(result_var),
+                        outer_evidence,
+                    )),
                 )
             }
         }
@@ -2958,21 +3025,53 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         &mut self,
         arm: &MArm,
         finally_block: &MExpr,
+        outer_evidence: CExpr,
     ) -> CArm {
         self.push_scope();
         self.bind_pat_locals(&arm.pattern);
-        let body = self.lower_direct_handler_result_with_finally(&arm.body, finally_block);
+        let body =
+            self.lower_direct_handler_result_with_finally(&arm.body, finally_block, outer_evidence);
         let guard = arm.guard.as_ref().map(|g| self.lower_expr(g));
         let pat = self.lower_pat(&arm.pattern);
         self.pop_scope();
         CArm { pat, guard, body }
     }
 
-    fn sequence_direct_finally_then(&mut self, finally_block: &MExpr, next: CExpr) -> CExpr {
+    fn lower_handler_finally_expr(
+        &mut self,
+        finally_block: &MExpr,
+        outer_evidence: CExpr,
+    ) -> CExpr {
+        if self.handler_arm_expr_is_cps_callback_call_subset(finally_block) {
+            let MExpr::App { head, args, .. } = finally_block else {
+                unreachable!();
+            };
+            return self.lower_cps_callback_call_result_value(head, args, outer_evidence);
+        }
+        self.lower_expr(finally_block)
+    }
+
+    fn lower_cps_callback_call_result_value(
+        &mut self,
+        head: &Atom,
+        args: &[Atom],
+        outer_evidence: CExpr,
+    ) -> CExpr {
+        let result_var = self.fresh_cps_temp("_CpsCallbackValue");
+        let return_k = CExpr::Fun(vec![result_var.clone()], Box::new(CExpr::Var(result_var)));
+        self.lower_cps_app(head, args, outer_evidence, return_k)
+    }
+
+    fn sequence_direct_finally_then(
+        &mut self,
+        finally_block: &MExpr,
+        next: CExpr,
+        outer_evidence: CExpr,
+    ) -> CExpr {
         let cleanup_var = self.fresh_cps_temp("_FinallyCleanup");
         CExpr::Let(
             cleanup_var,
-            Box::new(self.lower_expr(finally_block)),
+            Box::new(self.lower_handler_finally_expr(finally_block, outer_evidence)),
             Box::new(next),
         )
     }

@@ -1420,3 +1420,21 @@ boundaries exist.
   - `saga test --selective-no-fallback` from `tests/e2e` now gets through
     these stdlib frontiers and stops at `Std.Test.run_modules`, a direct test
     runner shape.
+- Implemented the scoped `finally` handler-arm design slice:
+  - handler operation-arm params are now bound using CPS-entry/protocol shapes
+    when the installed handler arm receives protocol arguments. When type
+    metadata is unavailable, callable arm params are inferred from direct call
+    use in the arm body and `finally` block and treated as runtime CPS
+    callbacks;
+  - `finally` proof now runs in the scoped handler-arm walk instead of checking
+    cleanup before arm-local bindings exist. This admits cleanup such as
+    `release resource` where `resource` is introduced before `resume resource`;
+  - handler-arm lowering can evaluate protocol callback calls as values via an
+    identity continuation, covering scoped acquire/release callbacks while
+    keeping the rule local to handler protocol params;
+  - `saga test --selective-no-fallback effects_test` now compiles/runs the
+    public CPS-shaped `tests` function, and the scoped-resource normal
+    completion test passes;
+  - remaining EffectsTest failures are abort/return-routing issues
+    (`evidence_tag_not_found` / `bad argument`) rather than the scoped-finally
+    callback ABI mismatch.

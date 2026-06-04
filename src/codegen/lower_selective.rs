@@ -1555,6 +1555,39 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         self.bind_pat_locals_with_shape(pat, None);
     }
 
+    fn bind_cps_handler_arm_param_locals(&mut self, arm: &MHandlerArm) {
+        for pat in &arm.params {
+            let shape = self
+                .local_shape_for_cps_entry_pat(pat)
+                .or_else(|| self.runtime_cps_shape_for_handler_param_use(pat, arm));
+            self.bind_pat_locals_with_shape(pat, shape);
+        }
+    }
+
+    fn runtime_cps_shape_for_handler_param_use(
+        &self,
+        pat: &Pat,
+        arm: &MHandlerArm,
+    ) -> Option<LocalValueShape> {
+        let Pat::Var { name, .. } = pat else {
+            return None;
+        };
+        let mut arity = None;
+        if !Self::collect_direct_call_arity_for_local_in_expr(name, &arm.body, &mut arity) {
+            return None;
+        }
+        if let Some(finally_block) = &arm.finally_block
+            && !Self::collect_direct_call_arity_for_local_in_expr(name, finally_block, &mut arity)
+        {
+            return None;
+        }
+        arity.map(|source_arity| LocalValueShape::RuntimeCpsCallable {
+            source_arity,
+            adapter_arity: source_arity + 2,
+            effects: Vec::new(),
+        })
+    }
+
     fn bind_pat_locals_with_shape(&mut self, pat: &Pat, explicit_shape: Option<LocalValueShape>) {
         match pat {
             Pat::Var { id, name, .. } => {
@@ -1982,21 +2015,144 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         if arm.params.iter().any(|p| !direct_param_supported(p)) {
             return false;
         }
-        if let Some(finally_block) = &arm.finally_block
-            && !self.expr_is_direct_subset(finally_block)
-        {
-            return false;
-        }
         if arm.finally_block.is_some() && Self::handler_arm_expr_contains_yield(&arm.body) {
             return false;
         }
         self.push_scope();
-        for pat in &arm.params {
-            self.bind_pat_locals(pat);
-        }
-        let supported = self.handler_arm_expr_is_cps_island_subset(&arm.body);
+        self.bind_cps_handler_arm_param_locals(arm);
+        let supported = match arm.finally_block.as_ref() {
+            Some(finally_block) => {
+                self.handler_arm_expr_is_cps_island_subset_with_finally(&arm.body, finally_block)
+            }
+            None => self.handler_arm_expr_is_cps_island_subset(&arm.body),
+        };
         self.pop_scope();
         supported
+    }
+
+    fn handler_arm_expr_is_cps_island_subset_with_finally(
+        &mut self,
+        expr: &MExpr,
+        finally_block: &MExpr,
+    ) -> bool {
+        match expr {
+            MExpr::Pure(atom) => {
+                self.handler_arm_atom_is_cps_island_subset(atom)
+                    && self.handler_finally_expr_is_supported(finally_block)
+            }
+            MExpr::Resume { value, .. } => {
+                self.atom_is_direct_subset(value)
+                    && self.handler_finally_expr_is_supported(finally_block)
+            }
+            MExpr::Bind {
+                var, value, body, ..
+            }
+            | MExpr::Let { var, value, body } => {
+                let value_supported = if let MExpr::Resume {
+                    value: resume_value,
+                    ..
+                } = &**value
+                {
+                    self.atom_is_direct_subset(resume_value)
+                        && self.handler_finally_expr_is_supported(finally_block)
+                } else {
+                    self.handler_arm_expr_is_cps_island_subset(value)
+                        || self.handler_arm_expr_is_cps_callback_call_subset(value)
+                };
+                if !value_supported {
+                    return false;
+                }
+                let local_shape = self.direct_local_shape_for_expr(value).or_else(|| {
+                    matches!(&**value, MExpr::Resume { .. })
+                        .then(|| self.direct_call_shape_for_local_use_in_expr(&var.name, body))
+                        .flatten()
+                });
+                self.push_scope();
+                self.current_scope_mut().insert(var.name.clone());
+                if let Some(shape) = local_shape {
+                    self.current_shape_scope_mut()
+                        .insert(var.name.clone(), shape);
+                }
+                let supported =
+                    self.handler_arm_expr_is_cps_island_subset_with_finally(body, finally_block);
+                self.pop_scope();
+                supported
+            }
+            MExpr::If {
+                cond,
+                then_branch,
+                else_branch,
+                ..
+            } => {
+                self.atom_is_direct_subset(cond)
+                    && self.handler_arm_expr_is_cps_island_subset_with_finally(
+                        then_branch,
+                        finally_block,
+                    )
+                    && self.handler_arm_expr_is_cps_island_subset_with_finally(
+                        else_branch,
+                        finally_block,
+                    )
+            }
+            MExpr::Case {
+                scrutinee, arms, ..
+            } => {
+                if !self.atom_is_direct_subset(scrutinee) {
+                    return false;
+                }
+                arms.iter().all(|arm| {
+                    if !direct_pat_supported(&arm.pattern) {
+                        return false;
+                    }
+                    self.push_scope();
+                    self.bind_pat_locals(&arm.pattern);
+                    let supported = arm
+                        .guard
+                        .as_ref()
+                        .is_none_or(|guard| self.expr_is_direct_subset(guard))
+                        && self.handler_arm_expr_is_cps_island_subset_with_finally(
+                            &arm.body,
+                            finally_block,
+                        );
+                    self.pop_scope();
+                    supported
+                })
+            }
+            MExpr::BitString { segments, .. } => {
+                segments.iter().all(|segment| {
+                    self.handler_arm_atom_is_cps_island_subset(&segment.value)
+                        && segment
+                            .size
+                            .as_ref()
+                            .is_none_or(|size| self.handler_arm_atom_is_cps_island_subset(size))
+                }) && self.handler_finally_expr_is_supported(finally_block)
+            }
+            MExpr::Yield { .. } => false,
+            MExpr::App { head, args, .. } if self.is_flat_map_identity_resume_app(head, args) => {
+                self.handler_finally_expr_is_supported(finally_block)
+            }
+            _ => {
+                (self.expr_is_direct_subset(expr)
+                    || self.handler_arm_expr_is_cps_island_subset(expr))
+                    && self.handler_finally_expr_is_supported(finally_block)
+            }
+        }
+    }
+
+    fn handler_finally_expr_is_supported(&mut self, expr: &MExpr) -> bool {
+        self.expr_is_direct_subset(expr) || self.handler_arm_expr_is_cps_callback_call_subset(expr)
+    }
+
+    fn handler_arm_expr_is_cps_callback_call_subset(&mut self, expr: &MExpr) -> bool {
+        let MExpr::App { head, args, .. } = expr else {
+            return false;
+        };
+        matches!(
+            self.call_shape(head),
+            Some(CallShape::Cps { .. } | CallShape::LocalCpsCallable { .. })
+        ) && args
+            .iter()
+            .all(|arg| self.atom_is_direct_subset(arg) || self.atom_is_cps_value_subset(arg))
     }
 
     fn handler_arm_expr_is_cps_island_subset(&mut self, expr: &MExpr) -> bool {
@@ -2009,6 +2165,10 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         match expr {
             MExpr::Yield { op, args, .. } => self.yield_args_are_cps_island_subset(op, args),
             MExpr::Resume { value, .. } => self.atom_is_direct_subset(value),
+            MExpr::App { head, args, .. } => {
+                self.handler_arm_expr_is_cps_callback_call_subset(expr)
+                    || self.is_flat_map_identity_resume_app(head, args)
+            }
             MExpr::Bind {
                 var, value, body, ..
             }
@@ -2071,7 +2231,6 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                         .as_ref()
                         .is_none_or(|size| self.handler_arm_atom_is_cps_island_subset(size))
             }),
-            MExpr::App { head, args, .. } => self.is_flat_map_identity_resume_app(head, args),
             _ => false,
         }
     }

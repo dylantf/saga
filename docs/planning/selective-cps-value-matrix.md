@@ -162,7 +162,7 @@ not port the implementation:
 | Effectful argument CPS chaining | `effectful_arg_idxs` paths | Mostly delegated to monadic `Bind`; needs fixtures for nested call arguments |
 | Partial application | old lowerer handles supplied args vs total arity | Open for CPS callables |
 | Handler values | static/conditional/dynamic handler item code in `effects.rs` | Inline, named, and `if`-selected dynamic handler values are supported for current e2e shapes; `case`/abort/finally stress remains |
-| `finally` / cleanup | old handler finalization paths | Narrow static resume/abort finally supported |
+| `finally` / cleanup | old handler finalization paths | Static resume cleanup supported, including cleanup that references arm-local bindings and protocol callback params; abort/return-clause routing remains separate |
 
 ## Related Specialization Track
 
@@ -202,18 +202,18 @@ static.
      methods and decide whether to cover the generated pure/effectful dict
      method shape directly or leave full generic dict specialization for later.
 
-3. **EffectsTest `tests` / finally frontier**
-   - Current strict blocker:
-     `saga test --selective-no-fallback effects_test` clears
-     `reabort_wrapped`, then stops at the public CPS-shaped `tests` function.
-   - The remaining stable frontier is in the `finally`/scoped-resource test
-     tree: static handler arms that bind a local resource, `resume resource`,
-     then run cleanup that references the bound local.
-   - This should stay narrower than a blanket static-handler admit. Handler-arm
-     re-yield is now supported by yielding through the outer evidence with the
-     arm continuation; cleanup sequencing still needs a scoped design for arms
-     whose `finally` block depends on arm-local bindings and whose resumed
-     continuation may itself abort.
+3. **EffectsTest abort/return routing frontier**
+   - Current strict result:
+     `saga test --selective-no-fallback effects_test` compiles and runs the
+     public CPS-shaped `tests` function.
+   - Scoped-resource normal completion now passes: handler operation params
+     that are function-typed are bound as protocol CPS callbacks inside handler
+     arm lowering, and `finally` cleanup is proven/lowered in the scope where
+     arm-local resources are available.
+   - Remaining failures are broader abort/return-routing cases
+     (`evidence_tag_not_found` and `bad argument`) where a resumed continuation
+     aborts through another handler or a terminal abort interacts with a return
+     clause. Keep this separate from scoped-finally ABI support.
 
 4. **Effectful trait method calls and values**
    - Local and imported dict constructors plus effectful method calls/values
