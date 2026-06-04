@@ -193,6 +193,12 @@ fn program_imports_module(program: &ast::Program, module_name: &str) -> bool {
     })
 }
 
+fn resolution_references_module(resolution: &resolve::ResolutionMap, module_name: &str) -> bool {
+    resolution
+        .values()
+        .any(|resolved| resolved.source_module.as_deref() == Some(module_name))
+}
+
 // -------------------------------------------------------------------------
 // New-path helpers (Phase 1, step 8)
 // -------------------------------------------------------------------------
@@ -446,7 +452,8 @@ pub fn emit_module_via_new_path(
             }
         }
         if imported_module_name != &source_module_name
-            && program_imports_module(program, imported_module_name)
+            && (program_imports_module(program, imported_module_name)
+                || resolution_references_module(&resolution_map, imported_module_name))
         {
             handler_info
                 .resumption
@@ -492,6 +499,11 @@ pub fn emit_module_via_new_path(
             imported_private_helpers.extend(imported_private);
         }
     }
+    let imported_dict_constructors = if source_module_name.starts_with("Std.") {
+        HashMap::new()
+    } else {
+        imported_dict_constructors
+    };
     let (monadic_prog, handler_value_map) = monadic::translate::translate_with_imports(
         &anf_program,
         &resolution_map,
@@ -514,7 +526,7 @@ pub fn emit_module_via_new_path(
             resolution: resolution_map.clone(),
             imported_function_variants,
             imported_handler_factories,
-            imported_dict_constructors,
+            imported_dict_constructors: imported_dict_constructors.clone(),
             imported_private_helpers,
         },
     );
@@ -546,7 +558,7 @@ pub fn emit_module_via_new_path(
         let selective_program =
             selective_program_with_preserved_abi_decls(&original_selective_program, &optimized)
                 .unwrap_or_else(|| optimized.clone());
-        let selective_cmod = lower_selective::lower_module_with_entry_export_options(
+        let selective_cmod = lower_selective::lower_module_with_entry_export_and_imported_dicts(
             module_name,
             &selective_program,
             &resolution_map,
@@ -556,6 +568,7 @@ pub fn emit_module_via_new_path(
             &effect_info,
             entry_export,
             &handler_value_map,
+            imported_dict_constructors.clone(),
             lower_selective::LoweringOptions {
                 require_all_functions: options.selective_no_fallback,
             },

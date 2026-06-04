@@ -189,8 +189,8 @@ extraction.
 
 | Slice | Goal | Notes |
 | --- | --- | --- |
-| Immediate monomorphic method call | Rewrite a known `DictMethodAccess(dict_ctor, method)` followed by apply into direct method-body lowering | Local known dict constructors are covered for the direct selective path. Imported constructors still use the dict-passing fallback until impl-method metadata is imported |
-| Impl-method metadata | Record, import, and query the trait name, impl type, method index/name, source arity, direct/CPS shape, and required sub-dicts for each dict constructor | `ModuleCodegenInfo::trait_impl_dicts` now carries per-method metadata for imported/public dicts. Next step is consuming it in selective call-site specialization |
+| Immediate monomorphic method call | Rewrite a known `DictMethodAccess(dict_ctor, method)` followed by apply into direct method-body lowering | Local known dict constructors are covered. Imported monomorphic constructors are covered when their method body is admitted into the caller, e.g. `Show Bool`; imported methods that reference private same-module helpers still fall back |
+| Impl-method metadata | Record, import, and query the trait name, impl type, method index/name, source arity, direct/CPS shape, and required sub-dicts for each dict constructor | `ModuleCodegenInfo::trait_impl_dicts` now carries per-method metadata for imported/public dicts. Selective lowering also consumes collected imported `MDictConstructor` bodies for direct call-site specialization |
 | Generic dict constructor args | Preserve and specialize constructor chains such as `__dict_ToJson_List(__dict_ToJson_Person)` | Local chains can now inline known generic method calls through known sub-dict aliases. Public/fallback dict constructor definitions are still emitted, and call-site dict tuple elision is a separate follow-up |
 | Dict-only local elision | Remove call-site dictionary tuple construction when the dict value is only used to reach a known method call | Deferred performance pass. Needs an occurrence proof for dictionary-only locals so `let d = __dict_T(...); let m = d.method; m x` can inline without first materializing `d` |
 | Effectful impl methods | Choose direct, CPS, or direct-with-island based on the impl method's lowering plan | Same ABI discipline as ordinary functions: pure direct methods call direct, leaky methods call CPS, handled/net-pure methods may get direct island wrappers |
@@ -218,9 +218,21 @@ extraction.
    - The dict-level metadata still records trait name, trait type args, impl
      target type, dict constructor name/arity, required sub-dict constraints,
      and impl-level effects.
-   - Next implementation step: consume this imported metadata in selective
-     call-site specialization, starting with monomorphic imported dicts such as
-     `Std.Base.Show Int`.
+   - Selective lowering now consumes collected imported dictionary constructor
+     bodies for admitted monomorphic direct methods. `Show Bool` is the current
+     stdlib canary; `Show Int` still falls back because its method references a
+     private same-module external helper (`Std.Int.to_string`).
+
+2.5. **Imported private helper policy**
+   - Decide how imported method bodies may reference private same-module
+     helpers. The old imported-dict collector rejects these today unless the
+     optimizer can clone the helper safely.
+   - This blocks specializations such as `Show Int`, whose body is just
+     `to_string x` but where `to_string` is a private external function in
+     `Std.Int`.
+   - Possible resolutions: make selected stdlib helpers public, allow imported
+     private external calls with resolved remote targets, or add selective
+     helper-clone support like the monadic optimizer path.
 
 3. **Generic dict constructor chains**
    - Recognize chains such as

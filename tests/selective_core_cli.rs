@@ -339,6 +339,47 @@ fn selective_core_codegen_runs_stdlib_dict_fixture() {
 }
 
 #[test]
+fn selective_core_specializes_imported_monomorphic_trait_method() {
+    let binary = env!("CARGO_BIN_EXE_saga");
+    let project_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("examples/optimization/selective-uniform/imported-stdlib-trait-specialization-project");
+
+    let inspect = std::process::Command::new(binary)
+        .current_dir(&project_dir)
+        .args(["inspect", "src/Main.saga", "--stage", "selective-core"])
+        .output()
+        .expect("inspect imported stdlib trait specialization fixture");
+    assert!(
+        inspect.status.success(),
+        "saga inspect failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&inspect.stdout),
+        String::from_utf8_lossy(&inspect.stderr)
+    );
+    let core = String::from_utf8_lossy(&inspect.stdout);
+    assert!(!core.contains("call 'erlang':'element'"), "{core}");
+    assert!(!core.contains("apply ___anf_v1"), "{core}");
+    assert!(core.contains("#{#<84>"), "{core}");
+
+    let output = std::process::Command::new(binary)
+        .current_dir(&project_dir)
+        .args(["run", "--selective-codegen"])
+        .output()
+        .expect("run imported stdlib trait specialization fixture");
+    assert!(
+        output.status.success(),
+        "saga run failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let output_text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output_text.contains("True"), "{output_text}");
+}
+
+#[test]
 fn selective_core_no_fallback_cli_rejects_private_unplanned_function() {
     let binary = env!("CARGO_BIN_EXE_saga");
     let manifest_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));

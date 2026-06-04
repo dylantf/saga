@@ -447,8 +447,9 @@ pub fn cmd_inspect_with_options(file: &str, stage: &str, options: &CompileOption
                 String,
                 saga::ast::HandlerBody,
             > = std::collections::HashMap::new();
+            let mut imported_dict_constructors = std::collections::HashMap::new();
             let mut handler_info = codegen::handler_analysis::analyze(&elaborated);
-            for compiled in ctx.modules.values() {
+            for (imported_module_name, compiled) in &ctx.modules {
                 let anf_imported = codegen::anf::normalize(
                     compiled.elaborated.clone(),
                     Some(&compiled.resolution),
@@ -463,9 +464,25 @@ pub fn cmd_inspect_with_options(file: &str, stage: &str, options: &CompileOption
                 handler_info
                     .resumption
                     .extend(codegen::handler_analysis::analyze(&compiled.elaborated).resumption);
+                if imported_module_name != &module_name {
+                    let (imported_monadic, _) = monadic::translate::translate(
+                        &anf_imported,
+                        &compiled.resolution,
+                        &effect_info,
+                    );
+                    imported_dict_constructors.extend(
+                        monadic::effect_opt::collect_imported_dict_constructors(
+                            imported_module_name,
+                            &imported_monadic,
+                            &compiled.resolution,
+                            &compiled.codegen_info,
+                            &std::collections::HashSet::new(),
+                        ),
+                    );
+                }
             }
 
-            let (monadic_prog, _handler_value_map) = monadic::translate::translate_with_imports(
+            let (monadic_prog, handler_value_map) = monadic::translate::translate_with_imports(
                 &anf_program,
                 &resolution_map,
                 &effect_info,
@@ -481,18 +498,22 @@ pub fn cmd_inspect_with_options(file: &str, stage: &str, options: &CompileOption
                 );
                 let monadic_prog =
                     monadic::effect_opt::run(monadic_prog, &handler_info, &effect_info);
-                let cmod = codegen::lower_selective::lower_module_with_options(
-                    &module_name,
-                    &monadic_prog,
-                    &resolution_map,
-                    &constructor_atoms,
-                    &ctx,
-                    &handler_info,
-                    &effect_info,
-                    codegen::lower_selective::LoweringOptions {
-                        require_all_functions: options.selective_no_fallback,
-                    },
-                );
+                let cmod =
+                    codegen::lower_selective::lower_module_with_entry_export_and_imported_dicts(
+                        &module_name,
+                        &monadic_prog,
+                        &resolution_map,
+                        &constructor_atoms,
+                        &ctx,
+                        &handler_info,
+                        &effect_info,
+                        None,
+                        &handler_value_map,
+                        imported_dict_constructors,
+                        codegen::lower_selective::LoweringOptions {
+                            require_all_functions: options.selective_no_fallback,
+                        },
+                    );
                 println!("{}", codegen::cerl::print_module(&cmod));
                 return;
             }

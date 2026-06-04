@@ -1596,3 +1596,22 @@ boundaries exist.
   - recorded that dict-only local elision as an explicit deferred performance
     pass in `selective-cps-value-matrix.md`, so the next trait-specialization
     slices can focus on imported/generic coverage without losing this cleanup.
+- Implemented the first imported monomorphic trait-call specialization slice:
+  - the selective backend now passes collected imported `MDictConstructor`
+    bodies into direct selective lowering, so admitted imported dictionaries
+    can be treated like known dictionaries at call sites;
+  - imported module candidate collection now also admits modules referenced by
+    backend resolution, not only explicit source `import` declarations. This
+    matters for prelude/stdlib trait dictionaries inserted by elaboration;
+  - `inspect --stage selective-core` uses the same imported dictionary
+    collection path for focused debugging;
+  - stdlib module self-compilation keeps imported dictionary specialization
+    disabled for now, avoiding a wider stdlib-cache frontier while user modules
+    can still specialize calls into stdlib;
+  - added a `Show Bool` stdlib fixture proving imported monomorphic method
+    dispatch can inline the method body and remove `erlang:element`/method
+    closure apply in the caller;
+  - `Show Int` remains a documented follow-up because the imported-dict
+    collector rejects its private same-module external helper call to
+    `Std.Int.to_string`. We need an imported private-helper/external-ref policy
+    before specializing that shape.

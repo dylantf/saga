@@ -1505,6 +1505,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             self.handler_info,
             self.effect_info,
             self.handler_value_map,
+            self.imported_dict_constructors.clone(),
             self.options,
         );
         imported.current_module = source_module_name;
@@ -2805,6 +2806,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             self.handler_info,
             self.effect_info,
             self.handler_value_map,
+            self.imported_dict_constructors.clone(),
             self.options,
         );
         imported.current_module = source_module_name;

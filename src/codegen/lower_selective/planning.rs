@@ -323,6 +323,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                 self.handler_info,
                 self.effect_info,
                 &imported_handler_value_map,
+                HashMap::new(),
                 LoweringOptions::default(),
             );
             imported.current_module = source_module_name.clone();

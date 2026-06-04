@@ -127,6 +127,35 @@ pub fn lower_module_with_entry_export_options(
     handler_value_map: &HandlerValueMap,
     options: LoweringOptions,
 ) -> CModule {
+    lower_module_with_entry_export_and_imported_dicts(
+        module_name,
+        program,
+        resolution,
+        ctors,
+        module_ctx,
+        handler_info,
+        effect_info,
+        entry_export,
+        handler_value_map,
+        HashMap::new(),
+        options,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn lower_module_with_entry_export_and_imported_dicts(
+    module_name: &str,
+    program: &MProgram,
+    resolution: &ResolutionMap,
+    ctors: &ConstructorAtoms,
+    module_ctx: &CodegenContext,
+    handler_info: &HandlerAnalysis,
+    effect_info: &EffectInfo<'_>,
+    entry_export: Option<&str>,
+    handler_value_map: &HandlerValueMap,
+    imported_dict_constructors: HashMap<String, MDictConstructor>,
+    options: LoweringOptions,
+) -> CModule {
     let mut lowerer = DirectLowerer::new(
         resolution,
         ctors,
@@ -134,6 +163,7 @@ pub fn lower_module_with_entry_export_options(
         handler_info,
         effect_info,
         handler_value_map,
+        imported_dict_constructors,
         options,
     );
     lowerer.lower_module(module_name, program, entry_export)
@@ -165,6 +195,7 @@ struct DirectLowerer<'a, 'info> {
     /// selected callback parameters are statically pure at a call site.
     local_hof_direct_specializations: HashMap<String, HofDirectSpecialization>,
     local_dict_constructors: HashMap<String, MDictConstructor>,
+    imported_dict_constructors: HashMap<String, MDictConstructor>,
     local_external_functions: HashMap<String, DirectCallable>,
     /// Emitted entries discovered for already-compiled imported user modules.
     imported_function_entries: HashMap<(String, String), FunctionEntryInfo>,
@@ -192,6 +223,7 @@ struct DirectLowerer<'a, 'info> {
 }
 
 impl<'a, 'info> DirectLowerer<'a, 'info> {
+    #[allow(clippy::too_many_arguments)]
     fn new(
         resolution: &'a ResolutionMap,
         ctors: &'a ConstructorAtoms,
@@ -199,6 +231,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         handler_info: &'a HandlerAnalysis,
         effect_info: &'a EffectInfo<'info>,
         handler_value_map: &'a HandlerValueMap,
+        imported_dict_constructors: HashMap<String, MDictConstructor>,
         options: LoweringOptions,
     ) -> Self {
         Self {
@@ -218,6 +251,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             local_dict_constructor_arities: HashMap::new(),
             local_hof_direct_specializations: HashMap::new(),
             local_dict_constructors: HashMap::new(),
+            imported_dict_constructors,
             local_external_functions: HashMap::new(),
             imported_function_entries: HashMap::new(),
             imported_hof_direct_specializations: HashMap::new(),
@@ -3134,7 +3168,11 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                 let Atom::DictRef { name, .. } = head else {
                     return None;
                 };
-                let constructor = self.local_dict_constructors.get(name)?.clone();
+                let constructor = self
+                    .local_dict_constructors
+                    .get(name)
+                    .or_else(|| self.imported_dict_constructors.get(name))?
+                    .clone();
                 if constructor.dict_params.len() != args.len()
                     || args.iter().any(|arg| !self.atom_is_direct_subset(arg))
                 {
@@ -3985,6 +4023,7 @@ mod tests {
             &handler_info,
             &effect_info,
             &handler_value_map,
+            HashMap::new(),
             LoweringOptions::default(),
         );
 
