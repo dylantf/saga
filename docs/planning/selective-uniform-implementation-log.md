@@ -1575,3 +1575,24 @@ boundaries exist.
   - this does not yet rewrite imported trait method call sites. The next slice
     should consume this metadata to specialize monomorphic imported dicts while
     preserving dictionary-passing fallback for unsupported/dynamic cases.
+- Implemented the first generic local dict-chain specialization slice:
+  - direct selective lowering now records known direct method lambdas produced
+    by `DictMethodAccess` on known dictionaries, and elides the method-closure
+    extraction binding when the local is used only as a call head;
+  - generic impl-method bodies receive scoped aliases for their dictionary
+    constructor parameters, so a known chain such as
+    `__dict_Size_Box(__dict_Size_Int())` can inline both the outer method and
+    the nested sub-dict method call;
+  - added an occurrence guard before eliding known method locals, avoiding
+    unbound Core variables if a method value is stored or returned instead of
+    called;
+  - added coverage for a local generic `Size (Box Int)` trait method chain. In
+    the generated `main` body the method closure extraction is gone and the
+    program evaluates correctly;
+  - current limitation: local call sites can still materialize the dict tuples
+    themselves, and public/fallback dict constructor functions are still
+    emitted. A later occurrence-proof pass can elide dictionary-only locals
+    once we are ready to chase that extra performance.
+  - recorded that dict-only local elision as an explicit deferred performance
+    pass in `selective-cps-value-matrix.md`, so the next trait-specialization
+    slices can focus on imported/generic coverage without losing this cleanup.

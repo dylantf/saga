@@ -14,6 +14,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 
 mod cps;
 mod direct;
+mod occurs;
 mod planning;
 mod support;
 
@@ -184,6 +185,7 @@ struct DirectLowerer<'a, 'info> {
     cps_temp_counter: usize,
     locals: Vec<HashSet<String>>,
     local_shapes: Vec<HashMap<String, LocalValueShape>>,
+    local_known_direct_lambdas: Vec<HashMap<String, KnownDirectLambda>>,
     local_known_cps_lambdas: Vec<HashMap<String, KnownCpsLambda>>,
     local_known_dict_values: Vec<HashMap<String, KnownDictValue>>,
     options: LoweringOptions,
@@ -227,6 +229,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             cps_temp_counter: 0,
             locals: vec![HashSet::new()],
             local_shapes: vec![HashMap::new()],
+            local_known_direct_lambdas: vec![HashMap::new()],
             local_known_cps_lambdas: vec![HashMap::new()],
             local_known_dict_values: vec![HashMap::new()],
             options,
@@ -1405,6 +1408,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
     fn push_scope(&mut self) {
         self.locals.push(HashSet::new());
         self.local_shapes.push(HashMap::new());
+        self.local_known_direct_lambdas.push(HashMap::new());
         self.local_known_cps_lambdas.push(HashMap::new());
         self.local_known_dict_values.push(HashMap::new());
     }
@@ -1412,6 +1416,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
     fn pop_scope(&mut self) {
         self.locals.pop();
         self.local_shapes.pop();
+        self.local_known_direct_lambdas.pop();
         self.local_known_cps_lambdas.pop();
         self.local_known_dict_values.pop();
     }
@@ -1432,10 +1437,23 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             .expect("direct lowerer has a known-CPS-lambda scope")
     }
 
+    fn current_known_direct_lambda_scope_mut(&mut self) -> &mut HashMap<String, KnownDirectLambda> {
+        self.local_known_direct_lambdas
+            .last_mut()
+            .expect("direct lowerer has a known-direct-lambda scope")
+    }
+
     fn current_known_dict_value_scope_mut(&mut self) -> &mut HashMap<String, KnownDictValue> {
         self.local_known_dict_values
             .last_mut()
             .expect("direct lowerer has a known-dict-value scope")
+    }
+
+    fn known_direct_lambda(&self, name: &str) -> Option<KnownDirectLambda> {
+        self.local_known_direct_lambdas
+            .iter()
+            .rev()
+            .find_map(|scope| scope.get(name).cloned())
     }
 
     fn known_cps_lambda(&self, name: &str) -> Option<KnownCpsLambda> {
@@ -3173,6 +3191,36 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             .zip(known_dict.dict_args)
             .collect();
         Some(KnownCpsLambda {
+            dict_bindings,
+            params,
+            body,
+        })
+    }
+
+    fn known_direct_lambda_for_expr(&self, expr: &MExpr) -> Option<KnownDirectLambda> {
+        let MExpr::DictMethodAccess {
+            dict, method_index, ..
+        } = expr
+        else {
+            return None;
+        };
+        let Atom::Var { name, .. } = dict else {
+            return None;
+        };
+        let known_dict = self.known_dict_value(&name.name)?;
+        let method = known_dict.methods.get(*method_index)?.clone();
+        let Atom::Lambda { params, body, .. } = method else {
+            return None;
+        };
+        if params.iter().any(|param| !direct_param_supported(param)) {
+            return None;
+        }
+        let dict_bindings = known_dict
+            .dict_params
+            .into_iter()
+            .zip(known_dict.dict_args)
+            .collect();
+        Some(KnownDirectLambda {
             dict_bindings,
             params,
             body,

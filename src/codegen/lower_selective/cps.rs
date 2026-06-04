@@ -1280,7 +1280,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         Some(lowered)
     }
 
-    fn known_dict_aliases_for_bindings(
+    pub(super) fn known_dict_aliases_for_bindings(
         &self,
         dict_bindings: &[(String, Atom)],
     ) -> Vec<(String, KnownDictValue)> {

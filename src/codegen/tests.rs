@@ -605,6 +605,43 @@ main () = encode 41
 }
 
 #[test]
+fn selective_core_specializes_local_generic_trait_method_chain() {
+    let src = r#"
+type Box a = Box a
+
+trait Size a {
+  fun size : a -> Int
+}
+
+impl Size for Int {
+  size x = x
+}
+
+impl Size for Box a where {a: Size} {
+  size (Box x) = size x + 1
+}
+
+fun main : Unit -> Int
+main () = size (Box 41)
+"#;
+    let out = emit_selective_core(src);
+    assert!(out.contains("'main'/1"), "{out}");
+    let main_body = out
+        .split("'main'/1 =")
+        .nth(1)
+        .unwrap_or_else(|| panic!("main function missing in:\n{out}"));
+    assert!(
+        !main_body.contains("call 'erlang':'element'"),
+        "known generic trait chain should not extract method closures in main\n{out}"
+    );
+    assert_selective_core_eval_stdout_contains(
+        src,
+        "io:format(\"~p~n\", ['_script':main(unit)]), init:stop().",
+        "42",
+    );
+}
+
+#[test]
 fn selective_core_lowers_effectful_trait_method_call() {
     let src = r#"
 effect ReadInt {

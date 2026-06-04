@@ -21,6 +21,24 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                 {
                     return lowered;
                 }
+                let known_direct_lambda = self.known_direct_lambda_for_expr(value);
+                if let Some(lambda) = known_direct_lambda
+                    && occurs::local_is_only_called_in_expr(&var.name, body)
+                {
+                    self.push_scope();
+                    self.current_scope_mut().insert(var.name.clone());
+                    self.current_shape_scope_mut().insert(
+                        var.name.clone(),
+                        LocalValueShape::PureCallable {
+                            arity: lambda.params.len(),
+                        },
+                    );
+                    self.current_known_direct_lambda_scope_mut()
+                        .insert(var.name.clone(), lambda);
+                    let body = self.lower_expr(body);
+                    self.pop_scope();
+                    return body;
+                }
                 let local_shape = self.direct_local_shape_for_expr(value);
                 let known_dict = self.known_dict_value_for_expr(value);
                 let value = self.lower_expr(value);
@@ -451,31 +469,72 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         method_index: usize,
         args: &[Atom],
     ) -> Option<CExpr> {
-        if !known_dict.dict_params.is_empty() {
-            return None;
-        }
         let method = known_dict.methods.get(method_index)?;
         let Atom::Lambda { params, body, .. } = method else {
             return None;
         };
         if params.len() != args.len()
             || params.iter().any(|param| !direct_param_supported(param))
-            || !self.lambda_is_direct_subset(params, body)
         {
             return None;
         }
 
-        Some(self.lower_inline_direct_lambda_app(params, body, args))
+        let dict_bindings: Vec<(String, Atom)> = known_dict
+            .dict_params
+            .iter()
+            .cloned()
+            .zip(known_dict.dict_args.iter().cloned())
+            .collect();
+        if !self.lambda_is_direct_subset_with_dict_bindings(&dict_bindings, params, body) {
+            return None;
+        }
+
+        Some(self.lower_inline_direct_lambda_app_with_dict_bindings(
+            &dict_bindings,
+            params,
+            body,
+            args,
+        ))
     }
 
-    fn lower_inline_direct_lambda_app(
+    fn lambda_is_direct_subset_with_dict_bindings(
         &mut self,
+        dict_bindings: &[(String, Atom)],
+        params: &[Pat],
+        body: &MExpr,
+    ) -> bool {
+        let known_dict_aliases = self.known_dict_aliases_for_bindings(dict_bindings);
+        self.push_scope();
+        for (name, _) in dict_bindings {
+            self.current_scope_mut().insert(name.clone());
+        }
+        for (name, dict) in known_dict_aliases {
+            self.current_known_dict_value_scope_mut().insert(name, dict);
+        }
+        for pat in params {
+            self.bind_pat_locals(pat);
+        }
+        let supported = self.expr_is_direct_subset(body);
+        self.pop_scope();
+        supported
+    }
+
+    fn lower_inline_direct_lambda_app_with_dict_bindings(
+        &mut self,
+        dict_bindings: &[(String, Atom)],
         params: &[Pat],
         body: &MExpr,
         args: &[Atom],
     ) -> CExpr {
         let param_names = lower_param_names(params);
+        let known_dict_aliases = self.known_dict_aliases_for_bindings(dict_bindings);
         self.push_scope();
+        for (name, _) in dict_bindings {
+            self.current_scope_mut().insert(name.clone());
+        }
+        for (name, dict) in known_dict_aliases {
+            self.current_known_dict_value_scope_mut().insert(name, dict);
+        }
         for pat in params {
             self.bind_pat_locals(pat);
         }
@@ -483,12 +542,20 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         let lowered_body = self.wrap_param_match(params, &param_names, lowered_body);
         self.pop_scope();
 
-        param_names
-            .into_iter()
-            .zip(args.iter())
+        let lowered_body =
+            param_names
+                .into_iter()
+                .zip(args.iter())
+                .rev()
+                .fold(lowered_body, |body, (param, arg)| {
+                    CExpr::Let(param, Box::new(self.lower_atom(arg)), Box::new(body))
+                });
+
+        dict_bindings
+            .iter()
             .rev()
             .fold(lowered_body, |body, (param, arg)| {
-                CExpr::Let(param, Box::new(self.lower_atom(arg)), Box::new(body))
+                CExpr::Let(core_var(param), Box::new(self.lower_atom(arg)), Box::new(body))
             })
     }
 
@@ -498,6 +565,22 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                 unreachable!("is_panic_or_todo_call only matches variable heads");
             };
             return self.lower_panic_or_todo(&name.name, &args[0]);
+        }
+        if let Atom::Var { name, .. } = head
+            && let Some(lambda) = self.known_direct_lambda(&name.name)
+            && lambda.params.len() == args.len()
+            && self.lambda_is_direct_subset_with_dict_bindings(
+                &lambda.dict_bindings,
+                &lambda.params,
+                &lambda.body,
+            )
+        {
+            return self.lower_inline_direct_lambda_app_with_dict_bindings(
+                &lambda.dict_bindings,
+                &lambda.params,
+                &lambda.body,
+                args,
+            );
         }
         if let Some(call) = self.lower_direct_external_app(head, args) {
             return call;

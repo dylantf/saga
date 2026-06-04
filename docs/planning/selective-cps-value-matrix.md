@@ -191,7 +191,8 @@ extraction.
 | --- | --- | --- |
 | Immediate monomorphic method call | Rewrite a known `DictMethodAccess(dict_ctor, method)` followed by apply into direct method-body lowering | Local known dict constructors are covered for the direct selective path. Imported constructors still use the dict-passing fallback until impl-method metadata is imported |
 | Impl-method metadata | Record, import, and query the trait name, impl type, method index/name, source arity, direct/CPS shape, and required sub-dicts for each dict constructor | `ModuleCodegenInfo::trait_impl_dicts` now carries per-method metadata for imported/public dicts. Next step is consuming it in selective call-site specialization |
-| Generic dict constructor args | Preserve and specialize constructor chains such as `__dict_ToJson_List(__dict_ToJson_Person)` | The specialized method still receives needed sub-dicts unless later passes inline them too |
+| Generic dict constructor args | Preserve and specialize constructor chains such as `__dict_ToJson_List(__dict_ToJson_Person)` | Local chains can now inline known generic method calls through known sub-dict aliases. Public/fallback dict constructor definitions are still emitted, and call-site dict tuple elision is a separate follow-up |
+| Dict-only local elision | Remove call-site dictionary tuple construction when the dict value is only used to reach a known method call | Deferred performance pass. Needs an occurrence proof for dictionary-only locals so `let d = __dict_T(...); let m = d.method; m x` can inline without first materializing `d` |
 | Effectful impl methods | Choose direct, CPS, or direct-with-island based on the impl method's lowering plan | Same ABI discipline as ordinary functions: pure direct methods call direct, leaky methods call CPS, handled/net-pure methods may get direct island wrappers |
 | Trait method values | Specialize `let f = method` separately from immediate calls | Known pure methods can become direct closures; known CPS methods need explicit CPS adapter closures; dynamic dict methods still extract runtime closures |
 | Generic functions with `where` clauses | Optional call-site specialization of functions whose dictionary params are statically known | Later than direct method calls. Avoid blanket monomorphization until naming/cache policy is clear |
@@ -224,17 +225,34 @@ extraction.
 3. **Generic dict constructor chains**
    - Recognize chains such as
      `__dict_ToJson_List(__dict_ToJson_Person)`.
-   - Specialize the outer concrete method call while still passing required
-     sub-dicts until later passes can inline them too.
+   - Local direct selective lowering now stores known direct method lambdas and
+     threads known sub-dict aliases through generic impl-method bodies. This
+     lets a generic method such as `Size (Box a)` inline its nested `Size a`
+     method call when the sub-dict is statically known.
+   - Current limitation: public/fallback dict constructor functions are still
+     emitted and local call sites may still materialize dict tuples before the
+     method call is inlined. Full call-site dict tuple elision should use a
+     separate occurrence proof for dictionary-only locals.
 
-4. **Known constructor/output-shape specialization**
+4. **Deferred performance pass: dict-only local elision**
+   - After local/imported trait specialization is stable, teach selective
+     lowering to skip dictionary constructor lets when the resulting dict local
+     is only used to select a known method that is itself inlined.
+   - This should be separate from generic method-chain correctness. It is an
+     allocation/tuple-construction cleanup, not an ABI fallback requirement.
+   - Shape to cover:
+     `let d = __dict_T(subdicts...); let m = DictMethodAccess(d, i);
+     m(args...)`, including harmless direct lets between the method binding and
+     the final call.
+
+5. **Known constructor/output-shape specialization**
    - After concrete trait calls are addressable, use Generic/record/ADT shape
      information to emit final derived outputs directly, especially
      `ToJson`/`FromJson`.
    - Do not add user-facing specialization attributes yet. If the compiler
      cannot prove the shape, use the normal Generic/dict fallback.
 
-5. **Std.Test runner strict frontier**
+6. **Std.Test runner strict frontier**
    - Current strict blocker:
      `saga test --selective-no-fallback` compiles stdlib and the test modules,
      then stops at the project-level CPS-shaped `tests` aggregator function.
@@ -245,7 +263,7 @@ extraction.
      grouped direct-runner lowering case, a direct subset extension, or a
      classification correction.
 
-6. **Derived generic dict constructor frontier**
+7. **Derived generic dict constructor frontier**
    - Current audit result:
      `saga test --selective-no-fallback generic_fromjson_test` passes, and
      `examples/28-deriving.saga` runs under `--selective-codegen`.
@@ -255,7 +273,7 @@ extraction.
      specialize known constructor/output shapes after trait specialization
      work, especially for JSON encoders/decoders.
 
-7. **EffectsTest abort/return routing frontier**
+8. **EffectsTest abort/return routing frontier**
    - Cleared: `saga test --selective-no-fallback effects_test` now reports
      `61 passed, 0 failed`.
    - Static `with` now has marked abort/value routing and a lexical delimiter
