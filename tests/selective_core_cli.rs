@@ -359,6 +359,7 @@ fn selective_core_specializes_imported_monomorphic_trait_method() {
     assert!(!core.contains("call 'erlang':'element'"), "{core}");
     assert!(!core.contains("apply ___anf_v1"), "{core}");
     assert!(core.contains("#{#<84>"), "{core}");
+    assert!(core.contains("call 'erlang':'integer_to_binary'"), "{core}");
 
     let output = std::process::Command::new(binary)
         .current_dir(&project_dir)
@@ -376,7 +377,7 @@ fn selective_core_specializes_imported_monomorphic_trait_method() {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
-    assert!(output_text.contains("True"), "{output_text}");
+    assert!(output_text.contains("True:42"), "{output_text}");
 }
 
 #[test]

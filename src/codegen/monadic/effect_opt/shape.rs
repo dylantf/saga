@@ -901,6 +901,51 @@ pub(super) fn expr_has_private_same_module_refs_except(
     resolution: &ResolutionMap,
     allowed_private_names: &HashSet<String>,
 ) -> bool {
+    expr_has_private_same_module_refs_except_with_policy(
+        expr,
+        source_module,
+        self_name,
+        public_names,
+        resolution,
+        allowed_private_names,
+        PrivateRefPolicy::RejectPrivateExternals,
+    )
+}
+
+pub(super) fn expr_has_private_same_module_refs_except_allowing_externals(
+    expr: &MExpr,
+    source_module: &str,
+    self_name: &str,
+    public_names: &HashSet<String>,
+    resolution: &ResolutionMap,
+    allowed_private_names: &HashSet<String>,
+) -> bool {
+    expr_has_private_same_module_refs_except_with_policy(
+        expr,
+        source_module,
+        self_name,
+        public_names,
+        resolution,
+        allowed_private_names,
+        PrivateRefPolicy::AllowPrivateExternals,
+    )
+}
+
+#[derive(Clone, Copy)]
+enum PrivateRefPolicy {
+    RejectPrivateExternals,
+    AllowPrivateExternals,
+}
+
+fn expr_has_private_same_module_refs_except_with_policy(
+    expr: &MExpr,
+    source_module: &str,
+    self_name: &str,
+    public_names: &HashSet<String>,
+    resolution: &ResolutionMap,
+    allowed_private_names: &HashSet<String>,
+    policy: PrivateRefPolicy,
+) -> bool {
     let mut refs = Vec::new();
     collect_app_head_refs(expr, &mut refs);
     refs.into_iter().any(|(name, source)| {
@@ -919,6 +964,12 @@ pub(super) fn expr_has_private_same_module_refs_except(
             .source_module
             .as_deref()
             .is_none_or(|module| module == source_module);
+        if same_module
+            && matches!(policy, PrivateRefPolicy::AllowPrivateExternals)
+            && matches!(resolved.kind, ResolvedCodegenKind::ExternalFunction { .. })
+        {
+            return false;
+        }
         same_module
             && name != self_name
             && !public_names.contains(&name)

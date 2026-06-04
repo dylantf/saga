@@ -3,4 +3,4 @@ module Main
 import Std.IO.Unsafe (print_stdout)
 
 fun main : Unit -> Unit
-main () = print_stdout (show True)
+main () = print_stdout (show True <> ":" <> show 42)

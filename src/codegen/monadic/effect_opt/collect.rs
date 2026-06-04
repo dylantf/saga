@@ -339,10 +339,9 @@ pub fn collect_imported_dict_constructors(
         // Dict constructors are compiler-generated implementation details.
         // The source export table is not a reliable visibility filter for
         // them, and imported optimized bodies may legitimately reference
-        // private impl dictionaries. Private helper calls are admitted here:
-        // the optimizer rewrites them to caller-local generated helper clones
-        // before lowering, so the generated body never needs a remote call to
-        // an unexported function.
+        // private impl dictionaries. Private helper calls are only admitted
+        // when they are already cloneable by this pass, or when they are
+        // private externals with resolved BEAM targets.
         if let Some(reason) = imported_dict_constructor_unsupported_reason(dc, resolution) {
             if debug_imported_dict_enabled(debug_filter.as_deref(), source_module, &dc.name) {
                 eprintln!(
@@ -353,7 +352,7 @@ pub fn collect_imported_dict_constructors(
             continue;
         }
         if dc.methods.iter().any(|method| {
-            expr_has_private_same_module_refs_except(
+            expr_has_private_same_module_refs_except_allowing_externals(
                 method,
                 source_module,
                 &dc.name,
@@ -363,7 +362,10 @@ pub fn collect_imported_dict_constructors(
             )
         }) {
             if debug_imported_dict_enabled(debug_filter.as_deref(), source_module, &dc.name) {
-                eprintln!("xmod dict reject private refs: {source_module}.{}", dc.name);
+                eprintln!(
+                    "xmod dict reject private non-external refs: {source_module}.{}",
+                    dc.name
+                );
             }
             continue;
         }

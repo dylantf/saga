@@ -1611,10 +1611,18 @@ boundaries exist.
   - added a `Show Bool` stdlib fixture proving imported monomorphic method
     dispatch can inline the method body and remove `erlang:element`/method
     closure apply in the caller;
-  - `Show Int` remains a documented follow-up because the imported-dict
-    collector rejects its private same-module external helper call to
-    `Std.Int.to_string`. We need an imported private-helper/external-ref policy
-    before specializing that shape.
+  - `Show Int` was initially blocked because its method body calls private
+    same-module helper `Std.Int.to_string`.
+- Added the imported private-external policy for trait specialization:
+  - imported dict method bodies may now reference private same-module
+    `@external` helpers when name resolution has a concrete BEAM target;
+  - ordinary private Saga helpers remain rejected unless they are admitted by
+    the existing helper-clone path, so the generated caller still never emits a
+    remote call to a non-exported Saga function;
+  - extended the stdlib fixture to print `show True <> ":" <> show 42`,
+    proving `Show Bool` and `Show Int` both specialize without method tuple
+    extraction. The `Show Int` body lowers directly to
+    `erlang:integer_to_binary`.
 - Added imported generic trait-chain coverage:
   - created an isolated project fixture with `Lib.Size Int` and
     `Lib.Size (Boxed a) where {a: Size}`;
