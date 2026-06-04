@@ -306,7 +306,7 @@ fn single_ets_lookup_result_pat(value: MVar, source: crate::ast::NodeId) -> Pat 
 }
 
 fn ets_ref_table_atom(source: crate::ast::NodeId) -> Atom {
-    backend_atom_at("saga_ref_store", source)
+    backend_atom_at(crate::codegen::ets_tables::ETS_REF_TABLE, source)
 }
 
 fn with_ets_ref_table_init(body: MExpr, source: crate::ast::NodeId) -> MExpr {
@@ -362,11 +362,10 @@ fn with_ets_ref_table_init(body: MExpr, source: crate::ast::NodeId) -> MExpr {
 
 fn ets_ref_table_options(source: crate::ast::NodeId) -> Atom {
     list_atom(
-        vec![
-            backend_atom_at("set", source),
-            backend_atom_at("public", source),
-            backend_atom_at("named_table", source),
-        ],
+        crate::codegen::ets_tables::ETS_TABLE_OPTIONS
+            .iter()
+            .map(|atom| backend_atom_at(atom, source))
+            .collect(),
         source,
     )
 }

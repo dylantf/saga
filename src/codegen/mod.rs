@@ -1,5 +1,6 @@
 pub mod anf;
 pub mod cerl;
+pub(crate) mod ets_tables;
 pub mod external;
 pub mod handler_analysis;
 pub mod lower;

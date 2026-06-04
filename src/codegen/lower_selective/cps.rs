@@ -484,7 +484,9 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         if op.effect != "Std.Ref.Ref" {
             return None;
         }
-        let table = CExpr::Lit(CLit::Atom("saga_ref_store".to_string()));
+        let table = crate::codegen::ets_tables::ets_table_atom_core(
+            crate::codegen::ets_tables::ETS_REF_TABLE,
+        );
         let result = match op.op.as_str() {
             "get" if args.len() == 1 => {
                 let lookup = self.fresh_cps_temp("_NativeRefLookup");
@@ -569,52 +571,13 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             }
             _ => None,
         };
-        result.map(|body| self.wrap_ets_ref_table_init(body))
-    }
-
-    fn wrap_ets_ref_table_init(&mut self, body: CExpr) -> CExpr {
-        let table = CExpr::Lit(CLit::Atom("saga_ref_store".to_string()));
-        let init = CExpr::Case(
-            Box::new(CExpr::Call(
-                "ets".to_string(),
-                "info".to_string(),
-                vec![table.clone()],
-            )),
-            vec![
-                CArm {
-                    pat: CPat::Lit(CLit::Atom("undefined".to_string())),
-                    guard: None,
-                    body: CExpr::Call(
-                        "ets".to_string(),
-                        "new".to_string(),
-                        vec![table, self.ets_table_options()],
-                    ),
-                },
-                CArm {
-                    pat: CPat::Wildcard,
-                    guard: None,
-                    body: CExpr::Lit(CLit::Atom("unit".to_string())),
-                },
-            ],
-        );
-        CExpr::Let(
-            self.fresh_cps_temp("_EtsRefInit"),
-            Box::new(init),
-            Box::new(body),
-        )
-    }
-
-    fn ets_table_options(&self) -> CExpr {
-        CExpr::Cons(
-            Box::new(CExpr::Lit(CLit::Atom("set".to_string()))),
-            Box::new(CExpr::Cons(
-                Box::new(CExpr::Lit(CLit::Atom("public".to_string()))),
-                Box::new(CExpr::Cons(
-                    Box::new(CExpr::Lit(CLit::Atom("named_table".to_string()))),
-                    Box::new(CExpr::Nil),
-                )),
-            )),
-        )
+        result.map(|body| {
+            crate::codegen::ets_tables::wrap_ets_table_init_core(
+                body,
+                crate::codegen::ets_tables::ETS_REF_TABLE,
+                &self.fresh_cps_temp("_EtsRefInit"),
+            )
+        })
     }
 
     fn lower_ref_modify_direct_call_result(
@@ -643,7 +606,9 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                         "ets".to_string(),
                         "lookup".to_string(),
                         vec![
-                            CExpr::Lit(CLit::Atom("saga_ref_store".to_string())),
+                            crate::codegen::ets_tables::ets_table_atom_core(
+                                crate::codegen::ets_tables::ETS_REF_TABLE,
+                            ),
                             key.clone(),
                         ],
                     )),
@@ -674,7 +639,9 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                 "ets".to_string(),
                 "insert".to_string(),
                 vec![
-                    CExpr::Lit(CLit::Atom("saga_ref_store".to_string())),
+                    crate::codegen::ets_tables::ets_table_atom_core(
+                        crate::codegen::ets_tables::ETS_REF_TABLE,
+                    ),
                     CExpr::Tuple(vec![key, CExpr::Var(new_value.clone())]),
                 ],
             ),

@@ -43,7 +43,8 @@
 mod native_effects;
 mod stores;
 
-use crate::codegen::cerl::{CArm, CExpr, CFunDef, CLit, CPat};
+use crate::codegen::cerl::{CExpr, CFunDef, CLit};
+use crate::codegen::ets_tables::{ETS_REF_TABLE, ETS_VEC_TABLE, wrap_ets_table_init_core};
 
 use self::native_effects::{ArgTransform, NATIVE_EFFECTS, NativeOp};
 use self::stores::{RefBackend, build_ref_call, ref_op_tuple, vec_op_tuple};
@@ -129,9 +130,9 @@ pub(super) fn build_main_entry_wrapper() -> CFunDef {
     );
     let let_k = CExpr::Let(k_var, Box::new(identity_k), Box::new(apply_main));
     let let_ev = CExpr::Let(ev_var, Box::new(evidence_call), Box::new(let_k));
-    let body = wrap_table_init(
-        wrap_table_init(let_ev, "saga_vec_store", "_EtsVecInit"),
-        "saga_ref_store",
+    let body = wrap_ets_table_init_core(
+        wrap_ets_table_init_core(let_ev, ETS_VEC_TABLE, "_EtsVecInit"),
+        ETS_REF_TABLE,
         "_EtsRefInit",
     );
 
@@ -140,47 +141,6 @@ pub(super) fn build_main_entry_wrapper() -> CFunDef {
         arity: 1,
         body: CExpr::Fun(vec![arg_param], Box::new(body)),
     }
-}
-
-fn wrap_table_init(body: CExpr, table_name: &str, bind_name: &str) -> CExpr {
-    let table = CExpr::Lit(CLit::Atom(table_name.to_string()));
-    let init_expr = CExpr::Case(
-        Box::new(CExpr::Call(
-            "ets".to_string(),
-            "info".to_string(),
-            vec![table.clone()],
-        )),
-        vec![
-            CArm {
-                pat: CPat::Lit(CLit::Atom("undefined".to_string())),
-                guard: None,
-                body: CExpr::Call(
-                    "ets".to_string(),
-                    "new".to_string(),
-                    vec![table, ets_table_options()],
-                ),
-            },
-            CArm {
-                pat: CPat::Wildcard,
-                guard: None,
-                body: CExpr::Lit(CLit::Atom("unit".to_string())),
-            },
-        ],
-    );
-    CExpr::Let(bind_name.to_string(), Box::new(init_expr), Box::new(body))
-}
-
-fn ets_table_options() -> CExpr {
-    CExpr::Cons(
-        Box::new(CExpr::Lit(CLit::Atom("set".to_string()))),
-        Box::new(CExpr::Cons(
-            Box::new(CExpr::Lit(CLit::Atom("public".to_string()))),
-            Box::new(CExpr::Cons(
-                Box::new(CExpr::Lit(CLit::Atom("named_table".to_string()))),
-                Box::new(CExpr::Nil),
-            )),
-        )),
-    )
 }
 
 /// Build a single op closure for an `OpTuple` slot.
