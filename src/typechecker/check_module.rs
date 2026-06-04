@@ -376,6 +376,27 @@ pub struct TraitImplDict {
     /// uses it to thread evidence at trait method call sites that elaborated
     /// to `DictMethodAccess`. Empty when the impl has no `needs` clause.
     pub impl_effects: Vec<String>,
+    /// Per-method metadata in trait declaration order.
+    pub methods: Vec<TraitImplMethodInfo>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TraitImplMethodRuntimeShape {
+    Direct,
+    Cps {
+        source_arity: usize,
+        adapter_arity: usize,
+        effects: Vec<String>,
+    },
+}
+
+#[derive(Debug, Clone)]
+pub struct TraitImplMethodInfo {
+    pub name: String,
+    pub source_arity: usize,
+    pub trait_effects: Vec<String>,
+    pub trait_open_row: bool,
+    pub runtime_shape: TraitImplMethodRuntimeShape,
 }
 
 /// Information about a module's exports needed by the lowerer/codegen.
@@ -1884,6 +1905,43 @@ fn collect_codegen_info(
                 }
                 impl_effects.sort();
                 impl_effects.dedup();
+                let method_infos = traits_map
+                    .get(&canonical_trait)
+                    .map(|info| {
+                        info.methods
+                            .iter()
+                            .filter(|trait_method| {
+                                methods.iter().any(|m| m.node.name == trait_method.name)
+                            })
+                            .map(|trait_method| {
+                                let trait_effects = trait_method.effect_sig.effects.clone();
+                                let trait_open_row = trait_method.effect_sig.is_open_row;
+                                let source_arity = trait_method.effect_sig.user_arity;
+                                let mut runtime_effects = impl_effects.clone();
+                                runtime_effects.extend(trait_effects.iter().cloned());
+                                runtime_effects.sort();
+                                runtime_effects.dedup();
+                                let runtime_shape = if runtime_effects.is_empty() && !trait_open_row
+                                {
+                                    TraitImplMethodRuntimeShape::Direct
+                                } else {
+                                    TraitImplMethodRuntimeShape::Cps {
+                                        source_arity,
+                                        adapter_arity: source_arity + 2,
+                                        effects: runtime_effects,
+                                    }
+                                };
+                                TraitImplMethodInfo {
+                                    name: trait_method.name.clone(),
+                                    source_arity,
+                                    trait_effects,
+                                    trait_open_row,
+                                    runtime_shape,
+                                }
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
                 trait_impl_dicts.push(TraitImplDict {
                     trait_name: canonical_trait,
                     trait_type_args: canonical_trait_type_args,
@@ -1892,6 +1950,7 @@ fn collect_codegen_info(
                     arity,
                     param_constraints,
                     impl_effects,
+                    methods: method_infos,
                 });
             }
             _ => {}

@@ -3221,6 +3221,49 @@ fn check_program(src: &str) -> (crate::ast::Program, crate::typechecker::CheckRe
 }
 
 #[test]
+fn module_codegen_info_records_trait_impl_method_metadata() {
+    let src = r#"
+main () = ()
+"#;
+    let (_, result) = check_program(src);
+    let all_dicts: Vec<_> = result
+        .codegen_info()
+        .values()
+        .flat_map(|info| &info.trait_impl_dicts)
+        .collect();
+    let show_int = all_dicts
+        .iter()
+        .copied()
+        .find(|dict| dict.trait_name == "Std.Base.Show" && dict.target_type == "Std.Int.Int")
+        .unwrap_or_else(|| panic!("Show Int dict metadata in {all_dicts:#?}"));
+
+    assert_eq!(show_int.methods.len(), 1);
+    assert_eq!(show_int.methods[0].name, "show");
+    assert_eq!(show_int.methods[0].source_arity, 1);
+    assert_eq!(show_int.methods[0].trait_effects, Vec::<String>::new());
+    assert!(!show_int.methods[0].trait_open_row);
+    assert!(matches!(
+        show_int.methods[0].runtime_shape,
+        crate::typechecker::TraitImplMethodRuntimeShape::Direct
+    ));
+
+    let semigroup_string = all_dicts
+        .iter()
+        .copied()
+        .find(|dict| {
+            dict.trait_name == "Std.Base.Semigroup" && dict.target_type == "Std.String.String"
+        })
+        .unwrap_or_else(|| panic!("Semigroup String dict metadata in {all_dicts:#?}"));
+    assert_eq!(semigroup_string.methods.len(), 1);
+    assert_eq!(semigroup_string.methods[0].name, "combine");
+    assert_eq!(semigroup_string.methods[0].source_arity, 2);
+    assert!(matches!(
+        semigroup_string.methods[0].runtime_shape,
+        crate::typechecker::TraitImplMethodRuntimeShape::Direct
+    ));
+}
+
+#[test]
 fn build_effect_ops_table_includes_local_and_qualified_keys() {
     let src = "effect Log {\n  fun log : (msg: String) -> Unit\n  fun warn : (msg: String) -> Unit\n}\n\nmain () = ()";
     let (_, result) = check_program(src);

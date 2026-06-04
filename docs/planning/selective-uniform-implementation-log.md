@@ -1562,3 +1562,16 @@ boundaries exist.
     call and kept the existing stdlib `show 42` test as imported fallback
     coverage;
   - verified `cargo test -p saga selective_core`.
+- Implemented the trait impl-method metadata slice:
+  - `ModuleCodegenInfo::trait_impl_dicts` now carries per-method metadata in
+    trait declaration order: method name, source arity, trait-declared effects,
+    open-row flag, and direct/CPS runtime shape;
+  - the existing dict-level metadata remains the source for trait name, trait
+    type args, target type, dict constructor name/arity, sub-dict constraints,
+    and impl-level effects;
+  - added coverage against imported stdlib metadata for `Show Int` and
+    `Semigroup String`, proving imported/public dictionaries expose method
+    names and arities without reconstructing them from `TraitInfo`;
+  - this does not yet rewrite imported trait method call sites. The next slice
+    should consume this metadata to specialize monomorphic imported dicts while
+    preserving dictionary-passing fallback for unsupported/dynamic cases.

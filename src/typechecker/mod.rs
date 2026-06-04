@@ -630,7 +630,10 @@ impl Scheme {
 }
 
 // Module export types are defined in check_module.rs and re-exported here.
-pub use check_module::{EffectDef, EffectOpDef, ModuleCodegenInfo, ModuleExports, TraitImplDict};
+pub use check_module::{
+    EffectDef, EffectOpDef, ModuleCodegenInfo, ModuleExports, TraitImplDict, TraitImplMethodInfo,
+    TraitImplMethodRuntimeShape,
+};
 
 // --- Type environment ---
 

@@ -190,7 +190,7 @@ extraction.
 | Slice | Goal | Notes |
 | --- | --- | --- |
 | Immediate monomorphic method call | Rewrite a known `DictMethodAccess(dict_ctor, method)` followed by apply into direct method-body lowering | Local known dict constructors are covered for the direct selective path. Imported constructors still use the dict-passing fallback until impl-method metadata is imported |
-| Impl-method metadata | Record, import, and query the trait name, impl type, method index/name, source arity, direct/CPS shape, and required sub-dicts for each dict constructor | Needs to survive cross-module codegen metadata; do this before broad imported specialization |
+| Impl-method metadata | Record, import, and query the trait name, impl type, method index/name, source arity, direct/CPS shape, and required sub-dicts for each dict constructor | `ModuleCodegenInfo::trait_impl_dicts` now carries per-method metadata for imported/public dicts. Next step is consuming it in selective call-site specialization |
 | Generic dict constructor args | Preserve and specialize constructor chains such as `__dict_ToJson_List(__dict_ToJson_Person)` | The specialized method still receives needed sub-dicts unless later passes inline them too |
 | Effectful impl methods | Choose direct, CPS, or direct-with-island based on the impl method's lowering plan | Same ABI discipline as ordinary functions: pure direct methods call direct, leaky methods call CPS, handled/net-pure methods may get direct island wrappers |
 | Trait method values | Specialize `let f = method` separately from immediate calls | Known pure methods can become direct closures; known CPS methods need explicit CPS adapter closures; dynamic dict methods still extract runtime closures |
@@ -211,11 +211,15 @@ extraction.
      the metadata slices below land.
 
 2. **Trait specialization metadata**
-   - Record enough metadata per dict constructor to answer:
-     trait name, impl type, method index/name, method source arity, direct/CPS
-     shape, and required sub-dict parameters.
-   - Preserve this across imported module codegen metadata so real stdlib and
-     JSON-library call sites can specialize.
+   - `ModuleCodegenInfo::trait_impl_dicts` now records per-method metadata:
+     method name, source arity, trait-declared effects/open-row flag, and
+     direct/CPS runtime shape.
+   - The dict-level metadata still records trait name, trait type args, impl
+     target type, dict constructor name/arity, required sub-dict constraints,
+     and impl-level effects.
+   - Next implementation step: consume this imported metadata in selective
+     call-site specialization, starting with monomorphic imported dicts such as
+     `Std.Base.Show Int`.
 
 3. **Generic dict constructor chains**
    - Recognize chains such as
