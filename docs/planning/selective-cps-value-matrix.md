@@ -145,7 +145,7 @@ direct/CPS/static-handler rules.
 | Handler | Effects / Ops Covered | Current Status | Correct Rule | Next Action |
 | --- | --- | --- | --- | --- |
 | `Std.Actor.beam_actor` | `Actor.self`, `Process.spawn/send/exit`, `Monitor.monitor`, `Link.link/unlink`, `Timer.sleep/send_after/cancel_timer`; plus direct `receive` syntax used by actor code | Covered by `beam-actor-native-project`, including strict `selective-core --selective-no-fallback` inspection and runtime `--selective-codegen` run | Run `effect_opt` before selective lowering so generated `__saga_native_variant__...` functions are visible; classify native variants as direct-shaped; lower `MHandler::Native` wrappers as no-ops only after their bodies are direct; lower `BackendAtom` and `BackendSpawnThunk` in direct/native code | Keep; add new rows only for future backend-native handlers |
-| `Std.Ref.beam_ref` / `Std.Ref.ets_ref` | `Ref.new/get/set/modify` | Partially covered for simple direct native bodies; strict `RefTest.tests` is still rejected | Native `with` is not automatically transparent in CPS islands. If the native body passes an effectful callback to a HOF such as `List.iter`, the callback must be rewritten/native-specialized too, or evidence must remain valid through the HOF. A blanket native no-op compiles but produces missing `Ref` evidence at runtime | Next frontier after local FFI: design native handler + HOF callback lowering, starting with `RefTest.count_evens` / `sum_with_ref` |
+| `Std.Ref.beam_ref` / `Std.Ref.ets_ref` | `Ref.new/get/set/modify` | Covered for the current `RefTest` runtime path under `--selective-codegen`; native direct rewrites exist for both BEAM ref and ETS ref shapes, including HOF callback boundaries such as `List.iter` | Native `with` is not automatically transparent. The supported path rewrites known native operations before selective lowering and bridges imported/open-row HOF calls through the CPS entry when the callback slot is CPS-shaped. ETS table initialization is shared between selective direct lowering, monadic native optimization, and bootstrap wrappers | Keep; strict `--selective-no-fallback` may still expose unrelated test-runner/frontier declarations before reaching runtime-equivalent coverage |
 
 ## Old Lowerer Cross-Check
 
@@ -179,9 +179,58 @@ static.
 | Static tail-resume operation arm | `op args = resume value` | Direct substitution/argumentization when safe | Existing narrow finally/resume support is a stepping stone, not the final optimizer |
 | Known constructor/output-shape specialization | `impl ToJson for SomeGenericType` | Specialize through known constructors/fields to emit the final output shape directly, skipping runtime traversal of generic intermediate nodes | Schedule after trait call/value ABI is correct; especially relevant for derived/generic encoders/decoders |
 
+## Trait Specialization Track
+
+Dictionary passing remains the correctness fallback. Specialization should be
+chosen at call sites when the compiler can prove the concrete dictionary and
+method shape. This keeps dynamic dictionaries and polymorphic APIs valid while
+letting hot monomorphic paths skip tuple construction and method-closure
+extraction.
+
+| Slice | Goal | Notes |
+| --- | --- | --- |
+| Immediate monomorphic method call | Rewrite a known `DictMethodAccess(dict_ctor, method)` followed by apply into direct method-body lowering | Local known dict constructors are covered for the direct selective path. Imported constructors still use the dict-passing fallback until impl-method metadata is imported |
+| Impl-method metadata | Record, import, and query the trait name, impl type, method index/name, source arity, direct/CPS shape, and required sub-dicts for each dict constructor | Needs to survive cross-module codegen metadata; do this before broad imported specialization |
+| Generic dict constructor args | Preserve and specialize constructor chains such as `__dict_ToJson_List(__dict_ToJson_Person)` | The specialized method still receives needed sub-dicts unless later passes inline them too |
+| Effectful impl methods | Choose direct, CPS, or direct-with-island based on the impl method's lowering plan | Same ABI discipline as ordinary functions: pure direct methods call direct, leaky methods call CPS, handled/net-pure methods may get direct island wrappers |
+| Trait method values | Specialize `let f = method` separately from immediate calls | Known pure methods can become direct closures; known CPS methods need explicit CPS adapter closures; dynamic dict methods still extract runtime closures |
+| Generic functions with `where` clauses | Optional call-site specialization of functions whose dictionary params are statically known | Later than direct method calls. Avoid blanket monomorphization until naming/cache policy is clear |
+| Known constructor/output-shape specialization | For derived encoders/decoders, use Generic/record/ADT shape at compile time to emit final output directly | `Generic` is an internal derivation substrate here. No user-facing opt-out/attribute yet; if specialization cannot prove the shape, fall back to the normal Generic/dict path |
+
 ## Suggested Next Chunks
 
-1. **Std.Test runner strict frontier**
+1. **Trait specialization: immediate monomorphic method calls**
+   - Local known dict constructors are now covered for the immediate shape:
+     `let dict = __dict_T(); let method = DictMethodAccess(dict, i);
+     method(args...)`.
+   - Current lowering skips dict tuple construction, method closure extraction,
+     and method closure apply by directly lowering the known method lambda
+     body at the call site.
+   - Imported dict constructors and parameterized/generic dict constructor
+     chains intentionally remain on the existing dict-passing fallback until
+     the metadata slices below land.
+
+2. **Trait specialization metadata**
+   - Record enough metadata per dict constructor to answer:
+     trait name, impl type, method index/name, method source arity, direct/CPS
+     shape, and required sub-dict parameters.
+   - Preserve this across imported module codegen metadata so real stdlib and
+     JSON-library call sites can specialize.
+
+3. **Generic dict constructor chains**
+   - Recognize chains such as
+     `__dict_ToJson_List(__dict_ToJson_Person)`.
+   - Specialize the outer concrete method call while still passing required
+     sub-dicts until later passes can inline them too.
+
+4. **Known constructor/output-shape specialization**
+   - After concrete trait calls are addressable, use Generic/record/ADT shape
+     information to emit final derived outputs directly, especially
+     `ToJson`/`FromJson`.
+   - Do not add user-facing specialization attributes yet. If the compiler
+     cannot prove the shape, use the normal Generic/dict fallback.
+
+5. **Std.Test runner strict frontier**
    - Current strict blocker:
      `saga test --selective-no-fallback` compiles stdlib and the test modules,
      then stops at the project-level CPS-shaped `tests` aggregator function.
@@ -192,7 +241,7 @@ static.
      grouped direct-runner lowering case, a direct subset extension, or a
      classification correction.
 
-2. **Derived generic dict constructor frontier**
+6. **Derived generic dict constructor frontier**
    - Current audit result:
      `saga test --selective-no-fallback generic_fromjson_test` passes, and
      `examples/28-deriving.saga` runs under `--selective-codegen`.
@@ -202,7 +251,7 @@ static.
      specialize known constructor/output shapes after trait specialization
      work, especially for JSON encoders/decoders.
 
-3. **EffectsTest abort/return routing frontier**
+7. **EffectsTest abort/return routing frontier**
    - Cleared: `saga test --selective-no-fallback effects_test` now reports
      `61 passed, 0 failed`.
    - Static `with` now has marked abort/value routing and a lexical delimiter
@@ -210,25 +259,25 @@ static.
    - Static handler install elision is paused until it can be reintroduced with
      a real grouped/imported-call lowering proof.
 
-4. **Effectful trait method calls and values**
+8. **Effectful trait method calls and values**
    - Local and imported dict constructors plus effectful method calls/values
      are covered, including generic constructors with dictionary parameters.
    - Next trait work can move from ABI correctness to specialization:
      monomorphic call-site specialization, known constructor/output-shape
      specialization, and direct handling of net-pure trait dispatch.
 
-5. **CPS lambdas and partial application**
+9. **CPS lambdas and partial application**
    - Basic runtime CPS closure generation is covered for callback arguments,
      effect protocol arguments, let-bound aliases, and lambda-headed calls.
    - Remaining lambda work is CPS partial application/captured callback
      parameter stress-testing, not the base closure ABI.
 
-6. **Storage guardrails**
+10. **Storage guardrails**
    - Tuple/record/constructor negative tests are covered.
    - Add list-literal coverage once list literals hit this selective path.
    - Support later only if we choose a representation.
 
-7. **Handler value matrix**
+11. **Handler value matrix**
    - Split handler values from callable values.
    - Inline, named, and `if`-selected dynamic handler values are covered for
      current e2e shapes.
@@ -254,3 +303,8 @@ static.
   now recorded from passthrough `FunSignature` declarations and can be called
   directly inside selective CPS islands. This clears `AdvancedTest.tests`
   under strict selective-core.
+- **Native Ref/HOF runtime frontier:** `RefTest` runs under
+  `--selective-codegen`. The selective path now preserves imported open-row HOF
+  callback shapes, bridges static-empty CPS HOF calls from direct/native code,
+  rewrites known `beam_ref`/`ets_ref` native operations, and shares ETS table
+  initialization helpers across bootstrap/selective/monadic native paths.

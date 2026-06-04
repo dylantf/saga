@@ -11,13 +11,28 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             | MExpr::Bind {
                 var, value, body, ..
             } => {
+                if let Some(lowered) =
+                    self.try_lower_known_dict_immediate_method_sequence(var, value, body)
+                {
+                    return lowered;
+                }
+                if let Some(lowered) =
+                    self.try_lower_immediate_known_dict_method_bind(var, value, body)
+                {
+                    return lowered;
+                }
                 let local_shape = self.direct_local_shape_for_expr(value);
+                let known_dict = self.known_dict_value_for_expr(value);
                 let value = self.lower_expr(value);
                 self.push_scope();
                 self.current_scope_mut().insert(var.name.clone());
                 if let Some(shape) = local_shape {
                     self.current_shape_scope_mut()
                         .insert(var.name.clone(), shape);
+                }
+                if let Some(dict) = known_dict {
+                    self.current_known_dict_value_scope_mut()
+                        .insert(var.name.clone(), dict);
                 }
                 let body = self.lower_expr(body);
                 self.pop_scope();
@@ -350,6 +365,131 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             func.to_string(),
             args.iter().map(|arg| self.lower_atom(arg)).collect(),
         )
+    }
+
+    fn try_lower_known_dict_immediate_method_sequence(
+        &mut self,
+        dict_var: &MVar,
+        dict_value: &MExpr,
+        body: &MExpr,
+    ) -> Option<CExpr> {
+        let known_dict = self.known_dict_value_for_expr(dict_value)?;
+        let (MExpr::Let {
+            var: method_var,
+            value: method_value,
+            body: method_body,
+        }
+        | MExpr::Bind {
+            var: method_var,
+            value: method_value,
+            body: method_body,
+            ..
+        }) = body
+        else {
+            return None;
+        };
+
+        let MExpr::DictMethodAccess {
+            dict, method_index, ..
+        } = method_value.as_ref()
+        else {
+            return None;
+        };
+        let Atom::Var { name, .. } = dict else {
+            return None;
+        };
+        if name.name != dict_var.name {
+            return None;
+        }
+
+        let MExpr::App { head, args, .. } = method_body.as_ref() else {
+            return None;
+        };
+        let Atom::Var { name, .. } = head else {
+            return None;
+        };
+        if name.name != method_var.name {
+            return None;
+        }
+
+        self.lower_known_dict_method_app(&known_dict, *method_index, args)
+    }
+
+    fn try_lower_immediate_known_dict_method_bind(
+        &mut self,
+        method_var: &MVar,
+        method_value: &MExpr,
+        body: &MExpr,
+    ) -> Option<CExpr> {
+        let MExpr::DictMethodAccess {
+            dict, method_index, ..
+        } = method_value
+        else {
+            return None;
+        };
+        let Atom::Var { name, .. } = dict else {
+            return None;
+        };
+        let known_dict = self.known_dict_value(&name.name)?;
+
+        let MExpr::App { head, args, .. } = body else {
+            return None;
+        };
+        let Atom::Var { name, .. } = head else {
+            return None;
+        };
+        if name.name != method_var.name {
+            return None;
+        }
+
+        self.lower_known_dict_method_app(&known_dict, *method_index, args)
+    }
+
+    fn lower_known_dict_method_app(
+        &mut self,
+        known_dict: &KnownDictValue,
+        method_index: usize,
+        args: &[Atom],
+    ) -> Option<CExpr> {
+        if !known_dict.dict_params.is_empty() {
+            return None;
+        }
+        let method = known_dict.methods.get(method_index)?;
+        let Atom::Lambda { params, body, .. } = method else {
+            return None;
+        };
+        if params.len() != args.len()
+            || params.iter().any(|param| !direct_param_supported(param))
+            || !self.lambda_is_direct_subset(params, body)
+        {
+            return None;
+        }
+
+        Some(self.lower_inline_direct_lambda_app(params, body, args))
+    }
+
+    fn lower_inline_direct_lambda_app(
+        &mut self,
+        params: &[Pat],
+        body: &MExpr,
+        args: &[Atom],
+    ) -> CExpr {
+        let param_names = lower_param_names(params);
+        self.push_scope();
+        for pat in params {
+            self.bind_pat_locals(pat);
+        }
+        let lowered_body = self.lower_expr(body);
+        let lowered_body = self.wrap_param_match(params, &param_names, lowered_body);
+        self.pop_scope();
+
+        param_names
+            .into_iter()
+            .zip(args.iter())
+            .rev()
+            .fold(lowered_body, |body, (param, arg)| {
+                CExpr::Let(param, Box::new(self.lower_atom(arg)), Box::new(body))
+            })
     }
 
     pub(super) fn lower_app(&mut self, head: &Atom, args: &[Atom]) -> CExpr {

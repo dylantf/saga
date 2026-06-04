@@ -34,6 +34,15 @@ The first implementation slice is:
   code, not for the whole program.
 - Trait/dictionary specialization belongs before effect lowering, while the
   program still looks like calls, dictionaries, tuples, and lambdas.
+- Dictionary passing remains the correctness fallback for traits.
+  Specialization should be call-site driven: when a concrete dictionary and
+  method are known, lower directly to the concrete impl method; otherwise keep
+  dynamic dict passing.
+- Generic deriving can be used as an internal compile-time substrate for
+  specialization. A derived encoder/decoder may specialize through the known
+  Generic/constructor shape without forcing runtime construction/traversal of
+  Generic nodes. User-facing opt-out or "materialize generic representation"
+  attributes are deliberately postponed.
 - Monadic IR is allowed inside CPS-shaped regions. It is not the universal
   backend language.
 - Current `selective-core` tests still build monadic IR before calling
@@ -401,6 +410,16 @@ The first implementation slice is:
   carry only stdlib plus the current file, which made imported handlers/effect
   helpers look missing to the selective path even though project build/run
   worked.
+- Native ref handling is now a proved runtime slice under `--selective-codegen`.
+  Known `beam_ref`/`ets_ref` handlers rewrite through native direct operations,
+  and imported/open-row HOF boundaries such as `List.iter` bridge through the
+  CPS entry with empty evidence and identity continuation when the callback
+  slot requires that ABI. This is not a blanket "native handlers disappear"
+  rule; only known native handler rewrites get this treatment.
+- ETS table initialization is centralized in `src/codegen/ets_tables.rs` and is
+  shared by bootstrap wrappers, selective direct ETS-ref lowering, and monadic
+  native rewrites. Future native table users should route through the shared
+  helper instead of rebuilding local `ets:new` option lists.
 
 ## Pipeline Integration Milestones
 
@@ -1490,3 +1509,56 @@ boundaries exist.
     still perform `Ref` operations. Strict mode should continue rejecting that
     until native handler/HOF callback lowering rewrites the callback body or
     routes evidence correctly.
+- Implemented the native Ref/HOF runtime slice and closed the ETS helper
+  cleanup:
+  - imported/open-row HOF function type shapes are now preserved from exported
+    schemes before `fun_effects` overlays, so stdlib HOFs with empty resolved
+    effects but open callback rows do not collapse to pure/direct metadata;
+  - direct/native code can call static-empty CPS HOF entries by appending empty
+    evidence and an identity continuation, and callback arguments are adapted
+    according to the HOF parameter shape instead of source arity;
+  - local CPS-shaped functions no longer masquerade as direct callables during
+    direct planning, while imported remote direct-entry matching still requires
+    metadata-proven direct arities;
+  - monadic native optimization rewrites known `beam_ref` and `ets_ref`
+    operations (`new`, `get`, `set`, `modify`) to direct native calls. ETS ref
+    rewrites initialize the named ETS table before raw `ets:*` operations;
+  - selective direct ETS lowering uses the same table atom/options helpers as
+    the monadic native optimizer and bootstrap wrappers through
+    `src/codegen/ets_tables.rs`;
+  - verified `saga test --selective-codegen ref_test` from `tests/e2e`
+    reports `16 passed, 0 failed`;
+  - verified `cargo test -p saga selective_core`,
+    `cargo test -p saga native_direct_call`, and `cargo clippy`.
+- Planned the trait-specialization track:
+  - start with immediate monomorphic trait method calls by recognizing a known
+    dictionary constructor feeding `DictMethodAccess` and replacing tuple
+    construction + method extraction + closure apply with a direct concrete
+    impl-method call;
+  - keep dictionary passing as the correctness fallback for dynamic dicts,
+    generic APIs, and unsupported shapes;
+  - record/import impl-method metadata before broad cross-module or generic
+    specialization;
+  - handle generic dict constructor chains next, e.g.
+    `__dict_ToJson_List(__dict_ToJson_Person)`, passing sub-dicts until later
+    passes can inline them too;
+  - postpone trait method value specialization until immediate calls work;
+  - treat Generic deriving as an internal compile-time specialization substrate
+    for known constructor/output-shape optimizations. Do not add user-facing
+    opt-out/materialization attributes yet; fall back to normal Generic/dict
+    traversal when the compiler cannot prove the shape.
+- Implemented the first local monomorphic trait-call specialization slice:
+  - direct selective lowering recognizes the immediate local-known-dict shape:
+    `let dict = __dict_T(); let method = DictMethodAccess(dict, i);
+    method(args...)`;
+  - when the method is a direct-supported lambda and the dict constructor has
+    no dictionary parameters, the call site now lowers the method body
+    directly, skipping dict tuple construction, `erlang:element`, and method
+    closure application;
+  - if the proof fails, the existing dictionary-passing lowering is preserved;
+  - imported dict constructors still use the fallback path until impl-method
+    metadata is recorded/imported;
+  - added a runtime regression for a local monomorphic `Encodable Int` method
+    call and kept the existing stdlib `show 42` test as imported fallback
+    coverage;
+  - verified `cargo test -p saga selective_core`.

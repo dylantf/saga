@@ -574,6 +574,37 @@ main () = show 42
 }
 
 #[test]
+fn selective_core_specializes_local_monomorphic_trait_method_call() {
+    let src = r#"
+trait Encodable a {
+  fun encode : a -> Int
+}
+
+impl Encodable for Int {
+  encode x = x + 1
+}
+
+fun main : Unit -> Int
+main () = encode 41
+"#;
+    let out = emit_selective_core(src);
+    assert!(out.contains("'main'/1"), "{out}");
+    assert!(
+        !out.contains("call 'erlang':'element'"),
+        "known local trait method should not extract a method closure\n{out}"
+    );
+    assert!(
+        !out.contains("apply '__dict_Encodable"),
+        "known local trait method should not construct its dict at the call site\n{out}"
+    );
+    assert_selective_core_eval_stdout_contains(
+        src,
+        "io:format(\"~p~n\", ['_script':main(unit)]), init:stop().",
+        "42",
+    );
+}
+
+#[test]
 fn selective_core_lowers_effectful_trait_method_call() {
     let src = r#"
 effect ReadInt {
