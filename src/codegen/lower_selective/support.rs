@@ -1,9 +1,42 @@
 use crate::ast::{BinOp as AstBinOp, BitSegSpec, Expr, ExprKind, Lit, Pat};
-use crate::codegen::cerl::{BinSegFlags, BinSegSize, BinSegType, CBinSeg, CExpr, CLit, Endianness};
+use crate::codegen::cerl::{
+    BinSegFlags, BinSegSize, BinSegType, CArm, CBinSeg, CExpr, CLit, CPat, Endianness,
+};
 use crate::codegen::lower::util::core_var;
 use crate::codegen::monadic::ir::{Atom, MExpr, MFunBinding};
 use crate::codegen::runtime_shape::RuntimeFunctionShape;
 use crate::intrinsics::IntrinsicId;
+
+pub(super) const ABORT_TAG: &str = "__saga_handler_abort";
+pub(super) const VALUE_RESULT_TAG: &str = "__saga_value_result";
+
+pub(super) fn marked_control_tuple(tag: &str, marker: CExpr, value: CExpr) -> CExpr {
+    CExpr::Tuple(vec![CExpr::Lit(CLit::Atom(tag.to_string())), marker, value])
+}
+
+pub(super) fn marked_control_pattern(tag: &str, marker: CPat, value_var: String) -> CPat {
+    CPat::Tuple(vec![
+        CPat::Lit(CLit::Atom(tag.to_string())),
+        marker,
+        CPat::Var(value_var),
+    ])
+}
+
+pub(super) fn marked_control_var_pattern(tag: &str, marker_var: String, value_var: String) -> CPat {
+    marked_control_pattern(tag, CPat::Var(marker_var), value_var)
+}
+
+pub(super) fn propagate_marked_control_arm(
+    tag: &str,
+    marker_var: String,
+    value_var: String,
+) -> CArm {
+    CArm {
+        pat: marked_control_var_pattern(tag, marker_var.clone(), value_var.clone()),
+        guard: None,
+        body: marked_control_tuple(tag, CExpr::Var(marker_var), CExpr::Var(value_var)),
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum FunctionLoweringPlan {

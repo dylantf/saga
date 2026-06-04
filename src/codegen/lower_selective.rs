@@ -177,6 +177,7 @@ struct DirectLowerer<'a, 'info> {
     direct_candidate_functions: HashSet<String>,
     static_handler_inline_stack: Vec<String>,
     static_handler_stack: Vec<Vec<MHandlerArm>>,
+    result_delimiter_stack: Vec<ResultDelimiterFrame>,
     cps_temp_counter: usize,
     locals: Vec<HashSet<String>>,
     local_shapes: Vec<HashMap<String, LocalValueShape>>,
@@ -217,6 +218,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             direct_candidate_functions: HashSet::new(),
             static_handler_inline_stack: Vec::new(),
             static_handler_stack: Vec::new(),
+            result_delimiter_stack: Vec::new(),
             cps_temp_counter: 0,
             locals: vec![HashSet::new()],
             local_shapes: vec![HashMap::new()],
@@ -2354,6 +2356,22 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         format!("{prefix}{id}")
     }
 
+    fn fresh_abort_marker(&mut self) -> String {
+        let id = self.cps_temp_counter;
+        self.cps_temp_counter += 1;
+        format!("__saga_abort_{}_{}", self.current_module, id)
+    }
+
+    fn handler_arm_semantically_aborts(&self, arm: &MHandlerArm) -> bool {
+        !self.expr_contains_resume(&arm.body)
+            && self.handler_info.resumption.get(&arm.id) != Some(&ResumptionKind::TailResumptive)
+    }
+
+    fn handler_arm_is_optimized_tail_resume(&self, arm: &MHandlerArm) -> bool {
+        !self.expr_contains_resume(&arm.body)
+            && self.handler_info.resumption.get(&arm.id) == Some(&ResumptionKind::TailResumptive)
+    }
+
     fn atom_is_direct_subset(&mut self, atom: &Atom) -> bool {
         match atom {
             Atom::Var { name, .. } => {
@@ -3594,6 +3612,32 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             std::mem::discriminant(atom)
         )
     }
+}
+
+#[derive(Clone)]
+struct ResultDelimiterFrame {
+    effects: Vec<String>,
+    abort_marker: String,
+}
+
+impl ResultDelimiterFrame {
+    fn handles_effect(&self, effect: &str) -> bool {
+        self.effects
+            .iter()
+            .any(|handled| effect_names_match(handled, effect))
+    }
+}
+
+fn effect_names_match(left: &str, right: &str) -> bool {
+    if left == right {
+        return true;
+    }
+    let left_qualified = left.contains('.');
+    let right_qualified = right.contains('.');
+    if left_qualified && right_qualified {
+        return false;
+    }
+    left.rsplit('.').next() == right.rsplit('.').next()
 }
 
 #[cfg(test)]

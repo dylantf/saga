@@ -303,8 +303,34 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             .map(|arg| self.lower_effect_protocol_arg_atom(arg))
             .collect();
         apply_args.push(evidence);
-        apply_args.push(return_k);
+        apply_args.push(self.delimited_perform_k(&op.effect, return_k));
         CExpr::Apply(Box::new(op_closure), apply_args)
+    }
+
+    fn delimited_perform_k(&mut self, effect: &str, return_k: CExpr) -> CExpr {
+        if !self
+            .result_delimiter_stack
+            .iter()
+            .any(|frame| frame.handles_effect(effect))
+        {
+            return return_k;
+        }
+
+        let arg = self.fresh_cps_temp("_DelimitedKArg");
+        let applied = CExpr::Apply(Box::new(return_k), vec![CExpr::Var(arg.clone())]);
+        let body = self.wrap_result_delimiter_stack_until(applied, effect);
+        CExpr::Fun(vec![arg], Box::new(body))
+    }
+
+    fn wrap_result_delimiter_stack_until(&mut self, mut body: CExpr, effect: &str) -> CExpr {
+        let frames = self.result_delimiter_stack.clone();
+        for frame in frames.iter().rev() {
+            body = self.wrap_with_result_delimiter_raw(body, &frame.abort_marker);
+            if frame.handles_effect(effect) {
+                break;
+            }
+        }
+        body
     }
 
     fn lower_static_direct_call_yield(
@@ -1124,6 +1150,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         imported.locals = self.locals.clone();
         imported.local_shapes = self.local_shapes.clone();
         imported.static_handler_stack = self.static_handler_stack.clone();
+        imported.result_delimiter_stack = self.result_delimiter_stack.clone();
         imported.static_handler_inline_stack = self.static_handler_inline_stack.clone();
         imported.static_handler_inline_stack.push(key);
         imported.cps_temp_counter = self.cps_temp_counter;
@@ -1635,7 +1662,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         CExpr::Fun(params, Box::new(body))
     }
 
-    fn lower_cps_with(
+    pub(super) fn lower_cps_with(
         &mut self,
         handler: &MHandler,
         body: &MExpr,
@@ -1687,15 +1714,24 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                 .push(arm);
         }
 
+        let raw_result_k = self.fresh_cps_temp("_RawResultK");
+        let raw_result_k_binding = self.identity_cps_continuation();
+        let abort_marker = self.fresh_abort_marker();
+
         let mut current_evidence = evidence.clone();
         let mut bindings = Vec::with_capacity(canonical_effects.len());
-        for effect in canonical_effects {
+        for effect in &canonical_effects {
             let effect_arms = by_effect
-                .get_mut(&effect)
+                .get_mut(effect)
                 .unwrap_or_else(|| self.unsupported("static handler effect without arms"));
             effect_arms.sort_by_key(|arm| arm.op.op_index);
-            let op_tuple = self.lower_cps_static_handler_op_tuple(&effect, effect_arms, &evidence);
-            let entry = CExpr::Tuple(vec![CExpr::Lit(CLit::Atom(effect)), op_tuple]);
+            let op_tuple = self.lower_cps_static_handler_op_tuple(
+                effect,
+                effect_arms,
+                &evidence,
+                Some(&abort_marker),
+            );
+            let entry = CExpr::Tuple(vec![CExpr::Lit(CLit::Atom(effect.clone())), op_tuple]);
             let insert = CExpr::Call(
                 "std_evidence_bridge".to_string(),
                 "insert_canonical".to_string(),
@@ -1708,18 +1744,29 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
 
         let return_binding = return_clause.as_ref().map(|arm| {
             let return_k_name = self.fresh_cps_temp("_ReturnClauseK");
-            let return_identity = self.identity_cps_continuation();
-            let closure =
-                self.lower_cps_return_clause_closure(arm, evidence.clone(), return_identity);
+            let closure = self.lower_cps_return_clause_closure(
+                arm,
+                evidence.clone(),
+                CExpr::Var(raw_result_k.clone()),
+            );
             (return_k_name, closure)
         });
-        let body_return_k = return_binding
+        let inner_k = return_binding
             .as_ref()
             .map(|(name, _)| CExpr::Var(name.clone()))
-            .unwrap_or_else(|| self.identity_cps_continuation());
+            .unwrap_or_else(|| CExpr::Var(raw_result_k.clone()));
+        let prompt_k = self.fresh_cps_temp("_PromptK");
+        let prompt_k_binding =
+            self.build_result_delimiter_k(&abort_marker, inner_k, CExpr::Var(raw_result_k.clone()));
 
         self.static_handler_stack.push(arms.clone());
-        let lowered_body = self.lower_cps_expr(body, current_evidence, body_return_k);
+        self.result_delimiter_stack.push(ResultDelimiterFrame {
+            effects: canonical_effects.clone(),
+            abort_marker: abort_marker.clone(),
+        });
+        let lowered_body =
+            self.lower_cps_expr(body, current_evidence, CExpr::Var(prompt_k.clone()));
+        self.result_delimiter_stack.pop();
         self.static_handler_stack.pop();
         let with_evidence = bindings
             .into_iter()
@@ -1727,19 +1774,151 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             .fold(lowered_body, |inner, (name, value)| {
                 CExpr::Let(name, Box::new(value), Box::new(inner))
             });
-        let with_result = self.fresh_cps_temp("_WithResult");
-        let apply_outer_return = CExpr::Let(
-            with_result.clone(),
+        let with_prompt = CExpr::Let(
+            prompt_k,
+            Box::new(prompt_k_binding),
             Box::new(with_evidence),
-            Box::new(CExpr::Apply(
-                Box::new(return_k),
-                vec![CExpr::Var(with_result)],
-            )),
         );
-        match return_binding {
-            Some((name, value)) => CExpr::Let(name, Box::new(value), Box::new(apply_outer_return)),
-            None => apply_outer_return,
-        }
+        let with_return = match return_binding {
+            Some((name, value)) => CExpr::Let(name, Box::new(value), Box::new(with_prompt)),
+            None => with_prompt,
+        };
+        let wrapped = self.wrap_with_result_delimiter_to_k(with_return, &abort_marker, return_k);
+        CExpr::Let(
+            raw_result_k,
+            Box::new(raw_result_k_binding),
+            Box::new(wrapped),
+        )
+    }
+
+    fn result_delimiter_arms(
+        &mut self,
+        abort_marker: &str,
+        local_value_body: impl Fn(CExpr) -> CExpr,
+        local_abort_body: impl Fn(CExpr) -> CExpr,
+        ordinary_value_body: impl Fn(CExpr) -> CExpr,
+    ) -> Vec<CArm> {
+        let value_result = self.fresh_cps_temp("_ValueResult");
+        let abort_value = self.fresh_cps_temp("_AbortValue");
+        let other_value_marker = self.fresh_cps_temp("_OtherValueMarker");
+        let other_value = self.fresh_cps_temp("_OtherValue");
+        let other_abort_marker = self.fresh_cps_temp("_OtherAbortMarker");
+        let other_abort_value = self.fresh_cps_temp("_OtherAbortValue");
+        let ordinary = self.fresh_cps_temp("_WithValue");
+        vec![
+            CArm {
+                pat: marked_control_pattern(
+                    VALUE_RESULT_TAG,
+                    CPat::Lit(CLit::Atom(abort_marker.to_string())),
+                    value_result.clone(),
+                ),
+                guard: None,
+                body: local_value_body(CExpr::Var(value_result)),
+            },
+            CArm {
+                pat: marked_control_pattern(
+                    ABORT_TAG,
+                    CPat::Lit(CLit::Atom(abort_marker.to_string())),
+                    abort_value.clone(),
+                ),
+                guard: None,
+                body: local_abort_body(CExpr::Var(abort_value)),
+            },
+            propagate_marked_control_arm(VALUE_RESULT_TAG, other_value_marker, other_value),
+            propagate_marked_control_arm(ABORT_TAG, other_abort_marker, other_abort_value),
+            CArm {
+                pat: CPat::Var(ordinary.clone()),
+                guard: None,
+                body: ordinary_value_body(CExpr::Var(ordinary)),
+            },
+        ]
+    }
+
+    fn build_result_delimiter_k(
+        &mut self,
+        abort_marker: &str,
+        success_k: CExpr,
+        abort_k: CExpr,
+    ) -> CExpr {
+        let result = self.fresh_cps_temp("_PromptResult");
+        let arms = self.result_delimiter_arms(
+            abort_marker,
+            |value| CExpr::Apply(Box::new(success_k.clone()), vec![value]),
+            |value| CExpr::Apply(Box::new(abort_k.clone()), vec![value]),
+            |value| CExpr::Apply(Box::new(success_k.clone()), vec![value]),
+        );
+        CExpr::Fun(
+            vec![result.clone()],
+            Box::new(CExpr::Case(Box::new(CExpr::Var(result)), arms)),
+        )
+    }
+
+    fn wrap_with_result_delimiter_to_k(
+        &mut self,
+        body: CExpr,
+        abort_marker: &str,
+        return_k: CExpr,
+    ) -> CExpr {
+        let with_result = self.fresh_cps_temp("_WithResult");
+        let arms = self.result_delimiter_arms(
+            abort_marker,
+            |value| CExpr::Apply(Box::new(return_k.clone()), vec![value]),
+            |value| CExpr::Apply(Box::new(return_k.clone()), vec![value]),
+            |value| CExpr::Apply(Box::new(return_k.clone()), vec![value]),
+        );
+        CExpr::Let(
+            with_result.clone(),
+            Box::new(body),
+            Box::new(CExpr::Case(Box::new(CExpr::Var(with_result)), arms)),
+        )
+    }
+
+    fn wrap_with_result_delimiter_raw(&mut self, body: CExpr, abort_marker: &str) -> CExpr {
+        let with_result = self.fresh_cps_temp("_WithResult");
+        let arms =
+            self.result_delimiter_arms(abort_marker, |value| value, |value| value, |value| value);
+        CExpr::Let(
+            with_result.clone(),
+            Box::new(body),
+            Box::new(CExpr::Case(Box::new(CExpr::Var(with_result)), arms)),
+        )
+    }
+
+    fn wrap_aborting_handler_arm_result(&mut self, body: CExpr, abort_marker: &str) -> CExpr {
+        let result = self.fresh_cps_temp("_ArmResult");
+        let other_value_marker = self.fresh_cps_temp("_OtherValueMarker");
+        let other_value = self.fresh_cps_temp("_OtherValue");
+        let other_abort_marker = self.fresh_cps_temp("_OtherAbortMarker");
+        let other_abort_value = self.fresh_cps_temp("_OtherAbortValue");
+        CExpr::Let(
+            result.clone(),
+            Box::new(body),
+            Box::new(CExpr::Case(
+                Box::new(CExpr::Var(result)),
+                vec![
+                    propagate_marked_control_arm(VALUE_RESULT_TAG, other_value_marker, other_value),
+                    propagate_marked_control_arm(ABORT_TAG, other_abort_marker, other_abort_value),
+                    CArm {
+                        pat: CPat::Var("_AbortValue".to_string()),
+                        guard: None,
+                        body: marked_control_tuple(
+                            ABORT_TAG,
+                            CExpr::Lit(CLit::Atom(abort_marker.to_string())),
+                            CExpr::Var("_AbortValue".to_string()),
+                        ),
+                    },
+                ],
+            )),
+        )
+    }
+
+    fn resume_direct_handler_arm_result(&mut self, body: CExpr, arm_k: CExpr) -> CExpr {
+        let result = self.fresh_cps_temp("_TailResumeValue");
+        CExpr::Let(
+            result.clone(),
+            Box::new(body),
+            Box::new(CExpr::Apply(Box::new(arm_k), vec![CExpr::Var(result)])),
+        )
     }
 
     fn lower_cps_with_dynamic(
@@ -1943,6 +2122,17 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         return_clause: Option<&MHandlerArm>,
         body: &MExpr,
     ) -> bool {
+        let _ = (arms, return_clause, body);
+        false
+    }
+
+    #[allow(dead_code)]
+    fn can_elide_static_handler_install_when_specialized(
+        &mut self,
+        arms: &[MHandlerArm],
+        return_clause: Option<&MHandlerArm>,
+        body: &MExpr,
+    ) -> bool {
         if return_clause.is_some() || arms.is_empty() {
             return false;
         }
@@ -1960,6 +2150,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         can_elide
     }
 
+    #[allow(dead_code)]
     fn static_handler_arm_can_direct_call(&mut self, arm: &MHandlerArm) -> bool {
         arm.finally_block.is_none()
             && self.handler_info.resumption.get(&arm.id) == Some(&ResumptionKind::TailResumptive)
@@ -1968,6 +2159,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             && self.handler_arm_expr_is_cps_island_subset(&arm.body)
     }
 
+    #[allow(dead_code)]
     fn static_handler_effects(&self, arms: &[MHandlerArm]) -> Vec<String> {
         let mut effects: Vec<String> = Vec::new();
         for arm in arms {
@@ -1981,6 +2173,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         effects
     }
 
+    #[allow(dead_code)]
     fn expr_can_run_with_elided_static_handler(
         &mut self,
         expr: &MExpr,
@@ -2038,15 +2231,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                     return args.iter().all(|arg| self.atom_is_direct_subset(arg));
                 }
                 if self.cps_call_effects_intersect_elided_static_handler(head, handled_effects) {
-                    self.can_static_handler_specialize_local_cps_call_without_evidence(
-                        head,
-                        args,
-                        handled_effects,
-                    ) || self.can_static_handler_specialize_imported_cps_call_without_evidence(
-                        head,
-                        args,
-                        handled_effects,
-                    )
+                    false
                 } else {
                     self.cps_app_is_supported_without_elided_effects(head, args)
                 }
@@ -2087,6 +2272,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         }
     }
 
+    #[allow(dead_code)]
     fn cps_app_is_supported_without_elided_effects(&mut self, head: &Atom, args: &[Atom]) -> bool {
         if let Some((source_arity, adapter_arity, _effects)) = self.cps_lambda_arity_for_atom(head)
             && self.lambda_is_cps_subset(head)
@@ -2112,6 +2298,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         call_supported && args.iter().all(|arg| self.atom_is_cps_value_subset(arg))
     }
 
+    #[allow(dead_code)]
     fn cps_call_effects_intersect_elided_static_handler(
         &mut self,
         head: &Atom,
@@ -2128,6 +2315,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         }
     }
 
+    #[allow(dead_code)]
     fn effect_is_handled_by_elided_static_handler(
         &self,
         effect: &str,
@@ -2138,6 +2326,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             .any(|handled| Self::effect_names_match(handled, effect))
     }
 
+    #[allow(dead_code)]
     fn can_static_handler_specialize_local_cps_call_without_evidence(
         &mut self,
         head: &Atom,
@@ -2191,6 +2380,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         supported
     }
 
+    #[allow(dead_code)]
     fn can_static_handler_specialize_imported_cps_call_without_evidence(
         &mut self,
         head: &Atom,
@@ -2241,6 +2431,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         imported.locals = self.locals.clone();
         imported.local_shapes = self.local_shapes.clone();
         imported.static_handler_stack = self.static_handler_stack.clone();
+        imported.result_delimiter_stack = self.result_delimiter_stack.clone();
         imported.static_handler_inline_stack = self.static_handler_inline_stack.clone();
         imported.static_handler_inline_stack.push(key);
 
@@ -2290,6 +2481,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         effect: &str,
         arms: &[&MHandlerArm],
         outer_evidence: &CExpr,
+        abort_marker: Option<&str>,
     ) -> CExpr {
         let mut by_op_index: std::collections::BTreeMap<u32, Vec<&MHandlerArm>> =
             std::collections::BTreeMap::new();
@@ -2305,7 +2497,11 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                     "static handler for effect '{effect}' is missing op_index {expected}"
                 ));
             };
-            closures.push(self.lower_cps_static_handler_arm_group(op_arms, outer_evidence.clone()));
+            closures.push(self.lower_cps_static_handler_arm_group(
+                op_arms,
+                outer_evidence.clone(),
+                abort_marker,
+            ));
         }
         CExpr::Tuple(closures)
     }
@@ -2387,8 +2583,12 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             .into_iter()
             .map(|(effect, mut effect_arms)| {
                 effect_arms.sort_by_key(|arm| arm.op.op_index);
-                let op_tuple =
-                    self.lower_cps_static_handler_op_tuple(&effect, &effect_arms, &outer_evidence);
+                let op_tuple = self.lower_cps_static_handler_op_tuple(
+                    &effect,
+                    &effect_arms,
+                    &outer_evidence,
+                    None,
+                );
                 CExpr::Tuple(vec![CExpr::Lit(CLit::Atom(effect)), op_tuple])
             })
             .collect();
@@ -2437,10 +2637,11 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         &mut self,
         arms: &[&MHandlerArm],
         outer_evidence: CExpr,
+        abort_marker: Option<&str>,
     ) -> CExpr {
         match arms {
             [] => self.unsupported("static handler operation group has no arms"),
-            [arm] => self.lower_cps_static_handler_arm(arm, outer_evidence),
+            [arm] => self.lower_cps_static_handler_arm(arm, outer_evidence, abort_marker),
             [first, rest @ ..] => {
                 let source_params = lower_param_names(&first.params);
                 let perform_evidence = self.fresh_cps_temp("_ArmEvidence");
@@ -2474,6 +2675,18 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                             CExpr::Var(arm_k.clone()),
                             arm.finally_block.as_deref(),
                         );
+                        let body = if self.handler_arm_is_optimized_tail_resume(arm) {
+                            self.resume_direct_handler_arm_result(body, CExpr::Var(arm_k.clone()))
+                        } else {
+                            body
+                        };
+                        let body = if let Some(marker) = abort_marker
+                            && self.handler_arm_semantically_aborts(arm)
+                        {
+                            self.wrap_aborting_handler_arm_result(body, marker)
+                        } else {
+                            body
+                        };
                         let pat =
                             CPat::Tuple(arm.params.iter().map(|pat| self.lower_pat(pat)).collect());
                         self.pop_scope();
@@ -2493,7 +2706,12 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         }
     }
 
-    fn lower_cps_static_handler_arm(&mut self, arm: &MHandlerArm, outer_evidence: CExpr) -> CExpr {
+    fn lower_cps_static_handler_arm(
+        &mut self,
+        arm: &MHandlerArm,
+        outer_evidence: CExpr,
+        abort_marker: Option<&str>,
+    ) -> CExpr {
         let source_params = lower_param_names(&arm.params);
         let perform_evidence = self.fresh_cps_temp("_ArmEvidence");
         let arm_k = self.fresh_cps_temp("_ArmK");
@@ -2509,6 +2727,18 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             CExpr::Var(arm_k.clone()),
             arm.finally_block.as_deref(),
         );
+        let body = if self.handler_arm_is_optimized_tail_resume(arm) {
+            self.resume_direct_handler_arm_result(body, CExpr::Var(arm_k.clone()))
+        } else {
+            body
+        };
+        let body = if let Some(marker) = abort_marker
+            && self.handler_arm_semantically_aborts(arm)
+        {
+            self.wrap_aborting_handler_arm_result(body, marker)
+        } else {
+            body
+        };
         let body = self.wrap_param_match(&arm.params, &source_params, body);
         self.pop_scope();
 

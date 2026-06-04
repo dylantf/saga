@@ -105,7 +105,8 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             self.unsupported("direct lowering for non-static handlers");
         };
         if !effects.is_empty() || !arms.is_empty() {
-            self.unsupported("direct lowering for effect handlers with operation arms");
+            let return_k = self.identity_cps_continuation();
+            return self.lower_cps_with(handler, body, CExpr::Tuple(vec![]), return_k);
         }
 
         let body = self.lower_expr(body);

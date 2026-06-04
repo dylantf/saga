@@ -182,38 +182,32 @@ static.
 
 1. **Std.Test runner strict frontier**
    - Current strict blocker:
-     `saga test --selective-no-fallback` stops during stdlib compilation at
-     `Std.Test.run_modules`.
+     `saga test --selective-no-fallback` compiles stdlib and the test modules,
+     then stops at the project-level CPS-shaped `tests` aggregator function.
    - This is likely a direct runner/control-flow shape in the test harness,
      not a new effect ABI category.
-   - Likely next investigation: inspect optimized monadic `Std.Test.run_modules`
-     and decide whether it needs another direct subset case or a classification
-     correction.
+   - Likely next investigation: inspect optimized monadic/Core for the
+     generated/aggregated `tests` function and decide whether it needs a
+     grouped direct-runner lowering case, a direct subset extension, or a
+     classification correction.
 
 2. **Derived generic dict constructor frontier**
-   - Known strict blocker after stdlib/HOF frontiers:
-     `saga test --selective-no-fallback` has previously compiled stdlib and
-     all test modules, then stopped at
-     `__dict_GenericFromjsonTest_FromJson_genericfromjsontest_Std_Generic_Variant`.
-   - This is the trait/deriving frontier we expected before JSON-library work:
-     generic derived constructors need either a selective lowering plan or a
-     deliberate fallback boundary policy.
-   - Likely next investigation: inspect the derived `FromJson` constructor
-     methods and decide whether to cover the generated pure/effectful dict
-     method shape directly or leave full generic dict specialization for later.
+   - Current audit result:
+     `saga test --selective-no-fallback generic_fromjson_test` passes, and
+     `examples/28-deriving.saga` runs under `--selective-codegen`.
+   - Derived generic constructors currently lower as direct tuple-producing
+     dict constructors in the inspected `GenericFromjsonTest` selective core.
+   - Keep this on the schedule for optimization, not current ABI correctness:
+     specialize known constructor/output shapes after trait specialization
+     work, especially for JSON encoders/decoders.
 
 3. **EffectsTest abort/return routing frontier**
-   - Current strict result:
-     `saga test --selective-no-fallback effects_test` compiles and runs the
-     public CPS-shaped `tests` function.
-   - Scoped-resource normal completion now passes: handler operation params
-     that are function-typed are bound as protocol CPS callbacks inside handler
-     arm lowering, and `finally` cleanup is proven/lowered in the scope where
-     arm-local resources are available.
-   - Remaining failures are broader abort/return-routing cases
-     (`evidence_tag_not_found` and `bad argument`) where a resumed continuation
-     aborts through another handler or a terminal abort interacts with a return
-     clause. Keep this separate from scoped-finally ABI support.
+   - Cleared: `saga test --selective-no-fallback effects_test` now reports
+     `61 passed, 0 failed`.
+   - Static `with` now has marked abort/value routing and a lexical delimiter
+     stack for perform-site continuations.
+   - Static handler install elision is paused until it can be reintroduced with
+     a real grouped/imported-call lowering proof.
 
 4. **Effectful trait method calls and values**
    - Local and imported dict constructors plus effectful method calls/values

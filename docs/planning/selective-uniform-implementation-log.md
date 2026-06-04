@@ -1438,3 +1438,36 @@ boundaries exist.
   - remaining EffectsTest failures are abort/return-routing issues
     (`evidence_tag_not_found` / `bad argument`) rather than the scoped-finally
     callback ABI mismatch.
+- Implemented the abort/return routing semantics slice:
+  - static `with` lowering now installs an explicit result delimiter with a
+    fresh marker. Aborting operation arms return a marked abort value, while
+    ordinary/tail-resumptive values route through the local return clause and
+    outer continuation exactly once;
+  - perform-site continuations are wrapped with a lexical delimiter stack.
+    This lets a resumed continuation consume abort/value markers for the
+    handler that owns the performed operation before returning to the handler
+    arm. This fixed the multishot `List.flat_map (fun x -> resume x)` case
+    where an abort marker was previously returned to `flat_map` as a non-list;
+  - direct lowering of a locally handled `with` with operation arms delegates
+    to a value-producing CPS island instead of rejecting the shape;
+  - static handler install elision is deliberately paused. The old elision
+    analysis could prove a handler in principle but still let grouped or
+    imported CPS calls fall back to normal calls with unextended evidence. The
+    dormant analysis helpers remain named in `cps.rs` so optimization can be
+    reintroduced behind an actual lowering proof later;
+  - `saga test --selective-no-fallback effects_test` now passes
+    `61 passed, 0 failed`, including nested foreign abort propagation,
+    return-clause composition, scoped finally, and multishot pruning;
+  - `cargo test -p saga selective_core` passes after updating shape tests to
+    expect install-preserving correctness rather than install-eliding
+    optimization.
+- Ran the first derived/generic trait dict audit after the abort-routing fix:
+  - `saga test --selective-no-fallback generic_fromjson_test` passes
+    `4 passed, 0 failed`;
+  - `saga run --selective-codegen examples/28-deriving.saga` builds and runs;
+  - `inspect --stage selective-core --selective-no-fallback` for
+    `GenericFromjsonTest` shows the derived generic dict constructors lowering
+    as direct tuple-producing dicts under the selective path;
+  - full `saga test --selective-no-fallback` is currently blocked earlier at
+    the project-level CPS-shaped `tests` aggregator function, not at derived
+    generic dict constructors.

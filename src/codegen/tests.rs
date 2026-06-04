@@ -698,7 +698,7 @@ main () = ()
         "{out}"
     );
     assert!(
-        !out.contains("call 'std_evidence_bridge':'insert_canonical'"),
+        out.contains("call 'std_evidence_bridge':'insert_canonical'"),
         "{out}"
     );
     assert_selective_core_eval_stdout_contains(
@@ -709,7 +709,7 @@ main () = ()
 }
 
 #[test]
-fn selective_core_elides_static_handler_around_non_intersecting_trait_method_call() {
+fn selective_core_keeps_static_handler_installs_around_nested_trait_method_call() {
     let src = r#"
 effect ReadInt {
   fun read : Unit -> Int
@@ -747,9 +747,9 @@ main () = ()
 "#;
     let out = emit_selective_core(src);
     assert!(out.contains("'ReadInt'"), "{out}");
-    assert!(!out.contains("'DbConfig'"), "{out}");
+    assert!(out.contains("'DbConfig'"), "{out}");
     assert!(
-        !out.contains("call 'std_evidence_bridge':'insert_canonical'\n              (_CpsEvidence"),
+        out.contains("call 'std_evidence_bridge':'insert_canonical'"),
         "{out}"
     );
     assert_selective_core_eval_stdout_contains(
@@ -1050,7 +1050,7 @@ main () = {
         "{out}"
     );
     assert!(
-        !out.contains("call 'std_evidence_bridge':'insert_canonical'"),
+        out.contains("call 'std_evidence_bridge':'insert_canonical'"),
         "{out}"
     );
     assert!(out.contains("let <Value>"), "{out}");
@@ -1095,7 +1095,7 @@ main () = {
         "{out}"
     );
     assert!(
-        !out.contains("call 'std_evidence_bridge':'insert_canonical'"),
+        out.contains("call 'std_evidence_bridge':'insert_canonical'"),
         "{out}"
     );
     assert!(out.contains("let <Config>"), "{out}");
@@ -1140,7 +1140,7 @@ main () = {
     let out = emit_selective_core(src);
     assert!(!out.contains("apply 'query'/3"), "{out}");
     assert!(
-        !out.contains("call 'std_evidence_bridge':'insert_canonical'"),
+        out.contains("call 'std_evidence_bridge':'insert_canonical'"),
         "{out}"
     );
     assert!(out.contains("let <Config>"), "{out}");

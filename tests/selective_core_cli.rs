@@ -539,7 +539,7 @@ fn selective_core_specializes_imported_static_handler_project() {
         "{inspect_stdout}"
     );
     assert!(
-        !inspect_stdout.contains("call 'std_evidence_bridge':'insert_canonical'"),
+        inspect_stdout.contains("call 'std_evidence_bridge':'insert_canonical'"),
         "{inspect_stdout}"
     );
     assert!(inspect_stdout.contains("let <Value>"), "{inspect_stdout}");
