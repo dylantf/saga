@@ -1789,6 +1789,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                         None
                     }
                 });
+                let known_direct_lambda = self.known_direct_lambda_for_expr(value);
                 if !self.expr_is_direct_subset(value) {
                     return false;
                 }
@@ -1797,6 +1798,10 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                 if let Some(shape) = local_shape {
                     self.current_shape_scope_mut()
                         .insert(var.name.clone(), shape);
+                }
+                if let Some(lambda) = known_direct_lambda {
+                    self.current_known_direct_lambda_scope_mut()
+                        .insert(var.name.clone(), lambda);
                 }
                 let supported = self.expr_is_direct_subset(body);
                 self.pop_scope();
@@ -1836,6 +1841,12 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             MExpr::App { head, args, .. } => {
                 if self.is_panic_or_todo_call(head, args) {
                     return self.atom_is_direct_subset(&args[0]);
+                }
+                if self
+                    .partial_known_direct_lambda_result_shape(head, args)
+                    .is_some()
+                {
+                    return args.iter().all(|arg| self.atom_is_direct_subset(arg));
                 }
                 match self.call_shape(head) {
                     Some(CallShape::Intrinsic(intrinsic)) => {
@@ -2835,7 +2846,9 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                 .pure_function_arity_at(*source)
                 .or_else(|| self.pure_trait_method_arity(trait_name, *method_index))
                 .map(|arity| LocalValueShape::PureCallable { arity }),
-            MExpr::App { source, .. } => self.local_shape_for_expr_result_type(*source),
+            MExpr::App { head, args, source } => self
+                .partial_known_direct_lambda_result_shape(head, args)
+                .or_else(|| self.local_shape_for_expr_result_type(*source)),
             MExpr::Resume { source, .. } | MExpr::With { source, .. } => {
                 self.local_shape_for_expr_result_type(*source)
             }
@@ -2846,6 +2859,17 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
     fn local_shape_for_expr_result_type(&self, source: NodeId) -> Option<LocalValueShape> {
         let ty = self.effect_info.type_at_node.get(&source)?;
         self.local_shape_for_param_type(ty)
+    }
+
+    fn partial_known_direct_lambda_result_shape(
+        &self,
+        head: &Atom,
+        args: &[Atom],
+    ) -> Option<LocalValueShape> {
+        let lambda = self.known_direct_lambda_for_atom(head)?;
+        (args.len() < lambda.params.len()).then_some(LocalValueShape::PureCallable {
+            arity: lambda.params.len() - args.len(),
+        })
     }
 
     fn direct_call_shape_for_local_use_in_expr(
@@ -3236,15 +3260,10 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
     }
 
     fn known_direct_lambda_for_expr(&self, expr: &MExpr) -> Option<KnownDirectLambda> {
-        if let MExpr::Pure(Atom::Lambda { params, body, .. }) = expr {
-            if params.iter().any(|param| !direct_param_supported(param)) {
-                return None;
-            }
-            return Some(KnownDirectLambda {
-                dict_bindings: Vec::new(),
-                params: params.clone(),
-                body: body.clone(),
-            });
+        if let MExpr::Pure(atom) = expr
+            && let Some(lambda) = self.known_direct_lambda_for_atom(atom)
+        {
+            return Some(lambda);
         }
 
         let MExpr::DictMethodAccess {
@@ -3274,6 +3293,23 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             params,
             body,
         })
+    }
+
+    fn known_direct_lambda_for_atom(&self, atom: &Atom) -> Option<KnownDirectLambda> {
+        match atom {
+            Atom::Var { name, .. } => self.known_direct_lambda(&name.name),
+            Atom::Lambda { params, body, .. } => {
+                if params.iter().any(|param| !direct_param_supported(param)) {
+                    return None;
+                }
+                Some(KnownDirectLambda {
+                    dict_bindings: Vec::new(),
+                    params: params.clone(),
+                    body: body.clone(),
+                })
+            }
+            _ => None,
+        }
     }
 
     fn cps_bind_value_expr_is_supported(&mut self, expr: &MExpr) -> bool {

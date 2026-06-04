@@ -404,6 +404,7 @@ fn selective_core_specializes_imported_generic_trait_method_chain() {
     assert!(!core.contains("call 'erlang':'element'"), "{core}");
     assert!(!core.contains("apply ___anf_v2"), "{core}");
     assert!(!core.contains("__dict_Lib_Size"), "{core}");
+    assert!(core.contains("'__saga_direct_hof_apply_box'/1"), "{core}");
     assert!(core.contains("call 'erlang':'+'"), "{core}");
     assert!(core.contains("42"), "{core}");
 

@@ -3,7 +3,12 @@ module Main
 import Lib (Boxed, Size)
 import Std.IO.Unsafe (print_stdout)
 
+fun apply_box : (Boxed Int -> Int) -> Int
+apply_box f = f (Boxed 41)
+
 fun main : Unit -> Unit
-main () =
-  if size (Boxed 41) == 42 then print_stdout "ok\n"
+main () = {
+  let f = size
+  if apply_box f == 42 then print_stdout "ok\n"
   else print_stdout "bad\n"
+}

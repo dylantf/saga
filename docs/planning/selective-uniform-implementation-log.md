@@ -1653,3 +1653,13 @@ boundaries exist.
     extracting the method closure from a dict tuple;
   - added a local direct-HOF canary proving the specialized `main` body does
     not call `erlang:element` or materialize the trait dict.
+- Broadened pure trait method-value specialization to imported generic chains:
+  - optimized monadic IR may erase `let f = size` into a lambda-headed partial
+    application of the trait dispatcher to a known dict, so known-direct-lambda
+    lookup now handles literal lambda heads as well as local aliases;
+  - direct subset planning records known direct lambdas while proving nested
+    bind bodies, allowing partial dispatcher applications to be recognized as
+    pure callable values;
+  - the imported generic `Lib.Size (Boxed Int)` fixture now passes its method
+    value through a direct HOF under `--selective-no-fallback`, with no dict
+    constructor calls or method tuple extraction in `Main.main`.

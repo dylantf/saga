@@ -683,8 +683,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             };
             return self.lower_panic_or_todo(&name.name, &args[0]);
         }
-        if let Atom::Var { name, .. } = head
-            && let Some(lambda) = self.known_direct_lambda(&name.name)
+        if let Some(lambda) = self.known_direct_lambda_for_atom(head)
             && lambda.params.len() == args.len()
             && self.lambda_is_direct_subset_with_dict_bindings(
                 &lambda.dict_bindings,
@@ -699,8 +698,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                 args,
             );
         }
-        if let Atom::Var { name, .. } = head
-            && let Some(lambda) = self.known_direct_lambda(&name.name)
+        if let Some(lambda) = self.known_direct_lambda_for_atom(head)
             && args.len() < lambda.params.len()
             && self.lambda_is_direct_subset_with_dict_bindings(
                 &lambda.dict_bindings,
