@@ -231,7 +231,11 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
 
         if self.expr_is_direct_subset(value) {
             let local_shape = self.direct_local_shape_for_expr(value);
+            let known_direct_lambda = self.known_direct_lambda_for_expr(value);
             let known_dict = self.known_dict_value_for_expr(value);
+            let known_atom = self.known_direct_atom_for_expr(value);
+            let can_elide_if_unused =
+                known_direct_lambda.is_some() || known_dict.is_some() || known_atom.is_some();
             let lowered_value = self.lower_expr(value);
             self.push_scope();
             self.current_scope_mut().insert(var.name.clone());
@@ -243,8 +247,21 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                 self.current_known_dict_value_scope_mut()
                     .insert(var.name.clone(), dict);
             }
+            if let Some(lambda) = known_direct_lambda {
+                self.current_known_direct_lambda_scope_mut()
+                    .insert(var.name.clone(), lambda);
+            }
+            if let Some(atom) = known_atom {
+                self.current_known_direct_atom_scope_mut()
+                    .insert(var.name.clone(), atom);
+            }
             let lowered_body = self.lower_cps_expr(body, evidence, return_k);
             self.pop_scope();
+            if can_elide_if_unused
+                && !super::direct::core_expr_mentions_var(&var.name, &lowered_body)
+            {
+                return lowered_body;
+            }
             return CExpr::Let(
                 core_var(&var.name),
                 Box::new(lowered_value),
@@ -1186,6 +1203,10 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             .map(|arg| self.lower_cps_arg_atom(arg, None))
             .collect();
         let known_dict_aliases = self.known_dict_aliases_for_bindings(&atom_dict_bindings);
+        let known_atom_bindings = self.known_direct_atom_pattern_bindings_for_params(&params, args);
+        let all_params_known = self
+            .known_direct_atom_bindings_for_all_params(&params, args)
+            .is_some();
 
         self.push_scope();
         for (name, _) in &dict_bindings {
@@ -1197,17 +1218,25 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         for pat in &params {
             self.bind_pat_locals(pat);
         }
+        self.bind_known_direct_atom_pattern_values(known_atom_bindings);
         let lowered_body = self.lower_cps_expr(&body, evidence, return_k);
-        let lowered_body = self.wrap_param_match(&params, &arg_names, lowered_body);
+        let lowered_body = if all_params_known {
+            lowered_body
+        } else {
+            self.wrap_param_match(&params, &arg_names, lowered_body)
+        };
         self.pop_scope();
 
-        let lowered_body = arg_names
-            .into_iter()
-            .zip(lowered_args)
-            .rev()
-            .fold(lowered_body, |body, (name, value)| {
-                CExpr::Let(name, Box::new(value), Box::new(body))
-            });
+        let lowered_body = arg_names.into_iter().zip(lowered_args).rev().fold(
+            lowered_body,
+            |body, (name, value)| {
+                if super::direct::core_expr_mentions_core_var(&name, &body) {
+                    CExpr::Let(name, Box::new(value), Box::new(body))
+                } else {
+                    body
+                }
+            },
+        );
         Some(
             dict_bindings
                 .into_iter()
@@ -1320,6 +1349,41 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             .collect()
     }
 
+    pub(super) fn known_direct_atom_pattern_bindings_for_params(
+        &self,
+        params: &[Pat],
+        args: &[Atom],
+    ) -> Vec<(String, Atom)> {
+        let mut bindings = Vec::new();
+        for (param, arg) in params.iter().zip(args) {
+            let Some(arg) = self.known_direct_atom_for_atom(arg) else {
+                continue;
+            };
+            let Some(param_bindings) = self.match_known_direct_atom_pattern(&arg, param) else {
+                continue;
+            };
+            bindings.extend(param_bindings);
+        }
+        bindings
+    }
+
+    pub(super) fn known_direct_atom_bindings_for_all_params(
+        &self,
+        params: &[Pat],
+        args: &[Atom],
+    ) -> Option<Vec<(String, Atom)>> {
+        if params.len() != args.len() {
+            return None;
+        }
+
+        let mut bindings = Vec::new();
+        for (param, arg) in params.iter().zip(args) {
+            let arg = self.known_direct_atom_for_atom(arg)?;
+            bindings.extend(self.match_known_direct_atom_pattern(&arg, param)?);
+        }
+        Some(bindings)
+    }
+
     fn lower_normal_cps_call(
         &mut self,
         head: &Atom,
@@ -1400,6 +1464,8 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         }
         let bindings = self.direct_call_param_bindings(&fb.params, args)?;
         let known_dict_aliases = self.known_dict_aliases_for_params(&fb.params, args);
+        let known_atom_bindings =
+            self.known_direct_atom_pattern_bindings_for_params(&fb.params, args);
 
         self.static_handler_inline_stack
             .push(function_name.to_string());
@@ -1408,6 +1474,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         for (name, dict) in known_dict_aliases {
             self.current_known_dict_value_scope_mut().insert(name, dict);
         }
+        self.bind_known_direct_atom_pattern_values(known_atom_bindings);
         let supported = self.expr_is_cps_island_subset(&fb.body);
         let lowered_body = supported.then(|| self.lower_cps_expr(&fb.body, evidence, return_k));
         self.pop_scope();
@@ -1418,7 +1485,11 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                 .into_iter()
                 .rev()
                 .fold(body, |body, (name, value)| {
-                    CExpr::Let(name, Box::new(value), Box::new(body))
+                    if super::direct::core_expr_mentions_core_var(&name, &body) {
+                        CExpr::Let(name, Box::new(value), Box::new(body))
+                    } else {
+                        body
+                    }
                 })
         })
     }
@@ -2752,6 +2823,8 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             return false;
         }
         let known_dict_aliases = self.known_dict_aliases_for_params(&fb.params, args);
+        let known_atom_bindings =
+            self.known_direct_atom_pattern_bindings_for_params(&fb.params, args);
 
         self.static_handler_inline_stack.push(local_name);
         self.push_scope();
@@ -2759,6 +2832,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         for (name, dict) in known_dict_aliases {
             self.current_known_dict_value_scope_mut().insert(name, dict);
         }
+        self.bind_known_direct_atom_pattern_values(known_atom_bindings);
         let supported = self.expr_can_run_with_elided_static_handler(&fb.body, handled_effects);
         self.pop_scope();
         self.static_handler_inline_stack.pop();
@@ -3715,6 +3789,25 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         evidence: CExpr,
         return_k: CExpr,
     ) -> CExpr {
+        if let Some(known_scrutinee) = self.known_direct_atom_for_case_scrutinee(scrutinee) {
+            for arm in arms {
+                if arm.guard.is_some() {
+                    break;
+                }
+                let Some(bindings) =
+                    self.match_known_direct_atom_pattern(&known_scrutinee, &arm.pattern)
+                else {
+                    continue;
+                };
+                self.push_scope();
+                self.bind_pat_locals(&arm.pattern);
+                self.bind_known_direct_atom_pattern_values(bindings);
+                let body = self.lower_cps_expr(&arm.body, evidence, return_k);
+                self.pop_scope();
+                return body;
+            }
+        }
+
         let scrutinee = self.lower_atom(scrutinee);
         let scrut_var = self.fresh_cps_temp("_CpsCaseScrut");
         let mut rest = self.case_clause_error();

@@ -721,10 +721,7 @@ main () = ()
         !out.contains("apply ___anf_v2('unit', _CpsEvidence"),
         "{out}"
     );
-    assert!(
-        out.contains("let <___anf_v0> =\n                41"),
-        "{out}"
-    );
+    assert!(out.contains("let <___anf_v0> =\n            41"), "{out}");
     assert_selective_core_eval_stdout_contains(
         src,
         "io:format(\"~p~n\", ['_script':run_trait_method(unit)]), init:stop().",
@@ -806,10 +803,8 @@ main () = ()
     assert!(out.contains("'__dict_Readable_Box'/1"), "{out}");
     assert!(out.contains("'__dict_Readable_Std_Int_Int'/0"), "{out}");
     assert!(out.contains("call 'erlang':'element'"), "{out}");
-    assert!(
-        out.contains("let <___anf_v0> =\n                    41"),
-        "{out}"
-    );
+    assert!(out.contains("let <___anf_v0> ="), "{out}");
+    assert!(out.contains("(___anf_v0, 1)"), "{out}");
     assert!(
         !out.contains("let <___anf_v1> =\n                fun"),
         "{out}"
@@ -910,9 +905,9 @@ main () = {
 }
 "#,
     );
-    assert!(out.contains("{'_script_Point', 3, 4}"), "{out}");
-    assert!(out.contains("(2, P)"), "{out}");
-    assert!(out.contains("(3, P)"), "{out}");
+    assert!(out.contains("call 'erlang':'+'\n        (3, 4)"), "{out}");
+    assert!(!out.contains("{'_script_Point', 3, 4}"), "{out}");
+    assert!(!out.contains("call 'erlang':'element'"), "{out}");
 }
 
 #[test]
@@ -953,7 +948,10 @@ main () = score (Second 41)
     assert!(out.contains("'_script_First'"), "{out}");
     assert!(out.contains("'_script_Second'"), "{out}");
     assert!(out.contains("{'_script_Second', 41}"), "{out}");
-    assert!(out.contains("apply 'score'/1({'_script_Second', 41})"), "{out}");
+    assert!(
+        out.contains("apply 'score'/1({'_script_Second', 41})"),
+        "{out}"
+    );
 }
 
 #[test]
@@ -1621,7 +1619,7 @@ main () = iter pure_tick [1, 2] with ignore_tick
             require_all_functions: true,
         },
     );
-    assert!(out.contains("apply F(H)"), "{out}");
+    assert!(out.contains("apply F(1)"), "{out}");
     assert!(out.contains("apply 'iter'/4(fun (_PureCpsArg"), "{out}");
     assert!(!out.contains("apply F(H, _CpsEvidence"), "{out}");
     assert_selective_core_compiles(src);

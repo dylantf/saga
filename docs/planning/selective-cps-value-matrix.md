@@ -269,13 +269,26 @@ extraction.
      and collapses unguarded cases whose scrutinee is a known constructor,
      tuple, or literal. Pattern variables bind known sub-values for the chosen
      arm, so nested constructor ladders can collapse one step at a time.
-   - Covered canary: `routed-derive-options/01-routed-derive-options.saga`
+  - Covered canary: `routed-derive-options/01-routed-derive-options.saga`
      now lowers the direct static `serialize` variant from the residual
      `Rep__User(Adt("User", Variant(Leaf(5))))` constructor/case ladder to the
      proven leaf encoder path, with no runtime `Rep__User`/`std_generic_*`
      allocation or traversal in that hot direct variant.
-   - Current limits: guarded arms, records, anonymous records, string-prefix
-     patterns, and bitstring patterns still fall back to normal case lowering.
+   - Second rewrite landed: known atom/pattern facts now thread through
+     CPS/static-handler lowering as well as direct lowering. This lets the
+     split-trait record shape in
+     `routed-derive-options/03-split-trait-record.saga` skip the hot
+     `Rep__User -> Record -> And -> Labeled -> Leaf` traversal in `main`
+     while preserving the normal dict/fallback path for unsupported dynamic
+     uses.
+   - Current limits: guarded arms, string-prefix patterns, and bitstring
+     patterns still fall back to normal case lowering.
+   - Cleanup note: known direct atoms, known direct/CPS lambdas, and known
+     dictionary values are now threaded through both direct lowering and
+     CPS/static-handler lowering. The next cleanup pass should centralize this
+     into a shared `KnownFacts`/proof-scope helper with common operations like
+     `bind_param_facts`, `bind_pat_known_atom`, and `known_atom_for_expr`, so
+     new optimizations do not have to remember every lowering context manually.
 
 6. **Std.Test runner strict frontier**
    - Current strict blocker:

@@ -461,9 +461,15 @@ fn selective_core_collapses_known_generic_constructor_ladder_canary() {
     let direct_body = &core[start..end];
     assert!(direct_body.contains("call 'erlang':'+'"), "{direct_body}");
     assert!(direct_body.contains("(5, 10)"), "{direct_body}");
-    assert!(!direct_body.contains("'_script_Rep__User'"), "{direct_body}");
+    assert!(
+        !direct_body.contains("'_script_Rep__User'"),
+        "{direct_body}"
+    );
     assert!(!direct_body.contains("'std_generic_Adt'"), "{direct_body}");
-    assert!(!direct_body.contains("'std_generic_Variant'"), "{direct_body}");
+    assert!(
+        !direct_body.contains("'std_generic_Variant'"),
+        "{direct_body}"
+    );
     assert!(!direct_body.contains("'std_generic_Leaf'"), "{direct_body}");
 
     let output = std::process::Command::new(binary)
@@ -486,6 +492,65 @@ fn selective_core_collapses_known_generic_constructor_ladder_canary() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(output_text.contains("\"15\""), "{output_text}");
+}
+
+#[test]
+fn selective_core_collapses_known_split_trait_record_ladder_canary() {
+    let binary = env!("CARGO_BIN_EXE_saga");
+    let manifest_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let fixture =
+        manifest_dir.join("examples/optimization/routed-derive-options/03-split-trait-record.saga");
+
+    let inspect = std::process::Command::new(binary)
+        .args([
+            "inspect",
+            fixture.to_str().expect("fixture path should be utf-8"),
+            "--stage",
+            "selective-core",
+            "--selective-no-fallback",
+        ])
+        .output()
+        .expect("inspect split-trait routed derive options fixture");
+    assert!(
+        inspect.status.success(),
+        "saga inspect failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&inspect.stdout),
+        String::from_utf8_lossy(&inspect.stderr)
+    );
+
+    let core = String::from_utf8_lossy(&inspect.stdout);
+    let start = core
+        .find("\n'main'/1")
+        .map(|index| index + 1)
+        .expect("main should be emitted");
+    let main_body = &core[start..];
+    assert!(main_body.contains("call 'erlang':'+'"), "{main_body}");
+    assert!(!main_body.contains("'_script_Rep__User'"), "{main_body}");
+    assert!(!main_body.contains("'std_generic_Record'"), "{main_body}");
+    assert!(!main_body.contains("'std_generic_And'"), "{main_body}");
+    assert!(!main_body.contains("'std_generic_Labeled'"), "{main_body}");
+    assert!(!main_body.contains("'std_generic_Leaf'"), "{main_body}");
+
+    let output = std::process::Command::new(binary)
+        .args([
+            "run",
+            "--selective-codegen",
+            fixture.to_str().expect("fixture path should be utf-8"),
+        ])
+        .output()
+        .expect("run split-trait routed derive options fixture");
+    assert!(
+        output.status.success(),
+        "saga run failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let output_text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output_text.contains("\"33\""), "{output_text}");
 }
 
 #[test]

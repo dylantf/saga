@@ -1546,10 +1546,12 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                 name: alias_name, ..
             } => self
                 .known_direct_atom_guarded(&alias_name.name, seen)
-                .or(Some(Atom::Var {
-                    name: alias_name,
-                    source,
-                })),
+                .or_else(|| {
+                    (alias_name.name != name).then_some(Atom::Var {
+                        name: alias_name,
+                        source,
+                    })
+                }),
             other => Some(other),
         }
     }
@@ -1749,6 +1751,16 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         match pat {
             Pat::Var { id, name, .. } => {
                 self.current_scope_mut().insert(name.clone());
+                self.current_known_direct_atom_scope_mut().insert(
+                    name.clone(),
+                    Atom::Var {
+                        name: MVar {
+                            name: name.clone(),
+                            id: id.0,
+                        },
+                        source: *id,
+                    },
+                );
                 let shape = explicit_shape.unwrap_or_else(|| {
                     if self.pure_function_arity_at(*id).is_some() {
                         LocalValueShape::PureCallableFromUseType
