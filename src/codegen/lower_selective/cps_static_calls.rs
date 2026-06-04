@@ -203,6 +203,16 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         {
             return None;
         }
+        if let Some(fb) = program.iter().find_map(|decl| match decl {
+            MDecl::FunBinding(fb) if fb.name == name => Some(fb),
+            _ => None,
+        }) && super::imported_facts::expr_has_same_module_local_app_refs(
+            &fb.body,
+            &source_module_name,
+            &compiled.resolution,
+        ) {
+            return None;
+        }
         Some(ImportedStaticHandlerCall {
             source_module_name,
             erlang_module,

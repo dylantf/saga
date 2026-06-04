@@ -102,6 +102,10 @@ pub struct CheckResult {
 }
 
 impl CheckResult {
+    pub fn clear_cached_programs_iterative(&mut self) {
+        self.modules.clear_cached_programs_iterative();
+    }
+
     /// Whether typechecking found any errors.
     pub fn has_errors(&self) -> bool {
         self.diagnostics
@@ -309,6 +313,10 @@ impl CheckResult {
 }
 
 impl Checker {
+    pub fn clear_cached_programs_iterative(&mut self) {
+        self.modules.clear_cached_programs_iterative();
+    }
+
     /// Extract the public-facing result from the current checker state.
     /// Clones the output-relevant fields, leaving the Checker intact
     /// (needed because with_prelude continues using the Checker after
@@ -402,5 +410,24 @@ impl Checker {
             needs_ets_ref_table: self.needs_ets_ref_table,
             needs_vec_table: self.needs_vec_table,
         }
+    }
+}
+
+impl ModuleContext {
+    fn clear_cached_programs_iterative(&mut self) {
+        let mut results: Vec<CheckResult> =
+            self.check_results.drain().map(|(_, result)| result).collect();
+        drain_programs_iterative(&mut self.programs);
+
+        while let Some(mut result) = results.pop() {
+            results.extend(result.modules.check_results.drain().map(|(_, result)| result));
+            drain_programs_iterative(&mut result.modules.programs);
+        }
+    }
+}
+
+fn drain_programs_iterative(programs: &mut HashMap<String, crate::ast::Program>) {
+    for (_, program) in programs.drain() {
+        crate::ast::drop_program_iterative(program);
     }
 }

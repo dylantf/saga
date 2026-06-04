@@ -1691,3 +1691,24 @@ boundaries exist.
   - CLI/build stats and `inspect --stage monadic-opt` / `monadic-stats` were
     removed with the optimizer path. Future stats should report selective Core
     and/or raw monadic fallback directly, not optimizer deltas.
+- Cleared the first `saga_json` selective build/run blockers after optimizer
+  removal:
+  - verified the JSON stack overflow was not caused by a huge derived record,
+    but by recursive known-dictionary method specialization (`Debug Value`
+    through `List Value` back to `Debug Value`);
+  - known dict method inlining now carries an active `(constructor, method)`
+    guard, and dict constructor lowering marks each method while lowering its
+    own body so recursive self-use falls back to an ordinary call instead of
+    inlining forever;
+  - fallback same-name uniform dict constructors are rewritten as tiny aliases
+    to selective direct dict constructors when the direct constructor exists,
+    shrinking the fallback side of derived dict-heavy modules;
+  - imported known dict method bodies are not inlined into a different module
+    until we have a real cross-module qualification/clone pass;
+  - imported static-handler body splicing now rejects source bodies that call
+    same-module local Beam functions, avoiding stale local calls like
+    `EncodeDeriveCustom:string/1` when the source body actually meant
+    `SagaJson.Encode.string/1`;
+  - `saga_json` now builds and runs end to end on the selective backend. The
+    next JSON work is actual output-shape specialization, not basic backend
+    correctness.

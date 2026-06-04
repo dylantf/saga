@@ -136,6 +136,11 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                 .is_some_and(|effects| !effects.is_empty())
                 || dc.method_open_rows.get(index).copied().unwrap_or(false);
 
+            let key = KnownDictMethodKey {
+                constructor_name: dc.name.clone(),
+                method_index: index,
+            };
+            let inserted = self.active_known_dict_methods.insert(key.clone());
             let lowered = match method {
                 MExpr::Pure(Atom::Lambda { params, body, .. }) if effectful => {
                     self.lower_cps_lambda_atom(params, body)
@@ -149,6 +154,9 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                     dc.name, index
                 )),
             };
+            if inserted {
+                self.active_known_dict_methods.remove(&key);
+            }
             methods.push(lowered);
         }
         self.pop_scope();

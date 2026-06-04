@@ -945,7 +945,7 @@ pub fn build_project_ext_with_options(
 
     // If a custom main is provided, use that. Otherwise typecheck the project's
     // main module for bin projects, or exposed modules for library projects.
-    let main_program = if let Some(source_file) = &main_source {
+    let mut main_program = if let Some(source_file) = &main_source {
         let (program, _) =
             parse_and_typecheck(&source_file.source, &source_file.path, &mut checker);
         Some(program)
@@ -965,7 +965,7 @@ pub fn build_project_ext_with_options(
         None
     };
 
-    let result = checker.to_result();
+    let mut result = checker.to_result();
 
     let build_dir = project_root.join("_build").join(profile);
     let _ = fs::remove_dir_all(&build_dir);
@@ -1048,7 +1048,7 @@ pub fn build_project_ext_with_options(
             }
         }
         let mut mod_checker = checker.seeded_module_checker(Some(project_root.clone()), false);
-        let mod_result = mod_checker.check_program(&mut program);
+        let mut mod_result = mod_checker.check_program(&mut program);
         for w in mod_result.warnings() {
             eprintln!("Warning in module {}: {}", module_name, w);
         }
@@ -1079,6 +1079,9 @@ pub fn build_project_ext_with_options(
                 front_resolution: mod_result.resolution.clone(),
             },
         );
+        ast::drop_program_iterative(program);
+        mod_result.clear_cached_programs_iterative();
+        mod_checker.clear_cached_programs_iterative();
     }
 
     // Elaborate Main (if this is a bin project)
@@ -1109,7 +1112,7 @@ pub fn build_project_ext_with_options(
     // Phase 3: Lower and emit user modules only (stdlib beams are cached globally)
     // user_modules + Main are the modules we need to emit; std modules are in the
     // CodegenContext for cross-module resolution but their beams come from the cache.
-    let ctx = codegen::CodegenContext {
+    let mut ctx = codegen::CodegenContext {
         modules: compiled_modules.clone(),
         let_effect_bindings: HashMap::new(),
         prelude_imports: result.prelude_imports.clone(),
@@ -1185,6 +1188,16 @@ pub fn build_project_ext_with_options(
     }
 
     let extra_ebin_dirs = project_config::extra_ebin_dirs(&project_root, config.deps.as_ref());
+
+    ctx.clear_elaborated_programs_iterative();
+    for compiled in compiled_modules.values_mut() {
+        compiled.clear_elaborated_program_iterative();
+    }
+    if let Some(program) = main_program.take() {
+        ast::drop_program_iterative(program);
+    }
+    result.clear_cached_programs_iterative();
+    checker.clear_cached_programs_iterative();
 
     ProjectBuild {
         build_dir,

@@ -257,6 +257,7 @@ struct DirectLowerer<'a, 'info> {
     local_known_cps_lambdas: Vec<HashMap<String, KnownCpsLambda>>,
     local_known_dict_values: Vec<HashMap<String, KnownDictValue>>,
     local_known_direct_atoms: Vec<HashMap<String, Atom>>,
+    active_known_dict_methods: HashSet<KnownDictMethodKey>,
     options: LoweringOptions,
 }
 

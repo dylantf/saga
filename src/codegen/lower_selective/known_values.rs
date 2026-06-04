@@ -368,11 +368,12 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                 let Atom::DictRef { name, .. } = head else {
                     return None;
                 };
-                let constructor = self
-                    .local_dict_constructors
-                    .get(name)
-                    .or_else(|| self.imported_dict_constructors.get(name))?
-                    .clone();
+                let (constructor, methods_inlineable) =
+                    if let Some(constructor) = self.local_dict_constructors.get(name) {
+                        (constructor.clone(), true)
+                    } else {
+                        (self.imported_dict_constructors.get(name)?.clone(), false)
+                    };
                 if constructor.dict_params.len() != args.len()
                     || args.iter().any(|arg| !self.atom_is_direct_subset(arg))
                 {
@@ -387,6 +388,8 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                     methods.push(atom.clone());
                 }
                 Some(KnownDictValue {
+                    constructor_name: name.clone(),
+                    methods_inlineable,
                     dict_params: constructor.dict_params.clone(),
                     dict_args: args.to_vec(),
                     methods,
@@ -416,6 +419,12 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             return None;
         };
         let known_dict = self.known_dict_value(&name.name)?;
+        if !known_dict.methods_inlineable {
+            return None;
+        }
+        if self.known_dict_method_is_active(&known_dict, *method_index) {
+            return None;
+        }
         let method = known_dict.methods.get(*method_index)?.clone();
         if !self.lambda_is_cps_subset(&method) {
             return None;
@@ -455,6 +464,12 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             return None;
         };
         let known_dict = self.known_dict_value(&name.name)?;
+        if !known_dict.methods_inlineable {
+            return None;
+        }
+        if self.known_dict_method_is_active(&known_dict, *method_index) {
+            return None;
+        }
         let method = known_dict.methods.get(*method_index)?.clone();
         let Atom::Lambda { params, body, .. } = method else {
             return None;

@@ -241,6 +241,70 @@ fn selective_core_merge_adds_direct_dict_adapter_over_uniform_fallback() {
 }
 
 #[test]
+fn selective_core_merge_replaces_same_name_uniform_dict_with_direct_alias() {
+    let fallback = test_core_module(
+        "m",
+        vec![("__dict_Readable_Int", 2)],
+        vec![test_core_fun("__dict_Readable_Int", 2, "huge_fallback")],
+    );
+    let selective = test_core_module(
+        "m",
+        vec![("__dict_Readable_Int", 0)],
+        vec![test_core_fun("__dict_Readable_Int", 0, "compact_selective")],
+    );
+    let mut adapters = HashMap::new();
+    adapters.insert(
+        "__dict_Readable_Int".to_string(),
+        super::DirectFallbackAdapter::Dict {
+            constructor: test_dict_constructor("__dict_Readable_Int", vec![]),
+        },
+    );
+
+    let merged = super::merge_selective_core_modules(fallback, selective, &adapters);
+    let fallback_alias = merged
+        .funs
+        .iter()
+        .find(|fun| fun.name == "__dict_Readable_Int" && fun.arity == 2)
+        .expect("uniform dict alias");
+    let CExpr::Fun(params, body) = &fallback_alias.body else {
+        panic!("expected alias function");
+    };
+    assert_eq!(params.len(), 2, "{params:?}");
+    assert!(
+        matches!(body.as_ref(), CExpr::Apply(callee, args) if matches!(callee.as_ref(), CExpr::Var(name) if name == "_DictAliasK") && matches!(args.as_slice(), [CExpr::Apply(inner, inner_args)] if matches!(inner.as_ref(), CExpr::FunRef(name, 0) if name == "__dict_Readable_Int") && inner_args.is_empty())),
+        "{body:?}"
+    );
+}
+
+#[test]
+fn selective_core_merge_keeps_same_name_uniform_dict_without_selective_source() {
+    let fallback = test_core_module(
+        "m",
+        vec![("__dict_Readable_Int", 2)],
+        vec![test_core_fun("__dict_Readable_Int", 2, "huge_fallback")],
+    );
+    let selective = test_core_module("m", vec![], vec![]);
+    let mut adapters = HashMap::new();
+    adapters.insert(
+        "__dict_Readable_Int".to_string(),
+        super::DirectFallbackAdapter::Dict {
+            constructor: test_dict_constructor("__dict_Readable_Int", vec![]),
+        },
+    );
+
+    let merged = super::merge_selective_core_modules(fallback, selective, &adapters);
+    let fallback_body = merged
+        .funs
+        .iter()
+        .find(|fun| fun.name == "__dict_Readable_Int" && fun.arity == 2)
+        .expect("uniform dict fallback");
+    let CExpr::Fun(_, body) = &fallback_body.body else {
+        panic!("expected fallback function");
+    };
+    assert!(matches!(body.as_ref(), CExpr::Lit(CLit::Atom(atom)) if atom == "huge_fallback"));
+}
+
+#[test]
 fn selective_core_merge_adds_private_direct_dict_adapter() {
     let fallback = test_core_module(
         "m",

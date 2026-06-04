@@ -373,6 +373,12 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         method_index: usize,
         args: &[Atom],
     ) -> Option<CExpr> {
+        if !known_dict.methods_inlineable {
+            return None;
+        }
+        if self.known_dict_method_is_active(known_dict, method_index) {
+            return None;
+        }
         let method = known_dict.methods.get(method_index)?;
         let Atom::Lambda { params, body, .. } = method else {
             return None;
@@ -387,16 +393,40 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             .cloned()
             .zip(known_dict.dict_args.iter().cloned())
             .collect();
+        let key = KnownDictMethodKey {
+            constructor_name: known_dict.constructor_name.clone(),
+            method_index,
+        };
+        let inserted = self.active_known_dict_methods.insert(key.clone());
         if !self.lambda_is_direct_subset_with_dict_bindings(&dict_bindings, params, body) {
+            if inserted {
+                self.active_known_dict_methods.remove(&key);
+            }
             return None;
         }
 
-        Some(self.lower_inline_direct_lambda_app_with_dict_bindings(
+        let lowered = self.lower_inline_direct_lambda_app_with_dict_bindings(
             &dict_bindings,
             params,
             body,
             args,
-        ))
+        );
+        if inserted {
+            self.active_known_dict_methods.remove(&key);
+        }
+        Some(lowered)
+    }
+
+    pub(super) fn known_dict_method_is_active(
+        &self,
+        known_dict: &KnownDictValue,
+        method_index: usize,
+    ) -> bool {
+        self.active_known_dict_methods
+            .contains(&KnownDictMethodKey {
+                constructor_name: known_dict.constructor_name.clone(),
+                method_index,
+            })
     }
 
     pub(super) fn lambda_is_direct_subset_with_dict_bindings(

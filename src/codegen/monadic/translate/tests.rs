@@ -159,7 +159,7 @@ fn run_program(program: Vec<Decl>, info: &EmptyInfo) -> Vec<MDecl> {
 
 fn fun_body(decl: MDecl) -> MExpr {
     match decl {
-        MDecl::FunBinding(f) => f.body,
+        MDecl::FunBinding(f) => f.body.clone(),
         _ => panic!("expected FunBinding"),
     }
 }

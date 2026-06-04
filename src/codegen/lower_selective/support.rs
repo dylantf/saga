@@ -95,9 +95,17 @@ pub(super) struct KnownDirectLambda {
 
 #[derive(Clone, Debug, PartialEq)]
 pub(super) struct KnownDictValue {
+    pub(super) constructor_name: String,
+    pub(super) methods_inlineable: bool,
     pub(super) dict_params: Vec<String>,
     pub(super) dict_args: Vec<Atom>,
     pub(super) methods: Vec<Atom>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub(super) struct KnownDictMethodKey {
+    pub(super) constructor_name: String,
+    pub(super) method_index: usize,
 }
 
 impl FunctionEntryInfo {

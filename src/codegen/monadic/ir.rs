@@ -493,6 +493,16 @@ pub struct MFunBinding {
     pub span: Span,
 }
 
+impl Drop for MFunBinding {
+    fn drop(&mut self) {
+        if let Some(guard) = self.guard.take() {
+            drop_mexpr_iterative(guard);
+        }
+        let body = take_mexpr(&mut self.body);
+        drop_mexpr_iterative(body);
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct MVal {
     pub id: NodeId,
@@ -500,6 +510,13 @@ pub struct MVal {
     pub name: String,
     pub value: MExpr,
     pub span: Span,
+}
+
+impl Drop for MVal {
+    fn drop(&mut self) {
+        let value = take_mexpr(&mut self.value);
+        drop_mexpr_iterative(value);
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -513,6 +530,14 @@ pub struct MDictConstructor {
     pub method_open_rows: Vec<bool>,
     pub impl_effects: Vec<String>,
     pub span: Span,
+}
+
+impl Drop for MDictConstructor {
+    fn drop(&mut self) {
+        for method in std::mem::take(&mut self.methods) {
+            drop_mexpr_iterative(method);
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -541,7 +566,195 @@ pub struct HandlerValueInfo {
     pub return_clause: Option<MHandlerArm>,
 }
 
+impl Drop for HandlerValueInfo {
+    fn drop(&mut self) {
+        for arm in std::mem::take(&mut self.arms) {
+            drop_mexpr_work_item(MExprWorkItem::HandlerArm(arm));
+        }
+        if let Some(arm) = self.return_clause.take() {
+            drop_mexpr_work_item(MExprWorkItem::HandlerArm(arm));
+        }
+    }
+}
+
 pub type HandlerValueMap = HashMap<String, HandlerValueInfo>;
+
+enum MExprWorkItem {
+    Expr(MExpr),
+    Atom(Atom),
+    Arm(MArm),
+    Handler(MHandler),
+    HandlerArm(MHandlerArm),
+}
+
+fn take_mexpr(expr: &mut MExpr) -> MExpr {
+    std::mem::replace(
+        expr,
+        MExpr::Pure(Atom::Lit {
+            value: Lit::Unit,
+            source: NodeId::fresh(),
+        }),
+    )
+}
+
+fn drop_mexpr_iterative(expr: MExpr) {
+    drop_mexpr_work_item(MExprWorkItem::Expr(expr));
+}
+
+fn drop_mexpr_work_item(item: MExprWorkItem) {
+    let mut stack = vec![item];
+    while let Some(item) = stack.pop() {
+        match item {
+            MExprWorkItem::Expr(expr) => push_mexpr_children(expr, &mut stack),
+            MExprWorkItem::Atom(atom) => push_atom_children(atom, &mut stack),
+            MExprWorkItem::Arm(arm) => {
+                if let Some(guard) = arm.guard {
+                    stack.push(MExprWorkItem::Expr(guard));
+                }
+                stack.push(MExprWorkItem::Expr(arm.body));
+            }
+            MExprWorkItem::Handler(handler) => push_handler_children(handler, &mut stack),
+            MExprWorkItem::HandlerArm(arm) => {
+                stack.push(MExprWorkItem::Expr(*arm.body));
+                if let Some(finally_block) = arm.finally_block {
+                    stack.push(MExprWorkItem::Expr(*finally_block));
+                }
+            }
+        }
+    }
+}
+
+fn push_mexpr_children(expr: MExpr, stack: &mut Vec<MExprWorkItem>) {
+    match expr {
+        MExpr::Pure(atom) => stack.push(MExprWorkItem::Atom(atom)),
+        MExpr::Yield { args, .. } | MExpr::ForeignCall { args, .. } => {
+            stack.extend(args.into_iter().map(MExprWorkItem::Atom));
+        }
+        MExpr::Bind { value, body, .. } | MExpr::Let { value, body, .. } => {
+            stack.push(MExprWorkItem::Expr(*value));
+            stack.push(MExprWorkItem::Expr(*body));
+        }
+        MExpr::Ensure { body, cleanup } => {
+            stack.push(MExprWorkItem::Expr(*body));
+            stack.push(MExprWorkItem::Expr(*cleanup));
+        }
+        MExpr::Case {
+            scrutinee, arms, ..
+        } => {
+            stack.push(MExprWorkItem::Atom(scrutinee));
+            stack.extend(arms.into_iter().map(MExprWorkItem::Arm));
+        }
+        MExpr::If {
+            cond,
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            stack.push(MExprWorkItem::Atom(cond));
+            stack.push(MExprWorkItem::Expr(*then_branch));
+            stack.push(MExprWorkItem::Expr(*else_branch));
+        }
+        MExpr::App { head, args, .. } => {
+            stack.push(MExprWorkItem::Atom(head));
+            stack.extend(args.into_iter().map(MExprWorkItem::Atom));
+        }
+        MExpr::With { handler, body, .. } => {
+            stack.push(MExprWorkItem::Handler(handler));
+            stack.push(MExprWorkItem::Expr(*body));
+        }
+        MExpr::Resume { value, .. }
+        | MExpr::UnaryMinus { value, .. }
+        | MExpr::FieldAccess { record: value, .. }
+        | MExpr::DictMethodAccess { dict: value, .. } => {
+            stack.push(MExprWorkItem::Atom(value));
+        }
+        MExpr::RecordUpdate { record, fields, .. } => {
+            stack.push(MExprWorkItem::Atom(record));
+            stack.extend(fields.into_iter().map(|(_, atom)| MExprWorkItem::Atom(atom)));
+        }
+        MExpr::BinOp { left, right, .. } => {
+            stack.push(MExprWorkItem::Atom(left));
+            stack.push(MExprWorkItem::Atom(right));
+        }
+        MExpr::BitString { segments, .. } => {
+            for segment in segments {
+                stack.push(MExprWorkItem::Atom(segment.value));
+                if let Some(size) = segment.size {
+                    stack.push(MExprWorkItem::Atom(size));
+                }
+            }
+        }
+        MExpr::Receive { arms, after, .. } => {
+            stack.extend(arms.into_iter().map(MExprWorkItem::Arm));
+            if let Some((timeout, body)) = after {
+                stack.push(MExprWorkItem::Atom(timeout));
+                stack.push(MExprWorkItem::Expr(*body));
+            }
+        }
+        MExpr::LetFun { body, rest, .. } => {
+            stack.push(MExprWorkItem::Expr(*body));
+            stack.push(MExprWorkItem::Expr(*rest));
+        }
+        MExpr::HandlerValue {
+            arms,
+            return_clause,
+            ..
+        } => {
+            stack.extend(arms.into_iter().map(MExprWorkItem::HandlerArm));
+            if let Some(return_clause) = return_clause {
+                stack.push(MExprWorkItem::HandlerArm(*return_clause));
+            }
+        }
+    }
+}
+
+fn push_atom_children(atom: Atom, stack: &mut Vec<MExprWorkItem>) {
+    match atom {
+        Atom::Ctor { args, .. } | Atom::Tuple { elements: args, .. } => {
+            stack.extend(args.into_iter().map(MExprWorkItem::Atom));
+        }
+        Atom::AnonRecord { fields, .. } | Atom::Record { fields, .. } => {
+            stack.extend(fields.into_iter().map(|(_, atom)| MExprWorkItem::Atom(atom)));
+        }
+        Atom::Lambda { body, .. } => stack.push(MExprWorkItem::Expr(*body)),
+        Atom::BackendSpawnThunk { callback, .. } => stack.push(MExprWorkItem::Atom(*callback)),
+        Atom::Var { .. }
+        | Atom::Lit { .. }
+        | Atom::DictRef { .. }
+        | Atom::QualifiedRef { .. }
+        | Atom::Symbol { .. }
+        | Atom::BackendAtom { .. } => {}
+    }
+}
+
+fn push_handler_children(handler: MHandler, stack: &mut Vec<MExprWorkItem>) {
+    match handler {
+        MHandler::Static {
+            arms,
+            return_clause,
+            ..
+        } => {
+            stack.extend(arms.into_iter().map(MExprWorkItem::HandlerArm));
+            if let Some(return_clause) = return_clause {
+                stack.push(MExprWorkItem::HandlerArm(return_clause));
+            }
+        }
+        MHandler::Composite { handlers, .. } => {
+            stack.extend(handlers.into_iter().map(MExprWorkItem::Handler));
+        }
+        MHandler::Dynamic {
+            op_tuple,
+            return_lambda,
+            ..
+        } => {
+            stack.push(MExprWorkItem::Atom(op_tuple));
+            if let Some(return_lambda) = return_lambda {
+                stack.push(MExprWorkItem::Atom(return_lambda));
+            }
+        }
+        MHandler::Native { .. } => {}
+    }
+}
 
 // -------------------------------------------------------------------------
 // EffectInfo (narrowed read-only view)

@@ -85,6 +85,18 @@ impl CodegenContext {
             )
         })
     }
+
+    pub fn clear_elaborated_programs_iterative(&mut self) {
+        for module in self.modules.values_mut() {
+            module.clear_elaborated_program_iterative();
+        }
+    }
+}
+
+impl CompiledModule {
+    pub fn clear_elaborated_program_iterative(&mut self) {
+        ast::drop_program_iterative(std::mem::take(&mut self.elaborated));
+    }
 }
 
 /// Compile a single module from a CheckResult into a CompiledModule.
@@ -472,6 +484,7 @@ pub fn emit_module_via_new_path(
                 &imported_private_names,
             ));
         }
+        ast::drop_program_iterative(anf_imported);
     }
     let imported_dict_constructors = if source_module_name.starts_with("Std.") {
         HashMap::new()
@@ -526,9 +539,9 @@ pub fn emit_module_via_new_path(
             selective_fallback_direct_adapters(&monadic_prog, &effect_info);
         merge_selective_core_modules(fallback_cmod, selective_cmod, &fallback_direct_adapters)
     };
-    EmitModuleOutput {
-        core_src: cerl::print_module(&cmod),
-    }
+    let core_src = cerl::print_module(&cmod);
+    ast::drop_program_iterative(anf_program);
+    EmitModuleOutput { core_src }
 }
 
 fn merge_selective_core_modules(
@@ -537,6 +550,11 @@ fn merge_selective_core_modules(
     direct_adapters: &HashMap<String, DirectFallbackAdapter>,
 ) -> cerl::CModule {
     let fallback_exports: HashSet<(String, usize)> = fallback.exports.iter().cloned().collect();
+    let selective_fun_keys: HashSet<(String, usize)> = selective
+        .funs
+        .iter()
+        .map(|fun| (fun.name.clone(), fun.arity))
+        .collect();
 
     let mut funs: Vec<cerl::CFunDef> = fallback
         .funs
@@ -544,7 +562,21 @@ fn merge_selective_core_modules(
         .map(|fun| {
             fallback_duplicate_dict_source(&selective.name, &fun.name, direct_adapters)
                 .and_then(|(source_name, adapter)| {
-                    build_duplicate_dict_alias(&fun.name, fun.arity, &source_name, adapter)
+                    build_dict_alias_if_selective_source_exists(
+                        &fun.name,
+                        fun.arity,
+                        &source_name,
+                        adapter,
+                        &selective_fun_keys,
+                    )
+                })
+                .or_else(|| {
+                    build_same_name_dict_alias_if_selective_source_exists(
+                        &fun.name,
+                        fun.arity,
+                        direct_adapters,
+                        &selective_fun_keys,
+                    )
                 })
                 .unwrap_or(fun)
         })
@@ -672,6 +704,38 @@ fn build_duplicate_dict_alias(
     }
 
     None
+}
+
+fn build_dict_alias_if_selective_source_exists(
+    fallback_name: &str,
+    arity: usize,
+    source_name: &str,
+    adapter: &DirectFallbackAdapter,
+    selective_fun_keys: &HashSet<(String, usize)>,
+) -> Option<cerl::CFunDef> {
+    let direct_key = (source_name.to_string(), adapter.direct_arity());
+    selective_fun_keys
+        .contains(&direct_key)
+        .then(|| build_duplicate_dict_alias(fallback_name, arity, source_name, adapter))
+        .flatten()
+}
+
+fn build_same_name_dict_alias_if_selective_source_exists(
+    name: &str,
+    arity: usize,
+    direct_adapters: &HashMap<String, DirectFallbackAdapter>,
+    selective_fun_keys: &HashSet<(String, usize)>,
+) -> Option<cerl::CFunDef> {
+    if !name.starts_with("__dict_") {
+        return None;
+    }
+
+    let adapter = direct_adapters.get(name)?;
+    if !matches!(adapter, DirectFallbackAdapter::Dict { .. }) || arity != adapter.uniform_arity() {
+        return None;
+    }
+
+    build_dict_alias_if_selective_source_exists(name, arity, name, adapter, selective_fun_keys)
 }
 
 fn erlang_module_name_for_core(module_name: &str) -> String {

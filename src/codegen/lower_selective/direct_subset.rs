@@ -75,6 +75,12 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                 {
                     return args.iter().all(|arg| self.atom_is_direct_subset(arg));
                 }
+                if let Atom::Lambda { params, body, .. } = head
+                    && params.len() == args.len()
+                    && args.iter().all(|arg| self.atom_is_direct_subset(arg))
+                {
+                    return self.lambda_is_direct_subset(params, body);
+                }
                 match self.call_shape(head) {
                     Some(CallShape::Intrinsic(intrinsic)) => {
                         direct_intrinsic_arity(intrinsic).is_some_and(|arity| arity == args.len())
