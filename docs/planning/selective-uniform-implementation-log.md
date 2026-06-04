@@ -1615,3 +1615,12 @@ boundaries exist.
     collector rejects its private same-module external helper call to
     `Std.Int.to_string`. We need an imported private-helper/external-ref policy
     before specializing that shape.
+- Added imported generic trait-chain coverage:
+  - created an isolated project fixture with `Lib.Size Int` and
+    `Lib.Size (Boxed a) where {a: Size}`;
+  - `Main.size (Boxed 41)` now specializes through the imported generic
+    dictionary chain, inlining both the outer `Size Boxed` method and the
+    nested `Size Int` method in the caller;
+  - the caller no longer emits `erlang:element`/method closure apply for this
+    imported generic chain. Dictionary constructor lets still remain until the
+    deferred dict-only local elision pass.

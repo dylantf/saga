@@ -1,0 +1,9 @@
+module Main
+
+import Lib (Boxed, Size)
+import Std.IO.Unsafe (print_stdout)
+
+fun main : Unit -> Unit
+main () =
+  if size (Boxed 41) == 42 then print_stdout "ok\n"
+  else print_stdout "bad\n"
