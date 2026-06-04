@@ -953,7 +953,7 @@ main () = score (Second 41)
     assert!(out.contains("'_script_First'"), "{out}");
     assert!(out.contains("'_script_Second'"), "{out}");
     assert!(out.contains("{'_script_Second', 41}"), "{out}");
-    assert!(out.contains("apply 'score'/1(___anf_v0)"), "{out}");
+    assert!(out.contains("apply 'score'/1({'_script_Second', 41})"), "{out}");
 }
 
 #[test]

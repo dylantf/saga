@@ -265,15 +265,17 @@ extraction.
      `ToJson`/`FromJson`.
    - Do not add user-facing specialization attributes yet. If the compiler
      cannot prove the shape, use the normal Generic/dict fallback.
-   - First canary: `routed-derive-options/01-routed-derive-options.saga`
-     currently lowers the direct static `serialize` variant to a literal
-     `Rep__User(Adt("User", Variant(Leaf(5))))` constructor tree and then
-     immediately walks it with nested case expressions before reaching the leaf
-     encoder. The first rewrite should collapse that known constructor/case
-     ladder generically, before any JSON-specific output builder exists.
-   - Target shape for the canary: no runtime `Rep__User`/`std_generic_*`
-     allocation or traversal in the hot direct variant; the proven leaf value
-     should flow straight into the concrete encoder path.
+   - First rewrite landed: the direct lowerer tracks scoped known pure atoms
+     and collapses unguarded cases whose scrutinee is a known constructor,
+     tuple, or literal. Pattern variables bind known sub-values for the chosen
+     arm, so nested constructor ladders can collapse one step at a time.
+   - Covered canary: `routed-derive-options/01-routed-derive-options.saga`
+     now lowers the direct static `serialize` variant from the residual
+     `Rep__User(Adt("User", Variant(Leaf(5))))` constructor/case ladder to the
+     proven leaf encoder path, with no runtime `Rep__User`/`std_generic_*`
+     allocation or traversal in that hot direct variant.
+   - Current limits: guarded arms, records, anonymous records, string-prefix
+     patterns, and bitstring patterns still fall back to normal case lowering.
 
 6. **Std.Test runner strict frontier**
    - Current strict blocker:

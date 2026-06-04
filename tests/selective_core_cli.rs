@@ -424,7 +424,7 @@ fn selective_core_specializes_imported_generic_trait_method_chain() {
 }
 
 #[test]
-fn selective_core_exposes_known_generic_constructor_ladder_canary() {
+fn selective_core_collapses_known_generic_constructor_ladder_canary() {
     let binary = env!("CARGO_BIN_EXE_saga");
     let manifest_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let fixture = manifest_dir
@@ -448,15 +448,23 @@ fn selective_core_exposes_known_generic_constructor_ladder_canary() {
     );
 
     let core = String::from_utf8_lossy(&inspect.stdout);
-    assert!(
-        core.contains("'__saga_direct___saga_static_variant__serialize"),
-        "{core}"
-    );
-    assert!(core.contains("'_script_Rep__User'"), "{core}");
-    assert!(core.contains("'std_generic_Adt'"), "{core}");
-    assert!(core.contains("'std_generic_Variant'"), "{core}");
-    assert!(core.contains("'std_generic_Leaf'"), "{core}");
-    assert!(core.contains("call 'erlang':'+'"), "{core}");
+    let direct_name = "'__saga_direct___saga_static_variant__serialize";
+    let definition_marker = format!("\n{direct_name}");
+    let start = core
+        .find(&definition_marker)
+        .map(|index| index + 1)
+        .expect("direct static serialize variant should be emitted");
+    let end = core[start..]
+        .find("\n\n'__saga_static_variant")
+        .map(|offset| start + offset)
+        .unwrap_or(core.len());
+    let direct_body = &core[start..end];
+    assert!(direct_body.contains("call 'erlang':'+'"), "{direct_body}");
+    assert!(direct_body.contains("(5, 10)"), "{direct_body}");
+    assert!(!direct_body.contains("'_script_Rep__User'"), "{direct_body}");
+    assert!(!direct_body.contains("'std_generic_Adt'"), "{direct_body}");
+    assert!(!direct_body.contains("'std_generic_Variant'"), "{direct_body}");
+    assert!(!direct_body.contains("'std_generic_Leaf'"), "{direct_body}");
 
     let output = std::process::Command::new(binary)
         .args([

@@ -72,6 +72,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                 }
                 let local_shape = self.direct_local_shape_for_expr(value);
                 let known_dict = self.known_dict_value_for_expr(value);
+                let known_atom = self.known_direct_atom_for_expr(value);
                 self.push_scope();
                 self.current_scope_mut().insert(var.name.clone());
                 if let Some(shape) = local_shape {
@@ -82,9 +83,16 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                     self.current_known_dict_value_scope_mut()
                         .insert(var.name.clone(), dict.clone());
                 }
+                if let Some(atom) = known_atom.as_ref() {
+                    self.current_known_direct_atom_scope_mut()
+                        .insert(var.name.clone(), atom.clone());
+                }
                 let body = self.lower_expr(body);
                 self.pop_scope();
                 if known_dict.is_some() && !core_expr_mentions_var(&var.name, &body) {
+                    return body;
+                }
+                if known_atom.is_some() && !core_expr_mentions_var(&var.name, &body) {
                     return body;
                 }
                 let value = self.lower_expr(value);
@@ -249,6 +257,25 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
     }
 
     fn lower_case_chain(&mut self, scrutinee: &Atom, arms: &[MArm]) -> CExpr {
+        if let Some(known_scrutinee) = self.known_direct_atom_for_case_scrutinee(scrutinee) {
+            for arm in arms {
+                if arm.guard.is_some() {
+                    break;
+                }
+                let Some(bindings) =
+                    self.match_known_direct_atom_pattern(&known_scrutinee, &arm.pattern)
+                else {
+                    continue;
+                };
+                self.push_scope();
+                self.bind_pat_locals(&arm.pattern);
+                self.bind_known_direct_atom_pattern_values(bindings);
+                let body = self.lower_expr(&arm.body);
+                self.pop_scope();
+                return body;
+            }
+        }
+
         let scrutinee = self.lower_atom(scrutinee);
         let scrut_var = self.fresh_cps_temp("_CaseScrut");
         let mut rest = self.case_clause_error();
@@ -1157,6 +1184,9 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
     pub(super) fn lower_atom(&mut self, atom: &Atom) -> CExpr {
         match atom {
             Atom::Var { name, .. } => {
+                if let Some(atom) = self.known_direct_atom(&name.name) {
+                    return self.lower_atom(&atom);
+                }
                 if self.is_local(&name.name) {
                     if matches!(
                         self.local_shape(&name.name),
@@ -1331,6 +1361,121 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         let mut elems = vec![CExpr::Lit(CLit::Atom(tag))];
         elems.extend(args.iter().map(|arg| self.lower_atom(arg)));
         CExpr::Tuple(elems)
+    }
+
+    fn known_direct_atom_for_expr(&self, expr: &MExpr) -> Option<Atom> {
+        match expr {
+            MExpr::Pure(atom) => self.known_direct_atom_for_atom(atom),
+            _ => None,
+        }
+    }
+
+    fn known_direct_atom_for_case_scrutinee(&self, atom: &Atom) -> Option<Atom> {
+        match atom {
+            Atom::Var { name, .. } => self.known_direct_atom(&name.name),
+            _ => self.known_direct_atom_for_atom(atom),
+        }
+    }
+
+    fn known_direct_atom_for_atom(&self, atom: &Atom) -> Option<Atom> {
+        match atom {
+            Atom::Lit { .. } => Some(atom.clone()),
+            Atom::Ctor { name, args, source } => Some(Atom::Ctor {
+                name: name.clone(),
+                args: args
+                    .iter()
+                    .map(|arg| {
+                        self.known_direct_atom_for_atom(arg)
+                            .unwrap_or_else(|| arg.clone())
+                    })
+                    .collect(),
+                source: *source,
+            }),
+            Atom::Tuple { elements, source } => Some(Atom::Tuple {
+                elements: elements
+                    .iter()
+                    .map(|arg| {
+                        self.known_direct_atom_for_atom(arg)
+                            .unwrap_or_else(|| arg.clone())
+                    })
+                    .collect(),
+                source: *source,
+            }),
+            Atom::Var { name, .. } => self.known_direct_atom(&name.name),
+            _ => None,
+        }
+    }
+
+    fn bind_known_direct_atom_pattern_values(&mut self, bindings: Vec<(String, Atom)>) {
+        for (name, atom) in bindings {
+            if matches!(&atom, Atom::Var { name: atom_name, .. } if atom_name.name == name) {
+                continue;
+            }
+            self.current_known_direct_atom_scope_mut()
+                .insert(name, atom);
+        }
+    }
+
+    fn match_known_direct_atom_pattern(
+        &self,
+        atom: &Atom,
+        pat: &Pat,
+    ) -> Option<Vec<(String, Atom)>> {
+        match pat {
+            Pat::Wildcard { .. } => Some(Vec::new()),
+            Pat::Var { name, .. } => Some(vec![(name.clone(), atom.clone())]),
+            Pat::Lit { value, .. } => {
+                let Atom::Lit {
+                    value: atom_value, ..
+                } = atom
+                else {
+                    return None;
+                };
+                lit_values_match(atom_value, value).then(Vec::new)
+            }
+            Pat::Constructor { name, args, .. } => {
+                let Atom::Ctor {
+                    name: atom_name,
+                    args: atom_args,
+                    ..
+                } = atom
+                else {
+                    return None;
+                };
+                if atom_args.len() != args.len()
+                    || mangle_ctor_atom(atom_name, self.ctors) != mangle_ctor_atom(name, self.ctors)
+                {
+                    return None;
+                }
+                self.match_known_direct_atom_patterns(atom_args, args)
+            }
+            Pat::Tuple { elements, .. } => {
+                let Atom::Tuple {
+                    elements: atom_elements,
+                    ..
+                } = atom
+                else {
+                    return None;
+                };
+                if atom_elements.len() != elements.len() {
+                    return None;
+                }
+                self.match_known_direct_atom_patterns(atom_elements, elements)
+            }
+            _ => None,
+        }
+    }
+
+    fn match_known_direct_atom_patterns(
+        &self,
+        atoms: &[Atom],
+        pats: &[Pat],
+    ) -> Option<Vec<(String, Atom)>> {
+        let mut bindings = Vec::new();
+        for (atom, pat) in atoms.iter().zip(pats) {
+            bindings.extend(self.match_known_direct_atom_pattern(atom, pat)?);
+        }
+        Some(bindings)
     }
 
     fn lower_anon_record_atom(&mut self, fields: &[(String, Atom)]) -> CExpr {
@@ -1582,6 +1727,19 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
 fn core_expr_mentions_var(source_name: &str, expr: &CExpr) -> bool {
     let var = core_var(source_name);
     core_expr_mentions_core_var(&var, expr)
+}
+
+fn lit_values_match(left: &Lit, right: &Lit) -> bool {
+    match (left, right) {
+        (Lit::Int(_, left), Lit::Int(_, right)) => left == right,
+        (Lit::Float(_, left), Lit::Float(_, right)) => left.to_bits() == right.to_bits(),
+        (Lit::String(left, left_kind), Lit::String(right, right_kind)) => {
+            left == right && left_kind == right_kind
+        }
+        (Lit::Bool(left), Lit::Bool(right)) => left == right,
+        (Lit::Unit, Lit::Unit) => true,
+        _ => false,
+    }
 }
 
 fn core_expr_mentions_core_var(var: &str, expr: &CExpr) -> bool {

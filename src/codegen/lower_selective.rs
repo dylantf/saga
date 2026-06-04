@@ -219,6 +219,7 @@ struct DirectLowerer<'a, 'info> {
     local_known_direct_lambdas: Vec<HashMap<String, KnownDirectLambda>>,
     local_known_cps_lambdas: Vec<HashMap<String, KnownCpsLambda>>,
     local_known_dict_values: Vec<HashMap<String, KnownDictValue>>,
+    local_known_direct_atoms: Vec<HashMap<String, Atom>>,
     options: LoweringOptions,
 }
 
@@ -266,6 +267,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             local_known_direct_lambdas: vec![HashMap::new()],
             local_known_cps_lambdas: vec![HashMap::new()],
             local_known_dict_values: vec![HashMap::new()],
+            local_known_direct_atoms: vec![HashMap::new()],
             options,
         }
     }
@@ -1445,6 +1447,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         self.local_known_direct_lambdas.push(HashMap::new());
         self.local_known_cps_lambdas.push(HashMap::new());
         self.local_known_dict_values.push(HashMap::new());
+        self.local_known_direct_atoms.push(HashMap::new());
     }
 
     fn pop_scope(&mut self) {
@@ -1453,6 +1456,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         self.local_known_direct_lambdas.pop();
         self.local_known_cps_lambdas.pop();
         self.local_known_dict_values.pop();
+        self.local_known_direct_atoms.pop();
     }
 
     fn current_scope_mut(&mut self) -> &mut HashSet<String> {
@@ -1483,6 +1487,12 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             .expect("direct lowerer has a known-dict-value scope")
     }
 
+    fn current_known_direct_atom_scope_mut(&mut self) -> &mut HashMap<String, Atom> {
+        self.local_known_direct_atoms
+            .last_mut()
+            .expect("direct lowerer has a known-direct-atom scope")
+    }
+
     fn known_direct_lambda(&self, name: &str) -> Option<KnownDirectLambda> {
         self.local_known_direct_lambdas
             .iter()
@@ -1502,6 +1512,46 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             .iter()
             .rev()
             .find_map(|scope| scope.get(name).cloned())
+    }
+
+    fn known_direct_atom(&self, name: &str) -> Option<Atom> {
+        self.known_direct_atom_guarded(name, &mut HashSet::new())
+    }
+
+    fn known_direct_atom_guarded(&self, name: &str, seen: &mut HashSet<String>) -> Option<Atom> {
+        if !seen.insert(name.to_string()) {
+            return None;
+        }
+        let atom = self
+            .local_known_direct_atoms
+            .iter()
+            .rev()
+            .find_map(|scope| scope.get(name).cloned())?;
+        let source = match &atom {
+            Atom::Var { source, .. }
+            | Atom::Lit { source, .. }
+            | Atom::Ctor { source, .. }
+            | Atom::Tuple { source, .. }
+            | Atom::AnonRecord { source, .. }
+            | Atom::Record { source, .. }
+            | Atom::Lambda { source, .. }
+            | Atom::DictRef { source, .. }
+            | Atom::QualifiedRef { source, .. }
+            | Atom::Symbol { source, .. }
+            | Atom::BackendAtom { source, .. }
+            | Atom::BackendSpawnThunk { source, .. } => *source,
+        };
+        match atom {
+            Atom::Var {
+                name: alias_name, ..
+            } => self
+                .known_direct_atom_guarded(&alias_name.name, seen)
+                .or(Some(Atom::Var {
+                    name: alias_name,
+                    source,
+                })),
+            other => Some(other),
+        }
     }
 
     fn bind_fun_param_locals(&mut self, fb: &MFunBinding) {

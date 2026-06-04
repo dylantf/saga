@@ -1663,14 +1663,18 @@ boundaries exist.
   - the imported generic `Lib.Size (Boxed Int)` fixture now passes its method
     value through a direct HOF under `--selective-no-fallback`, with no dict
     constructor calls or method tuple extraction in `Main.main`.
-- Added the first known-constructor/output-shape specialization canary:
+- Added the first known-constructor/output-shape specialization canary and rewrite:
   - inspected the routed derive-options fixture and confirmed the selective
     direct static `serialize` variant still builds a known
     `Rep__User(Adt("User", Variant(Leaf(5))))` representation, then
     immediately destructures it through nested cases before reaching the leaf
     encoder;
-  - added CLI coverage that pins this residual constructor/case ladder under
-    `--selective-no-fallback` and verifies the same fixture still runs under
-    `--selective-codegen`;
-  - recorded the planned rewrite as a generic known-constructor-through-case
-    collapse, not a JSON-specific special case.
+  - direct selective lowering now tracks scoped known pure atoms and, for
+    unguarded cases with known constructor/tuple/literal scrutinees, selects
+    the matching arm at compile time and binds pattern variables to known
+    sub-values;
+  - the fixture's hot direct static `serialize` variant now collapses to the
+    concrete leaf encoder path (`5 + 10`) with no `Rep__User` or
+    `std_generic_*` runtime allocation/traversal in that direct variant;
+  - kept the rewrite generic and conservative: unsupported patterns or guards
+    fall back to ordinary Core case lowering.
