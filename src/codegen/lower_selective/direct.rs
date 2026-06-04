@@ -39,6 +39,37 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                     self.pop_scope();
                     return body;
                 }
+                let known_direct_lambda = self.known_direct_lambda_for_expr(value);
+                if let Some(lambda) = known_direct_lambda
+                    && lambda.params.iter().all(direct_param_supported)
+                    && self.lambda_is_direct_subset_with_dict_bindings(
+                        &lambda.dict_bindings,
+                        &lambda.params,
+                        &lambda.body,
+                    )
+                {
+                    let lowered_value = self.lower_known_direct_lambda_value(&lambda);
+                    self.push_scope();
+                    self.current_scope_mut().insert(var.name.clone());
+                    self.current_shape_scope_mut().insert(
+                        var.name.clone(),
+                        LocalValueShape::PureCallable {
+                            arity: lambda.params.len(),
+                        },
+                    );
+                    self.current_known_direct_lambda_scope_mut()
+                        .insert(var.name.clone(), lambda);
+                    let body = self.lower_expr(body);
+                    self.pop_scope();
+                    if !core_expr_mentions_var(&var.name, &body) {
+                        return body;
+                    }
+                    return CExpr::Let(
+                        core_var(&var.name),
+                        Box::new(lowered_value),
+                        Box::new(body),
+                    );
+                }
                 let local_shape = self.direct_local_shape_for_expr(value);
                 let known_dict = self.known_dict_value_for_expr(value);
                 self.push_scope();
@@ -528,7 +559,8 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         args: &[Atom],
     ) -> CExpr {
         let param_names = lower_param_names(params);
-        let known_dict_aliases = self.known_dict_aliases_for_bindings(dict_bindings);
+        let mut known_dict_aliases = self.known_dict_aliases_for_bindings(dict_bindings);
+        known_dict_aliases.extend(self.known_dict_aliases_for_params(params, args));
         let candidate_elided_dict_bindings: HashSet<String> = dict_bindings
             .iter()
             .filter_map(|(name, arg)| {
@@ -580,6 +612,70 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             })
     }
 
+    fn lower_known_direct_lambda_value(&mut self, lambda: &KnownDirectLambda) -> CExpr {
+        self.lower_partial_known_direct_lambda_value(lambda, &[])
+    }
+
+    fn lower_partial_known_direct_lambda_value(
+        &mut self,
+        lambda: &KnownDirectLambda,
+        supplied_args: &[Atom],
+    ) -> CExpr {
+        if supplied_args.len() >= lambda.params.len() {
+            self.unsupported("known direct lambda value with too many supplied args");
+        }
+        let param_names = lower_param_names(&lambda.params);
+        let remaining_param_names = param_names[supplied_args.len()..].to_vec();
+        let mut known_dict_aliases = self.known_dict_aliases_for_bindings(&lambda.dict_bindings);
+        known_dict_aliases.extend(
+            self.known_dict_aliases_for_params(
+                &lambda.params[..supplied_args.len()],
+                supplied_args,
+            ),
+        );
+        self.push_scope();
+        for (name, _) in &lambda.dict_bindings {
+            self.current_scope_mut().insert(name.clone());
+        }
+        for (name, dict) in known_dict_aliases {
+            self.current_known_dict_value_scope_mut().insert(name, dict);
+        }
+        for pat in &lambda.params {
+            self.bind_pat_locals(pat);
+        }
+        let lowered_body = self.lower_expr(&lambda.body);
+        let lowered_body = self.wrap_param_match(&lambda.params, &param_names, lowered_body);
+        self.pop_scope();
+
+        let lowered_body = param_names
+            .iter()
+            .take(supplied_args.len())
+            .cloned()
+            .zip(supplied_args.iter())
+            .rev()
+            .fold(lowered_body, |body, (param, arg)| {
+                if core_expr_mentions_core_var(&param, &body) {
+                    CExpr::Let(param, Box::new(self.lower_atom(arg)), Box::new(body))
+                } else {
+                    body
+                }
+            });
+
+        let lowered_body =
+            lambda
+                .dict_bindings
+                .iter()
+                .rev()
+                .fold(lowered_body, |body, (param, arg)| {
+                    CExpr::Let(
+                        core_var(param),
+                        Box::new(self.lower_atom(arg)),
+                        Box::new(body),
+                    )
+                });
+        CExpr::Fun(remaining_param_names, Box::new(lowered_body))
+    }
+
     pub(super) fn lower_app(&mut self, head: &Atom, args: &[Atom]) -> CExpr {
         if self.is_panic_or_todo_call(head, args) {
             let Atom::Var { name, .. } = head else {
@@ -602,6 +698,17 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                 &lambda.body,
                 args,
             );
+        }
+        if let Atom::Var { name, .. } = head
+            && let Some(lambda) = self.known_direct_lambda(&name.name)
+            && args.len() < lambda.params.len()
+            && self.lambda_is_direct_subset_with_dict_bindings(
+                &lambda.dict_bindings,
+                &lambda.params,
+                &lambda.body,
+            )
+        {
+            return self.lower_partial_known_direct_lambda_value(&lambda, args);
         }
         if let Some(call) = self.lower_direct_external_app(head, args) {
             return call;

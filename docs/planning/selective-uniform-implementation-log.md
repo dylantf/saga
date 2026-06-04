@@ -1642,3 +1642,14 @@ boundaries exist.
     binding is actually skipped;
   - local and imported generic trait-chain tests now assert that specialized
     caller bodies do not materialize the relevant dict constructors.
+- Added the first pure trait method-value specialization slice:
+  - direct selective lowering now records direct lambda values as known direct
+    lambdas, not only `DictMethodAccess` locals;
+  - partial application of a known direct lambda to a known dictionary can
+    produce a direct closure over the remaining user arguments;
+  - lambda parameters supplied with known dict arguments are threaded into the
+    known-dict scope while lowering the lambda body, so dispatcher shapes like
+    `let f = encode; apply_it f` can inline the concrete impl method instead of
+    extracting the method closure from a dict tuple;
+  - added a local direct-HOF canary proving the specialized `main` body does
+    not call `erlang:element` or materialize the trait dict.

@@ -3236,6 +3236,17 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
     }
 
     fn known_direct_lambda_for_expr(&self, expr: &MExpr) -> Option<KnownDirectLambda> {
+        if let MExpr::Pure(Atom::Lambda { params, body, .. }) = expr {
+            if params.iter().any(|param| !direct_param_supported(param)) {
+                return None;
+            }
+            return Some(KnownDirectLambda {
+                dict_bindings: Vec::new(),
+                params: params.clone(),
+                body: body.clone(),
+            });
+        }
+
         let MExpr::DictMethodAccess {
             dict, method_index, ..
         } = expr

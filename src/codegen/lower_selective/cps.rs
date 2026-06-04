@@ -1296,7 +1296,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             .collect()
     }
 
-    fn known_dict_aliases_for_params(
+    pub(super) fn known_dict_aliases_for_params(
         &self,
         params: &[Pat],
         args: &[Atom],

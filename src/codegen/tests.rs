@@ -605,6 +605,51 @@ main () = encode 41
 }
 
 #[test]
+fn selective_core_specializes_local_trait_method_value_for_direct_hof() {
+    let src = r#"
+trait Encodable a {
+  fun encode : a -> Int
+}
+
+impl Encodable for Int {
+  encode x = x + 1
+}
+
+fun apply_it : (Int -> Int) -> Int
+apply_it f = f 41
+
+fun main : Unit -> Int
+main () = {
+  let f = encode
+  apply_it f
+}
+"#;
+    let out = emit_selective_core(src);
+    assert!(out.contains("'main'/1"), "{out}");
+    let main_body = out
+        .split("'main'/1 =")
+        .nth(1)
+        .unwrap_or_else(|| panic!("main function missing in:\n{out}"));
+    assert!(
+        !main_body.contains("call 'erlang':'element'"),
+        "known local trait method value should not extract a method closure\n{out}"
+    );
+    assert!(
+        !main_body.contains("__dict_Encodable"),
+        "known local trait method value should not materialize its dict in main\n{out}"
+    );
+    assert!(
+        out.contains("'__saga_direct_hof_apply_it'/1"),
+        "known local trait method value should feed the direct HOF specialization\n{out}"
+    );
+    assert_selective_core_eval_stdout_contains(
+        src,
+        "io:format(\"~p~n\", ['_script':main(unit)]), init:stop().",
+        "42",
+    );
+}
+
+#[test]
 fn selective_core_specializes_local_generic_trait_method_chain() {
     let src = r#"
 type Box a = Box a
