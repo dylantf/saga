@@ -8,12 +8,14 @@
 //! - `planning`: selective plan discovery, imported metadata, HOF specialization
 //! - `direct`: direct Core Erlang lowering
 //! - `cps`: CPS island and runtime CPS callable lowering
+//! - `known_facts`: scoped compile-time facts/proofs shared by direct and CPS lowering
 //! - `support`: small shared shape/data helpers
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 mod cps;
 mod direct;
+mod known_facts;
 mod occurs;
 mod planning;
 mod support;
@@ -1514,48 +1516,6 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             .find_map(|scope| scope.get(name).cloned())
     }
 
-    fn known_direct_atom(&self, name: &str) -> Option<Atom> {
-        self.known_direct_atom_guarded(name, &mut HashSet::new())
-    }
-
-    fn known_direct_atom_guarded(&self, name: &str, seen: &mut HashSet<String>) -> Option<Atom> {
-        if !seen.insert(name.to_string()) {
-            return None;
-        }
-        let atom = self
-            .local_known_direct_atoms
-            .iter()
-            .rev()
-            .find_map(|scope| scope.get(name).cloned())?;
-        let source = match &atom {
-            Atom::Var { source, .. }
-            | Atom::Lit { source, .. }
-            | Atom::Ctor { source, .. }
-            | Atom::Tuple { source, .. }
-            | Atom::AnonRecord { source, .. }
-            | Atom::Record { source, .. }
-            | Atom::Lambda { source, .. }
-            | Atom::DictRef { source, .. }
-            | Atom::QualifiedRef { source, .. }
-            | Atom::Symbol { source, .. }
-            | Atom::BackendAtom { source, .. }
-            | Atom::BackendSpawnThunk { source, .. } => *source,
-        };
-        match atom {
-            Atom::Var {
-                name: alias_name, ..
-            } => self
-                .known_direct_atom_guarded(&alias_name.name, seen)
-                .or_else(|| {
-                    (alias_name.name != name).then_some(Atom::Var {
-                        name: alias_name,
-                        source,
-                    })
-                }),
-            other => Some(other),
-        }
-    }
-
     fn bind_fun_param_locals(&mut self, fb: &MFunBinding) {
         let param_shapes = self.param_shapes_for_fun(fb);
         for (index, pat) in fb.params.iter().enumerate() {
@@ -1751,16 +1711,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         match pat {
             Pat::Var { id, name, .. } => {
                 self.current_scope_mut().insert(name.clone());
-                self.current_known_direct_atom_scope_mut().insert(
-                    name.clone(),
-                    Atom::Var {
-                        name: MVar {
-                            name: name.clone(),
-                            id: id.0,
-                        },
-                        source: *id,
-                    },
-                );
+                self.shadow_known_direct_atom_with_local(name.clone(), *id);
                 let shape = explicit_shape.unwrap_or_else(|| {
                     if self.pure_function_arity_at(*id).is_some() {
                         LocalValueShape::PureCallableFromUseType
@@ -1862,8 +1813,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                         .insert(var.name.clone(), shape);
                 }
                 if let Some(lambda) = known_direct_lambda {
-                    self.current_known_direct_lambda_scope_mut()
-                        .insert(var.name.clone(), lambda);
+                    self.bind_known_direct_lambda(var.name.clone(), lambda);
                 }
                 let supported = self.expr_is_direct_subset(body);
                 self.pop_scope();

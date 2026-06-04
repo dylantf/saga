@@ -179,8 +179,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             self.current_scope_mut().insert(var.name.clone());
             self.current_shape_scope_mut()
                 .insert(var.name.clone(), local_shape);
-            self.current_known_cps_lambda_scope_mut()
-                .insert(var.name.clone(), known_lambda);
+            self.bind_known_cps_lambda(var.name.clone(), known_lambda);
             let lowered_body = self.lower_cps_expr(body, evidence, return_k);
             self.pop_scope();
             return if let Some(lowered_value) = lowered_value {
@@ -244,16 +243,13 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                     .insert(var.name.clone(), shape);
             }
             if let Some(dict) = known_dict {
-                self.current_known_dict_value_scope_mut()
-                    .insert(var.name.clone(), dict);
+                self.bind_known_dict_value(var.name.clone(), dict);
             }
             if let Some(lambda) = known_direct_lambda {
-                self.current_known_direct_lambda_scope_mut()
-                    .insert(var.name.clone(), lambda);
+                self.bind_known_direct_lambda(var.name.clone(), lambda);
             }
             if let Some(atom) = known_atom {
-                self.current_known_direct_atom_scope_mut()
-                    .insert(var.name.clone(), atom);
+                self.bind_known_direct_atom(var.name.clone(), atom);
             }
             let lowered_body = self.lower_cps_expr(body, evidence, return_k);
             self.pop_scope();
@@ -1212,9 +1208,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         for (name, _) in &dict_bindings {
             self.current_scope_mut().insert(name.clone());
         }
-        for (name, dict) in known_dict_aliases {
-            self.current_known_dict_value_scope_mut().insert(name, dict);
-        }
+        self.bind_known_dict_values(known_dict_aliases);
         for pat in &params {
             self.bind_pat_locals(pat);
         }
@@ -1271,9 +1265,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         for (name, _) in &dict_bindings {
             self.current_scope_mut().insert(name.clone());
         }
-        for (name, dict) in known_dict_aliases {
-            self.current_known_dict_value_scope_mut().insert(name, dict);
-        }
+        self.bind_known_dict_values(known_dict_aliases);
         for pat in &known_lambda.params {
             self.bind_pat_locals(pat);
         }
@@ -1347,41 +1339,6 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                     .map(|dict| (param_name.clone(), dict))
             })
             .collect()
-    }
-
-    pub(super) fn known_direct_atom_pattern_bindings_for_params(
-        &self,
-        params: &[Pat],
-        args: &[Atom],
-    ) -> Vec<(String, Atom)> {
-        let mut bindings = Vec::new();
-        for (param, arg) in params.iter().zip(args) {
-            let Some(arg) = self.known_direct_atom_for_atom(arg) else {
-                continue;
-            };
-            let Some(param_bindings) = self.match_known_direct_atom_pattern(&arg, param) else {
-                continue;
-            };
-            bindings.extend(param_bindings);
-        }
-        bindings
-    }
-
-    pub(super) fn known_direct_atom_bindings_for_all_params(
-        &self,
-        params: &[Pat],
-        args: &[Atom],
-    ) -> Option<Vec<(String, Atom)>> {
-        if params.len() != args.len() {
-            return None;
-        }
-
-        let mut bindings = Vec::new();
-        for (param, arg) in params.iter().zip(args) {
-            let arg = self.known_direct_atom_for_atom(arg)?;
-            bindings.extend(self.match_known_direct_atom_pattern(&arg, param)?);
-        }
-        Some(bindings)
     }
 
     fn lower_normal_cps_call(
@@ -1471,9 +1428,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             .push(function_name.to_string());
         self.push_scope();
         self.bind_fun_param_locals_with_arg_shapes(&fb, args);
-        for (name, dict) in known_dict_aliases {
-            self.current_known_dict_value_scope_mut().insert(name, dict);
-        }
+        self.bind_known_dict_values(known_dict_aliases);
         self.bind_known_direct_atom_pattern_values(known_atom_bindings);
         let supported = self.expr_is_cps_island_subset(&fb.body);
         let lowered_body = supported.then(|| self.lower_cps_expr(&fb.body, evidence, return_k));
@@ -2669,12 +2624,10 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                         .insert(var.name.clone(), shape);
                 }
                 if let Some(lambda) = known_lambda {
-                    self.current_known_cps_lambda_scope_mut()
-                        .insert(var.name.clone(), lambda);
+                    self.bind_known_cps_lambda(var.name.clone(), lambda);
                 }
                 if let Some(dict) = known_dict {
-                    self.current_known_dict_value_scope_mut()
-                        .insert(var.name.clone(), dict);
+                    self.bind_known_dict_value(var.name.clone(), dict);
                 }
                 let supported = self.expr_can_run_with_elided_static_handler(body, handled_effects);
                 self.pop_scope();
@@ -2829,9 +2782,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         self.static_handler_inline_stack.push(local_name);
         self.push_scope();
         self.bind_fun_param_locals_with_arg_shapes(&fb, args);
-        for (name, dict) in known_dict_aliases {
-            self.current_known_dict_value_scope_mut().insert(name, dict);
-        }
+        self.bind_known_dict_values(known_dict_aliases);
         self.bind_known_direct_atom_pattern_values(known_atom_bindings);
         let supported = self.expr_can_run_with_elided_static_handler(&fb.body, handled_effects);
         self.pop_scope();

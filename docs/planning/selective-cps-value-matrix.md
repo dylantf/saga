@@ -283,12 +283,11 @@ extraction.
      uses.
    - Current limits: guarded arms, string-prefix patterns, and bitstring
      patterns still fall back to normal case lowering.
-   - Cleanup note: known direct atoms, known direct/CPS lambdas, and known
-     dictionary values are now threaded through both direct lowering and
-     CPS/static-handler lowering. The next cleanup pass should centralize this
-     into a shared `KnownFacts`/proof-scope helper with common operations like
-     `bind_param_facts`, `bind_pat_known_atom`, and `known_atom_for_expr`, so
-     new optimizations do not have to remember every lowering context manually.
+   - Cleanup landed: known direct atoms, known direct/CPS lambdas, and known
+     dictionary values now flow through the shared `known_facts` helper module.
+     Direct and CPS lowering still decide what Core to emit, but fact binding,
+     structural pattern proofs, and known-atom expression evaluation now have a
+     single home.
 
 6. **Std.Test runner strict frontier**
    - Current strict blocker:
