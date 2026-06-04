@@ -1663,3 +1663,14 @@ boundaries exist.
   - the imported generic `Lib.Size (Boxed Int)` fixture now passes its method
     value through a direct HOF under `--selective-no-fallback`, with no dict
     constructor calls or method tuple extraction in `Main.main`.
+- Added the first known-constructor/output-shape specialization canary:
+  - inspected the routed derive-options fixture and confirmed the selective
+    direct static `serialize` variant still builds a known
+    `Rep__User(Adt("User", Variant(Leaf(5))))` representation, then
+    immediately destructures it through nested cases before reaching the leaf
+    encoder;
+  - added CLI coverage that pins this residual constructor/case ladder under
+    `--selective-no-fallback` and verifies the same fixture still runs under
+    `--selective-codegen`;
+  - recorded the planned rewrite as a generic known-constructor-through-case
+    collapse, not a JSON-specific special case.

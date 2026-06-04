@@ -424,6 +424,63 @@ fn selective_core_specializes_imported_generic_trait_method_chain() {
 }
 
 #[test]
+fn selective_core_exposes_known_generic_constructor_ladder_canary() {
+    let binary = env!("CARGO_BIN_EXE_saga");
+    let manifest_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let fixture = manifest_dir
+        .join("examples/optimization/routed-derive-options/01-routed-derive-options.saga");
+
+    let inspect = std::process::Command::new(binary)
+        .args([
+            "inspect",
+            fixture.to_str().expect("fixture path should be utf-8"),
+            "--stage",
+            "selective-core",
+            "--selective-no-fallback",
+        ])
+        .output()
+        .expect("inspect routed derive options fixture");
+    assert!(
+        inspect.status.success(),
+        "saga inspect failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&inspect.stdout),
+        String::from_utf8_lossy(&inspect.stderr)
+    );
+
+    let core = String::from_utf8_lossy(&inspect.stdout);
+    assert!(
+        core.contains("'__saga_direct___saga_static_variant__serialize"),
+        "{core}"
+    );
+    assert!(core.contains("'_script_Rep__User'"), "{core}");
+    assert!(core.contains("'std_generic_Adt'"), "{core}");
+    assert!(core.contains("'std_generic_Variant'"), "{core}");
+    assert!(core.contains("'std_generic_Leaf'"), "{core}");
+    assert!(core.contains("call 'erlang':'+'"), "{core}");
+
+    let output = std::process::Command::new(binary)
+        .args([
+            "run",
+            "--selective-codegen",
+            fixture.to_str().expect("fixture path should be utf-8"),
+        ])
+        .output()
+        .expect("run routed derive options fixture");
+    assert!(
+        output.status.success(),
+        "saga run failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let output_text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output_text.contains("\"15\""), "{output_text}");
+}
+
+#[test]
 fn selective_core_no_fallback_cli_rejects_private_unplanned_function() {
     let binary = env!("CARGO_BIN_EXE_saga");
     let manifest_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));

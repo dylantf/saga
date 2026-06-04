@@ -265,6 +265,15 @@ extraction.
      `ToJson`/`FromJson`.
    - Do not add user-facing specialization attributes yet. If the compiler
      cannot prove the shape, use the normal Generic/dict fallback.
+   - First canary: `routed-derive-options/01-routed-derive-options.saga`
+     currently lowers the direct static `serialize` variant to a literal
+     `Rep__User(Adt("User", Variant(Leaf(5))))` constructor tree and then
+     immediately walks it with nested case expressions before reaching the leaf
+     encoder. The first rewrite should collapse that known constructor/case
+     ladder generically, before any JSON-specific output builder exists.
+   - Target shape for the canary: no runtime `Rep__User`/`std_generic_*`
+     allocation or traversal in the hot direct variant; the proven leaf value
+     should flow straight into the concrete encoder path.
 
 6. **Std.Test runner strict frontier**
    - Current strict blocker:
