@@ -171,6 +171,28 @@ pub(super) enum LocalValueShape {
     },
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum DirectHandlerKind {
+    BeamActor,
+    BeamRef,
+    EtsRef,
+    BeamVec,
+    BeamSignal,
+}
+
+impl DirectHandlerKind {
+    pub(super) fn from_handler_name(handler: &str) -> Option<Self> {
+        match handler.rsplit('.').next().unwrap_or(handler) {
+            "beam_actor" => Some(Self::BeamActor),
+            "beam_ref" => Some(Self::BeamRef),
+            "ets_ref" => Some(Self::EtsRef),
+            "beam_vec" => Some(Self::BeamVec),
+            "beam_signal" => Some(Self::BeamSignal),
+            _ => None,
+        }
+    }
+}
+
 pub(super) fn lower_param_names(params: &[Pat]) -> Vec<String> {
     params
         .iter()

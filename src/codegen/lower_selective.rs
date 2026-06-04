@@ -26,6 +26,7 @@ use crate::codegen::monadic::ir::{
     Atom, EffectInfo, EffectOpRef, HandlerValueInfo, HandlerValueMap, MArm, MDecl,
     MDictConstructor, MExpr, MFunBinding, MHandler, MHandlerArm, MProgram, MVar,
 };
+use crate::codegen::native_effects::{NativeArgTransform, native_op};
 use crate::codegen::resolve::{ConstructorAtoms, ResolutionMap, ResolvedCodegenKind};
 use crate::codegen::runtime_shape::RuntimeFunctionShape;
 use crate::intrinsics::IntrinsicId;
@@ -177,7 +178,7 @@ struct DirectLowerer<'a, 'info> {
     /// candidate set.
     direct_candidate_functions: HashSet<String>,
     static_handler_inline_stack: Vec<String>,
-    static_handler_stack: Vec<Vec<MHandlerArm>>,
+    direct_handler_stack: Vec<DirectHandlerFrame>,
     result_delimiter_stack: Vec<ResultDelimiterFrame>,
     cps_temp_counter: usize,
     locals: Vec<HashSet<String>>,
@@ -219,7 +220,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             direct_candidate_function: None,
             direct_candidate_functions: HashSet::new(),
             static_handler_inline_stack: Vec::new(),
-            static_handler_stack: Vec::new(),
+            direct_handler_stack: Vec::new(),
             result_delimiter_stack: Vec::new(),
             cps_temp_counter: 0,
             locals: vec![HashSet::new()],
@@ -371,11 +372,15 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
 
     fn lower_fun_binding(&mut self, fb: &MFunBinding) -> CFunDef {
         let params = lower_param_names(&fb.params);
+        let pushed_native_frame = self.push_native_variant_frame_for_name(&fb.name);
         self.push_scope();
         self.bind_fun_param_locals(fb);
         let lowered_body = self.lower_expr(&fb.body);
         let body = self.wrap_param_match(&fb.params, &params, lowered_body);
         self.pop_scope();
+        if pushed_native_frame {
+            self.direct_handler_stack.pop();
+        }
         CFunDef {
             name: self.direct_entry_name(&fb.name),
             arity: params.len(),
@@ -410,6 +415,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         let scrut_var = self.fresh_cps_temp("_FunScrut");
         let mut rest = self.case_clause_error();
 
+        let pushed_native_frame = self.push_native_variant_frame_for_name(name);
         for fb in group.iter().rev() {
             let rest_var = self.fresh_cps_temp("_FunRest");
             let rest_ref = || CExpr::Apply(Box::new(CExpr::Var(rest_var.clone())), vec![]);
@@ -456,6 +462,9 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                 Box::new(CExpr::Fun(vec![], Box::new(rest))),
                 Box::new(current),
             );
+        }
+        if pushed_native_frame {
+            self.direct_handler_stack.pop();
         }
 
         let body = CExpr::Let(scrut_var, Box::new(scrutinee), Box::new(rest));
@@ -578,12 +587,16 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         let params = lower_param_names(&fb.params);
 
         let prev_direct_candidate = self.direct_candidate_function.replace(fb.name.clone());
+        let pushed_native_frame = self.push_native_variant_frame_for_name(&fb.name);
         self.push_scope();
         self.bind_fun_param_locals(fb);
         let return_k = self.identity_cps_continuation();
         let lowered_body = self.lower_cps_expr(&fb.body, CExpr::Tuple(vec![]), return_k);
         let body = self.wrap_param_match(&fb.params, &params, lowered_body);
         self.pop_scope();
+        if pushed_native_frame {
+            self.direct_handler_stack.pop();
+        }
         self.direct_candidate_function = prev_direct_candidate;
 
         CFunDef {
@@ -621,6 +634,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         let mut rest = self.case_clause_error();
 
         let prev_direct_candidate = self.direct_candidate_function.replace(name.clone());
+        let pushed_native_frame = self.push_native_variant_frame_for_name(name);
         for fb in group.iter().rev() {
             let rest_var = self.fresh_cps_temp("_FunRest");
             let rest_ref = || CExpr::Apply(Box::new(CExpr::Var(rest_var.clone())), vec![]);
@@ -669,6 +683,9 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                 Box::new(current),
             );
         }
+        if pushed_native_frame {
+            self.direct_handler_stack.pop();
+        }
         self.direct_candidate_function = prev_direct_candidate;
 
         let body = CExpr::Let(scrut_var, Box::new(scrutinee), Box::new(rest));
@@ -690,6 +707,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         params.push("_Evidence".to_string());
         params.push("_ReturnK".to_string());
 
+        let pushed_native_frame = self.push_native_variant_frame_for_name(&fb.name);
         self.push_scope();
         self.bind_cps_entry_param_locals(fb);
         let lowered_body = self.lower_cps_expr(
@@ -699,6 +717,9 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         );
         let body = self.wrap_param_match(&fb.params, &direct_params, lowered_body);
         self.pop_scope();
+        if pushed_native_frame {
+            self.direct_handler_stack.pop();
+        }
 
         CFunDef {
             name: fb.name.clone(),
@@ -739,6 +760,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         let mut rest = self.case_clause_error();
 
         let prev_direct_candidate = self.direct_candidate_function.replace(name.clone());
+        let pushed_native_frame = self.push_native_variant_frame_for_name(name);
         for fb in group.iter().rev() {
             let rest_var = self.fresh_cps_temp("_FunRest");
             let rest_ref = || CExpr::Apply(Box::new(CExpr::Var(rest_var.clone())), vec![]);
@@ -789,6 +811,9 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                 Box::new(CExpr::Fun(vec![], Box::new(rest))),
                 Box::new(current),
             );
+        }
+        if pushed_native_frame {
+            self.direct_handler_stack.pop();
         }
         self.direct_candidate_function = prev_direct_candidate;
 
@@ -1683,6 +1708,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
     fn expr_is_direct_subset(&mut self, expr: &MExpr) -> bool {
         match expr {
             MExpr::Pure(atom) => self.atom_is_direct_subset(atom),
+            MExpr::Yield { op, args, .. } => self.native_direct_yield_is_direct_subset(op, args),
             MExpr::Let { var, value, body }
             | MExpr::Bind {
                 var, value, body, ..
@@ -1796,11 +1822,10 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             }
             MExpr::With { handler, body, .. } => {
                 (self.static_handler_is_direct_return_only(handler)
-                    || self.native_handler_is_direct_noop(handler))
+                    || self.direct_handler_kind(handler).is_some())
                     && self.expr_is_direct_subset(body)
             }
             MExpr::BitString { .. }
-            | MExpr::Yield { .. }
             | MExpr::Resume { .. }
             | MExpr::Ensure { .. }
             | MExpr::LetFun { .. }
@@ -1843,8 +1868,69 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         supported
     }
 
-    fn native_handler_is_direct_noop(&self, handler: &MHandler) -> bool {
-        matches!(handler, MHandler::Native { .. })
+    fn direct_handler_kind(&self, handler: &MHandler) -> Option<DirectHandlerKind> {
+        let MHandler::Native { handler, .. } = handler else {
+            return None;
+        };
+        DirectHandlerKind::from_handler_name(handler)
+    }
+
+    fn push_native_variant_frame_for_name(&mut self, name: &str) -> bool {
+        let Some(frame) = Self::native_variant_frame_for_name(name) else {
+            return false;
+        };
+        self.direct_handler_stack.push(frame);
+        true
+    }
+
+    fn native_variant_frame_for_name(name: &str) -> Option<DirectHandlerFrame> {
+        let (_, suffix) = name.split_once("__native__")?;
+        let (handler, effects) = suffix.split_once("__")?;
+        let kind = DirectHandlerKind::from_handler_name(handler)?;
+        let effects = effects
+            .split("__")
+            .filter(|effect| !effect.is_empty())
+            .map(|effect| effect.replace('_', "."))
+            .collect::<Vec<_>>();
+        if effects.is_empty() {
+            return None;
+        }
+        Some(DirectHandlerFrame::Native { effects, kind })
+    }
+
+    fn native_direct_yield_is_direct_subset(&mut self, op: &EffectOpRef, args: &[Atom]) -> bool {
+        let Some(kind) = self.native_direct_handler_kind_for_yield(op) else {
+            return false;
+        };
+        match kind {
+            DirectHandlerKind::BeamActor | DirectHandlerKind::BeamSignal => {
+                let Some(spec) = native_op(&op.effect, &op.op) else {
+                    return false;
+                };
+                !spec.erl_module.is_empty()
+                    && args.len() == spec.param_count
+                    && args.iter().all(|arg| self.atom_is_direct_subset(arg))
+            }
+            DirectHandlerKind::BeamRef | DirectHandlerKind::EtsRef => {
+                op.effect == "Std.Ref.Ref"
+                    && match op.op.as_str() {
+                        "get" => args.len() == 1 && self.atom_is_direct_subset(&args[0]),
+                        "set" => {
+                            args.len() == 2
+                                && self.atom_is_direct_subset(&args[0])
+                                && self.atom_is_direct_subset(&args[1])
+                        }
+                        "new" => args.len() == 1 && self.atom_is_direct_subset(&args[0]),
+                        "modify" => {
+                            args.len() == 2
+                                && self.atom_is_direct_subset(&args[0])
+                                && self.effect_protocol_arg_atom_is_cps_island_subset(&args[1])
+                        }
+                        _ => false,
+                    }
+            }
+            DirectHandlerKind::BeamVec => false,
+        }
     }
 
     fn expr_is_cps_island_subset(&mut self, expr: &MExpr) -> bool {
@@ -2002,6 +2088,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                         .as_ref()
                         .is_none_or(|lambda| self.atom_is_cps_value_subset(lambda));
             }
+            MHandler::Native { .. } => return self.direct_handler_kind(handler).is_some(),
             _ => return false,
         };
         if !return_clause.is_none_or(|arm| self.return_clause_is_cps_island_subset(arm)) {
@@ -3642,11 +3729,41 @@ struct ResultDelimiterFrame {
     abort_marker: String,
 }
 
+#[derive(Clone, Debug)]
+enum DirectHandlerFrame {
+    Static {
+        arms: Vec<MHandlerArm>,
+    },
+    Native {
+        effects: Vec<String>,
+        kind: DirectHandlerKind,
+    },
+}
+
+#[derive(Clone, Copy, Debug)]
+enum RefDirectBackend {
+    ProcessDictionary,
+    Ets,
+}
+
 impl ResultDelimiterFrame {
     fn handles_effect(&self, effect: &str) -> bool {
         self.effects
             .iter()
             .any(|handled| effect_names_match(handled, effect))
+    }
+}
+
+impl DirectHandlerFrame {
+    fn handles_effect(&self, effect: &str) -> bool {
+        match self {
+            DirectHandlerFrame::Static { arms } => arms
+                .iter()
+                .any(|arm| effect_names_match(&arm.op.effect, effect)),
+            DirectHandlerFrame::Native { effects, .. } => effects
+                .iter()
+                .any(|handled| effect_names_match(handled, effect)),
+        }
     }
 }
 

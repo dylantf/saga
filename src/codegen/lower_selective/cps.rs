@@ -282,6 +282,12 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         return_k: CExpr,
     ) -> CExpr {
         if let Some(lowered) =
+            self.lower_native_direct_call_yield(op, args, evidence.clone(), return_k.clone())
+        {
+            return lowered;
+        }
+
+        if let Some(lowered) =
             self.lower_static_direct_call_yield(op, args, evidence.clone(), return_k.clone())
         {
             return lowered;
@@ -305,6 +311,348 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         apply_args.push(evidence);
         apply_args.push(self.delimited_perform_k(&op.effect, return_k));
         CExpr::Apply(Box::new(op_closure), apply_args)
+    }
+
+    fn lower_native_direct_call_yield(
+        &mut self,
+        op: &EffectOpRef,
+        args: &[Atom],
+        evidence: CExpr,
+        return_k: CExpr,
+    ) -> Option<CExpr> {
+        let result = self.lower_native_direct_call_yield_result(op, args, evidence)?;
+        Some(CExpr::Apply(Box::new(return_k), vec![result]))
+    }
+
+    pub(super) fn lower_native_direct_call_yield_result(
+        &mut self,
+        op: &EffectOpRef,
+        args: &[Atom],
+        evidence: CExpr,
+    ) -> Option<CExpr> {
+        let kind = self.native_direct_handler_kind_for_yield(op)?;
+        match kind {
+            DirectHandlerKind::BeamActor | DirectHandlerKind::BeamSignal => {
+                self.lower_native_table_direct_call_result(op, args)
+            }
+            DirectHandlerKind::BeamRef => {
+                self.lower_beam_ref_direct_call_result(op, args, evidence)
+            }
+            DirectHandlerKind::EtsRef => self.lower_ets_ref_direct_call_result(op, args, evidence),
+            DirectHandlerKind::BeamVec => None,
+        }
+    }
+
+    pub(super) fn native_direct_handler_kind_for_yield(
+        &self,
+        op: &EffectOpRef,
+    ) -> Option<DirectHandlerKind> {
+        for frame in self.direct_handler_stack.iter().rev() {
+            if !frame.handles_effect(&op.effect) {
+                continue;
+            }
+            return match frame {
+                DirectHandlerFrame::Native { kind, .. } => Some(*kind),
+                DirectHandlerFrame::Static { .. } => None,
+            };
+        }
+        None
+    }
+
+    fn lower_native_table_direct_call_result(
+        &mut self,
+        op: &EffectOpRef,
+        args: &[Atom],
+    ) -> Option<CExpr> {
+        let spec = native_op(&op.effect, &op.op)?;
+        if spec.erl_module.is_empty() || args.len() != spec.param_count {
+            return None;
+        }
+        let args = self.lower_native_table_args(spec.arg_transform, args)?;
+        Some(CExpr::Call(
+            spec.erl_module.to_string(),
+            spec.erl_func.to_string(),
+            args,
+        ))
+    }
+
+    fn lower_native_table_args(
+        &mut self,
+        transform: NativeArgTransform,
+        args: &[Atom],
+    ) -> Option<Vec<CExpr>> {
+        match transform {
+            NativeArgTransform::Identity => {
+                Some(args.iter().map(|arg| self.lower_atom(arg)).collect())
+            }
+            NativeArgTransform::NoArgs => Some(Vec::new()),
+            NativeArgTransform::PrependAtom(atom) => {
+                let mut lowered = Vec::with_capacity(args.len() + 1);
+                lowered.push(CExpr::Lit(CLit::Atom(atom.to_string())));
+                lowered.extend(args.iter().map(|arg| self.lower_atom(arg)));
+                Some(lowered)
+            }
+            NativeArgTransform::Reorder(indices) => {
+                let mut lowered = Vec::with_capacity(indices.len());
+                for &idx in indices {
+                    lowered.push(self.lower_atom(args.get(idx)?));
+                }
+                Some(lowered)
+            }
+            NativeArgTransform::WrapThunk(idx) => {
+                let mut lowered = Vec::with_capacity(args.len());
+                for (arg_idx, arg) in args.iter().enumerate() {
+                    if arg_idx == idx {
+                        lowered.push(self.lower_backend_spawn_thunk(arg, NodeId(0)));
+                    } else {
+                        lowered.push(self.lower_atom(arg));
+                    }
+                }
+                Some(lowered)
+            }
+        }
+    }
+
+    fn lower_beam_ref_direct_call_result(
+        &mut self,
+        op: &EffectOpRef,
+        args: &[Atom],
+        evidence: CExpr,
+    ) -> Option<CExpr> {
+        if op.effect != "Std.Ref.Ref" {
+            return None;
+        }
+        match op.op.as_str() {
+            "get" if args.len() == 1 => Some(CExpr::Call(
+                "erlang".to_string(),
+                "get".to_string(),
+                vec![self.lower_atom(&args[0])],
+            )),
+            "set" if args.len() == 2 => {
+                let discard = self.fresh_cps_temp("_NativeRefPut");
+                Some(CExpr::Let(
+                    discard,
+                    Box::new(CExpr::Call(
+                        "erlang".to_string(),
+                        "put".to_string(),
+                        vec![self.lower_atom(&args[0]), self.lower_atom(&args[1])],
+                    )),
+                    Box::new(CExpr::Lit(CLit::Atom("unit".to_string()))),
+                ))
+            }
+            "new" if args.len() == 1 => {
+                let key = self.fresh_cps_temp("_NativeRefKey");
+                let discard = self.fresh_cps_temp("_NativeRefPut");
+                Some(CExpr::Let(
+                    key.clone(),
+                    Box::new(CExpr::Call(
+                        "erlang".to_string(),
+                        "make_ref".to_string(),
+                        Vec::new(),
+                    )),
+                    Box::new(CExpr::Let(
+                        discard,
+                        Box::new(CExpr::Call(
+                            "erlang".to_string(),
+                            "put".to_string(),
+                            vec![CExpr::Var(key.clone()), self.lower_atom(&args[0])],
+                        )),
+                        Box::new(CExpr::Var(key)),
+                    )),
+                ))
+            }
+            "modify" if args.len() == 2 => {
+                let key = self.lower_atom(&args[0]);
+                let callback = self.lower_effect_protocol_arg_atom(&args[1]);
+                self.lower_ref_modify_direct_call_result(
+                    key,
+                    callback,
+                    evidence,
+                    RefDirectBackend::ProcessDictionary,
+                )
+            }
+            _ => None,
+        }
+    }
+
+    fn lower_ets_ref_direct_call_result(
+        &mut self,
+        op: &EffectOpRef,
+        args: &[Atom],
+        evidence: CExpr,
+    ) -> Option<CExpr> {
+        if op.effect != "Std.Ref.Ref" {
+            return None;
+        }
+        let table = CExpr::Lit(CLit::Atom("saga_ref_store".to_string()));
+        match op.op.as_str() {
+            "get" if args.len() == 1 => {
+                let lookup = self.fresh_cps_temp("_NativeRefLookup");
+                let value = self.fresh_cps_temp("_NativeRefValue");
+                Some(CExpr::Let(
+                    lookup.clone(),
+                    Box::new(CExpr::Call(
+                        "ets".to_string(),
+                        "lookup".to_string(),
+                        vec![table, self.lower_atom(&args[0])],
+                    )),
+                    Box::new(CExpr::Case(
+                        Box::new(CExpr::Var(lookup)),
+                        vec![CArm {
+                            pat: CPat::Cons(
+                                Box::new(CPat::Tuple(vec![
+                                    CPat::Wildcard,
+                                    CPat::Var(value.clone()),
+                                ])),
+                                Box::new(CPat::Nil),
+                            ),
+                            guard: None,
+                            body: CExpr::Var(value),
+                        }],
+                    )),
+                ))
+            }
+            "set" if args.len() == 2 => {
+                let discard = self.fresh_cps_temp("_NativeRefInsert");
+                Some(CExpr::Let(
+                    discard,
+                    Box::new(CExpr::Call(
+                        "ets".to_string(),
+                        "insert".to_string(),
+                        vec![
+                            table,
+                            CExpr::Tuple(vec![
+                                self.lower_atom(&args[0]),
+                                self.lower_atom(&args[1]),
+                            ]),
+                        ],
+                    )),
+                    Box::new(CExpr::Lit(CLit::Atom("unit".to_string()))),
+                ))
+            }
+            "new" if args.len() == 1 => {
+                let key = self.fresh_cps_temp("_NativeRefKey");
+                let discard = self.fresh_cps_temp("_NativeRefInsert");
+                Some(CExpr::Let(
+                    key.clone(),
+                    Box::new(CExpr::Call(
+                        "erlang".to_string(),
+                        "make_ref".to_string(),
+                        Vec::new(),
+                    )),
+                    Box::new(CExpr::Let(
+                        discard,
+                        Box::new(CExpr::Call(
+                            "ets".to_string(),
+                            "insert".to_string(),
+                            vec![
+                                table,
+                                CExpr::Tuple(vec![
+                                    CExpr::Var(key.clone()),
+                                    self.lower_atom(&args[0]),
+                                ]),
+                            ],
+                        )),
+                        Box::new(CExpr::Var(key)),
+                    )),
+                ))
+            }
+            "modify" if args.len() == 2 => {
+                let key = self.lower_atom(&args[0]);
+                let callback = self.lower_effect_protocol_arg_atom(&args[1]);
+                self.lower_ref_modify_direct_call_result(
+                    key,
+                    callback,
+                    evidence,
+                    RefDirectBackend::Ets,
+                )
+            }
+            _ => None,
+        }
+    }
+
+    fn lower_ref_modify_direct_call_result(
+        &mut self,
+        key: CExpr,
+        callback: CExpr,
+        evidence: CExpr,
+        backend: RefDirectBackend,
+    ) -> Option<CExpr> {
+        let old = self.fresh_cps_temp("_NativeRefOld");
+        let new_value = self.fresh_cps_temp("_NativeRefNew");
+        let discard = self.fresh_cps_temp("_NativeRefPut");
+        let k_var = self.fresh_cps_temp("_NativeRefK");
+        let v_var = self.fresh_cps_temp("_NativeRefV");
+        let identity_k = CExpr::Fun(vec![v_var.clone()], Box::new(CExpr::Var(v_var)));
+        let get_old = match backend {
+            RefDirectBackend::ProcessDictionary => {
+                CExpr::Call("erlang".to_string(), "get".to_string(), vec![key.clone()])
+            }
+            RefDirectBackend::Ets => {
+                let lookup = self.fresh_cps_temp("_NativeRefLookup");
+                let value = self.fresh_cps_temp("_NativeRefLookupValue");
+                CExpr::Let(
+                    lookup.clone(),
+                    Box::new(CExpr::Call(
+                        "ets".to_string(),
+                        "lookup".to_string(),
+                        vec![
+                            CExpr::Lit(CLit::Atom("saga_ref_store".to_string())),
+                            key.clone(),
+                        ],
+                    )),
+                    Box::new(CExpr::Case(
+                        Box::new(CExpr::Var(lookup)),
+                        vec![CArm {
+                            pat: CPat::Cons(
+                                Box::new(CPat::Tuple(vec![
+                                    CPat::Wildcard,
+                                    CPat::Var(value.clone()),
+                                ])),
+                                Box::new(CPat::Nil),
+                            ),
+                            guard: None,
+                            body: CExpr::Var(value),
+                        }],
+                    )),
+                )
+            }
+        };
+        let put_new = match backend {
+            RefDirectBackend::ProcessDictionary => CExpr::Call(
+                "erlang".to_string(),
+                "put".to_string(),
+                vec![key, CExpr::Var(new_value.clone())],
+            ),
+            RefDirectBackend::Ets => CExpr::Call(
+                "ets".to_string(),
+                "insert".to_string(),
+                vec![
+                    CExpr::Lit(CLit::Atom("saga_ref_store".to_string())),
+                    CExpr::Tuple(vec![key, CExpr::Var(new_value.clone())]),
+                ],
+            ),
+        };
+        Some(CExpr::Let(
+            old.clone(),
+            Box::new(get_old),
+            Box::new(CExpr::Let(
+                k_var.clone(),
+                Box::new(identity_k),
+                Box::new(CExpr::Let(
+                    new_value.clone(),
+                    Box::new(CExpr::Apply(
+                        Box::new(callback),
+                        vec![CExpr::Var(old), evidence, CExpr::Var(k_var)],
+                    )),
+                    Box::new(CExpr::Let(
+                        discard,
+                        Box::new(put_new),
+                        Box::new(CExpr::Var(new_value)),
+                    )),
+                )),
+            )),
+        ))
     }
 
     fn delimited_perform_k(&mut self, effect: &str, return_k: CExpr) -> CExpr {
@@ -394,13 +742,13 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         args: &[Atom],
     ) -> Option<MHandlerArm> {
         let mut candidate = None;
-        for frame in self.static_handler_stack.iter().rev() {
-            let handles_effect = frame
-                .iter()
-                .any(|arm| Self::effect_names_match(&arm.op.effect, &op.effect));
-            if !handles_effect {
+        for frame in self.direct_handler_stack.iter().rev() {
+            if !frame.handles_effect(&op.effect) {
                 continue;
             }
+            let DirectHandlerFrame::Static { arms: frame } = frame else {
+                return None;
+            };
 
             let mut matching = frame.iter().filter(|arm| {
                 Self::effect_names_match(&arm.op.effect, &op.effect) && arm.op.op == op.op
@@ -1067,7 +1415,11 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         head: &Atom,
         args: &[Atom],
     ) -> Option<String> {
-        if self.static_handler_stack.is_empty() {
+        if !self
+            .direct_handler_stack
+            .iter()
+            .any(|frame| matches!(frame, DirectHandlerFrame::Static { .. }))
+        {
             return None;
         }
 
@@ -1149,7 +1501,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         imported.compute_local_function_entries(&program);
         imported.locals = self.locals.clone();
         imported.local_shapes = self.local_shapes.clone();
-        imported.static_handler_stack = self.static_handler_stack.clone();
+        imported.direct_handler_stack = self.direct_handler_stack.clone();
         imported.result_delimiter_stack = self.result_delimiter_stack.clone();
         imported.static_handler_inline_stack = self.static_handler_inline_stack.clone();
         imported.static_handler_inline_stack.push(key);
@@ -1178,7 +1530,11 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         head: &Atom,
         args: &[Atom],
     ) -> Option<ImportedStaticHandlerCall> {
-        if self.static_handler_stack.is_empty() {
+        if !self
+            .direct_handler_stack
+            .iter()
+            .any(|frame| matches!(frame, DirectHandlerFrame::Static { .. }))
+        {
             return None;
         }
         let CallShape::Cps {
@@ -1253,14 +1609,16 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
     }
 
     fn active_static_handler_handles_effect(&self, effect: &str) -> bool {
-        self.static_handler_stack.iter().rev().any(|frame| {
-            frame
-                .iter()
+        self.direct_handler_stack.iter().rev().any(|frame| {
+            let DirectHandlerFrame::Static { arms } = frame else {
+                return false;
+            };
+            arms.iter()
                 .any(|arm| Self::effect_names_match(&arm.op.effect, effect))
         })
     }
 
-    fn hof_direct_specialization_for_cps_call(
+    pub(super) fn hof_direct_specialization_for_cps_call(
         &mut self,
         head: &Atom,
         args: &[Atom],
@@ -1356,7 +1714,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         }
     }
 
-    fn lower_hof_direct_specialized_call(
+    pub(super) fn lower_hof_direct_specialized_call(
         &mut self,
         module: Option<String>,
         specialization: &HofDirectSpecialization,
@@ -1689,6 +2047,20 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                     evidence,
                     return_k,
                 ),
+                MHandler::Native {
+                    effects, handler, ..
+                } => {
+                    let Some(kind) = DirectHandlerKind::from_handler_name(handler) else {
+                        self.unsupported("selective CPS with unsupported native handler");
+                    };
+                    self.direct_handler_stack.push(DirectHandlerFrame::Native {
+                        effects: effects.clone(),
+                        kind,
+                    });
+                    let lowered = self.lower_cps_expr(body, evidence, return_k);
+                    self.direct_handler_stack.pop();
+                    lowered
+                }
                 _ => self.unsupported(
                     "selective CPS with currently supports static or dynamic handlers only",
                 ),
@@ -1759,7 +2131,8 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         let prompt_k_binding =
             self.build_result_delimiter_k(&abort_marker, inner_k, CExpr::Var(raw_result_k.clone()));
 
-        self.static_handler_stack.push(arms.clone());
+        self.direct_handler_stack
+            .push(DirectHandlerFrame::Static { arms: arms.clone() });
         self.result_delimiter_stack.push(ResultDelimiterFrame {
             effects: canonical_effects.clone(),
             abort_marker: abort_marker.clone(),
@@ -1767,7 +2140,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         let lowered_body =
             self.lower_cps_expr(body, current_evidence, CExpr::Var(prompt_k.clone()));
         self.result_delimiter_stack.pop();
-        self.static_handler_stack.pop();
+        self.direct_handler_stack.pop();
         let with_evidence = bindings
             .into_iter()
             .rev()
@@ -2100,10 +2473,12 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         evidence: CExpr,
         return_k: CExpr,
     ) -> CExpr {
-        self.static_handler_stack.push(arms.to_vec());
+        self.direct_handler_stack.push(DirectHandlerFrame::Static {
+            arms: arms.to_vec(),
+        });
         let body_return_k = self.identity_cps_continuation();
         let lowered_body = self.lower_cps_expr(body, evidence, body_return_k);
-        self.static_handler_stack.pop();
+        self.direct_handler_stack.pop();
 
         let with_result = self.fresh_cps_temp("_WithResult");
         CExpr::Let(
@@ -2144,9 +2519,11 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         }
 
         let handled_effects = self.static_handler_effects(arms);
-        self.static_handler_stack.push(arms.to_vec());
+        self.direct_handler_stack.push(DirectHandlerFrame::Static {
+            arms: arms.to_vec(),
+        });
         let can_elide = self.expr_can_run_with_elided_static_handler(body, &handled_effects);
-        self.static_handler_stack.pop();
+        self.direct_handler_stack.pop();
         can_elide
     }
 
@@ -2430,7 +2807,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         imported.compute_local_function_entries(&program);
         imported.locals = self.locals.clone();
         imported.local_shapes = self.local_shapes.clone();
-        imported.static_handler_stack = self.static_handler_stack.clone();
+        imported.direct_handler_stack = self.direct_handler_stack.clone();
         imported.result_delimiter_stack = self.result_delimiter_stack.clone();
         imported.static_handler_inline_stack = self.static_handler_inline_stack.clone();
         imported.static_handler_inline_stack.push(key);

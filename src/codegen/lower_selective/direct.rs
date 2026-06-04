@@ -4,6 +4,9 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
     pub(super) fn lower_expr(&mut self, expr: &MExpr) -> CExpr {
         match expr {
             MExpr::Pure(atom) => self.lower_atom(atom),
+            MExpr::Yield { op, args, .. } => self
+                .lower_native_direct_call_yield_result(op, args, CExpr::Tuple(vec![]))
+                .unwrap_or_else(|| self.unsupported_expr(expr)),
             MExpr::Let { var, value, body }
             | MExpr::Bind {
                 var, value, body, ..
@@ -82,8 +85,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                     vec![CExpr::Lit(CLit::Int(*method_index as i64 + 1)), dict],
                 )
             }
-            MExpr::Yield { .. }
-            | MExpr::Resume { .. }
+            MExpr::Resume { .. }
             | MExpr::Ensure { .. }
             | MExpr::LetFun { .. }
             | MExpr::HandlerValue { .. } => self.unsupported_expr(expr),
@@ -91,7 +93,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
     }
 
     fn lower_direct_with(&mut self, handler: &MHandler, body: &MExpr) -> CExpr {
-        if matches!(handler, MHandler::Native { .. }) {
+        if self.direct_handler_kind(handler).is_some() {
             return self.lower_expr(body);
         }
 
@@ -360,6 +362,11 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         if let Some(call) = self.lower_direct_external_app(head, args) {
             return call;
         }
+        if let Some((module, specialization)) =
+            self.hof_direct_specialization_for_cps_call(head, args)
+        {
+            return self.lower_hof_direct_specialized_call(module, &specialization, args);
+        }
 
         match self.call_shape(head) {
             Some(CallShape::Intrinsic(intrinsic)) => self.lower_intrinsic_app(intrinsic, args),
@@ -543,10 +550,17 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             .enumerate()
             .map(
                 |(index, arg)| match expected_arg_shapes.get(index).copied().flatten() {
-                    Some((source_arity, adapter_arity)) => {
+                    Some((source_arity, adapter_arity))
+                        if !matches!(
+                            arg,
+                            Atom::Lambda { params, body, .. }
+                                if self.lambda_is_direct_subset(params, body)
+                        ) =>
+                    {
                         self.lower_cps_runtime_value_atom(arg, source_arity, adapter_arity)
                     }
                     None => self.lower_atom(arg),
+                    Some(_) => self.lower_atom(arg),
                 },
             )
             .collect()
@@ -768,10 +782,11 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             Atom::AnonRecord { fields, .. } => self.lower_anon_record_atom(fields),
             Atom::Record { name, fields, .. } => self.lower_record_atom(name, fields),
             Atom::Lambda { params, body, .. } => {
-                if self.cps_value_atom_shape(atom).is_some() {
-                    return self.lower_cps_value_atom(atom);
-                }
-                if self.lambda_is_direct_cps_island_subset(params, body) {
+                if self.lambda_is_direct_subset(params, body) {
+                    self.lower_lambda_atom(params, body)
+                } else if self.cps_value_atom_shape(atom).is_some() {
+                    self.lower_cps_value_atom(atom)
+                } else if self.lambda_is_direct_cps_island_subset(params, body) {
                     self.lower_direct_cps_island_lambda_atom(params, body)
                 } else {
                     self.lower_lambda_atom(params, body)
@@ -796,7 +811,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         }
     }
 
-    fn lower_backend_spawn_thunk(&mut self, callback: &Atom, source: NodeId) -> CExpr {
+    pub(super) fn lower_backend_spawn_thunk(&mut self, callback: &Atom, source: NodeId) -> CExpr {
         let callback_expr = self.lower_effect_protocol_arg_atom(callback);
         let k_var = format!("_SpawnK{}", source.0);
         let v_var = format!("_SpawnV{}", source.0);
