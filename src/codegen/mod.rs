@@ -642,7 +642,17 @@ fn merge_selective_core_modules(
 ) -> cerl::CModule {
     let fallback_exports: HashSet<(String, usize)> = fallback.exports.iter().cloned().collect();
 
-    let mut funs = fallback.funs;
+    let mut funs: Vec<cerl::CFunDef> = fallback
+        .funs
+        .into_iter()
+        .map(|fun| {
+            fallback_duplicate_dict_source(&selective.name, &fun.name, direct_adapters)
+                .and_then(|(source_name, adapter)| {
+                    build_duplicate_dict_alias(&fun.name, fun.arity, &source_name, adapter)
+                })
+                .unwrap_or(fun)
+        })
+        .collect();
     let mut fun_indexes: HashMap<(String, usize), usize> = funs
         .iter()
         .enumerate()
@@ -688,6 +698,92 @@ fn merge_selective_core_modules(
         exports,
         funs,
     }
+}
+
+fn fallback_duplicate_dict_source<'a>(
+    module_name: &str,
+    fallback_name: &str,
+    direct_adapters: &'a HashMap<String, DirectFallbackAdapter>,
+) -> Option<(String, &'a DirectFallbackAdapter)> {
+    if !fallback_name.starts_with("__dict_") {
+        return None;
+    }
+
+    let erlang_module = erlang_module_name_for_core(module_name);
+    let marker = format!("_{erlang_module}");
+    let marker_index = fallback_name.find(&marker)?;
+    let mut source_name = fallback_name.to_string();
+    source_name.replace_range(marker_index..marker_index + marker.len(), "");
+
+    let adapter = direct_adapters.get(&source_name)?;
+    matches!(adapter, DirectFallbackAdapter::Dict { .. }).then_some((source_name, adapter))
+}
+
+fn build_duplicate_dict_alias(
+    fallback_name: &str,
+    arity: usize,
+    source_name: &str,
+    adapter: &DirectFallbackAdapter,
+) -> Option<cerl::CFunDef> {
+    let direct_arity = adapter.direct_arity();
+    if arity == direct_arity {
+        let params: Vec<String> = (0..direct_arity)
+            .map(|index| format!("_DictAliasArg{index}"))
+            .collect();
+        let args = params.iter().cloned().map(cerl::CExpr::Var).collect();
+        return Some(cerl::CFunDef {
+            name: fallback_name.to_string(),
+            arity,
+            body: cerl::CExpr::Fun(
+                params,
+                Box::new(cerl::CExpr::Apply(
+                    Box::new(cerl::CExpr::FunRef(source_name.to_string(), direct_arity)),
+                    args,
+                )),
+            ),
+        });
+    }
+
+    if arity == adapter.uniform_arity() {
+        let direct_params: Vec<String> = (0..direct_arity)
+            .map(|index| format!("_DictAliasArg{index}"))
+            .collect();
+        let evidence = "_DictAliasEvidence".to_string();
+        let return_k = "_DictAliasK".to_string();
+        let mut params = direct_params.clone();
+        params.push(evidence);
+        params.push(return_k.clone());
+        let direct_args = direct_params
+            .iter()
+            .cloned()
+            .map(cerl::CExpr::Var)
+            .collect();
+        let direct_call = cerl::CExpr::Apply(
+            Box::new(cerl::CExpr::FunRef(source_name.to_string(), direct_arity)),
+            direct_args,
+        );
+        return Some(cerl::CFunDef {
+            name: fallback_name.to_string(),
+            arity,
+            body: cerl::CExpr::Fun(
+                params,
+                Box::new(cerl::CExpr::Apply(
+                    Box::new(cerl::CExpr::Var(return_k)),
+                    vec![direct_call],
+                )),
+            ),
+        });
+    }
+
+    None
+}
+
+fn erlang_module_name_for_core(module_name: &str) -> String {
+    module_name
+        .split('.')
+        .map(str::to_lowercase)
+        .collect::<Vec<_>>()
+        .join("_")
 }
 
 #[derive(Clone)]

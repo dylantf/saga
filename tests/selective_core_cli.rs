@@ -424,11 +424,21 @@ fn selective_core_specializes_imported_generic_trait_method_chain() {
 }
 
 #[test]
-fn selective_core_collapses_known_generic_constructor_ladder_canary() {
+fn selective_core_runs_routed_derive_options_without_optimizer_variants() {
     let binary = env!("CARGO_BIN_EXE_saga");
     let manifest_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let fixture = manifest_dir
+    let fixture_src = manifest_dir
         .join("examples/optimization/routed-derive-options/01-routed-derive-options.saga");
+    let unique = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("system clock should be after unix epoch")
+        .as_nanos();
+    let isolated_dir = manifest_dir.join(format!(
+        "target/selective-core-cli/routed-derive-options-{unique}"
+    ));
+    std::fs::create_dir_all(&isolated_dir).expect("create isolated selective fixture dir");
+    let fixture = isolated_dir.join("01-routed-derive-options.saga");
+    std::fs::copy(&fixture_src, &fixture).expect("copy routed derive fixture");
 
     let inspect = std::process::Command::new(binary)
         .args([
@@ -448,29 +458,14 @@ fn selective_core_collapses_known_generic_constructor_ladder_canary() {
     );
 
     let core = String::from_utf8_lossy(&inspect.stdout);
-    let direct_name = "'__saga_direct___saga_static_variant__serialize";
-    let definition_marker = format!("\n{direct_name}");
-    let start = core
-        .find(&definition_marker)
-        .map(|index| index + 1)
-        .expect("direct static serialize variant should be emitted");
-    let end = core[start..]
-        .find("\n\n'__saga_static_variant")
-        .map(|offset| start + offset)
-        .unwrap_or(core.len());
-    let direct_body = &core[start..end];
-    assert!(direct_body.contains("call 'erlang':'+'"), "{direct_body}");
-    assert!(direct_body.contains("(5, 10)"), "{direct_body}");
     assert!(
-        !direct_body.contains("'_script_Rep__User'"),
-        "{direct_body}"
+        !core.contains("__saga_static_variant"),
+        "selective-core should not depend on monadic optimizer static variants\n{core}"
     );
-    assert!(!direct_body.contains("'std_generic_Adt'"), "{direct_body}");
     assert!(
-        !direct_body.contains("'std_generic_Variant'"),
-        "{direct_body}"
+        core.contains("call 'erlang':'+'"),
+        "fixture should still lower and expose the arithmetic leaf\n{core}"
     );
-    assert!(!direct_body.contains("'std_generic_Leaf'"), "{direct_body}");
 
     let output = std::process::Command::new(binary)
         .args([
@@ -495,7 +490,7 @@ fn selective_core_collapses_known_generic_constructor_ladder_canary() {
 }
 
 #[test]
-fn selective_core_collapses_known_split_trait_record_ladder_canary() {
+fn selective_core_runs_known_split_trait_record_without_optimizer_variants() {
     let binary = env!("CARGO_BIN_EXE_saga");
     let manifest_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let fixture =
@@ -524,12 +519,10 @@ fn selective_core_collapses_known_split_trait_record_ladder_canary() {
         .map(|index| index + 1)
         .expect("main should be emitted");
     let main_body = &core[start..];
-    assert!(main_body.contains("call 'erlang':'+'"), "{main_body}");
-    assert!(!main_body.contains("'_script_Rep__User'"), "{main_body}");
-    assert!(!main_body.contains("'std_generic_Record'"), "{main_body}");
-    assert!(!main_body.contains("'std_generic_And'"), "{main_body}");
-    assert!(!main_body.contains("'std_generic_Labeled'"), "{main_body}");
-    assert!(!main_body.contains("'std_generic_Leaf'"), "{main_body}");
+    assert!(
+        !main_body.contains("__saga_static_variant"),
+        "selective-core should not depend on monadic optimizer static variants\n{main_body}"
+    );
 
     let output = std::process::Command::new(binary)
         .args([
@@ -710,8 +703,8 @@ fn selective_core_codegen_runs_imported_cps_callback_project() {
     let effects_stdout = String::from_utf8_lossy(&effects_inspect.stdout);
     assert!(
         effects_stdout.contains("'apply_eff'/3")
-            && effects_stdout.contains("apply F('unit', _Evidence, _ReturnK)")
-            && effects_stdout.contains("'__saga_direct_hof_apply_eff'/1"),
+            && effects_stdout.contains("apply G('unit', _Evidence, _ReturnK)")
+            && !effects_stdout.contains("__saga_direct_hof_apply_eff"),
         "{effects_stdout}"
     );
 

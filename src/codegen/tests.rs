@@ -267,6 +267,103 @@ fn selective_core_merge_adds_private_direct_dict_adapter() {
 }
 
 #[test]
+fn selective_core_merge_aliases_duplicate_fallback_dict_direct_arity() {
+    let fallback_duplicate = "__dict_SagaJson_Encode_ToJson_sagajson_encode_Std_Generic_Variant";
+    let selective_source = "__dict_SagaJson_Encode_ToJson_Std_Generic_Variant";
+    let fallback = test_core_module(
+        "SagaJson.Encode",
+        vec![(fallback_duplicate, 0)],
+        vec![test_core_fun(fallback_duplicate, 0, "stale_fallback")],
+    );
+    let selective = test_core_module(
+        "SagaJson.Encode",
+        vec![(selective_source, 0)],
+        vec![test_core_fun(selective_source, 0, "selective")],
+    );
+    let mut adapters = HashMap::new();
+    adapters.insert(
+        selective_source.to_string(),
+        super::DirectFallbackAdapter::Dict {
+            constructor: test_dict_constructor(selective_source, vec![]),
+        },
+    );
+
+    let merged = super::merge_selective_core_modules(fallback, selective, &adapters);
+    let alias = merged
+        .funs
+        .iter()
+        .find(|fun| fun.name == fallback_duplicate && fun.arity == 0)
+        .expect("duplicate fallback dict direct alias");
+    let CExpr::Fun(params, body) = &alias.body else {
+        panic!("expected alias function");
+    };
+    assert!(params.is_empty(), "{params:?}");
+    assert!(
+        matches!(body.as_ref(), CExpr::Apply(callee, args) if matches!(callee.as_ref(), CExpr::FunRef(name, 0) if name == selective_source) && args.is_empty()),
+        "{body:?}"
+    );
+}
+
+#[test]
+fn selective_core_merge_aliases_duplicate_fallback_dict_uniform_arity() {
+    let fallback_duplicate = "__dict_SagaJson_Encode_ToJson_sagajson_encode_Std_Generic_Variant";
+    let selective_source = "__dict_SagaJson_Encode_ToJson_Std_Generic_Variant";
+    let fallback = test_core_module(
+        "SagaJson.Encode",
+        vec![(fallback_duplicate, 2)],
+        vec![test_core_fun(fallback_duplicate, 2, "stale_fallback")],
+    );
+    let selective = test_core_module(
+        "SagaJson.Encode",
+        vec![(selective_source, 0)],
+        vec![test_core_fun(selective_source, 0, "selective")],
+    );
+    let mut adapters = HashMap::new();
+    adapters.insert(
+        selective_source.to_string(),
+        super::DirectFallbackAdapter::Dict {
+            constructor: test_dict_constructor(selective_source, vec![]),
+        },
+    );
+
+    let merged = super::merge_selective_core_modules(fallback, selective, &adapters);
+    let alias = merged
+        .funs
+        .iter()
+        .find(|fun| fun.name == fallback_duplicate && fun.arity == 2)
+        .expect("duplicate fallback dict uniform alias");
+    let CExpr::Fun(params, body) = &alias.body else {
+        panic!("expected alias function");
+    };
+    assert_eq!(params.len(), 2, "{params:?}");
+    assert!(
+        matches!(body.as_ref(), CExpr::Apply(callee, args) if matches!(callee.as_ref(), CExpr::Var(name) if name == "_DictAliasK") && matches!(args.as_slice(), [CExpr::Apply(inner, inner_args)] if matches!(inner.as_ref(), CExpr::FunRef(name, 0) if name == selective_source) && inner_args.is_empty())),
+        "{body:?}"
+    );
+}
+
+#[test]
+fn selective_core_merge_does_not_alias_unmatched_duplicate_dict_name() {
+    let fallback_duplicate = "__dict_SagaJson_Encode_ToJson_sagajson_encode_Std_Generic_Variant";
+    let fallback = test_core_module(
+        "SagaJson.Encode",
+        vec![(fallback_duplicate, 0)],
+        vec![test_core_fun(fallback_duplicate, 0, "keep_me")],
+    );
+    let selective = test_core_module("SagaJson.Encode", vec![], vec![]);
+    let merged = super::merge_selective_core_modules(fallback, selective, &HashMap::new());
+    let fun = merged
+        .funs
+        .iter()
+        .find(|fun| fun.name == fallback_duplicate && fun.arity == 0)
+        .expect("fallback duplicate remains");
+    let CExpr::Fun(_, body) = &fun.body else {
+        panic!("expected function");
+    };
+    assert!(matches!(body.as_ref(), CExpr::Lit(CLit::Atom(atom)) if atom == "keep_me"));
+}
+
+#[test]
 fn selective_core_merge_adds_direct_pure_adapter_over_uniform_fallback() {
     let fallback = test_core_module(
         "m",

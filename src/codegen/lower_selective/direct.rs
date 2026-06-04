@@ -24,6 +24,12 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                 let known_direct_lambda = self.known_direct_lambda_for_expr(value);
                 if let Some(lambda) = known_direct_lambda
                     && occurs::local_is_only_called_in_expr(&var.name, body)
+                    && lambda.params.iter().all(direct_param_supported)
+                    && self.lambda_is_direct_subset_with_dict_bindings(
+                        &lambda.dict_bindings,
+                        &lambda.params,
+                        &lambda.body,
+                    )
                 {
                     self.push_scope();
                     self.current_scope_mut().insert(var.name.clone());
@@ -59,9 +65,6 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                     self.bind_known_direct_lambda(var.name.clone(), lambda);
                     let body = self.lower_expr(body);
                     self.pop_scope();
-                    if !core_expr_mentions_var(&var.name, &body) {
-                        return body;
-                    }
                     return CExpr::Let(
                         core_var(&var.name),
                         Box::new(lowered_value),
@@ -720,6 +723,14 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                 unreachable!("is_panic_or_todo_call only matches variable heads");
             };
             return self.lower_panic_or_todo(&name.name, &args[0]);
+        }
+        if let Some(known_head) = self.known_direct_atom_for_atom(head)
+            && matches!(
+                known_head,
+                Atom::Var { .. } | Atom::QualifiedRef { .. } | Atom::DictRef { .. }
+            )
+        {
+            return self.lower_app(&known_head, args);
         }
         if let Some(lambda) = self.known_direct_lambda_for_atom(head)
             && lambda.params.len() == args.len()

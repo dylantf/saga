@@ -169,16 +169,17 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             );
         }
 
-        if let Some(known_lambda) = self.known_cps_lambda_for_expr(value)
-            && let Some(local_shape) = self.cps_bind_shape_for_expr(value)
-        {
+        if let Some(known_lambda) = self.known_cps_lambda_for_expr(value) {
+            let local_shape = self.cps_bind_shape_for_expr(value);
             let needs_value = self.known_cps_lambda_value_needed_in_expr(&var.name, body);
             let lowered_value =
                 needs_value.then(|| self.lower_known_cps_lambda_value(&known_lambda));
             self.push_scope();
             self.current_scope_mut().insert(var.name.clone());
-            self.current_shape_scope_mut()
-                .insert(var.name.clone(), local_shape);
+            if let Some(local_shape) = local_shape {
+                self.current_shape_scope_mut()
+                    .insert(var.name.clone(), local_shape);
+            }
             self.bind_known_cps_lambda(var.name.clone(), known_lambda);
             let lowered_body = self.lower_cps_expr(body, evidence, return_k);
             self.pop_scope();
@@ -1359,6 +1360,12 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             } => {
                 self.assert_app_arity(&name, args.len(), source_arity);
                 self.assert_app_arity(&name, args.len() + 2, adapter_arity);
+                let call_name = if module.is_none() {
+                    self.native_variant_name_for_current_frame(&name)
+                        .unwrap_or_else(|| name.clone())
+                } else {
+                    name.clone()
+                };
 
                 let expected_arg_shapes = self.cps_callback_param_shapes(head);
                 let mut lowered_args: Vec<CExpr> = args
@@ -1375,10 +1382,11 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                 lowered_args.push(return_k);
 
                 match module {
-                    Some(module) => CExpr::Call(module, name, lowered_args),
-                    None => {
-                        CExpr::Apply(Box::new(CExpr::FunRef(name, adapter_arity)), lowered_args)
-                    }
+                    Some(module) => CExpr::Call(module, call_name, lowered_args),
+                    None => CExpr::Apply(
+                        Box::new(CExpr::FunRef(call_name, adapter_arity)),
+                        lowered_args,
+                    ),
                 }
             }
             CallShape::LocalCpsCallable {
@@ -1522,6 +1530,9 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             return None;
         }
         let bindings = self.direct_call_param_bindings(&fb.params, args)?;
+        let known_dict_aliases = self.known_dict_aliases_for_params(&fb.params, args);
+        let known_atom_bindings =
+            self.known_direct_atom_pattern_bindings_for_params(&fb.params, args);
 
         let compiled = self.module_ctx.modules.get(&source_module_name)?;
         let mut imported = DirectLowerer::new(
@@ -1549,6 +1560,8 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
 
         imported.push_scope();
         imported.bind_fun_param_locals(&fb);
+        imported.bind_known_dict_values(known_dict_aliases);
+        imported.bind_known_direct_atom_pattern_values(known_atom_bindings);
         let lowered_body = imported
             .expr_is_cps_island_subset(&fb.body)
             .then(|| imported.lower_cps_expr(&fb.body, evidence, return_k));
@@ -2820,6 +2833,9 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         if fb.guard.is_some() || fb.params.iter().any(|p| !direct_param_supported(p)) {
             return false;
         }
+        let known_dict_aliases = self.known_dict_aliases_for_params(&fb.params, args);
+        let known_atom_bindings =
+            self.known_direct_atom_pattern_bindings_for_params(&fb.params, args);
 
         let Some(compiled) = self.module_ctx.modules.get(&source_module_name) else {
             return false;
@@ -2848,6 +2864,8 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
 
         imported.push_scope();
         imported.bind_fun_param_locals(&fb);
+        imported.bind_known_dict_values(known_dict_aliases);
+        imported.bind_known_direct_atom_pattern_values(known_atom_bindings);
         let supported = imported.expr_can_run_with_elided_static_handler(&fb.body, handled_effects);
         imported.pop_scope();
         supported

@@ -30,7 +30,9 @@ use crate::codegen::monadic::ir::{
     MDictConstructor, MExpr, MFunBinding, MHandler, MHandlerArm, MProgram, MVar,
 };
 use crate::codegen::native_effects::{NativeArgTransform, native_op};
-use crate::codegen::resolve::{ConstructorAtoms, ResolutionMap, ResolvedCodegenKind};
+use crate::codegen::resolve::{
+    ConstructorAtoms, ResolutionMap, ResolvedCodegenKind, ResolvedSymbol,
+};
 use crate::codegen::runtime_shape::RuntimeFunctionShape;
 use crate::intrinsics::IntrinsicId;
 use crate::typechecker::Type;
@@ -321,6 +323,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
 
         let mut exports = Vec::new();
         let mut funs = Vec::new();
+        let native_variant_frames = self.native_variant_frames_in_program(program);
         let mut index = 0;
         while index < program.len() {
             match &program[index] {
@@ -357,6 +360,17 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                         }
                         FunctionLoweringPlan::CpsBody => {
                             funs.push(self.lower_cps_fun_binding_group(&group));
+                            for frame in &native_variant_frames {
+                                if let Some(variant_name) =
+                                    self.native_variant_name_for_function(&fb.name, frame)
+                                {
+                                    funs.push(self.lower_cps_fun_binding_group_native_variant(
+                                        &group,
+                                        &variant_name,
+                                        frame.clone(),
+                                    ));
+                                }
+                            }
                         }
                     }
                     if group.len() == 1
@@ -744,13 +758,18 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         CExpr::Fun(vec![result.clone()], Box::new(CExpr::Var(result)))
     }
 
-    fn lower_cps_fun_binding(&mut self, fb: &MFunBinding) -> CFunDef {
+    fn lower_cps_fun_binding_named(
+        &mut self,
+        fb: &MFunBinding,
+        output_name: &str,
+        native_frame: Option<DirectHandlerFrame>,
+    ) -> CFunDef {
         let direct_params = lower_param_names(&fb.params);
         let mut params = direct_params.clone();
         params.push("_Evidence".to_string());
         params.push("_ReturnK".to_string());
 
-        let pushed_native_frame = self.push_native_variant_frame_for_name(&fb.name);
+        let pushed_native_frame = self.push_native_variant_frame(output_name, native_frame);
         self.push_scope();
         self.bind_cps_entry_param_locals(fb);
         let lowered_body = self.lower_cps_expr(
@@ -765,19 +784,37 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         }
 
         CFunDef {
-            name: fb.name.clone(),
+            name: output_name.to_string(),
             arity: params.len(),
             body: CExpr::Fun(params, Box::new(body)),
         }
     }
 
     fn lower_cps_fun_binding_group(&mut self, group: &[&MFunBinding]) -> CFunDef {
+        self.lower_cps_fun_binding_group_named(group, &group[0].name, None)
+    }
+
+    fn lower_cps_fun_binding_group_native_variant(
+        &mut self,
+        group: &[&MFunBinding],
+        output_name: &str,
+        native_frame: DirectHandlerFrame,
+    ) -> CFunDef {
+        self.lower_cps_fun_binding_group_named(group, output_name, Some(native_frame))
+    }
+
+    fn lower_cps_fun_binding_group_named(
+        &mut self,
+        group: &[&MFunBinding],
+        output_name: &str,
+        native_frame: Option<DirectHandlerFrame>,
+    ) -> CFunDef {
         assert!(
             !group.is_empty(),
             "lower_cps_fun_binding_group: empty group is impossible"
         );
         if group.len() == 1 && group[0].guard.is_none() {
-            return self.lower_cps_fun_binding(group[0]);
+            return self.lower_cps_fun_binding_named(group[0], output_name, native_frame);
         }
 
         let name = &group[0].name;
@@ -803,7 +840,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         let mut rest = self.case_clause_error();
 
         let prev_direct_candidate = self.direct_candidate_function.replace(name.clone());
-        let pushed_native_frame = self.push_native_variant_frame_for_name(name);
+        let pushed_native_frame = self.push_native_variant_frame(output_name, native_frame);
         for fb in group.iter().rev() {
             let rest_var = self.fresh_cps_temp("_FunRest");
             let rest_ref = || CExpr::Apply(Box::new(CExpr::Var(rest_var.clone())), vec![]);
@@ -862,7 +899,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
 
         let body = CExpr::Let(scrut_var, Box::new(scrutinee), Box::new(rest));
         CFunDef {
-            name: name.clone(),
+            name: output_name.to_string(),
             arity: params.len(),
             body: CExpr::Fun(params, Box::new(body)),
         }
@@ -1106,7 +1143,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         else {
             return None;
         };
-        let module = resolved_erlang_module_for_call(erlang_mod, &self.current_module);
+        let module = self.resolved_erlang_module_for_symbol(resolved, erlang_mod);
         let metadata = module
             .as_ref()
             .and_then(|module| {
@@ -1161,6 +1198,21 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         })
     }
 
+    fn resolved_erlang_module_for_symbol(
+        &self,
+        resolved: &ResolvedSymbol,
+        erlang_mod: &Option<String>,
+    ) -> Option<String> {
+        resolved_erlang_module_for_call(erlang_mod, &self.current_module).or_else(|| {
+            resolved
+                .source_module
+                .as_ref()
+                .filter(|source_module| source_module.as_str() != self.current_module)
+                .map(|source_module| erlang_module_name(source_module))
+                .filter(|erlang_module| erlang_module != &self.current_module)
+        })
+    }
+
     fn direct_intrinsic(&self, head: &Atom) -> Option<IntrinsicId> {
         let source = match head {
             Atom::Var { source, .. } | Atom::QualifiedRef { source, .. } => *source,
@@ -1199,7 +1251,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             return None;
         }
         Some(DirectCallable {
-            module: erlang_mod.clone(),
+            module: self.resolved_erlang_module_for_symbol(resolved, erlang_mod),
             name: name.clone(),
             arity: *arity,
         })
@@ -1244,11 +1296,10 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         else {
             return None;
         };
-        let is_remote = erlang_mod
-            .as_ref()
-            .is_some_and(|module| module != &self.current_module);
+        let module = self.resolved_erlang_module_for_symbol(resolved, erlang_mod);
+        let is_remote = module.is_some();
         if is_remote
-            && erlang_mod
+            && module
                 .as_ref()
                 .and_then(|module| {
                     self.imported_function_entries
@@ -1259,20 +1310,20 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             return None;
         }
         if !effects.is_empty() && is_remote {
-            let module = erlang_mod.as_ref()?;
+            let module = module.as_ref()?;
             let entries = self
                 .imported_function_entries
                 .get(&(module.clone(), name.clone()))?;
             let direct_entry_arity = direct_entry_arity_matching_resolved(*arity, entries)?;
             return Some(DirectCallable {
-                module: erlang_mod.clone(),
+                module: Some(module.clone()),
                 name: direct_entry_name_for(name, entries),
                 arity: direct_entry_arity,
             });
         }
         if is_remote {
             return Some(DirectCallable {
-                module: erlang_mod.clone(),
+                module,
                 name: name.clone(),
                 arity: *arity,
             });
@@ -1389,13 +1440,9 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         if !effects.is_empty() {
             return None;
         }
-        let is_remote = erlang_mod
-            .as_ref()
-            .is_some_and(|module| module != &self.current_module);
-        if is_remote {
-            return erlang_mod
-                .as_ref()
-                .map(|module| remote_fun_value(module.clone(), name.clone(), *arity));
+        let module = self.resolved_erlang_module_for_symbol(resolved, erlang_mod);
+        if let Some(module) = module {
+            return Some(remote_fun_value(module, name.clone(), *arity));
         }
         let shape = self.callable_type_shapes.get(name)?;
         if !matches!(shape, RuntimeFunctionShape::Pure) || shape.expanded_arity(*arity) != *arity {
@@ -1983,6 +2030,18 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         true
     }
 
+    fn push_native_variant_frame(
+        &mut self,
+        output_name: &str,
+        native_frame: Option<DirectHandlerFrame>,
+    ) -> bool {
+        if let Some(frame) = native_frame {
+            self.direct_handler_stack.push(frame);
+            return true;
+        }
+        self.push_native_variant_frame_for_name(output_name)
+    }
+
     fn native_variant_frame_for_name(name: &str) -> Option<DirectHandlerFrame> {
         let (_, suffix) = name.split_once("__native__")?;
         let (handler, effects) = suffix.split_once("__")?;
@@ -1996,6 +2055,302 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             return None;
         }
         Some(DirectHandlerFrame::Native { effects, kind })
+    }
+
+    fn native_variant_frames_in_program(&self, program: &MProgram) -> Vec<DirectHandlerFrame> {
+        let mut frames = Vec::new();
+        let mut seen = HashSet::new();
+        for decl in program {
+            match decl {
+                MDecl::FunBinding(fb) => {
+                    self.collect_native_variant_frames_in_expr(&fb.body, &mut frames, &mut seen);
+                }
+                MDecl::Val(val) => {
+                    self.collect_native_variant_frames_in_expr(&val.value, &mut frames, &mut seen);
+                }
+                MDecl::DictConstructor(dc) => {
+                    for method in &dc.methods {
+                        self.collect_native_variant_frames_in_expr(method, &mut frames, &mut seen);
+                    }
+                }
+                MDecl::Passthrough(_) => {}
+            }
+        }
+        frames
+    }
+
+    fn collect_native_variant_frames_in_expr(
+        &self,
+        expr: &MExpr,
+        frames: &mut Vec<DirectHandlerFrame>,
+        seen: &mut HashSet<String>,
+    ) {
+        match expr {
+            MExpr::With { handler, body, .. } => {
+                self.collect_native_variant_frames_in_handler(handler, frames, seen);
+                self.collect_native_variant_frames_in_expr(body, frames, seen);
+            }
+            MExpr::Bind { value, body, .. } | MExpr::Let { value, body, .. } => {
+                self.collect_native_variant_frames_in_expr(value, frames, seen);
+                self.collect_native_variant_frames_in_expr(body, frames, seen);
+            }
+            MExpr::Ensure { body, cleanup } => {
+                self.collect_native_variant_frames_in_expr(body, frames, seen);
+                self.collect_native_variant_frames_in_expr(cleanup, frames, seen);
+            }
+            MExpr::Case { arms, .. } | MExpr::Receive { arms, .. } => {
+                if let MExpr::Case { scrutinee, .. } = expr {
+                    self.collect_native_variant_frames_in_atom(scrutinee, frames, seen);
+                }
+                for arm in arms {
+                    if let Some(guard) = &arm.guard {
+                        self.collect_native_variant_frames_in_expr(guard, frames, seen);
+                    }
+                    self.collect_native_variant_frames_in_expr(&arm.body, frames, seen);
+                }
+                if let MExpr::Receive {
+                    after: Some((_, body)),
+                    ..
+                } = expr
+                {
+                    if let MExpr::Receive {
+                        after: Some((timeout, _)),
+                        ..
+                    } = expr
+                    {
+                        self.collect_native_variant_frames_in_atom(timeout, frames, seen);
+                    }
+                    self.collect_native_variant_frames_in_expr(body, frames, seen);
+                }
+            }
+            MExpr::If {
+                cond,
+                then_branch,
+                else_branch,
+                ..
+            } => {
+                self.collect_native_variant_frames_in_atom(cond, frames, seen);
+                self.collect_native_variant_frames_in_expr(then_branch, frames, seen);
+                self.collect_native_variant_frames_in_expr(else_branch, frames, seen);
+            }
+            MExpr::LetFun { body, rest, .. } => {
+                self.collect_native_variant_frames_in_expr(body, frames, seen);
+                self.collect_native_variant_frames_in_expr(rest, frames, seen);
+            }
+            MExpr::HandlerValue {
+                arms,
+                return_clause,
+                ..
+            } => {
+                for arm in arms {
+                    self.collect_native_variant_frames_in_handler_arm(arm, frames, seen);
+                }
+                if let Some(arm) = return_clause {
+                    self.collect_native_variant_frames_in_handler_arm(arm, frames, seen);
+                }
+            }
+            MExpr::Pure(atom) | MExpr::Resume { value: atom, .. } => {
+                self.collect_native_variant_frames_in_atom(atom, frames, seen);
+            }
+            MExpr::Yield { args, .. } | MExpr::ForeignCall { args, .. } => {
+                for arg in args {
+                    self.collect_native_variant_frames_in_atom(arg, frames, seen);
+                }
+            }
+            MExpr::App { head, args, .. } => {
+                self.collect_native_variant_frames_in_atom(head, frames, seen);
+                for arg in args {
+                    self.collect_native_variant_frames_in_atom(arg, frames, seen);
+                }
+            }
+            MExpr::FieldAccess { record, .. } | MExpr::DictMethodAccess { dict: record, .. } => {
+                self.collect_native_variant_frames_in_atom(record, frames, seen);
+            }
+            MExpr::RecordUpdate { record, fields, .. } => {
+                self.collect_native_variant_frames_in_atom(record, frames, seen);
+                for (_, atom) in fields {
+                    self.collect_native_variant_frames_in_atom(atom, frames, seen);
+                }
+            }
+            MExpr::BinOp { left, right, .. } => {
+                self.collect_native_variant_frames_in_atom(left, frames, seen);
+                self.collect_native_variant_frames_in_atom(right, frames, seen);
+            }
+            MExpr::UnaryMinus { value, .. } => {
+                self.collect_native_variant_frames_in_atom(value, frames, seen);
+            }
+            MExpr::BitString { segments, .. } => {
+                for segment in segments {
+                    self.collect_native_variant_frames_in_atom(&segment.value, frames, seen);
+                    if let Some(size) = &segment.size {
+                        self.collect_native_variant_frames_in_atom(size, frames, seen);
+                    }
+                }
+            }
+        }
+    }
+
+    fn collect_native_variant_frames_in_atom(
+        &self,
+        atom: &Atom,
+        frames: &mut Vec<DirectHandlerFrame>,
+        seen: &mut HashSet<String>,
+    ) {
+        match atom {
+            Atom::Ctor { args, .. } | Atom::Tuple { elements: args, .. } => {
+                for arg in args {
+                    self.collect_native_variant_frames_in_atom(arg, frames, seen);
+                }
+            }
+            Atom::AnonRecord { fields, .. } | Atom::Record { fields, .. } => {
+                for (_, value) in fields {
+                    self.collect_native_variant_frames_in_atom(value, frames, seen);
+                }
+            }
+            Atom::Lambda { body, .. } => {
+                self.collect_native_variant_frames_in_expr(body, frames, seen);
+            }
+            Atom::BackendSpawnThunk { callback, .. } => {
+                self.collect_native_variant_frames_in_atom(callback, frames, seen);
+            }
+            Atom::Var { .. }
+            | Atom::Lit { .. }
+            | Atom::DictRef { .. }
+            | Atom::QualifiedRef { .. }
+            | Atom::Symbol { .. }
+            | Atom::BackendAtom { .. } => {}
+        }
+    }
+
+    fn collect_native_variant_frames_in_handler(
+        &self,
+        handler: &MHandler,
+        frames: &mut Vec<DirectHandlerFrame>,
+        seen: &mut HashSet<String>,
+    ) {
+        match handler {
+            MHandler::Native {
+                effects, handler, ..
+            } => {
+                let Some(kind) = DirectHandlerKind::from_handler_name(handler) else {
+                    return;
+                };
+                let frame = DirectHandlerFrame::Native {
+                    effects: effects.clone(),
+                    kind,
+                };
+                let key = Self::native_variant_frame_key(&frame);
+                if seen.insert(key) {
+                    frames.push(frame);
+                }
+            }
+            MHandler::Static {
+                arms,
+                return_clause,
+                ..
+            } => {
+                for arm in arms {
+                    self.collect_native_variant_frames_in_handler_arm(arm, frames, seen);
+                }
+                if let Some(arm) = return_clause {
+                    self.collect_native_variant_frames_in_handler_arm(arm, frames, seen);
+                }
+            }
+            MHandler::Composite { handlers, .. } => {
+                for handler in handlers {
+                    self.collect_native_variant_frames_in_handler(handler, frames, seen);
+                }
+            }
+            MHandler::Dynamic {
+                return_lambda: Some(Atom::Lambda { body, .. }),
+                ..
+            } => {
+                self.collect_native_variant_frames_in_expr(body, frames, seen);
+            }
+            MHandler::Dynamic { .. } => {}
+        }
+    }
+
+    fn collect_native_variant_frames_in_handler_arm(
+        &self,
+        arm: &MHandlerArm,
+        frames: &mut Vec<DirectHandlerFrame>,
+        seen: &mut HashSet<String>,
+    ) {
+        self.collect_native_variant_frames_in_expr(&arm.body, frames, seen);
+        if let Some(finally_block) = &arm.finally_block {
+            self.collect_native_variant_frames_in_expr(finally_block, frames, seen);
+        }
+    }
+
+    fn native_variant_name_for_function(
+        &self,
+        name: &str,
+        frame: &DirectHandlerFrame,
+    ) -> Option<String> {
+        if !self.native_variant_frame_handles_function(name, frame) {
+            return None;
+        }
+        Some(format!(
+            "__saga_native_variant__{}__{}",
+            Self::sanitize_native_variant_part(name),
+            Self::native_variant_frame_key(frame)
+        ))
+    }
+
+    fn native_variant_name_for_current_frame(&self, name: &str) -> Option<String> {
+        self.direct_handler_stack
+            .iter()
+            .rev()
+            .find_map(|frame| self.native_variant_name_for_function(name, frame))
+    }
+
+    fn native_variant_frame_handles_function(
+        &self,
+        name: &str,
+        frame: &DirectHandlerFrame,
+    ) -> bool {
+        let DirectHandlerFrame::Native { .. } = frame else {
+            return false;
+        };
+        self.function_plans
+            .get(name)
+            .copied()
+            .is_some_and(FunctionLoweringPlan::has_cps_body)
+    }
+
+    fn native_variant_frame_key(frame: &DirectHandlerFrame) -> String {
+        let DirectHandlerFrame::Native { effects, kind } = frame else {
+            return "native__unknown".to_string();
+        };
+        let handler = match kind {
+            DirectHandlerKind::BeamActor => "beam_actor",
+            DirectHandlerKind::BeamRef => "beam_ref",
+            DirectHandlerKind::EtsRef => "ets_ref",
+            DirectHandlerKind::BeamVec => "beam_vec",
+            DirectHandlerKind::BeamSignal => "beam_signal",
+        };
+        let mut parts = vec!["native".to_string(), handler.to_string()];
+        parts.extend(effects.iter().map(|effect| {
+            effect
+                .split('.')
+                .map(Self::sanitize_native_variant_part)
+                .collect::<Vec<_>>()
+                .join("_")
+        }));
+        parts.join("__")
+    }
+
+    fn sanitize_native_variant_part(part: &str) -> String {
+        part.chars()
+            .map(|ch| {
+                if ch.is_ascii_alphanumeric() || ch == '_' {
+                    ch
+                } else {
+                    '_'
+                }
+            })
+            .collect()
     }
 
     fn native_direct_yield_is_direct_subset(&mut self, op: &EffectOpRef, args: &[Atom]) -> bool {
@@ -3241,7 +3596,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         }
     }
 
-    fn known_cps_lambda_for_expr(&self, expr: &MExpr) -> Option<KnownCpsLambda> {
+    fn known_cps_lambda_for_expr(&mut self, expr: &MExpr) -> Option<KnownCpsLambda> {
         let MExpr::DictMethodAccess {
             dict, method_index, ..
         } = expr
@@ -3253,6 +3608,9 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         };
         let known_dict = self.known_dict_value(&name.name)?;
         let method = known_dict.methods.get(*method_index)?.clone();
+        if !self.lambda_is_cps_subset(&method) {
+            return None;
+        }
         let Atom::Lambda { params, body, .. } = method else {
             return None;
         };
@@ -4066,6 +4424,26 @@ mod tests {
         }
     }
 
+    fn test_lowerer<'a>(
+        resolution: &'a ResolutionMap,
+        ctors: &'a ConstructorAtoms,
+        module_ctx: &'a CodegenContext,
+        handler_info: &'a HandlerAnalysis,
+        effect_info: &'a EffectInfo<'a>,
+        handler_value_map: &'a HandlerValueMap,
+    ) -> DirectLowerer<'a, 'a> {
+        DirectLowerer::new(
+            resolution,
+            ctors,
+            module_ctx,
+            handler_info,
+            effect_info,
+            handler_value_map,
+            HashMap::new(),
+            LoweringOptions::default(),
+        )
+    }
+
     #[test]
     fn known_dict_values_compose_through_identical_if_branches() {
         let effect_info_fixture = TestEffectInfo::default();
@@ -4125,5 +4503,68 @@ mod tests {
         assert_eq!(known.dict_params, Vec::<String>::new());
         assert_eq!(known.dict_args, Vec::<Atom>::new());
         assert_eq!(known.methods.len(), 1);
+    }
+
+    #[test]
+    fn native_variant_frame_collection_walks_lambda_bodies() {
+        let effect_info_fixture = TestEffectInfo::default();
+        let effect_info = effect_info_fixture.as_effect_info();
+        let resolution = ResolutionMap::new();
+        let ctors = ConstructorAtoms::new();
+        let module_ctx = CodegenContext::default();
+        let handler_info = HandlerAnalysis::default();
+        let handler_value_map = HandlerValueMap::new();
+        let lowerer = test_lowerer(
+            &resolution,
+            &ctors,
+            &module_ctx,
+            &handler_info,
+            &effect_info,
+            &handler_value_map,
+        );
+
+        let program = vec![MDecl::FunBinding(MFunBinding {
+            id: test_node(),
+            public: true,
+            name: "stores_thunk".to_string(),
+            name_span: test_span(),
+            params: vec![Pat::Wildcard {
+                id: test_node(),
+                span: test_span(),
+            }],
+            guard: None,
+            body: MExpr::Pure(Atom::Lambda {
+                params: vec![Pat::Wildcard {
+                    id: test_node(),
+                    span: test_span(),
+                }],
+                body: Box::new(MExpr::With {
+                    handler: MHandler::Native {
+                        effects: vec!["Std.Actor.Actor".to_string()],
+                        handler: "beam_actor".to_string(),
+                        source: test_node(),
+                    },
+                    body: Box::new(MExpr::Pure(Atom::Lit {
+                        value: Lit::Unit,
+                        source: test_node(),
+                    })),
+                    source: test_node(),
+                }),
+                source: test_node(),
+            }),
+            span: test_span(),
+        })];
+
+        let frames = lowerer.native_variant_frames_in_program(&program);
+        assert!(
+            matches!(
+                frames.as_slice(),
+                [DirectHandlerFrame::Native {
+                    kind: DirectHandlerKind::BeamActor,
+                    effects
+                }] if effects == &vec!["Std.Actor.Actor".to_string()]
+            ),
+            "{frames:?}"
+        );
     }
 }
