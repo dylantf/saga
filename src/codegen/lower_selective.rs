@@ -162,6 +162,7 @@ struct DirectLowerer<'a, 'info> {
     /// selected callback parameters are statically pure at a call site.
     local_hof_direct_specializations: HashMap<String, HofDirectSpecialization>,
     local_dict_constructors: HashMap<String, MDictConstructor>,
+    local_external_functions: HashMap<String, DirectCallable>,
     /// Emitted entries discovered for already-compiled imported user modules.
     imported_function_entries: HashMap<(String, String), FunctionEntryInfo>,
     /// Direct HOF specializations discovered for already-compiled imported
@@ -212,6 +213,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             local_dict_constructor_arities: HashMap::new(),
             local_hof_direct_specializations: HashMap::new(),
             local_dict_constructors: HashMap::new(),
+            local_external_functions: HashMap::new(),
             imported_function_entries: HashMap::new(),
             imported_hof_direct_specializations: HashMap::new(),
             direct_candidate_function: None,
@@ -1136,6 +1138,9 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         if let Some(callable) = self.local_direct_function_callable_by_name(head) {
             return Some(callable);
         }
+        if let Some(callable) = self.local_external_callable_by_name(head) {
+            return Some(callable);
+        }
 
         let source = match head {
             Atom::Var { source, .. } | Atom::QualifiedRef { source, .. } => *source,
@@ -1319,6 +1324,13 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         } else {
             CExpr::FunRef(name.clone(), *arity)
         })
+    }
+
+    fn local_external_callable_by_name(&self, head: &Atom) -> Option<DirectCallable> {
+        let Atom::Var { name, .. } = head else {
+            return None;
+        };
+        self.local_external_functions.get(&name.name).cloned()
     }
 
     fn supported_direct_call(&self, head: &Atom) -> Option<DirectCallable> {
@@ -1891,7 +1903,10 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                     }) => source_arity == args.len() && adapter_arity == args.len() + 2,
                     _ => false,
                 };
-                call_supported && self.cps_call_args_are_supported(head, args)
+                if !call_supported {
+                    return false;
+                }
+                self.cps_call_args_are_supported(head, args)
             }
             MExpr::If {
                 cond,
@@ -3599,16 +3614,23 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
     }
 
     fn unsupported(&self, what: &str) -> ! {
-        panic!("selective-uniform direct lowerer TODO: {what}")
+        panic!(
+            "selective-uniform direct lowerer TODO in {}: {what}",
+            self.current_module
+        )
     }
 
     fn unsupported_expr(&self, expr: &MExpr) -> ! {
-        panic!("selective-uniform direct lowerer TODO: unsupported MExpr {expr:?}",)
+        panic!(
+            "selective-uniform direct lowerer TODO in {}: unsupported MExpr {expr:?}",
+            self.current_module
+        )
     }
 
     fn unsupported_atom(&self, atom: &Atom) -> ! {
         panic!(
-            "selective-uniform direct lowerer TODO: unsupported Atom {:?}",
+            "selective-uniform direct lowerer TODO in {}: unsupported Atom {:?}",
+            self.current_module,
             std::mem::discriminant(atom)
         )
     }

@@ -1471,3 +1471,22 @@ boundaries exist.
   - full `saga test --selective-no-fallback` is currently blocked earlier at
     the project-level CPS-shaped `tests` aggregator function, not at derived
     generic dict constructors.
+- Audited the full e2e strict test frontier after the generated test runner
+  work:
+  - `BaseTest` and `AdvancedTest` strict-lower their public `tests/3`
+    entries. `AdvancedTest` exposed a real local FFI gap: bodyless
+    `@external` signatures such as `erl_reverse` / `erl_length` were not
+    recorded as direct callables when used inside CPS-shaped test callbacks;
+  - selective classification now records local passthrough `FunSignature`
+    declarations with `@external` annotations as direct external callables,
+    and direct app lowering can call those native Erlang targets even when
+    resolver metadata for the local var ref is absent;
+  - TODO diagnostics now include the current lowering module, which turns
+    project-wide strict failures from anonymous `tests` panics into actionable
+    module frontiers such as `reftest`;
+  - the next strict blocker is `RefTest.tests`. A tempting native-handler
+    no-op admission was tried and rejected: it compiles but is semantically
+    wrong for native `beam_ref` handlers wrapped around HOF callbacks that
+    still perform `Ref` operations. Strict mode should continue rejecting that
+    until native handler/HOF callback lowering rewrites the callback body or
+    routes evidence correctly.

@@ -9,6 +9,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         self.local_dict_constructor_arities.clear();
         self.local_hof_direct_specializations.clear();
         self.local_dict_constructors.clear();
+        self.local_external_functions.clear();
         self.direct_candidate_functions.clear();
         let signature_shapes = self.signature_function_shapes(program);
         for decl in program {
@@ -50,6 +51,25 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                             .insert(dc.name.clone(), dc.dict_params.len());
                         self.local_dict_constructors
                             .insert(dc.name.clone(), dc.clone());
+                    }
+                }
+                MDecl::Passthrough(crate::ast::Decl::FunSignature {
+                    name,
+                    params,
+                    annotations,
+                    ..
+                }) => {
+                    if let Some((target_erlang_mod, target_name)) =
+                        crate::codegen::external::extract_external(annotations)
+                    {
+                        self.local_external_functions.insert(
+                            name.clone(),
+                            DirectCallable {
+                                module: Some(target_erlang_mod),
+                                name: target_name,
+                                arity: params.len(),
+                            },
+                        );
                     }
                 }
                 MDecl::Passthrough(_) => {}

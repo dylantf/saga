@@ -145,6 +145,7 @@ direct/CPS/static-handler rules.
 | Handler | Effects / Ops Covered | Current Status | Correct Rule | Next Action |
 | --- | --- | --- | --- | --- |
 | `Std.Actor.beam_actor` | `Actor.self`, `Process.spawn/send/exit`, `Monitor.monitor`, `Link.link/unlink`, `Timer.sleep/send_after/cancel_timer`; plus direct `receive` syntax used by actor code | Covered by `beam-actor-native-project`, including strict `selective-core --selective-no-fallback` inspection and runtime `--selective-codegen` run | Run `effect_opt` before selective lowering so generated `__saga_native_variant__...` functions are visible; classify native variants as direct-shaped; lower `MHandler::Native` wrappers as no-ops only after their bodies are direct; lower `BackendAtom` and `BackendSpawnThunk` in direct/native code | Keep; add new rows only for future backend-native handlers |
+| `Std.Ref.beam_ref` / `Std.Ref.ets_ref` | `Ref.new/get/set/modify` | Partially covered for simple direct native bodies; strict `RefTest.tests` is still rejected | Native `with` is not automatically transparent in CPS islands. If the native body passes an effectful callback to a HOF such as `List.iter`, the callback must be rewritten/native-specialized too, or evidence must remain valid through the HOF. A blanket native no-op compiles but produces missing `Ref` evidence at runtime | Next frontier after local FFI: design native handler + HOF callback lowering, starting with `RefTest.count_evens` / `sum_with_ref` |
 
 ## Old Lowerer Cross-Check
 
@@ -249,3 +250,7 @@ static.
 - **Handler re-yield frontier:** handler arms can now re-yield through the
   outer evidence using the arm continuation, covering
   `EffectsTest.reabort_wrapped`.
+- **Local external call frontier:** bodyless local `@external` signatures are
+  now recorded from passthrough `FunSignature` declarations and can be called
+  directly inside selective CPS islands. This clears `AdvancedTest.tests`
+  under strict selective-core.

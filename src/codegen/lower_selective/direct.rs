@@ -405,6 +405,27 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
     }
 
     fn lower_direct_external_app(&mut self, head: &Atom, args: &[Atom]) -> Option<CExpr> {
+        if let Some(callable) = self.local_external_callable_by_name(head) {
+            if args.len() != callable.arity {
+                return None;
+            }
+            let module = callable.module?;
+            let call_args = args
+                .iter()
+                .filter(|arg| {
+                    !matches!(
+                        arg,
+                        Atom::Lit {
+                            value: Lit::Unit,
+                            ..
+                        }
+                    )
+                })
+                .map(|arg| self.lower_atom(arg))
+                .collect();
+            return Some(CExpr::Call(module, callable.name, call_args));
+        }
+
         let source = match head {
             Atom::Var { source, .. } | Atom::QualifiedRef { source, .. } => *source,
             _ => return None,
