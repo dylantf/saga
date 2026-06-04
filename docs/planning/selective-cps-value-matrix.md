@@ -191,8 +191,8 @@ extraction.
 | --- | --- | --- |
 | Immediate monomorphic method call | Rewrite a known `DictMethodAccess(dict_ctor, method)` followed by apply into direct method-body lowering | Local known dict constructors are covered. Imported monomorphic constructors are covered when their method body is admitted into the caller, e.g. `Show Bool` and `Show Int`; imported methods that reference private ordinary Saga helpers still fall back unless those helpers are cloneable |
 | Impl-method metadata | Record, import, and query the trait name, impl type, method index/name, source arity, direct/CPS shape, and required sub-dicts for each dict constructor | `ModuleCodegenInfo::trait_impl_dicts` now carries per-method metadata for imported/public dicts. Selective lowering also consumes collected imported `MDictConstructor` bodies for direct call-site specialization |
-| Generic dict constructor args | Preserve and specialize constructor chains such as `__dict_ToJson_List(__dict_ToJson_Person)` | Local and imported admitted chains can now inline known generic method calls through known sub-dict aliases. Public/fallback dict constructor definitions are still emitted, and call-site dict tuple elision is a separate follow-up |
-| Dict-only local elision | Remove call-site dictionary tuple construction when the dict value is only used to reach a known method call | Deferred performance pass. Needs an occurrence proof for dictionary-only locals so `let d = __dict_T(...); let m = d.method; m x` can inline without first materializing `d` |
+| Generic dict constructor args | Preserve and specialize constructor chains such as `__dict_ToJson_List(__dict_ToJson_Person)` | Local and imported admitted chains can now inline known generic method calls through known sub-dict aliases. Public/fallback dict constructor definitions are still emitted for module boundaries |
+| Dict-only local elision | Remove call-site dictionary tuple construction when the dict value is only used to reach a known method call | First direct-lowering slice is covered for local/imported known dict locals erased by specialization. The pass uses a source candidate proof plus a lowered-Core no-reference guard |
 | Effectful impl methods | Choose direct, CPS, or direct-with-island based on the impl method's lowering plan | Same ABI discipline as ordinary functions: pure direct methods call direct, leaky methods call CPS, handled/net-pure methods may get direct island wrappers |
 | Trait method values | Specialize `let f = method` separately from immediate calls | Known pure methods can become direct closures; known CPS methods need explicit CPS adapter closures; dynamic dict methods still extract runtime closures |
 | Generic functions with `where` clauses | Optional call-site specialization of functions whose dictionary params are statically known | Later than direct method calls. Avoid blanket monomorphization until naming/cache policy is clear |
@@ -243,21 +243,21 @@ extraction.
      lambdas and thread known sub-dict aliases through generic impl-method
      bodies. This lets a generic method such as `Size (Box a)` inline its
      nested `Size a` method call when the sub-dict is statically known.
-   - Current limitation: public/fallback dict constructor functions are still
-     emitted and local call sites may still materialize dict tuples before the
-     method call is inlined. Full call-site dict tuple elision should use a
-     separate occurrence proof for dictionary-only locals.
+   - Public/fallback dict constructor functions are still emitted for module
+     boundaries, but direct selective callers can now elide local dict tuple
+     construction when specialization erases the use.
 
-4. **Deferred performance pass: dict-only local elision**
-   - After local/imported trait specialization is stable, teach selective
-     lowering to skip dictionary constructor lets when the resulting dict local
-     is only used to select a known method that is itself inlined.
-   - This should be separate from generic method-chain correctness. It is an
-     allocation/tuple-construction cleanup, not an ABI fallback requirement.
-   - Shape to cover:
+4. **Dict-only local elision**
+   - Direct selective lowering now skips dictionary constructor lets when the
+     resulting known dict local is erased by method specialization.
+   - The implementation keeps this as an allocation/tuple-construction cleanup,
+     not an ABI fallback requirement: it first identifies dict locals that are
+     only candidates for known method dispatch, then confirms the lowered Core
+     body no longer mentions the Core variable before omitting the binding.
+   - Covered shape:
      `let d = __dict_T(subdicts...); let m = DictMethodAccess(d, i);
      m(args...)`, including harmless direct lets between the method binding and
-     the final call.
+     the final call and nested generic sub-dict chains.
 
 5. **Known constructor/output-shape specialization**
    - After concrete trait calls are addressable, use Generic/record/ADT shape

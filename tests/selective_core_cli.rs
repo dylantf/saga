@@ -341,8 +341,9 @@ fn selective_core_codegen_runs_stdlib_dict_fixture() {
 #[test]
 fn selective_core_specializes_imported_monomorphic_trait_method() {
     let binary = env!("CARGO_BIN_EXE_saga");
-    let project_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("examples/optimization/selective-uniform/imported-stdlib-trait-specialization-project");
+    let project_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(
+        "examples/optimization/selective-uniform/imported-stdlib-trait-specialization-project",
+    );
 
     let inspect = std::process::Command::new(binary)
         .current_dir(&project_dir)
@@ -358,6 +359,7 @@ fn selective_core_specializes_imported_monomorphic_trait_method() {
     let core = String::from_utf8_lossy(&inspect.stdout);
     assert!(!core.contains("call 'erlang':'element'"), "{core}");
     assert!(!core.contains("apply ___anf_v1"), "{core}");
+    assert!(!core.contains("__dict_Std_Base_Show"), "{core}");
     assert!(core.contains("#{#<84>"), "{core}");
     assert!(core.contains("call 'erlang':'integer_to_binary'"), "{core}");
 
@@ -383,8 +385,9 @@ fn selective_core_specializes_imported_monomorphic_trait_method() {
 #[test]
 fn selective_core_specializes_imported_generic_trait_method_chain() {
     let binary = env!("CARGO_BIN_EXE_saga");
-    let project_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("examples/optimization/selective-uniform/imported-generic-trait-specialization-project");
+    let project_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(
+        "examples/optimization/selective-uniform/imported-generic-trait-specialization-project",
+    );
 
     let inspect = std::process::Command::new(binary)
         .current_dir(&project_dir)
@@ -400,6 +403,7 @@ fn selective_core_specializes_imported_generic_trait_method_chain() {
     let core = String::from_utf8_lossy(&inspect.stdout);
     assert!(!core.contains("call 'erlang':'element'"), "{core}");
     assert!(!core.contains("apply ___anf_v2"), "{core}");
+    assert!(!core.contains("__dict_Lib_Size"), "{core}");
     assert!(core.contains("call 'erlang':'+'"), "{core}");
     assert!(core.contains("42"), "{core}");
 

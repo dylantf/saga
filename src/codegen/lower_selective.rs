@@ -20,7 +20,7 @@ mod support;
 
 use crate::ast::{Lit, NodeId, Pat};
 use crate::codegen::CodegenContext;
-use crate::codegen::cerl::{CArm, CBinSeg, CExpr, CFunDef, CLit, CModule, CPat};
+use crate::codegen::cerl::{BinSegSize, CArm, CBinSeg, CExpr, CFunDef, CLit, CModule, CPat};
 use crate::codegen::handler_analysis::{HandlerAnalysis, ResumptionKind};
 use crate::codegen::lower::util::{core_var, lower_lit_atom, mangle_ctor_atom};
 use crate::codegen::monadic::ir::{

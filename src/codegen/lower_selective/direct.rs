@@ -41,19 +41,22 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                 }
                 let local_shape = self.direct_local_shape_for_expr(value);
                 let known_dict = self.known_dict_value_for_expr(value);
-                let value = self.lower_expr(value);
                 self.push_scope();
                 self.current_scope_mut().insert(var.name.clone());
                 if let Some(shape) = local_shape {
                     self.current_shape_scope_mut()
                         .insert(var.name.clone(), shape);
                 }
-                if let Some(dict) = known_dict {
+                if let Some(dict) = known_dict.as_ref() {
                     self.current_known_dict_value_scope_mut()
-                        .insert(var.name.clone(), dict);
+                        .insert(var.name.clone(), dict.clone());
                 }
                 let body = self.lower_expr(body);
                 self.pop_scope();
+                if known_dict.is_some() && !core_expr_mentions_var(&var.name, &body) {
+                    return body;
+                }
+                let value = self.lower_expr(value);
                 CExpr::Let(core_var(&var.name), Box::new(value), Box::new(body))
             }
             MExpr::If {
@@ -473,9 +476,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         let Atom::Lambda { params, body, .. } = method else {
             return None;
         };
-        if params.len() != args.len()
-            || params.iter().any(|param| !direct_param_supported(param))
-        {
+        if params.len() != args.len() || params.iter().any(|param| !direct_param_supported(param)) {
             return None;
         }
 
@@ -528,6 +529,17 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
     ) -> CExpr {
         let param_names = lower_param_names(params);
         let known_dict_aliases = self.known_dict_aliases_for_bindings(dict_bindings);
+        let candidate_elided_dict_bindings: HashSet<String> = dict_bindings
+            .iter()
+            .filter_map(|(name, arg)| {
+                let Atom::Var { name: arg_name, .. } = arg else {
+                    return None;
+                };
+                self.known_dict_value(&arg_name.name)?;
+                occurs::local_is_only_used_for_immediate_dict_method_calls(name, body)
+                    .then(|| name.clone())
+            })
+            .collect();
         self.push_scope();
         for (name, _) in dict_bindings {
             self.current_scope_mut().insert(name.clone());
@@ -542,20 +554,29 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         let lowered_body = self.wrap_param_match(params, &param_names, lowered_body);
         self.pop_scope();
 
-        let lowered_body =
-            param_names
-                .into_iter()
-                .zip(args.iter())
-                .rev()
-                .fold(lowered_body, |body, (param, arg)| {
-                    CExpr::Let(param, Box::new(self.lower_atom(arg)), Box::new(body))
-                });
+        let lowered_body = param_names
+            .into_iter()
+            .zip(args.iter())
+            .rev()
+            .fold(lowered_body, |body, (param, arg)| {
+                CExpr::Let(param, Box::new(self.lower_atom(arg)), Box::new(body))
+            });
 
         dict_bindings
             .iter()
             .rev()
             .fold(lowered_body, |body, (param, arg)| {
-                CExpr::Let(core_var(param), Box::new(self.lower_atom(arg)), Box::new(body))
+                if candidate_elided_dict_bindings.contains(param)
+                    && !core_expr_mentions_var(param, &body)
+                {
+                    body
+                } else {
+                    CExpr::Let(
+                        core_var(param),
+                        Box::new(self.lower_atom(arg)),
+                        Box::new(body),
+                    )
+                }
             })
     }
 
@@ -1450,5 +1471,113 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         let mut elems = vec![CPat::Lit(CLit::Atom(tag))];
         elems.extend(args.iter().map(|pat| self.lower_pat(pat)));
         CPat::Tuple(elems)
+    }
+}
+
+fn core_expr_mentions_var(source_name: &str, expr: &CExpr) -> bool {
+    let var = core_var(source_name);
+    core_expr_mentions_core_var(&var, expr)
+}
+
+fn core_expr_mentions_core_var(var: &str, expr: &CExpr) -> bool {
+    match expr {
+        CExpr::Var(name) => name == var,
+        CExpr::Lit(_) | CExpr::Nil | CExpr::FunRef(_, _) => false,
+        CExpr::Fun(params, body) => {
+            !params.iter().any(|param| param == var) && core_expr_mentions_core_var(var, body)
+        }
+        CExpr::Let(name, value, body) => {
+            core_expr_mentions_core_var(var, value)
+                || (name != var && core_expr_mentions_core_var(var, body))
+        }
+        CExpr::Apply(head, args) => {
+            core_expr_mentions_core_var(var, head)
+                || args.iter().any(|arg| core_expr_mentions_core_var(var, arg))
+        }
+        CExpr::Call(_, _, args) | CExpr::Tuple(args) | CExpr::Values(args) => {
+            args.iter().any(|arg| core_expr_mentions_core_var(var, arg))
+        }
+        CExpr::Case(scrutinee, arms) => {
+            core_expr_mentions_core_var(var, scrutinee)
+                || arms.iter().any(|arm| core_arm_mentions_core_var(var, arm))
+        }
+        CExpr::Cons(head, tail) => {
+            core_expr_mentions_core_var(var, head) || core_expr_mentions_core_var(var, tail)
+        }
+        CExpr::LetRec(bindings, body) => {
+            bindings
+                .iter()
+                .any(|(_, _, binding)| core_expr_mentions_core_var(var, binding))
+                || core_expr_mentions_core_var(var, body)
+        }
+        CExpr::Receive(arms, timeout, body) => {
+            arms.iter().any(|arm| core_arm_mentions_core_var(var, arm))
+                || core_expr_mentions_core_var(var, timeout)
+                || core_expr_mentions_core_var(var, body)
+        }
+        CExpr::Try {
+            expr,
+            ok_var,
+            ok_body,
+            catch_vars,
+            catch_body,
+        } => {
+            core_expr_mentions_core_var(var, expr)
+                || (ok_var != var && core_expr_mentions_core_var(var, ok_body))
+                || (catch_vars.0 != var
+                    && catch_vars.1 != var
+                    && catch_vars.2 != var
+                    && core_expr_mentions_core_var(var, catch_body))
+        }
+        CExpr::Binary(segments) => segments
+            .iter()
+            .any(|segment| core_expr_bin_segment_mentions_core_var(var, segment)),
+        CExpr::Annotated { expr, .. } => core_expr_mentions_core_var(var, expr),
+    }
+}
+
+fn core_arm_mentions_core_var(var: &str, arm: &CArm) -> bool {
+    arm.guard
+        .as_ref()
+        .is_some_and(|guard| core_expr_mentions_core_var(var, guard))
+        || (!core_pat_binds_core_var(var, &arm.pat) && core_expr_mentions_core_var(var, &arm.body))
+}
+
+fn core_expr_bin_segment_mentions_core_var(var: &str, segment: &CBinSeg<CExpr>) -> bool {
+    match segment {
+        CBinSeg::Byte(_) => false,
+        CBinSeg::BinaryAll(value) => core_expr_mentions_core_var(var, value),
+        CBinSeg::Segment { value, size, .. } => {
+            core_expr_mentions_core_var(var, value)
+                || matches!(size, BinSegSize::Expr(size) if core_expr_mentions_core_var(var, size))
+        }
+    }
+}
+
+fn core_pat_binds_core_var(var: &str, pat: &CPat) -> bool {
+    match pat {
+        CPat::Var(name) => name == var,
+        CPat::Alias(name, pat) => name == var || core_pat_binds_core_var(var, pat),
+        CPat::Lit(_) | CPat::Wildcard | CPat::Nil => false,
+        CPat::Tuple(fields) | CPat::Values(fields) => fields
+            .iter()
+            .any(|field| core_pat_binds_core_var(var, field)),
+        CPat::Cons(head, tail) => {
+            core_pat_binds_core_var(var, head) || core_pat_binds_core_var(var, tail)
+        }
+        CPat::Binary(segments) => segments
+            .iter()
+            .any(|segment| core_pat_bin_segment_binds_core_var(var, segment)),
+    }
+}
+
+fn core_pat_bin_segment_binds_core_var(var: &str, segment: &CBinSeg<CPat>) -> bool {
+    match segment {
+        CBinSeg::Byte(_) => false,
+        CBinSeg::BinaryAll(value) => core_pat_binds_core_var(var, value),
+        CBinSeg::Segment { value, size, .. } => {
+            core_pat_binds_core_var(var, value)
+                || matches!(size, BinSegSize::Expr(size) if core_expr_mentions_core_var(var, size))
+        }
     }
 }

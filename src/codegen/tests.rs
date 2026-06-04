@@ -634,6 +634,10 @@ main () = size (Box 41)
         !main_body.contains("call 'erlang':'element'"),
         "known generic trait chain should not extract method closures in main\n{out}"
     );
+    assert!(
+        !main_body.contains("__dict_Size"),
+        "known generic trait chain should not materialize dict tuples in main\n{out}"
+    );
     assert_selective_core_eval_stdout_contains(
         src,
         "io:format(\"~p~n\", ['_script':main(unit)]), init:stop().",

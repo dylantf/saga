@@ -1630,5 +1630,15 @@ boundaries exist.
     dictionary chain, inlining both the outer `Size Boxed` method and the
     nested `Size Int` method in the caller;
   - the caller no longer emits `erlang:element`/method closure apply for this
-    imported generic chain. Dictionary constructor lets still remain until the
-    deferred dict-only local elision pass.
+    imported generic chain.
+- Added the first dict-only local elision slice:
+  - direct selective lowering now omits known dictionary constructor lets when
+    specialization erases all lowered Core references to the dict local;
+  - method-body dict parameter aliases are also omitted when they only feed
+    nested known method calls, so generic chains do not leave behind dead
+    sub-dict aliases;
+  - the pass is guarded twice: a source-level candidate check for immediate
+    dict-method-call usage, and a lowered-Core no-reference scan before the
+    binding is actually skipped;
+  - local and imported generic trait-chain tests now assert that specialized
+    caller bodies do not materialize the relevant dict constructors.

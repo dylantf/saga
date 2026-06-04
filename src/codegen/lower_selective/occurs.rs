@@ -94,6 +94,110 @@ pub(super) fn local_is_only_called_in_expr(local: &str, expr: &MExpr) -> bool {
     }
 }
 
+pub(super) fn local_is_only_used_for_immediate_dict_method_calls(
+    local: &str,
+    expr: &MExpr,
+) -> bool {
+    match expr {
+        MExpr::Pure(atom) => !atom_mentions_local(local, atom),
+        MExpr::Yield { args, .. } | MExpr::ForeignCall { args, .. } => {
+            args.iter().all(|arg| !atom_mentions_local(local, arg))
+        }
+        MExpr::Bind {
+            var, value, body, ..
+        }
+        | MExpr::Let { var, value, body } => {
+            let value_ok = match value.as_ref() {
+                MExpr::DictMethodAccess {
+                    dict: Atom::Var { name, .. },
+                    ..
+                } if name.name == local => true,
+                _ => local_is_only_used_for_immediate_dict_method_calls(local, value),
+            };
+            value_ok
+                && (var.name == local
+                    || local_is_only_used_for_immediate_dict_method_calls(local, body))
+        }
+        MExpr::Ensure { body, cleanup } => {
+            local_is_only_used_for_immediate_dict_method_calls(local, body)
+                && local_is_only_used_for_immediate_dict_method_calls(local, cleanup)
+        }
+        MExpr::Case {
+            scrutinee, arms, ..
+        } => {
+            !atom_mentions_local(local, scrutinee)
+                && arms.iter().all(|arm| {
+                    arm.guard.as_ref().is_none_or(|guard| {
+                        local_is_only_used_for_immediate_dict_method_calls(local, guard)
+                    }) && (pat_binds_name(&arm.pattern, local)
+                        || local_is_only_used_for_immediate_dict_method_calls(local, &arm.body))
+                })
+        }
+        MExpr::If {
+            cond,
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            !atom_mentions_local(local, cond)
+                && local_is_only_used_for_immediate_dict_method_calls(local, then_branch)
+                && local_is_only_used_for_immediate_dict_method_calls(local, else_branch)
+        }
+        MExpr::App { head, args, .. } => {
+            !atom_mentions_local(local, head)
+                && args.iter().all(|arg| !atom_mentions_local(local, arg))
+        }
+        MExpr::With { handler, body, .. } => {
+            !handler_mentions_local(local, handler)
+                && local_is_only_used_for_immediate_dict_method_calls(local, body)
+        }
+        MExpr::Resume { value, .. }
+        | MExpr::FieldAccess { record: value, .. }
+        | MExpr::UnaryMinus { value, .. } => !atom_mentions_local(local, value),
+        MExpr::RecordUpdate { record, fields, .. } => {
+            !atom_mentions_local(local, record)
+                && fields
+                    .iter()
+                    .all(|(_, atom)| !atom_mentions_local(local, atom))
+        }
+        MExpr::DictMethodAccess { dict, .. } => !atom_mentions_local(local, dict),
+        MExpr::BinOp { left, right, .. } => {
+            !atom_mentions_local(local, left) && !atom_mentions_local(local, right)
+        }
+        MExpr::BitString { segments, .. } => segments
+            .iter()
+            .all(|segment| !atom_mentions_local(local, &segment.value)),
+        MExpr::Receive { arms, after, .. } => {
+            arms.iter().all(|arm| {
+                arm.guard.as_ref().is_none_or(|guard| {
+                    local_is_only_used_for_immediate_dict_method_calls(local, guard)
+                }) && (pat_binds_name(&arm.pattern, local)
+                    || local_is_only_used_for_immediate_dict_method_calls(local, &arm.body))
+            }) && after.as_ref().is_none_or(|(timeout, body)| {
+                !atom_mentions_local(local, timeout)
+                    && local_is_only_used_for_immediate_dict_method_calls(local, body)
+            })
+        }
+        MExpr::LetFun {
+            name, body, rest, ..
+        } => {
+            (name == local || local_is_only_used_for_immediate_dict_method_calls(local, body))
+                && local_is_only_used_for_immediate_dict_method_calls(local, rest)
+        }
+        MExpr::HandlerValue {
+            arms,
+            return_clause,
+            ..
+        } => {
+            arms.iter()
+                .all(|arm| !handler_arm_mentions_local(local, arm))
+                && return_clause
+                    .as_ref()
+                    .is_none_or(|arm| !handler_arm_mentions_local(local, arm))
+        }
+    }
+}
+
 fn expr_mentions_local(local: &str, expr: &MExpr) -> bool {
     match expr {
         MExpr::Pure(atom) => atom_mentions_local(local, atom),
@@ -169,8 +273,7 @@ fn expr_mentions_local(local: &str, expr: &MExpr) -> bool {
         MExpr::LetFun {
             name, body, rest, ..
         } => {
-            (name != local && expr_mentions_local(local, body))
-                || expr_mentions_local(local, rest)
+            (name != local && expr_mentions_local(local, body)) || expr_mentions_local(local, rest)
         }
         MExpr::HandlerValue {
             arms,
