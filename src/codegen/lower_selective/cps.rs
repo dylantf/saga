@@ -485,7 +485,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             return None;
         }
         let table = CExpr::Lit(CLit::Atom("saga_ref_store".to_string()));
-        match op.op.as_str() {
+        let result = match op.op.as_str() {
             "get" if args.len() == 1 => {
                 let lookup = self.fresh_cps_temp("_NativeRefLookup");
                 let value = self.fresh_cps_temp("_NativeRefValue");
@@ -568,7 +568,53 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                 )
             }
             _ => None,
-        }
+        };
+        result.map(|body| self.wrap_ets_ref_table_init(body))
+    }
+
+    fn wrap_ets_ref_table_init(&mut self, body: CExpr) -> CExpr {
+        let table = CExpr::Lit(CLit::Atom("saga_ref_store".to_string()));
+        let init = CExpr::Case(
+            Box::new(CExpr::Call(
+                "ets".to_string(),
+                "info".to_string(),
+                vec![table.clone()],
+            )),
+            vec![
+                CArm {
+                    pat: CPat::Lit(CLit::Atom("undefined".to_string())),
+                    guard: None,
+                    body: CExpr::Call(
+                        "ets".to_string(),
+                        "new".to_string(),
+                        vec![table, self.ets_table_options()],
+                    ),
+                },
+                CArm {
+                    pat: CPat::Wildcard,
+                    guard: None,
+                    body: CExpr::Lit(CLit::Atom("unit".to_string())),
+                },
+            ],
+        );
+        CExpr::Let(
+            self.fresh_cps_temp("_EtsRefInit"),
+            Box::new(init),
+            Box::new(body),
+        )
+    }
+
+    fn ets_table_options(&self) -> CExpr {
+        CExpr::Cons(
+            Box::new(CExpr::Lit(CLit::Atom("set".to_string()))),
+            Box::new(CExpr::Cons(
+                Box::new(CExpr::Lit(CLit::Atom("public".to_string()))),
+                Box::new(CExpr::Cons(
+                    Box::new(CExpr::Lit(CLit::Atom("named_table".to_string()))),
+                    Box::new(CExpr::Nil),
+                )),
+            )),
+        )
     }
 
     fn lower_ref_modify_direct_call_result(
@@ -1675,17 +1721,11 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         }
         let resolved = self.resolution.get(&source)?;
         let ResolvedCodegenKind::BeamFunction {
-            erlang_mod,
-            name,
-            effects,
-            ..
+            erlang_mod, name, ..
         } = &resolved.kind
         else {
             return None;
         };
-        if effects.is_empty() {
-            return None;
-        }
         let module = resolved_erlang_module_for_call(erlang_mod, &self.current_module)?;
         let specialization = self
             .imported_hof_direct_specializations

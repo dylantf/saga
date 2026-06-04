@@ -409,7 +409,7 @@ fn selective_core_codegen_runs_imported_higher_order_direct_callback_project() {
         "{inspect_stdout}"
     );
     assert!(
-        inspect_stdout.contains("apply 'apply_it'/1(call 'erlang':'make_fun'"),
+        inspect_stdout.contains("apply '__saga_direct_hof_apply_it'/1(call 'erlang':'make_fun'"),
         "{inspect_stdout}"
     );
 
@@ -752,12 +752,13 @@ fn selective_core_codegen_lowers_stdlib_stream_strict_frontier() {
     );
     let core = String::from_utf8_lossy(&inspect.stdout);
     assert!(core.contains("'for_each'/4"), "{core}");
+    assert!(core.contains("'__saga_direct_hof_for_each'/2"), "{core}");
     assert!(
         core.contains("apply F(V, _Evidence, fun (_CpsBindArg"),
         "{core}"
     );
     assert!(
-        core.contains("apply 'for_each'/4(F, Rest, _Evidence, _ReturnK)"),
+        core.contains("apply 'for_each'/4(F, Rest, {}, fun (_CpsResult"),
         "{core}"
     );
 }

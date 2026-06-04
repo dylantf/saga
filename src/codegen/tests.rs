@@ -1307,9 +1307,13 @@ main () = apply_it inc
 "#;
     let out = emit_selective_core(src);
     assert!(out.contains("'apply_it'/1"), "{out}");
+    assert!(out.contains("'__saga_direct_hof_apply_it'/1"), "{out}");
     assert!(out.contains("'inc'/1"), "{out}");
     assert!(out.contains("apply F(1)"), "{out}");
-    assert!(out.contains("apply 'apply_it'/1('inc'/1)"), "{out}");
+    assert!(
+        out.contains("apply '__saga_direct_hof_apply_it'/1('inc'/1)"),
+        "{out}"
+    );
     assert_selective_core_compiles(src);
 }
 

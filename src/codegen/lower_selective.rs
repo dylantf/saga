@@ -150,6 +150,7 @@ struct DirectLowerer<'a, 'info> {
     ///
     /// This can be CPS even when the implementation body is direct-lowerable.
     callable_type_shapes: HashMap<String, RuntimeFunctionShape>,
+    callable_callback_param_arities: HashMap<String, Vec<Option<usize>>>,
     local_fun_bindings: HashMap<String, MFunBinding>,
     direct_values: HashSet<String>,
     /// Per-function lowering decision for the implementation body.
@@ -207,6 +208,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             handler_value_map,
             current_module: String::new(),
             callable_type_shapes: HashMap::new(),
+            callable_callback_param_arities: HashMap::new(),
             local_fun_bindings: HashMap::new(),
             direct_values: HashSet::new(),
             function_plans: HashMap::new(),
@@ -1064,25 +1066,6 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             return None;
         };
         let module = resolved_erlang_module_for_call(erlang_mod, &self.current_module);
-        if module.is_none()
-            && let Some(RuntimeFunctionShape::Cps(shape)) = self.callable_type_shapes.get(name)
-        {
-            let (source_arity, adapter_arity, effects) =
-                self.cps_function_arity_at(source).unwrap_or_else(|| {
-                    let source_arity = source_arity_for_cps_resolved(*arity);
-                    (source_arity, source_arity + 2, shape.static_effects.clone())
-                });
-            return Some(CallShape::Cps {
-                module,
-                name: name.clone(),
-                source_arity,
-                adapter_arity,
-                effects,
-            });
-        }
-        if effects.is_empty() {
-            return None;
-        }
         let metadata = module
             .as_ref()
             .and_then(|module| {
@@ -1103,8 +1086,30 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                 name: name.clone(),
                 source_arity: entries.source_arity,
                 adapter_arity,
-                effects: effects.clone(),
+                effects: match &entries.callable_type_shape {
+                    RuntimeFunctionShape::Cps(shape) => shape.static_effects.clone(),
+                    _ => effects.clone(),
+                },
             });
+        }
+        if module.is_none()
+            && let Some(RuntimeFunctionShape::Cps(shape)) = self.callable_type_shapes.get(name)
+        {
+            let (source_arity, adapter_arity, effects) =
+                self.cps_function_arity_at(source).unwrap_or_else(|| {
+                    let source_arity = source_arity_for_cps_resolved(*arity);
+                    (source_arity, source_arity + 2, shape.static_effects.clone())
+                });
+            return Some(CallShape::Cps {
+                module,
+                name: name.clone(),
+                source_arity,
+                adapter_arity,
+                effects,
+            });
+        }
+        if effects.is_empty() {
+            return None;
         }
         Some(CallShape::Cps {
             module,
@@ -1201,6 +1206,17 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         let is_remote = erlang_mod
             .as_ref()
             .is_some_and(|module| module != &self.current_module);
+        if is_remote
+            && erlang_mod
+                .as_ref()
+                .and_then(|module| {
+                    self.imported_function_entries
+                        .get(&(module.clone(), name.clone()))
+                })
+                .is_some_and(FunctionEntryInfo::is_cps_typed)
+        {
+            return None;
+        }
         if !effects.is_empty() && is_remote {
             let module = erlang_mod.as_ref()?;
             let entries = self
@@ -1781,9 +1797,18 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                     Some(CallShape::LocalCallable { arity, .. }) => {
                         args.len() <= arity && self.direct_call_args_are_supported(head, args)
                     }
-                    Some(CallShape::Cps { .. })
-                    | Some(CallShape::LocalCpsCallable { .. })
-                    | None => false,
+                    Some(CallShape::Cps {
+                        source_arity,
+                        adapter_arity,
+                        effects,
+                        ..
+                    }) => {
+                        effects.is_empty()
+                            && source_arity == args.len()
+                            && adapter_arity == args.len() + 2
+                            && self.direct_cps_call_args_are_supported(head, args)
+                    }
+                    Some(CallShape::LocalCpsCallable { .. }) | None => false,
                 }
             }
             MExpr::BinOp { left, right, .. } => {
@@ -1930,6 +1955,51 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                     }
             }
             DirectHandlerKind::BeamVec => false,
+        }
+    }
+
+    fn direct_cps_call_args_are_supported(&mut self, head: &Atom, args: &[Atom]) -> bool {
+        let expected_arg_shapes = self.direct_call_effectful_callback_param_shapes(head);
+        if !expected_arg_shapes.iter().any(Option::is_some) {
+            return false;
+        }
+        args.iter().enumerate().all(|(index, arg)| {
+            match expected_arg_shapes.get(index).copied().flatten() {
+                Some((source_arity, _adapter_arity)) => {
+                    self.cps_runtime_arg_atom_is_supported(arg, source_arity)
+                }
+                None => self.atom_is_direct_subset(arg),
+            }
+        })
+    }
+
+    fn cps_runtime_arg_atom_is_supported(&mut self, atom: &Atom, source_arity: usize) -> bool {
+        match atom {
+            Atom::Lambda { params, body, .. } => {
+                params.len() == source_arity
+                    && (self.lambda_is_direct_subset(params, body)
+                        || self.lambda_is_cps_subset(atom)
+                        || self.lambda_is_direct_cps_island_subset(params, body))
+            }
+            _ => {
+                self.atom_is_direct_subset(atom)
+                    || self
+                        .cps_value_atom_shape(atom)
+                        .is_some_and(|shape| match shape {
+                            LocalValueShape::RuntimeCpsCallable {
+                                source_arity: actual,
+                                ..
+                            }
+                            | LocalValueShape::CpsCallable {
+                                source_arity: actual,
+                                ..
+                            }
+                            | LocalValueShape::PureCallable { arity: actual } => {
+                                actual == source_arity
+                            }
+                            LocalValueShape::PureCallableFromUseType => true,
+                        })
+            }
         }
     }
 
@@ -3471,6 +3541,19 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             current = ret;
         }
         (is_cps && arity > 0).then_some((arity, arity + 2, effects))
+    }
+
+    fn callback_param_arities_from_type(&self, ty: &Type) -> Vec<Option<usize>> {
+        let mut current = ty;
+        let mut arities = Vec::new();
+        while let Type::Fun(param, ret, _) = current {
+            arities.push(
+                self.cps_function_arity_from_type(param)
+                    .map(|(source_arity, _, _)| source_arity),
+            );
+            current = ret;
+        }
+        arities
     }
 
     fn expr_contains_yield(&self, expr: &MExpr) -> bool {

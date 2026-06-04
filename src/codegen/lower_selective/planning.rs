@@ -3,6 +3,7 @@ use super::*;
 impl<'a, 'info> DirectLowerer<'a, 'info> {
     pub(super) fn classify_program(&mut self, program: &MProgram) {
         self.callable_type_shapes.clear();
+        self.callable_callback_param_arities.clear();
         self.local_fun_bindings.clear();
         self.direct_values.clear();
         self.function_plans.clear();
@@ -16,10 +17,12 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             match decl {
                 MDecl::FunBinding(fb) => {
                     self.local_fun_bindings.insert(fb.name.clone(), fb.clone());
+                    let function_type = self.function_type_for_binding(fb).cloned();
                     let shape = if is_native_variant_name(&fb.name) {
                         RuntimeFunctionShape::Pure
                     } else {
-                        self.function_type_for_binding(fb)
+                        function_type
+                            .as_ref()
                             .map(|ty| RuntimeFunctionShape::from_type(ty, |effects| effects))
                             .or_else(|| signature_shapes.get(&fb.name).cloned())
                             .unwrap_or_else(|| match self.effect_info.fun_effects.get(&fb.name) {
@@ -38,6 +41,10 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                                 ),
                             })
                     };
+                    if let Some(ty) = function_type.as_ref() {
+                        self.callable_callback_param_arities
+                            .insert(fb.name.clone(), self.callback_param_arities_from_type(ty));
+                    }
                     self.callable_type_shapes.insert(fb.name.clone(), shape);
                 }
                 MDecl::Val(v) => {
@@ -238,12 +245,6 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             if !single_clause_funs.contains(&fb.name) {
                 continue;
             }
-            if !matches!(
-                self.function_plans.get(&fb.name),
-                Some(FunctionLoweringPlan::CpsBody)
-            ) {
-                continue;
-            }
             if let Some(specialization) = self.hof_direct_specialization_for_fun_binding(fb) {
                 self.local_hof_direct_specializations
                     .insert(fb.name.clone(), specialization);
@@ -294,10 +295,10 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         self.imported_function_entries.clear();
         self.imported_hof_direct_specializations.clear();
         for (source_module_name, compiled) in &self.module_ctx.modules {
+            let is_stdlib_module = source_module_name.starts_with("Std.");
             if source_module_name == &self.current_module
-                || source_module_name.starts_with("Std.")
                 || compiled.elaborated.is_empty()
-                || !self.current_module_references_module(source_module_name)
+                || (!is_stdlib_module && !self.current_module_references_module(source_module_name))
             {
                 continue;
             }
@@ -377,8 +378,24 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         &mut self,
         info: &crate::typechecker::ModuleCodegenInfo,
     ) {
+        for (name, scheme) in &info.exports {
+            self.callable_callback_param_arities.insert(
+                name.clone(),
+                self.callback_param_arities_from_type(&scheme.ty),
+            );
+            self.callable_type_shapes.insert(
+                name.clone(),
+                RuntimeFunctionShape::from_type(&scheme.ty, |effects| effects),
+            );
+        }
         for (name, effects) in &info.fun_effects {
             let shape = if effects.is_empty() {
+                if matches!(
+                    self.callable_type_shapes.get(name),
+                    Some(RuntimeFunctionShape::Cps(_))
+                ) {
+                    continue;
+                }
                 RuntimeFunctionShape::Pure
             } else {
                 RuntimeFunctionShape::Cps(crate::codegen::runtime_shape::CpsShape {
@@ -594,13 +611,6 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         if fb.guard.is_some() || fb.params.iter().any(|p| !direct_param_supported(p)) {
             return None;
         }
-        if !matches!(
-            self.callable_type_shapes.get(&fb.name),
-            Some(RuntimeFunctionShape::Cps(_))
-        ) {
-            return None;
-        }
-
         let (param_shapes, callback_params) = self.hof_direct_specialized_param_shapes(fb)?;
         if callback_params.is_empty() {
             return None;
@@ -639,6 +649,25 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                 }
                 shapes[index] = Some(LocalValueShape::PureCallable {
                     arity: source_arity,
+                });
+            }
+        }
+        if let Some(callback_arities) = self.callable_callback_param_arities.get(&fb.name) {
+            for (index, source_arity) in callback_arities.iter().enumerate() {
+                let Some(source_arity) = source_arity else {
+                    continue;
+                };
+                if index >= fb.params.len() {
+                    continue;
+                }
+                if !callback_params.iter().any(|param| param.index == index) {
+                    callback_params.push(HofCallbackParam {
+                        index,
+                        source_arity: *source_arity,
+                    });
+                }
+                shapes[index] = Some(LocalValueShape::PureCallable {
+                    arity: *source_arity,
                 });
             }
         }

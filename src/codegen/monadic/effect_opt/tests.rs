@@ -1483,13 +1483,6 @@ fn native_direct_call_rewrites_spawn_with_backend_thunk() {
 fn native_direct_call_skips_ref_vec_and_unknown_handler_backends() {
     for (effect, handler_name, op, args, source) in [
         (
-            "Std.Ref.Ref",
-            "ets_ref",
-            "get",
-            vec![lit_int("1", 1)],
-            crate::ast::NodeId(241),
-        ),
-        (
             "Std.Vec.Vec",
             "beam_vec",
             "vec_len",
@@ -1514,6 +1507,22 @@ fn native_direct_call_skips_ref_vec_and_unknown_handler_backends() {
 
         assert_eq!(out, val_program(with_expr(handler, yield_expr)));
     }
+}
+
+#[test]
+fn native_direct_call_rewrites_ets_ref_get() {
+    let f = Fixture::new();
+    let handler = native_handler("Std.Ref.Ref", "ets_ref", 251);
+    let yield_expr = yield_native("Std.Ref.Ref", "get", vec![lit_int("1", 1)], 241);
+    let prog = val_program(with_expr(handler, yield_expr));
+    let info = f.info();
+
+    let out = run(prog, &f.h, &info);
+    let out = format!("{out:?}");
+
+    assert!(out.contains("func: \"whereis\""), "{out}");
+    assert!(out.contains("func: \"lookup\""), "{out}");
+    assert!(!out.contains("Yield"), "{out}");
 }
 
 #[test]
