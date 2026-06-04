@@ -5,8 +5,8 @@
 //!
 //! Translation is uniform and total: every AST node maps to exactly one rule,
 //! the translator emits `Bind` everywhere (never `Let`), and Static-vs-Dynamic
-//! handler classification is decided at construction time. Bind→Let promotion
-//! and direct-call rewriting are the job of later `effect_opt` passes.
+//! handler classification is decided at construction time. Selective lowering
+//! decides which regions stay direct and which use the raw monadic fallback.
 //!
 //! See `docs/planning/uniform-effect-translation/monadic-ir-spec.md` for the
 //! IR spec and `agent-guide.md` for the cross-cutting invariants.

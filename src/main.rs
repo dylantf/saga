@@ -1,7 +1,7 @@
 mod cli;
 
 use clap::{Parser, Subcommand};
-use saga::compiler_options::{CodegenBackend, CompileOptions, MonadicStatsMode};
+use saga::compiler_options::CompileOptions;
 
 #[derive(Parser)]
 #[command(name = "saga", about = "The saga compiler", version)]
@@ -22,12 +22,6 @@ enum Command {
         /// Show full erlc/erl output
         #[arg(short, long)]
         verbose: bool,
-        /// Print monadic optimizer stats while compiling
-        #[arg(long)]
-        monadic_stats: bool,
-        /// Use the experimental selective direct/codegen backend
-        #[arg(long)]
-        selective_codegen: bool,
         /// Require every lowered function to use the selective backend
         #[arg(long)]
         selective_no_fallback: bool,
@@ -42,12 +36,6 @@ enum Command {
         /// Show full erlc/erl output
         #[arg(short, long)]
         verbose: bool,
-        /// Print monadic optimizer stats while compiling
-        #[arg(long)]
-        monadic_stats: bool,
-        /// Use the experimental selective direct/codegen backend
-        #[arg(long)]
-        selective_codegen: bool,
         /// Require every lowered function to use the selective backend
         #[arg(long)]
         selective_no_fallback: bool,
@@ -61,9 +49,6 @@ enum Command {
     Emit {
         /// The .saga source file
         file: String,
-        /// Use the experimental selective direct/codegen backend
-        #[arg(long)]
-        selective_codegen: bool,
         /// Require every lowered function to use the selective backend
         #[arg(long)]
         selective_no_fallback: bool,
@@ -72,7 +57,7 @@ enum Command {
     Inspect {
         /// The .saga source file
         file: String,
-        /// Stage to dump: elaborated | anf | monadic | monadic-opt | monadic-stats | core
+        /// Stage to dump: elaborated | anf | monadic | selective-core | core
         #[arg(long)]
         stage: String,
         /// Require every lowered function to use the selective backend for selective-core
@@ -86,12 +71,6 @@ enum Command {
         /// Show full erlc/erl output
         #[arg(short, long)]
         verbose: bool,
-        /// Print monadic optimizer stats while compiling
-        #[arg(long)]
-        monadic_stats: bool,
-        /// Use the experimental selective direct/codegen backend
-        #[arg(long)]
-        selective_codegen: bool,
         /// Require every lowered function to use the selective backend
         #[arg(long)]
         selective_no_fallback: bool,
@@ -151,24 +130,20 @@ fn main() {
             file,
             release,
             verbose,
-            monadic_stats,
-            selective_codegen,
             selective_no_fallback,
         } => {
             cli::set_verbose(verbose);
-            let options = compile_options(monadic_stats, selective_codegen, selective_no_fallback);
+            let options = compile_options(selective_no_fallback);
             cli::commands::cmd_run(file.as_deref(), release, &options);
         }
         Command::Build {
             file,
             release,
             verbose,
-            monadic_stats,
-            selective_codegen,
             selective_no_fallback,
         } => {
             cli::set_verbose(verbose);
-            let options = compile_options(monadic_stats, selective_codegen, selective_no_fallback);
+            let options = compile_options(selective_no_fallback);
             cli::commands::cmd_build(file.as_deref(), release, &options);
         }
         Command::Check { file } => {
@@ -176,10 +151,9 @@ fn main() {
         }
         Command::Emit {
             file,
-            selective_codegen,
             selective_no_fallback,
         } => {
-            let options = compile_options(false, selective_codegen, selective_no_fallback);
+            let options = compile_options(selective_no_fallback);
             cli::commands::cmd_emit(&file, &options);
         }
         Command::Inspect {
@@ -187,18 +161,16 @@ fn main() {
             stage,
             selective_no_fallback,
         } => {
-            let options = compile_options(false, false, selective_no_fallback);
+            let options = compile_options(selective_no_fallback);
             cli::commands::cmd_inspect_with_options(&file, &stage, &options);
         }
         Command::Test {
             filter,
             verbose,
-            monadic_stats,
-            selective_codegen,
             selective_no_fallback,
         } => {
             cli::set_verbose(verbose);
-            let options = compile_options(monadic_stats, selective_codegen, selective_no_fallback);
+            let options = compile_options(selective_no_fallback);
             cli::commands::cmd_test(filter.as_deref(), &options);
         }
         Command::New { name, lib } => {
@@ -221,18 +193,8 @@ fn main() {
     }
 }
 
-fn compile_options(
-    monadic_stats: bool,
-    selective_codegen: bool,
-    selective_no_fallback: bool,
-) -> CompileOptions {
+fn compile_options(selective_no_fallback: bool) -> CompileOptions {
     let mut options = CompileOptions::default();
-    if monadic_stats {
-        options = options.with_monadic_stats(MonadicStatsMode::Summary);
-    }
-    if selective_codegen {
-        options = options.with_codegen_backend(CodegenBackend::Selective);
-    }
     if selective_no_fallback {
         options = options.with_selective_no_fallback(true);
     }

@@ -15,7 +15,7 @@ mod tests;
 pub mod type_shape;
 
 use crate::ast;
-use crate::compiler_options::{CodegenBackend, CompileOptions, MonadicStatsMode};
+use crate::compiler_options::CompileOptions;
 use crate::typechecker::{CheckResult, ModuleCodegenInfo};
 use std::collections::{HashMap, HashSet};
 
@@ -129,7 +129,6 @@ pub struct SourceFile {
 
 pub struct EmitModuleOutput {
     pub core_src: String,
-    pub monadic_stats: Option<monadic::stats::StatsReport>,
 }
 
 pub fn emit_module_with_context(
@@ -161,10 +160,9 @@ pub fn emit_module_with_context_options(
     entry_export: Option<&str>,
     options: &CompileOptions,
 ) -> EmitModuleOutput {
-    // The uniform path consumes the raw elaborated AST, runs ANF + monadic
-    // translation + effect optimization, then lowers via
-    // `lower::Lowerer`. Bootstrap evidence emission is on only for
-    // the entry-point module (`entry_export.is_some()`).
+    // The selective path consumes the raw elaborated AST, runs ANF + monadic
+    // translation once, lowers direct-first selective Core, and overlays it on
+    // the raw monadic fallback unless `--selective-no-fallback` is enabled.
     emit_module_via_new_path(
         module_name,
         program,
@@ -317,18 +315,16 @@ pub fn build_let_handler_effects(check_result: &CheckResult) -> HashMap<ast::Nod
         .collect()
 }
 
-/// New-path emit. Sequence:
+/// Selective emit. Sequence:
 ///   a. resolution_map = resolve::resolve_names(module_name, raw_elaborated, …)
 ///   b. effect_info  = build_effect_info(check_result, module_check_result)
 ///   c. handler_info = handler_analysis::analyze(raw_elaborated)
 ///   d. anf_program  = anf::normalize(raw_elaborated.clone())
 ///   e. monadic      = monadic::translate(&anf_program, &resolution_map, &effect_info)
-///   f. for the legacy uniform backend only:
-///        optimized = monadic::effect_opt::run_with_context(monadic, …)
-///   g. cmod         = lower::Lowerer::new(…)
-///                         .with_bootstrap_emission(entry_export.is_some())
-///                         .lower_module(module_name, &optimized_or_raw)
-///   h. cerl::print_module(&cmod)
+///   f. selective    = lower_selective::lower_module(…)
+///   g. fallback     = lower::Lowerer::new(…).lower_module(module_name, &monadic)
+///   h. cmod         = merge(fallback, selective), unless fallback is disabled
+///   i. cerl::print_module(&cmod)
 ///
 /// `program` should be the raw elaborated AST (no `normalize_effects`
 /// applied). Bootstrap emission is on iff `entry_export.is_some()` — the
@@ -432,10 +428,7 @@ pub fn emit_module_via_new_path(
     // every reachable expression (including inlined handler arm bodies) to
     // satisfy the ANF atomicity invariant.
     let mut imported_handler_decls: HashMap<String, ast::HandlerBody> = HashMap::new();
-    let mut imported_function_variants = HashMap::new();
-    let mut imported_handler_factories = HashMap::new();
     let mut imported_dict_constructors = HashMap::new();
-    let mut imported_private_helpers = HashMap::new();
     for (imported_module_name, compiled) in &ctx.modules {
         let anf_imported = anf::normalize(compiled.elaborated.clone(), Some(&compiled.resolution));
         for decl in &anf_imported {
@@ -461,7 +454,7 @@ pub fn emit_module_via_new_path(
                 .extend(handler_analysis::analyze(&compiled.elaborated).resumption);
             let (imported_monadic, _) =
                 monadic::translate::translate(&anf_imported, &compiled.resolution, &effect_info);
-            let imported_private = monadic::effect_opt::collect_imported_private_helper_candidates(
+            let imported_private = lower_selective::collect_imported_private_helper_candidates(
                 imported_module_name,
                 &imported_monadic,
                 &compiled.resolution,
@@ -469,35 +462,15 @@ pub fn emit_module_via_new_path(
             );
             let imported_private_names = imported_private
                 .values()
-                .map(|candidate| candidate.binding.name.clone())
+                .map(|binding| binding.name.clone())
                 .collect::<std::collections::HashSet<_>>();
-
-            imported_function_variants.extend(
-                monadic::effect_opt::collect_imported_function_variant_candidates(
-                    imported_module_name,
-                    &imported_monadic,
-                    &compiled.resolution,
-                    &compiled.codegen_info,
-                ),
-            );
-            imported_handler_factories.extend(
-                monadic::effect_opt::collect_imported_handler_factory_candidates(
-                    imported_module_name,
-                    &imported_monadic,
-                    &compiled.resolution,
-                    &compiled.codegen_info,
-                ),
-            );
-            imported_dict_constructors.extend(
-                monadic::effect_opt::collect_imported_dict_constructors(
-                    imported_module_name,
-                    &imported_monadic,
-                    &compiled.resolution,
-                    &compiled.codegen_info,
-                    &imported_private_names,
-                ),
-            );
-            imported_private_helpers.extend(imported_private);
+            imported_dict_constructors.extend(lower_selective::collect_imported_dict_constructors(
+                imported_module_name,
+                &imported_monadic,
+                &compiled.resolution,
+                &compiled.codegen_info,
+                &imported_private_names,
+            ));
         }
     }
     let imported_dict_constructors = if source_module_name.starts_with("Std.") {
@@ -512,126 +485,49 @@ pub fn emit_module_via_new_path(
         &imported_handler_decls,
     );
 
-    let is_main = entry_export.is_some();
-    if matches!(options.codegen_backend, CodegenBackend::Selective) {
-        let selective_cmod = lower_selective::lower_module_with_entry_export_and_imported_dicts(
-            module_name,
-            &monadic_prog,
-            &resolution_map,
-            &constructor_atoms,
-            ctx,
-            &handler_info,
-            &effect_info,
-            entry_export,
-            &handler_value_map,
-            imported_dict_constructors.clone(),
-            lower_selective::LoweringOptions {
-                require_all_functions: options.selective_no_fallback,
-            },
-        );
-        let cmod = if options.selective_no_fallback {
-            selective_cmod
-        } else {
-            let mut fallback_lowerer = lower::Lowerer::new(
-                &resolution_map,
-                &constructor_atoms,
-                ctx,
-                &handler_info,
-                &effect_info,
-                &handler_value_map,
-            );
-            if let Some(source_file) = source_file {
-                let source_spans =
-                    source_spans::for_program(&anf_program, &check_result.node_spans);
-                fallback_lowerer = fallback_lowerer.with_source_info(lower::SourceInfo::new(
-                    source_file.path.clone(),
-                    &source_file.source,
-                    source_spans,
-                ));
-            }
-            let fallback_cmod = fallback_lowerer
-                .with_bootstrap_emission(is_main)
-                .lower_module(module_name, &monadic_prog);
-            let fallback_direct_adapters =
-                selective_fallback_direct_adapters(&monadic_prog, &effect_info);
-            merge_selective_core_modules(fallback_cmod, selective_cmod, &fallback_direct_adapters)
-        };
-        return EmitModuleOutput {
-            core_src: cerl::print_module(&cmod),
-            monadic_stats: None,
-        };
-    }
-
-    let before_stats = options
-        .diagnostics
-        .monadic_stats
-        .is_enabled()
-        .then(|| monadic_prog.clone());
-    let optimized = monadic::effect_opt::run_with_context(
-        monadic_prog,
-        &handler_info,
-        &effect_info,
-        monadic::effect_opt::OptimizerContext {
-            current_module: Some(source_module_name),
-            resolution: resolution_map.clone(),
-            imported_function_variants,
-            imported_handler_factories,
-            imported_dict_constructors: imported_dict_constructors.clone(),
-            imported_private_helpers,
-        },
-    );
-    let monadic_stats = before_stats.map(|before_program| {
-        let before = monadic::stats::Stats::collect_program(&before_program);
-        let after = monadic::stats::Stats::collect_program(&optimized);
-        let roots = entry_export.into_iter().collect::<Vec<_>>();
-        let reachable = if roots.is_empty() {
-            None
-        } else {
-            let before_reachable =
-                monadic::stats::Stats::collect_reachable_program(&before_program, &roots);
-            let after_reachable =
-                monadic::stats::Stats::collect_reachable_program(&optimized, &roots);
-            (before_reachable.decls > 0 || after_reachable.decls > 0)
-                .then(|| monadic::stats::StatsDiff::new(before_reachable, after_reachable))
-        };
-        monadic::stats::StatsReport::with_module_graph(
-            monadic::stats::StatsDiff::new(before, after),
-            reachable,
-            &before_program,
-            &optimized,
-            &resolution_map,
-        )
-    });
-
-    let mut lowerer = lower::Lowerer::new(
+    let selective_cmod = lower_selective::lower_module_with_entry_export_and_imported_dicts(
+        module_name,
+        &monadic_prog,
         &resolution_map,
         &constructor_atoms,
         ctx,
         &handler_info,
         &effect_info,
+        entry_export,
         &handler_value_map,
+        imported_dict_constructors.clone(),
+        lower_selective::LoweringOptions {
+            require_all_functions: options.selective_no_fallback,
+        },
     );
-    if let Some(source_file) = source_file {
-        let source_spans = source_spans::for_program(&anf_program, &check_result.node_spans);
-        lowerer = lowerer.with_source_info(lower::SourceInfo::new(
-            source_file.path.clone(),
-            &source_file.source,
-            source_spans,
-        ));
-    }
-    let cmod = lowerer
-        .with_bootstrap_emission(is_main)
-        .lower_module(module_name, &optimized);
-    let core_src = cerl::print_module(&cmod);
-    match options.diagnostics.monadic_stats {
-        MonadicStatsMode::Off => EmitModuleOutput {
-            core_src,
-            monadic_stats: None,
-        },
-        MonadicStatsMode::Summary | MonadicStatsMode::Full => EmitModuleOutput {
-            core_src,
-            monadic_stats,
-        },
+    let cmod = if options.selective_no_fallback {
+        selective_cmod
+    } else {
+        let mut fallback_lowerer = lower::Lowerer::new(
+            &resolution_map,
+            &constructor_atoms,
+            ctx,
+            &handler_info,
+            &effect_info,
+            &handler_value_map,
+        );
+        if let Some(source_file) = source_file {
+            let source_spans = source_spans::for_program(&anf_program, &check_result.node_spans);
+            fallback_lowerer = fallback_lowerer.with_source_info(lower::SourceInfo::new(
+                source_file.path.clone(),
+                &source_file.source,
+                source_spans,
+            ));
+        }
+        let fallback_cmod = fallback_lowerer
+            .with_bootstrap_emission(entry_export.is_some())
+            .lower_module(module_name, &monadic_prog);
+        let fallback_direct_adapters =
+            selective_fallback_direct_adapters(&monadic_prog, &effect_info);
+        merge_selective_core_modules(fallback_cmod, selective_cmod, &fallback_direct_adapters)
+    };
+    EmitModuleOutput {
+        core_src: cerl::print_module(&cmod),
     }
 }
 

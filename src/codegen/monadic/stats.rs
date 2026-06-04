@@ -7,9 +7,12 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
-use crate::codegen::monadic::effect_opt::is_generated_variant_name;
 use crate::codegen::monadic::ir::{Atom, MArm, MDecl, MExpr, MHandler, MHandlerArm, MProgram};
 use crate::codegen::resolve::{ResolutionMap, ResolvedCodegenKind};
+
+fn is_generated_variant_name(name: &str) -> bool {
+    name.starts_with("__saga_native_variant") || name.starts_with("__saga_static_variant")
+}
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Stats {

@@ -72,12 +72,8 @@ pub fn cmd_run(file: Option<&str>, release: bool, options: &CompileOptions) {
     if release {
         // --release: use cached build if still valid, otherwise rebuild
         if let Some(f) = file {
-            let sb = if options.diagnostics.monadic_stats.is_enabled() {
-                build_script_with_options(f, "release", options)
-            } else {
-                check_script_cache_with_options(f, "release", options)
-                    .unwrap_or_else(|| build_script_with_options(f, "release", options))
-            };
+            let sb = check_script_cache_with_options(f, "release", options)
+                .unwrap_or_else(|| build_script_with_options(f, "release", options));
             exec_erl(&sb.build_dir, &sb.stdlib_dir, &[], &sb.erlang_name);
         } else {
             let project_root = super::find_project_root().unwrap_or_else(|| {
@@ -90,17 +86,13 @@ pub fn cmd_run(file: Option<&str>, release: bool, options: &CompileOptions) {
                 std::process::exit(1);
             }
             let extra_dirs = project_config::extra_ebin_dirs(&project_root, config.deps.as_ref());
-            let (build_dir, stdlib_dir) = if options.diagnostics.monadic_stats.is_enabled() {
-                let pb = build_project_with_options("release", options);
-                (pb.build_dir, pb.stdlib_dir)
-            } else {
+            let (build_dir, stdlib_dir) =
                 check_project_cache_with_options(&project_root, "release", options).unwrap_or_else(
                     || {
                         let pb = build_project_with_options("release", options);
                         (pb.build_dir, pb.stdlib_dir)
                     },
-                )
-            };
+                );
             exec_erl(&build_dir, &stdlib_dir, &extra_dirs, "main");
         }
     } else {
@@ -361,11 +353,8 @@ pub fn cmd_emit(file: &str, options: &CompileOptions) {
 
 /// Dump an intermediate IR stage for a single `.saga` file.
 ///
-/// Bypasses the codegen toggle for `anf` / `monadic` / `monadic-opt` /
-/// `monadic-stats` / `selective-core`: those
-/// always run the new path (uniform-effect-translation), regardless of the
-/// active `emit_module_with_context` block. `elaborated` and `core` go through
-/// shared code and therefore observe the toggle.
+/// `monadic` and `selective-core` expose the two internal forms that feed the
+/// default selective backend. `core` goes through the normal emit path.
 pub fn cmd_inspect_with_options(file: &str, stage: &str, options: &CompileOptions) {
     use saga::codegen::monadic;
 
@@ -401,7 +390,7 @@ pub fn cmd_inspect_with_options(file: &str, stage: &str, options: &CompileOption
             let anf_program = codegen::anf::normalize(elaborated, None);
             println!("{:#?}", anf_program);
         }
-        "monadic" | "monadic-opt" | "monadic-stats" | "selective-core" => {
+        "monadic" | "selective-core" => {
             // Build a CodegenContext (std modules + checked user modules) so
             // resolve/effect-info match what the emit/build paths see.
             let module_name =
@@ -470,13 +459,24 @@ pub fn cmd_inspect_with_options(file: &str, stage: &str, options: &CompileOption
                         &compiled.resolution,
                         &effect_info,
                     );
-                    imported_dict_constructors.extend(
-                        monadic::effect_opt::collect_imported_dict_constructors(
+                    let imported_private =
+                        codegen::lower_selective::collect_imported_private_helper_candidates(
                             imported_module_name,
                             &imported_monadic,
                             &compiled.resolution,
                             &compiled.codegen_info,
-                            &std::collections::HashSet::new(),
+                        );
+                    let imported_private_names = imported_private
+                        .values()
+                        .map(|binding| binding.name.clone())
+                        .collect::<std::collections::HashSet<_>>();
+                    imported_dict_constructors.extend(
+                        codegen::lower_selective::collect_imported_dict_constructors(
+                            imported_module_name,
+                            &imported_monadic,
+                            &compiled.resolution,
+                            &compiled.codegen_info,
+                            &imported_private_names,
                         ),
                     );
                 }
@@ -516,47 +516,14 @@ pub fn cmd_inspect_with_options(file: &str, stage: &str, options: &CompileOption
                 return;
             }
 
-            if stage == "monadic-stats" {
-                let before = monadic::stats::Stats::collect_program(&monadic_prog);
-                let before_reachable = monadic::stats::Stats::collect_reachable_program(
-                    &monadic_prog,
-                    &["main", "tests"],
-                );
-                let handler_info = codegen::handler_analysis::analyze(&elaborated);
-                let after_program =
-                    monadic::effect_opt::run(monadic_prog, &handler_info, &effect_info);
-                let after = monadic::stats::Stats::collect_program(&after_program);
-                let after_reachable = monadic::stats::Stats::collect_reachable_program(
-                    &after_program,
-                    &["main", "tests"],
-                );
-                let reachable = (before_reachable.decls > 0 || after_reachable.decls > 0)
-                    .then(|| monadic::stats::StatsDiff::new(before_reachable, after_reachable));
-                println!(
-                    "{}",
-                    monadic::stats::StatsReport::new(
-                        monadic::stats::StatsDiff::new(before, after),
-                        reachable,
-                    )
-                );
-                return;
-            }
-
-            let to_print = if stage == "monadic-opt" {
-                let handler_info = codegen::handler_analysis::analyze(&elaborated);
-                monadic::effect_opt::run(monadic_prog, &handler_info, &effect_info)
-            } else {
-                monadic_prog
-            };
-
-            println!("{}", monadic::print::print_program(&to_print));
+            println!("{}", monadic::print::print_program(&monadic_prog));
         }
         "core" => {
             cmd_emit(file, &CompileOptions::default());
         }
         other => {
             eprintln!(
-                "Unknown stage: '{}'. Expected one of: elaborated, anf, monadic, monadic-opt, monadic-stats, selective-core, core",
+                "Unknown stage: '{}'. Expected one of: elaborated, anf, monadic, selective-core, core",
                 other
             );
             std::process::exit(1);

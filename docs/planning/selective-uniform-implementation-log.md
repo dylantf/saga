@@ -1678,3 +1678,16 @@ boundaries exist.
     `std_generic_*` runtime allocation/traversal in that direct variant;
   - kept the rewrite generic and conservative: unsupported patterns or guards
     fall back to ordinary Core case lowering.
+- Removed the old monadic optimizer from the active backend:
+  - the default codegen path is now selective-with-raw-fallback; there is no
+    `--selective-codegen` flag because selective is the only normal backend;
+  - the raw monadic fallback is still kept as the correctness blanket for CPS
+    and declarations the selective overlay does not lower;
+  - `--selective-no-fallback` remains as the diagnostic switch for auditing
+    what still falls through;
+  - imported dictionary/private-helper discovery moved into
+    `lower_selective/imported_facts.rs`, so selective lowering owns the facts
+    it uses without depending on optimizer internals;
+  - CLI/build stats and `inspect --stage monadic-opt` / `monadic-stats` were
+    removed with the optimizer path. Future stats should report selective Core
+    and/or raw monadic fallback directly, not optimizer deltas.

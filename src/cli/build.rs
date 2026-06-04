@@ -1,8 +1,7 @@
 use project_config::ProjectConfig;
 use saga::{
-    ast, codegen,
-    compiler_options::{CodegenBackend, CompileOptions},
-    derive, desugar, elaborate, lexer, parser, project_config, typechecker,
+    ast, codegen, compiler_options::CompileOptions, derive, desugar, elaborate, lexer, parser,
+    project_config, typechecker,
 };
 
 use std::collections::HashMap;
@@ -40,23 +39,16 @@ fn stdlib_content_hash() -> String {
 /// never reused across different compiler binaries.
 #[allow(dead_code)]
 fn stdlib_fingerprint() -> String {
-    stdlib_fingerprint_for_backend(CodegenBackend::Uniform)
+    stdlib_fingerprint_for_options(&CompileOptions::default())
 }
 
 fn stdlib_fingerprint_for_options(options: &CompileOptions) -> String {
-    stdlib_fingerprint_for_backend(options.codegen_backend)
-}
-
-fn stdlib_fingerprint_for_backend(backend: CodegenBackend) -> String {
     use std::hash::{Hash, Hasher};
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     BUILD_HASH.hash(&mut hasher);
     stdlib_content_hash().hash(&mut hasher);
-    match backend {
-        CodegenBackend::Uniform => "uniform",
-        CodegenBackend::Selective => "selective",
-    }
-    .hash(&mut hasher);
+    "selective".hash(&mut hasher);
+    options.selective_no_fallback.hash(&mut hasher);
     format!("{:016x}", hasher.finish())
 }
 
@@ -362,7 +354,7 @@ fn emit_module_with_options(
     check_result: &typechecker::CheckResult,
     build_dir: &Path,
     options: EmitModuleOptions<'_>,
-) -> Option<codegen::monadic::stats::StatsReport> {
+) {
     let erlang_name = module_name.to_lowercase().replace('.', "_");
     let output = codegen::emit_module_with_context_options(
         &erlang_name,
@@ -373,24 +365,11 @@ fn emit_module_with_options(
         options.entry_export,
         options.compile_options,
     );
-    if let Some(stats) = &output.monadic_stats {
-        match options.compile_options.diagnostics.monadic_stats {
-            saga::compiler_options::MonadicStatsMode::Off => {}
-            saga::compiler_options::MonadicStatsMode::Summary => {
-                eprintln!("{}", stats.summary(module_name));
-            }
-            saga::compiler_options::MonadicStatsMode::Full => {
-                eprintln!("{module_name}\n{stats}");
-            }
-        }
-    }
-    let monadic_stats = output.monadic_stats.clone();
     let core_path = build_dir.join(format!("{}.core", erlang_name));
     fs::write(&core_path, &output.core_src).unwrap_or_else(|e| {
         eprintln!("Error writing {}: {}", core_path.display(), e);
         std::process::exit(1);
     });
-    monadic_stats
 }
 
 /// Typecheck and elaborate Std modules. Returns compiled module bundles.
@@ -1141,7 +1120,6 @@ pub fn build_project_ext_with_options(
         modules_to_emit.push("Main");
     }
 
-    let mut monadic_stats_reports = Vec::new();
     for module_name in &modules_to_emit {
         let compiled = &compiled_modules[*module_name];
         let erlang_name = if *module_name == "Main" {
@@ -1159,7 +1137,7 @@ pub fn build_project_ext_with_options(
                 } else {
                     None
                 });
-        if let Some(stats) = emit_module_with_options(
+        emit_module_with_options(
             &erlang_name,
             &compiled.elaborated,
             &ctx,
@@ -1174,20 +1152,7 @@ pub fn build_project_ext_with_options(
                 },
                 compile_options: options,
             },
-        ) {
-            monadic_stats_reports.push(((*module_name).to_string(), stats));
-        }
-    }
-
-    if options.diagnostics.monadic_stats.is_enabled()
-        && (has_bin || custom_main.is_some())
-        && let Some(summary) = codegen::monadic::stats::StatsReport::whole_app_summary(
-            &monadic_stats_reports,
-            "Main",
-            "main",
-        )
-    {
-        eprintln!("{summary}");
+        );
     }
 
     // Copy project-specific bridge (.erl) files into build dir.

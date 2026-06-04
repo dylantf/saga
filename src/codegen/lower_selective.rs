@@ -15,10 +15,15 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 
 mod cps;
 mod direct;
+mod imported_facts;
 mod known_facts;
 mod occurs;
 mod planning;
 mod support;
+
+pub use imported_facts::{
+    collect_imported_dict_constructors, collect_imported_private_helper_candidates,
+};
 
 use crate::ast::{Lit, NodeId, Pat};
 use crate::codegen::CodegenContext;

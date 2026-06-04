@@ -144,8 +144,8 @@ direct/CPS/static-handler rules.
 
 | Handler | Effects / Ops Covered | Current Status | Correct Rule | Next Action |
 | --- | --- | --- | --- | --- |
-| `Std.Actor.beam_actor` | `Actor.self`, `Process.spawn/send/exit`, `Monitor.monitor`, `Link.link/unlink`, `Timer.sleep/send_after/cancel_timer`; plus direct `receive` syntax used by actor code | Covered by `beam-actor-native-project`, including strict `selective-core --selective-no-fallback` inspection and runtime `--selective-codegen` run | Run `effect_opt` before selective lowering so generated `__saga_native_variant__...` functions are visible; classify native variants as direct-shaped; lower `MHandler::Native` wrappers as no-ops only after their bodies are direct; lower `BackendAtom` and `BackendSpawnThunk` in direct/native code | Keep; add new rows only for future backend-native handlers |
-| `Std.Ref.beam_ref` / `Std.Ref.ets_ref` | `Ref.new/get/set/modify` | Covered for the current `RefTest` runtime path under `--selective-codegen`; native direct rewrites exist for both BEAM ref and ETS ref shapes, including HOF callback boundaries such as `List.iter` | Native `with` is not automatically transparent. The supported path rewrites known native operations before selective lowering and bridges imported/open-row HOF calls through the CPS entry when the callback slot is CPS-shaped. ETS table initialization is shared between selective direct lowering, monadic native optimization, and bootstrap wrappers | Keep; strict `--selective-no-fallback` may still expose unrelated test-runner/frontier declarations before reaching runtime-equivalent coverage |
+| `Std.Actor.beam_actor` | `Actor.self`, `Process.spawn/send/exit`, `Monitor.monitor`, `Link.link/unlink`, `Timer.sleep/send_after/cancel_timer`; plus direct `receive` syntax used by actor code | Covered by `beam-actor-native-project`, including strict `selective-core --selective-no-fallback` inspection and default runtime run | Selective lowering owns this category directly: classify native handler bodies as direct-shaped when proved, lower `MHandler::Native` wrappers as no-ops only after their bodies are direct, and lower `BackendAtom` / `BackendSpawnThunk` in direct/native code. No monadic optimizer pass is in the execution path. | Keep; add new rows only for future backend-native handlers |
+| `Std.Ref.beam_ref` / `Std.Ref.ets_ref` | `Ref.new/get/set/modify` | Covered for the current `RefTest` runtime path under the default selective backend; native direct rewrites exist for both BEAM ref and ETS ref shapes, including HOF callback boundaries such as `List.iter` | Native `with` is not automatically transparent. The supported path rewrites known native operations in selective lowering and bridges imported/open-row HOF calls through the CPS entry when the callback slot is CPS-shaped. ETS table initialization is shared between selective direct lowering and bootstrap wrappers. | Keep; strict `--selective-no-fallback` may still expose unrelated test-runner/frontier declarations before reaching runtime-equivalent coverage |
 
 ## Old Lowerer Cross-Check
 
@@ -345,13 +345,11 @@ extraction.
 
 ## Recently Cleared Frontiers
 
-- **Selective backend no longer consumes monadic optimizer output:** under
-  `--selective-codegen`, both the selective overlay and uniform fallback now
-  lower from the raw monadic translation. `inspect --stage selective-core`
-  also skips `monadic-opt`, so it no longer reports optimizer-created wins as
-  selective lowering wins. The legacy optimizer remains available to the
-  non-selective backend and explicit `monadic-opt` / `monadic-stats`
-  inspection only.
+- **Selective backend no longer has a separate monadic optimizer path:** the
+  default backend lowers from raw monadic translation, overlays selective Core
+  on the raw fallback, and keeps `--selective-no-fallback` as the audit switch.
+  `inspect` now exposes `monadic` and `selective-core`; optimizer-only stages
+  were removed so wins must be owned by selective lowering or later peepholes.
 - **Newly exposed native-handler frontier:** without optimizer-created native
   variants, functions called inside `with beam_actor` can still be emitted as
   ordinary CPS entries and perform evidence lookup with empty evidence. The

@@ -55,7 +55,7 @@ fn selective_core_codegen_handles_multi_clause_functions() {
 
     let output = std::process::Command::new(binary)
         .current_dir(&project_dir)
-        .args(["run", "--selective-codegen"])
+        .args(["run"])
         .output()
         .expect("run selective multi-clause fixture");
     assert!(
@@ -81,7 +81,7 @@ fn selective_core_codegen_runs_deriving_example() {
 
     let output = std::process::Command::new(binary)
         .current_dir(&project_dir)
-        .args(["run", "--selective-codegen"])
+        .args(["run"])
         .output()
         .expect("run selective deriving example");
     assert!(
@@ -110,7 +110,7 @@ fn selective_core_codegen_adapts_pure_effect_callback_args() {
 
     let output = std::process::Command::new(binary)
         .current_dir(&project_dir)
-        .args(["run", "--selective-codegen"])
+        .args(["run"])
         .output()
         .expect("run selective async fixture");
     assert!(
@@ -135,7 +135,7 @@ fn selective_core_codegen_preserves_cps_callback_abi_for_public_entries() {
 
     let output = std::process::Command::new(binary)
         .current_dir(&project_dir)
-        .args(["run", "--selective-codegen"])
+        .args(["run"])
         .output()
         .expect("run selective atomic-ref fixture");
     assert!(
@@ -164,7 +164,7 @@ fn selective_core_codegen_adapts_pure_callbacks_for_local_cps_calls() {
 
     let output = std::process::Command::new(binary)
         .current_dir(&project_dir)
-        .args(["run", "--selective-codegen"])
+        .args(["run"])
         .output()
         .expect("run selective state-effect fixture");
     assert!(
@@ -190,7 +190,7 @@ fn selective_core_codegen_falls_back_when_static_handler_specialization_cannot_i
 
     let output = std::process::Command::new(binary)
         .current_dir(&project_dir)
-        .args(["run", "--selective-codegen"])
+        .args(["run"])
         .output()
         .expect("run selective effect-row polymorphism fixture");
     assert!(
@@ -224,11 +224,7 @@ fn selective_core_codegen_runs_handler_finally_fixtures() {
         .join("examples/optimization/selective-uniform/28-handler-finally-resume-e2e.saga");
     let resume_output = std::process::Command::new(binary)
         .current_dir(&manifest_dir)
-        .args([
-            "run",
-            resume_fixture.to_str().expect("utf-8 fixture path"),
-            "--selective-codegen",
-        ])
+        .args(["run", resume_fixture.to_str().expect("utf-8 fixture path")])
         .output()
         .expect("run selective finally resume fixture");
     assert!(
@@ -247,11 +243,7 @@ fn selective_core_codegen_runs_handler_finally_fixtures() {
         .join("examples/optimization/selective-uniform/29-handler-finally-abort-e2e.saga");
     let abort_output = std::process::Command::new(binary)
         .current_dir(&manifest_dir)
-        .args([
-            "run",
-            abort_fixture.to_str().expect("utf-8 fixture path"),
-            "--selective-codegen",
-        ])
+        .args(["run", abort_fixture.to_str().expect("utf-8 fixture path")])
         .output()
         .expect("run selective finally abort fixture");
     assert!(
@@ -273,11 +265,7 @@ fn selective_core_codegen_runs_multiarm_handler_finally_bug_fixture() {
 
     let output = std::process::Command::new(binary)
         .current_dir(&manifest_dir)
-        .args([
-            "run",
-            fixture.to_str().expect("utf-8 fixture path"),
-            "--selective-codegen",
-        ])
+        .args(["run", fixture.to_str().expect("utf-8 fixture path")])
         .output()
         .expect("run selective multiarm finally fixture");
     assert!(
@@ -304,7 +292,7 @@ fn selective_core_codegen_runs_higher_order_direct_callback_fixture() {
 
     let output = std::process::Command::new(binary)
         .current_dir(&project_dir)
-        .args(["run", "--selective-codegen"])
+        .args(["run"])
         .output()
         .expect("run selective higher-order direct callback fixture");
     assert!(
@@ -325,7 +313,7 @@ fn selective_core_codegen_runs_stdlib_dict_fixture() {
 
     let output = std::process::Command::new(binary)
         .current_dir(&project_dir)
-        .args(["run", "--selective-codegen"])
+        .args(["run"])
         .output()
         .expect("run selective stdlib dict fixture");
     assert!(
@@ -365,7 +353,7 @@ fn selective_core_specializes_imported_monomorphic_trait_method() {
 
     let output = std::process::Command::new(binary)
         .current_dir(&project_dir)
-        .args(["run", "--selective-codegen"])
+        .args(["run"])
         .output()
         .expect("run imported stdlib trait specialization fixture");
     assert!(
@@ -410,7 +398,7 @@ fn selective_core_specializes_imported_generic_trait_method_chain() {
 
     let output = std::process::Command::new(binary)
         .current_dir(&project_dir)
-        .args(["run", "--selective-codegen"])
+        .args(["run"])
         .output()
         .expect("run imported generic trait specialization fixture");
     assert!(
@@ -470,7 +458,6 @@ fn selective_core_runs_routed_derive_options_without_optimizer_variants() {
     let output = std::process::Command::new(binary)
         .args([
             "run",
-            "--selective-codegen",
             fixture.to_str().expect("fixture path should be utf-8"),
         ])
         .output()
@@ -527,7 +514,6 @@ fn selective_core_runs_known_split_trait_record_without_optimizer_variants() {
     let output = std::process::Command::new(binary)
         .args([
             "run",
-            "--selective-codegen",
             fixture.to_str().expect("fixture path should be utf-8"),
         ])
         .output()
@@ -623,7 +609,7 @@ fn selective_core_codegen_runs_imported_higher_order_direct_callback_project() {
 
     let run = std::process::Command::new(binary)
         .current_dir(&project_dir)
-        .args(["run", "--selective-codegen"])
+        .args(["run"])
         .output()
         .expect("run imported higher-order direct callback project");
     assert!(
@@ -710,7 +696,7 @@ fn selective_core_codegen_runs_imported_cps_callback_project() {
 
     let run = std::process::Command::new(binary)
         .current_dir(&project_dir)
-        .args(["run", "--selective-codegen"])
+        .args(["run"])
         .output()
         .expect("run imported CPS callback project");
     assert!(
@@ -759,7 +745,7 @@ fn selective_core_specializes_imported_static_handler_project() {
 
     let run = std::process::Command::new(binary)
         .current_dir(&project_dir)
-        .args(["run", "--selective-codegen"])
+        .args(["run"])
         .output()
         .expect("run imported static handler specialization project");
     assert!(
@@ -816,7 +802,7 @@ fn selective_core_codegen_runs_imported_effectful_trait_project() {
 
     let run = std::process::Command::new(binary)
         .current_dir(&project_dir)
-        .args(["run", "--selective-codegen"])
+        .args(["run"])
         .output()
         .expect("run imported effectful trait project");
     assert!(
@@ -838,7 +824,7 @@ fn selective_core_codegen_specializes_imported_pure_callback_project() {
 
     let run = std::process::Command::new(binary)
         .current_dir(&project_dir)
-        .args(["run", "--selective-codegen"])
+        .args(["run"])
         .output()
         .expect("run imported pure callback specialization project");
     assert!(
@@ -920,7 +906,7 @@ fn selective_core_codegen_lowers_beam_actor_native_project() {
 
     let run = std::process::Command::new(binary)
         .current_dir(&project_dir)
-        .args(["run", "--selective-codegen"])
+        .args(["run"])
         .output()
         .expect("run beam actor native project");
     assert!(
