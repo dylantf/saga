@@ -323,10 +323,11 @@ pub fn build_let_handler_effects(check_result: &CheckResult) -> HashMap<ast::Nod
 ///   c. handler_info = handler_analysis::analyze(raw_elaborated)
 ///   d. anf_program  = anf::normalize(raw_elaborated.clone())
 ///   e. monadic      = monadic::translate(&anf_program, &resolution_map, &effect_info)
-///   f. optimized    = monadic::effect_opt::run_with_context(monadic, …)
+///   f. for the legacy uniform backend only:
+///        optimized = monadic::effect_opt::run_with_context(monadic, …)
 ///   g. cmod         = lower::Lowerer::new(…)
 ///                         .with_bootstrap_emission(entry_export.is_some())
-///                         .lower_module(module_name, &optimized)
+///                         .lower_module(module_name, &optimized_or_raw)
 ///   h. cerl::print_module(&cmod)
 ///
 /// `program` should be the raw elaborated AST (no `normalize_effects`
@@ -510,8 +511,57 @@ pub fn emit_module_via_new_path(
         &effect_info,
         &imported_handler_decls,
     );
-    let original_selective_program =
-        matches!(options.codegen_backend, CodegenBackend::Selective).then(|| monadic_prog.clone());
+
+    let is_main = entry_export.is_some();
+    if matches!(options.codegen_backend, CodegenBackend::Selective) {
+        let selective_cmod = lower_selective::lower_module_with_entry_export_and_imported_dicts(
+            module_name,
+            &monadic_prog,
+            &resolution_map,
+            &constructor_atoms,
+            ctx,
+            &handler_info,
+            &effect_info,
+            entry_export,
+            &handler_value_map,
+            imported_dict_constructors.clone(),
+            lower_selective::LoweringOptions {
+                require_all_functions: options.selective_no_fallback,
+            },
+        );
+        let cmod = if options.selective_no_fallback {
+            selective_cmod
+        } else {
+            let mut fallback_lowerer = lower::Lowerer::new(
+                &resolution_map,
+                &constructor_atoms,
+                ctx,
+                &handler_info,
+                &effect_info,
+                &handler_value_map,
+            );
+            if let Some(source_file) = source_file {
+                let source_spans =
+                    source_spans::for_program(&anf_program, &check_result.node_spans);
+                fallback_lowerer = fallback_lowerer.with_source_info(lower::SourceInfo::new(
+                    source_file.path.clone(),
+                    &source_file.source,
+                    source_spans,
+                ));
+            }
+            let fallback_cmod = fallback_lowerer
+                .with_bootstrap_emission(is_main)
+                .lower_module(module_name, &monadic_prog);
+            let fallback_direct_adapters =
+                selective_fallback_direct_adapters(&monadic_prog, &effect_info);
+            merge_selective_core_modules(fallback_cmod, selective_cmod, &fallback_direct_adapters)
+        };
+        return EmitModuleOutput {
+            core_src: cerl::print_module(&cmod),
+            monadic_stats: None,
+        };
+    }
+
     let before_stats = options
         .diagnostics
         .monadic_stats
@@ -553,59 +603,6 @@ pub fn emit_module_via_new_path(
         )
     });
 
-    let is_main = entry_export.is_some();
-    if matches!(options.codegen_backend, CodegenBackend::Selective) {
-        let selective_program =
-            selective_program_with_preserved_abi_decls(&original_selective_program, &optimized)
-                .unwrap_or_else(|| optimized.clone());
-        let selective_cmod = lower_selective::lower_module_with_entry_export_and_imported_dicts(
-            module_name,
-            &selective_program,
-            &resolution_map,
-            &constructor_atoms,
-            ctx,
-            &handler_info,
-            &effect_info,
-            entry_export,
-            &handler_value_map,
-            imported_dict_constructors.clone(),
-            lower_selective::LoweringOptions {
-                require_all_functions: options.selective_no_fallback,
-            },
-        );
-        let cmod = if options.selective_no_fallback {
-            selective_cmod
-        } else {
-            let mut fallback_lowerer = lower::Lowerer::new(
-                &resolution_map,
-                &constructor_atoms,
-                ctx,
-                &handler_info,
-                &effect_info,
-                &handler_value_map,
-            );
-            if let Some(source_file) = source_file {
-                let source_spans =
-                    source_spans::for_program(&anf_program, &check_result.node_spans);
-                fallback_lowerer = fallback_lowerer.with_source_info(lower::SourceInfo::new(
-                    source_file.path.clone(),
-                    &source_file.source,
-                    source_spans,
-                ));
-            }
-            let fallback_cmod = fallback_lowerer
-                .with_bootstrap_emission(is_main)
-                .lower_module(module_name, &optimized);
-            let fallback_direct_adapters =
-                selective_fallback_direct_adapters(&selective_program, &effect_info);
-            merge_selective_core_modules(fallback_cmod, selective_cmod, &fallback_direct_adapters)
-        };
-        return EmitModuleOutput {
-            core_src: cerl::print_module(&cmod),
-            monadic_stats: None,
-        };
-    }
-
     let mut lowerer = lower::Lowerer::new(
         &resolution_map,
         &constructor_atoms,
@@ -635,57 +632,6 @@ pub fn emit_module_via_new_path(
             core_src,
             monadic_stats,
         },
-    }
-}
-
-fn selective_program_with_preserved_abi_decls(
-    before_stats: &Option<monadic::ir::MProgram>,
-    optimized: &monadic::ir::MProgram,
-) -> Option<monadic::ir::MProgram> {
-    let original = before_stats.as_ref()?;
-    Some(merge_optimized_program_with_preserved_abi_decls(
-        original, optimized,
-    ))
-}
-
-fn merge_optimized_program_with_preserved_abi_decls(
-    original: &monadic::ir::MProgram,
-    optimized: &monadic::ir::MProgram,
-) -> monadic::ir::MProgram {
-    let mut merged = optimized.clone();
-    let optimized_keys: HashSet<String> = optimized
-        .iter()
-        .filter_map(selective_abi_decl_key)
-        .collect();
-
-    for decl in original {
-        let Some(key) = selective_abi_decl_key(decl) else {
-            continue;
-        };
-        if optimized_keys.contains(&key) || !preserve_removed_selective_abi_decl(decl) {
-            continue;
-        }
-        merged.push(decl.clone());
-    }
-
-    merged
-}
-
-fn selective_abi_decl_key(decl: &monadic::ir::MDecl) -> Option<String> {
-    match decl {
-        monadic::ir::MDecl::FunBinding(fb) => Some(format!("fun:{}", fb.name)),
-        monadic::ir::MDecl::Val(val) => Some(format!("val:{}", val.name)),
-        monadic::ir::MDecl::DictConstructor(dict) => Some(format!("dict:{}", dict.name)),
-        monadic::ir::MDecl::Passthrough(_) => None,
-    }
-}
-
-fn preserve_removed_selective_abi_decl(decl: &monadic::ir::MDecl) -> bool {
-    match decl {
-        monadic::ir::MDecl::FunBinding(fb) => fb.public,
-        monadic::ir::MDecl::Val(val) => val.public,
-        monadic::ir::MDecl::DictConstructor(_) => true,
-        monadic::ir::MDecl::Passthrough(_) => false,
     }
 }
 

@@ -345,6 +345,19 @@ extraction.
 
 ## Recently Cleared Frontiers
 
+- **Selective backend no longer consumes monadic optimizer output:** under
+  `--selective-codegen`, both the selective overlay and uniform fallback now
+  lower from the raw monadic translation. `inspect --stage selective-core`
+  also skips `monadic-opt`, so it no longer reports optimizer-created wins as
+  selective lowering wins. The legacy optimizer remains available to the
+  non-selective backend and explicit `monadic-opt` / `monadic-stats`
+  inspection only.
+- **Newly exposed native-handler frontier:** without optimizer-created native
+  variants, functions called inside `with beam_actor` can still be emitted as
+  ordinary CPS entries and perform evidence lookup with empty evidence. The
+  next native-handler chunk is selective-owned native variants or equivalent
+  call routing for functions invoked under `MHandler::Native`; this replaces
+  the old optimizer's behind-the-IR native variant rewrite.
 - **Stream HOF strict frontier:** `Std.Stream.for_each` now lowers as an
   open-row CPS HOF (`for_each/4`) that calls its callback with
   evidence/continuation and recurs on the CPS ABI.
