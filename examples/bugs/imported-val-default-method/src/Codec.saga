@@ -1,0 +1,19 @@
+module Codec
+
+import Options as O (Options, default_options)
+
+pub trait Encode a {
+  fun encode_with : Options -> a -> String
+  fun encode : a -> String
+  encode value = encode_with default_options value
+}
+
+impl Encode for String {
+  encode_with options value = options.prefix <> ":" <> value
+}
+
+pub fun encode_with_updated_default : String -> String
+encode_with_updated_default value = {
+  let options = { default_options | prefix: "updated" }
+  encode_with options value
+}

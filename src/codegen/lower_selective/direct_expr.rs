@@ -251,9 +251,18 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         self.effect_info
             .records
             .get(name)
+            .map(|info| info.fields.iter().map(|(field, _)| field.clone()).collect())
+            .or_else(|| self.imported_record_field_order(name))
             .or_else(|| {
                 let bare = name.rsplit('.').next().unwrap_or(name);
-                self.effect_info.records.get(bare)
+                self.effect_info
+                    .records
+                    .get(bare)
+                    .map(|info| info.fields.iter().map(|(field, _)| field.clone()).collect())
+            })
+            .or_else(|| {
+                let bare = name.rsplit('.').next().unwrap_or(name);
+                self.imported_record_field_order(bare)
             })
             .or_else(|| {
                 let bare = name.rsplit('.').next().unwrap_or(name);
@@ -266,9 +275,31 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                             .next()
                             .is_some_and(|last| last == bare)
                     })
-                    .map(|(_, info)| info)
+                    .map(|(_, info)| info.fields.iter().map(|(field, _)| field.clone()).collect())
             })
-            .map(|info| info.fields.iter().map(|(field, _)| field.clone()).collect())
+    }
+
+    fn imported_record_field_order(&self, record_name: &str) -> Option<Vec<String>> {
+        if let Some((module, record)) = record_name.rsplit_once('.')
+            && let Some(fields) = self.module_ctx.modules.get(module).and_then(|module| {
+                module
+                    .codegen_info
+                    .record_fields
+                    .iter()
+                    .find(|(name, _)| name == record)
+                    .map(|(_, fields)| fields)
+            })
+        {
+            return Some(fields.clone());
+        }
+        self.module_ctx.modules.values().find_map(|module| {
+            module
+                .codegen_info
+                .record_fields
+                .iter()
+                .find(|(name, _)| name == record_name)
+                .map(|(_, fields)| fields.clone())
+        })
     }
 
     pub(super) fn lower_known_field_access_expr(

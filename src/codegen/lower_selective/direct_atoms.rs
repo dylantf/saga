@@ -25,6 +25,8 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                     self.lower_cps_value_atom(atom)
                 } else if let Some(value_ref) = self.direct_function_value_ref(atom) {
                     value_ref
+                } else if let Some(value_ref) = self.imported_zero_arity_value_ref(&name.name) {
+                    value_ref
                 } else if self.direct_values.contains(&name.name) {
                     CExpr::Apply(Box::new(CExpr::FunRef(name.name.clone(), 0)), vec![])
                 } else {
@@ -72,6 +74,26 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             }
             Atom::DictRef { .. } => self.unsupported_atom(atom),
         }
+    }
+
+    pub(super) fn imported_zero_arity_value_ref(&self, name: &str) -> Option<CExpr> {
+        let mut candidates = self
+            .module_ctx
+            .modules
+            .iter()
+            .filter_map(|(module_name, module)| {
+                let (_, scheme) = module
+                    .codegen_info
+                    .exports
+                    .iter()
+                    .find(|(export_name, _)| export_name == name)?;
+                let (arity, effects) =
+                    crate::codegen::type_shape::arity_and_effects_from_type(&scheme.ty);
+                (arity == 0 && effects.is_empty())
+                    .then(|| CExpr::Call(erlang_module_name(module_name), name.to_string(), vec![]))
+            });
+        let candidate = candidates.next()?;
+        candidates.next().is_none().then_some(candidate)
     }
 
     pub(super) fn lower_backend_spawn_thunk(&mut self, callback: &Atom, source: NodeId) -> CExpr {

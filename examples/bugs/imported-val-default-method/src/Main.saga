@@ -1,0 +1,8 @@
+module Main
+
+import Codec (Encode, encode_with_updated_default)
+
+main () = {
+  let _ = encode "value"
+  encode_with_updated_default "value"
+}

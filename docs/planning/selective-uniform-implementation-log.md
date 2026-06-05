@@ -1855,3 +1855,22 @@ boundaries exist.
     42 }` through the parameterized bridge to the base `Int` method shape
     (`integer_to_binary(42)`) instead of routing raw `42` through a `Leaf`
     method case.
+- Unblocked `saga_json` main-branch build after the parameterized dict fix:
+  - `SagaJson.default_options` appears in two important shapes: qualified refs
+    inside trait default bodies, and imported bare refs used as record-update
+    bases such as `{ default_options | rename_all: CamelCase }`;
+  - the record-update path exposed that selective field/update lowering only
+    knew current-module record metadata. It now consults imported
+    `ModuleCodegenInfo::record_fields`, matching the old lowerer's
+    cross-module record-field cache;
+  - ANF/monadic lowering can produce value-position imported `Var` atoms whose
+    backend resolution entry is missing. Selective atom lowering now has a
+    conservative fallback for these: if exactly one loaded module exports a
+    pure arity-0 value with that name, lower it as a remote `/0` value call.
+    This is intentionally narrow and does not guess among ambiguous imports;
+  - added `examples/bugs/imported-val-default-method/` as a compact regression
+    for imported default values, imported record metadata, trait default
+    methods, and imported-val record updates;
+  - verified `/home/dylan/projects/saga_json` builds on its `main` branch with
+    the selective backend. Next JSON work can return to optimization shape
+    inspection instead of build correctness.
