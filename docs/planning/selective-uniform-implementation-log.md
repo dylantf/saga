@@ -1886,6 +1886,30 @@ boundaries exist.
     or reject;
   - `SAGA_DEBUG_SELECTIVE=dict-call` shows when dict constructor expressions
     lower as direct callable constructor calls instead of known dict values.
+- Fixed effectful parameterized trait-method ABI and full inlined-method
+  hygiene for the JSON reader benchmark:
+  - imported/direct fallback adapters now preserve per-method runtime shape.
+    If a trait method is effectful, the direct dictionary stores a CPS-shaped
+    method `(args..., evidence, k)` that forwards the caller's evidence and
+    continuation to the fallback method. This fixes the previous
+    `evidence_tag_not_found 'SagaJson.JsonOptions'` crash for imported
+    `ToJson (List a)`;
+  - added `examples/bugs/json-effect-list-field/` as a reduced regression for a
+    derived record with a `List String` field encoded under `json_defaults`;
+  - the reduced repro exposed a separate inlining hygiene bug. Repeated nested
+    `ToJsonFields` method bodies reused local ANF/CPS names like
+    `___anf_v291`, so the final continuation chain paired earlier fields with
+    later labels/values (`email,email,email,tags`). Known method inlining now
+    alpha-renames ordinary locals, params, case-arm binders, handler-arm
+    binders, lambdas, and local functions before both proof and lowering;
+  - the reduced repro now prints the correct object:
+    `{"id":1,"name":"Ada","email":"ada@example.com","tags":["active","verified"]}`;
+  - `json_bench/saga/src/EffectOpts.saga` now runs through warmup and measured
+    iterations without evidence/case-clause failures. Current result on the
+    user's machine path via this session: median `4351 ms` for 100k records,
+    versus ArgOpts at roughly `1502 ms`. The remaining runtime work is
+    reader/config evidence and options propagation, not basic generic field
+    alignment.
   The filter can be either a phase (`known-dict`) or a subject substring
   (`__dict_SagaJson_Encode_ToJsonFields`); an empty value enables every
   selective trace.

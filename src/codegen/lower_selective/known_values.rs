@@ -364,7 +364,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
 
     pub(super) fn known_dict_value_for_expr(&mut self, expr: &MExpr) -> Option<KnownDictValue> {
         match expr {
-            MExpr::Pure(Atom::Var { name, .. }) => self.known_dict_value(&name.name),
+            MExpr::Pure(atom) => self.known_dict_value_for_atom(atom),
             MExpr::App { head, args, .. } => {
                 let Atom::DictRef { name, .. } = head else {
                     return None;
@@ -394,7 +394,10 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                     });
                     return None;
                 }
-                if args.iter().any(|arg| !self.atom_is_direct_subset(arg)) {
+                if args
+                    .iter()
+                    .any(|arg| !self.atom_is_direct_subset(arg) && self.known_dict_value_for_atom(arg).is_none())
+                {
                     debug_selective_subject("known-dict", name, || {
                         format!(
                             "{}: reject {name}: dict arg outside direct atom subset",
@@ -432,12 +435,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                     dict_args: args.to_vec(),
                     known_dict_args: args
                         .iter()
-                        .map(|arg| {
-                            let Atom::Var { name, .. } = arg else {
-                                return None;
-                            };
-                            self.known_dict_value(&name.name).map(Box::new)
-                        })
+                        .map(|arg| self.known_dict_value_for_atom(arg).map(Box::new))
                         .collect(),
                     methods,
                     method_effectful: constructor
@@ -467,6 +465,18 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                 let else_dict = self.known_dict_value_for_expr(else_branch)?;
                 (then_dict == else_dict).then_some(then_dict)
             }
+            _ => None,
+        }
+    }
+
+    pub(super) fn known_dict_value_for_atom(&mut self, atom: &Atom) -> Option<KnownDictValue> {
+        match atom {
+            Atom::Var { name, .. } => self.known_dict_value(&name.name),
+            Atom::DictRef { .. } => self.known_dict_value_for_expr(&MExpr::App {
+                head: atom.clone(),
+                args: Vec::new(),
+                source: NodeId::fresh(),
+            }),
             _ => None,
         }
     }
@@ -505,6 +515,10 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         let Atom::Lambda { params, body, .. } = method else {
             return None;
         };
+        let (params, body) =
+            monadic_rename::freshen_lambda_for_inline(&params, &body, &mut |_| {
+                self.fresh_cps_temp("_Inlined")
+            });
         if params.iter().any(|param| !direct_param_supported(param)) {
             return None;
         }
@@ -522,7 +536,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             method_dict: Some(known_dict),
             dict_bindings,
             params,
-            body,
+            body: Box::new(body),
         })
     }
 
@@ -568,6 +582,12 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         };
         let known_dict = self.known_dict_value(&name.name)?;
         if !known_dict.methods_inlineable {
+            debug_selective_subject("known-method", &known_dict.constructor_name, || {
+                format!(
+                    "reject {}.{}: methods are not inlineable",
+                    known_dict.constructor_name, method_index
+                )
+            });
             return None;
         }
         if known_dict
@@ -576,6 +596,12 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             .copied()
             .unwrap_or(false)
         {
+            debug_selective_subject("known-method", &known_dict.constructor_name, || {
+                format!(
+                    "reject {}.{} as direct lambda: method is effectful",
+                    known_dict.constructor_name, method_index
+                )
+            });
             return None;
         }
         let method_key = KnownDictMethodKey {
@@ -584,13 +610,35 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             dict_arg_keys: Self::known_dict_method_arg_keys(&known_dict),
         };
         if self.active_known_dict_methods.contains(&method_key) {
+            debug_selective_subject("known-method", &known_dict.constructor_name, || {
+                format!(
+                    "reject {}.{}: method key is active",
+                    known_dict.constructor_name, method_index
+                )
+            });
             return None;
         }
         let method = known_dict.methods.get(*method_index)?.clone();
         let Atom::Lambda { params, body, .. } = method else {
+            debug_selective_subject("known-method", &known_dict.constructor_name, || {
+                format!(
+                    "reject {}.{}: method is not a lambda",
+                    known_dict.constructor_name, method_index
+                )
+            });
             return None;
         };
+        let (params, body) =
+            monadic_rename::freshen_lambda_for_inline(&params, &body, &mut |_| {
+                self.fresh_cps_temp("_Inlined")
+            });
         if params.iter().any(|param| !direct_param_supported(param)) {
+            debug_selective_subject("known-method", &known_dict.constructor_name, || {
+                format!(
+                    "reject {}.{}: unsupported parameter pattern",
+                    known_dict.constructor_name, method_index
+                )
+            });
             return None;
         }
         let known_dict_aliases = self.known_dict_aliases_for_known_dict(&known_dict);
@@ -601,6 +649,14 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             .collect();
         let (dict_bindings, known_dict_aliases, body) =
             self.freshen_dict_method_bindings(&dict_bindings, known_dict_aliases, &body);
+        debug_selective_subject("known-method", &known_dict.constructor_name, || {
+            format!(
+                "accept {}.{} as direct lambda with {} dict aliases",
+                known_dict.constructor_name,
+                method_index,
+                known_dict_aliases.len()
+            )
+        });
         Some(KnownDirectLambda {
             method_key: Some(method_key),
             dict_bindings,

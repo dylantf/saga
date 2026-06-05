@@ -84,6 +84,12 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                 if self.is_panic_or_todo_call(head, args) {
                     return self.atom_is_direct_subset(&args[0]);
                 }
+                if let Atom::DictRef { name, .. } = head
+                    && self.imported_dict_constructors.contains_key(name)
+                    && self.known_dict_value_for_expr(expr).is_some()
+                {
+                    return true;
+                }
                 if self
                     .partial_known_direct_lambda_result_shape(head, args)
                     .is_some()
@@ -317,6 +323,21 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                 format!("if branches rejected/accepted: then={then_ok}, else={else_ok}")
             }
             MExpr::App { head, args, .. } => {
+                if let Some(lambda) = self.known_direct_lambda_for_atom(head)
+                    && lambda.params.len() == args.len()
+                {
+                    let summary = self.lambda_app_direct_subset_rejection_summary_with_dict_aliases(
+                        &lambda.dict_bindings,
+                        lambda.known_dict_aliases.clone(),
+                        &lambda.params,
+                        &lambda.body,
+                        args,
+                    );
+                    return format!(
+                        "known lambda app rejected: head={}, body={summary}",
+                        atom_debug_label(head)
+                    );
+                }
                 let head_shape = self
                     .call_shape(head)
                     .as_ref()

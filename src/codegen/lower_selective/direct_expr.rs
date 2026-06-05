@@ -487,6 +487,10 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             });
             return None;
         };
+        let (params, body) =
+            monadic_rename::freshen_lambda_for_inline(params, body, &mut |_| {
+                self.fresh_cps_temp("_Inlined")
+            });
         if params.len() != args.len() {
             debug_selective_subject("known-method", &known_dict.constructor_name, || {
                 format!(
@@ -516,13 +520,13 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             .collect();
         let known_dict_aliases = self.known_dict_aliases_for_known_dict(known_dict);
         let (dict_bindings, known_dict_aliases, body) =
-            self.freshen_dict_method_bindings(&dict_bindings, known_dict_aliases, body);
+            self.freshen_dict_method_bindings(&dict_bindings, known_dict_aliases, &body);
         let key = self.known_dict_method_key(known_dict, method_index);
         let inserted = self.active_known_dict_methods.insert(key.clone());
         if !self.lambda_app_is_direct_subset_with_dict_aliases(
             &dict_bindings,
             known_dict_aliases.clone(),
-            params,
+            &params,
             &body,
             args,
         ) {
@@ -532,7 +536,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                         self.lambda_app_direct_subset_rejection_summary_with_dict_aliases(
                             &dict_bindings,
                             known_dict_aliases.clone(),
-                            params,
+                            &params,
                             &body,
                             args,
                         )
@@ -565,7 +569,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         let lowered = self.lower_inline_direct_lambda_app_with_dict_bindings(
             &dict_bindings,
             known_dict_aliases,
-            params,
+            &params,
             &body,
             args,
         );

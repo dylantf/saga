@@ -489,6 +489,7 @@ mod tests {
             effect_info,
             handler_value_map,
             HashMap::new(),
+            HashMap::new(),
             LoweringOptions::default(),
         )
     }
@@ -509,6 +510,7 @@ mod tests {
             &handler_info,
             &effect_info,
             &handler_value_map,
+            HashMap::new(),
             HashMap::new(),
             LoweringOptions::default(),
         );

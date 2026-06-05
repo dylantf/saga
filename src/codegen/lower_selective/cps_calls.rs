@@ -755,28 +755,20 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
     }
 
     pub(super) fn known_dict_aliases_for_bindings(
-        &self,
+        &mut self,
         dict_bindings: &[(String, Atom)],
     ) -> Vec<(String, KnownDictValue)> {
         dict_bindings
             .iter()
             .filter_map(|(binding_name, value)| {
-                let Atom::Var { name, .. } = value else {
-                    return None;
-                };
-                if binding_name == &name.name {
-                    return self
-                        .known_dict_value(&name.name)
-                        .map(|dict| (binding_name.clone(), dict));
-                }
-                self.known_dict_value(&name.name)
+                self.known_dict_value_for_atom(value)
                     .map(|dict| (binding_name.clone(), dict))
             })
             .collect()
     }
 
     pub(super) fn known_dict_aliases_for_known_dict(
-        &self,
+        &mut self,
         known_dict: &KnownDictValue,
     ) -> Vec<(String, KnownDictValue)> {
         known_dict
@@ -793,17 +785,14 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                     return Some((binding_name.clone(), (**dict).clone()));
                 }
 
-                let Atom::Var { name, .. } = value else {
-                    return None;
-                };
-                self.known_dict_value(&name.name)
+                self.known_dict_value_for_atom(value)
                     .map(|dict| (binding_name.clone(), dict))
             })
             .collect()
     }
 
     pub(super) fn known_dict_aliases_for_params(
-        &self,
+        &mut self,
         params: &[Pat],
         args: &[Atom],
     ) -> Vec<(String, KnownDictValue)> {
@@ -817,15 +806,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                 else {
                     return None;
                 };
-                let Atom::Var { name: arg_name, .. } = arg else {
-                    return None;
-                };
-                if param_name == &arg_name.name {
-                    return self
-                        .known_dict_value(&arg_name.name)
-                        .map(|dict| (param_name.clone(), dict));
-                }
-                self.known_dict_value(&arg_name.name)
+                self.known_dict_value_for_atom(arg)
                     .map(|dict| (param_name.clone(), dict))
             })
             .collect()

@@ -341,6 +341,9 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         if let Some(callable) = self.local_external_callable_by_name(head) {
             return Some(callable);
         }
+        if let Some(callable) = self.imported_direct_function_callable_by_unqualified_name(head) {
+            return Some(callable);
+        }
 
         let source = match head {
             Atom::Var { source, .. } | Atom::QualifiedRef { source, .. } => *source,
@@ -435,6 +438,49 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             name: direct_name,
             arity: *arity,
         })
+    }
+
+    fn imported_direct_function_callable_by_unqualified_name(
+        &self,
+        head: &Atom,
+    ) -> Option<DirectCallable> {
+        let Atom::Var { name, .. } = head else {
+            return None;
+        };
+        if self.is_local(&name.name) || self.local_fun_bindings.contains_key(&name.name) {
+            return None;
+        }
+
+        let mut matches = self
+            .imported_function_entries
+            .iter()
+            .filter_map(|((module, fun_name), entries)| {
+                if fun_name != &name.name {
+                    return None;
+                }
+                let arity = entries.direct_entry_arity?;
+                let module = if module.contains('.') {
+                    erlang_module_name(module)
+                } else {
+                    module.clone()
+                };
+                Some(DirectCallable {
+                    module: Some(module),
+                    name: direct_entry_name_for(fun_name, entries),
+                    arity,
+                })
+            })
+            .collect::<Vec<_>>();
+        matches.sort_by(|left, right| {
+            (&left.module, &left.name, left.arity).cmp(&(&right.module, &right.name, right.arity))
+        });
+        matches.dedup_by(|left, right| {
+            left.module == right.module && left.name == right.name && left.arity == right.arity
+        });
+        let [callable] = matches.as_slice() else {
+            return None;
+        };
+        Some(callable.clone())
     }
 
     pub(super) fn local_direct_function_callable_by_name(

@@ -773,11 +773,28 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             };
             self.pop_scope();
             if !method_supported {
+                let rejection_summary =
+                    selective_debug_subject_enabled("dict-plan", &dc.name).then(|| {
+                        self.push_scope();
+                        for dict_param in &dc.dict_params {
+                            self.current_scope_mut().insert(dict_param.clone());
+                        }
+                        for pat in params {
+                            self.bind_pat_locals(pat);
+                        }
+                        let summary = self.direct_subset_rejection_summary(body);
+                        self.pop_scope();
+                        summary
+                    });
                 debug_selective_subject("dict-plan", &dc.name, || {
                     let shape = if effectful { "cps/direct" } else { "direct" };
                     format!(
-                        "reject {} method {index}: body is outside {shape} subset",
-                        dc.name
+                        "reject {} method {index}: body is outside {shape} subset{}",
+                        dc.name,
+                        rejection_summary
+                            .as_ref()
+                            .map(|summary| format!("; {summary}"))
+                            .unwrap_or_default()
                     )
                 });
                 supported = false;

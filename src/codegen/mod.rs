@@ -706,7 +706,7 @@ fn build_duplicate_dict_alias(
                     direct_param.clone(),
                     uniform_dict_to_direct_dict_value(
                         cerl::CExpr::Var(param.clone()),
-                        &shape.method_arities,
+                        &shape.method_shapes,
                         &format!("_DictAliasParam{index}"),
                     ),
                 ));
@@ -722,8 +722,8 @@ fn build_duplicate_dict_alias(
         for (var, value) in param_bindings.into_iter().rev() {
             direct_call = cerl::CExpr::Let(var, Box::new(value), Box::new(direct_call));
         }
-        let result = if let Some(method_arities) = adapter.dict_method_arities() {
-            direct_dict_to_uniform_dict_value(direct_call, &method_arities, "_DictAlias")
+        let result = if let Some(method_shapes) = adapter.dict_method_shapes() {
+            direct_dict_to_uniform_dict_value(direct_call, &method_shapes, "_DictAlias")
         } else {
             direct_call
         };
@@ -796,7 +796,13 @@ enum DirectFallbackAdapter {
 
 #[derive(Clone)]
 struct DictParamAdapterShape {
-    method_arities: Vec<usize>,
+    method_shapes: Vec<DictMethodAdapterShape>,
+}
+
+#[derive(Clone)]
+struct DictMethodAdapterShape {
+    arity: usize,
+    effectful: bool,
 }
 
 impl DirectFallbackAdapter {
@@ -811,11 +817,11 @@ impl DirectFallbackAdapter {
         self.direct_arity() + 2
     }
 
-    fn dict_method_arities(&self) -> Option<Vec<usize>> {
+    fn dict_method_shapes(&self) -> Option<Vec<DictMethodAdapterShape>> {
         let Self::Dict { constructor, .. } = self else {
             return None;
         };
-        Some(dict_constructor_method_arities(constructor))
+        Some(dict_constructor_method_shapes(constructor))
     }
 
     fn dict_param_shapes(&self) -> &[Option<DictParamAdapterShape>] {
@@ -923,7 +929,7 @@ fn build_direct_dict_fallback_adapter(
                 uniform_param.clone(),
                 direct_dict_to_uniform_dict_value(
                     cerl::CExpr::Var(param.clone()),
-                    &shape.method_arities,
+                    &shape.method_shapes,
                     &format!("_DictParam{index}"),
                 ),
             ));
@@ -945,11 +951,11 @@ fn build_direct_dict_fallback_adapter(
     for (var, value) in param_bindings.into_iter().rev() {
         fallback_dict = cerl::CExpr::Let(var, Box::new(value), Box::new(fallback_dict));
     }
-    let methods = dc
-        .methods
+    let method_shapes = dict_constructor_method_shapes(dc);
+    let methods = method_shapes
         .iter()
         .enumerate()
-        .map(|(index, method)| {
+        .map(|(index, shape)| {
             let method_var = format!("_FallbackMethod{index}");
             let old_method = cerl::CExpr::Call(
                 "erlang".to_string(),
@@ -959,10 +965,7 @@ fn build_direct_dict_fallback_adapter(
                     cerl::CExpr::Var(fallback_var.clone()),
                 ],
             );
-            let monadic::ir::MExpr::Pure(monadic::ir::Atom::Lambda { params, .. }) = method else {
-                panic!("dict fallback adapter expected lambda method");
-            };
-            let method_params: Vec<String> = (0..params.len())
+            let method_params: Vec<String> = (0..shape.arity)
                 .map(|arg_index| format!("_Method{index}Arg{arg_index}"))
                 .collect();
             let mut args: Vec<cerl::CExpr> = method_params
@@ -970,6 +973,26 @@ fn build_direct_dict_fallback_adapter(
                 .cloned()
                 .map(cerl::CExpr::Var)
                 .collect();
+            if shape.effectful {
+                let evidence = format!("_Method{index}Evidence");
+                let return_k = format!("_Method{index}K");
+                let mut cps_params = method_params;
+                cps_params.push(evidence.clone());
+                cps_params.push(return_k.clone());
+                args.push(cerl::CExpr::Var(evidence));
+                args.push(cerl::CExpr::Var(return_k));
+                return cerl::CExpr::Fun(
+                    cps_params,
+                    Box::new(cerl::CExpr::Let(
+                        method_var.clone(),
+                        Box::new(old_method),
+                        Box::new(cerl::CExpr::Apply(
+                            Box::new(cerl::CExpr::Var(method_var)),
+                            args,
+                        )),
+                    )),
+                );
+            }
             args.push(cerl::CExpr::Tuple(vec![]));
             args.push(identity_continuation("_MethodResult"));
             cerl::CExpr::Fun(
@@ -997,14 +1020,24 @@ fn build_direct_dict_fallback_adapter(
     }
 }
 
-fn dict_constructor_method_arities(dc: &monadic::ir::MDictConstructor) -> Vec<usize> {
+fn dict_constructor_method_shapes(
+    dc: &monadic::ir::MDictConstructor,
+) -> Vec<DictMethodAdapterShape> {
     dc.methods
         .iter()
-        .map(|method| {
+        .enumerate()
+        .map(|(index, method)| {
             let monadic::ir::MExpr::Pure(monadic::ir::Atom::Lambda { params, .. }) = method else {
                 panic!("dict fallback adapter expected lambda method");
             };
-            params.len()
+            DictMethodAdapterShape {
+                arity: params.len(),
+                effectful: dc
+                    .method_effects
+                    .get(index)
+                    .is_some_and(|effects| !effects.is_empty())
+                    || dc.method_open_rows.get(index).copied().unwrap_or(false),
+            }
         })
         .collect()
 }
@@ -1018,10 +1051,13 @@ fn dict_param_adapter_shape(
     }
     let trait_info = trait_info_for_dict_param(param, effect_info)?;
     Some(DictParamAdapterShape {
-        method_arities: trait_info
+        method_shapes: trait_info
             .methods
             .iter()
-            .map(|method| method.effect_sig.user_arity)
+            .map(|method| DictMethodAdapterShape {
+                arity: method.effect_sig.user_arity,
+                effectful: !method.effect_sig.effects.is_empty() || method.effect_sig.is_open_row,
+            })
             .collect(),
     })
 }
@@ -1055,18 +1091,18 @@ fn dict_param_tail_matches_trait(tail: &str, trait_name: &str) -> bool {
 
 fn direct_dict_to_uniform_dict_value(
     direct_dict: cerl::CExpr,
-    method_arities: &[usize],
+    method_shapes: &[DictMethodAdapterShape],
     prefix: &str,
 ) -> cerl::CExpr {
     let direct_dict_var = format!("{prefix}DirectDict");
-    let methods = method_arities
+    let methods = method_shapes
         .iter()
         .enumerate()
-        .map(|(method_index, arity)| {
+        .map(|(method_index, shape)| {
             direct_method_to_uniform_method_value(
                 &direct_dict_var,
                 method_index,
-                *arity,
+                shape,
                 &format!("{prefix}Method{method_index}"),
             )
         })
@@ -1080,18 +1116,18 @@ fn direct_dict_to_uniform_dict_value(
 
 fn uniform_dict_to_direct_dict_value(
     uniform_dict: cerl::CExpr,
-    method_arities: &[usize],
+    method_shapes: &[DictMethodAdapterShape],
     prefix: &str,
 ) -> cerl::CExpr {
     let uniform_dict_var = format!("{prefix}UniformDict");
-    let methods = method_arities
+    let methods = method_shapes
         .iter()
         .enumerate()
-        .map(|(method_index, arity)| {
+        .map(|(method_index, shape)| {
             uniform_method_to_direct_method_value(
                 &uniform_dict_var,
                 method_index,
-                *arity,
+                shape,
                 &format!("{prefix}Method{method_index}"),
             )
         })
@@ -1106,16 +1142,16 @@ fn uniform_dict_to_direct_dict_value(
 fn direct_method_to_uniform_method_value(
     direct_dict_var: &str,
     method_index: usize,
-    method_arity: usize,
+    method_shape: &DictMethodAdapterShape,
     prefix: &str,
 ) -> cerl::CExpr {
-    let user_params: Vec<String> = (0..method_arity)
+    let user_params: Vec<String> = (0..method_shape.arity)
         .map(|arg_index| format!("{prefix}Arg{arg_index}"))
         .collect();
     let evidence = format!("{prefix}Evidence");
     let return_k = format!("{prefix}K");
     let mut params = user_params.clone();
-    params.push(evidence);
+    params.push(evidence.clone());
     params.push(return_k.clone());
 
     let direct_method = cerl::CExpr::Call(
@@ -1126,7 +1162,16 @@ fn direct_method_to_uniform_method_value(
             cerl::CExpr::Var(direct_dict_var.to_string()),
         ],
     );
-    let direct_args = user_params.iter().cloned().map(cerl::CExpr::Var).collect();
+    let mut direct_args: Vec<cerl::CExpr> =
+        user_params.iter().cloned().map(cerl::CExpr::Var).collect();
+    if method_shape.effectful {
+        direct_args.push(cerl::CExpr::Var(evidence));
+        direct_args.push(cerl::CExpr::Var(return_k));
+        return cerl::CExpr::Fun(
+            params,
+            Box::new(cerl::CExpr::Apply(Box::new(direct_method), direct_args)),
+        );
+    }
     let direct_call = cerl::CExpr::Apply(Box::new(direct_method), direct_args);
     cerl::CExpr::Fun(
         params,
@@ -1140,10 +1185,10 @@ fn direct_method_to_uniform_method_value(
 fn uniform_method_to_direct_method_value(
     uniform_dict_var: &str,
     method_index: usize,
-    method_arity: usize,
+    method_shape: &DictMethodAdapterShape,
     prefix: &str,
 ) -> cerl::CExpr {
-    let user_params: Vec<String> = (0..method_arity)
+    let user_params: Vec<String> = (0..method_shape.arity)
         .map(|arg_index| format!("{prefix}Arg{arg_index}"))
         .collect();
 
@@ -1156,6 +1201,19 @@ fn uniform_method_to_direct_method_value(
         ],
     );
     let mut args: Vec<cerl::CExpr> = user_params.iter().cloned().map(cerl::CExpr::Var).collect();
+    if method_shape.effectful {
+        let evidence = format!("{prefix}Evidence");
+        let return_k = format!("{prefix}K");
+        let mut params = user_params;
+        params.push(evidence.clone());
+        params.push(return_k.clone());
+        args.push(cerl::CExpr::Var(evidence));
+        args.push(cerl::CExpr::Var(return_k));
+        return cerl::CExpr::Fun(
+            params,
+            Box::new(cerl::CExpr::Apply(Box::new(uniform_method), args)),
+        );
+    }
     args.push(cerl::CExpr::Tuple(vec![]));
     args.push(identity_continuation(&format!("{prefix}Result")));
 

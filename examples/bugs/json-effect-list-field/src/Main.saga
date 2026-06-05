@@ -1,0 +1,24 @@
+module Main
+
+import Std.IO (console, println)
+import SagaJson (JsonOptions, json_defaults)
+import SagaJson.Encode (ToJson, serialize_with)
+
+record Payload {
+  id: Int,
+  name: String,
+  email: String,
+  tags: List String,
+} deriving (ToJson)
+
+fun encode_one : Payload -> String needs {JsonOptions}
+encode_one payload = serialize_with payload
+
+main () = {
+  println (encode_one (Payload {
+    id: 1,
+    name: "Ada",
+    email: "ada@example.com",
+    tags: ["active", "verified"],
+  }) with json_defaults)
+} with console
