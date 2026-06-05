@@ -468,7 +468,7 @@ fn expr_has_private_same_module_refs_except(
     )
 }
 
-fn expr_has_private_same_module_refs_except_allowing_externals(
+pub(super) fn expr_has_private_same_module_refs_except_allowing_externals(
     expr: &MExpr,
     source_module: &str,
     self_name: &str,
@@ -485,30 +485,6 @@ fn expr_has_private_same_module_refs_except_allowing_externals(
         allowed_private_names,
         PrivateRefPolicy::AllowPrivateExternals,
     )
-}
-
-pub(super) fn expr_has_same_module_local_app_refs(
-    expr: &MExpr,
-    source_module: &str,
-    resolution: &ResolutionMap,
-) -> bool {
-    let mut refs = Vec::new();
-    collect_app_head_refs(expr, &mut refs);
-    refs.into_iter().any(|(_, source)| {
-        let Some(resolved) = resolution.get(&source) else {
-            return false;
-        };
-        let ResolvedCodegenKind::BeamFunction {
-            erlang_mod: None, ..
-        } = resolved.kind
-        else {
-            return false;
-        };
-        resolved
-            .source_module
-            .as_deref()
-            .is_none_or(|module| module == source_module)
-    })
 }
 
 #[derive(Clone, Copy)]

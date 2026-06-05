@@ -79,6 +79,9 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
     }
 
     pub(super) fn local_cps_function_shape_by_name(&self, head: &Atom) -> Option<CallShape> {
+        if self.head_resolves_to_imported_clone_source_local_beam(head) {
+            return None;
+        }
         let Atom::Var { name, .. } = head else {
             return None;
         };
@@ -123,6 +126,9 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
     }
 
     pub(super) fn local_top_level_function_shape(&self, head: &Atom) -> Option<CallShape> {
+        if self.head_resolves_to_imported_clone_source_local_beam(head) {
+            return None;
+        }
         let Atom::Var { name, .. } = head else {
             return None;
         };
@@ -260,6 +266,9 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
     }
 
     pub(super) fn direct_dict_constructor(&self, head: &Atom) -> Option<DirectCallable> {
+        if self.head_resolves_to_imported_clone_source_local_beam(head) {
+            return None;
+        }
         let (name, source) = match head {
             Atom::DictRef { name, source } => (name, *source),
             _ => return None,
@@ -398,6 +407,9 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         &self,
         head: &Atom,
     ) -> Option<DirectCallable> {
+        if self.head_resolves_to_imported_clone_source_local_beam(head) {
+            return None;
+        }
         let Atom::Var { name, .. } = head else {
             return None;
         };
@@ -497,6 +509,31 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             return None;
         };
         self.local_external_functions.get(&name.name).cloned()
+    }
+
+    fn head_resolves_to_imported_clone_source_local_beam(&self, head: &Atom) -> bool {
+        let Some(source_module) = self.imported_clone_source_module.as_deref() else {
+            return false;
+        };
+        let source = match head {
+            Atom::Var { source, .. }
+            | Atom::QualifiedRef { source, .. }
+            | Atom::DictRef { source, .. } => *source,
+            _ => return false,
+        };
+        let Some(resolved) = self.resolution.get(&source) else {
+            return false;
+        };
+        let ResolvedCodegenKind::BeamFunction {
+            erlang_mod: None, ..
+        } = resolved.kind
+        else {
+            return false;
+        };
+        resolved
+            .source_module
+            .as_deref()
+            .is_none_or(|module| module == source_module)
     }
 
     pub(super) fn supported_direct_call(&self, head: &Atom) -> Option<DirectCallable> {

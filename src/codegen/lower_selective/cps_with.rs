@@ -796,11 +796,19 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             self.imported_dict_constructors.clone(),
             self.options,
         );
-        imported.current_module = source_module_name;
+        imported.current_module = source_module_name.clone();
         imported.classify_program(&program);
         imported.apply_codegen_info_function_shapes(&compiled.codegen_info);
         imported.compute_function_lowering_plans(&program);
         imported.compute_local_function_entries(&program);
+        for (name, constructor) in &self.local_dict_constructors {
+            imported
+                .local_dict_constructors
+                .entry(name.clone())
+                .or_insert_with(|| constructor.clone());
+        }
+        imported.current_module = self.current_module.clone();
+        imported.imported_clone_source_module = Some(source_module_name);
         imported.locals = self.locals.clone();
         imported.local_shapes = self.local_shapes.clone();
         imported.direct_handler_stack = self.direct_handler_stack.clone();

@@ -130,11 +130,19 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             self.imported_dict_constructors.clone(),
             self.options,
         );
-        imported.current_module = source_module_name;
+        imported.current_module = source_module_name.clone();
         imported.classify_program(&program);
         imported.apply_codegen_info_function_shapes(&compiled.codegen_info);
         imported.compute_function_lowering_plans(&program);
         imported.compute_local_function_entries(&program);
+        for (name, constructor) in &self.local_dict_constructors {
+            imported
+                .local_dict_constructors
+                .entry(name.clone())
+                .or_insert_with(|| constructor.clone());
+        }
+        imported.current_module = self.current_module.clone();
+        imported.imported_clone_source_module = Some(source_module_name);
         imported.locals = self.locals.clone();
         imported.local_shapes = self.local_shapes.clone();
         imported.direct_handler_stack = self.direct_handler_stack.clone();
@@ -153,13 +161,31 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         imported.pop_scope();
 
         self.cps_temp_counter = imported.cps_temp_counter;
-        lowered_body.map(|body| {
+        let source_public_names: HashSet<String> = compiled
+            .codegen_info
+            .exports
+            .iter()
+            .map(|(name, _)| name.clone())
+            .chain(
+                compiled
+                    .codegen_info
+                    .trait_impl_dicts
+                    .iter()
+                    .map(|dict| dict.dict_name.clone()),
+            )
+            .collect();
+        lowered_body.and_then(|body| {
+            if core_expr_has_private_remote_source_call(&body, &erlang_module, &source_public_names)
+            {
+                return None;
+            }
             bindings
                 .into_iter()
                 .rev()
                 .fold(body, |body, (name, value)| {
                     CExpr::Let(name, Box::new(value), Box::new(body))
                 })
+                .into()
         })
     }
 
@@ -201,16 +227,6 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             .iter()
             .any(|decl| matches!(decl, MDecl::FunBinding(fb) if fb.name == name))
         {
-            return None;
-        }
-        if let Some(fb) = program.iter().find_map(|decl| match decl {
-            MDecl::FunBinding(fb) if fb.name == name => Some(fb),
-            _ => None,
-        }) && super::imported_facts::expr_has_same_module_local_app_refs(
-            &fb.body,
-            &source_module_name,
-            &compiled.resolution,
-        ) {
             return None;
         }
         Some(ImportedStaticHandlerCall {
@@ -264,5 +280,133 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             arms.iter()
                 .any(|arm| Self::effect_names_match(&arm.op.effect, effect))
         })
+    }
+}
+
+fn core_expr_has_private_remote_source_call(
+    expr: &CExpr,
+    source_erlang_module: &str,
+    public_names: &HashSet<String>,
+) -> bool {
+    match expr {
+        CExpr::Lit(_) | CExpr::Var(_) | CExpr::Nil | CExpr::FunRef(_, _) => false,
+        CExpr::Fun(_, body) | CExpr::Annotated { expr: body, .. } => {
+            core_expr_has_private_remote_source_call(body, source_erlang_module, public_names)
+        }
+        CExpr::Let(_, value, body) => {
+            core_expr_has_private_remote_source_call(value, source_erlang_module, public_names)
+                || core_expr_has_private_remote_source_call(
+                    body,
+                    source_erlang_module,
+                    public_names,
+                )
+        }
+        CExpr::Apply(head, args) => {
+            core_expr_has_private_remote_source_call(head, source_erlang_module, public_names)
+                || args.iter().any(|arg| {
+                    core_expr_has_private_remote_source_call(
+                        arg,
+                        source_erlang_module,
+                        public_names,
+                    )
+                })
+        }
+        CExpr::Call(module, name, args) => {
+            (module == source_erlang_module && !public_names.contains(name))
+                || args.iter().any(|arg| {
+                    core_expr_has_private_remote_source_call(
+                        arg,
+                        source_erlang_module,
+                        public_names,
+                    )
+                })
+        }
+        CExpr::Case(scrutinee, arms) => {
+            core_expr_has_private_remote_source_call(scrutinee, source_erlang_module, public_names)
+                || arms.iter().any(|arm| {
+                    arm.guard.as_ref().is_some_and(|guard| {
+                        core_expr_has_private_remote_source_call(
+                            guard,
+                            source_erlang_module,
+                            public_names,
+                        )
+                    }) || core_expr_has_private_remote_source_call(
+                        &arm.body,
+                        source_erlang_module,
+                        public_names,
+                    )
+                })
+        }
+        CExpr::Tuple(items) | CExpr::Values(items) => items.iter().any(|item| {
+            core_expr_has_private_remote_source_call(item, source_erlang_module, public_names)
+        }),
+        CExpr::Cons(head, tail) => {
+            core_expr_has_private_remote_source_call(head, source_erlang_module, public_names)
+                || core_expr_has_private_remote_source_call(tail, source_erlang_module, public_names)
+        }
+        CExpr::LetRec(bindings, body) => {
+            bindings.iter().any(|(_, _, binding_body)| {
+                core_expr_has_private_remote_source_call(
+                    binding_body,
+                    source_erlang_module,
+                    public_names,
+                )
+            }) || core_expr_has_private_remote_source_call(
+                body,
+                source_erlang_module,
+                public_names,
+            )
+        }
+        CExpr::Receive(arms, timeout, after_body) => {
+            arms.iter().any(|arm| {
+                arm.guard.as_ref().is_some_and(|guard| {
+                    core_expr_has_private_remote_source_call(
+                        guard,
+                        source_erlang_module,
+                        public_names,
+                    )
+                }) || core_expr_has_private_remote_source_call(
+                    &arm.body,
+                    source_erlang_module,
+                    public_names,
+                )
+            }) || core_expr_has_private_remote_source_call(
+                timeout,
+                source_erlang_module,
+                public_names,
+            ) || core_expr_has_private_remote_source_call(
+                after_body,
+                source_erlang_module,
+                public_names,
+            )
+        }
+        CExpr::Try {
+            expr,
+            ok_body,
+            catch_body,
+            ..
+        } => {
+            core_expr_has_private_remote_source_call(expr, source_erlang_module, public_names)
+                || core_expr_has_private_remote_source_call(
+                    ok_body,
+                    source_erlang_module,
+                    public_names,
+                )
+                || core_expr_has_private_remote_source_call(
+                    catch_body,
+                    source_erlang_module,
+                    public_names,
+                )
+        }
+        CExpr::Binary(segments) => segments.iter().any(|segment| match segment {
+            CBinSeg::Byte(_) => false,
+            CBinSeg::BinaryAll(value) | CBinSeg::Segment { value, .. } => {
+                core_expr_has_private_remote_source_call(
+                    value,
+                    source_erlang_module,
+                    public_names,
+                )
+            }
+        }),
     }
 }
