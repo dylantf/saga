@@ -423,15 +423,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         if !known_dict.methods_inlineable {
             return None;
         }
-        if !known_dict.dict_params.is_empty()
-            || known_dict.constructor_name.contains("_Std_Generic_")
-        {
-            return None;
-        }
         if self.known_dict_method_is_active(known_dict, method_index) {
-            return None;
-        }
-        if !self.dict_param_collisions_are_self_aliases(known_dict) {
             return None;
         }
         let method = known_dict.methods.get(method_index)?;
@@ -448,12 +440,17 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             .cloned()
             .zip(known_dict.dict_args.iter().cloned())
             .collect();
-        let key = KnownDictMethodKey {
-            constructor_name: known_dict.constructor_name.clone(),
-            method_index,
-        };
+        let known_dict_aliases = self.known_dict_aliases_for_known_dict(known_dict);
+        let (dict_bindings, known_dict_aliases, body) =
+            self.freshen_dict_method_bindings(&dict_bindings, known_dict_aliases, body);
+        let key = self.known_dict_method_key(known_dict, method_index);
         let inserted = self.active_known_dict_methods.insert(key.clone());
-        if !self.lambda_is_direct_subset_with_dict_bindings(&dict_bindings, params, body) {
+        if !self.lambda_is_direct_subset_with_dict_aliases(
+            &dict_bindings,
+            known_dict_aliases.clone(),
+            params,
+            &body,
+        ) {
             if inserted {
                 self.active_known_dict_methods.remove(&key);
             }
@@ -462,8 +459,9 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
 
         let lowered = self.lower_inline_direct_lambda_app_with_dict_bindings(
             &dict_bindings,
+            known_dict_aliases,
             params,
-            body,
+            &body,
             args,
         );
         if inserted {
@@ -478,10 +476,70 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         method_index: usize,
     ) -> bool {
         self.active_known_dict_methods
-            .contains(&KnownDictMethodKey {
-                constructor_name: known_dict.constructor_name.clone(),
-                method_index,
+            .contains(&self.known_dict_method_key(known_dict, method_index))
+    }
+
+    pub(super) fn known_dict_method_key(
+        &self,
+        known_dict: &KnownDictValue,
+        method_index: usize,
+    ) -> KnownDictMethodKey {
+        KnownDictMethodKey {
+            constructor_name: known_dict.constructor_name.clone(),
+            method_index,
+            dict_arg_keys: Self::known_dict_method_arg_keys(known_dict),
+        }
+    }
+
+    pub(super) fn known_dict_method_arg_keys(known_dict: &KnownDictValue) -> Vec<String> {
+        known_dict
+            .known_dict_args
+            .iter()
+            .zip(known_dict.dict_args.iter())
+            .map(|(known, atom)| {
+                known
+                    .as_ref()
+                    .map(|dict| {
+                        let nested = Self::known_dict_method_arg_keys(dict);
+                        if nested.is_empty() {
+                            dict.constructor_name.clone()
+                        } else {
+                            format!("{}({})", dict.constructor_name, nested.join(","))
+                        }
+                    })
+                    .unwrap_or_else(|| format!("{atom:?}"))
             })
+            .collect()
+    }
+
+    pub(super) fn freshen_dict_method_bindings(
+        &mut self,
+        dict_bindings: &[(String, Atom)],
+        known_dict_aliases: Vec<(String, KnownDictValue)>,
+        body: &MExpr,
+    ) -> FreshenedDictMethodBindings {
+        if dict_bindings.is_empty() {
+            return (Vec::new(), known_dict_aliases, body.clone());
+        }
+
+        let mut renames = HashMap::new();
+        let dict_bindings = dict_bindings
+            .iter()
+            .map(|(name, arg)| {
+                let fresh = self.fresh_cps_temp("_DictParam");
+                renames.insert(name.clone(), fresh.clone());
+                (fresh, arg.clone())
+            })
+            .collect();
+        let known_dict_aliases = known_dict_aliases
+            .into_iter()
+            .map(|(name, dict)| {
+                let name = renames.get(&name).cloned().unwrap_or(name);
+                (name, dict)
+            })
+            .collect();
+        let body = monadic_rename::rename_expr_vars(body, &renames);
+        (dict_bindings, known_dict_aliases, body)
     }
 
     pub(super) fn lambda_is_direct_subset_with_dict_bindings(
@@ -491,6 +549,21 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         body: &MExpr,
     ) -> bool {
         let known_dict_aliases = self.known_dict_aliases_for_bindings(dict_bindings);
+        self.lambda_is_direct_subset_with_dict_aliases(
+            dict_bindings,
+            known_dict_aliases,
+            params,
+            body,
+        )
+    }
+
+    pub(super) fn lambda_is_direct_subset_with_dict_aliases(
+        &mut self,
+        dict_bindings: &[(String, Atom)],
+        known_dict_aliases: Vec<(String, KnownDictValue)>,
+        params: &[Pat],
+        body: &MExpr,
+    ) -> bool {
         self.push_scope();
         for (name, _) in dict_bindings {
             self.current_scope_mut().insert(name.clone());
@@ -507,12 +580,13 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
     pub(super) fn lower_inline_direct_lambda_app_with_dict_bindings(
         &mut self,
         dict_bindings: &[(String, Atom)],
+        known_dict_aliases: Vec<(String, KnownDictValue)>,
         params: &[Pat],
         body: &MExpr,
         args: &[Atom],
     ) -> CExpr {
         let param_names = lower_param_names(params);
-        let mut known_dict_aliases = self.known_dict_aliases_for_bindings(dict_bindings);
+        let mut known_dict_aliases = known_dict_aliases;
         known_dict_aliases.extend(self.known_dict_aliases_for_params(params, args));
         let known_atom_bindings = self.known_direct_atom_pattern_bindings_for_params(params, args);
         let known_value_bindings =
@@ -598,7 +672,8 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         }
         let param_names = lower_param_names(&lambda.params);
         let remaining_param_names = param_names[supplied_args.len()..].to_vec();
-        let mut known_dict_aliases = self.known_dict_aliases_for_bindings(&lambda.dict_bindings);
+        let mut known_dict_aliases = lambda.known_dict_aliases.clone();
+        known_dict_aliases.extend(self.known_dict_aliases_for_bindings(&lambda.dict_bindings));
         known_dict_aliases.extend(
             self.known_dict_aliases_for_params(
                 &lambda.params[..supplied_args.len()],

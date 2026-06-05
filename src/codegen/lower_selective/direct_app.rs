@@ -18,8 +18,9 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         }
         if let Some(lambda) = self.known_direct_lambda_for_atom(head)
             && lambda.params.len() == args.len()
-            && self.lambda_is_direct_subset_with_dict_bindings(
+            && self.lambda_is_direct_subset_with_dict_aliases(
                 &lambda.dict_bindings,
+                lambda.known_dict_aliases.clone(),
                 &lambda.params,
                 &lambda.body,
             )
@@ -28,8 +29,11 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             let inserted = method_key
                 .clone()
                 .is_some_and(|key| self.active_known_dict_methods.insert(key));
+            let mut known_dict_aliases = lambda.known_dict_aliases.clone();
+            known_dict_aliases.extend(self.known_dict_aliases_for_bindings(&lambda.dict_bindings));
             let lowered = self.lower_inline_direct_lambda_app_with_dict_bindings(
                 &lambda.dict_bindings,
+                known_dict_aliases,
                 &lambda.params,
                 &lambda.body,
                 args,
@@ -41,8 +45,9 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         }
         if let Some(lambda) = self.known_direct_lambda_for_atom(head)
             && args.len() < lambda.params.len()
-            && self.lambda_is_direct_subset_with_dict_bindings(
+            && self.lambda_is_direct_subset_with_dict_aliases(
                 &lambda.dict_bindings,
+                lambda.known_dict_aliases.clone(),
                 &lambda.params,
                 &lambda.body,
             )

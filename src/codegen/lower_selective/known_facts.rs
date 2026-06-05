@@ -58,20 +58,6 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         }
     }
 
-    pub(super) fn dict_param_collisions_are_self_aliases(
-        &self,
-        known_dict: &KnownDictValue,
-    ) -> bool {
-        known_dict
-            .dict_params
-            .iter()
-            .zip(known_dict.dict_args.iter())
-            .all(|(param, arg)| {
-                !self.is_local(param)
-                    || matches!(arg, Atom::Var { name, .. } if name.name == *param)
-            })
-    }
-
     pub(super) fn bind_known_direct_atom_pattern_values(
         &mut self,
         bindings: impl IntoIterator<Item = (String, Atom)>,
@@ -294,7 +280,8 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             return None;
         }
 
-        let dict_aliases = self.known_dict_aliases_for_bindings(&lambda.dict_bindings);
+        let mut dict_aliases = lambda.known_dict_aliases.clone();
+        dict_aliases.extend(self.known_dict_aliases_for_bindings(&lambda.dict_bindings));
         let mut atom_bindings = Vec::new();
         for (param, arg) in lambda.params.iter().zip(args) {
             let arg = self.known_direct_atom_for_atom(arg)?;
@@ -330,7 +317,8 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             return None;
         }
 
-        let dict_aliases = self.known_dict_aliases_for_bindings(&lambda.dict_bindings);
+        let mut dict_aliases = lambda.known_dict_aliases.clone();
+        dict_aliases.extend(self.known_dict_aliases_for_bindings(&lambda.dict_bindings));
         let mut value_bindings = Vec::new();
         for (param, arg) in lambda.params.iter().zip(args) {
             let arg = self.known_direct_value_for_atom(arg)?;

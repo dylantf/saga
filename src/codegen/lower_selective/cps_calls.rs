@@ -696,6 +696,33 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             .collect()
     }
 
+    pub(super) fn known_dict_aliases_for_known_dict(
+        &self,
+        known_dict: &KnownDictValue,
+    ) -> Vec<(String, KnownDictValue)> {
+        known_dict
+            .dict_params
+            .iter()
+            .zip(known_dict.dict_args.iter())
+            .enumerate()
+            .filter_map(|(index, (binding_name, value))| {
+                if let Some(dict) = known_dict
+                    .known_dict_args
+                    .get(index)
+                    .and_then(|dict| dict.as_ref())
+                {
+                    return Some((binding_name.clone(), (**dict).clone()));
+                }
+
+                let Atom::Var { name, .. } = value else {
+                    return None;
+                };
+                self.known_dict_value(&name.name)
+                    .map(|dict| (binding_name.clone(), dict))
+            })
+            .collect()
+    }
+
     pub(super) fn known_dict_aliases_for_params(
         &self,
         params: &[Pat],

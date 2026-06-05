@@ -1714,11 +1714,11 @@ boundaries exist.
     correctness.
 - Audited the simplified `examples/99*` Generic/derived fixtures as the next
   specialization canaries:
-  - `99b-generic-derived` through `99k-generic-derived-defaults` now run under
-    strict selective lowering. This covers record/ADT ToJson, parameterized
-    Generic bridges, derived ToJson, derived FromJson/Codec, custom
-    from-direction wrappers, multi-parameter methods, and default derived
-    ToJson output;
+  - `99b-generic-derived` through the non-parameterized derived cases run under
+    strict selective lowering. Parameterized Generic-derived dictionaries such
+    as `ToJson (Box a)` intentionally remain behind the fallback until the
+    compiler has a shape-preserving specialization pass for the representation
+    bridge;
   - added a `KnownDirectValue` representation-fact layer alongside
     `KnownDirectAtom`. It can carry constructor/tuple/record shapes whose
     leaves are direct Core values such as `erlang:element(N, x)` field reads,
@@ -1742,6 +1742,14 @@ boundaries exist.
   - constant call sites already benefit from known-atom case collapse: a call
     like `to_json (Person { ... })` can inline through known constructors until
     the generated `main` body formats fields directly;
+  - attempted to admit parameterized Generic-derived dict constructors directly
+    as ordinary known-dict method inlining. This is not sound. For `Box a`,
+    naive partial inlining can skip the `Generic.to` representation wrapper
+    enough to pass the raw field value (`42`) while still using the `Leaf a`
+    dictionary method, whose implementation expects `Leaf 42`. The result is a
+    runtime `Leaf` case-clause failure. The old guard that skips parameterized
+    user Generic traversal is correct until this is replaced with a coherent
+    representation-shape rewrite;
   - the benchmark-shaped case is `Generic.to x` for an unknown record variable:
     the new fact layer can represent the `Rep__T(shape)` spine with field-read
     leaves from `x`, then let known-constructor case reduction consume that
@@ -1820,3 +1828,30 @@ boundaries exist.
     shape-specialization layer plus small semantic helper calls supplied by the
     relevant library/impl, so JSON, Postgres rows, and CSV can share the same
     compiler machinery without hardcoded output rules.
+- Fixed the parameterized Generic-derived dict ABI/specialization split:
+  - local dict constructors are now recorded in two roles. The arity/export set
+    says which constructors are safe to emit as direct selective definitions;
+    the constructor-fact map may also contain skipped constructors so call-site
+    specialization can inspect their method bodies without committing them to
+    the public direct ABI;
+  - parameterized user Generic traversal dict constructors remain unsafe to
+    emit directly, but their bodies can be used as compile-time facts when a
+    concrete call site supplies the missing dictionaries;
+  - known dict values now capture known nested dict arguments at construction
+    time. This prevents a nested `__dict_ToJson_a` from being resolved by a
+    later same-named binding in the caller and fixes the `Box Int`/`Leaf Int`
+    shadowing trap;
+  - inlined dict method bodies alpha-rename dict parameters before lowering, so
+    generated names from nested generic impls do not recapture each other;
+  - the recursive inlining guard now keys on the constructor, method index, and
+    nested dict-argument signatures. This still prevents infinite recursive
+    expansion, but no longer treats `ToJson (Box Int)` and
+    `ToJson (Box String)` as the same active method frame;
+  - direct-subset proofs bind the same known dict facts as lowering across
+    `let`/`bind`, keeping strict selective planning aligned with the emitted
+    specialization path;
+  - `examples/99*.saga` all run under the selective backend. In particular,
+    `examples/99f-generic-derived-tojson.saga` now specializes `Box { value:
+    42 }` through the parameterized bridge to the base `Int` method shape
+    (`integer_to_binary(42)`) instead of routing raw `42` through a `Leaf`
+    method case.

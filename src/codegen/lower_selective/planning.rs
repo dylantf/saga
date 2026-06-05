@@ -53,11 +53,11 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                     }
                 }
                 MDecl::DictConstructor(dc) => {
+                    self.local_dict_constructors
+                        .insert(dc.name.clone(), dc.clone());
                     if self.can_lower_dict_constructor(dc) {
                         self.local_dict_constructor_arities
                             .insert(dc.name.clone(), dc.dict_params.len());
-                        self.local_dict_constructors
-                            .insert(dc.name.clone(), dc.clone());
                     }
                 }
                 MDecl::Passthrough(crate::ast::Decl::FunSignature {
@@ -142,11 +142,11 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             let MDecl::DictConstructor(dc) = decl else {
                 continue;
             };
+            self.local_dict_constructors
+                .insert(dc.name.clone(), dc.clone());
             if self.can_lower_dict_constructor(dc) {
                 self.local_dict_constructor_arities
                     .insert(dc.name.clone(), dc.dict_params.len());
-                self.local_dict_constructors
-                    .insert(dc.name.clone(), dc.clone());
             } else {
                 self.unsupported_local_dict_constructors
                     .insert(dc.name.clone());
@@ -551,18 +551,6 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         if fb.params.iter().any(|p| !direct_param_supported(p)) {
             return false;
         }
-        if !self.unsupported_local_dict_constructors.is_empty() && !fb.name.starts_with("__dict_") {
-            return false;
-        }
-        if fb.guard.as_ref().is_some_and(|guard| {
-            expr_mentions_dict_constructor_names(guard, &self.unsupported_local_dict_constructors)
-        }) || expr_mentions_dict_constructor_names(
-            &fb.body,
-            &self.unsupported_local_dict_constructors,
-        ) {
-            return false;
-        }
-
         let prev_direct_candidate = self.direct_candidate_function.replace(fb.name.clone());
         self.push_scope();
         self.bind_fun_param_locals(fb);
@@ -955,160 +943,6 @@ fn generic_rep_traversal_name(name: &str) -> bool {
         || name.contains("Std.Generic")
         || name.contains("std_generic")
         || name.contains("_Rep__")
-}
-
-fn expr_mentions_dict_constructor_names(expr: &MExpr, names: &HashSet<String>) -> bool {
-    match expr {
-        MExpr::Pure(atom) => atom_mentions_dict_constructor_names(atom, names),
-        MExpr::App { head, args, .. } => {
-            atom_mentions_dict_constructor_names(head, names)
-                || args
-                    .iter()
-                    .any(|arg| atom_mentions_dict_constructor_names(arg, names))
-        }
-        MExpr::Bind { value, body, .. } | MExpr::Let { value, body, .. } => {
-            expr_mentions_dict_constructor_names(value, names)
-                || expr_mentions_dict_constructor_names(body, names)
-        }
-        MExpr::If {
-            cond,
-            then_branch,
-            else_branch,
-            ..
-        } => {
-            atom_mentions_dict_constructor_names(cond, names)
-                || expr_mentions_dict_constructor_names(then_branch, names)
-                || expr_mentions_dict_constructor_names(else_branch, names)
-        }
-        MExpr::Case {
-            scrutinee, arms, ..
-        } => {
-            atom_mentions_dict_constructor_names(scrutinee, names)
-                || arms.iter().any(|arm| {
-                    arm.guard
-                        .as_ref()
-                        .is_some_and(|guard| expr_mentions_dict_constructor_names(guard, names))
-                        || expr_mentions_dict_constructor_names(&arm.body, names)
-                })
-        }
-        MExpr::With { handler, body, .. } => {
-            handler_mentions_dict_constructor_names(handler, names)
-                || expr_mentions_dict_constructor_names(body, names)
-        }
-        MExpr::Ensure { body, cleanup } => {
-            expr_mentions_dict_constructor_names(body, names)
-                || expr_mentions_dict_constructor_names(cleanup, names)
-        }
-        MExpr::Yield { args, .. } | MExpr::ForeignCall { args, .. } => args
-            .iter()
-            .any(|arg| atom_mentions_dict_constructor_names(arg, names)),
-        MExpr::Resume { value, .. }
-        | MExpr::FieldAccess { record: value, .. }
-        | MExpr::UnaryMinus { value, .. }
-        | MExpr::DictMethodAccess { dict: value, .. } => {
-            atom_mentions_dict_constructor_names(value, names)
-        }
-        MExpr::RecordUpdate { record, fields, .. } => {
-            atom_mentions_dict_constructor_names(record, names)
-                || fields
-                    .iter()
-                    .any(|(_, atom)| atom_mentions_dict_constructor_names(atom, names))
-        }
-        MExpr::BinOp { left, right, .. } => {
-            atom_mentions_dict_constructor_names(left, names)
-                || atom_mentions_dict_constructor_names(right, names)
-        }
-        MExpr::BitString { segments, .. } => segments
-            .iter()
-            .any(|segment| atom_mentions_dict_constructor_names(&segment.value, names)),
-        MExpr::Receive { arms, after, .. } => {
-            arms.iter().any(|arm| {
-                arm.guard
-                    .as_ref()
-                    .is_some_and(|guard| expr_mentions_dict_constructor_names(guard, names))
-                    || expr_mentions_dict_constructor_names(&arm.body, names)
-            }) || after.as_ref().is_some_and(|(timeout, body)| {
-                atom_mentions_dict_constructor_names(timeout, names)
-                    || expr_mentions_dict_constructor_names(body, names)
-            })
-        }
-        MExpr::LetFun { body, rest, .. } => {
-            expr_mentions_dict_constructor_names(body, names)
-                || expr_mentions_dict_constructor_names(rest, names)
-        }
-        MExpr::HandlerValue {
-            arms,
-            return_clause,
-            ..
-        } => {
-            arms.iter()
-                .any(|arm| handler_arm_mentions_dict_constructor_names(arm, names))
-                || return_clause
-                    .as_ref()
-                    .is_some_and(|arm| handler_arm_mentions_dict_constructor_names(arm, names))
-        }
-    }
-}
-
-fn handler_mentions_dict_constructor_names(handler: &MHandler, names: &HashSet<String>) -> bool {
-    match handler {
-        MHandler::Static {
-            arms,
-            return_clause,
-            ..
-        } => {
-            arms.iter()
-                .any(|arm| handler_arm_mentions_dict_constructor_names(arm, names))
-                || return_clause
-                    .as_ref()
-                    .is_some_and(|arm| handler_arm_mentions_dict_constructor_names(arm, names))
-        }
-        MHandler::Composite { handlers, .. } => handlers
-            .iter()
-            .any(|handler| handler_mentions_dict_constructor_names(handler, names)),
-        MHandler::Dynamic {
-            op_tuple,
-            return_lambda,
-            ..
-        } => {
-            atom_mentions_dict_constructor_names(op_tuple, names)
-                || return_lambda
-                    .as_ref()
-                    .is_some_and(|lambda| atom_mentions_dict_constructor_names(lambda, names))
-        }
-        MHandler::Native { .. } => false,
-    }
-}
-
-fn handler_arm_mentions_dict_constructor_names(arm: &MHandlerArm, names: &HashSet<String>) -> bool {
-    expr_mentions_dict_constructor_names(&arm.body, names)
-        || arm
-            .finally_block
-            .as_ref()
-            .is_some_and(|expr| expr_mentions_dict_constructor_names(expr, names))
-}
-
-fn atom_mentions_dict_constructor_names(atom: &Atom, names: &HashSet<String>) -> bool {
-    match atom {
-        Atom::Var { .. } | Atom::Lit { .. } | Atom::Symbol { .. } | Atom::BackendAtom { .. } => {
-            false
-        }
-        Atom::Ctor { args, .. } => args
-            .iter()
-            .any(|arg| atom_mentions_dict_constructor_names(arg, names)),
-        Atom::Tuple { elements, .. } => elements
-            .iter()
-            .any(|arg| atom_mentions_dict_constructor_names(arg, names)),
-        Atom::AnonRecord { fields, .. } | Atom::Record { fields, .. } => fields
-            .iter()
-            .any(|(_, atom)| atom_mentions_dict_constructor_names(atom, names)),
-        Atom::Lambda { body, .. } => expr_mentions_dict_constructor_names(body, names),
-        Atom::DictRef { name, .. } => names.contains(name),
-        Atom::QualifiedRef { name, .. } => names.contains(name),
-        Atom::BackendSpawnThunk { callback, .. } => {
-            atom_mentions_dict_constructor_names(callback, names)
-        }
-    }
 }
 
 fn is_native_variant_name(name: &str) -> bool {

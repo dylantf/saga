@@ -92,9 +92,13 @@ pub(super) struct KnownCpsLambda {
 pub(super) struct KnownDirectLambda {
     pub(super) method_key: Option<KnownDictMethodKey>,
     pub(super) dict_bindings: Vec<(String, Atom)>,
+    pub(super) known_dict_aliases: Vec<(String, KnownDictValue)>,
     pub(super) params: Vec<Pat>,
     pub(super) body: Box<MExpr>,
 }
+
+pub(super) type FreshenedDictMethodBindings =
+    (Vec<(String, Atom)>, Vec<(String, KnownDictValue)>, MExpr);
 
 #[derive(Clone, Debug, PartialEq)]
 pub(super) struct KnownDictValue {
@@ -102,6 +106,7 @@ pub(super) struct KnownDictValue {
     pub(super) methods_inlineable: bool,
     pub(super) dict_params: Vec<String>,
     pub(super) dict_args: Vec<Atom>,
+    pub(super) known_dict_args: Vec<Option<Box<KnownDictValue>>>,
     pub(super) methods: Vec<Atom>,
     pub(super) method_effectful: Vec<bool>,
 }
@@ -126,6 +131,7 @@ pub(super) enum KnownDirectValue {
 pub(super) struct KnownDictMethodKey {
     pub(super) constructor_name: String,
     pub(super) method_index: usize,
+    pub(super) dict_arg_keys: Vec<String>,
 }
 
 impl FunctionEntryInfo {

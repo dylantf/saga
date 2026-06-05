@@ -148,6 +148,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             let key = KnownDictMethodKey {
                 constructor_name: dc.name.clone(),
                 method_index: index,
+                dict_arg_keys: Vec::new(),
             };
             let inserted = self.active_known_dict_methods.insert(key.clone());
             let lowered = match method {

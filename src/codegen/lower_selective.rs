@@ -41,6 +41,7 @@ mod functions;
 mod imported_facts;
 mod known_facts;
 mod known_values;
+mod monadic_rename;
 mod occurs;
 mod planning;
 mod runtime_values;

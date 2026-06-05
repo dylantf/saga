@@ -18,6 +18,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                     }
                 });
                 let known_direct_lambda = self.known_direct_lambda_for_expr(value);
+                let known_dict = self.known_dict_value_for_expr(value);
                 let known_direct_value = self.known_direct_value_for_expr(value);
                 if !self.expr_is_direct_subset(value) {
                     return false;
@@ -30,6 +31,9 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                 }
                 if let Some(lambda) = known_direct_lambda {
                     self.bind_known_direct_lambda(var.name.clone(), lambda);
+                }
+                if let Some(dict) = known_dict {
+                    self.bind_known_dict_value(var.name.clone(), dict);
                 }
                 if let Some(value) = known_direct_value {
                     self.bind_known_direct_value(var.name.clone(), value);
