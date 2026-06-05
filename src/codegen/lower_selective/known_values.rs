@@ -425,11 +425,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         if self.known_dict_method_is_active(&known_dict, *method_index) {
             return None;
         }
-        if known_dict
-            .dict_params
-            .iter()
-            .any(|param| self.is_local(param))
-        {
+        if !self.dict_param_collisions_are_self_aliases(&known_dict) {
             return None;
         }
         let method = known_dict.methods.get(*method_index)?.clone();
@@ -477,11 +473,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         if self.known_dict_method_is_active(&known_dict, *method_index) {
             return None;
         }
-        if known_dict
-            .dict_params
-            .iter()
-            .any(|param| self.is_local(param))
-        {
+        if !self.dict_param_collisions_are_self_aliases(&known_dict) {
             return None;
         }
         let method = known_dict.methods.get(*method_index)?.clone();

@@ -479,7 +479,9 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                     return None;
                 };
                 if binding_name == &name.name {
-                    return None;
+                    return self
+                        .known_dict_value(&name.name)
+                        .map(|dict| (binding_name.clone(), dict));
                 }
                 self.known_dict_value(&name.name)
                     .map(|dict| (binding_name.clone(), dict))
@@ -506,7 +508,9 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                     return None;
                 };
                 if param_name == &arg_name.name {
-                    return None;
+                    return self
+                        .known_dict_value(&arg_name.name)
+                        .map(|dict| (param_name.clone(), dict));
                 }
                 self.known_dict_value(&arg_name.name)
                     .map(|dict| (param_name.clone(), dict))

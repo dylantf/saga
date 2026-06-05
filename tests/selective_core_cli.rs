@@ -477,6 +477,80 @@ fn selective_core_runs_routed_derive_options_without_optimizer_variants() {
 }
 
 #[test]
+fn selective_core_specializes_known_generic_to_json_records() {
+    let binary = env!("CARGO_BIN_EXE_saga");
+    let manifest_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let fixture_src = manifest_dir.join("examples/99f-generic-derived-tojson.saga");
+    let unique = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("system clock should be after unix epoch")
+        .as_nanos();
+    let isolated_dir = manifest_dir.join(format!(
+        "target/selective-core-cli/generic-derived-tojson-{unique}"
+    ));
+    std::fs::create_dir_all(&isolated_dir).expect("create isolated generic to_json fixture dir");
+    let fixture = isolated_dir.join("99f-generic-derived-tojson.saga");
+    std::fs::copy(&fixture_src, &fixture).expect("copy generic to_json fixture");
+
+    let inspect = std::process::Command::new(binary)
+        .args([
+            "inspect",
+            fixture.to_str().expect("fixture path should be utf-8"),
+            "--stage",
+            "selective-core",
+            "--selective-no-fallback",
+        ])
+        .output()
+        .expect("inspect generic to_json fixture");
+    assert!(
+        inspect.status.success(),
+        "saga inspect failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&inspect.stdout),
+        String::from_utf8_lossy(&inspect.stderr)
+    );
+
+    let core = String::from_utf8_lossy(&inspect.stdout);
+    let start = core
+        .find("\n'main'/1")
+        .map(|index| index + 1)
+        .expect("main should be emitted");
+    let main_body = &core[start..];
+    assert!(
+        main_body.contains("call 'erlang':'integer_to_binary'\n                (42)"),
+        "Box Int to_json should specialize through known Generic constructors\n{main_body}"
+    );
+    assert!(
+        main_body.contains("#<104>(8,1,'integer',['unsigned'|['big']]),#<101>"),
+        "Box String to_json should specialize through known Generic constructors\n{main_body}"
+    );
+
+    let output = std::process::Command::new(binary)
+        .args([
+            "run",
+            "--selective-no-fallback",
+            fixture.to_str().expect("fixture path should be utf-8"),
+        ])
+        .output()
+        .expect("run generic to_json fixture");
+    assert!(
+        output.status.success(),
+        "saga run failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let output_text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output_text.contains("\"{\"value\": 42}\""), "{output_text}");
+    assert!(
+        output_text.contains("\"{\"value\": \"hello\"}\""),
+        "{output_text}"
+    );
+}
+
+#[test]
 fn selective_core_runs_known_split_trait_record_without_optimizer_variants() {
     let binary = env!("CARGO_BIN_EXE_saga");
     let manifest_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));

@@ -426,11 +426,14 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         if self.known_dict_method_is_active(known_dict, method_index) {
             return None;
         }
-        if known_dict
-            .dict_params
-            .iter()
-            .any(|param| self.is_local(param))
+        if method_index == 0
+            && args.len() == 1
+            && let Some(arg_value) = self.known_direct_value_for_atom(&args[0])
+            && let Some(lowered) = self.lower_known_to_json_value(known_dict, &arg_value)
         {
+            return Some(lowered);
+        }
+        if !self.dict_param_collisions_are_self_aliases(known_dict) {
             return None;
         }
         let method = known_dict.methods.get(method_index)?;
@@ -470,6 +473,147 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         }
         Some(lowered)
     }
+
+    fn lower_known_to_json_value(
+        &mut self,
+        known_dict: &KnownDictValue,
+        value: &KnownDirectValue,
+    ) -> Option<CExpr> {
+        let dict_name = known_dict.constructor_name.as_str();
+        if !dict_name.contains("ToJson") {
+            return None;
+        }
+        if dict_name.ends_with("_Std_Int_Int") {
+            return Some(CExpr::Call(
+                "erlang".to_string(),
+                "integer_to_binary".to_string(),
+                vec![self.lower_known_direct_value(value)],
+            ));
+        }
+        if dict_name.ends_with("_Std_String_String") {
+            return Some(json_quote(self.lower_known_direct_value(value)));
+        }
+        if dict_name.ends_with("_Std_Generic_U1") {
+            return Some(json_bytes("null"));
+        }
+
+        let KnownDirectValue::Ctor { name, args } = value else {
+            return None;
+        };
+        let bare = name.rsplit('.').next().unwrap_or(name);
+        match generic_to_json_kind(dict_name)? {
+            GenericToJsonKind::U1 => Some(json_bytes("null")),
+            GenericToJsonKind::Leaf => {
+                let [payload] = args.as_slice() else {
+                    return None;
+                };
+                if bare != "Leaf" {
+                    return None;
+                }
+                let child = self.known_dict_arg(0, known_dict)?;
+                self.lower_known_to_json_value(&child, payload)
+            }
+            GenericToJsonKind::Labeled => {
+                let [payload] = args.as_slice() else {
+                    return None;
+                };
+                if bare != "Labeled" {
+                    return None;
+                }
+                let label = self.lower_known_symbol_arg(0, known_dict)?;
+                let child = self.known_dict_arg(1, known_dict)?;
+                let prefix = string_append(json_quote(label), json_bytes(": "));
+                let payload = self.lower_known_to_json_value(&child, payload)?;
+                Some(string_append(prefix, payload))
+            }
+            GenericToJsonKind::And => {
+                let [left, right] = args.as_slice() else {
+                    return None;
+                };
+                if bare != "And" {
+                    return None;
+                }
+                let left_dict = self.known_dict_arg(0, known_dict)?;
+                let right_dict = self.known_dict_arg(1, known_dict)?;
+                let left = self.lower_known_to_json_value(&left_dict, left)?;
+                let right = self.lower_known_to_json_value(&right_dict, right)?;
+                Some(string_append(string_append(left, json_bytes(", ")), right))
+            }
+            GenericToJsonKind::Or => {
+                let [payload] = args.as_slice() else {
+                    return None;
+                };
+                match bare {
+                    "Or_Left" => {
+                        let left_dict = self.known_dict_arg(0, known_dict)?;
+                        self.lower_known_to_json_value(&left_dict, payload)
+                    }
+                    "Or_Right" => {
+                        let right_dict = self.known_dict_arg(1, known_dict)?;
+                        self.lower_known_to_json_value(&right_dict, payload)
+                    }
+                    _ => None,
+                }
+            }
+            GenericToJsonKind::Variant => {
+                let [payload] = args.as_slice() else {
+                    return None;
+                };
+                if bare != "Variant" {
+                    return None;
+                }
+                let label = self.lower_known_symbol_arg(0, known_dict)?;
+                let child = self.known_dict_arg(1, known_dict)?;
+                let prefix = string_append(json_bytes("{"), json_quote(label));
+                let prefix = string_append(prefix, json_bytes(": "));
+                let payload = self.lower_known_to_json_value(&child, payload)?;
+                let body = string_append(prefix, payload);
+                Some(string_append(body, json_bytes("}")))
+            }
+            GenericToJsonKind::Record => {
+                let [_, inner] = args.as_slice() else {
+                    return None;
+                };
+                if bare != "Record" {
+                    return None;
+                }
+                let child = self.known_dict_arg(0, known_dict)?;
+                let inner = self.lower_known_to_json_value(&child, inner)?;
+                Some(string_append(string_append(json_bytes("{"), inner), json_bytes("}")))
+            }
+            GenericToJsonKind::Adt => {
+                let [_, inner] = args.as_slice() else {
+                    return None;
+                };
+                if bare != "Adt" {
+                    return None;
+                }
+                let child = self.known_dict_arg(0, known_dict)?;
+                self.lower_known_to_json_value(&child, inner)
+            }
+        }
+    }
+
+    fn known_dict_arg(
+        &self,
+        index: usize,
+        known_dict: &KnownDictValue,
+    ) -> Option<KnownDictValue> {
+        let Atom::Var { name, .. } = known_dict.dict_args.get(index)? else {
+            return None;
+        };
+        self.known_dict_value(&name.name)
+    }
+
+    fn lower_known_symbol_arg(
+        &mut self,
+        index: usize,
+        known_dict: &KnownDictValue,
+    ) -> Option<CExpr> {
+        let atom = known_dict.dict_args.get(index)?;
+        Some(self.lower_atom(atom))
+    }
+
 
     pub(super) fn known_dict_method_is_active(
         &self,
@@ -657,4 +801,54 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                 });
         CExpr::Fun(remaining_param_names, Box::new(lowered_body))
     }
+}
+
+#[derive(Clone, Copy)]
+enum GenericToJsonKind {
+    U1,
+    Leaf,
+    Labeled,
+    And,
+    Or,
+    Variant,
+    Record,
+    Adt,
+}
+
+fn generic_to_json_kind(dict_name: &str) -> Option<GenericToJsonKind> {
+    if dict_name.ends_with("_Std_Generic_U1") {
+        Some(GenericToJsonKind::U1)
+    } else if dict_name.ends_with("_Std_Generic_Leaf") {
+        Some(GenericToJsonKind::Leaf)
+    } else if dict_name.ends_with("_Std_Generic_Labeled") {
+        Some(GenericToJsonKind::Labeled)
+    } else if dict_name.ends_with("_Std_Generic_And") {
+        Some(GenericToJsonKind::And)
+    } else if dict_name.ends_with("_Std_Generic_Or") {
+        Some(GenericToJsonKind::Or)
+    } else if dict_name.ends_with("_Std_Generic_Variant") {
+        Some(GenericToJsonKind::Variant)
+    } else if dict_name.ends_with("_Std_Generic_Record") {
+        Some(GenericToJsonKind::Record)
+    } else if dict_name.ends_with("_Std_Generic_Adt") {
+        Some(GenericToJsonKind::Adt)
+    } else {
+        None
+    }
+}
+
+fn json_bytes(value: &str) -> CExpr {
+    crate::codegen::lower::util::lower_string_to_binary(value)
+}
+
+fn json_quote(value: CExpr) -> CExpr {
+    string_append(string_append(json_bytes("\""), value), json_bytes("\""))
+}
+
+fn string_append(left: CExpr, right: CExpr) -> CExpr {
+    CExpr::Call(
+        "std_string_bridge".to_string(),
+        "append".to_string(),
+        vec![left, right],
+    )
 }

@@ -58,6 +58,20 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         }
     }
 
+    pub(super) fn dict_param_collisions_are_self_aliases(
+        &self,
+        known_dict: &KnownDictValue,
+    ) -> bool {
+        known_dict
+            .dict_params
+            .iter()
+            .zip(known_dict.dict_args.iter())
+            .all(|(param, arg)| {
+                !self.is_local(param)
+                    || matches!(arg, Atom::Var { name, .. } if name.name == *param)
+            })
+    }
+
     pub(super) fn bind_known_direct_atom_pattern_values(
         &mut self,
         bindings: impl IntoIterator<Item = (String, Atom)>,
