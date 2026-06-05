@@ -416,6 +416,11 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
 
     pub(super) fn compute_imported_direct_values(&mut self) {
         self.imported_direct_values.clear();
+        let mut visited = HashSet::new();
+        self.compute_imported_direct_values_transitive(&mut visited);
+    }
+
+    fn compute_imported_direct_values_transitive(&mut self, visited: &mut HashSet<String>) {
         for (source_module_name, compiled) in &self.module_ctx.modules {
             let is_stdlib_module = source_module_name.starts_with("Std.");
             let skip_reason = if source_module_name == &self.current_module {
@@ -433,6 +438,15 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                 debug_selective_subject("imported-value", source_module_name, || {
                     format!(
                         "{}: skip module {source_module_name}: {reason}",
+                        self.current_module
+                    )
+                });
+                continue;
+            }
+            if !visited.insert(source_module_name.clone()) {
+                debug_selective_subject("imported-value", source_module_name, || {
+                    format!(
+                        "{}: skip module {source_module_name}: already scanned in imported-value traversal",
                         self.current_module
                     )
                 });
@@ -467,6 +481,11 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             );
             imported.current_module = source_module_name.clone();
             imported.classify_program(&monadic_imported);
+            imported.compute_imported_direct_values_transitive(visited);
+            self.merge_imported_direct_values_from(
+                source_module_name,
+                &imported.imported_direct_values,
+            );
 
             let erlang_module = erlang_module_name(source_module_name);
             for decl in &monadic_imported {
@@ -516,6 +535,24 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                 self.imported_direct_values
                     .insert((erlang_module.clone(), value.name.clone()), atom.clone());
             }
+        }
+    }
+
+    fn merge_imported_direct_values_from(
+        &mut self,
+        via_module_name: &str,
+        values: &HashMap<(String, String), Atom>,
+    ) {
+        for ((module, name), atom) in values {
+            debug_selective_subject("imported-value", &format!("{module}.{name}"), || {
+                format!(
+                    "{}: import transitive {module}.{name} via {via_module_name}: {}",
+                    self.current_module,
+                    atom_debug_label(atom)
+                )
+            });
+            self.imported_direct_values
+                .insert((module.clone(), name.clone()), atom.clone());
         }
     }
 

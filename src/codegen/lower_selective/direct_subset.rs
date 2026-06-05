@@ -90,6 +90,32 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                 {
                     return args.iter().all(|arg| self.atom_is_direct_subset(arg));
                 }
+                if let Some(lambda) = self.known_direct_lambda_for_atom(head)
+                    && lambda.params.len() == args.len()
+                    && args.iter().all(|arg| self.atom_is_direct_subset(arg))
+                {
+                    let Some(method_key) = lambda.method_key.clone() else {
+                        return self.lambda_app_is_direct_subset_with_dict_aliases(
+                            &lambda.dict_bindings,
+                            lambda.known_dict_aliases.clone(),
+                            &lambda.params,
+                            &lambda.body,
+                            args,
+                        );
+                    };
+                    if !self.active_known_dict_methods.insert(method_key.clone()) {
+                        return false;
+                    }
+                    let supported = self.lambda_app_is_direct_subset_with_dict_aliases(
+                        &lambda.dict_bindings,
+                        lambda.known_dict_aliases.clone(),
+                        &lambda.params,
+                        &lambda.body,
+                        args,
+                    );
+                    self.active_known_dict_methods.remove(&method_key);
+                    return supported;
+                }
                 if let Atom::Lambda { params, body, .. } = head
                     && params.len() == args.len()
                     && args.iter().all(|arg| self.atom_is_direct_subset(arg))
@@ -222,6 +248,17 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             | MExpr::Bind {
                 var, value, body, ..
             } => {
+                let local_shape = self.direct_local_shape_for_expr(value).or_else(|| {
+                    if matches!(&**value, MExpr::Resume { .. }) {
+                        self.direct_call_shape_for_local_use_in_expr(&var.name, body)
+                            .or(Some(LocalValueShape::PureCallableFromUseType))
+                    } else {
+                        None
+                    }
+                });
+                let known_direct_lambda = self.known_direct_lambda_for_expr(value);
+                let known_dict = self.known_dict_value_for_expr(value);
+                let known_direct_value = self.known_direct_value_for_expr(value);
                 if !self.expr_is_direct_subset(value) {
                     return format!(
                         "{} binding '{}' value rejected: {}",
@@ -230,11 +267,28 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                         self.direct_subset_rejection_summary(value)
                     );
                 }
+                self.push_scope();
+                self.current_scope_mut().insert(var.name.clone());
+                if let Some(shape) = local_shape {
+                    self.current_shape_scope_mut()
+                        .insert(var.name.clone(), shape);
+                }
+                if let Some(lambda) = known_direct_lambda {
+                    self.bind_known_direct_lambda(var.name.clone(), lambda);
+                }
+                if let Some(dict) = known_dict {
+                    self.bind_known_dict_value(var.name.clone(), dict);
+                }
+                if let Some(value) = known_direct_value {
+                    self.bind_known_direct_value(var.name.clone(), value);
+                }
+                let summary = self.direct_subset_rejection_summary(body);
+                self.pop_scope();
                 format!(
                     "{} binding '{}' body rejected: {}; value was {}",
                     mexpr_debug_label(expr),
                     var.name,
-                    mexpr_debug_label(body),
+                    summary,
                     mexpr_debug_label(value)
                 )
             }

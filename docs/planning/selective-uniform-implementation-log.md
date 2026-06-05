@@ -1931,3 +1931,20 @@ boundaries exist.
     can reference values owned by `SagaJson`, so the next real fix is a
     transitive imported-value fact path for imported method bodies, not another
     JSON-specific lowering rule.
+- Followed the trace into the `saga_json` generic record path:
+  - imported public value facts now propagate transitively through imported
+    modules. `EncodeDerive` can see `SagaJson.default_options` through
+    `SagaJson.Encode`, which turns the default options call sites into known
+    direct record values;
+  - known direct dictionary method temps now participate in direct-subset
+    proofs. This aligns the proof path with lowering for shapes like
+    `let method = DictMethodAccess(fieldsDict, 0); method opts inner`;
+  - known method-temp application is guarded by the active known-method key
+    before the proof walks the method body. This prevents recursive generic
+    traversal methods from overflowing the Rust stack while still allowing
+    non-recursive nested known-method inlining;
+  - a `saga_json` selective-core trace for `Std_Generic_Record` no longer stack
+    overflows and the derived `ToJson` dict bodies for the inspected module
+    collapse out of the export list. A full `saga_json build` passed once, but
+    avoid repeating full external inspect/build loops casually because they are
+    CPU-heavy.

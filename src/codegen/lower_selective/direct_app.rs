@@ -18,50 +18,69 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         }
         if let Some(lambda) = self.known_direct_lambda_for_atom(head)
             && lambda.params.len() == args.len()
-            && self.lambda_app_is_direct_subset_with_dict_aliases(
-                &lambda.dict_bindings,
-                lambda.known_dict_aliases.clone(),
-                &lambda.params,
-                &lambda.body,
-                args,
-            )
         {
             let method_key = lambda.method_key.clone();
-            let inserted = method_key
-                .clone()
-                .is_some_and(|key| self.active_known_dict_methods.insert(key));
-            let mut known_dict_aliases = lambda.known_dict_aliases.clone();
-            known_dict_aliases.extend(self.known_dict_aliases_for_bindings(&lambda.dict_bindings));
-            let lowered = self.lower_inline_direct_lambda_app_with_dict_bindings(
-                &lambda.dict_bindings,
-                known_dict_aliases,
-                &lambda.params,
-                &lambda.body,
-                args,
-            );
+            let inserted = if let Some(key) = method_key.clone() {
+                self.active_known_dict_methods.insert(key)
+            } else {
+                false
+            };
+            let supported = method_key.is_none() || inserted;
+            let supported = supported
+                && self.lambda_app_is_direct_subset_with_dict_aliases(
+                    &lambda.dict_bindings,
+                    lambda.known_dict_aliases.clone(),
+                    &lambda.params,
+                    &lambda.body,
+                    args,
+                );
+            if supported {
+                let mut known_dict_aliases = lambda.known_dict_aliases.clone();
+                known_dict_aliases
+                    .extend(self.known_dict_aliases_for_bindings(&lambda.dict_bindings));
+                let lowered = self.lower_inline_direct_lambda_app_with_dict_bindings(
+                    &lambda.dict_bindings,
+                    known_dict_aliases,
+                    &lambda.params,
+                    &lambda.body,
+                    args,
+                );
+                if inserted && let Some(key) = method_key {
+                    self.active_known_dict_methods.remove(&key);
+                }
+                return lowered;
+            }
             if inserted && let Some(key) = method_key {
                 self.active_known_dict_methods.remove(&key);
             }
-            return lowered;
         }
         if let Some(lambda) = self.known_direct_lambda_for_atom(head)
             && args.len() < lambda.params.len()
-            && self.lambda_is_direct_subset_with_dict_aliases(
-                &lambda.dict_bindings,
-                lambda.known_dict_aliases.clone(),
-                &lambda.params,
-                &lambda.body,
-            )
         {
             let method_key = lambda.method_key.clone();
-            let inserted = method_key
-                .clone()
-                .is_some_and(|key| self.active_known_dict_methods.insert(key));
-            let lowered = self.lower_partial_known_direct_lambda_value(&lambda, args);
+            let inserted = if let Some(key) = method_key.clone() {
+                self.active_known_dict_methods.insert(key)
+            } else {
+                false
+            };
+            let supported = method_key.is_none() || inserted;
+            let supported = supported
+                && self.lambda_is_direct_subset_with_dict_aliases(
+                    &lambda.dict_bindings,
+                    lambda.known_dict_aliases.clone(),
+                    &lambda.params,
+                    &lambda.body,
+                );
+            if supported {
+                let lowered = self.lower_partial_known_direct_lambda_value(&lambda, args);
+                if inserted && let Some(key) = method_key {
+                    self.active_known_dict_methods.remove(&key);
+                }
+                return lowered;
+            }
             if inserted && let Some(key) = method_key {
                 self.active_known_dict_methods.remove(&key);
             }
-            return lowered;
         }
         if let Some(call) = self.lower_direct_external_app(head, args) {
             return call;
