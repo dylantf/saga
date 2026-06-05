@@ -96,6 +96,25 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
     }
 
     pub(super) fn lower_case_chain(&mut self, scrutinee: &Atom, arms: &[MArm]) -> CExpr {
+        if let Some(known_scrutinee) = self.known_direct_value_for_atom(scrutinee) {
+            for arm in arms {
+                if arm.guard.is_some() {
+                    break;
+                }
+                let Some(bindings) =
+                    self.match_known_direct_value_pattern(&known_scrutinee, &arm.pattern)
+                else {
+                    continue;
+                };
+                self.push_scope();
+                self.bind_pat_locals(&arm.pattern);
+                self.bind_known_direct_value_pattern_values(bindings);
+                let body = self.lower_expr(&arm.body);
+                self.pop_scope();
+                return body;
+            }
+        }
+
         if let Some(known_scrutinee) = self.known_direct_atom_for_case_scrutinee(scrutinee) {
             for arm in arms {
                 if arm.guard.is_some() {
@@ -178,6 +197,11 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         record_name: Option<&str>,
         anon_fields: &Option<Vec<String>>,
     ) -> CExpr {
+        if let Some(value) =
+            self.known_direct_field_direct_value(record, field, record_name, anon_fields)
+        {
+            return self.lower_known_direct_value(&value);
+        }
         if let Some(atom) = self.known_direct_field_value(record, field, record_name, anon_fields) {
             return self.lower_atom(&atom);
         }
@@ -205,12 +229,25 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         record_name: Option<&str>,
         anon_fields: Option<&[String]>,
     ) -> Vec<String> {
+        self.record_field_order_opt(record_name, anon_fields)
+            .unwrap_or_else(|| {
+                let name = record_name.unwrap_or("<anonymous>");
+                panic!(
+                    "selective-uniform direct lowerer TODO: unknown record '{}'",
+                    name
+                )
+            })
+    }
+
+    pub(super) fn record_field_order_opt(
+        &self,
+        record_name: Option<&str>,
+        anon_fields: Option<&[String]>,
+    ) -> Option<Vec<String>> {
         if let Some(fields) = anon_fields {
-            return fields.to_vec();
+            return Some(fields.to_vec());
         }
-        let Some(name) = record_name else {
-            self.unsupported("field access without record field metadata");
-        };
+        let name = record_name?;
         self.effect_info
             .records
             .get(name)
@@ -232,12 +269,22 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                     .map(|(_, info)| info)
             })
             .map(|info| info.fields.iter().map(|(field, _)| field.clone()).collect())
-            .unwrap_or_else(|| {
-                panic!(
-                    "selective-uniform direct lowerer TODO: unknown record '{}'",
-                    name
-                )
-            })
+    }
+
+    pub(super) fn lower_known_field_access_expr(
+        &mut self,
+        record: &Atom,
+        field: &str,
+        record_name: Option<&str>,
+        anon_fields: Option<&[String]>,
+    ) -> Option<CExpr> {
+        let order = self.record_field_order_opt(record_name, anon_fields)?;
+        let index = order.iter().position(|candidate| candidate == field)? as i64 + 2;
+        Some(CExpr::Call(
+            "erlang".to_string(),
+            "element".to_string(),
+            vec![CExpr::Lit(CLit::Int(index)), self.lower_atom(record)],
+        ))
     }
 
     pub(super) fn lower_record_update(
@@ -460,9 +507,14 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         let mut known_dict_aliases = self.known_dict_aliases_for_bindings(dict_bindings);
         known_dict_aliases.extend(self.known_dict_aliases_for_params(params, args));
         let known_atom_bindings = self.known_direct_atom_pattern_bindings_for_params(params, args);
+        let known_value_bindings =
+            self.known_direct_value_pattern_bindings_for_params(params, args);
         let all_params_known = self
-            .known_direct_atom_bindings_for_all_params(params, args)
-            .is_some();
+            .known_direct_value_bindings_for_all_params(params, args)
+            .is_some()
+            || self
+                .known_direct_atom_bindings_for_all_params(params, args)
+                .is_some();
         let candidate_elided_dict_bindings: HashSet<String> = dict_bindings
             .iter()
             .filter_map(|(name, arg)| {
@@ -483,6 +535,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             self.bind_pat_locals(pat);
         }
         self.bind_known_direct_atom_pattern_values(known_atom_bindings);
+        self.bind_known_direct_value_pattern_values(known_value_bindings);
         let lowered_body = self.lower_expr(body);
         let lowered_body = if all_params_known {
             lowered_body
@@ -545,6 +598,10 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             &lambda.params[..supplied_args.len()],
             supplied_args,
         );
+        let known_value_bindings = self.known_direct_value_pattern_bindings_for_params(
+            &lambda.params[..supplied_args.len()],
+            supplied_args,
+        );
         self.push_scope();
         for (name, _) in &lambda.dict_bindings {
             self.current_scope_mut().insert(name.clone());
@@ -554,6 +611,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             self.bind_pat_locals(pat);
         }
         self.bind_known_direct_atom_pattern_values(known_atom_bindings);
+        self.bind_known_direct_value_pattern_values(known_value_bindings);
         let lowered_body = self.lower_expr(&lambda.body);
         let lowered_body = self.wrap_param_match(&lambda.params, &param_names, lowered_body);
         self.pop_scope();

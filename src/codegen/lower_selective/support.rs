@@ -102,6 +102,22 @@ pub(super) struct KnownDictValue {
     pub(super) methods: Vec<Atom>,
 }
 
+#[derive(Clone, Debug)]
+pub(super) enum KnownDirectValue {
+    Atom(Atom),
+    Ctor {
+        name: String,
+        args: Vec<KnownDirectValue>,
+    },
+    Tuple(Vec<KnownDirectValue>),
+    AnonRecord(Vec<(String, KnownDirectValue)>),
+    Record {
+        name: String,
+        fields: Vec<(String, KnownDirectValue)>,
+    },
+    Core(CExpr),
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(super) struct KnownDictMethodKey {
     pub(super) constructor_name: String,
@@ -220,6 +236,10 @@ pub(super) fn lower_param_names(params: &[Pat]) -> Vec<String> {
             _ => format!("_Arg{i}"),
         })
         .collect()
+}
+
+pub(super) fn core_expr_is_simple_value(expr: &CExpr) -> bool {
+    matches!(expr, CExpr::Lit(_) | CExpr::Var(_) | CExpr::Nil | CExpr::FunRef(_, _))
 }
 
 pub(super) fn direct_param_supported(pat: &Pat) -> bool {

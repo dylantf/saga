@@ -75,6 +75,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                 let local_shape = self.direct_local_shape_for_expr(value);
                 let known_dict = self.known_dict_value_for_expr(value);
                 let known_atom = self.known_direct_atom_for_expr(value);
+                let known_value = self.known_direct_value_for_expr(value);
                 self.push_scope();
                 self.current_scope_mut().insert(var.name.clone());
                 if let Some(shape) = local_shape {
@@ -87,12 +88,18 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                 if let Some(atom) = known_atom.as_ref() {
                     self.bind_known_direct_atom(var.name.clone(), atom.clone());
                 }
+                if let Some(value) = known_value.as_ref() {
+                    self.bind_known_direct_value(var.name.clone(), value.clone());
+                }
                 let body = self.lower_expr(body);
                 self.pop_scope();
                 if known_dict.is_some() && !core_expr_mentions_var(&var.name, &body) {
                     return body;
                 }
                 if known_atom.is_some() && !core_expr_mentions_var(&var.name, &body) {
+                    return body;
+                }
+                if known_value.is_some() && !core_expr_mentions_var(&var.name, &body) {
                     return body;
                 }
                 let value = self.lower_expr(value);

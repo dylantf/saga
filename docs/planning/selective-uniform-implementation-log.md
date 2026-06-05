@@ -1712,3 +1712,35 @@ boundaries exist.
   - `saga_json` now builds and runs end to end on the selective backend. The
     next JSON work is actual output-shape specialization, not basic backend
     correctness.
+- Audited the simplified `examples/99*` Generic/ToJson fixtures as the next
+  specialization canaries:
+  - `99b-generic-derived`, `99c-generic-adt`, `99e-generic-recursive`, and
+    `99k-generic-derived-defaults` run under strict selective lowering;
+  - added a `KnownDirectValue` representation-fact layer alongside
+    `KnownDirectAtom`. It can carry constructor/tuple/record shapes whose
+    leaves are direct Core values such as `erlang:element(N, x)` field reads,
+    then hoist those leaves before building Core tuples/calls. This lets
+    non-parameterized derived Generic values collapse through known-constructor
+    cases without materializing the intermediate `Std.Generic` nodes at
+    runtime;
+  - direct call/apply argument lowering now hoists non-atomic known-value
+    substitutions, fixing invalid Core like passing `erlang:element(...)`
+    directly as an apply argument;
+  - `99d-generic-parameterized` and `99f-generic-derived-tojson` still expose a
+    separate parameterized-wrapper bug: while inlining known dict methods, the
+    value fact for a parameterized representation can become too shallow
+    (`Labeled(field)` instead of `Labeled(Leaf(field))`). That erases a wrapper
+    check and produces impossible Core matches such as running the `Leaf` impl
+    on the raw field value. Treat these as the next pressure tests, not as the
+    current green path;
+  - `99g-generic-derived-fromjson` still stack-overflows during compile, so the
+    from-direction derived path needs a separate iterative/cycle-safe pass
+    before it can share the ToJson specialization story;
+  - constant call sites already benefit from known-atom case collapse: a call
+    like `to_json (Person { ... })` can inline through known constructors until
+    the generated `main` body formats fields directly;
+  - the benchmark-shaped case is `Generic.to x` for an unknown record variable:
+    the new fact layer can represent the `Rep__T(shape)` spine with field-read
+    leaves from `x`, then let known-constructor case reduction consume that
+    fact. Continue to avoid unlimited recursive inlining; recursive and
+    parameterized shapes need explicit cycle/wrapper handling.

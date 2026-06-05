@@ -65,10 +65,13 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                     self.lower_partial_local_callable(&name, arity, head, args)
                 } else {
                     self.assert_app_arity(&name, args.len(), arity);
-                    CExpr::Apply(
+                    let (lowered_args, bindings) =
+                        self.lower_direct_call_args_with_bindings(head, args);
+                    let body = CExpr::Apply(
                         Box::new(CExpr::Var(core_var(&name))),
-                        self.lower_direct_call_args(head, args),
-                    )
+                        lowered_args,
+                    );
+                    self.wrap_core_value_bindings(body, bindings)
                 }
             }
             Some(CallShape::LocalCpsCallable { name, .. }) => self.unsupported(&format!(
@@ -123,20 +126,16 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                 return None;
             }
             let module = callable.module?;
-            let call_args = args
+            let filtered_args: Vec<Atom> = args
                 .iter()
-                .filter(|arg| {
-                    !matches!(
-                        arg,
-                        Atom::Lit {
-                            value: Lit::Unit,
-                            ..
-                        }
-                    )
-                })
-                .map(|arg| self.lower_atom(arg))
+                .filter(|arg| !matches!(arg, Atom::Lit { value: Lit::Unit, .. }))
+                .cloned()
                 .collect();
-            return Some(CExpr::Call(module, callable.name, call_args));
+            let (call_args, bindings) = self.lower_atoms_as_core_values(&filtered_args);
+            return Some(self.wrap_core_value_bindings(
+                CExpr::Call(module, callable.name, call_args),
+                bindings,
+            ));
         }
 
         let source = match head {
@@ -161,23 +160,15 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             return None;
         }
         self.assert_app_arity(target_name, args.len(), *arity);
-        let call_args = args
+        let filtered_args: Vec<Atom> = args
             .iter()
-            .filter(|arg| {
-                !matches!(
-                    arg,
-                    Atom::Lit {
-                        value: Lit::Unit,
-                        ..
-                    }
-                )
-            })
-            .map(|arg| self.lower_atom(arg))
+            .filter(|arg| !matches!(arg, Atom::Lit { value: Lit::Unit, .. }))
+            .cloned()
             .collect();
-        Some(CExpr::Call(
-            target_erlang_mod.clone(),
-            target_name.clone(),
-            call_args,
+        let (call_args, bindings) = self.lower_atoms_as_core_values(&filtered_args);
+        Some(self.wrap_core_value_bindings(
+            CExpr::Call(target_erlang_mod.clone(), target_name.clone(), call_args),
+            bindings,
         ))
     }
 
@@ -196,14 +187,15 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         head: &Atom,
         args: &[Atom],
     ) -> CExpr {
-        let lowered_args = self.lower_direct_call_args(head, args);
-        match callable.module {
+        let (lowered_args, bindings) = self.lower_direct_call_args_with_bindings(head, args);
+        let body = match callable.module {
             Some(module) => CExpr::Call(module, callable.name, lowered_args),
             None => CExpr::Apply(
                 Box::new(CExpr::FunRef(callable.name, callable.arity)),
                 lowered_args,
             ),
-        }
+        };
+        self.wrap_core_value_bindings(body, bindings)
     }
 
     pub(super) fn lower_partial_direct_callable(
@@ -216,7 +208,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         let params: Vec<String> = (0..missing)
             .map(|index| self.fresh_cps_temp(&format!("_PartialArg{index}")))
             .collect();
-        let mut lowered_args = self.lower_direct_call_args(head, args);
+        let (mut lowered_args, bindings) = self.lower_direct_call_args_with_bindings(head, args);
         lowered_args.extend(params.iter().cloned().map(CExpr::Var));
         let body = match callable.module {
             Some(module) => CExpr::Call(module, callable.name, lowered_args),
@@ -225,7 +217,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                 lowered_args,
             ),
         };
-        CExpr::Fun(params, Box::new(body))
+        CExpr::Fun(params, Box::new(self.wrap_core_value_bindings(body, bindings)))
     }
 
     pub(super) fn lower_partial_local_callable(
@@ -239,37 +231,47 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         let params: Vec<String> = (0..missing)
             .map(|index| self.fresh_cps_temp(&format!("_PartialArg{index}")))
             .collect();
-        let mut lowered_args = self.lower_direct_call_args(head, args);
+        let (mut lowered_args, bindings) = self.lower_direct_call_args_with_bindings(head, args);
         lowered_args.extend(params.iter().cloned().map(CExpr::Var));
-        CExpr::Fun(
-            params,
-            Box::new(CExpr::Apply(
-                Box::new(CExpr::Var(core_var(name))),
-                lowered_args,
-            )),
-        )
+        let body = CExpr::Apply(Box::new(CExpr::Var(core_var(name))), lowered_args);
+        CExpr::Fun(params, Box::new(self.wrap_core_value_bindings(body, bindings)))
     }
 
-    pub(super) fn lower_direct_call_args(&mut self, head: &Atom, args: &[Atom]) -> Vec<CExpr> {
+    pub(super) fn lower_direct_call_args_with_bindings(
+        &mut self,
+        head: &Atom,
+        args: &[Atom],
+    ) -> (Vec<CExpr>, Vec<(String, CExpr)>) {
         let expected_arg_shapes = self.direct_call_effectful_callback_param_shapes(head);
-        args.iter()
-            .enumerate()
-            .map(
-                |(index, arg)| match expected_arg_shapes.get(index).copied().flatten() {
-                    Some((source_arity, adapter_arity))
-                        if !matches!(
-                            arg,
-                            Atom::Lambda { params, body, .. }
-                                if self.lambda_is_direct_subset(params, body)
-                        ) =>
-                    {
-                        self.lower_cps_runtime_value_atom(arg, source_arity, adapter_arity)
-                    }
-                    None => self.lower_atom(arg),
-                    Some(_) => self.lower_atom(arg),
-                },
-            )
-            .collect()
+        let mut lowered = Vec::with_capacity(args.len());
+        let mut bindings = Vec::new();
+        for (index, arg) in args.iter().enumerate() {
+            let arg = match expected_arg_shapes.get(index).copied().flatten() {
+                Some((source_arity, adapter_arity))
+                    if !matches!(
+                        arg,
+                        Atom::Lambda { params, body, .. }
+                            if self.lambda_is_direct_subset(params, body)
+                    ) =>
+                {
+                    self.lower_cps_runtime_value_atom(arg, source_arity, adapter_arity)
+                }
+                None | Some(_) => {
+                    let (arg, binding) = self.lower_atom_as_core_value(arg, "_CallArg");
+                    lowered.push(arg);
+                    bindings.extend(binding);
+                    continue;
+                }
+            };
+            if core_expr_is_simple_value(&arg) {
+                lowered.push(arg);
+            } else {
+                let temp = self.fresh_cps_temp("_CallArg");
+                lowered.push(CExpr::Var(temp.clone()));
+                bindings.push((temp, arg));
+            }
+        }
+        (lowered, bindings)
     }
 
     pub(super) fn lower_direct_cps_entry_call(
@@ -284,27 +286,38 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         self.assert_app_arity(name, args.len(), source_arity);
         self.assert_app_arity(name, args.len() + 2, adapter_arity);
         let expected_arg_shapes = self.direct_call_effectful_callback_param_shapes(head);
-        let mut lowered_args: Vec<CExpr> = args
-            .iter()
-            .enumerate()
-            .map(
-                |(index, arg)| match expected_arg_shapes.get(index).copied().flatten() {
-                    Some((source_arity, adapter_arity)) => {
-                        self.lower_cps_runtime_value_atom(arg, source_arity, adapter_arity)
-                    }
-                    None => self.lower_atom(arg),
-                },
-            )
-            .collect();
+        let mut lowered_args = Vec::with_capacity(args.len() + 2);
+        let mut bindings = Vec::new();
+        for (index, arg) in args.iter().enumerate() {
+            let expr = match expected_arg_shapes.get(index).copied().flatten() {
+                Some((source_arity, adapter_arity)) => {
+                    self.lower_cps_runtime_value_atom(arg, source_arity, adapter_arity)
+                }
+                None => {
+                    let (arg, binding) = self.lower_atom_as_core_value(arg, "_CallArg");
+                    lowered_args.push(arg);
+                    bindings.extend(binding);
+                    continue;
+                }
+            };
+            if core_expr_is_simple_value(&expr) {
+                lowered_args.push(expr);
+            } else {
+                let temp = self.fresh_cps_temp("_CallArg");
+                lowered_args.push(CExpr::Var(temp.clone()));
+                bindings.push((temp, expr));
+            }
+        }
         lowered_args.push(CExpr::Tuple(vec![]));
         lowered_args.push(self.identity_cps_continuation());
-        match module {
+        let body = match module {
             Some(module) => CExpr::Call(module, name.to_string(), lowered_args),
             None => CExpr::Apply(
                 Box::new(CExpr::FunRef(name.to_string(), adapter_arity)),
                 lowered_args,
             ),
-        }
+        };
+        self.wrap_core_value_bindings(body, bindings)
     }
 
     pub(super) fn lower_intrinsic_app(&mut self, intrinsic: IntrinsicId, args: &[Atom]) -> CExpr {

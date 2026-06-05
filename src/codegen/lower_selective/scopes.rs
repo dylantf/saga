@@ -32,6 +32,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         self.local_known_cps_lambdas.push(HashMap::new());
         self.local_known_dict_values.push(HashMap::new());
         self.local_known_direct_atoms.push(HashMap::new());
+        self.local_known_direct_values.push(HashMap::new());
     }
 
     pub(super) fn pop_scope(&mut self) {
@@ -41,6 +42,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         self.local_known_cps_lambdas.pop();
         self.local_known_dict_values.pop();
         self.local_known_direct_atoms.pop();
+        self.local_known_direct_values.pop();
     }
 
     pub(super) fn current_scope_mut(&mut self) -> &mut HashSet<String> {
@@ -81,6 +83,14 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         self.local_known_direct_atoms
             .last_mut()
             .expect("direct lowerer has a known-direct-atom scope")
+    }
+
+    pub(super) fn current_known_direct_value_scope_mut(
+        &mut self,
+    ) -> &mut HashMap<String, KnownDirectValue> {
+        self.local_known_direct_values
+            .last_mut()
+            .expect("direct lowerer has a known-direct-value scope")
     }
 
     pub(super) fn known_direct_lambda(&self, name: &str) -> Option<KnownDirectLambda> {

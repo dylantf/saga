@@ -4,6 +4,9 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
     pub(super) fn lower_atom(&mut self, atom: &Atom) -> CExpr {
         match atom {
             Atom::Var { name, .. } => {
+                if let Some(value) = self.known_direct_value(&name.name) {
+                    return self.lower_known_direct_value(&value);
+                }
                 if let Some(atom) = self.known_direct_atom(&name.name) {
                     return self.lower_atom(&atom);
                 }
@@ -31,7 +34,11 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             Atom::Lit { value, .. } => lower_lit_atom(value),
             Atom::Ctor { name, args, .. } => self.lower_ctor_atom(name, args),
             Atom::Tuple { elements, .. } => {
-                CExpr::Tuple(elements.iter().map(|arg| self.lower_atom(arg)).collect())
+                let (elements, bindings) = self.lower_atoms_as_core_values(elements);
+                bindings.into_iter().rev().fold(
+                    CExpr::Tuple(elements),
+                    |body, (name, value)| CExpr::Let(name, Box::new(value), Box::new(body)),
+                )
             }
             Atom::AnonRecord { fields, .. } => self.lower_anon_record_atom(fields),
             Atom::Record { name, fields, .. } => self.lower_record_atom(name, fields),
@@ -180,15 +187,20 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             _ => {}
         }
         if name == "Cons" && args.len() == 2 {
-            return CExpr::Cons(
-                Box::new(self.lower_atom(&args[0])),
-                Box::new(self.lower_atom(&args[1])),
-            );
+            let (args, bindings) = self.lower_atoms_as_core_values(args);
+            let body = CExpr::Cons(Box::new(args[0].clone()), Box::new(args[1].clone()));
+            return bindings.into_iter().rev().fold(body, |body, (name, value)| {
+                CExpr::Let(name, Box::new(value), Box::new(body))
+            });
         }
         let tag = mangle_ctor_atom(name, self.ctors);
+        let (args, bindings) = self.lower_atoms_as_core_values(args);
         let mut elems = vec![CExpr::Lit(CLit::Atom(tag))];
-        elems.extend(args.iter().map(|arg| self.lower_atom(arg)));
-        CExpr::Tuple(elems)
+        elems.extend(args);
+        bindings.into_iter().rev().fold(
+            CExpr::Tuple(elems),
+            |body, (name, value)| CExpr::Let(name, Box::new(value), Box::new(body)),
+        )
     }
 
     pub(super) fn lower_anon_record_atom(&mut self, fields: &[(String, Atom)]) -> CExpr {
@@ -196,16 +208,64 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         let tag = crate::ast::anon_record_tag(&names);
         let mut sorted: Vec<&(String, Atom)> = fields.iter().collect();
         sorted.sort_by(|a, b| a.0.cmp(&b.0));
+        let sorted_atoms: Vec<Atom> = sorted.into_iter().map(|(_, atom)| atom.clone()).collect();
+        let (fields, bindings) = self.lower_atoms_as_core_values(&sorted_atoms);
         let mut elems = vec![CExpr::Lit(CLit::Atom(tag))];
-        elems.extend(sorted.into_iter().map(|(_, atom)| self.lower_atom(atom)));
-        CExpr::Tuple(elems)
+        elems.extend(fields);
+        bindings.into_iter().rev().fold(
+            CExpr::Tuple(elems),
+            |body, (name, value)| CExpr::Let(name, Box::new(value), Box::new(body)),
+        )
     }
 
     pub(super) fn lower_record_atom(&mut self, name: &str, fields: &[(String, Atom)]) -> CExpr {
         let tag = mangle_ctor_atom(name, self.ctors);
+        let field_atoms: Vec<Atom> = fields.iter().map(|(_, atom)| atom.clone()).collect();
+        let (fields, bindings) = self.lower_atoms_as_core_values(&field_atoms);
         let mut elems = vec![CExpr::Lit(CLit::Atom(tag))];
-        elems.extend(fields.iter().map(|(_, atom)| self.lower_atom(atom)));
-        CExpr::Tuple(elems)
+        elems.extend(fields);
+        bindings.into_iter().rev().fold(
+            CExpr::Tuple(elems),
+            |body, (name, value)| CExpr::Let(name, Box::new(value), Box::new(body)),
+        )
+    }
+
+    pub(super) fn lower_atoms_as_core_values(
+        &mut self,
+        atoms: &[Atom],
+    ) -> (Vec<CExpr>, Vec<(String, CExpr)>) {
+        let mut lowered = Vec::with_capacity(atoms.len());
+        let mut bindings = Vec::new();
+        for atom in atoms {
+            let (expr, binding) = self.lower_atom_as_core_value(atom, "_AtomValue");
+            lowered.push(expr);
+            bindings.extend(binding);
+        }
+        (lowered, bindings)
+    }
+
+    pub(super) fn lower_atom_as_core_value(
+        &mut self,
+        atom: &Atom,
+        temp_prefix: &str,
+    ) -> (CExpr, Option<(String, CExpr)>) {
+        let expr = self.lower_atom(atom);
+        if core_expr_is_simple_value(&expr) {
+            (expr, None)
+        } else {
+            let temp = self.fresh_cps_temp(temp_prefix);
+            (CExpr::Var(temp.clone()), Some((temp, expr)))
+        }
+    }
+
+    pub(super) fn wrap_core_value_bindings(
+        &self,
+        body: CExpr,
+        bindings: Vec<(String, CExpr)>,
+    ) -> CExpr {
+        bindings.into_iter().rev().fold(body, |body, (name, value)| {
+            CExpr::Let(name, Box::new(value), Box::new(body))
+        })
     }
 
     pub(super) fn lower_bitstring_value(
