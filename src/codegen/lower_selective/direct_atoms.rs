@@ -61,7 +61,11 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                 crate::codegen::lower::util::lower_string_to_binary(symbol)
             }
             Atom::QualifiedRef { .. } => {
-                if self.cps_value_atom_shape(atom).is_some() {
+                if let Some(value) = self.known_direct_value_for_atom(atom)
+                    && !matches!(value, KnownDirectValue::Atom(Atom::QualifiedRef { .. }))
+                {
+                    self.lower_known_direct_value(&value)
+                } else if self.cps_value_atom_shape(atom).is_some() {
                     self.lower_cps_value_atom(atom)
                 } else {
                     self.direct_function_value_ref(atom)

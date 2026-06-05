@@ -18,11 +18,12 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         }
         if let Some(lambda) = self.known_direct_lambda_for_atom(head)
             && lambda.params.len() == args.len()
-            && self.lambda_is_direct_subset_with_dict_aliases(
+            && self.lambda_app_is_direct_subset_with_dict_aliases(
                 &lambda.dict_bindings,
                 lambda.known_dict_aliases.clone(),
                 &lambda.params,
                 &lambda.body,
+                args,
             )
         {
             let method_key = lambda.method_key.clone();

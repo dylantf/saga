@@ -394,9 +394,16 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             | Atom::Symbol { .. }
             | Atom::BackendAtom { .. }
             | Atom::DictRef { .. }
-            | Atom::QualifiedRef { .. }
             | Atom::Lambda { .. }
             | Atom::BackendSpawnThunk { .. } => Some(KnownDirectValue::Atom(atom.clone())),
+            Atom::QualifiedRef { module, name, .. } => self
+                .imported_direct_values
+                .get(&(module.clone(), name.clone()))
+                .map(|atom| {
+                    self.known_direct_value_for_atom(atom)
+                        .unwrap_or_else(|| KnownDirectValue::Atom(atom.clone()))
+                })
+                .or_else(|| Some(KnownDirectValue::Atom(atom.clone()))),
             Atom::Ctor { name, args, .. } => Some(KnownDirectValue::Ctor {
                 name: name.clone(),
                 args: args
@@ -444,6 +451,16 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             Atom::Var { name, .. } => self
                 .known_direct_value(&name.name)
                 .or_else(|| Some(KnownDirectValue::Atom(atom.clone()))),
+        }
+    }
+
+    pub(super) fn known_direct_bool_for_atom(&self, atom: &Atom) -> Option<bool> {
+        match self.known_direct_value_for_atom(atom)? {
+            KnownDirectValue::Atom(Atom::Lit {
+                value: Lit::Bool(value),
+                ..
+            }) => Some(value),
+            _ => None,
         }
     }
 

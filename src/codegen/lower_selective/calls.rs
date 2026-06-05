@@ -275,7 +275,10 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         };
         if let Some(arity) = self.local_dict_constructor_arities.get(name) {
             debug_selective_subject("dict-call", name, || {
-                format!("direct local constructor {name}/{arity}")
+                format!(
+                    "{}: direct local constructor {name}/{arity}",
+                    self.current_module
+                )
             });
             return Some(DirectCallable {
                 module: None,
@@ -285,7 +288,10 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         }
         let Some(resolved) = self.resolution.get(&source) else {
             debug_selective_subject("dict-call", name, || {
-                format!("miss {name}: no backend resolution entry")
+                format!(
+                    "{}: miss {name}: no backend resolution entry",
+                    self.current_module
+                )
             });
             return None;
         };
@@ -297,20 +303,29 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         } = &resolved.kind
         else {
             debug_selective_subject("dict-call", name, || {
-                format!("reject {name}: resolved symbol is not a BeamFunction")
+                format!(
+                    "{}: reject {name}: resolved symbol is not a BeamFunction",
+                    self.current_module
+                )
             });
             return None;
         };
         if !effects.is_empty() {
             debug_selective_subject("dict-call", name, || {
-                format!("reject {name}/{arity}: effectful resolved constructor")
+                format!(
+                    "{}: reject {name}/{arity}: effectful resolved constructor",
+                    self.current_module
+                )
             });
             return None;
         }
         let module = self.resolved_erlang_module_for_symbol(resolved, erlang_mod);
         debug_selective_subject("dict-call", name, || {
             let module_label = module.as_deref().unwrap_or("<local>");
-            format!("direct resolved constructor {module_label}:{name}/{arity}")
+            format!(
+                "{}: direct resolved constructor {module_label}:{name}/{arity}",
+                self.current_module
+            )
         });
         Some(DirectCallable {
             module,

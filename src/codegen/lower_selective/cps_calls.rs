@@ -179,7 +179,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             self.handler_info,
             self.effect_info,
             &imported_handler_value_map,
-            self.imported_dict_constructors.clone(),
+            self.imported_dict_constructors_for_module(source_module_name),
             self.options,
         );
         imported.current_module = source_module_name.clone();

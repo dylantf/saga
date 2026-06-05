@@ -110,21 +110,26 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                 then_branch,
                 else_branch,
                 ..
-            } => CExpr::Case(
-                Box::new(self.lower_atom(cond)),
-                vec![
-                    CArm {
-                        pat: CPat::Lit(CLit::Atom("true".to_string())),
-                        guard: None,
-                        body: self.lower_expr(then_branch),
-                    },
-                    CArm {
-                        pat: CPat::Lit(CLit::Atom("false".to_string())),
-                        guard: None,
-                        body: self.lower_expr(else_branch),
-                    },
-                ],
-            ),
+            } => {
+                if let Some(value) = self.known_direct_bool_for_atom(cond) {
+                    return self.lower_expr(if value { then_branch } else { else_branch });
+                }
+                CExpr::Case(
+                    Box::new(self.lower_atom(cond)),
+                    vec![
+                        CArm {
+                            pat: CPat::Lit(CLit::Atom("true".to_string())),
+                            guard: None,
+                            body: self.lower_expr(then_branch),
+                        },
+                        CArm {
+                            pat: CPat::Lit(CLit::Atom("false".to_string())),
+                            guard: None,
+                            body: self.lower_expr(else_branch),
+                        },
+                    ],
+                )
+            }
             MExpr::Case {
                 scrutinee, arms, ..
             } => self.lower_case_chain(scrutinee, arms),

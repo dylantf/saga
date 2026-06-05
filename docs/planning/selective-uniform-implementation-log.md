@@ -1889,3 +1889,28 @@ boundaries exist.
   The filter can be either a phase (`known-dict`) or a subject substring
   (`__dict_SagaJson_Encode_ToJsonFields`); an empty value enables every
   selective trace.
+- Current JSON optimization stop-marker:
+  - do not keep adding specialization patches against the full `saga_json`
+    output until the tiny shapes below are observable in isolation. The full
+    library is too large to tell whether a fact was never collected, was
+    collected but not scoped, was rejected by a proof, was ignored by lowering,
+    or was reintroduced through fallback/merge;
+  - in-progress work this session includes module-specific imported dict facts,
+    argument-aware direct-subset proofs for known method calls, known-boolean
+    `if` folding, and a speculative imported public `val` fact path for shapes
+    like `SagaJson.default_options`;
+  - verified so far: module-specific imported dict facts fix the earlier stale
+    imported-clone misses for `EncodeDerive` and `EncodeDeriveCustom`.
+    Unverified/speculative: imported public `val` facts did not change
+    `EncodeDerive` selective Core yet, so they need a small fixture before
+    committing as a real optimization;
+  - next patch should be observability-first:
+    - add focused debug output for imported direct values: collected, skipped
+      with reason, hit by `QualifiedRef`, and missed by `QualifiedRef`;
+    - add direct-subset rejection breadcrumbs scoped behind
+      `SAGA_DEBUG_SELECTIVE`, especially for known-method proof failures;
+    - add tiny fixtures for imported public value propagation, known method
+      calls through local method temps, generic record with known options, and
+      generic record with unknown options;
+    - only after those fixtures pass should we return to the full JSON
+      benchmark/library output.

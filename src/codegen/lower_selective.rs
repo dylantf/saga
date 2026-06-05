@@ -235,6 +235,7 @@ struct DirectLowerer<'a, 'info> {
     local_hof_direct_specializations: HashMap<String, HofDirectSpecialization>,
     local_dict_constructors: HashMap<String, MDictConstructor>,
     imported_dict_constructors: HashMap<String, MDictConstructor>,
+    imported_direct_values: HashMap<(String, String), Atom>,
     local_external_functions: HashMap<String, DirectCallable>,
     /// Emitted entries discovered for already-compiled imported user modules.
     imported_function_entries: HashMap<(String, String), FunctionEntryInfo>,

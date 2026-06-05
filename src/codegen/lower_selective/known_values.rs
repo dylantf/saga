@@ -376,14 +376,18 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                         (constructor.clone(), true, "imported")
                     } else {
                         debug_selective_subject("known-dict", name, || {
-                            format!("miss {name}: no local/imported constructor fact")
+                            format!(
+                                "{}: miss {name}: no local/imported constructor fact",
+                                self.current_module
+                            )
                         });
                         return None;
                     };
                 if constructor.dict_params.len() != args.len() {
                     debug_selective_subject("known-dict", name, || {
                         format!(
-                            "reject {name}: expected {} dict args, got {}",
+                            "{}: reject {name}: expected {} dict args, got {}",
+                            self.current_module,
                             constructor.dict_params.len(),
                             args.len()
                         )
@@ -392,7 +396,10 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                 }
                 if args.iter().any(|arg| !self.atom_is_direct_subset(arg)) {
                     debug_selective_subject("known-dict", name, || {
-                        format!("reject {name}: dict arg outside direct atom subset")
+                        format!(
+                            "{}: reject {name}: dict arg outside direct atom subset",
+                            self.current_module
+                        )
                     });
                     return None;
                 }
@@ -401,7 +408,10 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                 for method in &constructor.methods {
                     let MExpr::Pure(atom @ Atom::Lambda { .. }) = method else {
                         debug_selective_subject("known-dict", name, || {
-                            format!("reject {name}: method is not a pure lambda")
+                            format!(
+                                "{}: reject {name}: method is not a pure lambda",
+                                self.current_module
+                            )
                         });
                         return None;
                     };
@@ -409,7 +419,8 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                 }
                 debug_selective_subject("known-dict", name, || {
                     format!(
-                        "accept {name}: origin={origin}, params={}, methods={}",
+                        "{}: accept {name}: origin={origin}, params={}, methods={}",
+                        self.current_module,
                         constructor.dict_params.len(),
                         constructor.methods.len()
                     )

@@ -48,6 +48,13 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                 else_branch,
                 ..
             } => {
+                if let Some(value) = self.known_direct_bool_for_atom(cond) {
+                    return self.expr_is_direct_subset(if value {
+                        then_branch
+                    } else {
+                        else_branch
+                    });
+                }
                 self.atom_is_direct_subset(cond)
                     && self.expr_is_direct_subset(then_branch)
                     && self.expr_is_direct_subset(else_branch)
@@ -87,7 +94,13 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                     && params.len() == args.len()
                     && args.iter().all(|arg| self.atom_is_direct_subset(arg))
                 {
-                    return self.lambda_is_direct_subset(params, body);
+                    return self.lambda_app_is_direct_subset_with_dict_aliases(
+                        &[],
+                        Vec::new(),
+                        params,
+                        body,
+                        args,
+                    );
                 }
                 match self.call_shape(head) {
                     Some(CallShape::Intrinsic(intrinsic)) => {

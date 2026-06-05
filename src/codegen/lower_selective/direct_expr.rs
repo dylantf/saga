@@ -519,11 +519,12 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             self.freshen_dict_method_bindings(&dict_bindings, known_dict_aliases, body);
         let key = self.known_dict_method_key(known_dict, method_index);
         let inserted = self.active_known_dict_methods.insert(key.clone());
-        if !self.lambda_is_direct_subset_with_dict_aliases(
+        if !self.lambda_app_is_direct_subset_with_dict_aliases(
             &dict_bindings,
             known_dict_aliases.clone(),
             params,
             &body,
+            args,
         ) {
             debug_selective_subject("known-method", &known_dict.constructor_name, || {
                 format!(
@@ -660,6 +661,35 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         for pat in params {
             self.bind_pat_locals(pat);
         }
+        let supported = self.expr_is_direct_subset(body);
+        self.pop_scope();
+        supported
+    }
+
+    pub(super) fn lambda_app_is_direct_subset_with_dict_aliases(
+        &mut self,
+        dict_bindings: &[(String, Atom)],
+        known_dict_aliases: Vec<(String, KnownDictValue)>,
+        params: &[Pat],
+        body: &MExpr,
+        args: &[Atom],
+    ) -> bool {
+        let mut known_dict_aliases = known_dict_aliases;
+        known_dict_aliases.extend(self.known_dict_aliases_for_params(params, args));
+        let known_atom_bindings = self.known_direct_atom_pattern_bindings_for_params(params, args);
+        let known_value_bindings =
+            self.known_direct_value_pattern_bindings_for_params(params, args);
+
+        self.push_scope();
+        for (name, _) in dict_bindings {
+            self.current_scope_mut().insert(name.clone());
+        }
+        self.bind_known_dict_values(known_dict_aliases);
+        for pat in params {
+            self.bind_pat_locals(pat);
+        }
+        self.bind_known_direct_atom_pattern_values(known_atom_bindings);
+        self.bind_known_direct_value_pattern_values(known_value_bindings);
         let supported = self.expr_is_direct_subset(body);
         self.pop_scope();
         supported

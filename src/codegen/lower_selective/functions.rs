@@ -31,6 +31,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             local_hof_direct_specializations: HashMap::new(),
             local_dict_constructors: HashMap::new(),
             imported_dict_constructors,
+            imported_direct_values: HashMap::new(),
             local_external_functions: HashMap::new(),
             imported_function_entries: HashMap::new(),
             imported_hof_direct_specializations: HashMap::new(),
@@ -65,6 +66,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
     ) -> CModule {
         self.current_module = module_name.to_string();
         self.classify_program(program);
+        self.compute_imported_direct_values();
         self.compute_imported_function_entries();
         self.compute_function_lowering_plans(program);
         self.compute_local_function_entries(program);

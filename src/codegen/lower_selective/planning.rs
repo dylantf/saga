@@ -1,6 +1,63 @@
 use super::*;
 
 impl<'a, 'info> DirectLowerer<'a, 'info> {
+    pub(super) fn imported_dict_constructors_for_module(
+        &self,
+        source_module_name: &str,
+    ) -> HashMap<String, MDictConstructor> {
+        if source_module_name.starts_with("Std.") {
+            return HashMap::new();
+        }
+        let Some(source) = self.module_ctx.modules.get(source_module_name) else {
+            return HashMap::new();
+        };
+
+        let mut imported_dict_constructors = HashMap::new();
+        for (imported_module_name, compiled) in &self.module_ctx.modules {
+            if imported_module_name == source_module_name
+                || (!module_imports_module(&source.elaborated, imported_module_name)
+                    && !resolution_references_source_module(
+                        &source.resolution,
+                        imported_module_name,
+                    ))
+            {
+                continue;
+            }
+
+            let anf_imported = crate::codegen::anf::normalize(
+                compiled.elaborated.clone(),
+                Some(&compiled.resolution),
+            );
+            let (imported_monadic, _) = crate::codegen::monadic::translate::translate(
+                &anf_imported,
+                &compiled.resolution,
+                self.effect_info,
+            );
+            let imported_private =
+                super::imported_facts::collect_imported_private_helper_candidates(
+                    imported_module_name,
+                    &imported_monadic,
+                    &compiled.resolution,
+                    &compiled.codegen_info,
+                );
+            let imported_private_names = imported_private
+                .values()
+                .map(|binding| binding.name.clone())
+                .collect::<HashSet<_>>();
+            imported_dict_constructors.extend(
+                super::imported_facts::collect_imported_dict_constructors(
+                    imported_module_name,
+                    &imported_monadic,
+                    &compiled.resolution,
+                    &compiled.codegen_info,
+                    &imported_private_names,
+                ),
+            );
+            crate::ast::drop_program_iterative(anf_imported);
+        }
+        imported_dict_constructors
+    }
+
     pub(super) fn classify_program(&mut self, program: &MProgram) {
         self.callable_type_shapes.clear();
         self.callable_callback_param_arities.clear();
@@ -327,11 +384,12 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                 self.handler_info,
                 self.effect_info,
                 &imported_handler_value_map,
-                HashMap::new(),
+                self.imported_dict_constructors_for_module(source_module_name),
                 LoweringOptions::default(),
             );
             imported.current_module = source_module_name.clone();
             imported.classify_program(&monadic_imported);
+            imported.compute_imported_direct_values();
             imported.apply_codegen_info_function_shapes(&compiled.codegen_info);
             imported.compute_function_lowering_plans(&monadic_imported);
             imported.compute_local_function_entries(&monadic_imported);
@@ -352,6 +410,64 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                     .insert((erlang_module.clone(), name.clone()), entries.clone());
                 self.imported_function_entries
                     .insert((source_module_name.clone(), name.clone()), entries);
+            }
+        }
+    }
+
+    pub(super) fn compute_imported_direct_values(&mut self) {
+        self.imported_direct_values.clear();
+        for (source_module_name, compiled) in &self.module_ctx.modules {
+            let is_stdlib_module = source_module_name.starts_with("Std.");
+            if source_module_name == &self.current_module
+                || compiled.elaborated.is_empty()
+                || (!is_stdlib_module && !self.current_module_references_module(source_module_name))
+            {
+                continue;
+            }
+
+            let anf_imported = crate::codegen::anf::normalize(
+                compiled.elaborated.clone(),
+                Some(&compiled.resolution),
+            );
+            let imported_handler_decls = HashMap::new();
+            let (monadic_imported, imported_handler_value_map) =
+                crate::codegen::monadic::translate::translate_with_imports(
+                    &anf_imported,
+                    &compiled.resolution,
+                    self.effect_info,
+                    &imported_handler_decls,
+                );
+
+            let mut imported = DirectLowerer::new(
+                &compiled.resolution,
+                self.ctors,
+                self.module_ctx,
+                self.handler_info,
+                self.effect_info,
+                &imported_handler_value_map,
+                HashMap::new(),
+                LoweringOptions::default(),
+            );
+            imported.current_module = source_module_name.clone();
+            imported.classify_program(&monadic_imported);
+
+            let erlang_module = erlang_module_name(source_module_name);
+            for decl in &monadic_imported {
+                let MDecl::Val(value) = decl else {
+                    continue;
+                };
+                if !value.public || !imported.direct_values.contains(&value.name) {
+                    continue;
+                }
+                let MExpr::Pure(atom) = &value.value else {
+                    continue;
+                };
+                self.imported_direct_values.insert(
+                    (source_module_name.clone(), value.name.clone()),
+                    atom.clone(),
+                );
+                self.imported_direct_values
+                    .insert((erlang_module.clone(), value.name.clone()), atom.clone());
             }
         }
     }
@@ -813,6 +929,25 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             | MExpr::HandlerValue { .. } => {}
         }
     }
+}
+
+fn module_imports_module(program: &crate::ast::Program, module_name: &str) -> bool {
+    program.iter().any(|decl| {
+        matches!(
+            decl,
+            crate::ast::Decl::Import { module_path, .. }
+                if module_path.join(".") == module_name
+        )
+    })
+}
+
+fn resolution_references_source_module(
+    resolution: &ResolutionMap,
+    source_module_name: &str,
+) -> bool {
+    resolution
+        .values()
+        .any(|resolved| resolved.source_module.as_deref() == Some(source_module_name))
 }
 
 fn single_clause_function_names(program: &MProgram) -> HashSet<String> {
