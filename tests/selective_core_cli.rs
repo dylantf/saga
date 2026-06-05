@@ -523,6 +523,16 @@ fn selective_core_specializes_known_generic_to_json_records() {
         main_body.contains("#<104>(8,1,'integer',['unsigned'|['big']]),#<101>"),
         "Box String to_json should specialize through known Generic constructors\n{main_body}"
     );
+    assert!(
+        main_body.contains("#<83>(8,1,'integer',['unsigned'|['big']]),#<111>")
+            && main_body.contains("call 'erlang':'integer_to_binary'\n              (7)"),
+        "Some to_json should specialize through known Generic case constructors\n{main_body}"
+    );
+    assert!(
+        main_body.contains("#<78>(8,1,'integer',['unsigned'|['big']]),#<97>")
+            && main_body.contains("#<110>(8,1,'integer',['unsigned'|['big']]),#<117>"),
+        "Nada to_json should specialize through known Generic case constructors\n{main_body}"
+    );
 
     let output = std::process::Command::new(binary)
         .args([

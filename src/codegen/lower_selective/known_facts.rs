@@ -255,8 +255,35 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                         .map(KnownDirectValue::Core)
                 }),
             MExpr::App { head, args, .. } => self.known_direct_value_for_lambda_app(head, args),
+            MExpr::Case {
+                scrutinee, arms, ..
+            } => self.known_direct_value_for_case(scrutinee, arms),
             _ => None,
         }
+    }
+
+    fn known_direct_value_for_case(
+        &mut self,
+        scrutinee: &Atom,
+        arms: &[MArm],
+    ) -> Option<KnownDirectValue> {
+        let scrutinee = self.known_direct_value_for_atom(scrutinee)?;
+        for arm in arms {
+            if arm.guard.is_some() {
+                break;
+            }
+            let Some(bindings) = self.match_known_direct_value_pattern(&scrutinee, &arm.pattern)
+            else {
+                continue;
+            };
+            self.push_scope();
+            self.bind_pat_locals(&arm.pattern);
+            self.bind_known_direct_value_pattern_values(bindings);
+            let body = self.known_direct_value_for_expr(&arm.body);
+            self.pop_scope();
+            return body;
+        }
+        None
     }
 
     fn known_direct_atom_for_lambda_app(&mut self, head: &Atom, args: &[Atom]) -> Option<Atom> {
