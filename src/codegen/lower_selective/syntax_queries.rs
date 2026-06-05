@@ -223,7 +223,12 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         let left_qualified = left.contains('.');
         let right_qualified = right.contains('.');
         if left_qualified && right_qualified {
-            return false;
+            return left
+                .strip_suffix(right)
+                .is_some_and(|prefix| prefix.ends_with('.'))
+                || right
+                    .strip_suffix(left)
+                    .is_some_and(|prefix| prefix.ends_with('.'));
         }
         left.rsplit('.').next() == right.rsplit('.').next()
     }

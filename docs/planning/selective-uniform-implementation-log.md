@@ -1748,3 +1748,21 @@ boundaries exist.
     fact. Continue to avoid unlimited recursive inlining; recursive and
     parameterized shapes need explicit cycle/wrapper handling if/when we
     re-enable deeper same-name parameterized dict inlining.
+- Added private static-handler variants for recursive local CPS calls under a
+  known static handler frame:
+  - local CPS helper specialization no longer has to inline recursive self-calls
+    forever. A recursive edge under the same static handler is lowered to a
+    private `__saga_static_variant__.../(N+2)` entry whose body is emitted after
+    ordinary functions;
+  - variant keys include the function name, static handler arm identity, and
+    call-site parameter shapes. This prevents a pure-callback variant and a CPS
+    callback variant from colliding, and lets the generated recursive body keep
+    direct callback calls such as `F(H)`;
+  - qualified effect matching now accepts duplicated-module suffixes such as
+    `SagaJson.SagaJson.JsonOptions` matching `SagaJson.JsonOptions`, which is
+    needed for dependency effect metadata in the JSON benchmark;
+  - `json_bench/saga/src/EffectOpts.saga` now inlines the first `encode_all`
+    step under `json_defaults`, and recursive calls jump through the generated
+    static variant. The static handler install is still preserved, and `to_json`
+    still receives evidence, so the next JSON optimization is options-aware
+    known-dict/trait-method specialization rather than full handler elision.

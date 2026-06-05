@@ -1110,10 +1110,7 @@ main () = score (Second 41)
     assert!(out.contains("'_script_Second'"), "{out}");
     assert!(out.contains("{'_script_Second', 41}"), "{out}");
     assert!(out.contains("let <_CallArg"), "{out}");
-    assert!(
-        out.contains("apply 'score'/1(_CallArg"),
-        "{out}"
-    );
+    assert!(out.contains("apply 'score'/1(_CallArg"), "{out}");
 }
 
 #[test]
@@ -1782,7 +1779,11 @@ main () = iter pure_tick [1, 2] with ignore_tick
         },
     );
     assert!(out.contains("apply F(1)"), "{out}");
-    assert!(out.contains("apply 'iter'/4(fun (_PureCpsArg"), "{out}");
+    assert!(
+        out.contains("apply '__saga_static_variant__iter__"),
+        "{out}"
+    );
+    assert!(out.contains("apply F(H)"), "{out}");
     assert!(!out.contains("apply F(H, _CpsEvidence"), "{out}");
     assert_selective_core_compiles(src);
 }

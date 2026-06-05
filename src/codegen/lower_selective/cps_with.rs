@@ -713,10 +713,6 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             Atom::Var { name, .. } => name.name.clone(),
             _ => return false,
         };
-        if self.static_handler_inline_stack.contains(&local_name) {
-            return false;
-        }
-
         let Some(CallShape::Cps {
             module: None,
             source_arity,
@@ -727,13 +723,22 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         else {
             return false;
         };
-        if effects.is_empty()
-            || source_arity != args.len()
+        let covered_effects = self.covered_local_static_handler_effects(&local_name, &effects);
+        if source_arity != args.len()
             || adapter_arity != args.len() + 2
-            || !self.active_static_handlers_cover_effects(&effects)
             || !args.iter().all(|arg| self.atom_is_direct_subset(arg))
         {
             return false;
+        }
+        if covered_effects.is_none() {
+            return false;
+        }
+
+        if self.static_handler_inline_stack.contains(&local_name) {
+            let param_shapes = self.static_handler_variant_param_shapes(args);
+            return self
+                .ensure_static_handler_variant(&local_name, param_shapes)
+                .is_some();
         }
 
         let Some(fb) = self.local_fun_bindings.get(&local_name).cloned() else {

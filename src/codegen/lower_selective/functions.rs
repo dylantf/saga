@@ -49,6 +49,9 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             active_known_dict_methods: HashSet::new(),
             active_known_to_json_values: Vec::new(),
             active_imported_wrapper_calls: HashSet::new(),
+            static_handler_variants: HashMap::new(),
+            static_handler_variant_order: Vec::new(),
+            emitted_static_handler_variants: HashSet::new(),
             imported_clone_source_module: None,
             options,
         }
@@ -195,6 +198,19 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                 MDecl::Passthrough(_) => {
                     index += 1;
                 }
+            }
+        }
+
+        let mut variant_index = 0;
+        while variant_index < self.static_handler_variant_order.len() {
+            let key = self.static_handler_variant_order[variant_index].clone();
+            variant_index += 1;
+            if self.emitted_static_handler_variants.contains(&key) {
+                continue;
+            }
+            if let Some(fun) = self.lower_static_handler_variant_fun(&key) {
+                self.emitted_static_handler_variants.insert(key);
+                funs.push(fun);
             }
         }
 
@@ -732,5 +748,49 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
 
     pub(super) fn direct_entry_name_for(&self, name: &str, entries: &FunctionEntryInfo) -> String {
         direct_entry_name_for(name, entries)
+    }
+
+    pub(super) fn lower_static_handler_variant_fun(&mut self, key: &str) -> Option<CFunDef> {
+        let variant = self.static_handler_variants.get(key)?.clone();
+        let fb = self.local_fun_bindings.get(&variant.function_name)?.clone();
+        if fb.guard.is_some() || fb.params.iter().any(|p| !direct_param_supported(p)) {
+            return None;
+        }
+
+        let direct_params = lower_param_names(&fb.params);
+        let mut params = direct_params.clone();
+        params.push("_Evidence".to_string());
+        params.push("_ReturnK".to_string());
+
+        let prev_direct_candidate = self
+            .direct_candidate_function
+            .replace(variant.function_name.clone());
+        let original_stack_len = self.direct_handler_stack.len();
+        self.direct_handler_stack.extend(variant.frames.clone());
+        self.static_handler_inline_stack
+            .push(variant.function_name.clone());
+        self.push_scope();
+        for (index, pat) in fb.params.iter().enumerate() {
+            self.bind_pat_locals_with_shape(
+                pat,
+                variant.param_shapes.get(index).cloned().flatten(),
+            );
+        }
+        let lowered_body = self.lower_cps_expr(
+            &fb.body,
+            CExpr::Var("_Evidence".to_string()),
+            CExpr::Var("_ReturnK".to_string()),
+        );
+        let body = self.wrap_param_match(&fb.params, &direct_params, lowered_body);
+        self.pop_scope();
+        self.static_handler_inline_stack.pop();
+        self.direct_handler_stack.truncate(original_stack_len);
+        self.direct_candidate_function = prev_direct_candidate;
+
+        Some(CFunDef {
+            name: variant.entry_name,
+            arity: params.len(),
+            body: CExpr::Fun(params, Box::new(body)),
+        })
     }
 }

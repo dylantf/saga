@@ -261,6 +261,9 @@ struct DirectLowerer<'a, 'info> {
     active_known_dict_methods: HashSet<KnownDictMethodKey>,
     active_known_to_json_values: Vec<KnownToJsonFrame>,
     active_imported_wrapper_calls: HashSet<(String, String)>,
+    static_handler_variants: HashMap<String, StaticHandlerVariant>,
+    static_handler_variant_order: Vec<String>,
+    emitted_static_handler_variants: HashSet<String>,
     imported_clone_source_module: Option<String>,
     options: LoweringOptions,
 }
@@ -342,6 +345,14 @@ struct ImportedStaticHandlerCall {
     program: MProgram,
 }
 
+#[derive(Clone)]
+struct StaticHandlerVariant {
+    function_name: String,
+    entry_name: String,
+    frames: Vec<DirectHandlerFrame>,
+    param_shapes: Vec<Option<LocalValueShape>>,
+}
+
 enum CpsCallDecision {
     HofDirect {
         module: Option<String>,
@@ -388,7 +399,12 @@ fn effect_names_match(left: &str, right: &str) -> bool {
     let left_qualified = left.contains('.');
     let right_qualified = right.contains('.');
     if left_qualified && right_qualified {
-        return false;
+        return left
+            .strip_suffix(right)
+            .is_some_and(|prefix| prefix.ends_with('.'))
+            || right
+                .strip_suffix(left)
+                .is_some_and(|prefix| prefix.ends_with('.'));
     }
     left.rsplit('.').next() == right.rsplit('.').next()
 }
