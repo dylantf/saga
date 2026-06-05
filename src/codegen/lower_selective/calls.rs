@@ -274,13 +274,21 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             _ => return None,
         };
         if let Some(arity) = self.local_dict_constructor_arities.get(name) {
+            debug_selective_subject("dict-call", name, || {
+                format!("direct local constructor {name}/{arity}")
+            });
             return Some(DirectCallable {
                 module: None,
                 name: name.clone(),
                 arity: *arity,
             });
         }
-        let resolved = self.resolution.get(&source)?;
+        let Some(resolved) = self.resolution.get(&source) else {
+            debug_selective_subject("dict-call", name, || {
+                format!("miss {name}: no backend resolution entry")
+            });
+            return None;
+        };
         let ResolvedCodegenKind::BeamFunction {
             erlang_mod,
             name,
@@ -288,13 +296,24 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             effects,
         } = &resolved.kind
         else {
+            debug_selective_subject("dict-call", name, || {
+                format!("reject {name}: resolved symbol is not a BeamFunction")
+            });
             return None;
         };
         if !effects.is_empty() {
+            debug_selective_subject("dict-call", name, || {
+                format!("reject {name}/{arity}: effectful resolved constructor")
+            });
             return None;
         }
+        let module = self.resolved_erlang_module_for_symbol(resolved, erlang_mod);
+        debug_selective_subject("dict-call", name, || {
+            let module_label = module.as_deref().unwrap_or("<local>");
+            format!("direct resolved constructor {module_label}:{name}/{arity}")
+        });
         Some(DirectCallable {
-            module: self.resolved_erlang_module_for_symbol(resolved, erlang_mod),
+            module,
             name: name.clone(),
             arity: *arity,
         })

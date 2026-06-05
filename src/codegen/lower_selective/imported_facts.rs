@@ -833,6 +833,17 @@ fn is_generated_variant_name(name: &str) -> bool {
 }
 
 fn debug_imported_dict_enabled(filter: Option<&str>, source_module: &str, name: &str) -> bool {
+    if let Some(selective_filter) = std::env::var_os("SAGA_DEBUG_SELECTIVE") {
+        let selective_filter = selective_filter.to_string_lossy();
+        let target = format!("imported-dict:{source_module}.{name}");
+        if selective_filter.is_empty()
+            || target.contains(selective_filter.as_ref())
+            || source_module.contains(selective_filter.as_ref())
+            || name.contains(selective_filter.as_ref())
+        {
+            return true;
+        }
+    }
     let Some(filter) = filter else {
         return false;
     };

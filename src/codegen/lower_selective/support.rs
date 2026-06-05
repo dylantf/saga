@@ -10,6 +10,34 @@ use crate::intrinsics::IntrinsicId;
 pub(super) const ABORT_TAG: &str = "__saga_handler_abort";
 pub(super) const VALUE_RESULT_TAG: &str = "__saga_value_result";
 
+fn selective_debug_filter_matches(filter: &str, target: &str, subject: Option<&str>) -> bool {
+    if filter.is_empty() || target.contains(filter) {
+        return true;
+    }
+    let Some(subject) = subject else {
+        return false;
+    };
+    subject.contains(filter) || format!("{target}:{subject}").contains(filter)
+}
+
+pub(super) fn selective_debug_subject_enabled(target: &str, subject: &str) -> bool {
+    let Some(filter) = std::env::var_os("SAGA_DEBUG_SELECTIVE") else {
+        return false;
+    };
+    let filter = filter.to_string_lossy();
+    selective_debug_filter_matches(filter.as_ref(), target, Some(subject))
+}
+
+pub(super) fn debug_selective_subject(
+    target: &str,
+    subject: &str,
+    message: impl FnOnce() -> String,
+) {
+    if selective_debug_subject_enabled(target, subject) {
+        eprintln!("selective[{target}:{subject}]: {}", message());
+    }
+}
+
 pub(super) fn marked_control_tuple(tag: &str, marker: CExpr, value: CExpr) -> CExpr {
     CExpr::Tuple(vec![CExpr::Lit(CLit::Atom(tag.to_string())), marker, value])
 }

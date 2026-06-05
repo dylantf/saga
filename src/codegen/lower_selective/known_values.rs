@@ -369,25 +369,51 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                 let Atom::DictRef { name, .. } = head else {
                     return None;
                 };
-                let (constructor, methods_inlineable) =
+                let (constructor, methods_inlineable, origin) =
                     if let Some(constructor) = self.local_dict_constructors.get(name) {
-                        (constructor.clone(), true)
+                        (constructor.clone(), true, "local")
+                    } else if let Some(constructor) = self.imported_dict_constructors.get(name) {
+                        (constructor.clone(), true, "imported")
                     } else {
-                        (self.imported_dict_constructors.get(name)?.clone(), true)
+                        debug_selective_subject("known-dict", name, || {
+                            format!("miss {name}: no local/imported constructor fact")
+                        });
+                        return None;
                     };
-                if constructor.dict_params.len() != args.len()
-                    || args.iter().any(|arg| !self.atom_is_direct_subset(arg))
-                {
+                if constructor.dict_params.len() != args.len() {
+                    debug_selective_subject("known-dict", name, || {
+                        format!(
+                            "reject {name}: expected {} dict args, got {}",
+                            constructor.dict_params.len(),
+                            args.len()
+                        )
+                    });
+                    return None;
+                }
+                if args.iter().any(|arg| !self.atom_is_direct_subset(arg)) {
+                    debug_selective_subject("known-dict", name, || {
+                        format!("reject {name}: dict arg outside direct atom subset")
+                    });
                     return None;
                 }
 
                 let mut methods = Vec::with_capacity(constructor.methods.len());
                 for method in &constructor.methods {
                     let MExpr::Pure(atom @ Atom::Lambda { .. }) = method else {
+                        debug_selective_subject("known-dict", name, || {
+                            format!("reject {name}: method is not a pure lambda")
+                        });
                         return None;
                     };
                     methods.push(atom.clone());
                 }
+                debug_selective_subject("known-dict", name, || {
+                    format!(
+                        "accept {name}: origin={origin}, params={}, methods={}",
+                        constructor.dict_params.len(),
+                        constructor.methods.len()
+                    )
+                });
                 Some(KnownDictValue {
                     constructor_name: name.clone(),
                     methods_inlineable,

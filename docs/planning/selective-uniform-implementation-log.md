@@ -1874,3 +1874,18 @@ boundaries exist.
   - verified `/home/dylan/projects/saga_json` builds on its `main` branch with
     the selective backend. Next JSON work can return to optimization shape
     inspection instead of build correctness.
+- Added selective-lowering trace points behind `SAGA_DEBUG_SELECTIVE` so we can
+  see why a value takes a direct, specialized, imported, or fallback-ish route:
+  - `SAGA_DEBUG_SELECTIVE=imported-dict` shows cross-module dictionary fact
+    collection and rejection reasons;
+  - `SAGA_DEBUG_SELECTIVE=dict-plan` shows why a local dict constructor is or is
+    not emitted as a direct selective definition;
+  - `SAGA_DEBUG_SELECTIVE=known-dict` shows whether a dict-constructor
+    expression becomes a compile-time known dict value;
+  - `SAGA_DEBUG_SELECTIVE=known-method` shows why known dict method calls inline
+    or reject;
+  - `SAGA_DEBUG_SELECTIVE=dict-call` shows when dict constructor expressions
+    lower as direct callable constructor calls instead of known dict values.
+  The filter can be either a phase (`known-dict`) or a subject substring
+  (`__dict_SagaJson_Encode_ToJsonFields`); an empty value enables every
+  selective trace.

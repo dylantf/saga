@@ -452,16 +452,59 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         args: &[Atom],
     ) -> Option<CExpr> {
         if !known_dict.methods_inlineable {
+            debug_selective_subject("known-method", &known_dict.constructor_name, || {
+                format!(
+                    "reject {} method {method_index}: methods are not inlineable",
+                    known_dict.constructor_name
+                )
+            });
             return None;
         }
         if self.known_dict_method_is_active(known_dict, method_index) {
+            debug_selective_subject("known-method", &known_dict.constructor_name, || {
+                format!(
+                    "reject {} method {method_index}: active recursion guard",
+                    known_dict.constructor_name
+                )
+            });
             return None;
         }
-        let method = known_dict.methods.get(method_index)?;
-        let Atom::Lambda { params, body, .. } = method else {
+        let Some(method) = known_dict.methods.get(method_index) else {
+            debug_selective_subject("known-method", &known_dict.constructor_name, || {
+                format!(
+                    "reject {} method {method_index}: missing method",
+                    known_dict.constructor_name
+                )
+            });
             return None;
         };
-        if params.len() != args.len() || params.iter().any(|param| !direct_param_supported(param)) {
+        let Atom::Lambda { params, body, .. } = method else {
+            debug_selective_subject("known-method", &known_dict.constructor_name, || {
+                format!(
+                    "reject {} method {method_index}: method is not a lambda",
+                    known_dict.constructor_name
+                )
+            });
+            return None;
+        };
+        if params.len() != args.len() {
+            debug_selective_subject("known-method", &known_dict.constructor_name, || {
+                format!(
+                    "reject {} method {method_index}: expected {} args, got {}",
+                    known_dict.constructor_name,
+                    params.len(),
+                    args.len()
+                )
+            });
+            return None;
+        }
+        if params.iter().any(|param| !direct_param_supported(param)) {
+            debug_selective_subject("known-method", &known_dict.constructor_name, || {
+                format!(
+                    "reject {} method {method_index}: unsupported method parameter pattern",
+                    known_dict.constructor_name
+                )
+            });
             return None;
         }
 
@@ -482,11 +525,25 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             params,
             &body,
         ) {
+            debug_selective_subject("known-method", &known_dict.constructor_name, || {
+                format!(
+                    "reject {} method {method_index}: body outside direct subset after aliasing",
+                    known_dict.constructor_name
+                )
+            });
             if inserted {
                 self.active_known_dict_methods.remove(&key);
             }
             return None;
         }
+        debug_selective_subject("known-method", &known_dict.constructor_name, || {
+            format!(
+                "inline {} method {method_index}: args={}, dict_args={}",
+                known_dict.constructor_name,
+                args.len(),
+                dict_bindings.len()
+            )
+        });
 
         let lowered = self.lower_inline_direct_lambda_app_with_dict_bindings(
             &dict_bindings,

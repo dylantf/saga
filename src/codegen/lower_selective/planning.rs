@@ -511,13 +511,20 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             && !dc.name.contains("_Std_Generic_")
             && dict_constructor_mentions_generic_rep_traversal(dc)
         {
+            debug_selective_subject("dict-plan", &dc.name, || {
+                format!(
+                    "reject {}: parameterized user Generic traversal bridge",
+                    dc.name
+                )
+            });
             return false;
         }
         self.push_scope();
         for dict_param in &dc.dict_params {
             self.current_scope_mut().insert(dict_param.clone());
         }
-        let supported = dc.methods.iter().enumerate().all(|(index, method)| {
+        let mut supported = true;
+        for (index, method) in dc.methods.iter().enumerate() {
             let effectful = dc
                 .method_effects
                 .get(index)
@@ -525,25 +532,56 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                 || dc.method_open_rows.get(index).copied().unwrap_or(false);
 
             let MExpr::Pure(Atom::Lambda { params, body, .. }) = method else {
-                return !effectful && self.expr_is_direct_subset(method);
+                let direct = !effectful && self.expr_is_direct_subset(method);
+                if !direct {
+                    debug_selective_subject("dict-plan", &dc.name, || {
+                        format!(
+                            "reject {} method {index}: non-lambda method is not direct subset",
+                            dc.name
+                        )
+                    });
+                    supported = false;
+                    break;
+                }
+                continue;
             };
             if params.iter().any(|p| !direct_param_supported(p)) {
-                return false;
+                debug_selective_subject("dict-plan", &dc.name, || {
+                    format!(
+                        "reject {} method {index}: unsupported method parameter pattern",
+                        dc.name
+                    )
+                });
+                supported = false;
+                break;
             }
 
             self.push_scope();
             for pat in params {
                 self.bind_pat_locals(pat);
             }
-            let supported = if effectful {
+            let method_supported = if effectful {
                 self.expr_is_cps_island_subset(body) || self.expr_is_direct_subset(body)
             } else {
                 self.expr_is_direct_subset(body)
             };
             self.pop_scope();
-            supported
-        });
+            if !method_supported {
+                debug_selective_subject("dict-plan", &dc.name, || {
+                    let shape = if effectful { "cps/direct" } else { "direct" };
+                    format!(
+                        "reject {} method {index}: body is outside {shape} subset",
+                        dc.name
+                    )
+                });
+                supported = false;
+                break;
+            }
+        }
         self.pop_scope();
+        if supported {
+            debug_selective_subject("dict-plan", &dc.name, || format!("accept {}", dc.name));
+        }
         supported
     }
 
