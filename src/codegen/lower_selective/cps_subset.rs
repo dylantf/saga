@@ -722,18 +722,54 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             | Atom::Lambda { source, .. } => *source,
             _ => return Vec::new(),
         };
-        let Some(mut current) = self.effect_info.type_at_node.get(&source) else {
+        let mut shapes = Vec::new();
+        if let Some(mut current) = self.effect_info.type_at_node.get(&source) {
+            while let Type::Fun(param, ret, _) = current {
+                shapes.push(self.cps_callback_shape_from_type(param));
+                current = ret;
+            }
+        }
+        if shapes.iter().any(Option::is_some) {
+            return shapes;
+        }
+        self.resolved_callback_param_shapes(head)
+    }
+
+    pub(super) fn cps_callback_shape_from_type(&self, ty: &Type) -> Option<(usize, usize)> {
+        self.cps_function_arity_from_type(ty)
+            .map(|(source_arity, adapter_arity, _effects)| (source_arity, adapter_arity))
+    }
+
+    fn resolved_callback_param_shapes(&self, head: &Atom) -> Vec<Option<(usize, usize)>> {
+        let source = match head {
+            Atom::Var { source, .. } | Atom::QualifiedRef { source, .. } => *source,
+            _ => return Vec::new(),
+        };
+        let Some(resolved) = self.resolution.get(&source) else {
             return Vec::new();
         };
-        let mut shapes = Vec::new();
-        while let Type::Fun(param, ret, _) = current {
-            shapes.push(
-                self.cps_function_arity_from_type(param)
-                    .map(|(source_arity, adapter_arity, _effects)| (source_arity, adapter_arity)),
-            );
-            current = ret;
-        }
-        shapes
+        let ResolvedCodegenKind::BeamFunction {
+            erlang_mod, name, ..
+        } = &resolved.kind
+        else {
+            return Vec::new();
+        };
+        let arities = self
+            .resolved_erlang_module_for_symbol(resolved, erlang_mod)
+            .and_then(|module| {
+                self.imported_callback_param_arities
+                    .get(&(module, name.clone()))
+            })
+            .or_else(|| self.callable_callback_param_arities.get(name));
+
+        arities
+            .map(|arities| {
+                arities
+                    .iter()
+                    .map(|arity| arity.map(|source_arity| (source_arity, source_arity + 2)))
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     pub(super) fn lambda_is_direct_subset(&mut self, params: &[Pat], body: &MExpr) -> bool {

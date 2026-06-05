@@ -307,15 +307,9 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         let mut bindings = Vec::new();
         for (index, arg) in args.iter().enumerate() {
             let arg = match expected_arg_shapes.get(index).copied().flatten() {
-                Some((source_arity, adapter_arity))
-                    if !matches!(
-                        arg,
-                        Atom::Lambda { params, body, .. }
-                            if self.lambda_is_direct_subset(params, body)
-                    ) =>
-                {
-                    self.lower_cps_runtime_value_atom(arg, source_arity, adapter_arity)
-                }
+                Some((source_arity, adapter_arity)) if self
+                    .expected_cps_arg_needs_runtime_cps_shape(arg) =>
+                    self.lower_cps_runtime_value_atom(arg, source_arity, adapter_arity),
                 None | Some(_) => {
                     let (arg, binding) = self.lower_atom_as_core_value(arg, "_CallArg");
                     lowered.push(arg);
@@ -332,6 +326,16 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             }
         }
         (lowered, bindings)
+    }
+
+    fn expected_cps_arg_needs_runtime_cps_shape(&mut self, arg: &Atom) -> bool {
+        if self.cps_lambda_type_arity_for_atom(arg).is_some() {
+            return true;
+        }
+        !matches!(
+            arg,
+            Atom::Lambda { params, body, .. } if self.lambda_is_direct_subset(params, body)
+        )
     }
 
     pub(super) fn lower_direct_cps_entry_call(

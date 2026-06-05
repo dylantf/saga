@@ -280,6 +280,14 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             return CpsCallDecision::Lambda;
         }
 
+        if let Some(shape) = self
+            .same_module_cps_entry_shape(head)
+            .or_else(|| self.local_cps_function_shape_by_name(head))
+            .or_else(|| self.cps_function_shape(head))
+        {
+            return CpsCallDecision::Normal(shape);
+        }
+
         if let Some(shape @ (CallShape::Cps { .. } | CallShape::LocalCpsCallable { .. })) =
             self.call_shape(head)
         {
@@ -306,6 +314,77 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         }
 
         CpsCallDecision::Unsupported
+    }
+
+    pub(super) fn app_head_is_local_runtime_callable(&self, head: &Atom) -> bool {
+        let Atom::Var { name, source } = head else {
+            return false;
+        };
+        match self.local_shape(&name.name) {
+            Some(LocalValueShape::RuntimeCpsCallable { .. }) => true,
+            Some(LocalValueShape::PureCallableFromUseType) => self
+                .cps_function_arity_at(*source)
+                .is_some_and(|(_, _, effects)| !effects.is_empty()),
+            _ => false,
+        }
+    }
+
+    pub(super) fn app_head_has_cps_entry(&self, head: &Atom) -> bool {
+        self.same_module_cps_entry_shape(head).is_some()
+            || self.local_cps_function_shape_by_name(head).is_some()
+            || self.cps_function_shape(head).is_some()
+            || self
+                .direct_function_callable(head)
+                .is_some_and(|callable| match callable.module {
+                    Some(module) => self
+                        .imported_function_entries
+                        .get(&(module, callable.name))
+                        .is_some_and(|entries| entries.cps_adapter_entry_arity.is_some()),
+                    None => self
+                        .local_function_entries
+                        .get(&callable.name)
+                        .is_some_and(|entries| entries.cps_adapter_entry_arity.is_some()),
+                })
+    }
+
+    fn same_module_cps_entry_shape(&self, head: &Atom) -> Option<CallShape> {
+        let Atom::Var { name, .. } = head else {
+            return None;
+        };
+        if let Some(entries) = self.local_function_entries.get(&name.name)
+            && let Some(adapter_arity) = entries.cps_adapter_entry_arity
+        {
+            return Some(CallShape::Cps {
+                module: None,
+                name: name.name.clone(),
+                source_arity: entries.source_arity,
+                adapter_arity,
+                effects: match &entries.callable_type_shape {
+                    RuntimeFunctionShape::Cps(shape) => shape.static_effects.clone(),
+                    _ => Vec::new(),
+                },
+            });
+        }
+
+        let RuntimeFunctionShape::Cps(shape) = self.callable_type_shapes.get(&name.name)? else {
+            return None;
+        };
+        if !self
+            .function_plans
+            .get(&name.name)
+            .copied()
+            .is_some_and(FunctionLoweringPlan::has_cps_body)
+        {
+            return None;
+        }
+        let source_arity = self.local_fun_bindings.get(&name.name)?.params.len();
+        Some(CallShape::Cps {
+            module: None,
+            name: name.name.clone(),
+            source_arity,
+            adapter_arity: source_arity + 2,
+            effects: shape.static_effects.clone(),
+        })
     }
 
     pub(super) fn lower_cps_lambda_app(
@@ -808,7 +887,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                 self.assert_app_arity(&name, args.len(), source_arity);
                 self.assert_app_arity(&name, args.len() + 2, adapter_arity);
                 let expected_arg_shapes = self.cps_callback_param_shapes(head);
-                let mut lowered_args: Vec<CExpr> = args
+                let lowered_args: Vec<CExpr> = args
                     .iter()
                     .enumerate()
                     .map(|(index, arg)| {
@@ -818,9 +897,45 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                         )
                     })
                     .collect();
-                lowered_args.push(evidence);
-                lowered_args.push(return_k);
-                CExpr::Apply(Box::new(CExpr::Var(core_var(&name))), lowered_args)
+                let mut cps_args = lowered_args.clone();
+                cps_args.push(evidence);
+                cps_args.push(return_k.clone());
+
+                let fun_var = core_var(&name);
+                CExpr::Case(
+                    Box::new(CExpr::Call(
+                        "erlang".to_string(),
+                        "fun_info".to_string(),
+                        vec![
+                            CExpr::Var(fun_var.clone()),
+                            CExpr::Lit(CLit::Atom("arity".to_string())),
+                        ],
+                    )),
+                    vec![
+                        CArm {
+                            pat: CPat::Tuple(vec![
+                                CPat::Lit(CLit::Atom("arity".to_string())),
+                                CPat::Lit(CLit::Int(source_arity as i64)),
+                            ]),
+                            guard: None,
+                            body: CExpr::Apply(
+                                Box::new(return_k),
+                                vec![CExpr::Apply(
+                                    Box::new(CExpr::Var(fun_var.clone())),
+                                    lowered_args,
+                                )],
+                            ),
+                        },
+                        CArm {
+                            pat: CPat::Tuple(vec![
+                                CPat::Lit(CLit::Atom("arity".to_string())),
+                                CPat::Lit(CLit::Int(adapter_arity as i64)),
+                            ]),
+                            guard: None,
+                            body: CExpr::Apply(Box::new(CExpr::Var(fun_var)), cps_args),
+                        },
+                    ],
+                )
             }
             _ => self.unsupported("classified non-CPS call as normal CPS call"),
         }

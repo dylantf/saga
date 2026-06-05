@@ -113,7 +113,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
 
         self.push_scope();
         for pat in params {
-            self.bind_pat_locals(pat);
+            self.bind_cps_pat_locals(pat);
         }
         let lowered_body =
             self.lower_cps_expr(body, CExpr::Var(evidence_name), CExpr::Var(return_k_name));
@@ -181,7 +181,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         adapter_arity: usize,
     ) -> CArm {
         self.push_scope();
-        self.bind_pat_locals(&arm.pattern);
+        self.bind_cps_pat_locals(&arm.pattern);
         let body = self.lower_cps_runtime_value_expr(&arm.body, source_arity, adapter_arity);
         let guard = arm.guard.as_ref().map(|g| self.lower_expr(g));
         let pat = self.lower_pat(&arm.pattern);

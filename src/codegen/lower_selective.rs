@@ -221,6 +221,7 @@ struct DirectLowerer<'a, 'info> {
     callable_type_shapes: HashMap<String, RuntimeFunctionShape>,
     callable_callback_param_arities: HashMap<String, Vec<Option<usize>>>,
     local_fun_bindings: HashMap<String, MFunBinding>,
+    local_fun_binding_counts: HashMap<String, usize>,
     direct_values: HashSet<String>,
     /// Per-function lowering decision for the implementation body.
     function_plans: HashMap<String, FunctionLoweringPlan>,
@@ -239,6 +240,8 @@ struct DirectLowerer<'a, 'info> {
     local_external_functions: HashMap<String, DirectCallable>,
     /// Emitted entries discovered for already-compiled imported user modules.
     imported_function_entries: HashMap<(String, String), FunctionEntryInfo>,
+    /// CPS callback parameter arities discovered for imported functions.
+    imported_callback_param_arities: HashMap<(String, String), Vec<Option<usize>>>,
     /// Direct HOF specializations discovered for already-compiled imported
     /// user modules.
     imported_hof_direct_specializations: HashMap<(String, String), HofDirectSpecialization>,

@@ -122,7 +122,13 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             }
         }
 
-        if self.expr_is_direct_subset(value) {
+        let direct_app_needs_cps_bind = match value {
+            MExpr::App { head, .. } => {
+                self.app_head_has_cps_entry(head) || self.app_head_is_local_runtime_callable(head)
+            }
+            _ => false,
+        };
+        if self.expr_is_direct_subset(value) && !direct_app_needs_cps_bind {
             let local_shape = self.direct_local_shape_for_expr(value);
             let known_direct_lambda = self.known_direct_lambda_for_expr(value);
             let known_dict = self.known_dict_value_for_expr(value);

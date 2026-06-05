@@ -465,9 +465,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                     })
                     .collect(),
             }),
-            Atom::Var { name, .. } => self
-                .known_direct_value(&name.name)
-                .or_else(|| Some(KnownDirectValue::Atom(atom.clone()))),
+            Atom::Var { name, .. } => self.known_direct_value(&name.name),
         }
     }
 

@@ -19,7 +19,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                     continue;
                 };
                 self.push_scope();
-                self.bind_pat_locals(&arm.pattern);
+                self.bind_cps_pat_locals_for_expr_use(&arm.pattern, &arm.body);
                 self.bind_known_direct_atom_pattern_values(bindings);
                 let body = self.lower_cps_expr(&arm.body, evidence, return_k);
                 self.pop_scope();
@@ -35,7 +35,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             let rest_var = self.fresh_cps_temp("_CpsCaseRest");
             let rest_ref = || CExpr::Apply(Box::new(CExpr::Var(rest_var.clone())), vec![]);
             self.push_scope();
-            self.bind_pat_locals(&arm.pattern);
+            self.bind_cps_pat_locals_for_expr_use(&arm.pattern, &arm.body);
             let body = self.lower_cps_expr(&arm.body, evidence.clone(), return_k.clone());
             let body = match arm.guard.as_ref() {
                 Some(guard) => CExpr::Case(
@@ -114,7 +114,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         return_k: CExpr,
     ) -> CArm {
         self.push_scope();
-        self.bind_pat_locals(&arm.pattern);
+        self.bind_cps_pat_locals_for_expr_use(&arm.pattern, &arm.body);
         let raw_body = self.lower_cps_expr(&arm.body, evidence, return_k);
         let guard = arm.guard.as_ref().map(|g| self.lower_expr(g));
         let (pat, reason_wrapper) = self.lower_receive_pat(&arm.pattern);

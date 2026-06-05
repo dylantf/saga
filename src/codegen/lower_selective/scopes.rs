@@ -152,7 +152,11 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                         }
                     })
                 });
-            self.bind_pat_locals_with_shape(pat, shape);
+            if let Some(shape) = shape {
+                self.bind_cps_pat_locals_with_shape(pat, Some(shape));
+            } else {
+                self.bind_cps_pat_locals_for_expr_use(pat, &fb.body);
+            }
         }
     }
 
@@ -288,6 +292,162 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
 
     pub(super) fn bind_pat_locals(&mut self, pat: &Pat) {
         self.bind_pat_locals_with_shape(pat, None);
+    }
+
+    pub(super) fn bind_cps_pat_locals(&mut self, pat: &Pat) {
+        self.bind_cps_pat_locals_with_shape(pat, None);
+    }
+
+    pub(super) fn bind_cps_pat_locals_for_expr_use(&mut self, pat: &Pat, expr: &MExpr) {
+        match pat {
+            Pat::Var { name, .. } => {
+                let shape = self
+                    .local_shape_for_cps_entry_pat(pat)
+                    .or_else(|| self.runtime_cps_shape_for_local_use(name, expr));
+                self.bind_cps_pat_locals_with_shape(pat, shape);
+            }
+            Pat::Tuple { elements, .. } => {
+                for pat in elements {
+                    self.bind_cps_pat_locals_for_expr_use(pat, expr);
+                }
+            }
+            Pat::Constructor { args, .. } => {
+                for pat in args {
+                    self.bind_cps_pat_locals_for_expr_use(pat, expr);
+                }
+            }
+            Pat::Record {
+                fields, as_name, ..
+            } => {
+                if let Some(name) = as_name {
+                    self.current_scope_mut().insert(name.clone());
+                    self.current_shape_scope_mut()
+                        .insert(name.clone(), LocalValueShape::PureCallableFromUseType);
+                }
+                for (field_name, pat) in fields {
+                    match pat {
+                        Some(pat) => self.bind_cps_pat_locals_for_expr_use(pat, expr),
+                        None => {
+                            self.current_scope_mut().insert(field_name.clone());
+                            self.current_shape_scope_mut().insert(
+                                field_name.clone(),
+                                LocalValueShape::PureCallableFromUseType,
+                            );
+                        }
+                    }
+                }
+            }
+            Pat::AnonRecord { fields, .. } => {
+                for (field_name, pat) in fields {
+                    match pat {
+                        Some(pat) => self.bind_cps_pat_locals_for_expr_use(pat, expr),
+                        None => {
+                            self.current_scope_mut().insert(field_name.clone());
+                            self.current_shape_scope_mut().insert(
+                                field_name.clone(),
+                                LocalValueShape::PureCallableFromUseType,
+                            );
+                        }
+                    }
+                }
+            }
+            Pat::StringPrefix { rest, .. } => {
+                self.bind_cps_pat_locals_for_expr_use(rest, expr);
+            }
+            Pat::BitStringPat { segments, .. } => {
+                for segment in segments {
+                    self.bind_cps_pat_locals_for_expr_use(&segment.value, expr);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    pub(super) fn runtime_cps_shape_for_local_use(
+        &self,
+        name: &str,
+        expr: &MExpr,
+    ) -> Option<LocalValueShape> {
+        let mut arity = None;
+        if !Self::collect_direct_call_arity_for_local_in_expr(name, expr, &mut arity) {
+            return None;
+        }
+        arity.map(|source_arity| LocalValueShape::RuntimeCpsCallable {
+            source_arity,
+            adapter_arity: source_arity + 2,
+            effects: Vec::new(),
+        })
+    }
+
+    pub(super) fn bind_cps_pat_locals_with_shape(
+        &mut self,
+        pat: &Pat,
+        explicit_shape: Option<LocalValueShape>,
+    ) {
+        match pat {
+            Pat::Var { id, name, .. } => {
+                self.current_scope_mut().insert(name.clone());
+                self.shadow_known_direct_atom_with_local(name.clone(), *id);
+                let shape = explicit_shape
+                    .or_else(|| self.local_shape_for_cps_entry_pat(pat))
+                    .unwrap_or(LocalValueShape::PureCallableFromUseType);
+                self.current_shape_scope_mut().insert(name.clone(), shape);
+            }
+            Pat::Tuple { elements, .. } => {
+                for pat in elements {
+                    self.bind_cps_pat_locals(pat);
+                }
+            }
+            Pat::Constructor { args, .. } => {
+                for pat in args {
+                    self.bind_cps_pat_locals(pat);
+                }
+            }
+            Pat::Record {
+                fields, as_name, ..
+            } => {
+                if let Some(name) = as_name {
+                    self.current_scope_mut().insert(name.clone());
+                    self.current_shape_scope_mut()
+                        .insert(name.clone(), LocalValueShape::PureCallableFromUseType);
+                }
+                for (field_name, pat) in fields {
+                    match pat {
+                        Some(pat) => self.bind_cps_pat_locals(pat),
+                        None => {
+                            self.current_scope_mut().insert(field_name.clone());
+                            self.current_shape_scope_mut().insert(
+                                field_name.clone(),
+                                LocalValueShape::PureCallableFromUseType,
+                            );
+                        }
+                    }
+                }
+            }
+            Pat::AnonRecord { fields, .. } => {
+                for (field_name, pat) in fields {
+                    match pat {
+                        Some(pat) => self.bind_cps_pat_locals(pat),
+                        None => {
+                            self.current_scope_mut().insert(field_name.clone());
+                            self.current_shape_scope_mut().insert(
+                                field_name.clone(),
+                                LocalValueShape::PureCallableFromUseType,
+                            );
+                        }
+                    }
+                }
+            }
+            Pat::StringPrefix { rest, .. } => {
+                self.bind_cps_pat_locals(rest);
+            }
+            Pat::BitStringPat { segments, .. } => {
+                for segment in segments {
+                    self.bind_cps_pat_locals(&segment.value);
+                }
+            }
+            _ => {}
+        }
     }
 
     pub(super) fn bind_cps_handler_arm_param_locals(&mut self, arm: &MHandlerArm) {

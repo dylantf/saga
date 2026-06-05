@@ -1,4 +1,5 @@
 use super::*;
+use crate::ast::{Expr, ExprKind};
 
 pub(super) fn local_is_only_called_in_expr(local: &str, expr: &MExpr) -> bool {
     match expr {
@@ -22,9 +23,11 @@ pub(super) fn local_is_only_called_in_expr(local: &str, expr: &MExpr) -> bool {
         } => {
             !atom_mentions_local(local, scrutinee)
                 && arms.iter().all(|arm| {
-                    arm.guard
-                        .as_ref()
-                        .is_none_or(|guard| local_is_only_called_in_expr(local, guard))
+                    !pat_size_mentions_local(local, &arm.pattern)
+                        && arm
+                            .guard
+                            .as_ref()
+                            .is_none_or(|guard| local_is_only_called_in_expr(local, guard))
                         && (pat_binds_name(&arm.pattern, local)
                             || local_is_only_called_in_expr(local, &arm.body))
                 })
@@ -65,9 +68,11 @@ pub(super) fn local_is_only_called_in_expr(local: &str, expr: &MExpr) -> bool {
             .all(|segment| !atom_mentions_local(local, &segment.value)),
         MExpr::Receive { arms, after, .. } => {
             arms.iter().all(|arm| {
-                arm.guard
-                    .as_ref()
-                    .is_none_or(|guard| local_is_only_called_in_expr(local, guard))
+                !pat_size_mentions_local(local, &arm.pattern)
+                    && arm
+                        .guard
+                        .as_ref()
+                        .is_none_or(|guard| local_is_only_called_in_expr(local, guard))
                     && (pat_binds_name(&arm.pattern, local)
                         || local_is_only_called_in_expr(local, &arm.body))
             }) && after.as_ref().is_none_or(|(timeout, body)| {
@@ -127,10 +132,12 @@ pub(super) fn local_is_only_used_for_immediate_dict_method_calls(
         } => {
             !atom_mentions_local(local, scrutinee)
                 && arms.iter().all(|arm| {
-                    arm.guard.as_ref().is_none_or(|guard| {
-                        local_is_only_used_for_immediate_dict_method_calls(local, guard)
-                    }) && (pat_binds_name(&arm.pattern, local)
-                        || local_is_only_used_for_immediate_dict_method_calls(local, &arm.body))
+                    !pat_size_mentions_local(local, &arm.pattern)
+                        && arm.guard.as_ref().is_none_or(|guard| {
+                            local_is_only_used_for_immediate_dict_method_calls(local, guard)
+                        })
+                        && (pat_binds_name(&arm.pattern, local)
+                            || local_is_only_used_for_immediate_dict_method_calls(local, &arm.body))
                 })
         }
         MExpr::If {
@@ -169,10 +176,12 @@ pub(super) fn local_is_only_used_for_immediate_dict_method_calls(
             .all(|segment| !atom_mentions_local(local, &segment.value)),
         MExpr::Receive { arms, after, .. } => {
             arms.iter().all(|arm| {
-                arm.guard.as_ref().is_none_or(|guard| {
-                    local_is_only_used_for_immediate_dict_method_calls(local, guard)
-                }) && (pat_binds_name(&arm.pattern, local)
-                    || local_is_only_used_for_immediate_dict_method_calls(local, &arm.body))
+                !pat_size_mentions_local(local, &arm.pattern)
+                    && arm.guard.as_ref().is_none_or(|guard| {
+                        local_is_only_used_for_immediate_dict_method_calls(local, guard)
+                    })
+                    && (pat_binds_name(&arm.pattern, local)
+                        || local_is_only_used_for_immediate_dict_method_calls(local, &arm.body))
             }) && after.as_ref().is_none_or(|(timeout, body)| {
                 !atom_mentions_local(local, timeout)
                     && local_is_only_used_for_immediate_dict_method_calls(local, body)
@@ -219,9 +228,11 @@ fn expr_mentions_local(local: &str, expr: &MExpr) -> bool {
         } => {
             atom_mentions_local(local, scrutinee)
                 || arms.iter().any(|arm| {
-                    arm.guard
-                        .as_ref()
-                        .is_some_and(|guard| expr_mentions_local(local, guard))
+                    pat_size_mentions_local(local, &arm.pattern)
+                        || arm
+                            .guard
+                            .as_ref()
+                            .is_some_and(|guard| expr_mentions_local(local, guard))
                         || (!pat_binds_name(&arm.pattern, local)
                             && expr_mentions_local(local, &arm.body))
                 })
@@ -261,9 +272,11 @@ fn expr_mentions_local(local: &str, expr: &MExpr) -> bool {
             .any(|segment| atom_mentions_local(local, &segment.value)),
         MExpr::Receive { arms, after, .. } => {
             arms.iter().any(|arm| {
-                arm.guard
-                    .as_ref()
-                    .is_some_and(|guard| expr_mentions_local(local, guard))
+                pat_size_mentions_local(local, &arm.pattern)
+                    || arm
+                        .guard
+                        .as_ref()
+                        .is_some_and(|guard| expr_mentions_local(local, guard))
                     || (!pat_binds_name(&arm.pattern, local)
                         && expr_mentions_local(local, &arm.body))
             }) || after.as_ref().is_some_and(|(timeout, body)| {
@@ -311,6 +324,47 @@ fn atom_mentions_local(local: &str, atom: &Atom) -> bool {
     }
 }
 
+fn pat_size_mentions_local(local: &str, pat: &Pat) -> bool {
+    match pat {
+        Pat::BitStringPat { segments, .. } => segments.iter().any(|segment| {
+            segment
+                .size
+                .as_deref()
+                .is_some_and(|size| size_expr_mentions_local(local, size))
+                || pat_size_mentions_local(local, &segment.value)
+        }),
+        Pat::Constructor { args, .. } => args.iter().any(|pat| pat_size_mentions_local(local, pat)),
+        Pat::Record { fields, .. } | Pat::AnonRecord { fields, .. } => {
+            fields.iter().any(|(_, pat)| {
+                pat.as_ref()
+                    .is_some_and(|pat| pat_size_mentions_local(local, pat))
+            })
+        }
+        Pat::Tuple { elements, .. }
+        | Pat::Or {
+            patterns: elements, ..
+        } => elements
+            .iter()
+            .any(|pat| pat_size_mentions_local(local, pat)),
+        Pat::StringPrefix { rest, .. } => pat_size_mentions_local(local, rest),
+        Pat::ListPat { elements, .. } => elements
+            .iter()
+            .any(|pat| pat_size_mentions_local(local, pat)),
+        Pat::ConsPat { head, tail, .. } => {
+            pat_size_mentions_local(local, head) || pat_size_mentions_local(local, tail)
+        }
+        Pat::Wildcard { .. } | Pat::Var { .. } | Pat::Lit { .. } => false,
+    }
+}
+
+fn size_expr_mentions_local(local: &str, expr: &Expr) -> bool {
+    match &expr.kind {
+        ExprKind::Var { name, .. } => name == local,
+        ExprKind::Lit { .. } => false,
+        _ => false,
+    }
+}
+
 fn handler_mentions_local(local: &str, handler: &MHandler) -> bool {
     match handler {
         MHandler::Static {
@@ -342,6 +396,13 @@ fn handler_mentions_local(local: &str, handler: &MHandler) -> bool {
 }
 
 fn handler_arm_mentions_local(local: &str, arm: &MHandlerArm) -> bool {
+    if arm
+        .params
+        .iter()
+        .any(|param| pat_size_mentions_local(local, param))
+    {
+        return true;
+    }
     if arm.params.iter().any(|param| pat_binds_name(param, local)) {
         return false;
     }

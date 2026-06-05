@@ -204,9 +204,17 @@ fn program_imports_module(program: &ast::Program, module_name: &str) -> bool {
 }
 
 fn resolution_references_module(resolution: &resolve::ResolutionMap, module_name: &str) -> bool {
-    resolution
-        .values()
-        .any(|resolved| resolved.source_module.as_deref() == Some(module_name))
+    let erlang_module = erlang_module_name_for_core(module_name);
+    resolution.values().any(|resolved| {
+        resolved.source_module.as_deref() == Some(module_name)
+            || matches!(
+                &resolved.kind,
+                resolve::ResolvedCodegenKind::BeamFunction {
+                    erlang_mod: Some(module),
+                    ..
+                } if module == &erlang_module
+            )
+    })
 }
 
 // -------------------------------------------------------------------------
@@ -442,6 +450,15 @@ pub fn emit_module_via_new_path(
     let mut imported_handler_decls: HashMap<String, ast::HandlerBody> = HashMap::new();
     let mut imported_dict_constructors = HashMap::new();
     for (imported_module_name, compiled) in &ctx.modules {
+        if imported_module_name == &source_module_name {
+            continue;
+        }
+        let imported_module_is_referenced = program_imports_module(program, imported_module_name)
+            || resolution_references_module(&resolution_map, imported_module_name);
+        if !imported_module_is_referenced {
+            continue;
+        }
+
         let anf_imported = anf::normalize(compiled.elaborated.clone(), Some(&compiled.resolution));
         for decl in &anf_imported {
             if let ast::Decl::HandlerDef { name, body, .. } = decl {
@@ -457,33 +474,28 @@ pub fn emit_module_via_new_path(
                 }
             }
         }
-        if imported_module_name != &source_module_name
-            && (program_imports_module(program, imported_module_name)
-                || resolution_references_module(&resolution_map, imported_module_name))
-        {
-            handler_info
-                .resumption
-                .extend(handler_analysis::analyze(&compiled.elaborated).resumption);
-            let (imported_monadic, _) =
-                monadic::translate::translate(&anf_imported, &compiled.resolution, &effect_info);
-            let imported_private = lower_selective::collect_imported_private_helper_candidates(
-                imported_module_name,
-                &imported_monadic,
-                &compiled.resolution,
-                &compiled.codegen_info,
-            );
-            let imported_private_names = imported_private
-                .values()
-                .map(|binding| binding.name.clone())
-                .collect::<std::collections::HashSet<_>>();
-            imported_dict_constructors.extend(lower_selective::collect_imported_dict_constructors(
-                imported_module_name,
-                &imported_monadic,
-                &compiled.resolution,
-                &compiled.codegen_info,
-                &imported_private_names,
-            ));
-        }
+        handler_info
+            .resumption
+            .extend(handler_analysis::analyze(&compiled.elaborated).resumption);
+        let (imported_monadic, _) =
+            monadic::translate::translate(&anf_imported, &compiled.resolution, &effect_info);
+        let imported_private = lower_selective::collect_imported_private_helper_candidates(
+            imported_module_name,
+            &imported_monadic,
+            &compiled.resolution,
+            &compiled.codegen_info,
+        );
+        let imported_private_names = imported_private
+            .values()
+            .map(|binding| binding.name.clone())
+            .collect::<std::collections::HashSet<_>>();
+        imported_dict_constructors.extend(lower_selective::collect_imported_dict_constructors(
+            imported_module_name,
+            &imported_monadic,
+            &compiled.resolution,
+            &compiled.codegen_info,
+            &imported_private_names,
+        ));
         ast::drop_program_iterative(anf_imported);
     }
     let imported_dict_constructors = if source_module_name.starts_with("Std.") {

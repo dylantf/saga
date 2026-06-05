@@ -62,6 +62,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         self.callable_type_shapes.clear();
         self.callable_callback_param_arities.clear();
         self.local_fun_bindings.clear();
+        self.local_fun_binding_counts.clear();
         self.direct_values.clear();
         self.function_plans.clear();
         self.local_dict_constructor_arities.clear();
@@ -74,6 +75,10 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             match decl {
                 MDecl::FunBinding(fb) => {
                     self.local_fun_bindings.insert(fb.name.clone(), fb.clone());
+                    *self
+                        .local_fun_binding_counts
+                        .entry(fb.name.clone())
+                        .or_default() += 1;
                     let function_type = self.function_type_for_binding(fb).cloned();
                     let shape = if is_native_variant_name(&fb.name) {
                         RuntimeFunctionShape::Pure
@@ -354,12 +359,12 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
 
     pub(super) fn compute_imported_function_entries(&mut self) {
         self.imported_function_entries.clear();
+        self.imported_callback_param_arities.clear();
         self.imported_hof_direct_specializations.clear();
         for (source_module_name, compiled) in &self.module_ctx.modules {
-            let is_stdlib_module = source_module_name.starts_with("Std.");
             if source_module_name == &self.current_module
                 || compiled.elaborated.is_empty()
-                || (!is_stdlib_module && !self.current_module_references_module(source_module_name))
+                || !self.current_module_references_module(source_module_name)
             {
                 continue;
             }
@@ -411,25 +416,40 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                 self.imported_function_entries
                     .insert((source_module_name.clone(), name.clone()), entries);
             }
+            for (name, callback_arities) in imported.callable_callback_param_arities {
+                self.imported_callback_param_arities.insert(
+                    (erlang_module.clone(), name.clone()),
+                    callback_arities.clone(),
+                );
+                self.imported_callback_param_arities
+                    .insert((source_module_name.clone(), name), callback_arities);
+            }
         }
     }
 
     pub(super) fn compute_imported_direct_values(&mut self) {
         self.imported_direct_values.clear();
+        if self.current_module.starts_with("Std.") {
+            debug_selective_subject("imported-value", &self.current_module, || {
+                format!(
+                    "{}: skip imported public value scan while compiling stdlib",
+                    self.current_module
+                )
+            });
+            return;
+        }
         let mut visited = HashSet::new();
+        visited.insert(self.current_module.clone());
         self.compute_imported_direct_values_transitive(&mut visited);
     }
 
     fn compute_imported_direct_values_transitive(&mut self, visited: &mut HashSet<String>) {
         for (source_module_name, compiled) in &self.module_ctx.modules {
-            let is_stdlib_module = source_module_name.starts_with("Std.");
             let skip_reason = if source_module_name == &self.current_module {
                 Some("current module")
             } else if compiled.elaborated.is_empty() {
                 Some("empty elaborated program")
-            } else if !is_stdlib_module
-                && !self.current_module_references_module(source_module_name)
-            {
+            } else if !self.current_module_references_module(source_module_name) {
                 Some("not referenced by current module")
             } else {
                 None
@@ -558,25 +578,11 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
 
     fn current_module_references_module(&self, source_module_name: &str) -> bool {
         if let Some(current) = self.module_ctx.modules.get(&self.current_module) {
-            return current.elaborated.iter().any(|decl| {
-                matches!(
-                    decl,
-                    crate::ast::Decl::Import { module_path, .. }
-                        if module_path.join(".") == source_module_name
-                )
-            });
+            return module_imports_module(&current.elaborated, source_module_name)
+                || resolution_references_source_module(&current.resolution, source_module_name);
         }
 
-        let erlang_module = erlang_module_name(source_module_name);
-        self.resolution.values().any(|resolved| {
-            matches!(
-                &resolved.kind,
-                ResolvedCodegenKind::BeamFunction {
-                    erlang_mod: Some(module),
-                    ..
-                } if module == &erlang_module
-            )
-        })
+        resolution_references_source_module(self.resolution, source_module_name)
     }
 
     pub(super) fn apply_codegen_info_function_shapes(
@@ -1029,9 +1035,17 @@ fn resolution_references_source_module(
     resolution: &ResolutionMap,
     source_module_name: &str,
 ) -> bool {
-    resolution
-        .values()
-        .any(|resolved| resolved.source_module.as_deref() == Some(source_module_name))
+    let erlang_module = erlang_module_name(source_module_name);
+    resolution.values().any(|resolved| {
+        resolved.source_module.as_deref() == Some(source_module_name)
+            || matches!(
+                &resolved.kind,
+                ResolvedCodegenKind::BeamFunction {
+                    erlang_mod: Some(module),
+                    ..
+                } if module == &erlang_module
+            )
+    })
 }
 
 fn single_clause_function_names(program: &MProgram) -> HashSet<String> {

@@ -14,6 +14,9 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         {
             return self.lower_static_handler_variant_call(function_name, args, evidence, return_k);
         }
+        if self.local_fun_binding_counts.get(function_name).copied() != Some(1) {
+            return None;
+        }
 
         let fb = self.local_fun_bindings.get(function_name)?.clone();
         if fb.guard.is_some() || fb.params.iter().any(|p| !direct_param_supported(p)) {
@@ -88,6 +91,9 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             return None;
         }
         if covered_effects.is_empty() {
+            return None;
+        }
+        if self.local_fun_binding_counts.get(&local_name).copied() != Some(1) {
             return None;
         }
 

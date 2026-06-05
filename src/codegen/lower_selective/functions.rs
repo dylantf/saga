@@ -23,6 +23,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             callable_type_shapes: HashMap::new(),
             callable_callback_param_arities: HashMap::new(),
             local_fun_bindings: HashMap::new(),
+            local_fun_binding_counts: HashMap::new(),
             direct_values: HashSet::new(),
             function_plans: HashMap::new(),
             local_function_entries: HashMap::new(),
@@ -34,6 +35,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             imported_direct_values: HashMap::new(),
             local_external_functions: HashMap::new(),
             imported_function_entries: HashMap::new(),
+            imported_callback_param_arities: HashMap::new(),
             imported_hof_direct_specializations: HashMap::new(),
             direct_candidate_function: None,
             direct_candidate_functions: HashSet::new(),
@@ -754,6 +756,14 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
 
     pub(super) fn lower_static_handler_variant_fun(&mut self, key: &str) -> Option<CFunDef> {
         let variant = self.static_handler_variants.get(key)?.clone();
+        if self
+            .local_fun_binding_counts
+            .get(&variant.function_name)
+            .copied()
+            != Some(1)
+        {
+            return None;
+        }
         let fb = self.local_fun_bindings.get(&variant.function_name)?.clone();
         if fb.guard.is_some() || fb.params.iter().any(|p| !direct_param_supported(p)) {
             return None;

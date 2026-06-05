@@ -311,7 +311,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         &mut self,
         key: CExpr,
         callback: CExpr,
-        _evidence: CExpr,
+        evidence: CExpr,
         backend: RefDirectBackend,
     ) -> Option<CExpr> {
         let old = self.fresh_cps_temp("_NativeRefOld");
@@ -375,7 +375,10 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             Box::new(get_old),
             Box::new(CExpr::Let(
                 new_value.clone(),
-                Box::new(CExpr::Apply(Box::new(callback), vec![CExpr::Var(old)])),
+                Box::new(CExpr::Apply(
+                    Box::new(callback),
+                    vec![CExpr::Var(old), evidence, self.identity_cps_continuation()],
+                )),
                 Box::new(CExpr::Let(
                     discard,
                     Box::new(put_new),

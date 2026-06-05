@@ -63,9 +63,11 @@ pub(super) fn core_expr_mentions_core_var(var: &str, expr: &CExpr) -> bool {
 }
 
 fn core_arm_mentions_core_var(var: &str, arm: &CArm) -> bool {
-    arm.guard
-        .as_ref()
-        .is_some_and(|guard| core_expr_mentions_core_var(var, guard))
+    core_pat_size_mentions_core_var(var, &arm.pat)
+        || arm
+            .guard
+            .as_ref()
+            .is_some_and(|guard| core_expr_mentions_core_var(var, guard))
         || (!core_pat_binds_core_var(var, &arm.pat) && core_expr_mentions_core_var(var, &arm.body))
 }
 
@@ -101,8 +103,32 @@ fn core_pat_bin_segment_binds_core_var(var: &str, segment: &CBinSeg<CPat>) -> bo
     match segment {
         CBinSeg::Byte(_) => false,
         CBinSeg::BinaryAll(value) => core_pat_binds_core_var(var, value),
+        CBinSeg::Segment { value, .. } => core_pat_binds_core_var(var, value),
+    }
+}
+
+fn core_pat_size_mentions_core_var(var: &str, pat: &CPat) -> bool {
+    match pat {
+        CPat::Var(_) | CPat::Lit(_) | CPat::Wildcard | CPat::Nil => false,
+        CPat::Alias(_, pat) => core_pat_size_mentions_core_var(var, pat),
+        CPat::Tuple(fields) | CPat::Values(fields) => fields
+            .iter()
+            .any(|field| core_pat_size_mentions_core_var(var, field)),
+        CPat::Cons(head, tail) => {
+            core_pat_size_mentions_core_var(var, head) || core_pat_size_mentions_core_var(var, tail)
+        }
+        CPat::Binary(segments) => segments
+            .iter()
+            .any(|segment| core_pat_bin_segment_size_mentions_core_var(var, segment)),
+    }
+}
+
+fn core_pat_bin_segment_size_mentions_core_var(var: &str, segment: &CBinSeg<CPat>) -> bool {
+    match segment {
+        CBinSeg::Byte(_) => false,
+        CBinSeg::BinaryAll(value) => core_pat_size_mentions_core_var(var, value),
         CBinSeg::Segment { value, size, .. } => {
-            core_pat_binds_core_var(var, value)
+            core_pat_size_mentions_core_var(var, value)
                 || matches!(size, BinSegSize::Expr(size) if core_expr_mentions_core_var(var, size))
         }
     }

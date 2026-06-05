@@ -39,9 +39,6 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             MExpr::Receive { arms, after, .. } => {
                 self.lower_cps_receive(arms, after.as_ref(), evidence, return_k)
             }
-            MExpr::App { head, args, .. } if self.expr_is_direct_subset(expr) => {
-                CExpr::Apply(Box::new(return_k), vec![self.lower_app(head, args)])
-            }
             MExpr::App { head, args, .. } => self.lower_cps_app(head, args, evidence, return_k),
             MExpr::With { handler, body, .. } => {
                 self.lower_cps_with(handler, body, evidence, return_k)
@@ -139,10 +136,20 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                 CArm {
                     pat: CPat::Lit(CLit::Atom("shutdown".to_string())),
                     guard: None,
+                    body: CExpr::Lit(CLit::Atom(shutdown.clone())),
+                },
+                CArm {
+                    pat: CPat::Tuple(vec![CPat::Lit(CLit::Atom("shutdown".to_string()))]),
+                    guard: None,
                     body: CExpr::Lit(CLit::Atom(shutdown)),
                 },
                 CArm {
                     pat: CPat::Lit(CLit::Atom("killed".to_string())),
+                    guard: None,
+                    body: CExpr::Lit(CLit::Atom(killed.clone())),
+                },
+                CArm {
+                    pat: CPat::Tuple(vec![CPat::Lit(CLit::Atom("killed".to_string()))]),
                     guard: None,
                     body: CExpr::Lit(CLit::Atom(killed)),
                 },

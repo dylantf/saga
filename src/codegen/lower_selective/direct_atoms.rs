@@ -220,6 +220,9 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             "Nil" if args.is_empty() => return CExpr::Nil,
             "True" if args.is_empty() => return CExpr::Lit(CLit::Atom("true".to_string())),
             "False" if args.is_empty() => return CExpr::Lit(CLit::Atom("false".to_string())),
+            "Normal" | "Shutdown" | "Killed" | "Noproc" if args.is_empty() => {
+                return CExpr::Lit(CLit::Atom(mangle_ctor_atom(bare, self.ctors)));
+            }
             _ => {}
         }
         if name == "Cons" && args.len() == 2 {
