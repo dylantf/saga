@@ -292,6 +292,17 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             return CpsCallDecision::Direct;
         }
 
+        if let Atom::Var { name, .. } = head
+            && self.is_local(&name.name)
+        {
+            return CpsCallDecision::Normal(CallShape::LocalCpsCallable {
+                name: name.name.clone(),
+                source_arity: args.len(),
+                adapter_arity: args.len() + 2,
+                effects: Vec::new(),
+            });
+        }
+
         CpsCallDecision::Unsupported
     }
 
@@ -529,6 +540,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         return_k: CExpr,
     ) -> Option<CExpr> {
         let KnownCpsLambda {
+            method_key,
             dict_bindings: atom_dict_bindings,
             params,
             body,
@@ -559,7 +571,15 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             self.bind_pat_locals(pat);
         }
         self.bind_known_direct_atom_pattern_values(known_atom_bindings);
+        let inserted = method_key
+            .clone()
+            .is_some_and(|key| self.active_known_dict_methods.insert(key));
         let lowered_body = self.lower_cps_expr(&body, evidence, return_k);
+        if inserted
+            && let Some(key) = method_key
+        {
+            self.active_known_dict_methods.remove(&key);
+        }
         let lowered_body = if all_params_known {
             lowered_body
         } else {
@@ -615,11 +635,20 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         for pat in &known_lambda.params {
             self.bind_pat_locals(pat);
         }
+        let inserted = known_lambda
+            .method_key
+            .clone()
+            .is_some_and(|key| self.active_known_dict_methods.insert(key));
         let lowered_body = self.lower_cps_expr(
             &known_lambda.body,
             CExpr::Var(evidence_name),
             CExpr::Var(return_k_name),
         );
+        if inserted
+            && let Some(key) = &known_lambda.method_key
+        {
+            self.active_known_dict_methods.remove(key);
+        }
         let lowered_body =
             self.wrap_param_match(&known_lambda.params, &direct_params, lowered_body);
         self.pop_scope();

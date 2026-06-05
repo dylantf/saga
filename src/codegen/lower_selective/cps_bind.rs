@@ -49,19 +49,6 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             );
         }
 
-        if self.handler_value_expr_is_cps_island_subset(value) {
-            let lowered_value = self.lower_cps_handler_value_expr(value, evidence.clone());
-            self.push_scope();
-            self.current_scope_mut().insert(var.name.clone());
-            let lowered_body = self.lower_cps_expr(body, evidence, return_k);
-            self.pop_scope();
-            return CExpr::Let(
-                core_var(&var.name),
-                Box::new(lowered_value),
-                Box::new(lowered_body),
-            );
-        }
-
         if let Some(known_lambda) = self.known_cps_lambda_for_expr(value) {
             let local_shape = self.cps_bind_shape_for_expr(value);
             let needs_value = self.known_cps_lambda_value_needed_in_expr(&var.name, body);
@@ -85,6 +72,19 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             } else {
                 lowered_body
             };
+        }
+
+        if self.handler_value_expr_is_cps_island_subset(value) {
+            let lowered_value = self.lower_cps_handler_value_expr(value, evidence.clone());
+            self.push_scope();
+            self.current_scope_mut().insert(var.name.clone());
+            let lowered_body = self.lower_cps_expr(body, evidence, return_k);
+            self.pop_scope();
+            return CExpr::Let(
+                core_var(&var.name),
+                Box::new(lowered_value),
+                Box::new(lowered_body),
+            );
         }
 
         if let Some(local_shape) = self.cps_bind_shape_for_expr(value) {

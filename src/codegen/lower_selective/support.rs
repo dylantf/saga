@@ -81,6 +81,7 @@ pub(super) struct HofCallbackParam {
 
 #[derive(Clone, Debug, PartialEq)]
 pub(super) struct KnownCpsLambda {
+    pub(super) method_key: Option<KnownDictMethodKey>,
     pub(super) dict_bindings: Vec<(String, Atom)>,
     pub(super) params: Vec<Pat>,
     pub(super) body: Box<MExpr>,
@@ -88,6 +89,7 @@ pub(super) struct KnownCpsLambda {
 
 #[derive(Clone, Debug, PartialEq)]
 pub(super) struct KnownDirectLambda {
+    pub(super) method_key: Option<KnownDictMethodKey>,
     pub(super) dict_bindings: Vec<(String, Atom)>,
     pub(super) params: Vec<Pat>,
     pub(super) body: Box<MExpr>,
@@ -100,6 +102,7 @@ pub(super) struct KnownDictValue {
     pub(super) dict_params: Vec<String>,
     pub(super) dict_args: Vec<Atom>,
     pub(super) methods: Vec<Atom>,
+    pub(super) method_effectful: Vec<bool>,
 }
 
 #[derive(Clone, Debug)]

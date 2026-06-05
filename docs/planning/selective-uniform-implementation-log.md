@@ -1766,3 +1766,28 @@ boundaries exist.
     static variant. The static handler install is still preserved, and `to_json`
     still receives evidence, so the next JSON optimization is options-aware
     known-dict/trait-method specialization rather than full handler elision.
+- Checked the Reader/config path outside the JSON benchmark and tightened the
+  known-dict plumbing used by the next JSON pass:
+  - simple static Reader handlers already direct-call their operation at the
+    handled call site. The public CPS function still exists for ABI purposes,
+    and the `with` boundary still installs evidence, but the operation result
+    itself collapses to an ordinary direct value such as `5 + 10`;
+  - known dict values now carry per-method effectfulness, so pure dict methods
+    route through direct known-lambda specialization and effectful methods
+    route through known CPS-lambda specialization instead of guessing from
+    syntactic body shape;
+  - CPS-island subset proofs now bind the same known dict/lambda/atom facts
+    that lowering binds across `let`/`bind`, and prefer CPS bind shapes before
+    direct shapes for dict-method values. This keeps proof behavior aligned
+    with actual CPS bind lowering;
+  - imported static-handler body splicing copies known dict/lambda/value facts
+    into the imported clone, so a known call-site dict can survive across the
+    `serialize_with` module boundary when the imported body is small enough to
+    splice;
+  - the JSON hot loop still has a residual `element(1, ToJson User dict)` plus
+    CPS method call. The remaining blocker is not the Reader dispatch anymore:
+    the derived `User` representation includes a `List String` field, and
+    `ToJson List` is still outside the known-constructor/direct collection
+    specialization path. The next attack should be shape-level list encoding
+    under a known element `ToJson` dict, including runtime list variables whose
+    elements are not compile-time-known.

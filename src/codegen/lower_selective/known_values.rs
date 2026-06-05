@@ -364,6 +364,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
 
     pub(super) fn known_dict_value_for_expr(&mut self, expr: &MExpr) -> Option<KnownDictValue> {
         match expr {
+            MExpr::Pure(Atom::Var { name, .. }) => self.known_dict_value(&name.name),
             MExpr::App { head, args, .. } => {
                 let Atom::DictRef { name, .. } = head else {
                     return None;
@@ -393,6 +394,22 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                     dict_params: constructor.dict_params.clone(),
                     dict_args: args.to_vec(),
                     methods,
+                    method_effectful: constructor
+                        .methods
+                        .iter()
+                        .enumerate()
+                        .map(|(index, _)| {
+                            constructor
+                                .method_effects
+                                .get(index)
+                                .is_some_and(|effects| !effects.is_empty())
+                                || constructor
+                                    .method_open_rows
+                                    .get(index)
+                                    .copied()
+                                    .unwrap_or(false)
+                        })
+                        .collect(),
                 })
             }
             MExpr::If {
@@ -422,32 +439,63 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         if !known_dict.methods_inlineable {
             return None;
         }
-        if self.known_dict_method_is_active(&known_dict, *method_index) {
+        if !known_dict
+            .method_effectful
+            .get(*method_index)
+            .copied()
+            .unwrap_or(false)
+        {
             return None;
         }
-        if !self.dict_param_collisions_are_self_aliases(&known_dict) {
+        let method_key = KnownDictMethodKey {
+            constructor_name: known_dict.constructor_name.clone(),
+            method_index: *method_index,
+        };
+        if self.active_known_dict_methods.contains(&method_key) {
             return None;
         }
         let method = known_dict.methods.get(*method_index)?.clone();
-        if !self.lambda_is_cps_subset(&method) {
-            return None;
-        }
         let Atom::Lambda { params, body, .. } = method else {
             return None;
         };
         if params.iter().any(|param| !direct_param_supported(param)) {
             return None;
         }
-        let dict_bindings = known_dict
+        let dict_bindings: Vec<(String, Atom)> = known_dict
             .dict_params
             .into_iter()
             .zip(known_dict.dict_args)
             .collect();
+        if !self.known_cps_dict_method_lambda_is_supported(&dict_bindings, &params, &body) {
+            return None;
+        }
         Some(KnownCpsLambda {
+            method_key: Some(method_key),
             dict_bindings,
             params,
             body,
         })
+    }
+
+    fn known_cps_dict_method_lambda_is_supported(
+        &mut self,
+        dict_bindings: &[(String, Atom)],
+        params: &[Pat],
+        body: &MExpr,
+    ) -> bool {
+        let known_dict_aliases = self.known_dict_aliases_for_bindings(dict_bindings);
+        self.push_scope();
+        for (name, _) in dict_bindings {
+            self.current_scope_mut().insert(name.clone());
+        }
+        self.bind_known_dict_values(known_dict_aliases);
+        for pat in params {
+            self.bind_pat_locals(pat);
+        }
+        let direct = self.expr_is_direct_subset(body);
+        let supported = direct || self.expr_is_cps_island_subset(body);
+        self.pop_scope();
+        supported
     }
 
     pub(super) fn known_direct_lambda_for_expr(&self, expr: &MExpr) -> Option<KnownDirectLambda> {
@@ -470,10 +518,19 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         if !known_dict.methods_inlineable {
             return None;
         }
-        if self.known_dict_method_is_active(&known_dict, *method_index) {
+        if known_dict
+            .method_effectful
+            .get(*method_index)
+            .copied()
+            .unwrap_or(false)
+        {
             return None;
         }
-        if !self.dict_param_collisions_are_self_aliases(&known_dict) {
+        let method_key = KnownDictMethodKey {
+            constructor_name: known_dict.constructor_name.clone(),
+            method_index: *method_index,
+        };
+        if self.active_known_dict_methods.contains(&method_key) {
             return None;
         }
         let method = known_dict.methods.get(*method_index)?.clone();
@@ -489,6 +546,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             .zip(known_dict.dict_args)
             .collect();
         Some(KnownDirectLambda {
+            method_key: Some(method_key),
             dict_bindings,
             params,
             body,
@@ -503,6 +561,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                     return None;
                 }
                 Some(KnownDirectLambda {
+                    method_key: None,
                     dict_bindings: Vec::new(),
                     params: params.clone(),
                     body: body.clone(),

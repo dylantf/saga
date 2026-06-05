@@ -304,6 +304,14 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         imported.imported_clone_source_module = Some(source_module_name);
         imported.locals = self.locals.clone();
         imported.local_shapes = self.local_shapes.clone();
+        imported.local_known_direct_lambdas = self.local_known_direct_lambdas.clone();
+        imported.local_known_cps_lambdas = self.local_known_cps_lambdas.clone();
+        imported.local_known_dict_values = self.local_known_dict_values.clone();
+        imported.local_known_direct_atoms = self.local_known_direct_atoms.clone();
+        imported.local_known_direct_values = self.local_known_direct_values.clone();
+        imported.active_known_dict_methods = self.active_known_dict_methods.clone();
+        imported.active_known_to_json_values = self.active_known_to_json_values.clone();
+        imported.active_imported_wrapper_calls = self.active_imported_wrapper_calls.clone();
         imported.direct_handler_stack = self.direct_handler_stack.clone();
         imported.result_delimiter_stack = self.result_delimiter_stack.clone();
         imported.static_handler_inline_stack = self.static_handler_inline_stack.clone();

@@ -24,12 +24,22 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                 &lambda.body,
             )
         {
-            return self.lower_inline_direct_lambda_app_with_dict_bindings(
+            let method_key = lambda.method_key.clone();
+            let inserted = method_key
+                .clone()
+                .is_some_and(|key| self.active_known_dict_methods.insert(key));
+            let lowered = self.lower_inline_direct_lambda_app_with_dict_bindings(
                 &lambda.dict_bindings,
                 &lambda.params,
                 &lambda.body,
                 args,
             );
+            if inserted
+                && let Some(key) = method_key
+            {
+                self.active_known_dict_methods.remove(&key);
+            }
+            return lowered;
         }
         if let Some(lambda) = self.known_direct_lambda_for_atom(head)
             && args.len() < lambda.params.len()
@@ -39,7 +49,17 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                 &lambda.body,
             )
         {
-            return self.lower_partial_known_direct_lambda_value(&lambda, args);
+            let method_key = lambda.method_key.clone();
+            let inserted = method_key
+                .clone()
+                .is_some_and(|key| self.active_known_dict_methods.insert(key));
+            let lowered = self.lower_partial_known_direct_lambda_value(&lambda, args);
+            if inserted
+                && let Some(key) = method_key
+            {
+                self.active_known_dict_methods.remove(&key);
+            }
+            return lowered;
         }
         if let Some(call) = self.lower_direct_external_app(head, args) {
             return call;

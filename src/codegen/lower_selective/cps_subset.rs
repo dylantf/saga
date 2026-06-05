@@ -16,14 +16,30 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                 }
 
                 let local_shape = self
-                    .direct_local_shape_for_expr(value)
-                    .or_else(|| self.cps_bind_shape_for_expr(value))
+                    .cps_bind_shape_for_expr(value)
+                    .or_else(|| self.direct_local_shape_for_expr(value))
                     .or_else(|| self.direct_call_shape_for_local_use_in_expr(&var.name, body));
+                let known_dict = self.known_dict_value_for_expr(value);
+                let known_cps_lambda = self.known_cps_lambda_for_expr(value);
+                let known_direct_lambda = self.known_direct_lambda_for_expr(value);
+                let known_atom = self.known_direct_atom_for_expr(value);
                 self.push_scope();
                 self.current_scope_mut().insert(var.name.clone());
                 if let Some(shape) = local_shape {
                     self.current_shape_scope_mut()
                         .insert(var.name.clone(), shape);
+                }
+                if let Some(dict) = known_dict {
+                    self.bind_known_dict_value(var.name.clone(), dict);
+                }
+                if let Some(lambda) = known_cps_lambda {
+                    self.bind_known_cps_lambda(var.name.clone(), lambda);
+                }
+                if let Some(lambda) = known_direct_lambda {
+                    self.bind_known_direct_lambda(var.name.clone(), lambda);
+                }
+                if let Some(atom) = known_atom {
+                    self.bind_known_direct_atom(var.name.clone(), atom);
                 }
                 let supported =
                     self.expr_is_cps_island_subset(body) || self.expr_is_direct_subset(body);
