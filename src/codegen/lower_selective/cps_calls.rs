@@ -478,6 +478,9 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                 let Atom::Var { name, .. } = value else {
                     return None;
                 };
+                if binding_name == &name.name {
+                    return None;
+                }
                 self.known_dict_value(&name.name)
                     .map(|dict| (binding_name.clone(), dict))
             })
@@ -502,6 +505,9 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                 let Atom::Var { name: arg_name, .. } = arg else {
                     return None;
                 };
+                if param_name == &arg_name.name {
+                    return None;
+                }
                 self.known_dict_value(&arg_name.name)
                     .map(|dict| (param_name.clone(), dict))
             })

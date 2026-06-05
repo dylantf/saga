@@ -1109,8 +1109,9 @@ main () = score (Second 41)
     assert!(out.contains("'_script_First'"), "{out}");
     assert!(out.contains("'_script_Second'"), "{out}");
     assert!(out.contains("{'_script_Second', 41}"), "{out}");
+    assert!(out.contains("let <_CallArg"), "{out}");
     assert!(
-        out.contains("apply 'score'/1({'_script_Second', 41})"),
+        out.contains("apply 'score'/1(_CallArg"),
         "{out}"
     );
 }

@@ -108,10 +108,15 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
     }
 
     pub(super) fn known_dict_value(&self, name: &str) -> Option<KnownDictValue> {
-        self.local_known_dict_values
-            .iter()
-            .rev()
-            .find_map(|scope| scope.get(name).cloned())
+        for index in (0..self.local_known_dict_values.len()).rev() {
+            if let Some(dict) = self.local_known_dict_values[index].get(name) {
+                return Some(dict.clone());
+            }
+            if self.locals.get(index).is_some_and(|scope| scope.contains(name)) {
+                return None;
+            }
+        }
+        None
     }
 
     pub(super) fn bind_fun_param_locals(&mut self, fb: &MFunBinding) {

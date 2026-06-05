@@ -426,6 +426,13 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         if self.known_dict_method_is_active(known_dict, method_index) {
             return None;
         }
+        if known_dict
+            .dict_params
+            .iter()
+            .any(|param| self.is_local(param))
+        {
+            return None;
+        }
         let method = known_dict.methods.get(method_index)?;
         let Atom::Lambda { params, body, .. } = method else {
             return None;

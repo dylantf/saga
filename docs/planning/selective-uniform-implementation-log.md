@@ -1712,10 +1712,13 @@ boundaries exist.
   - `saga_json` now builds and runs end to end on the selective backend. The
     next JSON work is actual output-shape specialization, not basic backend
     correctness.
-- Audited the simplified `examples/99*` Generic/ToJson fixtures as the next
+- Audited the simplified `examples/99*` Generic/derived fixtures as the next
   specialization canaries:
-  - `99b-generic-derived`, `99c-generic-adt`, `99e-generic-recursive`, and
-    `99k-generic-derived-defaults` run under strict selective lowering;
+  - `99b-generic-derived` through `99k-generic-derived-defaults` now run under
+    strict selective lowering. This covers record/ADT ToJson, parameterized
+    Generic bridges, derived ToJson, derived FromJson/Codec, custom
+    from-direction wrappers, multi-parameter methods, and default derived
+    ToJson output;
   - added a `KnownDirectValue` representation-fact layer alongside
     `KnownDirectAtom`. It can carry constructor/tuple/record shapes whose
     leaves are direct Core values such as `erlang:element(N, x)` field reads,
@@ -1726,16 +1729,16 @@ boundaries exist.
   - direct call/apply argument lowering now hoists non-atomic known-value
     substitutions, fixing invalid Core like passing `erlang:element(...)`
     directly as an apply argument;
-  - `99d-generic-parameterized` and `99f-generic-derived-tojson` still expose a
-    separate parameterized-wrapper bug: while inlining known dict methods, the
-    value fact for a parameterized representation can become too shallow
-    (`Labeled(field)` instead of `Labeled(Leaf(field))`). That erases a wrapper
-    check and produces impossible Core matches such as running the `Leaf` impl
-    on the raw field value. Treat these as the next pressure tests, not as the
-    current green path;
-  - `99g-generic-derived-fromjson` still stack-overflows during compile, so the
-    from-direction derived path needs a separate iterative/cycle-safe pass
-    before it can share the ToJson specialization story;
+  - parameterized dict inlining had a same-name shadowing bug: generated dict
+    parameters like `___dict_ToJson_a` can appear at multiple nested levels.
+    Name-keyed known-dict facts leaked through inner scopes, so a wrapper dict
+    could be mistaken for its wrapped/base dict. That produced too-shallow
+    representation facts (`Labeled(field)` instead of `Labeled(Leaf(field))`)
+    and, in from-direction cases, recursive inlining/stack overflow. Known
+    dict lookup now respects lexical shadowing, same-name aliases are ignored,
+    and known-dict method inlining is skipped when a dict parameter name is
+    already a live local. This is deliberately conservative until dict facts
+    become NodeId-aware or inlined methods are alpha-renamed;
   - constant call sites already benefit from known-atom case collapse: a call
     like `to_json (Person { ... })` can inline through known constructors until
     the generated `main` body formats fields directly;
@@ -1743,4 +1746,5 @@ boundaries exist.
     the new fact layer can represent the `Rep__T(shape)` spine with field-read
     leaves from `x`, then let known-constructor case reduction consume that
     fact. Continue to avoid unlimited recursive inlining; recursive and
-    parameterized shapes need explicit cycle/wrapper handling.
+    parameterized shapes need explicit cycle/wrapper handling if/when we
+    re-enable deeper same-name parameterized dict inlining.
