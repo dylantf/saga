@@ -1791,25 +1791,32 @@ boundaries exist.
     specialization path. The next attack should be shape-level list encoding
     under a known element `ToJson` dict, including runtime list variables whose
     elements are not compile-time-known.
-- Completed the first `json_defaults`/`serialize_with` specialization for the
-  SagaJson benchmark:
-  - added a narrow imported-call hook for `serialize_with` that fires only when
-    the active static handler is the known `json_defaults` handler, the first
-    argument is a known `ToJson` dict, and the value argument has a known direct
-    representation. This avoids the earlier unsafe general CPS-bind rewrite and
-    leaves ordinary `to_json` calls returning `Json` values alone;
-  - added runtime `Maybe` and `List` direct encoders for known element `ToJson`
-    dicts. The list path emits a local Core `letrec` walker over runtime list
-    variables instead of trying to recursively inline list structure;
-  - added the default-options unit-variant case for SagaJson's
-    `VariantPayload U1`, so runtime ADTs such as `Role` can collapse to a Core
-    `case` returning JSON strings like `"Admin"`;
-  - made SagaJson known-dict string assembly use compact separators (`:` and
-    `,`) while preserving the spaced formatting used by the simplified `99*`
-    teaching fixtures;
-  - `json_bench/saga/src/EffectOpts.saga` now builds under
-    `--selective-no-fallback`, and the generated static `encode_all` variant no
-    longer contains the `__dict_ToJson_User` construction, `element(1, dict)`
-    method extraction, or `sagajson_encode:render` call in its hot branch. It
-    directly computes the serialized string, then calls `String.length` and the
-    recursive static variant.
+- Backed out the compiler-owned `json_defaults`/`serialize_with` specialization:
+  - the compiler must not encode JSON syntax or recognize SagaJson handler names
+    as semantic facts. JSON/Postgres/CSV-style optimizations have to follow the
+    actual trait/library implementation bodies;
+  - removed the imported `serialize_with` hook, the direct `ToJson` value
+    encoder, the SagaJson escaping helper call, and the ToJson recursion frame
+    state from the selective lowerer;
+  - this exposed a real correctness frontier: parameterized Generic-derived
+    trait dictionaries such as `ToJson (Box a)` are not safe to selectively
+    inline yet, and raw uniform fallback currently calls a uniform method value
+    at source arity inside `__dict_ToJson_Box/3`. The next fix is to make the
+    fallback/dict-method ABI bridge correct for parameterized derived trait
+    dictionaries, then reintroduce specialization by following trait bodies.
+- Specialization semantics constraint for JSON/Postgres/CSV-style traits:
+  - the compiler may remove representation indirection, dictionary lookup,
+    CPS/evidence plumbing, handler reinstallations, and known-constructor
+    traversal;
+  - the compiler must not invent trait-specific formatting semantics. Leaf
+    behavior must come from the actual trait impl body or from an explicit
+    library-provided helper that defines the same semantics. For example, a
+    `ToJson String` specialization cannot merely wrap the string in quotes,
+    because SagaJson owns JSON escaping through its renderer/string helper;
+  - future option-dependent branches and `ToPgRow`/`ToCsv` specializations
+    should preserve the library's semantic leaf operations instead of becoming
+    compiler-private encoders;
+  - next cleanup target: split the optimization into a generic
+    shape-specialization layer plus small semantic helper calls supplied by the
+    relevant library/impl, so JSON, Postgres rows, and CSV can share the same
+    compiler machinery without hardcoded output rules.

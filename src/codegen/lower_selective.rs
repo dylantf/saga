@@ -228,6 +228,7 @@ struct DirectLowerer<'a, 'info> {
     /// Local dictionary constructors that the selective lowerer can emit as
     /// direct tuple-producing functions.
     local_dict_constructor_arities: HashMap<String, usize>,
+    unsupported_local_dict_constructors: HashSet<String>,
     /// Private direct specializations of CPS-typed higher-order functions when
     /// selected callback parameters are statically pure at a call site.
     local_hof_direct_specializations: HashMap<String, HofDirectSpecialization>,
@@ -259,7 +260,6 @@ struct DirectLowerer<'a, 'info> {
     local_known_direct_atoms: Vec<HashMap<String, Atom>>,
     local_known_direct_values: Vec<HashMap<String, KnownDirectValue>>,
     active_known_dict_methods: HashSet<KnownDictMethodKey>,
-    active_known_to_json_values: Vec<KnownToJsonFrame>,
     active_imported_wrapper_calls: HashSet<(String, String)>,
     static_handler_variants: HashMap<String, StaticHandlerVariant>,
     static_handler_variant_order: Vec<String>,

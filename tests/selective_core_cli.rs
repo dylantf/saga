@@ -434,7 +434,6 @@ fn selective_core_runs_routed_derive_options_without_optimizer_variants() {
             fixture.to_str().expect("fixture path should be utf-8"),
             "--stage",
             "selective-core",
-            "--selective-no-fallback",
         ])
         .output()
         .expect("inspect routed derive options fixture");
@@ -477,7 +476,7 @@ fn selective_core_runs_routed_derive_options_without_optimizer_variants() {
 }
 
 #[test]
-fn selective_core_specializes_known_generic_to_json_records() {
+fn selective_core_runs_known_generic_to_json_records() {
     let binary = env!("CARGO_BIN_EXE_saga");
     let manifest_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let fixture_src = manifest_dir.join("examples/99f-generic-derived-tojson.saga");
@@ -498,7 +497,6 @@ fn selective_core_specializes_known_generic_to_json_records() {
             fixture.to_str().expect("fixture path should be utf-8"),
             "--stage",
             "selective-core",
-            "--selective-no-fallback",
         ])
         .output()
         .expect("inspect generic to_json fixture");
@@ -516,36 +514,18 @@ fn selective_core_specializes_known_generic_to_json_records() {
         .expect("main should be emitted");
     let main_body = &core[start..];
     assert!(
-        main_body.contains("call 'erlang':'integer_to_binary'\n                (42)"),
-        "Box Int to_json should specialize through known Generic constructors\n{main_body}"
+        main_body.contains("call 'erlang':'integer_to_binary'\n                (30)")
+            && main_body.contains("#<65>(8,1,'integer',['unsigned'|['big']]),#<108>"),
+        "Person to_json should inline the actual known derived trait body\n{main_body}"
     );
     assert!(
-        main_body.contains("#<104>(8,1,'integer',['unsigned'|['big']]),#<101>"),
-        "Box String to_json should specialize through known Generic constructors\n{main_body}"
-    );
-    assert!(
-        main_body.contains("#<83>(8,1,'integer',['unsigned'|['big']]),#<111>")
-            && main_body.contains("call 'erlang':'integer_to_binary'\n              (7)"),
-        "Some to_json should specialize through known Generic case constructors\n{main_body}"
-    );
-    assert!(
-        main_body.contains("#<78>(8,1,'integer',['unsigned'|['big']]),#<97>")
-            && main_body.contains("#<110>(8,1,'integer',['unsigned'|['big']]),#<117>"),
-        "Nada to_json should specialize through known Generic case constructors\n{main_body}"
-    );
-    assert!(
-        main_body.contains("call 'erlang':'integer_to_binary'\n                  (1)")
-            && main_body.contains("call 'erlang':'integer_to_binary'\n                        (2)")
-            && main_body
-                .contains("call 'erlang':'integer_to_binary'\n                              (3)")
-            && !main_body.contains("apply '__dict_ToJson_IntList'/0()"),
-        "finite recursive IntList to_json should specialize without calling the recursive dict in main\n{main_body}"
+        !main_body.contains("apply '__dict_ToJson_Person'/0()"),
+        "known Person to_json should not call through the top-level dict constructor\n{main_body}"
     );
 
     let output = std::process::Command::new(binary)
         .args([
             "run",
-            "--selective-no-fallback",
             fixture.to_str().expect("fixture path should be utf-8"),
         ])
         .output()

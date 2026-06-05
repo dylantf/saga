@@ -107,12 +107,6 @@ pub(super) struct KnownDictValue {
 }
 
 #[derive(Clone, Debug)]
-pub(super) struct KnownToJsonFrame {
-    pub(super) constructor_name: String,
-    pub(super) value_size: usize,
-}
-
-#[derive(Clone, Debug)]
 pub(super) enum KnownDirectValue {
     Atom(Atom),
     Ctor {

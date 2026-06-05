@@ -429,14 +429,10 @@ fn build_print_wrapper(name: String, stderr: bool) -> CFunDef {
 /// ```text
 /// fun (Dict, X, _Evidence, _ReturnK) ->
 ///   let <_DebugFn> = call 'erlang':'element'(1, Dict) in
-///   let <_Str> = apply _DebugFn(X) in
+///   let <_Str> = apply _DebugFn(X, _Evidence, fun (S) -> S) in
 ///   let <_R> = call 'io':'format'('standard_error', "~ts~n", [_Str])
 ///   in apply _ReturnK('unit')
 /// ```
-///
-/// **Note.** Pure trait method slots are direct function values, so this
-/// wrapper calls the Debug method at source arity and then threads the wrapper
-/// result through `_ReturnK`.
 fn build_dbg_wrapper(name: String) -> CFunDef {
     let dict_param = "Dict".to_string();
     let x_param = "X".to_string();
@@ -454,7 +450,11 @@ fn build_dbg_wrapper(name: String) -> CFunDef {
     );
     let apply_debug = CExpr::Apply(
         Box::new(CExpr::Var(debug_fn_var.clone())),
-        vec![CExpr::Var(x_param.clone())],
+        vec![
+            CExpr::Var(x_param.clone()),
+            CExpr::Var(EVIDENCE_VAR.to_string()),
+            identity_k("_DebugResult"),
+        ],
     );
     let print = CExpr::Call(
         "io".to_string(),

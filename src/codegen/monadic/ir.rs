@@ -579,7 +579,10 @@ impl Drop for HandlerValueInfo {
 
 pub type HandlerValueMap = HashMap<String, HandlerValueInfo>;
 
+#[allow(clippy::large_enum_variant)]
 enum MExprWorkItem {
+    // Intentionally inline: this is an iterative drop stack, and boxing each
+    // work item would add per-node allocations during cleanup.
     Expr(MExpr),
     Atom(Atom),
     Arm(MArm),

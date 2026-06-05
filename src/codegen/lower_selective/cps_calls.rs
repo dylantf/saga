@@ -103,11 +103,6 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             return None;
         }
         let source_module_name = resolved.source_module.as_ref()?;
-        if let Some(lowered) =
-            self.try_lower_known_json_serialize_with_call(name, args, return_k.clone())
-        {
-            return Some(lowered);
-        }
         if source_module_name == &self.current_module {
             return None;
         }
@@ -208,7 +203,6 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         imported.local_known_direct_atoms = self.local_known_direct_atoms.clone();
         imported.local_known_direct_values = self.local_known_direct_values.clone();
         imported.active_known_dict_methods = self.active_known_dict_methods.clone();
-        imported.active_known_to_json_values = self.active_known_to_json_values.clone();
         imported.active_imported_wrapper_calls = self.active_imported_wrapper_calls.clone();
         imported.active_imported_wrapper_calls.insert(key);
         imported.direct_handler_stack = self.direct_handler_stack.clone();
@@ -243,54 +237,6 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             },
         );
         Some(lowered_body)
-    }
-
-    fn try_lower_known_json_serialize_with_call(
-        &mut self,
-        function_name: &str,
-        args: &[Atom],
-        return_k: CExpr,
-    ) -> Option<CExpr> {
-        if !function_name.ends_with("serialize_with") {
-            return None;
-        }
-        let [dict_arg, value_arg] = args else {
-            return None;
-        };
-        if !self.known_default_json_options_handler_is_active() {
-            return None;
-        }
-        let Atom::Var {
-            name: dict_name, ..
-        } = dict_arg
-        else {
-            return None;
-        };
-        let known_dict = self.known_dict_value(&dict_name.name)?;
-        if !known_dict.constructor_name.contains("ToJson") {
-            return None;
-        }
-        let value = self.known_direct_value_for_atom(value_arg)?;
-        let lowered = self.lower_known_to_json_value(&known_dict, &value)?;
-        Some(CExpr::Apply(Box::new(return_k), vec![lowered]))
-    }
-
-    fn known_default_json_options_handler_is_active(&self) -> bool {
-        self.direct_handler_stack.iter().rev().any(|frame| {
-            let DirectHandlerFrame::Static { arms } = frame else {
-                return false;
-            };
-            arms.iter().any(|arm| {
-                effect_names_match(&arm.op.effect, "SagaJson.JsonOptions")
-                    && matches!(
-                        &*arm.body,
-                        MExpr::Resume {
-                            value: Atom::Var { name, .. },
-                            ..
-                        } if name.name == "default_options"
-                    )
-            })
-        })
     }
 
     fn atom_is_known_dict_value(&self, atom: &Atom) -> bool {

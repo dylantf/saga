@@ -85,10 +85,8 @@ pub(crate) struct LowerCtx {
     /// Local names proven to hold direct-callable function values.
     ///
     /// The uniform fallback lowerer normally calls function values with
-    /// `(args..., _Evidence, _ReturnK)`. Dict method slots are different:
-    /// pure trait methods are stored in dictionaries as direct function
-    /// values, so a local bound from `DictMethodAccess` must be called at
-    /// source arity and have its result passed to the ambient K.
+    /// `(args..., _Evidence, _ReturnK)`. This map is only for values whose
+    /// direct ABI is proven outside the ordinary uniform dictionary path.
     pub direct_callable_locals: BTreeMap<String, usize>,
 }
 

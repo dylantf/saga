@@ -157,6 +157,67 @@ fn test_dict_constructor(name: &str, dict_params: Vec<&str>) -> MDictConstructor
     }
 }
 
+fn cexpr_contains_funref(expr: &CExpr, expected_name: &str, expected_arity: usize) -> bool {
+    match expr {
+        CExpr::FunRef(name, arity) => name == expected_name && *arity == expected_arity,
+        CExpr::Apply(callee, args) => {
+            cexpr_contains_funref(callee, expected_name, expected_arity)
+                || args
+                    .iter()
+                    .any(|arg| cexpr_contains_funref(arg, expected_name, expected_arity))
+        }
+        CExpr::Call(_, _, args) | CExpr::Tuple(args) | CExpr::Values(args) => args
+            .iter()
+            .any(|arg| cexpr_contains_funref(arg, expected_name, expected_arity)),
+        CExpr::Let(_, value, body) => {
+            cexpr_contains_funref(value, expected_name, expected_arity)
+                || cexpr_contains_funref(body, expected_name, expected_arity)
+        }
+        CExpr::Case(scrutinee, arms) => {
+            cexpr_contains_funref(scrutinee, expected_name, expected_arity)
+                || arms
+                    .iter()
+                    .any(|arm| cexpr_contains_funref(&arm.body, expected_name, expected_arity))
+        }
+        CExpr::Fun(_, body) => cexpr_contains_funref(body, expected_name, expected_arity),
+        CExpr::Cons(head, tail) => {
+            cexpr_contains_funref(head, expected_name, expected_arity)
+                || cexpr_contains_funref(tail, expected_name, expected_arity)
+        }
+        CExpr::LetRec(bindings, body) => {
+            bindings
+                .iter()
+                .any(|(_, _, expr)| cexpr_contains_funref(expr, expected_name, expected_arity))
+                || cexpr_contains_funref(body, expected_name, expected_arity)
+        }
+        CExpr::Receive(arms, timeout, timeout_body) => {
+            arms.iter()
+                .any(|arm| cexpr_contains_funref(&arm.body, expected_name, expected_arity))
+                || cexpr_contains_funref(timeout, expected_name, expected_arity)
+                || cexpr_contains_funref(timeout_body, expected_name, expected_arity)
+        }
+        CExpr::Try {
+            expr,
+            ok_body,
+            catch_body,
+            ..
+        } => {
+            cexpr_contains_funref(expr, expected_name, expected_arity)
+                || cexpr_contains_funref(ok_body, expected_name, expected_arity)
+                || cexpr_contains_funref(catch_body, expected_name, expected_arity)
+        }
+        CExpr::Binary(segments) => segments.iter().any(|segment| match segment {
+            crate::codegen::cerl::CBinSeg::Byte(_) => false,
+            crate::codegen::cerl::CBinSeg::BinaryAll(value)
+            | crate::codegen::cerl::CBinSeg::Segment { value, .. } => {
+                cexpr_contains_funref(value, expected_name, expected_arity)
+            }
+        }),
+        CExpr::Annotated { expr, .. } => cexpr_contains_funref(expr, expected_name, expected_arity),
+        _ => false,
+    }
+}
+
 #[test]
 fn selective_core_merge_prefers_selective_definition_on_collision() {
     let fallback = test_core_module("m", vec![("foo", 0)], vec![test_core_fun("foo", 0, "old")]);
@@ -203,6 +264,7 @@ fn selective_core_merge_adds_direct_dict_adapter_over_uniform_fallback() {
         "__dict_Readable_Int".to_string(),
         super::DirectFallbackAdapter::Dict {
             constructor: test_dict_constructor("__dict_Readable_Int", vec![]),
+            dict_param_shapes: vec![],
         },
     );
 
@@ -257,6 +319,7 @@ fn selective_core_merge_replaces_same_name_uniform_dict_with_direct_alias() {
         "__dict_Readable_Int".to_string(),
         super::DirectFallbackAdapter::Dict {
             constructor: test_dict_constructor("__dict_Readable_Int", vec![]),
+            dict_param_shapes: vec![],
         },
     );
 
@@ -271,7 +334,10 @@ fn selective_core_merge_replaces_same_name_uniform_dict_with_direct_alias() {
     };
     assert_eq!(params.len(), 2, "{params:?}");
     assert!(
-        matches!(body.as_ref(), CExpr::Apply(callee, args) if matches!(callee.as_ref(), CExpr::Var(name) if name == "_DictAliasK") && matches!(args.as_slice(), [CExpr::Apply(inner, inner_args)] if matches!(inner.as_ref(), CExpr::FunRef(name, 0) if name == "__dict_Readable_Int") && inner_args.is_empty())),
+        matches!(body.as_ref(), CExpr::Apply(callee, _) if matches!(callee.as_ref(), CExpr::Var(name) if name == "_DictAliasK"))
+    );
+    assert!(
+        cexpr_contains_funref(body, "__dict_Readable_Int", 0),
         "{body:?}"
     );
 }
@@ -289,6 +355,7 @@ fn selective_core_merge_keeps_same_name_uniform_dict_without_selective_source() 
         "__dict_Readable_Int".to_string(),
         super::DirectFallbackAdapter::Dict {
             constructor: test_dict_constructor("__dict_Readable_Int", vec![]),
+            dict_param_shapes: vec![],
         },
     );
 
@@ -317,6 +384,7 @@ fn selective_core_merge_adds_private_direct_dict_adapter() {
         "__dict_Private_Int".to_string(),
         super::DirectFallbackAdapter::Dict {
             constructor: test_dict_constructor("__dict_Private_Int", vec![]),
+            dict_param_shapes: vec![],
         },
     );
 
@@ -349,6 +417,7 @@ fn selective_core_merge_aliases_duplicate_fallback_dict_direct_arity() {
         selective_source.to_string(),
         super::DirectFallbackAdapter::Dict {
             constructor: test_dict_constructor(selective_source, vec![]),
+            dict_param_shapes: vec![],
         },
     );
 
@@ -387,6 +456,7 @@ fn selective_core_merge_aliases_duplicate_fallback_dict_uniform_arity() {
         selective_source.to_string(),
         super::DirectFallbackAdapter::Dict {
             constructor: test_dict_constructor(selective_source, vec![]),
+            dict_param_shapes: vec![],
         },
     );
 
@@ -401,9 +471,9 @@ fn selective_core_merge_aliases_duplicate_fallback_dict_uniform_arity() {
     };
     assert_eq!(params.len(), 2, "{params:?}");
     assert!(
-        matches!(body.as_ref(), CExpr::Apply(callee, args) if matches!(callee.as_ref(), CExpr::Var(name) if name == "_DictAliasK") && matches!(args.as_slice(), [CExpr::Apply(inner, inner_args)] if matches!(inner.as_ref(), CExpr::FunRef(name, 0) if name == selective_source) && inner_args.is_empty())),
-        "{body:?}"
+        matches!(body.as_ref(), CExpr::Apply(callee, _) if matches!(callee.as_ref(), CExpr::Var(name) if name == "_DictAliasK"))
     );
+    assert!(cexpr_contains_funref(body, selective_source, 0), "{body:?}");
 }
 
 #[test]
