@@ -566,6 +566,9 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             .iter()
             .rev()
             .fold(lowered_body, |body, (param, arg)| {
+                if matches!(arg, Atom::Var { name, .. } if name.name == *param) {
+                    return body;
+                }
                 if candidate_elided_dict_bindings.contains(param)
                     && !core_expr_mentions_var(param, &body)
                 {
@@ -643,6 +646,9 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                 .iter()
                 .rev()
                 .fold(lowered_body, |body, (param, arg)| {
+                    if matches!(arg, Atom::Var { name, .. } if name.name == *param) {
+                        return body;
+                    }
                     CExpr::Let(
                         core_var(param),
                         Box::new(self.lower_atom(arg)),

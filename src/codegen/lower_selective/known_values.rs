@@ -372,7 +372,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                     if let Some(constructor) = self.local_dict_constructors.get(name) {
                         (constructor.clone(), true)
                     } else {
-                        (self.imported_dict_constructors.get(name)?.clone(), false)
+                        (self.imported_dict_constructors.get(name)?.clone(), true)
                     };
                 if constructor.dict_params.len() != args.len()
                     || args.iter().any(|arg| !self.atom_is_direct_subset(arg))
