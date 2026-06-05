@@ -396,14 +396,31 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             | Atom::DictRef { .. }
             | Atom::Lambda { .. }
             | Atom::BackendSpawnThunk { .. } => Some(KnownDirectValue::Atom(atom.clone())),
-            Atom::QualifiedRef { module, name, .. } => self
-                .imported_direct_values
-                .get(&(module.clone(), name.clone()))
-                .map(|atom| {
-                    self.known_direct_value_for_atom(atom)
-                        .unwrap_or_else(|| KnownDirectValue::Atom(atom.clone()))
-                })
-                .or_else(|| Some(KnownDirectValue::Atom(atom.clone()))),
+            Atom::QualifiedRef { module, name, .. } => {
+                let subject = format!("{module}.{name}");
+                if let Some(imported) = self
+                    .imported_direct_values
+                    .get(&(module.clone(), name.clone()))
+                {
+                    debug_selective_subject("imported-value", &subject, || {
+                        format!(
+                            "{}: hit {subject}: {}",
+                            self.current_module,
+                            atom_debug_label(imported)
+                        )
+                    });
+                    self.known_direct_value_for_atom(imported)
+                        .or_else(|| Some(KnownDirectValue::Atom(imported.clone())))
+                } else {
+                    debug_selective_subject("imported-value", &subject, || {
+                        format!(
+                            "{}: miss {subject}: no imported direct value fact",
+                            self.current_module
+                        )
+                    });
+                    Some(KnownDirectValue::Atom(atom.clone()))
+                }
+            }
             Atom::Ctor { name, args, .. } => Some(KnownDirectValue::Ctor {
                 name: name.clone(),
                 args: args

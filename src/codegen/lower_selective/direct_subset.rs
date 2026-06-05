@@ -176,6 +176,229 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         }
     }
 
+    pub(super) fn lambda_app_direct_subset_rejection_summary_with_dict_aliases(
+        &mut self,
+        dict_bindings: &[(String, Atom)],
+        known_dict_aliases: Vec<(String, KnownDictValue)>,
+        params: &[Pat],
+        body: &MExpr,
+        args: &[Atom],
+    ) -> String {
+        let mut known_dict_aliases = known_dict_aliases;
+        known_dict_aliases.extend(self.known_dict_aliases_for_params(params, args));
+        let known_atom_bindings = self.known_direct_atom_pattern_bindings_for_params(params, args);
+        let known_value_bindings =
+            self.known_direct_value_pattern_bindings_for_params(params, args);
+
+        self.push_scope();
+        for (name, _) in dict_bindings {
+            self.current_scope_mut().insert(name.clone());
+        }
+        self.bind_known_dict_values(known_dict_aliases);
+        for pat in params {
+            self.bind_pat_locals(pat);
+        }
+        self.bind_known_direct_atom_pattern_values(known_atom_bindings);
+        self.bind_known_direct_value_pattern_values(known_value_bindings);
+        let summary = self.direct_subset_rejection_summary(body);
+        self.pop_scope();
+        summary
+    }
+
+    pub(super) fn direct_subset_rejection_summary(&mut self, expr: &MExpr) -> String {
+        if self.expr_is_direct_subset(expr) {
+            return format!(
+                "{} is accepted by the current direct subset",
+                mexpr_debug_label(expr)
+            );
+        }
+
+        match expr {
+            MExpr::Pure(atom) => format!(
+                "pure atom rejected: {}",
+                self.atom_direct_subset_rejection_summary(atom)
+            ),
+            MExpr::Let { var, value, body }
+            | MExpr::Bind {
+                var, value, body, ..
+            } => {
+                if !self.expr_is_direct_subset(value) {
+                    return format!(
+                        "{} binding '{}' value rejected: {}",
+                        mexpr_debug_label(expr),
+                        var.name,
+                        self.direct_subset_rejection_summary(value)
+                    );
+                }
+                format!(
+                    "{} binding '{}' body rejected: {}; value was {}",
+                    mexpr_debug_label(expr),
+                    var.name,
+                    mexpr_debug_label(body),
+                    mexpr_debug_label(value)
+                )
+            }
+            MExpr::If {
+                cond,
+                then_branch,
+                else_branch,
+                ..
+            } => {
+                if !self.atom_is_direct_subset(cond) {
+                    return format!(
+                        "if condition rejected: {}",
+                        self.atom_direct_subset_rejection_summary(cond)
+                    );
+                }
+                if let Some(value) = self.known_direct_bool_for_atom(cond) {
+                    let branch = if value { then_branch } else { else_branch };
+                    return format!(
+                        "known-bool if selected {} branch, rejected: {}",
+                        if value { "then" } else { "else" },
+                        self.direct_subset_rejection_summary(branch)
+                    );
+                }
+                let then_ok = self.expr_is_direct_subset(then_branch);
+                let else_ok = self.expr_is_direct_subset(else_branch);
+                format!("if branches rejected/accepted: then={then_ok}, else={else_ok}")
+            }
+            MExpr::App { head, args, .. } => {
+                let head_shape = self
+                    .call_shape(head)
+                    .as_ref()
+                    .map(call_shape_debug_label)
+                    .unwrap_or_else(|| "no call shape".to_string());
+                let arg_support = args
+                    .iter()
+                    .enumerate()
+                    .map(|(index, arg)| {
+                        format!(
+                            "#{index} {}={}",
+                            atom_debug_label(arg),
+                            self.atom_is_direct_subset(arg)
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!(
+                    "app rejected: head={}, shape={}, args=[{}]",
+                    atom_debug_label(head),
+                    head_shape,
+                    arg_support
+                )
+            }
+            MExpr::Case {
+                scrutinee, arms, ..
+            } => {
+                if !self.atom_is_direct_subset(scrutinee) {
+                    return format!(
+                        "case scrutinee rejected: {}",
+                        self.atom_direct_subset_rejection_summary(scrutinee)
+                    );
+                }
+                format!("case rejected after scrutinee; arms={}", arms.len())
+            }
+            MExpr::With { handler, body, .. } => {
+                let handler_supported = self.static_handler_is_direct_return_only(handler)
+                    || self.direct_handler_kind(handler).is_some();
+                if !handler_supported {
+                    return "with handler is not direct-return-only/native-direct".to_string();
+                }
+                format!(
+                    "with body rejected: {}",
+                    self.direct_subset_rejection_summary(body)
+                )
+            }
+            MExpr::FieldAccess { record, field, .. } => format!(
+                "field '{field}' record rejected: {}",
+                self.atom_direct_subset_rejection_summary(record)
+            ),
+            MExpr::RecordUpdate { record, fields, .. } => format!(
+                "record update rejected: record={}, fields={}",
+                self.atom_is_direct_subset(record),
+                fields
+                    .iter()
+                    .map(|(field, atom)| format!("{field}={}", self.atom_is_direct_subset(atom)))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+            MExpr::DictMethodAccess { dict, .. } => format!(
+                "dict method access rejected: {}",
+                self.atom_direct_subset_rejection_summary(dict)
+            ),
+            MExpr::ForeignCall {
+                module, func, args, ..
+            } => format!(
+                "foreign call {module}.{func} rejected: args=[{}]",
+                args.iter()
+                    .enumerate()
+                    .map(|(index, arg)| format!("#{index}={}", self.atom_is_direct_subset(arg)))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+            MExpr::BinOp { left, right, .. } => format!(
+                "bin-op rejected: left={}, right={}",
+                self.atom_is_direct_subset(left),
+                self.atom_is_direct_subset(right)
+            ),
+            MExpr::UnaryMinus { value, .. } => format!(
+                "unary-minus value rejected: {}",
+                self.atom_direct_subset_rejection_summary(value)
+            ),
+            MExpr::Receive { arms, after, .. } => {
+                format!(
+                    "receive rejected: arms={}, after={}",
+                    arms.len(),
+                    after.is_some()
+                )
+            }
+            MExpr::Yield { op, .. } => format!("yield {}.{} rejected", op.effect, op.op),
+            MExpr::Resume { .. } => "resume is outside direct subset".to_string(),
+            MExpr::Ensure { .. } => "ensure is outside direct subset".to_string(),
+            MExpr::BitString { .. } => "bitstring is outside direct subset".to_string(),
+            MExpr::LetFun { name, .. } => format!("let-fun '{name}' is outside direct subset"),
+            MExpr::HandlerValue { effects, .. } => {
+                format!("handler value is outside direct subset: effects={effects:?}")
+            }
+        }
+    }
+
+    fn atom_direct_subset_rejection_summary(&mut self, atom: &Atom) -> String {
+        if self.atom_is_direct_subset(atom) {
+            return format!("{} is accepted", atom_debug_label(atom));
+        }
+        match atom {
+            Atom::Lambda { params, body, .. } => format!(
+                "lambda/{} rejected: {}",
+                params.len(),
+                self.direct_subset_rejection_summary(body)
+            ),
+            Atom::Var { name, .. } => format!(
+                "var({}) rejected: local={}, shape={:?}, direct-fun={}, direct-val={}",
+                name.name,
+                self.is_local(&name.name),
+                self.local_shape(&name.name),
+                self.direct_function_value_ref(atom).is_some(),
+                self.direct_values.contains(&name.name)
+            ),
+            Atom::QualifiedRef { .. } => format!(
+                "{} rejected: direct-fun={}, cps-shape={}, imported-value={}",
+                atom_debug_label(atom),
+                self.direct_function_value_ref(atom).is_some(),
+                self.cps_value_atom_shape(atom).is_some(),
+                matches!(
+                    self.known_direct_value_for_atom(atom),
+                    Some(value) if !matches!(value, KnownDirectValue::Atom(Atom::QualifiedRef { .. }))
+                )
+            ),
+            Atom::DictRef { name, .. } => format!(
+                "dict-ref({name}) rejected: direct-dict={}",
+                self.direct_dict_constructor(atom).is_some()
+            ),
+            _ => format!("{} rejected by atom subset", atom_debug_label(atom)),
+        }
+    }
+
     pub(super) fn static_handler_is_direct_return_only(&mut self, handler: &MHandler) -> bool {
         let MHandler::Static {
             effects,

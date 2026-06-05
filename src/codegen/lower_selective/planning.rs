@@ -418,12 +418,29 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         self.imported_direct_values.clear();
         for (source_module_name, compiled) in &self.module_ctx.modules {
             let is_stdlib_module = source_module_name.starts_with("Std.");
-            if source_module_name == &self.current_module
-                || compiled.elaborated.is_empty()
-                || (!is_stdlib_module && !self.current_module_references_module(source_module_name))
+            let skip_reason = if source_module_name == &self.current_module {
+                Some("current module")
+            } else if compiled.elaborated.is_empty() {
+                Some("empty elaborated program")
+            } else if !is_stdlib_module
+                && !self.current_module_references_module(source_module_name)
             {
+                Some("not referenced by current module")
+            } else {
+                None
+            };
+            if let Some(reason) = skip_reason {
+                debug_selective_subject("imported-value", source_module_name, || {
+                    format!(
+                        "{}: skip module {source_module_name}: {reason}",
+                        self.current_module
+                    )
+                });
                 continue;
             }
+            debug_selective_subject("imported-value", source_module_name, || {
+                format!("{}: scan module {source_module_name}", self.current_module)
+            });
 
             let anf_imported = crate::codegen::anf::normalize(
                 compiled.elaborated.clone(),
@@ -456,12 +473,42 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                 let MDecl::Val(value) = decl else {
                     continue;
                 };
-                if !value.public || !imported.direct_values.contains(&value.name) {
+                let subject = format!("{source_module_name}.{}", value.name);
+                if !value.public {
+                    debug_selective_subject("imported-value", &subject, || {
+                        format!(
+                            "{}: skip {subject}: value is not public",
+                            self.current_module
+                        )
+                    });
+                    continue;
+                }
+                if !imported.direct_values.contains(&value.name) {
+                    debug_selective_subject("imported-value", &subject, || {
+                        format!(
+                            "{}: skip {subject}: value is outside direct val subset",
+                            self.current_module
+                        )
+                    });
                     continue;
                 }
                 let MExpr::Pure(atom) = &value.value else {
+                    debug_selective_subject("imported-value", &subject, || {
+                        format!(
+                            "{}: skip {subject}: value is {} instead of pure atom",
+                            self.current_module,
+                            mexpr_debug_label(&value.value)
+                        )
+                    });
                     continue;
                 };
+                debug_selective_subject("imported-value", &subject, || {
+                    format!(
+                        "{}: collect {subject}: {}",
+                        self.current_module,
+                        atom_debug_label(atom)
+                    )
+                });
                 self.imported_direct_values.insert(
                     (source_module_name.clone(), value.name.clone()),
                     atom.clone(),

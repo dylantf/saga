@@ -64,6 +64,13 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                 if let Some(value) = self.known_direct_value_for_atom(atom)
                     && !matches!(value, KnownDirectValue::Atom(Atom::QualifiedRef { .. }))
                 {
+                    debug_selective_subject("imported-value", &atom_debug_label(atom), || {
+                        format!(
+                            "{}: lower {} as known direct value",
+                            self.current_module,
+                            atom_debug_label(atom)
+                        )
+                    });
                     self.lower_known_direct_value(&value)
                 } else if self.cps_value_atom_shape(atom).is_some() {
                     self.lower_cps_value_atom(atom)

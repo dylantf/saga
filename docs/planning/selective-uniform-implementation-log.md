@@ -1914,3 +1914,20 @@ boundaries exist.
       generic record with unknown options;
     - only after those fixtures pass should we return to the full JSON
       benchmark/library output.
+- Observability patch progress:
+  - `SAGA_DEBUG_SELECTIVE=imported-value` now traces imported public value fact
+    collection, skip reasons, qualified-reference hits, and misses. Subject
+    filters such as `default_options` work for the value-level path;
+  - `SAGA_DEBUG_SELECTIVE=known-method` now reports a shallow direct-subset
+    rejection frontier when a known dictionary method body fails after argument
+    and dictionary-alias binding. This deliberately avoids a full proof tree
+    for now, but reports useful shapes such as the rejected app head/call
+    shape, selected known-bool branch, or failing binder frontier;
+  - first `saga_json` trace result:
+    `SagaJson.default_options` is collected while lowering `SagaJson.Encode`,
+    but `EncodeDerive` still misses `SagaJson.default_options`. That suggests
+    the current imported public value facts are only direct-import/module-scan
+    facts. Derived/default trait method bodies imported from `SagaJson.Encode`
+    can reference values owned by `SagaJson`, so the next real fix is a
+    transitive imported-value fact path for imported method bodies, not another
+    JSON-specific lowering rule.

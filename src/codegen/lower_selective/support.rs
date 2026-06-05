@@ -38,6 +38,58 @@ pub(super) fn debug_selective_subject(
     }
 }
 
+pub(super) fn atom_debug_label(atom: &Atom) -> String {
+    match atom {
+        Atom::Var { name, .. } => format!("var({})", name.name),
+        Atom::QualifiedRef { module, name, .. } => format!("qualified({module}.{name})"),
+        Atom::DictRef { name, .. } => format!("dict-ref({name})"),
+        Atom::Lit { value, .. } => format!("lit({value:?})"),
+        Atom::Ctor { name, args, .. } => format!("ctor({name}/{})", args.len()),
+        Atom::Tuple { elements, .. } => format!("tuple/{}", elements.len()),
+        Atom::AnonRecord { fields, .. } => format!("anon-record/{}", fields.len()),
+        Atom::Record { name, fields, .. } => format!("record({name}/{})", fields.len()),
+        Atom::Lambda { params, .. } => format!("lambda/{}", params.len()),
+        Atom::Symbol { symbol, .. } => format!("symbol({symbol})"),
+        Atom::BackendAtom { atom, .. } => format!("backend-atom({atom})"),
+        Atom::BackendSpawnThunk { .. } => "backend-spawn-thunk".to_string(),
+    }
+}
+
+pub(super) fn mexpr_debug_label(expr: &MExpr) -> String {
+    match expr {
+        MExpr::Pure(atom) => format!("pure({})", atom_debug_label(atom)),
+        MExpr::Yield { op, args, .. } => {
+            format!("yield({}.{} / {})", op.effect, op.op, args.len())
+        }
+        MExpr::Bind { .. } => "bind".to_string(),
+        MExpr::Let { .. } => "let".to_string(),
+        MExpr::Ensure { .. } => "ensure".to_string(),
+        MExpr::Case { arms, .. } => format!("case/{}", arms.len()),
+        MExpr::If { cond, .. } => format!("if({})", atom_debug_label(cond)),
+        MExpr::App { head, args, .. } => {
+            format!("app({} / {})", atom_debug_label(head), args.len())
+        }
+        MExpr::With { .. } => "with".to_string(),
+        MExpr::Resume { .. } => "resume".to_string(),
+        MExpr::FieldAccess { field, .. } => format!("field({field})"),
+        MExpr::RecordUpdate { fields, .. } => format!("record-update/{}", fields.len()),
+        MExpr::DictMethodAccess {
+            trait_name,
+            method_index,
+            ..
+        } => format!("dict-method({trait_name}.{method_index})"),
+        MExpr::ForeignCall {
+            module, func, args, ..
+        } => format!("foreign-call({module}.{func} / {})", args.len()),
+        MExpr::BinOp { op, .. } => format!("bin-op({op:?})"),
+        MExpr::UnaryMinus { .. } => "unary-minus".to_string(),
+        MExpr::BitString { segments, .. } => format!("bitstring/{}", segments.len()),
+        MExpr::Receive { arms, .. } => format!("receive/{}", arms.len()),
+        MExpr::LetFun { name, .. } => format!("let-fun({name})"),
+        MExpr::HandlerValue { effects, .. } => format!("handler-value/{}", effects.len()),
+    }
+}
+
 pub(super) fn marked_control_tuple(tag: &str, marker: CExpr, value: CExpr) -> CExpr {
     CExpr::Tuple(vec![CExpr::Lit(CLit::Atom(tag.to_string())), marker, value])
 }
@@ -217,6 +269,44 @@ pub(super) enum CallShape {
         adapter_arity: usize,
         effects: Vec<String>,
     },
+}
+
+pub(super) fn call_shape_debug_label(shape: &CallShape) -> String {
+    match shape {
+        CallShape::Intrinsic(intrinsic) => format!("intrinsic({intrinsic:?})"),
+        CallShape::Direct(callable) => format!(
+            "direct({}{}/{})",
+            callable
+                .module
+                .as_ref()
+                .map(|module| format!("{module}:"))
+                .unwrap_or_default(),
+            callable.name,
+            callable.arity
+        ),
+        CallShape::LocalCallable { name, arity } => format!("local-callable({name}/{arity})"),
+        CallShape::LocalCpsCallable {
+            name,
+            source_arity,
+            adapter_arity,
+            effects,
+        } => format!(
+            "local-cps-callable({name}/{source_arity}->{adapter_arity}, effects={effects:?})"
+        ),
+        CallShape::Cps {
+            module,
+            name,
+            source_arity,
+            adapter_arity,
+            effects,
+        } => format!(
+            "cps({}{name}/{source_arity}->{adapter_arity}, effects={effects:?})",
+            module
+                .as_ref()
+                .map(|module| format!("{module}:"))
+                .unwrap_or_default()
+        ),
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

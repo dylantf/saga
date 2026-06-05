@@ -526,10 +526,26 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             &body,
             args,
         ) {
+            let rejection_summary =
+                selective_debug_subject_enabled("known-method", &known_dict.constructor_name).then(
+                    || {
+                        self.lambda_app_direct_subset_rejection_summary_with_dict_aliases(
+                            &dict_bindings,
+                            known_dict_aliases.clone(),
+                            params,
+                            &body,
+                            args,
+                        )
+                    },
+                );
             debug_selective_subject("known-method", &known_dict.constructor_name, || {
                 format!(
-                    "reject {} method {method_index}: body outside direct subset after aliasing",
-                    known_dict.constructor_name
+                    "reject {} method {method_index}: body outside direct subset after aliasing{}",
+                    known_dict.constructor_name,
+                    rejection_summary
+                        .as_ref()
+                        .map(|summary| format!("; {summary}"))
+                        .unwrap_or_default()
                 )
             });
             if inserted {
