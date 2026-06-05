@@ -595,7 +595,15 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                     return args.iter().all(|arg| self.atom_is_direct_subset(arg));
                 }
                 if self.cps_call_effects_intersect_elided_static_handler(head, handled_effects) {
-                    false
+                    self.can_static_handler_specialize_local_cps_call_without_evidence(
+                        head,
+                        args,
+                        handled_effects,
+                    ) || self.can_static_handler_specialize_imported_cps_call_without_evidence(
+                        head,
+                        args,
+                        handled_effects,
+                    )
                 } else {
                     self.cps_app_is_supported_without_elided_effects(head, args)
                 }

@@ -48,6 +48,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             local_known_direct_values: vec![HashMap::new()],
             active_known_dict_methods: HashSet::new(),
             active_known_to_json_values: Vec::new(),
+            active_imported_wrapper_calls: HashSet::new(),
             imported_clone_source_module: None,
             options,
         }

@@ -8,6 +8,15 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         evidence: CExpr,
         return_k: CExpr,
     ) -> CExpr {
+        if let Some(lowered) = self.try_lower_imported_known_dict_wrapper_call(
+            head,
+            args,
+            evidence.clone(),
+            return_k.clone(),
+        ) {
+            return lowered;
+        }
+
         match self.classify_cps_call(head, args) {
             CpsCallDecision::HofDirect {
                 module,
@@ -63,6 +72,176 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                 source: NodeId::fresh(),
             }),
         }
+    }
+
+    fn try_lower_imported_known_dict_wrapper_call(
+        &mut self,
+        head: &Atom,
+        args: &[Atom],
+        evidence: CExpr,
+        return_k: CExpr,
+    ) -> Option<CExpr> {
+        if args.iter().all(|arg| !self.atom_is_known_dict_value(arg)) {
+            return None;
+        }
+
+        let source = match head {
+            Atom::Var { source, .. } | Atom::QualifiedRef { source, .. } => *source,
+            _ => return None,
+        };
+        let resolved = self.resolution.get(&source)?;
+        let ResolvedCodegenKind::BeamFunction {
+            erlang_mod: _,
+            name,
+            effects,
+            ..
+        } = &resolved.kind
+        else {
+            return None;
+        };
+        if effects.is_empty() {
+            return None;
+        }
+        let source_module_name = resolved.source_module.as_ref()?;
+        if source_module_name == &self.current_module {
+            return None;
+        }
+        let key = (source_module_name.clone(), name.clone());
+        if self.active_imported_wrapper_calls.contains(&key) {
+            return None;
+        }
+
+        let compiled = self.module_ctx.modules.get(source_module_name)?;
+        let public_names: HashSet<String> = compiled
+            .codegen_info
+            .exports
+            .iter()
+            .map(|(name, _)| name.clone())
+            .collect();
+        if !public_names.contains(name) {
+            return None;
+        }
+
+        let anf_imported =
+            crate::codegen::anf::normalize(compiled.elaborated.clone(), Some(&compiled.resolution));
+        let imported_handler_decls = HashMap::new();
+        let (program, imported_handler_value_map) =
+            crate::codegen::monadic::translate::translate_with_imports(
+                &anf_imported,
+                &compiled.resolution,
+                self.effect_info,
+                &imported_handler_decls,
+            );
+        let candidates: Vec<MFunBinding> = program
+            .iter()
+            .filter_map(|decl| match decl {
+                MDecl::FunBinding(fb)
+                    if fb.public
+                        && fb.name == *name
+                        && fb.params.len() == args.len()
+                        && fb.guard.is_none() =>
+                {
+                    Some(fb.clone())
+                }
+                _ => None,
+            })
+            .collect();
+        let [fb] = candidates.as_slice() else {
+            return None;
+        };
+        if super::imported_facts::expr_node_count(&fb.body) > 32
+            || fb.params.iter().any(|param| !direct_param_supported(param))
+        {
+            return None;
+        }
+
+        let known_dict_aliases = self.known_dict_aliases_for_params(&fb.params, args);
+        if known_dict_aliases.is_empty() {
+            return None;
+        }
+        let known_atom_bindings =
+            self.known_direct_atom_pattern_bindings_for_params(&fb.params, args);
+        let all_params_known = self
+            .known_direct_atom_bindings_for_all_params(&fb.params, args)
+            .is_some();
+        let arg_names = lower_param_names(&fb.params);
+        let lowered_args: Vec<CExpr> = args
+            .iter()
+            .map(|arg| self.lower_cps_arg_atom(arg, None))
+            .collect();
+
+        let mut imported = DirectLowerer::new(
+            &compiled.resolution,
+            self.ctors,
+            self.module_ctx,
+            self.handler_info,
+            self.effect_info,
+            &imported_handler_value_map,
+            self.imported_dict_constructors.clone(),
+            self.options,
+        );
+        imported.current_module = source_module_name.clone();
+        imported.classify_program(&program);
+        imported.apply_codegen_info_function_shapes(&compiled.codegen_info);
+        imported.compute_function_lowering_plans(&program);
+        imported.compute_local_function_entries(&program);
+        for (name, constructor) in &self.local_dict_constructors {
+            imported
+                .local_dict_constructors
+                .entry(name.clone())
+                .or_insert_with(|| constructor.clone());
+        }
+        imported.current_module = self.current_module.clone();
+        imported.imported_clone_source_module = Some(source_module_name.clone());
+        imported.locals = self.locals.clone();
+        imported.local_shapes = self.local_shapes.clone();
+        imported.local_known_direct_lambdas = self.local_known_direct_lambdas.clone();
+        imported.local_known_cps_lambdas = self.local_known_cps_lambdas.clone();
+        imported.local_known_dict_values = self.local_known_dict_values.clone();
+        imported.local_known_direct_atoms = self.local_known_direct_atoms.clone();
+        imported.local_known_direct_values = self.local_known_direct_values.clone();
+        imported.active_known_dict_methods = self.active_known_dict_methods.clone();
+        imported.active_known_to_json_values = self.active_known_to_json_values.clone();
+        imported.active_imported_wrapper_calls = self.active_imported_wrapper_calls.clone();
+        imported.active_imported_wrapper_calls.insert(key);
+        imported.direct_handler_stack = self.direct_handler_stack.clone();
+        imported.result_delimiter_stack = self.result_delimiter_stack.clone();
+        imported.static_handler_inline_stack = self.static_handler_inline_stack.clone();
+        imported.cps_temp_counter = self.cps_temp_counter;
+
+        imported.push_scope();
+        for pat in &fb.params {
+            imported.bind_pat_locals(pat);
+        }
+        imported.bind_known_dict_values(known_dict_aliases);
+        imported.bind_known_direct_atom_pattern_values(known_atom_bindings);
+        let lowered_body = imported.lower_cps_expr(&fb.body, evidence, return_k);
+        let lowered_body = if all_params_known {
+            lowered_body
+        } else {
+            imported.wrap_param_match(&fb.params, &arg_names, lowered_body)
+        };
+        imported.pop_scope();
+
+        self.cps_temp_counter = imported.cps_temp_counter;
+        let lowered_body = arg_names.into_iter().zip(lowered_args).rev().fold(
+            lowered_body,
+            |body, (name, value)| {
+                if super::direct_core_refs::core_expr_mentions_core_var(&name, &body) {
+                    CExpr::Let(name, Box::new(value), Box::new(body))
+                } else {
+                    body
+                }
+            },
+        );
+        Some(lowered_body)
+    }
+
+    fn atom_is_known_dict_value(&self, atom: &Atom) -> bool {
+        let Atom::Var { name, .. } = atom else {
+            return false;
+        };
+        self.known_dict_value(&name.name).is_some()
     }
 
     pub(super) fn classify_cps_call(&mut self, head: &Atom, args: &[Atom]) -> CpsCallDecision {

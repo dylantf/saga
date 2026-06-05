@@ -697,7 +697,7 @@ fn collect_handler_arm_app_refs(arm: &MHandlerArm, out: &mut Vec<(String, NodeId
     }
 }
 
-fn expr_node_count(expr: &MExpr) -> usize {
+pub(super) fn expr_node_count(expr: &MExpr) -> usize {
     match expr {
         MExpr::Pure(atom) => 1 + atom_node_count(atom),
         MExpr::Yield { args, .. } | MExpr::ForeignCall { args, .. } => 1 + atoms_node_count(args),
