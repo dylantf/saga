@@ -1043,7 +1043,7 @@ fn selective_core_codegen_lowers_stdlib_stream_strict_frontier() {
         "{core}"
     );
     assert!(
-        core.contains("apply 'for_each'/4(F, Rest, {}, fun (_CpsResult"),
+        core.contains("apply 'for_each'/4(F, Rest, _Evidence, _ReturnK)"),
         "{core}"
     );
 }

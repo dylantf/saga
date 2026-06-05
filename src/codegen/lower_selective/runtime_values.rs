@@ -276,7 +276,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             _ => return Vec::new(),
         };
         let Some(mut current) = self.effect_info.type_at_node.get(&source) else {
-            return Vec::new();
+            return self.resolved_callback_param_shapes(head);
         };
         let mut shapes = Vec::new();
         while let Type::Fun(param, ret, _) = current {
@@ -289,7 +289,11 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             shapes.push(shape);
             current = ret;
         }
-        shapes
+        if shapes.iter().any(Option::is_some) {
+            shapes
+        } else {
+            self.resolved_callback_param_shapes(head)
+        }
     }
 
     pub(super) fn pure_trait_method_arity(

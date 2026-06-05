@@ -571,6 +571,18 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         }
         let module = self.resolved_erlang_module_for_symbol(resolved, erlang_mod);
         if let Some(module) = module {
+            if let Some(entries) = self
+                .imported_function_entries
+                .get(&(module.clone(), name.clone()))
+                && !entries.is_cps_typed()
+                && let Some(arity) = entries.direct_entry_arity
+            {
+                return Some(remote_fun_value(
+                    module,
+                    direct_entry_name_for(name, entries),
+                    arity,
+                ));
+            }
             return Some(remote_fun_value(module, name.clone(), *arity));
         }
         let shape = self.callable_type_shapes.get(name)?;

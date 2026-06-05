@@ -740,7 +740,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             .map(|(source_arity, adapter_arity, _effects)| (source_arity, adapter_arity))
     }
 
-    fn resolved_callback_param_shapes(&self, head: &Atom) -> Vec<Option<(usize, usize)>> {
+    pub(super) fn resolved_callback_param_shapes(&self, head: &Atom) -> Vec<Option<(usize, usize)>> {
         let source = match head {
             Atom::Var { source, .. } | Atom::QualifiedRef { source, .. } => *source,
             _ => return Vec::new(),

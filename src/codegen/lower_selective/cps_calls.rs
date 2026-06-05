@@ -184,6 +184,8 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         );
         imported.current_module = source_module_name.clone();
         imported.classify_program(&program);
+        imported.compute_imported_direct_values();
+        imported.compute_imported_function_entries();
         imported.apply_codegen_info_function_shapes(&compiled.codegen_info);
         imported.compute_function_lowering_plans(&program);
         imported.compute_local_function_entries(&program);

@@ -952,7 +952,8 @@ main () = ()
         !out.contains("apply ___anf_v2('unit', _CpsEvidence"),
         "{out}"
     );
-    assert!(out.contains("let <___anf_v0> =\n            41"), "{out}");
+    assert!(out.contains("let <__Inlined"), "{out}");
+    assert!(out.contains("41\n          in\n          apply _PromptK"), "{out}");
     assert_selective_core_eval_stdout_contains(
         src,
         "io:format(\"~p~n\", ['_script':run_trait_method(unit)]), init:stop().",

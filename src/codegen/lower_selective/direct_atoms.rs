@@ -21,10 +21,10 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                         return self.lower_cps_value_atom(atom);
                     }
                     CExpr::Var(core_var(&name.name))
-                } else if self.cps_value_atom_shape(atom).is_some() {
-                    self.lower_cps_value_atom(atom)
                 } else if let Some(value_ref) = self.direct_function_value_ref(atom) {
                     value_ref
+                } else if self.cps_value_atom_shape(atom).is_some() {
+                    self.lower_cps_value_atom(atom)
                 } else if let Some(value_ref) = self.imported_zero_arity_value_ref(&name.name) {
                     value_ref
                 } else if self.direct_values.contains(&name.name) {
@@ -72,11 +72,12 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                         )
                     });
                     self.lower_known_direct_value(&value)
+                } else if let Some(value_ref) = self.direct_function_value_ref(atom) {
+                    value_ref
                 } else if self.cps_value_atom_shape(atom).is_some() {
                     self.lower_cps_value_atom(atom)
                 } else {
-                    self.direct_function_value_ref(atom)
-                        .unwrap_or_else(|| self.unsupported_atom(atom))
+                    self.unsupported_atom(atom)
                 }
             }
             Atom::BackendAtom { atom, .. } => CExpr::Lit(CLit::Atom(atom.clone())),
