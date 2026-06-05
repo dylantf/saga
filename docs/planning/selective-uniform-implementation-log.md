@@ -1791,3 +1791,25 @@ boundaries exist.
     specialization path. The next attack should be shape-level list encoding
     under a known element `ToJson` dict, including runtime list variables whose
     elements are not compile-time-known.
+- Completed the first `json_defaults`/`serialize_with` specialization for the
+  SagaJson benchmark:
+  - added a narrow imported-call hook for `serialize_with` that fires only when
+    the active static handler is the known `json_defaults` handler, the first
+    argument is a known `ToJson` dict, and the value argument has a known direct
+    representation. This avoids the earlier unsafe general CPS-bind rewrite and
+    leaves ordinary `to_json` calls returning `Json` values alone;
+  - added runtime `Maybe` and `List` direct encoders for known element `ToJson`
+    dicts. The list path emits a local Core `letrec` walker over runtime list
+    variables instead of trying to recursively inline list structure;
+  - added the default-options unit-variant case for SagaJson's
+    `VariantPayload U1`, so runtime ADTs such as `Role` can collapse to a Core
+    `case` returning JSON strings like `"Admin"`;
+  - made SagaJson known-dict string assembly use compact separators (`:` and
+    `,`) while preserving the spaced formatting used by the simplified `99*`
+    teaching fixtures;
+  - `json_bench/saga/src/EffectOpts.saga` now builds under
+    `--selective-no-fallback`, and the generated static `encode_all` variant no
+    longer contains the `__dict_ToJson_User` construction, `element(1, dict)`
+    method extraction, or `sagajson_encode:render` call in its hot branch. It
+    directly computes the serialized string, then calls `String.length` and the
+    recursive static variant.

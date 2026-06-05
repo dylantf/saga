@@ -34,9 +34,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                 &lambda.body,
                 args,
             );
-            if inserted
-                && let Some(key) = method_key
-            {
+            if inserted && let Some(key) = method_key {
                 self.active_known_dict_methods.remove(&key);
             }
             return lowered;
@@ -54,9 +52,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                 .clone()
                 .is_some_and(|key| self.active_known_dict_methods.insert(key));
             let lowered = self.lower_partial_known_direct_lambda_value(&lambda, args);
-            if inserted
-                && let Some(key) = method_key
-            {
+            if inserted && let Some(key) = method_key {
                 self.active_known_dict_methods.remove(&key);
             }
             return lowered;
@@ -87,10 +83,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                     self.assert_app_arity(&name, args.len(), arity);
                     let (lowered_args, bindings) =
                         self.lower_direct_call_args_with_bindings(head, args);
-                    let body = CExpr::Apply(
-                        Box::new(CExpr::Var(core_var(&name))),
-                        lowered_args,
-                    );
+                    let body = CExpr::Apply(Box::new(CExpr::Var(core_var(&name))), lowered_args);
                     self.wrap_core_value_bindings(body, bindings)
                 }
             }
@@ -148,7 +141,15 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             let module = callable.module?;
             let filtered_args: Vec<Atom> = args
                 .iter()
-                .filter(|arg| !matches!(arg, Atom::Lit { value: Lit::Unit, .. }))
+                .filter(|arg| {
+                    !matches!(
+                        arg,
+                        Atom::Lit {
+                            value: Lit::Unit,
+                            ..
+                        }
+                    )
+                })
                 .cloned()
                 .collect();
             let (call_args, bindings) = self.lower_atoms_as_core_values(&filtered_args);
@@ -182,7 +183,15 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         self.assert_app_arity(target_name, args.len(), *arity);
         let filtered_args: Vec<Atom> = args
             .iter()
-            .filter(|arg| !matches!(arg, Atom::Lit { value: Lit::Unit, .. }))
+            .filter(|arg| {
+                !matches!(
+                    arg,
+                    Atom::Lit {
+                        value: Lit::Unit,
+                        ..
+                    }
+                )
+            })
             .cloned()
             .collect();
         let (call_args, bindings) = self.lower_atoms_as_core_values(&filtered_args);
@@ -237,7 +246,10 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                 lowered_args,
             ),
         };
-        CExpr::Fun(params, Box::new(self.wrap_core_value_bindings(body, bindings)))
+        CExpr::Fun(
+            params,
+            Box::new(self.wrap_core_value_bindings(body, bindings)),
+        )
     }
 
     pub(super) fn lower_partial_local_callable(
@@ -254,7 +266,10 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         let (mut lowered_args, bindings) = self.lower_direct_call_args_with_bindings(head, args);
         lowered_args.extend(params.iter().cloned().map(CExpr::Var));
         let body = CExpr::Apply(Box::new(CExpr::Var(core_var(name))), lowered_args);
-        CExpr::Fun(params, Box::new(self.wrap_core_value_bindings(body, bindings)))
+        CExpr::Fun(
+            params,
+            Box::new(self.wrap_core_value_bindings(body, bindings)),
+        )
     }
 
     pub(super) fn lower_direct_call_args_with_bindings(

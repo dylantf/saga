@@ -415,12 +415,21 @@ impl Checker {
 
 impl ModuleContext {
     fn clear_cached_programs_iterative(&mut self) {
-        let mut results: Vec<CheckResult> =
-            self.check_results.drain().map(|(_, result)| result).collect();
+        let mut results: Vec<CheckResult> = self
+            .check_results
+            .drain()
+            .map(|(_, result)| result)
+            .collect();
         drain_programs_iterative(&mut self.programs);
 
         while let Some(mut result) = results.pop() {
-            results.extend(result.modules.check_results.drain().map(|(_, result)| result));
+            results.extend(
+                result
+                    .modules
+                    .check_results
+                    .drain()
+                    .map(|(_, result)| result),
+            );
             drain_programs_iterative(&mut result.modules.programs);
         }
     }

@@ -127,6 +127,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             let known_direct_lambda = self.known_direct_lambda_for_expr(value);
             let known_dict = self.known_dict_value_for_expr(value);
             let known_atom = self.known_direct_atom_for_expr(value);
+            let known_value = self.known_direct_value_for_expr(value);
             let can_elide_if_unused =
                 known_direct_lambda.is_some() || known_dict.is_some() || known_atom.is_some();
             let lowered_value = self.lower_expr(value);
@@ -144,6 +145,9 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             }
             if let Some(atom) = known_atom {
                 self.bind_known_direct_atom(var.name.clone(), atom);
+            }
+            if let Some(value) = known_value {
+                self.bind_known_direct_value(var.name.clone(), value);
             }
             let lowered_body = self.lower_cps_expr(body, evidence, return_k);
             self.pop_scope();

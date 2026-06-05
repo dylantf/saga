@@ -215,10 +215,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         }
     }
 
-    pub(super) fn known_direct_value_for_expr(
-        &mut self,
-        expr: &MExpr,
-    ) -> Option<KnownDirectValue> {
+    pub(super) fn known_direct_value_for_expr(&mut self, expr: &MExpr) -> Option<KnownDirectValue> {
         match expr {
             MExpr::Pure(atom) => self.known_direct_value_for_atom(atom),
             MExpr::Let { var, value, body }
@@ -443,11 +440,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                     })
                     .collect(),
             )),
-            Atom::Record {
-                name,
-                fields,
-                ..
-            } => Some(KnownDirectValue::Record {
+            Atom::Record { name, fields, .. } => Some(KnownDirectValue::Record {
                 name: name.clone(),
                 fields: fields
                     .iter()
@@ -553,10 +546,9 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                     .into_iter()
                     .find_map(|(name, value)| (name == field).then_some(value))
             }
-            KnownDirectValue::Atom(atom) => {
-                self.known_direct_field_value(&atom, field, record_name, anon_fields)
-                    .map(KnownDirectValue::Atom)
-            }
+            KnownDirectValue::Atom(atom) => self
+                .known_direct_field_value(&atom, field, record_name, anon_fields)
+                .map(KnownDirectValue::Atom),
             _ => None,
         }
     }
@@ -754,15 +746,15 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                     return None;
                 };
                 if value_args.len() != args.len()
-                    || mangle_ctor_atom(value_name, self.ctors) != mangle_ctor_atom(name, self.ctors)
+                    || mangle_ctor_atom(value_name, self.ctors)
+                        != mangle_ctor_atom(name, self.ctors)
                 {
                     return None;
                 }
                 self.match_known_direct_value_patterns(value_args, args)
             }
             Pat::Tuple { elements, .. } => {
-                let KnownDirectValue::Tuple(value_elements) = value
-                else {
+                let KnownDirectValue::Tuple(value_elements) = value else {
                     return match elements.as_slice() {
                         [only] => self.match_known_direct_value_pattern(value, only),
                         _ => {
@@ -771,7 +763,9 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                                     |bindings| {
                                         bindings
                                             .into_iter()
-                                            .map(|(name, atom)| (name, KnownDirectValue::Atom(atom)))
+                                            .map(|(name, atom)| {
+                                                (name, KnownDirectValue::Atom(atom))
+                                            })
                                             .collect()
                                     },
                                 );
@@ -812,15 +806,15 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                 if mangle_ctor_atom(value_name, self.ctors) != mangle_ctor_atom(name, self.ctors) {
                     return None;
                 }
-                let mut bindings = self.match_known_direct_value_record_fields(value_fields, fields)?;
+                let mut bindings =
+                    self.match_known_direct_value_record_fields(value_fields, fields)?;
                 if let Some(as_name) = as_name {
                     bindings.push((as_name.clone(), value.clone()));
                 }
                 Some(bindings)
             }
             Pat::AnonRecord { fields, .. } => {
-                let KnownDirectValue::AnonRecord(value_fields) = value
-                else {
+                let KnownDirectValue::AnonRecord(value_fields) = value else {
                     if let KnownDirectValue::Atom(atom) = value {
                         return self
                             .match_known_direct_atom_pattern(atom, pat)
@@ -912,10 +906,12 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             }
             KnownDirectValue::Tuple(elements) => {
                 let (elements, bindings) = self.lower_known_direct_values_as_core_atoms(elements);
-                bindings.into_iter().rev().fold(
-                    CExpr::Tuple(elements),
-                    |body, (name, value)| CExpr::Let(name, Box::new(value), Box::new(body)),
-                )
+                bindings
+                    .into_iter()
+                    .rev()
+                    .fold(CExpr::Tuple(elements), |body, (name, value)| {
+                        CExpr::Let(name, Box::new(value), Box::new(body))
+                    })
             }
             KnownDirectValue::AnonRecord(fields) => {
                 let names: Vec<&str> = fields.iter().map(|(n, _)| n.as_str()).collect();
@@ -928,10 +924,12 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                     self.lower_known_direct_values_as_core_atoms(&sorted_values);
                 let mut elems = vec![CExpr::Lit(CLit::Atom(tag))];
                 elems.extend(field_values);
-                bindings.into_iter().rev().fold(
-                    CExpr::Tuple(elems),
-                    |body, (name, value)| CExpr::Let(name, Box::new(value), Box::new(body)),
-                )
+                bindings
+                    .into_iter()
+                    .rev()
+                    .fold(CExpr::Tuple(elems), |body, (name, value)| {
+                        CExpr::Let(name, Box::new(value), Box::new(body))
+                    })
             }
             KnownDirectValue::Record { name, fields, .. } => {
                 let tag = mangle_ctor_atom(name, self.ctors);
@@ -941,19 +939,17 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                     self.lower_known_direct_values_as_core_atoms(&field_values);
                 let mut elems = vec![CExpr::Lit(CLit::Atom(tag))];
                 elems.extend(field_values);
-                bindings.into_iter().rev().fold(
-                    CExpr::Tuple(elems),
-                    |body, (name, value)| CExpr::Let(name, Box::new(value), Box::new(body)),
-                )
+                bindings
+                    .into_iter()
+                    .rev()
+                    .fold(CExpr::Tuple(elems), |body, (name, value)| {
+                        CExpr::Let(name, Box::new(value), Box::new(body))
+                    })
             }
         }
     }
 
-    fn lower_known_direct_ctor_value(
-        &mut self,
-        name: &str,
-        args: &[KnownDirectValue],
-    ) -> CExpr {
+    fn lower_known_direct_ctor_value(&mut self, name: &str, args: &[KnownDirectValue]) -> CExpr {
         let bare = name.rsplit('.').next().unwrap_or(name);
         match bare {
             "Nil" if args.is_empty() => return CExpr::Nil,
@@ -963,22 +959,24 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         }
         if name == "Cons" && args.len() == 2 {
             let (args, bindings) = self.lower_known_direct_values_as_core_atoms(args);
-            let body = CExpr::Cons(
-                Box::new(args[0].clone()),
-                Box::new(args[1].clone()),
-            );
-            return bindings.into_iter().rev().fold(body, |body, (name, value)| {
-                CExpr::Let(name, Box::new(value), Box::new(body))
-            });
+            let body = CExpr::Cons(Box::new(args[0].clone()), Box::new(args[1].clone()));
+            return bindings
+                .into_iter()
+                .rev()
+                .fold(body, |body, (name, value)| {
+                    CExpr::Let(name, Box::new(value), Box::new(body))
+                });
         }
         let tag = mangle_ctor_atom(name, self.ctors);
         let (args, bindings) = self.lower_known_direct_values_as_core_atoms(args);
         let mut elems = vec![CExpr::Lit(CLit::Atom(tag))];
         elems.extend(args);
-        bindings.into_iter().rev().fold(
-            CExpr::Tuple(elems),
-            |body, (name, value)| CExpr::Let(name, Box::new(value), Box::new(body)),
-        )
+        bindings
+            .into_iter()
+            .rev()
+            .fold(CExpr::Tuple(elems), |body, (name, value)| {
+                CExpr::Let(name, Box::new(value), Box::new(body))
+            })
     }
 
     fn lower_known_direct_values_as_core_atoms(
@@ -1000,7 +998,6 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         (lowered, bindings)
     }
 }
-
 
 fn lit_values_match(left: &Lit, right: &Lit) -> bool {
     match (left, right) {

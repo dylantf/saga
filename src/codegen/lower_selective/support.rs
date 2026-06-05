@@ -82,6 +82,7 @@ pub(super) struct HofCallbackParam {
 #[derive(Clone, Debug, PartialEq)]
 pub(super) struct KnownCpsLambda {
     pub(super) method_key: Option<KnownDictMethodKey>,
+    pub(super) method_dict: Option<KnownDictValue>,
     pub(super) dict_bindings: Vec<(String, Atom)>,
     pub(super) params: Vec<Pat>,
     pub(super) body: Box<MExpr>,
@@ -248,7 +249,10 @@ pub(super) fn lower_param_names(params: &[Pat]) -> Vec<String> {
 }
 
 pub(super) fn core_expr_is_simple_value(expr: &CExpr) -> bool {
-    matches!(expr, CExpr::Lit(_) | CExpr::Var(_) | CExpr::Nil | CExpr::FunRef(_, _))
+    matches!(
+        expr,
+        CExpr::Lit(_) | CExpr::Var(_) | CExpr::Nil | CExpr::FunRef(_, _)
+    )
 }
 
 pub(super) fn direct_param_supported(pat: &Pat) -> bool {

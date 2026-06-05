@@ -536,7 +536,8 @@ fn selective_core_specializes_known_generic_to_json_records() {
     assert!(
         main_body.contains("call 'erlang':'integer_to_binary'\n                  (1)")
             && main_body.contains("call 'erlang':'integer_to_binary'\n                        (2)")
-            && main_body.contains("call 'erlang':'integer_to_binary'\n                              (3)")
+            && main_body
+                .contains("call 'erlang':'integer_to_binary'\n                              (3)")
             && !main_body.contains("apply '__dict_ToJson_IntList'/0()"),
         "finite recursive IntList to_json should specialize without calling the recursive dict in main\n{main_body}"
     );

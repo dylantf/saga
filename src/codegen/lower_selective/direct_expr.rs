@@ -474,7 +474,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         Some(lowered)
     }
 
-    fn lower_known_to_json_value(
+    pub(super) fn lower_known_to_json_value(
         &mut self,
         known_dict: &KnownDictValue,
         value: &KnownDirectValue,
@@ -500,6 +500,18 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         }
         if dict_name.ends_with("_Std_String_String") {
             return Some(json_quote(self.lower_known_direct_value(value)));
+        }
+        if dict_name.ends_with("_Std_Maybe_Maybe") {
+            let child = self.known_dict_arg(0, known_dict)?;
+            return self.lower_known_to_json_maybe_value(&child, value);
+        }
+        if dict_name.ends_with("_Std_List_List") {
+            let child = self.known_dict_arg(0, known_dict)?;
+            return self.lower_known_to_json_list_value(
+                &child,
+                value,
+                known_dict_uses_compact_json(known_dict),
+            );
         }
         if dict_name.ends_with("_Std_Generic_U1") {
             return Some(json_bytes("null"));
@@ -533,7 +545,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                 }
                 let label = self.lower_known_symbol_arg(0, known_dict)?;
                 let child = self.known_dict_arg(1, known_dict)?;
-                let prefix = string_append(json_quote(label), json_bytes(": "));
+                let prefix = string_append(json_quote(label), json_key_separator(known_dict));
                 let payload = self.lower_known_to_json_value(&child, payload)?;
                 Some(string_append(prefix, payload))
             }
@@ -548,7 +560,10 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                 let right_dict = self.known_dict_arg(1, known_dict)?;
                 let left = self.lower_known_to_json_value(&left_dict, left)?;
                 let right = self.lower_known_to_json_value(&right_dict, right)?;
-                Some(string_append(string_append(left, json_bytes(", ")), right))
+                Some(string_append(
+                    string_append(left, json_item_separator(known_dict)),
+                    right,
+                ))
             }
             GenericToJsonKind::Or => {
                 let [payload] = args.as_slice() else {
@@ -575,8 +590,13 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                 }
                 let label = self.lower_known_symbol_arg(0, known_dict)?;
                 let child = self.known_dict_arg(1, known_dict)?;
+                if child.constructor_name.contains("VariantPayload")
+                    && child.constructor_name.ends_with("_Std_Generic_U1")
+                {
+                    return Some(json_quote(label));
+                }
                 let prefix = string_append(json_bytes("{"), json_quote(label));
-                let prefix = string_append(prefix, json_bytes(": "));
+                let prefix = string_append(prefix, json_key_separator(known_dict));
                 let payload = self.lower_known_to_json_value(&child, payload)?;
                 let body = string_append(prefix, payload);
                 Some(string_append(body, json_bytes("}")))
@@ -590,7 +610,10 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                 }
                 let child = self.known_dict_arg(0, known_dict)?;
                 let inner = self.lower_known_to_json_value(&child, inner)?;
-                Some(string_append(string_append(json_bytes("{"), inner), json_bytes("}")))
+                Some(string_append(
+                    string_append(json_bytes("{"), inner),
+                    json_bytes("}"),
+                ))
             }
             GenericToJsonKind::Adt => {
                 let [_, inner] = args.as_slice() else {
@@ -616,14 +639,9 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             return None;
         }
         let value_size = known_direct_value_size(value);
-        if self
-            .active_known_to_json_values
-            .iter()
-            .any(|frame| {
-                frame.constructor_name == known_dict.constructor_name
-                    && frame.value_size <= value_size
-            })
-        {
+        if self.active_known_to_json_values.iter().any(|frame| {
+            frame.constructor_name == known_dict.constructor_name && frame.value_size <= value_size
+        }) {
             return None;
         }
 
@@ -657,17 +675,380 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         self.bind_known_dict_values(known_dict_aliases);
         self.bind_pat_locals(param);
         self.bind_known_direct_value_pattern_values(value_bindings);
-        let lowered = self.lower_expr(body);
+        let Some(lowered) = self.lower_known_to_json_expr(body) else {
+            self.pop_scope();
+            self.active_known_to_json_values.pop();
+            return None;
+        };
         self.pop_scope();
         self.active_known_to_json_values.pop();
         Some(lowered)
     }
 
-    fn known_dict_arg(
-        &self,
-        index: usize,
+    fn lower_known_to_json_expr(&mut self, expr: &MExpr) -> Option<CExpr> {
+        match expr {
+            MExpr::Let { var, value, body }
+            | MExpr::Bind {
+                var, value, body, ..
+            } => {
+                if let Some(lowered) =
+                    self.try_lower_known_to_json_case_value_bind(var, value, body)
+                {
+                    return Some(lowered);
+                }
+                let local_shape = self
+                    .cps_bind_shape_for_expr(value)
+                    .or_else(|| self.direct_local_shape_for_expr(value));
+                let known_dict = self.known_dict_value_for_expr(value);
+                let known_cps_lambda = self
+                    .known_cps_lambda_for_expr(value)
+                    .or_else(|| self.unchecked_known_to_json_cps_lambda_for_expr(value));
+                let known_direct_lambda = self.known_direct_lambda_for_expr(value);
+                let known_atom = self.known_direct_atom_for_expr(value);
+                let known_value = self.known_direct_value_for_expr(value);
+
+                self.push_scope();
+                self.current_scope_mut().insert(var.name.clone());
+                if let Some(shape) = local_shape {
+                    self.current_shape_scope_mut()
+                        .insert(var.name.clone(), shape);
+                }
+                if let Some(dict) = known_dict {
+                    self.bind_known_dict_value(var.name.clone(), dict);
+                }
+                if let Some(lambda) = known_cps_lambda {
+                    self.bind_known_cps_lambda(var.name.clone(), lambda);
+                }
+                if let Some(lambda) = known_direct_lambda {
+                    self.bind_known_direct_lambda(var.name.clone(), lambda);
+                }
+                if let Some(atom) = known_atom {
+                    self.bind_known_direct_atom(var.name.clone(), atom);
+                }
+                if let Some(value) = known_value {
+                    self.bind_known_direct_value(var.name.clone(), value);
+                }
+                let Some(lowered_body) = self.lower_known_to_json_expr(body) else {
+                    self.pop_scope();
+                    return None;
+                };
+                self.pop_scope();
+
+                if !core_expr_mentions_core_var(&var.name, &lowered_body) {
+                    return Some(lowered_body);
+                }
+                if !self.expr_is_direct_subset(value) {
+                    return None;
+                }
+                Some(CExpr::Let(
+                    core_var(&var.name),
+                    Box::new(self.lower_expr(value)),
+                    Box::new(lowered_body),
+                ))
+            }
+            MExpr::App { head, args, .. } => {
+                if args.len() == 1
+                    && let Some(method_dict) = self.known_to_json_method_dict_for_atom(head)
+                    && let Some(arg_value) = self.known_direct_value_for_atom(&args[0])
+                {
+                    return self.lower_known_to_json_value(&method_dict, &arg_value);
+                }
+                self.expr_is_direct_subset(expr)
+                    .then(|| self.lower_expr(expr))
+            }
+            _ => self
+                .expr_is_direct_subset(expr)
+                .then(|| self.lower_expr(expr)),
+        }
+    }
+
+    fn try_lower_known_to_json_case_value_bind(
+        &mut self,
+        var: &MVar,
+        value: &MExpr,
+        body: &MExpr,
+    ) -> Option<CExpr> {
+        let MExpr::App { head, args, .. } = value else {
+            return None;
+        };
+        let lambda = self.known_direct_lambda_for_atom(head)?;
+        if lambda.params.len() != args.len()
+            || lambda
+                .params
+                .iter()
+                .any(|param| !direct_param_supported(param))
+        {
+            return None;
+        }
+
+        let mut known_dict_aliases = self.known_dict_aliases_for_bindings(&lambda.dict_bindings);
+        known_dict_aliases.extend(self.known_dict_aliases_for_params(&lambda.params, args));
+        let known_atom_bindings =
+            self.known_direct_atom_pattern_bindings_for_params(&lambda.params, args);
+        let known_value_bindings =
+            self.known_direct_value_pattern_bindings_for_params(&lambda.params, args);
+
+        self.push_scope();
+        for (name, _) in &lambda.dict_bindings {
+            self.current_scope_mut().insert(name.clone());
+        }
+        self.bind_known_dict_values(known_dict_aliases);
+        for pat in &lambda.params {
+            self.bind_pat_locals(pat);
+        }
+        self.bind_known_direct_atom_pattern_values(known_atom_bindings);
+        self.bind_known_direct_value_pattern_values(known_value_bindings);
+
+        let MExpr::Case {
+            scrutinee, arms, ..
+        } = lambda.body.as_ref()
+        else {
+            self.pop_scope();
+            return None;
+        };
+        let scrutinee_expr = match self.known_direct_value_for_atom(scrutinee) {
+            Some(value) => self.lower_known_direct_value(&value),
+            None => {
+                if !self.atom_is_direct_subset(scrutinee) {
+                    self.pop_scope();
+                    return None;
+                }
+                self.lower_atom(scrutinee)
+            }
+        };
+
+        let mut lowered_arms = Vec::with_capacity(arms.len());
+        for arm in arms {
+            if arm.guard.is_some() {
+                self.pop_scope();
+                return None;
+            }
+            self.push_scope();
+            self.bind_pat_locals(&arm.pattern);
+            let Some(known_value) = self.known_direct_value_for_expr(&arm.body) else {
+                self.pop_scope();
+                self.pop_scope();
+                return None;
+            };
+            self.current_scope_mut().insert(var.name.clone());
+            self.bind_known_direct_value(var.name.clone(), known_value);
+            let Some(lowered_body) = self.lower_known_to_json_expr(body) else {
+                self.pop_scope();
+                self.pop_scope();
+                return None;
+            };
+            let pat = self.lower_pat(&arm.pattern);
+            self.pop_scope();
+            lowered_arms.push(CArm {
+                pat,
+                guard: None,
+                body: lowered_body,
+            });
+        }
+        self.pop_scope();
+
+        Some(CExpr::Case(Box::new(scrutinee_expr), lowered_arms))
+    }
+
+    fn known_to_json_method_dict_for_atom(&self, atom: &Atom) -> Option<KnownDictValue> {
+        let Atom::Var { name, .. } = atom else {
+            return None;
+        };
+        let lambda = self.known_cps_lambda(&name.name)?;
+        let method_key = lambda.method_key.as_ref()?;
+        if method_key.method_index != 0 || !method_key.constructor_name.contains("ToJson") {
+            return None;
+        }
+        lambda.method_dict
+    }
+
+    fn unchecked_known_to_json_cps_lambda_for_expr(&self, expr: &MExpr) -> Option<KnownCpsLambda> {
+        let MExpr::DictMethodAccess {
+            dict, method_index, ..
+        } = expr
+        else {
+            return None;
+        };
+        if *method_index != 0 {
+            return None;
+        }
+        let Atom::Var { name, .. } = dict else {
+            return None;
+        };
+        let known_dict = self.known_dict_value(&name.name)?;
+        if !known_dict.methods_inlineable || !known_dict.constructor_name.contains("ToJson") {
+            return None;
+        }
+        let method = known_dict.methods.first()?.clone();
+        let Atom::Lambda { params, body, .. } = method else {
+            return None;
+        };
+        if params.iter().any(|param| !direct_param_supported(param)) {
+            return None;
+        }
+        let method_key = KnownDictMethodKey {
+            constructor_name: known_dict.constructor_name.clone(),
+            method_index: *method_index,
+        };
+        let dict_bindings = known_dict
+            .dict_params
+            .iter()
+            .cloned()
+            .zip(known_dict.dict_args.iter().cloned())
+            .collect();
+        Some(KnownCpsLambda {
+            method_key: Some(method_key),
+            method_dict: Some(known_dict),
+            dict_bindings,
+            params,
+            body,
+        })
+    }
+
+    fn lower_known_to_json_list_value(
+        &mut self,
+        element_dict: &KnownDictValue,
+        value: &KnownDirectValue,
+        compact: bool,
+    ) -> Option<CExpr> {
+        let list_value = self.lower_known_direct_value(value);
+        let list_var = self.fresh_cps_temp("_JsonList");
+        let rest_fun = self.fresh_cps_temp("__json_list_rest");
+        let rest_list = self.fresh_cps_temp("_JsonRestList");
+        let rest_head = self.fresh_cps_temp("_JsonRestHead");
+        let rest_tail = self.fresh_cps_temp("_JsonRestTail");
+        let first_head = self.fresh_cps_temp("_JsonHead");
+        let first_tail = self.fresh_cps_temp("_JsonTail");
+
+        let rest_head_json =
+            self.lower_known_to_json_value_for_core_var(element_dict, &rest_head)?;
+        let rest_body = CExpr::Case(
+            Box::new(CExpr::Var(rest_list.clone())),
+            vec![
+                CArm {
+                    pat: CPat::Nil,
+                    guard: None,
+                    body: json_bytes("]"),
+                },
+                CArm {
+                    pat: CPat::Cons(
+                        Box::new(CPat::Var(rest_head.clone())),
+                        Box::new(CPat::Var(rest_tail.clone())),
+                    ),
+                    guard: None,
+                    body: string_append(
+                        string_append(json_list_separator(compact), rest_head_json),
+                        CExpr::Apply(
+                            Box::new(CExpr::FunRef(rest_fun.clone(), 1)),
+                            vec![CExpr::Var(rest_tail)],
+                        ),
+                    ),
+                },
+            ],
+        );
+
+        let first_head_json =
+            self.lower_known_to_json_value_for_core_var(element_dict, &first_head)?;
+        let list_body = CExpr::Case(
+            Box::new(CExpr::Var(list_var.clone())),
+            vec![
+                CArm {
+                    pat: CPat::Nil,
+                    guard: None,
+                    body: json_bytes("[]"),
+                },
+                CArm {
+                    pat: CPat::Cons(
+                        Box::new(CPat::Var(first_head.clone())),
+                        Box::new(CPat::Var(first_tail.clone())),
+                    ),
+                    guard: None,
+                    body: string_append(
+                        string_append(json_bytes("["), first_head_json),
+                        CExpr::Apply(
+                            Box::new(CExpr::FunRef(rest_fun.clone(), 1)),
+                            vec![CExpr::Var(first_tail)],
+                        ),
+                    ),
+                },
+            ],
+        );
+
+        Some(CExpr::Let(
+            list_var,
+            Box::new(list_value),
+            Box::new(CExpr::LetRec(
+                vec![(
+                    rest_fun,
+                    1,
+                    CExpr::Fun(vec![rest_list], Box::new(rest_body)),
+                )],
+                Box::new(list_body),
+            )),
+        ))
+    }
+
+    fn lower_known_to_json_maybe_value(
+        &mut self,
+        element_dict: &KnownDictValue,
+        value: &KnownDirectValue,
+    ) -> Option<CExpr> {
+        match value {
+            KnownDirectValue::Ctor { name, args } => {
+                let bare = name.rsplit('.').next().unwrap_or(name);
+                match (bare, args.as_slice()) {
+                    ("Nothing", []) => Some(json_bytes("null")),
+                    ("Just", [payload]) => self.lower_known_to_json_value(element_dict, payload),
+                    _ => None,
+                }
+            }
+            _ => {
+                let maybe_value = self.lower_known_direct_value(value);
+                let maybe_var = self.fresh_cps_temp("_JsonMaybe");
+                let payload_var = self.fresh_cps_temp("_JsonMaybeValue");
+                let just_tag = mangle_ctor_atom("Just", self.ctors);
+                let nothing_tag = mangle_ctor_atom("Nothing", self.ctors);
+                let payload_json =
+                    self.lower_known_to_json_value_for_core_var(element_dict, &payload_var)?;
+                Some(CExpr::Let(
+                    maybe_var.clone(),
+                    Box::new(maybe_value),
+                    Box::new(CExpr::Case(
+                        Box::new(CExpr::Var(maybe_var)),
+                        vec![
+                            CArm {
+                                pat: CPat::Tuple(vec![CPat::Lit(CLit::Atom(nothing_tag))]),
+                                guard: None,
+                                body: json_bytes("null"),
+                            },
+                            CArm {
+                                pat: CPat::Tuple(vec![
+                                    CPat::Lit(CLit::Atom(just_tag)),
+                                    CPat::Var(payload_var),
+                                ]),
+                                guard: None,
+                                body: payload_json,
+                            },
+                        ],
+                    )),
+                ))
+            }
+        }
+    }
+
+    fn lower_known_to_json_value_for_core_var(
+        &mut self,
         known_dict: &KnownDictValue,
-    ) -> Option<KnownDictValue> {
+        name: &str,
+    ) -> Option<CExpr> {
+        self.push_scope();
+        self.current_scope_mut().insert(name.to_string());
+        let lowered = self.lower_known_to_json_value(known_dict, &known_var(name));
+        self.pop_scope();
+        lowered
+    }
+
+    fn known_dict_arg(&self, index: usize, known_dict: &KnownDictValue) -> Option<KnownDictValue> {
         let Atom::Var { name, .. } = known_dict.dict_args.get(index)? else {
             return None;
         };
@@ -682,7 +1063,6 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         let atom = known_dict.dict_args.get(index)?;
         Some(self.lower_atom(atom))
     }
-
 
     pub(super) fn known_dict_method_is_active(
         &self,
@@ -914,12 +1294,41 @@ fn json_quote(value: CExpr) -> CExpr {
     string_append(string_append(json_bytes("\""), value), json_bytes("\""))
 }
 
+fn json_key_separator(known_dict: &KnownDictValue) -> CExpr {
+    if known_dict_uses_compact_json(known_dict) {
+        json_bytes(":")
+    } else {
+        json_bytes(": ")
+    }
+}
+
+fn json_item_separator(known_dict: &KnownDictValue) -> CExpr {
+    json_list_separator(known_dict_uses_compact_json(known_dict))
+}
+
+fn json_list_separator(compact: bool) -> CExpr {
+    if compact {
+        json_bytes(",")
+    } else {
+        json_bytes(", ")
+    }
+}
+
+fn known_dict_uses_compact_json(known_dict: &KnownDictValue) -> bool {
+    known_dict.constructor_name.contains("SagaJson_Encode")
+        || known_dict.constructor_name.contains("sagajson_encode")
+}
+
 fn string_append(left: CExpr, right: CExpr) -> CExpr {
     CExpr::Call(
         "std_string_bridge".to_string(),
         "append".to_string(),
         vec![left, right],
     )
+}
+
+fn known_var(name: &str) -> KnownDirectValue {
+    KnownDirectValue::Core(CExpr::Var(name.to_string()))
 }
 
 fn known_direct_value_size(value: &KnownDirectValue) -> usize {

@@ -112,7 +112,11 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             if let Some(dict) = self.local_known_dict_values[index].get(name) {
                 return Some(dict.clone());
             }
-            if self.locals.get(index).is_some_and(|scope| scope.contains(name)) {
+            if self
+                .locals
+                .get(index)
+                .is_some_and(|scope| scope.contains(name))
+            {
                 return None;
             }
         }

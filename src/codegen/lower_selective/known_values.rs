@@ -463,14 +463,16 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         }
         let dict_bindings: Vec<(String, Atom)> = known_dict
             .dict_params
-            .into_iter()
-            .zip(known_dict.dict_args)
+            .iter()
+            .cloned()
+            .zip(known_dict.dict_args.iter().cloned())
             .collect();
         if !self.known_cps_dict_method_lambda_is_supported(&dict_bindings, &params, &body) {
             return None;
         }
         Some(KnownCpsLambda {
             method_key: Some(method_key),
+            method_dict: Some(known_dict),
             dict_bindings,
             params,
             body,

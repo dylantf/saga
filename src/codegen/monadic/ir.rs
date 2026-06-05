@@ -670,7 +670,11 @@ fn push_mexpr_children(expr: MExpr, stack: &mut Vec<MExprWorkItem>) {
         }
         MExpr::RecordUpdate { record, fields, .. } => {
             stack.push(MExprWorkItem::Atom(record));
-            stack.extend(fields.into_iter().map(|(_, atom)| MExprWorkItem::Atom(atom)));
+            stack.extend(
+                fields
+                    .into_iter()
+                    .map(|(_, atom)| MExprWorkItem::Atom(atom)),
+            );
         }
         MExpr::BinOp { left, right, .. } => {
             stack.push(MExprWorkItem::Atom(left));
@@ -714,7 +718,11 @@ fn push_atom_children(atom: Atom, stack: &mut Vec<MExprWorkItem>) {
             stack.extend(args.into_iter().map(MExprWorkItem::Atom));
         }
         Atom::AnonRecord { fields, .. } | Atom::Record { fields, .. } => {
-            stack.extend(fields.into_iter().map(|(_, atom)| MExprWorkItem::Atom(atom)));
+            stack.extend(
+                fields
+                    .into_iter()
+                    .map(|(_, atom)| MExprWorkItem::Atom(atom)),
+            );
         }
         Atom::Lambda { body, .. } => stack.push(MExprWorkItem::Expr(*body)),
         Atom::BackendSpawnThunk { callback, .. } => stack.push(MExprWorkItem::Atom(*callback)),

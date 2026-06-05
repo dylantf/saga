@@ -23,6 +23,8 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         let known_dict_aliases = self.known_dict_aliases_for_params(&fb.params, args);
         let known_atom_bindings =
             self.known_direct_atom_pattern_bindings_for_params(&fb.params, args);
+        let known_value_bindings =
+            self.known_direct_value_pattern_bindings_for_params(&fb.params, args);
 
         self.static_handler_inline_stack
             .push(function_name.to_string());
@@ -30,6 +32,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         self.bind_fun_param_locals_with_arg_shapes(&fb, args);
         self.bind_known_dict_values(known_dict_aliases);
         self.bind_known_direct_atom_pattern_values(known_atom_bindings);
+        self.bind_known_direct_value_pattern_values(known_value_bindings);
         let lowered_body = self.lower_cps_expr(&fb.body, evidence, return_k);
         self.pop_scope();
         self.static_handler_inline_stack.pop();
@@ -277,6 +280,8 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         let known_dict_aliases = self.known_dict_aliases_for_params(&fb.params, args);
         let known_atom_bindings =
             self.known_direct_atom_pattern_bindings_for_params(&fb.params, args);
+        let known_value_bindings =
+            self.known_direct_value_pattern_bindings_for_params(&fb.params, args);
 
         let compiled = self.module_ctx.modules.get(&source_module_name)?;
         let mut imported = DirectLowerer::new(
@@ -322,6 +327,7 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         imported.bind_fun_param_locals(&fb);
         imported.bind_known_dict_values(known_dict_aliases);
         imported.bind_known_direct_atom_pattern_values(known_atom_bindings);
+        imported.bind_known_direct_value_pattern_values(known_value_bindings);
         let lowered_body = imported
             .expr_is_cps_island_subset(&fb.body)
             .then(|| imported.lower_cps_expr(&fb.body, evidence, return_k));

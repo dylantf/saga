@@ -35,10 +35,12 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             Atom::Ctor { name, args, .. } => self.lower_ctor_atom(name, args),
             Atom::Tuple { elements, .. } => {
                 let (elements, bindings) = self.lower_atoms_as_core_values(elements);
-                bindings.into_iter().rev().fold(
-                    CExpr::Tuple(elements),
-                    |body, (name, value)| CExpr::Let(name, Box::new(value), Box::new(body)),
-                )
+                bindings
+                    .into_iter()
+                    .rev()
+                    .fold(CExpr::Tuple(elements), |body, (name, value)| {
+                        CExpr::Let(name, Box::new(value), Box::new(body))
+                    })
             }
             Atom::AnonRecord { fields, .. } => self.lower_anon_record_atom(fields),
             Atom::Record { name, fields, .. } => self.lower_record_atom(name, fields),
@@ -189,18 +191,23 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         if name == "Cons" && args.len() == 2 {
             let (args, bindings) = self.lower_atoms_as_core_values(args);
             let body = CExpr::Cons(Box::new(args[0].clone()), Box::new(args[1].clone()));
-            return bindings.into_iter().rev().fold(body, |body, (name, value)| {
-                CExpr::Let(name, Box::new(value), Box::new(body))
-            });
+            return bindings
+                .into_iter()
+                .rev()
+                .fold(body, |body, (name, value)| {
+                    CExpr::Let(name, Box::new(value), Box::new(body))
+                });
         }
         let tag = mangle_ctor_atom(name, self.ctors);
         let (args, bindings) = self.lower_atoms_as_core_values(args);
         let mut elems = vec![CExpr::Lit(CLit::Atom(tag))];
         elems.extend(args);
-        bindings.into_iter().rev().fold(
-            CExpr::Tuple(elems),
-            |body, (name, value)| CExpr::Let(name, Box::new(value), Box::new(body)),
-        )
+        bindings
+            .into_iter()
+            .rev()
+            .fold(CExpr::Tuple(elems), |body, (name, value)| {
+                CExpr::Let(name, Box::new(value), Box::new(body))
+            })
     }
 
     pub(super) fn lower_anon_record_atom(&mut self, fields: &[(String, Atom)]) -> CExpr {
@@ -212,10 +219,12 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         let (fields, bindings) = self.lower_atoms_as_core_values(&sorted_atoms);
         let mut elems = vec![CExpr::Lit(CLit::Atom(tag))];
         elems.extend(fields);
-        bindings.into_iter().rev().fold(
-            CExpr::Tuple(elems),
-            |body, (name, value)| CExpr::Let(name, Box::new(value), Box::new(body)),
-        )
+        bindings
+            .into_iter()
+            .rev()
+            .fold(CExpr::Tuple(elems), |body, (name, value)| {
+                CExpr::Let(name, Box::new(value), Box::new(body))
+            })
     }
 
     pub(super) fn lower_record_atom(&mut self, name: &str, fields: &[(String, Atom)]) -> CExpr {
@@ -224,10 +233,12 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         let (fields, bindings) = self.lower_atoms_as_core_values(&field_atoms);
         let mut elems = vec![CExpr::Lit(CLit::Atom(tag))];
         elems.extend(fields);
-        bindings.into_iter().rev().fold(
-            CExpr::Tuple(elems),
-            |body, (name, value)| CExpr::Let(name, Box::new(value), Box::new(body)),
-        )
+        bindings
+            .into_iter()
+            .rev()
+            .fold(CExpr::Tuple(elems), |body, (name, value)| {
+                CExpr::Let(name, Box::new(value), Box::new(body))
+            })
     }
 
     pub(super) fn lower_atoms_as_core_values(
@@ -263,9 +274,12 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         body: CExpr,
         bindings: Vec<(String, CExpr)>,
     ) -> CExpr {
-        bindings.into_iter().rev().fold(body, |body, (name, value)| {
-            CExpr::Let(name, Box::new(value), Box::new(body))
-        })
+        bindings
+            .into_iter()
+            .rev()
+            .fold(body, |body, (name, value)| {
+                CExpr::Let(name, Box::new(value), Box::new(body))
+            })
     }
 
     pub(super) fn lower_bitstring_value(
