@@ -259,6 +259,7 @@ struct DirectLowerer<'a, 'info> {
     local_known_direct_atoms: Vec<HashMap<String, Atom>>,
     local_known_direct_values: Vec<HashMap<String, KnownDirectValue>>,
     active_known_dict_methods: HashSet<KnownDictMethodKey>,
+    active_known_to_json_values: Vec<KnownToJsonFrame>,
     imported_clone_source_module: Option<String>,
     options: LoweringOptions,
 }

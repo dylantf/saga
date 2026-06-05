@@ -479,6 +479,14 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         known_dict: &KnownDictValue,
         value: &KnownDirectValue,
     ) -> Option<CExpr> {
+        self.lower_known_to_json_value_guarded(known_dict, value)
+    }
+
+    fn lower_known_to_json_value_guarded(
+        &mut self,
+        known_dict: &KnownDictValue,
+        value: &KnownDirectValue,
+    ) -> Option<CExpr> {
         let dict_name = known_dict.constructor_name.as_str();
         if !dict_name.contains("ToJson") {
             return None;
@@ -496,12 +504,15 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         if dict_name.ends_with("_Std_Generic_U1") {
             return Some(json_bytes("null"));
         }
+        let Some(kind) = generic_to_json_kind(dict_name) else {
+            return self.lower_known_user_to_json_value(known_dict, value);
+        };
 
         let KnownDirectValue::Ctor { name, args } = value else {
             return None;
         };
         let bare = name.rsplit('.').next().unwrap_or(name);
-        match generic_to_json_kind(dict_name)? {
+        match kind {
             GenericToJsonKind::U1 => Some(json_bytes("null")),
             GenericToJsonKind::Leaf => {
                 let [payload] = args.as_slice() else {
@@ -592,6 +603,64 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
                 self.lower_known_to_json_value(&child, inner)
             }
         }
+    }
+
+    fn lower_known_user_to_json_value(
+        &mut self,
+        known_dict: &KnownDictValue,
+        value: &KnownDirectValue,
+    ) -> Option<CExpr> {
+        if !known_dict.methods_inlineable
+            || !self.dict_param_collisions_are_self_aliases(known_dict)
+        {
+            return None;
+        }
+        let value_size = known_direct_value_size(value);
+        if self
+            .active_known_to_json_values
+            .iter()
+            .any(|frame| {
+                frame.constructor_name == known_dict.constructor_name
+                    && frame.value_size <= value_size
+            })
+        {
+            return None;
+        }
+
+        let method = known_dict.methods.first()?;
+        let Atom::Lambda { params, body, .. } = method else {
+            return None;
+        };
+        let [param] = params.as_slice() else {
+            return None;
+        };
+        if !direct_param_supported(param) {
+            return None;
+        }
+        let value_bindings = self.match_known_direct_value_pattern(value, param)?;
+        let dict_bindings: Vec<(String, Atom)> = known_dict
+            .dict_params
+            .iter()
+            .cloned()
+            .zip(known_dict.dict_args.iter().cloned())
+            .collect();
+        let known_dict_aliases = self.known_dict_aliases_for_bindings(&dict_bindings);
+
+        self.active_known_to_json_values.push(KnownToJsonFrame {
+            constructor_name: known_dict.constructor_name.clone(),
+            value_size,
+        });
+        self.push_scope();
+        for (name, _) in &dict_bindings {
+            self.current_scope_mut().insert(name.clone());
+        }
+        self.bind_known_dict_values(known_dict_aliases);
+        self.bind_pat_locals(param);
+        self.bind_known_direct_value_pattern_values(value_bindings);
+        let lowered = self.lower_expr(body);
+        self.pop_scope();
+        self.active_known_to_json_values.pop();
+        Some(lowered)
     }
 
     fn known_dict_arg(
@@ -851,4 +920,25 @@ fn string_append(left: CExpr, right: CExpr) -> CExpr {
         "append".to_string(),
         vec![left, right],
     )
+}
+
+fn known_direct_value_size(value: &KnownDirectValue) -> usize {
+    match value {
+        KnownDirectValue::Atom(_) | KnownDirectValue::Core(_) => 1,
+        KnownDirectValue::Ctor { args, .. } | KnownDirectValue::Tuple(args) => {
+            1 + args.iter().map(known_direct_value_size).sum::<usize>()
+        }
+        KnownDirectValue::AnonRecord(fields) => {
+            1 + fields
+                .iter()
+                .map(|(_, value)| known_direct_value_size(value))
+                .sum::<usize>()
+        }
+        KnownDirectValue::Record { fields, .. } => {
+            1 + fields
+                .iter()
+                .map(|(_, value)| known_direct_value_size(value))
+                .sum::<usize>()
+        }
+    }
 }

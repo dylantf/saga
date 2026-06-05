@@ -533,6 +533,13 @@ fn selective_core_specializes_known_generic_to_json_records() {
             && main_body.contains("#<110>(8,1,'integer',['unsigned'|['big']]),#<117>"),
         "Nada to_json should specialize through known Generic case constructors\n{main_body}"
     );
+    assert!(
+        main_body.contains("call 'erlang':'integer_to_binary'\n                  (1)")
+            && main_body.contains("call 'erlang':'integer_to_binary'\n                        (2)")
+            && main_body.contains("call 'erlang':'integer_to_binary'\n                              (3)")
+            && !main_body.contains("apply '__dict_ToJson_IntList'/0()"),
+        "finite recursive IntList to_json should specialize without calling the recursive dict in main\n{main_body}"
+    );
 
     let output = std::process::Command::new(binary)
         .args([
