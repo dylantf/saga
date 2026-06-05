@@ -9,7 +9,7 @@
 //! See `docs/planning/uniform-effect-translation/lowerer-state-refactor.md`
 //! for the design rationale (step 1).
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::ast::Pat;
 
@@ -81,6 +81,15 @@ pub(crate) struct LowerCtx {
     /// shadowed by ANF/monadic binders. Local binders must win before those
     /// resolved symbols are considered.
     pub locals: BTreeSet<String>,
+
+    /// Local names proven to hold direct-callable function values.
+    ///
+    /// The uniform fallback lowerer normally calls function values with
+    /// `(args..., _Evidence, _ReturnK)`. Dict method slots are different:
+    /// pure trait methods are stored in dictionaries as direct function
+    /// values, so a local bound from `DictMethodAccess` must be called at
+    /// source arity and have its result passed to the ambient K.
+    pub direct_callable_locals: BTreeMap<String, usize>,
 }
 
 impl LowerCtx {
@@ -95,6 +104,7 @@ impl LowerCtx {
             preserve_abort_marker: false,
             result_delimiter: None,
             locals: BTreeSet::new(),
+            direct_callable_locals: BTreeMap::new(),
         }
     }
 
@@ -188,8 +198,10 @@ impl LowerCtx {
 
     /// Clone + add one source-level local binding.
     pub fn with_local(&self, name: impl Into<String>) -> Self {
+        let name = name.into();
         let mut next = self.clone();
-        next.locals.insert(name.into());
+        next.locals.insert(name.clone());
+        next.direct_callable_locals.remove(&name);
         next
     }
 
@@ -199,7 +211,19 @@ impl LowerCtx {
         I: IntoIterator<Item = String>,
     {
         let mut next = self.clone();
-        next.locals.extend(names);
+        for name in names {
+            next.locals.insert(name.clone());
+            next.direct_callable_locals.remove(&name);
+        }
+        next
+    }
+
+    /// Clone + add a local binding whose value is known to use direct ABI.
+    pub fn with_direct_callable_local(&self, name: impl Into<String>, arity: usize) -> Self {
+        let name = name.into();
+        let mut next = self.clone();
+        next.locals.insert(name.clone());
+        next.direct_callable_locals.insert(name, arity);
         next
     }
 

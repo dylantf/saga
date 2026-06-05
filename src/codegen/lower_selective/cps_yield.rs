@@ -311,15 +311,12 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
         &mut self,
         key: CExpr,
         callback: CExpr,
-        evidence: CExpr,
+        _evidence: CExpr,
         backend: RefDirectBackend,
     ) -> Option<CExpr> {
         let old = self.fresh_cps_temp("_NativeRefOld");
         let new_value = self.fresh_cps_temp("_NativeRefNew");
         let discard = self.fresh_cps_temp("_NativeRefPut");
-        let k_var = self.fresh_cps_temp("_NativeRefK");
-        let v_var = self.fresh_cps_temp("_NativeRefV");
-        let identity_k = CExpr::Fun(vec![v_var.clone()], Box::new(CExpr::Var(v_var)));
         let get_old = match backend {
             RefDirectBackend::ProcessDictionary => {
                 CExpr::Call("erlang".to_string(), "get".to_string(), vec![key.clone()])
@@ -377,19 +374,12 @@ impl<'a, 'info> DirectLowerer<'a, 'info> {
             old.clone(),
             Box::new(get_old),
             Box::new(CExpr::Let(
-                k_var.clone(),
-                Box::new(identity_k),
+                new_value.clone(),
+                Box::new(CExpr::Apply(Box::new(callback), vec![CExpr::Var(old)])),
                 Box::new(CExpr::Let(
-                    new_value.clone(),
-                    Box::new(CExpr::Apply(
-                        Box::new(callback),
-                        vec![CExpr::Var(old), evidence, CExpr::Var(k_var)],
-                    )),
-                    Box::new(CExpr::Let(
-                        discard,
-                        Box::new(put_new),
-                        Box::new(CExpr::Var(new_value)),
-                    )),
+                    discard,
+                    Box::new(put_new),
+                    Box::new(CExpr::Var(new_value)),
                 )),
             )),
         ))

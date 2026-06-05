@@ -434,16 +434,13 @@ fn build_print_wrapper(name: String, stderr: bool) -> CFunDef {
 ///   in apply _ReturnK('unit')
 /// ```
 ///
-/// **Note.** The dict's debug method is itself a uniform-shape closure
-/// (`fun(X, _Evidence, _ReturnK) -> …`), so applying it as `_DebugFn(X)`
-/// alone would underfill the arity. The wrapper threads outer
-/// `_Evidence` and an identity continuation through.
+/// **Note.** Pure trait method slots are direct function values, so this
+/// wrapper calls the Debug method at source arity and then threads the wrapper
+/// result through `_ReturnK`.
 fn build_dbg_wrapper(name: String) -> CFunDef {
     let dict_param = "Dict".to_string();
     let x_param = "X".to_string();
     let debug_fn_var = "_DebugFn".to_string();
-    let id_k_var = "_IdK".to_string();
-    let v_param = "_V".to_string();
     let str_var = "_Str".to_string();
     let r_var = "_R".to_string();
 
@@ -455,14 +452,9 @@ fn build_dbg_wrapper(name: String) -> CFunDef {
             CExpr::Var(dict_param.clone()),
         ],
     );
-    let id_k = identity_k(v_param);
     let apply_debug = CExpr::Apply(
         Box::new(CExpr::Var(debug_fn_var.clone())),
-        vec![
-            CExpr::Var(x_param.clone()),
-            CExpr::Var(EVIDENCE_VAR.to_string()),
-            CExpr::Var(id_k_var.clone()),
-        ],
+        vec![CExpr::Var(x_param.clone())],
     );
     let print = CExpr::Call(
         "io".to_string(),
@@ -484,8 +476,7 @@ fn build_dbg_wrapper(name: String) -> CFunDef {
 
     let let_r = CExpr::Let(r_var, Box::new(print), Box::new(apply_k));
     let let_str = CExpr::Let(str_var, Box::new(apply_debug), Box::new(let_r));
-    let let_id_k = CExpr::Let(id_k_var, Box::new(id_k), Box::new(let_str));
-    let let_debug_fn = CExpr::Let(debug_fn_var, Box::new(extract), Box::new(let_id_k));
+    let let_debug_fn = CExpr::Let(debug_fn_var, Box::new(extract), Box::new(let_str));
 
     CFunDef {
         name,

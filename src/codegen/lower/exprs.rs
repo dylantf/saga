@@ -7,6 +7,7 @@
 use crate::ast::Pat;
 use crate::codegen::cerl::{CArm, CExpr, CLit, CPat};
 use crate::codegen::monadic::ir::{Atom, BindMode, MExpr, MVar};
+use crate::typechecker::Type;
 
 use super::exprs_edge::binop_atoms;
 use super::pats::lower_param_names;
@@ -427,7 +428,7 @@ impl<'ctx> Lowerer<'ctx> {
         if matches!(mode, BindMode::ValuePosition) && !matches!(value, MExpr::Yield { .. }) {
             return self.lower_value_position_bind(var, value, body, ctx);
         }
-        let body_ctx = ctx.with_local(var.name.clone());
+        let body_ctx = ctx_for_bound_var(ctx, var, self.direct_callable_arity_for_value(value));
         let mut body_ce = self.lower_expr(body, &body_ctx);
         body_ce = self.bubble_abort_to_k(body_ce, &ctx.return_k);
         let bound_var = core_var(&var.name);
@@ -498,7 +499,7 @@ impl<'ctx> Lowerer<'ctx> {
             .with_return_k(local_k.clone())
             .with_preserve_abort_marker(true);
         let value_ce = self.lower_expr(value, &value_ctx);
-        let body_ctx = ctx.with_local(var.name.clone());
+        let body_ctx = ctx_for_bound_var(ctx, var, self.direct_callable_arity_for_value(value));
         let body_ce = self.lower_expr(body, &body_ctx);
         let raw_value = self.fresh_helper_name();
         let mut value_arms = vec![CArm {
@@ -526,6 +527,43 @@ impl<'ctx> Lowerer<'ctx> {
             )),
         );
         self.bubble_abort_to_k(value_bind, &ctx.return_k)
+    }
+
+    fn direct_callable_arity_for_value(&self, value: &MExpr) -> Option<usize> {
+        let MExpr::DictMethodAccess {
+            trait_name,
+            method_index,
+            source,
+            ..
+        } = value
+        else {
+            return None;
+        };
+        self.pure_trait_method_arity(trait_name, *method_index)
+            .or_else(|| closed_pure_function_arity(self.effect_info.type_at_node.get(source)?))
+    }
+
+    fn trait_info(&self, trait_name: &str) -> Option<&crate::typechecker::TraitInfo> {
+        self.effect_info
+            .traits
+            .get(trait_name)
+            .or_else(|| {
+                let bare = trait_name.rsplit('.').next().unwrap_or(trait_name);
+                self.effect_info.traits.get(bare)
+            })
+            .or_else(|| {
+                let bare = trait_name.rsplit('.').next().unwrap_or(trait_name);
+                let canonical = format!("{}.{}", self.current_erlang_module, bare);
+                self.effect_info.traits.get(&canonical)
+            })
+    }
+
+    fn pure_trait_method_arity(&self, trait_name: &str, method_index: usize) -> Option<usize> {
+        let trait_info = self.trait_info(trait_name)?;
+        let method = trait_info.methods.get(method_index)?;
+        method.effect_sig.effects.is_empty().then_some(())?;
+        (!method.effect_sig.is_open_row).then_some(())?;
+        Some(method.effect_sig.user_arity)
     }
 
     /// Lower `Let { var, value, body }` — a non-yielding binder
@@ -693,6 +731,7 @@ impl<'ctx> Lowerer<'ctx> {
             preserve_abort_marker: enclosing.preserve_abort_marker,
             result_delimiter: enclosing.result_delimiter.clone(),
             locals: enclosing.locals.clone(),
+            direct_callable_locals: enclosing.direct_callable_locals.clone(),
         }
         .with_param_locals(params);
         let body_ce_inner = self.lower_expr(body, &body_ctx);
@@ -717,4 +756,25 @@ impl<'ctx> Lowerer<'ctx> {
         self.restore_counters(snap);
         CExpr::Fun(param_vars, Box::new(body_ce))
     }
+}
+
+fn ctx_for_bound_var(ctx: &LowerCtx, var: &MVar, direct_callable_arity: Option<usize>) -> LowerCtx {
+    if let Some(arity) = direct_callable_arity {
+        ctx.with_direct_callable_local(var.name.clone(), arity)
+    } else {
+        ctx.with_local(var.name.clone())
+    }
+}
+
+fn closed_pure_function_arity(ty: &Type) -> Option<usize> {
+    let mut count = 0;
+    let mut cur = ty;
+    while let Type::Fun(_, ret, row) = cur {
+        if !row.is_empty() {
+            return None;
+        }
+        count += 1;
+        cur = ret;
+    }
+    if count == 0 { None } else { Some(count) }
 }

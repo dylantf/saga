@@ -197,6 +197,7 @@ impl<'ctx> Lowerer<'ctx> {
             preserve_abort_marker: enclosing.preserve_abort_marker,
             result_delimiter: enclosing.result_delimiter.clone(),
             locals: enclosing.locals.clone(),
+            direct_callable_locals: enclosing.direct_callable_locals.clone(),
         }
         .with_param_locals(&arm.params);
         let body_ce = self.lower_expr(&arm.body, &body_ctx);

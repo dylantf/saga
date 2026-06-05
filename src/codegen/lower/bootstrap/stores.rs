@@ -4,7 +4,6 @@ use crate::codegen::cerl::{CArm, CExpr, CLit, CPat};
 
 use super::native_effects::{ArgTransform, NativeOp};
 use super::{native_op_closure, not_implemented_native_op};
-use crate::codegen::lower::util::identity_k;
 
 #[derive(Clone, Copy)]
 pub(super) enum RefBackend {
@@ -541,7 +540,7 @@ pub(super) fn build_ref_call(op: &NativeOp, evidence_var: &str, backend: RefBack
     }
 }
 
-fn build_ref_procdict_call(op: &NativeOp, evidence_var: &str) -> CExpr {
+fn build_ref_procdict_call(op: &NativeOp, _evidence_var: &str) -> CExpr {
     match op.name {
         "new" => {
             let key = "_RefKey".to_string();
@@ -588,16 +587,9 @@ fn build_ref_procdict_call(op: &NativeOp, evidence_var: &str) -> CExpr {
             let old = "_RefOld".to_string();
             let new_value = "_RefNew".to_string();
             let discard = "_RefPut".to_string();
-            let k_var = "_RefK".to_string();
-            let v_var = "_RefV".to_string();
-            let id_k = identity_k(v_var);
             let apply_f = CExpr::Apply(
                 Box::new(CExpr::Var("_Arg1".to_string())),
-                vec![
-                    CExpr::Var(old.clone()),
-                    CExpr::Var(evidence_var.to_string()),
-                    CExpr::Var(k_var.clone()),
-                ],
+                vec![CExpr::Var(old.clone())],
             );
             CExpr::Let(
                 old.clone(),
@@ -607,23 +599,19 @@ fn build_ref_procdict_call(op: &NativeOp, evidence_var: &str) -> CExpr {
                     vec![CExpr::Var("_Arg0".to_string())],
                 )),
                 Box::new(CExpr::Let(
-                    k_var,
-                    Box::new(id_k),
+                    new_value.clone(),
+                    Box::new(apply_f),
                     Box::new(CExpr::Let(
-                        new_value.clone(),
-                        Box::new(apply_f),
-                        Box::new(CExpr::Let(
-                            discard,
-                            Box::new(CExpr::Call(
-                                "erlang".to_string(),
-                                "put".to_string(),
-                                vec![
-                                    CExpr::Var("_Arg0".to_string()),
-                                    CExpr::Var(new_value.clone()),
-                                ],
-                            )),
-                            Box::new(CExpr::Var(new_value)),
+                        discard,
+                        Box::new(CExpr::Call(
+                            "erlang".to_string(),
+                            "put".to_string(),
+                            vec![
+                                CExpr::Var("_Arg0".to_string()),
+                                CExpr::Var(new_value.clone()),
+                            ],
                         )),
+                        Box::new(CExpr::Var(new_value)),
                     )),
                 )),
             )
@@ -632,7 +620,7 @@ fn build_ref_procdict_call(op: &NativeOp, evidence_var: &str) -> CExpr {
     }
 }
 
-fn build_ref_ets_call(op: &NativeOp, evidence_var: &str) -> CExpr {
+fn build_ref_ets_call(op: &NativeOp, _evidence_var: &str) -> CExpr {
     let table = CExpr::Lit(CLit::Atom("saga_ref_store".to_string()));
     match op.name {
         "new" => {
@@ -708,16 +696,9 @@ fn build_ref_ets_call(op: &NativeOp, evidence_var: &str) -> CExpr {
             let old = "_RefOld".to_string();
             let new_value = "_RefNew".to_string();
             let discard = "_RefInsert".to_string();
-            let k_var = "_RefK".to_string();
-            let v_var = "_RefV".to_string();
-            let id_k = identity_k(v_var);
             let apply_f = CExpr::Apply(
                 Box::new(CExpr::Var("_Arg1".to_string())),
-                vec![
-                    CExpr::Var(old.clone()),
-                    CExpr::Var(evidence_var.to_string()),
-                    CExpr::Var(k_var.clone()),
-                ],
+                vec![CExpr::Var(old.clone())],
             );
             CExpr::Let(
                 lookup.clone(),
@@ -735,26 +716,22 @@ fn build_ref_ets_call(op: &NativeOp, evidence_var: &str) -> CExpr {
                         ),
                         guard: None,
                         body: CExpr::Let(
-                            k_var,
-                            Box::new(id_k),
+                            new_value.clone(),
+                            Box::new(apply_f),
                             Box::new(CExpr::Let(
-                                new_value.clone(),
-                                Box::new(apply_f),
-                                Box::new(CExpr::Let(
-                                    discard,
-                                    Box::new(CExpr::Call(
-                                        "ets".to_string(),
-                                        "insert".to_string(),
-                                        vec![
-                                            table,
-                                            CExpr::Tuple(vec![
-                                                CExpr::Var("_Arg0".to_string()),
-                                                CExpr::Var(new_value.clone()),
-                                            ]),
-                                        ],
-                                    )),
-                                    Box::new(CExpr::Var(new_value)),
+                                discard,
+                                Box::new(CExpr::Call(
+                                    "ets".to_string(),
+                                    "insert".to_string(),
+                                    vec![
+                                        table,
+                                        CExpr::Tuple(vec![
+                                            CExpr::Var("_Arg0".to_string()),
+                                            CExpr::Var(new_value.clone()),
+                                        ]),
+                                    ],
                                 )),
+                                Box::new(CExpr::Var(new_value)),
                             )),
                         ),
                     }],

@@ -98,6 +98,10 @@ impl<'ctx> Lowerer<'ctx> {
             return call;
         }
 
+        if let Some(call) = self.lower_direct_callable_local_app(head, args, source, ctx) {
+            return call;
+        }
+
         let head_ce = match head {
             Atom::Var { name, source }
                 if self.resolution.get(source).is_none()
@@ -111,6 +115,27 @@ impl<'ctx> Lowerer<'ctx> {
         call_args.push(CExpr::Var(ctx.evidence.clone()));
         call_args.push(CExpr::Var(ctx.return_k.clone()));
         self.annotate_node(CExpr::Apply(Box::new(head_ce), call_args), source)
+    }
+
+    fn lower_direct_callable_local_app(
+        &mut self,
+        head: &Atom,
+        args: &[Atom],
+        source: NodeId,
+        ctx: &LowerCtx,
+    ) -> Option<CExpr> {
+        let Atom::Var { name, .. } = head else {
+            return None;
+        };
+        let arity = ctx.direct_callable_locals.get(&name.name)?;
+        if *arity != args.len() {
+            return None;
+        }
+
+        let head_ce = self.lower_atom(head, ctx);
+        let call_args: Vec<CExpr> = args.iter().map(|a| self.lower_atom(a, ctx)).collect();
+        let call = self.annotate_node(CExpr::Apply(Box::new(head_ce), call_args), source);
+        Some(self.apply_current_k(call, ctx))
     }
 
     fn lower_saturated_external_app(
