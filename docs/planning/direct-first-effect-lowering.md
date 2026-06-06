@@ -1,6 +1,6 @@
 # Direct-First Effect Lowering
 
-Status: **phase 1 classifier-boundary cleanup complete; audit/trace planning next**.
+Status: **phase 2 audit trace complete**.
 
 This document is the restart plan after the uniform monadic CPS and
 selective-uniform backend experiments. The goal is not an entire backend rewrite.
@@ -211,12 +211,43 @@ Effect #126 Std.Actor.self: DirectNative handler=Std.Actor.beam_actor
 This does not need polished UX at first. The point is to make ABI choices
 visible and to make missing classifications loud.
 
+Adapt the useful trace habit from the selective-uniform branch:
+
+- keep a small, source-order trace at the classifier boundary;
+- use shape labels like `direct`, `cps-static`, and `cps-row-forwarded`;
+- allow filtering by module/target, following the old
+  `SAGA_DEBUG_SELECTIVE=...` workflow;
+- prefer adding one trace/assertion at an existing classification point over
+  creating a separate planning interpreter.
+
+Current hook:
+
+```bash
+SAGA_DEBUG_EFFECT_SHAPES=1 cargo run --bin saga -- build examples/scratch.saga
+SAGA_DEBUG_EFFECT_SHAPES=My.Module cargo run --bin saga -- build examples/scratch.saga
+SAGA_DEBUG_SELECTIVE=call-effects cargo run --bin saga -- build examples/scratch.saga
+SAGA_DEBUG_SELECTIVE=effect-ops cargo run --bin saga -- build examples/scratch.saga
+```
+
+The compatibility with `SAGA_DEBUG_SELECTIVE` is intentional: this branch is
+allowed to borrow the useful operator ergonomics from the previous refactor
+attempt. The emitted classification still comes from `call_effects.rs`, and the
+current lowerer remains the only Core Erlang emitter.
+
 Acceptance:
 
 - No behavior change by default.
-- In audit/debug mode, unknown or contradictory shapes fail before Core Erlang
-  can be emitted with the wrong arity.
-- The trace is useful enough to debug why a call was direct or CPS.
+- Done: the per-`App` classifier can emit a source-order trace before lowering.
+- Done: debug output supports both `SAGA_DEBUG_EFFECT_SHAPES` and the old
+  `SAGA_DEBUG_SELECTIVE` filter.
+- Done: effect-op lowering emits audit rows for evidence lookup vs direct-native
+  lowering, including static-index, open-row bridge, and runtime-bridge cases.
+- Done: classified-CPS apps fail loudly if no lowering dispatch path handles
+  them, so missing classifications do not quietly emit wrong-arity Core.
+- Done: the trace is useful enough to debug why a call or op is direct, CPS, or
+  evidence-routed.
+- Done: single-file mode was checked with `examples/scratch.saga`; project mode
+  was checked from `examples/bugs/dict-method-effectful-call`.
 
 ## Phase 3: Migrate Lowering Consumers Incrementally
 

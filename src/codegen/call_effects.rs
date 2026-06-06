@@ -97,6 +97,29 @@ impl CallEffectInfo {
         self.cps_call_plan().is_some()
     }
 
+    /// Human-readable ABI shape for debug/audit traces.
+    ///
+    /// The wording intentionally mirrors the selective-uniform branch's
+    /// `call_shape_debug_label` style, but describes the current direct-first
+    /// classifier contract rather than a separate planner.
+    pub fn debug_label(&self) -> String {
+        match &self.kind {
+            CallEffectKind::Pure => "direct".to_string(),
+            CallEffectKind::StaticOps { ops } => format!(
+                "cps-static({}->{}, effects={:?})",
+                self.user_arity,
+                self.user_arity + 2,
+                unique_effects(ops)
+            ),
+            CallEffectKind::RowForwarded { static_ops } => format!(
+                "cps-row-forwarded({}->{}, pinned_effects={:?})",
+                self.user_arity,
+                self.user_arity + 2,
+                unique_effects(static_ops)
+            ),
+        }
+    }
+
     /// Debug-builds-only invariant check for classifier-created entries.
     #[inline]
     fn debug_check(&self) {
@@ -165,6 +188,92 @@ pub struct OpKey {
 
 pub type CallEffectMap = HashMap<NodeId, CallEffectInfo>;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CallEffectTraceEntry {
+    pub app_id: NodeId,
+    pub head_id: NodeId,
+    pub head: String,
+    pub supplied_args: usize,
+    pub shape: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PopulatedCallEffects {
+    pub map: CallEffectMap,
+    pub trace: Vec<CallEffectTraceEntry>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EffectOpTraceEntry {
+    pub node_id: NodeId,
+    pub effect: String,
+    pub op: String,
+    pub source_args: usize,
+    pub runtime_args: usize,
+    pub shape: String,
+}
+
+pub fn call_effect_trace_enabled_for(subject: &str) -> bool {
+    let Some(filter) = call_effect_trace_filter() else {
+        return false;
+    };
+    debug_filter_matches(&filter, "call-effects", Some(subject))
+}
+
+pub fn effect_op_trace_enabled_for(subject: &str) -> bool {
+    let Some(filter) = call_effect_trace_filter() else {
+        return false;
+    };
+    debug_filter_matches(&filter, "effect-ops", Some(subject))
+}
+
+pub fn format_call_effect_trace(subject: &str, trace: &[CallEffectTraceEntry]) -> String {
+    let mut out = format!("call-effects[{subject}]: {} app(s)", trace.len());
+    for entry in trace {
+        out.push_str(&format!(
+            "\n  app#{} head#{} {} / {} -> {}",
+            entry.app_id.0, entry.head_id.0, entry.head, entry.supplied_args, entry.shape
+        ));
+    }
+    out
+}
+
+pub fn format_effect_op_trace(subject: &str, trace: &[EffectOpTraceEntry]) -> String {
+    let mut out = format!("effect-ops[{subject}]: {} op call(s)", trace.len());
+    for entry in trace {
+        out.push_str(&format!(
+            "\n  op#{} {}.{} / {} source arg(s), {} runtime arg(s) -> {}",
+            entry.node_id.0,
+            entry.effect,
+            entry.op,
+            entry.source_args,
+            entry.runtime_args,
+            entry.shape
+        ));
+    }
+    out
+}
+
+fn call_effect_trace_filter() -> Option<String> {
+    std::env::var_os("SAGA_DEBUG_EFFECT_SHAPES")
+        .or_else(|| std::env::var_os("SAGA_DEBUG_SELECTIVE"))
+        .map(|value| value.to_string_lossy().to_string())
+}
+
+fn debug_filter_matches(filter: &str, target: &str, subject: Option<&str>) -> bool {
+    let filter = filter.trim();
+    if filter.is_empty() || matches!(filter, "1" | "true" | "all") {
+        return true;
+    }
+    if target.contains(filter) {
+        return true;
+    }
+    let Some(subject) = subject else {
+        return false;
+    };
+    subject.contains(filter) || format!("{target}:{subject}").contains(filter)
+}
+
 fn unique_effects(ops: &[OpKey]) -> Vec<String> {
     let mut effects: Vec<String> = ops.iter().map(|k| k.effect.clone()).collect();
     effects.sort();
@@ -225,6 +334,7 @@ pub struct PopulatorInputs<'a> {
 pub struct Populator<'a> {
     inputs: PopulatorInputs<'a>,
     map: CallEffectMap,
+    trace: Vec<CallEffectTraceEntry>,
     /// Stack of lexical scopes. Each frame maps a bound name to the absorbed
     /// effects that calls of that name should thread.
     scopes: Vec<HashMap<String, Vec<String>>>,
@@ -248,6 +358,7 @@ impl<'a> Populator<'a> {
         Populator {
             inputs,
             map: HashMap::new(),
+            trace: Vec::new(),
             scopes: Vec::new(),
             open_row_vars: Vec::new(),
             local_fun_sigs: Vec::new(),
@@ -306,11 +417,18 @@ impl<'a> Populator<'a> {
         out
     }
 
-    pub fn populate(mut self, program: &Program) -> CallEffectMap {
+    pub fn populate(self, program: &Program) -> CallEffectMap {
+        self.populate_with_trace(program).map
+    }
+
+    pub fn populate_with_trace(mut self, program: &Program) -> PopulatedCallEffects {
         for decl in program {
             self.walk_decl(decl);
         }
-        self.map
+        PopulatedCallEffects {
+            map: self.map,
+            trace: self.trace,
+        }
     }
 
     /// Push parallel frames onto `scopes` and `open_row_vars`. Use
@@ -528,9 +646,21 @@ impl<'a> Populator<'a> {
         if matches!(expr.kind, ExprKind::App { .. }) {
             let info = self.classify_app(expr);
             info.debug_check();
+            self.trace.push(self.trace_entry(expr, &info));
             self.map.insert(expr.id, info);
         }
         self.walk_children(expr);
+    }
+
+    fn trace_entry(&self, expr: &Expr, info: &CallEffectInfo) -> CallEffectTraceEntry {
+        let (head, args) = peel_app(expr);
+        CallEffectTraceEntry {
+            app_id: expr.id,
+            head_id: head.id,
+            head: head_debug_label(head),
+            supplied_args: args.len(),
+            shape: info.debug_label(),
+        }
     }
 
     fn walk_children(&mut self, expr: &Expr) {
@@ -1121,5 +1251,172 @@ fn peel_app(expr: &Expr) -> (&Expr, Vec<&Expr>) {
                 return (current, args);
             }
         }
+    }
+}
+
+fn head_debug_label(head: &Expr) -> String {
+    match &head.kind {
+        ExprKind::Var { name } => format!("var({name})"),
+        ExprKind::QualifiedName { module, name, .. } => format!("qualified({module}.{name})"),
+        ExprKind::DictMethodAccess {
+            trait_name,
+            method_index,
+            ..
+        } => format!("dict-method({trait_name}#{method_index})"),
+        ExprKind::Lambda { params, .. } => format!("lambda/{}", params.len()),
+        ExprKind::Constructor { name } => format!("ctor({name})"),
+        ExprKind::DictRef { name } => format!("dict-ref({name})"),
+        ExprKind::ForeignCall { module, func, args } => {
+            format!("foreign({module}.{func}/{})", args.len())
+        }
+        ExprKind::EffectCall {
+            qualifier,
+            name,
+            args,
+            ..
+        } => format!(
+            "effect-call({}{name}!/{})",
+            qualifier
+                .as_ref()
+                .map(|qualifier| format!("{qualifier}."))
+                .unwrap_or_default(),
+            args.len()
+        ),
+        ExprKind::Lit { value } => format!("lit({value:?})"),
+        ExprKind::Tuple { elements } => format!("tuple/{}", elements.len()),
+        ExprKind::RecordCreate { name, fields } => format!("record({name}/{})", fields.len()),
+        ExprKind::AnonRecordCreate { fields } => format!("anon-record/{}", fields.len()),
+        ExprKind::HandlerExpr { .. } => "handler-expr".to_string(),
+        ExprKind::SymbolIntrinsic { symbol } => format!("symbol({symbol})"),
+        ExprKind::App { .. } => "app-head".to_string(),
+        ExprKind::BinOp { .. } => "binop".to_string(),
+        ExprKind::UnaryMinus { .. } => "unary-minus".to_string(),
+        ExprKind::If { .. } => "if".to_string(),
+        ExprKind::Case { .. } => "case".to_string(),
+        ExprKind::Block { .. } => "block".to_string(),
+        ExprKind::FieldAccess { field, .. } => format!("field-access(.{field})"),
+        ExprKind::RecordUpdate { .. } => "record-update".to_string(),
+        ExprKind::With { .. } => "with".to_string(),
+        ExprKind::Resume { .. } => "resume".to_string(),
+        ExprKind::Do { .. } => "do".to_string(),
+        ExprKind::Receive { .. } => "receive".to_string(),
+        ExprKind::BitString { segments } => format!("bitstring/{}", segments.len()),
+        ExprKind::Ascription { .. } => "ascription".to_string(),
+        ExprKind::Pipe { .. } => "pipe".to_string(),
+        ExprKind::BinOpChain { .. } => "binop-chain".to_string(),
+        ExprKind::PipeBack { .. } => "pipe-back".to_string(),
+        ExprKind::ComposeForward { .. } => "compose-forward".to_string(),
+        ExprKind::Cons { .. } => "cons".to_string(),
+        ExprKind::ListLit { elements } => format!("list/{}", elements.len()),
+        ExprKind::StringInterp { parts, .. } => format!("string-interp/{}", parts.len()),
+        ExprKind::ListComprehension { qualifiers, .. } => {
+            format!("list-comprehension/{}", qualifiers.len())
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn op(effect: &str, op: &str) -> OpKey {
+        OpKey {
+            effect: effect.to_string(),
+            op: op.to_string(),
+        }
+    }
+
+    #[test]
+    fn call_effect_info_debug_labels_direct_and_cps_shapes() {
+        assert_eq!(CallEffectInfo::pure().debug_label(), "direct");
+
+        let static_info = CallEffectInfo::cps(
+            CallEffectKind::StaticOps {
+                ops: vec![
+                    op("Std.Fail.Fail", "fail"),
+                    op("Std.Console.Console", "print"),
+                    op("Std.Console.Console", "read"),
+                ],
+            },
+            2,
+        );
+        assert_eq!(
+            static_info.debug_label(),
+            r#"cps-static(2->4, effects=["Std.Console.Console", "Std.Fail.Fail"])"#
+        );
+
+        let row_info = CallEffectInfo::cps(
+            CallEffectKind::RowForwarded {
+                static_ops: vec![op("Std.Fail.Fail", "fail")],
+            },
+            1,
+        );
+        assert_eq!(
+            row_info.debug_label(),
+            r#"cps-row-forwarded(1->3, pinned_effects=["Std.Fail.Fail"])"#
+        );
+    }
+
+    #[test]
+    fn format_call_effect_trace_keeps_walk_order() {
+        let trace = vec![
+            CallEffectTraceEntry {
+                app_id: NodeId(10),
+                head_id: NodeId(7),
+                head: "var(f)".to_string(),
+                supplied_args: 1,
+                shape: "direct".to_string(),
+            },
+            CallEffectTraceEntry {
+                app_id: NodeId(12),
+                head_id: NodeId(11),
+                head: "qualified(Foo.bar)".to_string(),
+                supplied_args: 2,
+                shape: r#"cps-static(2->4, effects=["Std.Fail.Fail"])"#.to_string(),
+            },
+        ];
+
+        assert_eq!(
+            format_call_effect_trace("Example", &trace),
+            concat!(
+                "call-effects[Example]: 2 app(s)",
+                "\n  app#10 head#7 var(f) / 1 -> direct",
+                "\n  app#12 head#11 qualified(Foo.bar) / 2 -> ",
+                r#"cps-static(2->4, effects=["Std.Fail.Fail"])"#
+            )
+        );
+    }
+
+    #[test]
+    fn format_effect_op_trace_keeps_lowering_order() {
+        let trace = vec![
+            EffectOpTraceEntry {
+                node_id: NodeId(20),
+                effect: "Std.IO.Stdio".to_string(),
+                op: "print".to_string(),
+                source_args: 1,
+                runtime_args: 1,
+                shape: "evidence-lookup(static-index)".to_string(),
+            },
+            EffectOpTraceEntry {
+                node_id: NodeId(25),
+                effect: "Std.Actor.Actor".to_string(),
+                op: "self".to_string(),
+                source_args: 1,
+                runtime_args: 0,
+                shape: "direct-native(handler=Std.Actor.beam_actor)".to_string(),
+            },
+        ];
+
+        assert_eq!(
+            format_effect_op_trace("Example", &trace),
+            concat!(
+                "effect-ops[Example]: 2 op call(s)",
+                "\n  op#20 Std.IO.Stdio.print / 1 source arg(s), ",
+                "1 runtime arg(s) -> evidence-lookup(static-index)",
+                "\n  op#25 Std.Actor.Actor.self / 1 source arg(s), ",
+                "0 runtime arg(s) -> direct-native(handler=Std.Actor.beam_actor)"
+            )
+        );
     }
 }

@@ -8,7 +8,8 @@
 /// - named/inline handler composition for `with` lowering
 use std::collections::{HashMap, HashSet, VecDeque};
 
-use crate::ast::{Annotated, Expr, ExprKind, Handler, HandlerArm, HandlerItem, Pat, Stmt};
+use crate::ast::{Annotated, Expr, ExprKind, Handler, HandlerArm, HandlerItem, NodeId, Pat, Stmt};
+use crate::codegen::call_effects;
 use crate::codegen::cerl::{CArm, CExpr, CLit, CPat};
 use crate::codegen::runtime_shape::CpsShape;
 
@@ -77,6 +78,36 @@ enum WithHandlerLayer {
 }
 
 impl<'a> Lowerer<'a> {
+    fn push_effect_op_trace(
+        &mut self,
+        node_id: NodeId,
+        effect_name: &str,
+        op_name: &str,
+        source_args: usize,
+        runtime_args: usize,
+        shape: String,
+    ) {
+        self.effect_op_trace.push(call_effects::EffectOpTraceEntry {
+            node_id,
+            effect: effect_name.to_string(),
+            op: op_name.to_string(),
+            source_args,
+            runtime_args,
+            shape,
+        });
+    }
+
+    fn evidence_lookup_trace_shape(&self, effect_name: &str) -> String {
+        match &self.current_evidence {
+            Some(ctx) if !ctx.is_open && ctx.layout.tags().iter().any(|tag| tag == effect_name) => {
+                "evidence-lookup(static-index)".to_string()
+            }
+            Some(ctx) if ctx.is_open => "evidence-lookup(open-row-bridge)".to_string(),
+            Some(_) => "evidence-lookup(runtime-bridge)".to_string(),
+            None => "evidence-lookup(missing-evidence)".to_string(),
+        }
+    }
+
     fn compose_return_k(&mut self, inner: Option<CExpr>, outer: Option<CExpr>) -> Option<CExpr> {
         match (inner, outer) {
             (Some(inner), Some(outer)) => {
@@ -355,6 +386,14 @@ impl<'a> Lowerer<'a> {
         // Direct path: ops that always resume exactly once can be inlined as
         // `let Result = <native call> in <continuation body>` — no closure allocation.
         if let Some(handler_canonical) = self.direct_ops.get(&effect_key).cloned() {
+            self.push_effect_op_trace(
+                node_id,
+                &effect_name,
+                op_name,
+                args.len(),
+                param_vars.len(),
+                format!("direct-native(handler={handler_canonical})"),
+            );
             let param_var_strs: Vec<String> = param_vars.clone();
             let native_call = if super::beam_interop::is_ref_op(op_name) {
                 super::beam_interop::build_ref_native_call(
@@ -406,6 +445,14 @@ impl<'a> Lowerer<'a> {
         }
 
         // CPS path: read the per-op closure out of the evidence vector and apply it.
+        self.push_effect_op_trace(
+            node_id,
+            &effect_name,
+            op_name,
+            args.len(),
+            param_vars.len(),
+            self.evidence_lookup_trace_shape(&effect_name),
+        );
         let handler_expr = self.evidence_op_lookup(&effect_name, op_name);
 
         let mut call_args: Vec<CExpr> = param_vars.into_iter().map(CExpr::Var).collect();

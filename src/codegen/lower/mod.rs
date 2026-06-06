@@ -256,6 +256,10 @@ pub struct Lowerer<'a> {
     /// effectful (params `_Evidence`/`_ReturnK`, evidence context installed)
     /// when its impl declares `needs`.
     impl_effects_by_dict: HashMap<String, Vec<String>>,
+    /// Source-order audit rows for direct-native vs evidence effect-op
+    /// lowering decisions in the current module. Populated during expression
+    /// lowering when `lower_effect_call` reaches the actual emission branch.
+    effect_op_trace: Vec<super::call_effects::EffectOpTraceEntry>,
 }
 
 impl<'a> Lowerer<'a> {
@@ -298,6 +302,7 @@ impl<'a> Lowerer<'a> {
             entry_export,
             call_effects: super::call_effects::CallEffectMap::new(),
             impl_effects_by_dict: HashMap::new(),
+            effect_op_trace: Vec::new(),
         }
     }
 
@@ -1140,13 +1145,6 @@ impl<'a> Lowerer<'a> {
             .is_some_and(|info| info.is_cps_call())
     }
 
-    /// Build the per-call effect map for the module currently being lowered.
-    /// Snapshots the relevant `FunInfo` and `EffectDefs` and hands them to the
-    /// stand-alone `call_effects::Populator` walker.
-    fn populate_call_effects(&self, program: &ast::Program) -> super::call_effects::CallEffectMap {
-        self.populate_call_effects_with_check(program, &self.check_result)
-    }
-
     /// Variant that uses an explicit `CheckResult` for type-at-span lookups.
     /// When the lowerer runs the pre-pass over a foreign module's elaborated
     /// AST (e.g. handler arm bodies imported from another module), the active
@@ -1157,7 +1155,7 @@ impl<'a> Lowerer<'a> {
         &self,
         program: &ast::Program,
         check_result: &crate::typechecker::CheckResult,
-    ) -> super::call_effects::CallEffectMap {
+    ) -> super::call_effects::PopulatedCallEffects {
         use super::call_effects::{FunSig, Populator};
 
         let fun_sigs: HashMap<String, FunSig> = self
@@ -1211,7 +1209,7 @@ impl<'a> Lowerer<'a> {
             impl_effects_by_dict: &self.impl_effects_by_dict,
             trait_method_effects_by_key: &trait_method_effects_by_key,
         })
-        .populate(program)
+        .populate_with_trace(program)
     }
 
     /// Get a function's arity.
@@ -1395,6 +1393,7 @@ impl<'a> Lowerer<'a> {
                 }
             })
             .unwrap_or_else(|| module_name.to_string());
+        self.effect_op_trace.clear();
         let mut pending_annotations = self.init_module(module_name, program);
 
         // Group FunBindings by name, preserving declaration order, and simultaneously
@@ -1565,7 +1564,17 @@ impl<'a> Lowerer<'a> {
         // lookup. Runs after `init_module` + per-decl `fun_info` registration
         // so all callees have arity/effect entries by the time we classify
         // their call sites.
-        self.call_effects = self.populate_call_effects(program);
+        let call_effects = self.populate_call_effects_with_check(program, &self.check_result);
+        if super::call_effects::call_effect_trace_enabled_for(&self.current_source_module) {
+            eprintln!(
+                "{}",
+                super::call_effects::format_call_effect_trace(
+                    &self.current_source_module,
+                    &call_effects.trace
+                )
+            );
+        }
+        self.call_effects = call_effects.map;
         // Cross-module inlined handler bodies live in the elaborated programs
         // of compiled modules and are lowered through the active Lowerer.
         // Tag their `App` nodes too so the parallel-check can see them.
@@ -1578,9 +1587,9 @@ impl<'a> Lowerer<'a> {
                 .module_check_results()
                 .get(name)
                 .unwrap_or(&self.check_result);
-            let cross_map =
+            let cross_call_effects =
                 self.populate_call_effects_with_check(&compiled.elaborated, module_check);
-            for (id, info) in cross_map {
+            for (id, info) in cross_call_effects.map {
                 self.call_effects.entry(id).or_insert(info);
             }
         }
@@ -1862,6 +1871,16 @@ impl<'a> Lowerer<'a> {
                 .find(|f| f.name == "main" || f.name == "tests")
         {
             entry_def.body = Self::wrap_with_vec_init(entry_def.body.clone());
+        }
+
+        if super::call_effects::effect_op_trace_enabled_for(&self.current_source_module) {
+            eprintln!(
+                "{}",
+                super::call_effects::format_effect_op_trace(
+                    &self.current_source_module,
+                    &self.effect_op_trace
+                )
+            );
         }
 
         CModule {
