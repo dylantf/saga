@@ -1,6 +1,6 @@
 # Direct-First Effect Lowering
 
-Status: **phase 2 audit trace complete**.
+Status: **phase 3 lowering-consumer migration complete**.
 
 This document is the restart plan after the uniform monadic CPS and
 selective-uniform backend experiments. The goal is not an entire backend rewrite.
@@ -267,14 +267,41 @@ Suggested order:
 Each slice should remove or shrink one local "figure out the ABI here" branch
 and replace it with a plan lookup.
 
+Progress:
+
+- Done: qualified function calls now route through the same
+  `lower_resolved_fun_call` consumer as bare resolved calls. The qualified path
+  remains as a small wrapper for module-alias fallback, but no longer has its
+  own copy of the direct/CPS/row-forwarded evidence and continuation branching.
+- Done: runtime CPS variable calls, effectful dictionary method calls, and
+  lambda-headed CPS calls now share `lower_runtime_cps_apply`, so the
+  classifier-derived CPS plan is consumed once for evidence threading, row
+  forwarding, return continuation binding, and nested effectful-argument
+  chaining.
+- Done: effect-op calls now consume an explicit local
+  `EffectOpLoweringPlan` (`DirectNative` or `EvidenceLookup`) before emission.
+- Done: handler installation already had an explicit `OpHandlerPlan`
+  (`Inline`, `Static`, `Conditional`, `Dynamic`, `BeamNative`, `Passthrough`);
+  phase 3 keeps that as the handler install shape rather than adding a second
+  planner.
+- Checked: current `json_bench`/`saga_json` EffectOpts benchmark on this
+  branch: median encode 908 ms, decode 852 ms, roundtrip 1763 ms for 100000
+  records. Reference against `saga` main for the same current branch: median
+  encode 1105 ms, decode 916 ms, roundtrip 2021 ms.
+
 Acceptance:
 
-- Behavior-neutral.
-- Benchmarks neutral.
-- If an `App` is classified as CPS, every lowering path that handles it must
-  prove it consumed the CPS plan.
-- Unsupported shapes fail with a classifier/lowering diagnostic, not a BEAM
-  `badarity`.
+- Done: behavior-neutral lowering refactor; no intended Core semantics change.
+- Done: current EffectOpts benchmark is within/better than the `saga` main
+  compiler reference for the active saga_json branch.
+- Done: if an `App` is classified as CPS, every lowering path that handles it
+  consumes `CallEffectInfo::cps_call_plan()` or the shared runtime CPS apply
+  helper fed by that plan.
+- Done: unsupported classified-CPS app shapes fail with a lowerer diagnostic,
+  not a BEAM `badarity`.
+- Historical requirement: if/when the options-as-arguments benchmark branch is
+  restored, run it as an additional regression gate. The current saga_json
+  branch is EffectOpts-focused.
 
 ## Phase 4: Guardrails For Future Cases
 

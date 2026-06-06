@@ -67,6 +67,11 @@ enum OpHandlerPlan {
     Passthrough,
 }
 
+enum EffectOpLoweringPlan {
+    DirectNative { handler_canonical: String },
+    EvidenceLookup { trace_shape: String },
+}
+
 enum WithHandlerLayer {
     Named {
         reference: crate::ast::NamedHandlerRef,
@@ -105,6 +110,16 @@ impl<'a> Lowerer<'a> {
             Some(ctx) if ctx.is_open => "evidence-lookup(open-row-bridge)".to_string(),
             Some(_) => "evidence-lookup(runtime-bridge)".to_string(),
             None => "evidence-lookup(missing-evidence)".to_string(),
+        }
+    }
+
+    fn effect_op_lowering_plan(&self, effect_key: &str, effect_name: &str) -> EffectOpLoweringPlan {
+        if let Some(handler_canonical) = self.direct_ops.get(effect_key).cloned() {
+            EffectOpLoweringPlan::DirectNative { handler_canonical }
+        } else {
+            EffectOpLoweringPlan::EvidenceLookup {
+                trace_shape: self.evidence_lookup_trace_shape(effect_name),
+            }
         }
     }
 
@@ -383,99 +398,110 @@ impl<'a> Lowerer<'a> {
             param_vars.push(v);
         }
 
-        // Direct path: ops that always resume exactly once can be inlined as
-        // `let Result = <native call> in <continuation body>` — no closure allocation.
-        if let Some(handler_canonical) = self.direct_ops.get(&effect_key).cloned() {
-            self.push_effect_op_trace(
-                node_id,
-                &effect_name,
-                op_name,
-                args.len(),
-                param_vars.len(),
-                format!("direct-native(handler={handler_canonical})"),
-            );
-            let param_var_strs: Vec<String> = param_vars.clone();
-            let native_call = if super::beam_interop::is_ref_op(op_name) {
-                super::beam_interop::build_ref_native_call(
-                    &handler_canonical,
+        match self.effect_op_lowering_plan(&effect_key, &effect_name) {
+            EffectOpLoweringPlan::DirectNative { handler_canonical } => {
+                // Direct path: ops that always resume exactly once can be
+                // inlined as `let Result = <native call> in <continuation
+                // body>` — no closure allocation.
+                self.push_effect_op_trace(
+                    node_id,
+                    &effect_name,
                     op_name,
-                    &param_var_strs,
-                    &mut || self.fresh(),
-                )
-            } else if super::beam_interop::is_vec_op(op_name) {
-                super::beam_interop::build_vec_native_call(op_name, &param_var_strs, &mut || {
-                    self.fresh()
+                    args.len(),
+                    param_vars.len(),
+                    format!("direct-native(handler={handler_canonical})"),
+                );
+                let param_var_strs: Vec<String> = param_vars.clone();
+                let native_call = if super::beam_interop::is_ref_op(op_name) {
+                    super::beam_interop::build_ref_native_call(
+                        &handler_canonical,
+                        op_name,
+                        &param_var_strs,
+                        &mut || self.fresh(),
+                    )
+                } else if super::beam_interop::is_vec_op(op_name) {
+                    super::beam_interop::build_vec_native_call(
+                        op_name,
+                        &param_var_strs,
+                        &mut || self.fresh(),
+                    )
+                } else {
+                    let ctor_atoms = self.constructor_atoms.clone();
+                    super::beam_interop::build_native_call(
+                        op_name,
+                        &param_var_strs,
+                        &ctor_atoms,
+                        &mut || self.fresh(),
+                    )
+                };
+
+                // Unwrap the continuation closure to inline its body directly.
+                // K is Fun([result_param], body) — we bind result_param via let.
+                let result = if let Some(k) = continuation {
+                    match k {
+                        CExpr::Fun(params, body) if params.len() == 1 => {
+                            let result_var = params[0].clone();
+                            CExpr::Let(result_var, Box::new(native_call), body)
+                        }
+                        // K is a variable reference (e.g. _ReturnK) — apply it
+                        other => {
+                            let result_var = self.fresh();
+                            CExpr::Let(
+                                result_var.clone(),
+                                Box::new(native_call),
+                                Box::new(CExpr::Apply(
+                                    Box::new(other),
+                                    vec![CExpr::Var(result_var)],
+                                )),
+                            )
+                        }
+                    }
+                } else {
+                    // No continuation — standalone effect call, just return the result
+                    native_call
+                };
+
+                bindings.into_iter().rev().fold(result, |body, (var, val)| {
+                    CExpr::Let(var, Box::new(val), Box::new(body))
                 })
-            } else {
-                let ctor_atoms = self.constructor_atoms.clone();
-                super::beam_interop::build_native_call(
+            }
+            EffectOpLoweringPlan::EvidenceLookup { trace_shape } => {
+                // CPS path: read the per-op closure out of the evidence vector
+                // and apply it.
+                self.push_effect_op_trace(
+                    node_id,
+                    &effect_name,
                     op_name,
-                    &param_var_strs,
-                    &ctor_atoms,
-                    &mut || self.fresh(),
-                )
-            };
+                    args.len(),
+                    param_vars.len(),
+                    trace_shape,
+                );
+                let handler_expr = self.evidence_op_lookup(&effect_name, op_name);
 
-            // Unwrap the continuation closure to inline its body directly.
-            // K is Fun([result_param], body) — we bind result_param via let.
-            let result = if let Some(k) = continuation {
-                match k {
-                    CExpr::Fun(params, body) if params.len() == 1 => {
-                        let result_var = params[0].clone();
-                        CExpr::Let(result_var, Box::new(native_call), body)
-                    }
-                    // K is a variable reference (e.g. _ReturnK) — apply it
-                    other => {
-                        let result_var = self.fresh();
-                        CExpr::Let(
-                            result_var.clone(),
-                            Box::new(native_call),
-                            Box::new(CExpr::Apply(Box::new(other), vec![CExpr::Var(result_var)])),
-                        )
-                    }
-                }
-            } else {
-                // No continuation — standalone effect call, just return the result
-                native_call
-            };
+                let mut call_args: Vec<CExpr> = param_vars.into_iter().map(CExpr::Var).collect();
 
-            return bindings.into_iter().rev().fold(result, |body, (var, val)| {
-                CExpr::Let(var, Box::new(val), Box::new(body))
-            });
+                // Append continuation. If the handler arm never calls resume,
+                // pass a cheap atom instead of a real closure so Erlang doesn't
+                // warn about a constructed-but-unused term.
+                let k = if self.no_resume_ops.contains(effect_key.as_str()) {
+                    CExpr::Lit(CLit::Atom("no_resume".to_string()))
+                } else {
+                    continuation.unwrap_or_else(|| {
+                        // Identity continuation for standalone effect calls
+                        let param = self.fresh();
+                        CExpr::Fun(vec![param.clone()], Box::new(CExpr::Var(param)))
+                    })
+                };
+                call_args.push(k);
+
+                let apply = CExpr::Apply(Box::new(handler_expr), call_args);
+
+                // Wrap with let-bindings for args
+                bindings.into_iter().rev().fold(apply, |body, (var, val)| {
+                    CExpr::Let(var, Box::new(val), Box::new(body))
+                })
+            }
         }
-
-        // CPS path: read the per-op closure out of the evidence vector and apply it.
-        self.push_effect_op_trace(
-            node_id,
-            &effect_name,
-            op_name,
-            args.len(),
-            param_vars.len(),
-            self.evidence_lookup_trace_shape(&effect_name),
-        );
-        let handler_expr = self.evidence_op_lookup(&effect_name, op_name);
-
-        let mut call_args: Vec<CExpr> = param_vars.into_iter().map(CExpr::Var).collect();
-
-        // Append continuation. If the handler arm never calls resume, pass a cheap atom
-        // instead of a real closure so Erlang doesn't warn about a constructed-but-unused term.
-        let k = if self.no_resume_ops.contains(effect_key.as_str()) {
-            CExpr::Lit(CLit::Atom("no_resume".to_string()))
-        } else {
-            continuation.unwrap_or_else(|| {
-                // Identity continuation for standalone effect calls
-                let param = self.fresh();
-                CExpr::Fun(vec![param.clone()], Box::new(CExpr::Var(param)))
-            })
-        };
-        call_args.push(k);
-
-        let apply = CExpr::Apply(Box::new(handler_expr), call_args);
-
-        // Wrap with let-bindings for args
-        bindings.into_iter().rev().fold(apply, |body, (var, val)| {
-            CExpr::Let(var, Box::new(val), Box::new(body))
-        })
     }
 
     /// Build a per-op handler function for a single BEAM-native operation.
