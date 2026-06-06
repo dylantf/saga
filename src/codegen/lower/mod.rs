@@ -183,6 +183,13 @@ struct HandlerFactoryInfo {
     source_module: Option<String>,
 }
 
+#[derive(Clone)]
+struct LocalHelperInfo {
+    params: Vec<Pat>,
+    body: Expr,
+    source_module: String,
+}
+
 /// Stored effect definition: maps op_name -> lowering metadata.
 struct EffectInfo {
     ops: HashMap<String, EffectOpInfo>,
@@ -285,6 +292,10 @@ pub struct Lowerer<'a> {
     handler_defs: HashMap<String, HandlerInfo>,
     /// Same-module handler factories whose body is exactly a handler expression.
     handler_factory_defs: HashMap<String, HandlerFactoryInfo>,
+    /// Same-module single-clause function bodies admitted for tiny static
+    /// handler helper islands.
+    local_helper_defs: HashMap<String, LocalHelperInfo>,
+    helper_inline_stack: Vec<String>,
     /// Evidence context for the currently-lowered effectful scope. `None` in
     /// pure code. Set by the function-entry plumbing for effectful functions
     /// (var = `_Evidence`) and refreshed at `with` boundaries (var = a fresh
@@ -400,6 +411,8 @@ impl<'a> Lowerer<'a> {
             effect_defs: HashMap::new(),
             handler_defs: HashMap::new(),
             handler_factory_defs: HashMap::new(),
+            local_helper_defs: HashMap::new(),
+            helper_inline_stack: Vec::new(),
             current_evidence: None,
             no_resume_ops: std::collections::HashSet::new(),
             direct_ops: HashMap::new(),
@@ -2832,6 +2845,319 @@ impl<'a> Lowerer<'a> {
     /// `emit_call`; effectful vars have no static arity at the call site
     /// and lower as `CExpr::Apply(Var, args)`. Merging them would replace
     /// two focused branches with one branchier function.
+    fn try_inline_static_helper_call(
+        &mut self,
+        lookup_name: &str,
+        head: &Expr,
+        args: &[&Expr],
+        return_k: Option<CExpr>,
+    ) -> Option<CExpr> {
+        let helper = self.local_helper_defs.get(lookup_name)?.clone();
+        if helper.source_module != self.current_semantic_module_name()
+            || self
+                .helper_inline_stack
+                .iter()
+                .any(|name| name == lookup_name)
+            || !self.static_helper_call_supported(lookup_name, args, &mut Vec::new())
+        {
+            return None;
+        }
+
+        let param_types = self.resolved_fun_info(head.id, lookup_name).map(|f| {
+            f.param_types
+                .iter()
+                .take(args.len())
+                .cloned()
+                .collect::<Vec<_>>()
+        });
+        let (arg_vars, arg_bindings) =
+            self.lower_call_args_with_expected_types(args, param_types.as_deref());
+        let params = pats::lower_params(&helper.params);
+        if params.len() != arg_vars.len() {
+            return None;
+        }
+
+        self.helper_inline_stack.push(lookup_name.to_string());
+        let body = self.lower_expr_with_installed_return_k(&helper.body, return_k);
+        self.helper_inline_stack.pop();
+
+        let body = params
+            .into_iter()
+            .zip(arg_vars)
+            .rev()
+            .fold(body, |body, (param, arg)| {
+                CExpr::Let(param, Box::new(CExpr::Var(arg)), Box::new(body))
+            });
+        Some(self.wrap_let_bindings(arg_bindings, body))
+    }
+
+    fn static_helper_call_supported(
+        &self,
+        lookup_name: &str,
+        args: &[&Expr],
+        stack: &mut Vec<String>,
+    ) -> bool {
+        let Some(helper) = self.local_helper_defs.get(lookup_name) else {
+            return false;
+        };
+        if helper.source_module != self.current_semantic_module_name()
+            || stack.iter().any(|name| name == lookup_name)
+            || !Self::static_helper_params_supported(&helper.params)
+            || helper.params.len() != args.len()
+            || args.iter().any(|arg| {
+                self.branch_is_effectful(arg) || !self.static_helper_expr_supported(arg, stack)
+            })
+        {
+            return false;
+        }
+
+        stack.push(lookup_name.to_string());
+        let supported = self.static_helper_expr_supported(&helper.body, stack);
+        stack.pop();
+        supported && self.static_helper_call_contains_covered_effect(lookup_name, &mut Vec::new())
+    }
+
+    fn static_helper_call_contains_covered_effect(
+        &self,
+        lookup_name: &str,
+        stack: &mut Vec<String>,
+    ) -> bool {
+        let Some(helper) = self.local_helper_defs.get(lookup_name) else {
+            return false;
+        };
+        if stack.iter().any(|name| name == lookup_name) {
+            return false;
+        }
+        stack.push(lookup_name.to_string());
+        let contains = self.static_helper_expr_contains_covered_effect(&helper.body, stack);
+        stack.pop();
+        contains
+    }
+
+    fn static_helper_expr_contains_covered_effect(
+        &self,
+        expr: &Expr,
+        stack: &mut Vec<String>,
+    ) -> bool {
+        if let Some((head, op_name, qualifier, _args)) = collect_effect_call_expr(expr) {
+            return self
+                .resolved_effect_call_name(head.id, op_name, qualifier)
+                .map(|effect_name| {
+                    self.static_tail_resume_ops
+                        .contains_key(&format!("{}.{}", effect_name, op_name))
+                })
+                .unwrap_or(false);
+        }
+
+        if self.expr_is_effectful_call(expr) {
+            return collect_fun_call(expr)
+                .map(|(callee, _, _)| {
+                    self.static_helper_call_contains_covered_effect(callee, stack)
+                })
+                .unwrap_or(false);
+        }
+
+        match &expr.kind {
+            ExprKind::App { func, arg } => {
+                self.static_helper_expr_contains_covered_effect(func, stack)
+                    || self.static_helper_expr_contains_covered_effect(arg, stack)
+            }
+            ExprKind::BinOp { left, right, .. } => {
+                self.static_helper_expr_contains_covered_effect(left, stack)
+                    || self.static_helper_expr_contains_covered_effect(right, stack)
+            }
+            ExprKind::UnaryMinus { expr } | ExprKind::FieldAccess { expr, .. } => {
+                self.static_helper_expr_contains_covered_effect(expr, stack)
+            }
+            ExprKind::Tuple { elements } | ExprKind::ListLit { elements } => elements
+                .iter()
+                .any(|element| self.static_helper_expr_contains_covered_effect(element, stack)),
+            ExprKind::RecordCreate { fields, .. } | ExprKind::AnonRecordCreate { fields } => fields
+                .iter()
+                .any(|(_, _, field)| self.static_helper_expr_contains_covered_effect(field, stack)),
+            ExprKind::RecordUpdate { record, fields, .. } => {
+                self.static_helper_expr_contains_covered_effect(record, stack)
+                    || fields.iter().any(|(_, _, field)| {
+                        self.static_helper_expr_contains_covered_effect(field, stack)
+                    })
+            }
+            ExprKind::Ascription { expr, .. } => {
+                self.static_helper_expr_contains_covered_effect(expr, stack)
+            }
+            ExprKind::If {
+                cond,
+                then_branch,
+                else_branch,
+                ..
+            } => {
+                self.static_helper_expr_contains_covered_effect(cond, stack)
+                    || self.static_helper_expr_contains_covered_effect(then_branch, stack)
+                    || self.static_helper_expr_contains_covered_effect(else_branch, stack)
+            }
+            ExprKind::Case {
+                scrutinee, arms, ..
+            } => {
+                self.static_helper_expr_contains_covered_effect(scrutinee, stack)
+                    || arms.iter().any(|arm| {
+                        arm.node.guard.as_ref().is_some_and(|guard| {
+                            self.static_helper_expr_contains_covered_effect(guard, stack)
+                        }) || self.static_helper_expr_contains_covered_effect(&arm.node.body, stack)
+                    })
+            }
+            ExprKind::Block { stmts, .. } => stmts.iter().any(|stmt| match &stmt.node {
+                Stmt::Let { value, .. } => {
+                    self.static_helper_expr_contains_covered_effect(value, stack)
+                }
+                Stmt::Expr(expr) => self.static_helper_expr_contains_covered_effect(expr, stack),
+                Stmt::LetFun { .. } => false,
+            }),
+            ExprKind::StringInterp { parts, .. } => parts.iter().any(|part| match part {
+                ast::StringPart::Lit(_) => false,
+                ast::StringPart::Expr(expr) => {
+                    self.static_helper_expr_contains_covered_effect(expr, stack)
+                }
+            }),
+            ExprKind::DictMethodAccess { dict, .. } => {
+                self.static_helper_expr_contains_covered_effect(dict, stack)
+            }
+            ExprKind::ForeignCall { args, .. } => args
+                .iter()
+                .any(|arg| self.static_helper_expr_contains_covered_effect(arg, stack)),
+            _ => false,
+        }
+    }
+
+    fn static_helper_params_supported(params: &[Pat]) -> bool {
+        params.iter().all(|param| {
+            matches!(
+                param,
+                Pat::Var { .. }
+                    | Pat::Wildcard { .. }
+                    | Pat::Lit {
+                        value: ast::Lit::Unit,
+                        ..
+                    }
+            )
+        })
+    }
+
+    fn static_helper_direct_effect_call_supported(
+        &self,
+        head: &Expr,
+        op_name: &str,
+        qualifier: Option<&str>,
+        args: &[&Expr],
+        stack: &mut Vec<String>,
+    ) -> bool {
+        let Some(effect_name) = self.resolved_effect_call_name(head.id, op_name, qualifier) else {
+            return false;
+        };
+        let key = format!("{}.{}", effect_name, op_name);
+        self.static_tail_resume_ops.contains_key(&key)
+            && args.iter().all(|arg| {
+                !self.branch_is_effectful(arg) && self.static_helper_expr_supported(arg, stack)
+            })
+    }
+
+    fn static_helper_expr_supported(&self, expr: &Expr, stack: &mut Vec<String>) -> bool {
+        if let Some((head, op_name, qualifier, args)) = collect_effect_call_expr(expr) {
+            return self.static_helper_direct_effect_call_supported(
+                head, op_name, qualifier, &args, stack,
+            );
+        }
+
+        if self.expr_is_effectful_call(expr) {
+            let Some((callee, _head, args)) = collect_fun_call(expr) else {
+                return false;
+            };
+            return self.static_helper_call_supported(callee, &args, stack);
+        }
+
+        match &expr.kind {
+            ExprKind::Lit { .. }
+            | ExprKind::Var { .. }
+            | ExprKind::Constructor { .. }
+            | ExprKind::QualifiedName { .. }
+            | ExprKind::DictRef { .. }
+            | ExprKind::SymbolIntrinsic { .. } => true,
+            ExprKind::App { func, arg } => {
+                self.static_helper_expr_supported(func, stack)
+                    && self.static_helper_expr_supported(arg, stack)
+            }
+            ExprKind::BinOp { left, right, .. } => {
+                self.static_helper_expr_supported(left, stack)
+                    && self.static_helper_expr_supported(right, stack)
+            }
+            ExprKind::UnaryMinus { expr } | ExprKind::FieldAccess { expr, .. } => {
+                self.static_helper_expr_supported(expr, stack)
+            }
+            ExprKind::Tuple { elements } | ExprKind::ListLit { elements } => elements
+                .iter()
+                .all(|element| self.static_helper_expr_supported(element, stack)),
+            ExprKind::RecordCreate { fields, .. } | ExprKind::AnonRecordCreate { fields } => fields
+                .iter()
+                .all(|(_, _, field)| self.static_helper_expr_supported(field, stack)),
+            ExprKind::RecordUpdate { record, fields, .. } => {
+                self.static_helper_expr_supported(record, stack)
+                    && fields
+                        .iter()
+                        .all(|(_, _, field)| self.static_helper_expr_supported(field, stack))
+            }
+            ExprKind::Ascription { expr, .. } => self.static_helper_expr_supported(expr, stack),
+            ExprKind::If {
+                cond,
+                then_branch,
+                else_branch,
+                ..
+            } => {
+                self.static_helper_expr_supported(cond, stack)
+                    && self.static_helper_expr_supported(then_branch, stack)
+                    && self.static_helper_expr_supported(else_branch, stack)
+            }
+            ExprKind::Case {
+                scrutinee, arms, ..
+            } => {
+                self.static_helper_expr_supported(scrutinee, stack)
+                    && arms.iter().all(|arm| {
+                        arm.node
+                            .guard
+                            .as_ref()
+                            .is_none_or(|guard| self.static_helper_expr_supported(guard, stack))
+                            && self.static_helper_expr_supported(&arm.node.body, stack)
+                    })
+            }
+            ExprKind::Block { stmts, .. } => stmts.iter().all(|stmt| match &stmt.node {
+                Stmt::Let { value, .. } => self.static_helper_expr_supported(value, stack),
+                Stmt::Expr(expr) => self.static_helper_expr_supported(expr, stack),
+                Stmt::LetFun { .. } => false,
+            }),
+            ExprKind::StringInterp { parts, .. } => parts.iter().all(|part| match part {
+                ast::StringPart::Lit(_) => true,
+                ast::StringPart::Expr(expr) => self.static_helper_expr_supported(expr, stack),
+            }),
+            ExprKind::DictMethodAccess { dict, .. } => {
+                self.static_helper_expr_supported(dict, stack)
+            }
+            ExprKind::ForeignCall { args, .. } => args
+                .iter()
+                .all(|arg| self.static_helper_expr_supported(arg, stack)),
+            ExprKind::Lambda { .. }
+            | ExprKind::With { .. }
+            | ExprKind::Resume { .. }
+            | ExprKind::Do { .. }
+            | ExprKind::Receive { .. }
+            | ExprKind::BitString { .. }
+            | ExprKind::HandlerExpr { .. }
+            | ExprKind::Pipe { .. }
+            | ExprKind::BinOpChain { .. }
+            | ExprKind::PipeBack { .. }
+            | ExprKind::ComposeForward { .. }
+            | ExprKind::Cons { .. }
+            | ExprKind::ListComprehension { .. }
+            | ExprKind::EffectCall { .. } => false,
+        }
+    }
+
     fn lower_resolved_fun_call(&mut self, site: ResolvedCallSite<'_>) -> Option<CExpr> {
         let ResolvedCallSite {
             app_id,
@@ -2886,6 +3212,13 @@ impl<'a> Lowerer<'a> {
         let call_arity = total_arity.unwrap_or(args.len() + extras);
 
         if args.len() + extras == call_arity {
+            if is_effectful
+                && let Some(inlined) =
+                    self.try_inline_static_helper_call(lookup_name, head, args, return_k.clone())
+            {
+                return Some(inlined);
+            }
+
             let param_types = self.resolved_fun_info(head.id, lookup_name).map(|f| {
                 f.param_types
                     .iter()

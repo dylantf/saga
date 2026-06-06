@@ -3,7 +3,7 @@
 /// declarations and imported module codegen info.
 use crate::ast::{self, Decl};
 use crate::codegen::runtime_shape::{CpsShape, RuntimeFunctionShape};
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 use super::util;
 use super::{EffectInfo, FunInfo, HandlerInfo, Lowerer};
@@ -111,6 +111,50 @@ impl<'a> Lowerer<'a> {
             self.handler_factory_defs
                 .insert(format!("{}.{}", source_module_name, name), info);
         }
+    }
+
+    fn register_local_helper_defs(&mut self, program: &ast::Program, source_module_name: &str) {
+        let mut seen: HashSet<String> = HashSet::new();
+        let mut duplicate_names: HashSet<String> = HashSet::new();
+        let mut helpers: HashMap<String, super::LocalHelperInfo> = HashMap::new();
+
+        for decl in program {
+            let Decl::FunBinding {
+                name,
+                params,
+                guard,
+                body,
+                ..
+            } = decl
+            else {
+                continue;
+            };
+
+            if !seen.insert(name.clone()) {
+                duplicate_names.insert(name.clone());
+                helpers.remove(name);
+                helpers.remove(&format!("{}.{}", source_module_name, name));
+                continue;
+            }
+            if guard.is_some() {
+                continue;
+            }
+
+            let info = super::LocalHelperInfo {
+                params: params.clone(),
+                body: body.clone(),
+                source_module: source_module_name.to_string(),
+            };
+            helpers.insert(name.clone(), info.clone());
+            helpers.insert(format!("{}.{}", source_module_name, name), info);
+        }
+
+        for name in duplicate_names {
+            helpers.remove(&name);
+            helpers.remove(&format!("{}.{}", source_module_name, name));
+        }
+
+        self.local_helper_defs.extend(helpers);
     }
 
     fn resolved_type_effects_for_module(
@@ -728,6 +772,7 @@ impl<'a> Lowerer<'a> {
         let (has_module_decl, source_module_name) = Self::source_module_info(program, module_name);
         let (effect_canonical, handler_canonical) =
             self.initialize_canonical_name_maps(program, &source_module_name);
+        self.register_local_helper_defs(program, &source_module_name);
         self.register_handler_factory_defs(program, &source_module_name);
         self.register_local_module_decls(
             program,

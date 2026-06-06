@@ -1,0 +1,15 @@
+effect ReadInt {
+  fun read : Unit -> Int
+}
+
+type Choice = UseEffect | UseDefault
+
+fun choose_read : Choice -> Int needs {ReadInt}
+choose_read choice = case choice {
+  UseEffect -> read! ()
+  UseDefault -> 0
+}
+
+main () = choose_read UseEffect with {
+  read () = resume 42
+}

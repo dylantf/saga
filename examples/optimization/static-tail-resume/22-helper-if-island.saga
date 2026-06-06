@@ -1,0 +1,11 @@
+effect ReadInt {
+  fun read : Unit -> Int
+}
+
+fun maybe_read : Bool -> Int needs {ReadInt}
+maybe_read use_read =
+  if use_read then read! () else 0
+
+main () = maybe_read True with {
+  read () = resume 42
+}

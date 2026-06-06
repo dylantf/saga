@@ -203,15 +203,21 @@ handled by the active static handler facts.
 
 | Case | Proof Required | Strategy | Fixture | Status |
 | --- | --- | --- | --- | --- |
-| Same-module single-clause helper | Small body, direct params, effects covered by active static handler facts | Generate private variant or inline local body | `16-cps-helper-call-island.saga` | Later |
-| If/case inside helper | All branches remain covered and supported | Generate variant | `17-cps-if-island.saga`, `18-cps-case-island.saga` | Later |
+| Same-module single-clause helper | Small body, direct params, effects covered by active static handler facts | Inline local body at covered call site | `static-tail-resume/20-helper-call-island.saga` | Done |
+| If/case inside helper | All branches remain covered and supported | Inline local body at covered call site | `static-tail-resume/22-helper-if-island.saga`, `static-tail-resume/23-helper-case-island.saga` | Done |
 | Imported public helper | Imported body and metadata admitted safely | Generate caller-local variant | Imported static handler project | Later |
-| Recursive or multi-clause helper | Termination/coverage not proven | Slow path | `multi-clause-project` | Later/guard |
-| Helper leaves residual uncovered effect | Effect summary says not net-direct | Slow path | New guard | Later |
+| Recursive or multi-clause helper | Termination/coverage not proven | Slow path | `static-tail-resume/21-multi-clause-helper-guard.saga`, `multi-clause-project` | Later/guard |
+| Helper leaves residual uncovered effect | Effect summary says not net-direct | Slow path | `static-tail-resume/24-helper-uncovered-effect-guard.saga` | Done/guard |
 
 Generated variants are the first point where optimizer output may add
 declarations. That needs a naming/cache policy and emitted-Core tests before
 implementation.
+
+The first same-module slice uses call-site inlining rather than generated
+variants. The admission policy is intentionally narrow: unguarded single-clause
+helpers, simple params, non-effectful call-site args, no recursion, and only
+direct ops or nested admitted helpers whose concrete op calls are covered by
+active static tail-resume facts.
 
 ## Stage 5: Higher-Order Callback Specialization
 

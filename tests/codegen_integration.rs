@@ -229,6 +229,19 @@ fn assert_contains(out: &str, needle: &str) {
     );
 }
 
+fn emitted_function(out: &str, name: &str, arity: usize) -> String {
+    let marker = format!("'{}'/{} =", name, arity);
+    let start = out
+        .find(&marker)
+        .unwrap_or_else(|| panic!("missing function marker {marker}\n{out}"));
+    let rest = &out[start..];
+    let end = rest
+        .find("\n\n")
+        .map(|idx| start + idx)
+        .unwrap_or_else(|| out.len());
+    out[start..end].to_string()
+}
+
 #[test]
 fn mixed_effect_trait_impl_keeps_pure_method_callable() {
     let src = r#"
@@ -1109,7 +1122,9 @@ effect Log {
 }
 
 handler silent for Log {
-  log msg = resume ()
+  log msg = resume () finally {
+    ()
+  }
 }
 
 fun do_work : Unit -> Int needs {Log}
@@ -1155,7 +1170,9 @@ effect Log {
 }
 
 handler silent for Log {
-  log msg = resume ()
+  log msg = resume () finally {
+    ()
+  }
 }
 
 fun do_work : Unit -> Int needs {Log}
@@ -1232,7 +1249,9 @@ fun outer : Unit -> Unit needs {Log}
 outer () = inner ()
 
 handler silent for Log {
-  log msg = resume ()
+  log msg = resume () finally {
+    ()
+  }
 }
 
 main () = outer () with silent
@@ -1260,7 +1279,9 @@ do_work () = {
 }
 
 handler silent for Log {
-  log msg = resume ()
+  log msg = resume () finally {
+    ()
+  }
 }
 
 main () = do_work () with silent
@@ -1995,6 +2016,148 @@ main () = {
 }
 
 #[test]
+fn same_module_helper_call_under_static_handler_inlines_direct_ops() {
+    let src = r#"
+effect ReadInt {
+  fun read : Unit -> Int
+}
+
+fun read_value : Unit -> Int needs {ReadInt}
+read_value () = read! ()
+
+fun read_plus_two : Unit -> Int needs {ReadInt}
+read_plus_two () = {
+  let value = read_value ()
+  value + 2
+}
+
+main () = read_plus_two () with {
+  read () = resume 40
+}
+"#;
+    let out = emit_elaborated(src);
+    let main = emitted_function(&out, "main", 1);
+    assert!(
+        !main.contains("apply 'read_plus_two'/3"),
+        "main should inline the covered helper call\n{main}"
+    );
+    assert!(
+        !main.contains("apply 'read_value'/3"),
+        "main should inline the nested covered helper call\n{main}"
+    );
+    assert_core_compiles(&out);
+    assert_runs_and_stdout_contains(src, &["42"]);
+}
+
+#[test]
+fn same_module_helper_if_under_static_handler_inlines_direct_ops() {
+    let src = r#"
+effect ReadInt {
+  fun read : Unit -> Int
+}
+
+fun maybe_read : Bool -> Int needs {ReadInt}
+maybe_read use_read =
+  if use_read then read! () else 0
+
+main () = maybe_read True with {
+  read () = resume 42
+}
+"#;
+    let out = emit_elaborated(src);
+    let main = emitted_function(&out, "main", 1);
+    assert!(
+        !main.contains("apply 'maybe_read'/3"),
+        "main should inline the covered helper if\n{main}"
+    );
+    assert_core_compiles(&out);
+    assert_runs_and_stdout_contains(src, &["42"]);
+}
+
+#[test]
+fn same_module_helper_case_under_static_handler_inlines_direct_ops() {
+    let src = r#"
+effect ReadInt {
+  fun read : Unit -> Int
+}
+
+type Choice = UseEffect | UseDefault
+
+fun choose_read : Choice -> Int needs {ReadInt}
+choose_read choice = case choice {
+  UseEffect -> read! ()
+  UseDefault -> 0
+}
+
+main () = choose_read UseEffect with {
+  read () = resume 42
+}
+"#;
+    let out = emit_elaborated(src);
+    let main = emitted_function(&out, "main", 1);
+    assert!(
+        !main.contains("apply 'choose_read'/3"),
+        "main should inline the covered helper case\n{main}"
+    );
+    assert_core_compiles(&out);
+    assert_runs_and_stdout_contains(src, &["42"]);
+}
+
+#[test]
+fn multi_clause_helper_under_static_handler_stays_on_evidence_path() {
+    let src = r#"
+effect ReadInt {
+  fun read : Unit -> Int
+}
+
+fun read_value : Bool -> Int needs {ReadInt}
+read_value True = read! ()
+read_value False = 0
+
+main () = read_value True with {
+  read () = resume 42
+}
+"#;
+    let out = emit_elaborated(src);
+    let main = emitted_function(&out, "main", 1);
+    assert_contains(&main, "apply 'read_value'/3");
+    assert_core_compiles(&out);
+    assert_runs_and_stdout_contains(src, &["42"]);
+}
+
+#[test]
+fn helper_with_residual_uncovered_effect_stays_on_evidence_path() {
+    let src = r#"
+effect ReadInt {
+  fun read : Unit -> Int
+}
+
+effect Log {
+  fun log : String -> Unit
+}
+
+fun helper : Unit -> Int needs {ReadInt, Log}
+helper () = {
+  log! "reading"
+  read! ()
+}
+
+main () = (helper () with {
+  read () = resume 42
+}) with {
+  log _ = resume () finally {
+    ()
+  }
+}
+"#;
+    let out = emit_elaborated(src);
+    let main = emitted_function(&out, "main", 1);
+    assert_contains(&main, "apply 'helper'/3");
+    assert_core_compiles(&out);
+    assert_runs_and_stdout_contains(src, &["42"]);
+}
+
+#[test]
 fn repeated_handler_binding_names_do_not_reuse_stale_conditional_facts() {
     let src = r#"
 effect Log {
@@ -2106,7 +2269,9 @@ compute () = {
 }
 
 main () = compute () with {
-  ask () = resume 42
+  ask () = resume 42 finally {
+    ()
+  }
 }
 "#;
     let out = emit_elaborated(src);
@@ -2133,7 +2298,9 @@ compute () = {
 }
 
 main () = compute () with {
-  ask () = resume 21
+  ask () = resume 21 finally {
+    ()
+  }
 }
 "#;
     let out = emit_elaborated(src);
@@ -2155,7 +2322,9 @@ decide () = {
 }
 
 main () = decide () with {
-  ask () = resume True
+  ask () = resume True finally {
+    ()
+  }
 }
 "#;
     let out = emit_elaborated(src);
@@ -2177,7 +2346,9 @@ compute () = {
 }
 
 main () = compute () with {
-  ask () = resume 10
+  ask () = resume 10 finally {
+    ()
+  }
 }
 "#;
     let out = emit_elaborated(src);

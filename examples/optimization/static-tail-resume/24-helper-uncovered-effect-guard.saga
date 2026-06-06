@@ -1,0 +1,21 @@
+effect ReadInt {
+  fun read : Unit -> Int
+}
+
+effect Log {
+  fun log : String -> Unit
+}
+
+fun helper : Unit -> Int needs {ReadInt, Log}
+helper () = {
+  log! "reading"
+  read! ()
+}
+
+main () = (helper () with {
+  read () = resume 42
+}) with {
+  log _ = resume () finally {
+    ()
+  }
+}
