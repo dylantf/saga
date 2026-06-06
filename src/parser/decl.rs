@@ -502,7 +502,7 @@ impl Parser {
             let name = self.expect_ident()?;
             let name_span = self.tokens[self.pos - 1].span;
 
-            const KNOWN_ANNOTATIONS: &[&str] = &["external", "builtin", "inline"];
+            const KNOWN_ANNOTATIONS: &[&str] = &["external", "builtin"];
             if !KNOWN_ANNOTATIONS.contains(&name.as_str()) {
                 return Err(ParseError {
                     message: format!("unknown annotation @{}", name),
@@ -680,14 +680,6 @@ impl Parser {
                     let op_name = self.expect_ident()?;
                     let mut params = Vec::new();
                     while !matches!(self.peek(), Token::Eq | Token::Eof) {
-                        // Skip `()` unit params (zero-param effect ops)
-                        if matches!(self.peek(), Token::LParen)
-                            && matches!(self.peek_at(1), Token::RParen)
-                        {
-                            self.advance(); // consume '('
-                            self.advance(); // consume ')'
-                            continue;
-                        }
                         params.push(self.parse_pattern()?);
                     }
                     self.expect(Token::Eq)?;

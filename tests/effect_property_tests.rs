@@ -380,6 +380,12 @@ fn run_erl(dir: &PathBuf, eval: &str, fixture: &str) -> String {
     String::from_utf8_lossy(&run.stdout).into_owned()
 }
 
+fn result_eval(format: &str) -> String {
+    format!(
+        "Ev = case erlang:function_exported(main, '__saga_initial_evidence', 0) of true -> main:'__saga_initial_evidence'(); false -> {{}} end, K = fun(V) -> V end, io:format(\"{format}\", [main:result(unit, Ev, K)]), init:stop()."
+    )
+}
+
 /// Compile a single-module Saga source and call `main:result(unit)`,
 /// asserting the returned string equals `expected`. The fixture must
 /// declare `module Main` and define `pub fun result : Unit -> String`.
@@ -387,14 +393,10 @@ fn check_result_string(fixture: &str, src: &str, expected: &str) {
     let root = fixtures_root_for_main_only();
     let mut checker = make_checker(root.clone());
     let program = typecheck_source(src, &mut checker, fixture);
-    let core = emit_program(&program, "main", &checker, Some("main"));
+    let core = emit_program(&program, "main", &checker, None);
     let dir = fresh_dir(fixture);
     compile_with_erlc(&dir, &core, "main", fixture);
-    let stdout = run_erl(
-        &dir,
-        "io:format(\"~s\", [main:result(unit)]), init:stop().",
-        fixture,
-    );
+    let stdout = run_erl(&dir, &result_eval("~s"), fixture);
     let _ = std::fs::remove_dir_all(&dir);
     let _ = std::fs::remove_dir_all(&root);
     assert_eq!(
@@ -410,14 +412,10 @@ fn check_result_int(fixture: &str, src: &str, expected: i64) {
     let root = fixtures_root_for_main_only();
     let mut checker = make_checker(root.clone());
     let program = typecheck_source(src, &mut checker, fixture);
-    let core = emit_program(&program, "main", &checker, Some("main"));
+    let core = emit_program(&program, "main", &checker, None);
     let dir = fresh_dir(fixture);
     compile_with_erlc(&dir, &core, "main", fixture);
-    let stdout = run_erl(
-        &dir,
-        "io:format(\"~p\", [main:result(unit)]), init:stop().",
-        fixture,
-    );
+    let stdout = run_erl(&dir, &result_eval("~p"), fixture);
     let _ = std::fs::remove_dir_all(&dir);
     let _ = std::fs::remove_dir_all(&root);
     let trimmed = stdout.trim();
@@ -482,14 +480,10 @@ fn check_cross_module(fixture: &str, modules: &[(&str, &str)], main_src: &str, e
         let core = emit_program(program, &erl_name, &checker, None);
         compile_with_erlc(&dir, &core, &erl_name, fixture);
     }
-    let main_core = emit_program(&main_program, "main", &checker, Some("main"));
+    let main_core = emit_program(&main_program, "main", &checker, None);
     compile_with_erlc(&dir, &main_core, "main", fixture);
 
-    let stdout = run_erl(
-        &dir,
-        "io:format(\"~s\", [main:result(unit)]), init:stop().",
-        fixture,
-    );
+    let stdout = run_erl(&dir, &result_eval("~s"), fixture);
     let _ = std::fs::remove_dir_all(&dir);
     let _ = std::fs::remove_dir_all(&root);
     assert_eq!(
@@ -850,7 +844,7 @@ effect Log {
 
 handler outer for Log {
   log msg = "OUTER:" <> msg <> resume ()
-  return _ = ""
+  return value = value
 }
 
 handler inner for Log {
@@ -1915,6 +1909,94 @@ result () = (work () with to_result_str) with collect
     // returns immediately with the inner Fail's err string; "after" never runs.
     check_result_string(
         "fail_handler_inside_resume_aborts_correctly",
+        src,
+        "before/err:bang",
+    );
+}
+
+#[test]
+fn fail_inside_nonresuming_arm_captures_outer_prompt() {
+    // Same routing shape as `fail_handler_inside_resume_aborts_correctly`, but
+    // the Log+Fail sequence lives inside a non-resuming handler arm. The Log
+    // handler is outside the Fail handler, so its `resume` must capture the
+    // Fail prompt from the arm body and return the handled error as a value.
+    let src = r#"module Main
+
+import Std.Fail (Fail)
+
+effect Log {
+  fun log : String -> Unit
+}
+
+effect Trigger {
+  fun fire : Unit -> String
+}
+
+handler collect for Log {
+  log msg = msg <> "/" <> resume ()
+}
+
+handler to_result_str for Fail String {
+  fail e = "err:" <> e
+  return v = "ok:" <> v
+}
+
+handler fire_h for Trigger needs {Log, Fail String} {
+  fire () = {
+    log! "before"
+    fail! "bang"
+    log! "after"
+    "tail"
+  }
+}
+
+pub fun result : Unit -> String
+result () = ((fire! () with fire_h) with to_result_str) with collect
+"#;
+    check_result_string(
+        "fail_inside_nonresuming_arm_captures_outer_prompt",
+        src,
+        "before/err:bang",
+    );
+}
+
+#[test]
+fn marked_value_result_bubbles_through_value_position_bind() {
+    // A routed value result can appear while lowering an argument/value-position
+    // bind. It must bubble to its marked prompt instead of being consumed by the
+    // local 2-tuple value-position protocol.
+    let src = r#"module Main
+
+import Std.Fail (Fail)
+
+effect Log {
+  fun log : String -> Unit
+}
+
+handler collect for Log {
+  log msg = msg <> "/" <> resume ()
+}
+
+handler to_result_str for Fail String {
+  fail e = "err:" <> e
+  return v = "ok:" <> v
+}
+
+fun id : String -> String
+id x = x
+
+fun work : Unit -> String needs {Log, Fail String}
+work () = {
+  log! "before"
+  fail! "bang"
+  "tail"
+}
+
+pub fun result : Unit -> String
+result () = id (work () with to_result_str) with collect
+"#;
+    check_result_string(
+        "marked_value_result_bubbles_through_value_position_bind",
         src,
         "before/err:bang",
     );

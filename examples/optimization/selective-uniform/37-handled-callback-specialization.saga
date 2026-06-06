@@ -1,0 +1,16 @@
+effect ReadInt {
+  fun read : Unit -> Int
+}
+
+handler forty_one for ReadInt {
+  read () = resume 41
+}
+
+fun handled_value : Unit -> Int
+handled_value () = read! () with forty_one
+
+fun apply_eff : (Unit -> Int needs {ReadInt}) -> Int needs {ReadInt}
+apply_eff f = f ()
+
+fun main : Unit -> Int
+main () = apply_eff handled_value with forty_one

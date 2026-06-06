@@ -1,0 +1,17 @@
+# Baseline: a static handler directly encloses a perform site.
+
+effect Options {
+  fun get_options : Unit -> Int
+}
+
+handler options_10 for Options {
+  get_options () = resume 10
+}
+
+fun compute : (x: Int) -> Int needs {Options}
+compute x = x + get_options! ()
+
+main () = {
+  let result = compute 5 with options_10
+  dbg (show result)
+}

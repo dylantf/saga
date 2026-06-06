@@ -1,0 +1,20 @@
+effect Choose { fun choose : Int -> Int }
+fun work : Unit -> Int needs {Choose}
+work () = choose! 0 + choose! 5
+main () = {
+  let r = work () with {
+    choose 0 = {
+      dbg "  choose 0"
+      resume 100
+    } finally {
+      dbg "  cleanup 0"
+    }
+    choose n = {
+      dbg $"  choose {n}"
+      resume (n * 2)
+    } finally {
+      dbg "  cleanup n"
+    }
+  }
+  dbg $"result: {r}"
+}

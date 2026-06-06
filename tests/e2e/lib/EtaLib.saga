@@ -1,0 +1,69 @@
+module EtaLib
+
+# Test surface for eta-reduced top-level function bindings.
+# Each `name = body` here has LHS arity less than the signature's
+# declared arity; the elaborator should eta-expand so the producer emits
+# the function at the type-implied arity and cross-module callers find it.
+
+# -------- Local source for the aliases below ---------------------------
+
+fun raw_id : Int -> Int
+raw_id x = x
+
+fun raw_add : Int -> Int -> Int
+raw_add a b = a + b
+
+fun raw_curried3 : Int -> Int -> Int -> Int
+raw_curried3 a b c = a + b + c
+
+# Polymorphic: identity over any type.
+fun raw_poly_id : a -> a
+raw_poly_id x = x
+
+# Higher-order: takes a function, applies it to an int.
+fun raw_apply_to_7 : (Int -> Int) -> Int
+raw_apply_to_7 f = f 7
+
+# -------- @external aliases (the saga_pgo `pg_text = coerce_value` shape) --
+
+@external("erlang", "erlang", "abs")
+fun ext_abs : Int -> Int
+
+# Eta-reduced alias to an @external. Used to fail with `undef` because the
+# producer emitted `/2` while cross-module callers called `/3`.
+pub fun aliased_ext_abs : Int -> Int
+aliased_ext_abs = ext_abs
+
+# -------- Saga-defined-function eta aliases ----------------------------
+
+# 1-arg eta of a local Saga function.
+pub fun aliased_id : Int -> Int
+aliased_id = raw_id
+
+# 2-arg eta — declared arity is 2 but LHS binds 0.
+pub fun aliased_add : Int -> Int -> Int
+aliased_add = raw_add
+
+# 3-arg eta — declared arity is 3 but LHS binds 0. Stress-tests the
+# nested `App` wrapping the elaborator produces.
+pub fun aliased_curried3 : Int -> Int -> Int -> Int
+aliased_curried3 = raw_curried3
+
+# Polymorphic eta — eta-expansion must not lose generality.
+pub fun aliased_poly_id : a -> a
+aliased_poly_id = raw_poly_id
+
+# Eta-reduced alias used as a first-class value (passed to a HOF).
+pub fun apply_via_aliased : Unit -> Int
+apply_via_aliased () = raw_apply_to_7 aliased_id
+
+# Chained eta: `a = b`, `b = c`.
+pub fun aliased_id_a : Int -> Int
+aliased_id_a = aliased_id
+
+# -------- In-module callers, exposed for the test ---------------------
+
+# Calls an eta-reduced binding from within the SAME module — exercises the
+# in-module resolution path (whereas all the tests below cross modules).
+pub fun in_module_caller : Int -> Int
+in_module_caller n = aliased_id n + aliased_add 10 20 + aliased_curried3 1 2 3

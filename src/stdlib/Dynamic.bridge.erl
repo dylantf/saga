@@ -83,13 +83,13 @@ decode_list_loop(DecoderFun, [H | T], Index, Acc) ->
 
 %% Optional decoder
 
-decode_optional(_DecoderFun, nil) -> {ok, {nothing}};
-decode_optional(_DecoderFun, undefined) -> {ok, {nothing}};
-decode_optional(_DecoderFun, null) -> {ok, {nothing}};
-decode_optional(_DecoderFun, {nothing}) -> {ok, {nothing}};
+decode_optional(_DecoderFun, nil) -> {ok, {std_maybe_Nothing}};
+decode_optional(_DecoderFun, undefined) -> {ok, {std_maybe_Nothing}};
+decode_optional(_DecoderFun, null) -> {ok, {std_maybe_Nothing}};
+decode_optional(_DecoderFun, {std_maybe_Nothing}) -> {ok, {std_maybe_Nothing}};
 decode_optional(DecoderFun, Data) ->
     case DecoderFun(Data) of
-        {ok, V} -> {ok, {just, V}};
+        {ok, V} -> {ok, {std_maybe_Just, V}};
         {error, E} -> {error, E}
     end.
 

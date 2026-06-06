@@ -22,12 +22,20 @@ effect Choose {
   fun choose : Unit -> Bool
 }
 
+effect ChooseList a {
+  fun choose_from : List a -> a
+}
+
 effect Recorder a {
   fun log_state : (entity: a) -> Unit
 }
 
 effect Validate {
   fun invalid : String -> Unit
+}
+
+effect Pick {
+  fun pick : Int -> Int
 }
 
 # --- Named handlers ---
@@ -71,6 +79,17 @@ handler all_choices for Choose {
     let b = resume False
     List.append a b
   }
+  return v = [v]
+}
+
+handler all_list_choices for ChooseList a {
+  choose_from options = List.flat_map (fun x -> resume x) options
+  return v = [v]
+}
+
+handler all_list_solutions for ChooseList a, Fail String {
+  choose_from options = List.flat_map (fun x -> resume x) options
+  fail _ = []
   return v = [v]
 }
 
@@ -142,10 +161,36 @@ nested_outer_fails () = double_positive (parse_or_fail (-3)) with to_result
 fun nested_both_succeed : Unit -> Result Int String
 nested_both_succeed () = double_positive (parse_or_fail 5) with to_result
 
+# Regression: a foreign abort (targeting the OUTER handler) must propagate
+# through an INNER resuming arm. Here `log!` is handled by `silent_log` (which
+# resumes); the resumed continuation then performs `fail!`, which must abort to
+# the outer `to_result` handler and yield `Err "boom"` — not be swallowed by
+# the inner Log delimiter.
+fun log_then_fail : Unit -> Int needs {Log, Fail String}
+log_then_fail () = {
+  log! "before"
+  fail! "boom"
+  99
+}
+
+fun foreign_abort_through_resume : Unit -> Result Int String
+foreign_abort_through_resume () =
+  (log_then_fail () with silent_log) with to_result
+
 fun let_wrapped_fallback : Unit -> String
 let_wrapped_fallback () = {
   let x = safe_div 10 0 with int_fallback
   if x == 0 then "after" else "wrong"
+}
+
+# Regression: a handler arm that catches Fail and re-performs `fail!` to an
+# OUTER handler must propagate that abort across a function-call boundary.
+# Inlining the inner handler at the call site works; hiding it behind this
+# function leaked the abort to the outer handler as an ordinary value, so the
+# outer `return` clause ran instead of its `fail` arm.
+fun reabort_wrapped : String -> String needs {Fail String}
+reabort_wrapped s = (if s == "bad" then fail! "boom" else s) with {
+  fail e = fail! ("wrapped:" <> e)
 }
 
 fun branch_terminal_with : Bool -> Result Int String
@@ -254,6 +299,12 @@ make_logger verbose = handler for Log {
   }
 }
 
+# Takes a `Handler Log` value as a parameter and uses it dynamically. The
+# typechecker now seeds `let_binding_handlers` from parameter NodeIds with
+# `Handler E` type so the with-site can install evidence.
+fun run_with_logger : (h: Handler Log) -> Int
+run_with_logger h = do_work () with h
+
 fun require_non_empty : String -> String -> Unit needs {Validate}
 require_non_empty label value =
   if value == "" then invalid! $"{label} is required"
@@ -328,6 +379,12 @@ nested_named_returns_reversed_order () = get_counter! () with {times_two_counter
 fun stacked_named_returns_match_list_sugar : Unit -> Int
 stacked_named_returns_match_list_sugar () =
   (get_counter! () with add_one_counter) with times_two_counter
+
+fun tail_resumptive_direct_call_return_clause : Unit -> Int
+tail_resumptive_direct_call_return_clause () = {
+  let x = get_counter! () with add_one_counter
+  x + 1
+}
 
 fun return_only_inline_inside_named_handler : Unit -> Int
 return_only_inline_inside_named_handler () = get_counter! () with {
@@ -504,6 +561,10 @@ tests () = {
           |> Result.map (fun x -> x * 10)
         assert_eq result (Ok 70)
       })
+      test "re-abort propagates across a function-call boundary" (fun () -> {
+        let result = reabort_wrapped "bad" with to_result
+        assert_eq result (Err "wrapped:boom")
+      })
     })
 
     describe "nested handler return composition" (fun () -> {
@@ -520,6 +581,11 @@ tests () = {
       test "stacked with matches list sugar" (fun () -> {
         let result = stacked_named_returns_match_list_sugar ()
         assert_eq result 22
+      })
+
+      test "tail-resumptive direct-call preserves return clause" (fun () -> {
+        let result = tail_resumptive_direct_call_return_clause ()
+        assert_eq result 12
       })
 
       test "return-only inline layer inside named handler still composes" (fun () -> {
@@ -550,6 +616,17 @@ tests () = {
       test "effect can bubble through multiple wrapped functions before being handled" (fun () -> {
         let result = counter_bubble_outer ()
         assert_eq result 81
+      })
+
+      # KNOWN GAP: when the resuming handler is INNER and the aborting handler
+      # is OUTER, the foreign abort must propagate past the inner resuming
+      # delimiter. Today `lower_resume`'s foreign-abort arm unwraps the abort
+      # (correct only when the aborting handler is INNER), so this currently
+      # mis-routes. Fixing it needs delimiter-scope awareness, not a blanket
+      # propagate/unwrap. Tracked in docs/planning/uniform-effect-translation.
+      test "foreign abort propagates through an inner resuming arm" (fun () -> {
+        let result = foreign_abort_through_resume ()
+        assert_eq result (Err "boom")
       })
     })
 
@@ -624,6 +701,34 @@ tests () = {
         let result = do_work () with logger
         assert_eq result 30
       })
+      # Regression: passing a `Handler E` value as a function parameter used
+      # to fall through with empty effects in the translator (no `let`-binding
+      # to seed `let_handler_effects`), so the lowerer skipped evidence
+      # install and `find_evidence` panicked at runtime. Parameter NodeIds
+      # now feed `let_binding_handlers` via the typechecker.
+      test "handler passed as function parameter" (fun () -> {
+        let logger = make_logger False
+        assert_eq (run_with_logger logger) 30
+      })
+      # Regression: multi-effect handler values used dynamically (let-bound,
+      # passed as a param, etc.) panicked at lowering with
+      # "Dynamic handler must carry exactly one effect" — the runtime
+      # handler-value shape only carried one op tuple. The shape now carries
+      # `OpsByEffect = {{EffectAtom, OpTuple}, ...}` in canonical order and
+      # the dynamic-with lowerer chains one `insert_canonical` per effect.
+      test "multi-effect handler value used dynamically" (fun () -> {
+        let h = handler for Log, Validate {
+          log _ = resume ()
+          invalid _ = resume ()
+          return v = v
+        }
+        let result = {
+          log! "hi"
+          invalid! "shrug"
+          42
+        } with h
+        assert_eq result 42
+      })
     })
 
     describe "multishot continuations" (fun () -> {
@@ -634,6 +739,25 @@ tests () = {
           x + y
         } with all_choices
         assert_eq results [11, 21, 12, 22]
+      })
+
+      test "flat_map branches collect list results" (fun () -> {
+        let results = {
+          let a = choose_from! [1, 2]
+          let b = choose_from! (List.range a 3)
+          (a, b)
+        } with all_list_choices
+        assert_eq results [(1, 1), (1, 2), (1, 3), (2, 2), (2, 3)]
+      })
+
+      test "flat_map branches can prune with abort arm" (fun () -> {
+        let results = {
+          let a = choose_from! [1, 2, 3]
+          let b = choose_from! (List.range a 4)
+          if a + b == 5 then () else fail! "pruned"
+          (a, b)
+        } with all_list_solutions
+        assert_eq results [(1, 4), (2, 3)]
       })
     })
 
@@ -684,6 +808,20 @@ tests () = {
         work_and_fail () with managed
       } with to_result
       assert_eq result (Err "something went wrong" : Result String String)
+    })
+
+    # Regression: a multi-arm-per-op handler (two arms pattern-matching the
+    # same op's param) where each arm carries its own `finally` block used to
+    # panic in the monadic lowerer ("finally_block deferred"). The cleanup is
+    # threaded per-arm exactly as the single-arm path does.
+    test "multi-arm-per-op arms each carry finally" (fun () -> {
+      let result = {
+        pick! 0 + pick! 5
+      } with {
+        pick 0 = resume 100 finally { () }
+        pick n = resume (n * 2) finally { () }
+      }
+      assert_eq result 110
     })
   })
 

@@ -14,6 +14,13 @@ pub struct CFunDef {
     pub body: CExpr, // always a Fun at the top level
 }
 
+impl Drop for CFunDef {
+    fn drop(&mut self) {
+        let body = std::mem::replace(&mut self.body, CExpr::Nil);
+        drop_expr_iterative(body);
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum CExpr {
     Lit(CLit),
@@ -140,6 +147,80 @@ pub enum Endianness {
     Big,
     Little,
     Native,
+}
+
+fn drop_expr_iterative(expr: CExpr) {
+    let mut stack = vec![expr];
+    while let Some(expr) = stack.pop() {
+        match expr {
+            CExpr::Lit(_) | CExpr::Var(_) | CExpr::Nil | CExpr::FunRef(_, _) => {}
+            CExpr::Fun(_, body) => stack.push(*body),
+            CExpr::Let(_, value, body) => {
+                stack.push(*value);
+                stack.push(*body);
+            }
+            CExpr::Apply(func, args) => {
+                stack.push(*func);
+                stack.extend(args);
+            }
+            CExpr::Call(_, _, args) | CExpr::Tuple(args) | CExpr::Values(args) => {
+                stack.extend(args);
+            }
+            CExpr::Case(scrutinee, arms) => {
+                stack.push(*scrutinee);
+                push_arm_exprs(arms, &mut stack);
+            }
+            CExpr::Cons(head, tail) => {
+                stack.push(*head);
+                stack.push(*tail);
+            }
+            CExpr::LetRec(defs, body) => {
+                stack.extend(defs.into_iter().map(|(_, _, expr)| expr));
+                stack.push(*body);
+            }
+            CExpr::Receive(arms, timeout, timeout_body) => {
+                push_arm_exprs(arms, &mut stack);
+                stack.push(*timeout);
+                stack.push(*timeout_body);
+            }
+            CExpr::Try {
+                expr,
+                ok_body,
+                catch_body,
+                ..
+            } => {
+                stack.push(*expr);
+                stack.push(*ok_body);
+                stack.push(*catch_body);
+            }
+            CExpr::Binary(segs) => push_binary_exprs(segs, &mut stack),
+            CExpr::Annotated { expr, .. } => stack.push(*expr),
+        }
+    }
+}
+
+fn push_arm_exprs(arms: Vec<CArm>, stack: &mut Vec<CExpr>) {
+    for arm in arms {
+        if let Some(guard) = arm.guard {
+            stack.push(guard);
+        }
+        stack.push(arm.body);
+    }
+}
+
+fn push_binary_exprs(segs: Vec<CBinSeg<CExpr>>, stack: &mut Vec<CExpr>) {
+    for seg in segs {
+        match seg {
+            CBinSeg::Byte(_) => {}
+            CBinSeg::BinaryAll(value) => stack.push(value),
+            CBinSeg::Segment { value, size, .. } => {
+                stack.push(value);
+                if let BinSegSize::Expr(size) = size {
+                    stack.push(size);
+                }
+            }
+        }
+    }
 }
 
 impl CExpr {

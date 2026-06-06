@@ -15,7 +15,7 @@ mod records;
 mod resolve;
 mod result;
 mod unify;
-pub(crate) use resolve::{ResolutionResult, ResolvedValue};
+pub(crate) use resolve::{ResolutionResult, ResolvedEffectOp, ResolvedValue};
 pub use result::{CheckResult, LetDictInfo};
 
 #[cfg(test)]
@@ -630,7 +630,10 @@ impl Scheme {
 }
 
 // Module export types are defined in check_module.rs and re-exported here.
-pub use check_module::{EffectDef, EffectOpDef, ModuleCodegenInfo, ModuleExports, TraitImplDict};
+pub use check_module::{
+    EffectDef, EffectOpDef, ModuleCodegenInfo, ModuleExports, TraitImplDict, TraitImplMethodInfo,
+    TraitImplMethodRuntimeShape,
+};
 
 // --- Type environment ---
 

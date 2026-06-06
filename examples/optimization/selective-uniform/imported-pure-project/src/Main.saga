@@ -1,0 +1,6 @@
+module Main
+
+import Helper (inc, pick)
+
+fun main : Unit -> Int
+main () = pick (inc 40)

@@ -1,1140 +1,985 @@
-/// Effect system lowering: CPS transform, handler building, BEAM-native ops.
-///
-/// This module handles:
-/// - `lower_effect_call`: lowering `op! args` to handler application
-/// - `lower_with`: lowering `expr with handler` blocks
-/// - `build_op_handler_fun`: building per-op CPS handler functions
-/// - `build_beam_native_op_fun`: synthesizing handlers for BEAM-native ops
-/// - named/inline handler composition for `with` lowering
-use std::collections::{HashMap, HashSet, VecDeque};
+//! Effect-machinery lowering for the new monadic lowerer (sub-steps 7d + 7e).
+//!
+//! Implements `MExpr::Yield` / `MExpr::With` in the **uniform open-row shape**
+//! (every yield goes through `std_evidence_bridge:find_evidence/2` at runtime,
+//! no closed-row specialization), and the handler-emission machinery feeding
+//! into With sites: arm closure compilation, multi-arm-per-op `case` fan-out,
+//! per-effect OpTuple assembly, and return-clause composition.
+//!
+//! See:
+//!   - `docs/effect-implementation.md` — runtime evidence layout, the
+//!     `find_evidence` / `insert_canonical` ABI, "Handler Representation",
+//!     "The `return` Clause", "Non-Resumable Effects".
+//!   - `src/codegen/lower/effects.rs` — the old lowerer's
+//!     `build_op_handler_fun`, `build_multi_arm_inline_op_handler_fun`,
+//!     `build_return_lambda`, and `compose_return_k` are the conventions we
+//!     mirror here (copied, not imported, per the agent-guide allowlist).
+//!   - `docs/planning/uniform-effect-translation/monadic-ir-spec.md` —
+//!     `MExpr::Yield`, `MExpr::With`, `MHandler` variants, `MHandlerArm`.
 
-use crate::ast::{Annotated, Expr, ExprKind, Handler, HandlerArm, HandlerItem, Pat, Stmt};
+use crate::ast::Pat;
 use crate::codegen::cerl::{CArm, CExpr, CLit, CPat};
-use crate::codegen::runtime_shape::CpsShape;
+use crate::codegen::monadic::ir::{Atom, EffectOpRef, MExpr, MHandler, MHandlerArm};
 
-use super::Lowerer;
-use super::util::cerl_call;
+use super::ctx::ResultDelimiter;
+use super::util::{
+    ABORT_TAG, VALUE_RESULT_TAG, core_var, marked_control_pattern, marked_control_tuple,
+};
+use super::{LowerCtx, Lowerer};
 
-struct PendingLet {
-    var: String,
-    val: CExpr,
-    deps: HashSet<String>,
+/// Erlang module hosting the runtime helpers
+/// (`find_evidence/2`, `insert_canonical/2`, `project_evidence/2`).
+const EVIDENCE_BRIDGE_MODULE: &str = "std_evidence_bridge";
+
+fn apply_to_k(k: &str, value: CExpr) -> CExpr {
+    CExpr::Apply(Box::new(CExpr::Var(k.to_string())), vec![value])
 }
 
-#[derive(Clone)]
-enum NamedHandlerItem {
-    Static {
-        canonical: String,
-        info: super::HandlerInfo,
-    },
-    Conditional {
-        cond_var: String,
-        cond_ce: CExpr,
-        then_info: super::HandlerInfo,
-        else_info: super::HandlerInfo,
-    },
-    Dynamic {
-        tuple_var: String,
-        effects: Vec<String>,
-        has_return: bool,
-    },
+#[derive(Clone, Copy)]
+enum ArmReturnMode {
+    Captured,
+    Direct,
 }
 
-#[derive(Clone)]
-enum OpHandlerPlan {
-    Inline {
-        arms: Vec<HandlerArm>,
-    },
-    Static {
-        arm: HandlerArm,
-        source_module: Option<String>,
-        handler_canonical: String,
-    },
-    Conditional {
-        cond_var: String,
-        then_arm: Option<HandlerArm>,
-        then_source: Option<String>,
-        else_arm: Option<HandlerArm>,
-        else_source: Option<String>,
-    },
-    Dynamic {
-        element_expr: CExpr,
-    },
-    BeamNative {
-        handler_canonical: String,
-    },
-    Passthrough,
-}
-
-enum WithHandlerLayer {
-    Named {
-        reference: crate::ast::NamedHandlerRef,
-    },
-    Inline {
-        arms: Vec<HandlerArm>,
-        return_clause: Option<Box<HandlerArm>>,
-    },
-}
-
-impl<'a> Lowerer<'a> {
-    fn compose_return_k(&mut self, inner: Option<CExpr>, outer: Option<CExpr>) -> Option<CExpr> {
-        match (inner, outer) {
-            (Some(inner), Some(outer)) => {
-                let param = self.fresh();
-                let inner_value = self.fresh();
-                Some(CExpr::Fun(
-                    vec![param.clone()],
-                    Box::new(CExpr::Let(
-                        inner_value.clone(),
-                        Box::new(CExpr::Apply(Box::new(inner), vec![CExpr::Var(param)])),
-                        Box::new(CExpr::Apply(Box::new(outer), vec![CExpr::Var(inner_value)])),
-                    )),
-                ))
-            }
-            (Some(k), None) | (None, Some(k)) => Some(k),
-            (None, None) => None,
+fn delimiter_stack_handles(delimiter: &ResultDelimiter, effect: &str) -> bool {
+    let mut current = Some(delimiter);
+    while let Some(delim) = current {
+        if delim.effects.iter().any(|handled| handled == effect) {
+            return true;
         }
+        current = delim.parent.as_deref();
     }
+    false
+}
 
-    fn lower_handler_owned_expr(&mut self, expr: &Expr) -> CExpr {
-        // For abort handler arm bodies inside an effectful host context
-        // (e.g. an impl method that has its own `_ReturnK`), the abort
-        // value must flow through the with's outer K — not just return
-        // raw up the Erlang stack, which would bypass the host's CPS
-        // chain. `current_handler_inherited_k` carries the with's outer
-        // K when applicable. For non-effectful hosts (None) we fall back
-        // to plain value-mode lowering: the abort value just becomes the
-        // closure's Erlang return value.
-        if let Some(k) = self.current_handler_inherited_k.clone() {
-            self.lower_expr_with_installed_return_k(expr, Some(k))
-        } else {
-            self.lower_expr_value(expr)
+fn delimiter_stack_marker_for(delimiter: &ResultDelimiter, effect: &str) -> Option<String> {
+    let mut current = Some(delimiter);
+    while let Some(delim) = current {
+        if delim.effects.iter().any(|handled| handled == effect) {
+            return Some(delim.abort_marker.clone());
         }
+        current = delim.parent.as_deref();
     }
+    None
+}
 
-    fn lower_handled_expr_with_return_k(&mut self, expr: &Expr, return_k: Option<CExpr>) -> CExpr {
-        self.lower_expr_with_installed_return_k(expr, return_k)
-    }
+impl<'ctx> Lowerer<'ctx> {
+    // -----------------------------------------------------------------
+    // MExpr::Yield
+    // -----------------------------------------------------------------
 
-    fn lower_handled_inner_expr(
-        &mut self,
-        expr: &Expr,
-        handled_return_k: Option<CExpr>,
-        inherited_return_k: Option<CExpr>,
-    ) -> CExpr {
-        let return_k = self.compose_return_k(handled_return_k, inherited_return_k);
-        if self.expr_is_effectful_call(expr) {
-            self.lower_expr_with_call_return_k(expr, return_k)
-        } else {
-            self.lower_handled_expr_with_return_k(expr, return_k)
-        }
-    }
+    /// Lower `Yield { op, args }` to an open-row evidence lookup followed
+    /// by an `apply` of the resolved op closure to the user args plus the
+    /// perform-site evidence vector and ambient return continuation.
+    ///
+    /// Emits (sketch):
+    /// ```text
+    ///   apply (call 'erlang':'element'(<op_index>,
+    ///             call 'std_evidence_bridge':'find_evidence'(
+    ///                 _Evidence, '<EffectAtom>')))
+    ///         (<args...>, <ctx.evidence>, <ctx.return_k>)
+    /// ```
+    ///
+    /// `find_evidence/2` returns the per-effect `OpTuple` (a runtime tuple
+    /// of op closures sorted alphabetically by op name); `erlang:element/2`
+    /// then picks out the specific op by its 1-based canonical index, which
+    /// is pre-resolved at translation time as `EffectOpRef.op_index`.
+    ///
+    /// Open-row is uniform here — the closed-row optimization (static
+    /// `element/2` loads when the layout is statically known) requires
+    /// per-call decisions that the new path explicitly avoids. The runtime
+    /// walk is O(n) over a typically-≤5-entry tuple; closed-row
+    /// specialization is a step-11+ optimization.
+    pub(super) fn lower_yield(&mut self, op: &EffectOpRef, args: &[Atom], ctx: &LowerCtx) -> CExpr {
+        // Lower args first — they're atoms (ANF), so non-effectful.
+        let lowered_args: Vec<CExpr> = args.iter().map(|a| self.lower_atom(a, ctx)).collect();
 
-    fn dynamic_return_lambda(&mut self, tuple_var: &str, op_count: usize) -> CExpr {
-        let param = self.fresh();
-        let identity = CExpr::Fun(vec![param.clone()], Box::new(CExpr::Var(param)));
-        let tuple_size = cerl_call(
-            "erlang",
-            "tuple_size",
-            vec![CExpr::Var(tuple_var.to_string())],
-        );
-        let return_index = op_count as i64 + 1;
-        let return_lambda = cerl_call(
-            "erlang",
-            "element",
+        let find_call = CExpr::Call(
+            EVIDENCE_BRIDGE_MODULE.to_string(),
+            "find_evidence".to_string(),
             vec![
-                CExpr::Lit(CLit::Int(return_index)),
-                CExpr::Var(tuple_var.to_string()),
+                CExpr::Var(ctx.evidence.clone()),
+                CExpr::Lit(CLit::Atom(op.effect.clone())),
             ],
         );
-        CExpr::Case(
-            Box::new(tuple_size),
-            vec![
-                CArm {
-                    pat: CPat::Lit(CLit::Int(return_index)),
-                    guard: None,
-                    body: return_lambda,
-                },
-                CArm {
-                    pat: CPat::Var("_".to_string()),
-                    guard: None,
-                    body: identity,
-                },
-            ],
-        )
-    }
+        let op_closure = CExpr::Call(
+            "erlang".to_string(),
+            "element".to_string(),
+            vec![CExpr::Lit(CLit::Int(op.op_index as i64)), find_call],
+        );
 
-    fn build_return_lambda(&mut self, ret: &HandlerArm, source_module: Option<&str>) -> CExpr {
-        let saved_source_module = self.current_handler_source_module.clone();
-        self.current_handler_source_module = source_module.map(str::to_string);
-        // Return-lambda body flows through the lambda's caller (which itself
-        // applies inherited_K to the lambda result). Threading inherited_K
-        // into the body would double-apply it.
-        let saved_inherited = self.current_handler_inherited_k.take();
-        let ret_body = self.lower_handler_owned_expr(&ret.body);
-        self.current_handler_inherited_k = saved_inherited;
-        let (param, body) = if ret.params.is_empty() {
-            (self.fresh(), ret_body)
-        } else {
-            self.destructure_pat(&ret.params[0], ret_body)
-        };
-        self.current_handler_source_module = saved_source_module;
-        CExpr::Fun(vec![param], Box::new(body))
-    }
-
-    /// Read the per-op closure for `effect.op` out of the in-scope evidence
-    /// vector. Closed-row callers with the effect statically present in their
-    /// layout emit pure `element/2` chains; open-row callers (or callers whose
-    /// layout doesn't include this effect — happens at handler-arm bodies that
-    /// re-perform an effect not held by the current arm's caller layout) fall
-    /// back to the runtime bridge.
-    pub(super) fn evidence_op_lookup(&mut self, effect_name: &str, op_name: &str) -> CExpr {
-        let ev_ctx = self
-            .current_evidence
-            .clone()
-            .unwrap_or_else(|| panic!("no evidence in scope for op '{}.{}'", effect_name, op_name));
-        let op_index = self.evidence_op_index(effect_name, op_name) as i64;
-        let layout_has_tag = ev_ctx.layout.tags().iter().any(|t| t == effect_name);
-        let entry_op_tuple: CExpr = if !ev_ctx.is_open && layout_has_tag {
-            let eff_idx = super::evidence::evidence_index_of(&ev_ctx.layout, effect_name) as i64;
-            cerl_call(
-                "erlang",
-                "element",
-                vec![
-                    CExpr::Lit(CLit::Int(2)),
-                    cerl_call(
-                        "erlang",
-                        "element",
-                        vec![
-                            CExpr::Lit(CLit::Int(eff_idx)),
-                            CExpr::Var(ev_ctx.var.clone()),
-                        ],
-                    ),
-                ],
-            )
-        } else {
-            super::evidence::find_evidence(CExpr::Var(ev_ctx.var.clone()), effect_name)
-        };
-        cerl_call(
-            "erlang",
-            "element",
-            vec![CExpr::Lit(CLit::Int(op_index)), entry_op_tuple],
-        )
-    }
-
-    /// 1-based op index inside an effect's op tuple. Op tuples are sorted
-    /// alphabetically by op name (matches `effect_handler_ops` ordering for a
-    /// single effect and the canonical shape produced by handler emission).
-    fn evidence_op_index(&self, effect_name: &str, op_name: &str) -> usize {
-        let info = self
-            .effect_defs
-            .get(effect_name)
-            .unwrap_or_else(|| panic!("unknown effect '{}'", effect_name));
-        let mut ops: Vec<&String> = info.ops.keys().collect();
-        ops.sort();
-        match ops.iter().position(|n| n.as_str() == op_name) {
-            Some(i) => i + 1,
-            None => panic!(
-                "unknown op '{}' on effect '{}' (have: {:?})",
-                op_name, effect_name, ops
-            ),
-        }
-    }
-
-    /// Lower an effect call: `op! args`.
-    ///
-    /// Emits: `apply _Handle_Effect_op(arg1, ..., argN, K)`
-    ///
-    /// If `continuation` is Some, it's the pre-built K closure. If None
-    /// (standalone effect call not in a block), we use an identity continuation.
-    pub(super) fn lower_effect_call(
-        &mut self,
-        node_id: crate::ast::NodeId,
-        op_name: &str,
-        qualifier: Option<&str>,
-        args: &[Expr],
-        continuation: Option<CExpr>,
-    ) -> CExpr {
-        // Resolve the effect name (canonical form).
-        let effect_name = self
-            .resolved_effect_call_name(node_id, op_name, qualifier)
-            .unwrap_or_else(|| panic!("unknown effect operation: {}", op_name));
-        let effect_key = format!("{}.{}", effect_name, op_name);
-
-        // Lower args (shared between direct and CPS paths).
-        let op_info = self
-            .effect_defs
-            .get(&effect_name)
-            .and_then(|effect| effect.ops.get(op_name));
-        let runtime_param_count = op_info
-            .map(|op| op.runtime_param_count)
-            .unwrap_or(args.len());
-        let op_param_absorbed = op_info.and_then(|op| {
-            if op.param_absorbed_effects.is_empty() {
-                None
-            } else {
-                Some(op.param_absorbed_effects.clone())
-            }
+        // A handler arm result is the result of the handler that owns the
+        // performed operation, not an ordinary value at the perform site.
+        // This only needs explicit marking while lowering an arm body
+        // (`abort_marker` is present). Ordinary handled-body performs keep
+        // the existing return-clause composition path; marking them here
+        // would skip or double-apply return clauses.
+        let target_marker = ctx.abort_marker.as_ref().and_then(|_| {
+            ctx.result_delimiter
+                .as_ref()
+                .and_then(|delimiter| delimiter_stack_marker_for(delimiter, &op.effect))
         });
-        let mut unit_args_to_erase = args.len().saturating_sub(runtime_param_count);
-        let mut param_vars = Vec::new();
-        let mut bindings = Vec::new();
-        for (source_idx, arg) in args.iter().enumerate() {
-            let is_unit_literal = matches!(
-                arg.kind,
-                ExprKind::Lit {
-                    value: crate::ast::Lit::Unit,
-                    ..
-                }
-            );
-            if is_unit_literal && unit_args_to_erase > 0 {
-                unit_args_to_erase -= 1;
-                continue;
-            }
-            let v = self.fresh();
-            // Effect call args are generally not CPS-expanded — the handler
-            // arm receives the callback as a plain value. However, if the op's
-            // parameter declares effects that are NOT already available in the
-            // enclosing scope's handler params, the lambda needs its own handler
-            // params so the handler arm can supply them via lower_effectful_var_call.
-            //
-            // If the callback's effects ARE in scope (e.g. spawn's callback
-            // needs {Actor} and Actor handler params are already threaded), the
-            // lambda captures them via closure — no extra params needed.
-            let saved_ctx = self.lambda_effect_context.take();
-            let saved_direct_ops = self.direct_ops.clone();
-            if let Some(ref pae) = op_param_absorbed
-                && let Some(effs) = pae.get(&source_idx)
-            {
-                let mut uncapturable: Vec<String> = Vec::new();
-                for eff in effs {
-                    let ops = self.effect_handler_ops(std::slice::from_ref(eff));
-                    if ops.is_empty() {
-                        continue;
-                    }
-                    let already_in_scope = self
-                        .current_evidence
-                        .as_ref()
-                        .map(|ctx| ctx.is_open || ctx.layout.tags().iter().any(|t| t == eff))
-                        .unwrap_or(false);
-                    if already_in_scope {
-                        continue;
-                    }
-                    // The op being called declares this effect as absorbed on
-                    // its parameter -- meaning the handler invokes the lambda
-                    // in a context where the effect is in scope. For BEAM-native
-                    // handlers (e.g. spawn installing Actor in the new process),
-                    // that context is satisfied by direct erlang calls, not an
-                    // explicit handler param. Mark the ops as `direct_ops` so any
-                    // use in the lambda body lowers natively.
-                    if let Some(handler_canonical) = self.beam_native_handler_for_effect(eff) {
-                        for (e, op) in &ops {
-                            self.direct_ops
-                                .insert(format!("{}.{}", e, op), handler_canonical.clone());
-                        }
-                        continue;
-                    }
-                    uncapturable.push(eff.clone());
-                }
-                if !uncapturable.is_empty() {
-                    self.lambda_effect_context = Some(CpsShape {
-                        static_effects: uncapturable,
-                        is_open_row: false,
-                    });
-                }
-            }
-            let ce = self
-                .lower_eta_reduced_effect_expr(arg)
-                .unwrap_or_else(|| self.lower_expr_value(arg));
-            self.lambda_effect_context = saved_ctx;
-            self.direct_ops = saved_direct_ops;
-            bindings.push((v.clone(), ce));
-            param_vars.push(v);
-        }
+        let k_for_op = self.delimited_perform_k(&op.effect, ctx);
 
-        // Direct path: ops that always resume exactly once can be inlined as
-        // `let Result = <native call> in <continuation body>` — no closure allocation.
-        if let Some(handler_canonical) = self.direct_ops.get(&effect_key).cloned() {
-            let param_var_strs: Vec<String> = param_vars.clone();
-            let native_call = if super::beam_interop::is_ref_op(op_name) {
-                super::beam_interop::build_ref_native_call(
-                    &handler_canonical,
-                    op_name,
-                    &param_var_strs,
-                    &mut || self.fresh(),
-                )
-            } else if super::beam_interop::is_vec_op(op_name) {
-                super::beam_interop::build_vec_native_call(op_name, &param_var_strs, &mut || {
-                    self.fresh()
-                })
-            } else {
-                let ctor_atoms = self.constructor_atoms.clone();
-                super::beam_interop::build_native_call(
-                    op_name,
-                    &param_var_strs,
-                    &ctor_atoms,
-                    &mut || self.fresh(),
-                )
-            };
-
-            // Unwrap the continuation closure to inline its body directly.
-            // K is Fun([result_param], body) — we bind result_param via let.
-            let result = if let Some(k) = continuation {
-                match k {
-                    CExpr::Fun(params, body) if params.len() == 1 => {
-                        let result_var = params[0].clone();
-                        CExpr::Let(result_var, Box::new(native_call), body)
-                    }
-                    // K is a variable reference (e.g. _ReturnK) — apply it
-                    other => {
-                        let result_var = self.fresh();
-                        CExpr::Let(
-                            result_var.clone(),
-                            Box::new(native_call),
-                            Box::new(CExpr::Apply(Box::new(other), vec![CExpr::Var(result_var)])),
-                        )
-                    }
-                }
-            } else {
-                // No continuation — standalone effect call, just return the result
-                native_call
-            };
-
-            return bindings.into_iter().rev().fold(result, |body, (var, val)| {
-                CExpr::Let(var, Box::new(val), Box::new(body))
-            });
-        }
-
-        // CPS path: read the per-op closure out of the evidence vector and apply it.
-        let handler_expr = self.evidence_op_lookup(&effect_name, op_name);
-
-        let mut call_args: Vec<CExpr> = param_vars.into_iter().map(CExpr::Var).collect();
-
-        // Append continuation. If the handler arm never calls resume, pass a cheap atom
-        // instead of a real closure so Erlang doesn't warn about a constructed-but-unused term.
-        let k = if self.no_resume_ops.contains(effect_key.as_str()) {
-            CExpr::Lit(CLit::Atom("no_resume".to_string()))
+        let mut apply_args = lowered_args;
+        apply_args.push(CExpr::Var(ctx.evidence.clone()));
+        apply_args.push(k_for_op);
+        let op_apply = CExpr::Apply(Box::new(op_closure), apply_args);
+        if let Some(marker) = target_marker {
+            self.wrap_yield_result_for_target(op_apply, &marker)
         } else {
-            continuation.unwrap_or_else(|| {
-                // Identity continuation for standalone effect calls
-                let param = self.fresh();
-                CExpr::Fun(vec![param.clone()], Box::new(CExpr::Var(param)))
-            })
-        };
-        call_args.push(k);
-
-        let apply = CExpr::Apply(Box::new(handler_expr), call_args);
-
-        // Wrap with let-bindings for args
-        bindings.into_iter().rev().fold(apply, |body, (var, val)| {
-            CExpr::Let(var, Box::new(val), Box::new(body))
-        })
+            op_apply
+        }
     }
 
-    /// Build a per-op handler function for a single BEAM-native operation.
-    /// Synthesizes: `fun (Arg0, ..., ArgN, K) -> let R = <native call> in K(R)`
-    ///
-    /// `handler_canonical` identifies which handler is providing this op,
-    /// used to dispatch handler-specific lowerings (e.g. beam_ref vs ets_ref).
-    fn build_beam_native_op_fun(&mut self, op_name: &str, handler_canonical: &str) -> CExpr {
-        let (_, _, param_count) = super::beam_interop::lookup_native_op(op_name)
-            .unwrap_or_else(|| panic!("unknown BEAM-native op: {}", op_name));
-
-        let k_var = self.fresh();
-        let param_vars: Vec<String> = (0..param_count).map(|i| format!("_HArg{}", i)).collect();
-
-        let mut fun_params: Vec<String> = param_vars.clone();
-        fun_params.push(k_var.clone());
-
-        let call = if super::beam_interop::is_ref_op(op_name) {
-            super::beam_interop::build_ref_native_call(
-                handler_canonical,
-                op_name,
-                &param_vars,
-                &mut || self.fresh(),
-            )
-        } else if super::beam_interop::is_vec_op(op_name) {
-            super::beam_interop::build_vec_native_call(op_name, &param_vars, &mut || self.fresh())
-        } else {
-            let ctor_atoms = self.constructor_atoms.clone();
-            super::beam_interop::build_native_call(op_name, &param_vars, &ctor_atoms, &mut || {
-                self.fresh()
-            })
+    fn delimited_perform_k(&mut self, effect: &str, ctx: &LowerCtx) -> CExpr {
+        let Some(delimiter) = &ctx.result_delimiter else {
+            return CExpr::Var(ctx.return_k.clone());
         };
+        if !delimiter_stack_handles(delimiter, effect) {
+            return CExpr::Var(ctx.return_k.clone());
+        }
 
-        let result_var = self.fresh();
-        let body = CExpr::Let(
-            result_var.clone(),
-            Box::new(call),
-            Box::new(CExpr::Apply(
-                Box::new(CExpr::Var(k_var.clone())),
-                vec![CExpr::Var(result_var)],
+        let arg = self.fresh_helper_name();
+        let applied = CExpr::Apply(
+            Box::new(CExpr::Var(ctx.return_k.clone())),
+            vec![CExpr::Var(arg.clone())],
+        );
+        let body = self.wrap_result_delimiter_stack_until(applied, delimiter, effect, ctx);
+        CExpr::Fun(vec![arg], Box::new(body))
+    }
+
+    fn wrap_yield_result_for_target(&mut self, op_apply: CExpr, target_marker: &str) -> CExpr {
+        let result = self.fresh_helper_name();
+        let mut arms = self.propagate_marked_control_arms();
+        arms.push(CArm {
+            pat: CPat::Var("_YieldValue".to_string()),
+            guard: None,
+            body: marked_control_tuple(
+                VALUE_RESULT_TAG,
+                CExpr::Lit(CLit::Atom(target_marker.to_string())),
+                CExpr::Var("_YieldValue".to_string()),
+            ),
+        });
+        CExpr::Let(
+            result.clone(),
+            Box::new(op_apply),
+            Box::new(CExpr::Case(Box::new(CExpr::Var(result)), arms)),
+        )
+    }
+
+    // -----------------------------------------------------------------
+    // MExpr::With
+    // -----------------------------------------------------------------
+
+    /// Lower `With { handler, body }` by extending the in-scope evidence
+    /// vector with the handler's `{EffectAtom, OpTuple}` entry/entries, then
+    /// lowering `body` under the extended evidence.
+    ///
+    /// Multi-effect static handlers emit one `insert_canonical` per effect
+    /// in sequence; innermost-wins ordering falls out of the runtime helper
+    /// (it replaces a same-tagged entry rather than appending).
+    pub(super) fn lower_with(&mut self, handler: &MHandler, body: &MExpr, ctx: &LowerCtx) -> CExpr {
+        match handler {
+            MHandler::Static {
+                effects,
+                arms,
+                return_clause,
+                ..
+            } => self.lower_with_static(effects, arms, return_clause.as_ref(), body, ctx),
+            MHandler::Native {
+                effects, handler, ..
+            } => self.lower_with_native(effects, handler, body, ctx),
+            MHandler::Composite { handlers, source } => {
+                let nested = handlers
+                    .iter()
+                    .rev()
+                    .fold(body.clone(), |acc, h| MExpr::With {
+                        handler: h.clone(),
+                        body: Box::new(acc),
+                        source: *source,
+                    });
+                self.lower_expr(&nested, ctx)
+            }
+            MHandler::Dynamic {
+                effects,
+                op_tuple,
+                return_lambda,
+                ..
+            } => {
+                if effects.is_empty() {
+                    eprintln!(
+                        "  warning: dynamic handler at `with` site has unknown effect tag — \
+                         evidence install skipped"
+                    );
+                    return self.lower_expr(body, ctx);
+                }
+                self.lower_with_dynamic(effects, op_tuple, return_lambda.as_ref(), body, ctx)
+            }
+        }
+    }
+
+    fn lower_with_native(
+        &mut self,
+        effects: &[String],
+        handler: &str,
+        body: &MExpr,
+        ctx: &LowerCtx,
+    ) -> CExpr {
+        let mut entry_bindings: Vec<(String, CExpr)> = Vec::with_capacity(effects.len());
+        let mut acc_evidence_var = ctx.evidence.clone();
+
+        for effect in effects {
+            let Some(op_tuple) = super::bootstrap::native_handler_op_tuple(effect, handler) else {
+                eprintln!(
+                    "  warning: native handler `{}` for effect `{}` is not implemented in \
+                     the new lowerer; evidence install skipped",
+                    handler, effect
+                );
+                continue;
+            };
+            let entry = CExpr::Tuple(vec![CExpr::Lit(CLit::Atom(effect.clone())), op_tuple]);
+            let insert = CExpr::Call(
+                EVIDENCE_BRIDGE_MODULE.to_string(),
+                "insert_canonical".to_string(),
+                vec![CExpr::Var(acc_evidence_var.clone()), entry],
+            );
+            let new_name = self.fresh_evidence_name();
+            entry_bindings.push((new_name.clone(), insert));
+            acc_evidence_var = new_name;
+        }
+
+        let body_ctx = ctx.with_evidence(acc_evidence_var);
+        let body_ce = self.lower_expr(body, &body_ctx);
+        entry_bindings
+            .into_iter()
+            .rev()
+            .fold(body_ce, |inner, (name, value)| {
+                CExpr::Let(name, Box::new(value), Box::new(inner))
+            })
+    }
+
+    /// Static-handler case of [`lower_with`]. For each effect handled, build
+    /// `{EffectAtom, OpTuple}` from the matching arms (sorted by canonical
+    /// op index) and chain `insert_canonical` calls; lower the return clause
+    /// (if any) as a fresh `_K_ret{n}` continuation; finally lower the body
+    /// under the extended evidence with K = return-clause K (or outer K).
+    ///
+    /// Arm closures are built using the outer `ctx` (its `ctx.evidence` /
+    /// `ctx.return_k` still reflect the *outer* scope) — re-performs from
+    /// inside an arm body must reach the outer handler stack, not recurse
+    /// into the just-installed entry. This falls out of building the
+    /// closures before deriving a `body_ctx` with the extended evidence
+    /// for lowering the `with` body.
+    fn lower_with_static(
+        &mut self,
+        effects: &[String],
+        arms: &[MHandlerArm],
+        return_clause: Option<&MHandlerArm>,
+        body: &MExpr,
+        ctx: &LowerCtx,
+    ) -> CExpr {
+        // Snapshot the outer scope. Arm bodies and the return-clause body
+        // both lower with these in scope, so re-performs hit the outer
+        // handler stack and the return clause forwards through the outer K.
+        let outer_evidence = ctx.evidence.clone();
+        let raw_result_k = self.fresh_k_ret_name();
+        let abort_marker = self.fresh_abort_marker();
+        let raw_result_k_binding = identity_continuation();
+        let arm_ctx = ctx
+            .with_return_k(raw_result_k.clone())
+            .with_abort_marker(abort_marker.clone());
+
+        // 1. Build per-effect entries from the arms. Arm closures reference
+        //    `outer_evidence` / `outer_return_k` inside; we build them with
+        //    the lowerer state still pointing at the outer scope.
+        //
+        // The handler's `effects` vec carries the **bare** source-level
+        // effect names (e.g. `Stdio`). Arm `op.effect` carries the
+        // **canonical** name (e.g. `Std.IO.Stdio`) from the typechecker's
+        // `effect_calls` map. The lowerer's `Yield` path also uses
+        // canonical names to look up evidence at runtime, so the with-site
+        // must install entries under the canonical tag — otherwise the
+        // tags don't match and `find_evidence` reports
+        // `evidence_tag_not_found`. We therefore derive the effect set
+        // from the arms, ignoring the bare-named `effects` parameter
+        // (left in for spec parity).
+        let _ = effects;
+        let mut canonical_effects: Vec<String> = Vec::new();
+        for arm in arms {
+            if !canonical_effects.contains(&arm.op.effect) {
+                canonical_effects.push(arm.op.effect.clone());
+            }
+        }
+        let mut entry_bindings: Vec<(String, CExpr)> = Vec::with_capacity(canonical_effects.len());
+        let mut acc_evidence_var = outer_evidence.clone();
+        for eff in &canonical_effects {
+            let effect_arms: Vec<&MHandlerArm> =
+                arms.iter().filter(|a| a.op.effect == *eff).collect();
+            let op_tuple = self.build_op_tuple_for_effect(eff, &effect_arms, &arm_ctx);
+            let entry = CExpr::Tuple(vec![CExpr::Lit(CLit::Atom(eff.clone())), op_tuple]);
+            let insert = CExpr::Call(
+                EVIDENCE_BRIDGE_MODULE.to_string(),
+                "insert_canonical".to_string(),
+                vec![CExpr::Var(acc_evidence_var.clone()), entry],
+            );
+            let new_name = self.fresh_evidence_name();
+            entry_bindings.push((new_name.clone(), insert));
+            acc_evidence_var = new_name;
+        }
+
+        // 2. Build the return-clause continuation (if any). Lowered while
+        //    state still reflects outer scope so its body forwards through
+        //    the outer K and references the outer evidence.
+        let ret_binding: Option<(String, CExpr)> = return_clause.map(|arm| {
+            let closure = self.build_return_clause_closure(arm, &arm_ctx);
+            (self.fresh_k_ret_name(), closure)
+        });
+
+        // 3. Lower the body under the inner K (return-clause K if present,
+        //    else the outer K) and the extended evidence.
+        let inner_k = ret_binding
+            .as_ref()
+            .map(|(name, _)| name.clone())
+            .unwrap_or_else(|| raw_result_k.clone());
+        let prompt_k = self.fresh_k_ret_name();
+        let prompt_k_binding =
+            self.build_result_delimiter_k(&abort_marker, &inner_k, &raw_result_k);
+
+        let body_ctx = ctx
+            .with_evidence(acc_evidence_var)
+            .with_return_k(prompt_k.clone())
+            .with_result_delimiter(
+                canonical_effects.clone(),
+                abort_marker.clone(),
+                prompt_k.clone(),
+                ctx.preserve_abort_marker,
+            );
+        let body_ce = self.lower_expr(body, &body_ctx);
+        let wrapped_body = self.wrap_with_result_delimiter(body_ce, &abort_marker, ctx);
+
+        // 4. Wrap inside-out: insert_canonical chain wraps the body, then
+        //    the return-K binding (if any) wraps the chain. The raw-result
+        //    K sits outermost so both handler arms and return clauses can
+        //    produce values back to the `with` delimiter; only the wrapper
+        //    around the whole handled computation applies the outer K.
+        let with_evidence = entry_bindings
+            .into_iter()
+            .rev()
+            .fold(wrapped_body, |inner, (name, value)| {
+                CExpr::Let(name, Box::new(value), Box::new(inner))
+            });
+        let with_prompt = CExpr::Let(
+            prompt_k,
+            Box::new(prompt_k_binding),
+            Box::new(with_evidence),
+        );
+        let with_return = match ret_binding {
+            Some((name, value)) => CExpr::Let(name, Box::new(value), Box::new(with_prompt)),
+            None => with_prompt,
+        };
+        CExpr::Let(
+            raw_result_k,
+            Box::new(raw_result_k_binding),
+            Box::new(with_return),
+        )
+    }
+
+    /// Dynamic-handler case of [`lower_with`]. The op tuple is a runtime
+    /// closure-tuple value (an `Atom` carrying it); we lower it in place and
+    /// wrap into `{EffectAtom, OpTuple}` exactly like the static path. The
+    /// optional `return_lambda` is wrapped into a continuation closure that
+    /// applies the lambda under outer evidence + outer K — same composition
+    /// shape as Static's return clause.
+    fn lower_with_dynamic(
+        &mut self,
+        effects: &[String],
+        op_tuple: &Atom,
+        return_lambda: Option<&Atom>,
+        body: &MExpr,
+        ctx: &LowerCtx,
+    ) -> CExpr {
+        // Sort effects canonically (alphabetical) so the positional index of
+        // each effect into `OpsByEffect` matches the producer's ordering in
+        // `build_ops_by_effect_tuple`. Single-effect is a 1-element list and
+        // the loop below installs exactly one entry.
+        let mut sorted_effects: Vec<String> = effects.to_vec();
+        sorted_effects.sort();
+
+        let outer_evidence = ctx.evidence.clone();
+        let raw_result_k = self.fresh_k_ret_name();
+        let abort_marker = self.fresh_abort_marker();
+        let raw_result_k_binding = identity_continuation();
+
+        let handler_value_ce = self.lower_atom(op_tuple, ctx);
+        let handler_value_var = self.fresh_helper_name();
+        let runtime_return_var = self.fresh_helper_name();
+        let runtime_return_value = CExpr::Call(
+            "erlang".to_string(),
+            "element".to_string(),
+            vec![
+                CExpr::Lit(CLit::Int(3)),
+                CExpr::Var(handler_value_var.clone()),
+            ],
+        );
+        // element 2 is the OpsByEffect tuple of {EffectAtom, OpTuple} pairs.
+        let ops_by_effect_var = self.fresh_helper_name();
+        let ops_by_effect_value = CExpr::Call(
+            "erlang".to_string(),
+            "element".to_string(),
+            vec![
+                CExpr::Lit(CLit::Int(2)),
+                CExpr::Var(handler_value_var.clone()),
+            ],
+        );
+
+        // Return-lambda composition (built under outer scope).
+        let ret_binding: Option<(String, CExpr)> = return_lambda.map(|atom| {
+            let lambda_ce = self.lower_atom(atom, ctx);
+            let v_param = self.fresh_helper_name();
+            // The Atom is a uniform-CPS lambda: `fun(value, _Evidence, _ReturnK)`.
+            // Wrap as a delimited continuation: the lambda produces a raw
+            // with-result, and the `with` wrapper applies the outer K once.
+            let wrapper = CExpr::Fun(
+                vec![v_param.clone()],
+                Box::new(CExpr::Apply(
+                    Box::new(lambda_ce),
+                    vec![
+                        CExpr::Var(v_param),
+                        CExpr::Var(outer_evidence.clone()),
+                        CExpr::Var(raw_result_k.clone()),
+                    ],
+                )),
+            );
+            (self.fresh_k_ret_name(), wrapper)
+        });
+
+        let runtime_ret_k = self.fresh_k_ret_name();
+        let runtime_ret_param = self.fresh_helper_name();
+        let runtime_ret_binding = CExpr::Fun(
+            vec![runtime_ret_param.clone()],
+            Box::new(CExpr::Case(
+                Box::new(CExpr::Var(runtime_return_var.clone())),
+                vec![
+                    CArm {
+                        pat: CPat::Lit(CLit::Atom("unit".to_string())),
+                        guard: None,
+                        body: CExpr::Apply(
+                            Box::new(CExpr::Var(raw_result_k.clone())),
+                            vec![CExpr::Var(runtime_ret_param.clone())],
+                        ),
+                    },
+                    CArm {
+                        pat: CPat::Var("_RuntimeReturn".to_string()),
+                        guard: None,
+                        body: CExpr::Apply(
+                            Box::new(CExpr::Var("_RuntimeReturn".to_string())),
+                            vec![
+                                CExpr::Var(runtime_ret_param),
+                                CExpr::Var(outer_evidence.clone()),
+                                CExpr::Var(raw_result_k.clone()),
+                            ],
+                        ),
+                    },
+                ],
             )),
         );
 
-        CExpr::Fun(fun_params, Box::new(body))
-    }
+        let inner_k = ret_binding
+            .as_ref()
+            .map(|(name, _)| name.clone())
+            .unwrap_or_else(|| runtime_ret_k.clone());
 
-    /// Lower a `with` expression: `expr with handler`.
-    ///
-    /// Builds handler function(s) from the handler definition and passes them
-    /// as extra parameters to the effectful computation.
-    pub(super) fn lower_with(&mut self, expr: &Expr, handler: &Handler) -> CExpr {
-        self.lower_with_inherited_return_k(expr, handler, None)
-    }
-
-    pub(super) fn lower_with_inherited_return_k(
-        &mut self,
-        expr: &Expr,
-        handler: &Handler,
-        inherited_return_k: Option<CExpr>,
-    ) -> CExpr {
-        if let Some(rewritten) = self.lower_with_chain_after_local_handler_bindings(
-            expr,
-            handler,
-            inherited_return_k.clone(),
-        ) {
-            return rewritten;
-        }
-
-        let normalized = self.normalize_with_handler(handler);
-        let (inline_arms, explicit_return_clause) = match &normalized {
-            WithHandlerLayer::Named { .. } => (Vec::new(), None),
-            WithHandlerLayer::Inline {
-                arms,
-                return_clause,
-            } => (arms.clone(), return_clause.clone()),
-        };
-
-        let mut condition_bindings: Vec<(String, CExpr)> = Vec::new();
-        let named_item = match &normalized {
-            WithHandlerLayer::Named { reference } => {
-                self.pre_register_local_with_binding(expr, &reference.name);
-                let item = self.resolve_named_handler_item(reference);
-                if let NamedHandlerItem::Conditional {
-                    cond_var, cond_ce, ..
-                } = &item
-                {
-                    condition_bindings.push((cond_var.clone(), cond_ce.clone()));
-                }
-                Some(item)
-            }
-            WithHandlerLayer::Inline { .. } => None,
-        };
-
-        let (handled_effects, inline_arms_by_op) = if let Some(item) = &named_item {
-            (item.effects().to_vec(), HashMap::new())
-        } else {
-            let mut handled_effects = Vec::new();
-            let mut inline_arms_by_op: HashMap<String, Vec<HandlerArm>> = HashMap::new();
-            for arm in &inline_arms {
-                if let Some(effect) = self.effect_for_handler_arm(arm, None) {
-                    if !handled_effects.contains(&effect) {
-                        handled_effects.push(effect.clone());
-                    }
-                    if arm.qualifier.is_some() {
-                        inline_arms_by_op
-                            .entry(format!("{}.{}", effect, arm.op_name))
-                            .or_default()
-                            .push(arm.clone());
-                    } else {
-                        inline_arms_by_op
-                            .entry(arm.op_name.clone())
-                            .or_default()
-                            .push(arm.clone());
-                    }
-                }
-            }
-            (handled_effects, inline_arms_by_op)
-        };
-
-        let handler_ops = self.effect_handler_ops(&handled_effects);
-
-        // For each op, build a handler function and bind it.
-        // Two passes: first allocate fresh closure binding names, then build
-        // the handler functions. Handler-arm bodies access sibling handlers
-        // through the evidence vector that this `with` installs, not via
-        // direct names; the per-binding name is just the closure's let-bound
-        // var (so it shows up in the emitted Core Erlang and gets reachability-
-        // pruned when unused).
-        let saved_no_resume_ops = self.no_resume_ops.clone();
-        let saved_direct_ops = self.direct_ops.clone();
-
-        // Pass 1: allocate handler-binding names and pick a per-op plan.
-        let mut op_vars: Vec<(String, String, String, OpHandlerPlan)> = Vec::new();
-        for (eff, op) in &handler_ops {
-            let var_name = self.fresh_handler_binding_name(eff, op);
-            let key = format!("{}.{}", eff, op);
-            let plan = match &named_item {
-                Some(item) => self.plan_named_op_handler(eff, op, item),
-                None => self.plan_inline_op_handler(eff, op, &inline_arms_by_op),
-            };
-            match &plan {
-                OpHandlerPlan::Inline { arms }
-                    if arms.iter().all(|arm| !arm.body.contains_resume()) =>
-                {
-                    self.no_resume_ops.insert(key.clone());
-                }
-                OpHandlerPlan::BeamNative { handler_canonical } => {
-                    if self.use_direct_native_fast_path(handler_canonical) {
-                        self.direct_ops
-                            .insert(key.clone(), handler_canonical.clone());
-                    }
-                }
-                OpHandlerPlan::Static {
-                    arm,
-                    handler_canonical,
-                    ..
-                } => {
-                    if !arm.body.contains_resume() {
-                        self.no_resume_ops.insert(key.clone());
-                    }
-                    if self.is_beam_native_handler_canonical(handler_canonical)
-                        && self.use_direct_native_fast_path(handler_canonical)
-                    {
-                        self.direct_ops
-                            .insert(key.clone(), handler_canonical.clone());
-                    }
-                }
-                _ => {}
-            }
-            op_vars.push((eff.clone(), op.clone(), var_name, plan));
-        }
-
-        // Build the new evidence vector for this `with` block. Group `op_vars`
-        // by canonical effect tag, build a `{EffectAtom, OpTuple}` entry per
-        // effect, and chain `insert_canonical` calls onto the inherited
-        // evidence (an empty tuple when there is no enclosing evidence in
-        // scope). Each op closure inside the entry refers to the corresponding
-        // handler binding by name (the binding itself is emitted by
-        // `attach_scoped_handler_bindings` below). The new evidence variable
-        // is published to `current_evidence` for the body lowering and for any
-        // call sites inside the body that need to thread evidence.
-        //
-        // Op tuples must be sorted alphabetically by op name (the canonical
-        // shape — see `evidence::build_evidence_entry`); `op_vars` is built
-        // from `handler_ops`, which is already op-sorted.
-        let saved_evidence = self.current_evidence.clone();
-        let (evidence_binding, new_evidence_var) = {
-            let mut effect_to_ops: std::collections::BTreeMap<String, Vec<&str>> =
-                std::collections::BTreeMap::new();
-            let mut effect_to_vars: std::collections::HashMap<(String, String), String> =
-                std::collections::HashMap::new();
-            for (eff, op, var_name, _plan) in &op_vars {
-                effect_to_ops
-                    .entry(eff.clone())
-                    .or_default()
-                    .push(op.as_str());
-                effect_to_vars.insert((eff.clone(), op.clone()), var_name.clone());
-            }
-            // Inherit the outer evidence by var-name. The dominance invariant
-            // — that `saved_evidence.var` is in scope at every site where the
-            // new evidence binding is placed — is preserved upstream: dynamic
-            // handler factories whose closures come from lets inside this
-            // wrapped block are rewritten ahead of lowering (see the named-
-            // chain rewrite earlier in this file) so the new evidence is only
-            // installed for the suffix where the dynamic handler tuples are
-            // bound. Non-dynamic withs install handlers that depend only on
-            // outer-scope values, so their evidence binding can safely live
-            // at the with boundary.
-            let mut acc = match &saved_evidence {
-                Some(ctx) => CExpr::Var(ctx.var.clone()),
-                None => CExpr::Tuple(Vec::new()),
-            };
-            for (eff, mut ops) in effect_to_ops {
-                ops.sort();
-                ops.dedup();
-                let op_closures: Vec<CExpr> = ops
-                    .iter()
-                    .map(|op| {
-                        let var = effect_to_vars
-                            .get(&(eff.clone(), (*op).to_string()))
-                            .expect("internal error: missing handler var for evidence entry");
-                        CExpr::Var(var.clone())
-                    })
-                    .collect();
-                let entry = super::evidence::build_evidence_entry(&eff, op_closures);
-                acc = super::evidence::insert_canonical(acc, entry);
-            }
-            let new_var = self.fresh();
-            // Layout mirrors the value we built: union of the inherited
-            // tags (when we kept the outer var) and the effects installed
-            // here. The is_open flag also propagates from the inherited
-            // context — a row-polymorphic outer caller's evidence may carry
-            // additional unknown effects beyond the static layout.
-            let mut tags: Vec<String> = Vec::new();
-            let mut is_open = false;
-            if let Some(ctx) = &saved_evidence {
-                tags.extend(ctx.layout.tags().iter().cloned());
-                is_open = ctx.is_open;
-            }
-            for (eff, _, _, _) in &op_vars {
-                if !tags.contains(eff) {
-                    tags.push(eff.clone());
-                }
-            }
-            let new_layout = super::evidence::EvidenceLayout::new(tags);
-            self.current_evidence = Some(super::EvidenceCtx {
-                var: new_var.clone(),
-                layout: new_layout,
-                is_open,
-            });
-            ((new_var.clone(), acc), new_var)
-        };
-
-        // Lower the inner expression once handler params are in scope.
-        let return_k_lambda = match (&explicit_return_clause, &named_item) {
-            (Some(ret), _) => Some(self.build_return_lambda(ret, None)),
-            (None, Some(item)) => self.named_return_lambda(item),
-            (None, None) => None,
-        };
-        let result =
-            self.lower_handled_inner_expr(expr, return_k_lambda, inherited_return_k.clone());
-
-        // Handler arm bodies must see the *outer* evidence, not the new one
-        // we just installed for the body of `with`. A re-perform of the same
-        // op (`fail e = fail! ...`) inside an arm reaches the outer handler
-        // stack; if the arm body's effectful calls picked up the new evidence,
-        // they'd recurse into the just-installed entry instead.
-        let saved_evidence_for_arms =
-            std::mem::replace(&mut self.current_evidence, saved_evidence.clone());
-
-        // Pass 2: build ALL handler functions unconditionally.
-        // We'll prune unreachable ones after lowering the body.
-        //
-        // Re-performing the same op inside an arm body (`fail e = fail! ...`,
-        // the "rethrow"/middleware pattern) must reach the outer handler
-        // stack, not recurse into this arm. That's already enforced by
-        // restoring `current_evidence` to `saved_evidence` for arm-body
-        // lowering above — `evidence_op_lookup` reads the outer layout, so
-        // op calls inside arms naturally hit the outer handler entry.
-        //
-        // Thread the with's outer K into abort-handler-arm bodies so their
-        // terminal value flows through the host context's CPS chain.
-        let saved_handler_inherited_k = std::mem::replace(
-            &mut self.current_handler_inherited_k,
-            inherited_return_k.clone(),
-        );
-        let mut handler_bindings: Vec<(String, CExpr)> = Vec::new();
-        for (_eff, op, var_name, plan) in &op_vars {
-            let binding = match plan {
-                OpHandlerPlan::Inline { arms } => self.build_inline_op_handler_fun(arms),
-                OpHandlerPlan::Static {
-                    handler_canonical, ..
-                } if self.is_beam_native_handler_canonical(handler_canonical) => {
-                    self.build_beam_native_op_fun(op, handler_canonical)
-                }
-                OpHandlerPlan::Static {
-                    arm, source_module, ..
-                } => self.build_op_handler_fun(arm, source_module.as_deref()),
-                OpHandlerPlan::Conditional {
-                    cond_var,
-                    then_arm,
-                    then_source,
-                    else_arm,
-                    else_source,
-                } => self.build_conditional_handler_fun(
-                    cond_var,
-                    then_arm.as_ref(),
-                    then_source.as_deref(),
-                    else_arm.as_ref(),
-                    else_source.as_deref(),
-                ),
-                OpHandlerPlan::Dynamic { element_expr } => element_expr.clone(),
-                OpHandlerPlan::BeamNative { handler_canonical } => {
-                    self.build_beam_native_op_fun(op, handler_canonical)
-                }
-                OpHandlerPlan::Passthrough => self.build_passthrough_handler_fun(),
-            };
-            handler_bindings.push((var_name.clone(), binding));
-        }
-        self.current_handler_inherited_k = saved_handler_inherited_k;
-
-        self.no_resume_ops = saved_no_resume_ops;
-        self.direct_ops = saved_direct_ops;
-        // Restore the body-scope evidence we replaced during pass 2 (it is
-        // unused after this point but kept symmetrical with the save). Then
-        // restore the caller's evidence as the function exits the `with`.
-        let _ = saved_evidence_for_arms;
-        self.current_evidence = saved_evidence;
-        let _ = new_evidence_var;
-
-        // Post-hoc reachability: scan the lowered body for _Handle_* references,
-        // then transitively close through handler binding values.
-        let mut needed: HashSet<String> = HashSet::new();
-        result.collect_handle_refs(&mut needed);
-        // Also seed reachability with any free-variable references to the new
-        // evidence variable, so that the evidence binding (and transitively
-        // its handler-var dependencies) is retained when the body forwards
-        // evidence at call sites.
-        let (ev_var, _) = &evidence_binding;
-        let mut body_free: HashSet<String> = HashSet::new();
-        Self::collect_var_refs(&result, &mut body_free);
-        if body_free.contains(ev_var) {
-            needed.insert(ev_var.clone());
-            // The evidence binding references every handler var it folds in,
-            // so pull them into `needed` directly.
-            for (eff, op, var_name, _) in &op_vars {
-                let _ = (eff, op);
-                needed.insert(var_name.clone());
-            }
-        }
-        // Transitive closure: handler arms can reference other handler vars
-        let mut changed = true;
-        while changed {
-            changed = false;
-            for (var, val) in &handler_bindings {
-                if needed.contains(var) {
-                    let mut refs = HashSet::new();
-                    val.collect_handle_refs(&mut refs);
-                    for r in refs {
-                        if needed.insert(r) {
-                            changed = true;
-                        }
-                    }
-                }
-            }
-        }
-
-        // Only emit bindings that are actually referenced
-        handler_bindings.retain(|(var, _)| needed.contains(var));
-
-        // Append the evidence binding as the final scoped binding so it is
-        // placed after all the handler bindings it references.
-        if needed.contains(&evidence_binding.0) {
-            handler_bindings.push(evidence_binding);
-        }
-
-        self.attach_scoped_handler_bindings(result, condition_bindings, handler_bindings)
-    }
-
-    /// If a nested `with` chain uses handler values bound inside the wrapped
-    /// block, the handler evidence cannot dominate the prefix that creates
-    /// those values. Lower:
-    ///
-    /// `{ prefix; let h = ...; suffix } with h`
-    ///
-    /// as:
-    ///
-    /// `{ prefix; let h = ...; suffix with h }`
-    ///
-    /// This is intentionally a lowering-only rewrite: it keeps dynamic handler
-    /// evidence scoped to the suffix where the handler tuple exists, avoiding
-    /// evidence bindings that reference lets which appear later in the input
-    /// Core Erlang chain.
-    fn lower_with_chain_after_local_handler_bindings(
-        &mut self,
-        expr: &Expr,
-        handler: &Handler,
-        inherited_return_k: Option<CExpr>,
-    ) -> Option<CExpr> {
-        let mut layers_outer_to_inner = vec![handler.clone()];
-        let mut base = expr;
-        while let ExprKind::With {
-            expr: inner,
-            handler,
-        } = &base.kind
-        {
-            layers_outer_to_inner.push((**handler).clone());
-            base = inner;
-        }
-
-        let ExprKind::Block {
-            stmts,
-            dangling_trivia,
-        } = &base.kind
-        else {
-            return None;
-        };
-
-        let local_handler_names: HashSet<String> = layers_outer_to_inner
-            .iter()
-            .filter_map(|layer| match layer {
-                Handler::Named(named) => Some(named.name.clone()),
-                Handler::Inline { .. } => None,
-            })
-            .collect();
-        if local_handler_names.is_empty() {
-            return None;
-        }
-
-        let split_at = stmts
-            .iter()
-            .enumerate()
-            .filter_map(|(idx, stmt)| match &stmt.node {
-                Stmt::Let {
-                    pattern: Pat::Var { name, .. },
-                    value,
-                    ..
-                } if local_handler_names.contains(name) && self.is_handler_value(value) => {
-                    Some(idx)
-                }
-                _ => None,
-            })
-            .max()?;
-
-        if split_at + 1 >= stmts.len() {
-            return None;
-        }
-
-        let suffix = Expr::synth(
-            base.span,
-            ExprKind::Block {
-                stmts: stmts[split_at + 1..].to_vec(),
-                dangling_trivia: dangling_trivia.clone(),
-            },
-        );
-        let mut handled_suffix = suffix;
-        for layer in layers_outer_to_inner.into_iter().rev() {
-            handled_suffix = Expr::synth(
-                base.span,
-                ExprKind::With {
-                    expr: Box::new(handled_suffix),
-                    handler: Box::new(layer),
-                },
+        // Build the per-effect evidence-install chain. For each effect at
+        // sorted index i, extract `element(i+1, OpsByEffect)` (a
+        // {EffectAtom, OpTuple} pair), then `element(2, pair)` (the
+        // per-effect op tuple), then call `insert_canonical(acc_ev,
+        // {EffectAtom_literal, op_tuple})` to extend the evidence vector.
+        // The effect atom is re-emitted as a literal — the pair carries the
+        // same atom but the consumer reconstructs it from static knowledge.
+        let mut install_bindings: Vec<(String, CExpr)> = Vec::new();
+        let mut acc_ev = outer_evidence.clone();
+        for (i, eff) in sorted_effects.iter().enumerate() {
+            let pair_var = self.fresh_helper_name();
+            let pair_value = CExpr::Call(
+                "erlang".to_string(),
+                "element".to_string(),
+                vec![
+                    CExpr::Lit(CLit::Int((i as i64) + 1)),
+                    CExpr::Var(ops_by_effect_var.clone()),
+                ],
             );
+            install_bindings.push((pair_var.clone(), pair_value));
+
+            let op_tuple_var = self.fresh_helper_name();
+            let op_tuple_value = CExpr::Call(
+                "erlang".to_string(),
+                "element".to_string(),
+                vec![CExpr::Lit(CLit::Int(2)), CExpr::Var(pair_var)],
+            );
+            install_bindings.push((op_tuple_var.clone(), op_tuple_value));
+
+            let entry = CExpr::Tuple(vec![
+                CExpr::Lit(CLit::Atom(eff.clone())),
+                CExpr::Var(op_tuple_var),
+            ]);
+            let insert = CExpr::Call(
+                EVIDENCE_BRIDGE_MODULE.to_string(),
+                "insert_canonical".to_string(),
+                vec![CExpr::Var(acc_ev.clone()), entry],
+            );
+            let new_ev_name = self.fresh_evidence_name();
+            install_bindings.push((new_ev_name.clone(), insert));
+            acc_ev = new_ev_name;
         }
 
-        let mut rewritten_stmts = stmts[..=split_at].to_vec();
-        rewritten_stmts.push(Annotated::bare(Stmt::Expr(handled_suffix)));
-        let rewritten = Expr::synth(
-            base.span,
-            ExprKind::Block {
-                stmts: rewritten_stmts,
-                dangling_trivia: dangling_trivia.clone(),
-            },
+        let prompt_k = self.fresh_k_ret_name();
+        let prompt_k_binding =
+            self.build_result_delimiter_k(&abort_marker, &inner_k, &raw_result_k);
+
+        let body_ctx = ctx
+            .with_evidence(acc_ev.clone())
+            .with_return_k(prompt_k.clone())
+            .with_result_delimiter(
+                sorted_effects.clone(),
+                abort_marker.clone(),
+                prompt_k.clone(),
+                ctx.preserve_abort_marker,
+            );
+        let body_ce = self.lower_expr(body, &body_ctx);
+        let wrapped_body = self.wrap_with_result_delimiter(body_ce, &abort_marker, ctx);
+
+        let with_evidence = install_bindings
+            .into_iter()
+            .rev()
+            .fold(wrapped_body, |inner, (name, value)| {
+                CExpr::Let(name, Box::new(value), Box::new(inner))
+            });
+        let with_prompt = CExpr::Let(
+            prompt_k,
+            Box::new(prompt_k_binding),
+            Box::new(with_evidence),
         );
-        Some(self.lower_expr_with_installed_return_k(&rewritten, inherited_return_k))
+        let with_runtime_return = CExpr::Let(
+            runtime_return_var,
+            Box::new(runtime_return_value),
+            Box::new(CExpr::Let(
+                runtime_ret_k,
+                Box::new(runtime_ret_binding),
+                Box::new(with_prompt),
+            )),
+        );
+        let with_return = match ret_binding {
+            Some((name, value)) => CExpr::Let(name, Box::new(value), Box::new(with_runtime_return)),
+            None => with_runtime_return,
+        };
+        let with_ops_by_effect = CExpr::Let(
+            ops_by_effect_var,
+            Box::new(ops_by_effect_value),
+            Box::new(with_return),
+        );
+        let with_handler_value = CExpr::Let(
+            handler_value_var,
+            Box::new(handler_value_ce),
+            Box::new(with_ops_by_effect),
+        );
+        CExpr::Let(
+            raw_result_k,
+            Box::new(raw_result_k_binding),
+            Box::new(with_handler_value),
+        )
     }
 
-    /// Build a per-op handler function from a single handler arm.
-    ///
-    /// Produces: `fun (Arg0, ..., ArgN, K) -> body`
-    /// Each op gets its own function with natural arity.
-    ///
-    /// When the arm has a `finally` block, `current_handler_finally` is set so
-    /// that each `resume` site inlines try/catch around the K call. This ensures
-    /// the cleanup code is lowered in the correct lexical scope (where arm body
-    /// variables like `conn` are bound). For abort handlers (no resume), cleanup
-    /// is appended after the arm body.
-    fn build_op_handler_fun(&mut self, arm: &HandlerArm, source_module: Option<&str>) -> CExpr {
-        let has_resume = arm.body.contains_resume();
-        let op_info = self
-            .effect_for_handler_arm(arm, source_module)
-            .and_then(|effect_name| {
-                self.effect_defs
-                    .get(&effect_name)
-                    .and_then(|info| info.ops.get(&arm.op_name))
-            })
-            .cloned();
-        let source_param_count = op_info
-            .as_ref()
-            .map(|op| op.source_param_count)
-            .unwrap_or(arm.params.len());
-        let runtime_param_positions = op_info
-            .as_ref()
-            .map(|op| op.runtime_param_positions.clone())
-            .unwrap_or_else(|| (0..source_param_count).collect());
-        let runtime_param_count = op_info
-            .as_ref()
-            .map(|op| op.runtime_param_count)
-            .unwrap_or(source_param_count);
+    fn build_result_delimiter_k(
+        &mut self,
+        abort_marker: &str,
+        success_k: &str,
+        abort_k: &str,
+    ) -> CExpr {
+        let result = self.fresh_helper_name();
+        let arms = self.result_delimiter_arms(
+            abort_marker,
+            |value| apply_to_k(success_k, value),
+            |value| apply_to_k(abort_k, value),
+            |value| apply_to_k(success_k, value),
+        );
+        CExpr::Fun(
+            vec![result.clone()],
+            Box::new(CExpr::Case(Box::new(CExpr::Var(result)), arms)),
+        )
+    }
 
-        // If resume is never called, use `_` (Core Erlang wildcard) so the compiler
-        // doesn't warn about the unused continuation parameter. Safe because
-        // `contains_resume()` being false guarantees no Resume node exists in the arm
-        // body, so `current_handler_k` ("<_>") is never read during lowering.
-        let k_var = if has_resume {
-            self.fresh()
-        } else {
-            "_".to_string()
-        };
-        let param_vars: Vec<String> = (0..runtime_param_count)
-            .map(|i| format!("_HArg{}", i))
+    /// Wrap a lowered `with` body in the common delimiter that interprets
+    /// local abort markers and forwards ordinary values through the outer K.
+    fn wrap_with_result_delimiter(
+        &mut self,
+        body_ce: CExpr,
+        abort_marker: &str,
+        ctx: &LowerCtx,
+    ) -> CExpr {
+        self.wrap_with_result_delimiter_to_k(
+            body_ce,
+            abort_marker,
+            &ctx.return_k,
+            ctx.preserve_abort_marker,
+        )
+    }
+
+    pub(super) fn wrap_with_result_delimiter_to_k(
+        &mut self,
+        body_ce: CExpr,
+        abort_marker: &str,
+        return_k: &str,
+        preserve_abort_marker: bool,
+    ) -> CExpr {
+        let with_result = self.fresh_helper_name();
+        let arms = self.result_delimiter_arms(
+            abort_marker,
+            |value| apply_to_k(return_k, value),
+            |value| {
+                if preserve_abort_marker {
+                    marked_control_tuple(
+                        ABORT_TAG,
+                        CExpr::Lit(CLit::Atom(abort_marker.to_string())),
+                        value,
+                    )
+                } else {
+                    apply_to_k(return_k, value)
+                }
+            },
+            |value| apply_to_k(return_k, value),
+        );
+        CExpr::Let(
+            with_result.clone(),
+            Box::new(body_ce),
+            Box::new(CExpr::Case(Box::new(CExpr::Var(with_result)), arms)),
+        )
+    }
+
+    pub(super) fn wrap_with_result_delimiter_raw(
+        &mut self,
+        body_ce: CExpr,
+        abort_marker: &str,
+        preserve_abort_marker: bool,
+    ) -> CExpr {
+        let with_result = self.fresh_helper_name();
+        let arms = self.result_delimiter_arms(
+            abort_marker,
+            |value| value,
+            |value| {
+                if preserve_abort_marker {
+                    marked_control_tuple(
+                        ABORT_TAG,
+                        CExpr::Lit(CLit::Atom(abort_marker.to_string())),
+                        value,
+                    )
+                } else {
+                    value
+                }
+            },
+            |value| value,
+        );
+        CExpr::Let(
+            with_result.clone(),
+            Box::new(body_ce),
+            Box::new(CExpr::Case(Box::new(CExpr::Var(with_result)), arms)),
+        )
+    }
+
+    fn result_delimiter_arms(
+        &mut self,
+        abort_marker: &str,
+        local_value_body: impl Fn(CExpr) -> CExpr,
+        local_abort_body: impl Fn(CExpr) -> CExpr,
+        ordinary_value_body: impl Fn(CExpr) -> CExpr,
+    ) -> Vec<CArm> {
+        let abort_value = self.fresh_helper_name();
+        let mut arms = vec![
+            CArm {
+                pat: marked_control_pattern(
+                    VALUE_RESULT_TAG,
+                    CPat::Lit(CLit::Atom(abort_marker.to_string())),
+                    abort_value.clone(),
+                ),
+                guard: None,
+                body: local_value_body(CExpr::Var(abort_value.clone())),
+            },
+            CArm {
+                pat: marked_control_pattern(
+                    ABORT_TAG,
+                    CPat::Lit(CLit::Atom(abort_marker.to_string())),
+                    abort_value.clone(),
+                ),
+                guard: None,
+                body: local_abort_body(CExpr::Var(abort_value)),
+            },
+        ];
+        arms.extend(self.propagate_marked_control_arms());
+        arms.push(CArm {
+            pat: CPat::Var("_WithValue".to_string()),
+            guard: None,
+            body: ordinary_value_body(CExpr::Var("_WithValue".to_string())),
+        });
+        arms
+    }
+
+    fn wrap_result_delimiter_stack_until(
+        &mut self,
+        mut body_ce: CExpr,
+        delimiter: &ResultDelimiter,
+        effect: &str,
+        ctx: &LowerCtx,
+    ) -> CExpr {
+        let mut current = Some(delimiter);
+        while let Some(delim) = current {
+            body_ce = self.wrap_with_result_delimiter_raw(
+                body_ce,
+                &delim.abort_marker,
+                ctx.preserve_abort_marker || delim.preserve_abort_marker,
+            );
+            if delim.effects.iter().any(|handled| handled == effect) {
+                break;
+            }
+            current = delim.parent.as_deref();
+        }
+        body_ce
+    }
+
+    // -----------------------------------------------------------------
+    // OpTuple assembly + arm closure compilation
+    // -----------------------------------------------------------------
+
+    /// Build the `OpTuple` (a Core Erlang tuple of per-op closures) for a
+    /// single effect's arms. Arms are sorted by `op_index`, grouped by
+    /// `op_index` (multi-arm-per-op is permitted — Saga's surface syntax
+    /// allows pattern-matching across op params), and emitted in canonical
+    /// (alphabetical) order.
+    ///
+    /// Invariant: op indices must be 1..N consecutive. If gaps appear (an
+    /// effect declares more ops than the handler covers), we panic rather
+    /// than emit a misaligned tuple — the typechecker is responsible for
+    /// rejecting handlers that don't discharge every op of every effect they
+    /// list. (Flagged: if a real workload hits this, the right fix is to
+    /// thread effect-op-set info via `EffectInfo` and pad missing ops with
+    /// a passthrough closure — same as `build_passthrough_handler_fun` in
+    /// the old lowerer.)
+    fn build_op_tuple_for_effect(
+        &mut self,
+        eff: &str,
+        arms: &[&MHandlerArm],
+        ctx: &LowerCtx,
+    ) -> CExpr {
+        let mut sorted: Vec<&MHandlerArm> = arms.to_vec();
+        sorted.sort_by_key(|a| a.op.op_index);
+
+        // Group consecutive arms with the same op_index together.
+        let mut groups: Vec<Vec<&MHandlerArm>> = Vec::new();
+        for arm in sorted {
+            if let Some(last) = groups.last_mut()
+                && last[0].op.op_index == arm.op.op_index
+            {
+                last.push(arm);
+                continue;
+            }
+            groups.push(vec![arm]);
+        }
+
+        // Verify canonical 1..N consecutive coverage.
+        for (i, group) in groups.iter().enumerate() {
+            let expected = (i as u32) + 1;
+            let actual = group[0].op.op_index;
+            if actual != expected {
+                panic!(
+                    "build_op_tuple_for_effect: Static handler for effect '{}' is missing \
+                     arm for op_index {} (next arm has op_index {}). The typechecker \
+                     should have rejected handlers that don't cover every op; if this \
+                     fires in practice, thread effect-op-set info via EffectInfo and \
+                     emit passthrough closures for missing ops.",
+                    eff, expected, actual
+                );
+            }
+        }
+
+        let closures: Vec<CExpr> = groups
+            .into_iter()
+            .map(|g| {
+                if g.len() == 1 {
+                    self.build_arm_closure(g[0], ctx)
+                } else {
+                    self.build_multi_arm_op_closure(&g, ctx)
+                }
+            })
             .collect();
 
-        let mut fun_params: Vec<String> = param_vars.clone();
-        fun_params.push(k_var.clone());
+        CExpr::Tuple(closures)
+    }
 
-        // Set up K for resume references in the body.
-        // The handler arm body is owned by the handler: it produces the
-        // handled computation's result itself rather than flowing into an
-        // enclosing function-level return continuation.
-        let prev_handler_k = self.current_handler_k.replace(k_var);
+    /// Compile a single `MHandlerArm` into its per-op closure:
+    ///
+    /// ```text
+    /// fun(<arm.params...>, _Ev_perform, _K_arm{n}) -> <arm.body lowered under _K_arm{n}>
+    /// ```
+    ///
+    /// Each arm param maps to a closure parameter:
+    ///   - `Pat::Var { name }` → that name (mangled via `core_var`).
+    ///   - non-Var patterns → a positional `_HArg{i}` plus a destructuring
+    ///     `case` wrap around the body.
+    pub(super) fn build_arm_closure(&mut self, arm: &MHandlerArm, ctx: &LowerCtx) -> CExpr {
+        self.build_arm_closure_with_return_mode(arm, ctx, ArmReturnMode::Captured)
+    }
 
-        // Resume handlers reach the rest of the computation via their own
-        // K parameter (the resume continuation), so threading inherited_K
-        // into their body would double-apply. Only abort arms (no resume)
-        // should pick up inherited_K — that's where the body's terminal
-        // value needs an explicit path to the host's outer K.
-        let saved_inherited = if has_resume {
-            self.current_handler_inherited_k.take()
+    pub(super) fn build_handler_value_arm_closure(
+        &mut self,
+        arm: &MHandlerArm,
+        ctx: &LowerCtx,
+    ) -> CExpr {
+        self.build_arm_closure_with_return_mode(arm, ctx, ArmReturnMode::Direct)
+    }
+
+    fn build_arm_closure_with_return_mode(
+        &mut self,
+        arm: &MHandlerArm,
+        ctx: &LowerCtx,
+        mode: ArmReturnMode,
+    ) -> CExpr {
+        let (closure_params, body_wraps) = self.plan_arm_params(&arm.params);
+        let perform_ev = self.fresh_helper_name();
+        let k_arm = self.fresh_k_arm_name();
+        let direct_k = if matches!(mode, ArmReturnMode::Direct) {
+            Some(self.fresh_helper_name())
         } else {
             None
         };
+        let body_ctx = match mode {
+            ArmReturnMode::Captured => ctx.with_arm_k(k_arm.clone()),
+            ArmReturnMode::Direct => ctx
+                .with_arm_k(k_arm.clone())
+                .with_return_k(direct_k.as_ref().unwrap().clone()),
+        };
+        let mut body_ce = self.lower_captured_arm_body(arm, &body_ctx);
 
-        // Set current_handler_finally so Resume lowering wraps K calls in try/catch.
-        let saved_finally = self.current_handler_finally.take();
-        let saved_source_module = self.current_handler_source_module.clone();
-        self.current_handler_source_module = source_module.map(str::to_string);
-        if let Some(ref fb) = arm.finally_block {
-            self.current_handler_finally = Some(fb.as_ref().clone());
+        if let Some(direct_k) = direct_k {
+            body_ce = CExpr::Let(
+                direct_k,
+                Box::new(CExpr::Fun(
+                    vec!["_V".to_string()],
+                    Box::new(CExpr::Var("_V".to_string())),
+                )),
+                Box::new(body_ce),
+            );
         }
+        let body_with_pats = self.wrap_arm_param_destructures(body_ce, body_wraps);
 
-        let mut body_ce = self.lower_handler_owned_expr(&arm.body);
+        let mut params = closure_params;
+        params.push(perform_ev);
+        params.push(k_arm);
+        CExpr::Fun(params, Box::new(body_with_pats))
+    }
 
-        self.current_handler_finally = saved_finally;
-
-        // Bind arm's params (possibly patterns) to the positional handler args
-        for (i, pat) in arm.params.iter().enumerate().rev() {
-            let bound_value = runtime_param_positions
-                .iter()
-                .position(|&source_idx| source_idx == i)
-                .map(|runtime_idx| CExpr::Var(param_vars[runtime_idx].clone()))
-                .unwrap_or_else(|| CExpr::Lit(CLit::Atom("unit".to_string())));
-            let (var, wrapped_body) = self.destructure_pat(pat, body_ce);
-            body_ce = CExpr::Let(var, Box::new(bound_value), Box::new(wrapped_body));
+    /// Lower a handler arm's body under a continuation already set in
+    /// `body_ctx` (its `arm_k`, and for value arms its `return_k`), applying
+    /// the arm's `finally` cleanup and abort-marker tagging:
+    ///   - resuming arm + finally: the cleanup runs at each resume site
+    ///     (threaded via `with_finally`, consumed in `lower_resume`).
+    ///   - aborting arm + finally: the cleanup is appended after the body.
+    ///   - aborting arm (no resume): the result is tagged with the with-site's
+    ///     abort marker so nested delimiters can propagate it.
+    ///
+    /// Param binding (closure params for single arms, case patterns for
+    /// multi-arm-per-op) is the caller's job; this only registers `arm.params`
+    /// as locals so the body resolves them.
+    fn lower_captured_arm_body(&mut self, arm: &MHandlerArm, body_ctx: &LowerCtx) -> CExpr {
+        let has_resume = arm.body.contains_resume();
+        let mut lower_ctx = body_ctx.clone();
+        if let Some(ref fb) = arm.finally_block
+            && has_resume
+        {
+            lower_ctx = lower_ctx.with_finally(fb.clone());
         }
+        let arm_ctx = lower_ctx.with_param_locals(&arm.params);
+        let mut body_ce = self.lower_expr(&arm.body, &arm_ctx);
 
-        // For abort handlers (no resume) with finally: append cleanup after body.
-        // The cleanup is lowered here because the arm body's let-bindings are not
-        // in scope — but for abort handlers, the typical pattern is that the resource
-        // was never acquired (the handler failed early), so cleanup referencing
-        // body-local variables is unlikely. If it does reference arm params, those
-        // are in scope via the param bindings above.
+        // For abort arms (no resume) with finally: append cleanup after body.
         if let (Some(fb), false) = (&arm.finally_block, has_resume) {
-            let cleanup_ce = self.lower_expr(fb);
-            let result_var = self.fresh();
+            let result_var = self.fresh_helper_name();
             body_ce = CExpr::Let(
                 result_var.clone(),
                 Box::new(body_ce),
-                Box::new(CExpr::Let(
-                    "_".to_string(),
-                    Box::new(cleanup_ce),
-                    Box::new(CExpr::Var(result_var)),
-                )),
+                Box::new(self.sequence_finally_then(fb, &arm_ctx, CExpr::Var(result_var))),
             );
         }
 
-        self.current_handler_source_module = saved_source_module;
-        self.current_handler_k = prev_handler_k;
-        if has_resume {
-            self.current_handler_inherited_k = saved_inherited;
+        if !has_resume && let Some(marker) = &arm_ctx.abort_marker {
+            let result_var = self.fresh_helper_name();
+            let mut arms = self.propagate_marked_control_arms();
+            arms.push(CArm {
+                pat: CPat::Var("_AbortValue".to_string()),
+                guard: None,
+                body: marked_control_tuple(
+                    ABORT_TAG,
+                    CExpr::Lit(CLit::Atom(marker.clone())),
+                    CExpr::Var("_AbortValue".to_string()),
+                ),
+            });
+            body_ce = CExpr::Let(
+                result_var.clone(),
+                Box::new(body_ce),
+                Box::new(CExpr::Case(Box::new(CExpr::Var(result_var)), arms)),
+            );
         }
-        CExpr::Fun(fun_params, Box::new(body_ce))
+
+        body_ce
     }
 
-    fn build_inline_op_handler_fun(&mut self, arms: &[HandlerArm]) -> CExpr {
-        match arms {
-            [] => self.build_passthrough_handler_fun(),
-            [arm] => self.build_op_handler_fun(arm, None),
-            [first, ..] => self.build_multi_arm_inline_op_handler_fun(first, arms),
+    /// Multi-arm-per-op closure. The op has N>1 arms that pattern-match on
+    /// op params; emit:
+    ///
+    /// ```text
+    /// fun(_HArg0, ..., _HArgK, _Ev_perform, _K_arm{n}) ->
+    ///   case _HArg0 of
+    ///     <arm0.params[0]> -> <arm0.body under _K_arm{n}>
+    ///     <arm1.params[0]> -> <arm1.body under _K_arm{n}>
+    ///     ...
+    ///   end
+    /// ```
+    ///
+    /// For >1 op param, the scrutinee is `<_HArg0, ..., _HArgK>` and each
+    /// arm pattern is `<arm.params[0], ..., arm.params[K]>` — matching the
+    /// old lowerer's `build_multi_arm_inline_op_handler_fun` shape.
+    ///
+    /// All arms share one K (`_K_arm{n}`) — the captured continuation of the
+    /// perform site is independent of which arm matched.
+    fn build_multi_arm_op_closure(&mut self, arms: &[&MHandlerArm], ctx: &LowerCtx) -> CExpr {
+        let n_params = arms[0].params.len();
+        for arm in arms.iter().skip(1) {
+            assert_eq!(
+                arm.params.len(),
+                n_params,
+                "multi-arm-per-op: all arms must take the same number of op params \
+                 (effect={}, op={})",
+                arm.op.effect,
+                arm.op.op
+            );
         }
-    }
 
-    fn build_multi_arm_inline_op_handler_fun(
-        &mut self,
-        first: &HandlerArm,
-        arms: &[HandlerArm],
-    ) -> CExpr {
-        let has_resume = arms.iter().any(|arm| arm.body.contains_resume());
-        let op_info = self
-            .effect_for_handler_arm(first, None)
-            .and_then(|effect_name| {
-                self.effect_defs
-                    .get(&effect_name)
-                    .and_then(|info| info.ops.get(&first.op_name))
-            })
-            .cloned();
-        let source_param_count = op_info
-            .as_ref()
-            .map(|op| op.source_param_count)
-            .unwrap_or(first.params.len());
-        let runtime_param_positions = op_info
-            .as_ref()
-            .map(|op| op.runtime_param_positions.clone())
-            .unwrap_or_else(|| (0..source_param_count).collect());
-        let runtime_param_count = op_info
-            .as_ref()
-            .map(|op| op.runtime_param_count)
-            .unwrap_or(source_param_count);
+        let positional: Vec<String> = (0..n_params).map(|i| format!("_HArg{}", i)).collect();
+        let perform_ev = self.fresh_helper_name();
+        let k_arm = self.fresh_k_arm_name();
 
-        let k_var = if has_resume {
-            self.fresh()
+        let scrutinee = if n_params == 1 {
+            CExpr::Var(positional[0].clone())
         } else {
-            "_".to_string()
-        };
-        let param_vars: Vec<String> = (0..runtime_param_count)
-            .map(|i| format!("_HArg{}", i))
-            .collect();
-        let mut fun_params = param_vars.clone();
-        fun_params.push(k_var.clone());
-
-        let prev_handler_k = self.current_handler_k.replace(k_var);
-        let saved_finally = self.current_handler_finally.take();
-        let saved_source_module = self.current_handler_source_module.clone();
-        self.current_handler_source_module = None;
-
-        let scrutinee = if runtime_param_count == 1 {
-            CExpr::Var(param_vars[0].clone())
-        } else {
-            CExpr::Values(
-                param_vars
-                    .iter()
-                    .map(|param| CExpr::Var(param.clone()))
-                    .collect(),
-            )
+            CExpr::Values(positional.iter().cloned().map(CExpr::Var).collect())
         };
 
-        let mut case_arms = Vec::new();
+        let body_ctx = ctx.with_arm_k(k_arm.clone());
+        let mut case_arms: Vec<CArm> = Vec::with_capacity(arms.len());
         for arm in arms {
-            self.current_handler_finally = arm.finally_block.as_ref().map(|fb| fb.as_ref().clone());
-            let mut body_ce = self.lower_handler_owned_expr(&arm.body);
-            if let (Some(fb), false) = (&arm.finally_block, arm.body.contains_resume()) {
-                let cleanup_ce = self.lower_expr(fb);
-                let result_var = self.fresh();
-                body_ce = CExpr::Let(
-                    result_var.clone(),
-                    Box::new(body_ce),
-                    Box::new(CExpr::Let(
-                        "_".to_string(),
-                        Box::new(cleanup_ce),
-                        Box::new(CExpr::Var(result_var)),
-                    )),
-                );
-            }
-
-            for (source_idx, pat) in arm.params.iter().enumerate().rev() {
-                if !runtime_param_positions.contains(&source_idx) {
-                    let (var, wrapped_body) = self.destructure_pat(pat, body_ce);
-                    body_ce = CExpr::Let(
-                        var,
-                        Box::new(CExpr::Lit(CLit::Atom("unit".to_string()))),
-                        Box::new(wrapped_body),
-                    );
-                }
-            }
-
-            let runtime_pats: Vec<CPat> = runtime_param_positions
-                .iter()
-                .take(runtime_param_count)
-                .map(|&source_idx| {
-                    arm.params
-                        .get(source_idx)
-                        .map(|pat| {
-                            self.lower_pat(
-                                pat,
-                                &self.constructor_atoms,
-                                self.handler_origin_module(),
-                            )
-                        })
-                        .unwrap_or(CPat::Wildcard)
-                })
-                .collect();
-            let pat = if runtime_param_count == 1 {
-                runtime_pats.into_iter().next().unwrap_or(CPat::Wildcard)
+            let body_ce = self.lower_captured_arm_body(arm, &body_ctx);
+            let pat = if n_params == 1 {
+                self.lower_pat(&arm.params[0])
             } else {
-                CPat::Values(runtime_pats)
+                CPat::Values(arm.params.iter().map(|p| self.lower_pat(p)).collect())
             };
             case_arms.push(CArm {
                 pat,
@@ -1143,810 +988,119 @@ impl<'a> Lowerer<'a> {
             });
         }
 
-        self.current_handler_finally = saved_finally;
-        self.current_handler_source_module = saved_source_module;
-        self.current_handler_k = prev_handler_k;
-
+        let mut fun_params = positional;
+        fun_params.push(perform_ev);
+        fun_params.push(k_arm);
         CExpr::Fun(
             fun_params,
             Box::new(CExpr::Case(Box::new(scrutinee), case_arms)),
         )
     }
 
-    /// Lower a handler expression to a tuple of per-op handler lambdas.
-    /// Used when a handler expression appears as a value (returned from function,
-    /// passed as argument, etc.) rather than in a `handle` binding.
+    /// Build the return-clause closure: a continuation `fun(_V) -> body`
+    /// where `body` is lowered with the outer K still in scope, so the
+    /// clause's tail value flows naturally to the surrounding caller.
     ///
-    /// The tuple layout is: ops sorted alphabetically by "Effect.op" key,
-    /// with an optional return clause lambda as the last element.
-    pub(super) fn lower_handler_expr_to_tuple(&mut self, body: &crate::ast::HandlerBody) -> CExpr {
-        let semantic_module_name = self.current_semantic_module_name().to_string();
-        let canonical_effects =
-            self.resolved_effect_refs_for_module(&semantic_module_name, &body.effects);
-        let handler_ops = self.effect_handler_ops(&canonical_effects);
-
-        // Index arms by op name for quick lookup
-        let arms_by_op: std::collections::HashMap<&str, &crate::ast::HandlerArm> = body
-            .arms
-            .iter()
-            .map(|a| (a.node.op_name.as_str(), &a.node))
-            .collect();
-
-        let mut tuple_elements = Vec::new();
-        for (_eff, op) in &handler_ops {
-            if let Some(arm) = arms_by_op.get(op.as_str()) {
-                tuple_elements.push(self.build_op_handler_fun(arm, None));
-            } else {
-                // Passthrough: identity continuation
-                let k_param = self.fresh();
-                tuple_elements.push(CExpr::Fun(
-                    vec![k_param.clone()],
-                    Box::new(CExpr::Apply(
-                        Box::new(CExpr::Var(k_param)),
-                        vec![CExpr::Lit(CLit::Atom("unit".to_string()))],
-                    )),
-                ));
-            }
-        }
-        if let Some(rc) = &body.return_clause {
-            let ret_body = self.lower_expr(&rc.body);
-            let (param, body) = if rc.params.is_empty() {
-                (self.fresh(), ret_body)
-            } else {
-                self.destructure_pat(&rc.params[0], ret_body)
-            };
-            tuple_elements.push(CExpr::Fun(vec![param], Box::new(body)));
-        }
-        CExpr::Tuple(tuple_elements)
-    }
-
-    /// Lower a named handler definition to a tuple-of-lambdas.
-    /// Used when a handler name appears as a value (e.g. returned from a function,
-    /// passed as an argument) rather than in a `with` block.
-    pub(super) fn lower_handler_def_to_tuple(&mut self, handler_name: &str) -> Option<CExpr> {
-        let canonical = self.resolve_handler_name(handler_name);
-        let info = self.handler_defs.get(&canonical)?.clone();
-        let handler_ops = self.effect_handler_ops(&info.effects);
-
-        let mut tuple_elements = Vec::new();
-        for (_eff, op) in &handler_ops {
-            if let Some(arm) = info.arms.iter().find(|a| a.op_name == *op) {
-                tuple_elements.push(self.build_op_handler_fun(arm, info.source_module.as_deref()));
-            } else {
-                let k_param = self.fresh();
-                tuple_elements.push(CExpr::Fun(
-                    vec![k_param.clone()],
-                    Box::new(CExpr::Apply(
-                        Box::new(CExpr::Var(k_param)),
-                        vec![CExpr::Lit(CLit::Atom("unit".to_string()))],
-                    )),
-                ));
-            }
-        }
-        if let Some(rc) = &info.return_clause {
-            let ret_body = self.lower_expr(&rc.body);
-            let (param, body) = if rc.params.is_empty() {
-                (self.fresh(), ret_body)
-            } else {
-                self.destructure_pat(&rc.params[0], ret_body)
-            };
-            tuple_elements.push(CExpr::Fun(vec![param], Box::new(body)));
-        }
-        Some(CExpr::Tuple(tuple_elements))
-    }
-
-    fn normalize_with_handler(&self, handler: &Handler) -> WithHandlerLayer {
-        match handler {
-            Handler::Named(named) => WithHandlerLayer::Named {
-                reference: named.clone(),
-            },
-            Handler::Inline { items, .. } => {
-                let mut inline_arms = Vec::new();
-                let mut return_clause = None;
-                for ann in items {
-                    match &ann.node {
-                        HandlerItem::Named(_) => panic!(
-                            "internal lowering error: named handler refs should have been desugared into nested `with` layers before lowering"
-                        ),
-                        HandlerItem::Arm(a) => inline_arms.push(a.clone()),
-                        HandlerItem::Return(rc) => {
-                            assert!(
-                                return_clause.is_none(),
-                                "internal lowering error: inline handler segment has multiple return clauses"
-                            );
-                            return_clause = Some(Box::new(rc.clone()));
-                        }
-                    }
-                }
-                WithHandlerLayer::Inline {
-                    arms: inline_arms,
-                    return_clause,
-                }
-            }
-        }
-    }
-
-    fn pre_register_local_with_binding(&mut self, expr: &Expr, named_ref: &str) {
-        let mut current = expr;
-        let stmts = loop {
-            match &current.kind {
-                ExprKind::Block { stmts, .. } => break stmts,
-                ExprKind::With { expr: inner, .. } => current = inner,
-                _ => return,
-            }
-        };
-
-        for stmt in stmts {
-            if let Stmt::Let { pattern, value, .. } = &stmt.node
-                && let Pat::Var {
-                    name, id: pat_id, ..
-                } = pattern
-                && name == named_ref
-                && self.is_handler_value(value)
-            {
-                self.lower_handle_binding(name, Some(*pat_id), value);
-            }
-        }
-    }
-
-    fn resolve_named_handler_item(
-        &self,
-        reference: &crate::ast::NamedHandlerRef,
-    ) -> NamedHandlerItem {
-        let name = &reference.name;
-        if let Some((tuple_var, effects, has_return)) = self.handle_dynamic_vars.get(name).cloned()
-        {
-            return NamedHandlerItem::Dynamic {
-                tuple_var,
-                effects,
-                has_return,
-            };
-        }
-        if let Some((cond_var, cond_ce, then_canonical, else_canonical)) =
-            self.handle_cond_vars.get(name).cloned()
-        {
-            let then_info = self
-                .handler_defs
-                .get(&then_canonical)
-                .cloned()
-                .unwrap_or_else(|| {
-                    panic!(
-                        "internal lowering error: unknown conditional handler branch '{}' for '{}'",
-                        then_canonical, name
-                    )
-                });
-            let else_info = self
-                .handler_defs
-                .get(&else_canonical)
-                .cloned()
-                .unwrap_or_else(|| {
-                    panic!(
-                        "internal lowering error: unknown conditional handler branch '{}' for '{}'",
-                        else_canonical, name
-                    )
-                });
-            return NamedHandlerItem::Conditional {
-                cond_var,
-                cond_ce,
-                then_info,
-                else_info,
-            };
-        }
-        let canonical = self
-            .resolved_handler_binding_name(reference.id)
-            .unwrap_or_else(|| {
-                panic!(
-                    "internal lowering error: missing handler resolution for '{}' ({:?})",
-                    name, reference.id
-                )
-            });
-        let info = self
-            .handler_defs
-            .get(&canonical)
-            .cloned()
-            .unwrap_or_else(|| {
-                panic!(
-                    "internal lowering error: unknown handler item '{}' (canonical: {})",
-                    name, canonical
-                )
-            });
-        NamedHandlerItem::Static { canonical, info }
-    }
-
-    fn effect_for_handler_arm(
-        &self,
-        arm: &HandlerArm,
-        source_module: Option<&str>,
-    ) -> Option<String> {
-        let module_name = source_module.unwrap_or_else(|| self.current_semantic_module_name());
-        self.resolved_handler_arm_effect_for_module(arm, module_name)
-    }
-
-    fn static_arm_for_effect_op(
-        &self,
-        info: &super::HandlerInfo,
-        eff: &str,
-        op: &str,
-    ) -> Option<(HandlerArm, Option<String>)> {
-        info.arms
-            .iter()
-            .find(|arm| {
-                self.handler_arm_matches_effect_op_for_module(
-                    arm,
-                    info.source_module.as_deref(),
-                    eff,
-                    op,
-                )
-            })
-            .cloned()
-            .map(|arm| (arm, info.source_module.clone()))
-    }
-
-    fn dynamic_tuple_element_expr(
-        &self,
-        tuple_var: &str,
-        effects: &[String],
-        eff: &str,
-        op: &str,
-    ) -> CExpr {
-        let handler_ops = self.effect_handler_ops(effects);
-        let index = handler_ops
-            .iter()
-            .position(|(item_eff, item_op)| item_eff == eff && item_op == op)
-            .unwrap_or_else(|| {
-                panic!(
-                    "internal lowering error: dynamic handler tuple '{}' is missing op '{}.{}'",
-                    tuple_var, eff, op
-                )
-            });
-        cerl_call(
-            "erlang",
-            "element",
-            vec![
-                CExpr::Lit(CLit::Int(index as i64 + 1)),
-                CExpr::Var(tuple_var.to_string()),
-            ],
-        )
-    }
-
-    fn plan_named_op_handler(
-        &self,
-        eff: &str,
-        op: &str,
-        named_item: &NamedHandlerItem,
-    ) -> OpHandlerPlan {
-        match named_item {
-            NamedHandlerItem::Static { canonical, info } => {
-                if let Some((arm, source_module)) = self.static_arm_for_effect_op(info, eff, op) {
-                    OpHandlerPlan::Static {
-                        arm,
-                        source_module,
-                        handler_canonical: canonical.clone(),
-                    }
-                } else if self.is_beam_native_handler_canonical(canonical) {
-                    OpHandlerPlan::BeamNative {
-                        handler_canonical: canonical.clone(),
-                    }
-                } else {
-                    OpHandlerPlan::Passthrough
-                }
-            }
-            NamedHandlerItem::Conditional {
-                cond_var,
-                then_info,
-                else_info,
-                ..
-            } => {
-                let then_arm = self
-                    .static_arm_for_effect_op(then_info, eff, op)
-                    .map(|(arm, _)| arm);
-                let then_source = then_info.source_module.clone();
-                let else_arm = self
-                    .static_arm_for_effect_op(else_info, eff, op)
-                    .map(|(arm, _)| arm);
-                let else_source = else_info.source_module.clone();
-                OpHandlerPlan::Conditional {
-                    cond_var: cond_var.clone(),
-                    then_arm,
-                    then_source,
-                    else_arm,
-                    else_source,
-                }
-            }
-            NamedHandlerItem::Dynamic {
-                tuple_var, effects, ..
-            } => OpHandlerPlan::Dynamic {
-                element_expr: self.dynamic_tuple_element_expr(tuple_var, effects, eff, op),
-            },
-        }
-    }
-
-    fn plan_inline_op_handler(
-        &self,
-        eff: &str,
-        op: &str,
-        inline_arms_by_op: &HashMap<String, Vec<HandlerArm>>,
-    ) -> OpHandlerPlan {
-        let qualified_key = format!("{}.{}", eff, op);
-        if let Some(arms) = inline_arms_by_op
-            .get(&qualified_key)
-            .or_else(|| inline_arms_by_op.get(op))
-        {
-            return OpHandlerPlan::Inline { arms: arms.clone() };
-        }
-        OpHandlerPlan::Passthrough
-    }
-
-    fn build_passthrough_handler_fun(&mut self) -> CExpr {
-        let k_param = self.fresh();
-        CExpr::Fun(
-            vec![k_param.clone()],
-            Box::new(CExpr::Apply(
-                Box::new(CExpr::Var(k_param)),
-                vec![CExpr::Lit(CLit::Atom("unit".to_string()))],
-            )),
-        )
-    }
-
-    fn build_conditional_handler_fun(
+    /// The closure shape matches a regular continuation (single value
+    /// parameter) — the with site binds it as `_K_ret{n}` and threads it
+    /// as the body's K. Nested withs compose innermost-first by
+    /// construction: each inner with binds its own `_K_ret{m}` referring
+    /// to the next-outer K, which is itself a `_K_ret{m-1}` if that layer
+    /// has a return clause.
+    pub(super) fn build_return_clause_closure(
         &mut self,
-        cond_var: &str,
-        then_arm: Option<&HandlerArm>,
-        then_source: Option<&str>,
-        else_arm: Option<&HandlerArm>,
-        else_source: Option<&str>,
+        arm: &MHandlerArm,
+        ctx: &LowerCtx,
     ) -> CExpr {
-        let then_fun = if let Some(arm) = then_arm {
-            self.build_op_handler_fun(arm, then_source)
-        } else {
-            self.build_passthrough_handler_fun()
-        };
-        let else_fun = if let Some(arm) = else_arm {
-            self.build_op_handler_fun(arm, else_source)
-        } else {
-            self.build_passthrough_handler_fun()
-        };
-        let arity = match then_arm.or(else_arm) {
-            Some(arm) => arm.params.len() + 1,
-            None => 1,
-        };
-        let wrapper_params: Vec<String> = (0..arity).map(|i| format!("_HW{}", i)).collect();
-        let args_ce: Vec<CExpr> = wrapper_params
-            .iter()
-            .map(|p| CExpr::Var(p.clone()))
-            .collect();
-        let then_call = CExpr::Apply(Box::new(then_fun), args_ce.clone());
-        let else_call = CExpr::Apply(Box::new(else_fun), args_ce);
-        let case_expr = CExpr::Case(
-            Box::new(CExpr::Var(cond_var.to_string())),
-            vec![
-                CArm {
-                    pat: CPat::Lit(CLit::Atom("true".to_string())),
-                    guard: None,
-                    body: then_call,
-                },
-                CArm {
-                    pat: CPat::Var("_".to_string()),
-                    guard: None,
-                    body: else_call,
-                },
-            ],
+        // The parser never attaches a `finally` to a `return` clause (both the
+        // named- and inline-handler paths hardcode `finally_block: None`), so a
+        // return clause's cleanup is structurally impossible. Asserted, not
+        // handled.
+        debug_assert!(
+            arm.finally_block.is_none(),
+            "return clause unexpectedly carries a finally block (effect={}, op={})",
+            arm.op.effect,
+            arm.op.op
         );
-        CExpr::Fun(wrapper_params, Box::new(case_expr))
+        let (param_name, body_wrap) = match arm.params.as_slice() {
+            [] => (self.fresh_helper_name(), None),
+            [Pat::Var { name, .. }] => (core_var(name), None),
+            [pat] => {
+                let positional = format!("_HArg{}", 0);
+                (positional, Some(pat.clone()))
+            }
+            many => panic!(
+                "build_return_clause_closure: return clause expected ≤1 param; got {}",
+                many.len()
+            ),
+        };
+
+        // Body lowers under the outer K + outer evidence (the ctx passed in
+        // by `lower_with_static` is the outer scope — see that fn).
+        let body_ctx = ctx.with_param_locals(&arm.params);
+        let body_ce = self.lower_expr(&arm.body, &body_ctx);
+        let body_with_pat = match body_wrap {
+            None => body_ce,
+            Some(pat) => {
+                let cpat = self.lower_pat(&pat);
+                CExpr::Case(
+                    Box::new(CExpr::Var(param_name.clone())),
+                    vec![CArm {
+                        pat: cpat,
+                        guard: None,
+                        body: body_ce,
+                    }],
+                )
+            }
+        };
+        CExpr::Fun(vec![param_name], Box::new(body_with_pat))
     }
 
-    fn identity_return_lambda(&mut self) -> CExpr {
-        let param = self.fresh();
-        CExpr::Fun(vec![param.clone()], Box::new(CExpr::Var(param)))
-    }
-
-    fn collect_top_level_scoped_vars(expr: &CExpr, out: &mut HashSet<String>) {
-        match expr {
-            CExpr::Let(var, _, body) => {
-                out.insert(var.clone());
-                Self::collect_top_level_scoped_vars(body, out);
-            }
-            CExpr::LetRec(_, body) => Self::collect_top_level_scoped_vars(body, out),
-            CExpr::Annotated { expr, .. } => Self::collect_top_level_scoped_vars(expr, out),
-            _ => {}
-        }
-    }
-
-    fn collect_var_refs(expr: &CExpr, out: &mut HashSet<String>) {
-        let mut bound = HashSet::new();
-        Self::collect_free_var_refs(expr, &mut bound, out);
-    }
-
-    /// Scope-aware free-variable collector. Tracks which names are locally
-    /// bound by `Let`/`Fun`/`LetRec`/`Case` patterns and only records vars
-    /// that escape those bindings. Without this, naive walking treats inner
-    /// shadowing names (e.g. a handler lambda that rebinds `Conn = _HArg0`)
-    /// as references to the outer name, producing spurious dependencies.
-    fn collect_free_var_refs(expr: &CExpr, bound: &mut HashSet<String>, out: &mut HashSet<String>) {
-        match expr {
-            CExpr::Var(v) => {
-                if !bound.contains(v) {
-                    out.insert(v.clone());
-                }
-            }
-            CExpr::Lit(_) | CExpr::Nil | CExpr::FunRef(_, _) => {}
-            CExpr::Fun(params, body) => {
-                let added: Vec<String> = params
-                    .iter()
-                    .filter(|p| bound.insert((*p).clone()))
-                    .cloned()
-                    .collect();
-                Self::collect_free_var_refs(body, bound, out);
-                for p in &added {
-                    bound.remove(p);
-                }
-            }
-            CExpr::Let(var, val, body) => {
-                Self::collect_free_var_refs(val, bound, out);
-                let added = bound.insert(var.clone());
-                Self::collect_free_var_refs(body, bound, out);
-                if added {
-                    bound.remove(var);
-                }
-            }
-            CExpr::Apply(func, args) => {
-                Self::collect_free_var_refs(func, bound, out);
-                for arg in args {
-                    Self::collect_free_var_refs(arg, bound, out);
-                }
-            }
-            CExpr::Call(_, _, args) | CExpr::Tuple(args) | CExpr::Values(args) => {
-                for arg in args {
-                    Self::collect_free_var_refs(arg, bound, out);
-                }
-            }
-            CExpr::Case(scrutinee, arms) => {
-                Self::collect_free_var_refs(scrutinee, bound, out);
-                for arm in arms {
-                    let mut pat_vars = Vec::new();
-                    Self::collect_pat_vars(&arm.pat, &mut pat_vars);
-                    let added: Vec<String> = pat_vars
-                        .into_iter()
-                        .filter(|v| bound.insert(v.clone()))
-                        .collect();
-                    if let Some(guard) = &arm.guard {
-                        Self::collect_free_var_refs(guard, bound, out);
-                    }
-                    Self::collect_free_var_refs(&arm.body, bound, out);
-                    for v in &added {
-                        bound.remove(v);
-                    }
-                }
-            }
-            CExpr::Cons(head, tail) => {
-                Self::collect_free_var_refs(head, bound, out);
-                Self::collect_free_var_refs(tail, bound, out);
-            }
-            CExpr::LetRec(defs, body) => {
-                // letrec: all defined names are in scope inside every def and the body
-                let added: Vec<String> = defs
-                    .iter()
-                    .filter_map(|(name, _, _)| {
-                        if bound.insert(name.clone()) {
-                            Some(name.clone())
-                        } else {
-                            None
-                        }
-                    })
-                    .collect();
-                for (_, _, def) in defs {
-                    Self::collect_free_var_refs(def, bound, out);
-                }
-                Self::collect_free_var_refs(body, bound, out);
-                for v in &added {
-                    bound.remove(v);
-                }
-            }
-            CExpr::Receive(arms, timeout, timeout_body) => {
-                for arm in arms {
-                    let mut pat_vars = Vec::new();
-                    Self::collect_pat_vars(&arm.pat, &mut pat_vars);
-                    let added: Vec<String> = pat_vars
-                        .into_iter()
-                        .filter(|v| bound.insert(v.clone()))
-                        .collect();
-                    if let Some(guard) = &arm.guard {
-                        Self::collect_free_var_refs(guard, bound, out);
-                    }
-                    Self::collect_free_var_refs(&arm.body, bound, out);
-                    for v in &added {
-                        bound.remove(v);
-                    }
-                }
-                Self::collect_free_var_refs(timeout, bound, out);
-                Self::collect_free_var_refs(timeout_body, bound, out);
-            }
-            CExpr::Try {
-                expr,
-                ok_var,
-                ok_body,
-                catch_vars,
-                catch_body,
-            } => {
-                Self::collect_free_var_refs(expr, bound, out);
-                let ok_added = bound.insert(ok_var.clone());
-                Self::collect_free_var_refs(ok_body, bound, out);
-                if ok_added {
-                    bound.remove(ok_var);
-                }
-                let catch_added: Vec<String> = [&catch_vars.0, &catch_vars.1, &catch_vars.2]
-                    .iter()
-                    .filter_map(|v| {
-                        if bound.insert((*v).clone()) {
-                            Some((*v).clone())
-                        } else {
-                            None
-                        }
-                    })
-                    .collect();
-                Self::collect_free_var_refs(catch_body, bound, out);
-                for v in &catch_added {
-                    bound.remove(v);
-                }
-            }
-            CExpr::Binary(segs) => {
-                for seg in segs {
-                    match seg {
-                        crate::codegen::cerl::CBinSeg::BinaryAll(expr) => {
-                            Self::collect_free_var_refs(expr, bound, out);
-                        }
-                        crate::codegen::cerl::CBinSeg::Segment { value, size, .. } => {
-                            Self::collect_free_var_refs(value, bound, out);
-                            if let crate::codegen::cerl::BinSegSize::Expr(size_expr) = size {
-                                Self::collect_free_var_refs(size_expr, bound, out);
-                            }
-                        }
-                        crate::codegen::cerl::CBinSeg::Byte(_) => {}
-                    }
-                }
-            }
-            CExpr::Annotated { expr, .. } => Self::collect_free_var_refs(expr, bound, out),
-        }
-    }
-
-    fn collect_pat_vars(pat: &CPat, out: &mut Vec<String>) {
-        match pat {
-            CPat::Var(v) => out.push(v.clone()),
-            CPat::Lit(_) | CPat::Wildcard | CPat::Nil => {}
-            CPat::Tuple(ps) | CPat::Values(ps) => {
-                for p in ps {
-                    Self::collect_pat_vars(p, out);
-                }
-            }
-            CPat::Cons(head, tail) => {
-                Self::collect_pat_vars(head, out);
-                Self::collect_pat_vars(tail, out);
-            }
-            CPat::Alias(name, inner) => {
-                out.push(name.clone());
-                Self::collect_pat_vars(inner, out);
-            }
-            CPat::Binary(segs) => {
-                for seg in segs {
-                    match seg {
-                        crate::codegen::cerl::CBinSeg::BinaryAll(p) => {
-                            Self::collect_pat_vars(p, out);
-                        }
-                        crate::codegen::cerl::CBinSeg::Segment { value, size, .. } => {
-                            Self::collect_pat_vars(value, out);
-                            if let crate::codegen::cerl::BinSegSize::Expr(_) = size {
-                                // size expr is not a binding site
-                            }
-                        }
-                        crate::codegen::cerl::CBinSeg::Byte(_) => {}
-                    }
+    /// Compute closure-parameter names + body-destructure plan for an arm's
+    /// op-parameter patterns.
+    ///
+    /// Single-arm path only: `Pat::Var` lets the var name *be* the closure
+    /// param; anything else gets a positional `_HArg{i}` and a destructure
+    /// wrapper on the body.
+    fn plan_arm_params(&self, params: &[Pat]) -> (Vec<String>, Vec<(String, Pat)>) {
+        let mut closure_params = Vec::with_capacity(params.len());
+        let mut wraps = Vec::new();
+        for (i, pat) in params.iter().enumerate() {
+            match pat {
+                Pat::Var { name, .. } => closure_params.push(core_var(name)),
+                Pat::Wildcard { .. } => closure_params.push(format!("_HArg{}", i)),
+                _ => {
+                    let name = format!("_HArg{}", i);
+                    closure_params.push(name.clone());
+                    wraps.push((name, pat.clone()));
                 }
             }
         }
+        (closure_params, wraps)
     }
 
-    fn wrap_ready_pending_lets(
-        mut body: CExpr,
-        pending: &mut VecDeque<PendingLet>,
-        bound: &mut HashSet<String>,
-    ) -> CExpr {
-        let bound_snapshot = bound.clone();
-        let mut ready = Vec::new();
-        let mut waiting = VecDeque::new();
-
-        while let Some(item) = pending.pop_front() {
-            if item.deps.is_subset(&bound_snapshot) {
-                ready.push(item);
-            } else {
-                waiting.push_back(item);
-            }
-        }
-
-        *pending = waiting;
-
-        for item in ready.into_iter().rev() {
-            body = CExpr::Let(item.var, Box::new(item.val), Box::new(body));
-        }
-
-        body
-    }
-
-    fn place_pending_lets(
-        body: CExpr,
-        pending: &mut VecDeque<PendingLet>,
-        bound: &mut HashSet<String>,
-    ) -> CExpr {
-        let body = Self::wrap_ready_pending_lets(body, pending, bound);
-        match body {
-            CExpr::Let(var, val, inner) => {
-                bound.insert(var.clone());
-                let inner = Self::place_pending_lets(*inner, pending, bound);
-                CExpr::Let(var, val, Box::new(inner))
-            }
-            CExpr::LetRec(defs, body) => {
-                let body = Self::place_pending_lets(*body, pending, bound);
-                CExpr::LetRec(defs, Box::new(body))
-            }
-            CExpr::Annotated { expr, line, file } => CExpr::Annotated {
-                expr: Box::new(Self::place_pending_lets(*expr, pending, bound)),
-                line,
-                file,
-            },
-            other => Self::wrap_ready_pending_lets(other, pending, bound),
-        }
-    }
-
-    fn attach_scoped_handler_bindings(
-        &self,
-        result: CExpr,
-        condition_bindings: Vec<(String, CExpr)>,
-        handler_bindings: Vec<(String, CExpr)>,
-    ) -> CExpr {
-        let mut relevant_names = HashSet::new();
-        Self::collect_top_level_scoped_vars(&result, &mut relevant_names);
-        for (var, _) in &condition_bindings {
-            relevant_names.insert(var.clone());
-        }
-        for (var, _) in &handler_bindings {
-            relevant_names.insert(var.clone());
-        }
-        let mut pending: VecDeque<PendingLet> = condition_bindings
-            .into_iter()
-            .chain(handler_bindings)
-            .map(|(var, val)| {
-                let mut refs = HashSet::new();
-                Self::collect_var_refs(&val, &mut refs);
-                let deps = refs
-                    .into_iter()
-                    .filter(|name| name != &var && relevant_names.contains(name))
-                    .collect();
-                PendingLet { var, val, deps }
-            })
-            .collect();
-
-        let mut bound = HashSet::new();
-        let output = Self::place_pending_lets(result, &mut pending, &mut bound);
-        if pending.is_empty() {
-            output
-        } else {
-            let waiting_on: Vec<String> = pending
-                .iter()
-                .map(|item| format!("{} -> {:?}", item.var, item.deps))
-                .collect();
-            panic!(
-                "internal lowering error: could not place scoped handler bindings: {}",
-                waiting_on.join(", ")
+    /// Apply the destructure plan from [`plan_arm_params`]: wrap `body` with
+    /// a `case <_HArg{i}> of <pat> -> body` for each non-Var/Wildcard arm
+    /// param. Outer wraps are emitted last so inner patterns bind first.
+    fn wrap_arm_param_destructures(&self, mut body: CExpr, wraps: Vec<(String, Pat)>) -> CExpr {
+        for (arg_name, pat) in wraps.into_iter().rev() {
+            let cpat = self.lower_pat(&pat);
+            body = CExpr::Case(
+                Box::new(CExpr::Var(arg_name)),
+                vec![CArm {
+                    pat: cpat,
+                    guard: None,
+                    body,
+                }],
             );
         }
-    }
-
-    fn named_return_lambda(&mut self, item: &NamedHandlerItem) -> Option<CExpr> {
-        match item {
-            NamedHandlerItem::Static { info, .. } => info
-                .return_clause
-                .as_ref()
-                .map(|ret| self.build_return_lambda(ret, info.source_module.as_deref())),
-            NamedHandlerItem::Conditional {
-                cond_var,
-                then_info,
-                else_info,
-                ..
-            } => {
-                if then_info.return_clause.is_some() || else_info.return_clause.is_some() {
-                    let then_fun = then_info
-                        .return_clause
-                        .as_ref()
-                        .map(|ret| {
-                            self.build_return_lambda(ret, then_info.source_module.as_deref())
-                        })
-                        .unwrap_or_else(|| self.identity_return_lambda());
-                    let else_fun = else_info
-                        .return_clause
-                        .as_ref()
-                        .map(|ret| {
-                            self.build_return_lambda(ret, else_info.source_module.as_deref())
-                        })
-                        .unwrap_or_else(|| self.identity_return_lambda());
-                    let param = self.fresh();
-                    let then_call =
-                        CExpr::Apply(Box::new(then_fun), vec![CExpr::Var(param.clone())]);
-                    let else_call =
-                        CExpr::Apply(Box::new(else_fun), vec![CExpr::Var(param.clone())]);
-                    let body = CExpr::Case(
-                        Box::new(CExpr::Var(cond_var.clone())),
-                        vec![
-                            CArm {
-                                pat: CPat::Lit(CLit::Atom("true".to_string())),
-                                guard: None,
-                                body: then_call,
-                            },
-                            CArm {
-                                pat: CPat::Var("_".to_string()),
-                                guard: None,
-                                body: else_call,
-                            },
-                        ],
-                    );
-                    Some(CExpr::Fun(vec![param], Box::new(body)))
-                } else {
-                    None
-                }
-            }
-            NamedHandlerItem::Dynamic {
-                tuple_var,
-                effects,
-                has_return,
-            } => {
-                if *has_return {
-                    Some(
-                        self.dynamic_return_lambda(
-                            tuple_var,
-                            self.effect_handler_ops(effects).len(),
-                        ),
-                    )
-                } else {
-                    None
-                }
-            }
-        }
-    }
-
-    fn is_beam_native_handler_canonical(&self, canonical: &str) -> bool {
-        self.handler_defs
-            .get(canonical)
-            .and_then(|info| info.source_module.as_deref())
-            .is_some_and(|module| super::beam_interop::is_beam_native_handler(module, canonical))
-    }
-
-    /// Find a BEAM-native handler that covers the given effect, if any.
-    /// Used to satisfy callback-parameter absorbed effects without threading
-    /// an explicit handler param: BEAM-native ops are installed as `direct_ops`
-    /// so any use inside the lambda body lowers to a direct erlang call.
-    pub(super) fn beam_native_handler_for_effect(&self, effect: &str) -> Option<String> {
-        for (canonical, info) in &self.handler_defs {
-            if !info.effects.iter().any(|e| e == effect) {
-                continue;
-            }
-            if let Some(module) = info.source_module.as_deref()
-                && super::beam_interop::is_beam_native_handler(module, canonical)
-            {
-                return Some(canonical.clone());
-            }
-        }
-        None
-    }
-
-    fn use_direct_native_fast_path(&self, _canonical: &str) -> bool {
-        false
+        body
     }
 }
 
-impl NamedHandlerItem {
-    fn effects(&self) -> &[String] {
-        match self {
-            NamedHandlerItem::Static { info, .. } => &info.effects,
-            NamedHandlerItem::Conditional { then_info, .. } => &then_info.effects,
-            NamedHandlerItem::Dynamic { effects, .. } => effects,
-        }
-    }
+fn identity_continuation() -> CExpr {
+    CExpr::Fun(
+        vec!["_V".to_string()],
+        Box::new(CExpr::Var("_V".to_string())),
+    )
 }

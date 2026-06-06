@@ -1,15 +1,23 @@
-pub mod call_effects;
+pub mod anf;
 pub mod cerl;
+pub(crate) mod ets_tables;
+pub mod external;
+pub mod handler_analysis;
 pub mod lower;
-pub mod normalize;
+pub mod lower_selective;
+pub mod monadic;
+pub mod native_effects;
 pub mod resolve;
 pub mod runtime_shape;
+mod source_spans;
 #[cfg(test)]
 mod tests;
+pub mod type_shape;
 
 use crate::ast;
-use crate::typechecker::ModuleCodegenInfo;
-use std::collections::HashMap;
+use crate::compiler_options::CompileOptions;
+use crate::typechecker::{CheckResult, ModuleCodegenInfo};
+use std::collections::{HashMap, HashSet};
 
 /// Result of compiling a single module: codegen metadata, elaborated AST,
 /// and pre-computed name resolution.
@@ -20,11 +28,6 @@ pub struct CompiledModule {
     pub resolution: resolve::ResolutionMap,
     /// Front-end name resolution from the typechecker.
     pub front_resolution: crate::typechecker::ResolutionResult,
-    /// Per-call effect metadata produced by the call-effects pre-pass. Empty
-    /// until the module has been lowered (the Lowerer populates this map and
-    /// writes it back via `set_compiled_call_effects`). Read by the lowerer at
-    /// every effectful call site to drive evidence threading and projection.
-    pub call_effects: call_effects::CallEffectMap,
 }
 
 pub struct ModuleSemantics<'a> {
@@ -82,6 +85,18 @@ impl CodegenContext {
             )
         })
     }
+
+    pub fn clear_elaborated_programs_iterative(&mut self) {
+        for module in self.modules.values_mut() {
+            module.clear_elaborated_program_iterative();
+        }
+    }
+}
+
+impl CompiledModule {
+    pub fn clear_elaborated_program_iterative(&mut self) {
+        ast::drop_program_iterative(std::mem::take(&mut self.elaborated));
+    }
 }
 
 /// Compile a single module from a CheckResult into a CompiledModule.
@@ -95,20 +110,24 @@ pub fn compile_module_from_result(
     let codegen_info = result.codegen_info();
     let info = codegen_info.get(module_name).cloned().unwrap_or_default();
     let elaborated = crate::elaborate::elaborate_module(program, mod_result, module_name);
-    let normalized = normalize::normalize_effects(&elaborated);
+
+    // Store the raw elaborated AST. ANF runs at emit time inside
+    // `emit_module_with_context`, and backend resolution is keyed to the same
+    // raw elaborated NodeIds.
     let resolution = resolve::resolve_names(
         module_name,
-        &normalized,
+        &elaborated,
         codegen_info,
         &result.prelude_imports,
         &mod_result.resolution,
     );
+    let stored = elaborated;
+
     Some(CompiledModule {
         codegen_info: info,
-        elaborated: normalized,
+        elaborated: stored,
         resolution,
         front_resolution: mod_result.resolution.clone(),
-        call_effects: call_effects::CallEffectMap::new(),
     })
 }
 
@@ -120,6 +139,10 @@ pub struct SourceFile {
     pub source: String,
 }
 
+pub struct EmitModuleOutput {
+    pub core_src: String,
+}
+
 pub fn emit_module_with_context(
     module_name: &str,
     program: &ast::Program,
@@ -128,14 +151,220 @@ pub fn emit_module_with_context(
     source_file: Option<&SourceFile>,
     entry_export: Option<&str>,
 ) -> String {
-    let codegen_info = ctx.codegen_info();
-    let program = normalize::normalize_effects(program);
-    let constructor_atoms = resolve::build_constructor_atoms(
+    emit_module_with_context_options(
         module_name,
-        &program,
-        &codegen_info,
-        &ctx.prelude_imports,
-    );
+        program,
+        ctx,
+        check_result,
+        source_file,
+        entry_export,
+        &CompileOptions::default(),
+    )
+    .core_src
+}
+
+pub fn emit_module_with_context_options(
+    module_name: &str,
+    program: &ast::Program,
+    ctx: &CodegenContext,
+    check_result: &crate::typechecker::CheckResult,
+    source_file: Option<&SourceFile>,
+    entry_export: Option<&str>,
+    options: &CompileOptions,
+) -> EmitModuleOutput {
+    // The selective path consumes the raw elaborated AST, runs ANF + monadic
+    // translation once, lowers direct-first selective Core, and overlays it on
+    // the raw monadic fallback unless `--selective-no-fallback` is enabled.
+    emit_module_via_new_path(
+        module_name,
+        program,
+        ctx,
+        check_result,
+        source_file,
+        entry_export,
+        options,
+    )
+}
+
+fn declared_module_name(program: &ast::Program) -> Option<String> {
+    program.iter().find_map(|decl| match decl {
+        ast::Decl::ModuleDecl { path, .. } => Some(path.join(".")),
+        _ => None,
+    })
+}
+
+fn program_imports_module(program: &ast::Program, module_name: &str) -> bool {
+    program.iter().any(|decl| {
+        matches!(
+            decl,
+            ast::Decl::Import { module_path, .. }
+                if module_path.join(".") == module_name
+        )
+    })
+}
+
+fn resolution_references_module(resolution: &resolve::ResolutionMap, module_name: &str) -> bool {
+    let erlang_module = erlang_module_name_for_core(module_name);
+    resolution.values().any(|resolved| {
+        resolved.source_module.as_deref() == Some(module_name)
+            || matches!(
+                &resolved.kind,
+                resolve::ResolvedCodegenKind::BeamFunction {
+                    erlang_mod: Some(module),
+                    ..
+                } if module == &erlang_module
+            )
+    })
+}
+
+// -------------------------------------------------------------------------
+// New-path helpers (Phase 1, step 8)
+// -------------------------------------------------------------------------
+
+/// Storage for the narrowed [`monadic::ir::EffectInfo`] view's
+/// `effect_ops` field. The view itself borrows; this struct owns the
+/// underlying map so the borrow stays alive for the duration of one
+/// emit.
+pub struct EffectOpsTable {
+    pub map: HashMap<String, Vec<String>>,
+}
+
+fn insert_effect_ops_entry(
+    map: &mut HashMap<String, Vec<String>>,
+    name: &str,
+    source_module: Option<&str>,
+    ops: Vec<String>,
+) {
+    map.insert(name.to_string(), ops.clone());
+    let bare = name.rsplit('.').next().unwrap_or(name);
+    if bare != name {
+        map.entry(bare.to_string()).or_insert_with(|| ops.clone());
+    }
+    if let Some(src_mod) = source_module {
+        let canonical = format!("{}.{}", src_mod, bare);
+        if canonical != name {
+            map.insert(canonical, ops);
+        }
+    }
+}
+
+fn insert_module_effect_defs(
+    map: &mut HashMap<String, Vec<String>>,
+    codegen_info: &HashMap<String, ModuleCodegenInfo>,
+) {
+    for info in codegen_info.values() {
+        for effect_def in &info.effect_defs {
+            let mut ops: Vec<String> = effect_def.ops.iter().map(|op| op.name.clone()).collect();
+            ops.sort();
+            let source_module = effect_def.name.rsplit_once('.').map(|(module, _)| module);
+            insert_effect_ops_entry(map, &effect_def.name, source_module, ops);
+        }
+    }
+}
+
+/// Build the canonical effect-name → ops list from `CheckResult.effects`.
+/// Both the bare effect name and the fully-qualified `Module.Name` form
+/// are inserted so callers can look up by either spelling.
+pub fn build_effect_ops_table(check_result: &CheckResult) -> EffectOpsTable {
+    let mut map: HashMap<String, Vec<String>> = HashMap::new();
+    for (name, info) in &check_result.effects {
+        let mut ops: Vec<String> = info.ops.iter().map(|op| op.name.clone()).collect();
+        ops.sort();
+        // `check_result.effects` may key by either bare (`Stdio`) or canonical
+        // (`Std.IO.Stdio`) names depending on where the entry was inserted
+        // (see `check_decl.rs:2219` for the canonical branch). Insert under
+        // both spellings so downstream lookups succeed either way, but avoid
+        // re-prepending the source module to a name that already contains it
+        // — `format!("Std.IO.{}", "Std.IO.Stdio")` would produce
+        // `Std.IO.Std.IO.Stdio` and poison the canonical lookup.
+        insert_effect_ops_entry(&mut map, name, info.source_module.as_deref(), ops);
+    }
+
+    // Imported/dependency effect definitions may be visible through module
+    // metadata without being present in the entry module's `effects` map. The
+    // translator needs the same op-index table for those cross-module effects.
+    insert_module_effect_defs(&mut map, check_result.codegen_info());
+    EffectOpsTable { map }
+}
+
+/// Build the narrowed [`monadic::ir::EffectInfo`] view from a
+/// `CheckResult` plus per-module `ResolutionResult`.
+///
+/// All fields are borrowed from the inputs except `effect_ops`, which is
+/// synthesized into `ops_storage` and then borrowed back into the view.
+/// The caller owns `ops_storage` and must keep it alive while the view
+/// is in use.
+pub fn build_effect_info<'a>(
+    check_result: &'a CheckResult,
+    module_check_result: &'a CheckResult,
+    ops_storage: &'a EffectOpsTable,
+    handler_effects_storage: &'a HashMap<String, Vec<String>>,
+    let_handler_effects_storage: &'a HashMap<ast::NodeId, Vec<String>>,
+) -> monadic::ir::EffectInfo<'a> {
+    monadic::ir::EffectInfo {
+        effect_calls: &module_check_result.resolution.effect_calls,
+        handler_arms: &module_check_result.resolution.handler_arms,
+        constructors: &module_check_result.resolution.constructors,
+        fun_effects: &check_result.fun_effects,
+        let_effect_bindings: &check_result.let_effect_bindings,
+        type_at_node: &check_result.type_at_node,
+        records: &check_result.records,
+        traits: &check_result.traits,
+        effect_ops: &ops_storage.map,
+        handler_effects: handler_effects_storage,
+        handler_refs: &module_check_result.resolution.handlers,
+        let_handler_effects: let_handler_effects_storage,
+    }
+}
+
+/// Build handler name → effects mapping from `CheckResult.handlers`.
+pub fn build_handler_effects(check_result: &CheckResult) -> HashMap<String, Vec<String>> {
+    check_result
+        .handlers
+        .iter()
+        .map(|(name, info)| (name.clone(), info.effects.clone()))
+        .collect()
+}
+
+/// Build pattern NodeId → effects mapping from `CheckResult.let_binding_handlers`.
+pub fn build_let_handler_effects(check_result: &CheckResult) -> HashMap<ast::NodeId, Vec<String>> {
+    check_result
+        .let_binding_handlers
+        .iter()
+        .map(|(id, info)| (*id, info.effects.clone()))
+        .collect()
+}
+
+/// Selective emit. Sequence:
+///   a. resolution_map = resolve::resolve_names(module_name, raw_elaborated, …)
+///   b. effect_info  = build_effect_info(check_result, module_check_result)
+///   c. handler_info = handler_analysis::analyze(raw_elaborated)
+///   d. anf_program  = anf::normalize(raw_elaborated.clone())
+///   e. monadic      = monadic::translate(&anf_program, &resolution_map, &effect_info)
+///   f. selective    = lower_selective::lower_module(…)
+///   g. fallback     = lower::Lowerer::new(…).lower_module(module_name, &monadic)
+///   h. cmod         = merge(fallback, selective), unless fallback is disabled
+///   i. cerl::print_module(&cmod)
+///
+/// `program` should be the raw elaborated AST (no `normalize_effects`
+/// applied). Bootstrap emission is on iff `entry_export.is_some()` — the
+/// only module the build pipeline passes an entry-export name to is the
+/// designated entry-point module.
+pub fn emit_module_via_new_path(
+    module_name: &str,
+    program: &ast::Program,
+    ctx: &CodegenContext,
+    check_result: &crate::typechecker::CheckResult,
+    source_file: Option<&SourceFile>,
+    entry_export: Option<&str>,
+    options: &CompileOptions,
+) -> EmitModuleOutput {
+    let _ = entry_export; // currently consumed only via is_main below
+    let source_module_name =
+        declared_module_name(program).unwrap_or_else(|| module_name.to_string());
+    let codegen_info = ctx.codegen_info();
+    let constructor_atoms =
+        resolve::build_constructor_atoms(module_name, program, &codegen_info, &ctx.prelude_imports);
     let front_resolution = check_result
         .module_check_results()
         .get(module_name)
@@ -143,26 +372,860 @@ pub fn emit_module_with_context(
         .unwrap_or(&check_result.resolution);
     let mut resolution_map = resolve::resolve_names(
         module_name,
-        &program,
+        program,
         &codegen_info,
         &ctx.prelude_imports,
         front_resolution,
     );
-    // Merge in pre-computed resolution maps from all compiled modules.
-    // Their NodeIds don't overlap with ours, so this is a simple extend.
     for compiled in ctx.modules.values() {
         resolution_map.extend(compiled.resolution.iter().map(|(k, v)| (*k, v.clone())));
     }
-    let source_info =
-        source_file.map(|sf| lower::errors::SourceInfo::new(sf.path.clone(), &sf.source));
-    let cmod = lower::Lowerer::new(
+
+    // Effect info: build the ops table once (borrowed by the view).
+    let mut ops_storage = build_effect_ops_table(check_result);
+    insert_module_effect_defs(&mut ops_storage.map, &codegen_info);
+    // Per-module CheckResult yields the per-module ResolutionResult that
+    // carries effect_calls / handler_arms. Script/test contexts (no module
+    // registered) fall back to the top-level check_result.
+    let mod_check_ref: &CheckResult = check_result
+        .module_check_results()
+        .get(module_name)
+        .unwrap_or(check_result);
+    let mut combined_effect_calls = mod_check_ref.resolution.effect_calls.clone();
+    let mut combined_handler_arms = mod_check_ref.resolution.handler_arms.clone();
+    let combined_handler_refs = mod_check_ref.resolution.handlers.clone();
+    let mut combined_constructors = mod_check_ref.resolution.constructors.clone();
+    for compiled in ctx.modules.values() {
+        combined_effect_calls.extend(
+            compiled
+                .front_resolution
+                .effect_calls
+                .iter()
+                .map(|(k, v)| (*k, v.clone())),
+        );
+        combined_handler_arms.extend(
+            compiled
+                .front_resolution
+                .handler_arms
+                .iter()
+                .map(|(k, v)| (*k, v.clone())),
+        );
+        combined_constructors.extend(
+            compiled
+                .front_resolution
+                .constructors
+                .iter()
+                .map(|(k, v)| (*k, v.clone())),
+        );
+    }
+    let handler_effects_storage = build_handler_effects(check_result);
+    let let_handler_effects_storage = build_let_handler_effects(check_result);
+    let effect_info = monadic::ir::EffectInfo {
+        effect_calls: &combined_effect_calls,
+        handler_arms: &combined_handler_arms,
+        constructors: &combined_constructors,
+        fun_effects: &check_result.fun_effects,
+        let_effect_bindings: &check_result.let_effect_bindings,
+        type_at_node: &check_result.type_at_node,
+        records: &check_result.records,
+        traits: &check_result.traits,
+        effect_ops: &ops_storage.map,
+        handler_effects: &handler_effects_storage,
+        handler_refs: &combined_handler_refs,
+        let_handler_effects: &let_handler_effects_storage,
+    };
+
+    let mut handler_info = handler_analysis::analyze(program);
+    let anf_program = anf::normalize(program.clone(), Some(&resolution_map));
+    // Collect imported handler bodies so `with <imported_handler>` translates
+    // to `Static` (arms inlined) instead of falling back to `Dynamic` with an
+    // empty effect list — the lowerer's Dynamic path requires a concrete
+    // effect tag for `insert_canonical`.
+    //
+    // Imported `elaborated` programs are NOT ANF-normalized (each module was
+    // ANF'd at its own emit time but the result isn't persisted), so we
+    // re-ANF each before extracting handler bodies — the translator expects
+    // every reachable expression (including inlined handler arm bodies) to
+    // satisfy the ANF atomicity invariant.
+    let mut imported_handler_decls: HashMap<String, ast::HandlerBody> = HashMap::new();
+    let mut imported_dict_constructors = HashMap::new();
+    for (imported_module_name, compiled) in &ctx.modules {
+        if imported_module_name == &source_module_name {
+            continue;
+        }
+        let imported_module_is_referenced = program_imports_module(program, imported_module_name)
+            || resolution_references_module(&resolution_map, imported_module_name);
+        if !imported_module_is_referenced {
+            continue;
+        }
+
+        let anf_imported = anf::normalize(compiled.elaborated.clone(), Some(&compiled.resolution));
+        for decl in &anf_imported {
+            if let ast::Decl::HandlerDef { name, body, .. } = decl {
+                imported_handler_decls
+                    .entry(name.clone())
+                    .or_insert_with(|| body.clone());
+                for canonical in &compiled.codegen_info.handler_defs {
+                    if canonical.rsplit('.').next() == Some(name.as_str()) {
+                        imported_handler_decls
+                            .entry(canonical.clone())
+                            .or_insert_with(|| body.clone());
+                    }
+                }
+            }
+        }
+        handler_info
+            .resumption
+            .extend(handler_analysis::analyze(&compiled.elaborated).resumption);
+        let (imported_monadic, _) =
+            monadic::translate::translate(&anf_imported, &compiled.resolution, &effect_info);
+        let imported_private = lower_selective::collect_imported_private_helper_candidates(
+            imported_module_name,
+            &imported_monadic,
+            &compiled.resolution,
+            &compiled.codegen_info,
+        );
+        let imported_private_names = imported_private
+            .values()
+            .map(|binding| binding.name.clone())
+            .collect::<std::collections::HashSet<_>>();
+        imported_dict_constructors.extend(lower_selective::collect_imported_dict_constructors(
+            imported_module_name,
+            &imported_monadic,
+            &compiled.resolution,
+            &compiled.codegen_info,
+            &imported_private_names,
+        ));
+        ast::drop_program_iterative(anf_imported);
+    }
+    let imported_dict_constructors = if source_module_name.starts_with("Std.") {
+        HashMap::new()
+    } else {
+        imported_dict_constructors
+    };
+    let (monadic_prog, handler_value_map) = monadic::translate::translate_with_imports(
+        &anf_program,
+        &resolution_map,
+        &effect_info,
+        &imported_handler_decls,
+    );
+
+    let selective_cmod = lower_selective::lower_module_with_entry_export_and_imported_dicts(
+        module_name,
+        &monadic_prog,
+        &resolution_map,
+        &constructor_atoms,
         ctx,
-        constructor_atoms,
-        resolution_map,
-        check_result,
-        source_info,
-        entry_export.map(str::to_string),
+        &handler_info,
+        &effect_info,
+        entry_export,
+        &handler_value_map,
+        imported_dict_constructors.clone(),
+        lower_selective::LoweringOptions {
+            require_all_functions: options.selective_no_fallback,
+        },
+    );
+    let cmod = if options.selective_no_fallback {
+        selective_cmod
+    } else {
+        let mut fallback_lowerer = lower::Lowerer::new(
+            &resolution_map,
+            &constructor_atoms,
+            ctx,
+            &handler_info,
+            &effect_info,
+            &handler_value_map,
+        );
+        if let Some(source_file) = source_file {
+            let source_spans = source_spans::for_program(&anf_program, &check_result.node_spans);
+            fallback_lowerer = fallback_lowerer.with_source_info(lower::SourceInfo::new(
+                source_file.path.clone(),
+                &source_file.source,
+                source_spans,
+            ));
+        }
+        let fallback_cmod = fallback_lowerer
+            .with_bootstrap_emission(entry_export.is_some())
+            .lower_module(module_name, &monadic_prog);
+        let fallback_direct_adapters =
+            selective_fallback_direct_adapters(&monadic_prog, &effect_info);
+        merge_selective_core_modules(fallback_cmod, selective_cmod, &fallback_direct_adapters)
+    };
+    let core_src = cerl::print_module(&cmod);
+    ast::drop_program_iterative(anf_program);
+    EmitModuleOutput { core_src }
+}
+
+fn merge_selective_core_modules(
+    fallback: cerl::CModule,
+    selective: cerl::CModule,
+    direct_adapters: &HashMap<String, DirectFallbackAdapter>,
+) -> cerl::CModule {
+    let fallback_exports: HashSet<(String, usize)> = fallback.exports.iter().cloned().collect();
+    let selective_fun_keys: HashSet<(String, usize)> = selective
+        .funs
+        .iter()
+        .map(|fun| (fun.name.clone(), fun.arity))
+        .collect();
+
+    let mut funs: Vec<cerl::CFunDef> = fallback
+        .funs
+        .into_iter()
+        .map(|fun| {
+            fallback_duplicate_dict_source(&selective.name, &fun.name, direct_adapters)
+                .and_then(|(source_name, adapter)| {
+                    build_dict_alias_if_selective_source_exists(
+                        &fun.name,
+                        fun.arity,
+                        &source_name,
+                        adapter,
+                        &selective_fun_keys,
+                    )
+                })
+                .or_else(|| {
+                    build_same_name_dict_alias_if_selective_source_exists(
+                        &fun.name,
+                        fun.arity,
+                        direct_adapters,
+                        &selective_fun_keys,
+                    )
+                })
+                .unwrap_or(fun)
+        })
+        .collect();
+    let mut fun_indexes: HashMap<(String, usize), usize> = funs
+        .iter()
+        .enumerate()
+        .map(|(index, fun)| ((fun.name.clone(), fun.arity), index))
+        .collect();
+    let fallback_fun_keys: HashSet<(String, usize)> = fun_indexes.keys().cloned().collect();
+
+    for fun in selective.funs {
+        let key = (fun.name.clone(), fun.arity);
+        if let Some(index) = fun_indexes.get(&key).copied() {
+            funs[index] = fun;
+        } else {
+            fun_indexes.insert(key, funs.len());
+            funs.push(fun);
+        }
+    }
+
+    let mut exports = Vec::new();
+    let mut export_seen = HashSet::new();
+    for export in fallback.exports {
+        push_export(&mut exports, &mut export_seen, export);
+    }
+    for export in selective.exports {
+        push_export(&mut exports, &mut export_seen, export);
+    }
+
+    for (name, adapter) in direct_adapters {
+        let direct_key = (name.clone(), adapter.direct_arity());
+        let fallback_key = (name.clone(), adapter.uniform_arity());
+        if !fallback_fun_keys.contains(&fallback_key) || fun_indexes.contains_key(&direct_key) {
+            continue;
+        }
+        let adapter = build_direct_fallback_adapter(name, adapter);
+        fun_indexes.insert(direct_key.clone(), funs.len());
+        funs.push(adapter);
+        if fallback_exports.contains(&fallback_key) {
+            push_export(&mut exports, &mut export_seen, direct_key);
+        }
+    }
+
+    cerl::CModule {
+        name: selective.name,
+        exports,
+        funs,
+    }
+}
+
+fn fallback_duplicate_dict_source<'a>(
+    module_name: &str,
+    fallback_name: &str,
+    direct_adapters: &'a HashMap<String, DirectFallbackAdapter>,
+) -> Option<(String, &'a DirectFallbackAdapter)> {
+    if !fallback_name.starts_with("__dict_") {
+        return None;
+    }
+
+    let erlang_module = erlang_module_name_for_core(module_name);
+    let marker = format!("_{erlang_module}");
+    let marker_index = fallback_name.find(&marker)?;
+    let mut source_name = fallback_name.to_string();
+    source_name.replace_range(marker_index..marker_index + marker.len(), "");
+
+    let adapter = direct_adapters.get(&source_name)?;
+    matches!(adapter, DirectFallbackAdapter::Dict { .. }).then_some((source_name, adapter))
+}
+
+fn build_duplicate_dict_alias(
+    fallback_name: &str,
+    arity: usize,
+    source_name: &str,
+    adapter: &DirectFallbackAdapter,
+) -> Option<cerl::CFunDef> {
+    let direct_arity = adapter.direct_arity();
+    if arity == direct_arity {
+        let params: Vec<String> = (0..direct_arity)
+            .map(|index| format!("_DictAliasArg{index}"))
+            .collect();
+        let args = params.iter().cloned().map(cerl::CExpr::Var).collect();
+        return Some(cerl::CFunDef {
+            name: fallback_name.to_string(),
+            arity,
+            body: cerl::CExpr::Fun(
+                params,
+                Box::new(cerl::CExpr::Apply(
+                    Box::new(cerl::CExpr::FunRef(source_name.to_string(), direct_arity)),
+                    args,
+                )),
+            ),
+        });
+    }
+
+    if arity == adapter.uniform_arity() {
+        let direct_params: Vec<String> = (0..direct_arity)
+            .map(|index| format!("_DictAliasArg{index}"))
+            .collect();
+        let evidence = "_DictAliasEvidence".to_string();
+        let return_k = "_DictAliasK".to_string();
+        let mut params = direct_params.clone();
+        params.push(evidence);
+        params.push(return_k.clone());
+        let mut param_bindings = Vec::new();
+        let mut direct_args = Vec::new();
+        for (index, param) in direct_params.iter().enumerate() {
+            if let Some(shape) = adapter
+                .dict_param_shapes()
+                .get(index)
+                .and_then(Option::as_ref)
+            {
+                let direct_param = format!("_DictAliasDirectParam{index}");
+                param_bindings.push((
+                    direct_param.clone(),
+                    uniform_dict_to_direct_dict_value(
+                        cerl::CExpr::Var(param.clone()),
+                        &shape.method_shapes,
+                        &format!("_DictAliasParam{index}"),
+                    ),
+                ));
+                direct_args.push(cerl::CExpr::Var(direct_param));
+            } else {
+                direct_args.push(cerl::CExpr::Var(param.clone()));
+            }
+        }
+        let mut direct_call = cerl::CExpr::Apply(
+            Box::new(cerl::CExpr::FunRef(source_name.to_string(), direct_arity)),
+            direct_args,
+        );
+        for (var, value) in param_bindings.into_iter().rev() {
+            direct_call = cerl::CExpr::Let(var, Box::new(value), Box::new(direct_call));
+        }
+        let result = if let Some(method_shapes) = adapter.dict_method_shapes() {
+            direct_dict_to_uniform_dict_value(direct_call, &method_shapes, "_DictAlias")
+        } else {
+            direct_call
+        };
+        return Some(cerl::CFunDef {
+            name: fallback_name.to_string(),
+            arity,
+            body: cerl::CExpr::Fun(
+                params,
+                Box::new(cerl::CExpr::Apply(
+                    Box::new(cerl::CExpr::Var(return_k)),
+                    vec![result],
+                )),
+            ),
+        });
+    }
+
+    None
+}
+
+fn build_dict_alias_if_selective_source_exists(
+    fallback_name: &str,
+    arity: usize,
+    source_name: &str,
+    adapter: &DirectFallbackAdapter,
+    selective_fun_keys: &HashSet<(String, usize)>,
+) -> Option<cerl::CFunDef> {
+    let direct_key = (source_name.to_string(), adapter.direct_arity());
+    selective_fun_keys
+        .contains(&direct_key)
+        .then(|| build_duplicate_dict_alias(fallback_name, arity, source_name, adapter))
+        .flatten()
+}
+
+fn build_same_name_dict_alias_if_selective_source_exists(
+    name: &str,
+    arity: usize,
+    direct_adapters: &HashMap<String, DirectFallbackAdapter>,
+    selective_fun_keys: &HashSet<(String, usize)>,
+) -> Option<cerl::CFunDef> {
+    if !name.starts_with("__dict_") {
+        return None;
+    }
+
+    let adapter = direct_adapters.get(name)?;
+    if !matches!(adapter, DirectFallbackAdapter::Dict { .. }) || arity != adapter.uniform_arity() {
+        return None;
+    }
+
+    build_dict_alias_if_selective_source_exists(name, arity, name, adapter, selective_fun_keys)
+}
+
+fn erlang_module_name_for_core(module_name: &str) -> String {
+    module_name
+        .split('.')
+        .map(str::to_lowercase)
+        .collect::<Vec<_>>()
+        .join("_")
+}
+
+#[derive(Clone)]
+enum DirectFallbackAdapter {
+    Function {
+        source_arity: usize,
+    },
+    Dict {
+        constructor: monadic::ir::MDictConstructor,
+        dict_param_shapes: Vec<Option<DictParamAdapterShape>>,
+    },
+}
+
+#[derive(Clone)]
+struct DictParamAdapterShape {
+    method_shapes: Vec<DictMethodAdapterShape>,
+}
+
+#[derive(Clone)]
+struct DictMethodAdapterShape {
+    arity: usize,
+    effectful: bool,
+}
+
+impl DirectFallbackAdapter {
+    fn direct_arity(&self) -> usize {
+        match self {
+            Self::Function { source_arity } => *source_arity,
+            Self::Dict { constructor, .. } => constructor.dict_params.len(),
+        }
+    }
+
+    fn uniform_arity(&self) -> usize {
+        self.direct_arity() + 2
+    }
+
+    fn dict_method_shapes(&self) -> Option<Vec<DictMethodAdapterShape>> {
+        let Self::Dict { constructor, .. } = self else {
+            return None;
+        };
+        Some(dict_constructor_method_shapes(constructor))
+    }
+
+    fn dict_param_shapes(&self) -> &[Option<DictParamAdapterShape>] {
+        match self {
+            Self::Dict {
+                dict_param_shapes, ..
+            } => dict_param_shapes,
+            Self::Function { .. } => &[],
+        }
+    }
+}
+
+fn selective_fallback_direct_adapters(
+    program: &monadic::ir::MProgram,
+    effect_info: &monadic::ir::EffectInfo<'_>,
+) -> HashMap<String, DirectFallbackAdapter> {
+    let mut adapters = HashMap::new();
+    for decl in program {
+        match decl {
+            monadic::ir::MDecl::FunBinding(fb)
+                if effect_info
+                    .fun_effects
+                    .get(&fb.name)
+                    .is_some_and(|effects| effects.is_empty()) =>
+            {
+                adapters
+                    .entry(fb.name.clone())
+                    .or_insert(DirectFallbackAdapter::Function {
+                        source_arity: fb.params.len(),
+                    });
+            }
+            monadic::ir::MDecl::DictConstructor(dc) => {
+                let dict_param_shapes = dc
+                    .dict_params
+                    .iter()
+                    .map(|param| dict_param_adapter_shape(param, effect_info))
+                    .collect();
+                adapters.insert(
+                    dc.name.clone(),
+                    DirectFallbackAdapter::Dict {
+                        constructor: dc.clone(),
+                        dict_param_shapes,
+                    },
+                );
+            }
+            monadic::ir::MDecl::FunBinding(_)
+            | monadic::ir::MDecl::Val(_)
+            | monadic::ir::MDecl::Passthrough(_) => {}
+        }
+    }
+    adapters
+}
+
+fn push_export(
+    exports: &mut Vec<(String, usize)>,
+    seen: &mut HashSet<(String, usize)>,
+    export: (String, usize),
+) {
+    if seen.insert(export.clone()) {
+        exports.push(export);
+    }
+}
+
+fn build_direct_fallback_adapter(name: &str, adapter: &DirectFallbackAdapter) -> cerl::CFunDef {
+    match adapter {
+        DirectFallbackAdapter::Function { source_arity } => {
+            build_direct_function_fallback_adapter(name, *source_arity)
+        }
+        DirectFallbackAdapter::Dict {
+            constructor,
+            dict_param_shapes,
+        } => build_direct_dict_fallback_adapter(constructor, dict_param_shapes),
+    }
+}
+
+fn build_direct_function_fallback_adapter(name: &str, direct_arity: usize) -> cerl::CFunDef {
+    let params: Vec<String> = (0..direct_arity)
+        .map(|index| format!("_DictArg{index}"))
+        .collect();
+    let mut args: Vec<cerl::CExpr> = params.iter().cloned().map(cerl::CExpr::Var).collect();
+    args.push(cerl::CExpr::Tuple(vec![]));
+    args.push(identity_continuation("_DictResult"));
+    let body = cerl::CExpr::Apply(
+        Box::new(cerl::CExpr::FunRef(name.to_string(), direct_arity + 2)),
+        args,
+    );
+    cerl::CFunDef {
+        name: name.to_string(),
+        arity: direct_arity,
+        body: cerl::CExpr::Fun(params, Box::new(body)),
+    }
+}
+
+fn build_direct_dict_fallback_adapter(
+    dc: &monadic::ir::MDictConstructor,
+    dict_param_shapes: &[Option<DictParamAdapterShape>],
+) -> cerl::CFunDef {
+    let params = dc.dict_params.clone();
+    let mut param_bindings = Vec::new();
+    let mut fallback_args = Vec::new();
+    for (index, param) in params.iter().enumerate() {
+        if let Some(shape) = dict_param_shapes.get(index).and_then(Option::as_ref) {
+            let uniform_param = format!("_UniformDictParam{index}");
+            param_bindings.push((
+                uniform_param.clone(),
+                direct_dict_to_uniform_dict_value(
+                    cerl::CExpr::Var(param.clone()),
+                    &shape.method_shapes,
+                    &format!("_DictParam{index}"),
+                ),
+            ));
+            fallback_args.push(cerl::CExpr::Var(uniform_param));
+        } else {
+            fallback_args.push(cerl::CExpr::Var(param.clone()));
+        }
+    }
+    fallback_args.push(cerl::CExpr::Tuple(vec![]));
+    fallback_args.push(identity_continuation("_DictResult"));
+    let fallback_var = "_FallbackDict".to_string();
+    let mut fallback_dict = cerl::CExpr::Apply(
+        Box::new(cerl::CExpr::FunRef(
+            dc.name.clone(),
+            dc.dict_params.len() + 2,
+        )),
+        fallback_args,
+    );
+    for (var, value) in param_bindings.into_iter().rev() {
+        fallback_dict = cerl::CExpr::Let(var, Box::new(value), Box::new(fallback_dict));
+    }
+    let method_shapes = dict_constructor_method_shapes(dc);
+    let methods = method_shapes
+        .iter()
+        .enumerate()
+        .map(|(index, shape)| {
+            let method_var = format!("_FallbackMethod{index}");
+            let old_method = cerl::CExpr::Call(
+                "erlang".to_string(),
+                "element".to_string(),
+                vec![
+                    cerl::CExpr::Lit(cerl::CLit::Int((index + 1) as i64)),
+                    cerl::CExpr::Var(fallback_var.clone()),
+                ],
+            );
+            let method_params: Vec<String> = (0..shape.arity)
+                .map(|arg_index| format!("_Method{index}Arg{arg_index}"))
+                .collect();
+            let mut args: Vec<cerl::CExpr> = method_params
+                .iter()
+                .cloned()
+                .map(cerl::CExpr::Var)
+                .collect();
+            if shape.effectful {
+                let evidence = format!("_Method{index}Evidence");
+                let return_k = format!("_Method{index}K");
+                let mut cps_params = method_params;
+                cps_params.push(evidence.clone());
+                cps_params.push(return_k.clone());
+                args.push(cerl::CExpr::Var(evidence));
+                args.push(cerl::CExpr::Var(return_k));
+                return cerl::CExpr::Fun(
+                    cps_params,
+                    Box::new(cerl::CExpr::Let(
+                        method_var.clone(),
+                        Box::new(old_method),
+                        Box::new(cerl::CExpr::Apply(
+                            Box::new(cerl::CExpr::Var(method_var)),
+                            args,
+                        )),
+                    )),
+                );
+            }
+            args.push(cerl::CExpr::Tuple(vec![]));
+            args.push(identity_continuation("_MethodResult"));
+            cerl::CExpr::Fun(
+                method_params,
+                Box::new(cerl::CExpr::Let(
+                    method_var.clone(),
+                    Box::new(old_method),
+                    Box::new(cerl::CExpr::Apply(
+                        Box::new(cerl::CExpr::Var(method_var)),
+                        args,
+                    )),
+                )),
+            )
+        })
+        .collect();
+    let body = cerl::CExpr::Let(
+        fallback_var,
+        Box::new(fallback_dict),
+        Box::new(cerl::CExpr::Tuple(methods)),
+    );
+    cerl::CFunDef {
+        name: dc.name.clone(),
+        arity: dc.dict_params.len(),
+        body: cerl::CExpr::Fun(params, Box::new(body)),
+    }
+}
+
+fn dict_constructor_method_shapes(
+    dc: &monadic::ir::MDictConstructor,
+) -> Vec<DictMethodAdapterShape> {
+    dc.methods
+        .iter()
+        .enumerate()
+        .map(|(index, method)| {
+            let monadic::ir::MExpr::Pure(monadic::ir::Atom::Lambda { params, .. }) = method else {
+                panic!("dict fallback adapter expected lambda method");
+            };
+            DictMethodAdapterShape {
+                arity: params.len(),
+                effectful: dc
+                    .method_effects
+                    .get(index)
+                    .is_some_and(|effects| !effects.is_empty())
+                    || dc.method_open_rows.get(index).copied().unwrap_or(false),
+            }
+        })
+        .collect()
+}
+
+fn dict_param_adapter_shape(
+    param: &str,
+    effect_info: &monadic::ir::EffectInfo<'_>,
+) -> Option<DictParamAdapterShape> {
+    if param.contains("KnownSymbol") {
+        return None;
+    }
+    let trait_info = trait_info_for_dict_param(param, effect_info)?;
+    Some(DictParamAdapterShape {
+        method_shapes: trait_info
+            .methods
+            .iter()
+            .map(|method| DictMethodAdapterShape {
+                arity: method.effect_sig.user_arity,
+                effectful: !method.effect_sig.effects.is_empty() || method.effect_sig.is_open_row,
+            })
+            .collect(),
+    })
+}
+
+fn trait_info_for_dict_param<'a>(
+    param: &str,
+    effect_info: &'a monadic::ir::EffectInfo<'_>,
+) -> Option<&'a crate::typechecker::TraitInfo> {
+    let tail = param.trim_start_matches('_').strip_prefix("dict_")?;
+    let mut best: Option<(usize, &crate::typechecker::TraitInfo)> = None;
+    for (trait_name, info) in effect_info.traits {
+        let canonical = trait_name.replace('.', "_");
+        let bare = trait_name.rsplit('.').next().unwrap_or(trait_name);
+        for candidate in [canonical.as_str(), bare] {
+            if dict_param_tail_matches_trait(tail, candidate)
+                && best.is_none_or(|(len, _)| candidate.len() > len)
+            {
+                best = Some((candidate.len(), info));
+            }
+        }
+    }
+    best.map(|(_, info)| info)
+}
+
+fn dict_param_tail_matches_trait(tail: &str, trait_name: &str) -> bool {
+    tail == trait_name
+        || tail
+            .strip_prefix(trait_name)
+            .is_some_and(|rest| rest.starts_with('_'))
+}
+
+fn direct_dict_to_uniform_dict_value(
+    direct_dict: cerl::CExpr,
+    method_shapes: &[DictMethodAdapterShape],
+    prefix: &str,
+) -> cerl::CExpr {
+    let direct_dict_var = format!("{prefix}DirectDict");
+    let methods = method_shapes
+        .iter()
+        .enumerate()
+        .map(|(method_index, shape)| {
+            direct_method_to_uniform_method_value(
+                &direct_dict_var,
+                method_index,
+                shape,
+                &format!("{prefix}Method{method_index}"),
+            )
+        })
+        .collect();
+    cerl::CExpr::Let(
+        direct_dict_var,
+        Box::new(direct_dict),
+        Box::new(cerl::CExpr::Tuple(methods)),
     )
-    .lower_module(module_name, &program);
-    cerl::print_module(&cmod)
+}
+
+fn uniform_dict_to_direct_dict_value(
+    uniform_dict: cerl::CExpr,
+    method_shapes: &[DictMethodAdapterShape],
+    prefix: &str,
+) -> cerl::CExpr {
+    let uniform_dict_var = format!("{prefix}UniformDict");
+    let methods = method_shapes
+        .iter()
+        .enumerate()
+        .map(|(method_index, shape)| {
+            uniform_method_to_direct_method_value(
+                &uniform_dict_var,
+                method_index,
+                shape,
+                &format!("{prefix}Method{method_index}"),
+            )
+        })
+        .collect();
+    cerl::CExpr::Let(
+        uniform_dict_var,
+        Box::new(uniform_dict),
+        Box::new(cerl::CExpr::Tuple(methods)),
+    )
+}
+
+fn direct_method_to_uniform_method_value(
+    direct_dict_var: &str,
+    method_index: usize,
+    method_shape: &DictMethodAdapterShape,
+    prefix: &str,
+) -> cerl::CExpr {
+    let user_params: Vec<String> = (0..method_shape.arity)
+        .map(|arg_index| format!("{prefix}Arg{arg_index}"))
+        .collect();
+    let evidence = format!("{prefix}Evidence");
+    let return_k = format!("{prefix}K");
+    let mut params = user_params.clone();
+    params.push(evidence.clone());
+    params.push(return_k.clone());
+
+    let direct_method = cerl::CExpr::Call(
+        "erlang".to_string(),
+        "element".to_string(),
+        vec![
+            cerl::CExpr::Lit(cerl::CLit::Int((method_index + 1) as i64)),
+            cerl::CExpr::Var(direct_dict_var.to_string()),
+        ],
+    );
+    let mut direct_args: Vec<cerl::CExpr> =
+        user_params.iter().cloned().map(cerl::CExpr::Var).collect();
+    if method_shape.effectful {
+        direct_args.push(cerl::CExpr::Var(evidence));
+        direct_args.push(cerl::CExpr::Var(return_k));
+        return cerl::CExpr::Fun(
+            params,
+            Box::new(cerl::CExpr::Apply(Box::new(direct_method), direct_args)),
+        );
+    }
+    let direct_call = cerl::CExpr::Apply(Box::new(direct_method), direct_args);
+    cerl::CExpr::Fun(
+        params,
+        Box::new(cerl::CExpr::Apply(
+            Box::new(cerl::CExpr::Var(return_k)),
+            vec![direct_call],
+        )),
+    )
+}
+
+fn uniform_method_to_direct_method_value(
+    uniform_dict_var: &str,
+    method_index: usize,
+    method_shape: &DictMethodAdapterShape,
+    prefix: &str,
+) -> cerl::CExpr {
+    let user_params: Vec<String> = (0..method_shape.arity)
+        .map(|arg_index| format!("{prefix}Arg{arg_index}"))
+        .collect();
+
+    let uniform_method = cerl::CExpr::Call(
+        "erlang".to_string(),
+        "element".to_string(),
+        vec![
+            cerl::CExpr::Lit(cerl::CLit::Int((method_index + 1) as i64)),
+            cerl::CExpr::Var(uniform_dict_var.to_string()),
+        ],
+    );
+    let mut args: Vec<cerl::CExpr> = user_params.iter().cloned().map(cerl::CExpr::Var).collect();
+    if method_shape.effectful {
+        let evidence = format!("{prefix}Evidence");
+        let return_k = format!("{prefix}K");
+        let mut params = user_params;
+        params.push(evidence.clone());
+        params.push(return_k.clone());
+        args.push(cerl::CExpr::Var(evidence));
+        args.push(cerl::CExpr::Var(return_k));
+        return cerl::CExpr::Fun(
+            params,
+            Box::new(cerl::CExpr::Apply(Box::new(uniform_method), args)),
+        );
+    }
+    args.push(cerl::CExpr::Tuple(vec![]));
+    args.push(identity_continuation(&format!("{prefix}Result")));
+
+    cerl::CExpr::Fun(
+        user_params,
+        Box::new(cerl::CExpr::Apply(Box::new(uniform_method), args)),
+    )
+}
+
+fn identity_continuation(param: &str) -> cerl::CExpr {
+    cerl::CExpr::Fun(
+        vec![param.to_string()],
+        Box::new(cerl::CExpr::Var(param.to_string())),
+    )
 }

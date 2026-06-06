@@ -1,0 +1,16 @@
+# Spike: pass a Saga lambda directly to `lists:map`. The Saga callback
+# is uniform-CPS `fun(X, _Evidence, _ReturnK)`, but `lists:map` expects a
+# native `fun(X) -> Y`. Without a wrapper, calls inside the BIF would
+# apply the callback at native arity → arity mismatch / undef.
+#
+# The new lowerer should route this through the generated @external wrapper,
+# which adapts function-typed params from Saga uniform-CPS arity to native
+# Erlang callback arity.
+
+@external("erlang", "lists", "map")
+fun ext_lists_map : (a -> b) -> List a -> List b
+
+main () = {
+  let r = ext_lists_map (fun x -> x + 1) [1, 2, 3]
+  dbg r
+}

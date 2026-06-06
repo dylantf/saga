@@ -1,0 +1,16 @@
+# Scenario 3: dynamic handler with NO return clause (the `unit` runtime fallback).
+
+effect Tag {
+  fun emit : String -> Unit
+}
+
+main () = {
+  let h = handler for Tag {
+    emit _ = resume ()
+  }
+  let r = {
+    emit! "x"
+    "passthrough"
+  } with h
+  dbg r
+}

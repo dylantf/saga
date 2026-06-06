@@ -1,0 +1,12 @@
+[project]
+name = "imported-effect-row-project"
+
+[bin]
+main = "src/Main.saga"
+
+# [library]
+# module = "ImportedEffectRowProject"
+# expose = []
+
+# [deps]
+# some-lib = { path = "../some-lib" }

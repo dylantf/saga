@@ -1,0 +1,8 @@
+[project]
+name = "json_effect_list_field"
+
+[bin]
+main = "src/Main.saga"
+
+[deps]
+saga_json = { path = "../../../../saga_json" }

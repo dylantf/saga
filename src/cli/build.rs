@@ -1,5 +1,8 @@
 use project_config::ProjectConfig;
-use saga::{ast, codegen, derive, desugar, elaborate, lexer, parser, project_config, typechecker};
+use saga::{
+    ast, codegen, compiler_options::CompileOptions, derive, desugar, elaborate, lexer, parser,
+    project_config, typechecker,
+};
 
 use std::collections::HashMap;
 use std::fs;
@@ -10,6 +13,12 @@ use super::color;
 use super::diagnostics::{byte_offset_to_line_col, print_tc_diagnostic};
 
 const BUILD_HASH: &str = env!("SAGA_BUILD_HASH");
+
+struct EmitModuleOptions<'a> {
+    source_file: Option<&'a codegen::SourceFile>,
+    entry_export: Option<&'a str>,
+    compile_options: &'a CompileOptions,
+}
 /// Compute a hash of the embedded stdlib sources and bridge files.
 fn stdlib_content_hash() -> String {
     use std::hash::{Hash, Hasher};
@@ -28,11 +37,18 @@ fn stdlib_content_hash() -> String {
 /// Compute the stdlib artifact fingerprint for this compiler build.
 /// This intentionally includes the compiler build hash so stdlib beams are
 /// never reused across different compiler binaries.
+#[allow(dead_code)]
 fn stdlib_fingerprint() -> String {
+    stdlib_fingerprint_for_options(&CompileOptions::default())
+}
+
+fn stdlib_fingerprint_for_options(options: &CompileOptions) -> String {
     use std::hash::{Hash, Hasher};
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     BUILD_HASH.hash(&mut hasher);
     stdlib_content_hash().hash(&mut hasher);
+    "selective".hash(&mut hasher);
+    options.selective_no_fallback.hash(&mut hasher);
     format!("{:016x}", hasher.finish())
 }
 
@@ -105,13 +121,22 @@ fn file_mtime(path: &Path) -> u64 {
 
 /// Check if a cached build is still valid for the given script file.
 /// Returns a `ScriptBuild` if the cache is fresh.
+#[allow(dead_code)]
 pub fn check_script_cache(file: &str, profile: &str) -> Option<ScriptBuild> {
+    check_script_cache_with_options(file, profile, &CompileOptions::default())
+}
+
+pub fn check_script_cache_with_options(
+    file: &str,
+    profile: &str,
+    options: &CompileOptions,
+) -> Option<ScriptBuild> {
     let build_root = Path::new(file)
         .parent()
         .unwrap_or(Path::new("."))
         .join("_build");
     let build_dir = build_root.join(profile);
-    let stdlib_fingerprint = stdlib_fingerprint();
+    let stdlib_fingerprint = stdlib_fingerprint_for_options(options);
     let stdlib_dir = stdlib_cache_dir(&build_root, &stdlib_fingerprint);
 
     let manifest = BuildManifest::read(&build_dir)?;
@@ -151,10 +176,19 @@ pub fn check_script_cache(file: &str, profile: &str) -> Option<ScriptBuild> {
 
 /// Check if a cached build is still valid for a project.
 /// Returns `Some((build_dir, stdlib_dir))` if the cache is fresh.
+#[allow(dead_code)]
 pub fn check_project_cache(project_root: &Path, profile: &str) -> Option<(PathBuf, PathBuf)> {
+    check_project_cache_with_options(project_root, profile, &CompileOptions::default())
+}
+
+pub fn check_project_cache_with_options(
+    project_root: &Path,
+    profile: &str,
+    options: &CompileOptions,
+) -> Option<(PathBuf, PathBuf)> {
     let build_dir = project_root.join("_build").join(profile);
     let build_root = project_root.join("_build");
-    let stdlib_fingerprint = stdlib_fingerprint();
+    let stdlib_fingerprint = stdlib_fingerprint_for_options(options);
     let stdlib_dir = stdlib_cache_dir(&build_root, &stdlib_fingerprint);
 
     let manifest = BuildManifest::read(&build_dir)?;
@@ -289,6 +323,7 @@ pub fn make_checker(project_root: Option<PathBuf>) -> typechecker::Checker {
 }
 
 /// Lower an elaborated module to Core Erlang and write it to the build directory.
+#[allow(dead_code)]
 pub fn emit_module(
     module_name: &str,
     elaborated: &ast::Program,
@@ -298,17 +333,40 @@ pub fn emit_module(
     source_file: Option<&codegen::SourceFile>,
     entry_export: Option<&str>,
 ) {
+    emit_module_with_options(
+        module_name,
+        elaborated,
+        ctx,
+        check_result,
+        build_dir,
+        EmitModuleOptions {
+            source_file,
+            entry_export,
+            compile_options: &CompileOptions::default(),
+        },
+    );
+}
+
+fn emit_module_with_options(
+    module_name: &str,
+    elaborated: &ast::Program,
+    ctx: &codegen::CodegenContext,
+    check_result: &typechecker::CheckResult,
+    build_dir: &Path,
+    options: EmitModuleOptions<'_>,
+) {
     let erlang_name = module_name.to_lowercase().replace('.', "_");
-    let core_src = codegen::emit_module_with_context(
+    let output = codegen::emit_module_with_context_options(
         &erlang_name,
         elaborated,
         ctx,
         check_result,
-        source_file,
-        entry_export,
+        options.source_file,
+        options.entry_export,
+        options.compile_options,
     );
     let core_path = build_dir.join(format!("{}.core", erlang_name));
-    fs::write(&core_path, &core_src).unwrap_or_else(|e| {
+    fs::write(&core_path, &output.core_src).unwrap_or_else(|e| {
         eprintln!("Error writing {}: {}", core_path.display(), e);
         std::process::exit(1);
     });
@@ -462,13 +520,14 @@ fn write_build_manifest(
     entry_module: String,
     source_file: String,
     source_mtime: u64,
+    options: &CompileOptions,
 ) {
     BuildManifest {
         entry_module,
         source_file,
         source_mtime,
         compiler_version: BUILD_HASH.to_string(),
-        stdlib_fingerprint: stdlib_fingerprint(),
+        stdlib_fingerprint: stdlib_fingerprint_for_options(options),
     }
     .write(build_dir);
 }
@@ -476,8 +535,13 @@ fn write_build_manifest(
 /// Ensure precompiled stdlib beams exist in the project's _build/.stdlib/ directory.
 /// Returns the stdlib directory path. On a cold cache, creates a fresh checker,
 /// imports ALL builtin modules, elaborates, and compiles them.
+#[allow(dead_code)]
 pub fn ensure_stdlib_cache(build_root: &Path) -> PathBuf {
-    let fingerprint = stdlib_fingerprint();
+    ensure_stdlib_cache_with_options(build_root, &CompileOptions::default())
+}
+
+pub fn ensure_stdlib_cache_with_options(build_root: &Path, options: &CompileOptions) -> PathBuf {
+    let fingerprint = stdlib_fingerprint_for_options(options);
     let cache_root = stdlib_cache_root(build_root);
     let cache_dir = stdlib_cache_dir(build_root, &fingerprint);
 
@@ -519,14 +583,17 @@ pub fn ensure_stdlib_cache(build_root: &Path) -> PathBuf {
             .module_check_results()
             .get(module_name)
             .expect("compiled std module missing module check result");
-        emit_module(
+        emit_module_with_options(
             module_name,
             &compiled.elaborated,
             &ctx,
             check_result,
             &temp_dir,
-            None,
-            None,
+            EmitModuleOptions {
+                source_file: None,
+                entry_export: None,
+                compile_options: options,
+            },
         );
     }
 
@@ -609,6 +676,10 @@ fn copy_bridges_from_dir(dir: &Path, build_dir: &Path, count: &mut usize) -> Res
         let entry = entry.map_err(|e| format!("read_dir error: {}", e))?;
         let path = entry.path();
         if path.is_dir() {
+            let name = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
+            if matches!(name, "_build" | "target") || name.starts_with('.') {
+                continue;
+            }
             copy_bridges_from_dir(&path, build_dir, count)?;
         } else if path.extension().is_some_and(|ext| ext == "erl") {
             let filename = path.file_name().unwrap();
@@ -780,15 +851,37 @@ pub struct ProjectBuild {
 }
 
 /// Build a project (with project.toml) into the given build directory.
+#[allow(dead_code)]
 pub fn build_project(profile: &str) -> ProjectBuild {
     build_project_ext(profile, &[], None)
 }
 
+pub fn build_project_with_options(profile: &str, options: &CompileOptions) -> ProjectBuild {
+    build_project_ext_with_options(profile, &[], None, options)
+}
+
 /// Build a project with optional extra source directories and a custom main.
+#[allow(dead_code)]
 pub fn build_project_ext(
     profile: &str,
     extra_source_dirs: &[PathBuf],
     custom_main: Option<(&str, &str)>,
+) -> ProjectBuild {
+    build_project_ext_with_options(
+        profile,
+        extra_source_dirs,
+        custom_main,
+        &CompileOptions::default(),
+    )
+}
+
+/// Build a project with optional extra source directories, a custom main, and
+/// compiler diagnostics/options.
+pub fn build_project_ext_with_options(
+    profile: &str,
+    extra_source_dirs: &[PathBuf],
+    custom_main: Option<(&str, &str)>,
+    options: &CompileOptions,
 ) -> ProjectBuild {
     let build_start = Instant::now();
     let project_root = super::find_project_root().unwrap_or_else(|| {
@@ -852,7 +945,7 @@ pub fn build_project_ext(
 
     // If a custom main is provided, use that. Otherwise typecheck the project's
     // main module for bin projects, or exposed modules for library projects.
-    let main_program = if let Some(source_file) = &main_source {
+    let mut main_program = if let Some(source_file) = &main_source {
         let (program, _) =
             parse_and_typecheck(&source_file.source, &source_file.path, &mut checker);
         Some(program)
@@ -872,7 +965,7 @@ pub fn build_project_ext(
         None
     };
 
-    let result = checker.to_result();
+    let mut result = checker.to_result();
 
     let build_dir = project_root.join("_build").join(profile);
     let _ = fs::remove_dir_all(&build_dir);
@@ -886,7 +979,7 @@ pub fn build_project_ext(
 
     // Ensure stdlib beams are cached in _build/
     let build_root = project_root.join("_build");
-    let stdlib_dir = ensure_stdlib_cache(&build_root);
+    let stdlib_dir = ensure_stdlib_cache_with_options(&build_root, options);
 
     // Elaborate user modules
     let codegen_info_map = result.codegen_info();
@@ -955,7 +1048,7 @@ pub fn build_project_ext(
             }
         }
         let mut mod_checker = checker.seeded_module_checker(Some(project_root.clone()), false);
-        let mod_result = mod_checker.check_program(&mut program);
+        let mut mod_result = mod_checker.check_program(&mut program);
         for w in mod_result.warnings() {
             eprintln!("Warning in module {}: {}", module_name, w);
         }
@@ -967,10 +1060,9 @@ pub fn build_project_ext(
         }
 
         let elaborated = elaborate::elaborate_module(&program, &mod_result, module_name);
-        let normalized = codegen::normalize::normalize_effects(&elaborated);
         let resolution = codegen::resolve::resolve_names(
             module_name,
-            &normalized,
+            &elaborated,
             codegen_info_map,
             &result.prelude_imports,
             &mod_result.resolution,
@@ -982,12 +1074,14 @@ pub fn build_project_ext(
                     .get(module_name)
                     .cloned()
                     .unwrap_or_default(),
-                elaborated: normalized,
+                elaborated,
                 resolution,
                 front_resolution: mod_result.resolution.clone(),
-                call_effects: codegen::call_effects::CallEffectMap::new(),
             },
         );
+        ast::drop_program_iterative(program);
+        mod_result.clear_cached_programs_iterative();
+        mod_checker.clear_cached_programs_iterative();
     }
 
     // Elaborate Main (if this is a bin project)
@@ -1001,7 +1095,6 @@ pub fn build_project_ext(
                 elaborated: main_elaborated,
                 resolution: codegen::resolve::ResolutionMap::new(),
                 front_resolution: result.resolution.clone(),
-                call_effects: codegen::call_effects::CallEffectMap::new(),
             },
         );
         let source_file = main_source
@@ -1019,7 +1112,7 @@ pub fn build_project_ext(
     // Phase 3: Lower and emit user modules only (stdlib beams are cached globally)
     // user_modules + Main are the modules we need to emit; std modules are in the
     // CodegenContext for cross-module resolution but their beams come from the cache.
-    let ctx = codegen::CodegenContext {
+    let mut ctx = codegen::CodegenContext {
         modules: compiled_modules.clone(),
         let_effect_bindings: HashMap::new(),
         prelude_imports: result.prelude_imports.clone(),
@@ -1047,17 +1140,20 @@ pub fn build_project_ext(
                 } else {
                     None
                 });
-        emit_module(
+        emit_module_with_options(
             &erlang_name,
             &compiled.elaborated,
             &ctx,
             check_result.unwrap_or(&result),
             &build_dir,
-            sf,
-            if *module_name == "Main" {
-                Some("main")
-            } else {
-                None
+            EmitModuleOptions {
+                source_file: sf,
+                entry_export: if *module_name == "Main" {
+                    Some("main")
+                } else {
+                    None
+                },
+                compile_options: options,
             },
         );
     }
@@ -1087,10 +1183,21 @@ pub fn build_project_ext(
             "main".to_string(),
             "project.toml".to_string(),
             max_project_mtime(&project_root),
+            options,
         );
     }
 
     let extra_ebin_dirs = project_config::extra_ebin_dirs(&project_root, config.deps.as_ref());
+
+    ctx.clear_elaborated_programs_iterative();
+    for compiled in compiled_modules.values_mut() {
+        compiled.clear_elaborated_program_iterative();
+    }
+    if let Some(program) = main_program.take() {
+        ast::drop_program_iterative(program);
+    }
+    result.clear_cached_programs_iterative();
+    checker.clear_cached_programs_iterative();
 
     ProjectBuild {
         build_dir,
@@ -1109,7 +1216,16 @@ pub fn declared_module_name(program: &ast::Program) -> Option<String> {
 
 /// Build a single script file into the given build directory.
 /// Returns (build_dir, stdlib_cache_dir, erlang_name).
+#[allow(dead_code)]
 pub fn build_script(file: &str, profile: &str) -> ScriptBuild {
+    build_script_with_options(file, profile, &CompileOptions::default())
+}
+
+pub fn build_script_with_options(
+    file: &str,
+    profile: &str,
+    options: &CompileOptions,
+) -> ScriptBuild {
     let build_start = Instant::now();
     let source = fs::read_to_string(file).unwrap_or_else(|e| {
         eprintln!("Error reading {}: {}", file, e);
@@ -1152,7 +1268,7 @@ pub fn build_script(file: &str, profile: &str) -> ScriptBuild {
     let mut compiled_modules = compile_std_modules(&result);
 
     // Ensure stdlib beams are cached in _build/
-    let stdlib_dir = ensure_stdlib_cache(&build_root);
+    let stdlib_dir = ensure_stdlib_cache_with_options(&build_root, options);
 
     let elaborated = elaborate::elaborate(&program, &result);
     compiled_modules.insert(
@@ -1162,7 +1278,6 @@ pub fn build_script(file: &str, profile: &str) -> ScriptBuild {
             elaborated,
             resolution: codegen::resolve::ResolutionMap::new(),
             front_resolution: result.resolution.clone(),
-            call_effects: codegen::call_effects::CallEffectMap::new(),
         },
     );
 
@@ -1176,14 +1291,17 @@ pub fn build_script(file: &str, profile: &str) -> ScriptBuild {
         path: file.to_string(),
         source: source.clone(),
     };
-    emit_module(
+    emit_module_with_options(
         &module_name,
         &compiled_modules[&module_name].elaborated,
         &ctx,
         &result,
         &build_dir,
-        Some(&script_source),
-        Some("main"),
+        EmitModuleOptions {
+            source_file: Some(&script_source),
+            entry_export: Some("main"),
+            compile_options: options,
+        },
     );
 
     run_erlc(&build_dir, build_start);
@@ -1194,6 +1312,7 @@ pub fn build_script(file: &str, profile: &str) -> ScriptBuild {
         erlang_name.clone(),
         relative_source_path(file),
         file_mtime(Path::new(file)),
+        options,
     );
 
     ScriptBuild {

@@ -1,0 +1,21 @@
+effect Choose {
+  fun choose : Unit -> Bool
+}
+
+handler all_choices for Choose {
+  choose () = {
+    let a = resume True
+    let b = resume False
+    List.append a b
+  }
+  return v = [v]
+}
+
+main () = {
+  let results = {
+    let x = if choose! () then 1 else 2
+    let y = if choose! () then 10 else 20
+    x + y
+  } with all_choices
+  if results == [11, 21, 12, 22] then dbg "ok" else dbg "bad"
+}

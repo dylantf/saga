@@ -1,0 +1,9 @@
+[project]
+name = "eta_reduced_fun_binding"
+
+[bin]
+main = "src/Main.saga"
+
+[library]
+module = "Lib"
+expose = ["Lib"]

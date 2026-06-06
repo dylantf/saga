@@ -1,0 +1,28 @@
+# Let-bound handler factory plus generic dictionary dispatch. This mirrors the
+# saga_json shape more closely: the handler becomes known through a let-binding,
+# but the effectful work is still behind a trait dictionary.
+
+effect Options {
+  fun get_options : Unit -> Int
+}
+
+make_options n = handler for Options {
+  get_options () = resume n
+}
+
+trait Encodable a {
+  fun encode : a -> Int needs {Options}
+}
+
+impl Encodable for Int needs {Options} {
+  encode x = x + get_options! ()
+}
+
+fun serialize : (x: a) -> Int needs {Options} where {a: Encodable}
+serialize x = encode x
+
+main () = {
+  let options = make_options 10
+  let result = serialize 5 with options
+  dbg (show result)
+}

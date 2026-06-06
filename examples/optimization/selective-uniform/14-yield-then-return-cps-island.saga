@@ -1,0 +1,12 @@
+effect Log {
+  fun log : String -> Unit
+}
+
+pub fun log_then_answer : Unit -> Int needs {Log}
+log_then_answer () = {
+  let _ignored = log! "hello"
+  42
+}
+
+fun main : Unit -> Unit
+main () = ()

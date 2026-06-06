@@ -1,0 +1,5 @@
+[project]
+name = "recursive_same_site_rethrow"
+
+[bin]
+main = "src/Main.saga"

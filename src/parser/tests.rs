@@ -3064,6 +3064,13 @@ fn external_fun_with_where_clause() {
 }
 
 #[test]
+fn inline_annotation_is_rejected() {
+    let tokens = Lexer::new("@inline val answer = 42").lex().unwrap();
+    let err = Parser::new(tokens).parse_program().unwrap_err();
+    assert!(err.message.contains("unknown annotation @inline"));
+}
+
+#[test]
 fn type_def_deriving_show() {
     let decls = parse("type Color = Red | Green | Blue deriving (Show)");
     assert_eq!(decls.len(), 1);

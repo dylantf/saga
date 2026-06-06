@@ -5,6 +5,238 @@ use crate::token::{Span, StringKind};
 
 pub type Program = Vec<Decl>;
 
+/// Drop a program's expression trees without recursing through nested `Box<Expr>`
+/// chains. Large derived programs can contain very deep elaborated expressions,
+/// and letting Rust recursively drop them may overflow the process stack after
+/// compilation has already succeeded.
+pub fn drop_program_iterative(program: Program) {
+    let mut stack = Vec::new();
+    for decl in program {
+        push_decl_exprs(decl, &mut stack);
+    }
+    drop_expr_stack(stack);
+}
+
+fn drop_expr_stack(mut stack: Vec<Expr>) {
+    while let Some(expr) = stack.pop() {
+        push_expr_children(expr, &mut stack);
+    }
+}
+
+fn push_decl_exprs(decl: Decl, stack: &mut Vec<Expr>) {
+    match decl {
+        Decl::FunBinding { guard, body, .. } => {
+            if let Some(guard) = guard {
+                stack.push(*guard);
+            }
+            stack.push(body);
+        }
+        Decl::Let { value, .. } | Decl::Val { value, .. } => stack.push(value),
+        Decl::HandlerDef {
+            body,
+            recovered_arms,
+            ..
+        } => {
+            push_handler_body_exprs(body, stack);
+            for arm in recovered_arms {
+                push_handler_arm_exprs(arm.node, stack);
+            }
+        }
+        Decl::ImplDef { methods, .. } => {
+            for method in methods {
+                stack.push(method.node.body);
+            }
+        }
+        Decl::DictConstructor { methods, .. } => stack.extend(methods),
+        Decl::TraitDef { methods, .. } => {
+            for method in methods {
+                if let Some(default_body) = method.node.default_body {
+                    stack.push(default_body.body);
+                }
+            }
+        }
+        Decl::FunSignature { .. }
+        | Decl::TypeDef { .. }
+        | Decl::RecordDef { .. }
+        | Decl::EffectDef { .. }
+        | Decl::Import { .. }
+        | Decl::ModuleDecl { .. }
+        | Decl::TypeAlias { .. } => {}
+    }
+}
+
+fn push_stmt_exprs(stmt: Stmt, stack: &mut Vec<Expr>) {
+    match stmt {
+        Stmt::Let { value, .. } | Stmt::Expr(value) => stack.push(value),
+        Stmt::LetFun { guard, body, .. } => {
+            if let Some(guard) = guard {
+                stack.push(*guard);
+            }
+            stack.push(body);
+        }
+    }
+}
+
+fn push_case_arm_exprs(arm: CaseArm, stack: &mut Vec<Expr>) {
+    if let Some(guard) = arm.guard {
+        stack.push(guard);
+    }
+    stack.push(arm.body);
+}
+
+fn push_handler_arm_exprs(arm: HandlerArm, stack: &mut Vec<Expr>) {
+    stack.push(*arm.body);
+    if let Some(finally_block) = arm.finally_block {
+        stack.push(*finally_block);
+    }
+}
+
+fn push_handler_body_exprs(body: HandlerBody, stack: &mut Vec<Expr>) {
+    for arm in body.arms {
+        push_handler_arm_exprs(arm.node, stack);
+    }
+    if let Some(return_clause) = body.return_clause {
+        push_handler_arm_exprs(*return_clause, stack);
+    }
+}
+
+fn push_handler_exprs(handler: Handler, stack: &mut Vec<Expr>) {
+    match handler {
+        Handler::Named(_) => {}
+        Handler::Inline { items, .. } => {
+            for item in items {
+                match item.node {
+                    HandlerItem::Named(_) => {}
+                    HandlerItem::Arm(arm) | HandlerItem::Return(arm) => {
+                        push_handler_arm_exprs(arm, stack);
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn push_expr_children(expr: Expr, stack: &mut Vec<Expr>) {
+    match expr.kind {
+        ExprKind::Lit { .. }
+        | ExprKind::Var { .. }
+        | ExprKind::Constructor { .. }
+        | ExprKind::QualifiedName { .. }
+        | ExprKind::DictRef { .. }
+        | ExprKind::SymbolIntrinsic { .. } => {}
+        ExprKind::App { func, arg } => {
+            stack.push(*func);
+            stack.push(*arg);
+        }
+        ExprKind::BinOp { left, right, .. } => {
+            stack.push(*left);
+            stack.push(*right);
+        }
+        ExprKind::UnaryMinus { expr } | ExprKind::FieldAccess { expr, .. } => stack.push(*expr),
+        ExprKind::If {
+            cond,
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            stack.push(*cond);
+            stack.push(*then_branch);
+            stack.push(*else_branch);
+        }
+        ExprKind::Case {
+            scrutinee, arms, ..
+        } => {
+            stack.push(*scrutinee);
+            for arm in arms {
+                push_case_arm_exprs(arm.node, stack);
+            }
+        }
+        ExprKind::Block { stmts, .. } => {
+            for stmt in stmts {
+                push_stmt_exprs(stmt.node, stack);
+            }
+        }
+        ExprKind::Lambda { body, .. } => stack.push(*body),
+        ExprKind::RecordCreate { fields, .. } | ExprKind::AnonRecordCreate { fields } => {
+            stack.extend(fields.into_iter().map(|(_, _, expr)| expr));
+        }
+        ExprKind::RecordUpdate { record, fields, .. } => {
+            stack.push(*record);
+            stack.extend(fields.into_iter().map(|(_, _, expr)| expr));
+        }
+        ExprKind::EffectCall { args, .. } | ExprKind::ForeignCall { args, .. } => {
+            stack.extend(args);
+        }
+        ExprKind::With { expr, handler } => {
+            stack.push(*expr);
+            push_handler_exprs(*handler, stack);
+        }
+        ExprKind::Resume { value } => stack.push(*value),
+        ExprKind::Tuple { elements } | ExprKind::ListLit { elements } => stack.extend(elements),
+        ExprKind::Do {
+            bindings,
+            success,
+            else_arms,
+            ..
+        } => {
+            stack.extend(bindings.into_iter().map(|(_, expr)| expr));
+            stack.push(*success);
+            for arm in else_arms {
+                push_case_arm_exprs(arm.node, stack);
+            }
+        }
+        ExprKind::Receive {
+            arms, after_clause, ..
+        } => {
+            for arm in arms {
+                push_case_arm_exprs(arm.node, stack);
+            }
+            if let Some((timeout, body)) = after_clause {
+                stack.push(*timeout);
+                stack.push(*body);
+            }
+        }
+        ExprKind::BitString { segments } => {
+            for segment in segments {
+                stack.push(segment.value);
+                if let Some(size) = segment.size {
+                    stack.push(*size);
+                }
+            }
+        }
+        ExprKind::Ascription { expr, .. } | ExprKind::DictMethodAccess { dict: expr, .. } => {
+            stack.push(*expr);
+        }
+        ExprKind::HandlerExpr { body } => push_handler_body_exprs(body, stack),
+        ExprKind::Pipe { segments, .. } | ExprKind::BinOpChain { segments, .. } => {
+            stack.extend(segments.into_iter().map(|segment| segment.node));
+        }
+        ExprKind::PipeBack { segments } | ExprKind::ComposeForward { segments } => {
+            stack.extend(segments.into_iter().map(|segment| segment.node));
+        }
+        ExprKind::Cons { head, tail } => {
+            stack.push(*head);
+            stack.push(*tail);
+        }
+        ExprKind::StringInterp { parts, .. } => {
+            stack.extend(parts.into_iter().filter_map(|part| match part {
+                StringPart::Lit(_) => None,
+                StringPart::Expr(expr) => Some(expr),
+            }));
+        }
+        ExprKind::ListComprehension { body, qualifiers } => {
+            stack.push(*body);
+            for qualifier in qualifiers {
+                match qualifier {
+                    ComprehensionQualifier::Generator(_, expr)
+                    | ComprehensionQualifier::Guard(expr)
+                    | ComprehensionQualifier::Let(_, expr) => stack.push(expr),
+                }
+            }
+        }
+    }
+}
+
 /// Kind of a type-level entity. `Star` is the kind of ordinary types; `Symbol`
 /// is the kind of type-level symbol literals like `'Foo`. Only `Symbol` is
 /// user-writable today; `Star` is the implicit default.
@@ -198,11 +430,23 @@ pub fn set_decl_doc(decl: &mut Decl, doc: Vec<String>) {
 }
 
 /// Compute the canonical tag for an anonymous record given its field names.
-/// The fields are sorted to produce a stable key regardless of declaration order.
+/// The fields are sorted to produce a stable key regardless of declaration
+/// order. Each name is length-prefixed (`_<len>_<name>`) so the encoding is
+/// injective over field-name sets: a plain `_`-join is ambiguous (`{a_b, c}`
+/// and `{a, b_c}` would collide), which corrupts runtime record identity and
+/// pattern matching. The tag is used only as an opaque key/runtime atom; field
+/// order for lowering comes from structural metadata, not by decoding this.
 pub fn anon_record_tag(field_names: &[&str]) -> String {
     let mut sorted: Vec<&str> = field_names.to_vec();
     sorted.sort();
-    format!("__anon_{}", sorted.join("_"))
+    let mut tag = String::from("__anon");
+    for name in &sorted {
+        tag.push('_');
+        tag.push_str(&name.len().to_string());
+        tag.push('_');
+        tag.push_str(name);
+    }
+    tag
 }
 
 static NEXT_NODE_ID: AtomicU32 = AtomicU32::new(1);
@@ -593,8 +837,14 @@ pub enum ExprKind {
     FieldAccess {
         expr: Box<Expr>,
         field: String,
-        /// Resolved record type name (filled in by elaboration).
+        /// Resolved record type name (filled in by elaboration). For anonymous
+        /// records this is the (opaque) `anon_record_tag`.
         record_name: Option<String>,
+        /// Canonical sorted field order when the record is anonymous (filled in
+        /// by elaboration from `Type::Record`). Lets lowering read field
+        /// positions structurally instead of decoding the runtime tag. `None`
+        /// for named records.
+        anon_fields: Option<Vec<String>>,
     },
 
     /// `User { name: "Dylan", age: 30 }`
@@ -610,8 +860,12 @@ pub enum ExprKind {
     RecordUpdate {
         record: Box<Expr>,
         fields: Vec<(String, Span, Expr)>,
-        /// Resolved record type name (filled in by elaboration).
+        /// Resolved record type name (filled in by elaboration). For anonymous
+        /// records this is the (opaque) `anon_record_tag`.
         record_name: Option<String>,
+        /// Canonical sorted field order when the record is anonymous (filled in
+        /// by elaboration from `Type::Record`). `None` for named records.
+        anon_fields: Option<Vec<String>>,
     },
 
     /// `log! "hello"`, `Cache.get! key`
@@ -1452,4 +1706,17 @@ pub struct TraitDefaultBody {
     pub params: Vec<Pat>,
     pub body: Expr,
     pub name_span: Span,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::anon_record_tag;
+
+    #[test]
+    fn anonymous_record_tags_are_injective_for_underscore_fields() {
+        assert_ne!(
+            anon_record_tag(&["a_b", "c"]),
+            anon_record_tag(&["a", "b_c"])
+        );
+    }
 }

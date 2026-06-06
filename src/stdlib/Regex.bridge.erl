@@ -9,8 +9,8 @@ match(Pattern, S) ->
 
 find(Pattern, S) ->
     case re:run(S, Pattern, [{capture, first, list}]) of
-        {match, [V]} -> {just, V};
-        _ -> {nothing}
+        {match, [V]} -> {std_maybe_Just, V};
+        _ -> {std_maybe_Nothing}
     end.
 
 find_all(Pattern, S) ->

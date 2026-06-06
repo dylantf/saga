@@ -1,0 +1,25 @@
+# Scenario 4: multi-effect handler value passed as a parameter.
+
+effect Tag {
+  fun emit : String -> Unit
+}
+
+effect Mark {
+  fun touch : Unit -> Unit
+}
+
+fun run_with : (h: Handler Tag Mark) -> String
+run_with h = {
+  emit! "tagged"
+  touch! ()
+  "body-result"
+} with h
+
+main () = {
+  let h = handler for Tag, Mark {
+    emit _ = resume ()
+    touch _ = resume ()
+    return _ = "two-effect"
+  }
+  dbg (run_with h)
+}

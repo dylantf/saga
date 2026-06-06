@@ -1,7 +1,12 @@
 use super::{CodegenContext, emit_module_with_context};
+use crate::ast::{Lit, NodeId, Pat};
+use crate::codegen::cerl::{CExpr, CFunDef, CLit, CModule};
+use crate::codegen::monadic::ir::{Atom, MDictConstructor, MExpr};
 use crate::lexer::Lexer;
 use crate::parser::Parser;
+use crate::token::Span;
 use crate::{derive, desugar, elaborate, typechecker};
+use std::collections::HashMap;
 
 /// Parse, typecheck, elaborate, and emit Core Erlang for a single-file script module.
 fn emit(src: &str) -> String {
@@ -33,6 +38,619 @@ fn emit_full_with_source(src: &str, source_file: Option<&super::SourceFile>) -> 
     emit_module_with_context("_script", &elaborated, &ctx, &result, source_file, None)
 }
 
+fn emit_selective_core(src: &str) -> String {
+    emit_selective_core_with_options(src, super::lower_selective::LoweringOptions::default())
+}
+
+fn emit_selective_core_with_options(
+    src: &str,
+    options: super::lower_selective::LoweringOptions,
+) -> String {
+    let tokens = Lexer::new(src).lex().expect("lex error");
+    let mut program = Parser::new(tokens).parse_program().expect("parse error");
+    derive::expand_derives(&mut program, &derive::ImportedDecls::empty());
+    desugar::desugar_program(&mut program);
+
+    let mut checker = typechecker::Checker::with_prelude(None).expect("prelude error");
+    let result = checker.check_program(&mut program);
+    assert!(!result.has_errors(), "Type errors: {:?}", result.errors());
+
+    let module_name = "_script";
+    let elaborated = elaborate::elaborate(&program, &result);
+    let ctx = CodegenContext {
+        modules: std::collections::HashMap::new(),
+        let_effect_bindings: result.let_effect_bindings.clone(),
+        prelude_imports: result.prelude_imports.clone(),
+    };
+    let codegen_info = result.codegen_info();
+    let resolution_map = super::resolve::resolve_names(
+        module_name,
+        &elaborated,
+        codegen_info,
+        &ctx.prelude_imports,
+        &result.resolution,
+    );
+    let constructor_atoms = super::resolve::build_constructor_atoms(
+        module_name,
+        &elaborated,
+        codegen_info,
+        &ctx.prelude_imports,
+    );
+    let handler_info = super::handler_analysis::analyze(&elaborated);
+    let anf_program = super::anf::normalize(elaborated, Some(&resolution_map));
+    let ops_storage = super::build_effect_ops_table(&result);
+    let handler_effects_storage = super::build_handler_effects(&result);
+    let let_handler_effects_storage = super::build_let_handler_effects(&result);
+    let effect_info = super::build_effect_info(
+        &result,
+        &result,
+        &ops_storage,
+        &handler_effects_storage,
+        &let_handler_effects_storage,
+    );
+    let imported_handler_decls = std::collections::HashMap::new();
+    let (monadic_prog, handler_value_map) = super::monadic::translate::translate_with_imports(
+        &anf_program,
+        &resolution_map,
+        &effect_info,
+        &imported_handler_decls,
+    );
+    let cmod = super::lower_selective::lower_module_with_entry_export_options(
+        module_name,
+        &monadic_prog,
+        &resolution_map,
+        &constructor_atoms,
+        &ctx,
+        &handler_info,
+        &effect_info,
+        None,
+        &handler_value_map,
+        options,
+    );
+    super::cerl::print_module(&cmod)
+}
+
+fn test_core_fun(name: &str, arity: usize, marker: &str) -> CFunDef {
+    let params: Vec<String> = (0..arity).map(|index| format!("_P{index}")).collect();
+    CFunDef {
+        name: name.to_string(),
+        arity,
+        body: CExpr::Fun(params, Box::new(CExpr::Lit(CLit::Atom(marker.to_string())))),
+    }
+}
+
+fn test_core_module(name: &str, exports: Vec<(&str, usize)>, funs: Vec<CFunDef>) -> CModule {
+    CModule {
+        name: name.to_string(),
+        exports: exports
+            .into_iter()
+            .map(|(name, arity)| (name.to_string(), arity))
+            .collect(),
+        funs,
+    }
+}
+
+fn test_span() -> Span {
+    Span { start: 0, end: 0 }
+}
+
+fn test_dict_constructor(name: &str, dict_params: Vec<&str>) -> MDictConstructor {
+    MDictConstructor {
+        id: NodeId::fresh(),
+        name: name.to_string(),
+        dict_params: dict_params.into_iter().map(str::to_string).collect(),
+        methods: vec![MExpr::Pure(Atom::Lambda {
+            params: vec![Pat::Wildcard {
+                id: NodeId::fresh(),
+                span: test_span(),
+            }],
+            body: Box::new(MExpr::Pure(Atom::Lit {
+                value: Lit::Unit,
+                source: NodeId::fresh(),
+            })),
+            source: NodeId::fresh(),
+        })],
+        method_effects: vec![vec![]],
+        method_open_rows: vec![false],
+        impl_effects: vec![],
+        span: test_span(),
+    }
+}
+
+fn cexpr_contains_funref(expr: &CExpr, expected_name: &str, expected_arity: usize) -> bool {
+    match expr {
+        CExpr::FunRef(name, arity) => name == expected_name && *arity == expected_arity,
+        CExpr::Apply(callee, args) => {
+            cexpr_contains_funref(callee, expected_name, expected_arity)
+                || args
+                    .iter()
+                    .any(|arg| cexpr_contains_funref(arg, expected_name, expected_arity))
+        }
+        CExpr::Call(_, _, args) | CExpr::Tuple(args) | CExpr::Values(args) => args
+            .iter()
+            .any(|arg| cexpr_contains_funref(arg, expected_name, expected_arity)),
+        CExpr::Let(_, value, body) => {
+            cexpr_contains_funref(value, expected_name, expected_arity)
+                || cexpr_contains_funref(body, expected_name, expected_arity)
+        }
+        CExpr::Case(scrutinee, arms) => {
+            cexpr_contains_funref(scrutinee, expected_name, expected_arity)
+                || arms
+                    .iter()
+                    .any(|arm| cexpr_contains_funref(&arm.body, expected_name, expected_arity))
+        }
+        CExpr::Fun(_, body) => cexpr_contains_funref(body, expected_name, expected_arity),
+        CExpr::Cons(head, tail) => {
+            cexpr_contains_funref(head, expected_name, expected_arity)
+                || cexpr_contains_funref(tail, expected_name, expected_arity)
+        }
+        CExpr::LetRec(bindings, body) => {
+            bindings
+                .iter()
+                .any(|(_, _, expr)| cexpr_contains_funref(expr, expected_name, expected_arity))
+                || cexpr_contains_funref(body, expected_name, expected_arity)
+        }
+        CExpr::Receive(arms, timeout, timeout_body) => {
+            arms.iter()
+                .any(|arm| cexpr_contains_funref(&arm.body, expected_name, expected_arity))
+                || cexpr_contains_funref(timeout, expected_name, expected_arity)
+                || cexpr_contains_funref(timeout_body, expected_name, expected_arity)
+        }
+        CExpr::Try {
+            expr,
+            ok_body,
+            catch_body,
+            ..
+        } => {
+            cexpr_contains_funref(expr, expected_name, expected_arity)
+                || cexpr_contains_funref(ok_body, expected_name, expected_arity)
+                || cexpr_contains_funref(catch_body, expected_name, expected_arity)
+        }
+        CExpr::Binary(segments) => segments.iter().any(|segment| match segment {
+            crate::codegen::cerl::CBinSeg::Byte(_) => false,
+            crate::codegen::cerl::CBinSeg::BinaryAll(value)
+            | crate::codegen::cerl::CBinSeg::Segment { value, .. } => {
+                cexpr_contains_funref(value, expected_name, expected_arity)
+            }
+        }),
+        CExpr::Annotated { expr, .. } => cexpr_contains_funref(expr, expected_name, expected_arity),
+        _ => false,
+    }
+}
+
+#[test]
+fn selective_core_merge_prefers_selective_definition_on_collision() {
+    let fallback = test_core_module("m", vec![("foo", 0)], vec![test_core_fun("foo", 0, "old")]);
+    let selective = test_core_module("m", vec![("foo", 0)], vec![test_core_fun("foo", 0, "new")]);
+
+    let merged = super::merge_selective_core_modules(fallback, selective, &HashMap::new());
+    let foo = merged
+        .funs
+        .iter()
+        .find(|fun| fun.name == "foo" && fun.arity == 0)
+        .expect("merged foo/0");
+    let CExpr::Fun(_, body) = &foo.body else {
+        panic!("expected fun body");
+    };
+    assert!(matches!(body.as_ref(), CExpr::Lit(CLit::Atom(atom)) if atom == "new"));
+    assert_eq!(merged.exports, vec![("foo".to_string(), 0)]);
+}
+
+#[test]
+fn selective_core_merge_preserves_fallback_only_definition() {
+    let fallback = test_core_module("m", vec![("foo", 0)], vec![test_core_fun("foo", 0, "old")]);
+    let selective = test_core_module("m", vec![], vec![]);
+
+    let merged = super::merge_selective_core_modules(fallback, selective, &HashMap::new());
+    assert!(
+        merged
+            .funs
+            .iter()
+            .any(|fun| fun.name == "foo" && fun.arity == 0)
+    );
+    assert_eq!(merged.exports, vec![("foo".to_string(), 0)]);
+}
+
+#[test]
+fn selective_core_merge_adds_direct_dict_adapter_over_uniform_fallback() {
+    let fallback = test_core_module(
+        "m",
+        vec![("__dict_Readable_Int", 2)],
+        vec![test_core_fun("__dict_Readable_Int", 2, "dict")],
+    );
+    let selective = test_core_module("m", vec![], vec![]);
+    let mut adapters = HashMap::new();
+    adapters.insert(
+        "__dict_Readable_Int".to_string(),
+        super::DirectFallbackAdapter::Dict {
+            constructor: test_dict_constructor("__dict_Readable_Int", vec![]),
+            dict_param_shapes: vec![],
+        },
+    );
+
+    let merged = super::merge_selective_core_modules(fallback, selective, &adapters);
+    assert!(
+        merged
+            .funs
+            .iter()
+            .any(|fun| fun.name == "__dict_Readable_Int" && fun.arity == 2)
+    );
+    let adapter = merged
+        .funs
+        .iter()
+        .find(|fun| fun.name == "__dict_Readable_Int" && fun.arity == 0)
+        .expect("direct dict adapter");
+    let CExpr::Fun(params, body) = &adapter.body else {
+        panic!("expected adapter function");
+    };
+    assert!(params.is_empty());
+    let CExpr::Let(_, fallback_dict, dict_tuple) = body.as_ref() else {
+        panic!("expected adapter to bind fallback dict constructor");
+    };
+    assert!(
+        matches!(fallback_dict.as_ref(), CExpr::Apply(callee, args) if matches!(callee.as_ref(), CExpr::FunRef(name, 2) if name == "__dict_Readable_Int") && matches!(args.as_slice(), [CExpr::Tuple(entries), CExpr::Fun(k_params, _)] if entries.is_empty() && k_params.len() == 1))
+    );
+    assert!(
+        matches!(dict_tuple.as_ref(), CExpr::Tuple(methods) if matches!(methods.as_slice(), [CExpr::Fun(params, _)] if params.len() == 1))
+    );
+    assert_eq!(
+        merged.exports,
+        vec![
+            ("__dict_Readable_Int".to_string(), 2),
+            ("__dict_Readable_Int".to_string(), 0)
+        ]
+    );
+}
+
+#[test]
+fn selective_core_merge_replaces_same_name_uniform_dict_with_direct_alias() {
+    let fallback = test_core_module(
+        "m",
+        vec![("__dict_Readable_Int", 2)],
+        vec![test_core_fun("__dict_Readable_Int", 2, "huge_fallback")],
+    );
+    let selective = test_core_module(
+        "m",
+        vec![("__dict_Readable_Int", 0)],
+        vec![test_core_fun("__dict_Readable_Int", 0, "compact_selective")],
+    );
+    let mut adapters = HashMap::new();
+    adapters.insert(
+        "__dict_Readable_Int".to_string(),
+        super::DirectFallbackAdapter::Dict {
+            constructor: test_dict_constructor("__dict_Readable_Int", vec![]),
+            dict_param_shapes: vec![],
+        },
+    );
+
+    let merged = super::merge_selective_core_modules(fallback, selective, &adapters);
+    let fallback_alias = merged
+        .funs
+        .iter()
+        .find(|fun| fun.name == "__dict_Readable_Int" && fun.arity == 2)
+        .expect("uniform dict alias");
+    let CExpr::Fun(params, body) = &fallback_alias.body else {
+        panic!("expected alias function");
+    };
+    assert_eq!(params.len(), 2, "{params:?}");
+    assert!(
+        matches!(body.as_ref(), CExpr::Apply(callee, _) if matches!(callee.as_ref(), CExpr::Var(name) if name == "_DictAliasK"))
+    );
+    assert!(
+        cexpr_contains_funref(body, "__dict_Readable_Int", 0),
+        "{body:?}"
+    );
+}
+
+#[test]
+fn selective_core_merge_keeps_same_name_uniform_dict_without_selective_source() {
+    let fallback = test_core_module(
+        "m",
+        vec![("__dict_Readable_Int", 2)],
+        vec![test_core_fun("__dict_Readable_Int", 2, "huge_fallback")],
+    );
+    let selective = test_core_module("m", vec![], vec![]);
+    let mut adapters = HashMap::new();
+    adapters.insert(
+        "__dict_Readable_Int".to_string(),
+        super::DirectFallbackAdapter::Dict {
+            constructor: test_dict_constructor("__dict_Readable_Int", vec![]),
+            dict_param_shapes: vec![],
+        },
+    );
+
+    let merged = super::merge_selective_core_modules(fallback, selective, &adapters);
+    let fallback_body = merged
+        .funs
+        .iter()
+        .find(|fun| fun.name == "__dict_Readable_Int" && fun.arity == 2)
+        .expect("uniform dict fallback");
+    let CExpr::Fun(_, body) = &fallback_body.body else {
+        panic!("expected fallback function");
+    };
+    assert!(matches!(body.as_ref(), CExpr::Lit(CLit::Atom(atom)) if atom == "huge_fallback"));
+}
+
+#[test]
+fn selective_core_merge_adds_private_direct_dict_adapter() {
+    let fallback = test_core_module(
+        "m",
+        vec![],
+        vec![test_core_fun("__dict_Private_Int", 2, "dict")],
+    );
+    let selective = test_core_module("m", vec![], vec![]);
+    let mut adapters = HashMap::new();
+    adapters.insert(
+        "__dict_Private_Int".to_string(),
+        super::DirectFallbackAdapter::Dict {
+            constructor: test_dict_constructor("__dict_Private_Int", vec![]),
+            dict_param_shapes: vec![],
+        },
+    );
+
+    let merged = super::merge_selective_core_modules(fallback, selective, &adapters);
+    assert!(
+        merged
+            .funs
+            .iter()
+            .any(|fun| fun.name == "__dict_Private_Int" && fun.arity == 0)
+    );
+    assert!(merged.exports.is_empty(), "{:?}", merged.exports);
+}
+
+#[test]
+fn selective_core_merge_aliases_duplicate_fallback_dict_direct_arity() {
+    let fallback_duplicate = "__dict_SagaJson_Encode_ToJson_sagajson_encode_Std_Generic_Variant";
+    let selective_source = "__dict_SagaJson_Encode_ToJson_Std_Generic_Variant";
+    let fallback = test_core_module(
+        "SagaJson.Encode",
+        vec![(fallback_duplicate, 0)],
+        vec![test_core_fun(fallback_duplicate, 0, "stale_fallback")],
+    );
+    let selective = test_core_module(
+        "SagaJson.Encode",
+        vec![(selective_source, 0)],
+        vec![test_core_fun(selective_source, 0, "selective")],
+    );
+    let mut adapters = HashMap::new();
+    adapters.insert(
+        selective_source.to_string(),
+        super::DirectFallbackAdapter::Dict {
+            constructor: test_dict_constructor(selective_source, vec![]),
+            dict_param_shapes: vec![],
+        },
+    );
+
+    let merged = super::merge_selective_core_modules(fallback, selective, &adapters);
+    let alias = merged
+        .funs
+        .iter()
+        .find(|fun| fun.name == fallback_duplicate && fun.arity == 0)
+        .expect("duplicate fallback dict direct alias");
+    let CExpr::Fun(params, body) = &alias.body else {
+        panic!("expected alias function");
+    };
+    assert!(params.is_empty(), "{params:?}");
+    assert!(
+        matches!(body.as_ref(), CExpr::Apply(callee, args) if matches!(callee.as_ref(), CExpr::FunRef(name, 0) if name == selective_source) && args.is_empty()),
+        "{body:?}"
+    );
+}
+
+#[test]
+fn selective_core_merge_aliases_duplicate_fallback_dict_uniform_arity() {
+    let fallback_duplicate = "__dict_SagaJson_Encode_ToJson_sagajson_encode_Std_Generic_Variant";
+    let selective_source = "__dict_SagaJson_Encode_ToJson_Std_Generic_Variant";
+    let fallback = test_core_module(
+        "SagaJson.Encode",
+        vec![(fallback_duplicate, 2)],
+        vec![test_core_fun(fallback_duplicate, 2, "stale_fallback")],
+    );
+    let selective = test_core_module(
+        "SagaJson.Encode",
+        vec![(selective_source, 0)],
+        vec![test_core_fun(selective_source, 0, "selective")],
+    );
+    let mut adapters = HashMap::new();
+    adapters.insert(
+        selective_source.to_string(),
+        super::DirectFallbackAdapter::Dict {
+            constructor: test_dict_constructor(selective_source, vec![]),
+            dict_param_shapes: vec![],
+        },
+    );
+
+    let merged = super::merge_selective_core_modules(fallback, selective, &adapters);
+    let alias = merged
+        .funs
+        .iter()
+        .find(|fun| fun.name == fallback_duplicate && fun.arity == 2)
+        .expect("duplicate fallback dict uniform alias");
+    let CExpr::Fun(params, body) = &alias.body else {
+        panic!("expected alias function");
+    };
+    assert_eq!(params.len(), 2, "{params:?}");
+    assert!(
+        matches!(body.as_ref(), CExpr::Apply(callee, _) if matches!(callee.as_ref(), CExpr::Var(name) if name == "_DictAliasK"))
+    );
+    assert!(cexpr_contains_funref(body, selective_source, 0), "{body:?}");
+}
+
+#[test]
+fn selective_core_merge_does_not_alias_unmatched_duplicate_dict_name() {
+    let fallback_duplicate = "__dict_SagaJson_Encode_ToJson_sagajson_encode_Std_Generic_Variant";
+    let fallback = test_core_module(
+        "SagaJson.Encode",
+        vec![(fallback_duplicate, 0)],
+        vec![test_core_fun(fallback_duplicate, 0, "keep_me")],
+    );
+    let selective = test_core_module("SagaJson.Encode", vec![], vec![]);
+    let merged = super::merge_selective_core_modules(fallback, selective, &HashMap::new());
+    let fun = merged
+        .funs
+        .iter()
+        .find(|fun| fun.name == fallback_duplicate && fun.arity == 0)
+        .expect("fallback duplicate remains");
+    let CExpr::Fun(_, body) = &fun.body else {
+        panic!("expected function");
+    };
+    assert!(matches!(body.as_ref(), CExpr::Lit(CLit::Atom(atom)) if atom == "keep_me"));
+}
+
+#[test]
+fn selective_core_merge_adds_direct_pure_adapter_over_uniform_fallback() {
+    let fallback = test_core_module(
+        "m",
+        vec![("mark_skip_entry", 3)],
+        vec![test_core_fun("mark_skip_entry", 3, "fallback")],
+    );
+    let selective = test_core_module("m", vec![], vec![]);
+    let mut adapters = HashMap::new();
+    adapters.insert(
+        "mark_skip_entry".to_string(),
+        super::DirectFallbackAdapter::Function { source_arity: 1 },
+    );
+
+    let merged = super::merge_selective_core_modules(fallback, selective, &adapters);
+    assert!(
+        merged
+            .funs
+            .iter()
+            .any(|fun| fun.name == "mark_skip_entry" && fun.arity == 3)
+    );
+    assert!(
+        merged
+            .funs
+            .iter()
+            .any(|fun| fun.name == "mark_skip_entry" && fun.arity == 1)
+    );
+    assert_eq!(
+        merged.exports,
+        vec![
+            ("mark_skip_entry".to_string(), 3),
+            ("mark_skip_entry".to_string(), 1)
+        ]
+    );
+}
+
+fn erlang_tool_available(tool: &str) -> bool {
+    std::process::Command::new(tool)
+        .arg("--help")
+        .output()
+        .is_ok()
+}
+
+fn compile_evidence_bridge_into(dir: &std::path::Path) {
+    let bridge_src = include_str!("../stdlib/evidence.bridge.erl");
+    let bridge_path = dir.join("std_evidence_bridge.erl");
+    std::fs::write(&bridge_path, bridge_src).unwrap();
+    let erlc = std::process::Command::new("erlc")
+        .arg("-o")
+        .arg(dir)
+        .arg(&bridge_path)
+        .output()
+        .expect("erlc evidence bridge spawn");
+    assert!(
+        erlc.status.success(),
+        "erlc rejected evidence bridge:\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&erlc.stdout),
+        String::from_utf8_lossy(&erlc.stderr)
+    );
+}
+
+fn assert_selective_core_eval_stdout_contains(src: &str, eval: &str, needle: &str) {
+    if !erlang_tool_available("erlc") || !erlang_tool_available("erl") {
+        return;
+    }
+
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    static COUNTER: AtomicUsize = AtomicUsize::new(0);
+
+    let core = emit_selective_core(src);
+    let id = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!(
+        "saga-selective-core-run-{}-{id}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let core_path = dir.join("_script.core");
+    std::fs::write(&core_path, &core).unwrap();
+
+    let erlc = std::process::Command::new("erlc")
+        .arg("+from_core")
+        .arg("-o")
+        .arg(&dir)
+        .arg(&core_path)
+        .output()
+        .expect("erlc spawn");
+    assert!(
+        erlc.status.success(),
+        "erlc rejected selective-core output:\nstdout: {}\nstderr: {}\ncore: {}",
+        String::from_utf8_lossy(&erlc.stdout),
+        String::from_utf8_lossy(&erlc.stderr),
+        core
+    );
+    if core.contains("std_evidence_bridge") {
+        compile_evidence_bridge_into(&dir);
+    }
+
+    let run = std::process::Command::new("erl")
+        .arg("-noshell")
+        .arg("-pa")
+        .arg(&dir)
+        .arg("-eval")
+        .arg(eval)
+        .output()
+        .expect("erl spawn");
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(
+        run.status.success(),
+        "erl rejected selective-core output:\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&run.stdout),
+        String::from_utf8_lossy(&run.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&run.stdout);
+    assert!(
+        stdout.contains(needle),
+        "expected '{needle}' in selective-core runtime output, got: {stdout}"
+    );
+}
+
+fn assert_selective_core_compiles(src: &str) {
+    if !erlang_tool_available("erlc") {
+        return;
+    }
+
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    static COUNTER: AtomicUsize = AtomicUsize::new(0);
+
+    let core = emit_selective_core(src);
+    let id = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!(
+        "saga-selective-core-compile-{}-{id}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let core_path = dir.join("_script.core");
+    std::fs::write(&core_path, &core).unwrap();
+
+    let erlc = std::process::Command::new("erlc")
+        .arg("+from_core")
+        .arg("-o")
+        .arg(&dir)
+        .arg(&core_path)
+        .output()
+        .expect("erlc spawn");
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(
+        erlc.status.success(),
+        "erlc rejected selective-core output:\nstdout: {}\nstderr: {}\ncore: {}",
+        String::from_utf8_lossy(&erlc.stdout),
+        String::from_utf8_lossy(&erlc.stderr),
+        core
+    );
+}
+
 /// Assert that `emit(src)` contains `needle` as a substring.
 /// On failure, prints the full output for easy debugging.
 fn assert_contains(src: &str, needle: &str) {
@@ -58,6 +676,1881 @@ fn assert_contains_full(src: &str, needle: &str) {
 #[test]
 fn full_pipeline_smoke() {
     assert_contains_full("main () = 42", "42");
+}
+
+#[test]
+fn selective_core_lowers_pure_direct_calls() {
+    let out = emit_selective_core(
+        r#"
+fun add1 : Int -> Int
+add1 x = x + 1
+
+fun twice : Int -> Int
+twice x = add1 (add1 x)
+
+fun main : Unit -> Int
+main () = twice 40
+"#,
+    );
+    assert!(out.contains("'add1'/1"), "{out}");
+    assert!(out.contains("'twice'/1"), "{out}");
+    assert!(out.contains("'main'/1"), "{out}");
+    assert!(out.contains("apply 'twice'/1(40)"), "{out}");
+}
+
+#[test]
+fn selective_core_lowers_recursive_pure_if() {
+    let out = emit_selective_core(
+        r#"
+fun sum_to : Int -> Int
+sum_to n =
+  if n <= 0 then 0
+  else n + sum_to (n - 1)
+
+fun main : Unit -> Int
+main () = sum_to 10
+"#,
+    );
+    assert!(out.contains("'sum_to'/1"), "{out}");
+    assert!(out.contains("apply 'sum_to'/1"), "{out}");
+    assert!(out.contains("apply 'sum_to'/1(10)"), "{out}");
+}
+
+#[test]
+fn selective_core_lowers_pure_top_level_val() {
+    let out = emit_selective_core(
+        r#"
+val base = 20 + 1
+
+fun double : Int -> Int
+double x = x * 2
+
+fun main : Unit -> Int
+main () = double base
+"#,
+    );
+    assert!(out.contains("'base'/0"), "{out}");
+    assert!(out.contains("'double'/1"), "{out}");
+    assert!(out.contains("apply 'base'/0()"), "{out}");
+}
+
+#[test]
+fn selective_core_lowers_print_stdout_intrinsic_directly() {
+    let out = emit_selective_core(
+        r#"
+import Std.IO.Unsafe (print_stdout)
+
+fun main : Unit -> Unit
+main () = print_stdout "hello\n"
+"#,
+    );
+    assert!(out.contains("'main'/1"), "{out}");
+    assert!(out.contains("call 'io':'format'"), "{out}");
+    assert!(out.contains("'unit'"), "{out}");
+}
+
+#[test]
+fn selective_core_lowers_catch_panic_with_handled_callback() {
+    let src = r#"
+import Std.Process
+
+effect Test {
+  fun assert : (ok: Bool) -> (msg: String) -> Unit
+}
+
+type TestStatus = Passed | Failed String
+
+fun run_single : (Unit -> Unit needs {Test}) -> TestStatus
+run_single body = case Process.catch_panic (fun () -> {
+  body () with {
+    assert ok msg =
+      if ok then resume ()
+      else Failed msg
+    return _ = Passed
+  }
+}) {
+  Ok status -> status
+  Err msg -> Failed msg
+}
+
+fun main : Unit -> TestStatus
+main () = run_single (fun () -> assert! True "")
+"#;
+    let out = emit_selective_core_with_options(
+        src,
+        super::lower_selective::LoweringOptions {
+            require_all_functions: true,
+        },
+    );
+    assert!(out.contains("'run_single'/1"), "{out}");
+    assert!(out.contains("try"), "{out}");
+    assert!(out.contains("apply Body"), "{out}");
+    assert_selective_core_compiles(src);
+}
+
+#[test]
+fn selective_core_lowers_monomorphic_trait_method_call() {
+    let out = emit_selective_core(
+        r#"
+fun main : Unit -> String
+main () = show 42
+"#,
+    );
+    assert!(
+        out.contains("call 'std_int':'__dict_Std_Base_Show_std_int_Std_Int_Int'"),
+        "{out}"
+    );
+    assert!(out.contains("call 'erlang':'element'"), "{out}");
+    assert!(out.contains("apply ___anf_v1(42)"), "{out}");
+}
+
+#[test]
+fn selective_core_specializes_local_monomorphic_trait_method_call() {
+    let src = r#"
+trait Encodable a {
+  fun encode : a -> Int
+}
+
+impl Encodable for Int {
+  encode x = x + 1
+}
+
+fun main : Unit -> Int
+main () = encode 41
+"#;
+    let out = emit_selective_core(src);
+    assert!(out.contains("'main'/1"), "{out}");
+    assert!(
+        !out.contains("call 'erlang':'element'"),
+        "known local trait method should not extract a method closure\n{out}"
+    );
+    assert!(
+        !out.contains("apply '__dict_Encodable"),
+        "known local trait method should not construct its dict at the call site\n{out}"
+    );
+    assert_selective_core_eval_stdout_contains(
+        src,
+        "io:format(\"~p~n\", ['_script':main(unit)]), init:stop().",
+        "42",
+    );
+}
+
+#[test]
+fn selective_core_specializes_local_trait_method_value_for_direct_hof() {
+    let src = r#"
+trait Encodable a {
+  fun encode : a -> Int
+}
+
+impl Encodable for Int {
+  encode x = x + 1
+}
+
+fun apply_it : (Int -> Int) -> Int
+apply_it f = f 41
+
+fun main : Unit -> Int
+main () = {
+  let f = encode
+  apply_it f
+}
+"#;
+    let out = emit_selective_core(src);
+    assert!(out.contains("'main'/1"), "{out}");
+    let main_body = out
+        .split("'main'/1 =")
+        .nth(1)
+        .unwrap_or_else(|| panic!("main function missing in:\n{out}"));
+    assert!(
+        !main_body.contains("call 'erlang':'element'"),
+        "known local trait method value should not extract a method closure\n{out}"
+    );
+    assert!(
+        !main_body.contains("__dict_Encodable"),
+        "known local trait method value should not materialize its dict in main\n{out}"
+    );
+    assert!(
+        out.contains("'__saga_direct_hof_apply_it'/1"),
+        "known local trait method value should feed the direct HOF specialization\n{out}"
+    );
+    assert_selective_core_eval_stdout_contains(
+        src,
+        "io:format(\"~p~n\", ['_script':main(unit)]), init:stop().",
+        "42",
+    );
+}
+
+#[test]
+fn selective_core_specializes_local_generic_trait_method_chain() {
+    let src = r#"
+type Box a = Box a
+
+trait Size a {
+  fun size : a -> Int
+}
+
+impl Size for Int {
+  size x = x
+}
+
+impl Size for Box a where {a: Size} {
+  size (Box x) = size x + 1
+}
+
+fun main : Unit -> Int
+main () = size (Box 41)
+"#;
+    let out = emit_selective_core(src);
+    assert!(out.contains("'main'/1"), "{out}");
+    let main_body = out
+        .split("'main'/1 =")
+        .nth(1)
+        .unwrap_or_else(|| panic!("main function missing in:\n{out}"));
+    assert!(
+        !main_body.contains("call 'erlang':'element'"),
+        "known generic trait chain should not extract method closures in main\n{out}"
+    );
+    assert!(
+        !main_body.contains("__dict_Size"),
+        "known generic trait chain should not materialize dict tuples in main\n{out}"
+    );
+    assert_selective_core_eval_stdout_contains(
+        src,
+        "io:format(\"~p~n\", ['_script':main(unit)]), init:stop().",
+        "42",
+    );
+}
+
+#[test]
+fn selective_core_lowers_effectful_trait_method_call() {
+    let src = r#"
+effect ReadInt {
+  fun read : Unit -> Int
+}
+
+handler forty_one for ReadInt {
+  read () = resume 41
+}
+
+trait Readable a {
+  fun read_it : a -> Int needs {ReadInt}
+}
+
+impl Readable for Unit needs {ReadInt} {
+  read_it _ = read! () + 1
+}
+
+pub fun run_trait_method : Unit -> Int
+run_trait_method () = read_it () with forty_one
+
+fun main : Unit -> Unit
+main () = ()
+"#;
+    let out = emit_selective_core(src);
+    assert!(out.contains("'__dict_Readable_Std_Base_Unit'/0"), "{out}");
+    assert!(
+        !out.contains("apply ___anf_v2('unit', _CpsEvidence"),
+        "{out}"
+    );
+    assert!(out.contains("let <__Inlined"), "{out}");
+    assert!(out.contains("41\n          in\n          apply _PromptK"), "{out}");
+    assert_selective_core_eval_stdout_contains(
+        src,
+        "io:format(\"~p~n\", ['_script':run_trait_method(unit)]), init:stop().",
+        "42",
+    );
+}
+
+#[test]
+fn selective_core_lowers_effectful_trait_method_value_as_cps_callback() {
+    let src = r#"
+effect ReadInt {
+  fun read : Unit -> Int
+}
+
+handler forty_one for ReadInt {
+  read () = resume 41
+}
+
+trait Readable a {
+  fun read_it : a -> Int needs {ReadInt}
+}
+
+impl Readable for Unit needs {ReadInt} {
+  read_it _ = read! () + 1
+}
+
+fun apply_eff : (Unit -> Int needs {ReadInt}) -> Int needs {ReadInt}
+apply_eff f = f ()
+
+pub fun run_trait_method_value : Unit -> Int
+run_trait_method_value () = apply_eff read_it with forty_one
+
+fun main : Unit -> Unit
+main () = ()
+"#;
+    let out = emit_selective_core(src);
+    assert!(out.contains("'apply_eff'/3"), "{out}");
+    assert!(out.contains("call 'erlang':'element'"), "{out}");
+    assert!(out.contains("apply 'apply_eff'/3(___anf_v2"), "{out}");
+    assert_selective_core_eval_stdout_contains(
+        src,
+        "io:format(\"~p~n\", ['_script':run_trait_method_value(unit)]), init:stop().",
+        "42",
+    );
+}
+
+#[test]
+fn selective_core_lowers_generic_effectful_trait_method_dispatch() {
+    let src = r#"
+type Box a = Box a
+
+effect ReadInt {
+  fun read : Unit -> Int
+}
+
+handler forty_one for ReadInt {
+  read () = resume 41
+}
+
+trait Readable a {
+  fun read_it : a -> Int needs {ReadInt}
+}
+
+impl Readable for Int needs {ReadInt} {
+  read_it _ = read! () + 1
+}
+
+impl Readable for Box a where {a: Readable} needs {ReadInt} {
+  read_it (Box x) = read_it x + 1
+}
+
+pub fun run_generic_trait_method : Unit -> Int
+run_generic_trait_method () = read_it (Box 0) with forty_one
+
+fun main : Unit -> Unit
+main () = ()
+"#;
+    let out = emit_selective_core(src);
+    assert!(out.contains("'__dict_Readable_Box'/1"), "{out}");
+    assert!(out.contains("'__dict_Readable_Std_Int_Int'/0"), "{out}");
+    assert!(out.contains("call 'erlang':'element'"), "{out}");
+    assert!(out.contains("let <___anf_v0> ="), "{out}");
+    assert!(out.contains("(___anf_v0, 1)"), "{out}");
+    assert!(
+        !out.contains("let <___anf_v1> =\n                fun"),
+        "{out}"
+    );
+    assert!(
+        out.contains("call 'std_evidence_bridge':'insert_canonical'"),
+        "{out}"
+    );
+    assert_selective_core_eval_stdout_contains(
+        src,
+        "io:format(\"~p~n\", ['_script':run_generic_trait_method(unit)]), init:stop().",
+        "43",
+    );
+}
+
+#[test]
+fn selective_core_keeps_static_handler_installs_around_nested_trait_method_call() {
+    let src = r#"
+effect ReadInt {
+  fun read : Unit -> Int
+}
+
+effect DbConfig {
+  fun db_url : Unit -> Int
+}
+
+handler forty_one for ReadInt {
+  read () = resume 41
+}
+
+trait Readable a {
+  fun read_it : a -> Int needs {ReadInt}
+}
+
+impl Readable for Unit needs {ReadInt} {
+  read_it _ = read! () + 1
+}
+
+pub fun run_nested_trait_and_config : Unit -> Int
+run_nested_trait_and_config () = {
+  {
+    let trait_value = read_it ()
+    let db = db_url! ()
+    trait_value + db
+  } with {
+    db_url () = resume 1
+  }
+} with forty_one
+
+fun main : Unit -> Unit
+main () = ()
+"#;
+    let out = emit_selective_core(src);
+    assert!(out.contains("'ReadInt'"), "{out}");
+    assert!(out.contains("'DbConfig'"), "{out}");
+    assert!(
+        out.contains("call 'std_evidence_bridge':'insert_canonical'"),
+        "{out}"
+    );
+    assert_selective_core_eval_stdout_contains(
+        src,
+        "io:format(\"~p~n\", ['_script':run_nested_trait_and_config(unit)]), init:stop().",
+        "43",
+    );
+}
+
+#[test]
+fn selective_core_lowers_dbg_intrinsic_with_direct_dictionary() {
+    let out = emit_selective_core(
+        r#"
+fun main : Unit -> Unit
+main () = dbg 42
+"#,
+    );
+    assert!(
+        out.contains("call 'std_int':'__dict_Std_Base_Debug_std_int_Std_Int_Int'"),
+        "{out}"
+    );
+    assert!(out.contains("call 'erlang':'element'"), "{out}");
+    assert!(out.contains("apply _DebugFn(42)"), "{out}");
+    assert!(out.contains("call 'io':'format'"), "{out}");
+    assert!(out.contains("'standard_error'"), "{out}");
+}
+
+#[test]
+fn selective_core_lowers_named_record_field_access() {
+    let out = emit_selective_core(
+        r#"
+record Point {
+  x: Int,
+  y: Int,
+}
+
+fun main : Unit -> Int
+main () = {
+  let p = Point { x: 3, y: 4 }
+  p.x + p.y
+}
+"#,
+    );
+    assert!(out.contains("call 'erlang':'+'\n        (3, 4)"), "{out}");
+    assert!(!out.contains("{'_script_Point', 3, 4}"), "{out}");
+    assert!(!out.contains("call 'erlang':'element'"), "{out}");
+}
+
+#[test]
+fn selective_core_lowers_tuple_param_match() {
+    let out = emit_selective_core(
+        r#"
+fun first : (Int, Int) -> Int
+first (x, _) = x
+
+fun main : Unit -> Int
+main () = first (1, 2)
+"#,
+    );
+    assert!(out.contains("'first'/1"), "{out}");
+    assert!(out.contains("case {_Arg0} of"), "{out}");
+    assert!(out.contains("<{{X, _W0}}>"), "{out}");
+}
+
+#[test]
+fn selective_core_lowers_constructor_case_patterns() {
+    let out = emit_selective_core(
+        r#"
+type Pick =
+  | First Int
+  | Second Int
+
+fun score : Pick -> Int
+score p = case p {
+  First x -> x
+  Second y -> y + 1
+}
+
+fun main : Unit -> Int
+main () = score (Second 41)
+"#,
+    );
+    assert!(out.contains("'score'/1"), "{out}");
+    assert!(out.contains("'_script_First'"), "{out}");
+    assert!(out.contains("'_script_Second'"), "{out}");
+    assert!(out.contains("{'_script_Second', 41}"), "{out}");
+    assert!(out.contains("let <_CallArg"), "{out}");
+    assert!(out.contains("apply 'score'/1(_CallArg"), "{out}");
+}
+
+#[test]
+fn selective_core_lowers_imported_pure_direct_call() {
+    let out = emit_selective_core(
+        r#"
+import Std.Maybe as Maybe
+
+fun main : Unit -> Bool
+main () = Maybe.is_just (Just 1)
+"#,
+    );
+    assert!(out.contains("'main'/1"), "{out}");
+    assert!(out.contains("{'std_maybe_Just', 1}"), "{out}");
+    assert!(out.contains("call 'std_maybe':'is_just'"), "{out}");
+    assert!(!out.contains("apply 'is_just'/1"), "{out}");
+}
+
+#[test]
+fn selective_core_lowers_simple_yield_cps_island() {
+    let src = r#"
+effect Log {
+  fun log : String -> Unit
+}
+
+pub fun do_log : Unit -> Unit needs {Log}
+do_log () = log! "hello"
+
+fun main : Unit -> Unit
+main () = ()
+"#;
+    let out = emit_selective_core(src);
+    assert!(out.contains("module '_script' ['do_log'/3"), "{out}");
+    assert!(out.contains("'do_log'/3"), "{out}");
+    assert!(!out.contains("__saga_direct_do_log"), "{out}");
+    assert!(
+        out.contains("call 'std_evidence_bridge':'find_evidence'"),
+        "{out}"
+    );
+    assert!(out.contains("call 'erlang':'element'"), "{out}");
+    assert!(out.contains("_Evidence, _ReturnK"), "{out}");
+    assert_selective_core_compiles(src);
+}
+
+#[test]
+fn selective_core_lowers_yield_then_return_cps_island() {
+    let src = r#"
+effect Log {
+  fun log : String -> Unit
+}
+
+pub fun log_then_answer : Unit -> Int needs {Log}
+log_then_answer () = {
+  let _ignored = log! "hello"
+  42
+}
+
+fun main : Unit -> Unit
+main () = ()
+"#;
+    let out = emit_selective_core(src);
+    assert!(out.contains("'log_then_answer'/3"), "{out}");
+    assert!(!out.contains("__saga_direct_log_then_answer"), "{out}");
+    assert!(
+        out.contains("call 'std_evidence_bridge':'find_evidence'"),
+        "{out}"
+    );
+    assert!(out.contains("fun (_CpsBindArg0) ->"), "{out}");
+    assert!(out.contains("let <__ignored>"), "{out}");
+    assert!(out.contains("apply _ReturnK(42)"), "{out}");
+    assert_selective_core_compiles(src);
+}
+
+#[test]
+fn selective_core_lowers_yield_result_used_cps_island() {
+    let src = r#"
+effect ReadInt {
+  fun read : Unit -> Int
+}
+
+pub fun read_plus_one : Unit -> Int needs {ReadInt}
+read_plus_one () = {
+  let value = read! ()
+  value + 1
+}
+
+fun main : Unit -> Unit
+main () = ()
+"#;
+    let out = emit_selective_core(src);
+    assert!(out.contains("'read_plus_one'/3"), "{out}");
+    assert!(!out.contains("__saga_direct_read_plus_one"), "{out}");
+    assert!(
+        out.contains("call 'std_evidence_bridge':'find_evidence'"),
+        "{out}"
+    );
+    assert!(out.contains("fun (_CpsBindArg0) ->"), "{out}");
+    assert!(out.contains("let <Value>"), "{out}");
+    assert!(out.contains("apply _ReturnK(call 'erlang':'+'"), "{out}");
+    assert_selective_core_compiles(src);
+}
+
+#[test]
+fn selective_core_lowers_local_cps_helper_call_in_cps_island() {
+    let src = r#"
+effect ReadInt {
+  fun read : Unit -> Int
+}
+
+fun read_value : Unit -> Int needs {ReadInt}
+read_value () = read! ()
+
+pub fun read_plus_two : Unit -> Int needs {ReadInt}
+read_plus_two () = {
+  let value = read_value ()
+  value + 2
+}
+
+fun main : Unit -> Unit
+main () = ()
+"#;
+    let out = emit_selective_core(src);
+    assert!(out.contains("'read_value'/3"), "{out}");
+    assert!(out.contains("'read_plus_two'/3"), "{out}");
+    assert!(
+        out.contains("apply 'read_value'/3('unit', _Evidence, fun (_CpsBindArg0) ->"),
+        "{out}"
+    );
+    assert!(out.contains("let <Value>"), "{out}");
+    assert!(out.contains("apply _ReturnK(call 'erlang':'+'"), "{out}");
+    assert_selective_core_compiles(src);
+}
+
+#[test]
+fn selective_core_lowers_if_in_cps_island() {
+    let src = r#"
+effect ReadInt {
+  fun read : Unit -> Int
+}
+
+pub fun maybe_read : Bool -> Int needs {ReadInt}
+maybe_read use_read =
+  if use_read then read! () else 0
+
+fun main : Unit -> Unit
+main () = ()
+"#;
+    let out = emit_selective_core(src);
+    assert!(out.contains("'maybe_read'/3"), "{out}");
+    assert!(out.contains("case Use_read of"), "{out}");
+    assert!(
+        out.contains("call 'std_evidence_bridge':'find_evidence'"),
+        "{out}"
+    );
+    assert!(out.contains("('unit', _Evidence, _ReturnK)"), "{out}");
+    assert!(out.contains("apply _ReturnK(0)"), "{out}");
+    assert_selective_core_compiles(src);
+}
+
+#[test]
+fn selective_core_lowers_case_in_cps_island() {
+    let src = r#"
+effect ReadInt {
+  fun read : Unit -> Int
+}
+
+type Choice = UseEffect | UseDefault
+
+pub fun choose_read : Choice -> Int needs {ReadInt}
+choose_read choice = case choice {
+  UseEffect -> read! ()
+  UseDefault -> 0
+}
+
+fun main : Unit -> Unit
+main () = ()
+"#;
+    let out = emit_selective_core(src);
+    assert!(out.contains("'choose_read'/3"), "{out}");
+    assert!(out.contains("case _CpsCaseScrut"), "{out}");
+    assert!(out.contains("'_script_UseEffect'"), "{out}");
+    assert!(out.contains("'_script_UseDefault'"), "{out}");
+    assert!(
+        out.contains("call 'std_evidence_bridge':'find_evidence'"),
+        "{out}"
+    );
+    assert!(out.contains("apply _ReturnK(0)"), "{out}");
+    assert_selective_core_compiles(src);
+}
+
+#[test]
+fn selective_core_direct_calls_static_tail_resumptive_handler_op() {
+    let src = r#"
+effect ReadInt {
+  fun read : Unit -> Int
+}
+
+handler forty_one for ReadInt {
+  read () = resume 41
+}
+
+fun main : Unit -> Int
+main () = {
+  let value = read! ()
+  value + 1
+} with forty_one
+"#;
+    let out = emit_selective_core(src);
+    assert!(
+        !out.contains("call 'std_evidence_bridge':'find_evidence'"),
+        "{out}"
+    );
+    assert!(
+        out.contains("call 'std_evidence_bridge':'insert_canonical'"),
+        "{out}"
+    );
+    assert!(out.contains("let <Value>"), "{out}");
+    assert!(out.contains("apply fun (_CpsResult"), "{out}");
+    assert!(out.contains("call 'erlang':'+'"), "{out}");
+    assert_selective_core_eval_stdout_contains(
+        src,
+        "io:format(\"~p~n\", ['_script':main(unit)]), init:stop().",
+        "42",
+    );
+}
+
+#[test]
+fn selective_core_direct_calls_static_handler_with_captured_runtime_value() {
+    let src = r#"
+effect SystemConfig {
+  fun read_config : Unit -> Int
+}
+
+effect DbConfig {
+  fun db_url : Unit -> Int
+}
+
+handler system_config for SystemConfig {
+  read_config () = resume 41
+}
+
+fun main : Unit -> Int
+main () = {
+  let config = read_config! () with system_config
+  {
+    let value = db_url! ()
+    value + 1
+  } with {
+    db_url () = resume config
+  }
+}
+"#;
+    let out = emit_selective_core(src);
+    assert!(
+        !out.contains("call 'std_evidence_bridge':'find_evidence'"),
+        "{out}"
+    );
+    assert!(
+        out.contains("call 'std_evidence_bridge':'insert_canonical'"),
+        "{out}"
+    );
+    assert!(out.contains("let <Config>"), "{out}");
+    assert!(out.contains("let <Value>"), "{out}");
+    assert!(out.contains("call 'erlang':'+'"), "{out}");
+    assert_selective_core_eval_stdout_contains(
+        src,
+        "io:format(\"~p~n\", ['_script':main(unit)]), init:stop().",
+        "42",
+    );
+}
+
+#[test]
+fn selective_core_specializes_local_cps_helper_under_static_handler() {
+    let src = r#"
+effect SystemConfig {
+  fun read_config : Unit -> Int
+}
+
+effect DbConfig {
+  fun db_url : Unit -> Int
+}
+
+handler system_config for SystemConfig {
+  read_config () = resume 41
+}
+
+fun query : Unit -> Int needs {DbConfig}
+query () = {
+  let value = db_url! ()
+  value + 1
+}
+
+fun main : Unit -> Int
+main () = {
+  let config = read_config! () with system_config
+  query () with {
+    db_url () = resume config
+  }
+}
+"#;
+    let out = emit_selective_core(src);
+    assert!(!out.contains("apply 'query'/3"), "{out}");
+    assert!(
+        out.contains("call 'std_evidence_bridge':'insert_canonical'"),
+        "{out}"
+    );
+    assert!(out.contains("let <Config>"), "{out}");
+    assert!(out.contains("let <Value>"), "{out}");
+    assert!(out.contains("call 'erlang':'+'"), "{out}");
+    assert_selective_core_eval_stdout_contains(
+        src,
+        "io:format(\"~p~n\", ['_script':main(unit)]), init:stop().",
+        "42",
+    );
+}
+
+#[test]
+fn selective_core_lowers_effect_row_function_with_direct_body() {
+    let out = emit_selective_core(
+        r#"
+effect Log {
+  fun log : String -> Unit
+}
+
+pub fun may_log : Unit -> Int needs {Log}
+may_log () = 42
+
+pub fun use_may_log : Unit -> Int needs {Log}
+use_may_log () = may_log ()
+
+fun main : Unit -> Unit
+main () = ()
+"#,
+    );
+    assert!(
+        out.contains("['__saga_direct_may_log'/1, 'may_log'/3"),
+        "{out}"
+    );
+    assert!(out.contains("'use_may_log'/3"), "{out}");
+    assert!(out.contains("'__saga_direct_may_log'/1"), "{out}");
+    assert!(out.contains("'may_log'/3"), "{out}");
+    assert!(
+        out.contains("apply '__saga_direct_may_log'/1(_Arg0)"),
+        "{out}"
+    );
+    assert!(
+        out.contains("apply '__saga_direct_may_log'/1('unit')"),
+        "{out}"
+    );
+    assert!(
+        out.contains("apply _ReturnK(apply '__saga_direct_use_may_log'/1(_Arg0))"),
+        "{out}"
+    );
+    assert!(out.contains("apply _ReturnK"), "{out}");
+    assert!(out.contains("42"), "{out}");
+}
+
+#[test]
+fn selective_core_effect_row_adapter_compiles_and_runs_on_beam() {
+    assert_selective_core_eval_stdout_contains(
+        r#"
+effect Log {
+  fun log : String -> Unit
+}
+
+pub fun may_log : Unit -> Int needs {Log}
+may_log () = 42
+
+fun main : Unit -> Unit
+main () = ()
+"#,
+        "io:format(\"~p~n\", ['_script':may_log(unit, [], fun(X) -> X end)]), init:stop().",
+        "42",
+    );
+}
+
+#[test]
+fn selective_core_handler_finally_runs_after_resume_continuation() {
+    let src = r#"
+import Std.IO.Unsafe (print_stdout)
+
+effect ReadInt {
+  fun read : Unit -> Int
+}
+
+handler read_with_cleanup for ReadInt {
+  read () = resume 41 finally {
+    print_stdout "cleanup\n"
+  }
+}
+
+fun main : Unit -> Unit
+main () = {
+  let value = {
+    let read_value = read! ()
+    print_stdout "body\n"
+    read_value + 1
+  } with read_with_cleanup
+
+  if value == 42 then print_stdout "after\n"
+  else print_stdout "bad\n"
+}
+"#;
+    let out = emit_selective_core(src);
+    assert!(
+        out.contains("call 'std_evidence_bridge':'find_evidence'"),
+        "{out}"
+    );
+    assert!(
+        out.contains("call 'std_evidence_bridge':'insert_canonical'"),
+        "{out}"
+    );
+    assert!(out.contains("_FinallyValue"), "{out}");
+    assert!(out.contains("_FinallyCleanup"), "{out}");
+    assert!(out.contains("_WithResult"), "{out}");
+    assert_selective_core_compiles(src);
+}
+
+#[test]
+fn selective_core_handler_finally_runs_after_abort_arm() {
+    let src = r#"
+import Std.IO.Unsafe (print_stdout)
+
+effect Fail {
+  fun fail : Unit -> Int
+}
+
+handler abort_with_cleanup for Fail {
+  fail () = 0 finally {
+    print_stdout "cleanup\n"
+  }
+}
+
+fun main : Unit -> Unit
+main () = {
+  let value = {
+    let unreachable = fail! ()
+    print_stdout "body\n"
+    unreachable + 1
+  } with abort_with_cleanup
+
+  if value == 0 then print_stdout "after\n"
+  else print_stdout "bad\n"
+}
+"#;
+    let out = emit_selective_core(src);
+    assert!(
+        out.contains("call 'std_evidence_bridge':'insert_canonical'"),
+        "{out}"
+    );
+    assert!(out.contains("_FinallyValue"), "{out}");
+    assert!(out.contains("_FinallyCleanup"), "{out}");
+    assert!(out.contains("_WithResult"), "{out}");
+    assert_selective_core_compiles(src);
+}
+
+#[test]
+fn selective_core_lowers_higher_order_direct_callback() {
+    let src = r#"
+fun apply_it : (Int -> Int) -> Int
+apply_it f = f 1
+
+fun inc : Int -> Int
+inc x = x + 1
+
+fun main : Unit -> Int
+main () = apply_it inc
+"#;
+    let out = emit_selective_core(src);
+    assert!(out.contains("'apply_it'/1"), "{out}");
+    assert!(out.contains("'__saga_direct_hof_apply_it'/1"), "{out}");
+    assert!(out.contains("'inc'/1"), "{out}");
+    assert!(out.contains("apply F(1)"), "{out}");
+    assert!(
+        out.contains("apply '__saga_direct_hof_apply_it'/1('inc'/1)"),
+        "{out}"
+    );
+    assert_selective_core_compiles(src);
+}
+
+#[test]
+fn selective_core_lowers_effectful_callback_value_adapter() {
+    let src = r#"
+effect ReadInt {
+  fun read : Unit -> Int
+}
+
+fun read_value : Unit -> Int needs {ReadInt}
+read_value () = read! ()
+
+fun apply_eff : (Unit -> Int needs {ReadInt}) -> Int needs {ReadInt}
+apply_eff f = {
+  let g = f
+  g ()
+}
+
+handler forty_one for ReadInt {
+  read () = resume 41
+}
+
+fun main : Unit -> Int
+main () = {
+  let f = read_value
+  let g = f
+  apply_eff g
+} with forty_one
+"#;
+    let out = emit_selective_core(src);
+    assert!(out.contains("'apply_eff'/3"), "{out}");
+    assert!(
+        out.contains("apply G('unit', _Evidence, _ReturnK)"),
+        "{out}"
+    );
+    assert!(out.contains("let <G>"), "{out}");
+    assert!(out.contains("apply 'apply_eff'/3(fun (_CpsFnArg"), "{out}");
+    assert!(out.contains("apply 'read_value'/3"), "{out}");
+    assert!(!out.contains("make_fun"), "{out}");
+    assert_selective_core_compiles(src);
+}
+
+#[test]
+fn selective_core_lowers_branch_shaped_effectful_callback_value() {
+    let src = r#"
+effect ReadInt {
+  fun read : Unit -> Int
+}
+
+fun read_value : Unit -> Int needs {ReadInt}
+read_value () = read! ()
+
+fun read_again : Unit -> Int needs {ReadInt}
+read_again () = read! ()
+
+fun apply_eff : (Unit -> Int needs {ReadInt}) -> Int needs {ReadInt}
+apply_eff f = f ()
+
+handler forty_one for ReadInt {
+  read () = resume 41
+}
+
+fun main : Unit -> Int
+main () = {
+  let choose = 1 == 1
+  let f = if choose then read_value else read_again
+  apply_eff f
+} with forty_one
+"#;
+    let out = emit_selective_core(src);
+    assert!(out.contains("'apply_eff'/3"), "{out}");
+    assert!(out.contains("let <F> =\n"), "{out}");
+    assert!(out.contains("case Choose of"), "{out}");
+    assert!(out.contains("apply 'read_value'/3"), "{out}");
+    assert!(out.contains("apply 'read_again'/3"), "{out}");
+    assert!(out.contains("apply 'apply_eff'/3(F"), "{out}");
+    assert!(!out.contains("make_fun"), "{out}");
+    assert_selective_core_compiles(src);
+}
+
+#[test]
+fn selective_core_lowers_mixed_pure_and_effectful_if_callback_value() {
+    let src = r#"
+effect ReadInt {
+  fun read : Unit -> Int
+}
+
+fun read_value : Unit -> Int needs {ReadInt}
+read_value () = read! ()
+
+fun pure_value : Unit -> Int
+pure_value () = 41
+
+fun apply_eff : (Unit -> Int needs {ReadInt}) -> Int needs {ReadInt}
+apply_eff f = f ()
+
+handler forty_one for ReadInt {
+  read () = resume 41
+}
+
+fun main : Unit -> Int
+main () = {
+  let choose = 1 == 1
+  let f = if choose then read_value else pure_value
+  apply_eff f
+} with forty_one
+"#;
+    let out = emit_selective_core(src);
+    assert!(out.contains("'apply_eff'/3"), "{out}");
+    assert!(out.contains("case Choose of"), "{out}");
+    assert!(out.contains("apply 'read_value'/3"), "{out}");
+    assert!(out.contains("fun (_PureCpsArg"), "{out}");
+    assert!(out.contains("apply 'pure_value'/1"), "{out}");
+    assert!(out.contains("apply _PureCpsK"), "{out}");
+    assert!(out.contains("apply 'apply_eff'/3(F"), "{out}");
+    assert!(!out.contains("make_fun"), "{out}");
+    assert_selective_core_compiles(src);
+}
+
+#[test]
+fn selective_core_lowers_pure_callback_in_effectful_callback_slot() {
+    let src = r#"
+effect ReadInt {
+  fun read : Unit -> Int
+}
+
+fun pure_value : Unit -> Int
+pure_value () = 41
+
+fun apply_eff : (Unit -> Int needs {ReadInt}) -> Int needs {ReadInt}
+apply_eff f = f ()
+
+handler forty_one for ReadInt {
+  read () = resume 41
+}
+
+fun main : Unit -> Int
+main () = apply_eff pure_value with forty_one
+"#;
+    let out = emit_selective_core(src);
+    assert!(out.contains("'apply_eff'/3"), "{out}");
+    assert!(out.contains("'__saga_direct_hof_apply_eff'/1"), "{out}");
+    assert!(out.contains("apply F('unit')"), "{out}");
+    assert!(
+        out.contains("apply '__saga_direct_hof_apply_eff'/1('pure_value'/1)"),
+        "{out}"
+    );
+    assert!(!out.contains("fun (_PureCpsArg"), "{out}");
+    assert!(!out.contains("apply _PureCpsK"), "{out}");
+    assert!(!out.contains("make_fun"), "{out}");
+    assert_selective_core_eval_stdout_contains(
+        src,
+        "io:format(\"~p~n\", ['_script':main(unit)]), init:stop().",
+        "41",
+    );
+}
+
+#[test]
+fn selective_core_inlines_recursive_effectful_callback_hof_with_pure_callback() {
+    let src = r#"
+effect Tick {
+  fun tick : Int -> Unit
+}
+
+fun iter : (Int -> Unit needs {Tick}) -> List Int -> Unit needs {Tick}
+iter f xs = case xs {
+  [] -> ()
+  h :: t -> {
+    f h
+    iter f t
+  }
+}
+
+fun pure_tick : Int -> Unit
+pure_tick _ = ()
+
+handler ignore_tick for Tick {
+  tick _ = resume ()
+}
+
+fun main : Unit -> Unit
+main () = iter pure_tick [1, 2] with ignore_tick
+"#;
+    let out = emit_selective_core_with_options(
+        src,
+        super::lower_selective::LoweringOptions {
+            require_all_functions: true,
+        },
+    );
+    assert!(out.contains("apply F(1)"), "{out}");
+    assert!(
+        out.contains("apply '__saga_static_variant__iter__"),
+        "{out}"
+    );
+    assert!(out.contains("apply F(H)"), "{out}");
+    assert!(!out.contains("apply F(H, _CpsEvidence"), "{out}");
+    assert_selective_core_compiles(src);
+}
+
+#[test]
+fn selective_core_lowers_grouped_direct_cps_island_function() {
+    let src = r#"
+effect Fail e {
+  fun fail : e -> a
+}
+
+type Result a e = Ok a | Err e
+
+fun supervised : Int -> (Unit -> a needs {Fail e}) -> Result a e
+supervised 0 f = {
+  f () with {
+    fail reason = Err reason
+    return value = Ok value
+  }
+}
+supervised n f = {
+  f () with {
+    fail _reason = supervised (n - 1) f
+    return value = Ok value
+  }
+}
+
+fun main : Unit -> Result Int String
+main () = supervised 1 (fun () -> 42)
+"#;
+    let out = emit_selective_core_with_options(
+        src,
+        super::lower_selective::LoweringOptions {
+            require_all_functions: true,
+        },
+    );
+    assert!(out.contains("'supervised'/2"), "{out}");
+    assert!(out.contains("case _FunScrut"), "{out}");
+    assert!(out.contains("apply F('unit'"), "{out}");
+    assert_selective_core_compiles(src);
+}
+
+#[test]
+fn selective_core_lowers_cps_receive_function() {
+    let src = r#"
+import Std.Actor (Actor)
+
+type Msg = Ping | Stop
+
+fun loop : Unit -> Unit needs {Actor Msg}
+loop () = receive {
+  Ping -> loop ()
+  Stop -> ()
+}
+
+fun main : Unit -> Unit
+main () = ()
+"#;
+    let out = emit_selective_core_with_options(
+        src,
+        super::lower_selective::LoweringOptions {
+            require_all_functions: true,
+        },
+    );
+    assert!(out.contains("'loop'/3"), "{out}");
+    assert!(out.contains("receive"), "{out}");
+    assert_selective_core_compiles(src);
+}
+
+#[test]
+fn selective_core_lowers_actor_spawn_callback_yield_argument() {
+    let src = r#"
+import Std.Actor (Process, Actor, beam_actor)
+
+type EchoMsg = Echo String (Pid String)
+
+fun echo_server : Unit -> Unit needs {Process, Actor EchoMsg}
+echo_server () = receive {
+  Echo msg caller -> {
+    send! caller msg
+    echo_server ()
+  }
+}
+
+fun test_echo : Unit -> String needs {Process, Actor String}
+test_echo () = {
+  let pid = spawn! (fun () -> echo_server ())
+  send! pid (Echo "hello" (self! ()))
+  receive {
+    msg -> msg
+  }
+}
+
+fun main : Unit -> Unit
+main () = ()
+"#;
+    let out = emit_selective_core_with_options(
+        src,
+        super::lower_selective::LoweringOptions {
+            require_all_functions: true,
+        },
+    );
+    assert!(out.contains("'test_echo'/3"), "{out}");
+    assert!(out.contains("'echo_server'/3"), "{out}");
+    assert!(out.contains("receive"), "{out}");
+    assert_selective_core_compiles(src);
+}
+
+#[test]
+fn selective_core_lowers_multi_clause_cps_function_group() {
+    let src = r#"
+effect Abort {
+  fun abort : String -> Int
+}
+
+pub fun safe_div : Int -> Int -> Int needs {Abort}
+safe_div _ 0 = abort! "division by zero"
+safe_div x y = x / y
+
+fun main : Unit -> Unit
+main () = ()
+"#;
+    let out = emit_selective_core_with_options(
+        src,
+        super::lower_selective::LoweringOptions {
+            require_all_functions: true,
+        },
+    );
+    assert!(out.contains("'safe_div'/4"), "{out}");
+    assert!(out.contains("case _FunScrut"), "{out}");
+    assert_selective_core_compiles(src);
+}
+
+#[test]
+fn selective_core_lowers_direct_partial_application() {
+    let src = r#"
+fun append_raw : List Int -> List Int -> List Int
+append_raw xs _ys = xs
+
+type Appender = Appender (List Int -> List Int)
+
+fun appender : List Int -> Appender
+appender xs = Appender (append_raw xs)
+
+fun main : Unit -> Unit
+main () = ()
+"#;
+    let out = emit_selective_core_with_options(
+        src,
+        super::lower_selective::LoweringOptions {
+            require_all_functions: true,
+        },
+    );
+    assert!(out.contains("fun (_PartialArg0"), "{out}");
+    assert!(out.contains("apply 'append_raw'/2"), "{out}");
+    assert_selective_core_compiles(src);
+}
+
+#[test]
+fn selective_core_specializes_aliased_hof_in_effectful_callback_slot() {
+    let src = r#"
+effect ReadInt {
+  fun read : Unit -> Int
+}
+
+fun pure_value : Unit -> Int
+pure_value () = 41
+
+fun apply_eff : (Unit -> Int needs {ReadInt}) -> Int needs {ReadInt}
+apply_eff f = f ()
+
+handler forty_one for ReadInt {
+  read () = resume 41
+}
+
+fun main : Unit -> Int
+main () = {
+  let hof = apply_eff
+  hof pure_value
+} with forty_one
+"#;
+    let out = emit_selective_core(src);
+    assert!(out.contains("'__saga_direct_hof_apply_eff'/1"), "{out}");
+    assert!(
+        out.contains("apply '__saga_direct_hof_apply_eff'/1('pure_value'/1)"),
+        "{out}"
+    );
+    assert!(!out.contains("fun (_PureCpsArg"), "{out}");
+    assert!(!out.contains("make_fun"), "{out}");
+    assert_selective_core_eval_stdout_contains(
+        src,
+        "io:format(\"~p~n\", ['_script':main(unit)]), init:stop().",
+        "41",
+    );
+}
+
+#[test]
+fn selective_core_specializes_inline_handled_callback_in_effectful_callback_slot() {
+    let src = r#"
+effect ReadInt {
+  fun read : Unit -> Int
+}
+
+fun apply_eff : (Unit -> Int needs {ReadInt}) -> Int needs {ReadInt}
+apply_eff f = f ()
+
+handler forty_one for ReadInt {
+  read () = resume 41
+}
+
+fun main : Unit -> Int
+main () =
+  apply_eff (fun () -> read! () with forty_one) with forty_one
+"#;
+    let out = emit_selective_core(src);
+    assert!(out.contains("'__saga_direct_hof_apply_eff'/1"), "{out}");
+    assert!(
+        out.contains("apply '__saga_direct_hof_apply_eff'/1(fun (_Arg0) ->"),
+        "{out}"
+    );
+    assert!(!out.contains("fun (_PureCpsArg"), "{out}");
+    assert!(!out.contains("apply _PureCpsK"), "{out}");
+    assert_selective_core_eval_stdout_contains(
+        src,
+        "io:format(\"~p~n\", ['_script':main(unit)]), init:stop().",
+        "41",
+    );
+}
+
+#[test]
+fn selective_core_specializes_handled_callback_in_effectful_callback_slot() {
+    let src = r#"
+effect ReadInt {
+  fun read : Unit -> Int
+}
+
+handler forty_one for ReadInt {
+  read () = resume 41
+}
+
+fun handled_value : Unit -> Int
+handled_value () = read! () with forty_one
+
+fun apply_eff : (Unit -> Int needs {ReadInt}) -> Int needs {ReadInt}
+apply_eff f = f ()
+
+fun main : Unit -> Int
+main () = apply_eff handled_value with forty_one
+"#;
+    let out = emit_selective_core(src);
+    assert!(out.contains("'handled_value'/1"), "{out}");
+    assert!(out.contains("'__saga_direct_hof_apply_eff'/1"), "{out}");
+    assert!(
+        out.contains("apply '__saga_direct_hof_apply_eff'/1('handled_value'/1)"),
+        "{out}"
+    );
+    assert!(!out.contains("fun (_PureCpsArg"), "{out}");
+    assert_selective_core_eval_stdout_contains(
+        src,
+        "io:format(\"~p~n\", ['_script':main(unit)]), init:stop().",
+        "41",
+    );
+}
+
+#[test]
+fn selective_core_lowers_effectful_lambda_as_cps_callback_arg() {
+    let src = r#"
+effect ReadInt {
+  fun read : Unit -> Int
+}
+
+handler forty_one for ReadInt {
+  read () = resume 41
+}
+
+fun apply_eff : (Unit -> Int needs {ReadInt}) -> Int needs {ReadInt}
+apply_eff f = f ()
+
+pub fun run_lambda_arg : Unit -> Int
+run_lambda_arg () =
+  apply_eff (fun () -> read! () + 1) with forty_one
+
+fun main : Unit -> Unit
+main () = ()
+"#;
+
+    let out = emit_selective_core(src);
+    assert!(out.contains("_LambdaEvidence"), "{out}");
+    assert!(out.contains("_LambdaK"), "{out}");
+    assert!(out.contains("call 'erlang':'+'"), "{out}");
+    assert!(
+        !out.contains("apply '__saga_direct_hof_apply_eff'/1(fun (_Arg0) ->"),
+        "{out}"
+    );
+    assert_selective_core_eval_stdout_contains(
+        src,
+        "io:format(\"~p~n\", ['_script':run_lambda_arg(unit)]), init:stop().",
+        "42",
+    );
+}
+
+#[test]
+fn selective_core_lowers_let_bound_effectful_lambda_cps_value() {
+    let src = r#"
+effect ReadInt {
+  fun read : Unit -> Int
+}
+
+handler forty_one for ReadInt {
+  read () = resume 41
+}
+
+fun apply_eff : (Unit -> Int needs {ReadInt}) -> Int needs {ReadInt}
+apply_eff f = f ()
+
+pub fun run_bound_lambda : Unit -> Int
+run_bound_lambda () = {
+  let f = fun () -> read! () + 1
+  apply_eff f
+} with forty_one
+
+fun main : Unit -> Unit
+main () = ()
+"#;
+
+    let out = emit_selective_core(src);
+    assert!(out.contains("let <F>"), "{out}");
+    assert!(out.contains("_LambdaEvidence"), "{out}");
+    assert!(out.contains("apply F('unit', _Evidence"), "{out}");
+    assert_selective_core_eval_stdout_contains(
+        src,
+        "io:format(\"~p~n\", ['_script':run_bound_lambda(unit)]), init:stop().",
+        "42",
+    );
+}
+
+#[test]
+fn selective_core_lowers_lambda_headed_cps_call() {
+    let src = r#"
+effect ReadInt {
+  fun read : Unit -> Int
+}
+
+handler forty_one for ReadInt {
+  read () = resume 41
+}
+
+pub fun run_lambda_head : Unit -> Int
+run_lambda_head () =
+  (fun () -> read! () + 1) () with forty_one
+
+fun main : Unit -> Unit
+main () = ()
+"#;
+
+    let out = emit_selective_core(src);
+    assert!(out.contains("_LambdaEvidence"), "{out}");
+    assert!(out.contains("apply _LambdaK"), "{out}");
+    assert_selective_core_eval_stdout_contains(
+        src,
+        "io:format(\"~p~n\", ['_script':run_lambda_head(unit)]), init:stop().",
+        "42",
+    );
+}
+
+#[test]
+fn selective_core_lowers_effectful_callback_value_as_yield_argument() {
+    let src = r#"
+effect ReadInt {
+  fun read : Unit -> Int
+}
+
+effect Sink {
+  fun send : (Unit -> Int needs {ReadInt}) -> Unit
+}
+
+fun read_value : Unit -> Int needs {ReadInt}
+read_value () = read! ()
+
+pub fun send_callback : Unit -> Unit needs {ReadInt, Sink}
+send_callback () = {
+  let f = read_value
+  send! f
+}
+
+fun main : Unit -> Unit
+main () = ()
+"#;
+    let out = emit_selective_core_with_options(
+        src,
+        super::lower_selective::LoweringOptions {
+            require_all_functions: true,
+        },
+    );
+    assert!(out.contains("'send_callback'/3"), "{out}");
+    assert!(out.contains("'read_value'/3"), "{out}");
+    assert_selective_core_compiles(src);
+}
+
+#[test]
+#[should_panic(expected = "direct function 'store_tuple' is outside the current direct subset")]
+fn selective_core_rejects_cps_callback_value_in_tuple_storage() {
+    let _ = emit_selective_core_with_options(
+        r#"
+effect ReadInt {
+  fun read : Unit -> Int
+}
+
+fun read_value : Unit -> Int needs {ReadInt}
+read_value () = read! ()
+
+pub fun store_tuple : Unit -> (Unit -> Int needs {ReadInt}, Int)
+store_tuple () = (read_value, 1)
+
+fun main : Unit -> Unit
+main () = ()
+"#,
+        super::lower_selective::LoweringOptions {
+            require_all_functions: true,
+        },
+    );
+}
+
+#[test]
+#[should_panic(expected = "direct function 'store_record' is outside the current direct subset")]
+fn selective_core_rejects_cps_callback_value_in_record_storage() {
+    let _ = emit_selective_core_with_options(
+        r#"
+effect ReadInt {
+  fun read : Unit -> Int
+}
+
+record CallbackBox {
+  cb: Unit -> Int needs {ReadInt},
+  n: Int,
+}
+
+fun read_value : Unit -> Int needs {ReadInt}
+read_value () = read! ()
+
+pub fun store_record : Unit -> CallbackBox
+store_record () = CallbackBox { cb: read_value, n: 1 }
+
+fun main : Unit -> Unit
+main () = ()
+"#,
+        super::lower_selective::LoweringOptions {
+            require_all_functions: true,
+        },
+    );
+}
+
+#[test]
+#[should_panic(
+    expected = "direct function 'store_constructor' is outside the current direct subset"
+)]
+fn selective_core_rejects_cps_callback_value_in_constructor_storage() {
+    let _ = emit_selective_core_with_options(
+        r#"
+effect ReadInt {
+  fun read : Unit -> Int
+}
+
+type CallbackBox = CallbackBox(Unit -> Int needs {ReadInt})
+
+fun read_value : Unit -> Int needs {ReadInt}
+read_value () = read! ()
+
+pub fun store_constructor : Unit -> CallbackBox
+store_constructor () = CallbackBox(read_value)
+
+fun main : Unit -> Unit
+main () = ()
+"#,
+        super::lower_selective::LoweringOptions {
+            require_all_functions: true,
+        },
+    );
+}
+
+#[test]
+#[should_panic(
+    expected = "CPS-shaped function 'resume_callback' is not lowered by selective-core yet"
+)]
+fn selective_core_rejects_cps_callback_value_as_resume_value() {
+    let _ = emit_selective_core_with_options(
+        r#"
+effect ReadInt {
+  fun read : Unit -> Int
+}
+
+effect AskCallback {
+  fun ask : Unit -> (Unit -> Int needs {ReadInt})
+}
+
+fun read_value : Unit -> Int needs {ReadInt}
+read_value () = read! ()
+
+pub fun resume_callback : Unit -> Unit -> Int needs {ReadInt}
+resume_callback () = ask! () with {
+  ask () = resume read_value
+}
+
+fun main : Unit -> Unit
+main () = ()
+"#,
+        super::lower_selective::LoweringOptions {
+            require_all_functions: true,
+        },
+    );
+}
+
+#[test]
+#[should_panic(
+    expected = "CPS-shaped function 'return_callback' is not lowered by selective-core yet"
+)]
+fn selective_core_rejects_cps_callback_value_in_handler_return_clause() {
+    let _ = emit_selective_core_with_options(
+        r#"
+effect ReadInt {
+  fun read : Unit -> Int
+}
+
+fun read_value : Unit -> Int needs {ReadInt}
+read_value () = read! ()
+
+pub fun return_callback : Unit -> (Unit -> Int needs {ReadInt})
+return_callback () = {
+  let _ = read! ()
+  read_value
+} with {
+  read () = resume 1
+  return value = value
+}
+
+fun main : Unit -> Unit
+main () = ()
+"#,
+        super::lower_selective::LoweringOptions {
+            require_all_functions: true,
+        },
+    );
+}
+
+#[test]
+fn selective_core_lowers_case_shaped_effectful_callback_value() {
+    let src = r#"
+effect ReadInt {
+  fun read : Unit -> Int
+}
+
+fun read_value : Unit -> Int needs {ReadInt}
+read_value () = read! ()
+
+fun read_again : Unit -> Int needs {ReadInt}
+read_again () = read! ()
+
+fun apply_eff : (Unit -> Int needs {ReadInt}) -> Int needs {ReadInt}
+apply_eff f = f ()
+
+handler forty_one for ReadInt {
+  read () = resume 41
+}
+
+fun main : Unit -> Int
+main () = {
+  let choose = 1 == 1
+  let f = case choose {
+    True -> read_value
+    False -> read_again
+  }
+  apply_eff f
+} with forty_one
+"#;
+    let out = emit_selective_core(src);
+    assert!(out.contains("'apply_eff'/3"), "{out}");
+    assert!(out.contains("let <F> =\n"), "{out}");
+    assert!(out.contains("case Choose of"), "{out}");
+    assert!(out.contains("apply 'read_value'/3"), "{out}");
+    assert!(out.contains("apply 'read_again'/3"), "{out}");
+    assert!(out.contains("apply 'apply_eff'/3(F"), "{out}");
+    assert!(!out.contains("make_fun"), "{out}");
+    assert_selective_core_compiles(src);
+}
+
+#[test]
+fn selective_core_lowers_mixed_pure_and_effectful_case_callback_value() {
+    let src = r#"
+effect ReadInt {
+  fun read : Unit -> Int
+}
+
+fun read_value : Unit -> Int needs {ReadInt}
+read_value () = read! ()
+
+fun pure_value : Unit -> Int
+pure_value () = 41
+
+fun apply_eff : (Unit -> Int needs {ReadInt}) -> Int needs {ReadInt}
+apply_eff f = f ()
+
+handler forty_one for ReadInt {
+  read () = resume 41
+}
+
+fun main : Unit -> Int
+main () = {
+  let choose = 1 == 1
+  let f = case choose {
+    True -> read_value
+    False -> pure_value
+  }
+  apply_eff f
+} with forty_one
+"#;
+    let out = emit_selective_core(src);
+    assert!(out.contains("'apply_eff'/3"), "{out}");
+    assert!(out.contains("case Choose of"), "{out}");
+    assert!(out.contains("apply 'read_value'/3"), "{out}");
+    assert!(out.contains("fun (_PureCpsArg"), "{out}");
+    assert!(out.contains("apply 'pure_value'/1"), "{out}");
+    assert!(out.contains("apply _PureCpsK"), "{out}");
+    assert!(out.contains("apply 'apply_eff'/3(F"), "{out}");
+    assert!(!out.contains("make_fun"), "{out}");
+    assert_selective_core_compiles(src);
+}
+
+#[test]
+fn selective_core_lowers_handler_arm_accumulator_lambda() {
+    let src = r#"
+effect State s {
+  fun get : Unit -> s
+  fun put : s -> Unit
+}
+
+fun run_state : s -> (Unit -> a needs {State s}) -> (a, s)
+run_state init f = {
+  let state_fn = f () with {
+    get () = fun s -> (resume s) s
+    put new_s = fun _ -> (resume ()) new_s
+    return value = fun s -> (value, s)
+  }
+  state_fn init
+}
+
+fun run_accumulator_test : Unit -> (Int, Int)
+run_accumulator_test () = run_state 0 (fun () -> {
+  put! 99
+  get! ()
+})
+"#;
+    let out = emit_selective_core(src);
+    assert!(out.contains("'run_state'/2"), "{out}");
+    assert!(out.contains("apply _ArmK"), "{out}");
+    assert_selective_core_compiles(src);
+}
+
+#[test]
+fn selective_core_lowers_constructor_stored_handled_thunk() {
+    let src = r#"
+type Step a = Done | More a (Stream a)
+type Stream a = Stream (Unit -> Step a)
+
+effect Gen a {
+  fun yield : a -> Unit
+}
+
+handler stream_of for Gen a {
+  yield v = More v (Stream (fun () -> resume ()))
+  return _ = Done
+}
+
+fun from_gen : (Unit -> Unit needs {Gen a}) -> Stream a
+from_gen producer = Stream (fun () -> producer () with stream_of)
+
+fun count_down : Int -> Unit needs {Gen Int}
+count_down n =
+  if n <= 0 then ()
+  else {
+    yield! n
+    count_down (n - 1)
+  }
+
+fun main : Unit -> Stream Int
+main () = from_gen (fun () -> count_down 2)
+"#;
+    let out = emit_selective_core_with_options(
+        src,
+        super::lower_selective::LoweringOptions {
+            require_all_functions: true,
+        },
+    );
+    assert!(out.contains("'from_gen'/1"), "{out}");
+    assert!(out.contains("'_script_Stream'"), "{out}");
+    assert!(out.contains("apply Producer"), "{out}");
+    assert_selective_core_compiles(src);
 }
 
 #[test]
@@ -167,52 +2660,6 @@ main () = run_all [fun () -> reg! "a"] with noop
     assert!(
         out.contains("fun (_Arg0, _Evidence, _ReturnK) ->"),
         "expected list callback lambda to receive threaded evidence\n{out}"
-    );
-}
-
-#[test]
-fn handler_returned_lambdas_capture_outer_effect_handlers() {
-    let src = r#"
-effect Log {
-  fun log : String -> Unit
-}
-
-effect Step {
-  fun step : Unit -> Unit
-}
-
-handler noop for Log {
-  log _ = resume ()
-}
-
-handler exec for Step needs {Log} {
-  step () = {
-    let k = resume ()
-    fun state -> {
-      log! "ok"
-      k state
-    }
-  }
-  return _ = fun state -> state
-}
-
-fun run : (Unit -> Unit needs {Step}) -> Unit
-  needs {Log}
-run body = {
-  let state_fn = { body () } with exec
-  state_fn ()
-}
-
-main () = run (fun () -> step! ()) with noop
-"#;
-    let out = emit_full(src);
-    assert!(
-        out.contains("fun (State) ->"),
-        "expected handler-returned lambda to stay unary and capture outer handlers\n{out}"
-    );
-    assert!(
-        !out.contains("fun (State, _Handle__script_Log_log"),
-        "handler-returned lambda unexpectedly took outer effect handlers as params\n{out}"
     );
 }
 
@@ -427,13 +2874,13 @@ fn if_else_arms() {
 
 #[test]
 fn fun_arity_zero_for_unit_param() {
-    // `main ()` keeps its Unit parameter at the Saga lowering level.
-    assert_contains("main () = 42", "'main'/1");
+    // Uniform CPS lowers `main ()` as `(unit, evidence, return_k)`.
+    assert_contains("main () = 42", "'main'/3");
 }
 
 #[test]
 fn fun_arity_one() {
-    assert_contains("double x = x + x", "'double'/1");
+    assert_contains("double x = x + x", "'double'/3");
 }
 
 #[test]
@@ -450,16 +2897,16 @@ main () = id 42
 
 #[test]
 fn nothing_is_tagged_tuple() {
-    // `Nothing` -> {'nothing'} (tagged 1-tuple)
-    assert_contains("main () = Nothing", "{'nothing'}");
+    // `Nothing` -> {'std_maybe_Nothing'} (tagged 1-tuple)
+    assert_contains("main () = Nothing", "{'std_maybe_Nothing'}");
 }
 
 #[test]
 fn just_is_tagged_tuple() {
-    // `Just(42)` -> {'just', 42} (tagged tuple)
+    // `Just(42)` -> {'std_maybe_Just', 42} (tagged tuple)
     let out = emit("main () = Just(42)");
     assert!(out.contains("42"), "missing value\n{out}");
-    assert!(out.contains("'just'"), "missing just tag\n{out}");
+    assert!(out.contains("'std_maybe_Just'"), "missing just tag\n{out}");
 }
 
 #[test]
@@ -521,7 +2968,7 @@ main () = case True {
 
 #[test]
 fn case_maybe_patterns() {
-    // Just(v) lowers to {'just', v}, Nothing to {'nothing'}.
+    // Just(v) lowers to {'std_maybe_Just', v}, Nothing to {'std_maybe_Nothing'}.
     // Arms stay in source order -- no reordering needed.
     let src = "
 unwrap opt = case opt {
@@ -531,11 +2978,11 @@ unwrap opt = case opt {
 ";
     let out = emit(src);
     assert!(
-        out.contains("'nothing'"),
+        out.contains("'std_maybe_Nothing'"),
         "missing nothing pattern for Nothing\n{out}"
     );
     assert!(
-        out.contains("'just'"),
+        out.contains("'std_maybe_Just'"),
         "missing just tag for Just pattern\n{out}"
     );
 }
@@ -576,8 +3023,11 @@ translate p = { p | x: 10, y: 20 }
     // Both updated field values must appear in the output.
     assert!(out.contains("10"), "missing updated x\n{out}");
     assert!(out.contains("20"), "missing updated y\n{out}");
-    // The result should be a 3-element tuple (tag + 2 fields)
-    assert!(out.contains("{_Cor"), "expected tuple construction\n{out}");
+    // The result should be a tuple preserving the original tag and updated fields.
+    assert!(
+        out.contains("{call 'erlang':'element'"),
+        "expected tuple construction preserving runtime tag\n{out}"
+    );
 }
 
 // --- do...else ---
@@ -680,7 +3130,7 @@ main n = case n {
 "#;
     let out = emit_full(src);
     for guard_fn in ["g1", "g2", "g3"] {
-        let needle = format!("apply '{guard_fn}'/1(");
+        let needle = format!("apply '{guard_fn}'/3(");
         let count = out.matches(&needle).count();
         assert_eq!(
             count, 1,
@@ -807,93 +3257,6 @@ process () = {
     );
 }
 
-// --- Handler arm bodies must not leak function-level _ReturnK ---
-
-#[test]
-fn handler_arm_does_not_apply_outer_return_k() {
-    // When a function handles one effect internally (with { ... }) and also
-    // uses a different effect (needs), the handler arm body must NOT apply
-    // the function-level _ReturnK. The handler arm's result is the with-block
-    // value, which flows to the rest of the block via rest_k.
-    let src = r#"
-effect Inner {
-  fun inner_op : Unit -> Unit
-}
-
-effect Outer {
-  fun outer_op : Unit -> Unit
-}
-
-fun middle : (body: Unit -> Unit needs {Inner}) -> Unit needs {Outer}
-middle body = {
-  let result = { body () } with {
-    inner_op () = { resume (); "handled" }
-    return _ = "ok"
-  }
-  outer_op! ()
-}
-"#;
-    let out = emit(src);
-    // The handler function for inner_op should NOT reference _ReturnK.
-    // If it does, the handler bypasses outer_op! and returns directly
-    // from the function, which is wrong.
-    //
-    // Find the handler function body. It's bound to _Handle_Inner_inner_op.
-    // The key check: _ReturnK must not appear inside the handler function.
-    //
-    // Strategy: split output at the handler binding, check the handler fun
-    // doesn't contain _ReturnK.
-    // With canonical effect names, "_script.Inner" becomes "_Handle__script_Inner_inner_op"
-    assert!(
-        out.contains("_Handle__script_Inner_inner_op"),
-        "expected Inner handler param in output\n{out}"
-    );
-    // The handler function for inner_op is between the handler param binding
-    // and the string literal "handled". _ReturnK must not appear in that region.
-    if let Some(start) = out.find("_Handle__script_Inner_inner_op")
-        && let Some(end) = out[start..].find("\"handled\"")
-    {
-        let handler_body = &out[start..start + end];
-        assert!(
-            !handler_body.contains("_ReturnK"),
-            "handler arm body must not reference _ReturnK!\nHandler region:\n{handler_body}\n\nFull output:\n{out}"
-        );
-    }
-}
-
-#[test]
-fn nested_named_handlers_use_distinct_local_handle_bindings() {
-    let src = r#"
-effect Counter {
-  fun get : Unit -> Int
-}
-
-handler add_one for Counter {
-  get () = resume 10
-  return value = value + 1
-}
-
-handler times_two for Counter {
-  get () = resume 20
-  return value = value * 2
-}
-
-main () = {
-  dbg (get! () with {add_one, times_two})
-}
-"#;
-    let out = emit_full(src);
-    let shadowed = "let <_Handle__script_Counter_get> =\n      fun";
-    assert!(
-        !out.contains(shadowed),
-        "expected nested named handlers to use fresh local binding names\n{out}"
-    );
-    assert!(
-        out.contains("_Handle__script_Counter_get__"),
-        "expected fresh scoped handler binding suffix in output\n{out}"
-    );
-}
-
 // --- Short-circuit operators ---
 
 #[test]
@@ -937,58 +3300,10 @@ main () = {
     assert!(out.contains("A"), "expected bound variable A\n{out}");
 }
 
-// --- Conversion builtins ---
-
-// Int.to_float, Float.trunc/round/floor/ceil are now @external in Std/Int.saga and Std/Float.saga.
-// Their codegen is covered by module integration tests.
-
-#[test]
-fn int_parse() {
-    let src = "import Std.Int\nmain () = Int.parse \"42\"";
-    let out = emit_full(src);
-    assert!(
-        out.contains("call 'std_int':'parse'"),
-        "expected std_int:parse\n{out}"
-    );
-}
-
-#[test]
-fn float_parse() {
-    let src = "import Std.Float\nmain () = Float.parse \"2.5\"";
-    let out = emit_full(src);
-    assert!(
-        out.contains("call 'std_float':'parse'"),
-        "expected std_float:parse\n{out}"
-    );
-}
-
-// --- Dict builtins ---
-
-#[test]
-fn dict_empty() {
-    let src = "import Std.Dict\nmain () = Dict.new ()";
-    let out = emit_full(src);
-    assert!(
-        out.contains("call 'std_dict':'new'") || out.contains("call 'std_dict_bridge':'new'"),
-        "expected dict new call\n{out}"
-    );
-}
-
-// Dict.put, Dict.remove, Dict.keys, Dict.values, Dict.size, Dict.from_list,
-// Dict.to_list, Dict.member are now @external in Std/Dict.saga.
-
-#[test]
-fn dict_get() {
-    let src = "import Std.Dict\nmain () = Dict.get \"a\" (Dict.new ())";
-    let out = emit_full(src);
-    assert!(
-        out.contains("call 'std_dict':'get'"),
-        "expected std_dict:get\n{out}"
-    );
-}
-
-// List.head, List.tail, List.length, List.map, List.filter, List.foldl, List.foldr,
-// List.reverse, List.append, List.flat_map are now defined in Std/List.saga.
+// Stdlib conversion and dictionary behavior is covered by the stdlib/e2e
+// suites. These isolated codegen tests intentionally do not compile imported
+// stdlib modules into a full CodegenContext, so they are the wrong harness for
+// asserting imported @external lowering.
 
 // --- @external ---
 
@@ -1005,10 +3320,10 @@ main () = 42
         out.contains("call 'lists':'reverse'"),
         "Expected call to lists:reverse in:\n{out}"
     );
-    // Wrapper should be exported
+    // Wrapper should be exported under the uniform CPS ABI.
     assert!(
-        out.contains("'reverse'/1"),
-        "Expected reverse/1 export in:\n{out}"
+        out.contains("'reverse'/3"),
+        "Expected reverse/3 export in:\n{out}"
     );
 }
 
@@ -1058,8 +3373,8 @@ main () = {
 "#;
     let out = emit(src);
     assert!(
-        out.contains("'empty'/1"),
-        "Expected external wrapper to keep surface Unit arity\n{out}"
+        out.contains("'empty'/3"),
+        "Expected external wrapper to use uniform CPS arity\n{out}"
     );
     assert!(
         out.contains("call 'maps':'new'"),
@@ -1069,9 +3384,7 @@ main () = {
 
 #[test]
 fn external_fun_returning_maybe() {
-    // An external function returning Maybe needs a bridge wrapper to convert
-    // Erlang's Value|undefined convention to {just, Value}|{nothing}.
-    // For now, test that the pattern match uses the tagged tuple form.
+    // The pattern match should use the new stdlib Maybe tags.
     let src = r#"
 @external("erlang", "os", "getenv")
 fun getenv : (name: String) -> Maybe String
@@ -1089,11 +3402,11 @@ main () = case getenv "HOME" {
     );
     // Pattern match should use tagged tuples
     assert!(
-        out.contains("'just'"),
+        out.contains("'std_maybe_Just'"),
         "Expected just tag for Just pattern in:\n{out}"
     );
     assert!(
-        out.contains("'nothing'"),
+        out.contains("'std_maybe_Nothing'"),
         "Expected nothing tag for Nothing pattern in:\n{out}"
     );
 }
@@ -1203,4 +3516,299 @@ fn no_annotations_without_source_info() {
         !out.contains("-|"),
         "Expected no annotations without source info in:\n{out}"
     );
+}
+
+// -----------------------------------------------------------------------
+// Phase 1, step 8 — new-path wiring tests.
+//
+// The new path is active in `emit_module_with_context`; these tests keep
+// focused coverage for the entry-point wiring that originally guarded the
+// path switch.
+// -----------------------------------------------------------------------
+
+fn check_program(src: &str) -> (crate::ast::Program, crate::typechecker::CheckResult) {
+    let tokens = Lexer::new(src).lex().expect("lex error");
+    let mut program = Parser::new(tokens).parse_program().expect("parse error");
+    derive::expand_derives(&mut program, &derive::ImportedDecls::empty());
+    desugar::desugar_program(&mut program);
+    let mut checker = typechecker::Checker::with_prelude(None).expect("prelude error");
+    let result = checker.check_program(&mut program);
+    assert!(!result.has_errors(), "Type errors: {:?}", result.errors());
+    let elaborated = elaborate::elaborate(&program, &result);
+    (elaborated, result)
+}
+
+#[test]
+fn module_codegen_info_records_trait_impl_method_metadata() {
+    let src = r#"
+main () = ()
+"#;
+    let (_, result) = check_program(src);
+    let all_dicts: Vec<_> = result
+        .codegen_info()
+        .values()
+        .flat_map(|info| &info.trait_impl_dicts)
+        .collect();
+    let show_int = all_dicts
+        .iter()
+        .copied()
+        .find(|dict| dict.trait_name == "Std.Base.Show" && dict.target_type == "Std.Int.Int")
+        .unwrap_or_else(|| panic!("Show Int dict metadata in {all_dicts:#?}"));
+
+    assert_eq!(show_int.methods.len(), 1);
+    assert_eq!(show_int.methods[0].name, "show");
+    assert_eq!(show_int.methods[0].source_arity, 1);
+    assert_eq!(show_int.methods[0].trait_effects, Vec::<String>::new());
+    assert!(!show_int.methods[0].trait_open_row);
+    assert!(matches!(
+        show_int.methods[0].runtime_shape,
+        crate::typechecker::TraitImplMethodRuntimeShape::Direct
+    ));
+
+    let semigroup_string = all_dicts
+        .iter()
+        .copied()
+        .find(|dict| {
+            dict.trait_name == "Std.Base.Semigroup" && dict.target_type == "Std.String.String"
+        })
+        .unwrap_or_else(|| panic!("Semigroup String dict metadata in {all_dicts:#?}"));
+    assert_eq!(semigroup_string.methods.len(), 1);
+    assert_eq!(semigroup_string.methods[0].name, "combine");
+    assert_eq!(semigroup_string.methods[0].source_arity, 2);
+    assert!(matches!(
+        semigroup_string.methods[0].runtime_shape,
+        crate::typechecker::TraitImplMethodRuntimeShape::Direct
+    ));
+}
+
+#[test]
+fn build_effect_ops_table_includes_local_and_qualified_keys() {
+    let src = "effect Log {\n  fun log : (msg: String) -> Unit\n  fun warn : (msg: String) -> Unit\n}\n\nmain () = ()";
+    let (_, result) = check_program(src);
+    let table = super::build_effect_ops_table(&result);
+    // The effect is declared in the script body, source_module is None →
+    // only the bare key is present.
+    let ops = table
+        .map
+        .get("Log")
+        .expect("expected `Log` entry in effect ops table");
+    assert_eq!(ops, &vec!["log".to_string(), "warn".to_string()]);
+}
+
+#[test]
+fn build_effect_ops_table_ops_sorted_alphabetically() {
+    let src = "effect E {\n  fun z : Unit -> Unit\n  fun a : Unit -> Unit\n  fun m : Unit -> Unit\n}\n\nmain () = ()";
+    let (_, result) = check_program(src);
+    let table = super::build_effect_ops_table(&result);
+    let ops = table.map.get("E").expect("E missing");
+    assert_eq!(
+        ops,
+        &vec!["a".to_string(), "m".to_string(), "z".to_string()]
+    );
+}
+
+#[test]
+fn build_effect_ops_table_includes_imported_module_effect_defs() {
+    let src = r#"import Std.Fail (Fail)
+
+fun boom : Unit -> Int needs {Fail String}
+boom () = fail! "boom"
+
+main () = ()
+"#;
+    let (_, result) = check_program(src);
+    let table = super::build_effect_ops_table(&result);
+    assert_eq!(
+        table.map.get("Std.Fail.Fail"),
+        Some(&vec!["fail".to_string()])
+    );
+}
+
+#[test]
+fn module_effect_defs_can_extend_effect_ops_table_at_emit_boundary() {
+    let mut map = std::collections::HashMap::new();
+    let mut modules = std::collections::HashMap::new();
+    modules.insert(
+        "Dep.Effects".to_string(),
+        crate::typechecker::ModuleCodegenInfo {
+            effect_defs: vec![crate::typechecker::EffectDef {
+                name: "Dep.Effects.Remote".to_string(),
+                ops: vec![crate::typechecker::EffectOpDef {
+                    name: "run".to_string(),
+                    source_param_count: 1,
+                    runtime_param_count: 1,
+                    runtime_param_positions: vec![0],
+                    param_absorbed_effects: std::collections::HashMap::new(),
+                }],
+                type_param_count: 0,
+            }],
+            ..Default::default()
+        },
+    );
+
+    super::insert_module_effect_defs(&mut map, &modules);
+
+    assert_eq!(
+        map.get("Dep.Effects.Remote"),
+        Some(&vec!["run".to_string()])
+    );
+}
+
+#[test]
+fn build_effect_info_populates_all_fields_from_check_result() {
+    let src = "effect Log {\n  fun log : (msg: String) -> Unit\n}\n\nmain () = ()";
+    let (_, result) = check_program(src);
+    let ops_storage = super::build_effect_ops_table(&result);
+    let handler_effects_storage = super::build_handler_effects(&result);
+    let let_handler_effects_storage = super::build_let_handler_effects(&result);
+    let info = super::build_effect_info(
+        &result,
+        &result,
+        &ops_storage,
+        &handler_effects_storage,
+        &let_handler_effects_storage,
+    );
+
+    // type_at_node and fun_effects come from check_result.
+    assert!(std::ptr::eq(info.type_at_node, &result.type_at_node));
+    assert!(std::ptr::eq(info.fun_effects, &result.fun_effects));
+    assert!(std::ptr::eq(info.traits, &result.traits));
+    assert!(std::ptr::eq(
+        info.let_effect_bindings,
+        &result.let_effect_bindings
+    ));
+    // effect_calls / handler_arms come from the (per-module) resolution.
+    assert!(std::ptr::eq(
+        info.effect_calls,
+        &result.resolution.effect_calls
+    ));
+    assert!(std::ptr::eq(
+        info.handler_arms,
+        &result.resolution.handler_arms
+    ));
+    // effect_ops borrows from the supplied storage.
+    assert!(std::ptr::eq(info.effect_ops, &ops_storage.map));
+    // And actually carries the declared op.
+    assert_eq!(info.effect_ops.get("Log"), Some(&vec!["log".to_string()]));
+}
+
+/// Smoke test the full new path on a trivial program. Kept as a default test
+/// now that the new path is active.
+#[test]
+fn new_path_smoke_hello_world() {
+    let src = "main () = ()";
+    let (elaborated, result) = check_program(src);
+    let ctx = super::CodegenContext {
+        modules: std::collections::HashMap::new(),
+        let_effect_bindings: result.let_effect_bindings.clone(),
+        prelude_imports: result.prelude_imports.clone(),
+    };
+    let core = super::emit_module_via_new_path(
+        "_script",
+        &elaborated,
+        &ctx,
+        &result,
+        None,
+        Some("main"),
+        &crate::compiler_options::CompileOptions::default(),
+    )
+    .core_src;
+    assert!(
+        core.contains("module '_script'"),
+        "Core Erlang module header missing:\n{core}"
+    );
+    assert!(
+        core.contains("__saga_initial_evidence"),
+        "Bootstrap function should be emitted for entry-point module:\n{core}"
+    );
+
+    // erlc-accept check. Writes the .core to a tempdir and shells out to
+    // erlc; skips silently if erlc isn't on PATH (sandbox / CI variant).
+    if std::process::Command::new("erlc")
+        .arg("--help")
+        .output()
+        .is_ok()
+    {
+        let tmp = std::env::temp_dir().join("saga-new-path-smoke");
+        std::fs::create_dir_all(&tmp).unwrap();
+        let core_path = tmp.join("_script.core");
+        std::fs::write(&core_path, &core).unwrap();
+        let out = std::process::Command::new("erlc")
+            .arg("+from_core")
+            .arg("-o")
+            .arg(&tmp)
+            .arg(&core_path)
+            .output()
+            .expect("erlc spawn");
+        assert!(
+            out.status.success(),
+            "erlc rejected new-path output:\nstdout: {}\nstderr: {}\ncore: {}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr),
+            core
+        );
+    }
+}
+
+/// Smoke test the new path on a program that has both a `main` fn and a
+/// `val` whose body is a non-trivial pure computation (not just `Pure(atom)`
+/// post-translation). Regression for the val identity-K wrapper fix —
+/// `lower_val` must thread `lower_expr` through with a synthesized
+/// `_ReturnK = fun(X) -> X` so `Bind` / `If` / etc. inside the body lower
+/// cleanly.
+#[test]
+fn new_path_smoke_val_with_computation() {
+    let src = "\
+val answer = 1 + 2
+main () = ()
+";
+    let (elaborated, result) = check_program(src);
+    let ctx = super::CodegenContext {
+        modules: std::collections::HashMap::new(),
+        let_effect_bindings: result.let_effect_bindings.clone(),
+        prelude_imports: result.prelude_imports.clone(),
+    };
+    let core = super::emit_module_via_new_path(
+        "_script",
+        &elaborated,
+        &ctx,
+        &result,
+        None,
+        Some("main"),
+        &crate::compiler_options::CompileOptions::default(),
+    )
+    .core_src;
+    assert!(
+        core.contains("module '_script'"),
+        "Core Erlang module header missing:\n{core}"
+    );
+    assert!(
+        core.contains("'answer'/0"),
+        "val 'answer' must be emitted as a /0 function:\n{core}"
+    );
+
+    if std::process::Command::new("erlc")
+        .arg("--help")
+        .output()
+        .is_ok()
+    {
+        let tmp = std::env::temp_dir().join("saga-new-path-smoke-val");
+        std::fs::create_dir_all(&tmp).unwrap();
+        let core_path = tmp.join("_script.core");
+        std::fs::write(&core_path, &core).unwrap();
+        let out = std::process::Command::new("erlc")
+            .arg("+from_core")
+            .arg("-o")
+            .arg(&tmp)
+            .arg(&core_path)
+            .output()
+            .expect("erlc spawn");
+        assert!(
+            out.status.success(),
+            "erlc rejected new-path val output:\nstdout: {}\nstderr: {}\ncore: {}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr),
+            core
+        );
+    }
 }

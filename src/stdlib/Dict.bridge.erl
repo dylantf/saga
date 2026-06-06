@@ -6,8 +6,8 @@ new() ->
 
 get(Key, Dict) ->
     case maps:find(Key, Dict) of
-        {ok, V} -> {just, V};
-        error -> {nothing}
+        {ok, V} -> {std_maybe_Just, V};
+        error -> {std_maybe_Nothing}
     end.
 
 map_values(Fun, Dict) ->

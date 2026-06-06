@@ -1,0 +1,19 @@
+# Scenario 2: handler passed as function parameter, with a return clause.
+
+effect Tag {
+  fun emit : String -> Unit
+}
+
+fun run_with : (h: Handler Tag) -> String
+run_with h = {
+  emit! "hi"
+  "body-result"
+} with h
+
+main () = {
+  let h = handler for Tag {
+    emit _ = resume ()
+    return _ = "wrapped"
+  }
+  dbg (run_with h)
+}

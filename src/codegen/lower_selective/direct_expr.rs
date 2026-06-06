@@ -1,0 +1,874 @@
+use super::direct_core_refs::{core_expr_mentions_core_var, core_expr_mentions_var};
+use super::*;
+
+impl<'a, 'info> DirectLowerer<'a, 'info> {
+    pub(super) fn lower_direct_with(&mut self, handler: &MHandler, body: &MExpr) -> CExpr {
+        if self.direct_handler_kind(handler).is_some() {
+            return self.lower_expr(body);
+        }
+
+        let MHandler::Static {
+            effects,
+            arms,
+            return_clause,
+            ..
+        } = handler
+        else {
+            self.unsupported("direct lowering for non-static handlers");
+        };
+        if !effects.is_empty() || !arms.is_empty() {
+            let return_k = self.identity_cps_continuation();
+            return self.lower_cps_with(handler, body, CExpr::Tuple(vec![]), return_k);
+        }
+
+        let body = self.lower_expr(body);
+        let Some(return_clause) = return_clause else {
+            return body;
+        };
+        self.lower_direct_return_clause(body, return_clause)
+    }
+
+    pub(super) fn lower_direct_return_clause(&mut self, value: CExpr, arm: &MHandlerArm) -> CExpr {
+        if arm.finally_block.is_some() {
+            self.unsupported("direct return clauses with finally blocks");
+        }
+        if arm.params.len() > 1 {
+            self.unsupported("direct return clauses with multiple params");
+        }
+
+        let return_value = self.fresh_cps_temp("_HandlerReturnValue");
+        self.push_scope();
+        for param in &arm.params {
+            self.bind_pat_locals(param);
+        }
+        let return_body = self.lower_expr(&arm.body);
+        let return_body = match arm.params.as_slice() {
+            [] => return_body,
+            [pat] => CExpr::Case(
+                Box::new(CExpr::Var(return_value.clone())),
+                vec![CArm {
+                    pat: self.lower_pat(pat),
+                    guard: None,
+                    body: return_body,
+                }],
+            ),
+            _ => unreachable!(),
+        };
+        self.pop_scope();
+
+        CExpr::Let(return_value, Box::new(value), Box::new(return_body))
+    }
+
+    pub(super) fn lower_direct_receive(
+        &mut self,
+        arms: &[MArm],
+        after: Option<&(Atom, Box<MExpr>)>,
+    ) -> CExpr {
+        let arms = arms
+            .iter()
+            .map(|arm| self.lower_direct_receive_arm(arm))
+            .collect();
+        let (timeout, timeout_body) = match after {
+            Some((timeout, body)) => (self.lower_atom(timeout), self.lower_expr(body)),
+            None => (
+                CExpr::Lit(CLit::Atom("infinity".to_string())),
+                CExpr::Lit(CLit::Atom("true".to_string())),
+            ),
+        };
+        CExpr::Receive(arms, Box::new(timeout), Box::new(timeout_body))
+    }
+
+    pub(super) fn lower_direct_receive_arm(&mut self, arm: &MArm) -> CArm {
+        self.push_scope();
+        self.bind_pat_locals(&arm.pattern);
+        let raw_body = self.lower_expr(&arm.body);
+        let guard = arm.guard.as_ref().map(|guard| self.lower_expr(guard));
+        let (pat, reason_wrapper) = self.lower_receive_pat(&arm.pattern);
+        let body = match reason_wrapper {
+            Some((user_var, raw_var)) => {
+                let conversion = self.exit_reason_from_erlang(&raw_var);
+                CExpr::Let(user_var, Box::new(conversion), Box::new(raw_body))
+            }
+            None => raw_body,
+        };
+        self.pop_scope();
+        CArm { pat, guard, body }
+    }
+
+    pub(super) fn lower_case_chain(&mut self, scrutinee: &Atom, arms: &[MArm]) -> CExpr {
+        if let Some(known_scrutinee) = self.known_direct_value_for_atom(scrutinee) {
+            for arm in arms {
+                if arm.guard.is_some() {
+                    break;
+                }
+                let Some(bindings) =
+                    self.match_known_direct_value_pattern(&known_scrutinee, &arm.pattern)
+                else {
+                    continue;
+                };
+                self.push_scope();
+                self.bind_pat_locals(&arm.pattern);
+                self.bind_known_direct_value_pattern_values(bindings);
+                let body = self.lower_expr(&arm.body);
+                self.pop_scope();
+                return body;
+            }
+        }
+
+        if let Some(known_scrutinee) = self.known_direct_atom_for_case_scrutinee(scrutinee) {
+            for arm in arms {
+                if arm.guard.is_some() {
+                    break;
+                }
+                let Some(bindings) =
+                    self.match_known_direct_atom_pattern(&known_scrutinee, &arm.pattern)
+                else {
+                    continue;
+                };
+                self.push_scope();
+                self.bind_pat_locals(&arm.pattern);
+                self.bind_known_direct_atom_pattern_values(bindings);
+                let body = self.lower_expr(&arm.body);
+                self.pop_scope();
+                return body;
+            }
+        }
+
+        let scrutinee = self.lower_atom(scrutinee);
+        let scrut_var = self.fresh_cps_temp("_CaseScrut");
+        let mut rest = self.case_clause_error();
+
+        for arm in arms.iter().rev() {
+            let rest_var = self.fresh_cps_temp("_CaseRest");
+            let rest_ref = || CExpr::Apply(Box::new(CExpr::Var(rest_var.clone())), vec![]);
+            self.push_scope();
+            self.bind_pat_locals(&arm.pattern);
+            let body = self.lower_expr(&arm.body);
+            let body = match arm.guard.as_ref() {
+                Some(guard) => CExpr::Case(
+                    Box::new(self.lower_expr(guard)),
+                    vec![
+                        CArm {
+                            pat: CPat::Lit(CLit::Atom("true".to_string())),
+                            guard: None,
+                            body,
+                        },
+                        CArm {
+                            pat: CPat::Wildcard,
+                            guard: None,
+                            body: rest_ref(),
+                        },
+                    ],
+                ),
+                None => body,
+            };
+            let pat = self.lower_pat(&arm.pattern);
+            self.pop_scope();
+
+            let current = CExpr::Case(
+                Box::new(CExpr::Var(scrut_var.clone())),
+                vec![
+                    CArm {
+                        pat,
+                        guard: None,
+                        body,
+                    },
+                    CArm {
+                        pat: CPat::Wildcard,
+                        guard: None,
+                        body: rest_ref(),
+                    },
+                ],
+            );
+            rest = CExpr::Let(
+                rest_var,
+                Box::new(CExpr::Fun(vec![], Box::new(rest))),
+                Box::new(current),
+            );
+        }
+
+        CExpr::Let(scrut_var, Box::new(scrutinee), Box::new(rest))
+    }
+
+    pub(super) fn lower_field_access(
+        &mut self,
+        record: &Atom,
+        field: &str,
+        record_name: Option<&str>,
+        anon_fields: &Option<Vec<String>>,
+    ) -> CExpr {
+        if let Some(value) =
+            self.known_direct_field_direct_value(record, field, record_name, anon_fields)
+        {
+            return self.lower_known_direct_value(&value);
+        }
+        if let Some(atom) = self.known_direct_field_value(record, field, record_name, anon_fields) {
+            return self.lower_atom(&atom);
+        }
+
+        let order = self.record_field_order(record_name, anon_fields.as_deref());
+        let index = order
+            .iter()
+            .position(|candidate| candidate == field)
+            .unwrap_or_else(|| {
+                panic!(
+                    "selective-uniform direct lowerer TODO: field '{}' not found in {:?}",
+                    field, order
+                )
+            }) as i64
+            + 2;
+        CExpr::Call(
+            "erlang".to_string(),
+            "element".to_string(),
+            vec![CExpr::Lit(CLit::Int(index)), self.lower_atom(record)],
+        )
+    }
+
+    pub(super) fn record_field_order(
+        &self,
+        record_name: Option<&str>,
+        anon_fields: Option<&[String]>,
+    ) -> Vec<String> {
+        self.record_field_order_opt(record_name, anon_fields)
+            .unwrap_or_else(|| {
+                let name = record_name.unwrap_or("<anonymous>");
+                panic!(
+                    "selective-uniform direct lowerer TODO: unknown record '{}'",
+                    name
+                )
+            })
+    }
+
+    pub(super) fn record_field_order_opt(
+        &self,
+        record_name: Option<&str>,
+        anon_fields: Option<&[String]>,
+    ) -> Option<Vec<String>> {
+        if let Some(fields) = anon_fields {
+            return Some(fields.to_vec());
+        }
+        let name = record_name?;
+        self.effect_info
+            .records
+            .get(name)
+            .map(|info| info.fields.iter().map(|(field, _)| field.clone()).collect())
+            .or_else(|| self.imported_record_field_order(name))
+            .or_else(|| {
+                let bare = name.rsplit('.').next().unwrap_or(name);
+                self.effect_info
+                    .records
+                    .get(bare)
+                    .map(|info| info.fields.iter().map(|(field, _)| field.clone()).collect())
+            })
+            .or_else(|| {
+                let bare = name.rsplit('.').next().unwrap_or(name);
+                self.imported_record_field_order(bare)
+            })
+            .or_else(|| {
+                let bare = name.rsplit('.').next().unwrap_or(name);
+                self.effect_info
+                    .records
+                    .iter()
+                    .find(|(candidate, _)| {
+                        candidate
+                            .rsplit('.')
+                            .next()
+                            .is_some_and(|last| last == bare)
+                    })
+                    .map(|(_, info)| info.fields.iter().map(|(field, _)| field.clone()).collect())
+            })
+    }
+
+    fn imported_record_field_order(&self, record_name: &str) -> Option<Vec<String>> {
+        if let Some((module, record)) = record_name.rsplit_once('.')
+            && let Some(fields) = self.module_ctx.modules.get(module).and_then(|module| {
+                module
+                    .codegen_info
+                    .record_fields
+                    .iter()
+                    .find(|(name, _)| name == record)
+                    .map(|(_, fields)| fields)
+            })
+        {
+            return Some(fields.clone());
+        }
+        self.module_ctx.modules.values().find_map(|module| {
+            module
+                .codegen_info
+                .record_fields
+                .iter()
+                .find(|(name, _)| name == record_name)
+                .map(|(_, fields)| fields.clone())
+        })
+    }
+
+    pub(super) fn lower_known_field_access_expr(
+        &mut self,
+        record: &Atom,
+        field: &str,
+        record_name: Option<&str>,
+        anon_fields: Option<&[String]>,
+    ) -> Option<CExpr> {
+        let order = self.record_field_order_opt(record_name, anon_fields)?;
+        let index = order.iter().position(|candidate| candidate == field)? as i64 + 2;
+        Some(CExpr::Call(
+            "erlang".to_string(),
+            "element".to_string(),
+            vec![CExpr::Lit(CLit::Int(index)), self.lower_atom(record)],
+        ))
+    }
+
+    pub(super) fn lower_record_update(
+        &mut self,
+        record: &Atom,
+        fields: &[(String, Atom)],
+        record_name: Option<&str>,
+        anon_fields: &Option<Vec<String>>,
+    ) -> CExpr {
+        let order = self.record_field_order(record_name, anon_fields.as_deref());
+        let rec_var = self.fresh_cps_temp("_RecordUpdate");
+        let field_map: HashMap<&str, &Atom> = fields
+            .iter()
+            .map(|(name, atom)| (name.as_str(), atom))
+            .collect();
+
+        let mut elems = Vec::with_capacity(order.len() + 1);
+        elems.push(CExpr::Call(
+            "erlang".to_string(),
+            "element".to_string(),
+            vec![CExpr::Lit(CLit::Int(1)), CExpr::Var(rec_var.clone())],
+        ));
+        for (index, field_name) in order.iter().enumerate() {
+            elems.push(match field_map.get(field_name.as_str()) {
+                Some(atom) => self.lower_atom(atom),
+                None => CExpr::Call(
+                    "erlang".to_string(),
+                    "element".to_string(),
+                    vec![
+                        CExpr::Lit(CLit::Int(index as i64 + 2)),
+                        CExpr::Var(rec_var.clone()),
+                    ],
+                ),
+            });
+        }
+
+        CExpr::Let(
+            rec_var,
+            Box::new(self.lower_atom(record)),
+            Box::new(CExpr::Tuple(elems)),
+        )
+    }
+
+    pub(super) fn lower_foreign_call(&mut self, module: &str, func: &str, args: &[Atom]) -> CExpr {
+        CExpr::Call(
+            module.to_string(),
+            func.to_string(),
+            args.iter().map(|arg| self.lower_atom(arg)).collect(),
+        )
+    }
+
+    pub(super) fn try_lower_known_dict_immediate_method_sequence(
+        &mut self,
+        dict_var: &MVar,
+        dict_value: &MExpr,
+        body: &MExpr,
+    ) -> Option<CExpr> {
+        let known_dict = self.known_dict_value_for_expr(dict_value)?;
+        let (MExpr::Let {
+            var: method_var,
+            value: method_value,
+            body: method_body,
+        }
+        | MExpr::Bind {
+            var: method_var,
+            value: method_value,
+            body: method_body,
+            ..
+        }) = body
+        else {
+            return None;
+        };
+
+        let MExpr::DictMethodAccess {
+            dict, method_index, ..
+        } = method_value.as_ref()
+        else {
+            return None;
+        };
+        let Atom::Var { name, .. } = dict else {
+            return None;
+        };
+        if name.name != dict_var.name {
+            return None;
+        }
+
+        let MExpr::App { head, args, .. } = method_body.as_ref() else {
+            return None;
+        };
+        let Atom::Var { name, .. } = head else {
+            return None;
+        };
+        if name.name != method_var.name {
+            return None;
+        }
+
+        self.lower_known_dict_method_app(&known_dict, *method_index, args)
+    }
+
+    pub(super) fn try_lower_immediate_known_dict_method_bind(
+        &mut self,
+        method_var: &MVar,
+        method_value: &MExpr,
+        body: &MExpr,
+    ) -> Option<CExpr> {
+        let MExpr::DictMethodAccess {
+            dict, method_index, ..
+        } = method_value
+        else {
+            return None;
+        };
+        let Atom::Var { name, .. } = dict else {
+            return None;
+        };
+        let known_dict = self.known_dict_value(&name.name)?;
+
+        let MExpr::App { head, args, .. } = body else {
+            return None;
+        };
+        let Atom::Var { name, .. } = head else {
+            return None;
+        };
+        if name.name != method_var.name {
+            return None;
+        }
+
+        self.lower_known_dict_method_app(&known_dict, *method_index, args)
+    }
+
+    pub(super) fn lower_known_dict_method_app(
+        &mut self,
+        known_dict: &KnownDictValue,
+        method_index: usize,
+        args: &[Atom],
+    ) -> Option<CExpr> {
+        if !known_dict.methods_inlineable {
+            debug_selective_subject("known-method", &known_dict.constructor_name, || {
+                format!(
+                    "reject {} method {method_index}: methods are not inlineable",
+                    known_dict.constructor_name
+                )
+            });
+            return None;
+        }
+        if self.known_dict_method_is_active(known_dict, method_index) {
+            debug_selective_subject("known-method", &known_dict.constructor_name, || {
+                format!(
+                    "reject {} method {method_index}: active recursion guard",
+                    known_dict.constructor_name
+                )
+            });
+            return None;
+        }
+        let Some(method) = known_dict.methods.get(method_index) else {
+            debug_selective_subject("known-method", &known_dict.constructor_name, || {
+                format!(
+                    "reject {} method {method_index}: missing method",
+                    known_dict.constructor_name
+                )
+            });
+            return None;
+        };
+        let Atom::Lambda { params, body, .. } = method else {
+            debug_selective_subject("known-method", &known_dict.constructor_name, || {
+                format!(
+                    "reject {} method {method_index}: method is not a lambda",
+                    known_dict.constructor_name
+                )
+            });
+            return None;
+        };
+        let (params, body) =
+            monadic_rename::freshen_lambda_for_inline(params, body, &mut |_| {
+                self.fresh_cps_temp("_Inlined")
+            });
+        if params.len() != args.len() {
+            debug_selective_subject("known-method", &known_dict.constructor_name, || {
+                format!(
+                    "reject {} method {method_index}: expected {} args, got {}",
+                    known_dict.constructor_name,
+                    params.len(),
+                    args.len()
+                )
+            });
+            return None;
+        }
+        if params.iter().any(|param| !direct_param_supported(param)) {
+            debug_selective_subject("known-method", &known_dict.constructor_name, || {
+                format!(
+                    "reject {} method {method_index}: unsupported method parameter pattern",
+                    known_dict.constructor_name
+                )
+            });
+            return None;
+        }
+
+        let dict_bindings: Vec<(String, Atom)> = known_dict
+            .dict_params
+            .iter()
+            .cloned()
+            .zip(known_dict.dict_args.iter().cloned())
+            .collect();
+        let known_dict_aliases = self.known_dict_aliases_for_known_dict(known_dict);
+        let (dict_bindings, known_dict_aliases, body) =
+            self.freshen_dict_method_bindings(&dict_bindings, known_dict_aliases, &body);
+        let key = self.known_dict_method_key(known_dict, method_index);
+        let inserted = self.active_known_dict_methods.insert(key.clone());
+        if !self.lambda_app_is_direct_subset_with_dict_aliases(
+            &dict_bindings,
+            known_dict_aliases.clone(),
+            &params,
+            &body,
+            args,
+        ) {
+            let rejection_summary =
+                selective_debug_subject_enabled("known-method", &known_dict.constructor_name).then(
+                    || {
+                        self.lambda_app_direct_subset_rejection_summary_with_dict_aliases(
+                            &dict_bindings,
+                            known_dict_aliases.clone(),
+                            &params,
+                            &body,
+                            args,
+                        )
+                    },
+                );
+            debug_selective_subject("known-method", &known_dict.constructor_name, || {
+                format!(
+                    "reject {} method {method_index}: body outside direct subset after aliasing{}",
+                    known_dict.constructor_name,
+                    rejection_summary
+                        .as_ref()
+                        .map(|summary| format!("; {summary}"))
+                        .unwrap_or_default()
+                )
+            });
+            if inserted {
+                self.active_known_dict_methods.remove(&key);
+            }
+            return None;
+        }
+        debug_selective_subject("known-method", &known_dict.constructor_name, || {
+            format!(
+                "inline {} method {method_index}: args={}, dict_args={}",
+                known_dict.constructor_name,
+                args.len(),
+                dict_bindings.len()
+            )
+        });
+
+        let lowered = self.lower_inline_direct_lambda_app_with_dict_bindings(
+            &dict_bindings,
+            known_dict_aliases,
+            &params,
+            &body,
+            args,
+        );
+        if inserted {
+            self.active_known_dict_methods.remove(&key);
+        }
+        Some(lowered)
+    }
+
+    pub(super) fn known_dict_method_is_active(
+        &self,
+        known_dict: &KnownDictValue,
+        method_index: usize,
+    ) -> bool {
+        self.active_known_dict_methods
+            .contains(&self.known_dict_method_key(known_dict, method_index))
+    }
+
+    pub(super) fn known_dict_method_key(
+        &self,
+        known_dict: &KnownDictValue,
+        method_index: usize,
+    ) -> KnownDictMethodKey {
+        KnownDictMethodKey {
+            constructor_name: known_dict.constructor_name.clone(),
+            method_index,
+            dict_arg_keys: Self::known_dict_method_arg_keys(known_dict),
+        }
+    }
+
+    pub(super) fn known_dict_method_arg_keys(known_dict: &KnownDictValue) -> Vec<String> {
+        known_dict
+            .known_dict_args
+            .iter()
+            .zip(known_dict.dict_args.iter())
+            .map(|(known, atom)| {
+                known
+                    .as_ref()
+                    .map(|dict| {
+                        let nested = Self::known_dict_method_arg_keys(dict);
+                        if nested.is_empty() {
+                            dict.constructor_name.clone()
+                        } else {
+                            format!("{}({})", dict.constructor_name, nested.join(","))
+                        }
+                    })
+                    .unwrap_or_else(|| format!("{atom:?}"))
+            })
+            .collect()
+    }
+
+    pub(super) fn freshen_dict_method_bindings(
+        &mut self,
+        dict_bindings: &[(String, Atom)],
+        known_dict_aliases: Vec<(String, KnownDictValue)>,
+        body: &MExpr,
+    ) -> FreshenedDictMethodBindings {
+        if dict_bindings.is_empty() {
+            return (Vec::new(), known_dict_aliases, body.clone());
+        }
+
+        let mut renames = HashMap::new();
+        let dict_bindings = dict_bindings
+            .iter()
+            .map(|(name, arg)| {
+                let fresh = self.fresh_cps_temp("_DictParam");
+                renames.insert(name.clone(), fresh.clone());
+                (fresh, arg.clone())
+            })
+            .collect();
+        let known_dict_aliases = known_dict_aliases
+            .into_iter()
+            .map(|(name, dict)| {
+                let name = renames.get(&name).cloned().unwrap_or(name);
+                (name, dict)
+            })
+            .collect();
+        let body = monadic_rename::rename_expr_vars(body, &renames);
+        (dict_bindings, known_dict_aliases, body)
+    }
+
+    pub(super) fn lambda_is_direct_subset_with_dict_bindings(
+        &mut self,
+        dict_bindings: &[(String, Atom)],
+        params: &[Pat],
+        body: &MExpr,
+    ) -> bool {
+        let known_dict_aliases = self.known_dict_aliases_for_bindings(dict_bindings);
+        self.lambda_is_direct_subset_with_dict_aliases(
+            dict_bindings,
+            known_dict_aliases,
+            params,
+            body,
+        )
+    }
+
+    pub(super) fn lambda_is_direct_subset_with_dict_aliases(
+        &mut self,
+        dict_bindings: &[(String, Atom)],
+        known_dict_aliases: Vec<(String, KnownDictValue)>,
+        params: &[Pat],
+        body: &MExpr,
+    ) -> bool {
+        self.push_scope();
+        for (name, _) in dict_bindings {
+            self.current_scope_mut().insert(name.clone());
+        }
+        self.bind_known_dict_values(known_dict_aliases);
+        for pat in params {
+            self.bind_pat_locals(pat);
+        }
+        let supported = self.expr_is_direct_subset(body);
+        self.pop_scope();
+        supported
+    }
+
+    pub(super) fn lambda_app_is_direct_subset_with_dict_aliases(
+        &mut self,
+        dict_bindings: &[(String, Atom)],
+        known_dict_aliases: Vec<(String, KnownDictValue)>,
+        params: &[Pat],
+        body: &MExpr,
+        args: &[Atom],
+    ) -> bool {
+        let mut known_dict_aliases = known_dict_aliases;
+        known_dict_aliases.extend(self.known_dict_aliases_for_params(params, args));
+        let known_atom_bindings = self.known_direct_atom_pattern_bindings_for_params(params, args);
+        let known_value_bindings =
+            self.known_direct_value_pattern_bindings_for_params(params, args);
+
+        self.push_scope();
+        for (name, _) in dict_bindings {
+            self.current_scope_mut().insert(name.clone());
+        }
+        self.bind_known_dict_values(known_dict_aliases);
+        for pat in params {
+            self.bind_pat_locals(pat);
+        }
+        self.bind_known_direct_atom_pattern_values(known_atom_bindings);
+        self.bind_known_direct_value_pattern_values(known_value_bindings);
+        let supported = self.expr_is_direct_subset(body);
+        self.pop_scope();
+        supported
+    }
+
+    pub(super) fn lower_inline_direct_lambda_app_with_dict_bindings(
+        &mut self,
+        dict_bindings: &[(String, Atom)],
+        known_dict_aliases: Vec<(String, KnownDictValue)>,
+        params: &[Pat],
+        body: &MExpr,
+        args: &[Atom],
+    ) -> CExpr {
+        let param_names = lower_param_names(params);
+        let mut known_dict_aliases = known_dict_aliases;
+        known_dict_aliases.extend(self.known_dict_aliases_for_params(params, args));
+        let known_atom_bindings = self.known_direct_atom_pattern_bindings_for_params(params, args);
+        let known_value_bindings =
+            self.known_direct_value_pattern_bindings_for_params(params, args);
+        let all_params_known = self
+            .known_direct_value_bindings_for_all_params(params, args)
+            .is_some()
+            || self
+                .known_direct_atom_bindings_for_all_params(params, args)
+                .is_some();
+        let candidate_elided_dict_bindings: HashSet<String> = dict_bindings
+            .iter()
+            .filter_map(|(name, arg)| {
+                let Atom::Var { name: arg_name, .. } = arg else {
+                    return None;
+                };
+                self.known_dict_value(&arg_name.name)?;
+                occurs::local_is_only_used_for_immediate_dict_method_calls(name, body)
+                    .then(|| name.clone())
+            })
+            .collect();
+        self.push_scope();
+        for (name, _) in dict_bindings {
+            self.current_scope_mut().insert(name.clone());
+        }
+        self.bind_known_dict_values(known_dict_aliases);
+        for pat in params {
+            self.bind_pat_locals(pat);
+        }
+        self.bind_known_direct_atom_pattern_values(known_atom_bindings);
+        self.bind_known_direct_value_pattern_values(known_value_bindings);
+        let lowered_body = self.lower_expr(body);
+        let lowered_body = if all_params_known {
+            lowered_body
+        } else {
+            self.wrap_param_match(params, &param_names, lowered_body)
+        };
+        self.pop_scope();
+
+        let lowered_body = param_names.into_iter().zip(args.iter()).rev().fold(
+            lowered_body,
+            |body, (param, arg)| {
+                if core_expr_mentions_core_var(&param, &body) {
+                    CExpr::Let(param, Box::new(self.lower_atom(arg)), Box::new(body))
+                } else {
+                    body
+                }
+            },
+        );
+
+        dict_bindings
+            .iter()
+            .rev()
+            .fold(lowered_body, |body, (param, arg)| {
+                if matches!(arg, Atom::Var { name, .. } if name.name == *param) {
+                    return body;
+                }
+                if candidate_elided_dict_bindings.contains(param)
+                    && !core_expr_mentions_var(param, &body)
+                {
+                    body
+                } else {
+                    CExpr::Let(
+                        core_var(param),
+                        Box::new(self.lower_atom(arg)),
+                        Box::new(body),
+                    )
+                }
+            })
+    }
+
+    pub(super) fn lower_known_direct_lambda_value(&mut self, lambda: &KnownDirectLambda) -> CExpr {
+        self.lower_partial_known_direct_lambda_value(lambda, &[])
+    }
+
+    pub(super) fn lower_partial_known_direct_lambda_value(
+        &mut self,
+        lambda: &KnownDirectLambda,
+        supplied_args: &[Atom],
+    ) -> CExpr {
+        if supplied_args.len() >= lambda.params.len() {
+            self.unsupported("known direct lambda value with too many supplied args");
+        }
+        let param_names = lower_param_names(&lambda.params);
+        let remaining_param_names = param_names[supplied_args.len()..].to_vec();
+        let mut known_dict_aliases = lambda.known_dict_aliases.clone();
+        known_dict_aliases.extend(self.known_dict_aliases_for_bindings(&lambda.dict_bindings));
+        known_dict_aliases.extend(
+            self.known_dict_aliases_for_params(
+                &lambda.params[..supplied_args.len()],
+                supplied_args,
+            ),
+        );
+        let known_atom_bindings = self.known_direct_atom_pattern_bindings_for_params(
+            &lambda.params[..supplied_args.len()],
+            supplied_args,
+        );
+        let known_value_bindings = self.known_direct_value_pattern_bindings_for_params(
+            &lambda.params[..supplied_args.len()],
+            supplied_args,
+        );
+        self.push_scope();
+        for (name, _) in &lambda.dict_bindings {
+            self.current_scope_mut().insert(name.clone());
+        }
+        self.bind_known_dict_values(known_dict_aliases);
+        for pat in &lambda.params {
+            self.bind_pat_locals(pat);
+        }
+        self.bind_known_direct_atom_pattern_values(known_atom_bindings);
+        self.bind_known_direct_value_pattern_values(known_value_bindings);
+        let lowered_body = self.lower_expr(&lambda.body);
+        let lowered_body = self.wrap_param_match(&lambda.params, &param_names, lowered_body);
+        self.pop_scope();
+
+        let lowered_body = param_names
+            .iter()
+            .take(supplied_args.len())
+            .cloned()
+            .zip(supplied_args.iter())
+            .rev()
+            .fold(lowered_body, |body, (param, arg)| {
+                if core_expr_mentions_core_var(&param, &body) {
+                    CExpr::Let(param, Box::new(self.lower_atom(arg)), Box::new(body))
+                } else {
+                    body
+                }
+            });
+
+        let lowered_body =
+            lambda
+                .dict_bindings
+                .iter()
+                .rev()
+                .fold(lowered_body, |body, (param, arg)| {
+                    if matches!(arg, Atom::Var { name, .. } if name.name == *param) {
+                        return body;
+                    }
+                    CExpr::Let(
+                        core_var(param),
+                        Box::new(self.lower_atom(arg)),
+                        Box::new(body),
+                    )
+                });
+        CExpr::Fun(remaining_param_names, Box::new(lowered_body))
+    }
+}

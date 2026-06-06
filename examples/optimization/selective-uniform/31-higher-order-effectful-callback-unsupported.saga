@@ -1,0 +1,12 @@
+effect ReadInt {
+  fun read : Unit -> Int
+}
+
+pub fun apply_eff : (Unit -> Int needs {ReadInt}) -> Int needs {ReadInt}
+apply_eff f = f ()
+
+fun read_value : Unit -> Int needs {ReadInt}
+read_value () = read! ()
+
+fun main : Unit -> Unit
+main () = ()

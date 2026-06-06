@@ -1,0 +1,9 @@
+module Main
+
+import Effects (Log, may_log)
+
+pub fun call_may_log : Unit -> Int needs {Log}
+call_may_log () = may_log ()
+
+fun main : Unit -> Int
+main () = 0

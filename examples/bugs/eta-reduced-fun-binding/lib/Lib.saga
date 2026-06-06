@@ -1,0 +1,20 @@
+module Lib
+
+@external("erlang", "erlang", "abs")
+fun ext_abs : Int -> Int
+
+# Eta-reduced alias to an @external function. Mirrors the saga_pgo
+# `pg_text = coerce_value` pattern.
+pub fun my_abs : Int -> Int
+my_abs = ext_abs
+
+# Eta-reduced alias to a local Saga-defined function.
+fun identity_int : Int -> Int
+identity_int x = x
+
+pub fun aliased_id : Int -> Int
+aliased_id = identity_int
+
+# In-module caller of the eta-reduced binding.
+pub fun in_module_uses_alias : Int -> Int
+in_module_uses_alias x = aliased_id x

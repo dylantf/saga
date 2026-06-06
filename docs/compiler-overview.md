@@ -130,6 +130,10 @@ This phase is responsible for:
 - handler parameter / return continuation threading
 - runtime-specific data layout and call shaping
 
+For the current effect lowering model, see
+`docs/uniform-cps-translation.md`. For optional rewrites that remove uniform
+CPS scaffolding after translation, see `docs/effect-optimization.md`.
+
 The lowerer consumes two different semantic layers:
 
 - front-end `ResolutionResult`

@@ -1,0 +1,6 @@
+module QualCtorLib
+
+pub type Shape =
+  | Circle Int
+  | Rect Int Int
+  deriving (Eq, Debug)

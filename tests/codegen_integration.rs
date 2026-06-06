@@ -30,6 +30,10 @@ fn emit_elaborated(src: &str) -> String {
     emit_elaborated_inner(src, false)
 }
 
+fn emit_elaborated_entry(src: &str) -> String {
+    emit_elaborated_inner_with_entry(src, false, Some("main"))
+}
+
 /// Like `emit_elaborated` but also compiles and includes Std module elaborated
 /// programs in the codegen context. This mirrors the real `build_script` pipeline
 /// and is needed to test cross-module external function resolution.
@@ -38,6 +42,14 @@ fn emit_elaborated_with_std(src: &str) -> String {
 }
 
 fn emit_elaborated_inner(src: &str, include_std_modules: bool) -> String {
+    emit_elaborated_inner_with_entry(src, include_std_modules, None)
+}
+
+fn emit_elaborated_inner_with_entry(
+    src: &str,
+    include_std_modules: bool,
+    entry_export: Option<&str>,
+) -> String {
     let tokens = lexer::Lexer::new(src).lex().expect("lex error");
     let mut program = parser::Parser::new(tokens)
         .parse_program()
@@ -84,13 +96,13 @@ fn emit_elaborated_inner(src: &str, include_std_modules: bool) -> String {
                 elaborated: Vec::new(),
                 resolution: codegen::resolve::ResolutionMap::new(),
                 front_resolution: Default::default(),
-                call_effects: codegen::call_effects::CallEffectMap::new(),
             },
         );
     }
-    // Overlay elaborated modules with their resolution maps
+    // Overlay elaborated modules with their resolution maps. Keep these in the
+    // same raw elaborated form as the real new-path pipeline; normalization is
+    // old-lowerer input and changes the shape the monadic translator expects.
     for (name, elab) in elaborated_modules {
-        let normalized = codegen::normalize::normalize_effects(&elab);
         let front_resolution = result
             .module_check_results()
             .get(&name)
@@ -98,13 +110,13 @@ fn emit_elaborated_inner(src: &str, include_std_modules: bool) -> String {
             .unwrap_or_default();
         let resolution = codegen::resolve::resolve_names(
             &name,
-            &normalized,
+            &elab,
             codegen_info_map,
             prelude_imports,
             &front_resolution,
         );
         let entry = modules.entry(name.clone()).or_default();
-        entry.elaborated = normalized;
+        entry.elaborated = elab;
         entry.resolution = resolution;
         entry.front_resolution = front_resolution;
     }
@@ -113,12 +125,12 @@ fn emit_elaborated_inner(src: &str, include_std_modules: bool) -> String {
         let_effect_bindings: result.let_effect_bindings.clone(),
         prelude_imports: result.prelude_imports.clone(),
     };
-    codegen::emit_module_with_context("_script", &elaborated, &ctx, &result, None, None)
+    codegen::emit_module_with_context("_script", &elaborated, &ctx, &result, None, entry_export)
 }
 
 /// Emit Core Erlang and compile it with erlc, asserting no compilation errors.
 fn assert_compiles(src: &str) {
-    let out = emit_elaborated(src);
+    let out = emit_elaborated_entry(src);
     assert_core_compiles(&out);
 }
 
@@ -171,7 +183,7 @@ fn assert_runs_and_stdout_contains(src: &str, needles: &[&str]) {
     use std::sync::atomic::{AtomicUsize, Ordering};
     static COUNTER: AtomicUsize = AtomicUsize::new(0);
 
-    let out = emit_elaborated(src);
+    let out = emit_elaborated_entry(src);
     let id = COUNTER.fetch_add(1, Ordering::Relaxed);
     let dir = std::env::temp_dir().join(format!("saga_run_test_{}_{id}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
@@ -191,7 +203,9 @@ fn assert_runs_and_stdout_contains(src: &str, needles: &[&str]) {
     );
     compile_evidence_bridge_into(&dir);
 
-    let eval = if out.contains("'main'/1") {
+    let eval = if out.contains("'main'/3") {
+        "Ev = case erlang:function_exported('_script', '__saga_initial_evidence', 0) of true -> '_script':'__saga_initial_evidence'(); false -> {} end, K = fun(V) -> V end, io:format(\"~p~n\", ['_script':main(unit, Ev, K)]), init:stop()."
+    } else if out.contains("'main'/1") {
         "io:format(\"~p~n\", ['_script':main(unit)]), init:stop()."
     } else {
         "io:format(\"~p~n\", ['_script':main()]), init:stop()."
@@ -229,34 +243,29 @@ fn assert_contains(out: &str, needle: &str) {
 }
 
 #[test]
-fn inner_dynamic_handler_is_kept_when_outer_static_handler_handles_same_effect() {
+fn let_bound_inner_handler_wins_over_outer_static_handler() {
     let src = r#"
-effect Log {
-  fun log : (msg: String) -> Unit
+effect Choose {
+  fun get : Unit -> Int
 }
 
-handler silent for Log {
-  log _ = resume ()
+handler outer for Choose {
+  get () = resume 1
 }
 
-make_logger () = handler for Log {
-  log _ = resume ()
+make_handler () = handler for Choose {
+  get () = resume 2
 }
 
 main () = {
-  let logger = make_logger ()
+  let h = make_handler ()
   {
-    log! "hello"
-  } with {logger, silent}
+    get! ()
+  } with {h, outer}
 }
 "#;
 
-    let out = emit_elaborated(src);
-    assert!(
-        out.contains("call 'erlang':'element'"),
-        "inner dynamic handler should remain when nested inside an outer static handler\n{out}"
-    );
-    assert_core_compiles(&out);
+    assert_runs_and_stdout_contains(src, &["2"]);
 }
 
 #[test]
@@ -487,30 +496,25 @@ main () = case 0 {
 }
 
 #[test]
-fn inner_dynamic_handler_is_kept_when_outer_inline_handler_handles_same_op() {
+fn let_bound_inner_handler_wins_over_outer_inline_handler() {
     let src = r#"
-effect Log {
-  fun log : (msg: String) -> Unit
+effect Choose {
+  fun get : Unit -> Int
 }
 
-make_logger () = handler for Log {
-  log _ = resume ()
+make_handler () = handler for Choose {
+  get () = resume 2
 }
 
 main () = {
-  let logger = make_logger ()
+  let h = make_handler ()
   {
-    log! "hello"
-  } with {logger, log _ = resume ()}
+    get! ()
+  } with {h, get () = resume 1}
 }
 "#;
 
-    let out = emit_elaborated(src);
-    assert!(
-        out.contains("call 'erlang':'element'"),
-        "inner dynamic handler should remain when nested inside an outer inline handler\n{out}"
-    );
-    assert_core_compiles(&out);
+    assert_runs_and_stdout_contains(src, &["2"]);
 }
 
 #[test]
@@ -544,20 +548,39 @@ main () = {
 "#;
 
     let out = emit_elaborated_with_std(src);
-    // The handler functions are bound locally at the `with beam_ref` site
-    // with freshly-numbered suffixes (e.g. `_Handle_Std_Ref_Ref_new__2`),
-    // so match the prefix with the `__` separator rather than a bare `(`.
     assert!(
-        out.contains("_Handle_Std_Ref_Ref_new"),
-        "beam_ref should install and apply a handler function for new!\n{out}"
+        out.contains("'Std.Ref.Ref'") && out.contains("'std_evidence_bridge':'insert_canonical'"),
+        "beam_ref should still install native evidence\n{out}"
     );
     assert!(
-        out.contains("_Handle_Std_Ref_Ref_get"),
-        "beam_ref should install and apply a handler function for get!\n{out}"
+        out.contains("call 'erlang':'make_ref'")
+            && out.contains("call 'erlang':'put'")
+            && out.contains("call 'erlang':'get'"),
+        "beam_ref new/get should direct-call native Erlang ref operations\n{out}"
     );
     assert!(
-        out.contains("call 'erlang':'make_ref'"),
-        "beam_ref should still lower through native Erlang ref operations\n{out}"
+        !out.contains("'std_evidence_bridge':'find_evidence'"),
+        "beam_ref new/get should not project evidence after native direct-call\n{out}"
+    );
+    assert_core_compiles(&out);
+}
+
+#[test]
+fn beam_actor_monitor_uses_backend_atom_direct_call() {
+    let src = r#"
+import Std.Actor (Actor, Monitor, beam_actor)
+
+main () = {
+  let pid = self! ()
+  let _ref = monitor! pid
+  ()
+} with beam_actor
+"#;
+
+    let out = emit_elaborated_with_std(src);
+    assert!(
+        out.contains("call 'erlang':'monitor'\n") && out.contains("'process'"),
+        "monitor! should direct-call erlang:monitor(process, Pid)\n{out}"
     );
     assert_core_compiles(&out);
 }
@@ -584,50 +607,30 @@ main () = {
 
 // --- Tail call position ---
 
-/// A tail-recursive function should have its recursive `apply` in tail position:
-/// the apply must be the last expression in its case arm, not bound by a `let`.
+/// A tail-recursive function must survive the uniform-CPS pipeline without
+/// losing its tail-call property — otherwise deep recursion blows the BEAM
+/// process stack.
+///
+/// The old selective-CPS path preserved tail position structurally (the
+/// recursive `apply` was the last expression in its case arm). The new
+/// uniform-monadic path lowers every call through `Bind`, producing a
+/// `let <V> = apply f(...) in case V of ...` shape that's structurally
+/// non-tail. BEAM's tail-call optimizer still handles this pattern because
+/// the recursive call passes the outer `_ReturnK` directly (CPS-style tail
+/// call) and each case arm either tail-calls `_ReturnK` or returns the bound
+/// value unchanged. The behavioral guard below is what actually matters:
+/// 10 million iterations must complete without a stack overflow.
 #[test]
 fn tail_recursive_apply_in_tail_position() {
     let src = "
 sum_to acc n = if n == 0 then acc else sum_to (acc + n) (n - 1)
+
+main () = sum_to 0 10000000
 ";
-    let out = emit(src);
-
-    // The output should contain the recursive apply.
-    assert!(
-        out.contains("apply 'sum_to'/2"),
-        "expected recursive apply in output\n{out}"
-    );
-
-    // The recursive apply must NOT appear as the value of a let-binding,
-    // which would take it out of tail position. i.e. no `let <X> = \n apply 'sum_to'/2`.
-    assert!(
-        !out.contains("=\n")
-            || !out.lines().any(|l| {
-                l.trim().starts_with("apply 'sum_to'/2")
-                    && out[..out.find(l.trim()).unwrap()]
-                        .lines()
-                        .rev()
-                        .find(|prev| !prev.trim().is_empty())
-                        .is_some_and(|prev| prev.trim().ends_with('='))
-            }),
-        "recursive apply should not be let-bound (would break tail position)\n{out}"
-    );
-
-    // After the apply line, the next non-empty line should be `end` (closing the case).
-    let lines: Vec<&str> = out.lines().collect();
-    let apply_idx = lines
-        .iter()
-        .position(|l| l.contains("apply 'sum_to'/2"))
-        .unwrap_or_else(|| panic!("expected recursive apply in output\n{out}"));
-    let after = lines[apply_idx + 1..]
-        .iter()
-        .find(|l| !l.trim().is_empty())
-        .expect("expected lines after apply");
-    assert!(
-        after.trim() == "end",
-        "expected `end` after tail-recursive apply, got: {after:?}\n{out}"
-    );
+    // sum_to 0 10_000_000 = 10_000_000 * 10_000_001 / 2 = 50_000_005_000_000.
+    // If tail recursion were broken, this would crash with stack_overflow long
+    // before reaching the answer.
+    assert_runs_and_stdout_contains(src, &["50000005000000"]);
 }
 
 // --- Mutual recursion ---
@@ -640,11 +643,11 @@ is_odd n = if n == 0 then False else is_even (n - 1)
 ";
     let out = emit(src);
     assert!(
-        out.contains("'is_odd'/1"),
+        out.contains("'is_odd'/3"),
         "is_even should reference is_odd\n{out}"
     );
     assert!(
-        out.contains("'is_even'/1"),
+        out.contains("'is_even'/3"),
         "is_odd should reference is_even\n{out}"
     );
 }
@@ -673,7 +676,7 @@ main () = describe Red
     let out = emit_elaborated(src);
     // Should emit a dictionary constructor function
     assert!(
-        out.contains("'__dict_Describe_Color'/0"),
+        out.contains("'__dict_Describe_Color'/2"),
         "expected dict constructor for Describe/Color\n{out}"
     );
     // The dict constructor should return a tuple containing a fun (the describe impl)
@@ -744,10 +747,10 @@ fn show_bool_uses_case() {
 fn print_uses_show_dict() {
     let src = "main () = dbg (show 42)";
     let out = emit_elaborated(src);
-    // dbg is lowered inline as io:format(standard_error, "~ts~n", [x])
+    // dbg is provided by Std.IO in the new path.
     assert!(
-        out.contains("'io':'format'"),
-        "expected io:format call in dbg\n{out}"
+        out.contains("'std_io', 'dbg'"),
+        "expected Std.IO dbg call\n{out}"
     );
     // show 42 should reference the Show/Int dict
     let dict = typechecker::make_dict_name("Std.Base.Show", &[], "std_int", "Std.Int.Int");
@@ -822,9 +825,9 @@ fn show_tuple_inlines_per_element() {
         out.contains("#<41>(8,1,'integer',['unsigned'|['big']])"),
         "expected closing paren binary\n{out}"
     );
-    // The inline lambda should appear directly in main (fun (___tup) -> ...)
+    // The inline lambda should appear directly in main in uniform CPS shape.
     assert!(
-        out.contains("fun (___tup)"),
+        out.contains("fun (___tup, _Evidence, _ReturnK)"),
         "main should contain inline tuple show lambda\n{out}"
     );
 }
@@ -845,7 +848,7 @@ fn show_triple_tuple_has_three_elements() {
     assert!(out.contains(&bool_dict), "expected Show/Bool dict\n{out}");
     // Should have the inline tuple lambda, not a Tuple dict
     assert!(
-        out.contains("fun (___tup)"),
+        out.contains("fun (___tup, _Evidence, _ReturnK)"),
         "expected inline tuple show lambda\n{out}"
     );
     assert!(
@@ -873,7 +876,7 @@ main () = show Red
     let dict = typechecker::make_dict_name("Std.Base.Show", &[], "", "Color");
     // Should emit the user's dict constructor
     assert!(
-        out.contains(&format!("'{dict}'/0")),
+        out.contains(&format!("'{dict}'/2")),
         "expected Show/Color dict constructor\n{out}"
     );
     // main should dispatch show through the user's dict
@@ -911,10 +914,10 @@ main () = dbg (show Red)
         out.contains(&format!("'{dict}'")),
         "expected Show/Color dict passed to show\n{out}"
     );
-    // dbg should call io:format
+    // dbg should call through Std.IO.
     assert!(
-        out.contains("'io':'format'"),
-        "expected io:format in dbg\n{out}"
+        out.contains("'std_io', 'dbg'"),
+        "expected Std.IO dbg call\n{out}"
     );
 }
 
@@ -1044,9 +1047,11 @@ do_work () = {
 main () = do_work () with silent
 "#;
     let out = emit_elaborated(src);
-    // main should bind _HandleLog from the silent handler and call do_work
-    assert_contains(&out, "_Handle__script_Log_log");
-    assert_contains(&out, "apply 'do_work'/3");
+    // The optimizer can erase this simple handler install completely by
+    // specializing the call under the named handler.
+    assert_contains(&out, "'Log'");
+    assert_contains(&out, "apply _ReturnK(42)");
+    assert_core_compiles(&out);
 }
 
 #[test]
@@ -1065,7 +1070,8 @@ main () = risky () with {
 "#;
     let out = emit_elaborated(src);
     // Should have an inline handler function bound to _HandleFail
-    assert_contains(&out, "_Handle__script_Fail_fail");
+    assert_contains(&out, "'std_evidence_bridge':'insert_canonical'");
+    assert_contains(&out, "'Fail'");
     assert_contains(&out, "apply 'risky'/3");
 }
 
@@ -1078,7 +1084,10 @@ effect Log {
 }
 
 handler silent for Log {
-  log msg = resume ()
+  log msg = {
+    resume ()
+    resume ()
+  }
 }
 
 fun do_work : Unit -> Int needs {Log}
@@ -1092,7 +1101,7 @@ main () = do_work () with silent
     let out = emit_elaborated(src);
     // The handler function should call its K parameter (resume).
     // K uses a fresh name, so just verify the handler body applies *something*.
-    assert_contains(&out, "apply _Cor");
+    assert_contains(&out, "apply _K_arm");
 }
 
 #[test]
@@ -1113,7 +1122,8 @@ main () = risky () with {
     let out = emit_elaborated(src);
     // The inline handler body should just return 0, no _K call
     // (the arm body is `0`, which doesn't reference _K)
-    assert_contains(&out, "_Handle__script_Fail_fail");
+    assert_contains(&out, "'std_evidence_bridge':'insert_canonical'");
+    assert_contains(&out, "'Fail'");
 }
 
 #[test]
@@ -1141,8 +1151,10 @@ main () = risky () with {
 
 #[test]
 fn effect_propagation_threads_handler() {
-    // When an effectful function calls another effectful function,
-    // the handler param should be threaded through
+    // When an effectful function calls another effectful function, the uniform
+    // slow path threads evidence through. The optimizer may now replace the
+    // outer helper with a generated static variant, but the inner slow-path
+    // ABI remains visible.
     let src = r#"
 effect Log {
   fun log : (msg: String) -> Unit
@@ -1161,11 +1173,8 @@ handler silent for Log {
 main () = outer () with silent
 "#;
     let out = emit_elaborated(src);
-    // outer should pass its _HandleLog to inner
-    // inner/outer each take Unit + _HandleLog + _ReturnK
-    // outer calls inner with its own _HandleLog
     assert_contains(&out, "'inner'/3");
-    assert_contains(&out, "'outer'/3");
+    assert_contains(&out, "'__saga_static_variant__outer");
 }
 
 #[test]
@@ -1189,13 +1198,9 @@ handler silent for Log {
 main () = do_work () with silent
 "#;
     let out = emit_elaborated(src);
-    // Should have two nested handler applies with continuations
-    // Count occurrences of apply _HandleLog
-    let count = out.matches("_Handle__script_Log_log").count();
-    assert!(
-        count >= 2,
-        "expected at least 2 handler applies, got {count}\n{out}"
-    );
+    // Static tail-resumptive function variants can eliminate both handler
+    // lookups from this shape.
+    assert_contains(&out, "__saga_static_variant__do_work");
 }
 
 #[test]
@@ -1221,9 +1226,9 @@ do_work () = {
 main () = do_work () with silent
 "#;
     let out = emit_elaborated(src);
-    // do_work should have nested handler applies with continuations
-    // wrapping the let bindings and final value
-    assert_contains(&out, "'do_work'/3");
+    // do_work is specialized away under the static handler, but the let-bound
+    // arithmetic still appears in the generated variant.
+    assert_contains(&out, "__saga_static_variant__do_work");
     assert_contains(&out, "_Evidence");
     // x = 10 + 20 should appear inside a continuation
     assert_contains(&out, "call 'erlang':'+'");
@@ -1253,8 +1258,9 @@ main () = {
 }
 "#;
     let out = emit_elaborated(src);
-    // Should have two with-expression lowerings, each with _Handle__script_Fail_fail
-    assert_contains(&out, "_Handle__script_Fail_fail");
+    // Should have evidence installation for the Fail handlers.
+    assert_contains(&out, "'std_evidence_bridge':'insert_canonical'");
+    assert_contains(&out, "'Fail'");
     // The fail arm should not call _K
     // The return clause should appear
 }
@@ -1287,11 +1293,10 @@ handler silent for Log {
 main () = outer () with silent
 "#;
     let out = emit_elaborated(src);
-    // Both should take Unit + _HandleLog + _ReturnK
+    // `inner` remains as the source function. `outer` may be replaced by a
+    // generated static variant once the optimizer proves the enclosing handler.
     assert_contains(&out, "'inner'/3");
-    assert_contains(&out, "'outer'/3");
-    // outer's body should call inner with _Evidence and _ReturnK passed through
-    assert_contains(&out, "apply 'inner'/3(");
+    assert_contains(&out, "'__saga_static_variant__outer");
 }
 
 #[test]
@@ -1331,8 +1336,8 @@ main () = risky_work () with {
     // risky_work takes Unit + _Evidence + _ReturnK = arity 3
     assert_contains(&out, "'risky_work'/3");
     // Both handler bindings should appear at the `with` site
-    assert_contains(&out, "_Handle__script_Fail_fail");
-    assert_contains(&out, "_Handle__script_Log_log");
+    assert_contains(&out, "'Fail'");
+    assert_contains(&out, "'Log'");
 }
 
 #[test]
@@ -1359,8 +1364,8 @@ do_work () = {
 main () = do_work () with console_log
 "#;
     let out = emit_elaborated(src);
-    // The handler arm body should call io:format (dbg is lowered inline)
-    assert_contains(&out, "'io':'format'");
+    // The handler arm body should call Std.IO dbg.
+    assert_contains(&out, "'std_io', 'dbg'");
 }
 
 #[test]
@@ -1406,9 +1411,8 @@ main () = {
 } with silent
 "#;
     let out = emit_elaborated(src);
-    assert_contains(&out, "_Handle__script_Log_log");
-    assert_contains(&out, "_Handle__script_Log_log");
-    assert_contains(&out, "_Handle__script_Fail_fail");
+    assert_contains(&out, "'Log'");
+    assert_contains(&out, "'Fail'");
 }
 
 #[test]
@@ -1446,8 +1450,8 @@ main () = {
 } with silent
 "#;
     let out = emit_elaborated(src);
-    assert_contains(&out, "_Handle__script_Log_log");
-    assert_contains(&out, "_Handle__script_Fail_fail");
+    assert_contains(&out, "'Log'");
+    assert_contains(&out, "'Fail'");
 }
 
 #[test]
@@ -1470,7 +1474,7 @@ main () = safe_div 10 0 with {
     let out = emit_elaborated(src);
     // safe_div takes 2 user params + _Evidence + _ReturnK = arity 4
     assert_contains(&out, "'safe_div'/4");
-    assert_contains(&out, "_Handle__script_Fail_fail");
+    assert_contains(&out, "'Fail'");
 }
 
 // --- Effect calls in non-block positions ---
@@ -1495,7 +1499,7 @@ main () = compute () with {
 "#;
     let out = emit_elaborated(src);
     // The ask! should be CPS-transformed with a continuation that does the addition
-    assert_contains(&out, "_Handle__script_Ask_ask");
+    assert_contains(&out, "'Ask'");
     // The addition should still happen
     assert_contains(&out, "call 'erlang':'+'");
 }
@@ -1521,7 +1525,7 @@ main () = compute () with {
 }
 "#;
     let out = emit_elaborated(src);
-    assert_contains(&out, "_Handle__script_Ask_ask");
+    assert_contains(&out, "'Ask'");
     assert_contains(&out, "'double'");
 }
 
@@ -1543,7 +1547,7 @@ main () = decide () with {
 }
 "#;
     let out = emit_elaborated(src);
-    assert_contains(&out, "_Handle__script_Ask_ask");
+    assert_contains(&out, "'Ask'");
 }
 
 #[test]
@@ -1565,12 +1569,8 @@ main () = compute () with {
 }
 "#;
     let out = emit_elaborated(src);
-    // Should have two separate handler applies for the two ask! calls
-    let count = out.matches("_Handle__script_Ask_ask").count();
-    assert!(
-        count >= 2,
-        "expected at least 2 handler applies, got {count}\n{out}"
-    );
+    // The two tail-resumptive ask! calls collapse into a static variant.
+    assert_contains(&out, "__saga_static_variant__compute");
 }
 
 #[test]
@@ -1617,7 +1617,7 @@ main () = try_it (fun () -> fail! "oops")
 "#;
     let out = emit_elaborated(src);
     // The lambda should have _HandleFail as a parameter
-    assert_contains(&out, "_Handle__script_Fail_fail");
+    assert_contains(&out, "'Fail'");
     // try_it's body should call computation with the handler param
     assert_contains(&out, "apply Computation(");
 }
@@ -1644,7 +1644,7 @@ main () = try_it (fun () -> {
 })
 "#;
     let out = emit_elaborated(src);
-    assert_contains(&out, "_Handle__script_Fail_fail");
+    assert_contains(&out, "'Fail'");
     assert_contains(&out, "apply Computation(");
 }
 
@@ -1889,8 +1889,8 @@ main () = {
 "#;
     let out = emit_elaborated(src);
     assert_contains(&out, "call 'erlang':'element'");
-    assert_contains(&out, "_Handle__script_One_one");
-    assert_contains(&out, "_Handle__script_Two_two");
+    assert_contains(&out, "'One'");
+    assert_contains(&out, "'Two'");
     assert_compiles(src);
 }
 
@@ -2184,7 +2184,7 @@ main () = {
 "#;
     let out = emit_elaborated(src);
     assert_contains(&out, "letrec");
-    assert_contains(&out, "'double'/1");
+    assert_contains(&out, "'double'/3");
 }
 
 #[test]
@@ -2252,8 +2252,8 @@ increment = add 1
         "expected lambda in partial application output:\n{out}"
     );
     assert!(
-        out.contains("'add'/2"),
-        "expected reference to add/2:\n{out}"
+        out.contains("'add'/4"),
+        "expected reference to add/4:\n{out}"
     );
 }
 
@@ -2303,8 +2303,8 @@ main () = {
     let out = emit_elaborated(src);
     // The partial application lambda should include handler params
     assert!(
-        out.contains("_Handle__script_Logger_log"),
-        "expected handler param in partial application lambda:\n{out}"
+        out.contains("'Logger'"),
+        "expected Logger evidence in partial application lambda:\n{out}"
     );
     assert!(
         out.contains("_ReturnK"),
@@ -2349,12 +2349,12 @@ main () = {
 "#;
     let out = emit_elaborated_with_std(src);
     assert!(
-        out.contains("call 'std_list':'reverse'"),
-        "List.reverse should emit std_list:reverse wrapper\n{out}"
+        out.contains("call 'lists':'reverse'"),
+        "List.reverse should emit lists:reverse\n{out}"
     );
     assert!(
-        out.contains("call 'std_string':'reverse'"),
-        "String.reverse should emit std_string:reverse wrapper\n{out}"
+        out.contains("call 'std_string_bridge':'reverse'"),
+        "String.reverse should emit std_string_bridge:reverse\n{out}"
     );
 }
 
@@ -2369,12 +2369,12 @@ main () = reverse "hello"
 "#;
     let out = emit_elaborated_with_std(src);
     assert!(
-        out.contains("call 'std_string':'reverse'"),
-        "Exposed reverse should emit std_string:reverse, not std_list:reverse\n{out}"
+        out.contains("call 'std_string_bridge':'reverse'"),
+        "Exposed reverse should emit std_string_bridge:reverse, not lists:reverse\n{out}"
     );
     assert!(
-        !out.contains("call 'std_list':'reverse'"),
-        "Should not contain std_list:reverse\n{out}"
+        !out.contains("call 'lists':'reverse'"),
+        "Should not contain lists:reverse\n{out}"
     );
 }
 
@@ -2394,12 +2394,12 @@ main () = {
 "#;
     let out = emit_elaborated_with_std(src);
     assert!(
-        out.contains("call 'std_string':'reverse'"),
-        "Exposed reverse should emit std_string:reverse wrapper\n{out}"
+        out.contains("call 'std_string_bridge':'reverse'"),
+        "Exposed reverse should emit std_string_bridge:reverse\n{out}"
     );
     assert!(
-        out.contains("call 'std_list':'reverse'"),
-        "List.reverse should emit std_list:reverse wrapper\n{out}"
+        out.contains("call 'lists':'reverse'"),
+        "List.reverse should emit lists:reverse\n{out}"
     );
 }
 
@@ -2647,11 +2647,11 @@ main () = {
 "#;
     let out = emit_elaborated_with_std(src);
     assert!(
-        out.contains("('std_file_bridge', 'write_file', 2)"),
+        out.contains("call 'std_file_bridge':'write_file'"),
         "Std.File.fs should lower write through std_file_bridge\n{out}"
     );
     assert!(
-        out.contains("('std_file_bridge', 'file_exists', 1)"),
+        out.contains("call 'std_file_bridge':'file_exists'"),
         "Std.File.fs should lower exists through std_file_bridge\n{out}"
     );
     assert!(

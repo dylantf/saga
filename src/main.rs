@@ -1,6 +1,7 @@
 mod cli;
 
 use clap::{Parser, Subcommand};
+use saga::compiler_options::CompileOptions;
 
 #[derive(Parser)]
 #[command(name = "saga", about = "The saga compiler", version)]
@@ -21,6 +22,9 @@ enum Command {
         /// Show full erlc/erl output
         #[arg(short, long)]
         verbose: bool,
+        /// Require every lowered function to use the selective backend
+        #[arg(long)]
+        selective_no_fallback: bool,
     },
     /// Build a project or single file
     Build {
@@ -32,6 +36,9 @@ enum Command {
         /// Show full erlc/erl output
         #[arg(short, long)]
         verbose: bool,
+        /// Require every lowered function to use the selective backend
+        #[arg(long)]
+        selective_no_fallback: bool,
     },
     /// Typecheck without building
     Check {
@@ -42,6 +49,20 @@ enum Command {
     Emit {
         /// The .saga source file
         file: String,
+        /// Require every lowered function to use the selective backend
+        #[arg(long)]
+        selective_no_fallback: bool,
+    },
+    /// Dump an intermediate IR stage for a single .saga file (new-path debugging)
+    Inspect {
+        /// The .saga source file
+        file: String,
+        /// Stage to dump: elaborated | anf | monadic | selective-core | core
+        #[arg(long)]
+        stage: String,
+        /// Require every lowered function to use the selective backend for selective-core
+        #[arg(long)]
+        selective_no_fallback: bool,
     },
     /// Run tests
     Test {
@@ -50,6 +71,9 @@ enum Command {
         /// Show full erlc/erl output
         #[arg(short, long)]
         verbose: bool,
+        /// Require every lowered function to use the selective backend
+        #[arg(long)]
+        selective_no_fallback: bool,
     },
     /// Create a new project
     New {
@@ -106,27 +130,48 @@ fn main() {
             file,
             release,
             verbose,
+            selective_no_fallback,
         } => {
             cli::set_verbose(verbose);
-            cli::commands::cmd_run(file.as_deref(), release);
+            let options = compile_options(selective_no_fallback);
+            cli::commands::cmd_run(file.as_deref(), release, &options);
         }
         Command::Build {
             file,
             release,
             verbose,
+            selective_no_fallback,
         } => {
             cli::set_verbose(verbose);
-            cli::commands::cmd_build(file.as_deref(), release);
+            let options = compile_options(selective_no_fallback);
+            cli::commands::cmd_build(file.as_deref(), release, &options);
         }
         Command::Check { file } => {
             cli::commands::cmd_check(file.as_deref());
         }
-        Command::Emit { file } => {
-            cli::commands::cmd_emit(&file);
+        Command::Emit {
+            file,
+            selective_no_fallback,
+        } => {
+            let options = compile_options(selective_no_fallback);
+            cli::commands::cmd_emit(&file, &options);
         }
-        Command::Test { filter, verbose } => {
+        Command::Inspect {
+            file,
+            stage,
+            selective_no_fallback,
+        } => {
+            let options = compile_options(selective_no_fallback);
+            cli::commands::cmd_inspect_with_options(&file, &stage, &options);
+        }
+        Command::Test {
+            filter,
+            verbose,
+            selective_no_fallback,
+        } => {
             cli::set_verbose(verbose);
-            cli::commands::cmd_test(filter.as_deref());
+            let options = compile_options(selective_no_fallback);
+            cli::commands::cmd_test(filter.as_deref(), &options);
         }
         Command::New { name, lib } => {
             cli::commands::cmd_new(&name, lib);
@@ -146,4 +191,12 @@ fn main() {
             cli::commands::cmd_docs(output.as_deref(), dir.as_deref());
         }
     }
+}
+
+fn compile_options(selective_no_fallback: bool) -> CompileOptions {
+    let mut options = CompileOptions::default();
+    if selective_no_fallback {
+        options = options.with_selective_no_fallback(true);
+    }
+    options
 }

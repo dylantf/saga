@@ -1,4 +1,7 @@
-use saga::{codegen, elaborate, project_config, project_config::ProjectConfig, typechecker};
+use saga::{
+    ast, codegen, compiler_options::CompileOptions, elaborate, project_config,
+    project_config::ProjectConfig, typechecker,
+};
 
 use std::fs;
 use std::path::PathBuf;
@@ -16,11 +19,61 @@ fn test_timeout() -> Duration {
     Duration::from_secs(secs)
 }
 
-pub fn cmd_run(file: Option<&str>, release: bool) {
+fn codegen_context_for_checked_module(
+    result: &typechecker::CheckResult,
+    module_name: &str,
+    elaborated: &ast::Program,
+) -> codegen::CodegenContext {
+    let mut compiled_modules = compile_std_modules(result);
+
+    for (name, info) in result.codegen_info() {
+        if name == module_name {
+            continue;
+        }
+        let compiled = codegen::compile_module_from_result(name, result).unwrap_or_else(|| {
+            codegen::CompiledModule {
+                codegen_info: info.clone(),
+                elaborated: Vec::new(),
+                resolution: codegen::resolve::ResolutionMap::new(),
+                front_resolution: Default::default(),
+            }
+        });
+        compiled_modules.entry(name.clone()).or_insert(compiled);
+    }
+
+    let front_resolution = result
+        .module_check_results()
+        .get(module_name)
+        .map(|module_result| module_result.resolution.clone())
+        .unwrap_or_else(|| result.resolution.clone());
+
+    compiled_modules.insert(
+        module_name.to_string(),
+        codegen::CompiledModule {
+            codegen_info: result
+                .codegen_info()
+                .get(module_name)
+                .cloned()
+                .unwrap_or_default(),
+            elaborated: elaborated.clone(),
+            resolution: codegen::resolve::ResolutionMap::new(),
+            front_resolution,
+        },
+    );
+
+    codegen::CodegenContext {
+        modules: compiled_modules,
+        let_effect_bindings: result.let_effect_bindings.clone(),
+        prelude_imports: result.prelude_imports.clone(),
+    }
+}
+
+pub fn cmd_run(file: Option<&str>, release: bool, options: &CompileOptions) {
     if release {
         // --release: use cached build if still valid, otherwise rebuild
         if let Some(f) = file {
-            let sb = check_script_cache(f, "release").unwrap_or_else(|| build_script(f, "release"));
+            let sb = check_script_cache_with_options(f, "release", options)
+                .unwrap_or_else(|| build_script_with_options(f, "release", options));
             exec_erl(&sb.build_dir, &sb.stdlib_dir, &[], &sb.erlang_name);
         } else {
             let project_root = super::find_project_root().unwrap_or_else(|| {
@@ -33,17 +86,19 @@ pub fn cmd_run(file: Option<&str>, release: bool) {
                 std::process::exit(1);
             }
             let extra_dirs = project_config::extra_ebin_dirs(&project_root, config.deps.as_ref());
-            let (build_dir, stdlib_dir) = check_project_cache(&project_root, "release")
-                .unwrap_or_else(|| {
-                    let pb = build_project("release");
-                    (pb.build_dir, pb.stdlib_dir)
-                });
+            let (build_dir, stdlib_dir) =
+                check_project_cache_with_options(&project_root, "release", options).unwrap_or_else(
+                    || {
+                        let pb = build_project_with_options("release", options);
+                        (pb.build_dir, pb.stdlib_dir)
+                    },
+                );
             exec_erl(&build_dir, &stdlib_dir, &extra_dirs, "main");
         }
     } else {
         // dev: always clean rebuild
         if let Some(f) = file {
-            let sb = build_script(f, "dev");
+            let sb = build_script_with_options(f, "dev", options);
             exec_erl(&sb.build_dir, &sb.stdlib_dir, &[], &sb.erlang_name);
         } else {
             let project_root = super::find_project_root().unwrap_or_else(|| {
@@ -55,19 +110,19 @@ pub fn cmd_run(file: Option<&str>, release: bool) {
                 eprintln!("This project is a library and cannot be run. Use `saga build` instead.");
                 std::process::exit(1);
             }
-            let pb = build_project("dev");
+            let pb = build_project_with_options("dev", options);
             exec_erl(&pb.build_dir, &pb.stdlib_dir, &pb.extra_ebin_dirs, "main");
         }
     }
 }
 
-pub fn cmd_build(file: Option<&str>, release: bool) {
+pub fn cmd_build(file: Option<&str>, release: bool, options: &CompileOptions) {
     let profile = if release { "release" } else { "dev" };
 
     if let Some(f) = file {
-        let _sb = build_script(f, profile);
+        let _sb = build_script_with_options(f, profile, options);
     } else {
-        let _pb = build_project(profile);
+        let _pb = build_project_with_options(profile, options);
     }
 }
 
@@ -252,49 +307,228 @@ pub fn cmd_install() {
     }
 }
 
-pub fn cmd_emit(file: &str) {
+pub fn cmd_emit(file: &str, options: &CompileOptions) {
     let source = fs::read_to_string(file).unwrap_or_else(|e| {
         eprintln!("Error reading {}: {}", file, e);
         std::process::exit(1);
     });
-    let mut checker = make_checker(None);
+    let project_root = super::find_project_root();
+    let mut checker = make_checker(project_root.clone());
+    if let Some(root) = &project_root {
+        let config = ProjectConfig::load(root);
+        if let Err(e) = config.validate() {
+            eprintln!("Error in project.toml: {}", e);
+            std::process::exit(1);
+        }
+        if let Some(deps) = &config.deps
+            && let Err(e) = saga::project_config::resolve_deps(&mut checker, root, deps)
+        {
+            eprintln!("Error resolving dependencies: {}", e);
+            std::process::exit(1);
+        }
+    }
     let (program, _) = parse_and_typecheck(&source, file, &mut checker);
     let result = checker.to_result();
 
     let module_name = declared_module_name(&program).unwrap_or_else(|| "_script".to_string());
     let erlang_name = module_name.to_lowercase().replace('.', "_");
 
-    // Full pipeline: compile Std modules + elaborate user code
-    let mut compiled_modules = compile_std_modules(&result);
     let elaborated = elaborate::elaborate(&program, &result);
-    compiled_modules.insert(
-        module_name,
-        codegen::CompiledModule {
-            codegen_info: Default::default(),
-            elaborated: elaborated.clone(),
-            resolution: codegen::resolve::ResolutionMap::new(),
-            front_resolution: result.resolution.clone(),
-            call_effects: codegen::call_effects::CallEffectMap::new(),
-        },
-    );
-    let ctx = codegen::CodegenContext {
-        modules: compiled_modules,
-        let_effect_bindings: result.let_effect_bindings.clone(),
-        prelude_imports: result.prelude_imports.clone(),
-    };
+    let ctx = codegen_context_for_checked_module(&result, &module_name, &elaborated);
     let source_file = codegen::SourceFile {
         path: file.to_string(),
         source: source.clone(),
     };
-    let core_src = codegen::emit_module_with_context(
+    let output = codegen::emit_module_with_context_options(
         &erlang_name,
         &elaborated,
         &ctx,
         &result,
         Some(&source_file),
         Some("main"),
+        options,
     );
-    print!("{}", core_src);
+    print!("{}", output.core_src);
+}
+
+/// Dump an intermediate IR stage for a single `.saga` file.
+///
+/// `monadic` and `selective-core` expose the two internal forms that feed the
+/// default selective backend. `core` goes through the normal emit path.
+pub fn cmd_inspect_with_options(file: &str, stage: &str, options: &CompileOptions) {
+    use saga::codegen::monadic;
+
+    let source = fs::read_to_string(file).unwrap_or_else(|e| {
+        eprintln!("Error reading {}: {}", file, e);
+        std::process::exit(1);
+    });
+    let project_root = super::find_project_root();
+    let mut checker = make_checker(project_root.clone());
+    if let Some(root) = &project_root {
+        let config = ProjectConfig::load(root);
+        if let Err(e) = config.validate() {
+            eprintln!("Error in project.toml: {}", e);
+            std::process::exit(1);
+        }
+        if let Some(deps) = &config.deps
+            && let Err(e) = saga::project_config::resolve_deps(&mut checker, root, deps)
+        {
+            eprintln!("Error resolving dependencies: {}", e);
+            std::process::exit(1);
+        }
+    }
+    let (program, _) = parse_and_typecheck(&source, file, &mut checker);
+    let result = checker.to_result();
+
+    let elaborated = elaborate::elaborate(&program, &result);
+
+    match stage {
+        "elaborated" => {
+            println!("{:#?}", elaborated);
+        }
+        "anf" => {
+            let anf_program = codegen::anf::normalize(elaborated, None);
+            println!("{:#?}", anf_program);
+        }
+        "monadic" | "selective-core" => {
+            // Build a CodegenContext (std modules + checked user modules) so
+            // resolve/effect-info match what the emit/build paths see.
+            let module_name =
+                declared_module_name(&program).unwrap_or_else(|| "_script".to_string());
+            let ctx = codegen_context_for_checked_module(&result, &module_name, &elaborated);
+
+            let codegen_info = ctx.codegen_info();
+            let front_resolution = result
+                .module_check_results()
+                .get(&module_name)
+                .map(|m| &m.resolution)
+                .unwrap_or(&result.resolution);
+            let mut resolution_map = codegen::resolve::resolve_names(
+                &module_name,
+                &elaborated,
+                &codegen_info,
+                &ctx.prelude_imports,
+                front_resolution,
+            );
+            for compiled in ctx.modules.values() {
+                resolution_map.extend(compiled.resolution.iter().map(|(k, v)| (*k, v.clone())));
+            }
+
+            let anf_program = codegen::anf::normalize(elaborated.clone(), Some(&resolution_map));
+
+            let ops_storage = codegen::build_effect_ops_table(&result);
+            let mod_check_ref = result
+                .module_check_results()
+                .get(&module_name)
+                .unwrap_or(&result);
+            let handler_effects_storage = codegen::build_handler_effects(&result);
+            let let_handler_effects_storage = codegen::build_let_handler_effects(&result);
+            let effect_info = codegen::build_effect_info(
+                &result,
+                mod_check_ref,
+                &ops_storage,
+                &handler_effects_storage,
+                &let_handler_effects_storage,
+            );
+
+            // Collect imported handler bodies (matches new-path emit behavior).
+            let mut imported_handler_decls: std::collections::HashMap<
+                String,
+                saga::ast::HandlerBody,
+            > = std::collections::HashMap::new();
+            let mut imported_dict_constructors = std::collections::HashMap::new();
+            let mut handler_info = codegen::handler_analysis::analyze(&elaborated);
+            for (imported_module_name, compiled) in &ctx.modules {
+                let anf_imported = codegen::anf::normalize(
+                    compiled.elaborated.clone(),
+                    Some(&compiled.resolution),
+                );
+                for decl in &anf_imported {
+                    if let saga::ast::Decl::HandlerDef { name, body, .. } = decl {
+                        imported_handler_decls
+                            .entry(name.clone())
+                            .or_insert_with(|| body.clone());
+                    }
+                }
+                handler_info
+                    .resumption
+                    .extend(codegen::handler_analysis::analyze(&compiled.elaborated).resumption);
+                if imported_module_name != &module_name {
+                    let (imported_monadic, _) = monadic::translate::translate(
+                        &anf_imported,
+                        &compiled.resolution,
+                        &effect_info,
+                    );
+                    let imported_private =
+                        codegen::lower_selective::collect_imported_private_helper_candidates(
+                            imported_module_name,
+                            &imported_monadic,
+                            &compiled.resolution,
+                            &compiled.codegen_info,
+                        );
+                    let imported_private_names = imported_private
+                        .values()
+                        .map(|binding| binding.name.clone())
+                        .collect::<std::collections::HashSet<_>>();
+                    imported_dict_constructors.extend(
+                        codegen::lower_selective::collect_imported_dict_constructors(
+                            imported_module_name,
+                            &imported_monadic,
+                            &compiled.resolution,
+                            &compiled.codegen_info,
+                            &imported_private_names,
+                        ),
+                    );
+                }
+            }
+
+            let (monadic_prog, handler_value_map) = monadic::translate::translate_with_imports(
+                &anf_program,
+                &resolution_map,
+                &effect_info,
+                &imported_handler_decls,
+            );
+
+            if stage == "selective-core" {
+                let constructor_atoms = codegen::resolve::build_constructor_atoms(
+                    &module_name,
+                    &elaborated,
+                    &codegen_info,
+                    &ctx.prelude_imports,
+                );
+                let cmod =
+                    codegen::lower_selective::lower_module_with_entry_export_and_imported_dicts(
+                        &module_name,
+                        &monadic_prog,
+                        &resolution_map,
+                        &constructor_atoms,
+                        &ctx,
+                        &handler_info,
+                        &effect_info,
+                        None,
+                        &handler_value_map,
+                        imported_dict_constructors,
+                        codegen::lower_selective::LoweringOptions {
+                            require_all_functions: options.selective_no_fallback,
+                        },
+                    );
+                println!("{}", codegen::cerl::print_module(&cmod));
+                return;
+            }
+
+            println!("{}", monadic::print::print_program(&monadic_prog));
+        }
+        "core" => {
+            cmd_emit(file, &CompileOptions::default());
+        }
+        other => {
+            eprintln!(
+                "Unknown stage: '{}'. Expected one of: elaborated, anf, monadic, selective-core, core",
+                other
+            );
+            std::process::exit(1);
+        }
+    }
 }
 
 pub fn cmd_fmt(file: &str, write_mode: bool, debug_mode: bool, cli_width: Option<usize>) {
@@ -336,7 +570,7 @@ pub fn cmd_fmt(file: &str, write_mode: bool, debug_mode: bool, cli_width: Option
     }
 }
 
-pub fn cmd_test(filter: Option<&str>) {
+pub fn cmd_test(filter: Option<&str>, options: &CompileOptions) {
     let project_root = super::find_project_root().unwrap_or_else(|| {
         eprintln!("No project.toml found. Tests require a project.");
         std::process::exit(1);
@@ -428,10 +662,11 @@ pub fn cmd_test(filter: Option<&str>) {
         .collect();
 
     let entry_source = generate_test_entry_source(&test_modules);
-    let pb = build_project_ext(
+    let pb = build_project_ext_with_options(
         "test",
         std::slice::from_ref(&tests_dir),
         Some(("_test_entry.saga", &entry_source)),
+        options,
     );
 
     exec_erl_with_timeout(

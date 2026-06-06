@@ -1,0 +1,39 @@
+module Main
+
+effect Log {
+  fun log : (msg: String) -> Unit
+}
+
+effect Fail {
+  fun fail : (msg: String) -> a
+}
+
+fun run_with_log : (f: Unit -> Unit needs {Log, ..e}) -> Unit needs {..e}
+run_with_log f = f () with {
+  log msg = {
+    dbg msg
+    resume ()
+  }
+}
+
+fun greet : (name: String) -> Unit needs {Fail}
+greet name = {
+  run_with_log (fun () -> log! $"hello, {name}")
+  if name == "" then fail! "empty name" else ()
+}
+
+fun twice : (f: Int -> Int) -> Int -> Int
+twice f x = f (f x)
+
+main () = {
+  let result = twice (fun x -> x * 2) 5
+  dbg $"5 doubled twice: {result}"
+
+  greet "world" with {
+    fail msg = dbg $"caught: {msg}"
+  }
+
+  greet "" with {
+    fail msg = dbg $"caught: {msg}"
+  }
+}

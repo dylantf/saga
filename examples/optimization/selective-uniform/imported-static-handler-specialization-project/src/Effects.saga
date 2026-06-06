@@ -1,0 +1,11 @@
+module Effects
+
+pub effect DbConfig {
+  fun db_url : Unit -> Int
+}
+
+pub fun query : Unit -> Int needs {DbConfig}
+query () = {
+  let value = db_url! ()
+  value + 1
+}

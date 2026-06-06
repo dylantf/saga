@@ -1,0 +1,10 @@
+# Eta-reduced binding aliasing an @external function.
+# Mirrors `pg_text = coerce_value` from saga_pgo lib/Types.saga.
+
+@external("erlang", "erlang", "abs")
+fun ext_abs : Int -> Int
+
+pub fun my_abs : Int -> Int
+my_abs = ext_abs
+
+main () = dbg (my_abs (-5))

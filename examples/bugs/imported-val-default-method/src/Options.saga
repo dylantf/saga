@@ -1,0 +1,5 @@
+module Options
+
+pub record Options { prefix: String }
+
+pub val default_options = Options { prefix: "ok" }

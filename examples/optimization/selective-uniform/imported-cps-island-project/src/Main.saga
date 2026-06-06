@@ -1,0 +1,12 @@
+module Main
+
+import Effects (ReadInt, read_value)
+
+pub fun read_plus_two : Unit -> Int needs {ReadInt}
+read_plus_two () = {
+  let value = read_value ()
+  value + 2
+}
+
+fun main : Unit -> Unit
+main () = ()
