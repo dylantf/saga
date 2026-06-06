@@ -190,6 +190,12 @@ struct LocalHelperInfo {
     source_module: String,
 }
 
+struct GeneratedHelperVariant {
+    name: String,
+    arity: usize,
+    body: CExpr,
+}
+
 /// Stored effect definition: maps op_name -> lowering metadata.
 struct EffectInfo {
     ops: HashMap<String, EffectOpInfo>,
@@ -296,6 +302,7 @@ pub struct Lowerer<'a> {
     /// handler helper islands.
     local_helper_defs: HashMap<String, LocalHelperInfo>,
     helper_inline_stack: Vec<String>,
+    generated_helper_variants: Vec<GeneratedHelperVariant>,
     /// Evidence context for the currently-lowered effectful scope. `None` in
     /// pure code. Set by the function-entry plumbing for effectful functions
     /// (var = `_Evidence`) and refreshed at `with` boundaries (var = a fresh
@@ -413,6 +420,7 @@ impl<'a> Lowerer<'a> {
             handler_factory_defs: HashMap::new(),
             local_helper_defs: HashMap::new(),
             helper_inline_stack: Vec::new(),
+            generated_helper_variants: Vec::new(),
             current_evidence: None,
             no_resume_ops: std::collections::HashSet::new(),
             direct_ops: HashMap::new(),
@@ -701,12 +709,6 @@ impl<'a> Lowerer<'a> {
             .and_then(|r| r.record_type(node_id))
     }
 
-    fn current_effect_call_effect(&self, node_id: crate::ast::NodeId) -> Option<&str> {
-        self.front_resolution_for_module(self.current_semantic_module_name())
-            .and_then(|r| r.effect_call(node_id))
-            .map(|resolved| resolved.effect.as_str())
-    }
-
     fn handler_arm_effect_for_module(
         &self,
         module_name: &str,
@@ -762,7 +764,17 @@ impl<'a> Lowerer<'a> {
         _op_name: &str,
         _qualifier: Option<&str>,
     ) -> Option<String> {
-        self.current_effect_call_effect(node_id)
+        self.resolved_effect_call_name_for_module(self.current_semantic_module_name(), node_id)
+    }
+
+    fn resolved_effect_call_name_for_module(
+        &self,
+        module_name: &str,
+        node_id: crate::ast::NodeId,
+    ) -> Option<String> {
+        self.front_resolution_for_module(module_name)
+            .and_then(|r| r.effect_call(node_id))
+            .map(|resolved| resolved.effect.as_str())
             .map(|resolved| self.canonical_effect_lookup(resolved))
     }
 
@@ -1646,6 +1658,7 @@ impl<'a> Lowerer<'a> {
             })
             .unwrap_or_else(|| module_name.to_string());
         self.effect_op_trace.clear();
+        self.generated_helper_variants.clear();
         let mut pending_annotations = self.init_module(module_name, program);
 
         // Group FunBindings by name, preserving declaration order, and simultaneously
@@ -2168,6 +2181,16 @@ impl<'a> Lowerer<'a> {
         {
             entry_def.body = Self::wrap_with_vec_init(entry_def.body.clone());
         }
+
+        fun_defs.extend(
+            self.generated_helper_variants
+                .drain(..)
+                .map(|variant| CFunDef {
+                    name: variant.name,
+                    arity: variant.arity,
+                    body: variant.body,
+                }),
+        );
 
         if super::call_effects::effect_op_trace_enabled_for(&self.current_source_module) {
             eprintln!(
@@ -2845,6 +2868,30 @@ impl<'a> Lowerer<'a> {
     /// `emit_call`; effectful vars have no static arity at the call site
     /// and lower as `CExpr::Apply(Var, args)`. Merging them would replace
     /// two focused branches with one branchier function.
+    fn helper_lookup_candidates(
+        &self,
+        lookup_name: &str,
+        head_id: crate::ast::NodeId,
+    ) -> Vec<String> {
+        let mut candidates = Vec::new();
+        if let Some(resolved) = self.resolved.get(&head_id) {
+            candidates.push(resolved.canonical_name.clone());
+        }
+        candidates.push(lookup_name.to_string());
+        candidates.dedup();
+        candidates
+    }
+
+    fn helper_key_for_call(
+        &self,
+        lookup_name: &str,
+        head_id: crate::ast::NodeId,
+    ) -> Option<String> {
+        self.helper_lookup_candidates(lookup_name, head_id)
+            .into_iter()
+            .find(|candidate| self.local_helper_defs.contains_key(candidate))
+    }
+
     fn try_inline_static_helper_call(
         &mut self,
         lookup_name: &str,
@@ -2852,13 +2899,14 @@ impl<'a> Lowerer<'a> {
         args: &[&Expr],
         return_k: Option<CExpr>,
     ) -> Option<CExpr> {
-        let helper = self.local_helper_defs.get(lookup_name)?.clone();
+        let helper_key = self.helper_key_for_call(lookup_name, head.id)?;
+        let helper = self.local_helper_defs.get(&helper_key)?.clone();
         if helper.source_module != self.current_semantic_module_name()
             || self
                 .helper_inline_stack
                 .iter()
-                .any(|name| name == lookup_name)
-            || !self.static_helper_call_supported(lookup_name, args, &mut Vec::new())
+                .any(|name| name == &helper_key)
+            || !self.static_helper_call_supported(&helper_key, args, &mut Vec::new())
         {
             return None;
         }
@@ -2877,7 +2925,7 @@ impl<'a> Lowerer<'a> {
             return None;
         }
 
-        self.helper_inline_stack.push(lookup_name.to_string());
+        self.helper_inline_stack.push(helper_key);
         let body = self.lower_expr_with_installed_return_k(&helper.body, return_k);
         self.helper_inline_stack.pop();
 
@@ -2889,6 +2937,99 @@ impl<'a> Lowerer<'a> {
                 CExpr::Let(param, Box::new(CExpr::Var(arg)), Box::new(body))
             });
         Some(self.wrap_let_bindings(arg_bindings, body))
+    }
+
+    fn direct_value_with_return_k(&mut self, value: CExpr, return_k: Option<CExpr>) -> CExpr {
+        if let Some(k) = return_k {
+            match k {
+                CExpr::Fun(params, body) if params.len() == 1 => {
+                    CExpr::Let(params[0].clone(), Box::new(value), body)
+                }
+                other => {
+                    let result_var = self.fresh();
+                    CExpr::Let(
+                        result_var.clone(),
+                        Box::new(value),
+                        Box::new(CExpr::Apply(Box::new(other), vec![CExpr::Var(result_var)])),
+                    )
+                }
+            }
+        } else {
+            value
+        }
+    }
+
+    fn generated_helper_variant_name(&mut self, lookup_name: &str) -> String {
+        let safe = lookup_name
+            .chars()
+            .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '_' })
+            .collect::<String>();
+        format!("__saga_static_helper_{}_{}", safe, self.fresh())
+    }
+
+    fn try_imported_static_helper_variant_call(
+        &mut self,
+        lookup_name: &str,
+        head: &Expr,
+        args: &[&Expr],
+        return_k: Option<CExpr>,
+    ) -> Option<CExpr> {
+        let helper_key = self.helper_key_for_call(lookup_name, head.id)?;
+        let helper = self.local_helper_defs.get(&helper_key)?.clone();
+        if helper.source_module == self.current_semantic_module_name()
+            || self
+                .helper_inline_stack
+                .iter()
+                .any(|name| name == &helper_key)
+            || !self.imported_static_helper_call_supported(&helper_key, args)
+        {
+            return None;
+        }
+
+        let param_types = self
+            .resolved_fun_info(head.id, &helper_key)
+            .or_else(|| self.resolved_fun_info(head.id, lookup_name))
+            .map(|f| {
+                f.param_types
+                    .iter()
+                    .take(args.len())
+                    .cloned()
+                    .collect::<Vec<_>>()
+            });
+        let (arg_vars, arg_bindings) =
+            self.lower_call_args_with_expected_types(args, param_types.as_deref());
+        let params = pats::lower_params(&helper.params);
+        if params.len() != arg_vars.len() {
+            return None;
+        }
+
+        let variant_name = self.generated_helper_variant_name(&helper_key);
+        let saved_source_module = self.current_handler_source_module.clone();
+        let saved_function = self.current_function.clone();
+        let saved_evidence = self.current_evidence.clone();
+        self.current_handler_source_module = Some(helper.source_module.clone());
+        self.current_function = variant_name.clone();
+        self.current_evidence = None;
+        self.helper_inline_stack.push(helper_key);
+        let body = self.lower_expr_with_installed_return_k(&helper.body, None);
+        self.helper_inline_stack.pop();
+        self.current_handler_source_module = saved_source_module;
+        self.current_function = saved_function;
+        self.current_evidence = saved_evidence;
+
+        let arity = params.len();
+        self.generated_helper_variants.push(GeneratedHelperVariant {
+            name: variant_name.clone(),
+            arity,
+            body: CExpr::Fun(params, Box::new(body)),
+        });
+
+        let call = CExpr::Apply(
+            Box::new(CExpr::FunRef(variant_name, arity)),
+            arg_vars.into_iter().map(CExpr::Var).collect(),
+        );
+        let call = self.direct_value_with_return_k(call, return_k);
+        Some(self.wrap_let_bindings(arg_bindings, call))
     }
 
     fn static_helper_call_supported(
@@ -3158,6 +3299,455 @@ impl<'a> Lowerer<'a> {
         }
     }
 
+    fn imported_static_helper_call_supported(&self, lookup_name: &str, args: &[&Expr]) -> bool {
+        let Some(helper) = self.local_helper_defs.get(lookup_name) else {
+            return false;
+        };
+        if helper.source_module == self.current_semantic_module_name()
+            || !Self::static_helper_params_supported(&helper.params)
+            || helper.params.len() != args.len()
+            || !self.static_tail_resume_facts_self_contained()
+            || args.iter().any(|arg| {
+                self.branch_is_effectful(arg) || !self.imported_static_helper_arg_supported(arg)
+            })
+        {
+            return false;
+        }
+
+        let body_supported =
+            self.imported_static_helper_expr_supported(&helper.body, &helper.source_module);
+        let contains_covered = self.imported_static_helper_expr_contains_covered_effect(
+            &helper.body,
+            &helper.source_module,
+        );
+        body_supported && contains_covered
+    }
+
+    fn imported_static_helper_direct_effect_call_supported(
+        &self,
+        source_module: &str,
+        head: &Expr,
+        op_name: &str,
+        _qualifier: Option<&str>,
+        args: &[&Expr],
+    ) -> bool {
+        let Some(effect_name) = self.resolved_effect_call_name_for_module(source_module, head.id)
+        else {
+            return false;
+        };
+        let key = format!("{}.{}", effect_name, op_name);
+        let has_key = self.static_tail_resume_ops.contains_key(&key);
+        let args_ok = args.iter().all(|arg| {
+            !self.branch_is_effectful(arg) && self.imported_static_helper_arg_supported(arg)
+        });
+        has_key && args_ok
+    }
+
+    fn imported_static_helper_arg_supported(&self, expr: &Expr) -> bool {
+        Self::imported_static_helper_pure_expr_supported(expr)
+    }
+
+    fn imported_static_helper_pure_expr_supported(expr: &Expr) -> bool {
+        if let Some((_ctor, args)) = collect_ctor_call(expr) {
+            return args
+                .into_iter()
+                .all(Self::imported_static_helper_pure_expr_supported);
+        }
+        if collect_effect_call_expr(expr).is_some() {
+            return false;
+        }
+
+        match &expr.kind {
+            ExprKind::Lit { .. }
+            | ExprKind::Var { .. }
+            | ExprKind::Constructor { .. }
+            | ExprKind::QualifiedName { .. }
+            | ExprKind::DictRef { .. }
+            | ExprKind::SymbolIntrinsic { .. } => true,
+            ExprKind::App { .. } => false,
+            ExprKind::BinOp { left, right, .. } => {
+                Self::imported_static_helper_pure_expr_supported(left)
+                    && Self::imported_static_helper_pure_expr_supported(right)
+            }
+            ExprKind::UnaryMinus { expr } | ExprKind::FieldAccess { expr, .. } => {
+                Self::imported_static_helper_pure_expr_supported(expr)
+            }
+            ExprKind::Tuple { elements } | ExprKind::ListLit { elements } => elements
+                .iter()
+                .all(Self::imported_static_helper_pure_expr_supported),
+            ExprKind::RecordCreate { fields, .. } | ExprKind::AnonRecordCreate { fields } => fields
+                .iter()
+                .all(|(_, _, field)| Self::imported_static_helper_pure_expr_supported(field)),
+            ExprKind::RecordUpdate { record, fields, .. } => {
+                Self::imported_static_helper_pure_expr_supported(record)
+                    && fields.iter().all(|(_, _, field)| {
+                        Self::imported_static_helper_pure_expr_supported(field)
+                    })
+            }
+            ExprKind::Ascription { expr, .. } => {
+                Self::imported_static_helper_pure_expr_supported(expr)
+            }
+            ExprKind::If {
+                cond,
+                then_branch,
+                else_branch,
+                ..
+            } => {
+                Self::imported_static_helper_pure_expr_supported(cond)
+                    && Self::imported_static_helper_pure_expr_supported(then_branch)
+                    && Self::imported_static_helper_pure_expr_supported(else_branch)
+            }
+            ExprKind::Case {
+                scrutinee, arms, ..
+            } => {
+                Self::imported_static_helper_pure_expr_supported(scrutinee)
+                    && arms.iter().all(|arm| {
+                        arm.node.guard.as_ref().is_none_or(|guard| {
+                            Self::imported_static_helper_pure_expr_supported(guard)
+                        }) && Self::imported_static_helper_pure_expr_supported(&arm.node.body)
+                    })
+            }
+            ExprKind::Block { stmts, .. } => stmts.iter().all(|stmt| match &stmt.node {
+                Stmt::Let { value, .. } => Self::imported_static_helper_pure_expr_supported(value),
+                Stmt::Expr(expr) => Self::imported_static_helper_pure_expr_supported(expr),
+                Stmt::LetFun { .. } => false,
+            }),
+            ExprKind::StringInterp { parts, .. } => parts.iter().all(|part| match part {
+                ast::StringPart::Lit(_) => true,
+                ast::StringPart::Expr(expr) => {
+                    Self::imported_static_helper_pure_expr_supported(expr)
+                }
+            }),
+            ExprKind::DictMethodAccess { dict, .. } => {
+                Self::imported_static_helper_pure_expr_supported(dict)
+            }
+            ExprKind::ForeignCall { args, .. } => args
+                .iter()
+                .all(Self::imported_static_helper_pure_expr_supported),
+            _ => false,
+        }
+    }
+
+    fn imported_static_helper_expr_supported(&self, expr: &Expr, source_module: &str) -> bool {
+        if let Some((head, op_name, qualifier, args)) = collect_effect_call_expr(expr) {
+            return self.imported_static_helper_direct_effect_call_supported(
+                source_module,
+                head,
+                op_name,
+                qualifier,
+                &args,
+            );
+        }
+        if let Some((_ctor, args)) = collect_ctor_call(expr) {
+            return args
+                .into_iter()
+                .all(|arg| self.imported_static_helper_expr_supported(arg, source_module));
+        }
+
+        match &expr.kind {
+            ExprKind::Lit { .. }
+            | ExprKind::Var { .. }
+            | ExprKind::Constructor { .. }
+            | ExprKind::QualifiedName { .. }
+            | ExprKind::DictRef { .. }
+            | ExprKind::SymbolIntrinsic { .. } => true,
+            ExprKind::App { .. } => false,
+            ExprKind::BinOp { left, right, .. } => {
+                self.imported_static_helper_expr_supported(left, source_module)
+                    && self.imported_static_helper_expr_supported(right, source_module)
+            }
+            ExprKind::UnaryMinus { expr } | ExprKind::FieldAccess { expr, .. } => {
+                self.imported_static_helper_expr_supported(expr, source_module)
+            }
+            ExprKind::Tuple { elements } | ExprKind::ListLit { elements } => elements
+                .iter()
+                .all(|element| self.imported_static_helper_expr_supported(element, source_module)),
+            ExprKind::RecordCreate { fields, .. } | ExprKind::AnonRecordCreate { fields } => {
+                fields.iter().all(|(_, _, field)| {
+                    self.imported_static_helper_expr_supported(field, source_module)
+                })
+            }
+            ExprKind::RecordUpdate { record, fields, .. } => {
+                self.imported_static_helper_expr_supported(record, source_module)
+                    && fields.iter().all(|(_, _, field)| {
+                        self.imported_static_helper_expr_supported(field, source_module)
+                    })
+            }
+            ExprKind::Ascription { expr, .. } => {
+                self.imported_static_helper_expr_supported(expr, source_module)
+            }
+            ExprKind::If {
+                cond,
+                then_branch,
+                else_branch,
+                ..
+            } => {
+                self.imported_static_helper_expr_supported(cond, source_module)
+                    && self.imported_static_helper_expr_supported(then_branch, source_module)
+                    && self.imported_static_helper_expr_supported(else_branch, source_module)
+            }
+            ExprKind::Case {
+                scrutinee, arms, ..
+            } => {
+                self.imported_static_helper_expr_supported(scrutinee, source_module)
+                    && arms.iter().all(|arm| {
+                        arm.node.guard.as_ref().is_none_or(|guard| {
+                            self.imported_static_helper_expr_supported(guard, source_module)
+                        }) && self
+                            .imported_static_helper_expr_supported(&arm.node.body, source_module)
+                    })
+            }
+            ExprKind::Block { stmts, .. } => stmts.iter().all(|stmt| match &stmt.node {
+                Stmt::Let { value, .. } => {
+                    self.imported_static_helper_expr_supported(value, source_module)
+                }
+                Stmt::Expr(expr) => self.imported_static_helper_expr_supported(expr, source_module),
+                Stmt::LetFun { .. } => false,
+            }),
+            ExprKind::StringInterp { parts, .. } => parts.iter().all(|part| match part {
+                ast::StringPart::Lit(_) => true,
+                ast::StringPart::Expr(expr) => {
+                    self.imported_static_helper_expr_supported(expr, source_module)
+                }
+            }),
+            ExprKind::DictMethodAccess { dict, .. } => {
+                self.imported_static_helper_expr_supported(dict, source_module)
+            }
+            ExprKind::ForeignCall { args, .. } => args
+                .iter()
+                .all(|arg| self.imported_static_helper_expr_supported(arg, source_module)),
+            _ => false,
+        }
+    }
+
+    fn imported_static_helper_expr_contains_covered_effect(
+        &self,
+        expr: &Expr,
+        source_module: &str,
+    ) -> bool {
+        if let Some((head, op_name, _qualifier, _args)) = collect_effect_call_expr(expr) {
+            return self
+                .resolved_effect_call_name_for_module(source_module, head.id)
+                .map(|effect_name| {
+                    self.static_tail_resume_ops
+                        .contains_key(&format!("{}.{}", effect_name, op_name))
+                })
+                .unwrap_or(false);
+        }
+        if let Some((_ctor, args)) = collect_ctor_call(expr) {
+            return args.into_iter().any(|arg| {
+                self.imported_static_helper_expr_contains_covered_effect(arg, source_module)
+            });
+        }
+
+        match &expr.kind {
+            ExprKind::App { .. } => false,
+            ExprKind::BinOp { left, right, .. } => {
+                self.imported_static_helper_expr_contains_covered_effect(left, source_module)
+                    || self
+                        .imported_static_helper_expr_contains_covered_effect(right, source_module)
+            }
+            ExprKind::UnaryMinus { expr } | ExprKind::FieldAccess { expr, .. } => {
+                self.imported_static_helper_expr_contains_covered_effect(expr, source_module)
+            }
+            ExprKind::Tuple { elements } | ExprKind::ListLit { elements } => {
+                elements.iter().any(|element| {
+                    self.imported_static_helper_expr_contains_covered_effect(element, source_module)
+                })
+            }
+            ExprKind::RecordCreate { fields, .. } | ExprKind::AnonRecordCreate { fields } => {
+                fields.iter().any(|(_, _, field)| {
+                    self.imported_static_helper_expr_contains_covered_effect(field, source_module)
+                })
+            }
+            ExprKind::RecordUpdate { record, fields, .. } => {
+                self.imported_static_helper_expr_contains_covered_effect(record, source_module)
+                    || fields.iter().any(|(_, _, field)| {
+                        self.imported_static_helper_expr_contains_covered_effect(
+                            field,
+                            source_module,
+                        )
+                    })
+            }
+            ExprKind::Ascription { expr, .. } => {
+                self.imported_static_helper_expr_contains_covered_effect(expr, source_module)
+            }
+            ExprKind::If {
+                cond,
+                then_branch,
+                else_branch,
+                ..
+            } => {
+                self.imported_static_helper_expr_contains_covered_effect(cond, source_module)
+                    || self.imported_static_helper_expr_contains_covered_effect(
+                        then_branch,
+                        source_module,
+                    )
+                    || self.imported_static_helper_expr_contains_covered_effect(
+                        else_branch,
+                        source_module,
+                    )
+            }
+            ExprKind::Case {
+                scrutinee, arms, ..
+            } => {
+                self.imported_static_helper_expr_contains_covered_effect(scrutinee, source_module)
+                    || arms.iter().any(|arm| {
+                        arm.node.guard.as_ref().is_some_and(|guard| {
+                            self.imported_static_helper_expr_contains_covered_effect(
+                                guard,
+                                source_module,
+                            )
+                        }) || self.imported_static_helper_expr_contains_covered_effect(
+                            &arm.node.body,
+                            source_module,
+                        )
+                    })
+            }
+            ExprKind::Block { stmts, .. } => {
+                stmts.iter().any(|stmt| match &stmt.node {
+                    Stmt::Let { value, .. } => self
+                        .imported_static_helper_expr_contains_covered_effect(value, source_module),
+                    Stmt::Expr(expr) => self
+                        .imported_static_helper_expr_contains_covered_effect(expr, source_module),
+                    Stmt::LetFun { .. } => false,
+                })
+            }
+            ExprKind::StringInterp { parts, .. } => parts.iter().any(|part| match part {
+                ast::StringPart::Lit(_) => false,
+                ast::StringPart::Expr(expr) => {
+                    self.imported_static_helper_expr_contains_covered_effect(expr, source_module)
+                }
+            }),
+            ExprKind::DictMethodAccess { dict, .. } => {
+                self.imported_static_helper_expr_contains_covered_effect(dict, source_module)
+            }
+            ExprKind::ForeignCall { args, .. } => args.iter().any(|arg| {
+                self.imported_static_helper_expr_contains_covered_effect(arg, source_module)
+            }),
+            _ => false,
+        }
+    }
+
+    fn static_tail_resume_facts_self_contained(&self) -> bool {
+        self.static_tail_resume_ops
+            .values()
+            .all(Self::static_tail_resume_plan_self_contained)
+    }
+
+    fn static_tail_resume_plan_self_contained(plan: &StaticTailResumeOp) -> bool {
+        if !plan.captures.is_empty() {
+            return false;
+        }
+        let mut bound = std::collections::HashSet::new();
+        for param in &plan.arm.params {
+            Self::collect_simple_pat_bindings(param, &mut bound);
+        }
+        Self::static_tail_resume_body_self_contained(&plan.arm.body, &mut bound)
+    }
+
+    fn collect_simple_pat_bindings(
+        pat: &Pat,
+        bound: &mut std::collections::HashSet<String>,
+    ) -> bool {
+        match pat {
+            Pat::Var { name, .. } => {
+                bound.insert(name.clone());
+                true
+            }
+            Pat::Wildcard { .. }
+            | Pat::Lit {
+                value: ast::Lit::Unit,
+                ..
+            } => true,
+            _ => false,
+        }
+    }
+
+    fn static_tail_resume_body_self_contained(
+        expr: &Expr,
+        bound: &mut std::collections::HashSet<String>,
+    ) -> bool {
+        match &expr.kind {
+            ExprKind::Resume { value } => {
+                Self::static_tail_resume_value_self_contained(value, bound)
+            }
+            ExprKind::Block { stmts, .. } => {
+                let Some((last, prefix)) = stmts.split_last() else {
+                    return false;
+                };
+                for stmt in prefix {
+                    match &stmt.node {
+                        Stmt::Let { pattern, value, .. } => {
+                            if !Self::static_tail_resume_value_self_contained(value, bound)
+                                || !Self::collect_simple_pat_bindings(pattern, bound)
+                            {
+                                return false;
+                            }
+                        }
+                        Stmt::Expr(expr) => {
+                            if !Self::static_tail_resume_value_self_contained(expr, bound) {
+                                return false;
+                            }
+                        }
+                        Stmt::LetFun { .. } => return false,
+                    }
+                }
+                match &last.node {
+                    Stmt::Expr(expr) => Self::static_tail_resume_body_self_contained(expr, bound),
+                    Stmt::Let { .. } | Stmt::LetFun { .. } => false,
+                }
+            }
+            _ => false,
+        }
+    }
+
+    fn static_tail_resume_value_self_contained(
+        expr: &Expr,
+        bound: &std::collections::HashSet<String>,
+    ) -> bool {
+        if let Some((_ctor, args)) = collect_ctor_call(expr) {
+            return args
+                .into_iter()
+                .all(|arg| Self::static_tail_resume_value_self_contained(arg, bound));
+        }
+        if collect_effect_call_expr(expr).is_some() {
+            return false;
+        }
+        match &expr.kind {
+            ExprKind::Lit { .. }
+            | ExprKind::Constructor { .. }
+            | ExprKind::DictRef { .. }
+            | ExprKind::SymbolIntrinsic { .. } => true,
+            ExprKind::Var { name } => bound.contains(name),
+            ExprKind::QualifiedName { .. } => false,
+            ExprKind::App { .. } => false,
+            ExprKind::BinOp { left, right, .. } => {
+                Self::static_tail_resume_value_self_contained(left, bound)
+                    && Self::static_tail_resume_value_self_contained(right, bound)
+            }
+            ExprKind::UnaryMinus { expr } | ExprKind::FieldAccess { expr, .. } => {
+                Self::static_tail_resume_value_self_contained(expr, bound)
+            }
+            ExprKind::Tuple { elements } | ExprKind::ListLit { elements } => elements
+                .iter()
+                .all(|element| Self::static_tail_resume_value_self_contained(element, bound)),
+            ExprKind::RecordCreate { fields, .. } | ExprKind::AnonRecordCreate { fields } => fields
+                .iter()
+                .all(|(_, _, field)| Self::static_tail_resume_value_self_contained(field, bound)),
+            ExprKind::RecordUpdate { record, fields, .. } => {
+                Self::static_tail_resume_value_self_contained(record, bound)
+                    && fields.iter().all(|(_, _, field)| {
+                        Self::static_tail_resume_value_self_contained(field, bound)
+                    })
+            }
+            ExprKind::Ascription { expr, .. } => {
+                Self::static_tail_resume_value_self_contained(expr, bound)
+            }
+            _ => false,
+        }
+    }
+
     fn lower_resolved_fun_call(&mut self, site: ResolvedCallSite<'_>) -> Option<CExpr> {
         let ResolvedCallSite {
             app_id,
@@ -3217,6 +3807,16 @@ impl<'a> Lowerer<'a> {
                     self.try_inline_static_helper_call(lookup_name, head, args, return_k.clone())
             {
                 return Some(inlined);
+            }
+            if is_effectful
+                && let Some(variant_call) = self.try_imported_static_helper_variant_call(
+                    lookup_name,
+                    head,
+                    args,
+                    return_k.clone(),
+                )
+            {
+                return Some(variant_call);
             }
 
             let param_types = self.resolved_fun_info(head.id, lookup_name).map(|f| {

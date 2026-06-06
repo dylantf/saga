@@ -205,9 +205,11 @@ handled by the active static handler facts.
 | --- | --- | --- | --- | --- |
 | Same-module single-clause helper | Small body, direct params, effects covered by active static handler facts | Inline local body at covered call site | `static-tail-resume/20-helper-call-island.saga` | Done |
 | If/case inside helper | All branches remain covered and supported | Inline local body at covered call site | `static-tail-resume/22-helper-if-island.saga`, `static-tail-resume/23-helper-case-island.saga` | Done |
-| Imported public helper | Imported body and metadata admitted safely | Generate caller-local variant | Imported static handler project | Later |
+| Imported public helper | Imported body and metadata admitted safely | Generate caller-local variant | `static-tail-resume/project-imported-helper` | Done |
 | Recursive or multi-clause helper | Termination/coverage not proven | Slow path | `static-tail-resume/21-multi-clause-helper-guard.saga`, `multi-clause-project` | Later/guard |
 | Helper leaves residual uncovered effect | Effect summary says not net-direct | Slow path | `static-tail-resume/24-helper-uncovered-effect-guard.saga` | Done/guard |
+| Imported helper with call-site captures | Captures must become explicit variant params | Slow path | `static-tail-resume/project-imported-helper-capture-guard` | Guard |
+| Imported multi-clause helper | Single body not proven | Slow path | `static-tail-resume/project-imported-helper-multi-clause-guard` | Guard |
 
 Generated variants are the first point where optimizer output may add
 declarations. That needs a naming/cache policy and emitted-Core tests before
@@ -218,6 +220,15 @@ variants. The admission policy is intentionally narrow: unguarded single-clause
 helpers, simple params, non-effectful call-site args, no recursion, and only
 direct ops or nested admitted helpers whose concrete op calls are covered by
 active static tail-resume facts.
+
+Imported public helpers use optimizer-exported helper facts plus
+`ModuleCodegenInfo.exports` as the publicness gate. The first imported slice
+generates an unexported caller-local direct variant only when the imported body
+contains supported pure structure plus direct effect ops covered by active
+static tail-resume facts. It intentionally rejects call-site captures,
+multi-clause helpers, and nested imported helper/function calls until generated
+variants can carry explicit capture parameters and source-module backend
+resolution.
 
 ## Stage 5: Higher-Order Callback Specialization
 

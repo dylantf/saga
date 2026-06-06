@@ -157,6 +157,38 @@ impl<'a> Lowerer<'a> {
         self.local_helper_defs.extend(helpers);
     }
 
+    fn register_imported_public_helper_facts(&mut self) {
+        for (module_name, module_semantics) in self.ctx.modules_semantics() {
+            if module_name == self.current_source_module {
+                continue;
+            }
+            let exported_names: HashSet<&str> = module_semantics
+                .codegen_info
+                .exports
+                .iter()
+                .map(|(name, _)| name.as_str())
+                .collect();
+            for (name, fact) in &module_semantics.optimization.public_helpers {
+                if !name.contains('.') {
+                    continue;
+                }
+                let Some(bare_name) = name.rsplit('.').next() else {
+                    continue;
+                };
+                if !exported_names.contains(bare_name) {
+                    continue;
+                }
+                self.local_helper_defs
+                    .entry(name.clone())
+                    .or_insert_with(|| super::LocalHelperInfo {
+                        params: fact.params.clone(),
+                        body: fact.body.clone(),
+                        source_module: fact.source_module.clone(),
+                    });
+            }
+        }
+    }
+
     fn resolved_type_effects_for_module(
         &self,
         module_name: &str,
@@ -773,6 +805,7 @@ impl<'a> Lowerer<'a> {
         let (effect_canonical, handler_canonical) =
             self.initialize_canonical_name_maps(program, &source_module_name);
         self.register_local_helper_defs(program, &source_module_name);
+        self.register_imported_public_helper_facts();
         self.register_handler_factory_defs(program, &source_module_name);
         self.register_local_module_decls(
             program,

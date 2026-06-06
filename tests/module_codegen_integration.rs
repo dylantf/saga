@@ -239,6 +239,19 @@ fn assert_contains(out: &str, needle: &str) {
     );
 }
 
+fn emitted_function(out: &str, name: &str, arity: usize) -> String {
+    let marker = format!("'{}'/{} =", name, arity);
+    let start = out
+        .find(&marker)
+        .unwrap_or_else(|| panic!("missing function marker {marker}\n{out}"));
+    let rest = &out[start..];
+    let end = rest
+        .find("\n\n")
+        .map(|idx| start + idx)
+        .unwrap_or_else(|| out.len());
+    out[start..end].to_string()
+}
+
 #[test]
 fn imported_handler_factory_with_named_shorthand_lowers_as_dynamic_handler() {
     let db_module = r#"module Db
@@ -276,6 +289,112 @@ main () = {
             assert_erlc_compiles(&out, "main");
         },
     );
+}
+
+#[test]
+fn imported_public_helper_under_static_handler_generates_direct_variant() {
+    let lib = r#"module Lib
+
+pub effect Options {
+  fun get_options : Unit -> Int
+}
+
+pub fun compute : Int -> Int needs {Options}
+compute x = x + get_options! ()
+"#;
+
+    let main_src = r#"module Main
+
+import Lib (Options)
+
+handler options for Options {
+  get_options () = resume 10
+}
+
+main () = Lib.compute 5 with options
+"#;
+
+    with_temp_project_files(&[("lib/Lib.saga", lib)], main_src, |checker, program| {
+        let out = emit_from_program(program, "main", checker);
+        let main = emitted_function(&out, "main", 1);
+        assert!(
+            !main.contains("call 'lib':'compute'"),
+            "main should call the generated direct variant, not imported CPS helper\n{main}"
+        );
+        assert_contains(&main, "apply '__saga_static_helper_Lib_compute_");
+        assert_contains(&out, "'__saga_static_helper_Lib_compute_");
+        assert_erlc_compiles(&out, "main");
+    });
+}
+
+#[test]
+fn imported_public_helper_with_capturing_static_handler_stays_on_evidence_path() {
+    let lib = r#"module Lib
+
+pub effect Options {
+  fun get_options : Unit -> Int
+}
+
+pub fun compute : Int -> Int needs {Options}
+compute x = x + get_options! ()
+"#;
+
+    let main_src = r#"module Main
+
+import Lib (Options)
+
+main () = {
+  let default = 10
+  Lib.compute 5 with {
+    get_options () = resume default
+  }
+}
+"#;
+
+    with_temp_project_files(&[("lib/Lib.saga", lib)], main_src, |checker, program| {
+        let out = emit_from_program(program, "main", checker);
+        let main = emitted_function(&out, "main", 1);
+        assert_contains(&main, "call 'lib':'compute'");
+        assert!(
+            !out.contains("'__saga_static_helper_Lib_compute_"),
+            "capturing handler arm should not generate a top-level direct variant\n{out}"
+        );
+        assert_erlc_compiles(&out, "main");
+    });
+}
+
+#[test]
+fn imported_multi_clause_public_helper_stays_on_evidence_path() {
+    let lib = r#"module Lib
+
+pub effect Options {
+  fun get_options : Unit -> Int
+}
+
+pub fun compute : Bool -> Int needs {Options}
+compute True = get_options! ()
+compute False = 0
+"#;
+
+    let main_src = r#"module Main
+
+import Lib (Options)
+
+main () = Lib.compute True with {
+  get_options () = resume 10
+}
+"#;
+
+    with_temp_project_files(&[("lib/Lib.saga", lib)], main_src, |checker, program| {
+        let out = emit_from_program(program, "main", checker);
+        let main = emitted_function(&out, "main", 1);
+        assert_contains(&main, "call 'lib':'compute'");
+        assert!(
+            !out.contains("'__saga_static_helper_Lib_compute_"),
+            "multi-clause imported helper should not generate a direct variant\n{out}"
+        );
+        assert_erlc_compiles(&out, "main");
+    });
 }
 
 #[test]

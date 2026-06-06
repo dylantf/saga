@@ -25,4 +25,5 @@ curated as individual cases graduate into the current optimizer pipeline.
 Current focused fixture groups:
 
 - `static-tail-resume/`: local direct lowering for statically known
-  tail-resumptive effect handlers, plus conservative guard cases.
+  tail-resumptive effect handlers, same-module/imported helper direct variants,
+  plus conservative guard cases.
