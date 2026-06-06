@@ -318,12 +318,13 @@ pub struct PopulatorInputs<'a> {
     /// Static let-binding effects from CodegenContext.
     pub let_effect_bindings: &'a HashMap<String, Vec<String>>,
     /// Trait impl dict name -> sorted canonical effect names from the impl's
-    /// `needs` clause. Sourced from `TraitImplDict.impl_effects` (both the
-    /// active module's and imported modules'). Used to classify
-    /// `App(DictMethodAccess { dict, .. }, ...)` call sites: walk the dict
-    /// expression to find the underlying `DictRef { name }`, then look up
-    /// effects here.
+    /// `needs` clause. Used as a fallback for imported module metadata that
+    /// does not yet expose per-method impl effects.
     pub impl_effects_by_dict: &'a HashMap<String, Vec<String>>,
+    /// (trait impl dict name, method index) -> sorted canonical effect names
+    /// needed by that concrete dictionary slot beyond the trait method
+    /// signature.
+    pub impl_method_effects_by_dict: &'a HashMap<(String, usize), Vec<String>>,
     /// (canonical trait name, method index) -> trait-declared effect signature.
     /// This is the contract for polymorphic/where-bound dictionary dispatch.
     pub trait_method_effects_by_key: &'a HashMap<(String, usize), TraitMethodEffectSig>,
@@ -963,7 +964,7 @@ impl<'a> Populator<'a> {
     /// signature. For concrete dicts, walk the dict expression to find the
     /// underlying `DictRef { name }`, peeling `App` chains for parameterized
     /// impls (e.g. `__dict_Show_List __dict_Show_String`), then union in the
-    /// impl's declared effects from `impl_effects_by_dict`.
+    /// concrete method slot's impl effects.
     ///
     /// Where-bounded dispatch (dict from a function parameter) ends in a
     /// `Var` rather than `DictRef`, so only the trait method signature is
@@ -1000,7 +1001,12 @@ impl<'a> Populator<'a> {
         }
         match &current.kind {
             ExprKind::DictRef { name, .. } => {
-                if let Some(impl_effects) = self.inputs.impl_effects_by_dict.get(name) {
+                if let Some(impl_effects) = self
+                    .inputs
+                    .impl_method_effects_by_dict
+                    .get(&(name.clone(), method_index))
+                    .or_else(|| self.inputs.impl_effects_by_dict.get(name))
+                {
                     effects.extend(impl_effects.iter().cloned());
                     effects.sort();
                     effects.dedup();

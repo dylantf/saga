@@ -229,6 +229,41 @@ fn assert_contains(out: &str, needle: &str) {
 }
 
 #[test]
+fn mixed_effect_trait_impl_keeps_pure_method_callable() {
+    let src = r#"
+effect Ask {
+  fun ask : Unit -> String
+}
+
+handler ask_default for Ask {
+  ask () = resume "x"
+}
+
+trait Payload a {
+  fun payload : a -> String needs {Ask}
+  fun is_unit : a -> Bool
+}
+
+type Leaf = Leaf String
+
+impl Payload for Leaf needs {Ask} {
+  payload (Leaf _) = ask! ()
+  is_unit _ = False
+}
+
+fun render_payload : a -> String needs {Ask} where {a: Payload}
+render_payload x = {
+  let p = payload x
+  if is_unit x then "bad" else p
+}
+
+main () = render_payload (Leaf "y") with ask_default
+"#;
+
+    assert_runs_and_stdout_contains(src, &["x"]);
+}
+
+#[test]
 fn inner_dynamic_handler_is_kept_when_outer_static_handler_handles_same_effect() {
     let src = r#"
 effect Log {

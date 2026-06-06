@@ -278,13 +278,14 @@ pub struct Lowerer<'a> {
     /// then consumed at every effectful call site to drive evidence threading.
     call_effects: super::call_effects::CallEffectMap,
     /// Trait impl dict name -> sorted canonical effect names from the impl's
-    /// `needs` clause. Populated during `lower_module` from the active and
-    /// imported modules' `TraitImplDict.impl_effects`. Read by (1) the
-    /// call-effects pre-pass for `DictMethodAccess` classification, and (2)
-    /// dict-constructor emission, where each method body is compiled as
-    /// effectful (params `_Evidence`/`_ReturnK`, evidence context installed)
-    /// when its impl declares `needs`.
+    /// `needs` clause. Populated during `lower_module` from active and
+    /// imported modules, and used as a fallback for imported metadata that
+    /// does not yet expose per-method impl effects.
     impl_effects_by_dict: HashMap<String, Vec<String>>,
+    /// Trait impl dict + method index -> sorted canonical effect names needed
+    /// by that concrete slot. Active modules populate this more precise shape
+    /// so pure methods in an effectful impl can remain direct-callable.
+    impl_method_effects_by_dict: HashMap<(String, usize), Vec<String>>,
     /// Source-order audit rows for direct-native vs evidence effect-op
     /// lowering decisions in the current module. Populated during expression
     /// lowering when `lower_effect_call` reaches the actual emission branch.
@@ -331,6 +332,7 @@ impl<'a> Lowerer<'a> {
             entry_export,
             call_effects: super::call_effects::CallEffectMap::new(),
             impl_effects_by_dict: HashMap::new(),
+            impl_method_effects_by_dict: HashMap::new(),
             effect_op_trace: Vec::new(),
         }
     }
@@ -1159,6 +1161,84 @@ impl<'a> Lowerer<'a> {
             || self.has_nested_effectful_expr(expr)
     }
 
+    fn contains_direct_effect_call(expr: &Expr) -> bool {
+        match &expr.kind {
+            ExprKind::EffectCall { .. } => true,
+            ExprKind::App { func, arg } => {
+                Self::contains_direct_effect_call(func) || Self::contains_direct_effect_call(arg)
+            }
+            ExprKind::Lambda { body, .. } => Self::contains_direct_effect_call(body),
+            ExprKind::If {
+                cond,
+                then_branch,
+                else_branch,
+                ..
+            } => {
+                Self::contains_direct_effect_call(cond)
+                    || Self::contains_direct_effect_call(then_branch)
+                    || Self::contains_direct_effect_call(else_branch)
+            }
+            ExprKind::Case {
+                scrutinee, arms, ..
+            } => {
+                Self::contains_direct_effect_call(scrutinee)
+                    || arms.iter().any(|arm| {
+                        arm.node
+                            .guard
+                            .as_ref()
+                            .is_some_and(Self::contains_direct_effect_call)
+                            || Self::contains_direct_effect_call(&arm.node.body)
+                    })
+            }
+            ExprKind::Block { stmts, .. } => stmts.iter().any(|stmt| match &stmt.node {
+                Stmt::Let { value, .. } => Self::contains_direct_effect_call(value),
+                Stmt::LetFun { body, guard, .. } => {
+                    guard
+                        .as_ref()
+                        .is_some_and(|guard| Self::contains_direct_effect_call(guard))
+                        || Self::contains_direct_effect_call(body)
+                }
+                Stmt::Expr(e) => Self::contains_direct_effect_call(e),
+            }),
+            ExprKind::With { expr, handler } => {
+                Self::contains_direct_effect_call(expr)
+                    || handler.inline_arms().any(|arm| {
+                        Self::contains_direct_effect_call(&arm.body)
+                            || arm
+                                .finally_block
+                                .as_ref()
+                                .is_some_and(|body| Self::contains_direct_effect_call(body))
+                    })
+                    || handler
+                        .return_clause()
+                        .is_some_and(|rc| Self::contains_direct_effect_call(&rc.body))
+            }
+            ExprKind::Tuple { elements, .. } | ExprKind::ListLit { elements } => {
+                elements.iter().any(Self::contains_direct_effect_call)
+            }
+            ExprKind::RecordCreate { fields, .. } | ExprKind::AnonRecordCreate { fields } => fields
+                .iter()
+                .any(|(_, _, field)| Self::contains_direct_effect_call(field)),
+            ExprKind::RecordUpdate { record, fields, .. } => {
+                Self::contains_direct_effect_call(record)
+                    || fields
+                        .iter()
+                        .any(|(_, _, field)| Self::contains_direct_effect_call(field))
+            }
+            ExprKind::FieldAccess { expr, .. } | ExprKind::UnaryMinus { expr } => {
+                Self::contains_direct_effect_call(expr)
+            }
+            ExprKind::BinOp { left, right, .. } => {
+                Self::contains_direct_effect_call(left) || Self::contains_direct_effect_call(right)
+            }
+            ExprKind::StringInterp { parts, .. } => parts.iter().any(|part| match part {
+                ast::StringPart::Expr(e) => Self::contains_direct_effect_call(e),
+                ast::StringPart::Lit(_) => false,
+            }),
+            _ => false,
+        }
+    }
+
     /// Canonical predicate for "is this a saturated effectful function call?"
     ///
     /// Reads from the pre-populated `CallEffectMap`. Returns true when the
@@ -1236,6 +1316,7 @@ impl<'a> Lowerer<'a> {
             effect_canonical: &self.effect_canonical,
             let_effect_bindings: &self.ctx.let_effect_bindings,
             impl_effects_by_dict: &self.impl_effects_by_dict,
+            impl_method_effects_by_dict: &self.impl_method_effects_by_dict,
             trait_method_effects_by_key: &trait_method_effects_by_key,
         })
         .populate_with_trace(program)
@@ -1578,12 +1659,23 @@ impl<'a> Lowerer<'a> {
         // `DictConstructor` nodes (which carry the field directly post-
         // elaboration, since the active module may not appear in
         // `check_result.codegen_info()`) and imported modules' TraitImplDicts.
-        // Used by both the call-effects pre-pass (to classify
-        // `DictMethodAccess` call sites) and dict-constructor emission below.
+        // The per-method map keeps pure sibling methods direct even when the
+        // impl has an effectful method.
         self.impl_effects_by_dict.clear();
-        for (name, _, _, _, _, impl_effects) in &dict_constructors {
+        self.impl_method_effects_by_dict.clear();
+        for (name, _, methods, method_effects, _, impl_effects) in &dict_constructors {
             self.impl_effects_by_dict
                 .insert((*name).to_string(), impl_effects.to_vec());
+            for (idx, method) in methods.iter().enumerate() {
+                let mut effects = method_effects.get(idx).cloned().unwrap_or_default();
+                if Self::contains_direct_effect_call(method) {
+                    effects.extend(impl_effects.iter().cloned());
+                }
+                effects.sort();
+                effects.dedup();
+                self.impl_method_effects_by_dict
+                    .insert(((*name).to_string(), idx), effects);
+            }
         }
         for m in self.ctx.modules.values() {
             for d in &m.codegen_info.trait_impl_dicts {
@@ -1852,19 +1944,18 @@ impl<'a> Lowerer<'a> {
         {
             let arity = dict_params.len();
             let params: Vec<String> = dict_params.iter().map(|p| core_var(p)).collect();
-            // Methods inherit the impl's `needs` clause as their effect row.
-            // When non-empty, set `lambda_effect_context` so each method's
-            // Lambda lowers with `_Evidence`/`_ReturnK` params and the body
-            // runs with evidence installed (mirrors the FunBinding effectful-
-            // function path for top-level effectful funs).
-            let impl_effects: Vec<String> = impl_effects.to_vec();
+            // Each dictionary slot must match the trait method's declared
+            // effect row. The impl-level `needs` clause describes what the
+            // impl may use overall, but call sites dispatch by method
+            // signature; leaking impl effects into pure sibling methods makes
+            // those closures CPS-shaped while callers apply them directly.
             let method_exprs: Vec<CExpr> = methods
                 .iter()
                 .enumerate()
                 .map(|(idx, m)| {
-                    let mut static_effects = impl_effects.clone();
-                    if let Some(effects) = method_effects.get(idx) {
-                        static_effects.extend(effects.iter().cloned());
+                    let mut static_effects = method_effects.get(idx).cloned().unwrap_or_default();
+                    if Self::contains_direct_effect_call(m) {
+                        static_effects.extend(impl_effects.iter().cloned());
                     }
                     static_effects.sort();
                     static_effects.dedup();

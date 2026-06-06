@@ -318,6 +318,10 @@ Important guardrails:
 - Imported callable or dictionary metadata missing a runtime shape.
 - Handler values whose runtime representation is not supported by the current
   lowering path.
+- Trait dictionary methods must have per-method runtime shape. An impl-level
+  `needs` clause cannot blindly force every method slot to CPS shape, because
+  polymorphic dispatch only sees the trait method signature and pure sibling
+  methods must remain direct-callable.
 
 The desired failure mode is:
 
@@ -330,6 +334,12 @@ not:
 ```text
 Core Erlang compiles, then crashes with badarity
 ```
+
+Open design question: impl-level effects are convenient today, but optimization
+would be simpler if effects were primarily a per-method contract. A later
+language cleanup should consider making impl-level `needs` constrained sugar for
+methods whose trait signatures already allow those effects, or rejecting
+effectful method bodies when the trait method is externally direct.
 
 ## Phase 5: Local Static Tail-Resume Optimization
 
