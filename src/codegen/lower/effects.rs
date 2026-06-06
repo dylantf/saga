@@ -73,6 +73,11 @@ enum EffectOpLoweringPlan {
     EvidenceLookup { trace_shape: String },
 }
 
+enum StaticTailResumeDirectBody {
+    Expr(Expr),
+    Block(Vec<Stmt>),
+}
+
 enum WithHandlerLayer {
     Named {
         reference: crate::ast::NamedHandlerRef,
@@ -198,12 +203,7 @@ impl<'a> Lowerer<'a> {
         runtime_param_positions: &[usize],
         continuation: Option<CExpr>,
     ) -> Option<CExpr> {
-        let ExprKind::Resume { value } = &plan.arm.body.kind else {
-            return None;
-        };
-        if !Self::static_tail_resume_value_supported(value) {
-            return None;
-        }
+        let body = self.static_tail_resume_direct_body(&plan.arm.body)?;
 
         let param_bindings = self.static_tail_resume_bindings(
             &plan.arm.params,
@@ -213,15 +213,22 @@ impl<'a> Lowerer<'a> {
 
         let saved_source_module = self.current_handler_source_module.clone();
         self.current_handler_source_module = plan.source_module;
-        let resumed_value = self.lower_expr_value(value);
+        let lowered_body = match body {
+            StaticTailResumeDirectBody::Expr(value) => {
+                let resumed_value = self.lower_expr_value(&value);
+                self.lower_direct_op_result(resumed_value, continuation)
+            }
+            StaticTailResumeDirectBody::Block(stmts) => {
+                self.lower_block_with_return_k(&stmts, continuation)
+            }
+        };
         self.current_handler_source_module = saved_source_module;
 
-        let result = self.lower_direct_op_result(resumed_value, continuation);
         Some(
             param_bindings
                 .into_iter()
                 .rev()
-                .fold(result, |body, (var, val)| {
+                .fold(lowered_body, |body, (var, val)| {
                     CExpr::Let(var, Box::new(val), Box::new(body))
                 }),
         )
@@ -241,6 +248,45 @@ impl<'a> Lowerer<'a> {
         })
     }
 
+    fn static_tail_resume_prefix_stmt_supported(&self, stmt: &Stmt) -> bool {
+        let value = match stmt {
+            Stmt::Let { value, .. } | Stmt::Expr(value) => value,
+            Stmt::LetFun { .. } => return false,
+        };
+        !value.contains_resume() && !self.branch_is_effectful(value)
+    }
+
+    fn static_tail_resume_direct_body(&self, body: &Expr) -> Option<StaticTailResumeDirectBody> {
+        match &body.kind {
+            ExprKind::Resume { value } if Self::static_tail_resume_value_supported(value) => {
+                Some(StaticTailResumeDirectBody::Expr((**value).clone()))
+            }
+            ExprKind::Block { stmts, .. } => {
+                let (last, prefix) = stmts.split_last()?;
+                if !prefix
+                    .iter()
+                    .all(|stmt| self.static_tail_resume_prefix_stmt_supported(&stmt.node))
+                {
+                    return None;
+                }
+                let Stmt::Expr(tail) = &last.node else {
+                    return None;
+                };
+                let ExprKind::Resume { value } = &tail.kind else {
+                    return None;
+                };
+                if !Self::static_tail_resume_value_supported(value) {
+                    return None;
+                }
+                let mut rewritten: Vec<Stmt> =
+                    prefix.iter().map(|stmt| stmt.node.clone()).collect();
+                rewritten.push(Stmt::Expr((**value).clone()));
+                Some(StaticTailResumeDirectBody::Block(rewritten))
+            }
+            _ => None,
+        }
+    }
+
     fn static_tail_resume_arm_supported(&self, arm: &HandlerArm) -> bool {
         if arm.finally_block.is_some()
             || self.optimization.handler_analysis.resumption.get(&arm.id)
@@ -249,10 +295,7 @@ impl<'a> Lowerer<'a> {
         {
             return false;
         }
-        let ExprKind::Resume { value } = &arm.body.kind else {
-            return false;
-        };
-        Self::static_tail_resume_value_supported(value)
+        self.static_tail_resume_direct_body(&arm.body).is_some()
     }
 
     fn static_tail_resume_plan_for_op_handler(

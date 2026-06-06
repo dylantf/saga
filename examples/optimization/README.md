@@ -21,3 +21,8 @@ Initial focus:
 
 The `selective-uniform/` directory is historical coverage. It should be
 curated as individual cases graduate into the current optimizer pipeline.
+
+Current focused fixture groups:
+
+- `static-tail-resume/`: local direct lowering for statically known
+  tail-resumptive effect handlers, plus conservative guard cases.

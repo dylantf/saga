@@ -1596,6 +1596,63 @@ main () = choose! 42 with {
 }
 
 #[test]
+fn inline_static_tail_resume_effect_op_allows_direct_prefix_block() {
+    let src = r#"
+effect Ask {
+  fun ask : Unit -> Int
+}
+
+fun pure_fun1 : Unit -> Int
+pure_fun1 () = 10
+
+fun pure_fun2 : Unit -> Int
+pure_fun2 () = 20
+
+main () = ask! () with {
+  ask () = {
+    let _ = pure_fun1 ()
+    let _ = pure_fun2 ()
+    resume 42
+  }
+}
+"#;
+    let out = emit_elaborated(src);
+    assert!(
+        !out.contains("_Handle__script_Ask_ask"),
+        "tail-resume op with direct prefix should not use handler closure\n{out}"
+    );
+    assert_contains(&out, "'pure_fun1'");
+    assert_contains(&out, "'pure_fun2'");
+    assert_contains(&out, "42");
+    assert_core_compiles(&out);
+}
+
+#[test]
+fn effectful_prefix_tail_resume_stays_on_evidence_path() {
+    let src = r#"
+effect Ask {
+  fun ask : Unit -> Int
+}
+
+effect Ping {
+  fun ping : Unit -> Unit
+}
+
+main () = (ask! () with {
+  ask () = {
+    ping! ()
+    resume 42
+  }
+}) with {
+  ping () = resume ()
+}
+"#;
+    let out = emit_elaborated(src);
+    assert_contains(&out, "_Handle__script_Ask_ask");
+    assert_core_compiles(&out);
+}
+
+#[test]
 fn non_tail_resume_stays_on_evidence_path() {
     let src = r#"
 effect Ask {

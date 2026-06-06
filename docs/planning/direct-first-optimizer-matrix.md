@@ -113,11 +113,13 @@ Target shape:
 | --- | --- | --- | --- | --- |
 | Inline handler, nullary op, captured value | Innermost matching inline arm is unique, `TailResumptive`, no `finally`, params match erased runtime arity | Lower op as the resumed value, then continue with current continuation | `static-tail-resume/01-inline-reader.saga` | Done |
 | Inline handler, op args bound to simple vars | Same, plus params are vars/wildcard/unit only | Bind lowered op args, lower resumed value | `inline_static_tail_resume_effect_op_binds_runtime_args` | Done |
+| Inline handler, pure prefix before tail resume | Prefix statements contain no resume/effectful calls; final expression is `resume <direct value>` | Lower prefix directly, then lower resumed value through current continuation | `static-tail-resume/03-prefix-block.saga` | Done |
 | Named static handler in same module | Named handler resolves to static arms; same arm proof | Same as inline | `selective-uniform/19-static-handler-with-cps-island.saga` | Todo |
 | Multiple arms for same op | Proof rejects ambiguity | Evidence path | New guard fixture | Todo |
 | Non-tail resume | `Multishot` from handler analysis | Evidence path | `static-tail-resume/02-non-tail-guard.saga` | Done |
 | Abort/one-shot arm | `OneShot`, not `TailResumptive` | Evidence path | `21-static-handler-abort-arm.saga` | Todo |
 | `finally` arm | `finally_block.is_some()` | Evidence path | `finally_tail_resume_stays_on_evidence_path` | Done |
+| Effectful prefix before tail resume | Prefix has direct/effectful call | Evidence path | `effectful_prefix_tail_resume_stays_on_evidence_path` | Done |
 | Dynamic or conditional handler | Handler is not statically known and unique | Evidence path | Existing dynamic handler fixtures | Todo |
 
 First implementation constraints:
