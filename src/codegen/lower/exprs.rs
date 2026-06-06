@@ -105,36 +105,29 @@ impl<'a> Lowerer<'a> {
     ) -> CExpr {
         if self.expr_is_effectful_call(expr) {
             if let Some((module, func_name, head, args)) = super::util::collect_qualified_call(expr)
-            {
-                if let Some(call) = self.lower_resolved_fun_call(
-                    expr.id,
-                    func_name,
-                    head,
-                    &args,
-                    return_k.clone(),
-                    Some(&expr.span),
-                ) {
-                    return call;
-                }
-                return self.lower_qualified_call(super::QualifiedCallSite {
+                && let Some(call) = self.lower_qualified_call(super::QualifiedCallSite {
                     app_id: expr.id,
                     module,
                     func_name,
                     head,
                     args: &args,
-                    return_k,
+                    return_k: return_k.clone(),
                     call_span: Some(&expr.span),
-                });
+                })
+            {
+                return call;
             }
             if let Some((func_name, head_expr, args)) = collect_fun_call(expr) {
-                if let Some(call) = self.lower_resolved_fun_call(
-                    expr.id,
-                    func_name,
-                    head_expr,
-                    &args,
-                    return_k.clone(),
-                    Some(&expr.span),
-                ) {
+                if let Some(call) = self.lower_resolved_fun_call(super::ResolvedCallSite {
+                    app_id: expr.id,
+                    lookup_name: func_name,
+                    emit_name: func_name,
+                    head: head_expr,
+                    args: &args,
+                    return_k: return_k.clone(),
+                    call_span: Some(&expr.span),
+                    fallback_erlang_module: None,
+                }) {
                     return call;
                 }
                 if let Some(call) =
@@ -159,11 +152,7 @@ impl<'a> Lowerer<'a> {
             {
                 return call;
             }
-            debug_assert!(
-                false,
-                "effectful App {:?} was classified by call_effects but no lowerer dispatch path handled it",
-                expr.id
-            );
+            self.panic_unhandled_effectful_app(expr, None);
         }
 
         self.lower_expr(expr)

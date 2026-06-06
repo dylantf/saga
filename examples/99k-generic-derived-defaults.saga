@@ -1,3 +1,5 @@
+import Std.Generic (Generic, U1, Leaf, Labeled, And, Or, Variant, Record, Adt)
+
 # Default method bodies for traits, with routed-derive Option B.
 #
 # `ToJson` declares two methods:

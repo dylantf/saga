@@ -1101,6 +1101,98 @@ main () = Logger.greet \"world\" with {
     );
 }
 
+#[test]
+fn imported_mixed_effect_trait_impl_preserves_method_slots() {
+    let lib_src = r#"
+module MixedDictLib
+
+pub effect Ask {
+  fun ask : Unit -> String
+}
+
+pub handler ask_default for Ask {
+  ask () = resume "imported"
+}
+
+pub trait Payload a {
+  fun payload : a -> String needs {Ask}
+  fun is_unit : a -> Bool
+}
+
+pub type PayloadLeaf = PayloadLeaf String
+pub type PayloadBox a = PayloadBox a
+
+impl Payload for PayloadLeaf needs {Ask} {
+  payload (PayloadLeaf _) = ask! ()
+  is_unit _ = False
+}
+
+impl Payload for PayloadBox a where {a: Payload} needs {Ask} {
+  payload (PayloadBox x) = payload x
+  is_unit (PayloadBox x) = is_unit x
+}
+
+pub fun render_payload : a -> String needs {Ask} where {a: Payload}
+render_payload x = {
+  let p = payload x
+  if is_unit x then "bad" else p
+}
+"#;
+    let main_src = r#"
+module Main
+import MixedDictLib (PayloadLeaf, PayloadBox, ask_default, render_payload)
+
+pub fun result : Unit -> String
+result () = render_payload (PayloadBox (PayloadLeaf "y")) with ask_default
+"#;
+
+    with_temp_project_files(
+        &[("MixedDictLib.saga", lib_src)],
+        main_src,
+        |checker, main_program| {
+            let lib_core = emit_project_module(lib_src, "mixeddictlib", checker);
+            let main_core = emit_from_program(main_program, "main", checker);
+
+            let dir = assert_erlc_compiles(&lib_core, "mixeddictlib");
+            let main_core_path = dir.join("main.core");
+            std::fs::write(&main_core_path, &main_core).unwrap();
+            let erlc = std::process::Command::new("erlc")
+                .arg("-o")
+                .arg(&dir)
+                .arg(&main_core_path)
+                .output()
+                .expect("failed to run erlc");
+            assert!(
+                erlc.status.success(),
+                "erlc failed on main:\n{main_core}\nstderr: {}",
+                String::from_utf8_lossy(&erlc.stderr)
+            );
+
+            compile_evidence_bridge_into(&dir);
+
+            let run = std::process::Command::new("erl")
+                .arg("-noshell")
+                .arg("-pa")
+                .arg(&dir)
+                .arg("-eval")
+                .arg("io:format(\"~ts~n\", [main:result(unit)]), init:stop().")
+                .output()
+                .expect("failed to run erl");
+            let _ = std::fs::remove_dir_all(&dir);
+            assert!(
+                run.status.success(),
+                "erl failed:\nstderr: {}",
+                String::from_utf8_lossy(&run.stderr)
+            );
+            let stdout = String::from_utf8_lossy(&run.stdout);
+            assert!(
+                stdout.contains("imported"),
+                "expected imported payload result, got: {stdout}"
+            );
+        },
+    );
+}
+
 /// Regression: a decoder defined in Main composes two effectful Lib functions
 /// (`Lib.unbox_int (Lib.unwrap b)`) and runs through `Lib.run_decoder`. The
 /// inner call must abort the chain when it fails, instead of leaking its
@@ -3289,6 +3381,8 @@ main () = Lib.greet "world"
 #[test]
 fn cross_module_routed_derive_compiles_and_lowers() {
     let lib = r#"module JsonLib
+
+import Std.Generic (Generic, U1, Leaf, Labeled, And, Or, Variant, Record, Adt)
 
 pub trait ToJson a {
   fun to_json : a -> String

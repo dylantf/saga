@@ -771,6 +771,28 @@ result () = log! ((fun n -> log! n) "inner") with echo
 }
 
 #[test]
+fn lambda_head_open_row_call_forwards_evidence() {
+    // The lambda head is effect-polymorphic: `(fun f -> f ())` has an open
+    // effect row because it calls the callback it receives. The call site must
+    // be classified as row-forwarded even though the lambda head itself has no
+    // named static effects.
+    let src = r#"module Main
+
+effect Log {
+  fun log : String -> String
+}
+
+handler accumulating for Log {
+  log msg = msg <> "/" <> resume "end"
+}
+
+pub fun result : Unit -> String
+result () = ((fun f -> f ()) (fun () -> log! "x")) with accumulating
+"#;
+    check_result_string("lambda_head_open_row_call_forwards_evidence", src, "x/end");
+}
+
+#[test]
 fn lambda_head_pure_call_under_effect_handler_stays_pure() {
     // A pure-bodied lambda head used inside an effectful function should not
     // be misclassified — no evidence/return_k threading. This guards against
@@ -2385,6 +2407,97 @@ result () = {
         "narrowed_cps_partial_app_passed_to_open_row_param",
         src,
         "pure",
+    );
+}
+
+#[test]
+fn branch_returning_mixed_callable_values_installs_adapter() {
+    let src = r#"module Main
+
+effect Log {
+  fun log : String -> Unit
+}
+
+handler collect for Log {
+  log msg = msg <> "/" <> resume ()
+}
+
+fun pure_cb : Unit -> String
+pure_cb () = "pure"
+
+fun effect_cb : Unit -> String needs {Log}
+effect_cb () = {
+  log! "hit"
+  "effect"
+}
+
+fun choose : Bool -> (Unit -> String needs {Log})
+choose flag = if flag then effect_cb else pure_cb
+
+pub fun result : Unit -> String
+result () = {
+  let f = choose False
+  let g = choose True
+  let a = f ()
+  let b = g ()
+  a <> "/" <> b
+} with collect
+"#;
+    check_result_string(
+        "branch_returning_mixed_callable_values_installs_adapter",
+        src,
+        "hit/pure/effect",
+    );
+}
+
+#[test]
+fn intrinsic_dbg_with_effectful_argument_lowers_after_nested_effect() {
+    let src = r#"module Main
+
+effect Ask {
+  fun ask : Unit -> String
+}
+
+handler fixed for Ask {
+  ask () = resume "value"
+}
+
+pub fun result : Unit -> String
+result () = {
+  dbg (ask! ())
+  "ok"
+} with fixed
+"#;
+    check_result_string(
+        "intrinsic_dbg_with_effectful_argument_lowers_after_nested_effect",
+        src,
+        "ok",
+    );
+}
+
+#[test]
+fn multiple_intrinsics_under_with_boundary_compile_and_resume() {
+    let src = r#"module Main
+
+effect Ask {
+  fun ask : String -> String
+}
+
+handler bracket for Ask {
+  ask label = resume ("[" <> label <> "]")
+}
+
+pub fun result : Unit -> String
+result () = {
+  dbg (ask! "a")
+  dbg (ask! "b")
+  "done"
+} with bracket
+"#;
+    check_result_string(
+        "multiple_intrinsics_under_with_boundary_compile_and_resume",
+        src,
+        "done",
     );
 }
 

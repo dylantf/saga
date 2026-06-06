@@ -1,3 +1,5 @@
+import Std.Generic (Generic, U1, Leaf, Labeled, And, Or, Variant, Record, Adt)
+
 # Phase 2e: deriving (Generic) for parameterized records and ADTs.
 # With Phase 5 framing, the library distinguishes record framing (Record)
 # from ADT framing (Adt), and record-field labels (Labeled) from sum

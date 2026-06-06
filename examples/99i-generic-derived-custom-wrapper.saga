@@ -1,3 +1,5 @@
+import Std.Generic (Generic, U1, Leaf, Labeled, And, Or, Variant, Record, Adt)
+
 # Phase 7: structural from-direction wrappers.
 #
 # Demonstrates that a library can define its own custom return wrapper

@@ -1,3 +1,5 @@
+import Std.Generic (Generic, U1, Leaf, Labeled, And, Or, Variant, Record, Adt)
+
 # Phase 6 follow-up: multi-parameter to-direction methods can be routed.
 #
 # An Eq2-style trait with `eq2 : a -> a -> Bool` derives end-to-end. Both

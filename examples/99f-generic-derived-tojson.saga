@@ -1,3 +1,5 @@
+import Std.Generic (Generic, U1, Leaf, Labeled, And, Or, Variant, Record, Adt)
+
 # Phase 3 + Phase 5: convention-based routing for user-defined derivable
 # traits, plus framing redesign.
 #

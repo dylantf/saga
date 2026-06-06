@@ -1,3 +1,5 @@
+import Std.Generic (Generic, U1, Leaf, Labeled, And, Or, Variant, Record, Adt)
+
 # Phase 2b: the same scenario as 99-generic-spike.saga, but using
 # `deriving (Generic)` instead of hand-written impls. Phase 5 added the
 # Record/Variant/Adt framing wrappers — the library now has a place to

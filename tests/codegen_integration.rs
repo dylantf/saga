@@ -229,6 +229,82 @@ fn assert_contains(out: &str, needle: &str) {
 }
 
 #[test]
+fn mixed_effect_trait_impl_keeps_pure_method_callable() {
+    let src = r#"
+effect Ask {
+  fun ask : Unit -> String
+}
+
+handler ask_default for Ask {
+  ask () = resume "x"
+}
+
+trait Payload a {
+  fun payload : a -> String needs {Ask}
+  fun is_unit : a -> Bool
+}
+
+type Leaf = Leaf String
+
+impl Payload for Leaf needs {Ask} {
+  payload (Leaf _) = ask! ()
+  is_unit _ = False
+}
+
+fun render_payload : a -> String needs {Ask} where {a: Payload}
+render_payload x = {
+  let p = payload x
+  if is_unit x then "bad" else p
+}
+
+main () = render_payload (Leaf "y") with ask_default
+"#;
+
+    assert_runs_and_stdout_contains(src, &["x"]);
+}
+
+#[test]
+fn parameterized_mixed_effect_trait_impl_preserves_method_slots() {
+    let src = r#"
+effect Ask {
+  fun ask : Unit -> String
+}
+
+handler ask_default for Ask {
+  ask () = resume "inner"
+}
+
+trait Payload a {
+  fun payload : a -> String needs {Ask}
+  fun is_unit : a -> Bool
+}
+
+type Leaf = Leaf String
+type Box a = Box a
+
+impl Payload for Leaf needs {Ask} {
+  payload (Leaf _) = ask! ()
+  is_unit _ = False
+}
+
+impl Payload for Box a where {a: Payload} needs {Ask} {
+  payload (Box x) = payload x
+  is_unit (Box x) = is_unit x
+}
+
+fun render_payload : a -> String needs {Ask} where {a: Payload}
+render_payload x = {
+  let p = payload x
+  if is_unit x then "bad" else p
+}
+
+main () = render_payload (Box (Leaf "y")) with ask_default
+"#;
+
+    assert_runs_and_stdout_contains(src, &["inner"]);
+}
+
+#[test]
 fn inner_dynamic_handler_is_kept_when_outer_static_handler_handles_same_effect() {
     let src = r#"
 effect Log {
@@ -2647,11 +2723,11 @@ main () = {
 "#;
     let out = emit_elaborated_with_std(src);
     assert!(
-        out.contains("('std_file_bridge', 'write_file', 2)"),
+        out.contains("call 'std_file_bridge':'write_file'"),
         "Std.File.fs should lower write through std_file_bridge\n{out}"
     );
     assert!(
-        out.contains("('std_file_bridge', 'file_exists', 1)"),
+        out.contains("call 'std_file_bridge':'file_exists'"),
         "Std.File.fs should lower exists through std_file_bridge\n{out}"
     );
     assert!(

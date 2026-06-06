@@ -1,5 +1,6 @@
 module GenericFromjsonTest
 
+import Std.Generic (Generic, U1, Leaf, Labeled, And, Or, Variant, Record, Adt)
 import Std.Test (Testing, describe, test, assert_eq)
 
 # Phase B bug repro: before the Generic migration, decoding a sum-type

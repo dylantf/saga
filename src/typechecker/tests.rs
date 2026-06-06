@@ -6439,7 +6439,7 @@ fn function_with_row_claiming_unavailable_effect_still_rejected() {
 #[test]
 fn derive_generic_two_field_record_roundtrip() {
     check(
-        "import Std.Generic (Generic, U1, Leaf, Labeled, And)\n\
+        "import Std.Generic (Generic, U1, Leaf, Labeled, And, Or, Variant, Record, Adt)\n\
          record Person { name: String, age: Int }\n  deriving (Generic)\n\
          fun rt : Person -> Person\n\
          rt p = from (to p : Rep__Person)",
@@ -6451,7 +6451,7 @@ fn derive_generic_two_field_record_roundtrip() {
 fn derive_generic_single_field_record() {
     // Single-field record: Rep is just `Labeled (Leaf T)`, no `And`.
     check(
-        "import Std.Generic (Generic, U1, Leaf, Labeled, And)\n\
+        "import Std.Generic (Generic, U1, Leaf, Labeled, And, Or, Variant, Record, Adt)\n\
          record Box { value: Int }\n  deriving (Generic)\n\
          fun rt : Box -> Box\n\
          rt b = from (to b : Rep__Box)",
@@ -6464,7 +6464,7 @@ fn derive_generic_three_field_record() {
     // Three fields produce a right-leaning And tree:
     // And (Labeled (Leaf String)) (And (Labeled (Leaf Int)) (Labeled (Leaf String)))
     check(
-        "import Std.Generic (Generic, U1, Leaf, Labeled, And)\n\
+        "import Std.Generic (Generic, U1, Leaf, Labeled, And, Or, Variant, Record, Adt)\n\
          record Triple { a: String, b: Int, c: String }\n  deriving (Generic)\n\
          fun rt : Triple -> Triple\n\
          rt t = from (to t : Rep__Triple)",
@@ -6476,7 +6476,7 @@ fn derive_generic_three_field_record() {
 fn derive_generic_zero_field_record() {
     // Empty record: Rep is U1.
     check(
-        "import Std.Generic (Generic, U1, Leaf, Labeled, And)\n\
+        "import Std.Generic (Generic, U1, Leaf, Labeled, And, Or, Variant, Record, Adt)\n\
          record Empty {}\n  deriving (Generic)\n\
          fun rt : Empty -> Empty\n\
          rt e = from (to e : Rep__Empty)",
@@ -6490,7 +6490,7 @@ fn derive_generic_roundtrip_without_ascription() {
     // resolution should resolve `from (to p)` without an explicit
     // ascription, because Generic Person <r> has a unique impl.
     check(
-        "import Std.Generic (Generic, U1, Leaf, Labeled, And)\n\
+        "import Std.Generic (Generic, U1, Leaf, Labeled, And, Or, Variant, Record, Adt)\n\
          record Person { name: String, age: Int }\n  deriving (Generic)\n\
          fun rt : Person -> Person\n\
          rt p = from (to p)",
@@ -6502,7 +6502,7 @@ fn derive_generic_roundtrip_without_ascription() {
 fn derive_generic_parameterized_record_roundtrip_int() {
     // Phase 2e: parameterized records now derive Generic.
     check(
-        "import Std.Generic (Generic, U1, Leaf, Labeled, And)\n\
+        "import Std.Generic (Generic, U1, Leaf, Labeled, And, Or, Variant, Record, Adt)\n\
          record Box a { value: a }\n  deriving (Generic)\n\
          fun rt : Box Int -> Box Int\n\
          rt b = from (to b : Rep__Box Int)",
@@ -6513,7 +6513,7 @@ fn derive_generic_parameterized_record_roundtrip_int() {
 #[test]
 fn derive_generic_parameterized_record_roundtrip_string() {
     check(
-        "import Std.Generic (Generic, U1, Leaf, Labeled, And)\n\
+        "import Std.Generic (Generic, U1, Leaf, Labeled, And, Or, Variant, Record, Adt)\n\
          record Box a { value: a }\n  deriving (Generic)\n\
          fun rt : Box String -> Box String\n\
          rt b = from (to b : Rep__Box String)",
@@ -6524,7 +6524,7 @@ fn derive_generic_parameterized_record_roundtrip_string() {
 #[test]
 fn derive_generic_parameterized_record_two_params() {
     check(
-        "import Std.Generic (Generic, U1, Leaf, Labeled, And)\n\
+        "import Std.Generic (Generic, U1, Leaf, Labeled, And, Or, Variant, Record, Adt)\n\
          record Pair a b { fst: a, snd: b }\n  deriving (Generic)\n\
          fun rt : Pair Int String -> Pair Int String\n\
          rt p = from (to p : Rep__Pair Int String)",
@@ -6538,7 +6538,7 @@ fn derive_generic_end_to_end_with_tojson() {
     // built on the building blocks composes through a derived Generic
     // impl. Same shape as examples/99b-generic-derived.saga.
     check(
-        "import Std.Generic (Generic, U1, Leaf, Labeled, And, Or)\n\
+        "import Std.Generic (Generic, U1, Leaf, Labeled, And, Or, Variant, Record, Adt)\n\
          record Person { name: String, age: Int }\n  deriving (Generic)\n\
          trait ToJson a { fun to_json : a -> String }\n\
          impl ToJson for U1 { to_json _ = \"null\" }\n\
@@ -6560,7 +6560,7 @@ fn derive_generic_end_to_end_with_tojson() {
 fn derive_generic_adt_enum_style() {
     // All-nullary ADT — every variant wraps U1.
     check(
-        "import Std.Generic (Generic, U1, Leaf, Labeled, And, Or)\n\
+        "import Std.Generic (Generic, U1, Leaf, Labeled, And, Or, Variant, Record, Adt)\n\
          type Color = Red | Green | Blue\n  deriving (Generic)\n\
          fun rt : Color -> Color\n\
          rt c = from (to c : Rep__Color)",
@@ -6572,7 +6572,7 @@ fn derive_generic_adt_enum_style() {
 fn derive_generic_adt_single_variant() {
     // Single-variant ADT — no Or wrapping at all.
     check(
-        "import Std.Generic (Generic, U1, Leaf, Labeled, And, Or)\n\
+        "import Std.Generic (Generic, U1, Leaf, Labeled, And, Or, Variant, Record, Adt)\n\
          type Wrapper = Wrap Int\n  deriving (Generic)\n\
          fun rt : Wrapper -> Wrapper\n\
          rt w = from (to w : Rep__Wrapper)",
@@ -6584,7 +6584,7 @@ fn derive_generic_adt_single_variant() {
 fn derive_generic_adt_maybe_like() {
     // Mixed arity: one variant has a field, the other is nullary.
     check(
-        "import Std.Generic (Generic, U1, Leaf, Labeled, And, Or)\n\
+        "import Std.Generic (Generic, U1, Leaf, Labeled, And, Or, Variant, Record, Adt)\n\
          type IntOpt = Just Int | Nothing\n  deriving (Generic)\n\
          fun rt : IntOpt -> IntOpt\n\
          rt x = from (to x : Rep__IntOpt)",
@@ -6597,7 +6597,7 @@ fn derive_generic_adt_three_variants_mixed() {
     // 3-variant ADT exercising all three arities, including a multi-field
     // variant (Rect Float Float -> And-tree).
     check(
-        "import Std.Generic (Generic, U1, Leaf, Labeled, And, Or)\n\
+        "import Std.Generic (Generic, U1, Leaf, Labeled, And, Or, Variant, Record, Adt)\n\
          type Shape = Circle Float | Rect Float Float | Triangle\n  deriving (Generic)\n\
          fun rt : Shape -> Shape\n\
          rt s = from (to s : Rep__Shape)",
@@ -6609,7 +6609,7 @@ fn derive_generic_adt_three_variants_mixed() {
 fn derive_generic_adt_three_multi_field_variants() {
     // All variants multi-field: deepest And chain on every arm.
     check(
-        "import Std.Generic (Generic, U1, Leaf, Labeled, And, Or)\n\
+        "import Std.Generic (Generic, U1, Leaf, Labeled, And, Or, Variant, Record, Adt)\n\
          type Tri = A Int Int | B String String | C Int String\n  deriving (Generic)\n\
          fun rt : Tri -> Tri\n\
          rt t = from (to t : Rep__Tri)",
@@ -6622,7 +6622,7 @@ fn derive_generic_adt_recursive_monomorphic() {
     // Phase 2d: recursive ADTs now derive Generic. The recursive field
     // round-trips through the runtime dictionary, not the Rep type shape.
     check(
-        "import Std.Generic (Generic, U1, Leaf, Labeled, And, Or)\n\
+        "import Std.Generic (Generic, U1, Leaf, Labeled, And, Or, Variant, Record, Adt)\n\
          type IntList = INil | ICons Int IntList\n  deriving (Generic)\n\
          fun rt : IntList -> IntList\n\
          rt xs = from (to xs : Rep__IntList)",
@@ -6634,7 +6634,7 @@ fn derive_generic_adt_recursive_monomorphic() {
 fn derive_generic_adt_parameterized() {
     // Phase 2e: parameterized ADTs derive Generic.
     check(
-        "import Std.Generic (Generic, U1, Leaf, Labeled, And, Or)\n\
+        "import Std.Generic (Generic, U1, Leaf, Labeled, And, Or, Variant, Record, Adt)\n\
          type Opt a = Some a | None\n  deriving (Generic)\n\
          fun rt : Opt Int -> Opt Int\n\
          rt x = from (to x : Rep__Opt Int)",
@@ -6649,7 +6649,7 @@ fn derive_generic_parameterized_adt_end_to_end_with_tojson() {
     // call-site coherence fallback to pin the Generic Rep, with no
     // where-app needed.
     check(
-        "import Std.Generic (Generic, U1, Leaf, Labeled, And, Or)\n\
+        "import Std.Generic (Generic, U1, Leaf, Labeled, And, Or, Variant, Record, Adt)\n\
          type Opt a = Some a | None\n  deriving (Generic)\n\
          trait ToJson a { fun to_json : a -> String }\n\
          impl ToJson for U1 { to_json _ = \"null\" }\n\
@@ -6672,7 +6672,7 @@ fn where_app_accepts_parenthesized_type_application() {
     // application, not just bare identifiers. Coherence keys on the head
     // (Opt), so this resolves cleanly through the derived Generic impl.
     check(
-        "import Std.Generic (Generic, U1, Leaf, Labeled, And, Or)\n\
+        "import Std.Generic (Generic, U1, Leaf, Labeled, And, Or, Variant, Record, Adt)\n\
          type Opt a = Some a | None\n  deriving (Generic)\n\
          trait ToJson a { fun to_json : a -> String }\n\
          impl ToJson for U1 { to_json _ = \"null\" }\n\
@@ -6693,7 +6693,7 @@ fn where_app_accepts_parenthesized_type_application() {
 fn derive_generic_adt_parameterized_recursive() {
     // Phase 2d + 2e combined: a parameterized recursive ADT.
     check(
-        "import Std.Generic (Generic, U1, Leaf, Labeled, And, Or)\n\
+        "import Std.Generic (Generic, U1, Leaf, Labeled, And, Or, Variant, Record, Adt)\n\
          type MyList a = MNil | MCons a (MyList a)\n  deriving (Generic)\n\
          fun rt : MyList Int -> MyList Int\n\
          rt xs = from (to xs : Rep__MyList Int)",
@@ -6706,7 +6706,7 @@ fn derive_generic_adt_end_to_end_with_tojson() {
     // ADT analogue of the Phase 2b record smoke test: a hand-written ToJson
     // over the building blocks routes through a derived Generic impl.
     check(
-        "import Std.Generic (Generic, U1, Leaf, Labeled, And, Or)\n\
+        "import Std.Generic (Generic, U1, Leaf, Labeled, And, Or, Variant, Record, Adt)\n\
          type Shape = Circle Float | Rect Float Float | Triangle\n  deriving (Generic)\n\
          trait ToJson a { fun to_json : a -> String }\n\
          impl ToJson for U1 { to_json _ = \"null\" }\n\
@@ -6727,7 +6727,8 @@ fn derive_generic_adt_end_to_end_with_tojson() {
 
 /// Minimal inline ToJson library reused across Phase 3 tests.
 fn phase3_tojson_lib() -> &'static str {
-    "trait ToJson a { fun to_json : a -> String }\n\
+    "import Std.Generic (Generic, U1, Leaf, Labeled, And, Or, Variant, Record, Adt)\n\
+     trait ToJson a { fun to_json : a -> String }\n\
      impl ToJson for U1 { to_json _ = \"null\" }\n\
      impl ToJson for Int { to_json n = show n }\n\
      impl ToJson for String { to_json s = s }\n\
@@ -6742,6 +6743,7 @@ fn phase3_tojson_lib() -> &'static str {
 
 fn module_tojson_lib() -> &'static str {
     "module JsonLib\n\
+     import Std.Generic (Generic, U1, Leaf, Labeled, And, Or, Variant, Record, Adt)\n\
      pub trait ToJson a { fun to_json : a -> String }\n\
      pub fun helper : Unit -> Unit\n\
      helper () = ()\n\
@@ -6878,6 +6880,7 @@ fn routed_from_derive_reports_ambiguous_imported_wrapper() {
 #[test]
 fn routed_from_derive_inspects_imported_wrapper_by_canonical_shape() {
     let db_lib = "module DbLib\n\
+        import Std.Generic (Generic, U1, Leaf, Labeled, And, Or, Variant, Record, Adt)\n\
         pub type DbError = Timeout\n\
         pub type DbResult a = DbOk a | DbErr DbError | DbNoRows\n\
         pub trait Decode a { fun decode : String -> DbResult a }\n\
@@ -6920,7 +6923,7 @@ fn phase3_routed_derive_record() {
     // delegating impl plus bridge impl let `to_json p` round-trip through
     // the building-block instances.
     let src = format!(
-        "import Std.Generic (Generic, U1, Leaf, Labeled, And, Or)\n\
+        "import Std.Generic (Generic, U1, Leaf, Labeled, And, Or, Variant, Record, Adt)\n\
          {lib}\
          record Person {{ name: String, age: Int }}\n  deriving (Generic, ToJson)\n\
          fun go : Person -> String\n\
@@ -6935,7 +6938,7 @@ fn phase3_routed_derive_auto_includes_generic() {
     // Only `deriving (ToJson)` listed — Generic is auto-included so the
     // routed synthesizer can chain through `to`.
     let src = format!(
-        "import Std.Generic (Generic, U1, Leaf, Labeled, And, Or)\n\
+        "import Std.Generic (Generic, U1, Leaf, Labeled, And, Or, Variant, Record, Adt)\n\
          {lib}\
          record Person {{ name: String, age: Int }}\n  deriving (ToJson)\n\
          fun go : Person -> String\n\
@@ -6948,7 +6951,7 @@ fn phase3_routed_derive_auto_includes_generic() {
 #[test]
 fn phase3_routed_derive_parameterized_record() {
     let src = format!(
-        "import Std.Generic (Generic, U1, Leaf, Labeled, And, Or)\n\
+        "import Std.Generic (Generic, U1, Leaf, Labeled, And, Or, Variant, Record, Adt)\n\
          {lib}\
          record Box a {{ v: a }}\n  deriving (ToJson)\n\
          fun go : Box Int -> String\n\
@@ -6961,7 +6964,7 @@ fn phase3_routed_derive_parameterized_record() {
 #[test]
 fn phase3_routed_derive_adt() {
     let src = format!(
-        "import Std.Generic (Generic, U1, Leaf, Labeled, And, Or)\n\
+        "import Std.Generic (Generic, U1, Leaf, Labeled, And, Or, Variant, Record, Adt)\n\
          {lib}\
          type Opt a = Some a | Nada\n  deriving (ToJson)\n\
          fun go : Opt Int -> String\n\
@@ -6974,7 +6977,7 @@ fn phase3_routed_derive_adt() {
 #[test]
 fn phase3_routed_derive_recursive_adt() {
     let src = format!(
-        "import Std.Generic (Generic, U1, Leaf, Labeled, And, Or)\n\
+        "import Std.Generic (Generic, U1, Leaf, Labeled, And, Or, Variant, Record, Adt)\n\
          {lib}\
          type IntList = INil | ICons Int IntList\n  deriving (ToJson)\n\
          fun go : IntList -> String\n\
@@ -6989,7 +6992,8 @@ fn phase3_routed_derive_recursive_adt() {
 /// Inline FromJson library with Result-wrapped returns. Dummy bodies — the
 /// tests only verify that derive expansion + typechecking succeed.
 fn phase3_fromjson_result_lib() -> &'static str {
-    "trait FromJson a { fun from_json : String -> Result a String }\n\
+    "import Std.Generic (Generic, U1, Leaf, Labeled, And, Or, Variant, Record, Adt)\n\
+     trait FromJson a { fun from_json : String -> Result a String }\n\
      impl FromJson for U1 { from_json _ = Ok U1 }\n\
      impl FromJson for Int { from_json _ = Ok 0 }\n\
      impl FromJson for String { from_json s = Ok s }\n\
@@ -7038,7 +7042,8 @@ fn phase3_routed_derive_from_direction_result() {
 
 #[test]
 fn phase3_routed_derive_from_direction_maybe() {
-    let src = "trait FromX a { fun from_x : Int -> Maybe a }\n\
+    let src = "import Std.Generic (Generic, U1, Leaf, Labeled, And, Or, Variant, Record, Adt)\n\
+               trait FromX a { fun from_x : Int -> Maybe a }\n\
                impl FromX for U1 { from_x _ = Just U1 }\n\
                impl FromX for Int { from_x _ = Just 0 }\n\
                impl FromX for String { from_x _ = Just \"\" }\n\
@@ -7071,7 +7076,8 @@ fn phase3_routed_derive_from_direction_maybe() {
 
 #[test]
 fn phase3_routed_derive_from_direction_bare() {
-    let src = "trait FromX a { fun from_x : Int -> a }\n\
+    let src = "import Std.Generic (Generic, U1, Leaf, Labeled, And, Or, Variant, Record, Adt)\n\
+               trait FromX a { fun from_x : Int -> a }\n\
                impl FromX for U1 { from_x _ = U1 }\n\
                impl FromX for Int { from_x _ = 0 }\n\
                impl FromX for String { from_x _ = \"\" }\n\
@@ -7162,7 +7168,7 @@ fn phase3_routed_derive_to_and_from_roundtrip() {
 #[test]
 fn phase3_routed_derive_unknown_trait_diagnostic() {
     // `Mystery` is not a trait in scope and not a hardcoded derive name.
-    let src = "import Std.Generic (Generic, U1, Leaf, Labeled, And, Or)\n\
+    let src = "import Std.Generic (Generic, U1, Leaf, Labeled, And, Or, Variant, Record, Adt)\n\
                record Person { name: String, age: Int }\n  deriving (Mystery)\n";
     let err = check(src).err().expect("expected error");
     assert!(
@@ -7179,7 +7185,7 @@ fn phase3_routed_derive_missing_field_instance_errors() {
     // constraint-resolution error rewritten to point at the user's
     // deriving clause and name the user-facing trait + type.
     let src = format!(
-        "import Std.Generic (Generic, U1, Leaf, Labeled, And, Or)\n\
+        "import Std.Generic (Generic, U1, Leaf, Labeled, And, Or, Variant, Record, Adt)\n\
          {lib}\
          type Tag = Tag\n\
          record Foo {{ x: Int, t: Tag }}\n  deriving (ToJson)\n",
@@ -7206,7 +7212,7 @@ fn routed_derive_missing_field_instance_from_direction() {
     // From-direction analogue: missing FromJson on a field type Tag should
     // surface the rewritten error pointing at the user's deriving clause.
     let src = format!(
-        "import Std.Generic (Generic, U1, Leaf, Labeled, And, Or)\n\
+        "import Std.Generic (Generic, U1, Leaf, Labeled, And, Or, Variant, Record, Adt)\n\
          {lib}\
          type Tag = Tag\n\
          record Foo {{ x: Int, t: Tag }}\n  deriving (FromJson)\n",
@@ -7226,7 +7232,7 @@ fn routed_derive_missing_variant_payload_instance_errors() {
     // ADT containing a variant payload of a type without ToJson should
     // also produce the rewritten diagnostic.
     let src = format!(
-        "import Std.Generic (Generic, U1, Leaf, Labeled, And, Or)\n\
+        "import Std.Generic (Generic, U1, Leaf, Labeled, And, Or, Variant, Record, Adt)\n\
          {lib}\
          type Tag = Tag\n\
          type Shape = Circle Int | Tagged Tag\n  deriving (ToJson)\n",
@@ -7249,7 +7255,7 @@ fn handwritten_impl_failure_uses_default_diagnostic() {
     // impls. Verifies the marker isn't accidentally applied to hand-written
     // code.
     let src = format!(
-        "import Std.Generic (Generic, U1, Leaf, Labeled, And, Or)\n\
+        "import Std.Generic (Generic, U1, Leaf, Labeled, And, Or, Variant, Record, Adt)\n\
          {lib}\
          type Tag = Tag\n\
          record Foo {{ t: Tag }}\n\
@@ -7274,7 +7280,8 @@ fn handwritten_impl_failure_uses_default_diagnostic() {
 /// `debug_repr`) sharing the same trait. The implementations are stubbed but
 /// distinct so we can confirm direction detection runs per method.
 fn phase6_showboth_lib() -> &'static str {
-    "trait ShowBoth a {\n  fun show_b : a -> String\n  fun debug_b : a -> String\n}\n\
+    "import Std.Generic (Generic, U1, Leaf, Labeled, And, Or, Variant, Record, Adt)\n\
+     trait ShowBoth a {\n  fun show_b : a -> String\n  fun debug_b : a -> String\n}\n\
      impl ShowBoth for U1 { show_b _ = \"u1\"\n  debug_b _ = \"U1\" }\n\
      impl ShowBoth for Int { show_b n = show n\n  debug_b n = show n }\n\
      impl ShowBoth for String { show_b s = s\n  debug_b s = s }\n\
@@ -7301,7 +7308,8 @@ fn phase6_routed_derive_multi_method_to_direction() {
 
 /// Two from-direction methods sharing a trait, derived on an ADT.
 fn phase6_from_pair_lib() -> &'static str {
-    "trait FromPair a {\n  fun from_str : String -> Result a String\n  fun from_int : Int -> Result a String\n}\n\
+    "import Std.Generic (Generic, U1, Leaf, Labeled, And, Or, Variant, Record, Adt)\n\
+     trait FromPair a {\n  fun from_str : String -> Result a String\n  fun from_int : Int -> Result a String\n}\n\
      impl FromPair for U1 { from_str _ = Ok U1\n  from_int _ = Ok U1 }\n\
      impl FromPair for Int { from_str _ = Ok 0\n  from_int n = Ok n }\n\
      impl FromPair for String { from_str s = Ok s\n  from_int _ = Ok \"\" }\n\
@@ -7332,7 +7340,8 @@ fn phase6_routed_derive_multi_method_from_direction() {
 /// encode (to-direction) and decode (from-direction) method in the same
 /// trait. Bridge + delegating impls each carry both methods.
 fn phase6_jsoncodec_lib() -> &'static str {
-    "trait JsonCodec a {\n  fun encode : a -> String\n  fun decode : String -> Result a String\n}\n\
+    "import Std.Generic (Generic, U1, Leaf, Labeled, And, Or, Variant, Record, Adt)\n\
+     trait JsonCodec a {\n  fun encode : a -> String\n  fun decode : String -> Result a String\n}\n\
      impl JsonCodec for U1 { encode _ = \"null\"\n  decode _ = Ok U1 }\n\
      impl JsonCodec for Int { encode n = show n\n  decode _ = Ok 0 }\n\
      impl JsonCodec for String { encode s = s\n  decode s = Ok s }\n\
@@ -7366,7 +7375,7 @@ fn phase6_routed_derive_mixed_includes_bad_method() {
     // A trait that mixes a valid to-direction method with a `roundtrip` whose
     // self-type appears on both sides — direction detection should reject the
     // derive and name the offending method.
-    let src = "import Std.Generic (Generic, U1, Leaf, Labeled, And, Or)\n\
+    let src = "import Std.Generic (Generic, U1, Leaf, Labeled, And, Or, Variant, Record, Adt)\n\
                trait Bad a {\n  fun show_it : a -> String\n  fun roundtrip : a -> a\n}\n\
                record Person { name: String, age: Int }\n  deriving (Bad)\n";
     let err = check(src).err().expect("expected error");
@@ -7382,7 +7391,8 @@ fn phase6_routed_derive_mixed_includes_bad_method() {
 /// Building-block Eq2-style library: an `eq2 : a -> a -> Bool` method
 /// exercising the two-a-param to-direction path.
 fn multi_param_eq_lib() -> &'static str {
-    "trait Eq2 a {\n  fun eq2 : a -> a -> Bool\n}\n\
+    "import Std.Generic (Generic, U1, Leaf, Labeled, And, Or, Variant, Record, Adt)\n\
+     trait Eq2 a {\n  fun eq2 : a -> a -> Bool\n}\n\
      impl Eq2 for U1 { eq2 _ _ = True }\n\
      impl Eq2 for Int { eq2 a b = a == b }\n\
      impl Eq2 for String { eq2 a b = a == b }\n\
@@ -7610,7 +7620,8 @@ fn phase7_custom_three_state_wrapper_succeeds() {
     // (no fields) — is now a valid from-direction wrapper. The synthesizer
     // walks DbResult's variants structurally instead of hardcoding the
     // accepted shapes.
-    let src = "type DbError = NotConnected | Timeout\n\
+    let src = "import Std.Generic (Generic, U1, Leaf, Labeled, And, Or, Variant, Record, Adt)\n\
+               type DbError = NotConnected | Timeout\n\
                type DbResult a = DbOk a | DbErr DbError | DbNoRows\n\
                trait Decode a { fun decode : String -> DbResult a }\n\
                impl Decode for U1     { decode _ = DbOk U1 }\n\
@@ -7682,7 +7693,8 @@ fn phase7_validated_two_param_wrapper_succeeds() {
     // is `Var("a")` → a-position. Invalid's field is `List e` — contains
     // `e` not `a`, so passthrough. Multi-param wrappers work via positional
     // alignment.
-    let src = "type Validated e a = Valid a | Invalid (List e)\n\
+    let src = "import Std.Generic (Generic, U1, Leaf, Labeled, And, Or, Variant, Record, Adt)\n\
+               type Validated e a = Valid a | Invalid (List e)\n\
                trait FromCsv a { fun from_csv : String -> Validated String a }\n\
                impl FromCsv for U1     { from_csv _ = Valid U1 }\n\
                impl FromCsv for Int    { from_csv _ = Valid 0 }\n\
@@ -7743,7 +7755,8 @@ fn phase7_record_wrapper_succeeds() {
     // `record Boxed a { value: a, meta: String }` — a product wrapper.
     // Single `Boxed { value, meta } -> Boxed { value: wrap(value), meta }`
     // case arm. Verifies the FromShape::Record path.
-    let src = "record Boxed a { value: a, meta: String }\n\
+    let src = "import Std.Generic (Generic, U1, Leaf, Labeled, And, Or, Variant, Record, Adt)\n\
+               record Boxed a { value: a, meta: String }\n\
                trait Decode a { fun decode : String -> Boxed a }\n\
                impl Decode for U1     { decode _ = Boxed { value: U1, meta: \"\" } }\n\
                impl Decode for Int    { decode _ = Boxed { value: 0, meta: \"\" } }\n\
@@ -7797,7 +7810,8 @@ fn phase7_phantom_param_wrapper_succeeds() {
     // in the variant's fields). Only `a` should be the a-position. Phase 7
     // doesn't care about phantom params; it just walks fields and matches
     // their TypeExpr against the wrapper_self_params set.
-    let src = "type Tagged tag a = Tag a\n\
+    let src = "import Std.Generic (Generic, U1, Leaf, Labeled, And, Or, Variant, Record, Adt)\n\
+               type Tagged tag a = Tag a\n\
                trait FromTag a { fun from_tag : String -> Tagged Int a }\n\
                impl FromTag for U1     { from_tag _ = Tag U1 }\n\
                impl FromTag for Int    { from_tag _ = Tag 0 }\n\
@@ -7861,7 +7875,8 @@ fn phase7_no_a_position_diagnostic() {
 fn phase7_either_multi_a_succeeds() {
     // `Either a a` (degenerate but legal). Both wrapper-local params bind
     // to self, so wrapper_self_params = {"l", "r"}. Both arms get `wrap`.
-    let src = "type Either l r = Left l | Right r\n\
+    let src = "import Std.Generic (Generic, U1, Leaf, Labeled, And, Or, Variant, Record, Adt)\n\
+               type Either l r = Left l | Right r\n\
                trait FromE a { fun from_e : String -> Either a a }\n\
                impl FromE for U1     { from_e _ = Left U1 }\n\
                impl FromE for Int    { from_e _ = Left 0 }\n\
@@ -7994,7 +8009,8 @@ fn trait_default_body_with_routed_derive() {
     // Headline Option B: a trait with a routed required method + a defaulted
     // convenience wrapper. The synthesizer skips the defaulted method; impl-
     // checking inherits it. Calling either method should typecheck.
-    let src = "trait Greet a {\n\
+    let src = "import Std.Generic (Generic, U1, Leaf, Labeled, And, Or, Variant, Record, Adt)\n\
+               trait Greet a {\n\
                  fun greet_with : String -> a -> String\n\
                  fun greet : a -> String\n\
                  greet x = greet_with \"hi\" x\n\

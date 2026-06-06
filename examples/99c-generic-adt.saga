@@ -1,3 +1,5 @@
+import Std.Generic (Generic, U1, Leaf, Labeled, And, Or, Variant, Record, Adt)
+
 # Phase 2c: deriving (Generic) for ADTs.
 # A multi-variant type with mixed arities routed through a hand-written
 # ToJson library over the Generic building blocks. With Phase 5 framing,

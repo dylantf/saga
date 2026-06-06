@@ -20,6 +20,10 @@
 //! `RowForwarded` (open row). Otherwise: `Pure`. Effectful let-bindings
 //! (`let g = factory(); g x`) are tracked via a lexical scope stack inside
 //! the populator.
+//!
+//! This module is intentionally a classifier, not a lowerer. It names the
+//! ABI/evidence shape a call site needs; Core Erlang emission remains in
+//! `codegen::lower`.
 
 use std::collections::{HashMap, HashSet};
 
@@ -33,19 +37,18 @@ use crate::typechecker::{CheckResult, TraitMethodEffectSig};
 /// Per-call metadata. Keyed by the `NodeId` of an `App` node.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CallEffectInfo {
-    pub kind: CallEffectKind,
+    kind: CallEffectKind,
     /// Logical user-argument count (excludes evidence and return_k).
     ///
     /// **Invariant**: when `kind == CallEffectKind::Pure`, `user_arity` is
     /// always `0`. The lowerer never reads `user_arity` on `Pure` entries,
     /// and pinning the value to a single canonical zero prevents drift if a
     /// future producer is added. Construct via [`CallEffectInfo::pure()`]
-    /// or [`CallEffectInfo::with_ops()`] to get the invariant enforced by
-    /// construction; ad-hoc construction must call
-    /// [`CallEffectInfo::debug_check()`] (debug builds verify it).
-    pub user_arity: usize,
+    /// or [`CallEffectInfo::cps()`] so debug builds verify the invariant at
+    /// the classifier boundary.
+    user_arity: usize,
     /// Whether this call accepts a return continuation (i.e. it is effectful).
-    pub needs_return_k: bool,
+    needs_return_k: bool,
 }
 
 impl CallEffectInfo {
@@ -58,25 +61,126 @@ impl CallEffectInfo {
         }
     }
 
-    /// Debug-builds-only invariant check: Pure entries must have user_arity 0
-    /// and needs_return_k == false. Call after ad-hoc construction.
+    /// CPS/evidence call. The caller must supply evidence and a return
+    /// continuation according to `kind`.
+    fn cps(kind: CallEffectKind, user_arity: usize) -> Self {
+        let info = CallEffectInfo {
+            kind,
+            user_arity,
+            needs_return_k: true,
+        };
+        info.debug_check();
+        info
+    }
+
+    /// Extract the CPS call plan the lowerer needs for evidence construction.
+    ///
+    /// Returns `None` for direct/externally-pure calls. Open-row calls return
+    /// `Some` even when their static effect prefix is empty, because they still
+    /// need caller evidence forwarded through the CPS ABI.
+    pub fn cps_call_plan(&self) -> Option<CpsCallPlan> {
+        match &self.kind {
+            CallEffectKind::Pure => None,
+            CallEffectKind::StaticOps { ops } if !ops.is_empty() => Some(CpsCallPlan {
+                effects: unique_effects(ops),
+                row_forwarded: false,
+            }),
+            CallEffectKind::StaticOps { .. } => None,
+            CallEffectKind::RowForwarded { static_ops } => Some(CpsCallPlan {
+                effects: unique_effects(static_ops),
+                row_forwarded: true,
+            }),
+        }
+    }
+
+    pub fn is_cps_call(&self) -> bool {
+        self.cps_call_plan().is_some()
+    }
+
+    /// Human-readable ABI shape for debug/audit traces.
+    ///
+    /// The wording intentionally mirrors the selective-uniform branch's
+    /// `call_shape_debug_label` style, but describes the current direct-first
+    /// classifier contract rather than a separate planner.
+    pub fn debug_label(&self) -> String {
+        match &self.kind {
+            CallEffectKind::Pure => "direct".to_string(),
+            CallEffectKind::StaticOps { ops } => format!(
+                "cps-static({}->{}, effects={:?})",
+                self.user_arity,
+                self.user_arity + 2,
+                unique_effects(ops)
+            ),
+            CallEffectKind::RowForwarded { static_ops } => format!(
+                "cps-row-forwarded({}->{}, pinned_effects={:?})",
+                self.user_arity,
+                self.user_arity + 2,
+                unique_effects(static_ops)
+            ),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_cps_static(effect: &str, op: &str, user_arity: usize) -> Self {
+        Self::cps(
+            CallEffectKind::StaticOps {
+                ops: vec![OpKey {
+                    effect: effect.to_string(),
+                    op: op.to_string(),
+                }],
+            },
+            user_arity,
+        )
+    }
+
+    /// Debug-builds-only invariant check for classifier-created entries.
     #[inline]
-    pub fn debug_check(&self) {
-        if cfg!(debug_assertions) && matches!(self.kind, CallEffectKind::Pure) {
-            debug_assert_eq!(
-                self.user_arity, 0,
-                "CallEffectInfo: Pure kind requires user_arity == 0"
-            );
-            debug_assert!(
-                !self.needs_return_k,
-                "CallEffectInfo: Pure kind requires needs_return_k == false"
-            );
+    fn debug_check(&self) {
+        if cfg!(debug_assertions) {
+            match &self.kind {
+                CallEffectKind::Pure => {
+                    debug_assert_eq!(
+                        self.user_arity, 0,
+                        "CallEffectInfo: Pure kind requires user_arity == 0"
+                    );
+                    debug_assert!(
+                        !self.needs_return_k,
+                        "CallEffectInfo: Pure kind requires needs_return_k == false"
+                    );
+                }
+                CallEffectKind::StaticOps { ops } => {
+                    debug_assert!(
+                        !ops.is_empty(),
+                        "CallEffectInfo: StaticOps requires at least one op; use Pure otherwise"
+                    );
+                    debug_assert!(
+                        self.needs_return_k,
+                        "CallEffectInfo: CPS calls require needs_return_k == true"
+                    );
+                }
+                CallEffectKind::RowForwarded { .. } => {
+                    debug_assert!(
+                        self.needs_return_k,
+                        "CallEffectInfo: CPS calls require needs_return_k == true"
+                    );
+                }
+            }
         }
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum CallEffectKind {
+pub struct CpsCallPlan {
+    /// Canonical effect names whose evidence entries should be projected or
+    /// pinned at this call site.
+    pub effects: Vec<String>,
+    /// True for open-row calls; the caller forwards ambient evidence instead
+    /// of projecting to exactly `effects`.
+    pub row_forwarded: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum CallEffectKind {
     /// Pure call. No effect threading.
     Pure,
     /// Effects fully known statically at this call site. Caller threads exactly
@@ -96,6 +200,99 @@ pub struct OpKey {
 }
 
 pub type CallEffectMap = HashMap<NodeId, CallEffectInfo>;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CallEffectTraceEntry {
+    pub app_id: NodeId,
+    pub head_id: NodeId,
+    pub head: String,
+    pub supplied_args: usize,
+    pub shape: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PopulatedCallEffects {
+    pub map: CallEffectMap,
+    pub trace: Vec<CallEffectTraceEntry>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EffectOpTraceEntry {
+    pub node_id: NodeId,
+    pub effect: String,
+    pub op: String,
+    pub source_args: usize,
+    pub runtime_args: usize,
+    pub shape: String,
+}
+
+pub fn call_effect_trace_enabled_for(subject: &str) -> bool {
+    let Some(filter) = call_effect_trace_filter() else {
+        return false;
+    };
+    debug_filter_matches(&filter, "call-effects", Some(subject))
+}
+
+pub fn effect_op_trace_enabled_for(subject: &str) -> bool {
+    let Some(filter) = call_effect_trace_filter() else {
+        return false;
+    };
+    debug_filter_matches(&filter, "effect-ops", Some(subject))
+}
+
+pub fn format_call_effect_trace(subject: &str, trace: &[CallEffectTraceEntry]) -> String {
+    let mut out = format!("call-effects[{subject}]: {} app(s)", trace.len());
+    for entry in trace {
+        out.push_str(&format!(
+            "\n  app#{} head#{} {} / {} -> {}",
+            entry.app_id.0, entry.head_id.0, entry.head, entry.supplied_args, entry.shape
+        ));
+    }
+    out
+}
+
+pub fn format_effect_op_trace(subject: &str, trace: &[EffectOpTraceEntry]) -> String {
+    let mut out = format!("effect-ops[{subject}]: {} op call(s)", trace.len());
+    for entry in trace {
+        out.push_str(&format!(
+            "\n  op#{} {}.{} / {} source arg(s), {} runtime arg(s) -> {}",
+            entry.node_id.0,
+            entry.effect,
+            entry.op,
+            entry.source_args,
+            entry.runtime_args,
+            entry.shape
+        ));
+    }
+    out
+}
+
+fn call_effect_trace_filter() -> Option<String> {
+    std::env::var_os("SAGA_DEBUG_EFFECT_SHAPES")
+        .or_else(|| std::env::var_os("SAGA_DEBUG_SELECTIVE"))
+        .map(|value| value.to_string_lossy().to_string())
+}
+
+fn debug_filter_matches(filter: &str, target: &str, subject: Option<&str>) -> bool {
+    let filter = filter.trim();
+    if filter.is_empty() || matches!(filter, "1" | "true" | "all") {
+        return true;
+    }
+    if target.contains(filter) {
+        return true;
+    }
+    let Some(subject) = subject else {
+        return false;
+    };
+    subject.contains(filter) || format!("{target}:{subject}").contains(filter)
+}
+
+fn unique_effects(ops: &[OpKey]) -> Vec<String> {
+    let mut effects: Vec<String> = ops.iter().map(|k| k.effect.clone()).collect();
+    effects.sort();
+    effects.dedup();
+    effects
+}
 
 /// Snapshot of the per-function metadata the populator needs. Built by the
 /// Lowerer from its own `FunInfo` table once `init_module` has finished.
@@ -134,12 +331,13 @@ pub struct PopulatorInputs<'a> {
     /// Static let-binding effects from CodegenContext.
     pub let_effect_bindings: &'a HashMap<String, Vec<String>>,
     /// Trait impl dict name -> sorted canonical effect names from the impl's
-    /// `needs` clause. Sourced from `TraitImplDict.impl_effects` (both the
-    /// active module's and imported modules'). Used to classify
-    /// `App(DictMethodAccess { dict, .. }, ...)` call sites: walk the dict
-    /// expression to find the underlying `DictRef { name }`, then look up
-    /// effects here.
+    /// `needs` clause. Used as a fallback for imported module metadata that
+    /// does not yet expose per-method impl effects.
     pub impl_effects_by_dict: &'a HashMap<String, Vec<String>>,
+    /// (trait impl dict name, method index) -> sorted canonical effect names
+    /// needed by that concrete dictionary slot beyond the trait method
+    /// signature.
+    pub impl_method_effects_by_dict: &'a HashMap<(String, usize), Vec<String>>,
     /// (canonical trait name, method index) -> trait-declared effect signature.
     /// This is the contract for polymorphic/where-bound dictionary dispatch.
     pub trait_method_effects_by_key: &'a HashMap<(String, usize), TraitMethodEffectSig>,
@@ -150,6 +348,7 @@ pub struct PopulatorInputs<'a> {
 pub struct Populator<'a> {
     inputs: PopulatorInputs<'a>,
     map: CallEffectMap,
+    trace: Vec<CallEffectTraceEntry>,
     /// Stack of lexical scopes. Each frame maps a bound name to the absorbed
     /// effects that calls of that name should thread.
     scopes: Vec<HashMap<String, Vec<String>>>,
@@ -173,6 +372,7 @@ impl<'a> Populator<'a> {
         Populator {
             inputs,
             map: HashMap::new(),
+            trace: Vec::new(),
             scopes: Vec::new(),
             open_row_vars: Vec::new(),
             local_fun_sigs: Vec::new(),
@@ -231,11 +431,18 @@ impl<'a> Populator<'a> {
         out
     }
 
-    pub fn populate(mut self, program: &Program) -> CallEffectMap {
+    pub fn populate(self, program: &Program) -> CallEffectMap {
+        self.populate_with_trace(program).map
+    }
+
+    pub fn populate_with_trace(mut self, program: &Program) -> PopulatedCallEffects {
         for decl in program {
             self.walk_decl(decl);
         }
-        self.map
+        PopulatedCallEffects {
+            map: self.map,
+            trace: self.trace,
+        }
     }
 
     /// Push parallel frames onto `scopes` and `open_row_vars`. Use
@@ -453,9 +660,21 @@ impl<'a> Populator<'a> {
         if matches!(expr.kind, ExprKind::App { .. }) {
             let info = self.classify_app(expr);
             info.debug_check();
+            self.trace.push(self.trace_entry(expr, &info));
             self.map.insert(expr.id, info);
         }
         self.walk_children(expr);
+    }
+
+    fn trace_entry(&self, expr: &Expr, info: &CallEffectInfo) -> CallEffectTraceEntry {
+        let (head, args) = peel_app(expr);
+        CallEffectTraceEntry {
+            app_id: expr.id,
+            head_id: head.id,
+            head: head_debug_label(head),
+            supplied_args: args.len(),
+            shape: info.debug_label(),
+        }
     }
 
     fn walk_children(&mut self, expr: &Expr) {
@@ -704,19 +923,11 @@ impl<'a> Populator<'a> {
     /// If `value` is itself an effectful call, return its effect list. Used to
     /// promote `let g = factory()` so subsequent `g x` calls thread evidence.
     fn value_effect_signature(&self, value: &Expr) -> Option<Vec<String>> {
-        match self.map.get(&value.id)?.kind.clone() {
-            CallEffectKind::Pure => None,
-            CallEffectKind::StaticOps { ops }
-            | CallEffectKind::RowForwarded { static_ops: ops } => {
-                let mut effects: Vec<String> = ops.into_iter().map(|k| k.effect).collect();
-                effects.sort();
-                effects.dedup();
-                if effects.is_empty() {
-                    None
-                } else {
-                    Some(effects)
-                }
-            }
+        let effects = self.map.get(&value.id)?.cps_call_plan()?.effects;
+        if effects.is_empty() {
+            None
+        } else {
+            Some(effects)
         }
     }
 
@@ -757,11 +968,7 @@ impl<'a> Populator<'a> {
         let Some(kind) = self.call_kind_from_cps_shape(&shape) else {
             return CallEffectInfo::pure();
         };
-        CallEffectInfo {
-            kind,
-            user_arity: supplied,
-            needs_return_k: true,
-        }
+        CallEffectInfo::cps(kind, supplied)
     }
 
     /// Classify a call whose head is a `DictMethodAccess` node.
@@ -770,7 +977,7 @@ impl<'a> Populator<'a> {
     /// signature. For concrete dicts, walk the dict expression to find the
     /// underlying `DictRef { name }`, peeling `App` chains for parameterized
     /// impls (e.g. `__dict_Show_List __dict_Show_String`), then union in the
-    /// impl's declared effects from `impl_effects_by_dict`.
+    /// concrete method slot's impl effects.
     ///
     /// Where-bounded dispatch (dict from a function parameter) ends in a
     /// `Var` rather than `DictRef`, so only the trait method signature is
@@ -807,7 +1014,12 @@ impl<'a> Populator<'a> {
         }
         match &current.kind {
             ExprKind::DictRef { name, .. } => {
-                if let Some(impl_effects) = self.inputs.impl_effects_by_dict.get(name) {
+                if let Some(impl_effects) = self
+                    .inputs
+                    .impl_method_effects_by_dict
+                    .get(&(name.clone(), method_index))
+                    .or_else(|| self.inputs.impl_effects_by_dict.get(name))
+                {
                     effects.extend(impl_effects.iter().cloned());
                     effects.sort();
                     effects.dedup();
@@ -821,11 +1033,7 @@ impl<'a> Populator<'a> {
                 } else {
                     CallEffectKind::StaticOps { ops }
                 };
-                CallEffectInfo {
-                    kind,
-                    user_arity: supplied,
-                    needs_return_k: true,
-                }
+                CallEffectInfo::cps(kind, supplied)
             }
             ExprKind::Var { .. } => {
                 // Where-bounded dispatch (dict from a function parameter):
@@ -840,11 +1048,7 @@ impl<'a> Populator<'a> {
                 } else {
                     CallEffectKind::StaticOps { ops }
                 };
-                CallEffectInfo {
-                    kind,
-                    user_arity: supplied,
-                    needs_return_k: true,
-                }
+                CallEffectInfo::cps(kind, supplied)
             }
             _ => CallEffectInfo::pure(),
         }
@@ -891,22 +1095,17 @@ impl<'a> Populator<'a> {
                     } else {
                         CallEffectKind::StaticOps { ops }
                     };
-                    return CallEffectInfo {
-                        kind,
-                        // Effectful-var calls don't carry a precise user_arity;
-                        // supplied > 0 is the gate (already checked above).
-                        user_arity: supplied,
-                        needs_return_k: true,
-                    };
+                    // Effectful-var calls don't carry a precise user_arity;
+                    // supplied > 0 is the gate (already checked above).
+                    return CallEffectInfo::cps(kind, supplied);
                 }
                 if is_open_row {
-                    return CallEffectInfo {
-                        kind: CallEffectKind::RowForwarded {
+                    return CallEffectInfo::cps(
+                        CallEffectKind::RowForwarded {
                             static_ops: Vec::new(),
                         },
-                        user_arity: supplied,
-                        needs_return_k: true,
-                    };
+                        supplied,
+                    );
                 }
                 return pure();
             }
@@ -931,11 +1130,7 @@ impl<'a> Populator<'a> {
             } else {
                 CallEffectKind::StaticOps { ops }
             };
-            return CallEffectInfo {
-                kind,
-                user_arity: supplied,
-                needs_return_k: true,
-            };
+            return CallEffectInfo::cps(kind, supplied);
         };
 
         let ops = self.collect_op_keys(&effects);
@@ -965,11 +1160,7 @@ impl<'a> Populator<'a> {
             CallEffectKind::StaticOps { ops }
         };
 
-        CallEffectInfo {
-            kind,
-            user_arity,
-            needs_return_k: has_ops || is_open_row,
-        }
+        CallEffectInfo::cps(kind, user_arity)
     }
 
     fn lookup_fun_sig(&self, name: &str, canonical_name: Option<&str>) -> Option<&FunSig> {
@@ -1079,5 +1270,172 @@ fn peel_app(expr: &Expr) -> (&Expr, Vec<&Expr>) {
                 return (current, args);
             }
         }
+    }
+}
+
+fn head_debug_label(head: &Expr) -> String {
+    match &head.kind {
+        ExprKind::Var { name } => format!("var({name})"),
+        ExprKind::QualifiedName { module, name, .. } => format!("qualified({module}.{name})"),
+        ExprKind::DictMethodAccess {
+            trait_name,
+            method_index,
+            ..
+        } => format!("dict-method({trait_name}#{method_index})"),
+        ExprKind::Lambda { params, .. } => format!("lambda/{}", params.len()),
+        ExprKind::Constructor { name } => format!("ctor({name})"),
+        ExprKind::DictRef { name } => format!("dict-ref({name})"),
+        ExprKind::ForeignCall { module, func, args } => {
+            format!("foreign({module}.{func}/{})", args.len())
+        }
+        ExprKind::EffectCall {
+            qualifier,
+            name,
+            args,
+            ..
+        } => format!(
+            "effect-call({}{name}!/{})",
+            qualifier
+                .as_ref()
+                .map(|qualifier| format!("{qualifier}."))
+                .unwrap_or_default(),
+            args.len()
+        ),
+        ExprKind::Lit { value } => format!("lit({value:?})"),
+        ExprKind::Tuple { elements } => format!("tuple/{}", elements.len()),
+        ExprKind::RecordCreate { name, fields } => format!("record({name}/{})", fields.len()),
+        ExprKind::AnonRecordCreate { fields } => format!("anon-record/{}", fields.len()),
+        ExprKind::HandlerExpr { .. } => "handler-expr".to_string(),
+        ExprKind::SymbolIntrinsic { symbol } => format!("symbol({symbol})"),
+        ExprKind::App { .. } => "app-head".to_string(),
+        ExprKind::BinOp { .. } => "binop".to_string(),
+        ExprKind::UnaryMinus { .. } => "unary-minus".to_string(),
+        ExprKind::If { .. } => "if".to_string(),
+        ExprKind::Case { .. } => "case".to_string(),
+        ExprKind::Block { .. } => "block".to_string(),
+        ExprKind::FieldAccess { field, .. } => format!("field-access(.{field})"),
+        ExprKind::RecordUpdate { .. } => "record-update".to_string(),
+        ExprKind::With { .. } => "with".to_string(),
+        ExprKind::Resume { .. } => "resume".to_string(),
+        ExprKind::Do { .. } => "do".to_string(),
+        ExprKind::Receive { .. } => "receive".to_string(),
+        ExprKind::BitString { segments } => format!("bitstring/{}", segments.len()),
+        ExprKind::Ascription { .. } => "ascription".to_string(),
+        ExprKind::Pipe { .. } => "pipe".to_string(),
+        ExprKind::BinOpChain { .. } => "binop-chain".to_string(),
+        ExprKind::PipeBack { .. } => "pipe-back".to_string(),
+        ExprKind::ComposeForward { .. } => "compose-forward".to_string(),
+        ExprKind::Cons { .. } => "cons".to_string(),
+        ExprKind::ListLit { elements } => format!("list/{}", elements.len()),
+        ExprKind::StringInterp { parts, .. } => format!("string-interp/{}", parts.len()),
+        ExprKind::ListComprehension { qualifiers, .. } => {
+            format!("list-comprehension/{}", qualifiers.len())
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn op(effect: &str, op: &str) -> OpKey {
+        OpKey {
+            effect: effect.to_string(),
+            op: op.to_string(),
+        }
+    }
+
+    #[test]
+    fn call_effect_info_debug_labels_direct_and_cps_shapes() {
+        assert_eq!(CallEffectInfo::pure().debug_label(), "direct");
+
+        let static_info = CallEffectInfo::cps(
+            CallEffectKind::StaticOps {
+                ops: vec![
+                    op("Std.Fail.Fail", "fail"),
+                    op("Std.Console.Console", "print"),
+                    op("Std.Console.Console", "read"),
+                ],
+            },
+            2,
+        );
+        assert_eq!(
+            static_info.debug_label(),
+            r#"cps-static(2->4, effects=["Std.Console.Console", "Std.Fail.Fail"])"#
+        );
+
+        let row_info = CallEffectInfo::cps(
+            CallEffectKind::RowForwarded {
+                static_ops: vec![op("Std.Fail.Fail", "fail")],
+            },
+            1,
+        );
+        assert_eq!(
+            row_info.debug_label(),
+            r#"cps-row-forwarded(1->3, pinned_effects=["Std.Fail.Fail"])"#
+        );
+    }
+
+    #[test]
+    fn format_call_effect_trace_keeps_walk_order() {
+        let trace = vec![
+            CallEffectTraceEntry {
+                app_id: NodeId(10),
+                head_id: NodeId(7),
+                head: "var(f)".to_string(),
+                supplied_args: 1,
+                shape: "direct".to_string(),
+            },
+            CallEffectTraceEntry {
+                app_id: NodeId(12),
+                head_id: NodeId(11),
+                head: "qualified(Foo.bar)".to_string(),
+                supplied_args: 2,
+                shape: r#"cps-static(2->4, effects=["Std.Fail.Fail"])"#.to_string(),
+            },
+        ];
+
+        assert_eq!(
+            format_call_effect_trace("Example", &trace),
+            concat!(
+                "call-effects[Example]: 2 app(s)",
+                "\n  app#10 head#7 var(f) / 1 -> direct",
+                "\n  app#12 head#11 qualified(Foo.bar) / 2 -> ",
+                r#"cps-static(2->4, effects=["Std.Fail.Fail"])"#
+            )
+        );
+    }
+
+    #[test]
+    fn format_effect_op_trace_keeps_lowering_order() {
+        let trace = vec![
+            EffectOpTraceEntry {
+                node_id: NodeId(20),
+                effect: "Std.IO.Stdio".to_string(),
+                op: "print".to_string(),
+                source_args: 1,
+                runtime_args: 1,
+                shape: "evidence-lookup(static-index)".to_string(),
+            },
+            EffectOpTraceEntry {
+                node_id: NodeId(25),
+                effect: "Std.Actor.Actor".to_string(),
+                op: "self".to_string(),
+                source_args: 1,
+                runtime_args: 0,
+                shape: "direct-native(handler=Std.Actor.beam_actor)".to_string(),
+            },
+        ];
+
+        assert_eq!(
+            format_effect_op_trace("Example", &trace),
+            concat!(
+                "effect-ops[Example]: 2 op call(s)",
+                "\n  op#20 Std.IO.Stdio.print / 1 source arg(s), ",
+                "1 runtime arg(s) -> evidence-lookup(static-index)",
+                "\n  op#25 Std.Actor.Actor.self / 1 source arg(s), ",
+                "0 runtime arg(s) -> direct-native(handler=Std.Actor.beam_actor)"
+            )
+        );
     }
 }

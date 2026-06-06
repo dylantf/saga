@@ -1,3 +1,5 @@
+import Std.Generic (Generic, U1, Leaf, Labeled, And, Or, Variant, Record, Adt)
+
 # Phase 6: multi-method routed deriving.
 #
 # A single `JsonCodec` trait carries both directions — `encode` (to) and
