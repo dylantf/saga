@@ -20,6 +20,10 @@
 //! `RowForwarded` (open row). Otherwise: `Pure`. Effectful let-bindings
 //! (`let g = factory(); g x`) are tracked via a lexical scope stack inside
 //! the populator.
+//!
+//! This module is intentionally a classifier, not a lowerer. It names the
+//! ABI/evidence shape a call site needs; Core Erlang emission remains in
+//! `codegen::lower`.
 
 use std::collections::{HashMap, HashSet};
 
@@ -33,19 +37,18 @@ use crate::typechecker::{CheckResult, TraitMethodEffectSig};
 /// Per-call metadata. Keyed by the `NodeId` of an `App` node.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CallEffectInfo {
-    pub kind: CallEffectKind,
+    kind: CallEffectKind,
     /// Logical user-argument count (excludes evidence and return_k).
     ///
     /// **Invariant**: when `kind == CallEffectKind::Pure`, `user_arity` is
     /// always `0`. The lowerer never reads `user_arity` on `Pure` entries,
     /// and pinning the value to a single canonical zero prevents drift if a
     /// future producer is added. Construct via [`CallEffectInfo::pure()`]
-    /// or [`CallEffectInfo::with_ops()`] to get the invariant enforced by
-    /// construction; ad-hoc construction must call
-    /// [`CallEffectInfo::debug_check()`] (debug builds verify it).
-    pub user_arity: usize,
+    /// or [`CallEffectInfo::cps()`] so debug builds verify the invariant at
+    /// the classifier boundary.
+    user_arity: usize,
     /// Whether this call accepts a return continuation (i.e. it is effectful).
-    pub needs_return_k: bool,
+    needs_return_k: bool,
 }
 
 impl CallEffectInfo {
@@ -58,25 +61,90 @@ impl CallEffectInfo {
         }
     }
 
-    /// Debug-builds-only invariant check: Pure entries must have user_arity 0
-    /// and needs_return_k == false. Call after ad-hoc construction.
+    /// CPS/evidence call. The caller must supply evidence and a return
+    /// continuation according to `kind`.
+    fn cps(kind: CallEffectKind, user_arity: usize) -> Self {
+        let info = CallEffectInfo {
+            kind,
+            user_arity,
+            needs_return_k: true,
+        };
+        info.debug_check();
+        info
+    }
+
+    /// Extract the CPS call plan the lowerer needs for evidence construction.
+    ///
+    /// Returns `None` for direct/externally-pure calls. Open-row calls return
+    /// `Some` even when their static effect prefix is empty, because they still
+    /// need caller evidence forwarded through the CPS ABI.
+    pub fn cps_call_plan(&self) -> Option<CpsCallPlan> {
+        match &self.kind {
+            CallEffectKind::Pure => None,
+            CallEffectKind::StaticOps { ops } if !ops.is_empty() => Some(CpsCallPlan {
+                effects: unique_effects(ops),
+                row_forwarded: false,
+            }),
+            CallEffectKind::StaticOps { .. } => None,
+            CallEffectKind::RowForwarded { static_ops } => Some(CpsCallPlan {
+                effects: unique_effects(static_ops),
+                row_forwarded: true,
+            }),
+        }
+    }
+
+    pub fn is_cps_call(&self) -> bool {
+        self.cps_call_plan().is_some()
+    }
+
+    /// Debug-builds-only invariant check for classifier-created entries.
     #[inline]
-    pub fn debug_check(&self) {
-        if cfg!(debug_assertions) && matches!(self.kind, CallEffectKind::Pure) {
-            debug_assert_eq!(
-                self.user_arity, 0,
-                "CallEffectInfo: Pure kind requires user_arity == 0"
-            );
-            debug_assert!(
-                !self.needs_return_k,
-                "CallEffectInfo: Pure kind requires needs_return_k == false"
-            );
+    fn debug_check(&self) {
+        if cfg!(debug_assertions) {
+            match &self.kind {
+                CallEffectKind::Pure => {
+                    debug_assert_eq!(
+                        self.user_arity, 0,
+                        "CallEffectInfo: Pure kind requires user_arity == 0"
+                    );
+                    debug_assert!(
+                        !self.needs_return_k,
+                        "CallEffectInfo: Pure kind requires needs_return_k == false"
+                    );
+                }
+                CallEffectKind::StaticOps { ops } => {
+                    debug_assert!(
+                        !ops.is_empty(),
+                        "CallEffectInfo: StaticOps requires at least one op; use Pure otherwise"
+                    );
+                    debug_assert!(
+                        self.needs_return_k,
+                        "CallEffectInfo: CPS calls require needs_return_k == true"
+                    );
+                }
+                CallEffectKind::RowForwarded { .. } => {
+                    debug_assert!(
+                        self.needs_return_k,
+                        "CallEffectInfo: CPS calls require needs_return_k == true"
+                    );
+                }
+            }
         }
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum CallEffectKind {
+pub struct CpsCallPlan {
+    /// Canonical effect names whose evidence entries should be projected or
+    /// pinned at this call site.
+    pub effects: Vec<String>,
+    /// True for open-row calls; the caller forwards ambient evidence instead
+    /// of projecting to exactly `effects`.
+    pub row_forwarded: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum CallEffectKind {
     /// Pure call. No effect threading.
     Pure,
     /// Effects fully known statically at this call site. Caller threads exactly
@@ -96,6 +164,13 @@ pub struct OpKey {
 }
 
 pub type CallEffectMap = HashMap<NodeId, CallEffectInfo>;
+
+fn unique_effects(ops: &[OpKey]) -> Vec<String> {
+    let mut effects: Vec<String> = ops.iter().map(|k| k.effect.clone()).collect();
+    effects.sort();
+    effects.dedup();
+    effects
+}
 
 /// Snapshot of the per-function metadata the populator needs. Built by the
 /// Lowerer from its own `FunInfo` table once `init_module` has finished.
@@ -704,19 +779,11 @@ impl<'a> Populator<'a> {
     /// If `value` is itself an effectful call, return its effect list. Used to
     /// promote `let g = factory()` so subsequent `g x` calls thread evidence.
     fn value_effect_signature(&self, value: &Expr) -> Option<Vec<String>> {
-        match self.map.get(&value.id)?.kind.clone() {
-            CallEffectKind::Pure => None,
-            CallEffectKind::StaticOps { ops }
-            | CallEffectKind::RowForwarded { static_ops: ops } => {
-                let mut effects: Vec<String> = ops.into_iter().map(|k| k.effect).collect();
-                effects.sort();
-                effects.dedup();
-                if effects.is_empty() {
-                    None
-                } else {
-                    Some(effects)
-                }
-            }
+        let effects = self.map.get(&value.id)?.cps_call_plan()?.effects;
+        if effects.is_empty() {
+            None
+        } else {
+            Some(effects)
         }
     }
 
@@ -757,11 +824,7 @@ impl<'a> Populator<'a> {
         let Some(kind) = self.call_kind_from_cps_shape(&shape) else {
             return CallEffectInfo::pure();
         };
-        CallEffectInfo {
-            kind,
-            user_arity: supplied,
-            needs_return_k: true,
-        }
+        CallEffectInfo::cps(kind, supplied)
     }
 
     /// Classify a call whose head is a `DictMethodAccess` node.
@@ -821,11 +884,7 @@ impl<'a> Populator<'a> {
                 } else {
                     CallEffectKind::StaticOps { ops }
                 };
-                CallEffectInfo {
-                    kind,
-                    user_arity: supplied,
-                    needs_return_k: true,
-                }
+                CallEffectInfo::cps(kind, supplied)
             }
             ExprKind::Var { .. } => {
                 // Where-bounded dispatch (dict from a function parameter):
@@ -840,11 +899,7 @@ impl<'a> Populator<'a> {
                 } else {
                     CallEffectKind::StaticOps { ops }
                 };
-                CallEffectInfo {
-                    kind,
-                    user_arity: supplied,
-                    needs_return_k: true,
-                }
+                CallEffectInfo::cps(kind, supplied)
             }
             _ => CallEffectInfo::pure(),
         }
@@ -891,22 +946,17 @@ impl<'a> Populator<'a> {
                     } else {
                         CallEffectKind::StaticOps { ops }
                     };
-                    return CallEffectInfo {
-                        kind,
-                        // Effectful-var calls don't carry a precise user_arity;
-                        // supplied > 0 is the gate (already checked above).
-                        user_arity: supplied,
-                        needs_return_k: true,
-                    };
+                    // Effectful-var calls don't carry a precise user_arity;
+                    // supplied > 0 is the gate (already checked above).
+                    return CallEffectInfo::cps(kind, supplied);
                 }
                 if is_open_row {
-                    return CallEffectInfo {
-                        kind: CallEffectKind::RowForwarded {
+                    return CallEffectInfo::cps(
+                        CallEffectKind::RowForwarded {
                             static_ops: Vec::new(),
                         },
-                        user_arity: supplied,
-                        needs_return_k: true,
-                    };
+                        supplied,
+                    );
                 }
                 return pure();
             }
@@ -931,11 +981,7 @@ impl<'a> Populator<'a> {
             } else {
                 CallEffectKind::StaticOps { ops }
             };
-            return CallEffectInfo {
-                kind,
-                user_arity: supplied,
-                needs_return_k: true,
-            };
+            return CallEffectInfo::cps(kind, supplied);
         };
 
         let ops = self.collect_op_keys(&effects);
@@ -965,11 +1011,7 @@ impl<'a> Populator<'a> {
             CallEffectKind::StaticOps { ops }
         };
 
-        CallEffectInfo {
-            kind,
-            user_arity,
-            needs_return_k: has_ops || is_open_row,
-        }
+        CallEffectInfo::cps(kind, user_arity)
     }
 
     fn lookup_fun_sig(&self, name: &str, canonical_name: Option<&str>) -> Option<&FunSig> {

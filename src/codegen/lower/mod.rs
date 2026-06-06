@@ -1135,11 +1135,9 @@ impl<'a> Lowerer<'a> {
         if !matches!(expr.kind, ExprKind::App { .. }) {
             return false;
         }
-        matches!(
-            self.call_effects.get(&expr.id).map(|i| &i.kind),
-            Some(super::call_effects::CallEffectKind::StaticOps { .. })
-                | Some(super::call_effects::CallEffectKind::RowForwarded { .. })
-        )
+        self.call_effects
+            .get(&expr.id)
+            .is_some_and(|info| info.is_cps_call())
     }
 
     /// Build the per-call effect map for the module currently being lowered.
@@ -2447,10 +2445,7 @@ impl<'a> Lowerer<'a> {
     ///   has no evidence in scope (pure caller installing first effect via a
     ///   `with` further out, or handler-bound value paths), emit an empty
     ///   tuple as a placeholder so arity matches.
-    pub(super) fn build_call_evidence(&mut self, callee_effects: &[String]) -> (String, CExpr) {
-        self.build_call_evidence_with(callee_effects, false)
-    }
-
+    ///
     /// When `is_row_forward` is true, the callee is row-polymorphic and must
     /// receive the caller's full evidence, including entries not known in the
     /// callee's static effect list.
@@ -2514,30 +2509,25 @@ impl<'a> Lowerer<'a> {
         // `info` tells us whether this call is effectful (needs evidence + _ReturnK)
         // and which effects the callee declares; both used to be recomputed here
         // from `resolved_effects` + `effect_handler_ops`.
-        let info = self.call_effects.get(&app_id);
-        // `is_row_forward` says "callee is row-polymorphic, forward caller's
+        let cps_plan = self
+            .call_effects
+            .get(&app_id)
+            .and_then(|info| info.cps_call_plan());
+        // `row_forwarded` says "callee is row-polymorphic, forward caller's
         // ambient evidence unchanged (don't project)". Without distinguishing
-        // it from `StaticOps`, a call to e.g. `wrap : ... -> ... needs
+        // it from closed calls, a call to e.g. `wrap : ... -> ... needs
         // {Stdio, ..e}` would project the caller's evidence down to just
         // `{Stdio}` and drop the entries that the open-row tail is supposed
         // to carry through into `wrap`'s body.
-        let (is_effectful, callee_effects_vec, is_row_forward): (bool, Vec<String>, bool) =
-            match info.map(|i| &i.kind) {
-                Some(super::call_effects::CallEffectKind::StaticOps { ops }) => {
-                    let mut effs: Vec<String> = ops.iter().map(|k| k.effect.clone()).collect();
-                    effs.sort();
-                    effs.dedup();
-                    (!ops.is_empty(), effs, false)
-                }
-                Some(super::call_effects::CallEffectKind::RowForwarded { static_ops }) => {
-                    let mut effs: Vec<String> =
-                        static_ops.iter().map(|k| k.effect.clone()).collect();
-                    effs.sort();
-                    effs.dedup();
-                    (true, effs, true)
-                }
-                _ => (false, Vec::new(), false),
-            };
+        let is_effectful = cps_plan.is_some();
+        let callee_effects_vec = cps_plan
+            .as_ref()
+            .map(|plan| plan.effects.clone())
+            .unwrap_or_default();
+        let is_row_forward = cps_plan
+            .as_ref()
+            .map(|plan| plan.row_forwarded)
+            .unwrap_or(false);
         let total_arity = self
             .resolved_fun_info(head_expr.id, func_name)
             .map(|f| f.arity);
@@ -2687,21 +2677,12 @@ impl<'a> Lowerer<'a> {
         //     callback param). Caller forwards its full ambient evidence
         //     without narrowing — including when `static_ops` is empty, which
         //     is the open-row-only case (`f: Unit -> Unit needs {..e}`).
-        let (absorbed, is_row_forward) = match self.call_effects.get(&app_id).map(|i| &i.kind) {
-            Some(super::call_effects::CallEffectKind::StaticOps { ops }) if !ops.is_empty() => {
-                let mut effs: Vec<String> = ops.iter().map(|k| k.effect.clone()).collect();
-                effs.sort();
-                effs.dedup();
-                (effs, false)
-            }
-            Some(super::call_effects::CallEffectKind::RowForwarded { static_ops }) => {
-                let mut effs: Vec<String> = static_ops.iter().map(|k| k.effect.clone()).collect();
-                effs.sort();
-                effs.dedup();
-                (effs, true)
-            }
-            _ => return None,
-        };
+        let plan = self
+            .call_effects
+            .get(&app_id)
+            .and_then(|info| info.cps_call_plan())?;
+        let absorbed = plan.effects;
+        let is_row_forward = plan.row_forwarded;
 
         let effectful_arg_idxs: Vec<usize> = args
             .iter()
@@ -2775,23 +2756,12 @@ impl<'a> Lowerer<'a> {
         args: &[&Expr],
         return_k: Option<CExpr>,
     ) -> Option<CExpr> {
-        let (absorbed, is_row_forward): (Vec<String>, bool) =
-            match self.call_effects.get(&app_id).map(|i| &i.kind) {
-                Some(super::call_effects::CallEffectKind::StaticOps { ops }) if !ops.is_empty() => {
-                    let mut effs: Vec<String> = ops.iter().map(|k| k.effect.clone()).collect();
-                    effs.sort();
-                    effs.dedup();
-                    (effs, false)
-                }
-                Some(super::call_effects::CallEffectKind::RowForwarded { static_ops }) => {
-                    let mut effs: Vec<String> =
-                        static_ops.iter().map(|k| k.effect.clone()).collect();
-                    effs.sort();
-                    effs.dedup();
-                    (effs, true)
-                }
-                _ => return None,
-            };
+        let plan = self
+            .call_effects
+            .get(&app_id)
+            .and_then(|info| info.cps_call_plan())?;
+        let absorbed = plan.effects;
+        let is_row_forward = plan.row_forwarded;
 
         let dict_var = self.fresh();
         let dict_ce = self.lower_expr_value(dict);
@@ -2880,23 +2850,15 @@ impl<'a> Lowerer<'a> {
         args: &[&Expr],
         return_k: Option<CExpr>,
     ) -> Option<CExpr> {
-        let absorbed: Vec<String> = match self.call_effects.get(&app_id).map(|i| &i.kind) {
-            Some(super::call_effects::CallEffectKind::StaticOps { ops })
-            | Some(super::call_effects::CallEffectKind::RowForwarded { static_ops: ops })
-                if !ops.is_empty() =>
-            {
-                let mut effs: Vec<String> = ops.iter().map(|k| k.effect.clone()).collect();
-                effs.sort();
-                effs.dedup();
-                effs
-            }
-            _ => return None,
-        };
+        let plan = self
+            .call_effects
+            .get(&app_id)
+            .and_then(|info| info.cps_call_plan())?;
 
         let saved_ctx = self.lambda_effect_context.take();
         self.lambda_effect_context = Some(CpsShape {
-            static_effects: absorbed.clone(),
-            is_open_row: false,
+            static_effects: plan.effects.clone(),
+            is_open_row: plan.row_forwarded,
         });
         let func_ce = self.lower_expr(lambda);
         self.lambda_effect_context = saved_ctx;
@@ -2923,7 +2885,7 @@ impl<'a> Lowerer<'a> {
 
             let mut call_args: Vec<CExpr> =
                 arg_vars.iter().map(|v| CExpr::Var(v.clone())).collect();
-            let (ev_var, ev_ce) = self.build_call_evidence(&absorbed);
+            let (ev_var, ev_ce) = self.build_call_evidence_with(&plan.effects, plan.row_forwarded);
             call_args.push(CExpr::Var(ev_var.clone()));
             let (rk_var, rk_ce) = self.effectful_call_return_k_binding(return_k);
             call_args.push(CExpr::Var(rk_var.clone()));
@@ -2943,7 +2905,7 @@ impl<'a> Lowerer<'a> {
         }
 
         let (mut arg_vars, mut bindings) = self.lower_call_args(args, None);
-        let (ev_var, ev_ce) = self.build_call_evidence(&absorbed);
+        let (ev_var, ev_ce) = self.build_call_evidence_with(&plan.effects, plan.row_forwarded);
         bindings.push((ev_var.clone(), ev_ce));
         arg_vars.push(ev_var);
         let (rk_var, rk_ce) = self.effectful_call_return_k_binding(return_k);
@@ -3113,6 +3075,13 @@ impl<'a> Lowerer<'a> {
             && let Some(call) = self.lower_lambda_head_call(expr.id, callee, &args_rev, None)
         {
             return call;
+        }
+
+        if self.expr_is_effectful_call(expr) {
+            panic!(
+                "effectful App {:?} was classified by call_effects but plain app lowering did not find a CPS dispatch path",
+                expr.id
+            );
         }
 
         self.lower_generic_apply(callee, &args_rev)
@@ -3773,30 +3742,25 @@ impl<'a> Lowerer<'a> {
             .unwrap_or_else(|| module.to_lowercase());
 
         // Source of truth: the per-call effect map populated pre-lowering.
-        let info = self.call_effects.get(&app_id);
-        // `is_row_forward` says "callee is row-polymorphic, forward caller's
+        let cps_plan = self
+            .call_effects
+            .get(&app_id)
+            .and_then(|info| info.cps_call_plan());
+        // `row_forwarded` says "callee is row-polymorphic, forward caller's
         // ambient evidence unchanged (don't project)". Without distinguishing
-        // it from `StaticOps`, a call to e.g. `wrap : ... -> ... needs
+        // it from closed calls, a call to e.g. `wrap : ... -> ... needs
         // {Stdio, ..e}` would project the caller's evidence down to just
         // `{Stdio}` and drop the entries that the open-row tail is supposed
         // to carry through into `wrap`'s body.
-        let (is_effectful, callee_effects_vec, is_row_forward): (bool, Vec<String>, bool) =
-            match info.map(|i| &i.kind) {
-                Some(super::call_effects::CallEffectKind::StaticOps { ops }) => {
-                    let mut effs: Vec<String> = ops.iter().map(|k| k.effect.clone()).collect();
-                    effs.sort();
-                    effs.dedup();
-                    (!ops.is_empty(), effs, false)
-                }
-                Some(super::call_effects::CallEffectKind::RowForwarded { static_ops }) => {
-                    let mut effs: Vec<String> =
-                        static_ops.iter().map(|k| k.effect.clone()).collect();
-                    effs.sort();
-                    effs.dedup();
-                    (true, effs, true)
-                }
-                _ => (false, Vec::new(), false),
-            };
+        let is_effectful = cps_plan.is_some();
+        let callee_effects_vec = cps_plan
+            .as_ref()
+            .map(|plan| plan.effects.clone())
+            .unwrap_or_default();
+        let is_row_forward = cps_plan
+            .as_ref()
+            .map(|plan| plan.row_forwarded)
+            .unwrap_or(false);
 
         let qualified = format!("{}.{}", module, func_name);
         // Detect partial application: if the call site supplies fewer user args

@@ -771,6 +771,28 @@ result () = log! ((fun n -> log! n) "inner") with echo
 }
 
 #[test]
+fn lambda_head_open_row_call_forwards_evidence() {
+    // The lambda head is effect-polymorphic: `(fun f -> f ())` has an open
+    // effect row because it calls the callback it receives. The call site must
+    // be classified as row-forwarded even though the lambda head itself has no
+    // named static effects.
+    let src = r#"module Main
+
+effect Log {
+  fun log : String -> String
+}
+
+handler accumulating for Log {
+  log msg = msg <> "/" <> resume "end"
+}
+
+pub fun result : Unit -> String
+result () = ((fun f -> f ()) (fun () -> log! "x")) with accumulating
+"#;
+    check_result_string("lambda_head_open_row_call_forwards_evidence", src, "x/end");
+}
+
+#[test]
 fn lambda_head_pure_call_under_effect_handler_stays_pure() {
     // A pure-bodied lambda head used inside an effectful function should not
     // be misclassified — no evidence/return_k threading. This guards against
