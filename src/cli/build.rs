@@ -975,6 +975,7 @@ pub fn build_project_ext(
             &result.prelude_imports,
             &mod_result.resolution,
         );
+        let optimization = codegen::optimize::analyze(module_name, &normalized, &resolution);
         compiled_modules.insert(
             module_name.clone(),
             codegen::CompiledModule {
@@ -986,6 +987,7 @@ pub fn build_project_ext(
                 resolution,
                 front_resolution: mod_result.resolution.clone(),
                 call_effects: codegen::call_effects::CallEffectMap::new(),
+                optimization,
             },
         );
     }
@@ -1002,6 +1004,7 @@ pub fn build_project_ext(
                 resolution: codegen::resolve::ResolutionMap::new(),
                 front_resolution: result.resolution.clone(),
                 call_effects: codegen::call_effects::CallEffectMap::new(),
+                optimization: codegen::optimize::OptimizationFacts::default(),
             },
         );
         let source_file = main_source
@@ -1163,6 +1166,7 @@ pub fn build_script(file: &str, profile: &str) -> ScriptBuild {
             resolution: codegen::resolve::ResolutionMap::new(),
             front_resolution: result.resolution.clone(),
             call_effects: codegen::call_effects::CallEffectMap::new(),
+            optimization: codegen::optimize::OptimizationFacts::default(),
         },
     );
 
