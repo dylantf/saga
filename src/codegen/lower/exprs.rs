@@ -1317,7 +1317,29 @@ impl<'a> Lowerer<'a> {
                             Stmt::Expr(e) => (None, false, e.span, self.lower_expr_value(e)),
                             Stmt::LetFun { .. } => unreachable!(),
                         };
+                        let hof_binding = match first {
+                            Stmt::Let {
+                                pattern: Pat::Var { name, .. },
+                                value,
+                                ..
+                            } => self
+                                .hof_direct_binding_for_value_expr(value)
+                                .map(|binding| (name.clone(), binding)),
+                            _ => None,
+                        };
+                        let saved_hof_binding =
+                            hof_binding.as_ref().and_then(|(name, specialization)| {
+                                self.direct_hof_value_bindings
+                                    .insert(name.clone(), specialization.clone())
+                            });
                         let rest_ce = self.lower_block_with_return_k(rest, return_k);
+                        if let Some((name, _)) = hof_binding {
+                            if let Some(saved) = saved_hof_binding {
+                                self.direct_hof_value_bindings.insert(name, saved);
+                            } else {
+                                self.direct_hof_value_bindings.remove(&name);
+                            }
+                        }
                         let (var, rest_ce) = match pat_opt {
                             Some(p) if is_assert => {
                                 self.destructure_pat_assert(p, rest_ce, let_span)

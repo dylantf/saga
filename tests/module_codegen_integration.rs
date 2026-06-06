@@ -328,6 +328,47 @@ main () = Lib.compute 5 with options
 }
 
 #[test]
+fn imported_let_bound_hof_alias_uses_direct_specialization() {
+    let effects = r#"module Effects
+
+pub effect ReadInt {
+  fun read : Unit -> Int
+}
+
+pub fun pure_value : Unit -> Int
+pure_value () = 41
+
+pub fun apply_eff : (Unit -> Int needs {ReadInt}) -> Int needs {ReadInt}
+apply_eff f = f ()
+
+pub handler forty_one for ReadInt {
+  read () = resume 41
+}
+"#;
+
+    let main_src = r#"module Main
+
+import Effects (pure_value, apply_eff, forty_one)
+
+main () = {
+  let hof = apply_eff
+  hof pure_value with forty_one
+}
+"#;
+
+    with_temp_project_files(
+        &[("lib/Effects.saga", effects)],
+        main_src,
+        |checker, program| {
+            let out = emit_from_program(program, "main", checker);
+            let main = emitted_function(&out, "main", 1);
+            assert_contains(&main, "call 'effects':'__saga_direct_hof_apply_eff'");
+            assert_erlc_compiles(&out, "main");
+        },
+    );
+}
+
+#[test]
 fn imported_public_helper_with_capturing_static_handler_generates_direct_variant() {
     let lib = r#"module Lib
 

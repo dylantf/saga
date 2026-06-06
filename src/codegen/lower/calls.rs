@@ -81,6 +81,17 @@ impl<'a> Lowerer<'a> {
 
         if args.len() + extras == call_arity {
             if is_effectful
+                && let Some(hof_call) = self.try_hof_direct_specialized_call(
+                    lookup_name,
+                    emit_name,
+                    head,
+                    args,
+                    return_k.clone(),
+                )
+            {
+                return Some(hof_call);
+            }
+            if is_effectful
                 && let Some(inlined) =
                     self.try_inline_static_helper_call(lookup_name, head, args, return_k.clone())
             {
@@ -332,6 +343,11 @@ impl<'a> Lowerer<'a> {
         args: &[&Expr],
         return_k: Option<CExpr>,
     ) -> Option<CExpr> {
+        if let Some(hof_call) =
+            self.try_hof_direct_specialized_value_call(var_name, args, return_k.clone())
+        {
+            return Some(hof_call);
+        }
         // Source of truth: the per-call effect map, keyed by this App's NodeId.
         // Pre-pass already walked the lexical scope and recorded the absorbed
         // effects for the bound variable on its call-site App entry.
@@ -574,6 +590,12 @@ impl<'a> Lowerer<'a> {
                 call_span: Some(&expr.span),
                 fallback_erlang_module: None,
             })
+        {
+            return call;
+        }
+
+        if let Some((var_name, _head, args)) = fun_call.as_ref()
+            && let Some(call) = self.try_hof_direct_specialized_value_call(var_name, args, None)
         {
             return call;
         }

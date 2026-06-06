@@ -249,10 +249,11 @@ net-direct.
 
 | Case | Proof Required | Strategy | Fixture | Status |
 | --- | --- | --- | --- | --- |
-| Pure callback passed to effect-capable HOF | Callback exposed type is direct; HOF body can call it directly under known shape | Direct HOF specialization | `30-higher-order-direct-callback.saga` | Later |
-| Fully handled callback | Callback effects are handled below callback boundary | Treat as externally direct | `37-handled-callback-specialization.saga` | Later |
-| Effectful callback expected by HOF | Callback remains leaky | Existing CPS adapter path | `31-higher-order-effectful-callback-unsupported.saga` | Guard |
-| Imported direct callback helper | Imported function metadata proves direct shape | Direct specialization | imported direct callback project | Later |
+| Pure callback passed to effect-capable HOF | Callback exposed type is direct; HOF body can call it directly under known shape | Direct HOF specialization | `30-higher-order-direct-callback.saga` | Done |
+| Fully handled callback | Callback effects are handled below callback boundary | Treat as externally direct | `37-handled-callback-specialization.saga` | Done |
+| Effectful callback expected by HOF | Callback remains leaky | Existing CPS adapter path | `31-higher-order-effectful-callback-unsupported.saga` | Guarded |
+| Imported direct callback helper | Imported function metadata proves direct shape | Direct specialization | imported direct callback project | Done |
+| Let-bound imported HOF alias | Alias recovers known HOF specialization; callback arg is direct | Direct imported HOF entry | imported pure callback specialization project | Done |
 | Handler-arm HOF resume | Resume used in callback under handler arm | Preserve continuation semantics; no broad rewrite initially | Add guard before optimizing | Later |
 
 This stage should not precede basic static op specialization.

@@ -106,6 +106,7 @@ impl<'a> Lowerer<'a> {
             .unwrap_or_else(|| module_name.to_string());
         self.effect_op_trace.clear();
         self.generated_helper_variants.clear();
+        self.generated_hof_variants.clear();
         let mut pending_annotations = self.init_module(module_name, program);
 
         // Group FunBindings by name, preserving declaration order, and simultaneously
@@ -362,7 +363,8 @@ impl<'a> Lowerer<'a> {
         for (name, arity, clauses, fun_span) in clause_groups {
             self.current_function = name.clone();
             let is_entry_export = self.entry_export.as_deref() == Some(name.as_str());
-            if !is_module || self.pub_names.contains(&name) || is_entry_export {
+            let export_fun = !is_module || self.pub_names.contains(&name) || is_entry_export;
+            if export_fun {
                 exports.push((name.clone(), arity));
             }
 
@@ -561,10 +563,11 @@ impl<'a> Lowerer<'a> {
             // fun_span is available for future use (e.g. function-level metadata)
             let _ = fun_span;
             fun_defs.push(CFunDef {
-                name,
+                name: name.clone(),
                 arity,
                 body: fun_body,
             });
+            self.maybe_emit_hof_direct_variant(&name, base_arity, &clauses, export_fun);
         }
 
         // Emit dictionary constructor functions
@@ -638,6 +641,9 @@ impl<'a> Lowerer<'a> {
                     body: variant.body,
                 }),
         );
+        let (hof_exports, hof_funs) = self.generated_hof_fun_defs();
+        exports.extend(hof_exports);
+        fun_defs.extend(hof_funs);
 
         if call_effects::effect_op_trace_enabled_for(&self.current_source_module) {
             eprintln!(

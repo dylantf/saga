@@ -2459,6 +2459,91 @@ main () = {
 }
 
 #[test]
+fn pure_callback_to_effect_capable_hof_uses_direct_specialization() {
+    let src = r#"
+effect ReadInt {
+  fun read : Unit -> Int
+}
+
+fun pure_value : Unit -> Int
+pure_value () = 41
+
+fun apply_eff : (Unit -> Int needs {ReadInt}) -> Int needs {ReadInt}
+apply_eff f = f ()
+
+handler forty_one for ReadInt {
+  read () = resume 41
+}
+
+main () = apply_eff pure_value with forty_one
+"#;
+    let out = emit_elaborated(src);
+    assert_contains(&out, "'__saga_direct_hof_apply_eff'/1 =");
+    let main = emitted_function(&out, "main", 1);
+    assert_contains(&main, "apply '__saga_direct_hof_apply_eff'/1");
+    assert!(
+        !main.contains("apply 'apply_eff'/3"),
+        "main should use the generated direct HOF entry\n{main}"
+    );
+}
+
+#[test]
+fn leaky_callback_to_effect_capable_hof_stays_on_cps_path() {
+    let src = r#"
+effect ReadInt {
+  fun read : Unit -> Int
+}
+
+fun read_value : Unit -> Int needs {ReadInt}
+read_value () = read! ()
+
+fun apply_eff : (Unit -> Int needs {ReadInt}) -> Int needs {ReadInt}
+apply_eff f = f ()
+
+handler forty_one for ReadInt {
+  read () = resume 41
+}
+
+main () = apply_eff read_value with forty_one
+"#;
+    let out = emit_elaborated(src);
+    let main = emitted_function(&out, "main", 1);
+    assert_contains(&main, "apply 'apply_eff'/3");
+    assert!(
+        !main.contains("apply '__saga_direct_hof_apply_eff'/1"),
+        "leaky callback should not use the generated direct HOF entry\n{main}"
+    );
+}
+
+#[test]
+fn handled_callback_to_effect_capable_hof_uses_direct_specialization() {
+    let src = r#"
+effect ReadInt {
+  fun read : Unit -> Int
+}
+
+handler forty_one for ReadInt {
+  read () = resume 41
+}
+
+fun handled_value : Unit -> Int
+handled_value () = read! () with forty_one
+
+fun apply_eff : (Unit -> Int needs {ReadInt}) -> Int needs {ReadInt}
+apply_eff f = f ()
+
+main () = apply_eff handled_value with forty_one
+"#;
+    let out = emit_elaborated(src);
+    let main = emitted_function(&out, "main", 1);
+    assert_contains(&main, "apply '__saga_direct_hof_apply_eff'/1");
+    assert!(
+        !main.contains("apply 'apply_eff'/3"),
+        "handled callback should use the generated direct HOF entry\n{main}"
+    );
+}
+
+#[test]
 fn return_clause_inside_cps_chain() {
     // The return clause should be inside the CPS chain, not a post-wrapper.
     // Verify the return clause (Ok wrapper) is inside the CPS chain.

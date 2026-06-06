@@ -17,7 +17,7 @@ impl<'a> Lowerer<'a> {
             .cps_shape()
     }
 
-    fn expr_cps_function_shape(&self, expr: &Expr) -> Option<CpsShape> {
+    pub(super) fn expr_cps_function_shape(&self, expr: &Expr) -> Option<CpsShape> {
         self.check_result
             .resolved_type_for_node(expr.id)
             .and_then(|ty| self.cps_function_shape_from_type(&ty))

@@ -6,6 +6,7 @@ pub mod errors;
 mod evidence;
 mod exprs;
 mod function_values;
+mod hof;
 pub(crate) mod init;
 mod module;
 mod pats;
@@ -101,6 +102,19 @@ struct GeneratedHelperVariant {
     name: String,
     arity: usize,
     body: CExpr,
+}
+
+struct GeneratedHofVariant {
+    name: String,
+    arity: usize,
+    body: CExpr,
+    export: bool,
+}
+
+#[derive(Clone)]
+struct DirectHofValueBinding {
+    specialization: super::optimize::HofDirectSpecialization,
+    source_module: Option<String>,
 }
 
 /// Stored effect definition: maps op_name -> lowering metadata.
@@ -210,6 +224,7 @@ pub struct Lowerer<'a> {
     local_helper_defs: HashMap<String, LocalHelperInfo>,
     helper_inline_stack: Vec<String>,
     generated_helper_variants: Vec<GeneratedHelperVariant>,
+    generated_hof_variants: Vec<GeneratedHofVariant>,
     /// Evidence context for the currently-lowered effectful scope. `None` in
     /// pure code. Set by the function-entry plumbing for effectful functions
     /// (var = `_Evidence`) and refreshed at `with` boundaries (var = a fresh
@@ -234,6 +249,8 @@ pub struct Lowerer<'a> {
     /// helper variant. These are rebound only around direct handler-arm bodies
     /// so they do not shadow imported helper params or locals.
     static_helper_variant_capture_bindings: Vec<(String, String)>,
+    direct_hof_callback_params: HashMap<String, usize>,
+    direct_hof_value_bindings: HashMap<String, DirectHofValueBinding>,
     /// Runtime function shape that the next lambda/effect-op ref should use.
     /// Set by typed value-boundary lowering when a function value is placed
     /// into an effectful or open-row slot.
@@ -332,11 +349,14 @@ impl<'a> Lowerer<'a> {
             local_helper_defs: HashMap::new(),
             helper_inline_stack: Vec::new(),
             generated_helper_variants: Vec::new(),
+            generated_hof_variants: Vec::new(),
             current_evidence: None,
             no_resume_ops: std::collections::HashSet::new(),
             direct_ops: HashMap::new(),
             static_tail_resume_ops: HashMap::new(),
             static_helper_variant_capture_bindings: Vec::new(),
+            direct_hof_callback_params: HashMap::new(),
+            direct_hof_value_bindings: HashMap::new(),
             lambda_effect_context: None,
             constructor_atoms,
             resolved,
@@ -685,9 +705,25 @@ impl<'a> Lowerer<'a> {
         if !matches!(expr.kind, ExprKind::App { .. }) {
             return false;
         }
+        if let Some((head, arity)) = Self::app_head_and_source_arity(expr)
+            && let ExprKind::Var { name, .. } = &head.kind
+            && self.direct_hof_callback_arity(&core_var(name)) == Some(arity)
+        {
+            return false;
+        }
         self.call_effects
             .get(&expr.id)
             .is_some_and(|info| info.is_cps_call())
+    }
+
+    fn app_head_and_source_arity(expr: &Expr) -> Option<(&Expr, usize)> {
+        let mut current = expr;
+        let mut arity = 0;
+        while let ExprKind::App { func, .. } = &current.kind {
+            arity += 1;
+            current = func;
+        }
+        (arity > 0).then_some((current, arity))
     }
 
     pub(super) fn panic_unhandled_effectful_app(&self, expr: &Expr, head: Option<&Expr>) -> ! {
