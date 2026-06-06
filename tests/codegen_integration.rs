@@ -2723,11 +2723,11 @@ main () = {
 "#;
     let out = emit_elaborated_with_std(src);
     assert!(
-        out.contains("('std_file_bridge', 'write_file', 2)"),
+        out.contains("call 'std_file_bridge':'write_file'"),
         "Std.File.fs should lower write through std_file_bridge\n{out}"
     );
     assert!(
-        out.contains("('std_file_bridge', 'file_exists', 1)"),
+        out.contains("call 'std_file_bridge':'file_exists'"),
         "Std.File.fs should lower exists through std_file_bridge\n{out}"
     );
     assert!(

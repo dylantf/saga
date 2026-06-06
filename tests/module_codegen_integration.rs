@@ -3382,6 +3382,8 @@ main () = Lib.greet "world"
 fn cross_module_routed_derive_compiles_and_lowers() {
     let lib = r#"module JsonLib
 
+import Std.Generic (Generic, U1, Leaf, Labeled, And, Or, Variant, Record, Adt)
+
 pub trait ToJson a {
   fun to_json : a -> String
 }

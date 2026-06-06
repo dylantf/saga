@@ -4,6 +4,7 @@
 module OtherModule
 
 import Std.Fail (Fail)
+import Std.Generic (Generic, U1, Leaf, Labeled, And, Or, Variant, Record, Adt)
 
 pub type DecodeErr = DecodeErr String deriving (Debug)
 

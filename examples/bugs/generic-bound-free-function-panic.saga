@@ -1,4 +1,4 @@
-import Std.Generic
+import Std.Generic (Generic, U1, Leaf, Labeled, And, Or, Variant, Record, Adt)
 
 trait MyJson a {
   fun encode : a -> String

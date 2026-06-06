@@ -1,3 +1,5 @@
+import Std.Generic (Generic, U1, Leaf, Labeled, And, Or, Variant, Record, Adt)
+
 # Phase 2d: deriving (Generic) for recursive ADTs.
 # A recursive field becomes a `Leaf <SelfType>` in the Rep tree, exactly
 # like any other field — the recursion lives in the runtime dictionary
