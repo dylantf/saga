@@ -1,0 +1,5 @@
+fun first : (Int, Int) -> Int
+first (x, _) = x
+
+fun main : Unit -> Int
+main () = first (1, 2)

@@ -1,0 +1,12 @@
+effect Log {
+  fun log : String -> Unit
+}
+
+pub fun may_log : Unit -> Int needs {Log}
+may_log () = 42
+
+pub fun use_may_log : Unit -> Int needs {Log}
+use_may_log () = may_log ()
+
+fun main : Unit -> Unit
+main () = ()

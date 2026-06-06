@@ -1,0 +1,15 @@
+effect ReadInt {
+  fun read : Unit -> Int
+}
+
+fun read_value : Unit -> Int needs {ReadInt}
+read_value () = read! ()
+
+fun hidden : Unit -> (Unit -> Int needs {ReadInt}, Int)
+hidden () = {
+  let f = read_value
+  (f, 1)
+}
+
+pub fun main : Unit -> Int
+main () = 1

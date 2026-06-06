@@ -1,0 +1,25 @@
+module Lib
+
+pub effect Options {
+  fun get_options : Unit -> Int
+}
+
+pub type Boxed a = Boxed a
+
+pub trait Encodable a {
+  fun encode : a -> Int needs {Options}
+}
+
+fun adjust : (value: Int) -> Int
+adjust value = value + 1
+
+impl Encodable for Int needs {Options} {
+  encode x = x + get_options! ()
+}
+
+impl Encodable for Boxed a where {a: Encodable} needs {Options} {
+  encode (Boxed value) = adjust (encode value)
+}
+
+pub fun serialize : a -> Int needs {Options} where {a: Encodable}
+serialize x = encode x

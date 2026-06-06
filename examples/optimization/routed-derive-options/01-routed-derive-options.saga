@@ -1,0 +1,43 @@
+# Real routed derive plus an ambient options effect. This is the smallest
+# same-module version of the saga_json shape: `deriving (Encodable)` expands
+# into Generic bridge/delegating dictionaries, and the leaf encoder reads
+# Options through an effect.
+
+effect Options {
+  fun get_options : Unit -> Int
+}
+
+handler options_10 for Options {
+  get_options () = resume 10
+}
+
+trait Encodable a {
+  fun encode : a -> Int needs {Options}
+}
+
+impl Encodable for Int needs {Options} {
+  encode x = x + get_options! ()
+}
+
+impl Encodable for Leaf a where {a: Encodable} needs {Options} {
+  encode (Leaf x) = encode x
+}
+
+impl Encodable for Variant (n : Symbol) a where {a: Encodable} needs {Options} {
+  encode (Variant inner) = encode inner
+}
+
+impl Encodable for Adt a where {a: Encodable} needs {Options} {
+  encode (Adt _ inner) = encode inner
+}
+
+type User = User Int
+  deriving (Encodable)
+
+fun serialize : (x: a) -> Int needs {Options} where {a: Encodable}
+serialize x = encode x
+
+main () = {
+  let result = serialize (User 5) with options_10
+  dbg (show result)
+}

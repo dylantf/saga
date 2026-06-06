@@ -1,0 +1,5 @@
+[project]
+name = "imported-direct-callback-project"
+
+[bin]
+main = "src/Main.saga"

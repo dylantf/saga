@@ -1,0 +1,15 @@
+module Main
+
+import Lib (Options, Encodable)
+
+type Status =
+  | Active
+  | Login Int
+  deriving (Encodable)
+
+main () = {
+  let h = Lib.options 10
+  let active = Lib.serialize Active with h
+  let login = Lib.serialize (Login 5) with h
+  dbg (show (active + login))
+}

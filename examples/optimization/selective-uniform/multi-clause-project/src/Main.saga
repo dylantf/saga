@@ -1,0 +1,27 @@
+module Main
+
+import Std.IO.Unsafe (print_stdout)
+
+fun fib : (n: Int) -> Int
+fib 0 = 0
+fib 1 = 1
+fib n = fib (n - 1) + fib (n - 2)
+
+effect Fail {
+  fun fail : (msg: String) -> a
+}
+
+fun safe_div : (x: Int) -> (y: Int) -> Int needs {Fail}
+safe_div _ 0 = fail! "division by zero"
+safe_div x y = x / y
+
+main () = {
+  let result = {
+    safe_div 100 4
+  } with {
+    fail _ = 0 - 1
+  }
+  print_stdout (show (fib 10) <> "\n")
+  print_stdout ("safe_div result: " <> show result <> "\n")
+}
+

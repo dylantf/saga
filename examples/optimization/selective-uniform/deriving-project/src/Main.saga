@@ -1,0 +1,50 @@
+module Main
+
+type Animal =
+  | Dog (age: Int)
+  | Cat
+  deriving (Show, Eq)
+
+speak animal = case animal {
+  Dog age when age > 15 -> "im tired"
+  Dog _ -> "woof"
+  Cat -> "meow"
+}
+
+comp a1 a2 when a1 == a2 = "Equal"
+comp _ _ = "Not equal"
+
+type Color = Red | Green | Blue deriving (Show, Eq, Ord, Enum)
+type Priority = Low | Medium | High deriving (Show, Eq, Ord, Enum)
+type Scored a = Scored (score: Int) (value: a) deriving (Show, Eq, Ord)
+
+main () = {
+  let hans = Dog 5
+  dbg $"{hans} says {hans |> speak}"
+
+  let dylan = Dog 5
+  dbg $"Hans and Dylan are: {comp hans dylan}"
+
+  let hanna = Dog 7
+  dbg $"Hans and Hanna are {comp hans hanna}"
+
+  let cat = Cat
+  dbg $"Hans and Cat are {comp hans cat}"
+
+  dbg $"Red vs Blue: {show (compare Red Blue)}"
+  dbg $"Green vs Green: {show (compare Green Green)}"
+  dbg $"Blue vs Red: {show (compare Blue Red)}"
+
+  if High > Low then dbg "High > Low" else dbg "nope"
+  if Medium <= Medium then dbg "Medium <= Medium" else dbg "nope"
+
+  let a = Scored 10 "first"
+  let b = Scored 10 "second"
+  let c = Scored 20 "third"
+  dbg $"{a} vs {b}: {show (compare a b)}"
+  dbg $"{a} vs {c}: {show (compare a c)}"
+
+  dbg $"Red = {show (to_enum Red)}, Green = {show (to_enum Green)}, Blue = {show (to_enum Blue)}"
+  dbg $"from_enum 1 = {show (from_enum 1 : Color)}"
+  dbg $"from_enum 2 = {show (from_enum 2 : Priority)}"
+}

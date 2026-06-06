@@ -1,0 +1,12 @@
+effect ReadInt {
+  fun read : Unit -> Int
+}
+
+pub fun read_plus_one : Unit -> Int needs {ReadInt}
+read_plus_one () = {
+  let value = read! ()
+  value + 1
+}
+
+fun main : Unit -> Unit
+main () = ()
