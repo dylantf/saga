@@ -114,13 +114,13 @@ Target shape:
 | Inline handler, nullary op, captured value | Innermost matching inline arm is unique, `TailResumptive`, no `finally`, params match erased runtime arity | Lower op as the resumed value, then continue with current continuation | `static-tail-resume/01-inline-reader.saga` | Done |
 | Inline handler, op args bound to simple vars | Same, plus params are vars/wildcard/unit only | Bind lowered op args, lower resumed value | `inline_static_tail_resume_effect_op_binds_runtime_args` | Done |
 | Inline handler, pure prefix before tail resume | Prefix statements contain no resume/effectful calls; final expression is `resume <direct value>` | Lower prefix directly, then lower resumed value through current continuation | `static-tail-resume/03-prefix-block.saga` | Done |
-| Named static handler in same module | Named handler resolves to static arms; same arm proof | Same as inline | `selective-uniform/19-static-handler-with-cps-island.saga` | Todo |
-| Multiple arms for same op | Proof rejects ambiguity | Evidence path | New guard fixture | Todo |
+| Named static handler in same module | Named handler resolves to static arms; same arm proof | Same as inline | `static-tail-resume/04-named-handler.saga` | Done |
+| Multiple arms for same op | Proof rejects ambiguity | Evidence path | `static-tail-resume/05-multi-arm-guard.saga` | Done |
 | Non-tail resume | `Multishot` from handler analysis | Evidence path | `static-tail-resume/02-non-tail-guard.saga` | Done |
-| Abort/one-shot arm | `OneShot`, not `TailResumptive` | Evidence path | `21-static-handler-abort-arm.saga` | Todo |
+| Abort/one-shot arm | `OneShot`, not `TailResumptive` | Evidence path | `static-tail-resume/06-abort-guard.saga` | Done |
 | `finally` arm | `finally_block.is_some()` | Evidence path | `finally_tail_resume_stays_on_evidence_path` | Done |
 | Effectful prefix before tail resume | Prefix has direct/effectful call | Evidence path | `effectful_prefix_tail_resume_stays_on_evidence_path` | Done |
-| Dynamic or conditional handler | Handler is not statically known and unique | Evidence path | Existing dynamic handler fixtures | Todo |
+| Dynamic or conditional handler | Handler is not statically known and unique | Evidence path | `static-tail-resume/07-conditional-handler-guard.saga`, `static-tail-resume/08-dynamic-handler-guard.saga` | Done |
 
 First implementation constraints:
 
@@ -145,14 +145,19 @@ only optimizing operation sites.
 
 | Case | Proof Required | Lowering Rule | Fixture | Status |
 | --- | --- | --- | --- | --- |
-| Nested handlers, inner shadows outer | Static handler stack knows innermost matching effect/op | Pick inner arm only | New fixture | Todo |
-| Static handler inside direct outer code | Fact scope exists only while lowering handled body | Apply Stage 1 in body | `19-static-handler-with-cps-island.saga` | Todo |
-| Handler return clause present | Return clause does not affect op directness unless continuation composition is needed | Initially reject | `20-static-handler-return-clause.saga` | Todo |
-| Handler body contains pure lets before op use | Fact scope survives ordinary direct lets | Apply Stage 1 at op site | New reader/config fixture | Todo |
-| Static handler for multiple effects | Only optimize the proven op; other ops stay normal | Mixed path | New fixture | Todo |
+| Nested handlers, inner shadows outer | Static handler stack knows innermost matching effect/op | Pick inner arm only | `static-tail-resume/09-nested-shadowing.saga` | Done |
+| Static handler inside direct outer code | Fact scope exists only while lowering handled body | Apply Stage 1 in body | `static-tail-resume/10-direct-outer-code.saga` | Done |
+| Handler return clause present | Return clause may compose the handled result; direct op rewrite initially rejects it | Evidence path | `static-tail-resume/13-return-clause-guard.saga` | Done |
+| Handler body contains pure lets before op use | Fact scope survives ordinary direct lets | Apply Stage 1 at op site | `static-tail-resume/11-body-pure-lets.saga` | Done |
+| Static handler for multiple effects | Only optimize the proven op; other ops stay normal | Mixed path | `static-tail-resume/12-multi-effect-mixed-path.saga` | Done |
 
 This stage should still not clone functions. If an op is hidden inside a helper
 call, leave it alone for now.
+
+Note: a proven op can lower directly at its call site while its handler closure
+is still conservatively retained in a mixed evidence entry if another op in the
+same `with` needs evidence. Pruning individual evidence entries safely requires
+knowing whether evidence is forwarded to helpers that still need that effect.
 
 ## Stage 3: Let-Bound Handler Values And Fact Recovery
 
@@ -261,5 +266,7 @@ of structure facts, not a reason to monomorphize the whole program.
 - [x] Add emitted-Core assertion that optimized op skips evidence lookup.
 - [x] Add guard fixture proving non-tail resume stays on evidence path.
 - [x] Add guard fixture proving `finally` stays on evidence path.
+- [x] Add same-module named handler fixture for static tail resume.
+- [x] Add guard fixtures for multi-arm, abort, conditional, and dynamic handlers.
 - [x] Add project-mode smoke check for the first optimized fixture.
 - [ ] Benchmark saga_json EffectOpts after Stage 1.

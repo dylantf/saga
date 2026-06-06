@@ -1,0 +1,8 @@
+effect Choose {
+  fun choose : Int -> Int
+}
+
+main () = choose! 1 with {
+  choose 0 = resume 10
+  choose _ = resume 20
+}

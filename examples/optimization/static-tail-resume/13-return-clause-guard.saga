@@ -1,0 +1,10 @@
+effect Ask {
+  fun ask : Unit -> Int
+}
+
+handler add_one_return for Ask {
+  ask () = resume 41
+  return value = value + 1
+}
+
+main () = ask! () with add_one_return

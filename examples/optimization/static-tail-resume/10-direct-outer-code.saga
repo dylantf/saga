@@ -1,0 +1,12 @@
+effect ReadInt {
+  fun read : Unit -> Int
+}
+
+handler forty_one for ReadInt {
+  read () = resume 41
+}
+
+main () = {
+  let value = read! () with forty_one
+  value + 1
+}

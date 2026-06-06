@@ -1,0 +1,9 @@
+effect Ask {
+  fun ask : Unit -> Int
+}
+
+handler forty_one for Ask {
+  ask () = resume 41
+}
+
+main () = ask! () with forty_one

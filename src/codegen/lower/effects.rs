@@ -910,7 +910,13 @@ impl<'a> Lowerer<'a> {
                 }
                 _ => {}
             }
-            if let Some(static_plan) = self.static_tail_resume_plan_for_op_handler(&plan) {
+            let handler_has_return_clause = explicit_return_clause.is_some()
+                || named_item
+                    .as_ref()
+                    .is_some_and(NamedHandlerItem::has_return_clause);
+            if !handler_has_return_clause
+                && let Some(static_plan) = self.static_tail_resume_plan_for_op_handler(&plan)
+            {
                 self.static_tail_resume_ops.insert(key.clone(), static_plan);
             }
             op_vars.push((eff.clone(), op.clone(), var_name, plan));
@@ -2263,6 +2269,18 @@ impl NamedHandlerItem {
             NamedHandlerItem::Static { info, .. } => &info.effects,
             NamedHandlerItem::Conditional { then_info, .. } => &then_info.effects,
             NamedHandlerItem::Dynamic { effects, .. } => effects,
+        }
+    }
+
+    fn has_return_clause(&self) -> bool {
+        match self {
+            NamedHandlerItem::Static { info, .. } => info.return_clause.is_some(),
+            NamedHandlerItem::Conditional {
+                then_info,
+                else_info,
+                ..
+            } => then_info.return_clause.is_some() || else_info.return_clause.is_some(),
+            NamedHandlerItem::Dynamic { has_return, .. } => *has_return,
         }
     }
 }

@@ -1628,6 +1628,235 @@ main () = ask! () with {
 }
 
 #[test]
+fn named_static_tail_resume_effect_op_lowers_directly() {
+    let src = r#"
+effect Ask {
+  fun ask : Unit -> Int
+}
+
+handler forty_one for Ask {
+  ask () = resume 41
+}
+
+main () = ask! () with forty_one
+"#;
+    let out = emit_elaborated(src);
+    assert!(
+        !out.contains("_Handle__script_Ask_ask"),
+        "same-module named tail-resume handler should not use handler closure\n{out}"
+    );
+    assert_contains(&out, "41");
+    assert_core_compiles(&out);
+}
+
+#[test]
+fn multiple_matching_tail_resume_arms_stay_on_evidence_path() {
+    let src = r#"
+effect Choose {
+  fun choose : Int -> Int
+}
+
+main () = choose! 1 with {
+  choose 0 = resume 10
+  choose _ = resume 20
+}
+"#;
+    let out = emit_elaborated(src);
+    assert_contains(&out, "_Handle__script_Choose_choose");
+    assert_core_compiles(&out);
+}
+
+#[test]
+fn abort_arm_stays_on_evidence_path() {
+    let src = r#"
+effect Fail {
+  fun fail : Unit -> Int
+}
+
+main () = fail! () with {
+  fail () = 0
+}
+"#;
+    let out = emit_elaborated(src);
+    assert_contains(&out, "_Handle__script_Fail_fail");
+    assert_core_compiles(&out);
+}
+
+#[test]
+fn conditional_tail_resume_handler_stays_on_evidence_path() {
+    let src = r#"
+effect Ask {
+  fun ask : Unit -> Int
+}
+
+handler forty_one for Ask {
+  ask () = resume 41
+}
+
+handler forty_two for Ask {
+  ask () = resume 42
+}
+
+main () = {
+  let h = if True then forty_one else forty_two
+  ask! () with h
+}
+"#;
+    let out = emit_elaborated(src);
+    assert_contains(&out, "_Handle__script_Ask_ask");
+    assert_core_compiles(&out);
+}
+
+#[test]
+fn dynamic_tail_resume_handler_stays_on_evidence_path() {
+    let src = r#"
+effect Ask {
+  fun ask : Unit -> Int
+}
+
+fun make_handler : Unit -> Handler Ask
+make_handler () = handler for Ask {
+  ask () = resume 41
+}
+
+main () = {
+  let h = make_handler ()
+  ask! () with h
+}
+"#;
+    let out = emit_elaborated(src);
+    assert_contains(&out, "_Handle__script_Ask_ask");
+    assert_core_compiles(&out);
+}
+
+#[test]
+fn nested_static_tail_resume_handlers_shadow_correctly() {
+    let src = r#"
+effect Ask {
+  fun ask : Unit -> Int
+}
+
+main () = {
+  let inner = ask! () with {
+    ask () = resume 20
+  }
+  let outer = ask! ()
+  inner + outer
+} with {
+  ask () = resume 10
+}
+"#;
+    let out = emit_elaborated(src);
+    assert!(
+        !out.contains("_Handle__script_Ask_ask"),
+        "nested static tail-resume handlers should both lower directly\n{out}"
+    );
+    assert_core_compiles(&out);
+    assert_runs_and_stdout_contains(src, &["30"]);
+}
+
+#[test]
+fn static_tail_resume_inside_direct_outer_code_lowers_directly() {
+    let src = r#"
+effect ReadInt {
+  fun read : Unit -> Int
+}
+
+handler forty_one for ReadInt {
+  read () = resume 41
+}
+
+main () = {
+  let value = read! () with forty_one
+  value + 1
+}
+"#;
+    let out = emit_elaborated(src);
+    assert!(
+        !out.contains("_Handle__script_ReadInt_read"),
+        "static handler inside direct outer code should lower op directly\n{out}"
+    );
+    assert_contains(&out, "call 'erlang':'+'");
+    assert_core_compiles(&out);
+}
+
+#[test]
+fn static_tail_resume_fact_survives_pure_body_lets() {
+    let src = r#"
+effect Ask {
+  fun ask : Unit -> Int
+}
+
+main () = {
+  let x = 40
+  let y = x + 1
+  ask! ()
+} with {
+  ask () = resume 42
+}
+"#;
+    let out = emit_elaborated(src);
+    assert!(
+        !out.contains("_Handle__script_Ask_ask"),
+        "pure lets in handled body should preserve static tail-resume facts\n{out}"
+    );
+    assert_contains(&out, "call 'erlang':'+'");
+    assert_core_compiles(&out);
+}
+
+#[test]
+fn multi_effect_static_handler_only_optimizes_proven_op() {
+    let src = r#"
+effect Ask {
+  fun ask : Unit -> Int
+}
+
+effect Log {
+  fun log : String -> Unit
+}
+
+handler mixed for Ask, Log {
+  ask () = resume 41
+  log _ = resume () finally {
+    ()
+  }
+}
+
+main () = {
+  log! "x"
+  ask! ()
+} with mixed
+"#;
+    let out = emit_elaborated(src);
+    assert_contains(&out, "_Handle__script_Log_log");
+    let evidence_applies = out.matches("apply call 'erlang':'element'").count();
+    assert_eq!(
+        evidence_applies, 1,
+        "only Log.log should use evidence lookup; Ask.ask should lower directly\n{out}"
+    );
+    assert_core_compiles(&out);
+}
+
+#[test]
+fn return_clause_tail_resume_handler_stays_on_evidence_path() {
+    let src = r#"
+effect Ask {
+  fun ask : Unit -> Int
+}
+
+handler add_one_return for Ask {
+  ask () = resume 41
+  return value = value + 1
+}
+
+main () = ask! () with add_one_return
+"#;
+    let out = emit_elaborated(src);
+    assert_contains(&out, "_Handle__script_Ask_ask");
+    assert_core_compiles(&out);
+}
+
+#[test]
 fn effectful_prefix_tail_resume_stays_on_evidence_path() {
     let src = r#"
 effect Ask {

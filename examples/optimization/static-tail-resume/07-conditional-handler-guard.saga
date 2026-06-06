@@ -1,0 +1,16 @@
+effect Ask {
+  fun ask : Unit -> Int
+}
+
+handler forty_one for Ask {
+  ask () = resume 41
+}
+
+handler forty_two for Ask {
+  ask () = resume 42
+}
+
+main () = {
+  let h = if True then forty_one else forty_two
+  ask! () with h
+}
