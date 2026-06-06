@@ -208,12 +208,14 @@ handled by the active static handler facts.
 | Imported public helper | Imported body and metadata admitted safely | Generate caller-local variant | `static-tail-resume/project-imported-helper` | Done |
 | Recursive or multi-clause helper | Termination/coverage not proven | Slow path | `static-tail-resume/21-multi-clause-helper-guard.saga`, `multi-clause-project` | Later/guard |
 | Helper leaves residual uncovered effect | Effect summary says not net-direct | Slow path | `static-tail-resume/24-helper-uncovered-effect-guard.saga` | Done/guard |
-| Imported helper with call-site captures | Captures must become explicit variant params | Slow path | `static-tail-resume/project-imported-helper-capture-guard` | Guard |
+| Imported helper with call-site captures | Captures become explicit variant params and are rebound only around direct handler-arm bodies | Generate caller-local variant with extra capture params | `static-tail-resume/project-imported-helper-captures` | Done |
+| Nested imported public helper | Nested helper is public, single-clause, admitted, and covered by active static facts | Inline nested public helper inside generated caller-local variant | `static-tail-resume/project-imported-helper-nested-public` | Done |
+| Imported helper calls private helper | Private helper body not exported as an optimizer fact | Slow path | `static-tail-resume/project-imported-helper-private-guard` | Guard |
 | Imported multi-clause helper | Single body not proven | Slow path | `static-tail-resume/project-imported-helper-multi-clause-guard` | Guard |
 
-Generated variants are the first point where optimizer output may add
-declarations. That needs a naming/cache policy and emitted-Core tests before
-implementation.
+Generated variants are emitted as unexported caller-local functions with
+unique names. Emitted-Core tests assert the caller moves off the imported CPS
+path when a variant is admitted.
 
 The first same-module slice uses call-site inlining rather than generated
 variants. The admission policy is intentionally narrow: unguarded single-clause
@@ -222,13 +224,23 @@ direct ops or nested admitted helpers whose concrete op calls are covered by
 active static tail-resume facts.
 
 Imported public helpers use optimizer-exported helper facts plus
-`ModuleCodegenInfo.exports` as the publicness gate. The first imported slice
-generates an unexported caller-local direct variant only when the imported body
-contains supported pure structure plus direct effect ops covered by active
-static tail-resume facts. It intentionally rejects call-site captures,
-multi-clause helpers, and nested imported helper/function calls until generated
-variants can carry explicit capture parameters and source-module backend
-resolution.
+`ModuleCodegenInfo.exports` as the publicness gate. The imported helper path
+generates an unexported caller-local direct variant when the imported body
+contains supported pure structure, direct effect ops covered by active static
+tail-resume facts, and nested calls only to other admitted public helpers.
+Captured handler-arm values become extra variant parameters and are rebound
+only while lowering the direct handler-arm body, so they do not shadow imported
+helper params or locals. Private helper bodies are deliberately not exported as
+optimizer facts; public helpers that depend on private helpers stay on the
+evidence path for now.
+
+### Remaining Stage 4 Breakdown
+
+| Slice | Goal | Notes | Status |
+| --- | --- | --- | --- |
+| 4D: Imported helper variants with captures | Allow imported direct variants when static handler arms reference local values | Implemented with explicit extra variant params and handler-arm-local rebinding. | Done |
+| 4E: Nested imported public helper calls | Allow an admitted imported helper body to call another admitted public helper | Implemented by admitting and inlining nested public helpers inside the generated variant. | Done |
+| 4F: Private helper policy | Decide whether public imported helpers may pull in private helper bodies | Decision: private imported helper bodies remain a hard guard. Revisit only if we deliberately introduce a private body cloning policy. | Done/guard |
 
 ## Stage 5: Higher-Order Callback Specialization
 

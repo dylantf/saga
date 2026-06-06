@@ -328,7 +328,7 @@ main () = Lib.compute 5 with options
 }
 
 #[test]
-fn imported_public_helper_with_capturing_static_handler_stays_on_evidence_path() {
+fn imported_public_helper_with_capturing_static_handler_generates_direct_variant() {
     let lib = r#"module Lib
 
 pub effect Options {
@@ -354,11 +354,12 @@ main () = {
     with_temp_project_files(&[("lib/Lib.saga", lib)], main_src, |checker, program| {
         let out = emit_from_program(program, "main", checker);
         let main = emitted_function(&out, "main", 1);
-        assert_contains(&main, "call 'lib':'compute'");
         assert!(
-            !out.contains("'__saga_static_helper_Lib_compute_"),
-            "capturing handler arm should not generate a top-level direct variant\n{out}"
+            !main.contains("call 'lib':'compute'"),
+            "main should call the generated direct variant with capture params\n{main}"
         );
+        assert_contains(&main, "apply '__saga_static_helper_Lib_compute_");
+        assert_contains(&out, "'__saga_static_helper_Lib_compute_");
         assert_erlc_compiles(&out, "main");
     });
 }
@@ -392,6 +393,82 @@ main () = Lib.compute True with {
         assert!(
             !out.contains("'__saga_static_helper_Lib_compute_"),
             "multi-clause imported helper should not generate a direct variant\n{out}"
+        );
+        assert_erlc_compiles(&out, "main");
+    });
+}
+
+#[test]
+fn imported_public_helper_can_inline_nested_public_helper_in_direct_variant() {
+    let lib = r#"module Lib
+
+pub effect Options {
+  fun get_options : Unit -> Int
+}
+
+pub fun read_value : Unit -> Int needs {Options}
+read_value () = get_options! ()
+
+pub fun compute : Int -> Int needs {Options}
+compute x = x + read_value ()
+"#;
+
+    let main_src = r#"module Main
+
+import Lib (Options)
+
+main () = Lib.compute 5 with {
+  get_options () = resume 10
+}
+"#;
+
+    with_temp_project_files(&[("lib/Lib.saga", lib)], main_src, |checker, program| {
+        let out = emit_from_program(program, "main", checker);
+        let main = emitted_function(&out, "main", 1);
+        assert!(
+            !main.contains("call 'lib':'compute'"),
+            "main should call generated direct variant for nested public helper\n{main}"
+        );
+        assert!(
+            !out.contains("call 'lib':'read_value'"),
+            "nested public helper should stay inside the direct variant, not call imported CPS helper\n{out}"
+        );
+        assert_contains(&main, "apply '__saga_static_helper_Lib_compute_");
+        assert_erlc_compiles(&out, "main");
+    });
+}
+
+#[test]
+fn imported_public_helper_calling_private_helper_stays_on_evidence_path() {
+    let lib = r#"module Lib
+
+pub effect Options {
+  fun get_options : Unit -> Int
+}
+
+fun read_value : Unit -> Int needs {Options}
+read_value () = get_options! ()
+
+pub fun compute : Int -> Int needs {Options}
+compute x = x + read_value ()
+"#;
+
+    let main_src = r#"module Main
+
+import Lib (Options)
+
+main () = Lib.compute 5 with {
+  get_options () = resume 10
+}
+"#;
+
+    with_temp_project_files(&[("lib/Lib.saga", lib)], main_src, |checker, program| {
+        let out = emit_from_program(program, "main", checker);
+        let main = emitted_function(&out, "main", 1);
+        assert_contains(&main, "call 'lib':'compute'");
+        assert!(
+            !out.contains("'__saga_static_helper_Lib_compute_"),
+            "private helper dependency should keep the public helper on evidence path\n{out}"
         );
         assert_erlc_compiles(&out, "main");
     });

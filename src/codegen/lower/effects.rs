@@ -216,6 +216,11 @@ impl<'a> Lowerer<'a> {
             .iter()
             .map(|(name, value)| (super::core_var(name), self.lower_expr_value(value)))
             .collect();
+        let variant_capture_bindings: Vec<(String, CExpr)> = self
+            .static_helper_variant_capture_bindings
+            .iter()
+            .map(|(name, param_var)| (super::core_var(name), CExpr::Var(param_var.clone())))
+            .collect();
 
         let saved_source_module = self.current_handler_source_module.clone();
         self.current_handler_source_module = plan.source_module;
@@ -233,6 +238,7 @@ impl<'a> Lowerer<'a> {
         Some(
             capture_bindings
                 .into_iter()
+                .chain(variant_capture_bindings)
                 .chain(param_bindings)
                 .rev()
                 .fold(lowered_body, |body, (var, val)| {
