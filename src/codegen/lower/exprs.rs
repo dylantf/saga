@@ -152,10 +152,7 @@ impl<'a> Lowerer<'a> {
             {
                 return call;
             }
-            panic!(
-                "effectful App {:?} was classified by call_effects but no lowerer dispatch path handled it",
-                expr.id
-            );
+            self.panic_unhandled_effectful_app(expr, None);
         }
 
         self.lower_expr(expr)

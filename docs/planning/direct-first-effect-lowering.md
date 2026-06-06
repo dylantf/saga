@@ -341,6 +341,42 @@ language cleanup should consider making impl-level `needs` constrained sugar for
 methods whose trait signatures already allow those effects, or rejecting
 effectful method bodies when the trait method is externally direct.
 
+### Guardrail Checklist
+
+Work through this as targeted TDD. Each item should be a small executable
+compiler-side test that either passes boringly or exposes a classifier/lowerer
+ABI mismatch. Prefer one representative shape per row over broad enumeration.
+
+- [x] Mixed-method trait impl: effectful method plus pure sibling method keeps
+  the pure method direct-callable.
+- [x] Concrete trait method dispatch where the impl-level `needs` clause is the
+  only source of evidence still threads evidence correctly.
+- [x] Polymorphic trait method dispatch through `where {a: Trait}` uses the
+  trait method signature as the ABI contract.
+- [x] Parameterized dictionary constructor with mixed method shapes preserves
+  per-method direct/CPS slots after sub-dict application.
+- [x] Imported mixed-method trait impl preserves method-slot shape in project
+  mode.
+- [x] Effectful top-level function partial application calls correctly under a
+  handler.
+- [x] Effectful partial application stored in a `let` binding keeps CPS shape
+  when applied later.
+- [x] Effectful callback passed to a higher-order function expecting
+  `a -> b needs {...}` threads evidence.
+- [x] Pure callback passed where CPS shape is expected gets an explicit adapter.
+- [x] CPS callback passed where direct shape is expected either adapts
+  explicitly or fails loudly.
+- [x] List/tuple/record/constructor values containing effectful callbacks use a
+  supported runtime representation.
+- [x] Branches returning callable values agree on direct/CPS shape, or install
+  an explicit adapter.
+- [x] Intrinsic call with an effectful argument routes through intrinsic lowering
+  after nested effect lowering.
+- [x] Multiple intrinsic statements under one `with` boundary do not escape as
+  wrong-arity Core calls.
+- [x] Unsupported classified-CPS app shapes panic in lowering with the source
+  node and shape label.
+
 ## Phase 5: Local Static Tail-Resume Optimization
 
 Only after the classifier refactor is behavior-neutral, add the first effect

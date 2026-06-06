@@ -2411,6 +2411,97 @@ result () = {
 }
 
 #[test]
+fn branch_returning_mixed_callable_values_installs_adapter() {
+    let src = r#"module Main
+
+effect Log {
+  fun log : String -> Unit
+}
+
+handler collect for Log {
+  log msg = msg <> "/" <> resume ()
+}
+
+fun pure_cb : Unit -> String
+pure_cb () = "pure"
+
+fun effect_cb : Unit -> String needs {Log}
+effect_cb () = {
+  log! "hit"
+  "effect"
+}
+
+fun choose : Bool -> (Unit -> String needs {Log})
+choose flag = if flag then effect_cb else pure_cb
+
+pub fun result : Unit -> String
+result () = {
+  let f = choose False
+  let g = choose True
+  let a = f ()
+  let b = g ()
+  a <> "/" <> b
+} with collect
+"#;
+    check_result_string(
+        "branch_returning_mixed_callable_values_installs_adapter",
+        src,
+        "hit/pure/effect",
+    );
+}
+
+#[test]
+fn intrinsic_dbg_with_effectful_argument_lowers_after_nested_effect() {
+    let src = r#"module Main
+
+effect Ask {
+  fun ask : Unit -> String
+}
+
+handler fixed for Ask {
+  ask () = resume "value"
+}
+
+pub fun result : Unit -> String
+result () = {
+  dbg (ask! ())
+  "ok"
+} with fixed
+"#;
+    check_result_string(
+        "intrinsic_dbg_with_effectful_argument_lowers_after_nested_effect",
+        src,
+        "ok",
+    );
+}
+
+#[test]
+fn multiple_intrinsics_under_with_boundary_compile_and_resume() {
+    let src = r#"module Main
+
+effect Ask {
+  fun ask : String -> String
+}
+
+handler bracket for Ask {
+  ask label = resume ("[" <> label <> "]")
+}
+
+pub fun result : Unit -> String
+result () = {
+  dbg (ask! "a")
+  dbg (ask! "b")
+  "done"
+} with bracket
+"#;
+    check_result_string(
+        "multiple_intrinsics_under_with_boundary_compile_and_resume",
+        src,
+        "done",
+    );
+}
+
+#[test]
 fn pure_only_list_runs_without_adapter_wrapping() {
     // Lists of only-pure elements should not gain spurious effect
     // wrapping. Verifies that the join's all-closed branch returns a

@@ -120,6 +120,19 @@ impl CallEffectInfo {
         }
     }
 
+    #[cfg(test)]
+    pub(crate) fn test_cps_static(effect: &str, op: &str, user_arity: usize) -> Self {
+        Self::cps(
+            CallEffectKind::StaticOps {
+                ops: vec![OpKey {
+                    effect: effect.to_string(),
+                    op: op.to_string(),
+                }],
+            },
+            user_arity,
+        )
+    }
+
     /// Debug-builds-only invariant check for classifier-created entries.
     #[inline]
     fn debug_check(&self) {

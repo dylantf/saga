@@ -85,6 +85,66 @@ fn count_lambda_params(body: &Expr) -> usize {
     }
 }
 
+fn lower_head_debug_label(head: &Expr) -> String {
+    match &head.kind {
+        ExprKind::Var { name } => format!("var({name})"),
+        ExprKind::QualifiedName { module, name, .. } => format!("qualified({module}.{name})"),
+        ExprKind::DictMethodAccess {
+            trait_name,
+            method_index,
+            ..
+        } => format!("dict-method({trait_name}#{method_index})"),
+        ExprKind::Lambda { params, .. } => format!("lambda/{}", params.len()),
+        ExprKind::Constructor { name } => format!("ctor({name})"),
+        ExprKind::DictRef { name } => format!("dict-ref({name})"),
+        ExprKind::ForeignCall { module, func, args } => {
+            format!("foreign({module}.{func}/{})", args.len())
+        }
+        ExprKind::EffectCall {
+            qualifier,
+            name,
+            args,
+        } => format!(
+            "effect-call({}{name}!/{})",
+            qualifier
+                .as_ref()
+                .map(|qualifier| format!("{qualifier}."))
+                .unwrap_or_default(),
+            args.len()
+        ),
+        ExprKind::Lit { value } => format!("lit({value:?})"),
+        ExprKind::Tuple { elements } => format!("tuple/{}", elements.len()),
+        ExprKind::RecordCreate { name, fields } => format!("record({name}/{})", fields.len()),
+        ExprKind::AnonRecordCreate { fields } => format!("anon-record/{}", fields.len()),
+        ExprKind::HandlerExpr { .. } => "handler-expr".to_string(),
+        ExprKind::SymbolIntrinsic { symbol } => format!("symbol({symbol})"),
+        ExprKind::App { .. } => "app-head".to_string(),
+        ExprKind::BinOp { .. } => "binop".to_string(),
+        ExprKind::UnaryMinus { .. } => "unary-minus".to_string(),
+        ExprKind::If { .. } => "if".to_string(),
+        ExprKind::Case { .. } => "case".to_string(),
+        ExprKind::Block { .. } => "block".to_string(),
+        ExprKind::FieldAccess { field, .. } => format!("field-access(.{field})"),
+        ExprKind::RecordUpdate { .. } => "record-update".to_string(),
+        ExprKind::With { .. } => "with".to_string(),
+        ExprKind::Resume { .. } => "resume".to_string(),
+        ExprKind::Do { .. } => "do".to_string(),
+        ExprKind::Receive { .. } => "receive".to_string(),
+        ExprKind::BitString { segments } => format!("bitstring/{}", segments.len()),
+        ExprKind::Ascription { .. } => "ascription".to_string(),
+        ExprKind::Pipe { segments, .. } => format!("pipe/{}", segments.len()),
+        ExprKind::BinOpChain { segments, .. } => format!("binop-chain/{}", segments.len()),
+        ExprKind::PipeBack { segments } => format!("pipe-back/{}", segments.len()),
+        ExprKind::ComposeForward { segments } => format!("compose-forward/{}", segments.len()),
+        ExprKind::Cons { .. } => "cons".to_string(),
+        ExprKind::ListLit { elements } => format!("list/{}", elements.len()),
+        ExprKind::StringInterp { parts, .. } => format!("string-interp/{}", parts.len()),
+        ExprKind::ListComprehension { qualifiers, .. } => {
+            format!("list-comprehension/{}", qualifiers.len())
+        }
+    }
+}
+
 fn is_unit_type_expr(ty: &ast::TypeExpr) -> bool {
     match ty {
         ast::TypeExpr::Named { name, .. } => {
@@ -519,6 +579,25 @@ impl<'a> Lowerer<'a> {
                 .map(|ty| Self::substitute_type_vars(&ty, &subst))
                 .collect(),
         )
+    }
+
+    fn function_tail_type_after_params(
+        &self,
+        name: &str,
+        consumed_params: usize,
+    ) -> Option<crate::typechecker::Type> {
+        let mut ty = self
+            .check_result
+            .env
+            .get(name)
+            .map(|scheme| self.check_result.sub.apply(&scheme.ty))?;
+        for _ in 0..consumed_params {
+            let crate::typechecker::Type::Fun(_, ret, _) = ty else {
+                return None;
+            };
+            ty = *ret;
+        }
+        Some(ty)
     }
 
     fn current_semantic_module_name(&self) -> &str {
@@ -1254,6 +1333,23 @@ impl<'a> Lowerer<'a> {
             .is_some_and(|info| info.is_cps_call())
     }
 
+    pub(super) fn panic_unhandled_effectful_app(&self, expr: &Expr, head: Option<&Expr>) -> ! {
+        let shape = self
+            .call_effects
+            .get(&expr.id)
+            .map(|info| info.debug_label())
+            .unwrap_or_else(|| "missing-call-effect-info".to_string());
+        let head = head.unwrap_or(expr);
+        panic!(
+            "effectful App {:?} at span {:?} was classified by call_effects as {} but no lowerer dispatch path handled it (head {:?}: {})",
+            expr.id,
+            expr.span,
+            shape,
+            head.id,
+            lower_head_debug_label(head)
+        );
+    }
+
     /// Variant that uses an explicit `CheckResult` for type-at-span lookups.
     /// When the lowerer runs the pre-pass over a foreign module's elaborated
     /// AST (e.g. handler arm bodies imported from another module), the active
@@ -1664,10 +1760,12 @@ impl<'a> Lowerer<'a> {
         self.impl_effects_by_dict.clear();
         self.impl_method_effects_by_dict.clear();
         for (name, _, methods, method_effects, _, impl_effects) in &dict_constructors {
+            let impl_effects = self.canonicalize_effects(impl_effects.to_vec());
             self.impl_effects_by_dict
-                .insert((*name).to_string(), impl_effects.to_vec());
+                .insert((*name).to_string(), impl_effects.clone());
             for (idx, method) in methods.iter().enumerate() {
-                let mut effects = method_effects.get(idx).cloned().unwrap_or_default();
+                let mut effects =
+                    self.canonicalize_effects(method_effects.get(idx).cloned().unwrap_or_default());
                 if Self::contains_direct_effect_call(method) {
                     effects.extend(impl_effects.iter().cloned());
                 }
@@ -1830,6 +1928,7 @@ impl<'a> Lowerer<'a> {
                 // declares (e.g. `pg_text = coerce_value` with type String -> Value).
                 // Without this, the function is emitted as /0 but cross-module
                 // callers derive arity from the type and call /1.
+                let body_expected_ty = self.function_tail_type_after_params(&name, params_ce.len());
                 let eta_count = base_arity.saturating_sub(params_ce.len());
                 let eta_params: Vec<String> =
                     (0..eta_count).map(|i| format!("_Eta{}", i)).collect();
@@ -1838,20 +1937,49 @@ impl<'a> Lowerer<'a> {
                     params_ce.push("_Evidence".to_string());
                     params_ce.push("_ReturnK".to_string());
                 }
-                // For non-block bodies, lower_block didn't run, so apply return_k.
-                // Special case: if the body is a terminal effect call, pass _ReturnK
-                // directly as K so abort-style handlers skip the rest (proper CPS).
-                let mut body_ce = if has_effects && !matches!(body.kind, ExprKind::Block { .. }) {
+                let body_ce = if !eta_params.is_empty() {
+                    let eta_args: Vec<CExpr> =
+                        eta_params.iter().map(|p| CExpr::Var(p.clone())).collect();
+                    if let Some(body_ty) = body_expected_ty {
+                        let body_fun =
+                            self.lower_expr_value_with_expected_type(body, Some(&body_ty));
+                        let body_is_cps = self.cps_function_shape_from_type(&body_ty).is_some();
+                        let mut call_args = eta_args;
+                        if body_is_cps {
+                            call_args.push(CExpr::Var("_Evidence".to_string()));
+                            call_args.push(CExpr::Var("_ReturnK".to_string()));
+                            CExpr::Apply(Box::new(body_fun), call_args)
+                        } else {
+                            let call = CExpr::Apply(Box::new(body_fun), call_args);
+                            if has_effects {
+                                CExpr::Apply(
+                                    Box::new(CExpr::Var("_ReturnK".to_string())),
+                                    vec![call],
+                                )
+                            } else {
+                                call
+                            }
+                        }
+                    } else {
+                        // For non-block bodies, lower_block didn't run, so apply return_k.
+                        // Special case: if the body is a terminal effect call, pass _ReturnK
+                        // directly as K so abort-style handlers skip the rest (proper CPS).
+                        let body_ce = if has_effects && !matches!(body.kind, ExprKind::Block { .. })
+                        {
+                            self.lower_terminal_effectful_expr_with_return_k(
+                                body,
+                                effect_return_k.clone(),
+                            )
+                        } else {
+                            self.lower_expr_with_installed_return_k(body, effect_return_k.clone())
+                        };
+                        CExpr::Apply(Box::new(body_ce), eta_args)
+                    }
+                } else if has_effects && !matches!(body.kind, ExprKind::Block { .. }) {
                     self.lower_terminal_effectful_expr_with_return_k(body, effect_return_k.clone())
                 } else {
                     self.lower_expr_with_installed_return_k(body, effect_return_k.clone())
                 };
-                // Apply eta params to the body: `pg_text(_Eta0) = coerce_value(_Eta0)`
-                if !eta_params.is_empty() {
-                    let eta_args: Vec<CExpr> =
-                        eta_params.iter().map(|p| CExpr::Var(p.clone())).collect();
-                    body_ce = CExpr::Apply(Box::new(body_ce), eta_args);
-                }
                 CExpr::Fun(params_ce, Box::new(body_ce))
             } else {
                 // Multi-clause or single clause with a guard: generate fresh arg vars
@@ -1944,6 +2072,7 @@ impl<'a> Lowerer<'a> {
         {
             let arity = dict_params.len();
             let params: Vec<String> = dict_params.iter().map(|p| core_var(p)).collect();
+            let impl_effects = self.canonicalize_effects(impl_effects.to_vec());
             // Each dictionary slot must match the trait method's declared
             // effect row. The impl-level `needs` clause describes what the
             // impl may use overall, but call sites dispatch by method
@@ -1953,7 +2082,8 @@ impl<'a> Lowerer<'a> {
                 .iter()
                 .enumerate()
                 .map(|(idx, m)| {
-                    let mut static_effects = method_effects.get(idx).cloned().unwrap_or_default();
+                    let mut static_effects = self
+                        .canonicalize_effects(method_effects.get(idx).cloned().unwrap_or_default());
                     if Self::contains_direct_effect_call(m) {
                         static_effects.extend(impl_effects.iter().cloned());
                     }
@@ -2446,6 +2576,40 @@ impl<'a> Lowerer<'a> {
                 }
                 let tuple = CExpr::Tuple(vars.iter().map(|v| CExpr::Var(v.clone())).collect());
                 return self.wrap_let_bindings(bindings, tuple);
+            }
+
+            if let ExprKind::If {
+                cond,
+                then_branch,
+                else_branch,
+                ..
+            } = &expr.kind
+            {
+                let cond_var = self.fresh();
+                let cond_ce = self.lower_expr_value(cond);
+                let then_ce =
+                    self.lower_expr_value_with_expected_type(then_branch, Some(expected_ty));
+                let else_ce =
+                    self.lower_expr_value_with_expected_type(else_branch, Some(expected_ty));
+                return CExpr::Let(
+                    cond_var.clone(),
+                    Box::new(cond_ce),
+                    Box::new(CExpr::Case(
+                        Box::new(CExpr::Var(cond_var)),
+                        vec![
+                            CArm {
+                                pat: CPat::Lit(CLit::Atom("true".to_string())),
+                                guard: None,
+                                body: then_ce,
+                            },
+                            CArm {
+                                pat: CPat::Lit(CLit::Atom("false".to_string())),
+                                guard: None,
+                                body: else_ce,
+                            },
+                        ],
+                    )),
+                );
             }
 
             if let Some(shape) = self.cps_function_shape_from_type(expected_ty) {
@@ -3203,10 +3367,7 @@ impl<'a> Lowerer<'a> {
         }
 
         if self.expr_is_effectful_call(expr) {
-            panic!(
-                "effectful App {:?} was classified by call_effects but plain app lowering did not find a CPS dispatch path",
-                expr.id
-            );
+            self.panic_unhandled_effectful_app(expr, Some(callee));
         }
 
         self.lower_generic_apply(callee, &args_rev)
@@ -3877,5 +4038,70 @@ impl<'a> Lowerer<'a> {
             call_span,
             fallback_erlang_module: Some(erlang_module.as_str()),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::codegen::CodegenContext;
+    use crate::token::Span;
+
+    #[test]
+    fn unhandled_effectful_app_panic_includes_classifier_shape_and_head_label() {
+        let ctx = CodegenContext::default();
+        let check_result = crate::typechecker::Checker::new().to_result();
+        let mut lowerer = Lowerer::new(
+            &ctx,
+            std::collections::HashMap::new(),
+            std::collections::HashMap::new(),
+            &check_result,
+            None,
+            None,
+        );
+        let head = Expr::synth(
+            Span { start: 10, end: 16 },
+            ExprKind::Tuple { elements: vec![] },
+        );
+        let app = Expr::synth(
+            Span { start: 10, end: 22 },
+            ExprKind::App {
+                func: Box::new(head.clone()),
+                arg: Box::new(Expr::synth(
+                    Span { start: 17, end: 22 },
+                    ExprKind::Lit {
+                        value: Lit::String("arg".to_string(), crate::token::StringKind::Normal),
+                    },
+                )),
+            },
+        );
+        lowerer.call_effects.insert(
+            app.id,
+            super::super::call_effects::CallEffectInfo::test_cps_static("Main.Log", "log", 1),
+        );
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            lowerer.panic_unhandled_effectful_app(&app, Some(&head));
+        }));
+        let payload = result.expect_err("expected panic for unhandled effectful app");
+        let msg = payload
+            .downcast_ref::<String>()
+            .map(String::as_str)
+            .or_else(|| payload.downcast_ref::<&str>().copied())
+            .expect("panic payload should be a string");
+
+        assert!(
+            msg.contains(&format!("effectful App {:?}", app.id)),
+            "{msg}"
+        );
+        assert!(msg.contains("span Span { start: 10, end: 22 }"), "{msg}");
+        assert!(
+            msg.contains(r#"cps-static(1->3, effects=["Main.Log"])"#),
+            "{msg}"
+        );
+        assert!(
+            msg.contains(&format!("head {:?}: tuple/0", head.id)),
+            "{msg}"
+        );
     }
 }
