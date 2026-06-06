@@ -266,7 +266,7 @@ impl<'a> Populator<'a> {
                 self.walk_expr(body);
                 self.pop_scope();
             }
-            Decl::Val { value, .. } | Decl::Let { value, .. } => {
+            Decl::Let { value, .. } => {
                 self.push_scope();
                 self.walk_expr(value);
                 self.pop_scope();
@@ -862,10 +862,7 @@ impl<'a> Populator<'a> {
         let resolved = self.inputs.resolved.get(&head_id);
         let resolved_shape =
             resolved.map(|resolved| self.runtime_shape_from_resolved_head(head_id, resolved));
-        if matches!(
-            resolved_shape,
-            Some(RuntimeFunctionShape::Intrinsic | RuntimeFunctionShape::InlineVal)
-        ) {
+        if matches!(resolved_shape, Some(RuntimeFunctionShape::Intrinsic)) {
             return pure();
         }
         let canonical_name = resolved.map(|resolved| resolved.canonical_name.clone());

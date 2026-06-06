@@ -498,6 +498,13 @@ fn annotation_correct() {
 }
 
 #[test]
+fn zero_arity_function_constant_typechecks() {
+    let checker = check("pub fun answer : Int\nanswer = 5").unwrap();
+    let ty = checker.sub.apply(&checker.env.get("answer").unwrap().ty);
+    assert_eq!(ty, Type::int());
+}
+
+#[test]
 fn annotation_mismatch() {
     let result = check("fun add : (a: Int) -> (b: Int) -> String\nadd a b = a + b");
     assert!(result.is_err());
@@ -755,8 +762,9 @@ fn lambda_effects_ride_on_returned_function_type() {
     // `foo x = fun y -> fail! ...` RETURNS an effectful function. The effect
     // rides on the returned arrow (calling `foo` itself performs nothing), so
     // the unannotated foo checks and its type carries {Fail}.
-    let c = check("effect Fail {\n  fun fail : (msg: String) -> a\n}\nfoo x = fun y -> fail! \"oops\"")
-        .expect("function returning an effectful lambda should check");
+    let c =
+        check("effect Fail {\n  fun fail : (msg: String) -> a\n}\nfoo x = fun y -> fail! \"oops\"")
+            .expect("function returning an effectful lambda should check");
     assert!(
         fun_effects(&c, "foo").iter().any(|e| e.contains("Fail")),
         "foo's type should carry {{Fail}} on the returned arrow, got: {:?}",
@@ -789,7 +797,7 @@ fn tuple_pattern_lambda_argument_uses_expected_callback_type_for_fields() {
          record Normalized { wind_avg: Maybe Int, wind_gust: Maybe Int }\n\
          fun map_rows : (rows: List a) -> (f: a -> b) -> List b\n\
          map_rows rows f = List.map f rows\n\
-         val rows = [(1, WindDetails { wind_avg: 10, wind_gust: 20 })]\n\
+         rows = [(1, WindDetails { wind_avg: 10, wind_gust: 20 })]\n\
          main () = map_rows rows (fun (sesh_id, wd) -> wd.wind_avg + sesh_id)",
     )
     .unwrap();
@@ -800,7 +808,7 @@ fn first_argument_lambda_can_use_later_argument_constraints_for_tuple_pattern() 
     check(
         "record WindDetails { wind_avg: Int, wind_gust: Int }\n\
          record Normalized { wind_avg: Maybe Int, wind_gust: Maybe Int }\n\
-         val rows = [(1, WindDetails { wind_avg: 10, wind_gust: 20 })]\n\
+         rows = [(1, WindDetails { wind_avg: 10, wind_gust: 20 })]\n\
          main () = List.filter_map (fun pair -> case pair {\n\
            (sesh_id, wd) -> Just (wd.wind_avg + sesh_id)\n\
          }) rows",
@@ -827,7 +835,7 @@ fn named_binder_lambda_argument_still_typechecks() {
         "record Row { sesh_id: Int, wind_avg: Int }\n\
          fun push_values : (rows: List a) -> (bind_row: a -> List Int) -> List Int\n\
          push_values rows bind_row = List.flat_map bind_row rows\n\
-         val rows = [Row { sesh_id: 1, wind_avg: 10 }]\n\
+         rows = [Row { sesh_id: 1, wind_avg: 10 }]\n\
          main () = push_values rows (fun row -> [row.sesh_id, row.wind_avg])",
     )
     .unwrap();
@@ -841,7 +849,7 @@ fn non_lambda_callback_argument_still_needs_annotation_for_ambiguous_fields() {
          bind_row pair = case pair {\n\
            (_, wd) -> wd.wind_avg\n\
          }\n\
-         val rows = [(1, WindDetails { wind_avg: 10 })]\n\
+         rows = [(1, WindDetails { wind_avg: 10 })]\n\
          main () = List.map bind_row rows",
     );
     assert!(result.is_err(), "expected ambiguous field error");
@@ -5174,7 +5182,7 @@ pub record Normalized {
     let main_src = r#"import Db (make_wind, push_values)
 import Input (Normalized)
 
-val rows = [
+rows = [
   (1, make_wind 10 20 "spot"),
 ]
 
@@ -5218,7 +5226,7 @@ pub record Normalized {
     let main_src = r#"import Db (make_wind)
 import Input (Normalized)
 
-val rows = [
+rows = [
   (1, make_wind 10 20),
 ]
 

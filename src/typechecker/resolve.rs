@@ -131,7 +131,6 @@ impl LocalModuleNames {
             match decl {
                 Decl::FunBinding { name, .. }
                 | Decl::FunSignature { name, .. }
-                | Decl::Val { name, .. }
                 | Decl::Let { name, .. } => {
                     out.top_level_values.insert(name.clone());
                 }
@@ -667,7 +666,6 @@ impl<'a> Resolver<'a> {
                 }
                 self.resolve_expr(value);
             }
-            Decl::Val { value, .. } => self.resolve_expr(value),
             Decl::TypeDef { variants, .. } => {
                 for variant in variants {
                     for (_, texpr) in &variant.node.fields {
@@ -1088,7 +1086,7 @@ fn walk_decl(decl: &Decl, out: &mut HashMap<String, crate::token::Span>) {
             }
             walk_expr(body, out);
         }
-        Decl::Let { value, .. } | Decl::Val { value, .. } => walk_expr(value, out),
+        Decl::Let { value, .. } => walk_expr(value, out),
         Decl::HandlerDef { body, .. } => walk_handler_body(body, out),
         Decl::ImplDef { methods, .. } => {
             for m in methods {

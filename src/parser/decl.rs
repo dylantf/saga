@@ -18,11 +18,7 @@ type AnnotatedSignature = (
     Option<(String, Span)>,
 );
 
-/// Where a `fun name : ...` signature appears. Drives the error message when
-/// the signature has no `->` (zero parameters); saga functions must take at
-/// least one parameter, so a parameter-free signature is never legitimate
-/// regardless of how the body is written (eta-reduced bindings still have
-/// arrows in their annotated type).
+/// Where a `fun name : ...` signature appears.
 #[derive(Clone, Copy)]
 pub(super) enum SignatureSite {
     TopLevel,
@@ -33,9 +29,7 @@ pub(super) enum SignatureSite {
 impl SignatureSite {
     fn zero_param_message(self, name: &str) -> String {
         match self {
-            SignatureSite::TopLevel => format!(
-                "function `{name}` has no parameters; functions must take at least one parameter (use `val {name} = ...` for constants)"
-            ),
+            SignatureSite::TopLevel => format!("function `{name}` has no return type"),
             SignatureSite::EffectOp => format!(
                 "effect operation `{name}` has no parameters; use `fun {name} : Unit -> ...` for nullary operations"
             ),
@@ -122,14 +116,10 @@ impl Parser {
                     value,
                 })
             }
-            Token::Val => {
-                let start = self.tokens[self.pos].span;
-                self.parse_val(false, start, vec![])
-            }
             Token::At => {
                 let start = self.tokens[self.pos].span;
                 let annotations = self.parse_annotations()?;
-                // After annotations, expect a function or val declaration (optionally pub)
+                // After annotations, expect a function declaration (optionally pub)
                 let public = if matches!(self.peek(), Token::Pub) {
                     self.advance();
                     true
@@ -138,12 +128,8 @@ impl Parser {
                 };
                 match self.peek() {
                     Token::Fun => self.parse_fun_signature(public, start, annotations),
-                    Token::Val => self.parse_val(public, start, annotations),
                     _ => Err(ParseError {
-                        message: format!(
-                            "expected 'fun' or 'val' after annotation, got {:?}",
-                            self.peek()
-                        ),
+                        message: format!("expected 'fun' after annotation, got {:?}", self.peek()),
                         span: self.tokens[self.pos].span,
                     }),
                 }
@@ -153,7 +139,6 @@ impl Parser {
                 self.advance(); // consume 'pub'
                 match self.peek() {
                     Token::Fun => self.parse_fun_signature(true, start, vec![]),
-                    Token::Val => self.parse_val(true, start, vec![]),
                     Token::Type => self.parse_type_def(true, false),
                     Token::Opaque => {
                         self.advance(); // consume 'opaque'
@@ -468,30 +453,6 @@ impl Parser {
         })
     }
 
-    // Parses: [pub] val <name> = <expr>
-    fn parse_val(
-        &mut self,
-        public: bool,
-        start: Span,
-        annotations: Vec<Annotation>,
-    ) -> Result<Decl, ParseError> {
-        self.advance(); // consume 'val'
-        let name = self.expect_ident()?;
-        let name_span = self.tokens[self.pos - 1].span;
-        self.expect(Token::Eq)?;
-        let value = self.parse_expr(0)?;
-        Ok(Decl::Val {
-            id: NodeId::fresh(),
-            doc: vec![],
-            public,
-            name,
-            name_span,
-            annotations,
-            span: start.to(value.span),
-            value,
-        })
-    }
-
     /// Parse one or more annotations: `@name` or `@name(arg1, arg2, ...)`
     fn parse_annotations(&mut self) -> Result<Vec<Annotation>, ParseError> {
         let mut annotations = Vec::new();
@@ -502,7 +463,7 @@ impl Parser {
             let name = self.expect_ident()?;
             let name_span = self.tokens[self.pos - 1].span;
 
-            const KNOWN_ANNOTATIONS: &[&str] = &["external", "builtin", "inline"];
+            const KNOWN_ANNOTATIONS: &[&str] = &["external", "builtin"];
             if !KNOWN_ANNOTATIONS.contains(&name.as_str()) {
                 return Err(ParseError {
                     message: format!("unknown annotation @{}", name),
@@ -1244,9 +1205,9 @@ impl Parser {
 
     /// Parse an annotated type signature after the `:`.
     /// Each arrow segment can optionally have a label: `(label: Type) -> Type -> RetType`
-    /// Returns (params, return_type, effects). Rejects zero-parameter signatures
-    /// with a site-specific message: saga functions must take at least one
-    /// parameter at every declaration site that uses an annotated signature.
+    /// Returns (params, return_type, effects). Top-level signatures may omit
+    /// arrows for zero-arity functions; effect ops and trait methods still use
+    /// `Unit -> ...` for nullary operations.
     fn parse_annotated_signature(
         &mut self,
         site: SignatureSite,
@@ -1292,9 +1253,10 @@ impl Parser {
         }
 
         if segments.len() < 2 {
-            // No arrow: zero-parameter signature. Saga functions require at
-            // least one parameter at every annotated declaration site.
             let (_label, ty) = segments.pop().unwrap();
+            if matches!(site, SignatureSite::TopLevel) {
+                return Ok((Vec::new(), ty, effects, effect_row_var));
+            }
             let span = sig_start.to(ty.span());
             return Err(ParseError {
                 message: site.zero_param_message(name),

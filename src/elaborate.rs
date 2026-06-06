@@ -669,29 +669,6 @@ impl Elaborator {
                     });
                 }
 
-                Decl::Val {
-                    doc,
-                    public,
-                    name,
-                    name_span,
-                    annotations,
-                    value,
-                    span,
-                    ..
-                } => {
-                    let elab_value = self.elaborate_expr(value);
-                    output.push(Decl::Val {
-                        id: NodeId::fresh(),
-                        doc: doc.clone(),
-                        public: *public,
-                        name: name.clone(),
-                        name_span: *name_span,
-                        annotations: annotations.clone(),
-                        value: elab_value,
-                        span: *span,
-                    });
-                }
-
                 // Pass through everything else
                 _ => output.push(decl.clone()),
             }
@@ -1092,7 +1069,7 @@ impl Elaborator {
 
                                     if let Some(dict_param_info) = dict_info {
                                         // Set up dict params for elaborating the value.
-                                        // Eta-expand: `let f = val` becomes
+                                        // Eta-expand: `let f = value` becomes
                                         // `let f = fun (dict, __arg) -> (elaborated_val)(__arg)`
                                         // so the lowerer sees a single function of arity N+1.
                                         let saved = (

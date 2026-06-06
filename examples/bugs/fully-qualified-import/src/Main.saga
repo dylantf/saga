@@ -7,5 +7,5 @@ main () = {
 
   println "Hello, world!"
 
-  println $"The inlined val is {Lib.bar}"
+  println $"The imported constant is {Lib.bar}"
 } with console

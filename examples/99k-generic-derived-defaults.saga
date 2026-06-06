@@ -14,7 +14,7 @@
 
 record Options { compact: Bool }
 
-val default_options = Options { compact: True }
+default_options = Options { compact: True }
 
 trait ToJson a {
   fun to_json_with : Options -> a -> String

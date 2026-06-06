@@ -1020,6 +1020,27 @@ fn fun_annotation_simple() {
 }
 
 #[test]
+fn fun_annotation_zero_arity() {
+    let decls = parse("pub fun answer : Int");
+    assert_eq!(decls.len(), 1);
+    match &decls[0] {
+        Decl::FunSignature {
+            name,
+            params,
+            return_type,
+            public,
+            ..
+        } => {
+            assert_eq!(name, "answer");
+            assert!(*public);
+            assert!(params.is_empty());
+            assert!(matches!(return_type, TypeExpr::Named { name: n, .. } if n == "Int"));
+        }
+        _ => panic!("expected FunSignature, got {:?}", decls[0]),
+    }
+}
+
+#[test]
 fn fun_annotation_public_with_effects() {
     let decls = parse("pub fun print : (msg: String) -> Unit needs { Console }");
     assert_eq!(decls.len(), 1);

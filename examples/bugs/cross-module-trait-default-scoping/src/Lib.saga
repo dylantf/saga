@@ -11,7 +11,8 @@ module Lib
 
 pub record Cfg { tag: String }
 
-pub val default_cfg = Cfg { tag: "default" }
+pub fun default_cfg : Cfg
+default_cfg = Cfg { tag: "default" }
 
 pub trait Act a {
   fun act_with : Cfg -> a -> String

@@ -86,15 +86,15 @@ handler collect for Testing {
   return _ = fun entries -> entries
 }
 
-val empty_result = TestResult {
+empty_result = TestResult {
   passed: 0,
   failed: 0,
   skipped: 0,
 }
 
-val green_check = "\x1b[32m✓\x1b[0m"
-val red_cross = "\x1b[31m✗\x1b[0m"
-val yellow_skip = "\x1b[33m○\x1b[0m"
+green_check = "\x1b[32m✓\x1b[0m"
+red_cross = "\x1b[31m✗\x1b[0m"
+yellow_skip = "\x1b[33m○\x1b[0m"
 
 fun merge_results : TestResult -> TestResult -> TestResult
 merge_results left right = TestResult {

@@ -3073,7 +3073,7 @@ run () = {
 //
 // These pin the codegen analogue of the typecheck-side rule:
 // loaded modules must be resolvable canonically without an explicit import,
-// and decls without a BEAM function (`@builtin`, `@inline val`) must intercept
+// and decls without a normal BEAM function (`@builtin`) must intercept
 // at the use site for both bare AND qualified spellings.
 
 /// Qualified-form `Std.IO.Unsafe.print_stdout` is `@builtin`: it has no BEAM
@@ -3215,15 +3215,14 @@ main () = Std.Process.catch_panic (fun () -> 42)
     );
 }
 
-/// Cross-module qualified reference to an `@inline val` must substitute the
-/// RHS expression at the use site. No BEAM function is emitted for inline
-/// vals, so a direct call would fail at runtime (`undef`).
+/// Cross-module qualified reference to a zero-arity function must emit a
+/// normal BEAM call to the defining module's /0 function.
 #[test]
-fn qualified_inline_val_cross_module_substitutes_rhs() {
+fn qualified_zero_arity_fun_cross_module_emits_beam_call() {
     let lib = r#"module Lib
 
-@inline
-pub val answer = 123
+pub fun answer : Int
+answer = 123
 "#;
     let main = r#"module Main
 
@@ -3232,26 +3231,20 @@ main () = Lib.answer
     let out = with_temp_project_files(&[("src/Lib.saga", lib)], main, |checker, program| {
         emit_from_program(program, "main", checker)
     });
-    // Substitution should produce a literal 123 in main, with no call to lib:answer/0.
-    assert_contains(&out, "123");
-    assert!(
-        !out.contains("'lib':'answer'"),
-        "@inline val cross-module ref must not emit a BEAM call:\n{out}"
-    );
+    assert_contains(&out, "call 'lib':'answer'");
 }
 
-/// Cross-module inline vals must be lowered under the defining module's
-/// semantic context. `answer = base` used to lower `base` against Main's
-/// resolver/inline table and could emit a bad `lib:base/0` reference.
+/// Cross-module zero-arity functions that reference a sibling zero-arity
+/// function should resolve that sibling in the defining module.
 #[test]
-fn qualified_inline_val_cross_module_resolves_sibling_ref_in_defining_module() {
+fn qualified_zero_arity_fun_cross_module_resolves_sibling_ref_in_defining_module() {
     let lib = r#"module Lib
 
-@inline
-pub val base = 123
+pub fun base : Int
+base = 123
 
-@inline
-pub val answer = base
+pub fun answer : Int
+answer = base
 "#;
     let main = r#"module Main
 
@@ -3260,11 +3253,7 @@ main () = Lib.answer
     let out = with_temp_project_files(&[("src/Lib.saga", lib)], main, |checker, program| {
         emit_from_program(program, "main", checker)
     });
-    assert_contains(&out, "123");
-    assert!(
-        !out.contains("'lib':'base'") && !out.contains("'main':'base'"),
-        "@inline val sibling refs must be substituted in the defining module:\n{out}"
-    );
+    assert_contains(&out, "call 'lib':'answer'");
 }
 
 /// Project module referenced by canonical name without `import Lib` should
@@ -3366,7 +3355,8 @@ fn cross_module_trait_default_body_resolves_in_trait_module() {
 
 pub record Cfg { tag: String }
 
-pub val default_cfg = Cfg { tag: "default" }
+pub fun default_cfg : Cfg
+default_cfg = Cfg { tag: "default" }
 
 pub trait Act a {
   fun act_with : Cfg -> a -> String

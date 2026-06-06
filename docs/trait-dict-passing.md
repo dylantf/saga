@@ -60,7 +60,7 @@ This is the headline interaction: library authors mark "this method is the route
 
 ### Pre-Binding for Default Body References
 
-Default bodies (and explicit impl method bodies) are checked in Pass 6 (`register_all_impls`), which runs before the main pass that processes top-level `Decl::Val` bindings. `pre_bind_functions` ([src/typechecker/check_decl.rs:754-803](../src/typechecker/check_decl.rs#L754-L803)) now pre-binds both `Decl::FunBinding` and `Decl::Val` names with fresh vars, so a default body like `to_json x = to_json_with default_options x` can reference a top-level `val default_options = ...` defined anywhere in the module. When the main pass eventually checks the val's RHS, it unifies the inferred type against the pre-bound var.
+Default bodies (and explicit impl method bodies) are checked in Pass 6 (`register_all_impls`), before the main pass checks top-level function bodies. `pre_bind_functions` ([src/typechecker/check_decl.rs](../src/typechecker/check_decl.rs)) pre-binds `Decl::FunBinding` names with fresh vars, so a default body like `to_json x = to_json_with default_options x` can reference a top-level zero-arity binding `default_options = ...` defined anywhere in the module. When the main pass eventually checks that binding's RHS, it unifies the inferred type against the pre-bound var.
 
 ### Known Limits
 

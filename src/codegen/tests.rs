@@ -432,6 +432,11 @@ fn fun_arity_zero_for_unit_param() {
 }
 
 #[test]
+fn zero_arity_binding_lowers_to_zero_arity_fun() {
+    assert_contains("answer = 42", "'answer'/0");
+}
+
+#[test]
 fn fun_arity_one() {
     assert_contains("double x = x + x", "'double'/1");
 }

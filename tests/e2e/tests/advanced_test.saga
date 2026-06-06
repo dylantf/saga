@@ -65,9 +65,9 @@ nok amount = Currency amount
 
 # --- Val bindings ---
 
-val greeting = "hello world"
-val max_retries = 5
-val origins = ["localhost", "example.com"]
+greeting = "hello world"
+max_retries = 5
+origins = ["localhost", "example.com"]
 
 # --- FFI ---
 
@@ -225,17 +225,17 @@ tests () = {
     })
   })
 
-  describe "val bindings" (fun () -> {
+  describe "zero-arity bindings" (fun () -> {
 
-    test "string val" (fun () -> {
+    test "string binding" (fun () -> {
       assert_eq greeting "hello world"
     })
 
-    test "int val" (fun () -> {
+    test "int binding" (fun () -> {
       assert_eq max_retries 5
     })
 
-    test "list val" (fun () -> {
+    test "list binding" (fun () -> {
       assert_eq origins ["localhost", "example.com"]
     })
   })
