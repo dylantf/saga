@@ -78,6 +78,12 @@ struct RuntimeCpsApplySite<'a> {
     flat_arg_lowering: RuntimeCpsArgLowering,
 }
 
+#[derive(Clone)]
+struct StaticTailResumeOp {
+    arm: HandlerArm,
+    source_module: Option<String>,
+}
+
 fn count_lambda_params(body: &Expr) -> usize {
     match &body.kind {
         ExprKind::Lambda { params, body, .. } => params.len() + count_lambda_params(body),
@@ -283,6 +289,10 @@ pub struct Lowerer<'a> {
     /// `let` bindings instead of going through CPS continuation-passing, avoiding
     /// closure allocation. Currently all BEAM-native ops satisfy this property.
     direct_ops: HashMap<String, String>,
+    /// Maps "effect.op" -> static handler arm facts for the local
+    /// tail-resume optimization. These are scoped to a `with` body and are
+    /// optional; missing entries use the normal evidence path.
+    static_tail_resume_ops: HashMap<String, StaticTailResumeOp>,
     /// Runtime function shape that the next lambda/effect-op ref should use.
     /// Set by typed value-boundary lowering when a function value is placed
     /// into an effectful or open-row slot.
@@ -322,6 +332,8 @@ pub struct Lowerer<'a> {
     /// Typechecker result for the module currently being lowered.
     /// Provides resolved types, handler info, effect info, etc.
     check_result: crate::typechecker::CheckResult,
+    /// Post-classifier optimizer facts for the module being lowered.
+    optimization: super::optimize::OptimizationFacts,
     /// Conditional handle bindings: name -> (cond_var, cond_expr, then_canonical, else_canonical).
     /// Used during lower_with to generate conditional handler dispatch.
     handle_cond_vars: HashMap<String, (String, CExpr, String, String)>,
@@ -358,6 +370,7 @@ impl<'a> Lowerer<'a> {
         constructor_atoms: super::resolve::ConstructorAtoms,
         resolved: super::resolve::ResolutionMap,
         check_result: &crate::typechecker::CheckResult,
+        optimization: super::optimize::OptimizationFacts,
         source_info: Option<SourceInfo>,
         entry_export: Option<String>,
     ) -> Self {
@@ -377,6 +390,7 @@ impl<'a> Lowerer<'a> {
             current_evidence: None,
             no_resume_ops: std::collections::HashSet::new(),
             direct_ops: HashMap::new(),
+            static_tail_resume_ops: HashMap::new(),
             lambda_effect_context: None,
             constructor_atoms,
             resolved,
@@ -387,6 +401,7 @@ impl<'a> Lowerer<'a> {
             handler_canonical: HashMap::new(),
             effect_canonical: HashMap::new(),
             check_result: check_result.clone(),
+            optimization,
             handle_cond_vars: HashMap::new(),
             handle_dynamic_vars: HashMap::new(),
             entry_export,
@@ -4056,6 +4071,7 @@ mod tests {
             std::collections::HashMap::new(),
             std::collections::HashMap::new(),
             &check_result,
+            super::super::optimize::OptimizationFacts::default(),
             None,
             None,
         );

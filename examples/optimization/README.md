@@ -8,6 +8,9 @@ Use these as probes for optimization facts and emitted Core shape. Correctness
 must continue to fall back to the existing direct-first lowering path when an
 optimization cannot be proven.
 
+The staged worklist lives in
+`docs/planning/direct-first-optimizer-matrix.md`.
+
 Initial focus:
 
 1. Direct specialization for statically known, pure tail-resumptive effect

@@ -874,12 +874,12 @@ effect Counter {
 }
 
 handler add_one for Counter {
-  get () = resume 10
+  get () = resume 10 finally { () }
   return value = value + 1
 }
 
 handler times_two for Counter {
-  get () = resume 20
+  get () = resume 20 finally { () }
   return value = value * 2
 }
 

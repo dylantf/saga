@@ -1553,6 +1553,83 @@ main () = safe_div 10 0 with {
 // --- Effect calls in non-block positions ---
 
 #[test]
+fn inline_static_tail_resume_effect_op_lowers_directly() {
+    let src = r#"
+effect Ask {
+  fun ask : Unit -> Int
+}
+
+main () = {
+  let x = 1 + ask! ()
+  x
+} with {
+  ask () = resume 41
+}
+"#;
+    let out = emit_elaborated(src);
+    assert!(
+        !out.contains("_Handle__script_Ask_ask"),
+        "tail-resume op should not allocate/apply handler closure\n{out}"
+    );
+    assert_contains(&out, "call 'erlang':'+'");
+    assert_core_compiles(&out);
+}
+
+#[test]
+fn inline_static_tail_resume_effect_op_binds_runtime_args() {
+    let src = r#"
+effect Choose {
+  fun choose : Int -> Int
+}
+
+main () = choose! 42 with {
+  choose value = resume value
+}
+"#;
+    let out = emit_elaborated(src);
+    assert!(
+        !out.contains("_Handle__script_Choose_choose"),
+        "tail-resume op with direct arg should not use handler closure\n{out}"
+    );
+    assert_contains(&out, "42");
+    assert_core_compiles(&out);
+}
+
+#[test]
+fn non_tail_resume_stays_on_evidence_path() {
+    let src = r#"
+effect Ask {
+  fun ask : Unit -> Int
+}
+
+main () = ask! () with {
+  ask () = (resume 40) + 1
+}
+"#;
+    let out = emit_elaborated(src);
+    assert_contains(&out, "_Handle__script_Ask_ask");
+    assert_core_compiles(&out);
+}
+
+#[test]
+fn finally_tail_resume_stays_on_evidence_path() {
+    let src = r#"
+effect Ask {
+  fun ask : Unit -> Int
+}
+
+main () = ask! () with {
+  ask () = resume 41 finally {
+    ()
+  }
+}
+"#;
+    let out = emit_elaborated(src);
+    assert_contains(&out, "_Handle__script_Ask_ask");
+    assert_core_compiles(&out);
+}
+
+#[test]
 fn effect_call_in_binop() {
     // Effect call nested in a binary operation should be lifted to a let binding
     let src = r#"

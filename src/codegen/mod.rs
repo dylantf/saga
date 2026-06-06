@@ -163,7 +163,7 @@ pub fn emit_module_with_context(
     for compiled in ctx.modules.values() {
         resolution_map.extend(compiled.resolution.iter().map(|(k, v)| (*k, v.clone())));
     }
-    let _optimization = optimize::analyze(module_name, &program, &resolution_map);
+    let optimization = optimize::analyze(module_name, &program, &resolution_map);
     let source_info =
         source_file.map(|sf| lower::errors::SourceInfo::new(sf.path.clone(), &sf.source));
     let cmod = lower::Lowerer::new(
@@ -171,6 +171,7 @@ pub fn emit_module_with_context(
         constructor_atoms,
         resolution_map,
         check_result,
+        optimization,
         source_info,
         entry_export.map(str::to_string),
     )

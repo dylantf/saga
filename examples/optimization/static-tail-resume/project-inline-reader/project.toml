@@ -1,0 +1,3 @@
+[project]
+name = "static_tail_resume_inline_reader"
+version = "0.1.0"

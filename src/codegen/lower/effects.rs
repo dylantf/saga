@@ -69,6 +69,7 @@ enum OpHandlerPlan {
 
 enum EffectOpLoweringPlan {
     DirectNative { handler_canonical: String },
+    DirectStaticTailResume { plan: super::StaticTailResumeOp },
     EvidenceLookup { trace_shape: String },
 }
 
@@ -116,10 +117,175 @@ impl<'a> Lowerer<'a> {
     fn effect_op_lowering_plan(&self, effect_key: &str, effect_name: &str) -> EffectOpLoweringPlan {
         if let Some(handler_canonical) = self.direct_ops.get(effect_key).cloned() {
             EffectOpLoweringPlan::DirectNative { handler_canonical }
+        } else if let Some(plan) = self.static_tail_resume_ops.get(effect_key).cloned() {
+            EffectOpLoweringPlan::DirectStaticTailResume { plan }
         } else {
             EffectOpLoweringPlan::EvidenceLookup {
                 trace_shape: self.evidence_lookup_trace_shape(effect_name),
             }
+        }
+    }
+
+    fn lower_direct_op_result(&mut self, value: CExpr, continuation: Option<CExpr>) -> CExpr {
+        if let Some(k) = continuation {
+            match k {
+                CExpr::Fun(params, body) if params.len() == 1 => {
+                    CExpr::Let(params[0].clone(), Box::new(value), body)
+                }
+                other => {
+                    let result_var = self.fresh();
+                    CExpr::Let(
+                        result_var.clone(),
+                        Box::new(value),
+                        Box::new(CExpr::Apply(Box::new(other), vec![CExpr::Var(result_var)])),
+                    )
+                }
+            }
+        } else {
+            value
+        }
+    }
+
+    fn static_tail_resume_value_supported(expr: &Expr) -> bool {
+        match &expr.kind {
+            ExprKind::Lit { .. }
+            | ExprKind::Var { .. }
+            | ExprKind::Constructor { .. }
+            | ExprKind::QualifiedName { .. }
+            | ExprKind::DictRef { .. }
+            | ExprKind::SymbolIntrinsic { .. } => true,
+            ExprKind::Tuple { elements } | ExprKind::ListLit { elements } => elements
+                .iter()
+                .all(Self::static_tail_resume_value_supported),
+            ExprKind::RecordCreate { fields, .. } | ExprKind::AnonRecordCreate { fields } => fields
+                .iter()
+                .all(|(_, _, value)| Self::static_tail_resume_value_supported(value)),
+            ExprKind::Ascription { expr, .. } => Self::static_tail_resume_value_supported(expr),
+            _ => false,
+        }
+    }
+
+    fn static_tail_resume_bindings(
+        &mut self,
+        params: &[Pat],
+        param_vars: &[String],
+        runtime_param_positions: &[usize],
+    ) -> Option<Vec<(String, CExpr)>> {
+        let mut bindings = Vec::new();
+        for (source_idx, param) in params.iter().enumerate() {
+            let value = runtime_param_positions
+                .iter()
+                .position(|&runtime_source_idx| runtime_source_idx == source_idx)
+                .map(|runtime_idx| CExpr::Var(param_vars[runtime_idx].clone()))
+                .unwrap_or_else(|| CExpr::Lit(CLit::Atom("unit".to_string())));
+            match param {
+                Pat::Var { name, .. } => bindings.push((super::core_var(name), value)),
+                Pat::Wildcard { .. }
+                | Pat::Lit {
+                    value: crate::ast::Lit::Unit,
+                    ..
+                } => {}
+                _ => return None,
+            }
+        }
+        Some(bindings)
+    }
+
+    fn lower_static_tail_resume_op(
+        &mut self,
+        plan: super::StaticTailResumeOp,
+        param_vars: &[String],
+        runtime_param_positions: &[usize],
+        continuation: Option<CExpr>,
+    ) -> Option<CExpr> {
+        let ExprKind::Resume { value } = &plan.arm.body.kind else {
+            return None;
+        };
+        if !Self::static_tail_resume_value_supported(value) {
+            return None;
+        }
+
+        let param_bindings = self.static_tail_resume_bindings(
+            &plan.arm.params,
+            param_vars,
+            runtime_param_positions,
+        )?;
+
+        let saved_source_module = self.current_handler_source_module.clone();
+        self.current_handler_source_module = plan.source_module;
+        let resumed_value = self.lower_expr_value(value);
+        self.current_handler_source_module = saved_source_module;
+
+        let result = self.lower_direct_op_result(resumed_value, continuation);
+        Some(
+            param_bindings
+                .into_iter()
+                .rev()
+                .fold(result, |body, (var, val)| {
+                    CExpr::Let(var, Box::new(val), Box::new(body))
+                }),
+        )
+    }
+
+    fn static_tail_resume_params_supported(params: &[Pat]) -> bool {
+        params.iter().all(|param| {
+            matches!(
+                param,
+                Pat::Var { .. }
+                    | Pat::Wildcard { .. }
+                    | Pat::Lit {
+                        value: crate::ast::Lit::Unit,
+                        ..
+                    }
+            )
+        })
+    }
+
+    fn static_tail_resume_arm_supported(&self, arm: &HandlerArm) -> bool {
+        if arm.finally_block.is_some()
+            || self.optimization.handler_analysis.resumption.get(&arm.id)
+                != Some(&crate::codegen::handler_analysis::ResumptionKind::TailResumptive)
+            || !Self::static_tail_resume_params_supported(&arm.params)
+        {
+            return false;
+        }
+        let ExprKind::Resume { value } = &arm.body.kind else {
+            return false;
+        };
+        Self::static_tail_resume_value_supported(value)
+    }
+
+    fn static_tail_resume_plan_for_op_handler(
+        &self,
+        plan: &OpHandlerPlan,
+    ) -> Option<super::StaticTailResumeOp> {
+        match plan {
+            OpHandlerPlan::Inline { arms } if arms.len() == 1 => {
+                let arm = arms[0].clone();
+                self.static_tail_resume_arm_supported(&arm)
+                    .then_some(super::StaticTailResumeOp {
+                        arm,
+                        source_module: None,
+                    })
+            }
+            OpHandlerPlan::Static {
+                arm,
+                source_module,
+                handler_canonical,
+            } if !self.is_beam_native_handler_canonical(handler_canonical)
+                && match source_module {
+                    Some(module) => module == &self.current_source_module,
+                    None => true,
+                } =>
+            {
+                let arm = arm.clone();
+                self.static_tail_resume_arm_supported(&arm)
+                    .then_some(super::StaticTailResumeOp {
+                        arm,
+                        source_module: source_module.clone(),
+                    })
+            }
+            _ => None,
         }
     }
 
@@ -315,6 +481,9 @@ impl<'a> Lowerer<'a> {
         let runtime_param_count = op_info
             .map(|op| op.runtime_param_count)
             .unwrap_or(args.len());
+        let runtime_param_positions = op_info
+            .map(|op| op.runtime_param_positions.clone())
+            .unwrap_or_else(|| (0..args.len()).collect());
         let op_param_absorbed = op_info.and_then(|op| {
             if op.param_absorbed_effects.is_empty() {
                 None
@@ -461,6 +630,32 @@ impl<'a> Lowerer<'a> {
                     native_call
                 };
 
+                bindings.into_iter().rev().fold(result, |body, (var, val)| {
+                    CExpr::Let(var, Box::new(val), Box::new(body))
+                })
+            }
+            EffectOpLoweringPlan::DirectStaticTailResume { plan } => {
+                self.push_effect_op_trace(
+                    node_id,
+                    &effect_name,
+                    op_name,
+                    args.len(),
+                    param_vars.len(),
+                    "direct-static-tail-resume".to_string(),
+                );
+                let result = self
+                    .lower_static_tail_resume_op(
+                        plan,
+                        &param_vars,
+                        &runtime_param_positions,
+                        continuation,
+                    )
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "internal optimizer error: static tail-resume proof for '{}.{}' was not lowerable",
+                            effect_name, op_name
+                        )
+                    });
                 bindings.into_iter().rev().fold(result, |body, (var, val)| {
                     CExpr::Let(var, Box::new(val), Box::new(body))
                 })
@@ -632,6 +827,7 @@ impl<'a> Lowerer<'a> {
         // pruned when unused).
         let saved_no_resume_ops = self.no_resume_ops.clone();
         let saved_direct_ops = self.direct_ops.clone();
+        let saved_static_tail_resume_ops = self.static_tail_resume_ops.clone();
 
         // Pass 1: allocate handler-binding names and pick a per-op plan.
         let mut op_vars: Vec<(String, String, String, OpHandlerPlan)> = Vec::new();
@@ -670,6 +866,9 @@ impl<'a> Lowerer<'a> {
                     }
                 }
                 _ => {}
+            }
+            if let Some(static_plan) = self.static_tail_resume_plan_for_op_handler(&plan) {
+                self.static_tail_resume_ops.insert(key.clone(), static_plan);
             }
             op_vars.push((eff.clone(), op.clone(), var_name, plan));
         }
@@ -825,6 +1024,7 @@ impl<'a> Lowerer<'a> {
 
         self.no_resume_ops = saved_no_resume_ops;
         self.direct_ops = saved_direct_ops;
+        self.static_tail_resume_ops = saved_static_tail_resume_ops;
         // Restore the body-scope evidence we replaced during pass 2 (it is
         // unused after this point but kept symmetrical with the save). Then
         // restore the caller's evidence as the function exits the `with`.

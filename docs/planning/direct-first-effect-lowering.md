@@ -488,6 +488,10 @@ Related docs:
 - `docs/planning/direct-first-effect-shape-matrix.md` - local checklist for
   call, callable-value, effect-op, handler, dictionary, and Generic shape
   families.
+- `docs/planning/direct-first-optimizer-matrix.md` - staged checklist for
+  post-classifier optimization facts, static tail-resume direct calls,
+  handler-fact recovery, trait/dictionary specialization, and Generic/output
+  specialization.
 - `docs/planning/effectful-call-detection.md` - earlier cleanup plan for
   consolidating effectful call detection. This remains relevant as the first
   slice of the classifier work.
