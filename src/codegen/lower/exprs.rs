@@ -6,7 +6,7 @@ use crate::codegen::cerl::{CArm, CBinSeg, CExpr, CLit, CPat};
 use crate::codegen::runtime_shape::RuntimeFunctionShape;
 use crate::token::Span;
 use crate::typechecker::Type;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use super::pats;
 use super::util::{
@@ -1836,9 +1836,9 @@ impl<'a> Lowerer<'a> {
         pat_id: Option<crate::ast::NodeId>,
         value: &Expr,
     ) {
-        if self.handle_dynamic_vars.contains_key(name) || self.handle_cond_vars.contains_key(name) {
-            return;
-        }
+        self.handler_canonical.remove(name);
+        self.handle_dynamic_vars.remove(name);
+        self.handle_cond_vars.remove(name);
 
         // Direct handler reference: compile-time alias
         if let ExprKind::Var { name: handler_name } = &value.kind
@@ -1860,8 +1860,13 @@ impl<'a> Lowerer<'a> {
                     arms: body.arms.iter().map(|a| a.node.clone()).collect(),
                     return_clause: body.return_clause.clone(),
                     source_module: None,
+                    captures: Vec::new(),
                 },
             );
+            self.handler_canonical.insert(name.to_string(), synthetic);
+            return;
+        }
+        if let Some(synthetic) = self.recover_handler_factory_binding(value) {
             self.handler_canonical.insert(name.to_string(), synthetic);
             return;
         }
@@ -1919,6 +1924,82 @@ impl<'a> Lowerer<'a> {
             self.handle_dynamic_vars
                 .insert(name.to_string(), (var, effects, has_return));
         }
+    }
+
+    fn recover_handler_factory_binding(&mut self, value: &Expr) -> Option<String> {
+        let (factory_name, _head, args) = collect_fun_call(value)?;
+        let factory = self.handler_factory_defs.get(factory_name)?.clone();
+        if factory.params.len() != args.len() {
+            return None;
+        }
+        if !args
+            .iter()
+            .all(|arg| Self::handler_factory_arg_supported(arg))
+        {
+            return None;
+        }
+        if factory.body.return_clause.is_some() {
+            return None;
+        }
+        let captures: Vec<(String, Expr)> = factory
+            .params
+            .iter()
+            .cloned()
+            .zip(args.iter().map(|arg| (*arg).clone()))
+            .collect();
+        if Self::handler_factory_capture_collides(&captures, &factory.body) {
+            return None;
+        }
+
+        let synthetic = format!("__handler_factory_{}", value.id.0);
+        let source_module = factory
+            .source_module
+            .as_deref()
+            .unwrap_or_else(|| self.current_semantic_module_name());
+        let canonical_effects =
+            self.resolved_effect_refs_for_module(source_module, &factory.body.effects);
+        self.handler_defs.insert(
+            synthetic.clone(),
+            super::HandlerInfo {
+                effects: canonical_effects,
+                arms: factory.body.arms.iter().map(|a| a.node.clone()).collect(),
+                return_clause: None,
+                source_module: factory.source_module,
+                captures,
+            },
+        );
+        Some(synthetic)
+    }
+
+    fn handler_factory_arg_supported(expr: &Expr) -> bool {
+        match &expr.kind {
+            ExprKind::Lit { .. }
+            | ExprKind::Var { .. }
+            | ExprKind::Constructor { .. }
+            | ExprKind::QualifiedName { .. }
+            | ExprKind::DictRef { .. }
+            | ExprKind::SymbolIntrinsic { .. } => true,
+            ExprKind::Ascription { expr, .. } => Self::handler_factory_arg_supported(expr),
+            ExprKind::Tuple { elements } | ExprKind::ListLit { elements } => {
+                elements.iter().all(Self::handler_factory_arg_supported)
+            }
+            _ => false,
+        }
+    }
+
+    fn handler_factory_capture_collides(
+        captures: &[(String, Expr)],
+        body: &crate::ast::HandlerBody,
+    ) -> bool {
+        let capture_names: HashSet<&str> = captures.iter().map(|(name, _)| name.as_str()).collect();
+        body.arms
+            .iter()
+            .flat_map(|arm| arm.node.params.iter())
+            .chain(body.return_clause.iter().flat_map(|arm| arm.params.iter()))
+            .any(|param| match param {
+                Pat::Var { name, .. } => capture_names.contains(name.as_str()),
+                _ => false,
+            })
     }
 
     fn dynamic_handler_info_from_expr(&self, expr: &Expr) -> Option<(Vec<String>, bool)> {

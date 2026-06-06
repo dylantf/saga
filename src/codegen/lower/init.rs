@@ -58,6 +58,61 @@ impl<'a> Lowerer<'a> {
         map.get(bare).cloned().unwrap_or_else(|| bare.to_string())
     }
 
+    fn handler_factory_body(expr: &ast::Expr) -> Option<&ast::HandlerBody> {
+        match &expr.kind {
+            ast::ExprKind::HandlerExpr { body } => Some(body),
+            ast::ExprKind::Ascription { expr, .. } => Self::handler_factory_body(expr),
+            ast::ExprKind::Block { stmts, .. } if stmts.len() == 1 => match &stmts[0].node {
+                ast::Stmt::Expr(expr) => Self::handler_factory_body(expr),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    fn handler_factory_params(params: &[ast::Pat]) -> Option<Vec<String>> {
+        params
+            .iter()
+            .map(|param| match param {
+                ast::Pat::Var { name, .. } => Some(name.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn register_handler_factory_defs(&mut self, program: &ast::Program, source_module_name: &str) {
+        for decl in program {
+            let Decl::FunBinding {
+                name,
+                params,
+                guard,
+                body,
+                ..
+            } = decl
+            else {
+                continue;
+            };
+            if guard.is_some() {
+                continue;
+            }
+            let Some(handler_body) = Self::handler_factory_body(body) else {
+                continue;
+            };
+            let Some(param_names) = Self::handler_factory_params(params) else {
+                continue;
+            };
+
+            let info = super::HandlerFactoryInfo {
+                params: param_names,
+                body: handler_body.clone(),
+                source_module: Some(source_module_name.to_string()),
+            };
+            self.handler_factory_defs.insert(name.clone(), info.clone());
+            self.handler_factory_defs
+                .insert(format!("{}.{}", source_module_name, name), info);
+        }
+    }
+
     fn resolved_type_effects_for_module(
         &self,
         module_name: &str,
@@ -254,6 +309,7 @@ impl<'a> Lowerer<'a> {
                             arms: body.arms.iter().map(|a| a.node.clone()).collect(),
                             return_clause: body.return_clause.clone(),
                             source_module: Some(source_module_name.to_string()),
+                            captures: Vec::new(),
                         },
                     );
                 }
@@ -426,6 +482,7 @@ impl<'a> Lowerer<'a> {
                                     arms: body.arms.iter().map(|a| a.node.clone()).collect(),
                                     return_clause: body.return_clause.clone(),
                                     source_module: Some(mod_name.to_string()),
+                                    captures: Vec::new(),
                                 });
                         }
                         Decl::FunSignature { .. } => {}
@@ -542,6 +599,7 @@ impl<'a> Lowerer<'a> {
                             arms: body.arms.iter().map(|a| a.node.clone()).collect(),
                             return_clause: body.return_clause.clone(),
                             source_module: Some(module_name.to_string()),
+                            captures: Vec::new(),
                         });
                 }
                 Decl::FunSignature { .. } => {
@@ -588,6 +646,8 @@ impl<'a> Lowerer<'a> {
                 );
             }
         }
+
+        self.register_handler_factory_defs(program, &source_module_name);
 
         for decl in program {
             if let Decl::FunBinding {
@@ -668,6 +728,7 @@ impl<'a> Lowerer<'a> {
         let (has_module_decl, source_module_name) = Self::source_module_info(program, module_name);
         let (effect_canonical, handler_canonical) =
             self.initialize_canonical_name_maps(program, &source_module_name);
+        self.register_handler_factory_defs(program, &source_module_name);
         self.register_local_module_decls(
             program,
             &source_module_name,

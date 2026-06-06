@@ -166,13 +166,35 @@ without making dynamic handlers globally special.
 
 | Case | Proof Required | Strategy | Fixture | Status |
 | --- | --- | --- | --- | --- |
-| `let h = handler for E { ... }; body with h` | Binding dominates `with`, no shadowing, handler value is static | Treat `with h` as static for the body | New fixture | Todo |
-| Simple handler factory returning handler value | Factory is same-module, small, single result shape, no dynamic branches | Recover handler arms under factory args | `trait-method-specialization/05-let-bound-handler-factory.saga` | Later |
-| Factory with pure config prefix | Prefix can be evaluated once at binding site | Bind prefix once; recovered arms reference prefix values | Routed derive options fixtures | Later |
+| `let h = handler for E { ... }; body with h` | Binding dominates `with`, no shadowing, handler value is static | Treat `with h` as static for the body | `static-tail-resume/14-let-bound-handler.saga` | Done |
+| Simple handler factory returning handler value | Factory is same-module, small, single result shape, no dynamic branches, simple args only | Recover handler arms under factory args | `static-tail-resume/17-handler-factory.saga` | Done |
+| Factory with pure config prefix | Prefix can be evaluated once at binding site | Bind prefix once; recovered arms reference prefix values | `static-tail-resume/19-handler-factory-prefix-guard.saga` | Later/guard |
 | Conditional handler value | Branches produce common runtime handler value | Keep dynamic path | Existing dynamic handler tests | Later |
 | Cross-module public factory | Imported metadata admits factory safely | Recover facts in caller | Cross-module routed fixtures | Later |
 
-Do not start this before Stage 1 has a trace and guard fixtures.
+Recovered handler expressions still use the same proof predicates as named or
+inline handlers. Return-clause and `finally` shapes are pinned by
+`static-tail-resume/16-let-bound-return-guard.saga` and
+`static-tail-resume/15-let-bound-finally-guard.saga`; other leaky shapes follow
+the same Stage 1 guard rules where the surface syntax admits them.
+
+Handler factory recovery is intentionally local and small: same-module
+single-clause factories whose body is exactly a handler expression, with simple
+value arguments. Factory return clauses stay on the evidence path, pinned by
+`static-tail-resume/18-handler-factory-return-guard.saga`. The more realistic
+`trait-method-specialization/05-let-bound-handler-factory.saga` still waits on
+helper/dictionary specialization because the optimized op is hidden behind a
+trait call.
+
+Factories with prefix work stay dynamic for now, pinned by
+`static-tail-resume/19-handler-factory-prefix-guard.saga`. Optimizing them
+requires a binding-site evaluation hook so prefix lets run once when the handler
+value is bound, not repeatedly at each recovered op site.
+
+Conditional handler aliases should be treated as a union of branch facts. A
+`Leaky | Pure` union must reject direct lowering. A future `Pure | Pure`
+optimization needs either same-shape value facts or explicit branch
+specialization; it is intentionally not part of the first recovery slice.
 
 ## Stage 4: Helper/Function Variants Under Static Handlers
 

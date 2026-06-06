@@ -82,6 +82,7 @@ struct RuntimeCpsApplySite<'a> {
 struct StaticTailResumeOp {
     arm: HandlerArm,
     source_module: Option<String>,
+    captures: Vec<(String, Expr)>,
 }
 
 fn count_lambda_params(body: &Expr) -> usize {
@@ -170,6 +171,15 @@ struct HandlerInfo {
     return_clause: Option<Box<HandlerArm>>,
     /// The module this handler was defined in (e.g. "Std.Actor").
     /// Used to identify BEAM-native handlers that need special lowering.
+    source_module: Option<String>,
+    /// Simple factory argument captures recovered at a let-bound handler value.
+    captures: Vec<(String, Expr)>,
+}
+
+#[derive(Clone)]
+struct HandlerFactoryInfo {
+    params: Vec<String>,
+    body: crate::ast::HandlerBody,
     source_module: Option<String>,
 }
 
@@ -273,6 +283,8 @@ pub struct Lowerer<'a> {
     effect_defs: HashMap<String, EffectInfo>,
     /// Maps handler name -> handler arms + return clause.
     handler_defs: HashMap<String, HandlerInfo>,
+    /// Same-module handler factories whose body is exactly a handler expression.
+    handler_factory_defs: HashMap<String, HandlerFactoryInfo>,
     /// Evidence context for the currently-lowered effectful scope. `None` in
     /// pure code. Set by the function-entry plumbing for effectful functions
     /// (var = `_Evidence`) and refreshed at `with` boundaries (var = a fresh
@@ -387,6 +399,7 @@ impl<'a> Lowerer<'a> {
             fun_info: HashMap::new(),
             effect_defs: HashMap::new(),
             handler_defs: HashMap::new(),
+            handler_factory_defs: HashMap::new(),
             current_evidence: None,
             no_resume_ops: std::collections::HashSet::new(),
             direct_ops: HashMap::new(),

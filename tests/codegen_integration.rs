@@ -1857,6 +1857,182 @@ main () = ask! () with add_one_return
 }
 
 #[test]
+fn let_bound_handler_expr_tail_resume_lowers_directly() {
+    let src = r#"
+effect Ask {
+  fun ask : Unit -> Int
+}
+
+main () = {
+  let h = handler for Ask {
+    ask () = resume 41
+  }
+  ask! () with h
+}
+"#;
+    let out = emit_elaborated(src);
+    assert!(
+        !out.contains("_Handle__script_Ask_ask"),
+        "let-bound pure handler expression should recover static tail-resume facts\n{out}"
+    );
+    assert_contains(&out, "41");
+    assert_core_compiles(&out);
+}
+
+#[test]
+fn let_bound_handler_expr_finally_stays_on_evidence_path() {
+    let src = r#"
+effect Ask {
+  fun ask : Unit -> Int
+}
+
+main () = {
+  let h = handler for Ask {
+    ask () = resume 41 finally {
+      ()
+    }
+  }
+  ask! () with h
+}
+"#;
+    let out = emit_elaborated(src);
+    assert_contains(&out, "_Handle__script_Ask_ask");
+    assert_core_compiles(&out);
+}
+
+#[test]
+fn let_bound_handler_expr_return_clause_stays_on_evidence_path() {
+    let src = r#"
+effect Ask {
+  fun ask : Unit -> Int
+}
+
+main () = {
+  let h = handler for Ask {
+    ask () = resume 41
+    return value = value + 1
+  }
+  ask! () with h
+}
+"#;
+    let out = emit_elaborated(src);
+    assert_contains(&out, "_Handle__script_Ask_ask");
+    assert_core_compiles(&out);
+}
+
+#[test]
+fn same_module_handler_factory_tail_resume_lowers_directly() {
+    let src = r#"
+effect Ask {
+  fun ask : Unit -> Int
+}
+
+make_ask n = handler for Ask {
+  ask () = resume n
+}
+
+main () = {
+  let h = make_ask 41
+  ask! () with h
+}
+"#;
+    let out = emit_elaborated(src);
+    assert!(
+        !out.contains("_Handle__script_Ask_ask"),
+        "same-module handler factory should recover static tail-resume facts\n{out}"
+    );
+    assert_contains(&out, "41");
+    assert_core_compiles(&out);
+    assert_runs_and_stdout_contains(src, &["41"]);
+}
+
+#[test]
+fn handler_factory_return_clause_preserves_evidence_path() {
+    let src = r#"
+effect Ask {
+  fun ask : Unit -> Int
+}
+
+make_ask n = handler for Ask {
+  ask () = resume n
+  return value = value + 1
+}
+
+main () = {
+  let h = make_ask 41
+  ask! () with h
+}
+"#;
+    let out = emit_elaborated(src);
+    assert_contains(&out, "apply call 'erlang':'element'");
+    assert_core_compiles(&out);
+    assert_runs_and_stdout_contains(src, &["42"]);
+}
+
+#[test]
+fn handler_factory_with_prefix_stays_on_evidence_path_for_now() {
+    let src = r#"
+effect Ask {
+  fun ask : Unit -> Int
+}
+
+make_ask n = {
+  let m = n + 1
+  handler for Ask {
+    ask () = resume m
+  }
+}
+
+main () = {
+  let h = make_ask 41
+  ask! () with h
+}
+"#;
+    let out = emit_elaborated(src);
+    assert_contains(&out, "apply call 'erlang':'element'");
+    assert_core_compiles(&out);
+    assert_runs_and_stdout_contains(src, &["42"]);
+}
+
+#[test]
+fn repeated_handler_binding_names_do_not_reuse_stale_conditional_facts() {
+    let src = r#"
+effect Log {
+  fun log : String -> Unit
+}
+
+handler loud for Log {
+  log _ = resume ()
+}
+
+handler quiet for Log {
+  log _ = resume ()
+}
+
+do_work () = {
+  log! "working"
+  30
+}
+
+main () = {
+  let conditional = fun () -> {
+    let dev = False
+    let logger = if dev then loud else quiet
+    do_work () with logger
+  }
+  let static = fun () -> {
+    let logger = quiet
+    do_work () with logger
+  }
+  conditional () + static ()
+}
+"#;
+    let out = emit_elaborated(src);
+    assert_core_compiles(&out);
+    assert_runs_and_stdout_contains(src, &["60"]);
+}
+
+#[test]
 fn effectful_prefix_tail_resume_stays_on_evidence_path() {
     let src = r#"
 effect Ask {

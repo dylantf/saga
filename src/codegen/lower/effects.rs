@@ -26,13 +26,13 @@ struct PendingLet {
 enum NamedHandlerItem {
     Static {
         canonical: String,
-        info: super::HandlerInfo,
+        info: Box<super::HandlerInfo>,
     },
     Conditional {
         cond_var: String,
-        cond_ce: CExpr,
-        then_info: super::HandlerInfo,
-        else_info: super::HandlerInfo,
+        cond_ce: Box<CExpr>,
+        then_info: Box<super::HandlerInfo>,
+        else_info: Box<super::HandlerInfo>,
     },
     Dynamic {
         tuple_var: String,
@@ -50,6 +50,7 @@ enum OpHandlerPlan {
         arm: HandlerArm,
         source_module: Option<String>,
         handler_canonical: String,
+        captures: Vec<(String, Expr)>,
     },
     Conditional {
         cond_var: String,
@@ -210,6 +211,11 @@ impl<'a> Lowerer<'a> {
             param_vars,
             runtime_param_positions,
         )?;
+        let capture_bindings: Vec<(String, CExpr)> = plan
+            .captures
+            .iter()
+            .map(|(name, value)| (super::core_var(name), self.lower_expr_value(value)))
+            .collect();
 
         let saved_source_module = self.current_handler_source_module.clone();
         self.current_handler_source_module = plan.source_module;
@@ -225,8 +231,9 @@ impl<'a> Lowerer<'a> {
         self.current_handler_source_module = saved_source_module;
 
         Some(
-            param_bindings
+            capture_bindings
                 .into_iter()
+                .chain(param_bindings)
                 .rev()
                 .fold(lowered_body, |body, (var, val)| {
                     CExpr::Let(var, Box::new(val), Box::new(body))
@@ -309,12 +316,14 @@ impl<'a> Lowerer<'a> {
                     .then_some(super::StaticTailResumeOp {
                         arm,
                         source_module: None,
+                        captures: Vec::new(),
                     })
             }
             OpHandlerPlan::Static {
                 arm,
                 source_module,
                 handler_canonical,
+                captures,
             } if !self.is_beam_native_handler_canonical(handler_canonical)
                 && match source_module {
                     Some(module) => module == &self.current_source_module,
@@ -326,6 +335,7 @@ impl<'a> Lowerer<'a> {
                     .then_some(super::StaticTailResumeOp {
                         arm,
                         source_module: source_module.clone(),
+                        captures: captures.clone(),
                     })
             }
             _ => None,
@@ -826,7 +836,7 @@ impl<'a> Lowerer<'a> {
                     cond_var, cond_ce, ..
                 } = &item
                 {
-                    condition_bindings.push((cond_var.clone(), cond_ce.clone()));
+                    condition_bindings.push((cond_var.clone(), cond_ce.as_ref().clone()));
                 }
                 Some(item)
             }
@@ -1046,8 +1056,11 @@ impl<'a> Lowerer<'a> {
                     self.build_beam_native_op_fun(op, handler_canonical)
                 }
                 OpHandlerPlan::Static {
-                    arm, source_module, ..
-                } => self.build_op_handler_fun(arm, source_module.as_deref()),
+                    arm,
+                    source_module,
+                    captures,
+                    ..
+                } => self.build_op_handler_fun(arm, source_module.as_deref(), captures),
                 OpHandlerPlan::Conditional {
                     cond_var,
                     then_arm,
@@ -1239,7 +1252,12 @@ impl<'a> Lowerer<'a> {
     /// the cleanup code is lowered in the correct lexical scope (where arm body
     /// variables like `conn` are bound). For abort handlers (no resume), cleanup
     /// is appended after the arm body.
-    fn build_op_handler_fun(&mut self, arm: &HandlerArm, source_module: Option<&str>) -> CExpr {
+    fn build_op_handler_fun(
+        &mut self,
+        arm: &HandlerArm,
+        source_module: Option<&str>,
+        captures: &[(String, Expr)],
+    ) -> CExpr {
         let has_resume = arm.body.contains_resume();
         let op_info = self
             .effect_for_handler_arm(arm, source_module)
@@ -1338,6 +1356,14 @@ impl<'a> Lowerer<'a> {
             );
         }
 
+        for (name, value) in captures.iter().rev() {
+            body_ce = CExpr::Let(
+                super::core_var(name),
+                Box::new(self.lower_expr_value(value)),
+                Box::new(body_ce),
+            );
+        }
+
         self.current_handler_source_module = saved_source_module;
         self.current_handler_k = prev_handler_k;
         if has_resume {
@@ -1349,7 +1375,7 @@ impl<'a> Lowerer<'a> {
     fn build_inline_op_handler_fun(&mut self, arms: &[HandlerArm]) -> CExpr {
         match arms {
             [] => self.build_passthrough_handler_fun(),
-            [arm] => self.build_op_handler_fun(arm, None),
+            [arm] => self.build_op_handler_fun(arm, None, &[]),
             [first, ..] => self.build_multi_arm_inline_op_handler_fun(first, arms),
         }
     }
@@ -1497,7 +1523,7 @@ impl<'a> Lowerer<'a> {
         let mut tuple_elements = Vec::new();
         for (_eff, op) in &handler_ops {
             if let Some(arm) = arms_by_op.get(op.as_str()) {
-                tuple_elements.push(self.build_op_handler_fun(arm, None));
+                tuple_elements.push(self.build_op_handler_fun(arm, None, &[]));
             } else {
                 // Passthrough: identity continuation
                 let k_param = self.fresh();
@@ -1533,7 +1559,11 @@ impl<'a> Lowerer<'a> {
         let mut tuple_elements = Vec::new();
         for (_eff, op) in &handler_ops {
             if let Some(arm) = info.arms.iter().find(|a| a.op_name == *op) {
-                tuple_elements.push(self.build_op_handler_fun(arm, info.source_module.as_deref()));
+                tuple_elements.push(self.build_op_handler_fun(
+                    arm,
+                    info.source_module.as_deref(),
+                    &info.captures,
+                ));
             } else {
                 let k_param = self.fresh();
                 tuple_elements.push(CExpr::Fun(
@@ -1649,9 +1679,9 @@ impl<'a> Lowerer<'a> {
                 });
             return NamedHandlerItem::Conditional {
                 cond_var,
-                cond_ce,
-                then_info,
-                else_info,
+                cond_ce: Box::new(cond_ce),
+                then_info: Box::new(then_info),
+                else_info: Box::new(else_info),
             };
         }
         let canonical = self
@@ -1672,7 +1702,10 @@ impl<'a> Lowerer<'a> {
                     name, canonical
                 )
             });
-        NamedHandlerItem::Static { canonical, info }
+        NamedHandlerItem::Static {
+            canonical,
+            info: Box::new(info),
+        }
     }
 
     fn effect_for_handler_arm(
@@ -1744,6 +1777,7 @@ impl<'a> Lowerer<'a> {
                         arm,
                         source_module,
                         handler_canonical: canonical.clone(),
+                        captures: info.captures.clone(),
                     }
                 } else if self.is_beam_native_handler_canonical(canonical) {
                     OpHandlerPlan::BeamNative {
@@ -1819,12 +1853,12 @@ impl<'a> Lowerer<'a> {
         else_source: Option<&str>,
     ) -> CExpr {
         let then_fun = if let Some(arm) = then_arm {
-            self.build_op_handler_fun(arm, then_source)
+            self.build_op_handler_fun(arm, then_source, &[])
         } else {
             self.build_passthrough_handler_fun()
         };
         let else_fun = if let Some(arm) = else_arm {
-            self.build_op_handler_fun(arm, else_source)
+            self.build_op_handler_fun(arm, else_source, &[])
         } else {
             self.build_passthrough_handler_fun()
         };
