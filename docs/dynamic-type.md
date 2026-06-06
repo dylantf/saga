@@ -71,13 +71,20 @@ validation, use the `Validate` effect pattern (see
 
 ### Primitive decoders
 
-Exposed as `val` bindings (not functions — `Decoder` is data, not a computation):
+Exposed as zero-arity bindings:
 
 ```
-pub val string = Decoder decode_string_raw
-pub val int = Decoder decode_int_raw
-pub val float = Decoder decode_float_raw
-pub val bool = Decoder decode_bool_raw
+pub fun string : Decoder String
+string = Decoder decode_string_raw
+
+pub fun int : Decoder Int
+int = Decoder decode_int_raw
+
+pub fun float : Decoder Float
+float = Decoder decode_float_raw
+
+pub fun bool : Decoder Bool
+bool = Decoder decode_bool_raw
 ```
 
 Each `decode_*_raw` function is an `@external` backed by a 2-line Erlang guard

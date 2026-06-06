@@ -8,7 +8,8 @@ import Std.Fail (Fail)
 
 pub record Opts { tag: String }
 
-pub val default_opts = Opts { tag: "default" }
+pub fun default_opts : Opts
+default_opts = Opts { tag: "default" }
 
 # Mirrors saga_json's `J.run : (Json -> a needs {Fail Error}) -> Json -> Result a Error`.
 # Takes a decoder function and applies it to an input under a handler.

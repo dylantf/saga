@@ -239,14 +239,6 @@ fn find_in_decl(decl: &Decl, offset: usize) -> Found {
             value,
             span,
             ..
-        }
-        | Decl::Val {
-            id,
-            name,
-            name_span,
-            value,
-            span,
-            ..
         } => {
             if !contains(span, offset) {
                 return None;

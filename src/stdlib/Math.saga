@@ -4,13 +4,16 @@ module Std.Math
 import Std.Base (Show, Debug, Ord, Semigroup, Enum)
 
 #@ The ratio of a circle's circumference to its diameter.
-pub val pi = 3.141592653589793
+pub fun pi : Float
+pi = 3.141592653589793
 
 #@ Euler's number, the base of the natural logarithm.
-pub val e = 2.718281828459045
+pub fun e : Float
+e = 2.718281828459045
 
 #@ Two times pi. The ratio of a circle's circumference to its radius.
-pub val tau = 6.283185307179586
+pub fun tau : Float
+tau = 6.283185307179586
 
 # --- Functions that need domain validation (via bridge) ---
 

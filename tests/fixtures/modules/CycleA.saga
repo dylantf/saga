@@ -2,4 +2,5 @@ module CycleA
 
 import CycleB
 
-pub val_a = 1
+pub fun val_a : Int
+val_a = 1

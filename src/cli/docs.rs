@@ -126,7 +126,6 @@ fn render_module(module_name: &str, decls: &[Decl]) -> String {
     let mut effects = Vec::new();
     let mut handlers = Vec::new();
     let mut traits = Vec::new();
-    let mut vals = Vec::new();
 
     for decl in decls {
         match decl {
@@ -137,7 +136,6 @@ fn render_module(module_name: &str, decls: &[Decl]) -> String {
             Decl::EffectDef { public: true, .. } => effects.push(decl),
             Decl::HandlerDef { public: true, .. } => handlers.push(decl),
             Decl::TraitDef { public: true, .. } => traits.push(decl),
-            Decl::Val { public: true, .. } => vals.push(decl),
             _ => {}
         }
     }
@@ -171,14 +169,6 @@ fn render_module(module_name: &str, decls: &[Decl]) -> String {
         writeln!(out, "## Handlers\n").unwrap();
         for decl in &handlers {
             render_handler_decl(&mut out, decl);
-        }
-    }
-
-    // Values
-    if !vals.is_empty() {
-        writeln!(out, "## Values\n").unwrap();
-        for decl in &vals {
-            render_val_decl(&mut out, decl);
         }
     }
 
@@ -491,18 +481,6 @@ fn render_trait_decl(out: &mut String, decl: &Decl) {
             writeln!(out).unwrap();
         }
     }
-}
-
-fn render_val_decl(out: &mut String, decl: &Decl) {
-    let Decl::Val { name, doc, .. } = decl else {
-        return;
-    };
-
-    writeln!(out, "### {}\n", name).unwrap();
-    writeln!(out, "```saga").unwrap();
-    writeln!(out, "val {}", name).unwrap();
-    writeln!(out, "```\n").unwrap();
-    render_doc(out, doc);
 }
 
 // --- Type expression formatting (string output, mirroring LSP's type_display) ---

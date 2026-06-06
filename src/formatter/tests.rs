@@ -133,23 +133,6 @@ fn normalize_decl(d: &mut Decl) {
             }
             normalize_expr(value);
         }
-        Decl::Val {
-            id,
-            name_span,
-            annotations,
-            value,
-            span,
-            ..
-        } => {
-            *id = NID;
-            *name_span = S;
-            *span = S;
-            for ann in annotations.iter_mut() {
-                ann.name_span = S;
-                ann.span = S;
-            }
-            normalize_expr(value);
-        }
         Decl::TypeDef {
             id,
             name_span,

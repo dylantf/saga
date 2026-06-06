@@ -35,7 +35,7 @@ record Opts {
   prefix: String,
 }
 
-val default_opts = Opts { prefix: "" }
+default_opts = Opts { prefix: "" }
 
 trait ToJson a {
   fun to_json_with : Opts -> a -> String

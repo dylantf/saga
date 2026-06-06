@@ -16,7 +16,7 @@
 # body below, which re-instantiate the default body against Main.)
 #
 # Same trait shape as saga/examples/99k-generic-derived-defaults.saga,
-# which compiles fine because the trait, the val, and the call site
+# which compiles fine because the trait, the constant, and the call site
 # are all in one module.
 #
 # Note: invoking the defaulted method from `main ()` directly

@@ -138,7 +138,7 @@ pad4 n = show n |> String.pad_left 4 "0"
 fun pad6 : Int -> String
 pad6 n = show n |> String.pad_left 6 "0"
 
-val short_months = [
+short_months = [
   "Jan",
   "Feb",
   "Mar",
@@ -153,7 +153,7 @@ val short_months = [
   "Dec",
 ]
 
-val long_months = [
+long_months = [
   "January",
   "February",
   "March",
@@ -168,9 +168,9 @@ val long_months = [
   "December",
 ]
 
-val short_days = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+short_days = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
 
-val long_days = [
+long_days = [
   "Monday",
   "Tuesday",
   "Wednesday",

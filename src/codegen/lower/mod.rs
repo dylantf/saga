@@ -224,8 +224,6 @@ pub struct Lowerer<'a> {
     /// Pre-resolved name resolution map: NodeId -> ResolvedSymbol.
     /// Built by resolve::resolve_names before lowering.
     resolved: super::resolve::ResolutionMap,
-    /// @inline val name -> lowered expression. Substituted at reference sites.
-    inline_vals: HashMap<String, CExpr>,
     /// Bare handler name -> canonical handler name (e.g. "collect_handler" -> "Std.Test.collect_handler").
     /// Built during init_module for resolving handler references in `with` expressions.
     handler_canonical: HashMap<String, String>,
@@ -292,7 +290,6 @@ impl<'a> Lowerer<'a> {
             current_handler_finally: None,
             current_handler_source_module: None,
             current_handler_inherited_k: None,
-            inline_vals: HashMap::new(),
             handler_canonical: HashMap::new(),
             effect_canonical: HashMap::new(),
             check_result: check_result.clone(),
@@ -1219,123 +1216,6 @@ impl<'a> Lowerer<'a> {
         .populate(program)
     }
 
-    fn inline_val_deps_for_module(
-        expr: &Expr,
-        module_name: &str,
-        inline_exprs: &HashMap<String, Expr>,
-        out: &mut Vec<String>,
-    ) {
-        match &expr.kind {
-            ExprKind::Var { name, .. } => {
-                if inline_exprs.contains_key(name) && !out.contains(name) {
-                    out.push(name.clone());
-                }
-            }
-            ExprKind::QualifiedName { module, name, .. } if module == module_name => {
-                if inline_exprs.contains_key(name) && !out.contains(name) {
-                    out.push(name.clone());
-                }
-            }
-            ExprKind::App { func, arg, .. } => {
-                Self::inline_val_deps_for_module(func, module_name, inline_exprs, out);
-                Self::inline_val_deps_for_module(arg, module_name, inline_exprs, out);
-            }
-            ExprKind::Tuple { elements, .. } | ExprKind::ListLit { elements } => {
-                for e in elements {
-                    Self::inline_val_deps_for_module(e, module_name, inline_exprs, out);
-                }
-            }
-            ExprKind::Cons { head, tail }
-            | ExprKind::BinOp {
-                left: head,
-                right: tail,
-                ..
-            } => {
-                Self::inline_val_deps_for_module(head, module_name, inline_exprs, out);
-                Self::inline_val_deps_for_module(tail, module_name, inline_exprs, out);
-            }
-            ExprKind::UnaryMinus { expr, .. } | ExprKind::Ascription { expr, .. } => {
-                Self::inline_val_deps_for_module(expr, module_name, inline_exprs, out);
-            }
-            _ => {}
-        }
-    }
-
-    fn lower_inline_vals_for_module(
-        &mut self,
-        module_name: &str,
-        inline_exprs: &HashMap<String, Expr>,
-        expose_bare: bool,
-    ) {
-        let mut lowered = HashMap::new();
-        let mut visiting = std::collections::HashSet::new();
-        let names: Vec<String> = inline_exprs.keys().cloned().collect();
-        for name in names {
-            self.lower_inline_val_for_module(
-                module_name,
-                &name,
-                inline_exprs,
-                &mut lowered,
-                &mut visiting,
-                expose_bare,
-            );
-        }
-    }
-
-    fn lower_inline_val_for_module(
-        &mut self,
-        module_name: &str,
-        name: &str,
-        inline_exprs: &HashMap<String, Expr>,
-        lowered: &mut HashMap<String, CExpr>,
-        visiting: &mut std::collections::HashSet<String>,
-        expose_bare: bool,
-    ) -> Option<CExpr> {
-        let canonical = format!("{}.{}", module_name, name);
-        if let Some(existing) = self.inline_vals.get(&canonical).cloned() {
-            return Some(existing);
-        }
-        if let Some(existing) = lowered.get(name).cloned() {
-            return Some(existing);
-        }
-        let expr = inline_exprs.get(name)?;
-        if !visiting.insert(name.to_string()) {
-            return None;
-        }
-
-        let mut deps = Vec::new();
-        Self::inline_val_deps_for_module(expr, module_name, inline_exprs, &mut deps);
-        for dep in deps {
-            if dep != name {
-                self.lower_inline_val_for_module(
-                    module_name,
-                    &dep,
-                    inline_exprs,
-                    lowered,
-                    visiting,
-                    expose_bare,
-                );
-            }
-        }
-
-        let saved_source_module =
-            std::mem::replace(&mut self.current_source_module, module_name.to_string());
-        let lowered_expr = self.lower_expr(expr);
-        self.current_source_module = saved_source_module;
-
-        visiting.remove(name);
-        lowered.insert(name.to_string(), lowered_expr.clone());
-        self.inline_vals
-            .entry(canonical)
-            .or_insert_with(|| lowered_expr.clone());
-        if expose_bare {
-            self.inline_vals
-                .entry(name.to_string())
-                .or_insert_with(|| lowered_expr.clone());
-        }
-        Some(lowered_expr)
-    }
-
     /// Get a function's arity.
     fn fun_arity(&self, name: &str) -> Option<usize> {
         self.fun_info.get(name).map(|f| f.arity)
@@ -1394,16 +1274,13 @@ impl<'a> Lowerer<'a> {
                         call_args,
                         resolved.source_module.as_deref(),
                     ),
-                super::resolve::ResolvedCodegenKind::Intrinsic { .. }
-                | super::resolve::ResolvedCodegenKind::InlineVal => {
+                super::resolve::ResolvedCodegenKind::Intrinsic { .. } => {
                     // Intrinsics are intercepted by `lower_intrinsic` at the
-                    // qualified/bare-call dispatch sites above; inline vals
-                    // are values, not callables, and so cannot legally appear
-                    // as a call head in a well-typed program. This arm exists
+                    // qualified/bare-call dispatch sites above. This arm exists
                     // so the match is exhaustive.
                     debug_assert!(
                         false,
-                        "intrinsic/inline_val should be intercepted upstream: {}",
+                        "intrinsic should be intercepted upstream: {}",
                         resolved.canonical_name,
                     );
                     CExpr::Apply(
@@ -1429,18 +1306,6 @@ impl<'a> Lowerer<'a> {
         resolved: super::resolve::ResolvedSymbol,
     ) -> CExpr {
         match resolved.kind {
-            super::resolve::ResolvedCodegenKind::InlineVal => self
-                .inline_vals
-                .get(&resolved.canonical_name)
-                .cloned()
-                .unwrap_or_else(|| {
-                    panic!(
-                        "resolved inline val was not lowered canonically: {} (source_module={:?}, current_module={})",
-                        resolved.canonical_name,
-                        resolved.source_module,
-                        self.current_source_module,
-                    )
-                }),
             super::resolve::ResolvedCodegenKind::Intrinsic { arity, .. } => {
                 CExpr::FunRef(resolved.name, arity)
             }
@@ -1546,7 +1411,6 @@ impl<'a> Lowerer<'a> {
             &'b [String],
         );
         let mut dict_constructors: Vec<DictCtor<'_>> = Vec::new();
-        let mut val_bindings: Vec<(&str, bool, &Expr)> = Vec::new(); // (name, is_inline, value)
 
         for decl in program {
             match decl {
@@ -1599,7 +1463,7 @@ impl<'a> Lowerer<'a> {
                             base_arity = declared_arity;
                         }
                     }
-                    let shape = self
+                    let mut shape = self
                         .check_result
                         .env
                         .get(name)
@@ -1619,6 +1483,12 @@ impl<'a> Lowerer<'a> {
                                 })
                             }
                         });
+                    if matches!(shape, RuntimeFunctionShape::Pure) && !effects.is_empty() {
+                        shape = RuntimeFunctionShape::Cps(CpsShape {
+                            static_effects: effects.clone(),
+                            is_open_row: false,
+                        });
+                    }
                     let is_open_row = shape.cps_shape().is_some_and(|shape| shape.is_open_row);
                     let arity = shape.expanded_arity(base_arity);
                     if let Some(group) = clause_groups.iter_mut().find(|(n, _, _, _)| n == name) {
@@ -1668,15 +1538,6 @@ impl<'a> Lowerer<'a> {
                         method_open_rows,
                         impl_effects,
                     ));
-                }
-                Decl::Val {
-                    name,
-                    annotations,
-                    value,
-                    ..
-                } => {
-                    let is_inline = annotations.iter().any(|a| a.name == "inline");
-                    val_bindings.push((name, is_inline, value));
                 }
                 _ => {}
             }
@@ -1763,49 +1624,6 @@ impl<'a> Lowerer<'a> {
                 if *public || !is_module {
                     exports.push((name.clone(), arity));
                 }
-            }
-        }
-
-        // Process @inline vals first so their expressions are available for substitution
-        // when lowering function bodies. Lower each module's inline vals under
-        // that module's semantic identity, so sibling refs like `b = a` resolve
-        // against the defining module rather than the importing module.
-        let local_inline_exprs: HashMap<String, Expr> = val_bindings
-            .iter()
-            .filter(|&(_name, is_inline, _value)| *is_inline)
-            .map(|(name, _is_inline, value)| ((*name).to_string(), (*value).clone()))
-            .collect();
-        self.lower_inline_vals_for_module(
-            &self.current_source_module.clone(),
-            &local_inline_exprs,
-            true,
-        );
-
-        let imported_inline_exprs: Vec<(String, HashMap<String, Expr>)> = self
-            .ctx
-            .modules
-            .iter()
-            .filter(|(mod_name, _)| *mod_name != &self.current_source_module)
-            .map(|(mod_name, m)| {
-                (
-                    mod_name.clone(),
-                    m.codegen_info.inline_vals.iter().cloned().collect(),
-                )
-            })
-            .collect();
-        for (mod_name, inline_exprs) in imported_inline_exprs {
-            self.lower_inline_vals_for_module(&mod_name, &inline_exprs, false);
-        }
-        for (mod_name, m) in &self.ctx.modules {
-            if mod_name == &self.current_source_module {
-                continue;
-            }
-            for (val_name, _) in &m.codegen_info.inline_vals {
-                let canonical = format!("{}.{}", mod_name, val_name);
-                debug_assert!(
-                    self.inline_vals.contains_key(&canonical),
-                    "imported inline val was not lowered canonically: {canonical}"
-                );
             }
         }
 
@@ -2027,23 +1845,6 @@ impl<'a> Lowerer<'a> {
                 name: name.to_string(),
                 arity,
                 body: CExpr::Fun(params, Box::new(body)),
-            });
-        }
-
-        // Lower non-inline val bindings to zero-arity functions.
-        // (Inline vals were already processed before function clause lowering.)
-        for (name, is_inline, value) in val_bindings {
-            if is_inline {
-                continue; // already in self.inline_vals
-            }
-            let lowered = self.lower_expr(value);
-            if !is_module || self.pub_names.contains(name) {
-                exports.push((name.to_string(), 0));
-            }
-            fun_defs.push(CFunDef {
-                name: name.to_string(),
-                arity: 0,
-                body: CExpr::Fun(vec![], Box::new(lowered)),
             });
         }
 
@@ -3831,8 +3632,7 @@ impl<'a> Lowerer<'a> {
                         | super::resolve::ResolvedCodegenKind::ExternalFunction { .. } => {
                             self.lower_resolved_value_ref(expr.id, resolved)
                         }
-                        super::resolve::ResolvedCodegenKind::Intrinsic { .. }
-                        | super::resolve::ResolvedCodegenKind::InlineVal => {
+                        super::resolve::ResolvedCodegenKind::Intrinsic { .. } => {
                             panic!(
                                 "dict ref resolved to non-dictionary codegen kind: {}",
                                 resolved.canonical_name

@@ -61,11 +61,6 @@ fn find_in_decl(decl: &Decl, name: &str) -> Option<Span> {
             name: let_name,
             span,
             ..
-        }
-        | Decl::Val {
-            name: let_name,
-            span,
-            ..
         } if let_name == name => Some(*span),
 
         Decl::TypeDef {

@@ -1,32 +1,12 @@
 use std::collections::HashMap;
 
-use crate::ast::{self, Decl, ExprKind, Lit, TypeParam};
+use crate::ast::{self, Decl, TypeParam};
 
 use super::result::CheckResult;
 use super::{
     Checker, Diagnostic, EffectDefInfo, EffectEntry, EffectOpSig, EffectRow, HandlerInfo,
-    RecordInfo, Scheme, Span, Type, find_effect_call,
+    RecordInfo, Scheme, Span, Type,
 };
-
-/// Check if an expression is a compile-time inlineable value:
-/// scalar literals, lists/tuples of inlineable values, constructors, or refs to other vals.
-/// Note: list literals [1, 2, 3] are desugared to Cons/Nil chains before typechecking,
-/// so we also accept Constructor and App(Constructor, ...) forms.
-fn is_inlineable_expr(expr: &ast::Expr) -> bool {
-    match &expr.kind {
-        ExprKind::Lit { value, .. } => matches!(
-            value,
-            Lit::Int(..) | Lit::Float(..) | Lit::String(..) | Lit::Bool(..)
-        ),
-        ExprKind::ListLit { elements, .. } => elements.iter().all(is_inlineable_expr),
-        ExprKind::Tuple { elements, .. } => elements.iter().all(is_inlineable_expr),
-        ExprKind::Constructor { .. } => true, // Nil, True, etc.
-        ExprKind::App { func, arg, .. } => is_inlineable_expr(func) && is_inlineable_expr(arg),
-        ExprKind::Var { .. } => true, // reference to another val (validated at use site)
-        ExprKind::UnaryMinus { expr: inner, .. } => is_inlineable_expr(inner),
-        _ => false,
-    }
-}
 
 /// Walk an arrow chain and return the EffectRow from the innermost Fun.
 fn innermost_effect_row(ty: &Type) -> Option<EffectRow> {
@@ -53,9 +33,15 @@ fn collect_arrow_effects(ty: &Type, out: &mut std::collections::HashSet<String>)
 /// Annotations collected from FunAnnotation declarations:
 /// (name -> (type, span)) and (name -> where clause constraints).
 type Annotations = (
-    HashMap<String, (Type, Span)>,
+    HashMap<String, (Type, Span, EffectRow)>,
     HashMap<String, Vec<(String, u32, Vec<Type>)>>,
 );
+
+struct FunctionAnnotation<'a> {
+    ty: Option<&'a Type>,
+    span: Option<Span>,
+    effect_row: Option<&'a EffectRow>,
+}
 
 impl Checker {
     pub(crate) fn build_effect_row_from_refs(
@@ -232,22 +218,25 @@ impl Checker {
                 }
                 let clauses: Vec<&Decl> = program[start..i].iter().collect();
                 let fun_var = fun_vars[&name].clone();
-                let (annotation, annotation_span) = match annotations.get(&name).cloned() {
-                    Some((ty, span)) => (Some(ty), Some(span)),
-                    None => (None, None),
+                let annotation = match annotations.get(&name) {
+                    Some((ty, span, row)) => FunctionAnnotation {
+                        ty: Some(ty),
+                        span: Some(*span),
+                        effect_row: Some(row),
+                    },
+                    None => FunctionAnnotation {
+                        ty: None,
+                        span: None,
+                        effect_row: None,
+                    },
                 };
                 let where_cons = annotation_constraints
                     .get(&name)
                     .map(|v| v.as_slice())
                     .unwrap_or(&[]);
-                if let Err(e) = self.check_fun_clauses(
-                    &name,
-                    &clauses,
-                    &fun_var,
-                    annotation.as_ref(),
-                    annotation_span,
-                    where_cons,
-                ) {
+                if let Err(e) =
+                    self.check_fun_clauses(&name, &clauses, &fun_var, annotation, where_cons)
+                {
                     errors.push(e);
                     // Clear pending constraints for this function -- they may reference
                     // unresolved types from the error site and would produce cascading errors
@@ -355,7 +344,7 @@ impl Checker {
                     _ => None,
                 })
                 .collect();
-            for (name, (_, span)) in &annotations {
+            for (name, (_, span, _)) in &annotations {
                 if !bound_names.contains(name.as_str()) && !bodyless_names.contains(name.as_str()) {
                     errors.push(Diagnostic::error_at(
                         *span,
@@ -394,66 +383,6 @@ impl Checker {
                     self.unify_at(&ty, &ann_ty, *span)?;
                 }
                 let scheme = self.generalize(&ty);
-                self.env.insert_with_def(name.clone(), scheme, *id);
-                self.lsp.node_spans.insert(*id, *name_span);
-                Ok(())
-            }
-
-            Decl::Val {
-                id,
-                name,
-                name_span,
-                annotations,
-                value,
-                span,
-                ..
-            } => {
-                let saved = self.save_effects();
-                let ty = self.infer_expr(value)?;
-                let accumulated = self.restore_effects(saved);
-
-                // Val bindings must be pure (no effects)
-                if !accumulated.is_empty() {
-                    let err_span = find_effect_call(value).unwrap_or(*span);
-                    return Err(Diagnostic::error_at(
-                        err_span,
-                        format!(
-                            "'val' bindings must be pure (no effects), but '{}' uses effects",
-                            name
-                        ),
-                    ));
-                }
-
-                // Val bindings cannot have function type
-                let resolved = self.sub.apply(&ty);
-                if matches!(resolved, Type::Fun(..)) {
-                    return Err(Diagnostic::error_at(
-                        *span,
-                        "'val' bindings cannot have function type; use 'fun' to define functions instead".to_string(),
-                    ));
-                }
-
-                // @inline vals must have compile-time inlineable RHS
-                if annotations.iter().any(|a| a.name == "inline") && !is_inlineable_expr(value) {
-                    return Err(Diagnostic::error_at(
-                        *span,
-                        format!(
-                            "@inline val '{}' must have a compile-time literal value (scalar, list, or tuple of literals)",
-                            name
-                        ),
-                    ));
-                }
-
-                // Unify with the pre-bound fresh var (see pre_bind_functions)
-                // so any forward references from impl method bodies pin to
-                // the same type variable as the val's inferred RHS.
-                if let Some(prebound) = self.env.get(name).cloned()
-                    && let Type::Var(_) = prebound.ty
-                {
-                    self.unify_at(&prebound.ty, &ty, *span)?;
-                }
-                let resolved_ty = self.sub.apply(&ty);
-                let scheme = self.generalize(&resolved_ty);
                 self.env.insert_with_def(name.clone(), scheme, *id);
                 self.lsp.node_spans.insert(*id, *name_span);
                 Ok(())
@@ -734,7 +663,7 @@ impl Checker {
         &mut self,
         program: &[Decl],
     ) -> std::result::Result<Annotations, Vec<Diagnostic>> {
-        let mut annotations: HashMap<String, (Type, Span)> = HashMap::new();
+        let mut annotations: HashMap<String, (Type, Span, EffectRow)> = HashMap::new();
         let mut annotation_constraints: HashMap<String, Vec<(String, u32, Vec<Type>)>> =
             HashMap::new();
 
@@ -765,9 +694,12 @@ impl Checker {
                 let fun_ty = self.function_type_with_innermost_effects(
                     &param_types,
                     return_ty,
-                    fun_effect_row,
+                    fun_effect_row.clone(),
                 );
-                annotations.insert(name.clone(), (fun_ty.clone(), *span));
+                annotations.insert(
+                    name.clone(),
+                    (fun_ty.clone(), *span, fun_effect_row.clone()),
+                );
 
                 // Always register in known_funs (even pure functions) so the
                 // `with` validation can distinguish local declarations
@@ -860,42 +792,16 @@ impl Checker {
         Ok((annotations, annotation_constraints))
     }
 
-    /// Pass 5: Pre-bind all function and val names with fresh vars.
-    /// For functions, this enables mutual recursion. For vals, this lets
-    /// trait/impl method bodies (checked in Pass 6) reference top-level vals
-    /// declared anywhere in the module — without pre-binding, vals are only
-    /// processed in the main pass, after impls are typechecked.
+    /// Pass 5: Pre-bind all function names with fresh vars. This enables
+    /// mutual recursion and lets trait/impl method bodies (checked in Pass 6)
+    /// reference top-level zero-arity bindings declared anywhere in the module.
     fn pre_bind_functions(
         &mut self,
         program: &[Decl],
-        annotations: &HashMap<String, (Type, Span)>,
+        annotations: &HashMap<String, (Type, Span, EffectRow)>,
     ) -> HashMap<String, Type> {
         let mut fun_vars: HashMap<String, Type> = HashMap::new();
         for decl in program {
-            if let Decl::Val {
-                id,
-                name,
-                name_span,
-                ..
-            } = decl
-            {
-                if self.env.get(name).is_some() {
-                    continue;
-                }
-                let var = self.fresh_var();
-                fun_vars.insert(name.clone(), var.clone());
-                self.env.insert_with_def(
-                    name.clone(),
-                    Scheme {
-                        forall: vec![],
-                        constraints: vec![],
-                        ty: var,
-                    },
-                    *id,
-                );
-                self.lsp.node_spans.insert(*id, *name_span);
-                continue;
-            }
             if let Decl::FunBinding {
                 id,
                 name,
@@ -1020,20 +926,22 @@ impl Checker {
 
     /// Check a group of function clauses that share the same name.
     /// Handles recursion (pre-binds name) and multi-clause pattern matching.
-    pub(crate) fn check_fun_clauses(
+    fn check_fun_clauses(
         &mut self,
         name: &str,
         clauses: &[&Decl],
         fun_var: &Type,
-        annotation: Option<&Type>,
-        annotation_span: Option<Span>,
+        annotation: FunctionAnnotation<'_>,
         where_constraints: &[(String, u32, Vec<Type>)],
     ) -> Result<(), Diagnostic> {
+        let annotation_span = annotation.span;
         // All clauses must have the same arity
         let arity = match clauses[0] {
             Decl::FunBinding { params, .. } => params.len(),
             _ => unreachable!(),
         };
+        let declared_effect_row = (arity == 0).then_some(annotation.effect_row).flatten();
+        let annotation = annotation.ty;
 
         let result_ty = self.fresh_var();
         let param_types: Vec<Type> = (0..arity).map(|_| self.fresh_var()).collect();
@@ -1226,8 +1134,10 @@ impl Checker {
         // point the callback is invoked. Detect this here so the user gets a
         // typechecker error instead of a codegen ICE.
         if let Some(ann) = annotation {
-            let declared_row_for_check =
-                innermost_effect_row(&self.sub.apply(ann)).unwrap_or_else(EffectRow::empty);
+            let declared_row_for_check = declared_effect_row
+                .map(|row| self.sub.apply_effect_row(row))
+                .or_else(|| innermost_effect_row(&self.sub.apply(ann)))
+                .unwrap_or_else(EffectRow::empty);
             let declared_names: std::collections::HashSet<String> = declared_row_for_check
                 .effects
                 .iter()
@@ -1294,8 +1204,9 @@ impl Checker {
         let scope_result = self.exit_scope(body_scope);
         let body_field_candidates = scope_result.field_candidates;
 
-        let declared_row = annotation
-            .and_then(|ann| innermost_effect_row(&self.sub.apply(ann)))
+        let declared_row = declared_effect_row
+            .map(|row| self.sub.apply_effect_row(row))
+            .or_else(|| annotation.and_then(|ann| innermost_effect_row(&self.sub.apply(ann))))
             .unwrap_or_else(EffectRow::empty);
 
         // A callback parameter with an open effect row (..e) represents
@@ -1427,8 +1338,9 @@ impl Checker {
         // 2. The inferred body effects (for unannotated functions)
         // 3. Empty row (for pure functions)
         let mut fun_ty = result_ty;
-        let effect_row = annotation
-            .and_then(|ann| innermost_effect_row(&self.sub.apply(ann)))
+        let effect_row = declared_effect_row
+            .map(|row| self.sub.apply_effect_row(row))
+            .or_else(|| annotation.and_then(|ann| innermost_effect_row(&self.sub.apply(ann))))
             .or_else(|| {
                 if all_body_effs.is_empty() {
                     None
@@ -1465,24 +1377,6 @@ impl Checker {
                     format!("type annotation mismatch for '{}': {}", name, e.message),
                 )
             })?;
-        }
-
-        // Zero-param bindings only make sense as eta-reduced function values
-        // (e.g. `add_five = add 5` where the body has type `Int -> Int`). When
-        // the body is a non-function value, the user wrote a constant under
-        // `fun`-binding syntax and should use `val` instead. The parser cannot
-        // distinguish these cases up-front because the body is typechecked here.
-        if arity == 0 && !matches!(self.sub.apply(&fun_ty), Type::Fun(_, _, _)) {
-            let span = match clauses[0] {
-                Decl::FunBinding { span, .. } => *span,
-                _ => unreachable!(),
-            };
-            return Err(Diagnostic::error_at(
-                span,
-                format!(
-                    "`{name}` has no parameters and its body is not a function; use `val {name} = ...` for constants"
-                ),
-            ));
         }
 
         let scheme = self.build_fun_scheme(

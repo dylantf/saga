@@ -679,7 +679,7 @@ mod tests {
                 }
                 walk(body, ids);
             }
-            Decl::Let { value, .. } | Decl::Val { value, .. } => walk(value, ids),
+            Decl::Let { value, .. } => walk(value, ids),
             Decl::HandlerDef {
                 body,
                 recovered_arms,

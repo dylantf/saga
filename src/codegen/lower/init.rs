@@ -339,12 +339,6 @@ impl<'a> Lowerer<'a> {
                         );
                     }
                 }
-                Decl::Val { public, name, .. } => {
-                    if *public {
-                        self.pub_names.insert(name.clone());
-                    }
-                    self.fun_info.insert(name.clone(), FunInfo::default());
-                }
                 _ => {}
             }
         }
@@ -596,77 +590,68 @@ impl<'a> Lowerer<'a> {
         }
 
         for decl in program {
-            match decl {
-                Decl::FunBinding {
-                    name, params, body, ..
-                } => {
-                    let PendingAnnotation {
-                        effects,
-                        param_absorbed_effects,
-                    } = pending_annotations
-                        .remove(name.as_str())
-                        .unwrap_or(PendingAnnotation {
-                            effects: Vec::new(),
-                            param_absorbed_effects: HashMap::new(),
-                        });
-                    let mut base_arity = params.len() + count_lambda_params(body);
-                    // Use annotation arity for eta-reduced functions (same fix as mod.rs)
-                    if let Some(scheme) = self.check_result.env.get(name) {
-                        let declared = super::util::arity_and_effects_from_type(
-                            &self.check_result.sub.apply(&scheme.ty),
-                        )
-                        .0;
-                        if declared > base_arity {
-                            base_arity = declared;
-                        }
+            if let Decl::FunBinding {
+                name, params, body, ..
+            } = decl
+            {
+                let PendingAnnotation {
+                    effects,
+                    param_absorbed_effects,
+                } = pending_annotations
+                    .remove(name.as_str())
+                    .unwrap_or(PendingAnnotation {
+                        effects: Vec::new(),
+                        param_absorbed_effects: HashMap::new(),
+                    });
+                let mut base_arity = params.len() + count_lambda_params(body);
+                // Use annotation arity for eta-reduced functions (same fix as mod.rs)
+                if let Some(scheme) = self.check_result.env.get(name) {
+                    let declared = super::util::arity_and_effects_from_type(
+                        &self.check_result.sub.apply(&scheme.ty),
+                    )
+                    .0;
+                    if declared > base_arity {
+                        base_arity = declared;
                     }
-                    let shape = self
-                        .check_result
-                        .env
-                        .get(name)
-                        .map(|scheme| {
-                            let ty = self.check_result.sub.apply(&scheme.ty);
-                            RuntimeFunctionShape::from_type(&ty, |effects| {
-                                self.canonicalize_effects(effects)
+                }
+                let shape = self
+                    .check_result
+                    .env
+                    .get(name)
+                    .map(|scheme| {
+                        let ty = self.check_result.sub.apply(&scheme.ty);
+                        RuntimeFunctionShape::from_type(&ty, |effects| {
+                            self.canonicalize_effects(effects)
+                        })
+                    })
+                    .unwrap_or_else(|| {
+                        if effects.is_empty() {
+                            RuntimeFunctionShape::Pure
+                        } else {
+                            RuntimeFunctionShape::Cps(CpsShape {
+                                static_effects: effects.clone(),
+                                is_open_row: false,
                             })
-                        })
-                        .unwrap_or_else(|| {
-                            if effects.is_empty() {
-                                RuntimeFunctionShape::Pure
-                            } else {
-                                RuntimeFunctionShape::Cps(CpsShape {
-                                    static_effects: effects.clone(),
-                                    is_open_row: false,
-                                })
-                            }
-                        });
-                    let is_open_row = shape.cps_shape().is_some_and(|shape| shape.is_open_row);
-                    let arity = shape.expanded_arity(base_arity);
-                    let param_types = self
-                        .check_result
-                        .env
-                        .get(name)
-                        .map(|scheme| {
-                            util::param_types_from_type(&self.check_result.sub.apply(&scheme.ty))
-                        })
-                        .unwrap_or_default();
-                    let canonical = format!("{}.{}", source_module_name, name);
-                    self.fun_info.entry(canonical).or_insert(FunInfo {
-                        arity,
-                        effects,
-                        is_open_row,
-                        param_absorbed_effects,
-                        param_types,
+                        }
                     });
-                }
-                Decl::Val { name, .. } => {
-                    let canonical = format!("{}.{}", source_module_name, name);
-                    self.fun_info.entry(canonical).or_insert(FunInfo {
-                        arity: 0,
-                        ..Default::default()
-                    });
-                }
-                _ => {}
+                let is_open_row = shape.cps_shape().is_some_and(|shape| shape.is_open_row);
+                let arity = shape.expanded_arity(base_arity);
+                let param_types = self
+                    .check_result
+                    .env
+                    .get(name)
+                    .map(|scheme| {
+                        util::param_types_from_type(&self.check_result.sub.apply(&scheme.ty))
+                    })
+                    .unwrap_or_default();
+                let canonical = format!("{}.{}", source_module_name, name);
+                self.fun_info.entry(canonical).or_insert(FunInfo {
+                    arity,
+                    effects,
+                    is_open_row,
+                    param_absorbed_effects,
+                    param_types,
+                });
             }
         }
     }

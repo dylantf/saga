@@ -41,25 +41,29 @@ pub type Decoder a =
 fun decode_string_raw : Dynamic -> Result String DecodeError
 
 #@ Decoder for String values.
-pub val string = Decoder decode_string_raw
+pub fun string : Decoder String
+string = Decoder decode_string_raw
 
 @external("erlang", "std_dynamic_bridge", "decode_int")
 fun decode_int_raw : Dynamic -> Result Int DecodeError
 
 #@ Decoder for Int values.
-pub val int = Decoder decode_int_raw
+pub fun int : Decoder Int
+int = Decoder decode_int_raw
 
 @external("erlang", "std_dynamic_bridge", "decode_float")
 fun decode_float_raw : Dynamic -> Result Float DecodeError
 
 #@ Decoder for Float values.
-pub val float = Decoder decode_float_raw
+pub fun float : Decoder Float
+float = Decoder decode_float_raw
 
 @external("erlang", "std_dynamic_bridge", "decode_bool")
 fun decode_bool_raw : Dynamic -> Result Bool DecodeError
 
 #@ Decoder for Bool values.
-pub val bool = Decoder decode_bool_raw
+pub fun bool : Decoder Bool
+bool = Decoder decode_bool_raw
 
 # --- Utilities ---
 

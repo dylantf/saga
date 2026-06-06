@@ -194,8 +194,6 @@ pub enum ResolvedCodegenKind {
         id: crate::intrinsics::IntrinsicId,
         arity: usize,
     },
-    /// An `@inline val`; lowering clones the canonical lowered RHS.
-    InlineVal,
 }
 
 impl ResolvedCodegenKind {
@@ -204,7 +202,6 @@ impl ResolvedCodegenKind {
             ResolvedCodegenKind::BeamFunction { arity, .. }
             | ResolvedCodegenKind::ExternalFunction { arity, .. }
             | ResolvedCodegenKind::Intrinsic { arity, .. } => *arity,
-            ResolvedCodegenKind::InlineVal => 0,
         }
     }
 
@@ -212,7 +209,7 @@ impl ResolvedCodegenKind {
         match self {
             ResolvedCodegenKind::BeamFunction { effects, .. }
             | ResolvedCodegenKind::ExternalFunction { effects, .. } => effects,
-            ResolvedCodegenKind::Intrinsic { .. } | ResolvedCodegenKind::InlineVal => &[],
+            ResolvedCodegenKind::Intrinsic { .. } => &[],
         }
     }
 }
@@ -526,7 +523,7 @@ fn resolve_decl(
             resolve_expr(body, scope, map, front_resolution);
             scope.pop();
         }
-        Decl::Let { value, .. } | Decl::Val { value, .. } => {
+        Decl::Let { value, .. } => {
             resolve_expr(value, scope, map, front_resolution);
         }
         Decl::HandlerDef { body, .. } => {
@@ -924,9 +921,6 @@ fn collect_local_fun_arities(program: &Program) -> HashMap<String, usize> {
             Decl::FunBinding { name, params, .. } => {
                 local_funs.entry(name.clone()).or_insert(params.len());
             }
-            Decl::Val { name, .. } => {
-                local_funs.entry(name.clone()).or_insert(0);
-            }
             Decl::FunSignature {
                 name,
                 params,
@@ -943,7 +937,7 @@ fn collect_local_fun_arities(program: &Program) -> HashMap<String, usize> {
 }
 
 /// Classify a declaration into its codegen kind by consulting the module's
-/// `intrinsic_exports` / `inline_vals` / `external_funs` tables. Shared by
+/// `intrinsic_exports` / `external_funs` tables. Shared by
 /// local-scope registration (`erlang_mod_for_beam = None`) and imported-scope
 /// registration (`erlang_mod_for_beam = Some(...)`).
 ///
@@ -965,9 +959,6 @@ fn classify_codegen_kind(
             id: *intrinsic,
             arity,
         };
-    }
-    if info.is_some_and(|info| info.inline_vals.iter().any(|(n, _)| n == name)) {
-        return ResolvedCodegenKind::InlineVal;
     }
     if let Some((_, target_mod, target_fun, _)) = info.and_then(|info| {
         info.external_funs

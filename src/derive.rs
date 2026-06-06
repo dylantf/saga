@@ -179,10 +179,7 @@ fn module_summary(program: &[Decl]) -> ModuleSummary {
     let defining_module_values: std::collections::HashSet<String> = program
         .iter()
         .filter_map(|d| match d {
-            Decl::Val {
-                name, public: true, ..
-            }
-            | Decl::FunSignature {
+            Decl::FunSignature {
                 name, public: true, ..
             } => Some(name.clone()),
             _ => None,
@@ -457,7 +454,6 @@ pub fn expand_derives(program: &mut Vec<Decl>, imported: &ImportedDecls) -> Vec<
     let local_defining_values: std::collections::HashSet<String> = original
         .iter()
         .filter_map(|d| match d {
-            Decl::Val { name, .. } => Some(name.clone()),
             Decl::FunSignature { name, .. } => Some(name.clone()),
             _ => None,
         })
@@ -1083,7 +1079,7 @@ pub struct RoutedTraitInfo {
     /// resolve against the trait's defining module rather than the
     /// downstream impl-site module.
     pub defining_module: Option<String>,
-    /// Names of top-level `val`/`fun` bindings exported from
+    /// Names of top-level `fun` bindings exported from
     /// `defining_module`. A free identifier inside a cloned default body
     /// that matches one of these names is rewritten to a `QualifiedName`
     /// referencing the trait's module, so cross-module impls don't see
