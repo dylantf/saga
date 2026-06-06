@@ -32,6 +32,23 @@ impl Lowerer<'_> {
         }
     }
 
+    pub(super) fn lower_intrinsic_values(
+        &mut self,
+        intrinsic: crate::intrinsics::IntrinsicId,
+        args: Vec<CExpr>,
+    ) -> Option<CExpr> {
+        match intrinsic {
+            crate::intrinsics::IntrinsicId::PrintStdout => {
+                self.lower_builtin_print_values(args, false, false)
+            }
+            crate::intrinsics::IntrinsicId::PrintStderr => {
+                self.lower_builtin_print_values(args, true, false)
+            }
+            crate::intrinsics::IntrinsicId::Dbg => self.lower_builtin_dbg_values(args),
+            crate::intrinsics::IntrinsicId::CatchPanic => None,
+        }
+    }
+
     /// Lower print/println/eprint/eprintln to io:format.
     /// `x` is always a String.
     pub(super) fn lower_builtin_print(
@@ -44,6 +61,19 @@ impl Lowerer<'_> {
             return None;
         }
         let val = self.lower_expr(args[0]);
+        self.lower_builtin_print_values(vec![val], stderr, newline)
+    }
+
+    fn lower_builtin_print_values(
+        &mut self,
+        mut args: Vec<CExpr>,
+        stderr: bool,
+        newline: bool,
+    ) -> Option<CExpr> {
+        if args.len() != 1 {
+            return None;
+        }
+        let val = args.remove(0);
         let v = self.fresh();
         let fmt = if newline { "~ts~n" } else { "~ts" };
         let mut fmt_args = vec![
@@ -65,8 +95,23 @@ impl Lowerer<'_> {
     pub(super) fn lower_builtin_dbg(&mut self, args: &[&crate::ast::Expr]) -> Option<CExpr> {
         match args.len() {
             1 => {
-                // Partial application: fn2 = dbg -> fn2(dict) = fun(v) -> dbg_inline(dict, v)
                 let dict = self.lower_expr(args[0]);
+                self.lower_builtin_dbg_values(vec![dict])
+            }
+            2 => {
+                let dict = self.lower_expr(args[0]);
+                let val = self.lower_expr(args[1]);
+                self.lower_builtin_dbg_values(vec![dict, val])
+            }
+            _ => None,
+        }
+    }
+
+    fn lower_builtin_dbg_values(&mut self, mut args: Vec<CExpr>) -> Option<CExpr> {
+        match args.len() {
+            1 => {
+                // Partial application: fn2 = dbg -> fn2(dict) = fun(v) -> dbg_inline(dict, v)
+                let dict = args.remove(0);
                 let d = self.fresh();
                 let v_param = self.fresh();
                 let body = self.dbg_body(CExpr::Var(d.clone()), CExpr::Var(v_param.clone()));
@@ -74,8 +119,8 @@ impl Lowerer<'_> {
                 Some(CExpr::Let(d, Box::new(dict), Box::new(lambda)))
             }
             2 => {
-                let dict = self.lower_expr(args[0]);
-                let val = self.lower_expr(args[1]);
+                let val = args.pop().expect("checked len");
+                let dict = args.pop().expect("checked len");
                 let d = self.fresh();
                 let v = self.fresh();
                 let body = self.dbg_body(CExpr::Var(d.clone()), CExpr::Var(v.clone()));

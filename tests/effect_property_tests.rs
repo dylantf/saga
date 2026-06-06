@@ -2502,6 +2502,39 @@ result () = {
 }
 
 #[test]
+fn multiple_intrinsics_with_effectful_function_arguments_under_handler_factory() {
+    let src = r#"module Main
+
+effect Ask {
+  fun ask : String -> String
+}
+
+fun answer : String -> String needs {Ask}
+answer label = ask! label
+
+fun ask_handler : String -> Handler Ask
+ask_handler prefix = handler for Ask {
+  ask label = resume (prefix <> label)
+}
+
+pub fun result : Unit -> String
+result () = {
+  let h = ask_handler "["
+  {
+    dbg (answer "a")
+    dbg (answer "b")
+    "done"
+  } with h
+}
+"#;
+    check_result_string(
+        "multiple_intrinsics_with_effectful_function_arguments_under_handler_factory",
+        src,
+        "done",
+    );
+}
+
+#[test]
 fn pure_only_list_runs_without_adapter_wrapping() {
     // Lists of only-pure elements should not gain spurious effect
     // wrapping. Verifies that the join's all-closed branch returns a

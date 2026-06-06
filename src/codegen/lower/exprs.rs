@@ -1507,6 +1507,18 @@ impl<'a> Lowerer<'a> {
                             })
                             .collect();
                         return self.lower_with_cps_slots(slots, k_var, move |this, arg_vars| {
+                            if let Some(resolved) = this.resolved.get(&callee.id).cloned()
+                                && let super::super::resolve::ResolvedCodegenKind::Intrinsic {
+                                    id,
+                                    ..
+                                } = resolved.kind
+                                && let Some(ce) = this.lower_intrinsic_values(
+                                    id,
+                                    arg_vars.iter().map(|v| CExpr::Var(v.clone())).collect(),
+                                )
+                            {
+                                return ce;
+                            }
                             let callee_ce = this.lower_expr(callee);
                             CExpr::Apply(
                                 Box::new(callee_ce),
