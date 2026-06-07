@@ -29,10 +29,14 @@ effects through a per-constraint row variable.
     effectful impl stays pure); union fallback for where-bound function calls.
 - **Bounding check.** `register_impl` rejects an impl whose method body uses
   effects the trait method's row does not permit (see the matrix below).
+- **Open-row generic surfacing + required forwarding.** A generic function over
+  an *open-row* trait method surfaces the constraint's effects as `..a` in its
+  own row and must forward them, or it's an error. See "How it works" below;
+  this was the last piece and is now implemented.
 
-**Remaining (this doc's task):** generic functions over an *open-row* trait
-method must surface and forward the constraint's effects as `..a` in their own
-signature, instead of propagating implicitly. See "Work remaining".
+All phases of this design are implemented. This doc is retained as the design
+rationale; the implementation notes live in
+[trait-dict-passing.md](../trait-dict-passing.md) ("Trait Method Effects").
 
 ## The problem this solves
 
@@ -135,58 +139,61 @@ A `..name` row variable reuses the var id of a same-named type parameter
 (`convert_type_expr`, [unify.rs](../../src/typechecker/unify.rs) ~L914), so
 `needs {..a}` and `where {a: Foo}` already share the variable `a`.
 
-## Work remaining (Phase B)
-
-Two parts.
-
-### 1. Fix tests broken by the bounding check (mechanical)
-
-The bounding check correctly rejects pure-trait + effectful-impl. Tests that
-encoded the old permissive behavior must move to the opt-in form (declare an
-open row on the trait method). Affected typechecker tests:
-`impl_uses_effect_with_correct_needs_ok`,
-`concrete_trait_method_call_propagates_impl_effect`,
-`concrete_trait_method_call_with_needs_ok`,
-`pure_sibling_method_of_effectful_impl_stays_pure`,
-`effectful_sibling_method_still_propagates`, `concrete_trait_effect_handled_by_with_is_ok`.
-For each, give the effectful method an open row on the trait
-(`fun foo : a -> Int needs {..e}`); the pure-sibling test keeps the pure
-sibling pure. Add a test asserting pure-trait + effectful-impl is a bounding
-error.
-
-### 2. Open-row generic surfacing + required forwarding
+## How it works (open-row generic surfacing + required forwarding)
 
 When a trait method with an **open row** is called on an **abstract,
-where-bound** type variable `a`, the constraint's effects must:
+where-bound** type variable `a`, the constraint's effects:
 
 - **surface** as the row variable `..a` in the function's inferred/stored row
   (so the signature shows it, hover/specializer can read it), and
-- be **required**: the function must declare `..a` (or otherwise discharge it),
+- are **required**: the function must declare `..a` (or otherwise discharge it),
   else error — mirroring the open-row callback forwarding requirement.
 
 This is the open-row analog of `emit_concrete_trait_impl_effects`'s concrete
-case. Reuse the existing forwarding-requirement machinery rather than inventing
-a new rule: see `callback_row_vars` and the "calls a callback parameter whose
-declared effect … is not handled" error in
-[check_decl.rs](../../src/typechecker/check_decl.rs) (~L1117-L1178). The
-diagnostic should read like "forwards effects from `Foo a`; add `needs {..a}`".
+case, and it reuses the existing forwarding-requirement machinery (the
+`callback_row_vars` / "calls a callback parameter whose declared effect … is not
+handled" pattern in [check_decl.rs](../../src/typechecker/check_decl.rs)).
 
-Implementation gotchas found during investigation:
+Implementation:
 
-- `emit_effects` / `emit_saturated_call_effects` propagate only **named**
-  effects, not tails. That is why closed-named trait methods already propagate
-  but open rows do not — the open tail is dropped. The new work must route the
-  open tail into the function's row (its `tails`) and/or into the
-  forwarding-requirement check.
-- A `..a` tail that resolves to a concrete type (after `a = Int`) is not a valid
-  effect row. At concrete sites, the real effects come from
-  `emit_concrete_trait_impl_effects`; the type-resolved tail must not be emitted
-  as garbage. Keep the surfaced `..a` meaningful only while `a` is abstract.
-- Granularity: prefer per-method precision (a function forwards only the
-  effects of the methods it actually calls). `ImplInfo.method_effects` is keyed
-  per method; the per-constraint `..a` is the union of the methods the function
-  calls on `a`. Per-trait union is the acceptable fallback if per-method proves
-  too costly.
+- `emit_concrete_trait_impl_effects` ([infer.rs](../../src/typechecker/infer.rs))
+  detects an abstract self (`Type::Var`) for an open-row method
+  (`trait_call_forwards_open_row`), pushes `..a` (the type var's own id, reused
+  as the row variable) onto `effect_row.tails`, and records the var → trait in
+  `Checker::trait_forward_row_vars: HashMap<u32, String>`. The map is scoped per
+  function clause (saved/restored in `check_fun_clauses`).
+- The requirement fires in `check_fun_clauses`: for each recorded var still
+  abstract after substitution and not among the declared row's tails, it raises
+  "forwards effects from `Foo a`; add `needs {..a}`". The check is driven off
+  `trait_forward_row_vars` (not the body's live effect tails) so a
+  `with`-wrapped body still requires the annotation — a `with` rebuilds the
+  effect row and drops the abstract tail, but cannot actually handle an
+  unnameable open row.
+- `..a` is meaningful only while `a` is abstract. At a concrete site `a`
+  resolves to `Type::Con` and the real effects come from
+  `emit_concrete_trait_impl_effects`'s named-effect path; the type-resolved tail
+  is never emitted as garbage.
+
+Per-method precision: a function forwards only the effects of the methods it
+actually calls on `a` (a pure sibling forces no `..a`); `ImplInfo.method_effects`
+is keyed per method.
+
+### Background: tests adjusted for the bounding check
+
+The bounding check rejects pure-trait + effectful-impl, so tests that encoded
+the old permissive behavior were moved to the opt-in form (open row on the trait
+method): `impl_uses_effect_with_correct_needs_ok`,
+`concrete_trait_method_call_propagates_impl_effect`,
+`concrete_trait_method_call_with_needs_ok`,
+`pure_sibling_method_of_effectful_impl_stays_pure`,
+`effectful_sibling_method_still_propagates`,
+`concrete_trait_effect_handled_by_with_is_ok`. New coverage includes
+`pure_trait_method_with_effectful_impl_is_bounding_error`,
+`open_row_generic_requires_forwarding` / `..._with_forwarding_ok`,
+`show_bound_generic_needs_no_row_var`,
+`closed_named_trait_method_generic_unaffected`, and the `with`-wrapper
+regressions `open_row_generic_with_wrapper_still_requires_forwarding` /
+`..._and_forwarding_ok`.
 
 ## Runtime
 

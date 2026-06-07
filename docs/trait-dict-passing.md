@@ -122,18 +122,73 @@ The `type_var_name` field is critical for disambiguation. When multiple where-cl
 
 ### Trait Method Effects
 
-Trait methods opt into effect capability:
+Effect capability is **opt-in on the trait method's effect row**, and impls are
+**bounded** by it (`register_impl` rejects an impl whose body uses effects the
+trait method's row does not permit):
 
-- pure method row: every impl method must be pure
-- closed named row, e.g. `needs {Config}`: impl bodies may use only that named
-  set
-- open row, e.g. `needs {..e}`: impl bodies may use any effects
+- pure method row (`fun foo : a -> Int`): every impl method must be pure
+- closed named row (`fun foo : a -> Int needs {Config}`): impl bodies may use
+  only that named set
+- open row (`fun foo : a -> Int needs {..e}`): impl bodies may use any effects
 
-For concrete dispatch, the typechecker and codegen can use the selected impl's
-per-method effects. For generic dispatch through a where-bound dictionary, an
-open-row method surfaces as the constraint row variable, e.g.
-`needs {..a} where {a: Foo}`. This keeps generic signatures stable when new
-impls are added elsewhere.
+How a method's effects reach a caller depends on the row and on whether the
+call's self type is concrete or an abstract, where-bound type variable.
+
+**Concrete dispatch.** When the self type resolves to a `Type::Con`,
+`Checker::emit_concrete_trait_impl_effects` ([infer.rs](../src/typechecker/infer.rs))
+emits the *selected impl's* actual effects into the caller's row. The effects
+come from `ImplInfo.method_effects: HashMap<String, Vec<String>>` (per-method
+effect names, populated in `register_impl`, cloned cross-module via
+`ModuleExports.trait_impls`). This holds for closed-named and open rows alike,
+with per-method precision: a pure sibling of an effectful impl stays pure.
+
+**Generic dispatch (abstract self).** A closed-named row is part of the trait
+method's *type*, so its named effects already propagate through the normal
+`emit_saturated_call_effects` path — a generic over such a trait already
+requires `needs {Config}`. An **open** row is the interesting case: the impl's
+concrete effects are *not* in the trait method's named row, so they would be
+silently dropped. Instead, when an open-row method is called on an abstract
+where-bound variable `a`, the constraint's effects **surface** as the
+per-constraint row variable `..a` (named after the type variable) and must be
+**forwarded**:
+
+```saga
+trait Foo a { fun foo : a -> Int needs {..e} }
+
+fun count_foos : a -> Int needs {..a} where {a: Foo}   # ..a required
+count_foos x = foo x
+```
+
+Omitting `needs {..a}` is an error, mirroring the open-row callback forwarding
+rule (you can only handle/forward effects the signature names or opens; `..a` is
+unknowable, so a generic can't handle it — it must forward). This keeps generic
+signatures stable as new impls are added elsewhere (the modularity invariant:
+adding an impl never changes existing code's effect row).
+
+Mechanism ([infer.rs](../src/typechecker/infer.rs),
+[check_decl.rs](../src/typechecker/check_decl.rs)):
+
+- `emit_concrete_trait_impl_effects` detects an abstract self (`Type::Var`) for
+  an open-row method (`trait_call_forwards_open_row`), pushes `..a` (the type
+  var's own id, reused as a row variable) onto the function's `effect_row.tails`,
+  and records it in `Checker::trait_forward_row_vars: HashMap<u32, String>`
+  (var id → trait name). This map is scoped per function clause (saved/restored
+  in `check_fun_clauses`).
+- The forwarding requirement fires in `check_fun_clauses`, alongside the
+  callback-row-var check it mirrors. For each recorded var still abstract after
+  substitution and **not** present among the declared row's tails, it raises
+  "forwards effects from `Foo a`; add `needs {..a}`". Driving the check off
+  `trait_forward_row_vars` (rather than the body's live effect tails) is what
+  makes a `with`-wrapped body still require the annotation — a `with` rebuilds
+  the effect row and drops the abstract tail, but it cannot actually handle an
+  unnameable open row, so the requirement must persist.
+- `..a` is meaningful only while `a` is abstract. At a concrete site `a` resolves
+  to a `Type::Con` and the real effects come from
+  `emit_concrete_trait_impl_effects`'s named-effect path; the type-resolved tail
+  is never emitted as a (garbage) effect row.
+
+See [effect-polymorphic-traits.md](planning/effect-polymorphic-traits.md) for
+the full design rationale and the three-row propagation matrix.
 
 ---
 
