@@ -803,6 +803,7 @@ impl Checker {
 
             if is_last && !matches!(self.sub.apply(&ret_ty), Type::Fun(_, _, _)) {
                 self.emit_saturated_call_effects(&callee_ty, &absorbed_entries);
+                self.emit_concrete_trait_impl_effects(head);
             }
         }
 
@@ -836,6 +837,7 @@ impl Checker {
                 && !matches!(self.sub.apply(&deferred_lambda.ret_ty), Type::Fun(_, _, _))
             {
                 self.emit_saturated_call_effects(&deferred_lambda.callee_ty, &absorbed_entries);
+                self.emit_concrete_trait_impl_effects(head);
             }
         }
 
@@ -1237,6 +1239,88 @@ impl Checker {
             let applied_row = self.sub.apply_effect_row(row);
             let emitted_row = applied_row.subtract_entries(absorbed_entries);
             self.emit_effects(&emitted_row);
+        }
+    }
+
+    /// Trait-effect propagation (the bugfix): when a saturated call's head
+    /// carries trait constraints whose self type has resolved to a concrete
+    /// `Type::Con`, emit the selected impl's effects into the caller's row.
+    ///
+    /// Without this, effects declared on an impl are checked locally against the
+    /// method body but never reach the caller — a concrete `foo 42` whose `Foo
+    /// Int` impl needs `Config` would type-check as pure, then hit an unhandled
+    /// effect at runtime. Emitting here (at the call site, during inference)
+    /// routes through the normal accumulator, so `with` subtraction and the
+    /// handler-necessity check see it.
+    ///
+    /// Per-method precision: if the head names a method of the constrained trait
+    /// (a direct trait-method call), only that method's effects are emitted, so
+    /// a pure sibling of an effectful impl stays pure. Otherwise (a where-bound
+    /// function whose internal method use isn't visible from the signature yet),
+    /// the union of the impl's method effects is emitted. The precise
+    /// per-constraint row variable that would replace the union is Phase B
+    /// (see docs/planning/effect-polymorphic-traits.md).
+    fn emit_concrete_trait_impl_effects(&mut self, head: &Expr) {
+        let head_id = head.id;
+        // Bare method name from the head, for per-method precision on direct
+        // trait-method calls (`foo 42` → "foo").
+        let head_method: Option<String> = match &head.kind {
+            ExprKind::Var { name, .. } => {
+                Some(name.rsplit('.').next().unwrap_or(name).to_string())
+            }
+            _ => None,
+        };
+        // Constraints recorded for this call head (cloned to drop the borrow).
+        let constraints: Vec<(String, Type)> = self
+            .trait_state
+            .pending_constraints
+            .iter()
+            .filter(|(_, _, _, _, nid)| *nid == head_id)
+            .map(|(trait_name, _extra, self_ty, _, _)| (trait_name.clone(), self_ty.clone()))
+            .collect();
+        for (trait_name, self_ty) in constraints {
+            let resolved = self.sub.apply(&self_ty);
+            let Type::Con(type_name, args) = &resolved else {
+                continue;
+            };
+            // Single-param trait lookup: arity-keyed target first (tuples),
+            // then the bare canonical name. Multi-param traits (non-empty
+            // trait_type_args) are not handled here yet.
+            let arity_key = super::arity_keyed_target_name(type_name, args.len());
+            let info = self
+                .trait_state
+                .impls
+                .get(&(trait_name.clone(), vec![], arity_key))
+                .or_else(|| {
+                    self.trait_state
+                        .impls
+                        .get(&(trait_name.clone(), vec![], type_name.clone()))
+                })
+                .cloned();
+            let Some(info) = info else {
+                continue;
+            };
+            if info.method_effects.is_empty() {
+                continue;
+            }
+            let names: Vec<String> = match &head_method {
+                Some(m) if info.method_effects.contains_key(m) => {
+                    info.method_effects.get(m).cloned().unwrap_or_default()
+                }
+                _ => {
+                    let mut set: std::collections::BTreeSet<String> =
+                        std::collections::BTreeSet::new();
+                    for v in info.method_effects.values() {
+                        for e in v {
+                            set.insert(e.clone());
+                        }
+                    }
+                    set.into_iter().collect()
+                }
+            };
+            for name in names {
+                self.emit_effect(name, vec![]);
+            }
         }
     }
 

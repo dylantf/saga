@@ -800,6 +800,12 @@ impl Checker {
             self.outer_named_type_vars.insert(tp.name.clone(), *var_id);
         }
 
+        // Per-method effect rows this impl performs, collected from each method
+        // body's inferred effects below and stored on the `ImplInfo` so concrete
+        // trait-method call sites can propagate the selected impl's effects.
+        let mut impl_method_effects: std::collections::HashMap<String, Vec<String>> =
+            std::collections::HashMap::new();
+
         for m in methods {
             let (method_name, params, body) = (&m.name, &m.params, &m.body);
             let trait_method = trait_info
@@ -877,6 +883,13 @@ impl Checker {
             let body_field_candidates = scope_result.field_candidates;
             let body_effects: std::collections::HashSet<String> =
                 body_effs.effects.iter().map(|e| e.name.clone()).collect();
+            // Record this method's own effects (per-method precision: a pure
+            // sibling of an effectful impl contributes nothing).
+            {
+                let mut effs: Vec<String> = body_effects.iter().cloned().collect();
+                effs.sort();
+                impl_method_effects.insert(method_name.clone(), effs);
+            }
             if !body_effects.is_empty() || !declared_effects.is_empty() {
                 let undeclared: Vec<String> = body_effects
                     .difference(&declared_effects)
@@ -991,6 +1004,7 @@ impl Checker {
                 trait_type_args: trait_type_args_types,
                 target_type_param_ids,
                 span: Some(span),
+                method_effects: impl_method_effects,
             },
         );
         Ok(())

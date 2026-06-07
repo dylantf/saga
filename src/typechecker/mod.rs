@@ -931,7 +931,7 @@ pub struct TraitInfo {
     pub is_functional: bool,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct ImplInfo {
     /// Constraints on type parameters: (trait_name, param_index)
     /// e.g. Show for List requires Show on param 0 (the element type)
@@ -948,6 +948,13 @@ pub struct ImplInfo {
     /// Used to substitute call-site target args back into `trait_type_args`.
     pub target_type_param_ids: Vec<u32>,
     pub span: Option<Span>,
+    /// Per-method effect rows this impl performs: method name -> sorted effect
+    /// names. Populated in `register_impl` from each method body's inferred
+    /// effects (per-method, not the impl-level `needs` union). Read at concrete
+    /// trait-method call sites to propagate the selected impl's effects to the
+    /// caller (the trait-effect-propagation bugfix). Travels cross-module via
+    /// `ModuleExports.trait_impls`. See docs/planning/effect-polymorphic-traits.md.
+    pub method_effects: HashMap<String, Vec<String>>,
 }
 
 /// Evidence that a trait constraint was resolved during typechecking.

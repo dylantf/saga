@@ -2,94 +2,112 @@
 
 ## Status
 
-Planning + **Session-1 spike landed** (see "Spike results" below). The concrete
-half of the soundness fix is implemented behind no flag; the polymorphic
-row-variable design described in the body of this doc turned out to be
-unnecessary for *soundness* (though still relevant for precise inferred types
-and codegen evidence — see the spike section).
+Planning, with one prerequisite **landed** and a spike **proven then reset**:
 
-## Spike results (Session 1)
+- ✅ **Multi-source effect rows landed.** Effect rows now support multiple row
+  variables: `EffectRow { effects, tails: Vec<Type> }`, with `is_open()`, and
+  `needs {..a, ..b}` parses, type-checks, and runs. Partial declaration is
+  rejected — forwarding `{..a, ..b}` requires *both* tails in the signature, so
+  forwarded effects can't be silently dropped. This was the foundational
+  prerequisite (see "Why multi-source rows had to come first").
+- ✅ **Phase A landed — sound concrete-discharge propagation (the bugfix).**
+  An effectful impl's effects now reach the caller of a concrete trait-method
+  dispatch. Implemented:
+  - `ImplInfo.method_effects: HashMap<String, Vec<String>>` (per-method effect
+    names), populated in `register_impl` from each method body's inferred
+    effects. Travels cross-module via the cloned `ImplInfo` in
+    `ModuleExports.trait_impls`.
+  - `Checker::emit_concrete_trait_impl_effects(head)` in `infer.rs`, called at
+    both saturated-call points: for constraints recorded on the call head whose
+    self type resolved to a concrete `Type::Con`, it emits the selected impl's
+    effects via `emit_effect`. **Per-method precision** for direct trait-method
+    calls (a pure sibling of an effectful impl stays pure); union fallback for
+    where-bound function calls (precise per-constraint surfacing is Phase B).
+  - Tests: `concrete_trait_method_call_*`, `pure_sibling_method_*`,
+    `effectful_sibling_*`, `pure_impl_emits_nothing`, `where_bound_call_*`
+    (typechecker), and `cross_module_effectful_trait_call_requires_effect`
+    (module integration). Full suite green, clippy clean.
+  - **Known Phase-A limitation (by design):** a generic `where {a: Foo}`
+    function still propagates *implicitly* — its own signature shows no effect;
+    the obligation surfaces at concrete callers. Making it explicit/required is
+    Phase B.
 
-A spike implemented the smallest mechanism that could prove the propagation
-model and found it covers far more than expected.
+- 🔬 Session-1 spike (per-impl granularity, same-module only) proved the model,
+  then was reset; Phase A is its rounded replacement.
 
-**What was built (~40 lines, no new syntax, no representation change):**
+Next: Phase B — explicit per-constraint surfacing + required declaration,
+aligned with the open-row forwarding rule. Phase C — codegen E2E verification.
 
-- `TraitState.impl_effects: HashMap<(canonical_trait, canonical_target), Vec<String>>`,
-  populated in `register_impl` from the impl's `needs` clause
-  ([check_traits.rs](../../src/typechecker/check_traits.rs)).
-- `Checker::emit_concrete_trait_impl_effects(head)` in
-  [infer.rs](../../src/typechecker/infer.rs), called at the two saturated-call
-  points in `infer_app_chain_with_expected`. It scans the constraints recorded
-  for the call head's node id; for any whose self type has resolved to a
-  concrete `Type::Con`, it emits that impl's effect row into the accumulator via
-  the normal `emit_effect` path.
+## Why multi-source rows had to come first
 
-**Key finding — emit at the call site, during inference, not as a post-pass.**
-The first attempt emitted impl effects *after* body inference, in
-`check_fun_clauses`. That was too late: it bypassed `with` subtraction and the
-handler-necessity check, so a handled call still warned "handler unnecessary"
-*and* the effect leaked to the function's row. Emitting at the saturated-call
-point routes the effect through the normal accumulator, so `with` subtraction
-and necessity checks just work.
+The spike's polymorphic-surfacing design originally assumed a row has exactly
+**one** tail variable, so `where {a: Foo, b: Bar}` would collapse both
+constraints' effects into a single `..e`. That collapse is wrong for the same
+reason it's wrong for two independent callbacks:
 
-**Key finding — concrete-discharge emission alone propagates through arbitrary
-polymorphic chains.** Because every call chain bottoms out at a concrete call
-site (entry points are concrete), and a where-bound function re-pushes its
-constraint at each call, the obligation surfaces wherever the constraint
-resolves concretely. Verified:
+```saga
+fun do_work : (Unit -> Int needs {..a}) -> (Unit -> Int needs {..b}) -> Int
+  needs {..a, ..b}
+```
+
+Sharing one row var across two independent sources forces them to unify to each
+other (`expected {Foo}, got {Bar}`). Forwarding the *union* of two independent
+open rows needs genuinely multiple tails — which the type representation did not
+support. That gap blocked both the lambda case above and per-constraint trait
+forwarding, so it was fixed first as its own change. With it in place, a
+generic function over `where {a: Foo, b: Bar}` can forward `needs {..a, ..b}`
+with each constraint's effects in its own row variable.
+
+## Spike findings (reset, but proven)
+
+A throwaway spike implemented the smallest mechanism that could prove the
+propagation model. It has been reset; these findings drive the rounded bugfix.
+
+**The mechanism that worked — concrete-discharge emission at the call site.**
+At each saturated call, scan the trait constraints recorded for the call head;
+for any whose self type has resolved to a concrete `Type::Con`, emit that impl's
+effect row into the accumulator via the normal `emit_effect` path. Crucially,
+**emit at the call site during inference, not as a post-pass** — a post-body
+pass bypasses `with` subtraction and the handler-necessity check (a handled call
+still warned "handler unnecessary" *and* leaked the effect). Emitting at the
+call site routes through the normal accumulator, so `with` subtraction and
+necessity checks just work.
+
+**It propagates through arbitrary polymorphic chains.** Because every call chain
+bottoms out at a concrete call site (entry points are concrete) and a
+where-bound function re-pushes its constraint at each call, the obligation
+surfaces wherever the constraint resolves concretely. Verified by the spike:
 
 - `call_it () = foo 42` → errors requiring `Config`. (direct concrete dispatch)
 - `use_it () = count_foos 42` where `count_foos : a -> Int where {a: Foo}` →
   errors requiring `Config`. (where-bound generic called at a concrete type)
-- `entry () = bar 7` where `bar` calls `count_foos` and both stay polymorphic →
-  still errors at `entry`. (transitive through two polymorphic hops)
-- A **pure** impl emits nothing (no over-emission).
+- `entry () = bar 7` where `bar` calls `count_foos`, both polymorphic → still
+  errors at `entry`. (transitive through two polymorphic hops)
+- A **pure** impl emits nothing.
 
-**Key finding — the `where` constraint alone carries the effect; `needs {..e}`
-is not required.** `fun count_foos : a -> Int where {a: Foo}` (no `needs`)
-already propagates `Config` to a concrete caller. This is the **Option-1
-("implicit via constraint") semantics** emerging naturally — even though the
-intended surface syntax was `needs {..e}`. The `..e` becomes optional
-documentation, not a soundness requirement.
+**Soundness does not require surfacing a row variable** — concrete-discharge
+emission alone is sound. *But* we still want surfacing, for two reasons that
+emerged in discussion:
 
-**What this changes about the plan.** The constraint-representation surgery, the
-per-constraint canonical effect variable, and generalizing `ε_a` into schemes
-(steps 2, 4, 5 in the implementation plan below) are **not needed for
-soundness.** They remain relevant only for:
+- **Explicit effects in signatures.** The spike made `fun count_foos : a -> Int
+  where {a: Foo}` propagate effects while showing none — a deviation from
+  Saga's "effects are always explicit in the type" rule. The rounded bugfix
+  should make the open row visible (`needs {..a}`) and *required*, leaning on
+  the new multi-tail rule that every forwarded tail must be declared.
+- **The optimizer/specializer.** Specializing `count_foos` at a concrete type
+  needs to see, from the stored scheme, that there's an open effect row fed by
+  the constraint. Concrete-discharge computes that on demand at call sites; the
+  scheme itself must carry it for the specializer to read.
 
-- **Precise inferred-type display** — showing `count_foos : a -> Int needs
-  {..e} where {a: Foo}` rather than a bare `where {a: Foo}` whose effect
-  obligation is implicit.
-- **Codegen evidence threading** — confirming the runtime hands the right
-  evidence to the dict method at concrete sites. (Not yet verified by the
-  spike; the existing integration suite for effectful trait dispatch still
-  passes, which is encouraging but not a direct test of the new propagation.)
-- **The genuinely-abstract boundary** — separately-compiled generic code that
-  is *never* instantiated concretely in-module. Unobservable in whole-program
-  checking; revisit only if it bites.
+**Gaps the spike did NOT handle (must be fixed for the rounded bugfix):**
 
-**Validation:** full suite green with the change in place — 968 lib + 135
-integration + property/codegen suites, 0 failures. Four new typechecker tests
-(`concrete_trait_method_call_*`, `where_bound_call_at_concrete_type_*`) encode
-the proof. `cargo clippy` clean.
-
-**Open questions for Session 2:**
-
-1. Codegen — does a concrete effectful trait-method call now thread `Config`
-   evidence correctly end-to-end, and does the necessity/projection match the
-   new typechecker view? (Spike only covered the type level.)
-2. Granularity — `impl_effects` is currently per-impl (per-trait granularity).
-   Move to per-method to keep pure siblings precise? (See Granularity section.)
-3. Inferred-type display — do we want `needs {..e}` to show up, i.e. is the
-   constraint-representation work worth it for ergonomics even though soundness
-   doesn't need it?
-
----
-
-The remainder of this doc is the original design (pre-spike). It is still the
-reference for the polymorphic row-variable machinery, should we decide the
-inferred-type/codegen reasons justify it.
+- **Granularity.** The spike keyed effects per-impl (per-trait granularity), so
+  calling a *pure* method of an effectful impl over-emitted the whole impl's
+  effects. Confirmed via probe: a pure sibling method spuriously required the
+  effect. The bugfix must be **per-method**.
+- **Cross-module.** The spike populated `impl_effects` only in `register_impl`
+  (same module). Imported impls' effect rows must be available too, or
+  cross-module effectful trait calls silently drop effects again.
 
 ## Motivation: a real soundness hole
 
@@ -180,46 +198,43 @@ A buys a fixed row by forbidding impl-introduced effects.)
 
 ## Surface syntax
 
-A function generic over an effectful-impl trait carries an open effect row
-whose tail is fed by the constraint:
+A function generic over an effectful-impl trait carries an open effect row,
+with one row variable per forwarded constraint, named after the constrained
+type variable:
 
 ```saga
-fun generic_foo : a -> Int needs {..e} where {a: Foo}
+fun generic_foo : a -> Int needs {..a} where {a: Foo}
 generic_foo thing = foo thing
+```
+
+For multiple constraints, one tail each:
+
+```saga
+fun do_two : a -> b -> Int needs {..a, ..b} where {a: Foo, b: Bar}
 ```
 
 Rules:
 
-- The `..e` is an ordinary open row variable. It names the function's
-  "everything-extra" effects, which **include** whatever the `Foo` impl for
-  `a` needs.
+- `..a` is the effect row contributed by the constraints on type variable `a`
+  (the union of `a`'s traits' impl effects, resolved per instantiation). It
+  reads as "a's effects."
 - `needs {...}` lists effects the function performs *directly* (its own ops,
-  calls to concrete effectful functions). Constraint-contributed effects flow
-  into the open tail.
-- **No effects on value types.** `(a needs {..e})` is malformed — effects live
+  calls to concrete effectful functions); `..a` forwards constraint effects.
+- **No effects on value types.** `(a needs {..a})` is malformed — effects live
   on arrows (computations), never on a plain value of type `a`.
-- For non-`pub` functions the row can be fully inferred (omit `needs`). For
-  `pub` functions, signatures are mandatory, so you write `needs {..e}`; the
-  body-effect check (below) forces you to, so it can't be accidentally
-  dropped.
+- **Forwarding must be declared.** Multi-tail rows already enforce that every
+  forwarded tail appears in the signature, so a function that forwards a
+  constraint's effects must spell `..a`, or it won't type-check. This keeps
+  effects explicit in the signature (the property we want) for free.
+- For non-`pub` functions the row can be inferred (omit `needs`); `pub`
+  signatures must declare it.
 
-There is **no new grammar** — `needs {Log, ..e}` open rows and `where {a: T}`
-constraints already parse
-([syntax-reference.md, Effects/Traits](../../../saga-website/public/syntax-reference.md)).
-
-### Optional explicit binding (deferred)
-
-The link between `e` and `Foo` is established by inference, not written. If
-that proves too implicit for public APIs, a future explicit form could bind
-the constraint's effect row to a name:
-
-```saga
-fun generic_foo : a -> Int needs {..e} where {a: Foo / e}   # not in v1
-```
-
-This is deliberately out of scope for the first cut; inference + the
-determinism guarantee below make the implicit form sound. Revisit only if
-readability demands it.
+No new grammar is required: `needs {..a, ..b}` and `where {a: T}` both parse
+today. The only open call is whether `..a` (referencing the type variable
+directly) is the spelling, versus an explicit constraint-binding form like
+`where {a: Foo / e}`. Current lean: `..a`, since it needs no new binding and
+maps directly onto the per-constraint row variables the representation now
+supports. See "Per-constraint row variables".
 
 ## The core mechanism: constraint discharge emits effects
 
@@ -263,12 +278,17 @@ calls on `a` use *that* var. Then:
 No "did unification happen to merge the right vars" — it is wired by
 construction.
 
-### No ambiguity, by construction
+### Per-constraint row variables (updated: multi-tail rows now exist)
 
-A row has exactly one tail var, so `..e` absorbs the *union* of all
-unresolved constraint effects (plus any forwarded callback rows). With
-`where {a: Foo, b: Bar}`, `e = ε_a ∪ ε_b` — correct, never ambiguous. There
-is never a "which constraint does `e` belong to" question.
+The original plan collapsed all constraint effects into a single `..e` because
+rows had one tail. That is no longer the representation: rows now carry
+`tails: Vec<Type>`, so each constraint can own its own row variable. With
+`where {a: Foo, b: Bar}`, a forwarding function writes `needs {..a, ..b}` —
+`..a` is `Foo`'s contribution for `a`, `..b` is `Bar`'s for `b`. This is both
+more precise (the specializer can resolve each independently) and matches the
+"a's effects" mental model directly. A single shared `..e` is no longer
+required and should be avoided, since it would over-constrain (force the two
+constraints' effects to unify).
 
 ## Type-level design
 
@@ -277,12 +297,12 @@ rows are already first-class and constraints already carry rider data.
 
 What already exists:
 
-- **Row variables as `Type::Var(u32)` in `EffectRow.tail`**, generalized into
-  `Scheme.forall` by `collect_free_vars` and instantiated fresh per use
-  ([mod.rs:84-162](../../src/typechecker/mod.rs#L84-L162),
-  [unify.rs:353-478](../../src/typechecker/unify.rs#L353-L478)).
-- **Row unification / tail binding** (`{Log} ~ {..e}`, open-open shared tail)
-  ([unify.rs:242-321](../../src/typechecker/unify.rs#L242-L321)).
+- **Multi-source effect rows (landed).** `EffectRow { effects, tails: Vec<Type> }`
+  with `is_open()`; `needs {..a, ..b}` parses, checks, and runs; partial
+  declaration is rejected. Row variables are `Type::Var(u32)` in `tails`,
+  generalized into `Scheme.forall` by `collect_free_vars` and instantiated
+  fresh per use; row unification handles multiple open tails (with a clear
+  error on genuinely-ambiguous multi-open-tail cases).
 - **Constraints carry riders.** `Scheme.constraints: Vec<(String, u32,
   Vec<Type>)>` already threads extra *type* args for multi-param traits
   (`trait Generic a r`); `TraitEvidence.trait_type_args` carries them to
@@ -388,32 +408,69 @@ secondary choice. Inference is more ergonomic (the body already determines it);
 an explicit declaration is clearer and is what exists today. Either is
 compatible with this design; the body-effect check keeps the two consistent.
 
-## Implementation plan
+## Implementation plan (rounded bugfix)
 
-Ordered to de-risk the type-level model before touching representation
-surgery, and to lean on the runtime that already exists.
+The spike proved the model; this is the production version. The prerequisite
+(multi-source rows) is already landed. Ordered so soundness lands first, then
+explicit surfacing, then verification.
 
-1. **Spike — trait effect parameter + propagation.** Add `..ε` (per-method)
-   to stored trait-method scheme rows at registration. Add the
-   constraint-discharge emission for the polymorphic case. Assert in a
-   typechecker test that `count_foos x = foo x` over `where {a: Foo}` *infers*
-   `needs {..e}` instead of pure. This proves propagation before any
-   representation change.
-2. **Constraint representation.** Widen the constraint tuple to carry the
-   effect var(s); thread through `instantiate` / `generalize` / evidence.
-3. **Concrete-dispatch emission.** At concrete constraint resolution, emit the
-   impl's row (`impl_effects` / per-method). Add the test from the Motivation:
-   `call_it () = foo 42` must now require `needs {Config}` (or a handler).
-4. **Elaboration check.** Confirm the resolved row reaches `call_effects` so
-   the polymorphic dict call classifies `RowForwarded` (should follow from the
-   open-row trait signature).
-5. **Codegen verification.** End-to-end: `generic_foo someWidget` requires and
-   threads `Log` evidence; verify `project_evidence` fires at the concrete
-   boundary. Likely no new codegen beyond verification.
-6. **Migration.** Existing impls already declare `needs`; reinterpret it as the
-   effect-parameter binding. Audit `examples/optimization/**` and
-   `examples/bugs/**effectful**` for behavior changes (these are the existing
-   effectful-trait test cases).
+**Phase A — sound concrete-discharge propagation (the bugfix core).**
+
+1. **Per-method impl effect rows, stored for lookup.** Record each impl
+   *method's* effect row (per-method, not the per-impl union the spike used),
+   keyed so a call site can find it from the resolved concrete type. Source it
+   from the per-method data the typechecker already has rather than the
+   impl-level `needs` clause, so a pure sibling method contributes nothing.
+2. **Cross-module availability.** Ensure imported impls' per-method effect rows
+   are present in the same lookup, not just impls registered in the current
+   module. The impl effect rows are already exported for codegen
+   (`TraitImplDict.impl_effects`); thread an equivalent per-method view into
+   the typechecker so cross-module calls propagate too.
+3. **Emit at the saturated call site, during inference.** At each saturated
+   call, scan the constraints recorded for the call head; for any whose self
+   type resolved to a concrete `Type::Con`, emit *that method's* effect row via
+   `emit_effect`. (Not a post-body pass — must flow through `with` subtraction.)
+4. **Tests.** Same-module concrete dispatch; where-bound generic called
+   concretely; transitive polymorphic chain; cross-module; **pure sibling of an
+   effectful impl stays pure** (the per-method precision check); pure impl emits
+   nothing.
+
+**Phase B — explicit surfacing via per-constraint row variables.**
+
+This is the existing **open-row forwarding rule** applied to constraints, not a
+new trait-specific rule. The rule: *you can only handle effects you can name;
+an open/unknown row must be forwarded, never silently swallowed.*
+
+- Closed-row callback (`(a -> b needs {Fail}) -> b`): `Fail` is nameable, so the
+  HOF may handle it internally (and must, if its return row is pure).
+- Open-row callback (`(a -> b needs {..e}) -> b`): `..e` is unknowable, so the
+  HOF cannot handle it; it must forward it (`-> b needs {..e}`) or it's an error.
+
+A trait constraint is the open-row case: inside `count_foos : a -> Int where
+{a: Foo}`, the effects of `foo x` on abstract `a` depend on the impl and are
+unknowable, so `count_foos` cannot handle them internally — exactly like `..e`.
+Therefore:
+
+5. **Polymorphic emission.** A trait-method call on an abstract (where-bound)
+   self emits the constraint's row variable (`..a`) into the function's body
+   effects — the analog of a callback's open row flowing into the body.
+6. **Surface + require the row.** That `..a` must appear in the function's
+   declared row, or it's an error — the same diagnostic as an unforwarded
+   open-row callback ("calls X whose open effect row isn't handled; add `needs
+   {..a}`"). This makes the open row visible in the signature (for humans,
+   hover, and the specializer) and forbids implicit absorption, consistent with
+   HOFs. The multi-tail "every forwarded tail must be declared" rule provides
+   the enforcement mechanism. `ε_a` generalizes into the stored scheme.
+
+**Phase C — verification + migration.**
+
+7. **Codegen end-to-end.** Confirm a concrete effectful trait call threads the
+   right evidence and `project_evidence` fires at the concrete boundary; the
+   polymorphic dict call should classify `RowForwarded`. Likely little new
+   codegen.
+8. **Migration / audit.** Re-check `examples/optimization/**` and
+   `examples/bugs/**effectful**` for intended behavior changes (calls that were
+   silently dropping effects now correctly require handlers).
 
 ## Edge cases
 

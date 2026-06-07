@@ -3724,3 +3724,58 @@ main () = act (Pair { a: 1, b: 2 })
     );
     assert_erlc_compiles(&out, "main");
 }
+
+/// Cross-module trait-effect propagation (bugfix): an effectful impl defined in
+/// one module must propagate its effect to a concrete trait-method call in
+/// another module. The impl's per-method effects travel via
+/// `ModuleExports.trait_impls` (the cloned `ImplInfo`), so `call_it` in `Main`
+/// — which neither declares `needs {Config}` nor handles it — must error.
+#[test]
+fn cross_module_effectful_trait_call_requires_effect() {
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("clock before epoch")
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!(
+        "saga-xmod-effprop-{}-{unique}",
+        std::process::id()
+    ));
+    fs::create_dir_all(root.join("src")).expect("create temp project src");
+    fs::write(root.join("project.toml"), "name = \"xmod\"\n").expect("write project.toml");
+    fs::write(
+        root.join("src/Lib.saga"),
+        "module Lib\n\
+         pub effect Config { fun config : Unit -> String }\n\
+         pub trait Foo a { fun foo : a -> Int }\n\
+         impl Foo for Int needs {Config} {\n\
+         \x20 foo thing = if config! () == \"x\" then thing else thing\n\
+         }\n",
+    )
+    .expect("write Lib.saga");
+
+    let main_src = "module Main\n\
+                    import Lib (Foo, Config)\n\
+                    fun call_it : Unit -> Int\n\
+                    call_it () = foo 42\n";
+
+    let mut checker = make_project_checker_for_root(root.clone());
+    let tokens = lexer::Lexer::new(main_src).lex().expect("lex error");
+    let mut program = parser::Parser::new(tokens)
+        .parse_program()
+        .expect("parse error");
+    saga::desugar::desugar_program(&mut program);
+    checker.set_current_module("Main".to_string());
+    let result = checker.check_program(&mut program);
+    let errors: Vec<String> = result.errors().iter().map(|e| e.message.clone()).collect();
+    let _ = fs::remove_dir_all(&root);
+
+    assert!(
+        result.has_errors(),
+        "expected a cross-module Config propagation error, got none"
+    );
+    assert!(
+        errors.iter().any(|m| m.contains("Config")),
+        "expected Config in cross-module errors, got: {:?}",
+        errors
+    );
+}

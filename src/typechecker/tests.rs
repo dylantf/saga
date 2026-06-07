@@ -1026,6 +1026,137 @@ impl Store for Redis needs {Fail} {
     .unwrap();
 }
 
+// --- Trait-effect propagation (bugfix) ---
+//
+// An effectful impl's effects must reach the caller of a concrete trait-method
+// dispatch. Previously they were checked against the method body locally and
+// silently dropped at call sites. See docs/planning/effect-polymorphic-traits.md.
+
+#[test]
+fn concrete_trait_method_call_propagates_impl_effect() {
+    // `foo 42` selects the `Foo Int` impl, which needs Config. `call_it`
+    // declares no needs and provides no handler -> error.
+    let result = check(
+        "effect Config { fun config : Unit -> String }
+trait Foo a { fun foo : a -> Int }
+impl Foo for Int needs {Config} {
+  foo thing = if config! () == \"x\" then thing else thing
+}
+fun call_it : Unit -> Int
+call_it () = foo 42",
+    );
+    assert!(result.is_err(), "expected Config to propagate to call_it");
+    assert!(
+        result.err().unwrap().message.contains("Config"),
+        "expected Config in the error"
+    );
+}
+
+#[test]
+fn concrete_trait_method_call_with_needs_ok() {
+    check(
+        "effect Config { fun config : Unit -> String }
+trait Foo a { fun foo : a -> Int }
+impl Foo for Int needs {Config} {
+  foo thing = if config! () == \"x\" then thing else thing
+}
+fun call_it : Unit -> Int needs {Config}
+call_it () = foo 42",
+    )
+    .unwrap();
+}
+
+#[test]
+fn pure_sibling_method_of_effectful_impl_stays_pure() {
+    // Per-method precision: calling the PURE method of an impl that has a
+    // separate effectful method must NOT require the effect.
+    check(
+        "effect Config { fun config : Unit -> String }
+trait Foo a {
+  fun eff : a -> Int
+  fun pure_m : a -> Int
+}
+impl Foo for Int needs {Config} {
+  eff thing = if config! () == \"x\" then thing else thing
+  pure_m thing = thing + 1
+}
+fun call_pure : Unit -> Int
+call_pure () = pure_m 42",
+    )
+    .unwrap();
+}
+
+#[test]
+fn effectful_sibling_method_still_propagates() {
+    // The effectful method of the same impl still propagates.
+    let result = check(
+        "effect Config { fun config : Unit -> String }
+trait Foo a {
+  fun eff : a -> Int
+  fun pure_m : a -> Int
+}
+impl Foo for Int needs {Config} {
+  eff thing = if config! () == \"x\" then thing else thing
+  pure_m thing = thing + 1
+}
+fun call_eff : Unit -> Int
+call_eff () = eff 42",
+    );
+    assert!(result.is_err(), "expected Config to propagate via eff");
+    assert!(result.err().unwrap().message.contains("Config"));
+}
+
+#[test]
+fn pure_impl_emits_nothing() {
+    // Guard against over-emission: a fully pure impl invents no effects.
+    check(
+        "trait Foo a { fun foo : a -> Int }
+impl Foo for Int { foo thing = thing + 1 }
+fun call_it : Unit -> Int
+call_it () = foo 42",
+    )
+    .unwrap();
+}
+
+#[test]
+fn where_bound_call_at_concrete_type_propagates_impl_effect() {
+    // A where-bound generic carries the `Foo` constraint; calling it at a
+    // concrete `Int` resolves the constraint to the effectful impl, so the
+    // obligation propagates to the concrete caller.
+    let result = check(
+        "effect Config { fun config : Unit -> String }
+trait Foo a { fun foo : a -> Int }
+impl Foo for Int needs {Config} {
+  foo thing = if config! () == \"x\" then thing else thing
+}
+fun count_foos : a -> Int where {a: Foo}
+count_foos x = foo x + 2
+fun use_it : Unit -> Int
+use_it () = count_foos 42",
+    );
+    assert!(
+        result.is_err(),
+        "expected Config to propagate through the where-bound call"
+    );
+    assert!(result.err().unwrap().message.contains("Config"));
+}
+
+#[test]
+fn concrete_trait_effect_handled_by_with_is_ok() {
+    // Handling the propagated effect with a `with` satisfies the obligation
+    // (and the handler is not flagged unnecessary).
+    check(
+        "effect Config { fun config : Unit -> String }
+trait Foo a { fun foo : a -> Int }
+impl Foo for Int needs {Config} {
+  foo thing = if config! () == \"x\" then thing else thing
+}
+fun call_it : Unit -> Int
+call_it () = foo 42 with { config () = resume \"x\" }",
+    )
+    .unwrap();
+}
+
 #[test]
 fn impl_needs_missing_one_effect_is_error() {
     // Impl method uses Fail and Log but only declares Fail in needs
