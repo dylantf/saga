@@ -1181,6 +1181,53 @@ call_it () = foo 42 with { config () = resume \"x\" }",
     .unwrap();
 }
 
+#[test]
+fn closed_named_trait_effect_handled_in_wrapper_does_not_leak_at_concrete_call() {
+    // Regression for a concrete-discharge over-emission. A CLOSED-NAMED
+    // effectful trait method carries its effect in the type, so a generic
+    // wrapper that handles it internally with `with` is genuinely pure.
+    // Calling that wrapper at a concrete type must NOT resurrect the handled
+    // effect via concrete discharge. Mirrors saga_json's
+    // `serialize x = serialize_with x with json_defaults` leaking JsonOptions
+    // into pure callers.
+    check(
+        "effect Config { fun config : Unit -> String }
+trait Foo a { fun foo : a -> Int needs {Config} }
+impl Foo for Int needs {Config} {
+  foo thing = if config! () == \"x\" then thing else thing
+}
+fun wrap : a -> Int where {a: Foo}
+wrap x = foo x with { config () = resume \"x\" }
+fun use_it : Unit -> Int
+use_it () = wrap 42",
+    )
+    .unwrap();
+}
+
+#[test]
+fn closed_named_trait_effect_still_propagates_via_type_when_unhandled() {
+    // Complement to the no-leak test: closed-named effects must still propagate
+    // through the normal type row. A wrapper that does NOT handle the effect is
+    // effectful and a pure caller must be rejected. Guards against
+    // over-correcting the no-leak fix into dropping closed-named propagation.
+    let result = check(
+        "effect Config { fun config : Unit -> String }
+trait Foo a { fun foo : a -> Int needs {Config} }
+impl Foo for Int needs {Config} {
+  foo thing = if config! () == \"x\" then thing else thing
+}
+fun wrap : a -> Int where {a: Foo}
+wrap x = foo x
+fun use_it : Unit -> Int
+use_it () = wrap 42",
+    );
+    assert!(
+        result.is_err(),
+        "expected the unhandled Config effect to propagate to the pure caller"
+    );
+    assert!(result.err().unwrap().message.contains("Config"));
+}
+
 // --- Open-row generic surfacing + required forwarding (Phase B) ---
 //
 // When an open-row trait method is called on an abstract, where-bound type

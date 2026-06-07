@@ -1321,16 +1321,51 @@ impl Checker {
             if info.method_effects.is_empty() {
                 continue;
             }
+            // Only *open-row* trait methods need concrete discharge. Their
+            // effects are NOT in the method's declared type, so the normal
+            // row-tracking never sees them and an enclosing `with` cannot
+            // subtract them -- concrete discharge is what surfaces them at the
+            // concrete call site. A closed-named method (`to_json : a -> Json
+            // needs {JsonOptions}`) already carries its effect in the type: it
+            // propagates -- and gets subtracted by an enclosing handler --
+            // through the normal path. Re-emitting it here would resurrect an
+            // effect the callee already handled (e.g. `serialize x =
+            // serialize_with x with json_defaults`, where `serialize` is pure
+            // but PersonD's `ToJson` impl performs `JsonOptions`).
+            let open_row_methods: std::collections::HashSet<&str> = self
+                .trait_state
+                .traits
+                .get(&trait_name)
+                .map(|t| {
+                    t.methods
+                        .iter()
+                        .filter(|m| m.effect_sig.is_open_row)
+                        .map(|m| m.name.as_str())
+                        .collect()
+                })
+                .unwrap_or_default();
+            if open_row_methods.is_empty() {
+                continue;
+            }
             let names: Vec<String> = match &head_method {
+                // Direct trait-method call: discharge only if THAT method is
+                // open-row (a pure/closed sibling of an open-row method stays on
+                // the normal path).
                 Some(m) if info.method_effects.contains_key(m) => {
-                    info.method_effects.get(m).cloned().unwrap_or_default()
+                    if open_row_methods.contains(m.as_str()) {
+                        info.method_effects.get(m).cloned().unwrap_or_default()
+                    } else {
+                        continue;
+                    }
                 }
+                // Where-bound function call (`count_foos 42`): union the effects
+                // of the trait's open-row methods only.
                 _ => {
                     let mut set: std::collections::BTreeSet<String> =
                         std::collections::BTreeSet::new();
-                    for v in info.method_effects.values() {
-                        for e in v {
-                            set.insert(e.clone());
+                    for (mname, effs) in &info.method_effects {
+                        if open_row_methods.contains(mname.as_str()) {
+                            set.extend(effs.iter().cloned());
                         }
                     }
                     set.into_iter().collect()
