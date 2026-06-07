@@ -223,13 +223,7 @@ fn render_fun_signature(out: &mut String, decl: &Decl) {
     write!(out, "{}", format_type_expr(return_type)).unwrap();
 
     // Effects
-    if !effects.is_empty() || !effect_row_var.is_empty() {
-        let mut parts: Vec<String> = effects.iter().map(format_effect_ref).collect();
-        for (var, _) in effect_row_var {
-            parts.push(format!("..{}", var));
-        }
-        write!(out, " needs {{{}}}", parts.join(", ")).unwrap();
-    }
+    write_needs_row(out, effects, effect_row_var);
 
     // Where clause
     if !where_clause.is_empty() {
@@ -250,6 +244,7 @@ fn render_type_decl(out: &mut String, decl: &Decl) {
             doc,
             type_params,
             variants,
+            deriving,
             opaque,
             ..
         } => {
@@ -280,6 +275,7 @@ fn render_type_decl(out: &mut String, decl: &Decl) {
                 }
             }
             writeln!(out).unwrap();
+            write_deriving(out, deriving);
             writeln!(out, "```\n").unwrap();
             render_doc(out, doc);
         }
@@ -305,6 +301,7 @@ fn render_type_decl(out: &mut String, decl: &Decl) {
             doc,
             type_params,
             fields,
+            deriving,
             ..
         } => {
             writeln!(out, "### {}\n", name).unwrap();
@@ -324,11 +321,20 @@ fn render_type_decl(out: &mut String, decl: &Decl) {
                 }
             }
             writeln!(out, "}}").unwrap();
+            write_deriving(out, deriving);
             writeln!(out, "```\n").unwrap();
             render_doc(out, doc);
         }
         _ => {}
     }
+}
+
+/// Render a ` deriving (...)` line when the type derives any traits.
+fn write_deriving(out: &mut String, deriving: &[String]) {
+    if deriving.is_empty() {
+        return;
+    }
+    writeln!(out, "  deriving ({})", deriving.join(", ")).unwrap();
 }
 
 fn render_effect_decl(out: &mut String, decl: &Decl) {
@@ -360,13 +366,7 @@ fn render_effect_decl(out: &mut String, decl: &Decl) {
             }
         }
         write!(out, "{}", format_type_expr(&op.node.return_type)).unwrap();
-        if !op.node.effects.is_empty() || !op.node.effect_row_var.is_empty() {
-            let mut parts: Vec<String> = op.node.effects.iter().map(format_effect_ref).collect();
-            for (var, _) in &op.node.effect_row_var {
-                parts.push(format!("..{}", var));
-            }
-            write!(out, " needs {{{}}}", parts.join(", ")).unwrap();
-        }
+        write_needs_row(out, &op.node.effects, &op.node.effect_row_var);
         writeln!(out).unwrap();
     }
     writeln!(out, "}}").unwrap();
@@ -466,7 +466,9 @@ fn render_trait_decl(out: &mut String, decl: &Decl) {
                 write!(out, "({}: {}) -> ", label, format_type_expr(ty)).unwrap();
             }
         }
-        writeln!(out, "{}", format_type_expr(&m.node.return_type)).unwrap();
+        write!(out, "{}", format_type_expr(&m.node.return_type)).unwrap();
+        write_needs_row(out, &m.node.effects, &m.node.effect_row_var);
+        writeln!(out).unwrap();
     }
     writeln!(out, "}}").unwrap();
     writeln!(out, "```\n").unwrap();
@@ -537,6 +539,20 @@ fn format_type_expr_atom(ty: &TypeExpr) -> String {
         TypeExpr::App { .. } | TypeExpr::Arrow { .. } => format!("({})", format_type_expr(ty)),
         _ => format_type_expr(ty),
     }
+}
+
+/// Render a trailing ` needs {...}` row from named effects plus open row
+/// variables, or nothing when both are empty. Shared by function signatures,
+/// effect operations, and trait methods.
+fn write_needs_row<S>(out: &mut String, effects: &[EffectRef], effect_row_var: &[(String, S)]) {
+    if effects.is_empty() && effect_row_var.is_empty() {
+        return;
+    }
+    let mut parts: Vec<String> = effects.iter().map(format_effect_ref).collect();
+    for (var, _) in effect_row_var {
+        parts.push(format!("..{}", var));
+    }
+    write!(out, " needs {{{}}}", parts.join(", ")).unwrap();
 }
 
 fn format_effect_ref(e: &EffectRef) -> String {
