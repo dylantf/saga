@@ -1355,9 +1355,7 @@ impl Parser {
     /// variables are allowed and may be interleaved with named effects, e.g.
     /// `{Foo, ..a, Bar, ..b}`.
     #[allow(clippy::type_complexity)]
-    fn parse_needs_row(
-        &mut self,
-    ) -> Result<(Vec<EffectRef>, Vec<(String, Span)>), ParseError> {
+    fn parse_needs_row(&mut self) -> Result<(Vec<EffectRef>, Vec<(String, Span)>), ParseError> {
         let mut effects = Vec::new();
         let mut row_vars = Vec::new();
         self.expect(Token::LBrace)?;

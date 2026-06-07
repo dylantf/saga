@@ -1032,6 +1032,7 @@ impl Checker {
 
         // Save effects and start fresh for this function body
         let saved_absorbed = std::mem::take(&mut self.call_site_absorbed);
+        let saved_trait_forward = std::mem::take(&mut self.trait_forward_row_vars);
         let saved_effs = self.save_effects();
         for clause in clauses {
             let Decl::FunBinding {
@@ -1256,6 +1257,78 @@ impl Checker {
             }
         }
 
+        // Open-row trait constraint forwarding requirement. When an open-row
+        // trait method is called on an abstract, where-bound type variable `a`,
+        // `emit_concrete_trait_impl_effects` surfaces `a` as an effect row tail
+        // and records it in `trait_forward_row_vars`. Like the open-row callback
+        // rule above, these effects are unknowable to this function, so it cannot
+        // handle them — it must forward each as `needs {..a}` (or it's an error).
+        // The surfaced tail rides through `all_body_effs`; per-method precision
+        // comes from surfacing only happening when the method is actually called.
+        if annotation.is_some() && !self.trait_forward_row_vars.is_empty() {
+            let declared_tail_ids: std::collections::HashSet<u32> = declared_row
+                .tails
+                .iter()
+                .filter_map(|t| match self.sub.apply(t) {
+                    Type::Var(id) => Some(id),
+                    _ => None,
+                })
+                .collect();
+            // Drive the check off the recorded row vars (which persist across a
+            // `with`), not off `all_body_effs.tails`: an internal `with` rebuilds
+            // the effect row and drops the abstract tail, but it cannot actually
+            // handle an open row (you can't name its effects), so the obligation
+            // still leaks to callers. Fire whenever a recorded var is *still
+            // abstract* (sub.apply → Type::Var) and not forwarded in the declared
+            // row. A var that resolved to a concrete type at a concrete call site
+            // is no longer a row variable — that's the concrete-discharge escape
+            // hatch, and it stays intact.
+            let mut unforwarded: Vec<(u32, String)> = Vec::new();
+            for (var_id, trait_name) in &self.trait_forward_row_vars {
+                let resolved = self.sub.apply(&Type::Var(*var_id));
+                let Type::Var(rid) = resolved else {
+                    continue;
+                };
+                if !declared_tail_ids.contains(&rid) {
+                    unforwarded.push((rid, trait_name.clone()));
+                }
+            }
+            if !unforwarded.is_empty() {
+                unforwarded.sort();
+                unforwarded.dedup();
+                let (rid, trait_name) = &unforwarded[0];
+                // Recover the source name of the type variable (e.g. `a`) for the
+                // diagnostic; fall back to the trait's self position if unknown.
+                let var_name = self
+                    .fun_type_param_vars
+                    .get(name)
+                    .and_then(|params| {
+                        params.iter().find_map(|(pname, pid)| {
+                            if self.sub.apply(&Type::Var(*pid)) == Type::Var(*rid) {
+                                Some(pname.clone())
+                            } else {
+                                None
+                            }
+                        })
+                    })
+                    .unwrap_or_else(|| "a".to_string());
+                let pretty_trait = trait_name.rsplit('.').next().unwrap_or(trait_name);
+                let err_span = annotation_span.unwrap_or_else(|| match clauses[0] {
+                    Decl::FunBinding { span, .. } => *span,
+                    _ => unreachable!(),
+                });
+                return Err(Diagnostic::error_at(
+                    err_span,
+                    format!(
+                        "`{}` calls an open-row method of `{} {}` but does not forward its \
+                         effects; add `needs {{..{}}}` to the annotation to forward `{}`'s \
+                         effects to the caller",
+                        name, pretty_trait, var_name, var_name, var_name,
+                    ),
+                ));
+            }
+        }
+
         if !all_body_effs.is_empty() || !declared_row.is_empty() {
             let err_span = match clauses[0] {
                 Decl::FunBinding { span, .. } => *span,
@@ -1325,6 +1398,7 @@ impl Checker {
 
         // Restore call_site_absorbed for outer scope
         self.call_site_absorbed = saved_absorbed;
+        self.trait_forward_row_vars = saved_trait_forward;
 
         // Check for unresolved ambiguous field accesses. Any var still in field_candidates
         // after the full body was checked is genuinely ambiguous -- the programmer needs

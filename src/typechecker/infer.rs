@@ -1265,9 +1265,7 @@ impl Checker {
         // Bare method name from the head, for per-method precision on direct
         // trait-method calls (`foo 42` → "foo").
         let head_method: Option<String> = match &head.kind {
-            ExprKind::Var { name, .. } => {
-                Some(name.rsplit('.').next().unwrap_or(name).to_string())
-            }
+            ExprKind::Var { name, .. } => Some(name.rsplit('.').next().unwrap_or(name).to_string()),
             _ => None,
         };
         // Constraints recorded for this call head (cloned to drop the borrow).
@@ -1280,6 +1278,26 @@ impl Checker {
             .collect();
         for (trait_name, self_ty) in constraints {
             let resolved = self.sub.apply(&self_ty);
+            // Abstract self (a where-bound type variable): the impl's concrete
+            // effects are unknowable here. For an *open-row* trait method, surface
+            // the constraint's effects as the row variable `..a` (the type var's
+            // own id) and require the enclosing function to forward it. This is
+            // the open-row analog of the concrete-discharge case below; closed and
+            // pure trait methods propagate (or don't) through the normal type row,
+            // so they are left untouched. See
+            // docs/planning/effect-polymorphic-traits.md.
+            if let Type::Var(var_id) = &resolved {
+                if self.trait_call_forwards_open_row(&trait_name, head_method.as_deref()) {
+                    let tail = Type::Var(*var_id);
+                    if !self.effect_row.tails.iter().any(|t| t == &tail) {
+                        self.effect_row.tails.push(tail);
+                    }
+                    self.trait_forward_row_vars
+                        .entry(*var_id)
+                        .or_insert_with(|| trait_name.clone());
+                }
+                continue;
+            }
             let Type::Con(type_name, args) = &resolved else {
                 continue;
             };
@@ -1321,6 +1339,26 @@ impl Checker {
             for name in names {
                 self.emit_effect(name, vec![]);
             }
+        }
+    }
+
+    /// Whether a call carrying a constraint on `trait_name` forwards an open
+    /// effect row (`..a`) when its `self` is abstract. Per-method precision for
+    /// direct trait-method calls: only the named method's open-row-ness counts,
+    /// so a pure sibling of an open-row method does not force forwarding. For a
+    /// where-bound function call (the head is not a trait method), fall back to
+    /// the per-trait union: any open-row method in the trait forwards. A trait
+    /// with no open-row method (e.g. `Show`/`Eq`) never forwards.
+    fn trait_call_forwards_open_row(&self, trait_name: &str, head_method: Option<&str>) -> bool {
+        let Some(info) = self.trait_state.traits.get(trait_name) else {
+            return false;
+        };
+        match head_method {
+            Some(m) if info.methods.iter().any(|tm| tm.name == m) => info
+                .methods
+                .iter()
+                .any(|tm| tm.name == m && tm.effect_sig.is_open_row),
+            _ => info.methods.iter().any(|tm| tm.effect_sig.is_open_row),
         }
     }
 

@@ -3736,17 +3736,15 @@ fn cross_module_effectful_trait_call_requires_effect() {
         .duration_since(UNIX_EPOCH)
         .expect("clock before epoch")
         .as_nanos();
-    let root = std::env::temp_dir().join(format!(
-        "saga-xmod-effprop-{}-{unique}",
-        std::process::id()
-    ));
+    let root =
+        std::env::temp_dir().join(format!("saga-xmod-effprop-{}-{unique}", std::process::id()));
     fs::create_dir_all(root.join("src")).expect("create temp project src");
     fs::write(root.join("project.toml"), "name = \"xmod\"\n").expect("write project.toml");
     fs::write(
         root.join("src/Lib.saga"),
         "module Lib\n\
          pub effect Config { fun config : Unit -> String }\n\
-         pub trait Foo a { fun foo : a -> Int }\n\
+         pub trait Foo a { fun foo : a -> Int needs {..e} }\n\
          impl Foo for Int needs {Config} {\n\
          \x20 foo thing = if config! () == \"x\" then thing else thing\n\
          }\n",

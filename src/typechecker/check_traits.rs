@@ -890,6 +890,49 @@ impl Checker {
                 effs.sort();
                 impl_method_effects.insert(method_name.clone(), effs);
             }
+
+            // Effect-capability bounding (opt-in via the trait method's row): an
+            // impl may only use effects the trait method permits. A pure trait
+            // method permits nothing; a closed named row permits exactly its
+            // effects; an open row (`..e`) permits anything. This makes
+            // effect-capability declared at the trait — keeping generic callers'
+            // obligations modular — rather than smuggled in via the impl. See
+            // docs/planning/effect-polymorphic-traits.md ("Effect-capability is
+            // opt-in"). Routed-derive impls are synthesized from the trait
+            // methods themselves, so they are within the row by construction;
+            // skip them to avoid false positives on canonicalization edge cases.
+            if !is_routed_derive && !trait_method.effect_sig.is_open_row {
+                let permitted: std::collections::HashSet<&String> =
+                    trait_method.effect_sig.effects.iter().collect();
+                let mut exceeded: Vec<String> = body_effects
+                    .iter()
+                    .filter(|e| !permitted.contains(e))
+                    .cloned()
+                    .collect();
+                if !exceeded.is_empty() {
+                    exceeded.sort();
+                    let pretty: Vec<String> = exceeded
+                        .iter()
+                        .map(|e| e.rsplit('.').next().unwrap_or(e).to_string())
+                        .collect();
+                    return Err(Diagnostic::error_at(
+                        body.span,
+                        format!(
+                            "impl {} for {}, method '{}' uses effect{} {{{}}} that trait method \
+                             '{}' does not permit. Declare the effect on the trait method \
+                             (e.g. `needs {{..e}}` to allow any impl effects, or `needs {{{}}}` \
+                             to allow exactly these).",
+                            trait_name,
+                            target_type,
+                            method_name,
+                            if pretty.len() == 1 { "" } else { "s" },
+                            pretty.join(", "),
+                            method_name,
+                            pretty.join(", "),
+                        ),
+                    ));
+                }
+            }
             if !body_effects.is_empty() || !declared_effects.is_empty() {
                 let undeclared: Vec<String> = body_effects
                     .difference(&declared_effects)

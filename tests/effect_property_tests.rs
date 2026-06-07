@@ -599,7 +599,7 @@ fn dict_method_effectful_call_threads_evidence() {
 import Std.Fail (Fail)
 
 trait Decoder a {
-  fun decode : a -> Int
+  fun decode : a -> Int needs {..e}
 }
 
 type Box = Box Int

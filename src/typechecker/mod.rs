@@ -1036,6 +1036,14 @@ pub struct Checker {
     /// was genuinely needed in scope even though it no longer appears in the accumulator.
     /// Cleared at the start of each function body in check_fun_clauses.
     pub(crate) call_site_absorbed: std::collections::HashSet<String>,
+    /// Open-row trait constraints surfaced as forwarded effect row variables in
+    /// the current function body: maps the constrained type variable's id to the
+    /// trait that made it open-row. Populated by
+    /// `emit_concrete_trait_impl_effects` when an open-row trait method is called
+    /// on an abstract (where-bound) `self`, so the surfaced `..a` tail can be
+    /// checked for required forwarding in `check_fun_clauses`. Cleared at the
+    /// start of each function body. See docs/planning/effect-polymorphic-traits.md.
+    pub(crate) trait_forward_row_vars: std::collections::HashMap<u32, String>,
     /// Trait system state (definitions, impls, constraints, where bounds).
     pub(crate) trait_state: TraitState,
     /// Per-variable record candidate narrowing for field access: var_id -> (candidate record names, span).
@@ -1470,6 +1478,7 @@ impl Checker {
             effect_meta: EffectMeta::default(),
             effect_row: EffectRow::empty(),
             call_site_absorbed: std::collections::HashSet::new(),
+            trait_forward_row_vars: std::collections::HashMap::new(),
             trait_state: TraitState::default(),
             field_candidates: HashMap::new(),
             modules: ModuleContext::default(),

@@ -1017,7 +1017,7 @@ fn impl_uses_effect_with_correct_needs_ok() {
         "effect Fail { fun fail : (msg: String) -> a }
 record Redis { url: String }
 trait Store a {
-  fun get : (x: a) -> String
+  fun get : (x: a) -> String needs {..e}
 }
 impl Store for Redis needs {Fail} {
   get s = fail! \"oops\"
@@ -1038,7 +1038,7 @@ fn concrete_trait_method_call_propagates_impl_effect() {
     // declares no needs and provides no handler -> error.
     let result = check(
         "effect Config { fun config : Unit -> String }
-trait Foo a { fun foo : a -> Int }
+trait Foo a { fun foo : a -> Int needs {..e} }
 impl Foo for Int needs {Config} {
   foo thing = if config! () == \"x\" then thing else thing
 }
@@ -1056,7 +1056,7 @@ call_it () = foo 42",
 fn concrete_trait_method_call_with_needs_ok() {
     check(
         "effect Config { fun config : Unit -> String }
-trait Foo a { fun foo : a -> Int }
+trait Foo a { fun foo : a -> Int needs {..e} }
 impl Foo for Int needs {Config} {
   foo thing = if config! () == \"x\" then thing else thing
 }
@@ -1073,7 +1073,7 @@ fn pure_sibling_method_of_effectful_impl_stays_pure() {
     check(
         "effect Config { fun config : Unit -> String }
 trait Foo a {
-  fun eff : a -> Int
+  fun eff : a -> Int needs {..e}
   fun pure_m : a -> Int
 }
 impl Foo for Int needs {Config} {
@@ -1092,7 +1092,7 @@ fn effectful_sibling_method_still_propagates() {
     let result = check(
         "effect Config { fun config : Unit -> String }
 trait Foo a {
-  fun eff : a -> Int
+  fun eff : a -> Int needs {..e}
   fun pure_m : a -> Int
 }
 impl Foo for Int needs {Config} {
@@ -1104,6 +1104,30 @@ call_eff () = eff 42",
     );
     assert!(result.is_err(), "expected Config to propagate via eff");
     assert!(result.err().unwrap().message.contains("Config"));
+}
+
+#[test]
+fn pure_trait_method_with_effectful_impl_is_bounding_error() {
+    // A pure trait method does not permit any impl effects: an effectful impl
+    // (even one that declares `needs {Config}`) is a bounding error, because
+    // the effect-capability is not opted into on the trait method.
+    let result = check(
+        "effect Config { fun config : Unit -> String }
+trait Foo a { fun foo : a -> Int }
+impl Foo for Int needs {Config} {
+  foo thing = if config! () == \"x\" then thing else thing
+}",
+    );
+    assert!(
+        result.is_err(),
+        "expected a bounding error for effectful impl of a pure trait method"
+    );
+    let err = result.err().unwrap();
+    assert!(
+        err.message.contains("does not permit"),
+        "expected a bounding error, got: {}",
+        err.message
+    );
 }
 
 #[test]
@@ -1125,11 +1149,11 @@ fn where_bound_call_at_concrete_type_propagates_impl_effect() {
     // obligation propagates to the concrete caller.
     let result = check(
         "effect Config { fun config : Unit -> String }
-trait Foo a { fun foo : a -> Int }
+trait Foo a { fun foo : a -> Int needs {..e} }
 impl Foo for Int needs {Config} {
   foo thing = if config! () == \"x\" then thing else thing
 }
-fun count_foos : a -> Int where {a: Foo}
+fun count_foos : a -> Int needs {..a} where {a: Foo}
 count_foos x = foo x + 2
 fun use_it : Unit -> Int
 use_it () = count_foos 42",
@@ -1147,12 +1171,167 @@ fn concrete_trait_effect_handled_by_with_is_ok() {
     // (and the handler is not flagged unnecessary).
     check(
         "effect Config { fun config : Unit -> String }
-trait Foo a { fun foo : a -> Int }
+trait Foo a { fun foo : a -> Int needs {..e} }
 impl Foo for Int needs {Config} {
   foo thing = if config! () == \"x\" then thing else thing
 }
 fun call_it : Unit -> Int
 call_it () = foo 42 with { config () = resume \"x\" }",
+    )
+    .unwrap();
+}
+
+// --- Open-row generic surfacing + required forwarding (Phase B) ---
+//
+// When an open-row trait method is called on an abstract, where-bound type
+// variable `a`, the constraint's effects must surface as `..a` and be forwarded
+// in the function's `needs` clause, or it's an error. See
+// docs/planning/effect-polymorphic-traits.md.
+
+#[test]
+fn open_row_generic_requires_forwarding() {
+    // count_foos calls the open-row `foo` on abstract `a`; without `needs {..a}`
+    // the surfaced row variable is unforwarded -> error.
+    let result = check(
+        "effect Config { fun config : Unit -> String }
+trait Foo a { fun foo : a -> Int needs {..e} }
+impl Foo for Int needs {Config} {
+  foo thing = if config! () == \"x\" then thing else thing
+}
+fun count_foos : a -> Int where {a: Foo}
+count_foos x = foo x + 2",
+    );
+    assert!(
+        result.is_err(),
+        "expected a missing-forward error for the open-row constraint"
+    );
+    let err = result.err().unwrap();
+    assert!(
+        err.message.contains("..a") && err.message.contains("Foo"),
+        "expected an actionable `needs {{..a}}` diagnostic, got: {}",
+        err.message
+    );
+}
+
+#[test]
+fn open_row_generic_with_forwarding_ok() {
+    // Declaring `needs {..a}` forwards the constraint's effects -> ok.
+    check(
+        "effect Config { fun config : Unit -> String }
+trait Foo a { fun foo : a -> Int needs {..e} }
+impl Foo for Int needs {Config} {
+  foo thing = if config! () == \"x\" then thing else thing
+}
+fun count_foos : a -> Int needs {..a} where {a: Foo}
+count_foos x = foo x + 2",
+    )
+    .unwrap();
+}
+
+#[test]
+fn show_bound_generic_needs_no_row_var() {
+    // A generic over a pure trait method (Show) must NOT require `..a`: pure
+    // trait methods never surface a forwarded row variable.
+    check(
+        "fun stringify : a -> String where {a: Show}
+stringify x = show x",
+    )
+    .unwrap();
+}
+
+#[test]
+fn closed_named_trait_method_generic_unaffected() {
+    // A closed/named trait method's effects are part of its type and propagate
+    // through the normal row, requiring the named effect (not `..a`).
+    let result = check(
+        "effect Config { fun config : Unit -> String }
+trait Foo a { fun foo : a -> Int needs {Config} }
+impl Foo for Int needs {Config} {
+  foo thing = if config! () == \"x\" then thing else thing
+}
+fun count_foos : a -> Int where {a: Foo}
+count_foos x = foo x + 2",
+    );
+    assert!(
+        result.is_err(),
+        "expected the named Config effect to be required"
+    );
+    assert!(result.err().unwrap().message.contains("Config"));
+}
+
+#[test]
+fn closed_named_trait_method_generic_with_needs_ok() {
+    check(
+        "effect Config { fun config : Unit -> String }
+trait Foo a { fun foo : a -> Int needs {Config} }
+impl Foo for Int needs {Config} {
+  foo thing = if config! () == \"x\" then thing else thing
+}
+fun count_foos : a -> Int needs {Config} where {a: Foo}
+count_foos x = foo x + 2",
+    )
+    .unwrap();
+}
+
+#[test]
+fn open_row_generic_with_wrapper_still_requires_forwarding() {
+    // A `with` cannot handle an open row (you can't name its effects), so it
+    // does not discharge the forwarding obligation: the function is still
+    // effectful from the outside and must declare `needs {..a}`. The `with`
+    // rebuilds the row and drops the abstract tail, so the check must be driven
+    // off the recorded constraint var, not the body's residual tail.
+    let result = check(
+        "effect Config { fun config : Unit -> String }
+trait Foo a { fun foo : a -> Int needs {..e} }
+impl Foo for Int needs {Config} {
+  foo thing = if config! () == \"x\" then thing else thing
+}
+fun handled : a -> Int where {a: Foo}
+handled x = foo x with { config () = resume \"x\" }",
+    );
+    assert!(
+        result.is_err(),
+        "expected a `with` wrapper to still require `needs {{..a}}`"
+    );
+    let err = result.err().unwrap();
+    assert!(
+        err.message.contains("..a") && err.message.contains("Foo"),
+        "expected an actionable `needs {{..a}}` diagnostic, got: {}",
+        err.message
+    );
+}
+
+#[test]
+fn open_row_generic_with_wrapper_and_forwarding_ok() {
+    // Declaring `needs {..a}` makes the `with`-wrapped form legal.
+    check(
+        "effect Config { fun config : Unit -> String }
+trait Foo a { fun foo : a -> Int needs {..e} }
+impl Foo for Int needs {Config} {
+  foo thing = if config! () == \"x\" then thing else thing
+}
+fun handled : a -> Int needs {..a} where {a: Foo}
+handled x = foo x with { config () = resume \"x\" }",
+    )
+    .unwrap();
+}
+
+#[test]
+fn open_row_generic_pure_sibling_needs_no_forwarding() {
+    // Per-method precision: a generic that calls only the PURE sibling of an
+    // open-row method must not require forwarding.
+    check(
+        "effect Config { fun config : Unit -> String }
+trait Foo a {
+  fun eff : a -> Int needs {..e}
+  fun pure_m : a -> Int
+}
+impl Foo for Int needs {Config} {
+  eff thing = if config! () == \"x\" then thing else thing
+  pure_m thing = thing + 1
+}
+fun count_pure : a -> Int where {a: Foo}
+count_pure x = pure_m x + 2",
     )
     .unwrap();
 }
