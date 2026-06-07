@@ -18,6 +18,14 @@ Three compiler phases cooperate: the **typechecker** records evidence about whic
 
 A fourth, earlier concern — **default method bodies** — is independent of dict passing but worth describing alongside it since it sits in the same trait pipeline. See [Default Method Bodies](#default-method-bodies) below.
 
+Trait method effects are part of the type/effect contract, not payload baked
+into the dictionary. The typechecker records method effect capability on the
+trait method and records each impl method's actual effects in
+`ImplInfo.method_effects`. At runtime, effectful dict methods use the normal
+effectful function ABI: user args plus `_Evidence` and `_ReturnK`. Evidence is
+threaded at the call site, where handlers are in scope; dictionary constructors
+do not capture handlers.
+
 ---
 
 ## Default Method Bodies
@@ -111,6 +119,21 @@ The `type_var_name` field is critical for disambiguation. When multiple where-cl
 ### Operator Traits
 
 `Num` and `Eq` use BEAM BIFs directly (e.g., `erlang:'+'`) rather than dictionary passing. `Semigroup` now lowers through regular trait dictionaries, so `<>` elaborates to a `combine` dictionary method call.
+
+### Trait Method Effects
+
+Trait methods opt into effect capability:
+
+- pure method row: every impl method must be pure
+- closed named row, e.g. `needs {Config}`: impl bodies may use only that named
+  set
+- open row, e.g. `needs {..e}`: impl bodies may use any effects
+
+For concrete dispatch, the typechecker and codegen can use the selected impl's
+per-method effects. For generic dispatch through a where-bound dictionary, an
+open-row method surfaces as the constraint row variable, e.g.
+`needs {..a} where {a: Foo}`. This keeps generic signatures stable when new
+impls are added elsewhere.
 
 ---
 

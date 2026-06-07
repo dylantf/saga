@@ -14,7 +14,9 @@ Source (.saga)
   -> Elaborate (src/elaborate.rs)
   -> Normalize (src/codegen/normalize.rs)
   -> Backend Resolve (src/codegen/resolve.rs)
+  -> Optimization Facts (src/codegen/optimize.rs)
   -> Lower (src/codegen/lower/)
+     begins by populating CallEffectMap (src/codegen/call_effects.rs)
   -> Core Erlang AST (src/codegen/cerl.rs)
   -> Print -> .core file
   -> erlc -> .beam file
@@ -70,9 +72,18 @@ Key outputs:
   - `ResolutionResult`
   - per-node type information
   - module codegen metadata
+  - trait method effect signatures and per-impl/per-method effect facts
 - per-module `CheckResult`s for imported modules
 - `ModuleCodegenInfo` per module
 - prelude imports used later by codegen
+
+Trait methods define their effect capability. A pure trait method admits only
+pure impl methods; a closed `needs {Config}` method admits impl methods whose
+body effects stay within that named row; an open `needs {..e}` method admits
+impl-specific effects. For generic callers of open-row trait methods, the
+constraint's unknown effects surface as the constrained type variable's row
+tail, e.g. `needs {..a} where {a: Foo}`. Concrete trait dispatch can use the
+selected impl's per-method effect facts.
 
 ### Elaborate
 
@@ -118,16 +129,46 @@ What it is **not** supposed to do anymore:
   raw spelling
 - paper over missing front-end semantic resolution for ordinary source nodes
 
+### Optimization Facts (`src/codegen/optimize.rs`)
+
+The optimizer is metadata-first. It runs after backend resolve and before
+lowering, recording optional facts that the lowerer may use for narrow fast
+paths. Missing facts must preserve the normal direct-first lowering behavior.
+
+Current fact families include:
+
+- handler-arm resumption analysis in `src/codegen/handler_analysis.rs`
+- same-module/imported helper facts used for static handler variants
+- direct higher-order-function specializations for externally-direct callbacks
+
+Optimization facts are proof inputs, not a second lowered IR. The lowerer
+remains the only Core Erlang emitter.
+
+### Call Classification (`src/codegen/call_effects.rs`)
+
+At the start of module lowering, the lowerer populates a `CallEffectMap` by
+walking the elaborated program and writing one `CallEffectInfo` entry per `App`
+node. This is the single place that decides the runtime call shape:
+
+- `Pure` -- direct call, no evidence, no return continuation
+- `StaticOps` -- closed-row CPS call with a known static effect set
+- `RowForwarded` -- open-row CPS call that forwards caller evidence
+
+The rest of lowering consumes this map. It should not rediscover call effect
+shape from raw syntax.
+
 ### Lower (`src/codegen/lower/`)
 
 Converts the normalized AST into Core Erlang (`CModule`).
 
 This phase is responsible for:
 
-- CPS transformation for algebraic effects
+- consuming `CallEffectInfo` and optimizer facts
+- CPS transformation for algebraic effects when the classified shape requires it
 - handler lowering and inlining
 - saturated vs partial application detection
 - handler parameter / return continuation threading
+- direct fast paths proven by optimizer facts
 - runtime-specific data layout and call shaping
 
 The lowerer consumes two different semantic layers:
@@ -194,6 +235,7 @@ struct CompiledModule {
 - `modules: HashMap<String, CompiledModule>`
 - `prelude_imports`
 - `let_effect_bindings`
+- imported modules' optimization facts
 
 This is the cross-module semantic bundle the lowerer uses for imported modules.
 
@@ -205,7 +247,8 @@ This is the cross-module semantic bundle the lowerer uses for imported modules.
 2. Typecheck/load stdlib modules
 3. Compile imported modules to `CompiledModule`
 4. Elaborate + normalize the user module
-5. Run backend resolve + lower + emit with `emit_module_with_context(...)`
+5. Run backend resolve, collect optimizer facts, lower (including call
+   classification), and emit with `emit_module_with_context(...)`
 6. Compile `.core` with `erlc` and run with `erl`
 
 ### Project (`saga build`)

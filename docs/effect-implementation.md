@@ -14,16 +14,23 @@ Every function type carries an effect row:
 Type::Fun(Box<Type>, Box<Type>, EffectRow)  // param -> return with effects
 ```
 
-`EffectRow` has a list of known effects and an optional row variable tail:
+`EffectRow` has a list of known effects and zero or more row variable tails:
 
 ```rust
 struct EffectRow {
-    effects: Vec<(String, Vec<Type>)>,  // e.g. [("Log", []), ("State", [Int])]
-    tail: Option<Box<Type>>,             // None = closed, Some(Var) = open (..e)
+    effects: Vec<EffectEntry>,  // e.g. Log, State Int
+    tails: Vec<Type>,           // [] = closed, [Var(e)] = open (..e)
 }
 ```
 
-Pure functions have `EffectRow::empty()` (closed, no effects). `Type::arrow(a, b)` is a convenience constructor for pure function types.
+Pure functions have `EffectRow::empty()` (closed, no effects).
+`Type::arrow(a, b)` is a convenience constructor for pure function types.
+
+Multiple tails are allowed: `needs {..a, ..b}` means "the union of the
+independent open rows carried by `a` and `b`." Each tail binds independently
+during unification. This is important for higher-order functions with multiple
+effectful callbacks and for generic functions that forward multiple trait
+constraints' effects.
 
 ### Where Effects Live on Curried Functions
 
@@ -38,7 +45,11 @@ Partial application `greet "hi"` returns `Fun(String, Unit, {Log})` -- effects a
 
 ### Computation Types
 
-`infer_expr` returns `(Type, EffectRow)` -- a value type and the effects the expression performs. This is the core mechanism: effects flow as return values from inference, not in a side-channel.
+`infer_expr` returns the value `Type` and emits performed effects into
+`Checker.effect_row`. Callers use `save_effects` / `restore_effects` to isolate
+sub-expressions and recover their accumulated `EffectRow`. This is the core
+mechanism: effects are inferred while walking expressions, then checked against
+the declared `needs` row at function, handler, and callback boundaries.
 
 How effects compose at each expression form:
 
@@ -79,6 +90,59 @@ run f = f () with { fail msg = () }
 
 The row variable `..e` captures any extra effects from the callback and forwards them to the caller. In unification, when one row is open and the other has extras, the tail variable binds to the extras.
 
+Rows can forward more than one independent source:
+
+```saga
+fun both :
+  (Unit -> Int needs {..a}) ->
+  (Unit -> Int needs {..b}) ->
+  Int needs {..a, ..b}
+both fa fb = fa () + fb ()
+```
+
+Forwarding only one tail would silently drop the other callback's unknown
+effects, so annotated functions must forward every open callback tail they call.
+
+### Effect-Polymorphic Traits
+
+Trait methods define their effect capability. Impl methods are bounded by the
+trait method's row at impl registration time:
+
+| Trait method row | Impl method may use |
+| --- | --- |
+| pure, e.g. `foo : a -> Int` | no effects; an effectful impl is a type error |
+| closed/named, e.g. `foo : a -> Int needs {Config}` | only the named effects |
+| open, e.g. `foo : a -> Int needs {..e}` | any effects, supplied by the impl |
+
+This keeps generic callers modular: adding a new impl in another module cannot
+change an existing generic function's effect row.
+
+Concrete trait dispatch uses per-impl, per-method facts stored in
+`ImplInfo.method_effects`. A call like `foo 42` emits the selected impl
+method's effects into the caller, with per-method precision so a pure sibling
+of an effectful method stays pure.
+
+Generic dispatch over an open-row trait method surfaces the unknown impl
+effects as the constrained type variable's row tail:
+
+```saga
+trait Foo a {
+  fun foo : a -> Int needs {..e}
+}
+
+fun generic_foo : a -> Int needs {..a} where {a: Foo}
+generic_foo x = foo x
+```
+
+The `..a` tail reuses the type variable id for `a`. While `a` is abstract it
+means "effects supplied by the selected `Foo a` impl." After specialization at
+a concrete type, the tail resolves to that type and is no longer an effect row;
+concrete effects must come from concrete impl method facts instead.
+
+Open trait rows must be forwarded even if the body wraps the call in `with`.
+The generic function cannot name the open row's effects, so it cannot soundly
+handle them internally.
+
 ### Handler Effect Subtraction
 
 `with` blocks are desugared early into nested handlers. For example:
@@ -107,15 +171,26 @@ sibling item later in the same surface block.
 
 ### Function Body Checking
 
-After inferring all clauses of a function body, the accumulated `EffectRow` (merged across clauses) is checked against the declared `needs` row from the annotation. This uses `check_effects_via_row`: if the declared row is open, any extras are allowed; if closed, undeclared effects are an error.
+After inferring all clauses of a function body, the accumulated `EffectRow`
+(merged across clauses) is checked against the declared `needs` row from the
+annotation. This uses `check_effects_via_row`: if the declared row is open, any
+extras are allowed; if closed, undeclared effects are an error.
+
+Function boundary checks also enforce forwarding obligations:
+
+- callback parameters with open rows must have their row tails forwarded by the
+  function's own `needs` row
+- calls to open-row trait methods on abstract where-bound variables must
+  forward the corresponding `..a` tail
 
 ### Key Files
 
-- `typechecker/mod.rs` -- `Type::Fun`, `EffectRow` (with `empty`, `merge`, `subtract`), `EffectMeta`, `effects_from_type`
-- `typechecker/infer.rs` -- `infer_expr` returns `(Type, EffectRow)`, App absorption logic, lambda effect propagation, handler binding detection in `infer_block` (`extract_handler_info`, `handler_info_from_type`)
+- `typechecker/mod.rs` -- `Type::Fun`, `EffectRow` (with `empty`, `merge`, `subtract`), `EffectMeta`, `effects_from_type`, `ImplInfo.method_effects`
+- `typechecker/infer.rs` -- `infer_expr`, App absorption logic, lambda effect propagation, concrete trait impl effect emission, open-row trait forwarding surfacing, handler binding detection in `infer_block` (`extract_handler_info`, `handler_info_from_type`)
 - `typechecker/effects.rs` -- `check_effects_via_row`, effect op lookup/instantiation
 - `typechecker/handlers.rs` -- `infer_with`/`infer_with_inner`, handler subtraction
-- `typechecker/check_decl.rs` -- `collect_annotations` (builds EffectRow on innermost arrow), `check_fun_clauses` (body effect check), `innermost_effect_row` helper
+- `typechecker/check_decl.rs` -- `collect_annotations` (builds EffectRow on innermost arrow), `check_fun_clauses` (body effect check and forwarding requirements), `innermost_effect_row` helper
+- `typechecker/check_traits.rs` -- impl body effect checking, trait method capability bounds, per-method impl effect collection
 - `typechecker/unify.rs` -- `unify_effect_rows` (row matching, tail binding)
 
 ### EffectMeta
@@ -320,7 +395,26 @@ their own surrounding handled expression completes.
 
 ### Lowering Structure
 
-Per-call effect metadata is computed once by a pre-pass and stored in `CallEffectMap` (keyed by AST `NodeId`). The lowerer is a read-only consumer: at every effectful call site, it reads `CallEffectInfo` from the map to determine projection, evidence layout, and op-call indices. There is no inline call-shape recognition at lowering time — adding a new call shape (e.g. `DictMethodAccess`, lambda-headed call) means teaching the populator one new branch, not auditing every dispatcher.
+Per-call effect metadata is computed once by a pre-pass and stored in
+`CallEffectMap` (keyed by AST `NodeId`). The lowerer is a read-only consumer:
+at every effectful call site, it reads `CallEffectInfo` from the map to
+determine projection, evidence layout, and op-call indices. There is no inline
+call-shape recognition at lowering time -- adding a new call shape (e.g.
+`DictMethodAccess`, lambda-headed call) means teaching the populator one new
+branch, not auditing every dispatcher.
+
+`CallEffectInfo` has three runtime shapes:
+
+- `Pure` -- direct call; no evidence and no return continuation
+- `StaticOps` -- closed-row CPS call; evidence can be projected to the static
+  effect set
+- `RowForwarded` -- open-row CPS call; caller evidence is forwarded unchanged,
+  with any static prefix still known for diagnostics/layout
+
+`src/codegen/optimize.rs` records optional optimizer facts before lowering.
+Those facts are independent metadata that the lowerer may consume for direct
+fast paths. Missing facts always fall back to the classified evidence/CPS path.
+Optimization facts are not a second lowered program.
 
 Continuation flow is threaded through explicit helpers:
 
@@ -348,9 +442,12 @@ nested `with` semantics; the native interop happens inside the handler body.
 ### Key Files
 
 - `codegen/call_effects.rs` -- `CallEffectInfo`, `CallEffectMap`, populator. The pre-pass that determines per-call evidence shape ahead of lowering.
+- `codegen/handler_analysis.rs` -- conservative `resume`-position analysis for static handler optimizations.
+- `codegen/optimize.rs` -- post-classifier optimizer fact collection: handler analysis, public helper facts, and HOF direct-specialization facts.
 - `codegen/lower/evidence.rs` -- `EvidenceLayout`, `build_evidence_entry`, `insert_canonical`, `find_evidence`, `project_evidence`, `evidence_index_of`. Compile-time helpers for emitting the runtime evidence operations.
 - `codegen/lower/mod.rs` -- `Lowerer`, `FunInfo`, call-site emission. Single helper for effectful calls regardless of head shape (Var, QualifiedName, DictMethodAccess, lambda).
 - `codegen/lower/effects.rs` -- `lower_effect_call` (op call lookup against evidence), `lower_with` (extends evidence via `insert_canonical`), `build_op_handler_fun`, `build_beam_native_op_fun`, `lower_handler_def_to_tuple`.
+- `codegen/lower/hof.rs` -- generated direct HOF entries for externally-direct callbacks.
 - `codegen/lower/exprs.rs` -- value/tail lowering helpers, `lower_handle_binding`, `is_handler_value`.
 - `codegen/lower/init.rs` -- populates `FunInfo` (with `EvidenceLayout`) from type schemes via `arity_and_effects_from_type`.
 - `stdlib/evidence.bridge.erl` -- runtime helpers `find_evidence/2`, `insert_canonical/2`, `project_evidence/2` for the operations that don't inline cleanly.
@@ -363,11 +460,28 @@ Already in place:
 - **Row polymorphism:** row variables are resolved before codegen. No runtime cost; rows that survive to lowering are forwarded through `_Evidence` unchanged.
 - **Canonical-ordered indices:** for closed rows, op call sites emit static `element/2` loads rather than runtime atom comparisons. The runtime `find_evidence` helper is only used for open rows.
 - **Innermost-wins via canonical insertion:** same-effect nesting handled by tuple replacement, not mask machinery.
+- **Static tail-resume handler ops:** when a static handler arm is proven to
+  tail-resume directly, matching op calls can lower as direct values instead of
+  evidence lookup + handler closure application.
+- **Static helper variants:** simple same-module/imported helpers whose
+  escaping effects are covered by active static handler facts can use direct
+  variants or inlining, with conservative guards for recursive, multi-clause,
+  private, or residual-effect cases.
+- **Direct HOF specializations:** higher-order functions can get generated
+  direct entries when callback arguments are externally direct and the HOF's
+  own effects are covered by callback-absorbed effects.
 
 Future work:
 
+- **Trait/dictionary specialization:** concrete trait dispatch can use
+  per-method impl effect facts and known dictionaries to skip generic dict
+  traversal. Pure trait methods are globally pure by the typechecker invariant;
+  open-row concrete dispatch must use `ImplInfo.method_effects`, not a resolved
+  `..a` tail.
+- **Known constructor/generic specialization:** for derived `Generic`-based
+  traits, compile known representation walking into direct constructor/field
+  code where the dictionary path is statically known.
 - **Direct-native fast path:** for BEAM-native ops (Process, Ref, Timer, etc.) called outside of user-defined handlers, fold the closure call into a direct native call. The `use_direct_native_fast_path` hook in `effects.rs` is currently a no-op stub.
 - **Closed-row specialization:** when the entire program is closed-row (common for top-level entry points), specialize op call emission to skip the runtime tag and use direct positional indexing without the `{Tag, OpTuple}` wrapping. Speculative perf — needs benchmarking to justify.
 - **Open-row lookup memoization:** for loops that repeatedly call the same op under an open row, cache the resolved handler closure once outside the loop. Probably not worth doing until a real workload shows it.
-- **Handler inlining:** when the handler is statically known and small, inline the handler body at the call site, eliminating closure allocation.
 - **Dead effect elimination:** if a handled effect is never called, strip the handler.
