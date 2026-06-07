@@ -1,58 +1,22 @@
-effect Graph {
-  fun neighbors : String -> List (String, Int)
+effect Foo {
+  fun foo : Unit -> Int
+}
+effect Bar {
+  fun bar : Unit -> Int
 }
 
-fun insert_sorted : (Int, String, List String) -> List (Int, String, List String) -> List (Int, String, List String)
-insert_sorted item [] = [item]
-insert_sorted item (h :: t) = {
-  let (ci, _, _) = item
-  let (ch, _, _) = h
-  if ci <= ch then item :: h :: t
-  else h :: insert_sorted item t
-}
-
-fun search : String -> List (Int, String, List String) -> Dict String Int -> Maybe (List String, Int)
-  needs {Graph}
-search _ [] _ = Nothing
-search goal ((cost, node, path) :: rest) visited = {
-  if node == goal then Just (List.reverse path, cost)
-  else case Dict.get node visited {
-    Just best when best <= cost -> search goal rest visited
-    _ -> {
-      let new_visited = Dict.put node cost visited
-      let nbrs = neighbors! node
-      let new_entries = List.map (fun (n, c) -> (cost + c, n, n :: path)) nbrs
-      let new_frontier =
-        List.foldl (fun acc e -> insert_sorted e acc) rest new_entries
-      search goal new_frontier new_visited
-    }
-  }
-}
-
-fun dijkstra : String -> String -> Maybe (List String, Int) needs {Graph}
-dijkstra start goal = search goal [(0, start, [start])] (Dict.new ())
-
-edges =
-  Dict.from_list [
-    ("A", [("B", 1), ("C", 4)]),
-    ("B", [("C", 2), ("D", 5)]),
-    ("C", [("D", 1)]),
-    ("D", []),
-  ]
-
-handler graph_from_dict for Graph {
-  neighbors node = {
-    let nbrs = case Dict.get node edges {
-      Just xs -> xs
-      Nothing -> []
-    }
-    resume nbrs
-  }
+fun do_work : (Unit -> Int needs {..a}) -> (Unit -> Int needs {..a}) -> Int
+  needs {..a}
+do_work a b = {
+  let res_a = a ()
+  let res_b = b ()
+  res_a + res_b
 }
 
 main () = {
-  case dijkstra "A" "D" with graph_from_dict {
-    Just (path, cost) -> dbg $"shortest: {debug path} cost={cost}"
-    Nothing -> dbg "no path"
-  }
+  let res = do_work (fun () -> foo! ()) (fun () -> bar! ())
+  dbg res
+} with {
+  foo () = resume 42
+  bar () = resume 3
 }

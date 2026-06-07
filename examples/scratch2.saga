@@ -1,0 +1,27 @@
+effect Config {
+  fun config : Unit -> String needs {..e}
+}
+
+trait Foo a {
+  fun foo : a -> Int
+}
+
+impl Foo for Int needs {Config} {
+  foo thing = if config! () == "foo" then thing + 1 else thing
+}
+
+fun generic_foo : a -> Int needs {..e} where {a: Foo}
+generic_foo thing = foo thing
+
+main () = {
+  let direct = foo 41 with {
+    config () = resume "foo"
+  }
+
+  # If impl-selected effects are tracked soundly, this should require a
+  # Config handler too. If it compiles/runs without one, generic trait dispatch
+  # is losing the impl method effect.
+  let generic = generic_foo 41
+
+  dbg (direct, generic)
+}
