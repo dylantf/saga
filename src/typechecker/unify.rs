@@ -914,15 +914,14 @@ impl Checker {
                     let tails: Vec<Type> = effect_row_var
                         .iter()
                         .map(|(name, _)| {
-                            let id =
-                                if let Some((_, id)) = params.iter().find(|(n, _)| n == name) {
-                                    *id
-                                } else {
-                                    let id = self.next_var;
-                                    self.next_var += 1;
-                                    params.push((name.clone(), id));
-                                    id
-                                };
+                            let id = if let Some((_, id)) = params.iter().find(|(n, _)| n == name) {
+                                *id
+                            } else {
+                                let id = self.next_var;
+                                self.next_var += 1;
+                                params.push((name.clone(), id));
+                                id
+                            };
                             Type::Var(id)
                         })
                         .collect();
