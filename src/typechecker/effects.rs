@@ -93,7 +93,7 @@ impl Checker {
                     EffectEntry::unnamed(resolved_name, args)
                 })
                 .collect(),
-            tail: None,
+            tails: vec![],
         }
     }
 
@@ -159,8 +159,8 @@ impl Checker {
             return Ok(());
         }
         let declared = self.sub.apply_effect_row(declared_row);
-        // Open row: extras flow through the tail variable
-        if declared.tail.is_some() {
+        // Open row: extras flow through the tail variable(s)
+        if declared.is_open() {
             return Ok(());
         }
         // Closed row: every body effect must appear in declared
@@ -313,7 +313,7 @@ impl Checker {
                                 collect_vars(arg, vars);
                             }
                         }
-                        if let Some(tail) = &row.tail {
+                        for tail in &row.tails {
                             collect_vars(tail, vars);
                         }
                     }
@@ -340,7 +340,7 @@ impl Checker {
                     collect_vars(arg, &mut free_vars);
                 }
             }
-            if let Some(tail) = &op.needs.tail {
+            for tail in &op.needs.tails {
                 collect_vars(tail, &mut free_vars);
             }
             if free_vars.is_empty() {
@@ -391,7 +391,7 @@ impl Checker {
                             collect_vars2(arg, vars);
                         }
                     }
-                    if let Some(tail) = &row.tail {
+                    for tail in &row.tails {
                         collect_vars2(tail, vars);
                     }
                 }
@@ -418,7 +418,7 @@ impl Checker {
                 collect_vars2(arg, &mut free_vars);
             }
         }
-        if let Some(tail) = &op.needs.tail {
+        for tail in &op.needs.tails {
             collect_vars2(tail, &mut free_vars);
         }
         for id in free_vars {
@@ -574,28 +574,27 @@ impl Checker {
 
         // Decide tail. If any input is open, the result is open and shares
         // a single fresh tail var; otherwise the result is closed.
-        let any_open = applied.iter().any(|r| r.tail.is_some());
+        let any_open = applied.iter().any(|r| r.is_open());
         if !any_open {
             return Ok(EffectRow {
                 effects: union,
-                tail: None,
+                tails: vec![],
             });
         }
 
         let shared_tail = self.fresh_var();
 
-        // For each open input, bind its tail var to (extras-for-this-row,
-        // shared_tail). Extras are entries in the union whose effect name
-        // doesn't already appear in this row's known effects.
+        // For each open input, bind its tail var(s) so the row widens to
+        // (union, shared_tail). The first tail of a row absorbs the extras
+        // (union entries this row lacks); any further tails simply alias the
+        // shared tail so the row stays open without losing information.
         //
-        // Track which tail vars we've bound to avoid double-binding when
-        // two inputs happen to share the same tail variable.
+        // Track which tail vars we've bound to avoid double-binding when two
+        // inputs happen to share the same tail variable.
         let mut bound: HashSet<u32> = HashSet::new();
         for row in &applied {
-            let Some(tail_id) = row.tail_var_id() else {
-                continue;
-            };
-            if !bound.insert(tail_id) {
+            let tail_ids = row.tail_var_ids();
+            if tail_ids.is_empty() {
                 continue;
             }
             let extras: Vec<EffectEntry> = union
@@ -603,20 +602,23 @@ impl Checker {
                 .filter(|u| !row.effects.iter().any(|re| re.matches(u)))
                 .cloned()
                 .collect();
-            self.sub
-                .bind_row(
-                    tail_id,
-                    EffectRow {
-                        effects: extras,
-                        tail: Some(Box::new(shared_tail.clone())),
-                    },
-                )
-                .map_err(|e| e.with_span(span))?;
+            for (i, &tail_id) in tail_ids.iter().enumerate() {
+                if !bound.insert(tail_id) {
+                    continue;
+                }
+                let binding = EffectRow {
+                    effects: if i == 0 { extras.clone() } else { vec![] },
+                    tails: vec![shared_tail.clone()],
+                };
+                self.sub
+                    .bind_row(tail_id, binding)
+                    .map_err(|e| e.with_span(span))?;
+            }
         }
 
         Ok(EffectRow {
             effects: union,
-            tail: Some(Box::new(shared_tail)),
+            tails: vec![shared_tail],
         })
     }
 
@@ -720,7 +722,7 @@ impl Checker {
                 continue;
             };
             let resolved_row = self.sub.apply_effect_row(row);
-            if let Some(id) = resolved_row.tail_var_id() {
+            for id in resolved_row.tail_var_ids() {
                 tail_positions.entry(id).or_default().push(i);
             }
         }

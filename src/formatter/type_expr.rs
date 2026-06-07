@@ -66,7 +66,7 @@ pub fn format_type_expr(ty: &TypeExpr) -> Doc {
                 _ => format_type_expr(from),
             };
             let mut d = docs![from_doc, Doc::text(" -> "), format_type_expr(to)];
-            if !effects.is_empty() || effect_row_var.is_some() {
+            if !effects.is_empty() || !effect_row_var.is_empty() {
                 d = docs![
                     d,
                     Doc::text(" "),
@@ -135,10 +135,10 @@ pub fn format_fun_type(
     params: &[(String, TypeExpr)],
     return_type: &TypeExpr,
     effects: &[EffectRef],
-    effect_row_var: &Option<(String, Span)>,
+    effect_row_var: &[(String, Span)],
 ) -> Doc {
     let type_doc = format_arrow_chain(params, return_type);
-    if effects.is_empty() && effect_row_var.is_none() {
+    if effects.is_empty() && effect_row_var.is_empty() {
         type_doc
     } else {
         docs![
@@ -178,7 +178,7 @@ pub fn format_arrow_chain(params: &[(String, TypeExpr)], return_type: &TypeExpr)
             effects,
             effect_row_var,
             ..
-        } if !effects.is_empty() || effect_row_var.is_some() => {
+        } if !effects.is_empty() || !effect_row_var.is_empty() => {
             docs![
                 Doc::text("("),
                 format_type_expr(return_type),
@@ -192,17 +192,17 @@ pub fn format_arrow_chain(params: &[(String, TypeExpr)], return_type: &TypeExpr)
 }
 
 /// Format `needs {Effect1, Effect2}` if non-empty.
-pub fn format_needs(effects: &[EffectRef], effect_row_var: &Option<(String, Span)>) -> Doc {
-    if effects.is_empty() && effect_row_var.is_none() {
+pub fn format_needs(effects: &[EffectRef], effect_row_var: &[(String, Span)]) -> Doc {
+    if effects.is_empty() && effect_row_var.is_empty() {
         return Doc::Nil;
     }
     format_needs_inner(effects, effect_row_var)
 }
 
 /// Format `needs {Effect1, Effect2}` unconditionally.
-fn format_needs_inner(effects: &[EffectRef], effect_row_var: &Option<(String, Span)>) -> Doc {
+fn format_needs_inner(effects: &[EffectRef], effect_row_var: &[(String, Span)]) -> Doc {
     let mut parts: Vec<Doc> = effects.iter().map(format_effect_ref).collect();
-    if let Some((var, _)) = effect_row_var {
+    for (var, _) in effect_row_var {
         parts.push(Doc::text(format!("..{}", var)));
     }
     docs![

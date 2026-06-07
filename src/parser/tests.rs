@@ -2351,7 +2351,7 @@ fn trait_method_signature_needs() {
             let method = &methods[0].node;
             assert_eq!(method.name, "decode");
             assert_eq!(effect_names(&method.effects), vec!["Fail"]);
-            assert!(method.effect_row_var.is_none());
+            assert!(method.effect_row_var.is_empty());
         }
         other => panic!("expected trait def, got {:?}", other),
     }

@@ -1133,7 +1133,7 @@ impl Checker {
                             Box::new(ret_ty.clone()),
                             EffectRow {
                                 effects: vec![],
-                                tail: Some(Box::new(eff_row_var)),
+                                tails: vec![eff_row_var],
                             },
                         ),
                         span,
@@ -1163,7 +1163,13 @@ impl Checker {
         param_ty: &Type,
         arg_span: Span,
     ) -> Result<(), Diagnostic> {
-        if self.unify_at(arg_ty, param_ty, arg_span).is_err() {
+        if let Err(orig) = self.unify_at(arg_ty, param_ty, arg_span) {
+            // Preserve specific, actionable row-ambiguity errors (e.g. an
+            // argument forcing a named effect into one of several open tails)
+            // rather than collapsing them into a generic type mismatch.
+            if orig.message.contains("ambiguous effect row") {
+                return Err(orig);
+            }
             let expected = self.prettify_type(&self.sub.apply(param_ty));
             let actual = self.prettify_type(arg_ty_pre);
             return Err(Diagnostic::error_at(
@@ -1376,7 +1382,7 @@ impl Checker {
                 return_type: None,
                 needs_effects: super::EffectRow {
                     effects: vec![],
-                    tail: None,
+                    tails: vec![],
                 },
                 forall: vec![],
                 arm_spans: std::collections::HashMap::new(),
@@ -1688,7 +1694,7 @@ impl Checker {
         if let (Type::Fun(_, _, actual_row), Type::Fun(_, _, expected_row)) = (&actual, &expected) {
             let actual_row = self.sub.apply_effect_row(actual_row);
             let expected_row = self.sub.apply_effect_row(expected_row);
-            if actual_row.tail.is_none() && expected_row.tail.is_none() {
+            if actual_row.tails.is_empty() && expected_row.tails.is_empty() {
                 let mut extra_effects: Vec<&str> = actual_row
                     .effects
                     .iter()

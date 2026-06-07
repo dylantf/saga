@@ -285,7 +285,7 @@ impl Checker {
                                         .collect(),
                                 })
                                 .collect(),
-                            tail: None,
+                            tails: vec![],
                         };
                         let final_effs = remaining_effs.merge(&fresh_needs);
                         self.emit_effects(&final_effs);

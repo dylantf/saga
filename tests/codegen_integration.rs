@@ -3661,6 +3661,59 @@ main () = probe (Proxy : Proxy 'id_left) (Proxy : Proxy 'id_right)
     assert_runs_and_stdout_contains(src, &["id_left", "id_right"]);
 }
 
+#[test]
+fn multi_row_var_forwards_union_e2e() {
+    // A HOF forwards the union of two independent open effect rows
+    // (`needs {..a, ..b}`); each callback's effects are handled by `main`.
+    let src = r#"
+effect Foo { fun foo : Unit -> Int }
+effect Bar { fun bar : Unit -> Int }
+
+fun do_work : (Unit -> Int needs {..a}) -> (Unit -> Int needs {..b}) -> Int
+  needs {..a, ..b}
+do_work a b = {
+  let res_a = a ()
+  let res_b = b ()
+  res_a + res_b
+}
+
+main () = {
+  do_work (fun () -> foo! ()) (fun () -> bar! ())
+} with {
+  foo () = resume 42
+  bar () = resume 3
+}
+"#;
+    assert_runs_and_stdout_contains(src, &["45"]);
+}
+
+#[test]
+fn multi_row_var_with_named_callback_effects_e2e() {
+    // Each callback also carries a named effect alongside its open tail.
+    let src = r#"
+effect Foo { fun foo : Unit -> Int }
+effect Bar { fun bar : Unit -> Int }
+effect Baz { fun baz : Unit -> Int }
+
+fun do_work : (Unit -> Int needs {Foo, ..a}) -> (Unit -> Int needs {Bar, ..b}) -> Int
+  needs {Foo, Bar, ..a, ..b}
+do_work a b = {
+  let res_a = a ()
+  let res_b = b ()
+  res_a + res_b
+}
+
+main () = {
+  do_work (fun () -> foo! () + baz! ()) (fun () -> bar! ())
+} with {
+  foo () = resume 42
+  bar () = resume 3
+  baz () = resume 100
+}
+"#;
+    assert_runs_and_stdout_contains(src, &["145"]);
+}
+
 // Phase B sum-type FromJson bug repro lives in
 // `tests/e2e/tests/generic_fromjson_test.saga` — it needs `<>`
 // (Semigroup) and Std.Test, neither of which this harness links against.

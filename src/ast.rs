@@ -282,8 +282,10 @@ pub enum Decl {
         params: Vec<(String, TypeExpr)>,
         return_type: TypeExpr,
         effects: Vec<EffectRef>,
-        /// Row variable for open effect rows, e.g. `..e` in `needs {Test, ..e}`
-        effect_row_var: Option<(String, Span)>,
+        /// Row variables for open effect rows, e.g. `..e` in `needs {Test, ..e}`.
+        /// A row may carry several (`needs {..a, ..b}`) for forwarding the union
+        /// of multiple independent open rows.
+        effect_row_var: Vec<(String, Span)>,
         /// `where {a: Show + Eq, b: Ord}` - trait bounds on type variables
         where_clause: Vec<TraitBound>,
         /// Compile-time annotations, e.g. `@external("erlang", "lists", "reverse")`
@@ -1025,8 +1027,9 @@ pub enum TypeExpr {
         from: Box<TypeExpr>,
         to: Box<TypeExpr>,
         effects: Vec<EffectRef>,
-        /// Row variable for open effect rows, e.g. `..e` in `needs {Test, ..e}`
-        effect_row_var: Option<(String, Span)>,
+        /// Row variables for open effect rows, e.g. `..e` in `needs {Test, ..e}`.
+        /// May carry several (`needs {..a, ..b}`).
+        effect_row_var: Vec<(String, Span)>,
         span: Span,
     },
 
@@ -1256,7 +1259,7 @@ pub struct EffectOp {
     pub params: Vec<(String, TypeExpr)>,
     pub return_type: TypeExpr,
     pub effects: Vec<EffectRef>,
-    pub effect_row_var: Option<(String, Span)>,
+    pub effect_row_var: Vec<(String, Span)>,
     pub span: Span,
 }
 
@@ -1424,7 +1427,7 @@ pub struct TraitMethod {
     pub params: Vec<(String, TypeExpr)>,
     pub return_type: TypeExpr,
     pub effects: Vec<EffectRef>,
-    pub effect_row_var: Option<(String, Span)>,
+    pub effect_row_var: Vec<(String, Span)>,
     pub span: Span,
     /// Optional default body. When present, impls that omit this method
     /// inherit it via clone-with-fresh-NodeIds in `register_impl`.
