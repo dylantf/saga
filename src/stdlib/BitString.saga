@@ -40,6 +40,15 @@ pub fun from_string : (s: String) -> BitString
 @external("erlang", "std_bitstring_bridge", "to_string")
 pub fun to_string : (bs: BitString) -> Result String String
 
+#@ Reinterprets a bitstring as a String with no validation. Zero-cost
+#@ (Saga strings are already UTF-8 binaries), but UNSAFE: the caller must
+#@ guarantee the bytes are valid UTF-8. Use when validity is established by
+#@ construction (e.g. concatenating fragments that are themselves valid
+#@ UTF-8) and the `to_string` validation pass is pure overhead. When in
+#@ doubt, use `to_string`.
+@external("erlang", "std_bitstring_bridge", "to_string_unchecked")
+pub fun to_string_unchecked : (bs: BitString) -> String
+
 #@ Returns the byte at the given zero-based index, or Nothing if out of bounds.
 @external("erlang", "std_bitstring_bridge", "at")
 pub fun at : (index: Int) -> (bs: BitString) -> Maybe Int
@@ -51,6 +60,16 @@ pub fun slice : (start: Int) -> (len: Int) -> (bs: BitString) -> BitString
 #@ Appends two bitstrings. Also available via the <> operator.
 @external("erlang", "std_bitstring_bridge", "append")
 pub fun append : (a: BitString) -> (b: BitString) -> BitString
+
+#@ Concatenates a list of bitstrings into one, in a single pass.
+#@ Backed by Erlang's `iolist_to_binary`, so the result is built once with
+#@ the total size known up front. Prefer this over folding `append`/`<>`
+#@ across a list: each `append` allocates and copies the whole accumulator,
+#@ so an N-fragment fold is O(N^2), whereas `concat` is O(total bytes).
+#@ This is the right way to flatten iodata-style fragment lists at a
+#@ serialization boundary.
+@external("erlang", "std_bitstring_bridge", "concat")
+pub fun concat : (parts: List BitString) -> BitString
 
 #@ Creates a bitstring of the given size filled with zero bytes.
 @external("erlang", "std_bitstring_bridge", "zeroes")
