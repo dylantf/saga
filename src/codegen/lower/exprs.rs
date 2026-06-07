@@ -2606,7 +2606,9 @@ impl<'a> Lowerer<'a> {
 
             // --- Elaboration-only constructs ---
             ExprKind::DictMethodAccess {
-                dict, method_index, ..
+                dict,
+                method_index,
+                trait_name,
             } => {
                 // Lower to: let D = <dict> in element(idx+1, D)
                 let dict_var = self.fresh();
@@ -2619,7 +2621,16 @@ impl<'a> Lowerer<'a> {
                         CExpr::Var(dict_var.clone()),
                     ],
                 );
-                CExpr::Let(dict_var, Box::new(dict_ce), Box::new(extract_method))
+                // A nullary trait method (`fun default : a`) is stored in the dict
+                // as a zero-arity thunk (`fun () -> 0`) and is never the head of an
+                // `App`, so nothing else applies it. Apply it here so the call
+                // yields the value, not the closure.
+                let body = if self.trait_method_is_nullary(trait_name, *method_index) {
+                    CExpr::Apply(Box::new(extract_method), vec![])
+                } else {
+                    extract_method
+                };
+                CExpr::Let(dict_var, Box::new(dict_ce), Box::new(body))
             }
 
             ExprKind::ForeignCall {

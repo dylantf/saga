@@ -632,6 +632,61 @@ result () = {
 }
 
 #[test]
+fn nullary_effect_op_performs_immediately() {
+    // A zero-parameter effect op (`fun number : Int`) is a saturated perform,
+    // not an eta-reduced op reference. `number!` must run the handler and yield
+    // the value, not a thunk. Regression for zero-arity effect ops being
+    // lowered as `fun () -> perform`.
+    let src = r#"module Main
+
+effect Config {
+  fun number : Int
+}
+
+fun compute : Unit -> Int needs {Config}
+compute () = number! + 1
+
+pub fun result : Unit -> String
+result () = {
+  let n = compute () with { number = resume 41 }
+  show n
+}
+"#;
+    check_result_string("nullary_effect_op_performs_immediately", src, "42");
+}
+
+#[test]
+fn nullary_trait_method_dispatches_by_return_type() {
+    // A zero-parameter trait method (`fun default : a`) dispatches purely by
+    // return type and is stored in the dict as a zero-arity thunk. Accessing it
+    // must apply the thunk so the call yields the value, not the closure.
+    let src = r#"module Main
+
+trait Default a {
+  fun default : a
+}
+
+impl Default for Int {
+  default = 7
+}
+
+impl Default for String {
+  default = "hi"
+}
+
+fun an_int : Unit -> Int
+an_int () = default + 1
+
+fun a_string : Unit -> String
+a_string () = default
+
+pub fun result : Unit -> String
+result () = show (an_int ()) <> ";" <> a_string ()
+"#;
+    check_result_string("nullary_trait_method_dispatches_by_return_type", src, "8;hi");
+}
+
+#[test]
 fn where_bound_trait_method_effect_threads_evidence() {
     // A where-bound dict elaborates to `DictMethodAccess(Var __dict_..., ...)`.
     // The call-effects pre-pass must use the trait method's declared `needs`

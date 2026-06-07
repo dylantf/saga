@@ -526,6 +526,15 @@ impl<'a> Lowerer<'a> {
             .get(op_name)?
             .clone();
 
+        // A nullary effect op (`fun now : Int`) can't be an eta-reduced *reference*
+        // that still awaits arguments -- `now!` is always a saturated perform.
+        // Without this, the zero-param loop below would emit `fun () -> perform`,
+        // thunking the perform instead of running it. Fall through to
+        // `lower_effect_call`, which performs immediately.
+        if op_info.source_param_count == 0 {
+            return None;
+        }
+
         let mut params = Vec::new();
         let mut runtime_args = Vec::new();
         for idx in 0..op_info.source_param_count {

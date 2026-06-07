@@ -18,28 +18,6 @@ type AnnotatedSignature = (
     Vec<(String, Span)>,
 );
 
-/// Where a `fun name : ...` signature appears.
-#[derive(Clone, Copy)]
-pub(super) enum SignatureSite {
-    TopLevel,
-    EffectOp,
-    TraitMethod,
-}
-
-impl SignatureSite {
-    fn zero_param_message(self, name: &str) -> String {
-        match self {
-            SignatureSite::TopLevel => format!("function `{name}` has no return type"),
-            SignatureSite::EffectOp => format!(
-                "effect operation `{name}` has no parameters; use `fun {name} : Unit -> ...` for nullary operations"
-            ),
-            SignatureSite::TraitMethod => format!(
-                "trait method `{name}` has no parameters; use `fun {name} : Unit -> ...` for nullary methods"
-            ),
-        }
-    }
-}
-
 impl Parser {
     // Parse `Name` or `Module.Name`, returning the full qualified string.
     // Used where we want to preserve the qualification (e.g. needs lists).
@@ -423,7 +401,7 @@ impl Parser {
 
         self.expect(Token::Colon)?;
         let (params, return_type, effects, effect_row_var) =
-            self.parse_annotated_signature(SignatureSite::TopLevel, &name)?;
+            self.parse_annotated_signature()?;
 
         // Parse optional `where {a: Show + Eq, b: Ord}`
         let (where_clause, where_apps) = self.parse_where_clause()?;
@@ -534,7 +512,7 @@ impl Parser {
 
             self.expect(Token::Colon)?;
             let (params, return_type, effects, effect_row_var) =
-                self.parse_annotated_signature(SignatureSite::EffectOp, &op_name)?;
+                self.parse_annotated_signature()?;
             let op_end = self.tokens[self.pos - 1].span;
 
             let trailing_comment = self.take_trailing_comment(self.pos - 1);
@@ -827,7 +805,7 @@ impl Parser {
 
             self.expect(Token::Colon)?;
             let (params, return_type, effects, effect_row_var) =
-                self.parse_annotated_signature(SignatureSite::TraitMethod, &method_name)?;
+                self.parse_annotated_signature()?;
             let mut method_end = self.tokens[self.pos - 1].span;
 
             // Optional default body: `methodname <pat>... = <expr>` immediately
@@ -1205,15 +1183,9 @@ impl Parser {
 
     /// Parse an annotated type signature after the `:`.
     /// Each arrow segment can optionally have a label: `(label: Type) -> Type -> RetType`
-    /// Returns (params, return_type, effects). Top-level signatures may omit
-    /// arrows for zero-arity functions; effect ops and trait methods still use
-    /// `Unit -> ...` for nullary operations.
-    fn parse_annotated_signature(
-        &mut self,
-        site: SignatureSite,
-        name: &str,
-    ) -> Result<AnnotatedSignature, ParseError> {
-        let sig_start = self.tokens[self.pos].span;
+    /// Returns (params, return_type, effects). A signature with no arrow is a
+    /// zero-arity function, effect op, or trait method (just a return type).
+    fn parse_annotated_signature(&mut self) -> Result<AnnotatedSignature, ParseError> {
         // Collect all arrow segments: parse "A -> B -> C -> D" as [A, B, C, D]
         // Each segment is either (Some(label), type) or (None, type)
         let mut segments: Vec<(Option<String>, TypeExpr)> = Vec::new();
@@ -1235,15 +1207,13 @@ impl Parser {
         }
 
         if segments.len() < 2 {
+            // Zero-arity signature: no arrow, just a return type. Valid at every
+            // site now that zero-arity functions are supported (effect ops and
+            // trait methods included -- a nullary effect op like `fun now : Int`
+            // performs without an argument; a nullary trait method dispatches by
+            // return type).
             let (_label, ty) = segments.pop().unwrap();
-            if matches!(site, SignatureSite::TopLevel) {
-                return Ok((Vec::new(), ty, effects, effect_row_var));
-            }
-            let span = sig_start.to(ty.span());
-            return Err(ParseError {
-                message: site.zero_param_message(name),
-                span,
-            });
+            return Ok((Vec::new(), ty, effects, effect_row_var));
         }
 
         // Last segment is the return type, rest are params

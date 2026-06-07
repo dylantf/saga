@@ -816,6 +816,17 @@ impl<'a> Lowerer<'a> {
         self.fun_info.get(name).map(|f| f.arity)
     }
 
+    /// Whether the trait method at `(trait_name, method_index)` takes no
+    /// parameters (e.g. `fun default : a`). Such methods are stored in the dict
+    /// as zero-arity thunks and must be applied when accessed.
+    pub(super) fn trait_method_is_nullary(&self, trait_name: &str, method_index: usize) -> bool {
+        self.check_result
+            .traits
+            .get(trait_name)
+            .and_then(|info| info.methods.get(method_index))
+            .is_some_and(|m| m.param_types.is_empty())
+    }
+
     /// Get a function's effects.
     fn fun_effects(&self, name: &str) -> Option<&Vec<String>> {
         self.fun_info
