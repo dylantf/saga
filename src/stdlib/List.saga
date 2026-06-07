@@ -2,7 +2,6 @@
 module Std.List
 
 import Std.Base (Show, Debug, Ord, Semigroup, Enum)
-
 import Std.Base (Ordering)
 import Std.Maybe (Maybe)
 
@@ -52,7 +51,7 @@ is_empty xs = case xs {
 
 #@ Applies a function to every element, returning a new list of results.
 # @external("erlang", "lists", "map")
-pub fun map : (f: a -> b) -> (xs: List a) -> List b
+pub fun map : (f: a -> b needs {..e}) -> (xs: List a) -> List b needs {..e}
 map f xs = case xs {
   [] -> []
   h :: t -> f h :: map f t
@@ -60,7 +59,8 @@ map f xs = case xs {
 
 #@ Returns a list of elements for which the predicate returns True.
 # @external("erlang", "lists", "filter")
-pub fun filter : (pred: a -> Bool) -> (xs: List a) -> List a
+pub fun filter : (pred: a -> Bool needs {..e}) -> (xs: List a) -> List a
+  needs {..e}
 filter pred xs = case xs {
   [] -> []
   h :: t ->
@@ -69,7 +69,8 @@ filter pred xs = case xs {
 }
 
 #@ Left fold. Applies f to the accumulator and each element, left to right.
-pub fun foldl : (f: b -> a -> b) -> (acc: b) -> (xs: List a) -> b
+pub fun foldl : (f: b -> a -> b needs {..e}) -> (acc: b) -> (xs: List a) -> b
+  needs {..e}
 foldl f acc xs = case xs {
   [] -> acc
   h :: t -> foldl f (f acc h) t
@@ -77,7 +78,8 @@ foldl f acc xs = case xs {
 
 #@ Right fold. Applies f to each element and the accumulator, right to left.
 # @external("erlang", "lists", "foldr")
-pub fun foldr : (f: a -> b -> b) -> (acc: b) -> (xs: List a) -> b
+pub fun foldr : (f: a -> b -> b needs {..e}) -> (acc: b) -> (xs: List a) -> b
+  needs {..e}
 foldr f acc xs = case xs {
   [] -> acc
   h :: t -> f h (foldr f acc t)
@@ -93,14 +95,16 @@ pub fun append : (xs: List a) -> (ys: List a) -> List a
 
 #@ Maps a function over a list and flattens the results by one level.
 # @external("erlang", "lists", "flatmap")
-pub fun flat_map : (f: a -> List b) -> (xs: List a) -> List b
+pub fun flat_map : (f: a -> List b needs {..e}) -> (xs: List a) -> List b
+  needs {..e}
 flat_map f xs = case xs {
   [] -> []
   h :: t -> append (f h) (flat_map f t)
 }
 
 #@ Maps a function over a list and keeps only the Just results.
-pub fun filter_map : (f: a -> Maybe b) -> (xs: List a) -> List b
+pub fun filter_map : (f: a -> Maybe b needs {..e}) -> (xs: List a) -> List b
+  needs {..e}
 filter_map f xs = case xs {
   [] -> []
   h :: t -> case f h {
@@ -138,14 +142,14 @@ zip xs ys = case xs {
 }
 
 #@ Returns True if any element satisfies the predicate.
-pub fun any : (pred: a -> Bool) -> (xs: List a) -> Bool
+pub fun any : (pred: a -> Bool needs {..e}) -> (xs: List a) -> Bool needs {..e}
 any pred xs = case xs {
   [] -> False
   h :: t -> if pred h then True else any pred t
 }
 
 #@ Returns True if all elements satisfy the predicate.
-pub fun all : (pred: a -> Bool) -> (xs: List a) -> Bool
+pub fun all : (pred: a -> Bool needs {..e}) -> (xs: List a) -> Bool needs {..e}
 all pred xs = case xs {
   [] -> True
   h :: t -> if pred h then all pred t else False
@@ -172,7 +176,8 @@ pub fun sort_by : (key: a -> b) -> (xs: List a) -> List a
 # --- Search & Access ---
 
 #@ Returns the first element matching the predicate, or Nothing.
-pub fun find : (pred: a -> Bool) -> (xs: List a) -> Maybe a
+pub fun find : (pred: a -> Bool needs {..e}) -> (xs: List a) -> Maybe a
+  needs {..e}
 find pred xs = case xs {
   [] -> Nothing
   h :: t -> if pred h then Just h else find pred t
@@ -189,7 +194,8 @@ pub fun nth : (n: Int) -> (xs: List a) -> Maybe a
 # --- Transformations ---
 
 #@ Combines two lists element-wise using a function. Stops at the shorter list.
-pub fun zip_with : (f: a -> b -> c) -> (xs: List a) -> (ys: List b) -> List c
+pub fun zip_with : (f: a -> b -> c needs {..e}) -> (xs: List a) -> (ys: List b) -> List c
+  needs {..e}
 zip_with f xs ys = case xs {
   [] -> []
   x :: xt -> case ys {
@@ -204,7 +210,8 @@ pub fun unzip : (xs: List (a, b)) -> (List a, List b)
 
 #@ Splits a list into two: elements that satisfy the predicate and those that don't.
 # @external("erlang", "lists", "partition")
-pub fun partition : (pred: a -> Bool) -> (xs: List a) -> (List a, List a)
+pub fun partition : (pred: a -> Bool needs {..e}) -> (xs: List a) -> (List a, List a)
+  needs {..e}
 partition pred xs = case xs {
   [] -> ([], [])
   h :: t -> {
@@ -252,7 +259,8 @@ iter f xs = case xs {
 }
 
 #@ Like foldl, but returns a list of all intermediate accumulator values.
-pub fun scan : (f: b -> a -> b) -> (acc: b) -> (xs: List a) -> List b
+pub fun scan : (f: b -> a -> b needs {..e}) -> (acc: b) -> (xs: List a) -> List b
+  needs {..e}
 scan f acc xs = case xs {
   [] -> []
   h :: t -> {
