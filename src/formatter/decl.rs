@@ -492,7 +492,7 @@ pub fn format_handler_def(
 
     if !needs.is_empty() {
         parts.push(Doc::text(" "));
-        parts.push(format_needs(needs, &None));
+        parts.push(format_needs(needs, &[]));
     }
     if !where_clause.is_empty() {
         parts.push(Doc::text(" "));
@@ -576,7 +576,7 @@ pub fn format_impl_def(decl: &Decl) -> Doc {
     }
     if !needs.is_empty() {
         parts.push(Doc::text(" "));
-        parts.push(format_needs(needs, &None));
+        parts.push(format_needs(needs, &[]));
     }
 
     parts.push(Doc::text(" {"));

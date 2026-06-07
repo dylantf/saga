@@ -15,7 +15,7 @@ type AnnotatedSignature = (
     Vec<(String, TypeExpr)>,
     TypeExpr,
     Vec<EffectRef>,
-    Option<(String, Span)>,
+    Vec<(String, Span)>,
 );
 
 /// Where a `fun name : ...` signature appears.
@@ -1226,30 +1226,12 @@ impl Parser {
 
         // Parse trailing `needs {...}` if present
         let mut effects = Vec::new();
-        let mut effect_row_var = None;
+        let mut effect_row_var = Vec::new();
         if matches!(self.peek(), Token::Needs) {
             self.advance();
-            self.expect(Token::LBrace)?;
-            while !matches!(self.peek(), Token::RBrace) {
-                // Check for row variable: `..e`
-                if matches!(self.peek(), Token::DotDot) {
-                    let dot_span = self.tokens[self.pos].span;
-                    self.advance(); // consume '..'
-                    let name = self.expect_ident()?;
-                    let end_span = self.tokens[self.pos - 1].span;
-                    effect_row_var = Some((name, dot_span.to(end_span)));
-                    // optional trailing comma
-                    if matches!(self.peek(), Token::Comma) {
-                        self.advance();
-                    }
-                    break;
-                }
-                effects.push(self.parse_effect_ref()?);
-                if matches!(self.peek(), Token::Comma) {
-                    self.advance();
-                }
-            }
-            self.expect(Token::RBrace)?;
+            let (effs, row_vars) = self.parse_needs_row()?;
+            effects = effs;
+            effect_row_var = row_vars;
         }
 
         if segments.len() < 2 {
@@ -1367,6 +1349,38 @@ impl Parser {
 
     // --- Type expressions ---
 
+    /// Parse the body of a `needs {...}` clause: a comma-separated mix of
+    /// effect references and row variables (`..a`). The opening `needs` token
+    /// must already be consumed; this consumes `{ ... }`. Multiple row
+    /// variables are allowed and may be interleaved with named effects, e.g.
+    /// `{Foo, ..a, Bar, ..b}`.
+    #[allow(clippy::type_complexity)]
+    fn parse_needs_row(
+        &mut self,
+    ) -> Result<(Vec<EffectRef>, Vec<(String, Span)>), ParseError> {
+        let mut effects = Vec::new();
+        let mut row_vars = Vec::new();
+        self.expect(Token::LBrace)?;
+        while !matches!(self.peek(), Token::RBrace) {
+            if matches!(self.peek(), Token::DotDot) {
+                let dot_span = self.tokens[self.pos].span;
+                self.advance(); // consume '..'
+                let name = self.expect_ident()?;
+                let end_span = self.tokens[self.pos - 1].span;
+                row_vars.push((name, dot_span.to(end_span)));
+            } else {
+                effects.push(self.parse_effect_ref()?);
+            }
+            if matches!(self.peek(), Token::Comma) {
+                self.advance();
+            } else {
+                break;
+            }
+        }
+        self.expect(Token::RBrace)?;
+        Ok((effects, row_vars))
+    }
+
     pub(super) fn parse_type_expr(&mut self) -> Result<TypeExpr, ParseError> {
         let start = self.tokens[self.pos].span;
         // First: parse a type with possible application (`Option a`, `Result a e`)
@@ -1388,28 +1402,12 @@ impl Parser {
             self.advance();
             let right = self.parse_type_expr()?; // recurse = right-associative
             let mut needs = Vec::new();
-            let mut row_var = None;
+            let mut row_var = Vec::new();
             if matches!(self.peek(), Token::Needs) {
                 self.advance();
-                self.expect(Token::LBrace)?;
-                while !matches!(self.peek(), Token::RBrace) {
-                    if matches!(self.peek(), Token::DotDot) {
-                        let dot_span = self.tokens[self.pos].span;
-                        self.advance();
-                        let name = self.expect_ident()?;
-                        let end_span = self.tokens[self.pos - 1].span;
-                        row_var = Some((name, dot_span.to(end_span)));
-                        if matches!(self.peek(), Token::Comma) {
-                            self.advance();
-                        }
-                        break;
-                    }
-                    needs.push(self.parse_effect_ref()?);
-                    if matches!(self.peek(), Token::Comma) {
-                        self.advance();
-                    }
-                }
-                self.expect(Token::RBrace)?;
+                let (effs, row_vars) = self.parse_needs_row()?;
+                needs = effs;
+                row_var = row_vars;
             }
             let end = self.tokens[self.pos - 1].span;
             let span = start.to(end);

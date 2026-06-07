@@ -5359,6 +5359,80 @@ fn effect_row_var_handler_not_unnecessary() {
     .unwrap();
 }
 
+// --- Multiple row variables ---
+
+#[test]
+fn multi_row_var_forwards_union_of_two_open_rows() {
+    // Two callbacks each with their own open row; the HOF forwards the union
+    // `needs {..a, ..b}`. Each tail binds independently.
+    check(
+        "effect Foo {\n  fun foo : Unit -> Int\n}\n\
+         effect Bar {\n  fun bar : Unit -> Int\n}\n\
+         fun do_work : (Unit -> Int needs {..a}) -> (Unit -> Int needs {..b}) -> Int needs {..a, ..b}\n\
+         do_work a b = {\n  let ra = a ()\n  let rb = b ()\n  ra + rb\n}\n\
+         main () = {\n  let res = do_work (fun () -> foo! ()) (fun () -> bar! ())\n  res\n} with {\n  foo () = resume 42\n  bar () = resume 3\n}",
+    )
+    .unwrap();
+}
+
+#[test]
+fn multi_row_var_with_named_effects_on_each_callback() {
+    // Each callback carries a named effect plus its own open tail; the HOF
+    // forwards both names and both tails.
+    check(
+        "effect Foo {\n  fun foo : Unit -> Int\n}\n\
+         effect Bar {\n  fun bar : Unit -> Int\n}\n\
+         effect Baz {\n  fun baz : Unit -> Int\n}\n\
+         fun do_work : (Unit -> Int needs {Foo, ..a}) -> (Unit -> Int needs {Bar, ..b}) -> Int needs {Foo, Bar, ..a, ..b}\n\
+         do_work a b = {\n  let ra = a ()\n  let rb = b ()\n  ra + rb\n}\n\
+         main () = {\n  do_work (fun () -> foo! () + baz! ()) (fun () -> bar! ())\n} with {\n  foo () = resume 42\n  bar () = resume 3\n  baz () = resume 100\n}",
+    )
+    .unwrap();
+}
+
+#[test]
+fn multi_row_var_two_open_tails_in_callback_are_ambiguous() {
+    // A callback parameter whose row has two unconstrained open tails cannot
+    // absorb a named effect: it is undetermined which tail it belongs to.
+    let result = check(
+        "effect Foo {\n  fun foo : Unit -> Int\n}\n\
+         fun consume : (Unit -> Int needs {..a, ..b}) -> Int needs {..a, ..b}\n\
+         consume f = f ()\n\
+         main () = {\n  consume (fun () -> foo! ())\n} with {\n  foo () = resume 1\n}",
+    );
+    let err = match result {
+        Err(e) => e,
+        Ok(_) => panic!("expected ambiguous multi-open-tail error, got Ok"),
+    };
+    assert!(
+        err.message.contains("ambiguous effect row"),
+        "expected ambiguous effect row error, got: {}",
+        err.message
+    );
+}
+
+#[test]
+fn multi_row_var_must_forward_every_callback_tail() {
+    // Two callbacks with independent open rows, but the function only declares
+    // `needs {..a}` — `..b`'s effects would silently escape the signature. The
+    // body still calls `b ()`, so this must be rejected.
+    let result = check(
+        "effect Foo {\n  fun foo : Unit -> Int\n}\n\
+         effect Bar {\n  fun bar : Unit -> Int\n}\n\
+         fun do_work : (Unit -> Int needs {..a}) -> (Unit -> Int needs {..b}) -> Int needs {..a}\n\
+         do_work a b = {\n  let ra = a ()\n  let rb = b ()\n  ra + rb\n}",
+    );
+    let err = match result {
+        Err(e) => e,
+        Ok(_) => panic!("expected error: callback row variable ..b not forwarded"),
+    };
+    assert!(
+        err.message.contains("does not forward it"),
+        "expected unforwarded-row error, got: {}",
+        err.message
+    );
+}
+
 // --- Comprehensive effect flow tests ---
 
 #[test]

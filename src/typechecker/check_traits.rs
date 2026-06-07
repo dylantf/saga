@@ -27,7 +27,7 @@ fn trait_method_effect_sig(ty: &Type) -> TraitMethodEffectSig {
         for entry in &row.effects {
             effects.insert(entry.name.clone());
         }
-        if row.tail.is_some() {
+        if row.is_open() {
             is_open_row = true;
         }
         current = ret;
@@ -114,9 +114,11 @@ impl Checker {
                                 .collect(),
                         })
                         .collect(),
-                    tail: row.tail.as_ref().map(|t| {
-                        Box::new(self.substitute_trait_param(trait_param_id, replacement, t))
-                    }),
+                    tails: row
+                        .tails
+                        .iter()
+                        .map(|t| self.substitute_trait_param(trait_param_id, replacement, t))
+                        .collect(),
                 },
             ),
             Type::Con(name, args) => Type::Con(

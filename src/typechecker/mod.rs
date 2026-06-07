@@ -77,20 +77,26 @@ impl EffectEntry {
     }
 }
 
-/// An effect row: a list of known effects plus an optional row variable (tail).
-/// When `tail` is `None`, the row is closed (no additional effects allowed).
-/// When `tail` is `Some(id)`, the row is open (additional effects unify with the variable).
+/// An effect row: a list of known effects plus zero or more row variables
+/// (tails). The row denotes the *union* of its named effects and all of its
+/// tail variables.
+///
+/// When `tails` is empty, the row is closed (no additional effects allowed).
+/// When `tails` is non-empty, the row is open: each tail variable independently
+/// stands for a set of additional effects. A row with several tails
+/// (`needs {..a, ..b}`) forwards the union of multiple independent open rows;
+/// each binds independently during unification.
 #[derive(Debug, Clone, PartialEq)]
 pub struct EffectRow {
     pub effects: Vec<EffectEntry>,
-    pub tail: Option<Box<Type>>,
+    pub tails: Vec<Type>,
 }
 
 impl EffectRow {
     pub fn closed(effects: Vec<EffectEntry>) -> Self {
         EffectRow {
             effects,
-            tail: None,
+            tails: vec![],
         }
     }
 
@@ -98,23 +104,29 @@ impl EffectRow {
     pub fn empty() -> Self {
         EffectRow {
             effects: vec![],
-            tail: None,
+            tails: vec![],
         }
     }
 
     /// True if this is a closed row with no effects.
     pub fn is_empty(&self) -> bool {
-        self.effects.is_empty() && self.tail.is_none()
+        self.effects.is_empty() && self.tails.is_empty()
     }
 
-    pub fn tail_var_id(&self) -> Option<u32> {
-        match &self.tail {
-            Some(ty) => match ty.as_ref() {
+    /// True if the row has at least one open tail.
+    pub fn is_open(&self) -> bool {
+        !self.tails.is_empty()
+    }
+
+    /// The variable IDs of all tails that are bare type variables, in order.
+    pub fn tail_var_ids(&self) -> Vec<u32> {
+        self.tails
+            .iter()
+            .filter_map(|t| match t {
                 Type::Var(id) => Some(*id),
                 _ => None,
-            },
-            None => None,
-        }
+            })
+            .collect()
     }
 
     /// Merge two closed effect rows, preserving distinct instantiations of the
@@ -128,7 +140,7 @@ impl EffectRow {
         }
         EffectRow {
             effects,
-            tail: None,
+            tails: vec![],
         }
     }
 
@@ -142,7 +154,7 @@ impl EffectRow {
             .collect();
         EffectRow {
             effects,
-            tail: self.tail.clone(),
+            tails: self.tails.clone(),
         }
     }
 
@@ -156,7 +168,7 @@ impl EffectRow {
             .collect();
         EffectRow {
             effects,
-            tail: self.tail.clone(),
+            tails: self.tails.clone(),
         }
     }
 }
@@ -329,7 +341,7 @@ impl std::fmt::Display for Type {
                     Type::Fun(_, _, _) => write!(f, "({}) -> {}", a, b)?,
                     _ => write!(f, "{} -> {}", a, b)?,
                 }
-                if !row.effects.is_empty() || row.tail.is_some() {
+                if !row.effects.is_empty() || !row.tails.is_empty() {
                     write!(f, " needs {{")?;
                     for (i, entry) in row.effects.iter().enumerate() {
                         if i > 0 {
@@ -340,8 +352,8 @@ impl std::fmt::Display for Type {
                             write!(f, " {}", arg)?;
                         }
                     }
-                    if let Some(tail) = &row.tail {
-                        if !row.effects.is_empty() {
+                    for (i, tail) in row.tails.iter().enumerate() {
+                        if !row.effects.is_empty() || i > 0 {
                             write!(f, ", ")?;
                         }
                         write!(f, "..{}", tail)?;
@@ -445,32 +457,49 @@ impl Substitution {
     /// Apply the substitution to an effect row, resolving type args and chasing
     /// row variable bindings.
     pub fn apply_effect_row(&self, row: &EffectRow) -> EffectRow {
-        let mut effects: Vec<EffectEntry> = row
-            .effects
-            .iter()
-            .map(|entry| EffectEntry {
+        let mut effects: Vec<EffectEntry> = vec![];
+        let push_effect = |effects: &mut Vec<EffectEntry>, entry: &EffectEntry| {
+            let resolved = EffectEntry {
                 name: entry.name.clone(),
                 args: entry.args.iter().map(|t| self.apply(t)).collect(),
-            })
-            .collect();
-        let mut tail = row.tail.as_ref().map(|t| Box::new(self.apply(t)));
-        // Chase row variable bindings
-        while let Some(tail_ty) = &tail {
-            if let Type::Var(tail_id) = tail_ty.as_ref()
-                && let Some(bound) = self.row_map.get(tail_id)
-            {
-                for entry in &bound.effects {
-                    effects.push(EffectEntry {
-                        name: entry.name.clone(),
-                        args: entry.args.iter().map(|t| self.apply(t)).collect(),
-                    });
-                }
-                tail = bound.tail.clone();
-                continue;
+            };
+            if !effects.iter().any(|e| e.same_instantiation(&resolved)) {
+                effects.push(resolved);
             }
-            break;
+        };
+        for entry in &row.effects {
+            push_effect(&mut effects, entry);
         }
-        EffectRow { effects, tail }
+
+        // Chase each tail's row-variable binding independently, accumulating
+        // effects and collecting the leftover (still-unbound) tails. Each tail
+        // binds independently, so two tails can resolve to disjoint effect sets.
+        let mut out_tails: Vec<Type> = vec![];
+        let mut seen_tail_ids: std::collections::HashSet<u32> = std::collections::HashSet::new();
+        let mut worklist: std::collections::VecDeque<Type> =
+            row.tails.iter().map(|t| self.apply(t)).collect();
+        while let Some(tail_ty) = worklist.pop_front() {
+            match &tail_ty {
+                Type::Var(tail_id) => {
+                    if let Some(bound) = self.row_map.get(tail_id) {
+                        for entry in &bound.effects {
+                            push_effect(&mut effects, entry);
+                        }
+                        for t in &bound.tails {
+                            worklist.push_back(self.apply(t));
+                        }
+                    } else if seen_tail_ids.insert(*tail_id) {
+                        out_tails.push(tail_ty);
+                    }
+                }
+                // A non-variable tail can't be chased further; keep it.
+                _ => out_tails.push(tail_ty),
+            }
+        }
+        EffectRow {
+            effects,
+            tails: out_tails,
+        }
     }
 
     /// Resolve a type variable to its binding, without recursively applying
@@ -489,11 +518,19 @@ impl Substitution {
 
     /// Bind a row variable to an effect row, with occurs check.
     pub(crate) fn bind_row(&mut self, id: u32, row: EffectRow) -> Result<(), Diagnostic> {
-        if let Some(tail_id) = row.tail_var_id()
-            && tail_id == id
-        {
-            // Binding to itself (e.g., ..e = ..e) is a no-op
-            if row.effects.is_empty() {
+        let mentions_self = row
+            .tails
+            .iter()
+            .any(|t| matches!(t, Type::Var(v) if *v == id));
+        if mentions_self {
+            // Binding a row variable to a row that only mentions itself
+            // (e.g. `..e = ..e`) is a no-op.
+            let only_self = row.effects.is_empty()
+                && row
+                    .tails
+                    .iter()
+                    .all(|t| matches!(t, Type::Var(v) if *v == id));
+            if only_self {
                 return Ok(());
             }
             return Err(Diagnostic::error(format!(
@@ -712,7 +749,7 @@ fn free_vars_in_type(ty: &Type, bound: &[u32], out: &mut Vec<u32>) {
                     free_vars_in_type(t, bound, out);
                 }
             }
-            if let Some(tail) = &row.tail {
+            for tail in &row.tails {
                 free_vars_in_type(tail, bound, out);
             }
         }

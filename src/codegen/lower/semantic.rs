@@ -76,10 +76,11 @@ impl<'a> Lowerer<'a> {
                                 .collect(),
                         })
                         .collect(),
-                    tail: row
-                        .tail
-                        .as_ref()
-                        .map(|tail| Box::new(Self::substitute_type_vars(tail, subst))),
+                    tails: row
+                        .tails
+                        .iter()
+                        .map(|tail| Self::substitute_type_vars(tail, subst))
+                        .collect(),
                 },
             ),
             Type::Con(name, args) => Type::Con(

@@ -179,7 +179,7 @@ fn format_decl(decl: &Decl) -> Doc {
             // Break from the end: needs/where break to indented lines when too long.
             // Annotations (with hardlines) stay outside the group so they don't
             // force the signature itself to break.
-            let has_needs = !effects.is_empty() || effect_row_var.is_some();
+            let has_needs = !effects.is_empty() || !effect_row_var.is_empty();
             let has_where = !where_clause.is_empty();
             let sig = if !has_needs && !has_where {
                 sig_head

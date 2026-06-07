@@ -47,10 +47,10 @@ impl Checker {
     pub(crate) fn build_effect_row_from_refs(
         &mut self,
         effects: &[ast::EffectRef],
-        effect_row_var: &Option<(String, Span)>,
+        effect_row_var: &[(String, Span)],
         params_list: &mut Vec<(String, u32)>,
     ) -> Result<EffectRow, Diagnostic> {
-        if effects.is_empty() && effect_row_var.is_none() {
+        if effects.is_empty() && effect_row_var.is_empty() {
             return Ok(EffectRow::closed(vec![]));
         }
 
@@ -90,20 +90,23 @@ impl Checker {
             seen_effects.insert(name.clone(), args.clone());
             effect_refs.push(EffectEntry::unnamed(name, args));
         }
-        let tail = effect_row_var.as_ref().map(|(rv_name, _)| {
-            let id = if let Some((_, id)) = params_list.iter().find(|(n, _)| n == rv_name) {
-                *id
-            } else {
-                let id = self.next_var;
-                self.next_var += 1;
-                params_list.push((rv_name.clone(), id));
-                id
-            };
-            Box::new(Type::Var(id))
-        });
+        let tails: Vec<Type> = effect_row_var
+            .iter()
+            .map(|(rv_name, _)| {
+                let id = if let Some((_, id)) = params_list.iter().find(|(n, _)| n == rv_name) {
+                    *id
+                } else {
+                    let id = self.next_var;
+                    self.next_var += 1;
+                    params_list.push((rv_name.clone(), id));
+                    id
+                };
+                Type::Var(id)
+            })
+            .collect();
         Ok(EffectRow {
             effects: effect_refs,
-            tail,
+            tails,
         })
     }
 
@@ -1116,10 +1119,10 @@ impl Checker {
             let resolved = self.sub.apply(pt);
             fn collect_row_vars(ty: &Type, out: &mut std::collections::HashSet<u32>) {
                 if let Type::Fun(_, ret, row) = ty {
-                    if let Some(tail) = &row.tail
-                        && let Type::Var(id) = tail.as_ref()
-                    {
-                        out.insert(*id);
+                    for tail in &row.tails {
+                        if let Type::Var(id) = tail {
+                            out.insert(*id);
+                        }
                     }
                     collect_row_vars(ret, out);
                 }
@@ -1211,19 +1214,32 @@ impl Checker {
 
         // A callback parameter with an open effect row (..e) represents
         // unknown effects that can't be handled with `with` — they must be
-        // propagated via `needs {..e}` on the function's own annotation,
-        // and the row variable must be the SAME one (connected).
+        // propagated via `needs {..e}` on the function's own annotation, and
+        // the row variable must be the SAME one (connected). Every open tail
+        // on a callback parameter must be forwarded: forwarding only some of
+        // them (e.g. declaring `needs {..a}` while a second callback carries
+        // `..b`) would silently drop `..b`'s effects from the signature even
+        // though the body still requires them.
         if annotation.is_some() && !callback_row_vars.is_empty() {
-            // Check: the declared row must have an open tail whose variable
-            // resolves to the same root as one of the callback row variables.
-            let propagates = declared_row.tail.as_ref().is_some_and(|t| {
-                let decl_resolved = self.sub.apply(t);
-                callback_row_vars.iter().any(|&cb_id| {
+            // A callback tail is satisfied if the declared row has a tail that
+            // resolves to the same root. Tails that have already resolved to a
+            // concrete (closed) row carry no unknown effects, so they don't
+            // need forwarding.
+            let unpropagated: Vec<u32> = callback_row_vars
+                .iter()
+                .copied()
+                .filter(|&cb_id| {
                     let cb_resolved = self.sub.apply(&Type::Var(cb_id));
-                    decl_resolved == cb_resolved
+                    if !matches!(cb_resolved, Type::Var(_)) {
+                        return false;
+                    }
+                    !declared_row
+                        .tails
+                        .iter()
+                        .any(|t| self.sub.apply(t) == cb_resolved)
                 })
-            });
-            if !propagates {
+                .collect();
+            if !unpropagated.is_empty() {
                 let err_span = annotation_span.unwrap_or_else(|| match clauses[0] {
                     Decl::FunBinding { span, .. } => *span,
                     _ => unreachable!(),
@@ -1231,8 +1247,9 @@ impl Checker {
                 return Err(Diagnostic::error_at(
                     err_span,
                     format!(
-                        "`{}` accepts callback with open effect row but does not propagate effects; \
-                         add `needs {{..e}}` to the annotation",
+                        "`{}` accepts a callback with an open effect row but does not forward it; \
+                         every `..` row variable on a callback parameter must also appear in the \
+                         function's own `needs` clause",
                         name,
                     ),
                 ));
@@ -2212,7 +2229,7 @@ impl Checker {
                 .collect();
             let return_type = self.convert_user_type_expr(&op.return_type, &mut params_list);
             // Convert the op's own `needs` clause to an EffectRow
-            let needs = if !op.effects.is_empty() || op.effect_row_var.is_some() {
+            let needs = if !op.effects.is_empty() || !op.effect_row_var.is_empty() {
                 let effect_refs: Vec<EffectEntry> = op
                     .effects
                     .iter()
@@ -2222,20 +2239,25 @@ impl Checker {
                         EffectEntry::unnamed(resolved_name, args)
                     })
                     .collect();
-                let tail = op.effect_row_var.as_ref().map(|(rv_name, _)| {
-                    let id = if let Some((_, id)) = params_list.iter().find(|(n, _)| n == rv_name) {
-                        *id
-                    } else {
-                        let id = self.next_var;
-                        self.next_var += 1;
-                        params_list.push((rv_name.clone(), id));
-                        id
-                    };
-                    Box::new(Type::Var(id))
-                });
+                let tails: Vec<Type> = op
+                    .effect_row_var
+                    .iter()
+                    .map(|(rv_name, _)| {
+                        let id =
+                            if let Some((_, id)) = params_list.iter().find(|(n, _)| n == rv_name) {
+                                *id
+                            } else {
+                                let id = self.next_var;
+                                self.next_var += 1;
+                                params_list.push((rv_name.clone(), id));
+                                id
+                            };
+                        Type::Var(id)
+                    })
+                    .collect();
                 EffectRow {
                     effects: effect_refs,
-                    tail,
+                    tails,
                 }
             } else {
                 EffectRow::empty()

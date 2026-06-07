@@ -885,7 +885,7 @@ pub fn format_handler_expr_header(body: &crate::ast::HandlerBody) -> Doc {
     parts.push(Doc::join(Doc::text(", "), eff_docs));
     if !body.needs.is_empty() {
         parts.push(Doc::text(" "));
-        parts.push(super::type_expr::format_needs(&body.needs, &None));
+        parts.push(super::type_expr::format_needs(&body.needs, &[]));
     }
     if !body.where_clause.is_empty() {
         parts.push(Doc::text(" "));
