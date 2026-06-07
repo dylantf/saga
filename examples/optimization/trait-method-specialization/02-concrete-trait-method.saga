@@ -1,0 +1,26 @@
+# Concrete trait method dispatch: the handler encloses a monomorphic trait
+# method call whose impl method performs the effect.
+
+effect Options {
+  fun get_options : Unit -> Int
+}
+
+handler options_10 for Options {
+  get_options () = resume 10
+}
+
+trait Encodable a {
+  fun encode : a -> Int needs {Options}
+}
+
+impl Encodable for Int needs {Options} {
+  encode x = x + get_options! ()
+}
+
+fun compute : (x: Int) -> Int needs {Options}
+compute x = encode x
+
+main () = {
+  let result = compute 5 with options_10
+  dbg (show result)
+}

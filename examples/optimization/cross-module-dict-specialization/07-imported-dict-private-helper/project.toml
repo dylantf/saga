@@ -1,0 +1,4 @@
+[project]
+name = "xmod-dict-07"
+version = "0.1.0"
+main = "src/Main.saga"

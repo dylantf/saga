@@ -1,0 +1,12 @@
+module Main
+
+import Std.IO.Unsafe (print_stdout)
+import Helper (inc)
+
+fun apply_it : (Int -> Int) -> Int
+apply_it f = f 1
+
+fun main : Unit -> Unit
+main () =
+  if apply_it inc == 2 then print_stdout "ok\n"
+  else print_stdout "bad\n"

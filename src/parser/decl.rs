@@ -15,30 +15,8 @@ type AnnotatedSignature = (
     Vec<(String, TypeExpr)>,
     TypeExpr,
     Vec<EffectRef>,
-    Option<(String, Span)>,
+    Vec<(String, Span)>,
 );
-
-/// Where a `fun name : ...` signature appears.
-#[derive(Clone, Copy)]
-pub(super) enum SignatureSite {
-    TopLevel,
-    EffectOp,
-    TraitMethod,
-}
-
-impl SignatureSite {
-    fn zero_param_message(self, name: &str) -> String {
-        match self {
-            SignatureSite::TopLevel => format!("function `{name}` has no return type"),
-            SignatureSite::EffectOp => format!(
-                "effect operation `{name}` has no parameters; use `fun {name} : Unit -> ...` for nullary operations"
-            ),
-            SignatureSite::TraitMethod => format!(
-                "trait method `{name}` has no parameters; use `fun {name} : Unit -> ...` for nullary methods"
-            ),
-        }
-    }
-}
 
 impl Parser {
     // Parse `Name` or `Module.Name`, returning the full qualified string.
@@ -423,7 +401,7 @@ impl Parser {
 
         self.expect(Token::Colon)?;
         let (params, return_type, effects, effect_row_var) =
-            self.parse_annotated_signature(SignatureSite::TopLevel, &name)?;
+            self.parse_annotated_signature()?;
 
         // Parse optional `where {a: Show + Eq, b: Ord}`
         let (where_clause, where_apps) = self.parse_where_clause()?;
@@ -534,7 +512,7 @@ impl Parser {
 
             self.expect(Token::Colon)?;
             let (params, return_type, effects, effect_row_var) =
-                self.parse_annotated_signature(SignatureSite::EffectOp, &op_name)?;
+                self.parse_annotated_signature()?;
             let op_end = self.tokens[self.pos - 1].span;
 
             let trailing_comment = self.take_trailing_comment(self.pos - 1);
@@ -827,7 +805,7 @@ impl Parser {
 
             self.expect(Token::Colon)?;
             let (params, return_type, effects, effect_row_var) =
-                self.parse_annotated_signature(SignatureSite::TraitMethod, &method_name)?;
+                self.parse_annotated_signature()?;
             let mut method_end = self.tokens[self.pos - 1].span;
 
             // Optional default body: `methodname <pat>... = <expr>` immediately
@@ -1205,15 +1183,9 @@ impl Parser {
 
     /// Parse an annotated type signature after the `:`.
     /// Each arrow segment can optionally have a label: `(label: Type) -> Type -> RetType`
-    /// Returns (params, return_type, effects). Top-level signatures may omit
-    /// arrows for zero-arity functions; effect ops and trait methods still use
-    /// `Unit -> ...` for nullary operations.
-    fn parse_annotated_signature(
-        &mut self,
-        site: SignatureSite,
-        name: &str,
-    ) -> Result<AnnotatedSignature, ParseError> {
-        let sig_start = self.tokens[self.pos].span;
+    /// Returns (params, return_type, effects). A signature with no arrow is a
+    /// zero-arity function, effect op, or trait method (just a return type).
+    fn parse_annotated_signature(&mut self) -> Result<AnnotatedSignature, ParseError> {
         // Collect all arrow segments: parse "A -> B -> C -> D" as [A, B, C, D]
         // Each segment is either (Some(label), type) or (None, type)
         let mut segments: Vec<(Option<String>, TypeExpr)> = Vec::new();
@@ -1226,42 +1198,22 @@ impl Parser {
 
         // Parse trailing `needs {...}` if present
         let mut effects = Vec::new();
-        let mut effect_row_var = None;
+        let mut effect_row_var = Vec::new();
         if matches!(self.peek(), Token::Needs) {
             self.advance();
-            self.expect(Token::LBrace)?;
-            while !matches!(self.peek(), Token::RBrace) {
-                // Check for row variable: `..e`
-                if matches!(self.peek(), Token::DotDot) {
-                    let dot_span = self.tokens[self.pos].span;
-                    self.advance(); // consume '..'
-                    let name = self.expect_ident()?;
-                    let end_span = self.tokens[self.pos - 1].span;
-                    effect_row_var = Some((name, dot_span.to(end_span)));
-                    // optional trailing comma
-                    if matches!(self.peek(), Token::Comma) {
-                        self.advance();
-                    }
-                    break;
-                }
-                effects.push(self.parse_effect_ref()?);
-                if matches!(self.peek(), Token::Comma) {
-                    self.advance();
-                }
-            }
-            self.expect(Token::RBrace)?;
+            let (effs, row_vars) = self.parse_needs_row()?;
+            effects = effs;
+            effect_row_var = row_vars;
         }
 
         if segments.len() < 2 {
+            // Zero-arity signature: no arrow, just a return type. Valid at every
+            // site now that zero-arity functions are supported (effect ops and
+            // trait methods included -- a nullary effect op like `fun now : Int`
+            // performs without an argument; a nullary trait method dispatches by
+            // return type).
             let (_label, ty) = segments.pop().unwrap();
-            if matches!(site, SignatureSite::TopLevel) {
-                return Ok((Vec::new(), ty, effects, effect_row_var));
-            }
-            let span = sig_start.to(ty.span());
-            return Err(ParseError {
-                message: site.zero_param_message(name),
-                span,
-            });
+            return Ok((Vec::new(), ty, effects, effect_row_var));
         }
 
         // Last segment is the return type, rest are params
@@ -1367,6 +1319,36 @@ impl Parser {
 
     // --- Type expressions ---
 
+    /// Parse the body of a `needs {...}` clause: a comma-separated mix of
+    /// effect references and row variables (`..a`). The opening `needs` token
+    /// must already be consumed; this consumes `{ ... }`. Multiple row
+    /// variables are allowed and may be interleaved with named effects, e.g.
+    /// `{Foo, ..a, Bar, ..b}`.
+    #[allow(clippy::type_complexity)]
+    fn parse_needs_row(&mut self) -> Result<(Vec<EffectRef>, Vec<(String, Span)>), ParseError> {
+        let mut effects = Vec::new();
+        let mut row_vars = Vec::new();
+        self.expect(Token::LBrace)?;
+        while !matches!(self.peek(), Token::RBrace) {
+            if matches!(self.peek(), Token::DotDot) {
+                let dot_span = self.tokens[self.pos].span;
+                self.advance(); // consume '..'
+                let name = self.expect_ident()?;
+                let end_span = self.tokens[self.pos - 1].span;
+                row_vars.push((name, dot_span.to(end_span)));
+            } else {
+                effects.push(self.parse_effect_ref()?);
+            }
+            if matches!(self.peek(), Token::Comma) {
+                self.advance();
+            } else {
+                break;
+            }
+        }
+        self.expect(Token::RBrace)?;
+        Ok((effects, row_vars))
+    }
+
     pub(super) fn parse_type_expr(&mut self) -> Result<TypeExpr, ParseError> {
         let start = self.tokens[self.pos].span;
         // First: parse a type with possible application (`Option a`, `Result a e`)
@@ -1388,28 +1370,12 @@ impl Parser {
             self.advance();
             let right = self.parse_type_expr()?; // recurse = right-associative
             let mut needs = Vec::new();
-            let mut row_var = None;
+            let mut row_var = Vec::new();
             if matches!(self.peek(), Token::Needs) {
                 self.advance();
-                self.expect(Token::LBrace)?;
-                while !matches!(self.peek(), Token::RBrace) {
-                    if matches!(self.peek(), Token::DotDot) {
-                        let dot_span = self.tokens[self.pos].span;
-                        self.advance();
-                        let name = self.expect_ident()?;
-                        let end_span = self.tokens[self.pos - 1].span;
-                        row_var = Some((name, dot_span.to(end_span)));
-                        if matches!(self.peek(), Token::Comma) {
-                            self.advance();
-                        }
-                        break;
-                    }
-                    needs.push(self.parse_effect_ref()?);
-                    if matches!(self.peek(), Token::Comma) {
-                        self.advance();
-                    }
-                }
-                self.expect(Token::RBrace)?;
+                let (effs, row_vars) = self.parse_needs_row()?;
+                needs = effs;
+                row_var = row_vars;
             }
             let end = self.tokens[self.pos - 1].span;
             let span = start.to(end);

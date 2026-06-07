@@ -275,6 +275,7 @@ pub fn cmd_emit(file: &str) {
             resolution: codegen::resolve::ResolutionMap::new(),
             front_resolution: result.resolution.clone(),
             call_effects: codegen::call_effects::CallEffectMap::new(),
+            optimization: codegen::optimize::OptimizationFacts::default(),
         },
     );
     let ctx = codegen::CodegenContext {

@@ -87,7 +87,7 @@ fn normalize_decl(d: &mut Decl) {
             for er in effects.iter_mut() {
                 normalize_effect_ref(er);
             }
-            if let Some((_, s)) = effect_row_var {
+            for (_, s) in effect_row_var.iter_mut() {
                 *s = S;
             }
             for tb in where_clause.iter_mut() {
@@ -653,7 +653,7 @@ fn normalize_type_expr(te: &mut TypeExpr) {
             for er in effects.iter_mut() {
                 normalize_effect_ref(er);
             }
-            if let Some((_, s)) = effect_row_var {
+            for (_, s) in effect_row_var.iter_mut() {
                 *s = S;
             }
         }
@@ -706,7 +706,7 @@ fn normalize_effect_op(op: &mut EffectOp) {
     for er in op.effects.iter_mut() {
         normalize_effect_ref(er);
     }
-    if let Some((_, s)) = &mut op.effect_row_var {
+    for (_, s) in op.effect_row_var.iter_mut() {
         *s = S;
     }
 }

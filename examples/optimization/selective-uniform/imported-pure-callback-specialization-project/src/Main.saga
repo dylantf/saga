@@ -1,0 +1,12 @@
+module Main
+
+import Std.IO.Unsafe (print_stdout)
+import Effects (pure_value, apply_eff, forty_one)
+
+fun main : Unit -> Unit
+main () = {
+  let hof = apply_eff
+  let value = hof pure_value with forty_one
+  if value == 41 then print_stdout "ok\n"
+  else print_stdout "bad\n"
+}

@@ -1,0 +1,13 @@
+effect Ask {
+  fun ask : Unit -> Int
+}
+
+main () = {
+  let inner = ask! () with {
+    ask () = resume 20
+  }
+  let outer = ask! ()
+  inner + outer
+} with {
+  ask () = resume 10
+}

@@ -1,0 +1,10 @@
+module NonTailGuard
+
+effect Config {
+  fun port : Unit -> Int
+}
+
+fun main : Unit -> Int
+main () = port! () with {
+  port () = (resume 40) + 1
+}

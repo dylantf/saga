@@ -26,13 +26,13 @@ struct PendingLet {
 enum NamedHandlerItem {
     Static {
         canonical: String,
-        info: super::HandlerInfo,
+        info: Box<super::HandlerInfo>,
     },
     Conditional {
         cond_var: String,
-        cond_ce: CExpr,
-        then_info: super::HandlerInfo,
-        else_info: super::HandlerInfo,
+        cond_ce: Box<CExpr>,
+        then_info: Box<super::HandlerInfo>,
+        else_info: Box<super::HandlerInfo>,
     },
     Dynamic {
         tuple_var: String,
@@ -50,6 +50,7 @@ enum OpHandlerPlan {
         arm: HandlerArm,
         source_module: Option<String>,
         handler_canonical: String,
+        captures: Vec<(String, Expr)>,
     },
     Conditional {
         cond_var: String,
@@ -69,7 +70,13 @@ enum OpHandlerPlan {
 
 enum EffectOpLoweringPlan {
     DirectNative { handler_canonical: String },
+    DirectStaticTailResume { plan: super::StaticTailResumeOp },
     EvidenceLookup { trace_shape: String },
+}
+
+enum StaticTailResumeDirectBody {
+    Expr(Expr),
+    Block(Vec<Stmt>),
 }
 
 enum WithHandlerLayer {
@@ -116,10 +123,228 @@ impl<'a> Lowerer<'a> {
     fn effect_op_lowering_plan(&self, effect_key: &str, effect_name: &str) -> EffectOpLoweringPlan {
         if let Some(handler_canonical) = self.direct_ops.get(effect_key).cloned() {
             EffectOpLoweringPlan::DirectNative { handler_canonical }
+        } else if let Some(plan) = self.static_tail_resume_ops.get(effect_key).cloned() {
+            EffectOpLoweringPlan::DirectStaticTailResume { plan }
         } else {
             EffectOpLoweringPlan::EvidenceLookup {
                 trace_shape: self.evidence_lookup_trace_shape(effect_name),
             }
+        }
+    }
+
+    fn lower_direct_op_result(&mut self, value: CExpr, continuation: Option<CExpr>) -> CExpr {
+        if let Some(k) = continuation {
+            match k {
+                CExpr::Fun(params, body) if params.len() == 1 => {
+                    CExpr::Let(params[0].clone(), Box::new(value), body)
+                }
+                other => {
+                    let result_var = self.fresh();
+                    CExpr::Let(
+                        result_var.clone(),
+                        Box::new(value),
+                        Box::new(CExpr::Apply(Box::new(other), vec![CExpr::Var(result_var)])),
+                    )
+                }
+            }
+        } else {
+            value
+        }
+    }
+
+    fn static_tail_resume_value_supported(expr: &Expr) -> bool {
+        match &expr.kind {
+            ExprKind::Lit { .. }
+            | ExprKind::Var { .. }
+            | ExprKind::Constructor { .. }
+            | ExprKind::QualifiedName { .. }
+            | ExprKind::DictRef { .. }
+            | ExprKind::SymbolIntrinsic { .. } => true,
+            ExprKind::Tuple { elements } | ExprKind::ListLit { elements } => elements
+                .iter()
+                .all(Self::static_tail_resume_value_supported),
+            ExprKind::RecordCreate { fields, .. } | ExprKind::AnonRecordCreate { fields } => fields
+                .iter()
+                .all(|(_, _, value)| Self::static_tail_resume_value_supported(value)),
+            ExprKind::Ascription { expr, .. } => Self::static_tail_resume_value_supported(expr),
+            _ => false,
+        }
+    }
+
+    fn static_tail_resume_bindings(
+        &mut self,
+        params: &[Pat],
+        param_vars: &[String],
+        runtime_param_positions: &[usize],
+    ) -> Option<Vec<(String, CExpr)>> {
+        let mut bindings = Vec::new();
+        for (source_idx, param) in params.iter().enumerate() {
+            let value = runtime_param_positions
+                .iter()
+                .position(|&runtime_source_idx| runtime_source_idx == source_idx)
+                .map(|runtime_idx| CExpr::Var(param_vars[runtime_idx].clone()))
+                .unwrap_or_else(|| CExpr::Lit(CLit::Atom("unit".to_string())));
+            match param {
+                Pat::Var { name, .. } => bindings.push((super::core_var(name), value)),
+                Pat::Wildcard { .. }
+                | Pat::Lit {
+                    value: crate::ast::Lit::Unit,
+                    ..
+                } => {}
+                _ => return None,
+            }
+        }
+        Some(bindings)
+    }
+
+    fn lower_static_tail_resume_op(
+        &mut self,
+        plan: super::StaticTailResumeOp,
+        param_vars: &[String],
+        runtime_param_positions: &[usize],
+        continuation: Option<CExpr>,
+    ) -> Option<CExpr> {
+        let body = self.static_tail_resume_direct_body(&plan.arm.body)?;
+
+        let param_bindings = self.static_tail_resume_bindings(
+            &plan.arm.params,
+            param_vars,
+            runtime_param_positions,
+        )?;
+        let capture_bindings: Vec<(String, CExpr)> = plan
+            .captures
+            .iter()
+            .map(|(name, value)| (super::core_var(name), self.lower_expr_value(value)))
+            .collect();
+        let variant_capture_bindings: Vec<(String, CExpr)> = self
+            .static_helper_variant_capture_bindings
+            .iter()
+            .map(|(name, param_var)| (super::core_var(name), CExpr::Var(param_var.clone())))
+            .collect();
+
+        let saved_source_module = self.current_handler_source_module.clone();
+        self.current_handler_source_module = plan.source_module;
+        let lowered_body = match body {
+            StaticTailResumeDirectBody::Expr(value) => {
+                let resumed_value = self.lower_expr_value(&value);
+                self.lower_direct_op_result(resumed_value, continuation)
+            }
+            StaticTailResumeDirectBody::Block(stmts) => {
+                self.lower_block_with_return_k(&stmts, continuation)
+            }
+        };
+        self.current_handler_source_module = saved_source_module;
+
+        Some(
+            capture_bindings
+                .into_iter()
+                .chain(variant_capture_bindings)
+                .chain(param_bindings)
+                .rev()
+                .fold(lowered_body, |body, (var, val)| {
+                    CExpr::Let(var, Box::new(val), Box::new(body))
+                }),
+        )
+    }
+
+    fn static_tail_resume_params_supported(params: &[Pat]) -> bool {
+        params.iter().all(|param| {
+            matches!(
+                param,
+                Pat::Var { .. }
+                    | Pat::Wildcard { .. }
+                    | Pat::Lit {
+                        value: crate::ast::Lit::Unit,
+                        ..
+                    }
+            )
+        })
+    }
+
+    fn static_tail_resume_prefix_stmt_supported(&self, stmt: &Stmt) -> bool {
+        let value = match stmt {
+            Stmt::Let { value, .. } | Stmt::Expr(value) => value,
+            Stmt::LetFun { .. } => return false,
+        };
+        !value.contains_resume() && !self.branch_is_effectful(value)
+    }
+
+    fn static_tail_resume_direct_body(&self, body: &Expr) -> Option<StaticTailResumeDirectBody> {
+        match &body.kind {
+            ExprKind::Resume { value } if Self::static_tail_resume_value_supported(value) => {
+                Some(StaticTailResumeDirectBody::Expr((**value).clone()))
+            }
+            ExprKind::Block { stmts, .. } => {
+                let (last, prefix) = stmts.split_last()?;
+                if !prefix
+                    .iter()
+                    .all(|stmt| self.static_tail_resume_prefix_stmt_supported(&stmt.node))
+                {
+                    return None;
+                }
+                let Stmt::Expr(tail) = &last.node else {
+                    return None;
+                };
+                let ExprKind::Resume { value } = &tail.kind else {
+                    return None;
+                };
+                if !Self::static_tail_resume_value_supported(value) {
+                    return None;
+                }
+                let mut rewritten: Vec<Stmt> =
+                    prefix.iter().map(|stmt| stmt.node.clone()).collect();
+                rewritten.push(Stmt::Expr((**value).clone()));
+                Some(StaticTailResumeDirectBody::Block(rewritten))
+            }
+            _ => None,
+        }
+    }
+
+    fn static_tail_resume_arm_supported(&self, arm: &HandlerArm) -> bool {
+        if arm.finally_block.is_some()
+            || self.optimization.handler_analysis.resumption.get(&arm.id)
+                != Some(&crate::codegen::handler_analysis::ResumptionKind::TailResumptive)
+            || !Self::static_tail_resume_params_supported(&arm.params)
+        {
+            return false;
+        }
+        self.static_tail_resume_direct_body(&arm.body).is_some()
+    }
+
+    fn static_tail_resume_plan_for_op_handler(
+        &self,
+        plan: &OpHandlerPlan,
+    ) -> Option<super::StaticTailResumeOp> {
+        match plan {
+            OpHandlerPlan::Inline { arms } if arms.len() == 1 => {
+                let arm = arms[0].clone();
+                self.static_tail_resume_arm_supported(&arm)
+                    .then_some(super::StaticTailResumeOp {
+                        arm,
+                        source_module: None,
+                        captures: Vec::new(),
+                    })
+            }
+            OpHandlerPlan::Static {
+                arm,
+                source_module,
+                handler_canonical,
+                captures,
+            } if !self.is_beam_native_handler_canonical(handler_canonical)
+                && match source_module {
+                    Some(module) => module == &self.current_source_module,
+                    None => true,
+                } =>
+            {
+                let arm = arm.clone();
+                self.static_tail_resume_arm_supported(&arm)
+                    .then_some(super::StaticTailResumeOp {
+                        arm,
+                        source_module: source_module.clone(),
+                        captures: captures.clone(),
+                    })
+            }
+            _ => None,
         }
     }
 
@@ -315,6 +540,9 @@ impl<'a> Lowerer<'a> {
         let runtime_param_count = op_info
             .map(|op| op.runtime_param_count)
             .unwrap_or(args.len());
+        let runtime_param_positions = op_info
+            .map(|op| op.runtime_param_positions.clone())
+            .unwrap_or_else(|| (0..args.len()).collect());
         let op_param_absorbed = op_info.and_then(|op| {
             if op.param_absorbed_effects.is_empty() {
                 None
@@ -465,6 +693,32 @@ impl<'a> Lowerer<'a> {
                     CExpr::Let(var, Box::new(val), Box::new(body))
                 })
             }
+            EffectOpLoweringPlan::DirectStaticTailResume { plan } => {
+                self.push_effect_op_trace(
+                    node_id,
+                    &effect_name,
+                    op_name,
+                    args.len(),
+                    param_vars.len(),
+                    "direct-static-tail-resume".to_string(),
+                );
+                let result = self
+                    .lower_static_tail_resume_op(
+                        plan,
+                        &param_vars,
+                        &runtime_param_positions,
+                        continuation,
+                    )
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "internal optimizer error: static tail-resume proof for '{}.{}' was not lowerable",
+                            effect_name, op_name
+                        )
+                    });
+                bindings.into_iter().rev().fold(result, |body, (var, val)| {
+                    CExpr::Let(var, Box::new(val), Box::new(body))
+                })
+            }
             EffectOpLoweringPlan::EvidenceLookup { trace_shape } => {
                 // CPS path: read the per-op closure out of the evidence vector
                 // and apply it.
@@ -588,7 +842,7 @@ impl<'a> Lowerer<'a> {
                     cond_var, cond_ce, ..
                 } = &item
                 {
-                    condition_bindings.push((cond_var.clone(), cond_ce.clone()));
+                    condition_bindings.push((cond_var.clone(), cond_ce.as_ref().clone()));
                 }
                 Some(item)
             }
@@ -632,6 +886,7 @@ impl<'a> Lowerer<'a> {
         // pruned when unused).
         let saved_no_resume_ops = self.no_resume_ops.clone();
         let saved_direct_ops = self.direct_ops.clone();
+        let saved_static_tail_resume_ops = self.static_tail_resume_ops.clone();
 
         // Pass 1: allocate handler-binding names and pick a per-op plan.
         let mut op_vars: Vec<(String, String, String, OpHandlerPlan)> = Vec::new();
@@ -670,6 +925,15 @@ impl<'a> Lowerer<'a> {
                     }
                 }
                 _ => {}
+            }
+            let handler_has_return_clause = explicit_return_clause.is_some()
+                || named_item
+                    .as_ref()
+                    .is_some_and(NamedHandlerItem::has_return_clause);
+            if !handler_has_return_clause
+                && let Some(static_plan) = self.static_tail_resume_plan_for_op_handler(&plan)
+            {
+                self.static_tail_resume_ops.insert(key.clone(), static_plan);
             }
             op_vars.push((eff.clone(), op.clone(), var_name, plan));
         }
@@ -798,8 +1062,11 @@ impl<'a> Lowerer<'a> {
                     self.build_beam_native_op_fun(op, handler_canonical)
                 }
                 OpHandlerPlan::Static {
-                    arm, source_module, ..
-                } => self.build_op_handler_fun(arm, source_module.as_deref()),
+                    arm,
+                    source_module,
+                    captures,
+                    ..
+                } => self.build_op_handler_fun(arm, source_module.as_deref(), captures),
                 OpHandlerPlan::Conditional {
                     cond_var,
                     then_arm,
@@ -825,6 +1092,7 @@ impl<'a> Lowerer<'a> {
 
         self.no_resume_ops = saved_no_resume_ops;
         self.direct_ops = saved_direct_ops;
+        self.static_tail_resume_ops = saved_static_tail_resume_ops;
         // Restore the body-scope evidence we replaced during pass 2 (it is
         // unused after this point but kept symmetrical with the save). Then
         // restore the caller's evidence as the function exits the `with`.
@@ -990,7 +1258,12 @@ impl<'a> Lowerer<'a> {
     /// the cleanup code is lowered in the correct lexical scope (where arm body
     /// variables like `conn` are bound). For abort handlers (no resume), cleanup
     /// is appended after the arm body.
-    fn build_op_handler_fun(&mut self, arm: &HandlerArm, source_module: Option<&str>) -> CExpr {
+    fn build_op_handler_fun(
+        &mut self,
+        arm: &HandlerArm,
+        source_module: Option<&str>,
+        captures: &[(String, Expr)],
+    ) -> CExpr {
         let has_resume = arm.body.contains_resume();
         let op_info = self
             .effect_for_handler_arm(arm, source_module)
@@ -1089,6 +1362,14 @@ impl<'a> Lowerer<'a> {
             );
         }
 
+        for (name, value) in captures.iter().rev() {
+            body_ce = CExpr::Let(
+                super::core_var(name),
+                Box::new(self.lower_expr_value(value)),
+                Box::new(body_ce),
+            );
+        }
+
         self.current_handler_source_module = saved_source_module;
         self.current_handler_k = prev_handler_k;
         if has_resume {
@@ -1100,7 +1381,7 @@ impl<'a> Lowerer<'a> {
     fn build_inline_op_handler_fun(&mut self, arms: &[HandlerArm]) -> CExpr {
         match arms {
             [] => self.build_passthrough_handler_fun(),
-            [arm] => self.build_op_handler_fun(arm, None),
+            [arm] => self.build_op_handler_fun(arm, None, &[]),
             [first, ..] => self.build_multi_arm_inline_op_handler_fun(first, arms),
         }
     }
@@ -1248,7 +1529,7 @@ impl<'a> Lowerer<'a> {
         let mut tuple_elements = Vec::new();
         for (_eff, op) in &handler_ops {
             if let Some(arm) = arms_by_op.get(op.as_str()) {
-                tuple_elements.push(self.build_op_handler_fun(arm, None));
+                tuple_elements.push(self.build_op_handler_fun(arm, None, &[]));
             } else {
                 // Passthrough: identity continuation
                 let k_param = self.fresh();
@@ -1284,7 +1565,11 @@ impl<'a> Lowerer<'a> {
         let mut tuple_elements = Vec::new();
         for (_eff, op) in &handler_ops {
             if let Some(arm) = info.arms.iter().find(|a| a.op_name == *op) {
-                tuple_elements.push(self.build_op_handler_fun(arm, info.source_module.as_deref()));
+                tuple_elements.push(self.build_op_handler_fun(
+                    arm,
+                    info.source_module.as_deref(),
+                    &info.captures,
+                ));
             } else {
                 let k_param = self.fresh();
                 tuple_elements.push(CExpr::Fun(
@@ -1400,9 +1685,9 @@ impl<'a> Lowerer<'a> {
                 });
             return NamedHandlerItem::Conditional {
                 cond_var,
-                cond_ce,
-                then_info,
-                else_info,
+                cond_ce: Box::new(cond_ce),
+                then_info: Box::new(then_info),
+                else_info: Box::new(else_info),
             };
         }
         let canonical = self
@@ -1423,7 +1708,10 @@ impl<'a> Lowerer<'a> {
                     name, canonical
                 )
             });
-        NamedHandlerItem::Static { canonical, info }
+        NamedHandlerItem::Static {
+            canonical,
+            info: Box::new(info),
+        }
     }
 
     fn effect_for_handler_arm(
@@ -1495,6 +1783,7 @@ impl<'a> Lowerer<'a> {
                         arm,
                         source_module,
                         handler_canonical: canonical.clone(),
+                        captures: info.captures.clone(),
                     }
                 } else if self.is_beam_native_handler_canonical(canonical) {
                     OpHandlerPlan::BeamNative {
@@ -1570,12 +1859,12 @@ impl<'a> Lowerer<'a> {
         else_source: Option<&str>,
     ) -> CExpr {
         let then_fun = if let Some(arm) = then_arm {
-            self.build_op_handler_fun(arm, then_source)
+            self.build_op_handler_fun(arm, then_source, &[])
         } else {
             self.build_passthrough_handler_fun()
         };
         let else_fun = if let Some(arm) = else_arm {
-            self.build_op_handler_fun(arm, else_source)
+            self.build_op_handler_fun(arm, else_source, &[])
         } else {
             self.build_passthrough_handler_fun()
         };
@@ -2020,6 +2309,18 @@ impl NamedHandlerItem {
             NamedHandlerItem::Static { info, .. } => &info.effects,
             NamedHandlerItem::Conditional { then_info, .. } => &then_info.effects,
             NamedHandlerItem::Dynamic { effects, .. } => effects,
+        }
+    }
+
+    fn has_return_clause(&self) -> bool {
+        match self {
+            NamedHandlerItem::Static { info, .. } => info.return_clause.is_some(),
+            NamedHandlerItem::Conditional {
+                then_info,
+                else_info,
+                ..
+            } => then_info.return_clause.is_some() || else_info.return_clause.is_some(),
+            NamedHandlerItem::Dynamic { has_return, .. } => *has_return,
         }
     }
 }

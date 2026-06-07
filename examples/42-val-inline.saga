@@ -1,5 +1,0 @@
-# inline val example removed
-
-main () = {
-  dbg "Example removed, noop"
-}

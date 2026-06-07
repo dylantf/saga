@@ -1,0 +1,5 @@
+[project]
+name = "imported-handled-effect-project"
+
+[bin]
+main = "src/Main.saga"

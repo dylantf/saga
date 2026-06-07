@@ -239,6 +239,19 @@ fn assert_contains(out: &str, needle: &str) {
     );
 }
 
+fn emitted_function(out: &str, name: &str, arity: usize) -> String {
+    let marker = format!("'{}'/{} =", name, arity);
+    let start = out
+        .find(&marker)
+        .unwrap_or_else(|| panic!("missing function marker {marker}\n{out}"));
+    let rest = &out[start..];
+    let end = rest
+        .find("\n\n")
+        .map(|idx| start + idx)
+        .unwrap_or_else(|| out.len());
+    out[start..end].to_string()
+}
+
 #[test]
 fn imported_handler_factory_with_named_shorthand_lowers_as_dynamic_handler() {
     let db_module = r#"module Db
@@ -276,6 +289,230 @@ main () = {
             assert_erlc_compiles(&out, "main");
         },
     );
+}
+
+#[test]
+fn imported_public_helper_under_static_handler_generates_direct_variant() {
+    let lib = r#"module Lib
+
+pub effect Options {
+  fun get_options : Unit -> Int
+}
+
+pub fun compute : Int -> Int needs {Options}
+compute x = x + get_options! ()
+"#;
+
+    let main_src = r#"module Main
+
+import Lib (Options)
+
+handler options for Options {
+  get_options () = resume 10
+}
+
+main () = Lib.compute 5 with options
+"#;
+
+    with_temp_project_files(&[("lib/Lib.saga", lib)], main_src, |checker, program| {
+        let out = emit_from_program(program, "main", checker);
+        let main = emitted_function(&out, "main", 1);
+        assert!(
+            !main.contains("call 'lib':'compute'"),
+            "main should call the generated direct variant, not imported CPS helper\n{main}"
+        );
+        assert_contains(&main, "apply '__saga_static_helper_Lib_compute_");
+        assert_contains(&out, "'__saga_static_helper_Lib_compute_");
+        assert_erlc_compiles(&out, "main");
+    });
+}
+
+#[test]
+fn imported_let_bound_hof_alias_uses_direct_specialization() {
+    let effects = r#"module Effects
+
+pub effect ReadInt {
+  fun read : Unit -> Int
+}
+
+pub fun pure_value : Unit -> Int
+pure_value () = 41
+
+pub fun apply_eff : (Unit -> Int needs {ReadInt}) -> Int needs {ReadInt}
+apply_eff f = f ()
+
+pub handler forty_one for ReadInt {
+  read () = resume 41
+}
+"#;
+
+    let main_src = r#"module Main
+
+import Effects (pure_value, apply_eff, forty_one)
+
+main () = {
+  let hof = apply_eff
+  hof pure_value with forty_one
+}
+"#;
+
+    with_temp_project_files(
+        &[("lib/Effects.saga", effects)],
+        main_src,
+        |checker, program| {
+            let out = emit_from_program(program, "main", checker);
+            let main = emitted_function(&out, "main", 1);
+            assert_contains(&main, "call 'effects':'__saga_direct_hof_apply_eff'");
+            assert_erlc_compiles(&out, "main");
+        },
+    );
+}
+
+#[test]
+fn imported_public_helper_with_capturing_static_handler_generates_direct_variant() {
+    let lib = r#"module Lib
+
+pub effect Options {
+  fun get_options : Unit -> Int
+}
+
+pub fun compute : Int -> Int needs {Options}
+compute x = x + get_options! ()
+"#;
+
+    let main_src = r#"module Main
+
+import Lib (Options)
+
+main () = {
+  let default = 10
+  Lib.compute 5 with {
+    get_options () = resume default
+  }
+}
+"#;
+
+    with_temp_project_files(&[("lib/Lib.saga", lib)], main_src, |checker, program| {
+        let out = emit_from_program(program, "main", checker);
+        let main = emitted_function(&out, "main", 1);
+        assert!(
+            !main.contains("call 'lib':'compute'"),
+            "main should call the generated direct variant with capture params\n{main}"
+        );
+        assert_contains(&main, "apply '__saga_static_helper_Lib_compute_");
+        assert_contains(&out, "'__saga_static_helper_Lib_compute_");
+        assert_erlc_compiles(&out, "main");
+    });
+}
+
+#[test]
+fn imported_multi_clause_public_helper_stays_on_evidence_path() {
+    let lib = r#"module Lib
+
+pub effect Options {
+  fun get_options : Unit -> Int
+}
+
+pub fun compute : Bool -> Int needs {Options}
+compute True = get_options! ()
+compute False = 0
+"#;
+
+    let main_src = r#"module Main
+
+import Lib (Options)
+
+main () = Lib.compute True with {
+  get_options () = resume 10
+}
+"#;
+
+    with_temp_project_files(&[("lib/Lib.saga", lib)], main_src, |checker, program| {
+        let out = emit_from_program(program, "main", checker);
+        let main = emitted_function(&out, "main", 1);
+        assert_contains(&main, "call 'lib':'compute'");
+        assert!(
+            !out.contains("'__saga_static_helper_Lib_compute_"),
+            "multi-clause imported helper should not generate a direct variant\n{out}"
+        );
+        assert_erlc_compiles(&out, "main");
+    });
+}
+
+#[test]
+fn imported_public_helper_can_inline_nested_public_helper_in_direct_variant() {
+    let lib = r#"module Lib
+
+pub effect Options {
+  fun get_options : Unit -> Int
+}
+
+pub fun read_value : Unit -> Int needs {Options}
+read_value () = get_options! ()
+
+pub fun compute : Int -> Int needs {Options}
+compute x = x + read_value ()
+"#;
+
+    let main_src = r#"module Main
+
+import Lib (Options)
+
+main () = Lib.compute 5 with {
+  get_options () = resume 10
+}
+"#;
+
+    with_temp_project_files(&[("lib/Lib.saga", lib)], main_src, |checker, program| {
+        let out = emit_from_program(program, "main", checker);
+        let main = emitted_function(&out, "main", 1);
+        assert!(
+            !main.contains("call 'lib':'compute'"),
+            "main should call generated direct variant for nested public helper\n{main}"
+        );
+        assert!(
+            !out.contains("call 'lib':'read_value'"),
+            "nested public helper should stay inside the direct variant, not call imported CPS helper\n{out}"
+        );
+        assert_contains(&main, "apply '__saga_static_helper_Lib_compute_");
+        assert_erlc_compiles(&out, "main");
+    });
+}
+
+#[test]
+fn imported_public_helper_calling_private_helper_stays_on_evidence_path() {
+    let lib = r#"module Lib
+
+pub effect Options {
+  fun get_options : Unit -> Int
+}
+
+fun read_value : Unit -> Int needs {Options}
+read_value () = get_options! ()
+
+pub fun compute : Int -> Int needs {Options}
+compute x = x + read_value ()
+"#;
+
+    let main_src = r#"module Main
+
+import Lib (Options)
+
+main () = Lib.compute 5 with {
+  get_options () = resume 10
+}
+"#;
+
+    with_temp_project_files(&[("lib/Lib.saga", lib)], main_src, |checker, program| {
+        let out = emit_from_program(program, "main", checker);
+        let main = emitted_function(&out, "main", 1);
+        assert_contains(&main, "call 'lib':'compute'");
+        assert!(
+            !out.contains("'__saga_static_helper_Lib_compute_"),
+            "private helper dependency should keep the public helper on evidence path\n{out}"
+        );
+        assert_erlc_compiles(&out, "main");
+    });
 }
 
 #[test]
@@ -3486,4 +3723,57 @@ main () = act (Pair { a: 1, b: 2 })
         "expected reference to lib:default_cfg in Main's lowered output:\n{out}"
     );
     assert_erlc_compiles(&out, "main");
+}
+
+/// Cross-module trait-effect propagation (bugfix): an effectful impl defined in
+/// one module must propagate its effect to a concrete trait-method call in
+/// another module. The impl's per-method effects travel via
+/// `ModuleExports.trait_impls` (the cloned `ImplInfo`), so `call_it` in `Main`
+/// — which neither declares `needs {Config}` nor handles it — must error.
+#[test]
+fn cross_module_effectful_trait_call_requires_effect() {
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("clock before epoch")
+        .as_nanos();
+    let root =
+        std::env::temp_dir().join(format!("saga-xmod-effprop-{}-{unique}", std::process::id()));
+    fs::create_dir_all(root.join("src")).expect("create temp project src");
+    fs::write(root.join("project.toml"), "name = \"xmod\"\n").expect("write project.toml");
+    fs::write(
+        root.join("src/Lib.saga"),
+        "module Lib\n\
+         pub effect Config { fun config : Unit -> String }\n\
+         pub trait Foo a { fun foo : a -> Int needs {..e} }\n\
+         impl Foo for Int needs {Config} {\n\
+         \x20 foo thing = if config! () == \"x\" then thing else thing\n\
+         }\n",
+    )
+    .expect("write Lib.saga");
+
+    let main_src = "module Main\n\
+                    import Lib (Foo, Config)\n\
+                    fun call_it : Unit -> Int\n\
+                    call_it () = foo 42\n";
+
+    let mut checker = make_project_checker_for_root(root.clone());
+    let tokens = lexer::Lexer::new(main_src).lex().expect("lex error");
+    let mut program = parser::Parser::new(tokens)
+        .parse_program()
+        .expect("parse error");
+    saga::desugar::desugar_program(&mut program);
+    checker.set_current_module("Main".to_string());
+    let result = checker.check_program(&mut program);
+    let errors: Vec<String> = result.errors().iter().map(|e| e.message.clone()).collect();
+    let _ = fs::remove_dir_all(&root);
+
+    assert!(
+        result.has_errors(),
+        "expected a cross-module Config propagation error, got none"
+    );
+    assert!(
+        errors.iter().any(|m| m.contains("Config")),
+        "expected Config in cross-module errors, got: {:?}",
+        errors
+    );
 }

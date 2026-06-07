@@ -1,0 +1,11 @@
+effect Ask {
+  fun ask : Unit -> Int
+}
+
+main () = {
+  let h = handler for Ask {
+    ask () = resume 41
+    return value = value + 1
+  }
+  ask! () with h
+}

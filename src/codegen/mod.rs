@@ -1,7 +1,9 @@
 pub mod call_effects;
 pub mod cerl;
+pub mod handler_analysis;
 pub mod lower;
 pub mod normalize;
+pub mod optimize;
 pub mod resolve;
 pub mod runtime_shape;
 #[cfg(test)]
@@ -25,6 +27,9 @@ pub struct CompiledModule {
     /// writes it back via `set_compiled_call_effects`). Read by the lowerer at
     /// every effectful call site to drive evidence threading and projection.
     pub call_effects: call_effects::CallEffectMap,
+    /// Post-classifier optimizer facts for this module. Empty facts mean
+    /// lowering should take the normal direct-first/evidence path.
+    pub optimization: optimize::OptimizationFacts,
 }
 
 pub struct ModuleSemantics<'a> {
@@ -32,6 +37,7 @@ pub struct ModuleSemantics<'a> {
     pub elaborated: &'a ast::Program,
     pub resolution: &'a resolve::ResolutionMap,
     pub front_resolution: &'a crate::typechecker::ResolutionResult,
+    pub optimization: &'a optimize::OptimizationFacts,
 }
 
 /// Bundles the cross-module information needed by the lowerer.
@@ -66,6 +72,7 @@ impl CodegenContext {
             elaborated: &m.elaborated,
             resolution: &m.resolution,
             front_resolution: &m.front_resolution,
+            optimization: &m.optimization,
         })
     }
 
@@ -78,6 +85,7 @@ impl CodegenContext {
                     elaborated: &m.elaborated,
                     resolution: &m.resolution,
                     front_resolution: &m.front_resolution,
+                    optimization: &m.optimization,
                 },
             )
         })
@@ -103,12 +111,14 @@ pub fn compile_module_from_result(
         &result.prelude_imports,
         &mod_result.resolution,
     );
+    let optimization = optimize::analyze(module_name, &normalized, &resolution);
     Some(CompiledModule {
         codegen_info: info,
         elaborated: normalized,
         resolution,
         front_resolution: mod_result.resolution.clone(),
         call_effects: call_effects::CallEffectMap::new(),
+        optimization,
     })
 }
 
@@ -153,6 +163,7 @@ pub fn emit_module_with_context(
     for compiled in ctx.modules.values() {
         resolution_map.extend(compiled.resolution.iter().map(|(k, v)| (*k, v.clone())));
     }
+    let optimization = optimize::analyze(module_name, &program, &resolution_map);
     let source_info =
         source_file.map(|sf| lower::errors::SourceInfo::new(sf.path.clone(), &sf.source));
     let cmod = lower::Lowerer::new(
@@ -160,6 +171,7 @@ pub fn emit_module_with_context(
         constructor_atoms,
         resolution_map,
         check_result,
+        optimization,
         source_info,
         entry_export.map(str::to_string),
     )

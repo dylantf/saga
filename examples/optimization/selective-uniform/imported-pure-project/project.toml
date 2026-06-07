@@ -1,0 +1,12 @@
+[project]
+name = "imported-pure-project"
+
+[bin]
+main = "src/Main.saga"
+
+# [library]
+# module = "ImportedPureProject"
+# expose = []
+
+# [deps]
+# some-lib = { path = "../some-lib" }

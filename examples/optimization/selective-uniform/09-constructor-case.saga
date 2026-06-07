@@ -1,0 +1,12 @@
+type Pick =
+  | First Int
+  | Second Int
+
+fun score : Pick -> Int
+score p = case p {
+  First x -> x
+  Second y -> y + 1
+}
+
+fun main : Unit -> Int
+main () = score (Second 41)

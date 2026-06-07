@@ -15,6 +15,11 @@ fallback means current direct/CPS behavior, not fallback Core
 unknown ABI choices fail loudly
 ```
 
+Optimization-specific cases now live in
+[direct-first-optimizer-matrix.md](./direct-first-optimizer-matrix.md). Keep
+this file focused on correct runtime shape; use the optimizer matrix for faster
+equivalent shapes.
+
 ## Invariants
 
 - A call site must never infer runtime arity from source arity alone.

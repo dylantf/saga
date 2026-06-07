@@ -1,0 +1,15 @@
+module Lib
+
+pub type Boxed a = Boxed a
+
+pub trait Size a {
+  fun size : a -> Int
+}
+
+impl Size for Int {
+  size x = x
+}
+
+impl Size for Boxed a where {a: Size} {
+  size (Boxed x) = size x + 1
+}

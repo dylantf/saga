@@ -1,0 +1,15 @@
+effect Fail {
+  fun fail : Unit -> Int
+}
+
+handler fail_to_zero for Fail {
+  fail () = 0
+  return value = value
+}
+
+pub fun abort_to_zero : Unit -> Int
+abort_to_zero () =
+  fail! () with fail_to_zero
+
+fun main : Unit -> Unit
+main () = ()

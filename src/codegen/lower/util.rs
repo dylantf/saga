@@ -308,7 +308,7 @@ pub fn dict_param_count(constraints: &[(String, u32, Vec<crate::typechecker::Typ
 pub fn has_open_effect_row(ty: &Type) -> bool {
     let mut current = ty;
     while let Type::Fun(_, ret, row) = current {
-        if row.tail.is_some() {
+        if !row.tails.is_empty() {
             return true;
         }
         current = ret;

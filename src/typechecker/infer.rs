@@ -803,6 +803,7 @@ impl Checker {
 
             if is_last && !matches!(self.sub.apply(&ret_ty), Type::Fun(_, _, _)) {
                 self.emit_saturated_call_effects(&callee_ty, &absorbed_entries);
+                self.emit_concrete_trait_impl_effects(head);
             }
         }
 
@@ -836,6 +837,7 @@ impl Checker {
                 && !matches!(self.sub.apply(&deferred_lambda.ret_ty), Type::Fun(_, _, _))
             {
                 self.emit_saturated_call_effects(&deferred_lambda.callee_ty, &absorbed_entries);
+                self.emit_concrete_trait_impl_effects(head);
             }
         }
 
@@ -1133,7 +1135,7 @@ impl Checker {
                             Box::new(ret_ty.clone()),
                             EffectRow {
                                 effects: vec![],
-                                tail: Some(Box::new(eff_row_var)),
+                                tails: vec![eff_row_var],
                             },
                         ),
                         span,
@@ -1163,7 +1165,13 @@ impl Checker {
         param_ty: &Type,
         arg_span: Span,
     ) -> Result<(), Diagnostic> {
-        if self.unify_at(arg_ty, param_ty, arg_span).is_err() {
+        if let Err(orig) = self.unify_at(arg_ty, param_ty, arg_span) {
+            // Preserve specific, actionable row-ambiguity errors (e.g. an
+            // argument forcing a named effect into one of several open tails)
+            // rather than collapsing them into a generic type mismatch.
+            if orig.message.contains("ambiguous effect row") {
+                return Err(orig);
+            }
             let expected = self.prettify_type(&self.sub.apply(param_ty));
             let actual = self.prettify_type(arg_ty_pre);
             return Err(Diagnostic::error_at(
@@ -1231,6 +1239,161 @@ impl Checker {
             let applied_row = self.sub.apply_effect_row(row);
             let emitted_row = applied_row.subtract_entries(absorbed_entries);
             self.emit_effects(&emitted_row);
+        }
+    }
+
+    /// Trait-effect propagation (the bugfix): when a saturated call's head
+    /// carries trait constraints whose self type has resolved to a concrete
+    /// `Type::Con`, emit the selected impl's effects into the caller's row.
+    ///
+    /// Without this, effects declared on an impl are checked locally against the
+    /// method body but never reach the caller — a concrete `foo 42` whose `Foo
+    /// Int` impl needs `Config` would type-check as pure, then hit an unhandled
+    /// effect at runtime. Emitting here (at the call site, during inference)
+    /// routes through the normal accumulator, so `with` subtraction and the
+    /// handler-necessity check see it.
+    ///
+    /// Per-method precision: if the head names a method of the constrained trait
+    /// (a direct trait-method call), only that method's effects are emitted, so
+    /// a pure sibling of an effectful impl stays pure. Otherwise (a where-bound
+    /// function whose internal method use isn't visible from the signature yet),
+    /// the union of the impl's method effects is emitted. The precise
+    /// per-constraint row variable that would replace the union is Phase B
+    /// (see docs/planning/effect-polymorphic-traits.md).
+    fn emit_concrete_trait_impl_effects(&mut self, head: &Expr) {
+        let head_id = head.id;
+        // Bare method name from the head, for per-method precision on direct
+        // trait-method calls (`foo 42` → "foo").
+        let head_method: Option<String> = match &head.kind {
+            ExprKind::Var { name, .. } => Some(name.rsplit('.').next().unwrap_or(name).to_string()),
+            _ => None,
+        };
+        // Constraints recorded for this call head (cloned to drop the borrow).
+        let constraints: Vec<(String, Type)> = self
+            .trait_state
+            .pending_constraints
+            .iter()
+            .filter(|(_, _, _, _, nid)| *nid == head_id)
+            .map(|(trait_name, _extra, self_ty, _, _)| (trait_name.clone(), self_ty.clone()))
+            .collect();
+        for (trait_name, self_ty) in constraints {
+            let resolved = self.sub.apply(&self_ty);
+            // Abstract self (a where-bound type variable): the impl's concrete
+            // effects are unknowable here. For an *open-row* trait method, surface
+            // the constraint's effects as the row variable `..a` (the type var's
+            // own id) and require the enclosing function to forward it. This is
+            // the open-row analog of the concrete-discharge case below; closed and
+            // pure trait methods propagate (or don't) through the normal type row,
+            // so they are left untouched. See
+            // docs/planning/effect-polymorphic-traits.md.
+            if let Type::Var(var_id) = &resolved {
+                if self.trait_call_forwards_open_row(&trait_name, head_method.as_deref()) {
+                    let tail = Type::Var(*var_id);
+                    if !self.effect_row.tails.iter().any(|t| t == &tail) {
+                        self.effect_row.tails.push(tail);
+                    }
+                    self.trait_forward_row_vars
+                        .entry(*var_id)
+                        .or_insert_with(|| trait_name.clone());
+                }
+                continue;
+            }
+            let Type::Con(type_name, args) = &resolved else {
+                continue;
+            };
+            // Single-param trait lookup: arity-keyed target first (tuples),
+            // then the bare canonical name. Multi-param traits (non-empty
+            // trait_type_args) are not handled here yet.
+            let arity_key = super::arity_keyed_target_name(type_name, args.len());
+            let info = self
+                .trait_state
+                .impls
+                .get(&(trait_name.clone(), vec![], arity_key))
+                .or_else(|| {
+                    self.trait_state
+                        .impls
+                        .get(&(trait_name.clone(), vec![], type_name.clone()))
+                })
+                .cloned();
+            let Some(info) = info else {
+                continue;
+            };
+            if info.method_effects.is_empty() {
+                continue;
+            }
+            // Only *open-row* trait methods need concrete discharge. Their
+            // effects are NOT in the method's declared type, so the normal
+            // row-tracking never sees them and an enclosing `with` cannot
+            // subtract them -- concrete discharge is what surfaces them at the
+            // concrete call site. A closed-named method (`to_json : a -> Json
+            // needs {JsonOptions}`) already carries its effect in the type: it
+            // propagates -- and gets subtracted by an enclosing handler --
+            // through the normal path. Re-emitting it here would resurrect an
+            // effect the callee already handled (e.g. `serialize x =
+            // serialize_with x with json_defaults`, where `serialize` is pure
+            // but PersonD's `ToJson` impl performs `JsonOptions`).
+            let open_row_methods: std::collections::HashSet<&str> = self
+                .trait_state
+                .traits
+                .get(&trait_name)
+                .map(|t| {
+                    t.methods
+                        .iter()
+                        .filter(|m| m.effect_sig.is_open_row)
+                        .map(|m| m.name.as_str())
+                        .collect()
+                })
+                .unwrap_or_default();
+            if open_row_methods.is_empty() {
+                continue;
+            }
+            let names: Vec<String> = match &head_method {
+                // Direct trait-method call: discharge only if THAT method is
+                // open-row (a pure/closed sibling of an open-row method stays on
+                // the normal path).
+                Some(m) if info.method_effects.contains_key(m) => {
+                    if open_row_methods.contains(m.as_str()) {
+                        info.method_effects.get(m).cloned().unwrap_or_default()
+                    } else {
+                        continue;
+                    }
+                }
+                // Where-bound function call (`count_foos 42`): union the effects
+                // of the trait's open-row methods only.
+                _ => {
+                    let mut set: std::collections::BTreeSet<String> =
+                        std::collections::BTreeSet::new();
+                    for (mname, effs) in &info.method_effects {
+                        if open_row_methods.contains(mname.as_str()) {
+                            set.extend(effs.iter().cloned());
+                        }
+                    }
+                    set.into_iter().collect()
+                }
+            };
+            for name in names {
+                self.emit_effect(name, vec![]);
+            }
+        }
+    }
+
+    /// Whether a call carrying a constraint on `trait_name` forwards an open
+    /// effect row (`..a`) when its `self` is abstract. Per-method precision for
+    /// direct trait-method calls: only the named method's open-row-ness counts,
+    /// so a pure sibling of an open-row method does not force forwarding. For a
+    /// where-bound function call (the head is not a trait method), fall back to
+    /// the per-trait union: any open-row method in the trait forwards. A trait
+    /// with no open-row method (e.g. `Show`/`Eq`) never forwards.
+    fn trait_call_forwards_open_row(&self, trait_name: &str, head_method: Option<&str>) -> bool {
+        let Some(info) = self.trait_state.traits.get(trait_name) else {
+            return false;
+        };
+        match head_method {
+            Some(m) if info.methods.iter().any(|tm| tm.name == m) => info
+                .methods
+                .iter()
+                .any(|tm| tm.name == m && tm.effect_sig.is_open_row),
+            _ => info.methods.iter().any(|tm| tm.effect_sig.is_open_row),
         }
     }
 
@@ -1376,7 +1539,7 @@ impl Checker {
                 return_type: None,
                 needs_effects: super::EffectRow {
                     effects: vec![],
-                    tail: None,
+                    tails: vec![],
                 },
                 forall: vec![],
                 arm_spans: std::collections::HashMap::new(),
@@ -1688,7 +1851,7 @@ impl Checker {
         if let (Type::Fun(_, _, actual_row), Type::Fun(_, _, expected_row)) = (&actual, &expected) {
             let actual_row = self.sub.apply_effect_row(actual_row);
             let expected_row = self.sub.apply_effect_row(expected_row);
-            if actual_row.tail.is_none() && expected_row.tail.is_none() {
+            if actual_row.tails.is_empty() && expected_row.tails.is_empty() {
                 let mut extra_effects: Vec<&str> = actual_row
                     .effects
                     .iter()

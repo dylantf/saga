@@ -1,0 +1,11 @@
+effect Ask {
+  fun ask : Unit -> Int
+}
+
+main () = {
+  let x = 40
+  let _ = x + 1
+  ask! ()
+} with {
+  ask () = resume 42
+}

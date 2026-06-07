@@ -223,13 +223,12 @@ fn render_fun_signature(out: &mut String, decl: &Decl) {
     write!(out, "{}", format_type_expr(return_type)).unwrap();
 
     // Effects
-    if !effects.is_empty() {
-        let effs: Vec<String> = effects.iter().map(format_effect_ref).collect();
-        let mut needs = effs.join(", ");
-        if let Some((var, _)) = effect_row_var {
-            needs.push_str(&format!(", ..{}", var));
+    if !effects.is_empty() || !effect_row_var.is_empty() {
+        let mut parts: Vec<String> = effects.iter().map(format_effect_ref).collect();
+        for (var, _) in effect_row_var {
+            parts.push(format!("..{}", var));
         }
-        write!(out, " needs {{{}}}", needs).unwrap();
+        write!(out, " needs {{{}}}", parts.join(", ")).unwrap();
     }
 
     // Where clause
@@ -361,13 +360,12 @@ fn render_effect_decl(out: &mut String, decl: &Decl) {
             }
         }
         write!(out, "{}", format_type_expr(&op.node.return_type)).unwrap();
-        if !op.node.effects.is_empty() {
-            let effs: Vec<String> = op.node.effects.iter().map(format_effect_ref).collect();
-            let mut needs = effs.join(", ");
-            if let Some((var, _)) = &op.node.effect_row_var {
-                needs.push_str(&format!(", ..{}", var));
+        if !op.node.effects.is_empty() || !op.node.effect_row_var.is_empty() {
+            let mut parts: Vec<String> = op.node.effects.iter().map(format_effect_ref).collect();
+            for (var, _) in &op.node.effect_row_var {
+                parts.push(format!("..{}", var));
             }
-            write!(out, " needs {{{}}}", needs).unwrap();
+            write!(out, " needs {{{}}}", parts.join(", ")).unwrap();
         }
         writeln!(out).unwrap();
     }
@@ -507,15 +505,14 @@ fn format_type_expr(ty: &TypeExpr) -> String {
             ..
         } => {
             let arrow = format!("{} -> {}", format_type_expr(from), format_type_expr(to));
-            if effects.is_empty() {
+            if effects.is_empty() && effect_row_var.is_empty() {
                 arrow
             } else {
-                let effs: Vec<String> = effects.iter().map(format_effect_ref).collect();
-                let mut needs = effs.join(", ");
-                if let Some((var, _)) = effect_row_var {
-                    needs.push_str(&format!(", ..{}", var));
+                let mut parts: Vec<String> = effects.iter().map(format_effect_ref).collect();
+                for (var, _) in effect_row_var {
+                    parts.push(format!("..{}", var));
                 }
-                format!("{} needs {{{}}}", arrow, needs)
+                format!("{} needs {{{}}}", arrow, parts.join(", "))
             }
         }
         TypeExpr::Record { fields, .. } => {

@@ -1,0 +1,2 @@
+fun main : Unit -> String
+main () = show 42

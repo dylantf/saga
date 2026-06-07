@@ -1,0 +1,10 @@
+record Point {
+  x: Int,
+  y: Int,
+}
+
+fun main : Unit -> Int
+main () = {
+  let p = Point { x: 3, y: 4 }
+  p.x + p.y
+}

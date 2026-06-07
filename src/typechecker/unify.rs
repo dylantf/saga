@@ -28,10 +28,11 @@ pub(crate) fn substitute_vars(ty: &Type, subst: &HashMap<u32, Type>) -> Type {
                             .collect(),
                     })
                     .collect(),
-                tail: row
-                    .tail
-                    .as_ref()
-                    .map(|t| Box::new(substitute_vars(t, subst))),
+                tails: row
+                    .tails
+                    .iter()
+                    .map(|t| substitute_vars(t, subst))
+                    .collect(),
             },
         ),
         Type::Con(name, args) => Type::Con(
@@ -46,6 +47,25 @@ pub(crate) fn substitute_vars(ty: &Type, subst: &HashMap<u32, Type>) -> Type {
         ),
         Type::Symbol(_) | Type::Error => ty.clone(),
     }
+}
+
+/// Error for the genuinely-ambiguous multi-open-tail case: a closed/partial
+/// row is being matched against a row with two or more unconstrained open
+/// tails, so it's undetermined which tail should absorb the extra effect(s).
+fn ambiguous_row_error(extras: &[super::EffectEntry]) -> Diagnostic {
+    let mut names: Vec<&str> = extras
+        .iter()
+        .map(|e| e.name.rsplit('.').next().unwrap_or(&e.name))
+        .collect();
+    names.sort();
+    names.dedup();
+    Diagnostic::error(format!(
+        "ambiguous effect row: cannot determine which open row variable should \
+         absorb effect{} {{{}}}; a row with two or more open tails (`..a, ..b`) \
+         cannot be matched against a row carrying named effects not present in both",
+        if names.len() == 1 { "" } else { "s" },
+        names.join(", "),
+    ))
 }
 
 pub(crate) fn kind_name(k: Kind) -> &'static str {
@@ -77,7 +97,7 @@ pub(super) fn rename_vars(ty: &Type, names: &HashMap<u32, String>) -> Type {
                         args: entry.args.iter().map(|t| rename_vars(t, names)).collect(),
                     })
                     .collect(),
-                tail: row.tail.as_ref().map(|t| Box::new(rename_vars(t, names))),
+                tails: row.tails.iter().map(|t| rename_vars(t, names)).collect(),
             },
         ),
         Type::Con(name, args) => Type::Con(
@@ -111,7 +131,7 @@ pub(crate) fn collect_free_vars(ty: &Type, out: &mut Vec<u32>) {
                     collect_free_vars(t, out);
                 }
             }
-            if let Some(tail) = &row.tail {
+            for tail in &row.tails {
                 collect_free_vars(tail, out);
             }
         }
@@ -267,14 +287,17 @@ impl Checker {
             .cloned()
             .collect();
 
-        match (r1.tail_var_id(), r2.tail_var_id()) {
+        let tails1 = r1.tail_var_ids();
+        let tails2 = r2.tail_var_ids();
+
+        match (tails1.is_empty(), tails2.is_empty()) {
             // Both closed: accept if one side is a subset of the other.
             // This is symmetric (unification doesn't know direction), so it
             // accepts both directions of effect subsumption. The directional
             // check (effectful callback where pure expected = error) is
             // enforced by check_callback_effect_subtype in infer.rs at
             // function application sites.
-            (None, None) => {
+            (true, true) => {
                 if extras1.is_empty() || extras2.is_empty() {
                     Ok(())
                 } else {
@@ -292,32 +315,120 @@ impl Checker {
                     )))
                 }
             }
-            // row1 is open: bind its tail to the extras from row2
-            (Some(tail1), None) => self.sub.bind_row(tail1, EffectRow::closed(extras2)),
-            // row2 is open: bind its tail to the extras from row1
-            (None, Some(tail2)) => self.sub.bind_row(tail2, EffectRow::closed(extras1)),
-            // Both open: create a fresh row variable for the shared tail
-            (Some(tail1), Some(tail2)) => {
-                if tail1 == tail2 {
-                    return Ok(());
-                }
-                let fresh_var = self.fresh_var();
-                self.sub.bind_row(
-                    tail1,
-                    EffectRow {
-                        effects: extras2,
-                        tail: Some(Box::new(fresh_var.clone())),
-                    },
-                )?;
-                self.sub.bind_row(
-                    tail2,
-                    EffectRow {
-                        effects: extras1,
-                        tail: Some(Box::new(fresh_var)),
-                    },
-                )
-            }
+            // row1 open, row2 closed: row1's tails must absorb the effects that
+            // row2 has but row1 lacks (extras2).
+            (false, true) => self.absorb_extras_into_tails(&tails1, extras2),
+            // row2 open, row1 closed: symmetric.
+            (true, false) => self.absorb_extras_into_tails(&tails2, extras1),
+            // Both open.
+            (false, false) => self.unify_open_rows(&tails1, &tails2, extras1, extras2),
         }
+    }
+
+    /// Bind a set of open tails so the row absorbs `extras` (named effects the
+    /// other, closed side carries that this side lacks).
+    ///
+    /// - No extras: each tail must be empty, so bind all to the empty row.
+    /// - Extras with exactly one tail: that tail absorbs them.
+    /// - Extras with two or more tails: genuinely ambiguous — which tail
+    ///   absorbs them is undetermined, so report a clear error.
+    fn absorb_extras_into_tails(
+        &mut self,
+        tails: &[u32],
+        extras: Vec<super::EffectEntry>,
+    ) -> Result<(), Diagnostic> {
+        if extras.is_empty() {
+            for &t in tails {
+                self.sub.bind_row(t, EffectRow::empty())?;
+            }
+            return Ok(());
+        }
+        if tails.len() == 1 {
+            return self.sub.bind_row(tails[0], EffectRow::closed(extras));
+        }
+        Err(ambiguous_row_error(&extras))
+    }
+
+    /// Unify two open rows (both have at least one tail). The fast path covers
+    /// the common single-tail/single-tail case and identical tail sets; cases
+    /// where named effects would have to be distributed across two or more
+    /// open tails are genuinely ambiguous and produce a clear error.
+    fn unify_open_rows(
+        &mut self,
+        tails1: &[u32],
+        tails2: &[u32],
+        extras1: Vec<super::EffectEntry>,
+        extras2: Vec<super::EffectEntry>,
+    ) -> Result<(), Diagnostic> {
+        // Identical tail sets with no named extras: already equal.
+        let set1: HashSet<u32> = tails1.iter().copied().collect();
+        let set2: HashSet<u32> = tails2.iter().copied().collect();
+        if set1 == set2 && extras1.is_empty() && extras2.is_empty() {
+            return Ok(());
+        }
+
+        // Single tail on each side: classic open/open unification through a
+        // fresh shared tail that carries whatever is common beyond the extras.
+        if tails1.len() == 1 && tails2.len() == 1 {
+            let (t1, t2) = (tails1[0], tails2[0]);
+            if t1 == t2 {
+                // Same variable on both sides; nothing left to do unless one
+                // side has extras the other lacks, which can't happen since
+                // the variable denotes the same set on both sides.
+                return Ok(());
+            }
+            let fresh = self.fresh_var();
+            self.sub.bind_row(
+                t1,
+                EffectRow {
+                    effects: extras2,
+                    tails: vec![fresh.clone()],
+                },
+            )?;
+            return self.sub.bind_row(
+                t2,
+                EffectRow {
+                    effects: extras1,
+                    tails: vec![fresh],
+                },
+            );
+        }
+
+        // One side has a single tail and the other has several. If the
+        // multi-tail side has no named effects the single side must absorb,
+        // the single tail can stand for the union of the multi side's tails.
+        if tails2.len() == 1 && !tails1.is_empty() && extras1.is_empty() {
+            // extras2 (effects r2 has, r1 lacks) must be absorbed by r1's
+            // tails — ambiguous when there are 2+ of them.
+            if !extras2.is_empty() {
+                return Err(ambiguous_row_error(&extras2));
+            }
+            return self.sub.bind_row(
+                tails2[0],
+                EffectRow {
+                    effects: vec![],
+                    tails: tails1.iter().map(|&id| Type::Var(id)).collect(),
+                },
+            );
+        }
+        if tails1.len() == 1 && !tails2.is_empty() && extras2.is_empty() {
+            if !extras1.is_empty() {
+                return Err(ambiguous_row_error(&extras1));
+            }
+            return self.sub.bind_row(
+                tails1[0],
+                EffectRow {
+                    effects: vec![],
+                    tails: tails2.iter().map(|&id| Type::Var(id)).collect(),
+                },
+            );
+        }
+
+        // Two or more open tails on a side with named effects to place, or
+        // differing multi-tail sets: undetermined which tail absorbs what.
+        let mut all_extras = extras1;
+        all_extras.extend(extras2);
+        Err(ambiguous_row_error(&all_extras))
     }
 
     /// Format a type for error messages: apply substitutions, then replace
@@ -397,10 +508,11 @@ impl Checker {
                                 .collect(),
                         })
                         .collect(),
-                    tail: row
-                        .tail
-                        .as_ref()
-                        .map(|t| Box::new(Self::replace_vars(t, mapping))),
+                    tails: row
+                        .tails
+                        .iter()
+                        .map(|t| Self::replace_vars(t, mapping))
+                        .collect(),
                 },
             ),
             Type::Con(name, args) => Type::Con(
@@ -439,10 +551,11 @@ impl Checker {
                         .collect(),
                 })
                 .collect(),
-            tail: row
-                .tail
-                .as_ref()
-                .map(|t| Box::new(Self::replace_vars(t, mapping))),
+            tails: row
+                .tails
+                .iter()
+                .map(|t| Self::replace_vars(t, mapping))
+                .collect(),
         }
     }
 
@@ -591,7 +704,11 @@ impl Checker {
                                 .collect(),
                         })
                         .collect(),
-                    tail: row.tail.map(|t| Box::new(self.unfold_aliases_in_type(*t))),
+                    tails: row
+                        .tails
+                        .into_iter()
+                        .map(|t| self.unfold_aliases_in_type(t))
+                        .collect(),
                 },
             ),
             Type::Record(fields) => Type::Record(
@@ -794,18 +911,21 @@ impl Checker {
                             super::EffectEntry::unnamed(name, args)
                         })
                         .collect();
-                    let tail = effect_row_var.as_ref().map(|(name, _)| {
-                        let id = if let Some((_, id)) = params.iter().find(|(n, _)| n == name) {
-                            *id
-                        } else {
-                            let id = self.next_var;
-                            self.next_var += 1;
-                            params.push((name.clone(), id));
-                            id
-                        };
-                        Box::new(Type::Var(id))
-                    });
-                    if effect_refs.is_empty() && tail.is_none() {
+                    let tails: Vec<Type> = effect_row_var
+                        .iter()
+                        .map(|(name, _)| {
+                            let id = if let Some((_, id)) = params.iter().find(|(n, _)| n == name) {
+                                *id
+                            } else {
+                                let id = self.next_var;
+                                self.next_var += 1;
+                                params.push((name.clone(), id));
+                                id
+                            };
+                            Type::Var(id)
+                        })
+                        .collect();
+                    if effect_refs.is_empty() && tails.is_empty() {
                         Type::arrow(a_ty, b_ty)
                     } else {
                         Type::Fun(
@@ -813,7 +933,7 @@ impl Checker {
                             Box::new(b_ty),
                             EffectRow {
                                 effects: effect_refs,
-                                tail,
+                                tails,
                             },
                         )
                     }
@@ -890,7 +1010,7 @@ impl Checker {
                                 .collect(),
                         })
                         .collect(),
-                    tail: row.tail,
+                    tails: row.tails,
                 },
             ),
             Type::Con(name, args) => {

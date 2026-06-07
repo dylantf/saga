@@ -1,0 +1,15 @@
+module Main
+
+import Std.IO.Unsafe (print_stdout)
+import Effects (read_value, forty_one)
+
+fun answer : Unit -> Int
+answer () = {
+  let value = read_value () with forty_one
+  value + 1
+}
+
+fun main : Unit -> Unit
+main () =
+  if answer () == 42 then print_stdout "ok\n"
+  else print_stdout "bad\n"

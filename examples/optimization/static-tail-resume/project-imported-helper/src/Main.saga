@@ -1,0 +1,10 @@
+module Main
+
+import Lib (Options)
+
+handler options for Options {
+  get_options () = resume 10
+}
+
+main () = Lib.compute 5 with options
+

@@ -1,0 +1,12 @@
+effect Ask {
+  fun ask : Unit -> Int
+}
+
+make_ask n = handler for Ask {
+  ask () = resume n
+}
+
+main () = {
+  let h = make_ask 41
+  ask! () with h
+}

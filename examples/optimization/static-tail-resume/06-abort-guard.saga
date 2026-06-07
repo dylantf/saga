@@ -1,0 +1,7 @@
+effect Fail {
+  fun fail : Unit -> Int
+}
+
+main () = fail! () with {
+  fail () = 0
+}

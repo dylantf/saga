@@ -3,7 +3,7 @@
 /// declarations and imported module codegen info.
 use crate::ast::{self, Decl};
 use crate::codegen::runtime_shape::{CpsShape, RuntimeFunctionShape};
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 use super::util;
 use super::{EffectInfo, FunInfo, HandlerInfo, Lowerer};
@@ -56,6 +56,137 @@ impl<'a> Lowerer<'a> {
 
     fn canonical_name(map: &HashMap<String, String>, bare: &str) -> String {
         map.get(bare).cloned().unwrap_or_else(|| bare.to_string())
+    }
+
+    fn handler_factory_body(expr: &ast::Expr) -> Option<&ast::HandlerBody> {
+        match &expr.kind {
+            ast::ExprKind::HandlerExpr { body } => Some(body),
+            ast::ExprKind::Ascription { expr, .. } => Self::handler_factory_body(expr),
+            ast::ExprKind::Block { stmts, .. } if stmts.len() == 1 => match &stmts[0].node {
+                ast::Stmt::Expr(expr) => Self::handler_factory_body(expr),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    fn handler_factory_params(params: &[ast::Pat]) -> Option<Vec<String>> {
+        params
+            .iter()
+            .map(|param| match param {
+                ast::Pat::Var { name, .. } => Some(name.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn register_handler_factory_defs(&mut self, program: &ast::Program, source_module_name: &str) {
+        for decl in program {
+            let Decl::FunBinding {
+                name,
+                params,
+                guard,
+                body,
+                ..
+            } = decl
+            else {
+                continue;
+            };
+            if guard.is_some() {
+                continue;
+            }
+            let Some(handler_body) = Self::handler_factory_body(body) else {
+                continue;
+            };
+            let Some(param_names) = Self::handler_factory_params(params) else {
+                continue;
+            };
+
+            let info = super::HandlerFactoryInfo {
+                params: param_names,
+                body: handler_body.clone(),
+                source_module: Some(source_module_name.to_string()),
+            };
+            self.handler_factory_defs.insert(name.clone(), info.clone());
+            self.handler_factory_defs
+                .insert(format!("{}.{}", source_module_name, name), info);
+        }
+    }
+
+    fn register_local_helper_defs(&mut self, program: &ast::Program, source_module_name: &str) {
+        let mut seen: HashSet<String> = HashSet::new();
+        let mut duplicate_names: HashSet<String> = HashSet::new();
+        let mut helpers: HashMap<String, super::LocalHelperInfo> = HashMap::new();
+
+        for decl in program {
+            let Decl::FunBinding {
+                name,
+                params,
+                guard,
+                body,
+                ..
+            } = decl
+            else {
+                continue;
+            };
+
+            if !seen.insert(name.clone()) {
+                duplicate_names.insert(name.clone());
+                helpers.remove(name);
+                helpers.remove(&format!("{}.{}", source_module_name, name));
+                continue;
+            }
+            if guard.is_some() {
+                continue;
+            }
+
+            let info = super::LocalHelperInfo {
+                params: params.clone(),
+                body: body.clone(),
+                source_module: source_module_name.to_string(),
+            };
+            helpers.insert(name.clone(), info.clone());
+            helpers.insert(format!("{}.{}", source_module_name, name), info);
+        }
+
+        for name in duplicate_names {
+            helpers.remove(&name);
+            helpers.remove(&format!("{}.{}", source_module_name, name));
+        }
+
+        self.local_helper_defs.extend(helpers);
+    }
+
+    fn register_imported_public_helper_facts(&mut self) {
+        for (module_name, module_semantics) in self.ctx.modules_semantics() {
+            if module_name == self.current_source_module {
+                continue;
+            }
+            let exported_names: HashSet<&str> = module_semantics
+                .codegen_info
+                .exports
+                .iter()
+                .map(|(name, _)| name.as_str())
+                .collect();
+            for (name, fact) in &module_semantics.optimization.public_helpers {
+                if !name.contains('.') {
+                    continue;
+                }
+                let Some(bare_name) = name.rsplit('.').next() else {
+                    continue;
+                };
+                if !exported_names.contains(bare_name) {
+                    continue;
+                }
+                self.local_helper_defs
+                    .entry(name.clone())
+                    .or_insert_with(|| super::LocalHelperInfo {
+                        params: fact.params.clone(),
+                        body: fact.body.clone(),
+                        source_module: fact.source_module.clone(),
+                    });
+            }
+        }
     }
 
     fn resolved_type_effects_for_module(
@@ -254,6 +385,7 @@ impl<'a> Lowerer<'a> {
                             arms: body.arms.iter().map(|a| a.node.clone()).collect(),
                             return_clause: body.return_clause.clone(),
                             source_module: Some(source_module_name.to_string()),
+                            captures: Vec::new(),
                         },
                     );
                 }
@@ -426,6 +558,7 @@ impl<'a> Lowerer<'a> {
                                     arms: body.arms.iter().map(|a| a.node.clone()).collect(),
                                     return_clause: body.return_clause.clone(),
                                     source_module: Some(mod_name.to_string()),
+                                    captures: Vec::new(),
                                 });
                         }
                         Decl::FunSignature { .. } => {}
@@ -542,6 +675,7 @@ impl<'a> Lowerer<'a> {
                             arms: body.arms.iter().map(|a| a.node.clone()).collect(),
                             return_clause: body.return_clause.clone(),
                             source_module: Some(module_name.to_string()),
+                            captures: Vec::new(),
                         });
                 }
                 Decl::FunSignature { .. } => {
@@ -588,6 +722,8 @@ impl<'a> Lowerer<'a> {
                 );
             }
         }
+
+        self.register_handler_factory_defs(program, &source_module_name);
 
         for decl in program {
             if let Decl::FunBinding {
@@ -668,6 +804,9 @@ impl<'a> Lowerer<'a> {
         let (has_module_decl, source_module_name) = Self::source_module_info(program, module_name);
         let (effect_canonical, handler_canonical) =
             self.initialize_canonical_name_maps(program, &source_module_name);
+        self.register_local_helper_defs(program, &source_module_name);
+        self.register_imported_public_helper_facts();
+        self.register_handler_factory_defs(program, &source_module_name);
         self.register_local_module_decls(
             program,
             &source_module_name,

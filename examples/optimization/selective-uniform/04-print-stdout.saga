@@ -1,0 +1,4 @@
+import Std.IO.Unsafe (print_stdout)
+
+fun main : Unit -> Unit
+main () = print_stdout "hello\n"

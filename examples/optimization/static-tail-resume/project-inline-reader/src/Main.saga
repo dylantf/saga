@@ -1,0 +1,13 @@
+module Main
+
+effect Config {
+  fun port : Unit -> Int
+}
+
+fun main : Unit -> Int
+main () = {
+  let value = port! ()
+  value + 1
+} with {
+  port () = resume 41
+}

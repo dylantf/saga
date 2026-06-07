@@ -1,0 +1,25 @@
+module HandlerFinallyResumeE2e
+
+import Std.IO.Unsafe (print_stdout)
+
+effect ReadInt {
+  fun read : Unit -> Int
+}
+
+handler read_with_cleanup for ReadInt {
+  read () = resume 41 finally {
+    print_stdout "cleanup\n"
+  }
+}
+
+fun main : Unit -> Unit
+main () = {
+  let value = {
+    let read_value = read! ()
+    print_stdout "body\n"
+    read_value + 1
+  } with read_with_cleanup
+
+  if value == 42 then print_stdout "after\n"
+  else print_stdout "bad\n"
+}
