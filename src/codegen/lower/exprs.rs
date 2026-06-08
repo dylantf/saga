@@ -859,30 +859,35 @@ impl<'a> Lowerer<'a> {
 
         let rec_var = self.fresh();
 
-        // Slot layout: [tag, field_0, field_1, ...]. Tag and untouched
-        // fields are Pure slots reading from the base record via
-        // `element/2` (rec_var is bound by the outer `lower_bind_expr_with_cps`
-        // wrap, so it's in scope when these CExprs are evaluated).
+        // Destructure the base record with a single tuple pattern up front
+        // (`case rec_var of <{Tag, F0, F1, ...}> -> ...`) instead of reading
+        // each untouched field with `erlang:element/2`. The pattern match
+        // proves the record's arity *locally*, so beam_ssa lowers every field
+        // read to the fast unguarded `get_tuple_element`. Reading via
+        // `element/2` only becomes `get_tuple_element` when beam can prove the
+        // arity by whole-module type inference, which an opaque cross-module
+        // call in the data-flow path defeats -- leaving the slow guarded BIF.
+        let tag_var = self.fresh();
+        let mut pat_vars: Vec<Option<String>> = Vec::with_capacity(field_order.len());
+
+        // Slot layout: [tag, field_0, field_1, ...]. Tag and untouched fields
+        // are Pure slots reading the variables bound by the destructure.
         // Updated fields are Expr slots that get CPS-chained if effectful.
         let mut slots: Vec<CpsSlot<'_>> = Vec::with_capacity(field_order.len() + 1);
-        slots.push(CpsSlot::Pure(cerl_call(
-            "erlang",
-            "element",
-            vec![CExpr::Lit(CLit::Int(1)), CExpr::Var(rec_var.clone())],
-        )));
-        for (pos, name) in field_order.iter().enumerate() {
+        slots.push(CpsSlot::Pure(CExpr::Var(tag_var.clone())));
+        for name in field_order.iter() {
             slots.push(match field_map.get(name.as_str()) {
-                Some(new_expr) => CpsSlot::Expr {
-                    expr: new_expr,
-                    expected: None,
-                },
+                Some(new_expr) => {
+                    pat_vars.push(None);
+                    CpsSlot::Expr {
+                        expr: new_expr,
+                        expected: None,
+                    }
+                }
                 None => {
-                    let idx = (pos + 2) as i64;
-                    CpsSlot::Pure(cerl_call(
-                        "erlang",
-                        "element",
-                        vec![CExpr::Lit(CLit::Int(idx)), CExpr::Var(rec_var.clone())],
-                    ))
+                    let fv = self.fresh();
+                    pat_vars.push(Some(fv.clone()));
+                    CpsSlot::Pure(CExpr::Var(fv))
                 }
             });
         }
@@ -891,7 +896,37 @@ impl<'a> Lowerer<'a> {
             CExpr::Tuple(vars.iter().map(|v| CExpr::Var(v.clone())).collect())
         });
 
-        self.lower_bind_expr_with_cps(record_expr, rec_var, None, inner)
+        let destructured = Self::record_destructure_case(&rec_var, &tag_var, &pat_vars, inner);
+        self.lower_bind_expr_with_cps(record_expr, rec_var, None, destructured)
+    }
+
+    /// Build `case rec_var of <{TagVar, ...field pats...}> when 'true' -> body`,
+    /// binding the record's tag and its untouched fields so subsequent reads use
+    /// `get_tuple_element` (arity proven locally) rather than `erlang:element/2`.
+    /// `pat_vars[pos]` is `Some(var)` to bind that field (untouched) or `None`
+    /// (a wildcard) when the field is being overwritten and its old value unused.
+    fn record_destructure_case(
+        rec_var: &str,
+        tag_var: &str,
+        pat_vars: &[Option<String>],
+        body: CExpr,
+    ) -> CExpr {
+        let mut pats: Vec<CPat> = Vec::with_capacity(pat_vars.len() + 1);
+        pats.push(CPat::Var(tag_var.to_string()));
+        for pv in pat_vars {
+            pats.push(match pv {
+                Some(v) => CPat::Var(v.clone()),
+                None => CPat::Wildcard,
+            });
+        }
+        CExpr::Case(
+            Box::new(CExpr::Var(rec_var.to_string())),
+            vec![CArm {
+                pat: CPat::Tuple(pats),
+                guard: None,
+                body,
+            }],
+        )
     }
 
     fn lower_value_to_k_with_ce(&mut self, ce: CExpr, k_var: &str) -> CExpr {
@@ -2560,38 +2595,36 @@ impl<'a> Lowerer<'a> {
                 let field_map: HashMap<&str, &Expr> =
                     fields.iter().map(|(n, _, e)| (n.as_str(), e)).collect();
 
-                let mut vars: Vec<String> = Vec::new();
-                let mut bindings: Vec<(String, CExpr)> = Vec::new();
-                for (pos, field_name) in order.iter().enumerate() {
-                    let v = self.fresh();
-                    let ce = if let Some(new_expr) = field_map.get(field_name.as_str()) {
-                        self.lower_expr_value(new_expr)
-                    } else {
-                        let idx = (pos + 2) as i64;
-                        cerl_call(
-                            "erlang",
-                            "element",
-                            vec![CExpr::Lit(CLit::Int(idx)), CExpr::Var(rec_var.clone())],
-                        )
-                    };
-                    vars.push(v.clone());
-                    bindings.push((v, ce));
-                }
-                // Preserve the tag via element(1, rec)
+                // Destructure the base record with a single tuple pattern so
+                // untouched fields read via `get_tuple_element` (arity proven
+                // locally) rather than the guarded `erlang:element/2` BIF. See
+                // `record_destructure_case` for why this matters across module
+                // boundaries.
                 let tag_var = self.fresh();
-                let tag_ce = cerl_call(
-                    "erlang",
-                    "element",
-                    vec![CExpr::Lit(CLit::Int(1)), CExpr::Var(rec_var.clone())],
-                );
+                let mut pat_vars: Vec<Option<String>> = Vec::with_capacity(order.len());
+                let mut vars: Vec<String> = Vec::with_capacity(order.len());
+                let mut bindings: Vec<(String, CExpr)> = Vec::new();
+                for field_name in order.iter() {
+                    let v = self.fresh();
+                    if let Some(new_expr) = field_map.get(field_name.as_str()) {
+                        pat_vars.push(None);
+                        let ce = self.lower_expr_value(new_expr);
+                        bindings.push((v.clone(), ce));
+                    } else {
+                        // Untouched field: bound directly by the destructure.
+                        pat_vars.push(Some(v.clone()));
+                    }
+                    vars.push(v);
+                }
                 let mut elems = vec![CExpr::Var(tag_var.clone())];
                 elems.extend(vars.iter().map(|v| CExpr::Var(v.clone())));
                 let tuple = CExpr::Tuple(elems);
                 let inner = bindings.into_iter().rev().fold(tuple, |body, (var, val)| {
                     CExpr::Let(var, Box::new(val), Box::new(body))
                 });
-                let with_tag = CExpr::Let(tag_var, Box::new(tag_ce), Box::new(inner));
-                CExpr::Let(rec_var, Box::new(rec_ce), Box::new(with_tag))
+                let destructured =
+                    Self::record_destructure_case(&rec_var, &tag_var, &pat_vars, inner);
+                CExpr::Let(rec_var, Box::new(rec_ce), Box::new(destructured))
             }
 
             ExprKind::Do {
