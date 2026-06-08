@@ -1,11 +1,11 @@
 -module(std_int_bridge).
 -export([parse/1, shift_left/2, shift_right/2, to_hex/1, parse_hex/1]).
 
+%% Parse a string that is entirely an integer (optionally signed).
+%% Returns {nothing} if any character is not part of the integer.
 parse(S) ->
-    case string:to_integer(S) of
-        {N, <<>>} -> {just, N};
-        {N, []} -> {just, N};
-        _ -> {nothing}
+    try {just, binary_to_integer(S)}
+    catch _:_ -> {nothing}
     end.
 
 shift_left(Bits, N) ->
