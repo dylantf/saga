@@ -1389,7 +1389,7 @@ fn derive_routed(
 /// wrapper structurally.
 #[derive(Clone)]
 enum MethodDirection {
-    To { a_params: Vec<bool> },
+    To { a_params: Vec<Option<SplicePath>> },
     From(FromShape),
 }
 
@@ -1408,20 +1408,20 @@ fn classify_method_direction(
 ) -> Result<MethodDirection, String> {
     let return_has_self = type_expr_contains_var(&method.return_type, self_var);
 
-    let mut a_params: Vec<bool> = Vec::with_capacity(method.params.len());
+    let mut a_params: Vec<Option<SplicePath>> = Vec::with_capacity(method.params.len());
     let mut any_param_has_self = false;
     for (_label, ty) in &method.params {
-        if is_self_var(ty, self_var) {
-            a_params.push(true);
-            any_param_has_self = true;
-        } else if type_expr_contains_var(ty, self_var) {
-            return Err(format!(
-                "method `{}` has a parameter with the trait's self type nested in a non-leaf \
-                 position; only direct `a` parameters are supported",
-                method.name
-            ));
-        } else {
-            a_params.push(false);
+        let mut visiting = Vec::new();
+        match classify_splice_path(ty, self_var, scope, &mut visiting) {
+            Ok(path) => {
+                if path.is_some() {
+                    any_param_has_self = true;
+                }
+                a_params.push(path);
+            }
+            Err(reason) => {
+                return Err(format!("method `{}` parameter: {}", method.name, reason));
+            }
         }
     }
 
@@ -1458,60 +1458,63 @@ fn synth_method_pair(
             // Bridge:    method (Rep__T i0) (Rep__T i1) p2 = method i0 i1 p2
             // Delegate:  method p0 p1 p2                   = method (to p0) (to p1) p2
             // For each param:
-            //   - a-param: bridge pattern destructures `Rep__T __i<k>`, body uses __i<k>
-            //              delegate pattern binds __p<k>, body wraps with `to __p<k>`
-            //   - passthrough: bridge & delegate both bind __p<k>, body forwards __p<k>
+            //   - splice param (path is Some): the bridge destructures `Rep__T`
+            //     at every a-leaf (via `build_splice_pattern`) and forwards the
+            //     rebuilt product; the delegate binds the whole param and threads
+            //     `to` into each a-leaf (via `apply_splice_path`). A bare-`a` param
+            //     is the `Leaf` case of both — `(Rep__T __i)` / `to __p`.
+            //   - passthrough (path is None): bridge & delegate both bind __p<k>
+            //     and forward it unchanged.
             let n = a_params.len();
             let mut bridge_params: Vec<Pat> = Vec::with_capacity(n);
             let mut bridge_args: Vec<Expr> = Vec::with_capacity(n);
             let mut deleg_params: Vec<Pat> = Vec::with_capacity(n);
             let mut deleg_args: Vec<Expr> = Vec::with_capacity(n);
-            for (i, &is_a) in a_params.iter().enumerate() {
+            let to_op = |e: Expr, s: Span| -> Expr {
+                Expr::synth(
+                    s,
+                    ExprKind::App {
+                        func: Box::new(Expr::synth(s, ExprKind::Var { name: "to".into() })),
+                        arg: Box::new(e),
+                    },
+                )
+            };
+            let mut bridge_counter = 0usize;
+            for (i, path) in a_params.iter().enumerate() {
                 let param_var = format!("__p{i}");
-                if is_a {
-                    let inner_var = format!("__i{i}");
-                    bridge_params.push(Pat::Constructor {
-                        id: NodeId::fresh(),
-                        name: rep_name.to_string(),
-                        args: vec![Pat::Var {
+                match path {
+                    Some(p) => {
+                        let (bpat, barg) =
+                            build_splice_pattern(p, rep_name, &mut bridge_counter, span);
+                        bridge_params.push(bpat);
+                        bridge_args.push(barg);
+                        deleg_params.push(Pat::Var {
                             id: NodeId::fresh(),
-                            name: inner_var.clone(),
-                            span,
-                        }],
-                        span,
-                    });
-                    bridge_args.push(Expr::synth(span, ExprKind::Var { name: inner_var }));
-                    deleg_params.push(Pat::Var {
-                        id: NodeId::fresh(),
-                        name: param_var.clone(),
-                        span,
-                    });
-                    let to_call = Expr::synth(
-                        span,
-                        ExprKind::App {
-                            func: Box::new(Expr::synth(span, ExprKind::Var { name: "to".into() })),
-                            arg: Box::new(Expr::synth(span, ExprKind::Var { name: param_var })),
-                        },
-                    );
-                    deleg_args.push(to_call);
-                } else {
-                    bridge_params.push(Pat::Var {
-                        id: NodeId::fresh(),
-                        name: param_var.clone(),
-                        span,
-                    });
-                    bridge_args.push(Expr::synth(
-                        span,
-                        ExprKind::Var {
                             name: param_var.clone(),
-                        },
-                    ));
-                    deleg_params.push(Pat::Var {
-                        id: NodeId::fresh(),
-                        name: param_var.clone(),
-                        span,
-                    });
-                    deleg_args.push(Expr::synth(span, ExprKind::Var { name: param_var }));
+                            span,
+                        });
+                        let arg = Expr::synth(span, ExprKind::Var { name: param_var });
+                        deleg_args.push(apply_splice_path(p, arg, &to_op, span));
+                    }
+                    None => {
+                        bridge_params.push(Pat::Var {
+                            id: NodeId::fresh(),
+                            name: param_var.clone(),
+                            span,
+                        });
+                        bridge_args.push(Expr::synth(
+                            span,
+                            ExprKind::Var {
+                                name: param_var.clone(),
+                            },
+                        ));
+                        deleg_params.push(Pat::Var {
+                            id: NodeId::fresh(),
+                            name: param_var.clone(),
+                            span,
+                        });
+                        deleg_args.push(Expr::synth(span, ExprKind::Var { name: param_var }));
+                    }
                 }
             }
             let method_name_for_call = method_name.clone();
@@ -1622,15 +1625,38 @@ enum FromShape {
 #[derive(Clone)]
 struct VariantShape {
     ctor_name: String,
-    /// One entry per field; `true` = field's type equals the trait's self
-    /// variable (under wrapper-self-param substitution); apply `wrap` here.
-    field_a_positions: Vec<bool>,
+    /// One entry per field; `None` = no `a` (passthrough), `Some(path)` =
+    /// the field's type carries `a` at the leaves the path locates; apply
+    /// `wrap` there (under wrapper-self-param substitution).
+    field_a_positions: Vec<Option<SplicePath>>,
 }
 
 #[derive(Clone)]
 struct FieldShape {
     label: String,
-    is_a_position: bool,
+    /// `None` = passthrough, `Some(path)` = splice `a` at the path's leaves.
+    path: Option<SplicePath>,
+}
+
+/// A lens locating every occurrence of the trait's self type `a` inside a
+/// (possibly nested) product type, so codegen can splice the `Generic` iso
+/// (`to`/`from`/`Rep__T`) at each `a`-leaf rather than around the whole value.
+///
+/// `Leaf` is the base case (the value *is* `a`); `Tuple`/`Record` recurse into
+/// product positions. `a` nested under a sum or a parametric/recursive
+/// container (`List a`, custom sums, self-referential records) is *not*
+/// representable here — `classify_splice_path` rejects those with a diagnostic.
+#[derive(Clone)]
+enum SplicePath {
+    /// The value at this position is exactly `a`.
+    Leaf,
+    /// `(T0, T1, ...)` — per-element path (`None` = element has no `a`).
+    Tuple(Vec<Option<SplicePath>>),
+    /// A named record `Name { f0: .., f1: .. }` — per-field path.
+    Record {
+        name: String,
+        fields: Vec<(String, Option<SplicePath>)>,
+    },
 }
 
 /// Classify a from-direction method's return type by structural inspection.
@@ -1661,31 +1687,24 @@ fn classify_from_return(
             .to_string()
     })?;
 
-    // Nested-`a` at the trait-return level: each call-site arg should either
-    // BE `self_var` or NOT contain it. `from : Input -> W (List a)` falls
-    // foul of this — `a` appears nested in `List a`, which we can't thread
-    // `from` through without recursing into List's representation.
-    for arg in &args {
-        if !is_self_var(arg, self_var) && type_expr_contains_var(arg, self_var) {
-            return Err(format!(
-                "return wrapper `{}` has the trait's self type nested in a non-leaf type \
-                 argument; only direct `a` arguments are supported",
-                head
-            ));
-        }
-    }
+    // The wrapper's call-site args may now nest `a` inside a product (e.g.
+    // `Result (a, Int) String`). The per-field substitution in
+    // `classify_sum_wrapper`/`classify_record_wrapper` feeds each such arg
+    // through `classify_splice_path`, which rejects non-product nesting
+    // (`Result (List a) String`) with a diagnostic. So no up-front arg check
+    // is needed here.
 
     // Look up the wrapper. Sum (TypeDef) first, then record (RecordDef).
     match scope.type_entry(&head) {
         Ok(Some(td)) => {
-            return classify_sum_wrapper(&head, &td.info, &args, self_var);
+            return classify_sum_wrapper(&head, &td.info, &args, self_var, scope);
         }
         Ok(None) => {}
         Err(reason) => return Err(reason),
     }
     match scope.record_entry(&head) {
         Ok(Some(rd)) => {
-            return classify_record_wrapper(&head, &rd.info, &args, self_var);
+            return classify_record_wrapper(&head, &rd.info, &args, self_var, scope);
         }
         Ok(None) => {}
         Err(reason) => return Err(reason),
@@ -1728,6 +1747,7 @@ fn classify_sum_wrapper(
     td: &WrapperTypeInfo,
     call_args: &[TypeExpr],
     self_var: &str,
+    scope: &DeriveScope<'_>,
 ) -> Result<FromShape, String> {
     if call_args.len() != td.type_params.len() {
         return Err(format!(
@@ -1737,24 +1757,13 @@ fn classify_sum_wrapper(
             call_args.len()
         ));
     }
-    let wrapper_self_params: std::collections::HashSet<String> = td
-        .type_params
-        .iter()
-        .zip(call_args)
-        .filter_map(|(p, a)| {
-            if is_self_var(a, self_var) {
-                Some(p.name.clone())
-            } else {
-                None
-            }
-        })
-        .collect();
-    if wrapper_self_params.is_empty() {
+    if !call_args.iter().any(|a| type_expr_contains_var(a, self_var)) {
         return Err(format!(
             "wrapper `{}` doesn't carry the trait's self type at any type-argument position",
             name
         ));
     }
+    let subst = param_subst(&td.type_params, call_args);
 
     let mut variants = Vec::with_capacity(td.variants.len());
     let mut any_a_position = false;
@@ -1762,27 +1771,20 @@ fn classify_sum_wrapper(
     for variant in &td.variants {
         let mut field_a_positions = Vec::with_capacity(variant.fields.len());
         for (_label, fty) in &variant.fields {
-            let is_a = match fty {
-                TypeExpr::Var { name: vn, .. } => wrapper_self_params.contains(vn),
-                _ => false,
-            };
-            if !is_a {
-                // Reject if any wrapper-self-param appears nested in this field.
-                let nested = wrapper_self_params
-                    .iter()
-                    .any(|p| type_expr_contains_var(fty, p));
-                if nested {
-                    return Err(format!(
-                        "wrapper `{}` variant `{}` has the trait's self type nested in a \
-                         non-leaf field position; only direct `a` fields are supported",
-                        name, variant.name
-                    ));
-                }
-            }
-            if is_a {
+            let resolved = subst_type_params(fty, &subst);
+            let mut visiting = Vec::new();
+            let path = classify_splice_path(&resolved, self_var, scope, &mut visiting).map_err(
+                |reason| {
+                    format!(
+                        "wrapper `{}` variant `{}`: {}",
+                        name, variant.name, reason
+                    )
+                },
+            )?;
+            if path.is_some() {
                 any_a_position = true;
             }
-            field_a_positions.push(is_a);
+            field_a_positions.push(path);
         }
         variants.push(VariantShape {
             ctor_name: ctor_prefix
@@ -1807,6 +1809,7 @@ fn classify_record_wrapper(
     rd: &WrapperRecordInfo,
     call_args: &[TypeExpr],
     self_var: &str,
+    scope: &DeriveScope<'_>,
 ) -> Result<FromShape, String> {
     if call_args.len() != rd.type_params.len() {
         return Err(format!(
@@ -1816,50 +1819,27 @@ fn classify_record_wrapper(
             call_args.len()
         ));
     }
-    let wrapper_self_params: std::collections::HashSet<String> = rd
-        .type_params
-        .iter()
-        .zip(call_args)
-        .filter_map(|(p, a)| {
-            if is_self_var(a, self_var) {
-                Some(p.name.clone())
-            } else {
-                None
-            }
-        })
-        .collect();
-    if wrapper_self_params.is_empty() {
+    if !call_args.iter().any(|a| type_expr_contains_var(a, self_var)) {
         return Err(format!(
             "wrapper record `{}` doesn't carry the trait's self type at any type-argument \
              position",
             name
         ));
     }
+    let subst = param_subst(&rd.type_params, call_args);
     let mut fields = Vec::with_capacity(rd.fields.len());
     let mut any_a_position = false;
     for (label, fty) in &rd.fields {
-        let is_a = match fty {
-            TypeExpr::Var { name: vn, .. } => wrapper_self_params.contains(vn),
-            _ => false,
-        };
-        if !is_a {
-            let nested = wrapper_self_params
-                .iter()
-                .any(|p| type_expr_contains_var(fty, p));
-            if nested {
-                return Err(format!(
-                    "wrapper record `{}` field `{}` has the trait's self type nested in a \
-                     non-leaf position; only direct `a` fields are supported",
-                    name, label
-                ));
-            }
-        }
-        if is_a {
+        let resolved = subst_type_params(fty, &subst);
+        let mut visiting = Vec::new();
+        let path = classify_splice_path(&resolved, self_var, scope, &mut visiting)
+            .map_err(|reason| format!("wrapper record `{}` field `{}`: {}", name, label, reason))?;
+        if path.is_some() {
             any_a_position = true;
         }
         fields.push(FieldShape {
             label: label.clone(),
-            is_a_position: is_a,
+            path,
         });
     }
     if !any_a_position {
@@ -1873,6 +1853,371 @@ fn classify_record_wrapper(
         wrapper_name: name.to_string(),
         fields,
     })
+}
+
+/// Build a `[(param_name, call_arg)]` substitution pairing a wrapper's declared
+/// type parameters with the type arguments it's applied to at the call site.
+fn param_subst(type_params: &[TypeParam], call_args: &[TypeExpr]) -> Vec<(String, TypeExpr)> {
+    type_params
+        .iter()
+        .map(|p| p.name.clone())
+        .zip(call_args.iter().cloned())
+        .collect()
+}
+
+/// Substitute type-parameter variables in `te` according to `subst`. Used to
+/// resolve a wrapper's declared field types against the call-site type
+/// arguments before locating the trait's self type within them. The cloned
+/// TypeExpr is only ever inspected (never spliced into the AST), so reusing the
+/// original NodeIds is harmless.
+fn subst_type_params(te: &TypeExpr, subst: &[(String, TypeExpr)]) -> TypeExpr {
+    match te {
+        TypeExpr::Var { name, .. } => subst
+            .iter()
+            .find(|(p, _)| p == name)
+            .map(|(_, replacement)| replacement.clone())
+            .unwrap_or_else(|| te.clone()),
+        TypeExpr::Named { .. } | TypeExpr::Symbol { .. } => te.clone(),
+        TypeExpr::App {
+            id, func, arg, span,
+        } => TypeExpr::App {
+            id: *id,
+            func: Box::new(subst_type_params(func, subst)),
+            arg: Box::new(subst_type_params(arg, subst)),
+            span: *span,
+        },
+        TypeExpr::Arrow {
+            id,
+            from,
+            to,
+            effects,
+            effect_row_var,
+            span,
+        } => TypeExpr::Arrow {
+            id: *id,
+            from: Box::new(subst_type_params(from, subst)),
+            to: Box::new(subst_type_params(to, subst)),
+            effects: effects.clone(),
+            effect_row_var: effect_row_var.clone(),
+            span: *span,
+        },
+        TypeExpr::Record {
+            id,
+            fields,
+            multiline,
+            span,
+        } => TypeExpr::Record {
+            id: *id,
+            fields: fields
+                .iter()
+                .map(|(l, t)| (l.clone(), subst_type_params(t, subst)))
+                .collect(),
+            multiline: *multiline,
+            span: *span,
+        },
+        TypeExpr::Labeled {
+            id,
+            label,
+            inner,
+            span,
+        } => TypeExpr::Labeled {
+            id: *id,
+            label: label.clone(),
+            inner: Box::new(subst_type_params(inner, subst)),
+            span: *span,
+        },
+    }
+}
+
+/// Locate every occurrence of the trait's self type `a` inside `te` as a
+/// `SplicePath`, or return:
+/// - `Ok(None)` — `te` doesn't mention `a` (a passthrough position)
+/// - `Ok(Some(path))` — `a` sits at the leaves the path locates (products only)
+/// - `Err(reason)` — `a` is nested under a non-product (sum / `List a` / arrow /
+///   anonymous record) or a recursive type
+///
+/// `visiting` carries the canonical names of named records currently being
+/// expanded, so a self-referential record is rejected rather than looped.
+fn classify_splice_path(
+    te: &TypeExpr,
+    self_var: &str,
+    scope: &DeriveScope<'_>,
+    visiting: &mut Vec<String>,
+) -> Result<Option<SplicePath>, String> {
+    // Bare `a`.
+    if is_self_var(te, self_var) {
+        return Ok(Some(SplicePath::Leaf));
+    }
+    // No occurrence anywhere — passthrough.
+    if !type_expr_contains_var(te, self_var) {
+        return Ok(None);
+    }
+
+    // `a` occurs nested. Only products (tuples / named records) are spliceable.
+    let (head, args) = extract_head_and_args(te).ok_or_else(|| {
+        "the trait's self type is nested in a non-leaf position that routed deriving cannot \
+         splice through; only `a` inside tuples and records is supported"
+            .to_string()
+    })?;
+
+    // Tuple `(T0, T1, ...)` — recurse per element.
+    if head == "Tuple" {
+        let mut elems = Vec::with_capacity(args.len());
+        for arg in &args {
+            elems.push(classify_splice_path(arg, self_var, scope, visiting)?);
+        }
+        return Ok(Some(SplicePath::Tuple(elems)));
+    }
+
+    // Named record — recurse into its fields, guarding against recursion.
+    if let Some(rd) = scope.record_entry(&head)? {
+        let canonical = rd.canonical.clone();
+        if visiting.contains(&canonical) {
+            return Err(format!(
+                "the trait's self type is nested in a non-leaf position inside recursive record \
+                 `{}`; routed deriving cannot splice through a recursive type",
+                head
+            ));
+        }
+        let info = &rd.info;
+        if args.len() != info.type_params.len() {
+            return Err(format!(
+                "record `{}` declares {} type parameter(s) but is applied to {}",
+                head,
+                info.type_params.len(),
+                args.len()
+            ));
+        }
+        let subst = param_subst(&info.type_params, &args);
+        visiting.push(canonical);
+        let mut fields = Vec::with_capacity(info.fields.len());
+        for (label, fty) in &info.fields {
+            let resolved = subst_type_params(fty, &subst);
+            let sub = classify_splice_path(&resolved, self_var, scope, visiting)?;
+            fields.push((label.clone(), sub));
+        }
+        visiting.pop();
+        return Ok(Some(SplicePath::Record {
+            name: head.clone(),
+            fields,
+        }));
+    }
+
+    // Sum types, `List a`, arrows, anonymous records: not a product we can
+    // structurally rebuild. The phrasing keeps "nested in a non-leaf" so callers
+    // (and the existing diagnostics/tests) read consistently.
+    Err(format!(
+        "the trait's self type is nested in a non-leaf position under `{}`, which is not a \
+         product type; routed deriving can only splice through tuples and records",
+        head
+    ))
+}
+
+/// Transform a value expression by applying `leaf_op` (the `Generic` iso —
+/// `to`/`from`/`Rep__T`) at every `a`-leaf the path locates. Products are
+/// destructured with a single-arm `case` and rebuilt, threading `leaf_op` into
+/// marked positions and passing the rest through unchanged.
+fn apply_splice_path(
+    path: &SplicePath,
+    value: Expr,
+    leaf_op: &dyn Fn(Expr, Span) -> Expr,
+    span: Span,
+) -> Expr {
+    match path {
+        SplicePath::Leaf => leaf_op(value, span),
+        SplicePath::Tuple(elems) => {
+            let vars: Vec<String> = (0..elems.len()).map(|i| format!("__t{i}")).collect();
+            let pat = Pat::Tuple {
+                id: NodeId::fresh(),
+                elements: vars
+                    .iter()
+                    .map(|n| Pat::Var {
+                        id: NodeId::fresh(),
+                        name: n.clone(),
+                        span,
+                    })
+                    .collect(),
+                span,
+            };
+            let rebuilt: Vec<Expr> = elems
+                .iter()
+                .enumerate()
+                .map(|(i, sub)| {
+                    let v = Expr::synth(span, ExprKind::Var {
+                        name: vars[i].clone(),
+                    });
+                    match sub {
+                        Some(p) => apply_splice_path(p, v, leaf_op, span),
+                        None => v,
+                    }
+                })
+                .collect();
+            let body = Expr::synth(span, ExprKind::Tuple { elements: rebuilt });
+            single_arm_case(value, pat, body, span)
+        }
+        SplicePath::Record { name, fields } => {
+            let zero_span = Span { start: 0, end: 0 };
+            let pat = Pat::Record {
+                id: NodeId::fresh(),
+                name: name.clone(),
+                fields: fields.iter().map(|(l, _)| (l.clone(), None)).collect(),
+                rest: false,
+                as_name: None,
+                span,
+            };
+            let body_fields: Vec<(String, Span, Expr)> = fields
+                .iter()
+                .map(|(label, sub)| {
+                    let v = Expr::synth(span, ExprKind::Var {
+                        name: label.clone(),
+                    });
+                    let value = match sub {
+                        Some(p) => apply_splice_path(p, v, leaf_op, span),
+                        None => v,
+                    };
+                    (label.clone(), zero_span, value)
+                })
+                .collect();
+            let body = Expr::synth(
+                span,
+                ExprKind::RecordCreate {
+                    name: name.clone(),
+                    fields: body_fields,
+                },
+            );
+            single_arm_case(value, pat, body, span)
+        }
+    }
+}
+
+fn single_arm_case(scrutinee: Expr, pattern: Pat, body: Expr, span: Span) -> Expr {
+    Expr::synth(
+        span,
+        ExprKind::Case {
+            scrutinee: Box::new(scrutinee),
+            arms: vec![Annotated::bare(CaseArm {
+                pattern,
+                guard: None,
+                body,
+                span,
+            })],
+            dangling_trivia: vec![],
+        },
+    )
+}
+
+/// Build a destructuring pattern + matching rebuild expression for the
+/// To-direction *bridge*, which unwraps `Rep__T` at each `a`-leaf in the
+/// pattern (rather than via an expression). The bridge binds inner structural
+/// values at the leaves and passthrough vars elsewhere, then reassembles the
+/// product to forward to the recursive method call. `counter` makes every bound
+/// variable unique across the whole parameter list.
+fn build_splice_pattern(
+    path: &SplicePath,
+    rep_name: &str,
+    counter: &mut usize,
+    span: Span,
+) -> (Pat, Expr) {
+    match path {
+        SplicePath::Leaf => {
+            let inner = format!("__i{}", *counter);
+            *counter += 1;
+            let pat = Pat::Constructor {
+                id: NodeId::fresh(),
+                name: rep_name.to_string(),
+                args: vec![Pat::Var {
+                    id: NodeId::fresh(),
+                    name: inner.clone(),
+                    span,
+                }],
+                span,
+            };
+            (pat, Expr::synth(span, ExprKind::Var { name: inner }))
+        }
+        SplicePath::Tuple(elems) => {
+            let mut pats = Vec::with_capacity(elems.len());
+            let mut exprs = Vec::with_capacity(elems.len());
+            for sub in elems {
+                let (p, e) = build_splice_pattern_field(sub, rep_name, counter, span);
+                pats.push(p);
+                exprs.push(e);
+            }
+            (
+                Pat::Tuple {
+                    id: NodeId::fresh(),
+                    elements: pats,
+                    span,
+                },
+                Expr::synth(span, ExprKind::Tuple { elements: exprs }),
+            )
+        }
+        SplicePath::Record { name, fields } => {
+            let zero_span = Span { start: 0, end: 0 };
+            let mut pat_fields = Vec::with_capacity(fields.len());
+            let mut expr_fields = Vec::with_capacity(fields.len());
+            for (label, sub) in fields {
+                match sub {
+                    Some(p) => {
+                        let (pp, ee) = build_splice_pattern(p, rep_name, counter, span);
+                        pat_fields.push((label.clone(), Some(pp)));
+                        expr_fields.push((label.clone(), zero_span, ee));
+                    }
+                    None => {
+                        pat_fields.push((label.clone(), None));
+                        expr_fields.push((
+                            label.clone(),
+                            zero_span,
+                            Expr::synth(span, ExprKind::Var {
+                                name: label.clone(),
+                            }),
+                        ));
+                    }
+                }
+            }
+            (
+                Pat::Record {
+                    id: NodeId::fresh(),
+                    name: name.clone(),
+                    fields: pat_fields,
+                    rest: false,
+                    as_name: None,
+                    span,
+                },
+                Expr::synth(
+                    span,
+                    ExprKind::RecordCreate {
+                        name: name.clone(),
+                        fields: expr_fields,
+                    },
+                ),
+            )
+        }
+    }
+}
+
+/// A single product element/field for the To-bridge: either recurse (it carries
+/// `a`) or bind a fresh passthrough var.
+fn build_splice_pattern_field(
+    sub: &Option<SplicePath>,
+    rep_name: &str,
+    counter: &mut usize,
+    span: Span,
+) -> (Pat, Expr) {
+    match sub {
+        Some(p) => build_splice_pattern(p, rep_name, counter, span),
+        None => {
+            let v = format!("__p{}", *counter);
+            *counter += 1;
+            (
+                Pat::Var {
+                    id: NodeId::fresh(),
+                    name: v.clone(),
+                    span,
+                },
+                Expr::synth(span, ExprKind::Var { name: v }),
+            )
+        }
+    }
 }
 
 /// Build the body of a from-direction method. The body has the shape
@@ -1963,14 +2308,17 @@ fn build_variant_arm(v: &VariantShape, wrap: &dyn Fn(Expr, Span) -> Expr, span: 
             name: v.ctor_name.clone(),
         },
     );
-    for (i, &is_a) in v.field_a_positions.iter().enumerate() {
+    for (i, path) in v.field_a_positions.iter().enumerate() {
         let arg = Expr::synth(
             span,
             ExprKind::Var {
                 name: field_vars[i].clone(),
             },
         );
-        let arg = if is_a { wrap(arg, span) } else { arg };
+        let arg = match path {
+            Some(p) => apply_splice_path(p, arg, wrap, span),
+            None => arg,
+        };
         body = Expr::synth(
             span,
             ExprKind::App {
@@ -2013,10 +2361,9 @@ fn build_record_arm(
                     name: f.label.clone(),
                 },
             );
-            let value = if f.is_a_position {
-                wrap(var_expr, span)
-            } else {
-                var_expr
+            let value = match &f.path {
+                Some(p) => apply_splice_path(p, var_expr, wrap, span),
+                None => var_expr,
             };
             (f.label.clone(), zero_span, value)
         })

@@ -7593,6 +7593,212 @@ fn phase3_routed_derive_to_and_from_roundtrip() {
     check(&src).unwrap();
 }
 
+// --- Phase 7.1: self type `a` nested in a product inside the wrapper -------
+
+/// Like `phase3_fromjson_result_lib`, but every instance returns
+/// `Result (a, Int) String` — the self type nested inside a tuple (the fused
+/// decoder shape, where `Int` stands in for the consumed-cursor tail). The
+/// derive must splice `from` into the tuple's first slot, not around the whole
+/// `Result`.
+fn phase7_decode_tuple_lib() -> &'static str {
+    "import Std.Generic (Generic, U1, Leaf, Labeled, And, Or, Variant, Record, Adt)\n\
+     trait Decode a { fun decode : Int -> Result (a, Int) String }\n\
+     impl Decode for U1 { decode n = Ok (U1, n) }\n\
+     impl Decode for Int { decode n = Ok (0, n) }\n\
+     impl Decode for String { decode n = Ok (\"\", n) }\n\
+     impl Decode for Leaf a where {a: Decode} {\n\
+       decode n = case decode n { Ok (x, n2) -> Ok (Leaf x, n2); Err e -> Err e }\n\
+     }\n\
+     impl Decode for Labeled (sym : Symbol) a where {a: Decode} {\n\
+       decode n = case decode n { Ok (x, n2) -> Ok (Labeled x, n2); Err e -> Err e }\n\
+     }\n\
+     impl Decode for And l r where {l: Decode, r: Decode} {\n\
+       decode n = case decode n {\n\
+         Ok (l, n2) -> case decode n2 { Ok (r, n3) -> Ok (And l r, n3); Err e -> Err e }\n\
+         Err e -> Err e\n\
+       }\n\
+     }\n\
+     impl Decode for Or l r where {l: Decode, r: Decode} {\n\
+       decode n = case decode n {\n\
+         Ok (l, n2) -> Ok (Or_Left l, n2)\n\
+         Err _ -> case decode n { Ok (r, n2) -> Ok (Or_Right r, n2); Err e -> Err e }\n\
+       }\n\
+     }\n\
+     impl Decode for Variant (sym : Symbol) a where {a: Decode} {\n\
+       decode n = case decode n { Ok (x, n2) -> Ok (Variant x, n2); Err e -> Err e }\n\
+     }\n\
+     impl Decode for Record a where {a: Decode} {\n\
+       decode n = case decode n { Ok (x, n2) -> Ok (Record \"\" x, n2); Err e -> Err e }\n\
+     }\n\
+     impl Decode for Adt a where {a: Decode} {\n\
+       decode n = case decode n { Ok (x, n2) -> Ok (Adt \"\" x, n2); Err e -> Err e }\n\
+     }\n"
+}
+
+#[test]
+fn phase7_routed_derive_from_nested_tuple_return() {
+    // Headline: `decode : Int -> Result (a, Int) String` — the self type `a`
+    // nested inside the tuple `(a, Int)`. Previously rejected up front.
+    let src = format!(
+        "{lib}\
+         record Foo {{ x: Int, y: Int }}\n  deriving (Generic, Decode)\n\
+         fun go : Int -> Result (Foo, Int) String\n\
+         go n = decode n",
+        lib = phase7_decode_tuple_lib()
+    );
+    check(&src).unwrap();
+}
+
+#[test]
+fn phase7_routed_derive_from_nested_named_record_return() {
+    // `a` nested inside a named record `Box a { v: a }`, itself inside the
+    // tuple/Result wrapper. The derive must splice `from` into Box's field.
+    let src = "import Std.Generic (Generic, U1, Leaf, Labeled, And, Or, Variant, Record, Adt)\n\
+               record Box a { v: a }\n\
+               trait Decode a { fun decode : Int -> Result (Box a) String }\n\
+               impl Decode for U1 { decode _ = Ok (Box { v: U1 }) }\n\
+               impl Decode for Int { decode _ = Ok (Box { v: 0 }) }\n\
+               impl Decode for String { decode _ = Ok (Box { v: \"\" }) }\n\
+               impl Decode for Leaf a where {a: Decode} {\n\
+                 decode n = case decode n { Ok (Box { v: x }) -> Ok (Box { v: Leaf x }); Err e -> Err e }\n\
+               }\n\
+               impl Decode for Labeled (sym : Symbol) a where {a: Decode} {\n\
+                 decode n = case decode n { Ok (Box { v: x }) -> Ok (Box { v: Labeled x }); Err e -> Err e }\n\
+               }\n\
+               impl Decode for And l r where {l: Decode, r: Decode} {\n\
+                 decode n = case decode n {\n\
+                   Ok (Box { v: l }) -> case decode n { Ok (Box { v: r }) -> Ok (Box { v: And l r }); Err e -> Err e }\n\
+                   Err e -> Err e\n\
+                 }\n\
+               }\n\
+               impl Decode for Variant (sym : Symbol) a where {a: Decode} {\n\
+                 decode n = case decode n { Ok (Box { v: x }) -> Ok (Box { v: Variant x }); Err e -> Err e }\n\
+               }\n\
+               impl Decode for Record a where {a: Decode} {\n\
+                 decode n = case decode n { Ok (Box { v: x }) -> Ok (Box { v: Record \"\" x }); Err e -> Err e }\n\
+               }\n\
+               impl Decode for Adt a where {a: Decode} {\n\
+                 decode n = case decode n { Ok (Box { v: x }) -> Ok (Box { v: Adt \"\" x }); Err e -> Err e }\n\
+               }\n\
+               record Foo { x: Int }\n  deriving (Generic, Decode)\n\
+               fun go : Int -> Result (Box Foo) String\n\
+               go n = decode n";
+    check(src).unwrap();
+}
+
+/// To-direction analogue: `encode : (a, Int) -> Int` — self type nested in a
+/// tuple *argument*. The bridge destructures `Rep__T` at the tuple's `a`-slot;
+/// the delegate threads `to` into it.
+fn phase7_encode_tuple_lib() -> &'static str {
+    "import Std.Generic (Generic, U1, Leaf, Labeled, And, Or, Variant, Record, Adt)\n\
+     trait Encode a { fun encode : (a, Int) -> Int }\n\
+     impl Encode for U1 { encode (_, n) = n }\n\
+     impl Encode for Int { encode (m, n) = m + n }\n\
+     impl Encode for String { encode (_, n) = n }\n\
+     impl Encode for Leaf a where {a: Encode} { encode (Leaf x, n) = encode (x, n) }\n\
+     impl Encode for Labeled (sym : Symbol) a where {a: Encode} { encode (Labeled x, n) = encode (x, n) }\n\
+     impl Encode for And l r where {l: Encode, r: Encode} { encode (And l r, n) = encode (r, encode (l, n)) }\n\
+     impl Encode for Or l r where {l: Encode, r: Encode} {\n\
+       encode (o, n) = case o { Or_Left l -> encode (l, n); Or_Right r -> encode (r, n) }\n\
+     }\n\
+     impl Encode for Variant (sym : Symbol) a where {a: Encode} { encode (Variant x, n) = encode (x, n) }\n\
+     impl Encode for Record a where {a: Encode} { encode (Record _ inner, n) = encode (inner, n) }\n\
+     impl Encode for Adt a where {a: Encode} { encode (Adt _ inner, n) = encode (inner, n) }\n"
+}
+
+#[test]
+fn phase7_routed_derive_to_nested_tuple_arg() {
+    let src = format!(
+        "{lib}\
+         record Foo {{ x: Int, y: Int }}\n  deriving (Generic, Encode)\n\
+         fun go : Foo -> Int\n\
+         go p = encode (p, 0)",
+        lib = phase7_encode_tuple_lib()
+    );
+    check(&src).unwrap();
+}
+
+#[test]
+fn phase7_routed_derive_mixed_nested_codec_roundtrip() {
+    // One trait with both a nested-tuple argument (`encode`) and a nested-tuple
+    // return (`decode`), derived together on the same record.
+    let src = "import Std.Generic (Generic, U1, Leaf, Labeled, And, Or, Variant, Record, Adt)\n\
+               trait Codec a {\n\
+                 fun encode : (a, Int) -> Int\n\
+                 fun decode : Int -> Result (a, Int) String\n\
+               }\n\
+               impl Codec for U1 { encode (_, n) = n\n  decode n = Ok (U1, n) }\n\
+               impl Codec for Int { encode (m, n) = m + n\n  decode n = Ok (0, n) }\n\
+               impl Codec for String { encode (_, n) = n\n  decode n = Ok (\"\", n) }\n\
+               impl Codec for Leaf a where {a: Codec} {\n\
+                 encode (Leaf x, n) = encode (x, n)\n\
+                 decode n = case decode n { Ok (x, n2) -> Ok (Leaf x, n2); Err e -> Err e }\n\
+               }\n\
+               impl Codec for Labeled (sym : Symbol) a where {a: Codec} {\n\
+                 encode (Labeled x, n) = encode (x, n)\n\
+                 decode n = case decode n { Ok (x, n2) -> Ok (Labeled x, n2); Err e -> Err e }\n\
+               }\n\
+               impl Codec for And l r where {l: Codec, r: Codec} {\n\
+                 encode (And l r, n) = encode (r, encode (l, n))\n\
+                 decode n = case decode n {\n\
+                   Ok (l, n2) -> case decode n2 { Ok (r, n3) -> Ok (And l r, n3); Err e -> Err e }\n\
+                   Err e -> Err e\n\
+                 }\n\
+               }\n\
+               impl Codec for Or l r where {l: Codec, r: Codec} {\n\
+                 encode (o, n) = case o { Or_Left l -> encode (l, n); Or_Right r -> encode (r, n) }\n\
+                 decode n = case decode n {\n\
+                   Ok (l, n2) -> Ok (Or_Left l, n2)\n\
+                   Err _ -> case decode n { Ok (r, n2) -> Ok (Or_Right r, n2); Err e -> Err e }\n\
+                 }\n\
+               }\n\
+               impl Codec for Variant (sym : Symbol) a where {a: Codec} {\n\
+                 encode (Variant x, n) = encode (x, n)\n\
+                 decode n = case decode n { Ok (x, n2) -> Ok (Variant x, n2); Err e -> Err e }\n\
+               }\n\
+               impl Codec for Record a where {a: Codec} {\n\
+                 encode (Record _ inner, n) = encode (inner, n)\n\
+                 decode n = case decode n { Ok (x, n2) -> Ok (Record \"\" x, n2); Err e -> Err e }\n\
+               }\n\
+               impl Codec for Adt a where {a: Codec} {\n\
+                 encode (Adt _ inner, n) = encode (inner, n)\n\
+                 decode n = case decode n { Ok (x, n2) -> Ok (Adt \"\" x, n2); Err e -> Err e }\n\
+               }\n\
+               record Foo { x: Int, y: Int }\n  deriving (Generic, Codec)\n\
+               fun roundtrip : Foo -> Result (Foo, Int) String\n\
+               roundtrip p = decode (encode (p, 0))";
+    check(src).unwrap();
+}
+
+#[test]
+fn phase7_routed_derive_nested_under_list_still_rejected() {
+    // `a` nested under a non-product container (`List`) stays rejected — that
+    // would need functor/Generic recursion the derive doesn't do.
+    let src = "trait Decode a { fun decode : Int -> Result (List a) String }\n\
+               record Foo { x: Int }\n  deriving (Decode)\n";
+    let err = check(src).err().expect("expected error");
+    assert!(
+        err.message.contains("nested in a non-leaf") && err.message.contains("List"),
+        "expected nested-a diagnostic naming List; got: {}",
+        err.message
+    );
+}
+
+#[test]
+fn phase7_routed_derive_nested_in_recursive_record_rejected() {
+    // `a` reachable only through a self-referential record trips the recursion
+    // guard rather than looping.
+    let src = "record R a { self_ref: R a, v: a }\n\
+               trait Decode a { fun decode : Int -> Result (R a) String }\n\
+               record Foo { x: Int }\n  deriving (Decode)\n";
+    let err = check(src).err().expect("expected error");
+    assert!(
+        err.message.contains("recursive"),
+        "expected recursion-guard diagnostic; got: {}",
+        err.message
+    );
+}
+
 // Multi-method routed deriving is supported as of Phase 6 — see
 // `phase6_routed_derive_multi_method_to_direction` and friends below.
 
