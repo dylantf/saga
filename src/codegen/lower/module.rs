@@ -334,9 +334,6 @@ impl<'a> Lowerer<'a> {
         let mut exports = Vec::new();
         let mut fun_defs = Vec::new();
 
-        // If there's no module declaration, it's a single-file script -- export everything.
-        let is_module = program.iter().any(|d| matches!(d, Decl::ModuleDecl { .. }));
-
         // Generate wrapper functions for external declarations so cross-module
         // imports can call them by the local name.
         for decl in program {
@@ -365,19 +362,22 @@ impl<'a> Lowerer<'a> {
                     arity,
                     body: CExpr::Fun(arg_vars, Box::new(call)),
                 });
-                if *public || !is_module {
-                    exports.push((name.clone(), arity));
-                }
+                let _ = public; // privacy enforced upstream; export-all in Core
+                exports.push((name.clone(), arity));
             }
         }
 
         for (name, arity, clauses, fun_span) in clause_groups {
             self.current_function = name.clone();
-            let is_entry_export = self.entry_export.as_deref() == Some(name.as_str());
-            let export_fun = !is_module || self.pub_names.contains(&name) || is_entry_export;
-            if export_fun {
-                exports.push((name.clone(), arity));
-            }
+            // Export every function in the emitted Core, not just `pub` ones.
+            // Privacy is a front-end concern (the typechecker/resolver already
+            // rejected illegal cross-module references in source); at the Core
+            // level we export everything so codegen optimizations — notably the
+            // cross-module generic fold, which inlines a producer impl body whose
+            // own private helpers then lower to `call 'producer':'helper'` — can
+            // reach any function without a per-callee export-set computation.
+            let export_fun = true;
+            exports.push((name.clone(), arity));
 
             // Effects in scope for this function (drives _Evidence threading).
             let effects = self.fun_effects(&name).cloned().unwrap_or_default();

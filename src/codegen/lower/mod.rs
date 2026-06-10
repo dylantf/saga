@@ -326,6 +326,9 @@ pub struct Lowerer<'a> {
     handle_dynamic_vars: HashMap<String, (String, Vec<String>, bool)>,
     /// Optional function name that should be exported even if it is not `pub`.
     /// Used by the build pipeline to mark the chosen entrypoint explicitly.
+    /// Subsumed by Core-level export-all (every function is exported), but kept
+    /// wired through the build pipeline's `emit_module*` API.
+    #[allow(dead_code)]
     entry_export: Option<String>,
     /// Per-call effect metadata for every `App` node in the module being
     /// lowered. Populated by the call-effects pre-pass after `init_module`,

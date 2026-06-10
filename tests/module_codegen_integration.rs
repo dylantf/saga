@@ -957,20 +957,23 @@ fn pub_functions_exported() {
 }
 
 #[test]
-fn private_functions_not_exported() {
+fn private_functions_are_exported_in_core() {
+    // Privacy is a front-end concern (the typechecker/resolver rejects illegal
+    // cross-module references in source). At the Core level we export *every*
+    // function so codegen optimizations — notably the cross-module generic fold,
+    // which inlines a producer impl body whose private helpers then lower to
+    // `call 'producer':'helper'` — can reach any function without computing a
+    // per-callee export set. So a private `secret` is both defined and exported.
     let math_src = std::fs::read_to_string(fixtures_root().join("Math.saga")).unwrap();
     let mut checker = make_project_checker();
     let program = typecheck_source(&math_src, &mut checker);
     let out = emit_from_program(&program, "math", &checker);
 
-    // 'secret' is private -- should be defined but not exported
-    // The export list is on the first line between [ ]
     let export_line = out.lines().next().unwrap();
     assert!(
-        !export_line.contains("'secret'"),
-        "private function 'secret' should not be in exports\n{export_line}"
+        export_line.contains("'secret'/"),
+        "private function 'secret' should be exported in Core (export-all)\n{export_line}"
     );
-    // But it should still be defined in the module body
     assert_contains(&out, "'secret'/");
 }
 
