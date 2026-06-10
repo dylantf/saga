@@ -1,0 +1,113 @@
+module GenericFromjsonFusionTest
+
+import Std.Generic (Generic, U1, Leaf, Labeled, And, Or, Variant, Record, Adt)
+import Std.Test (Testing, describe, test, assert_eq)
+
+# Phase 6 (decode-direction Rep-cancellation fusion): a routed-derive `from`
+# delegating impl `from_json s = case (codec s) { Ok f -> Ok (from f); Err e ->
+# Err e }` inlines the producer codec (which builds `Ok (Rep__T (Adt … / Record
+# …))`) and `Generic.from` (which consumes the `Rep` via a `case`), then commutes
+# the consuming case through the codec's `Result` threading and cancels the `Rep`
+# constructors against `from`'s patterns.
+#
+# This is a BEAM correctness guard for that cascade. Two ways it can regress and
+# crash with `case_clause` instead of returning the wrong value:
+#  - the multi-variant ADT decode relies on a *recursive* static match (several
+#    `from` arms share the outer `Adt` ctor but differ in nested `Or_Left`/
+#    `Or_Right`); deciding on the outer ctor alone routes every variant to the
+#    first arm;
+#  - the case-of-case commute must be capture-avoiding.
+#
+# Toy decoder: `from_json` ignores its input and yields a fixed value per type,
+# so the assertions check the *fused structure* decodes to the right shape.
+
+trait FromJson a {
+  fun from_json : String -> Result a String
+}
+
+impl FromJson for Int {
+  from_json _ = Ok 7
+}
+
+impl FromJson for U1 {
+  from_json _ = Ok U1
+}
+
+impl FromJson for Leaf a where {a: FromJson} {
+  from_json s = case from_json s {
+    Ok x -> Ok (Leaf x)
+    Err e -> Err e
+  }
+}
+
+impl FromJson for Labeled (n : Symbol) a where {a: FromJson} {
+  from_json s = case from_json s {
+    Ok x -> Ok (Labeled x)
+    Err e -> Err e
+  }
+}
+
+impl FromJson for And l r where {l: FromJson, r: FromJson} {
+  from_json s = case from_json s {
+    Ok l -> case from_json s {
+      Ok r -> Ok (And l r)
+      Err e -> Err e
+    }
+    Err e -> Err e
+  }
+}
+
+impl FromJson for Or l r where {l: FromJson, r: FromJson} {
+  from_json s = case from_json s {
+    Ok l -> Ok (Or_Left l)
+    Err _ -> case from_json s {
+      Ok r -> Ok (Or_Right r)
+      Err e -> Err e
+    }
+  }
+}
+
+impl FromJson for Variant (n : Symbol) a where {a: FromJson} {
+  from_json s = case from_json s {
+    Ok x -> Ok (Variant x)
+    Err e -> Err e
+  }
+}
+
+impl FromJson for Record a where {a: FromJson} {
+  from_json s = case from_json s {
+    Ok x -> Ok (Record "" x)
+    Err e -> Err e
+  }
+}
+
+impl FromJson for Adt a where {a: FromJson} {
+  from_json s = case from_json s {
+    Ok x -> Ok (Adt "" x)
+    Err e -> Err e
+  }
+}
+
+# Single-variant payload ADT — exercises Adt/Variant/Leaf cancellation without
+# the `Or` ambiguity a toy always-succeeds decoder has on multi-variant types
+# (multi-variant decode correctness is covered by `generic_fromjson_test`).
+type Boxed = Boxed Int
+  deriving (Eq, Show, Debug, FromJson)
+
+record Point {
+  x: Int,
+  y: Int,
+} deriving (Eq, Show, Debug, FromJson)
+
+pub fun tests : Unit -> Unit needs {Testing}
+tests () = {
+  describe "Generic deriving: Phase 6 decode-direction fusion correctness" (fun () -> {
+    test "payload ADT variant decodes (Adt/Variant/Leaf)" (fun () -> {
+      assert_eq (from_json "x" : Result Boxed String) (Ok (Boxed 7))
+    })
+
+    test "record fields decode in order (Record/And/Labeled/Leaf)" (fun () -> {
+      assert_eq (from_json "x" : Result Point String) (Ok (Point { x: 7, y: 7 }))
+    })
+  })
+}

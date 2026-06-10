@@ -1,15 +1,15 @@
 # Trait Specialization And Generic Folding
 
-Status: **Phases 0–5 done. Phase 5 (Rep-cancellation fusion) works on the
-encode/`to` direction — derived codecs lose the intermediate `Rep` tree. Phase 5
-is not yet committed (pending review). Phase 6 (from/decode mirror) is next.**
+Status: **Phases 0–6 done. Phases 5 (encode `Rep`-cancellation) and 6 (decode
+mirror) both fuse the `Rep` tree; both are implemented and validated but **not yet
+committed** (pending review). Phase 7 (dict-arg pruning) is next.**
 
 ## Implementation Status & Handoff (2026-06-10)
 
 Phases 0–4a-x are done and committed (`a4fd655`, `85fa3b4`, `05ed117`, `d5a4b63`,
-`b88fe38`, `dd282b9`, `631f7a2`, `40b5b13`, `18c03c1`). Phase 5 is implemented and
-validated but **not yet committed** (see the Phase 5 section below for the
-ready-to-commit changes and their suggested commit order).
+`b88fe38`, `dd282b9`, `631f7a2`, `40b5b13`, `18c03c1`). Phases 5 and 6 are
+implemented and validated but **not yet committed** (see the Phase 5 / Phase 6
+sections below).
 
 | Phase                                    | What it does                                                       | Status                                         |
 | ---------------------------------------- | ------------------------------------------------------------------ | ---------------------------------------------- |
@@ -20,7 +20,7 @@ ready-to-commit changes and their suggested commit order).
 | 4a Inline parameterized (local)          | `generic_fold.rs`: inline local parameterized dict chains          | done (committed `dd282b9`)                     |
 | 4a-x Inline parameterized (cross-module) | inline external impl bodies; carry producer resolution; export-all | done (committed `631f7a2`,`40b5b13`,`18c03c1`) |
 | 5 Rep-cancellation fusion                | inline `to x` + codec, cancel `Rep` tree (encode/`to` direction)   | done (uncommitted — see Phase 5 section)       |
-| 6 Decode mirror                          | same for `from`/decode direction                                   | not started                                    |
+| 6 Decode mirror                          | same for `from`/decode direction (parse-bound: fuses, small win)   | done (uncommitted — see Phase 6 section)       |
 | 7 Dict-arg pruning                       | drop dead dict args after fusion                                   | not started                                    |
 
 **Phase 4a-x** (cross-module) extends the fold to inline parameterized impl
@@ -175,12 +175,100 @@ resolve by name; only cross-module inlines need the backend-resolution carry
 
 ### Next: Phase 6 (decode mirror), Phase 7 (dict-arg pruning)
 
-Phase 6 mirrors this for the `from`/decode direction (decode currently
-unchanged). The shape is `from x = from_ctor (from x)` — the codec produces a
-`Rep` value that the synthesized `from` then _consumes_ via a `case`; fusion is
-the dual (push the `from` case into the codec's constructor-producing arms). The
-`is_duplicable`/capture-avoidance machinery carries over. Phase 7 prunes dict
-args that become dead after fusion.
+See "Phase 6 (decode fusion) — DONE" below. Phase 7 prunes dict args that become
+dead after fusion.
+
+## Phase 6 (decode fusion) — DONE (uncommitted, pending review)
+
+**Status: implemented (Option A, Rep-anchored), validated.** The decode/`from`
+direction now cancels the `Rep` tree symmetrically to encode. Correctness is
+proven on BEAM; the wall-clock payoff is small because decode is parse-dominated
+(see "Result" below). Regression examples:
+`examples/…/08-generic-fusion-decode.saga` (ADT + record decode) and
+`tests/e2e/tests/generic_fromjson_fusion_test.saga` (BEAM).
+
+### Concrete shapes (empirically confirmed)
+
+The routed `derive_routed` from-direction synthesizes (pre-ANF):
+
+- **Delegating** `FromJson_T.from_json`:
+  `from_json p0 = case (FromJson_Rep__T.from_json p0) { Ok f -> Ok (Generic.from f); Err e -> Err e }`
+- **Codec/bridge** `FromJson_Rep__T.from_json` — a nested `Result`-map that
+  _produces_ the `Rep` constructors layer by layer, bottoming out at
+  `Ok (Rep__T (Adt _ (Variant (Leaf v))))`; records build the `Rep`'s `And` node
+  deep inside two-field threading (`Ok l -> case … { Ok r -> Ok (And l r) … }`).
+- **`Generic.from`** (trait `Std.Generic.Generic`, **method index 1**) _consumes_
+  the `Rep` via a `case rep { Rep__T (…) -> T … ; _ -> err }`.
+
+Decode is the dual of encode (producer = codec, consumer = `from`), but the `Rep`
+value is wrapped in `Ok` and threaded through `case Result {Ok|Err}` — the
+monadic wrapping encode didn't have.
+
+### The rewrites (added to the same bottom-up fixpoint engine)
+
+1. **Inline `Generic.from`** — `is_generic_from` gate (trait `Std.Generic.Generic`,
+   method index 1), symmetric to `is_generic_to`.
+2. **`inline_codec_scrutinee`** — inline a *nullary* producer codec that is the
+   scrutinee of a `case`, so its `Ok (Rep__T …)` becomes a literal ctor under the
+   case. Gated on `body_is_rep_producing_case` (the codec body is a `case` whose
+   arm produces a `Rep`, i.e. the routed-from bridge) — the parameterized codec
+   layers inline via `try_inline` (4a) as before.
+3. **`case_of_case`** commuting conversion —
+   `case (case S { p_i -> e_i }) { outer }` → `case S { p_i -> case e_i { outer } }`,
+   pushing the consuming `{Ok f -> Ok (from f); Err e -> Err e}` down to the
+   produced `Rep`. Two guards: it fires only when an inner arm's *subtree*
+   produces a `Rep` (`subtree_produces_rep` — records build `And` deep, so a
+   top-level check misses them), and it is **capture-avoiding** (skips when an
+   inner pattern binds a name free in `outer`, via binder-aware `free_vars_arms`).
+4. **`case_of_known_constructor` broadened to any ctor** (`known_ctor`, not just
+   `known_rep_ctor`) so it cancels the `Result` wrapper (`Ok`/`Err`) too. The
+   match decision is now **recursive** (`static_match` → `Yes`/`No`/`Unknown`):
+   a multi-variant `Generic.from` has several arms sharing the outer `Adt` ctor
+   but differing in nested `Or_Left`/`Or_Right`, so deciding on the outer ctor
+   alone wrongly commits to the first arm and `case_clause`-crashes at runtime.
+
+Cascade: inline `from` (1) → inline codec scrutinee (2) → commute (3) → cancel
+`Ok`/`Err` (4) → cancel `Rep` (existing) → recurse into the next codec layer.
+Capture-avoidance + `is_duplicable` carry over unchanged.
+
+### Rep-anchoring is load-bearing (don't loosen the gates)
+
+The first cut gated 2 & 3 on *any* constructor (literal Option A). That was both
+unsound-for-performance and worse: on saga_json's real decode — which parses by
+object-key lookup (`parse_object_raw` → `lookup_raw` → field decode), threading
+`Ok (value, rest)` *tuples*, not a clean `Rep`-map — the loose gates commuted the
+parser's `Result` threading without ever cancelling, exploding
+`FromJson_User` to **2229 lines** *and* tangling the fixpoint so the genuine
+`Rep` cancellation never completed. Anchoring 2 & 3 on actual `Rep` production
+(`body_is_rep_producing_case` / `subtree_produces_rep`) skips the parser threading
+and lets the real fusion finish: **`FromJson_User` → 66 lines, `Rep` cancelled.**
+(`case_of_known_constructor`'s broadening is fine unanchored — it only ever fires
+on a *literal* ctor scrutinee, which parser code never produces.)
+
+### Result
+
+- **Correct + fused**: 08 (ADT + record) and the two e2e fusion tests pass on
+  BEAM; saga_json's `FromJson_User` fuses to 66 lines (was 2229 under loose
+  gates) with the `Rep` tree cancelled.
+- **Full suite green, clippy clean**; saga_json stays **100% specialized** + 280
+  tests pass. One integration test (`prelude_constructors_mangled_with_std_prefix`)
+  was updated: its `case Just(42) { … }` now constant-folds away (sound — broadened
+  cancellation), so its scrutinee was made a function call to keep the mangling
+  check meaningful.
+- **Wall-clock**: json_bench decode is **~unchanged** (476 → 467 ms, noise) even
+  though the code fused. Decode is **parse-dominated** — `Rep` traversal is a
+  small fraction of decode cost (string/int parsing, `lookup_raw`, `List`
+  building dominate), unlike encode where the `Rep` walk *was* the bottleneck
+  (Phase 5: 283 → 209 ms). So Phase 6's payoff is correctness + code size, not
+  decode throughput on this workload. The reaching-hand-written-shape gap is, as
+  for encode, the in-library representation step (out of scope).
+
+### What's in the tree (Phase 6, on top of Phase 5)
+
+`src/codegen/generic_fold.rs` (the rewrites above),
+`tests/module_codegen_integration.rs` (the one updated mangling test),
+`examples/…/08-generic-fusion-decode.saga`,
+`tests/e2e/tests/generic_fromjson_fusion_test.saga`.
 
 ### Code map
 

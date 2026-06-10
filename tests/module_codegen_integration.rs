@@ -2772,10 +2772,16 @@ main () = {
 
 #[test]
 fn prelude_constructors_mangled_with_std_prefix() {
+    // The scrutinee is a function call (not a literal `Just(42)`), so the generic
+    // fold's constructor cancellation can't constant-fold the case away — keeping
+    // the constructor atoms in the output for this mangling check.
     let main_src = "
 module Main
 
-main () = case Just(42) {
+fun mk : Int -> Maybe Int
+mk n = Just n
+
+main () = case mk 42 {
   Just(x) -> x
   Nothing -> 0
 }

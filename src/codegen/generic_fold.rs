@@ -73,6 +73,9 @@ const INLINE_FUEL: u32 = 64;
 /// against the codec's case-matches. (`from`, the decode direction, is Phase 6.)
 const GENERIC_TRAIT: &str = "Std.Generic.Generic";
 const GENERIC_TO_METHOD: usize = 0;
+/// `Generic.from` (the `Rep` *consumer*, decode direction). Inlining it exposes
+/// the consuming `case rep { Rep__T (…) -> T … }` so the produced `Rep` cancels.
+const GENERIC_FROM_METHOD: usize = 1;
 
 /// The `Std.Generic` representation constructors. The fusion engine only cancels
 /// *these* (plus the per-type `Rep__T` wrappers), which scopes it to the
@@ -241,8 +244,8 @@ impl Folder<'_> {
 
     /// One simplification step at `expr`, or `None` at a fixpoint. Ordered
     /// collapse-before-inline (the key Phase-4/5 insight): cancel known
-    /// constructors and float cases outward *before* inlining, so the inline
-    /// fuel never sees an un-collapsed `Rep` tree.
+    /// constructors and float/commute cases outward *before* inlining, so the
+    /// inline fuel never sees an un-collapsed `Rep` tree.
     fn rewrite_once(&mut self, expr: &Expr) -> Option<Expr> {
         // Type ascriptions are erased at codegen; drop them so the rewrites
         // below see through `(to x : Rep__T)`.
@@ -252,7 +255,18 @@ impl Folder<'_> {
         if let Some(e) = case_of_known_constructor(expr) {
             return Some(e);
         }
+        // Phase 6 (decode): `case (case S {…}) {…}` ⟶ commute, so the producer
+        // codec's `Ok (RepCtor …)` meets the consuming `from`/`Result` case.
+        if let Some(e) = case_of_case(expr) {
+            return Some(e);
+        }
         if let Some(e) = float_case_out_of_arg(expr) {
+            return Some(e);
+        }
+        // Phase 6 (decode): inline a nullary producer codec that is the scrutinee
+        // of a case, so its `Ok (RepCtor …)` result becomes a literal ctor under
+        // that case (which `case_of_case` + cancellation then collapse).
+        if let Some(e) = self.inline_codec_scrutinee(expr) {
             return Some(e);
         }
         self.try_inline(expr)
@@ -280,30 +294,107 @@ impl Folder<'_> {
 
         // Nullary dicts normally lower to a direct call (Phase 2/3). Inline a
         // nullary body only in a *fusion* context, where the inline immediately
-        // unblocks constructor cancellation: either it's `Generic.to` (the `Rep`
-        // builder, whose result the codec then walks), or its argument is already
-        // a known `Rep` constructor (the codec walking a known `Rep`). Otherwise
-        // leave it — e.g. `encode u.id` on a plain value stays a direct leaf
-        // call. Parameterized dicts (Phase 4a) always inline.
+        // unblocks constructor cancellation: it's `Generic.to` (the `Rep`
+        // builder, encode) or `Generic.from` (the `Rep` consumer, decode), or its
+        // argument is already a known `Rep` constructor (a codec walking a known
+        // `Rep`). Otherwise leave it — e.g. `encode u.id` on a plain value stays
+        // a direct leaf call. Parameterized dicts (Phase 4a) always inline.
         if sub_dicts.is_empty() {
-            let is_generic_to =
-                trait_name == GENERIC_TRAIT && *method_index == GENERIC_TO_METHOD;
+            let is_generic_to = trait_name == GENERIC_TRAIT && *method_index == GENERIC_TO_METHOD;
+            let is_generic_from =
+                trait_name == GENERIC_TRAIT && *method_index == GENERIC_FROM_METHOD;
             let arg_is_rep_ctor = args.iter().any(|a| known_rep_ctor(a).is_some());
-            if !is_generic_to && !arg_is_rep_ctor {
+            if !is_generic_to && !is_generic_from && !arg_is_rep_ctor {
                 return None;
             }
         }
 
+        self.perform_inline(name, &sub_dicts, &args, *method_index)
+    }
+
+    /// Inline a nullary producer codec that is the *scrutinee* of a case (decode
+    /// direction). The routed-from codec `FromJson_Rep__T.from_json s` is nullary
+    /// and its argument is the input (not a `Rep` ctor), so the `try_inline` gates
+    /// don't fire — but its result is `Ok (RepCtor …)`, consumed by the enclosing
+    /// `case`. Inlining it here makes that `Ok (RepCtor …)` a literal ctor under
+    /// the case, which `case_of_case` + cancellation then collapse. Gated on the
+    /// codec body being a constructor-producing `case` (a `Result`-map), so it
+    /// never inlines arbitrary nullary methods that merely sit in scrutinee
+    /// position.
+    fn inline_codec_scrutinee(&mut self, expr: &Expr) -> Option<Expr> {
+        let ExprKind::Case {
+            scrutinee,
+            arms,
+            dangling_trivia,
+        } = &expr.kind
+        else {
+            return None;
+        };
+        let (head, sargs) = peel_app(scrutinee);
+        let ExprKind::DictMethodAccess {
+            dict, method_index, ..
+        } = &head.kind
+        else {
+            return None;
+        };
+        let (dict_head, sub_dicts) = peel_app(dict);
+        let ExprKind::DictRef { name } = &dict_head.kind else {
+            return None;
+        };
+        // Only nullary codecs here; parameterized ones inline via `try_inline`.
+        if !sub_dicts.is_empty() || !self.codec_body_produces_rep(name, *method_index) {
+            return None;
+        }
+        let inlined = self.perform_inline(name, &sub_dicts, &sargs, *method_index)?;
+        Some(Expr::synth(
+            expr.span,
+            ExprKind::Case {
+                scrutinee: Box::new(inlined),
+                arms: arms.clone(),
+                dangling_trivia: dangling_trivia.clone(),
+            },
+        ))
+    }
+
+    /// True when dict `name`'s method `method_index` body is a `Rep`-producing
+    /// `case` — the routed-from bridge shape `case _ { Ok x -> Ok (Rep__T x); Err
+    /// e -> Err e }`. Used to gate [`Self::inline_codec_scrutinee`] so it only
+    /// inlines genuine `Rep`-tree producers.
+    fn codec_body_produces_rep(&self, name: &str, method_index: usize) -> bool {
+        let Some(ctor) = self.ctors.get(name) else {
+            return false;
+        };
+        let Some(method) = ctor.methods.get(method_index) else {
+            return false;
+        };
+        let ExprKind::Lambda { body, .. } = &method.kind else {
+            return false;
+        };
+        body_is_rep_producing_case(body)
+    }
+
+    /// Perform the inline: look up dict `name`'s method `method_index`, β-reduce
+    /// its lambda against `args`, substituting the `where`-bound dict params with
+    /// `sub_dicts`. Freshens the body's NodeIds (carrying a cross-module
+    /// producer's resolution onto the fresh ids). Returns `None` on
+    /// missing/partial/over-application.
+    fn perform_inline(
+        &mut self,
+        name: &str,
+        sub_dicts: &[&Expr],
+        args: &[&Expr],
+        method_index: usize,
+    ) -> Option<Expr> {
         // Copy out the borrowed ctor fields (all `&'a`) so the `&self.ctors`
         // borrow ends before we mutate `self.carried` below.
         let (dict_params, methods, resolution) = {
-            let ctor = self.ctors.get(name.as_str())?;
+            let ctor = self.ctors.get(name)?;
             (ctor.dict_params, ctor.methods, ctor.resolution)
         };
         if dict_params.len() != sub_dicts.len() {
             return None;
         }
-        let method = methods.get(*method_index)?;
+        let method = methods.get(method_index)?;
         let ExprKind::Lambda { params, body } = &method.kind else {
             return None;
         };
@@ -353,7 +444,7 @@ impl Folder<'_> {
         // val -> …` that would hide the constructor from floating); a constructor
         // parameter becomes a single-arm `case`. Patterns are exhaustive for the
         // dispatched type (the impl method typechecked).
-        Some(bind_subpats(params, &args, &new_body))
+        Some(bind_subpats(params, args, &new_body))
     }
 }
 
@@ -425,11 +516,17 @@ fn known_ctor(expr: &Expr) -> Option<(&str, Vec<&Expr>)> {
     }
 }
 
-/// `case Con(args) of { … }` where the scrutinee is a *known* `Rep` constructor:
+/// `case Con(args) of { … }` where the scrutinee is *any* known constructor:
 /// select the matching arm and bind its sub-patterns to `args`, dropping the
-/// other arms. Returns `None` when the scrutinee isn't a known `Rep` constructor
-/// or the match can't be decided statically (a guard on a matching arm, or an
+/// other arms. Returns `None` when the scrutinee isn't a known constructor or the
+/// match can't be decided statically (a guard on a matching arm, or an
 /// undecidable pattern shape) — in which case the case is left intact.
+///
+/// Not restricted to `Rep` constructors: this fires on `Ok`/`Err` too (Phase 6
+/// cancels the `Result` wrapper threaded through the decode codec). It is sound
+/// and bounded for arbitrary constructors because it only matches a scrutinee
+/// that is a *literal* constructor application — a shape that arises from the
+/// fold's own inlining/commuting, not from ordinary source.
 fn case_of_known_constructor(expr: &Expr) -> Option<Expr> {
     let ExprKind::Case {
         scrutinee, arms, ..
@@ -437,44 +534,96 @@ fn case_of_known_constructor(expr: &Expr) -> Option<Expr> {
     else {
         return None;
     };
-    let (con, cargs) = known_rep_ctor(scrutinee)?;
+    known_ctor(scrutinee)?; // bail unless the scrutinee is a known constructor
 
     for ann in arms {
         let arm = &ann.node;
-        let matches = match &arm.pattern {
-            Pat::Wildcard { .. } | Pat::Var { .. } => Some(true),
-            Pat::Constructor { name, args, .. } if base_name(name) == base_name(con) => {
-                if args.len() == cargs.len() {
-                    Some(true)
-                } else {
-                    return None; // arity mismatch we don't understand — bail
+        match static_match(&arm.pattern, scrutinee) {
+            // Definitely doesn't match — skip to the next arm.
+            Match::No => continue,
+            // Can't decide this arm statically (e.g. a nested constructor against
+            // a non-literal sub-value): we can't safely pick *or* skip it, so
+            // leave the whole case for a later round once more is known.
+            Match::Unknown => return None,
+            // Definitely matches. A guard could still fail at runtime, so only
+            // commit when there's none.
+            Match::Yes => {
+                if arm.guard.is_some() {
+                    return None;
                 }
+                return Some(commit_matched_arm(&arm.pattern, scrutinee, &arm.body));
             }
-            Pat::Constructor { .. } | Pat::Lit { .. } => Some(false),
-            _ => return None, // record/tuple/etc. on a ctor value — bail
-        };
-        match matches {
-            Some(false) => continue,
-            Some(true) if arm.guard.is_none() => {
-                return Some(match &arm.pattern {
-                    Pat::Wildcard { .. } => arm.body.clone(),
-                    Pat::Var { name, .. } => {
-                        let mut body = arm.body.clone();
-                        substitute_var(&mut body, name, scrutinee);
-                        body
-                    }
-                    Pat::Constructor { args: subpats, .. } => {
-                        bind_subpats(subpats, &cargs, &arm.body)
-                    }
-                    _ => unreachable!("matched arm is wildcard/var/constructor"),
-                });
-            }
-            // A guard on the matching arm, or an undecidable earlier arm: we
-            // can't statically pick the arm. Leave the case.
-            _ => return None,
         }
     }
     None
+}
+
+/// Result of statically deciding whether `pat` matches a (partially) known value.
+enum Match {
+    Yes,
+    No,
+    Unknown,
+}
+
+/// Decide whether `pat` matches `value`, recursing through nested constructors.
+/// A multi-variant `Generic.from` has several arms sharing an outer constructor
+/// (`Adt _ (Or_Left …)`, `Adt _ (Or_Right …)`, …), so deciding on the outer
+/// constructor alone would wrongly commit to the first; the recursion routes each
+/// `Or` branch to the correct arm.
+fn static_match(pat: &Pat, value: &Expr) -> Match {
+    match pat {
+        // Irrefutable binders always match.
+        Pat::Wildcard { .. } | Pat::Var { .. } => Match::Yes,
+        Pat::Constructor { name, args, .. } => {
+            let Some((cname, cargs)) = known_ctor(value) else {
+                return Match::Unknown; // value isn't a literal ctor — can't decide
+            };
+            if base_name(cname) != base_name(name) || cargs.len() != args.len() {
+                return Match::No;
+            }
+            let mut result = Match::Yes;
+            for (subpat, subval) in args.iter().zip(&cargs) {
+                match static_match(subpat, subval) {
+                    Match::No => return Match::No,
+                    Match::Unknown => result = Match::Unknown,
+                    Match::Yes => {}
+                }
+            }
+            result
+        }
+        Pat::Lit { value: litpat, .. } => match &value.kind {
+            ExprKind::Lit { value: litval, .. } => {
+                if litval == litpat {
+                    Match::Yes
+                } else {
+                    Match::No
+                }
+            }
+            _ => Match::Unknown,
+        },
+        // Tuple/record/etc. against a constructor value: don't try to decide.
+        _ => Match::Unknown,
+    }
+}
+
+/// Bind a definitely-matching arm's pattern against the known scrutinee value and
+/// return the rewritten arm body. The pattern's match was already confirmed
+/// `Match::Yes` by [`static_match`].
+fn commit_matched_arm(pat: &Pat, scrutinee: &Expr, body: &Expr) -> Expr {
+    match pat {
+        Pat::Wildcard { .. } | Pat::Lit { .. } => body.clone(),
+        Pat::Var { name, .. } => {
+            let mut body = body.clone();
+            substitute_var(&mut body, name, scrutinee);
+            body
+        }
+        Pat::Constructor { args: subpats, .. } => {
+            // `static_match` Yes ⇒ the scrutinee is the matching ctor.
+            let (_, cargs) = known_ctor(scrutinee).expect("matched arm has known ctor scrutinee");
+            bind_subpats(subpats, &cargs, body)
+        }
+        _ => body.clone(),
+    }
 }
 
 /// Bind a constructor pattern's sub-patterns to the scrutinee's arguments in the
@@ -832,6 +981,327 @@ fn clone_fresh_pat(pat: &Pat) -> Pat {
     let mut p = pat.clone();
     freshen_pat_ids(&mut p);
     p
+}
+
+fn clone_fresh_arm(arm: &CaseArm) -> Annotated<CaseArm> {
+    let mut body = arm.body.clone();
+    freshen_expr_ids(&mut body);
+    let guard = arm.guard.as_ref().map(|g| {
+        let mut g = g.clone();
+        freshen_expr_ids(&mut g);
+        g
+    });
+    Annotated::bare(CaseArm {
+        pattern: clone_fresh_pat(&arm.pattern),
+        guard,
+        body,
+        span: arm.span,
+    })
+}
+
+/// case-of-case commuting conversion (Phase 6, decode direction):
+/// `case (case S { p_i -> e_i }) { outer }` ⟶ `case S { p_i -> case e_i { outer } }`.
+///
+/// This pushes the consuming `case` (the delegating `{Ok f -> Ok (from f); Err e
+/// -> Err e}` once `from` is inlined) down to where the producer codec's
+/// `Ok (RepCtor …)` / `Err e` constructors are built, so `case_of_known_constructor`
+/// can then cancel them. Two guards keep it sound and non-explosive:
+///
+/// - **Unblocks cancellation**: fires only when some inner arm body `e_i` is a
+///   known constructor application (mirrors `float_case_out_of_arg`), so the
+///   duplicated `outer` arms immediately collapse rather than lingering.
+/// - **Capture-avoiding**: each inner arm pattern `p_i` now also scopes the
+///   `outer` arms it wraps; if any `p_i` binds a name that occurs *free* in
+///   `outer`, commuting would capture it, so we leave the case intact.
+fn case_of_case(expr: &Expr) -> Option<Expr> {
+    let ExprKind::Case {
+        scrutinee,
+        arms: outer_arms,
+        ..
+    } = &expr.kind
+    else {
+        return None;
+    };
+    let ExprKind::Case {
+        scrutinee: inner_scrut,
+        arms: inner_arms,
+        ..
+    } = &scrutinee.kind
+    else {
+        return None;
+    };
+    // Anchor on `Rep` production somewhere in an inner arm's subtree: only
+    // commute when the codec eventually builds a `Rep` tree, so this never
+    // duplicates the outer arms across an unrelated nested `case` (e.g. a
+    // hand-written parser's `Result` threading, which carries no `Rep`).
+    if !inner_arms
+        .iter()
+        .any(|a| subtree_produces_rep(&a.node.body))
+    {
+        return None;
+    }
+    let outer_free = free_vars_arms(outer_arms);
+    let captures = inner_arms.iter().any(|a| {
+        let mut bound = Vec::new();
+        pat_bound_names(&a.node.pattern, &mut bound);
+        bound.iter().any(|n| outer_free.contains(n))
+    });
+    if captures {
+        return None;
+    }
+
+    let new_arms = inner_arms
+        .iter()
+        .map(|ann| {
+            let arm = &ann.node;
+            // Duplicate `outer` into this arm (fresh ids per copy), wrapping the
+            // inner arm body as the new scrutinee.
+            let outer_copy: Vec<Annotated<CaseArm>> =
+                outer_arms.iter().map(|a| clone_fresh_arm(&a.node)).collect();
+            let wrapped = Expr::synth(
+                arm.body.span,
+                ExprKind::Case {
+                    scrutinee: Box::new(arm.body.clone()),
+                    arms: outer_copy,
+                    dangling_trivia: vec![],
+                },
+            );
+            Annotated::bare(CaseArm {
+                pattern: clone_fresh_pat(&arm.pattern),
+                guard: arm.guard.clone(),
+                body: wrapped,
+                span: arm.span,
+            })
+        })
+        .collect();
+    Some(Expr::synth(
+        expr.span,
+        ExprKind::Case {
+            scrutinee: Box::new((**inner_scrut).clone()),
+            arms: new_arms,
+            dangling_trivia: vec![],
+        },
+    ))
+}
+
+/// True when `body` is a `Rep`-producing `case` — the routed-from bridge codec
+/// shape `case _ { Ok x -> Ok (Rep__T x); Err e -> Err e }`. Sees through a
+/// leading ascription. Anchoring on a *`Rep`* constructor (not any ctor) keeps
+/// the decode rewrites a no-op on unrelated codecs — e.g. a hand-written JSON
+/// object parser that returns `Ok (value, rest)` produces a tuple, not a `Rep`,
+/// so it is left untouched rather than inlined without any cancellation payoff.
+fn body_is_rep_producing_case(body: &Expr) -> bool {
+    match &body.kind {
+        ExprKind::Case { arms, .. } => arms.iter().any(|a| produces_rep_ctor(&a.node.body)),
+        ExprKind::Ascription { expr, .. } => body_is_rep_producing_case(expr),
+        _ => false,
+    }
+}
+
+/// True when `e` builds a `Rep` constructor, possibly under wrapper constructors
+/// (`Ok (Rep__T …)`, `Ok (Adt …)`). Used to anchor the decode rewrites to actual
+/// `Rep`-tree production so they don't fire on unrelated `Result`-returning code.
+fn produces_rep_ctor(e: &Expr) -> bool {
+    match known_ctor(e) {
+        Some((name, args)) => is_rep_ctor(name) || args.iter().any(|a| produces_rep_ctor(a)),
+        None => false,
+    }
+}
+
+/// True when `e` builds a `Rep` constructor *anywhere* in its subtree. A record's
+/// `And` node is built deep inside the field-codec's nested `Result` threading
+/// (`Ok l -> case … { Ok r -> Ok (And l r) … }`), so the top-level arms don't
+/// directly produce a `Rep`; `case_of_case` needs the subtree view to know the
+/// commute will eventually reach a cancellation. A hand-written object parser
+/// threads tuples with no `Rep` anywhere, so it stays `false`.
+fn subtree_produces_rep(e: &Expr) -> bool {
+    if produces_rep_ctor(e) {
+        return true;
+    }
+    let mut tmp = e.clone();
+    child_exprs_mut(&mut tmp)
+        .into_iter()
+        .any(|c| subtree_produces_rep(c))
+}
+
+/// Names bound by a pattern (appended to `out`). Used by the case-of-case capture
+/// guard and is the dual of [`pat_binds`].
+fn pat_bound_names(pat: &Pat, out: &mut Vec<String>) {
+    match pat {
+        Pat::Wildcard { .. } | Pat::Lit { .. } => {}
+        Pat::Var { name, .. } => out.push(name.clone()),
+        Pat::Constructor { args, .. } => {
+            for a in args {
+                pat_bound_names(a, out);
+            }
+        }
+        Pat::Tuple { elements, .. } | Pat::ListPat { elements, .. } => {
+            for a in elements {
+                pat_bound_names(a, out);
+            }
+        }
+        Pat::Or { patterns, .. } => {
+            for a in patterns {
+                pat_bound_names(a, out);
+            }
+        }
+        Pat::Record {
+            fields, as_name, ..
+        } => {
+            if let Some(n) = as_name {
+                out.push(n.clone());
+            }
+            record_field_bound_names(fields, out);
+        }
+        Pat::AnonRecord { fields, .. } => record_field_bound_names(fields, out),
+        Pat::StringPrefix { rest, .. } => pat_bound_names(rest, out),
+        Pat::ConsPat { head, tail, .. } => {
+            pat_bound_names(head, out);
+            pat_bound_names(tail, out);
+        }
+        Pat::BitStringPat { segments, .. } => {
+            for s in segments {
+                pat_bound_names(&s.value, out);
+            }
+        }
+    }
+}
+
+fn record_field_bound_names(fields: &[(String, Option<Pat>)], out: &mut Vec<String>) {
+    for (fname, sub) in fields {
+        match sub {
+            Some(p) => pat_bound_names(p, out),
+            None => out.push(fname.clone()),
+        }
+    }
+}
+
+/// Free variables across a list of case arms (each arm pattern binds within its
+/// guard + body). Binder-aware so a name bound *inside* an arm isn't counted as
+/// free — the case-of-case capture guard needs the precise set, not an
+/// over-approximation (the decode codec reuses `e` for every `Err` arm).
+fn free_vars_arms(arms: &[Annotated<CaseArm>]) -> std::collections::HashSet<String> {
+    let mut acc = std::collections::HashSet::new();
+    for ann in arms {
+        let arm = &ann.node;
+        let mut bound = Vec::new();
+        pat_bound_names(&arm.pattern, &mut bound);
+        if let Some(g) = &arm.guard {
+            collect_free_vars(g, &bound, &mut acc);
+        }
+        collect_free_vars(&arm.body, &bound, &mut acc);
+    }
+    acc
+}
+
+/// Collect free `Var` names of `expr` into `acc`, treating names in `bound` (and
+/// any binders encountered along the way) as not free. Mirrors the binder
+/// structure of [`substitute_var`].
+fn collect_free_vars(expr: &Expr, bound: &[String], acc: &mut std::collections::HashSet<String>) {
+    match &expr.kind {
+        ExprKind::Var { name } => {
+            if !bound.contains(name) {
+                acc.insert(name.clone());
+            }
+        }
+        ExprKind::Case {
+            scrutinee, arms, ..
+        } => {
+            collect_free_vars(scrutinee, bound, acc);
+            for ann in arms {
+                let arm = &ann.node;
+                let mut inner = bound.to_vec();
+                pat_bound_names(&arm.pattern, &mut inner);
+                if let Some(g) = &arm.guard {
+                    collect_free_vars(g, &inner, acc);
+                }
+                collect_free_vars(&arm.body, &inner, acc);
+            }
+        }
+        ExprKind::Lambda { params, body } => {
+            let mut inner = bound.to_vec();
+            for p in params {
+                pat_bound_names(p, &mut inner);
+            }
+            collect_free_vars(body, &inner, acc);
+        }
+        ExprKind::Block { stmts, .. } => {
+            let mut inner = bound.to_vec();
+            for ann in stmts {
+                match &ann.node {
+                    Stmt::Let { pattern, value, .. } => {
+                        collect_free_vars(value, &inner, acc);
+                        pat_bound_names(pattern, &mut inner);
+                    }
+                    Stmt::LetFun {
+                        name,
+                        params,
+                        guard,
+                        body,
+                        ..
+                    } => {
+                        inner.push(name.clone());
+                        let mut body_scope = inner.clone();
+                        for p in params {
+                            pat_bound_names(p, &mut body_scope);
+                        }
+                        if let Some(g) = guard {
+                            collect_free_vars(g, &body_scope, acc);
+                        }
+                        collect_free_vars(body, &body_scope, acc);
+                    }
+                    Stmt::Expr(e) => collect_free_vars(e, &inner, acc),
+                }
+            }
+        }
+        ExprKind::Do {
+            bindings,
+            success,
+            else_arms,
+            ..
+        } => {
+            let mut inner = bound.to_vec();
+            for (pat, e) in bindings {
+                collect_free_vars(e, &inner, acc);
+                pat_bound_names(pat, &mut inner);
+            }
+            collect_free_vars(success, &inner, acc);
+            for ann in else_arms {
+                let arm = &ann.node;
+                let mut arm_scope = bound.to_vec();
+                pat_bound_names(&arm.pattern, &mut arm_scope);
+                if let Some(g) = &arm.guard {
+                    collect_free_vars(g, &arm_scope, acc);
+                }
+                collect_free_vars(&arm.body, &arm_scope, acc);
+            }
+        }
+        ExprKind::ListComprehension { body, qualifiers } => {
+            let mut inner = bound.to_vec();
+            for q in qualifiers {
+                match q {
+                    ComprehensionQualifier::Generator(pat, e)
+                    | ComprehensionQualifier::Let(pat, e) => {
+                        collect_free_vars(e, &inner, acc);
+                        pat_bound_names(pat, &mut inner);
+                    }
+                    ComprehensionQualifier::Guard(e) => collect_free_vars(e, &inner, acc),
+                }
+            }
+            collect_free_vars(body, &inner, acc);
+        }
+        // Other binders (Receive, With, HandlerExpr) don't appear in the decode
+        // fusion shapes; fall through to the generic child walk, which keeps the
+        // outer `bound` set. This can only *over*-count free vars there (treating
+        // their binders as free), which makes the capture guard more conservative
+        // — never unsound.
+        _ => {
+            let mut e = expr.clone();
+            for child in child_exprs_mut(&mut e) {
+                collect_free_vars(child, bound, acc);
+            }
+        }
+    }
 }
 
 /// Peel a chain of `App` nodes, returning the innermost non-`App` head and the

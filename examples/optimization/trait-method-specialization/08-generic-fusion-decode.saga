@@ -1,0 +1,98 @@
+# Generic-routing fusion, decode direction (Phase 6 target).
+# Mirror of 07 for `from`/decode: a `deriving`-routed `FromJson` produces the
+# Rep tree (Adt/Variant/Leaf/Rep__T constructor ALLOCATIONS) inside `Ok (...)`,
+# and the synthesized `Generic.from` CONSUMES it via a `case`. Fusion should
+# cancel the produced Rep constructors against `from`'s case-match — the dual of
+# the encode direction. The monadic `Result` (`Ok`/`Err`) threading is the extra
+# wrinkle decode has that encode does not.
+#
+# Emit this to inspect whether the Rep constructors (Adt/Variant/Leaf/Rep__User)
+# survive in the derived `from_json` dict; run it to confirm correctness.
+
+import Std.Generic (Generic, U1, Leaf, Labeled, And, Or, Variant, Record, Adt)
+
+trait FromJson a {
+  fun from_json : String -> Result a String
+}
+
+impl FromJson for Int {
+  from_json _ = Ok 5
+}
+
+impl FromJson for U1 {
+  from_json _ = Ok U1
+}
+
+impl FromJson for Leaf a where {a: FromJson} {
+  from_json s = case from_json s {
+    Ok x -> Ok (Leaf x)
+    Err e -> Err e
+  }
+}
+
+impl FromJson for And l r where {l: FromJson, r: FromJson} {
+  from_json s = case from_json s {
+    Ok l -> case from_json s {
+      Ok r -> Ok (And l r)
+      Err e -> Err e
+    }
+    Err e -> Err e
+  }
+}
+
+impl FromJson for Or l r where {l: FromJson, r: FromJson} {
+  from_json s = case from_json s {
+    Ok l -> Ok (Or_Left l)
+    Err _ -> case from_json s {
+      Ok r -> Ok (Or_Right r)
+      Err e -> Err e
+    }
+  }
+}
+
+impl FromJson for Labeled (n : Symbol) a where {a: FromJson} {
+  from_json s = case from_json s {
+    Ok x -> Ok (Labeled x)
+    Err e -> Err e
+  }
+}
+
+impl FromJson for Variant (n : Symbol) a where {a: FromJson} {
+  from_json s = case from_json s {
+    Ok x -> Ok (Variant x)
+    Err e -> Err e
+  }
+}
+
+impl FromJson for Record a where {a: FromJson} {
+  from_json s = case from_json s {
+    Ok x -> Ok (Record "" x)
+    Err e -> Err e
+  }
+}
+
+impl FromJson for Adt a where {a: FromJson} {
+  from_json s = case from_json s {
+    Ok x -> Ok (Adt "" x)
+    Err e -> Err e
+  }
+}
+
+type User = User Int
+  deriving (FromJson)
+
+record Point {
+  x: Int,
+  y: Int,
+} deriving (FromJson)
+
+main () = {
+  case (from_json "x" : Result User String) {
+    Ok (User n) -> dbg (show n)
+    Err e -> dbg e
+  }
+  case (from_json "x" : Result Point String) {
+    Ok (Point { x, y }) -> dbg (show (x + y))
+    Err e -> dbg e
+  }
+}
