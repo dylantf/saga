@@ -1,5 +1,6 @@
 pub mod call_effects;
 pub mod cerl;
+pub mod generic_fold;
 pub mod handler_analysis;
 pub mod lower;
 pub mod normalize;
@@ -104,7 +105,7 @@ pub fn compile_module_from_result(
     let codegen_info = result.codegen_info();
     let info = codegen_info.get(module_name).cloned().unwrap_or_default();
     let elaborated = crate::elaborate::elaborate_module(program, mod_result, module_name);
-    let normalized = normalize::normalize_effects(&elaborated);
+    let normalized = generic_fold::fold_program(&normalize::normalize_effects(&elaborated));
     let resolution = resolve::resolve_names(
         module_name,
         &normalized,
@@ -140,7 +141,7 @@ pub fn emit_module_with_context(
     entry_export: Option<&str>,
 ) -> String {
     let codegen_info = ctx.codegen_info();
-    let program = normalize::normalize_effects(program);
+    let program = generic_fold::fold_program(&normalize::normalize_effects(program));
     let constructor_atoms = resolve::build_constructor_atoms(
         module_name,
         &program,

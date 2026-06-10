@@ -967,7 +967,8 @@ pub fn build_project_ext(
         }
 
         let elaborated = elaborate::elaborate_module(&program, &mod_result, module_name);
-        let normalized = codegen::normalize::normalize_effects(&elaborated);
+        let normalized =
+            codegen::generic_fold::fold_program(&codegen::normalize::normalize_effects(&elaborated));
         let resolution = codegen::resolve::resolve_names(
             module_name,
             &normalized,
