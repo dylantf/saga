@@ -2536,6 +2536,34 @@ main () = run (Box 5)
 }
 
 #[test]
+fn cross_module_fold_specializes_method_of_unimported_trait() {
+    // Box's impl body calls `tag`, a method of Container's `Tag` trait that Main
+    // never imports. After inlining the impl body into Main, the `tag` call on
+    // the nullary `Tag Int` dict must still specialize: the saturation guard
+    // reads the method arity from the dict constructor (via the compiled
+    // modules), since `Tag` is absent from Main's own trait registry. Without
+    // that fallback the call would fall back to `element/2` dispatch.
+    let main_src = "
+module Main
+import Container (Encodable, Box)
+
+fun run : (b: Box Int) -> Int
+run b = encode b
+
+main () = run (Box 5)
+";
+    let mut checker = make_project_checker();
+    let program = typecheck_source(main_src, &mut checker);
+    let out = emit_from_program(&program, "main", &checker);
+
+    let dict = typechecker::make_dict_name("Container.Tag", &[], "container", "Std.Int.Int");
+    assert_contains(
+        &out,
+        &format!("call 'container':'__saga_dictmethod_{dict}_0'"),
+    );
+}
+
+#[test]
 fn cross_module_parameterized_fold_compiles_with_erlc() {
     // Proves the inlined cross-module body (with its private-helper and hoisted
     // leaf calls) links: emit both modules and run erlc over the importer.

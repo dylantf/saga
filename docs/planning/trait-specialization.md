@@ -28,11 +28,19 @@ freshened and the producer's resolution entries are remapped onto the fresh ids,
 merged into the consumer's resolution map after `resolve_names` so they override
 any consumer-scope guess. We do the cross-module move at the AST level (BEAM
 won't inline across modules) — the GHC "ship the unfolding, specialize at the
-consumer" move. saga_json now has **zero `parameterized` fallbacks** (all chains
-collapse); the only remaining fallbacks are `unsaturated` (the partial/over-
-application guard — a separate category). The `Rep` constructor allocations are
+consumer" move. saga_json now specializes **100%** of known dict-method sites
+(every module `N | N | 0 fell back`). The `Rep` constructor allocations are
 **not** cancelled yet — that's 4b/Phase 5 (`case_of_known_constructor` + inlined
 `to x`).
+
+One follow-on fix the cross-module fold required: the saturation guard's arity
+lookup (`dict_method_user_arity` in `calls.rs`) falls back to the dict
+constructor's own method-lambda arity (via `ctx.modules`) when the trait isn't in
+the consumer's registry. A *dependency's internal trait* (e.g. saga_json's
+`VariantPayload`) is never imported by the consumer, so it's absent from
+`check_result.traits` and `module_check_results`; it surfaces only because an
+inlined producer body calls it. The impl method lambda carries the full param
+list (eta-soundness), so its arity equals the trait arity.
 
 **Phase 4a** (`generic_fold.rs`, commit `dd282b9`) added an elaborated-AST pass
 that inlines statically-known *parameterized* dict-method calls on **local**

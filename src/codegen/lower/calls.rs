@@ -443,7 +443,9 @@ impl<'a> Lowerer<'a> {
 
         Some(if !sub_dicts_empty {
             Err(FallbackReason::Parameterized)
-        } else if self.trait_method_user_arity(trait_name, method_index) != Some(supplied) {
+        } else if self.dict_method_user_arity(&dict_constructor, trait_name, method_index)
+            != Some(supplied)
+        {
             // Partial/over-application: the hoisted function's arity would not
             // match. (Saturated trait calls are the norm; guard anyway.)
             Err(FallbackReason::Unsaturated)
@@ -478,6 +480,46 @@ impl<'a> Lowerer<'a> {
             .get(trait_name)
             .and_then(|info| info.methods.get(method_index))
             .map(|m| m.param_types.len())
+    }
+
+    /// User-argument arity of a dict method's `method_index`, for the saturation
+    /// guard. Prefers the trait signature (`trait_name`), which covers local and
+    /// imported-into-scope traits. Falls back to the dict constructor's own
+    /// method lambda arity — needed when the trait is defined in a *dependency*
+    /// the consumer never imported (e.g. a library's internal `VariantPayload`),
+    /// surfaced here only because the cross-module fold inlined a body that calls
+    /// it. Impl methods carry the full parameter list (eta-reduced impls are
+    /// rejected at typecheck), so the lambda arity equals the trait arity.
+    fn dict_method_user_arity(
+        &self,
+        dict_constructor: &str,
+        trait_name: &str,
+        method_index: usize,
+    ) -> Option<usize> {
+        self.trait_method_user_arity(trait_name, method_index)
+            .or_else(|| self.external_dict_method_arity(dict_constructor, method_index))
+    }
+
+    /// The user arity of a dict constructor's method lambda, looked up across the
+    /// compiled modules (including dependencies). The elaborated method lambda's
+    /// params are the user params (evidence/return-K are added at lowering).
+    fn external_dict_method_arity(
+        &self,
+        dict_constructor: &str,
+        method_index: usize,
+    ) -> Option<usize> {
+        for compiled in self.ctx.modules.values() {
+            for decl in &compiled.elaborated {
+                if let crate::ast::Decl::DictConstructor { name, methods, .. } = decl
+                    && name == dict_constructor
+                    && let Some(method) = methods.get(method_index)
+                    && let crate::ast::ExprKind::Lambda { params, .. } = &method.kind
+                {
+                    return Some(params.len());
+                }
+            }
+        }
+        None
     }
 
     /// The Erlang module that defines an imported dict's hoisted methods, by

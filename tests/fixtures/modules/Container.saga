@@ -11,12 +11,24 @@ pub trait Encodable a {
   fun encode : (x: a) -> Int
 }
 
+# An internal trait that consumers do NOT import. The Box impl body calls its
+# `tag` method, so after the cross-module fold inlines that body into a consumer,
+# the consumer sees a `Tag` dict call for a trait it never imported — exercising
+# the saturation guard's dict-constructor arity fallback.
+trait Tag a {
+  fun tag : (x: a) -> Int
+}
+
+impl Tag for Int {
+  tag _ = 1000
+}
+
 impl Encodable for Int {
   encode x = bump x
 }
 
-impl Encodable for Box a where {a: Encodable} {
-  encode (Box x) = wrap_value (encode x)
+impl Encodable for Box a where {a: Encodable, a: Tag} {
+  encode (Box x) = wrap_value (encode x) + tag x
 }
 
 fun bump : (x: Int) -> Int
