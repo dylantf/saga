@@ -260,6 +260,10 @@ This stage should not precede basic static op specialization.
 
 ## Stage 6: Trait And Dictionary Specialization
 
+Detailed plan: [trait-specialization.md](./trait-specialization.md). Stages 6
+and 7 below are the index; that doc carries the phased implementation plan,
+design anchors, and fixtures.
+
 Purpose: specialize known dictionary method calls only when concrete dictionary
 facts are visible. Dictionary passing remains the correctness fallback.
 
@@ -273,9 +277,13 @@ facts are visible. Dictionary passing remains the correctness fallback.
 | Effectful impl method | Per-method effect shape is known | Direct/CPS according to method slot, not impl-level blanket | `34-effectful-trait-method.saga` | Later |
 | Dynamic dictionary | Concrete constructor unknown | Normal tuple/method dispatch | Existing fallback | Always |
 
-Open design question: effects probably need to become a per-method trait
-contract for this stage to stay simple. Impl-level `needs` is not enough as an
-optimization boundary because pure sibling methods should remain direct.
+Resolved design question (was: "effects probably need to become a per-method
+trait contract"): yes — per-method is the boundary. Impl-level `needs` is not
+enough because pure sibling methods must stay direct. main already carries
+per-method effect rows through elaboration, and `selective-uniform`'s
+`TraitImplMethodInfo` (per-method `trait_effects` / `trait_open_row`) is the
+export shape to surface them. See
+[trait-specialization.md](./trait-specialization.md) Phase 3 and Salvage §1.
 
 ## Stage 7: Generic/Output-Shape Specialization
 
