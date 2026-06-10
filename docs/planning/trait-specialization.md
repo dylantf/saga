@@ -107,6 +107,34 @@ already exists inside `classify_dict_method_call`
 ([call_effects.rs:986](../../src/codegen/call_effects.rs#L986)) and will be
 factored into a shared helper.
 
+## Measuring Specialization
+
+The direct-first analog of the abandoned branch's `--monadic-stats`. After each
+module lowers, `SAGA_STATS=trait-spec` prints a one-line summary of how many
+statically-known dispatch sites were specialized to direct calls vs left on the
+`element/2` dict-passing path, with a reason for each fallback
+([src/codegen/lower/trait_spec_stats.rs](../../src/codegen/lower/trait_spec_stats.rs)):
+
+```text
+trait-spec[EncodeDerive]: 32 known site(s) | 8 specialized | 24 fell back (14 imported, 10 parameterized)
+```
+
+It measures backend truth (what lowering actually decided), keyed by App
+`NodeId` so re-visits do not double-count. The fallback reasons map onto the
+phases below — `imported` → Phase 3, `parameterized` → Phase 4 — so each phase's
+acceptance can be stated as "this reason's count drops" on a representative
+fixture, and a regression that silently stops specializing is caught even though
+behavior stays correct. Run it on any lowering command:
+
+```bash
+SAGA_STATS=trait-spec saga emit file.saga 2>&1 >/dev/null | grep trait-spec
+```
+
+`SAGA_STATS` accepts `trait-spec`/`1`/`all` (every module) or a module-name
+substring filter. See the README "Diagnostics" section for usage;
+`SAGA_DEBUG_TRAIT_DISPATCH` (classification trace, Phase 0/1) is the companion
+upstream view.
+
 ## Phased Plan
 
 ### Phase 0 — Facts shell (behavior-neutral)

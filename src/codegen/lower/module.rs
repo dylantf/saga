@@ -119,6 +119,7 @@ impl<'a> Lowerer<'a> {
         self.effect_op_trace.clear();
         self.generated_helper_variants.clear();
         self.generated_hof_variants.clear();
+        self.trait_spec_stats.clear();
         let mut pending_annotations = self.init_module(module_name, program);
 
         // Group FunBindings by name, preserving declaration order, and simultaneously
@@ -675,6 +676,10 @@ impl<'a> Lowerer<'a> {
                     &self.effect_op_trace
                 )
             );
+        }
+
+        if super::trait_spec_stats::stats_enabled_for(&self.current_source_module) {
+            eprintln!("{}", self.trait_spec_stats.report(&self.current_source_module));
         }
 
         CModule {

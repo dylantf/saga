@@ -12,6 +12,7 @@ mod module;
 mod pats;
 mod semantic;
 mod static_helpers;
+mod trait_spec_stats;
 pub mod util;
 
 use crate::ast::{self, Expr, ExprKind, HandlerArm, Lit, NodeId, Pat, Stmt};
@@ -245,6 +246,8 @@ pub struct Lowerer<'a> {
     /// emitted during dict-constructor lowering. Empty when no local nullary
     /// dict has a statically-known call site.
     dict_method_hoists: HashMap<(String, usize), HoistedDictMethod>,
+    /// Per-module trait-specialization outcome counts (SAGA_STATS=trait-spec).
+    trait_spec_stats: trait_spec_stats::TraitSpecStats,
     generated_hof_variants: Vec<GeneratedHofVariant>,
     /// Evidence context for the currently-lowered effectful scope. `None` in
     /// pure code. Set by the function-entry plumbing for effectful functions
@@ -371,6 +374,7 @@ impl<'a> Lowerer<'a> {
             helper_inline_stack: Vec::new(),
             generated_helper_variants: Vec::new(),
             dict_method_hoists: HashMap::new(),
+            trait_spec_stats: trait_spec_stats::TraitSpecStats::default(),
             generated_hof_variants: Vec::new(),
             current_evidence: None,
             no_resume_ops: std::collections::HashSet::new(),

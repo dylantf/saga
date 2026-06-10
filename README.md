@@ -35,6 +35,36 @@ saga docs                  # Generate markdown docs for the current project's ex
 saga docs --dir <path>     # Document every .saga module under <path> (no project.toml needed)
 ```
 
+## Diagnostics
+
+Set environment variables on any command that lowers (`run`/`build`/`emit`) to
+print compiler diagnostics to stderr.
+
+```bash
+# Trait specialization stats: per module, how many statically-known trait
+# dictionary-method dispatch sites were specialized to direct calls vs left on
+# the runtime element/2 dict-passing path (with a reason for each fallback).
+SAGA_STATS=trait-spec saga emit file.saga
+```
+
+Example output (one line per module):
+
+```text
+trait-spec[MyModule]: 32 known site(s) | 8 specialized | 24 fell back (14 imported, 10 parameterized)
+```
+
+`SAGA_STATS` accepts `trait-spec`/`1`/`all` for every module, or a module-name
+substring to filter (e.g. `SAGA_STATS=MyModule`). Stats print to stderr, so the
+emitted Core on stdout is unaffected:
+
+```bash
+SAGA_STATS=trait-spec saga emit file.saga 2>&1 >/dev/null | grep trait-spec
+```
+
+Related tracing flags (`SAGA_DEBUG_TRAIT_DISPATCH`, `SAGA_DEBUG_EFFECT_SHAPES`)
+are described in [docs/planning/trait-specialization.md](docs/planning/trait-specialization.md)
+and [docs/planning/direct-first-effect-lowering.md](docs/planning/direct-first-effect-lowering.md).
+
 ## Running tests
 
 ```bash

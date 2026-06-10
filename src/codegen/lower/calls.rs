@@ -381,33 +381,57 @@ impl<'a> Lowerer<'a> {
     /// `element/2` dispatch. This only chooses the callee — argument, evidence,
     /// and return-continuation threading at the call site is unchanged.
     fn specialized_dict_method_callee(
-        &self,
+        &mut self,
         app_id: NodeId,
         method_index: usize,
         supplied: usize,
         cps: bool,
     ) -> Option<CExpr> {
-        let super::super::trait_dispatch::DictDispatch::KnownImpl {
-            dict_constructor,
-            method_index: known_index,
-            sub_dicts,
-        } = self.optimization.dict_dispatch.get(&app_id)?
-        else {
-            return None;
-        };
-        if !sub_dicts.is_empty() || *known_index != method_index {
-            return None;
-        }
-        let hoist = self
+        use super::trait_spec_stats::FallbackReason;
+
+        // Read the classification fact. A missing/`Dynamic` fact means this is
+        // not a statically-known dispatch site, so it is not counted at all.
+        let (dict_constructor, sub_dicts_empty) =
+            match self.optimization.dict_dispatch.get(&app_id)? {
+                super::super::trait_dispatch::DictDispatch::KnownImpl {
+                    dict_constructor,
+                    method_index: known_index,
+                    sub_dicts,
+                } if *known_index == method_index => (dict_constructor.clone(), sub_dicts.is_empty()),
+                _ => return None,
+            };
+
+        // Decide the outcome for this known site, then record it for stats.
+        let outcome: Result<CExpr, FallbackReason> = if !sub_dicts_empty {
+            Err(FallbackReason::Parameterized)
+        } else if let Some(hoist) = self
             .dict_method_hoists
-            .get(&(dict_constructor.clone(), method_index))?;
-        // Require a saturated call with the planned ABI; otherwise the hoisted
-        // function's arity would not match the args. Fall back to element/2.
-        if hoist.is_cps != cps || hoist.user_arity != supplied {
-            return None;
+            .get(&(dict_constructor, method_index))
+            .cloned()
+        {
+            if hoist.is_cps != cps {
+                Err(FallbackReason::AbiMismatch)
+            } else if hoist.user_arity != supplied {
+                Err(FallbackReason::Unsaturated)
+            } else {
+                let arity = hoist.user_arity + if cps { 2 } else { 0 };
+                Ok(CExpr::FunRef(hoist.fn_name, arity))
+            }
+        } else {
+            // Known impl, but not a locally-hoisted method — an imported dict.
+            Err(FallbackReason::Imported)
+        };
+
+        match outcome {
+            Ok(callee) => {
+                self.trait_spec_stats.record_specialized(app_id);
+                Some(callee)
+            }
+            Err(reason) => {
+                self.trait_spec_stats.record_fallback(app_id, reason);
+                None
+            }
         }
-        let arity = hoist.user_arity + if cps { 2 } else { 0 };
-        Some(CExpr::FunRef(hoist.fn_name.clone(), arity))
     }
 
     /// Lower a saturated effectful call whose head is a `DictMethodAccess`
@@ -663,8 +687,12 @@ impl<'a> Lowerer<'a> {
 
         // Phase 2: pure trait method call with a statically-known, locally-
         // hoisted impl — call the hoisted method function directly instead of
-        // building the dict tuple and extracting via `element/2`.
-        if let Some((_dict, method_index, dm_args)) = super::util::collect_dict_method_call(expr)
+        // building the dict tuple and extracting via `element/2`. Guarded to
+        // pure calls (effectful dict calls specialize via the CPS path), so the
+        // pure ABI (`cps = false`) is the right one to ask for here.
+        if !self.expr_is_effectful_call(expr)
+            && let Some((_dict, method_index, dm_args)) =
+                super::util::collect_dict_method_call(expr)
             && let Some(callee) =
                 self.specialized_dict_method_callee(expr.id, method_index, dm_args.len(), false)
         {
