@@ -103,6 +103,7 @@ fn emit_elaborated_inner(src: &str, include_std_modules: bool) -> String {
             codegen_info_map,
             prelude_imports,
             &front_resolution,
+            &std::collections::HashMap::new(),
         );
         let entry = modules.entry(name.clone()).or_default();
         entry.elaborated = normalized;

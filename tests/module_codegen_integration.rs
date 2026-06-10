@@ -978,6 +978,106 @@ fn private_functions_are_exported_in_core() {
 }
 
 #[test]
+fn cross_module_derived_dict_inlines_producer_private_helper() {
+    // Regression: a `deriving (ToJson)` record forces a specialized dict method
+    // (`__saga_dictmethod_..._Rep__Foo`) whose body the generic fold builds by
+    // inlining the producer module's `ToJson Record` impl. That impl references a
+    // producer-*private* helper (`io_open`). The reference is freshened (and the
+    // surrounding fold rewrites re-freshen/duplicate it), orphaning the id-keyed
+    // cross-module resolution carry; without the name-keyed carry it lowered to an
+    // unbound Erlang variable `Io_open` and `erlc` rejected the module.
+    //
+    // The triggering body shape (a hand-written object-encoder rewrite) is the
+    // load-bearing part: a trait method with a tuple return + a threaded
+    // accumulator, whose caller seeds the accumulator from a private-helper call
+    // and destructures the tuple result, with branching inside.
+    let codec = r#"module Codec
+
+import Std.Generic (Generic, Leaf, Labeled, And, Record)
+import Std.List as List
+
+opaque type Iodata = Iodata
+
+@external("erlang", "std_bitstring_bridge", "from_string")
+pub fun raw : String -> Iodata
+
+@external("erlang", "std_bitstring_bridge", "concat")
+pub fun concat : List Iodata -> Iodata
+
+fun io_open : Iodata
+io_open = raw "{"
+
+fun io_close : Iodata
+io_close = raw "}"
+
+fun io_comma : Iodata
+io_comma = raw ","
+
+pub trait ToJson a {
+  fun to_json : a -> Iodata
+}
+
+pub trait ToJsonFields a {
+  fun emit_fields : a -> Bool -> List Iodata -> (Bool, List Iodata)
+}
+
+impl ToJson for Int {
+  to_json _ = raw "0"
+}
+
+impl ToJson for Leaf a where {a: ToJson} {
+  to_json (Leaf x) = to_json x
+}
+
+impl ToJson for Record a where {a: ToJsonFields} {
+  to_json (Record _ inner) = {
+    let (_, frags) = emit_fields inner False [io_open]
+    concat (List.reverse (io_close :: frags))
+  }
+}
+
+impl ToJsonFields for Labeled (n : Symbol) a where {a: ToJson} {
+  emit_fields (Labeled x) need_comma acc = {
+    let v = to_json x
+    let acc1 = if need_comma then io_comma :: acc else acc
+    (True, v :: acc1)
+  }
+}
+
+impl ToJsonFields for And l r where {l: ToJsonFields, r: ToJsonFields} {
+  emit_fields (And l r) need_comma acc = {
+    let (nc1, acc1) = emit_fields l need_comma acc
+    emit_fields r nc1 acc1
+  }
+}
+"#;
+
+    let main_src = r#"module Main
+
+import Codec (ToJson, ToJsonFields)
+
+record Foo {
+  a: Int,
+  b: Int,
+} deriving (ToJson)
+
+main () = {
+  let _ = to_json (Foo { a: 1, b: 2 })
+  dbg "ok"
+}
+"#;
+
+    with_temp_project_files(&[("lib/Codec.saga", codec)], main_src, |checker, program| {
+        let out = emit_from_program(program, "main", checker);
+        // The producer-private helper must lower to a remote call, never an
+        // unbound variable.
+        assert_contains(&out, "call 'codec':'io_open'");
+        // `erlc` is the real assertion: it rejects an unbound `Io_open`.
+        assert_erlc_compiles(&out, "main");
+    });
+}
+
+#[test]
 fn no_module_decl_exports_everything() {
     // Single-file (no module declaration) should export all functions
     let src = "

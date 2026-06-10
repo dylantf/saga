@@ -58,7 +58,7 @@ use crate::ast::{
     Annotated, CaseArm, ComprehensionQualifier, Decl, Expr, ExprKind, Handler, HandlerArm,
     HandlerBody, HandlerItem, NodeId, Pat, Program, Stmt, StringPart,
 };
-use crate::codegen::resolve::ResolutionMap;
+use crate::codegen::resolve::{ResolutionMap, ResolvedCodegenKind, ResolvedSymbol};
 use crate::desugar::{freshen_expr_ids, freshen_pat_ids};
 use std::collections::HashMap;
 
@@ -86,6 +86,16 @@ const REP_CTORS: &[&str] = &[
     "U1", "Leaf", "Labeled", "And", "Or_Left", "Or_Right", "Variant", "Record", "Adt",
 ];
 
+/// A resolution kind referenced by a plain `Var` (a function), as opposed to a
+/// constructor or intrinsic. Only these are indexed by name for the cross-module
+/// carry — they're the ones an inlined body refers to unqualifiedly.
+fn is_fn_ref(kind: &ResolvedCodegenKind) -> bool {
+    matches!(
+        kind,
+        ResolvedCodegenKind::BeamFunction { .. } | ResolvedCodegenKind::ExternalFunction { .. }
+    )
+}
+
 /// A parameterized `DictConstructor` defined in another compiled module, with
 /// the producer's resolution map for carrying its body's name resolutions.
 pub struct ExternalCtor<'a> {
@@ -104,6 +114,16 @@ pub type ExternalCtors<'a> = HashMap<String, ExternalCtor<'a>>;
 pub struct FoldOutput {
     pub program: Program,
     pub carried_resolution: ResolutionMap,
+    /// Resolution for **cross-module producer-local functions** referenced by an
+    /// inlined body, keyed by unqualified name (anchored to the producer module).
+    /// The id-keyed `carried_resolution` is fragile: subsequent fold rewrites
+    /// re-freshen and duplicate the inlined nodes, orphaning the id mapping. A
+    /// freshened reference to a producer-private helper (e.g. `io_open`) is then
+    /// unresolvable in the consumer's scope and would lower to an unbound
+    /// variable. These name-keyed entries are registered into the consumer's
+    /// resolve scope (filling gaps only, so the consumer's own names win), so the
+    /// reference resolves to a remote call regardless of its (re-freshened) id.
+    pub carried_names: HashMap<String, ResolvedSymbol>,
 }
 
 /// Collect every module's parameterized `DictConstructor`s as external ctors,
@@ -147,6 +167,7 @@ struct CtorView<'a> {
 struct Folder<'a> {
     ctors: HashMap<&'a str, CtorView<'a>>,
     carried: ResolutionMap,
+    carried_names: HashMap<String, ResolvedSymbol>,
 }
 
 /// Inline known dict-method calls throughout a module's function and
@@ -190,12 +211,14 @@ pub fn fold_program(program: &Program, externals: &ExternalCtors<'_>) -> FoldOut
         return FoldOutput {
             program: program.clone(),
             carried_resolution: ResolutionMap::new(),
+            carried_names: HashMap::new(),
         };
     }
 
     let mut folder = Folder {
         ctors,
         carried: ResolutionMap::new(),
+        carried_names: HashMap::new(),
     };
     let mut out = program.clone();
     for decl in &mut out {
@@ -204,6 +227,7 @@ pub fn fold_program(program: &Program, externals: &ExternalCtors<'_>) -> FoldOut
     FoldOutput {
         program: out,
         carried_resolution: folder.carried,
+        carried_names: folder.carried_names,
     }
 }
 
@@ -423,7 +447,22 @@ impl Folder<'_> {
                 );
                 for (old, new) in old_ids.iter().zip(&new_ids) {
                     if let Some(sym) = producer_res.get(old) {
-                        self.carried.insert(*new, sym.clone());
+                        // Anchor producer-local `BeamFunction`s (`erlang_mod:
+                        // None`) to the producer module so they lower as remote
+                        // calls in the consumer instead of unbound variables.
+                        let anchored = sym.anchored_to_source_module();
+                        // Also index function references by name (see
+                        // `FoldOutput::carried_names`): the id-keyed entry above is
+                        // orphaned when a later rewrite re-freshens/duplicates this
+                        // node, but the name survives. First write wins (a private
+                        // helper name colliding across two inlined producer modules
+                        // is vanishingly rare and would only leave it unresolved).
+                        if is_fn_ref(&anchored.kind) {
+                            self.carried_names
+                                .entry(anchored.name.clone())
+                                .or_insert_with(|| anchored.clone());
+                        }
+                        self.carried.insert(*new, anchored);
                     }
                 }
             }

@@ -118,6 +118,7 @@ pub fn compile_module_from_result(
         codegen_info,
         &result.prelude_imports,
         &mod_result.resolution,
+        &HashMap::new(),
     );
     let optimization = optimize::analyze(module_name, &normalized, &resolution);
     Some(CompiledModule {
@@ -155,6 +156,7 @@ pub fn emit_module_with_context(
     let generic_fold::FoldOutput {
         program,
         carried_resolution,
+        carried_names,
     } = fold_out;
     let constructor_atoms = resolve::build_constructor_atoms(
         module_name,
@@ -173,6 +175,7 @@ pub fn emit_module_with_context(
         &codegen_info,
         &ctx.prelude_imports,
         front_resolution,
+        &carried_names,
     );
     // Merge in pre-computed resolution maps from all compiled modules.
     // Their NodeIds don't overlap with ours, so this is a simple extend.

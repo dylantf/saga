@@ -980,6 +980,7 @@ pub fn build_project_ext(
             codegen_info_map,
             &result.prelude_imports,
             &mod_result.resolution,
+            &std::collections::HashMap::new(),
         );
         let optimization = codegen::optimize::analyze(module_name, &normalized, &resolution);
         compiled_modules.insert(
