@@ -6,6 +6,7 @@ pub mod normalize;
 pub mod optimize;
 pub mod resolve;
 pub mod runtime_shape;
+pub mod trait_dispatch;
 #[cfg(test)]
 mod tests;
 

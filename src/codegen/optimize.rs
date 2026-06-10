@@ -25,6 +25,9 @@ pub struct OptimizationFacts {
     /// Higher-order functions with a generated direct entry that may be used
     /// when callback arguments are externally direct.
     pub hof_direct_specializations: HashMap<String, HofDirectSpecialization>,
+    /// Trait dictionary dispatch facts, keyed by `DictMethodAccess` App node.
+    /// A `Dynamic` (or absent) entry keeps the normal `element/2` dispatch.
+    pub dict_dispatch: super::trait_dispatch::DictDispatchMap,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -43,12 +46,13 @@ pub struct HofCallbackParam {
 pub fn analyze(
     module_name: &str,
     program: &ast::Program,
-    _resolution: &super::resolve::ResolutionMap,
+    resolution: &super::resolve::ResolutionMap,
 ) -> OptimizationFacts {
     OptimizationFacts {
         handler_analysis: super::handler_analysis::analyze(program),
         public_helpers: collect_public_helper_facts(module_name, program),
         hof_direct_specializations: collect_hof_direct_specializations(module_name, program),
+        dict_dispatch: super::trait_dispatch::analyze(module_name, program, resolution),
     }
 }
 
