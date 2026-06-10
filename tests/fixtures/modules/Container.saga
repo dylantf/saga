@@ -23,12 +23,25 @@ impl Tag for Int {
   tag _ = 1000
 }
 
+# A private record. The Box impl body reads a field on it, so after the Box impl
+# body is inlined cross-module the consumer must know this (non-`pub`, never
+# imported) record's field layout to compute the field's tuple index.
+record Opts {
+  scale: Int,
+}
+
+fun default_opts : Unit -> Opts
+default_opts () = Opts { scale: 3 }
+
 impl Encodable for Int {
   encode x = bump x
 }
 
 impl Encodable for Box a where {a: Encodable, a: Tag} {
-  encode (Box x) = wrap_value (encode x) + tag x
+  encode (Box x) = {
+    let o = default_opts ()
+    wrap_value (encode x) + tag x + o.scale
+  }
 }
 
 fun bump : (x: Int) -> Int

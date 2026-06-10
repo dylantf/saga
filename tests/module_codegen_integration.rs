@@ -2564,6 +2564,35 @@ main () = run (Box 5)
 }
 
 #[test]
+fn cross_module_fold_resolves_field_access_on_unimported_record() {
+    // Box's impl body reads `o.scale` on Container's private `Opts` record. After
+    // the body is inlined into Main, lowering the field access needs Opts's field
+    // layout to compute the tuple index — but Opts is non-`pub` and never
+    // imported, so it isn't in Main's public codegen info. Emit must still
+    // succeed (the layout comes from the all-modules record pass); previously
+    // this panicked with "could not resolve record type for field access".
+    let main_src = "
+module Main
+import Container (Encodable, Box)
+
+fun run : (b: Box Int) -> Int
+run b = encode b
+
+main () = run (Box 5)
+";
+    let mut checker = make_project_checker();
+    let program = typecheck_source(main_src, &mut checker);
+    let out = emit_from_program(&program, "main", &checker);
+    let run_fn = emitted_function(&out, "run", 1);
+    // The field access lowered to an element/2 projection (index 2 = first field
+    // after the tag), inside the inlined body — not a panic.
+    assert!(
+        run_fn.contains("call 'erlang':'element'"),
+        "expected the inlined `o.scale` to lower to an element/2 projection\n{run_fn}"
+    );
+}
+
+#[test]
 fn cross_module_parameterized_fold_compiles_with_erlc() {
     // Proves the inlined cross-module body (with its private-helper and hoisted
     // leaf calls) links: emit both modules and run erlc over the importer.

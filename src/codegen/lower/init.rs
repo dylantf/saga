@@ -641,6 +641,22 @@ impl<'a> Lowerer<'a> {
         }
     }
 
+    /// Register record field layouts for every compiled module's records
+    /// (public and private), keyed by `<module>.<Record>`. Uses `or_insert` so
+    /// any more-specific local/imported registration already present wins.
+    fn register_all_module_records(&mut self) {
+        for (mod_name, module_semantics) in self.ctx.modules_semantics() {
+            for decl in module_semantics.elaborated {
+                if let Decl::RecordDef { name, fields, .. } = decl {
+                    let canonical = format!("{}.{}", mod_name, name);
+                    self.record_fields
+                        .entry(canonical)
+                        .or_insert_with(|| fields.iter().map(|a| a.node.0.clone()).collect());
+                }
+            }
+        }
+    }
+
     fn register_imported_records_and_dicts(
         &mut self,
         module_name: &str,
@@ -825,6 +841,13 @@ impl<'a> Lowerer<'a> {
         for decl in program {
             self.register_import(decl);
         }
+        // Register record layouts for *every* compiled module (public and
+        // private), not just directly-imported ones: the cross-module generic
+        // fold can inline a producer body that accesses a record from a module
+        // this one only depends on transitively (e.g. a private `Options`), and
+        // computing the field's tuple index needs that layout.
+        self.register_all_module_records();
+
         // Register anonymous record types found in record field types and expressions.
         Self::collect_anon_records_from_program(program, &mut self.record_fields);
 
