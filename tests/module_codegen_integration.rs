@@ -2545,13 +2545,19 @@ fn bare_method_dispatches_via_resolved_trait_when_imports_collide() {
                 .map(|i| main_body_start + i)
                 .unwrap_or(out.len());
             let main_body_slice = &out[main_body_start..main_body_end];
+            // `pp 1` is a saturated pure call to the local `Foo Int` impl, so
+            // Phase 2 may specialize it to a direct call to that impl's hoisted
+            // method (`__saga_dictmethod_<A.Foo dict>_0`). Either way — dict
+            // application or hoisted-method call — the A.Foo dict name must
+            // appear in main/1 and the B.Bar dict name must not. Substring
+            // matching covers both forms (the hoisted name embeds the dict name).
             assert!(
-                main_body_slice.contains(&format!("'{foo_dict}'")),
-                "main/1 should apply the A.Foo dict\n{main_body_slice}"
+                main_body_slice.contains(&foo_dict),
+                "main/1 should dispatch via the A.Foo impl\n{main_body_slice}"
             );
             assert!(
-                !main_body_slice.contains(&format!("'{bar_dict}'")),
-                "main/1 must not apply the B.Bar dict (only A.Foo is exposed)\n{main_body_slice}"
+                !main_body_slice.contains(&bar_dict),
+                "main/1 must not dispatch via the B.Bar impl (only A.Foo is exposed)\n{main_body_slice}"
             );
         },
     );

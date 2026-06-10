@@ -774,7 +774,7 @@ main () = describe Red
 }
 
 #[test]
-fn trait_method_call_uses_dict() {
+fn trait_method_call_specializes_known_local_impl() {
     let src = "
 type Color = Red | Green | Blue
 
@@ -793,10 +793,44 @@ impl Describe for Color {
 main () = describe Red
 ";
     let out = emit_elaborated(src);
-    // The call to `describe` should use element() to extract the method from the dict
+    // Phase 2 trait specialization: a saturated call to a statically-known
+    // local, nullary impl is lowered to a direct call to the hoisted method
+    // function, instead of building the dict tuple and extracting via
+    // `element/2`.
     assert!(
-        out.contains("call 'erlang':'element'"),
-        "expected element() call for dict method access\n{out}"
+        out.contains("apply '__saga_dictmethod"),
+        "expected a direct hoisted-method call for the known impl\n{out}"
+    );
+    // The dict constructor is still emitted (its tuple now references the
+    // hoisted method) so dynamic/polymorphic dispatch keeps working.
+    assert!(
+        out.contains("'__dict_Describe_Color'/0"),
+        "expected the dict constructor to still be emitted\n{out}"
+    );
+}
+
+#[test]
+fn effectful_trait_method_specialization_threads_evidence() {
+    // The effectful `encode` call is specialized to a direct hoisted-method
+    // call, but the call must still thread `_Evidence`/`_ReturnK` (a 3-arity
+    // call: one user arg plus the two CPS params). This pins the anchor that
+    // specialization swaps only the callee, never the effect ABI.
+    let src = "
+effect Options { fun get_options : Unit -> Int }
+handler options_10 for Options { get_options () = resume 10 }
+
+trait Encodable a { fun encode : a -> Int needs {Options} }
+impl Encodable for Int needs {Options} { encode x = x + get_options! () }
+
+fun compute : (x: Int) -> Int needs {Options}
+compute x = encode x
+
+main () = compute 5 with options_10
+";
+    let out = emit_elaborated(src);
+    assert!(
+        out.contains("apply '__saga_dictmethod") && out.contains("_0'/3("),
+        "expected a 3-arity direct hoisted-method call (arg + evidence + return_k)\n{out}"
     );
 }
 

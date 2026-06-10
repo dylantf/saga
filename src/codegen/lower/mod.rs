@@ -104,6 +104,22 @@ struct GeneratedHelperVariant {
     body: CExpr,
 }
 
+/// A trait impl method hoisted out of its dict tuple into a top-level function,
+/// so statically-known dispatch sites can call it directly instead of building
+/// the dict tuple and extracting via `element/2` (Phase 2 trait specialization).
+/// Keyed by `(dict_constructor_name, method_index)`. Only local, nullary
+/// (non-parameterized) dicts are hoisted, so the method body captures nothing.
+#[derive(Clone)]
+struct HoistedDictMethod {
+    /// Generated top-level function name (e.g. `__saga_dictmethod_<dict>_<idx>`).
+    fn_name: String,
+    /// User-argument arity of the method (excludes `_Evidence`/`_ReturnK`).
+    /// Used to require a saturated call site before specializing.
+    user_arity: usize,
+    /// Whether the method's runtime ABI is CPS (`user_arity + 2` params).
+    is_cps: bool,
+}
+
 struct GeneratedHofVariant {
     name: String,
     arity: usize,
@@ -224,6 +240,11 @@ pub struct Lowerer<'a> {
     local_helper_defs: HashMap<String, LocalHelperInfo>,
     helper_inline_stack: Vec<String>,
     generated_helper_variants: Vec<GeneratedHelperVariant>,
+    /// Trait impl methods hoisted to top-level functions for direct dispatch.
+    /// Planned before body lowering (so call sites can reference them) and
+    /// emitted during dict-constructor lowering. Empty when no local nullary
+    /// dict has a statically-known call site.
+    dict_method_hoists: HashMap<(String, usize), HoistedDictMethod>,
     generated_hof_variants: Vec<GeneratedHofVariant>,
     /// Evidence context for the currently-lowered effectful scope. `None` in
     /// pure code. Set by the function-entry plumbing for effectful functions
@@ -349,6 +370,7 @@ impl<'a> Lowerer<'a> {
             local_helper_defs: HashMap::new(),
             helper_inline_stack: Vec::new(),
             generated_helper_variants: Vec::new(),
+            dict_method_hoists: HashMap::new(),
             generated_hof_variants: Vec::new(),
             current_evidence: None,
             no_resume_ops: std::collections::HashSet::new(),

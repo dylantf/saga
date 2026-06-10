@@ -373,6 +373,43 @@ impl<'a> Lowerer<'a> {
         }))
     }
 
+    /// If the trait method call at `app_id` dispatches on a statically-known,
+    /// locally-hoisted dict method, return a direct `FunRef` callee to the
+    /// hoisted top-level function (Phase 2 trait specialization). `supplied` is
+    /// the user-arg count and `cps` the call site's ABI; both must match the
+    /// hoist plan or this returns `None` and lowering falls back to the normal
+    /// `element/2` dispatch. This only chooses the callee — argument, evidence,
+    /// and return-continuation threading at the call site is unchanged.
+    fn specialized_dict_method_callee(
+        &self,
+        app_id: NodeId,
+        method_index: usize,
+        supplied: usize,
+        cps: bool,
+    ) -> Option<CExpr> {
+        let super::super::trait_dispatch::DictDispatch::KnownImpl {
+            dict_constructor,
+            method_index: known_index,
+            sub_dicts,
+        } = self.optimization.dict_dispatch.get(&app_id)?
+        else {
+            return None;
+        };
+        if !sub_dicts.is_empty() || *known_index != method_index {
+            return None;
+        }
+        let hoist = self
+            .dict_method_hoists
+            .get(&(dict_constructor.clone(), method_index))?;
+        // Require a saturated call with the planned ABI; otherwise the hoisted
+        // function's arity would not match the args. Fall back to element/2.
+        if hoist.is_cps != cps || hoist.user_arity != supplied {
+            return None;
+        }
+        let arity = hoist.user_arity + if cps { 2 } else { 0 };
+        Some(CExpr::FunRef(hoist.fn_name.clone(), arity))
+    }
+
     /// Lower a saturated effectful call whose head is a `DictMethodAccess`
     /// (post-elaboration shape of a trait method call). Returns `None` when
     /// the per-call effect map says the call is pure — caller falls through
@@ -390,6 +427,22 @@ impl<'a> Lowerer<'a> {
             .call_effects
             .get(&app_id)
             .and_then(|info| info.cps_call_plan())?;
+
+        // Phase 2: statically-known impl with a locally-hoisted method — call
+        // it directly, skipping the dict tuple build and `element/2`. Only the
+        // callee changes; evidence/return-continuation threading is unchanged.
+        if let Some(callee) =
+            self.specialized_dict_method_callee(app_id, method_index, args.len(), true)
+        {
+            return Some(self.lower_runtime_cps_apply(RuntimeCpsApplySite {
+                plan,
+                callee,
+                args,
+                return_k,
+                nested_pure_arg_lowering: RuntimeCpsArgLowering::Value,
+                flat_arg_lowering: RuntimeCpsArgLowering::EtaReduced,
+            }));
+        }
 
         let dict_var = self.fresh();
         let dict_ce = self.lower_expr_value(dict);
@@ -606,6 +659,17 @@ impl<'a> Lowerer<'a> {
             return self
                 .lower_effectful_var_call(expr.id, var_name, args, None)
                 .expect("effectful variable call should lower");
+        }
+
+        // Phase 2: pure trait method call with a statically-known, locally-
+        // hoisted impl — call the hoisted method function directly instead of
+        // building the dict tuple and extracting via `element/2`.
+        if let Some((_dict, method_index, dm_args)) = super::util::collect_dict_method_call(expr)
+            && let Some(callee) =
+                self.specialized_dict_method_callee(expr.id, method_index, dm_args.len(), false)
+        {
+            let arg_ces: Vec<CExpr> = dm_args.iter().map(|a| self.lower_expr_value(a)).collect();
+            return CExpr::Apply(Box::new(callee), arg_ces);
         }
 
         let mut callee = expr;

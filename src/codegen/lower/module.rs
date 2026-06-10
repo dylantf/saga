@@ -9,9 +9,21 @@ use super::evidence;
 use super::init::{PendingAnnotation, extract_external};
 use super::pats::lower_params;
 use super::util::{self, core_var};
-use super::{EvidenceCtx, FunInfo, Lowerer};
+use super::{EvidenceCtx, FunInfo, GeneratedHelperVariant, HoistedDictMethod, Lowerer};
 
 type Clause<'a> = (&'a [Pat], &'a Option<Box<Expr>>, &'a Expr);
+
+/// Borrowed metadata for one `DictConstructor` decl, in the field order the
+/// dict-lowering and hoist planner consume: name, dict params, method bodies,
+/// per-method effects, per-method open-row flags, impl-level effects.
+type DictCtorMeta<'a> = (
+    &'a str,
+    &'a [String],
+    &'a [Expr],
+    &'a [Vec<String>],
+    &'a [bool],
+    &'a [String],
+);
 
 fn count_lambda_params(body: &Expr) -> usize {
     match &body.kind {
@@ -112,15 +124,7 @@ impl<'a> Lowerer<'a> {
         // Group FunBindings by name, preserving declaration order, and simultaneously
         // populate top_level_funs. Handler params are added to the arity for effectful funs.
         let mut clause_groups: Vec<(String, usize, Vec<Clause>, crate::token::Span)> = Vec::new();
-        type DictCtor<'b> = (
-            &'b str,
-            &'b [String],
-            &'b [Expr],
-            &'b [Vec<String>],
-            &'b [bool],
-            &'b [String],
-        );
-        let mut dict_constructors: Vec<DictCtor<'_>> = Vec::new();
+        let mut dict_constructors: Vec<DictCtorMeta<'_>> = Vec::new();
 
         for decl in program {
             match decl {
@@ -252,6 +256,12 @@ impl<'a> Lowerer<'a> {
                 _ => {}
             }
         }
+
+        // Phase 2 trait specialization: plan which local nullary dict methods
+        // to hoist into top-level functions for direct dispatch. Done before
+        // body lowering so call sites can reference the hoisted names; the
+        // functions themselves are emitted during dict-constructor lowering.
+        self.plan_dict_method_hoists(&dict_constructors);
 
         // Build dict_name -> impl_effects from the active module's
         // `DictConstructor` nodes (which carry the field directly post-
@@ -576,35 +586,47 @@ impl<'a> Lowerer<'a> {
         {
             let arity = dict_params.len();
             let params: Vec<String> = dict_params.iter().map(|p| core_var(p)).collect();
-            let impl_effects = self.canonicalize_effects(impl_effects.to_vec());
             // Each dictionary slot must match the trait method's declared
             // effect row. The impl-level `needs` clause describes what the
             // impl may use overall, but call sites dispatch by method
             // signature; leaking impl effects into pure sibling methods makes
             // those closures CPS-shaped while callers apply them directly.
-            let method_exprs: Vec<CExpr> = methods
-                .iter()
-                .enumerate()
-                .map(|(idx, m)| {
-                    let mut static_effects = self
-                        .canonicalize_effects(method_effects.get(idx).cloned().unwrap_or_default());
-                    if Self::contains_direct_effect_call(m) {
-                        static_effects.extend(impl_effects.iter().cloned());
-                    }
-                    static_effects.sort();
-                    static_effects.dedup();
-                    let is_open_row = method_open_rows.get(idx).copied().unwrap_or(false);
-                    if !static_effects.is_empty() || is_open_row {
-                        self.lambda_effect_context = Some(CpsShape {
-                            static_effects,
-                            is_open_row,
-                        });
-                    }
-                    let ce = self.lower_expr(m);
-                    self.lambda_effect_context = None;
+            let mut method_exprs: Vec<CExpr> = Vec::with_capacity(methods.len());
+            for (idx, m) in methods.iter().enumerate() {
+                let (is_cps, static_effects, is_open_row) =
+                    self.method_cps_shape(m, method_effects, method_open_rows, impl_effects, idx);
+                if is_cps {
+                    self.lambda_effect_context = Some(CpsShape {
+                        static_effects,
+                        is_open_row,
+                    });
+                }
+                let ce = self.lower_expr(m);
+                self.lambda_effect_context = None;
+                // Phase 2: if this method is a planned specialization target,
+                // hoist the lowered closure into a top-level function and put a
+                // reference to it in the dict tuple (so dynamic dispatch still
+                // works via `element/2`). Direct call sites call the hoisted
+                // function instead, skipping the tuple build and extraction.
+                let slot = if let Some(hoist) =
+                    self.dict_method_hoists.get(&(name.to_string(), idx)).cloned()
+                {
+                    let hoisted_arity = hoist.user_arity + if hoist.is_cps { 2 } else { 0 };
+                    debug_assert!(
+                        matches!(&ce, CExpr::Fun(ps, _) if ps.len() == hoisted_arity),
+                        "hoisted dict method {name}#{idx}: lowered arity != planned {hoisted_arity}"
+                    );
+                    self.generated_helper_variants.push(GeneratedHelperVariant {
+                        name: hoist.fn_name.clone(),
+                        arity: hoisted_arity,
+                        body: ce,
+                    });
+                    CExpr::FunRef(hoist.fn_name, hoisted_arity)
+                } else {
                     ce
-                })
-                .collect();
+                };
+                method_exprs.push(slot);
+            }
             let body = CExpr::Tuple(method_exprs);
             exports.push((name.to_string(), arity));
             fun_defs.push(CFunDef {
@@ -730,5 +752,91 @@ impl<'a> Lowerer<'a> {
             }
             other => other,
         }
+    }
+
+    /// Compute a dict method's runtime CPS shape: whether it takes
+    /// `_Evidence`/`_ReturnK` (`is_cps`), plus the canonicalized static effect
+    /// set and open-row flag used to build its `CpsShape`. Centralizes the
+    /// per-method effect logic so the hoist planner and the dict-constructor
+    /// emitter agree on shape (and thus arity).
+    fn method_cps_shape(
+        &self,
+        m: &Expr,
+        method_effects: &[Vec<String>],
+        method_open_rows: &[bool],
+        impl_effects: &[String],
+        idx: usize,
+    ) -> (bool, Vec<String>, bool) {
+        let mut static_effects =
+            self.canonicalize_effects(method_effects.get(idx).cloned().unwrap_or_default());
+        if Self::contains_direct_effect_call(m) {
+            static_effects.extend(self.canonicalize_effects(impl_effects.to_vec()));
+        }
+        static_effects.sort();
+        static_effects.dedup();
+        let is_open_row = method_open_rows.get(idx).copied().unwrap_or(false);
+        let is_cps = !static_effects.is_empty() || is_open_row;
+        (is_cps, static_effects, is_open_row)
+    }
+
+    /// Plan Phase 2 trait specialization: for each statically-known dispatch
+    /// site (`DictDispatch::KnownImpl`) on a local, nullary (non-parameterized)
+    /// dict, record the method to hoist into a top-level function. Only local
+    /// dicts qualify (their `DictConstructor` is in this module) and only
+    /// nullary ones (their methods capture no dict params, so hoisting is
+    /// capture-free). Imported and parameterized dicts stay on the `element/2`
+    /// path until later phases.
+    fn plan_dict_method_hoists(&mut self, dict_constructors: &[DictCtorMeta<'_>]) {
+        self.dict_method_hoists.clear();
+        if self.optimization.dict_dispatch.is_empty() {
+            return;
+        }
+        // Collect (dict_constructor, method_index) referenced by a fully-known
+        // (no dynamic sub-dict) dispatch site.
+        let mut targets: std::collections::HashSet<(String, usize)> = std::collections::HashSet::new();
+        for dispatch in self.optimization.dict_dispatch.values() {
+            if let super::super::trait_dispatch::DictDispatch::KnownImpl {
+                dict_constructor,
+                method_index,
+                sub_dicts,
+            } = dispatch
+                && sub_dicts.is_empty()
+            {
+                targets.insert((dict_constructor.clone(), *method_index));
+            }
+        }
+        if targets.is_empty() {
+            return;
+        }
+        let mut hoists = HashMap::new();
+        for &(name, dict_params, methods, method_effects, method_open_rows, impl_effects) in
+            dict_constructors
+        {
+            if !dict_params.is_empty() {
+                continue; // parameterized dict: method captures sub-dicts (later phase)
+            }
+            for (idx, m) in methods.iter().enumerate() {
+                if !targets.contains(&(name.to_string(), idx)) {
+                    continue;
+                }
+                let ExprKind::Lambda { params, .. } = &m.kind else {
+                    continue;
+                };
+                let (is_cps, _, _) =
+                    self.method_cps_shape(m, method_effects, method_open_rows, impl_effects, idx);
+                // Keep the full dict name in the hoisted name (so it appears as
+                // a clean substring — useful for debugging and dispatch-coherence
+                // checks). Dict names are unique, so this is unique per method.
+                hoists.insert(
+                    (name.to_string(), idx),
+                    HoistedDictMethod {
+                        fn_name: format!("__saga_dictmethod_{name}_{idx}"),
+                        user_arity: params.len(),
+                        is_cps,
+                    },
+                );
+            }
+        }
+        self.dict_method_hoists = hoists;
     }
 }
