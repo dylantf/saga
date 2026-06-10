@@ -2507,6 +2507,75 @@ main () = show (Animal { name: \"Rex\", species: \"Dog\" })
 }
 
 #[test]
+fn cross_module_parameterized_dict_chain_inlines_with_private_helper() {
+    // Container.saga defines a parameterized `impl Encodable for Box a where
+    // {a: Encodable}` whose body calls a private helper `wrap_value`. Importing
+    // it and calling `encode` on a `Box Int` inlines the producer impl body into
+    // Main (cross-module generic fold), collapsing the dict chain into a `case`
+    // on Box. The private helper lowers to a direct cross-module call
+    // (`call 'container':'wrap_value'`) — possible because every function is
+    // exported in Core and the inlined node carries the producer's resolution.
+    let main_src = "
+module Main
+import Container (Encodable, Box)
+
+fun run : (b: Box Int) -> Int
+run b = encode b
+
+main () = run (Box 5)
+";
+    let mut checker = make_project_checker();
+    let program = typecheck_source(main_src, &mut checker);
+    let out = emit_from_program(&program, "main", &checker);
+
+    // The Box impl body was inlined: a `case` destructuring Box appears in Main.
+    assert_contains(&out, "'container_Box'");
+    // Its private helper is reached by a direct cross-module call, not a local
+    // (undefined-here) reference.
+    assert_contains(&out, "call 'container':'wrap_value'");
+}
+
+#[test]
+fn cross_module_parameterized_fold_compiles_with_erlc() {
+    // Proves the inlined cross-module body (with its private-helper and hoisted
+    // leaf calls) links: emit both modules and run erlc over the importer.
+    let main_src = "
+module Main
+import Container (Encodable, Box)
+
+fun run : (b: Box Int) -> Int
+run b = encode b
+
+main () = run (Box 5)
+";
+    let mut checker = make_project_checker();
+    let main_program = typecheck_source(main_src, &mut checker);
+    let result = checker.to_result();
+    let container_program = result
+        .programs()
+        .get("Container")
+        .expect("Container module not found");
+    let container_core = emit_from_program(container_program, "container", &checker);
+    let main_core = emit_from_program(&main_program, "main", &checker);
+
+    let dir = assert_erlc_compiles(&container_core, "container");
+    let main_core_path = dir.join("main.core");
+    std::fs::write(&main_core_path, &main_core).unwrap();
+    let output = std::process::Command::new("erlc")
+        .arg("-o")
+        .arg(&dir)
+        .arg(&main_core_path)
+        .output()
+        .expect("failed to run erlc");
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(
+        output.status.success(),
+        "erlc failed on main:\n{main_core}\nstderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
 fn local_dict_names_are_module_qualified() {
     // When Animals.saga defines impl Show for Animal, the dict should be
     // named with canonical trait + module-qualified type (not bare __dict_Show_Animal)

@@ -1,0 +1,26 @@
+module Container
+
+# A parameterized trait impl whose method body calls a *private* helper, used to
+# exercise the cross-module generic fold: importing this and calling `encode` on
+# a `Box Int` inlines this impl body into the consumer, where `wrap_value` must
+# lower to a direct cross-module call.
+
+pub type Box a = Box a
+
+pub trait Encodable a {
+  fun encode : (x: a) -> Int
+}
+
+impl Encodable for Int {
+  encode x = bump x
+}
+
+impl Encodable for Box a where {a: Encodable} {
+  encode (Box x) = wrap_value (encode x)
+}
+
+fun bump : (x: Int) -> Int
+bump x = x * 2
+
+fun wrap_value : (x: Int) -> Int
+wrap_value x = x + 100

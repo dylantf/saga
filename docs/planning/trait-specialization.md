@@ -13,8 +13,26 @@ Phases 0–3 are done and committed (`a4fd655`, `85fa3b4`, `05ed117`, `d5a4b63`,
 | 1 Classify | shape-based `KnownImpl`/`Dynamic` | done (committed) |
 | 2 Local direct call | hoist local nullary methods; `FunRef` call | done (committed) |
 | 3 Cross-module | export hoisted methods; remote `call` | done (committed) |
-| 4a Inline parameterized | `generic_fold.rs`: inline local parameterized dict chains | done (committed) |
+| 4a Inline parameterized (local) | `generic_fold.rs`: inline local parameterized dict chains | done (committed) |
+| 4a-x Inline parameterized (cross-module) | inline external impl bodies; carry producer resolution; export-all | done |
 | 4b Case-of-ctor + Phase 5 | cancel `Rep` ctors once `to x` is inlined | **next** |
+
+**Phase 4a-x** (cross-module) extends the fold to inline parameterized impl
+bodies defined in *other* modules. Two enabling changes: (1) **export-all in
+Core** — every function is exported (privacy is a front-end concern), so an
+inlined producer body's private-helper calls can lower to
+`call 'producer':'helper'`; (2) **carried resolution** — `fold_program` now takes
+external dict ctors (from `ctx.modules` at emit) and returns
+`FoldOutput { program, carried_resolution }`; inlined cross-module nodes are
+freshened and the producer's resolution entries are remapped onto the fresh ids,
+merged into the consumer's resolution map after `resolve_names` so they override
+any consumer-scope guess. We do the cross-module move at the AST level (BEAM
+won't inline across modules) — the GHC "ship the unfolding, specialize at the
+consumer" move. saga_json now has **zero `parameterized` fallbacks** (all chains
+collapse); the only remaining fallbacks are `unsaturated` (the partial/over-
+application guard — a separate category). The `Rep` constructor allocations are
+**not** cancelled yet — that's 4b/Phase 5 (`case_of_known_constructor` + inlined
+`to x`).
 
 **Phase 4a** (`generic_fold.rs`, commit `dd282b9`) added an elaborated-AST pass
 that inlines statically-known *parameterized* dict-method calls on **local**

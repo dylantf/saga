@@ -105,7 +105,13 @@ pub fn compile_module_from_result(
     let codegen_info = result.codegen_info();
     let info = codegen_info.get(module_name).cloned().unwrap_or_default();
     let elaborated = crate::elaborate::elaborate_module(program, mod_result, module_name);
-    let normalized = generic_fold::fold_program(&normalize::normalize_effects(&elaborated));
+    // Local-only fold here (no cross-module context); the cross-module fold runs
+    // at emit, which re-folds with `ctx.modules` supplied.
+    let normalized = generic_fold::fold_program(
+        &normalize::normalize_effects(&elaborated),
+        &generic_fold::ExternalCtors::new(),
+    )
+    .program;
     let resolution = resolve::resolve_names(
         module_name,
         &normalized,
@@ -141,7 +147,15 @@ pub fn emit_module_with_context(
     entry_export: Option<&str>,
 ) -> String {
     let codegen_info = ctx.codegen_info();
-    let program = generic_fold::fold_program(&normalize::normalize_effects(program));
+    // Generic fold, with cross-module impls supplied from the other compiled
+    // modules. Inlined cross-module nodes carry the producer's resolution, merged
+    // below after `resolve_names`.
+    let externals = generic_fold::external_ctors_from_modules(&ctx.modules);
+    let fold_out = generic_fold::fold_program(&normalize::normalize_effects(program), &externals);
+    let generic_fold::FoldOutput {
+        program,
+        carried_resolution,
+    } = fold_out;
     let constructor_atoms = resolve::build_constructor_atoms(
         module_name,
         &program,
@@ -165,6 +179,10 @@ pub fn emit_module_with_context(
     for compiled in ctx.modules.values() {
         resolution_map.extend(compiled.resolution.iter().map(|(k, v)| (*k, v.clone())));
     }
+    // Carried resolution for inlined cross-module nodes: keyed by fresh NodeIds,
+    // so this overrides any consumer-scope resolution `resolve_names` guessed for
+    // them (e.g. a producer-private helper unknown in this module's scope).
+    resolution_map.extend(carried_resolution);
     let optimization = optimize::analyze(module_name, &program, &resolution_map);
     let source_info =
         source_file.map(|sf| lower::errors::SourceInfo::new(sf.path.clone(), &sf.source));
