@@ -10,10 +10,11 @@
 //! the call shape from `CallEffectInfo` (same App `NodeId`) so the effect ABI is
 //! never altered by specialization.
 //!
-//! Phase 0 is a behavior-neutral shell: it classifies nothing yet, so every
-//! dict method call site is implicitly `Dynamic`. Phase 1 fills the map.
+//! Keyed by the **outer `App` node id** — the same key `call_effects` uses
+//! (`CallEffectMap`) and the same id lowering passes to `lower_dict_method_call`
+//! — so the two maps join trivially at the call site.
 
-use crate::ast::{self, Decl, NodeId};
+use crate::ast::{self, Decl, Expr, ExprKind, NodeId};
 use std::collections::HashMap;
 
 /// How a single trait `DictMethodAccess` call site dispatches.
@@ -28,11 +29,26 @@ pub enum DictDispatch {
         dict_constructor: String,
         /// 0-based method slot in trait-declaration order.
         method_index: usize,
-        /// Dispatch for each sub-dictionary of a parameterized impl, in order.
-        /// Empty for a nullary (monomorphic) dict. A single `Dynamic` sub-dict
-        /// makes the whole call ineligible (all-or-nothing).
-        sub_dicts: Vec<DictDispatch>,
+        /// Sub-dictionary *values* of a parameterized impl, in order. Empty for
+        /// a nullary (monomorphic) dict. These are dictionary values, not method
+        /// call sites, so they carry no method index. A `Dynamic` sub-dict makes
+        /// the call ineligible for full specialization (all-or-nothing) — that
+        /// admission rule lives in the Phase 2 consumer, not here.
+        sub_dicts: Vec<DictValue>,
     },
+}
+
+/// A dictionary *value* passed as a sub-dictionary argument to a parameterized
+/// impl's dict constructor (e.g. the element dict in `ToJson (List a)`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DictValue {
+    /// Statically-known dict constructor, with its own resolved sub-dicts.
+    Known {
+        constructor: String,
+        sub_dicts: Vec<DictValue>,
+    },
+    /// Runtime dict value (where-bound param), or otherwise unresolved.
+    Dynamic,
 }
 
 /// Per-call-site trait dispatch facts, keyed by the `DictMethodAccess` App node.
@@ -40,18 +56,93 @@ pub type DictDispatchMap = HashMap<NodeId, DictDispatch>;
 
 /// Classify trait dictionary dispatch for a module.
 ///
-/// Phase 0 returns an empty map (every site stays on the default `Dynamic`
-/// path). `resolution` is threaded now because Phase 1 needs it to distinguish
-/// local from imported dict constructors.
+/// Classification is purely shape-based on the elaborated dict expression: a
+/// `DictRef` head resolves to `KnownImpl`; a `Var` (where-bound) head resolves
+/// to `Dynamic`. `resolution` is threaded for later phases (local-vs-imported
+/// gating lives in the consumer); classification itself does not need it.
 pub fn analyze(
     module_name: &str,
     program: &ast::Program,
     _resolution: &super::resolve::ResolutionMap,
 ) -> DictDispatchMap {
-    let map = DictDispatchMap::new();
+    let mut map = DictDispatchMap::new();
+    for decl in program {
+        match decl {
+            Decl::FunBinding { body, .. } => visit_expr(body, &mut map),
+            // Building-block and impl method bodies live here post-elaboration.
+            Decl::DictConstructor { methods, .. } => {
+                for method in methods {
+                    visit_expr(method, &mut map);
+                }
+            }
+            _ => {}
+        }
+    }
     maybe_trace(module_name, program, &map);
     map
 }
+
+fn visit_expr(expr: &Expr, map: &mut DictDispatchMap) {
+    if matches!(expr.kind, ExprKind::App { .. })
+        && let Some(dispatch) = classify_app(expr)
+    {
+        map.insert(expr.id, dispatch);
+    }
+    super::optimize::walk_expr(expr, &mut |child| visit_expr(child, map));
+}
+
+/// Classify an `App` whose peeled head is a `DictMethodAccess`. Returns `None`
+/// for any other call shape (those are not trait dispatch sites).
+fn classify_app(expr: &Expr) -> Option<DictDispatch> {
+    let (head, _args) = peel_app(expr);
+    match &head.kind {
+        ExprKind::DictMethodAccess {
+            dict, method_index, ..
+        } => Some(dispatch_for_dict(dict, *method_index)),
+        _ => None,
+    }
+}
+
+/// Resolve the dictionary expression of a method call to a dispatch fact.
+fn dispatch_for_dict(dict: &Expr, method_index: usize) -> DictDispatch {
+    let (head, sub_dict_exprs) = peel_app(dict);
+    match &head.kind {
+        ExprKind::DictRef { name } => DictDispatch::KnownImpl {
+            dict_constructor: name.clone(),
+            method_index,
+            sub_dicts: sub_dict_exprs.iter().map(|e| dict_value(e)).collect(),
+        },
+        // `Var` => where-bound runtime dict; anything else => not a static dict.
+        _ => DictDispatch::Dynamic,
+    }
+}
+
+/// Resolve a sub-dictionary argument (a dictionary *value*) to a `DictValue`.
+fn dict_value(expr: &Expr) -> DictValue {
+    let (head, sub_dict_exprs) = peel_app(expr);
+    match &head.kind {
+        ExprKind::DictRef { name } => DictValue::Known {
+            constructor: name.clone(),
+            sub_dicts: sub_dict_exprs.iter().map(|e| dict_value(e)).collect(),
+        },
+        _ => DictValue::Dynamic,
+    }
+}
+
+/// Peel a chain of `App` nodes, returning the innermost non-`App` head and the
+/// supplied arguments in source order.
+fn peel_app(expr: &Expr) -> (&Expr, Vec<&Expr>) {
+    let mut args: Vec<&Expr> = Vec::new();
+    let mut current = expr;
+    while let ExprKind::App { func, arg } = &current.kind {
+        args.push(arg.as_ref());
+        current = func;
+    }
+    args.reverse();
+    (current, args)
+}
+
+// --- Debug trace --------------------------------------------------------------
 
 fn source_module_name(module_name: &str, program: &ast::Program) -> String {
     program
@@ -84,7 +175,14 @@ fn maybe_trace(module_name: &str, program: &ast::Program, map: &DictDispatchMap)
 pub fn format_trace(subject: &str, map: &DictDispatchMap) -> String {
     let mut entries: Vec<(&NodeId, &DictDispatch)> = map.iter().collect();
     entries.sort_by_key(|(id, _)| id.0);
-    let mut out = format!("trait-dispatch[{subject}]: {} dict method call(s)", entries.len());
+    let known = entries
+        .iter()
+        .filter(|(_, d)| matches!(d, DictDispatch::KnownImpl { .. }))
+        .count();
+    let mut out = format!(
+        "trait-dispatch[{subject}]: {} dict method call(s), {known} known",
+        entries.len()
+    );
     for (id, dispatch) in entries {
         out.push_str(&format!("\n  app#{} {}", id.0, format_dispatch(dispatch)));
     }
@@ -98,17 +196,28 @@ fn format_dispatch(dispatch: &DictDispatch) -> String {
             dict_constructor,
             method_index,
             sub_dicts,
-        } => {
-            let subs: Vec<String> = sub_dicts.iter().map(format_dispatch).collect();
-            if subs.is_empty() {
-                format!("KnownImpl {dict_constructor}#{method_index}")
-            } else {
-                format!(
-                    "KnownImpl {dict_constructor}#{method_index} [{}]",
-                    subs.join(", ")
-                )
-            }
-        }
+        } => format!(
+            "KnownImpl {dict_constructor}#{method_index}{}",
+            format_sub_dicts(sub_dicts)
+        ),
+    }
+}
+
+fn format_sub_dicts(sub_dicts: &[DictValue]) -> String {
+    if sub_dicts.is_empty() {
+        return String::new();
+    }
+    let rendered: Vec<String> = sub_dicts.iter().map(format_dict_value).collect();
+    format!(" [{}]", rendered.join(", "))
+}
+
+fn format_dict_value(value: &DictValue) -> String {
+    match value {
+        DictValue::Dynamic => "Dynamic".to_string(),
+        DictValue::Known {
+            constructor,
+            sub_dicts,
+        } => format!("{constructor}{}", format_sub_dicts(sub_dicts)),
     }
 }
 
@@ -121,12 +230,12 @@ mod tests {
         let map = DictDispatchMap::new();
         assert_eq!(
             format_trace("Example", &map),
-            "trait-dispatch[Example]: 0 dict method call(s)"
+            "trait-dispatch[Example]: 0 dict method call(s), 0 known"
         );
     }
 
     #[test]
-    fn format_trace_orders_by_node_id() {
+    fn format_trace_orders_by_node_id_and_counts_known() {
         let mut map = DictDispatchMap::new();
         map.insert(NodeId(7), DictDispatch::Dynamic);
         map.insert(
@@ -139,25 +248,37 @@ mod tests {
         );
         assert_eq!(
             format_trace("M", &map),
-            "trait-dispatch[M]: 2 dict method call(s)\n  \
+            "trait-dispatch[M]: 2 dict method call(s), 1 known\n  \
              app#2 KnownImpl __dict_ToJson_Person#0\n  app#7 Dynamic"
         );
     }
 
     #[test]
-    fn format_dispatch_renders_nested_sub_dicts() {
+    fn format_renders_nested_known_sub_dicts() {
         let dispatch = DictDispatch::KnownImpl {
             dict_constructor: "__dict_ToJson_List".to_string(),
             method_index: 0,
-            sub_dicts: vec![DictDispatch::KnownImpl {
-                dict_constructor: "__dict_ToJson_Int".to_string(),
-                method_index: 0,
+            sub_dicts: vec![DictValue::Known {
+                constructor: "__dict_ToJson_Int".to_string(),
                 sub_dicts: vec![],
             }],
         };
         assert_eq!(
             format_dispatch(&dispatch),
-            "KnownImpl __dict_ToJson_List#0 [KnownImpl __dict_ToJson_Int#0]"
+            "KnownImpl __dict_ToJson_List#0 [__dict_ToJson_Int]"
+        );
+    }
+
+    #[test]
+    fn format_renders_dynamic_sub_dict() {
+        let dispatch = DictDispatch::KnownImpl {
+            dict_constructor: "__dict_ToJson_List".to_string(),
+            method_index: 0,
+            sub_dicts: vec![DictValue::Dynamic],
+        };
+        assert_eq!(
+            format_dispatch(&dispatch),
+            "KnownImpl __dict_ToJson_List#0 [Dynamic]"
         );
     }
 }

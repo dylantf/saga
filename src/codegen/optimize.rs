@@ -272,7 +272,10 @@ fn hof_body_supported(expr: &Expr) -> bool {
     }
 }
 
-fn walk_expr(expr: &Expr, visit: &mut impl FnMut(&Expr)) {
+/// Visit an expression's immediate sub-expressions. Shared with sibling
+/// optimizer-fact passes (e.g. `trait_dispatch`) so AST traversal stays in one
+/// place rather than drifting across copies.
+pub(super) fn walk_expr(expr: &Expr, visit: &mut impl FnMut(&Expr)) {
     match &expr.kind {
         ExprKind::App { func, arg } => {
             visit(func);
