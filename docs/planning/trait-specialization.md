@@ -13,7 +13,23 @@ Phases 0–3 are done and committed (`a4fd655`, `85fa3b4`, `05ed117`, `d5a4b63`,
 | 1 Classify | shape-based `KnownImpl`/`Dynamic` | done (committed) |
 | 2 Local direct call | hoist local nullary methods; `FunRef` call | done (committed) |
 | 3 Cross-module | export hoisted methods; remote `call` | done (committed) |
-| 4 Inline + case-of-ctor | collapse the `parameterized` walk | **next** |
+| 4a Inline parameterized | `generic_fold.rs`: inline local parameterized dict chains | done (committed) |
+| 4b Case-of-ctor + Phase 5 | cancel `Rep` ctors once `to x` is inlined | **next** |
+
+**Phase 4a** (`generic_fold.rs`, commit `dd282b9`) added an elaborated-AST pass
+that inlines statically-known *parameterized* dict-method calls on **local**
+impls: the conditional impl's method lambda is β-reduced (with `where`-bound dict
+params substituted by the concrete sub-dicts) into nested single-arm `case`s that
+bottom out at a nullary/monomorphic dict call. Runs after `normalize_effects`,
+before `resolve`, so all NodeId-keyed analyses recompute over the rewritten tree;
+meaning-preserving so the effect ABI is untouched (Anchor 2). In-module
+parameterized fallbacks now collapse fully (06: `1→0`; 99f: `10→0`, zero
+`element/2`). **Still on the dict path:** cross-module parameterized impls (the
+method body isn't local — needs producer bodies; a 4a-cross-module follow-up or
+Phase 5), and the `Rep` constructor allocations themselves (need
+`case_of_known_constructor` + inlined `to x`, which is 4b/Phase 5). `case_of_
+known_constructor` was deliberately deferred to 4b — 4a's scrutinees are
+variables, so nothing exercises it until `to x` is inlined.
 
 ### Code map
 
@@ -324,7 +340,15 @@ Acceptance (met):
 
 ### Phase 4 — The two trait-neutral rewrites
 
-- `inline_known_impl_body`: pull the method `Lambda` from
+**Split into 4a (done) and 4b (next).** 4a implemented `inline_known_impl_body`
+for **local parameterized** dict chains in `src/codegen/generic_fold.rs` (commit
+`dd282b9`). `case_of_known_constructor` and the collapse-before-inline ordering
+were deferred to 4b: 4a's scrutinees are always variables (the `Rep` value
+arrives via `to x`, not yet inlined), so there is no known-constructor scrutinee
+to cancel until Phase 5 inlines `to`. 4b therefore lands alongside the Phase 5
+`m … (to x)` trigger, which is the only thing that exercises the rewrite.
+
+- `inline_known_impl_body` (4a, done): pull the method `Lambda` from
   `DictConstructor.methods[i]` and β-reduce against the call arguments.
 - `case_of_known_constructor`: rewrite `case (Con …) { Con x -> e }` to
   `e[x := …]`.

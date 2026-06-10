@@ -881,6 +881,57 @@ main () = greet 42 \"hi\"
     );
 }
 
+#[test]
+fn parameterized_dict_chain_is_inlined_in_module() {
+    // Phase 4a (generic fold): a statically-known *parameterized* dict-method
+    // call on a local impl is inlined — the conditional impl's method body is
+    // beta-reduced into a `case` over the argument whose body dispatches through
+    // the concrete sub-dictionary, collapsing the dict chain. Here `encode b`
+    // with `b : Box Int` dispatches `__dict_Encodable_Box(__dict_Encodable_Int)`;
+    // after folding it becomes `case b of Box x -> <direct Int-method call>`,
+    // with no dict tuple build and no `element/2` projection for the chain.
+    let src = "
+trait Encodable a { fun encode : (x: a) -> Int }
+type Box a = Box a
+impl Encodable for Int { encode x = x }
+impl Encodable for Box a where {a: Encodable} { encode (Box x) = encode x }
+fun run : (b: Box Int) -> Int
+run b = encode b
+main () = run (Box 5)
+";
+    let out = emit_elaborated(src);
+    let run_fn = emitted_function(&out, "run", 1);
+    assert!(
+        run_fn.contains("_script_Box")
+            && run_fn.contains("apply '__saga_dictmethod___dict_Encodable_Std_Int_Int_0'/1("),
+        "expected `run` to destructure Box and call the Int method directly\n{run_fn}"
+    );
+    assert!(
+        !run_fn.contains("element("),
+        "expected no element/2 dict projection in the inlined chain\n{run_fn}"
+    );
+}
+
+#[test]
+fn effectful_parameterized_dict_chain_threads_evidence_through_inline() {
+    // The inlined parameterized chain must still thread evidence: an effectful
+    // conditional impl folded into nested cases keeps `_Evidence`/`_ReturnK`
+    // flowing to the leaf call (Anchor 2: specialization swaps callees, never the
+    // effect ABI). Runs on BEAM to prove the fold is sound, not just shaped right.
+    let src = "
+effect Options { fun get_options : Unit -> Int }
+handler options_10 for Options { get_options () = resume 10 }
+trait Encodable a { fun encode : (x: a) -> Int needs {Options} }
+type Box a = Box a
+impl Encodable for Int needs {Options} { encode x = x + get_options! () }
+impl Encodable for Box a where {a: Encodable} needs {Options} { encode (Box x) = encode x }
+fun run : (b: Box Int) -> Int needs {Options}
+run b = encode b
+main () = run (Box 5) with options_10
+";
+    assert_runs_and_stdout_contains(src, &["15"]);
+}
+
 // --- Built-in Show dispatch ---
 
 #[test]
