@@ -1,0 +1,107 @@
+module GenericTojsonFusionTest
+
+import Std.Generic (Generic, U1, Leaf, Labeled, And, Or, Variant, Record, Adt)
+import Std.Test (Testing, describe, test, assert_eq)
+
+# Phase 5 (Rep-cancellation fusion): a routed-derive delegating impl
+# `encode x = encode (to x)` inlines `to` (the Generic `Rep` builder) and the
+# building-block codec, cancelling the intermediate `Record`/`And`/`Labeled`/
+# `Leaf`/`Adt`/`Or`/`Variant`/`U1` constructors against the codec's case-matches.
+#
+# This is a correctness guard for that cancellation. The fold's substitution must
+# be capture-avoiding: bottom-up folding nests inlined bodies that all name their
+# payload `inner`/`x`, so the same binder is shadowed at several depths. A naive
+# substitution rewrites the shadowed occurrences too, producing a type-wrong
+# `case Adt of Variant` that badmatches at runtime. If fusion regresses that way,
+# the assertions below crash rather than return the wrong string.
+#
+# Both Rep shapes are exercised: a record (Record/And/Labeled/Leaf) and a
+# multi-variant ADT with a nullary and a payload variant (Adt/Or/Variant/U1/Leaf).
+
+trait Encodable a {
+  fun encode : a -> String
+}
+
+impl Encodable for Int {
+  encode x = show x
+}
+
+impl Encodable for U1 {
+  encode _ = ""
+}
+
+impl Encodable for Leaf a where {a: Encodable} {
+  encode (Leaf x) = encode x
+}
+
+impl Encodable for Labeled (n : Symbol) a where {a: Encodable} {
+  encode (Labeled x) = encode x
+}
+
+impl Encodable for And l r where {l: Encodable, r: Encodable} {
+  encode (And l r) = encode l <> "," <> encode r
+}
+
+impl Encodable for Or l r where {l: Encodable, r: Encodable} {
+  encode o = case o {
+    Or_Left l -> encode l
+    Or_Right r -> encode r
+  }
+}
+
+impl Encodable for Variant (n : Symbol) a where {a: Encodable} {
+  encode (Variant inner) = "<" <> encode inner <> ">"
+}
+
+impl Encodable for Record a where {a: Encodable} {
+  encode (Record _ inner) = "{" <> encode inner <> "}"
+}
+
+impl Encodable for Adt a where {a: Encodable} {
+  encode (Adt _ inner) = encode inner
+}
+
+record Point {
+  x: Int,
+  y: Int,
+} deriving (Generic)
+
+impl Encodable for Rep__Point {
+  encode (Rep__Point inner) = encode inner
+}
+
+# Delegating impl — the fusion trigger for the record shape.
+impl Encodable for Point {
+  encode p = encode (to p : Rep__Point)
+}
+
+type Shape =
+  | Dot
+  | Line Int
+  deriving (Generic)
+
+impl Encodable for Rep__Shape {
+  encode (Rep__Shape inner) = encode inner
+}
+
+# Delegating impl — the fusion trigger for the ADT shape.
+impl Encodable for Shape {
+  encode s = encode (to s : Rep__Shape)
+}
+
+pub fun tests : Unit -> Unit needs {Testing}
+tests () = {
+  describe "Generic deriving: Phase 5 encode-direction fusion correctness" (fun () -> {
+    test "record fields encode in order (Record/And/Labeled/Leaf)" (fun () -> {
+      assert_eq (encode (Point { x: 1, y: 2 })) "{1,2}"
+    })
+
+    test "nullary ADT variant encodes (Adt/Or_Left/Variant/U1)" (fun () -> {
+      assert_eq (encode Dot) "<>"
+    })
+
+    test "payload ADT variant encodes (Adt/Or_Right/Variant/Leaf)" (fun () -> {
+      assert_eq (encode (Line 5)) "<5>"
+    })
+  })
+}

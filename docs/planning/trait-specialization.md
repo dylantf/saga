@@ -1,24 +1,30 @@
 # Trait Specialization And Generic Folding
 
-Status: **Phases 0–3 implemented; Phase 4 next.**
+Status: **Phases 0–5 done. Phase 5 (Rep-cancellation fusion) works on the
+encode/`to` direction — derived codecs lose the intermediate `Rep` tree. Phase 5
+is not yet committed (pending review). Phase 6 (from/decode mirror) is next.**
 
 ## Implementation Status & Handoff (2026-06-10)
 
-Phases 0–3 are done and committed (`a4fd655`, `85fa3b4`, `05ed117`, `d5a4b63`,
-`b88fe38`). Phase 4 (the trait-neutral rewrites) is the next step.
+Phases 0–4a-x are done and committed (`a4fd655`, `85fa3b4`, `05ed117`, `d5a4b63`,
+`b88fe38`, `dd282b9`, `631f7a2`, `40b5b13`, `18c03c1`). Phase 5 is implemented and
+validated but **not yet committed** (see the Phase 5 section below for the
+ready-to-commit changes and their suggested commit order).
 
-| Phase | What it does | Status |
-| --- | --- | --- |
-| 0 Facts shell | `DictDispatchMap` in `OptimizationFacts` | done (committed) |
-| 1 Classify | shape-based `KnownImpl`/`Dynamic` | done (committed) |
-| 2 Local direct call | hoist local nullary methods; `FunRef` call | done (committed) |
-| 3 Cross-module | export hoisted methods; remote `call` | done (committed) |
-| 4a Inline parameterized (local) | `generic_fold.rs`: inline local parameterized dict chains | done (committed) |
-| 4a-x Inline parameterized (cross-module) | inline external impl bodies; carry producer resolution; export-all | done |
-| 4b Case-of-ctor + Phase 5 | cancel `Rep` ctors once `to x` is inlined | **next** |
+| Phase                                    | What it does                                                       | Status                                         |
+| ---------------------------------------- | ------------------------------------------------------------------ | ---------------------------------------------- |
+| 0 Facts shell                            | `DictDispatchMap` in `OptimizationFacts`                           | done (committed)                               |
+| 1 Classify                               | shape-based `KnownImpl`/`Dynamic`                                  | done (committed)                               |
+| 2 Local direct call                      | hoist local nullary methods; `FunRef` call                         | done (committed)                               |
+| 3 Cross-module                           | export hoisted methods; remote `call`                              | done (committed)                               |
+| 4a Inline parameterized (local)          | `generic_fold.rs`: inline local parameterized dict chains          | done (committed `dd282b9`)                     |
+| 4a-x Inline parameterized (cross-module) | inline external impl bodies; carry producer resolution; export-all | done (committed `631f7a2`,`40b5b13`,`18c03c1`) |
+| 5 Rep-cancellation fusion                | inline `to x` + codec, cancel `Rep` tree (encode/`to` direction)   | done (uncommitted — see Phase 5 section)       |
+| 6 Decode mirror                          | same for `from`/decode direction                                   | not started                                    |
+| 7 Dict-arg pruning                       | drop dead dict args after fusion                                   | not started                                    |
 
 **Phase 4a-x** (cross-module) extends the fold to inline parameterized impl
-bodies defined in *other* modules. Two enabling changes: (1) **export-all in
+bodies defined in _other_ modules. Two enabling changes: (1) **export-all in
 Core** — every function is exported (privacy is a front-end concern), so an
 inlined producer body's private-helper calls can lower to
 `call 'producer':'helper'`; (2) **carried resolution** — `fold_program` now takes
@@ -36,14 +42,14 @@ consumer" move. saga_json now specializes **100%** of known dict-method sites
 One follow-on fix the cross-module fold required: the saturation guard's arity
 lookup (`dict_method_user_arity` in `calls.rs`) falls back to the dict
 constructor's own method-lambda arity (via `ctx.modules`) when the trait isn't in
-the consumer's registry. A *dependency's internal trait* (e.g. saga_json's
+the consumer's registry. A _dependency's internal trait_ (e.g. saga_json's
 `VariantPayload`) is never imported by the consumer, so it's absent from
 `check_result.traits` and `module_check_results`; it surfaces only because an
 inlined producer body calls it. The impl method lambda carries the full param
 list (eta-soundness), so its arity equals the trait arity.
 
 **Phase 4a** (`generic_fold.rs`, commit `dd282b9`) added an elaborated-AST pass
-that inlines statically-known *parameterized* dict-method calls on **local**
+that inlines statically-known _parameterized_ dict-method calls on **local**
 impls: the conditional impl's method lambda is β-reduced (with `where`-bound dict
 params substituted by the concrete sub-dicts) into nested single-arm `case`s that
 bottom out at a nullary/monomorphic dict call. Runs after `normalize_effects`,
@@ -57,6 +63,125 @@ Phase 5), and the `Rep` constructor allocations themselves (need
 known_constructor` was deliberately deferred to 4b — 4a's scrutinees are
 variables, so nothing exercises it until `to x` is inlined.
 
+## Phase 5 (Rep-cancellation fusion) — DONE
+
+**Goal (option A, achieved):** cancel the intermediate `Rep` constructor tree in
+the encode/`to` direction. Result = "no `Rep` tree, direct field encodes",
+trait-agnostic (works for `ToJson`/`PostgresRow`/`CsvRow` — keys off `Generic`
+routing, not any codec). We are **NOT** putting JSON-specific knowledge in the
+compiler: the further `object [(k,io)…] → concat [raw …]` step (byte-identical
+hand-written shape) is explicitly **out of scope** — to be done in-library later.
+
+### Result
+
+On `~/projects/json_bench/saga` (`CodecPathDerived`, real 7-field nested `User`
+with a `Maybe`, an ADT `Role`, a nested record, and a `List`):
+
+- The derived `ToJson User` delegating impl now folds to **direct field
+  encodes** — `__p1.id`, `__p1.name`, `case __p1.age of {Nothing|Just}`,
+  `to_json __p0 __p1.role`, … — with **zero `Rep` constructor allocations** on
+  the hot path. The `Rep__User`/`Record`/`And`/`Labeled`/`Leaf` walk is gone;
+  the `__dict_…_ToJson_…_Rep__User` building-block codec is now dead on this path
+  (still emitted as an exported dict method, just unreferenced).
+- Encode median (100k records, `--release`): **283 ms → 209 ms** (hand-written
+  target = 119 ms). Decode is unchanged (~476 ms) — that's the `from` direction,
+  which is Phase 6. The residual encode gap to hand-written is the in-library
+  `object → concat [raw …]` representation step (out of scope, as agreed).
+- saga_json: still builds, **100% specialized** (every module `N | N | 0 fell
+back`), all **280** library tests pass.
+
+### The engine (`src/codegen/generic_fold.rs`)
+
+`fold_expr` is now **bottom-up + fuel-bounded fixpoint** (simplify children, then
+re-apply `rewrite_once` at the node until no rule fires). `rewrite_once` applies,
+collapse-before-inline:
+
+1. **strip `Ascription`** (erased at codegen; lets rewrites see through `(to x :
+Rep__T)`).
+2. **`case_of_known_constructor`** — `case Con(args) of {…Con pats -> e…}` →
+   bind `pats:=args`, drop other arms. Restricted to **`Rep` constructors only**
+   (`is_rep_ctor`: `U1/Leaf/Labeled/And/Or_Left/Or_Right/Variant/Record/Adt` or
+   `Rep__*`) so it never touches arbitrary user/stdlib codecs. Constructor names
+   are compared on their **base** (`base_name`): `to` writes fully-qualified
+   `Std.Generic.Adt`, impl patterns carry the unqualified `Adt`.
+3. **`float_case_out_of_arg`** — `f (case s of p -> e)` → `case s of p -> f e`,
+   gated on an arm body being a `Rep` ctor (so it unblocks an inline). Floats the
+   codec into the arm where `to`'s constructor is visible.
+4. **selective nullary inlining** in `try_inline` (4a only inlined
+   parameterized): also inline a nullary dict body when it's `Std.Generic.Generic`
+   `to` (method 0), or when an arg is a known `Rep` ctor (codec walking a known
+   `Rep`). Parameterized dicts (4a) always inline.
+
+β-reduction is `bind_subpats(params, args, body)`, used by both `try_inline` and
+`case_of_known_constructor`.
+
+### Two load-bearing correctness findings (do not regress)
+
+1. **Capture-avoiding substitution is mandatory.** Bottom-up folding nests
+   inlined bodies that all reuse the same binder name (every building-block codec
+   names its payload `inner`/`x`; freshening only refreshes NodeIds, _not_
+   names), so a single name is shadowed at several depths: the post-fold body of
+   `Encodable Rep__User` is `case inner of {Adt _ inner -> case inner of {Variant
+inner -> …}}`. A naive `substitute_var(inner := Adt(…))` rewrote the shadowed
+   scrutinees too, producing the type-wrong `case Adt of Variant` that badmatches
+   at runtime (this was the original blocker). `substitute_var` now stops at any
+   sub-scope that re-binds the name (`Case` arms, `Lambda`/handler params, `Block`
+   `let`/`letfun`, `Do`, `ListComprehension`, `Receive` — see `pat_binds`).
+2. **`bind_subpats` must preserve effect semantics.** The committed 4a always
+   case-wrapped each arg (`case arg of pat -> body`), evaluating it exactly once.
+   Substituting instead (needed to expose constructors for cancellation) would
+   re-run or drop effects. So `bind_subpats` only substitutes a `Var`/`Wildcard`
+   parameter when the argument **`is_duplicable`** (pure & cheap: var, literal,
+   field access, constructor application of duplicables, …); a non-duplicable
+   argument is let-bound (single-arm `case`) exactly like before. `to`'s `Rep`
+   trees are built from field accesses / literals / ctor apps → duplicable, which
+   is what lets fusion proceed without changing effects.
+
+### Resolution of freshened inlined nodes (the other fix in the tree)
+
+Freshening inlined bodies **orphans id-keyed resolution** — `resolve_expr`
+resolves non-local refs via `front_resolution.value(expr.id)` (by NodeId), so a
+freshened plain/`@external` function ref (e.g. `Set`'s `to_list`, in its
+parameterized `Debug` impl) lowered as an **unbound variable** and broke stdlib.
+**Fix (`src/codegen/resolve.rs`):** in the `Var` `None` arm, fall back to
+**name-based** resolution (`scope.resolve_unqualified(name)`). Sound (the inlined
+ref is in this module's scope), fixes a latent 4a hazard, and obviates the
+`carried_front` plumbing that an earlier draft was building — local inlines now
+resolve by name; only cross-module inlines need the backend-resolution carry
+(`carried_resolution`, which already existed and is unchanged).
+
+### What's in the tree (suggested commit order — user commits)
+
+1. `src/codegen/resolve.rs` — the name-fallback fix. Correct and foundational on
+   its own (fixes a latent 4a hazard); commit standalone first.
+2. `src/codegen/generic_fold.rs` — the Phase 5 engine (bottom-up fixpoint,
+   `rewrite_once`, `case_of_known_constructor`/`float_case_out_of_arg`, capture-
+   avoiding `substitute_var`, effect-safe `bind_subpats`/`is_duplicable`), plus
+   `examples/optimization/trait-method-specialization/07-generic-fusion.saga`
+   (the in-module miniature) and
+   `tests/e2e/tests/generic_tojson_fusion_test.saga` (BEAM correctness regression
+   for both `Rep` shapes — record and ADT — which is exactly what crashes if the
+   capture-avoidance regresses).
+
+### Validation run this session
+
+- `cargo test`: full suite green (1007 + 142 + 94 + 68 + e2e/stdlib = all pass),
+  `cargo clippy` clean.
+- 07 fuses to `case x of {User __x0 -> Encodable_Int.encode __x0}` (the `Int`
+  encode is the identity), **0** `Rep` allocations, runtime `"5"`.
+- New e2e test (`generic_tojson_fusion_test`) passes on BEAM: record `{1,2}`,
+  nullary ADT variant `<>`, payload ADT variant `<5>`.
+- saga_json + json_bench as above.
+
+### Next: Phase 6 (decode mirror), Phase 7 (dict-arg pruning)
+
+Phase 6 mirrors this for the `from`/decode direction (decode currently
+unchanged). The shape is `from x = from_ctor (from x)` — the codec produces a
+`Rep` value that the synthesized `from` then _consumes_ via a `case`; fusion is
+the dual (push the `from` case into the codec's constructor-producing arms). The
+`is_duplicable`/capture-avoidance machinery carries over. Phase 7 prunes dict
+args that become dead after fusion.
+
 ### Code map
 
 - **Classification** — `src/codegen/trait_dispatch.rs`:
@@ -68,7 +193,7 @@ variables, so nothing exercises it until `to x` is inlined.
   methods, exported), `method_cps_shape`; dict-constructor lowering emits
   `__saga_dictmethod_<dict>_<idx>`, exports it, and references it (`FunRef`) from
   the dict tuple. `dict_method_hoists: HashMap<(dict, idx), HoistedDictMethod {
-  fn_name, user_arity, is_cps }>` lives on the `Lowerer`.
+fn_name, user_arity, is_cps }>` lives on the `Lowerer`.
 - **Specialization (consumer)** — `src/codegen/lower/calls.rs`:
   `specialized_dict_method_callee` (records stats) → `classify_dict_specialization`
   (pure decision). `CpsCallee { Value, Remote }` threads through
@@ -88,7 +213,7 @@ variables, so nothing exercises it until `to x` is inlined.
 - Hoisted name `__saga_dictmethod_<full canonical dict name>_<idx>` is
   deterministic and globally canonical, so the consumer reconstructs it with no
   exported fact (this is why Phase 3 needed **no** `TraitImplMethodInfo`).
-- Anchor 2 holds: specialization swaps only the *callee*; arg/evidence/return-K
+- Anchor 2 holds: specialization swaps only the _callee_; arg/evidence/return-K
   threading is unchanged. `cps` comes from `CallEffectInfo`.
 - Only **nullary** dicts hoist (capture-free). Parameterized dicts (non-empty
   `sub_dicts`) are the Phase 4 target.
@@ -102,10 +227,19 @@ variables, so nothing exercises it until `to x` is inlined.
   correctly falls back (`unsaturated`); it does not regress this. Root cause:
   `collect_dict_method_call` greedily collects all `App` args.
 
-### Stats baselines (regression watch — all remaining fallbacks are `parameterized`)
+### Stats baselines (regression watch)
+
+After Phase 5, **saga_json specializes 100%** — every module reports
+`N | N | 0 fell back` (`SAGA_STATS=trait-spec saga build`), including the
+derive-heavy ones (`EncodeDerive 26|26|0`, `DecodeDerive 34|34|0`). The site
+counts rose vs the 4a-x baselines below because Phase 5 inlines the nullary
+`Generic.to` and the codec walk that 4a left on the dict path; the invariant is
+**zero fallbacks**, not a fixed count.
+
+Pre-Phase-5 (4a-x) baselines, kept for history:
 
 - `examples/99f-generic-derived-tojson`: `32 known | 22 specialized | 10 fell
-  back (10 parameterized)`.
+back (10 parameterized)`.
 - saga_json `EncodeDerive`: `21 | 18 | 3 parameterized`;
   `EncodeDeriveCustom`: `33 | 28 | 5 parameterized`.
 - `cross-module-dict-specialization/02-imported-concrete-method`: `Lib 1/1`,
@@ -154,7 +288,7 @@ Explicit non-goals (we are not building GHC-grade class optimization):
 
 Trait-agnostic by construction: every routed derive (`ToJson`, `FromJson`,
 `PostgresRow`, `CsvRow`, …) is synthesized by the same `derive_routed`
-machinery, so the folding driver matches the routing *shape*, not any particular
+machinery, so the folding driver matches the routing _shape_, not any particular
 trait. Only leaf impls differ, and those resolve as ordinary known-impl calls.
 
 ## Design Anchors
@@ -185,7 +319,7 @@ is how the optimization honors "traits carry effect rows": it never alters the
 effect shape. An effectful `PostgresRow` method specializes exactly like a pure
 `ToJson` method — same evidence threading, cheaper callee.
 
-### 3. Facts say *which impl*; lowering joins *what shape*
+### 3. Facts say _which impl_; lowering joins _what shape_
 
 `DictDispatch` carries impl identity only. At lowering time the consumer
 cross-references the existing `CallEffectInfo`
@@ -292,7 +426,7 @@ Acceptance:
   `__method_{dict}_{i}`. Join with `call_effects` for threading (unchanged).
 - Parameterized dicts (non-empty `sub_dicts`) are deferred to a sub-phase: the
   method captures sub-dict params, which must be threaded explicitly. Admission
-  is **all-or-nothing on sub-dicts** — only specialize when *every* constructor
+  is **all-or-nothing on sub-dicts** — only specialize when _every_ constructor
   sub-dict arg is itself statically known (e.g.
   `__dict_Encodable_Box(__dict_Encodable_Int)`); inline the outer method and
   continue through the inner dispatch. A single `Dynamic` sub-dict makes the whole
@@ -316,7 +450,7 @@ those functions and has importers **call them remotely**.
 What was actually implemented:
 
 - **Producer (supply-driven hoisting).** `plan_dict_method_hoists` now hoists
-  *every* local nullary dict method, not only the ones with a local call site,
+  _every_ local nullary dict method, not only the ones with a local call site,
   and the dict-constructor lowering **exports** each hoisted function. A producer
   can't know which of its dicts an importer will specialize, and separate
   compilation means we can't add the function later — so it hoists all of them
@@ -332,7 +466,7 @@ What was actually implemented:
 
 Why this is simpler than the plan's original shape:
 
-- **No `TraitImplMethodInfo` export needed.** The consumer *derives* everything:
+- **No `TraitImplMethodInfo` export needed.** The consumer _derives_ everything:
   the hoisted name is deterministic from the (globally canonical) dict name + the
   method index; the Erlang module comes from resolving the `DictRef`; the arity
   is `supplied + (cps ? 2 : 0)`, where `cps` comes from `CallEffectInfo` (which
@@ -341,14 +475,14 @@ Why this is simpler than the plan's original shape:
 - **No private-helper policy.** Because the body stays in its defining module and
   is called remotely (not cloned into the caller), private helpers it calls are
   always in scope. The whole private-helper-cloning problem evaporates. (Body
-  *inlining* — and with it the private-helper question — only returns at
+  _inlining_ — and with it the private-helper question — only returns at
   Phase 4/5, where the Generic fold genuinely needs the body caller-local.)
 - The open design question is still resolved the same way: per-method effects are
   the boundary (`cps` is per-method via `CallEffectInfo`/`method_cps_shape`), not
   impl-level `needs`.
 
 Tradeoff vs. clone-caller-local: a remote call has marginally more overhead than
-an inlined body, but it is still a *direct* call (no dict tuple build, no
+an inlined body, but it is still a _direct_ call (no dict tuple build, no
 `element/2`), which is Phase 3's whole point. Inlining for further speedup is the
 Phase 5 fusion track.
 
@@ -382,7 +516,7 @@ to cancel until Phase 5 inlines `to`. 4b therefore lands alongside the Phase 5
 Both are completely trait- and derive-agnostic.
 
 **Ordering matters** (the key insight from selective-uniform — Salvage §3):
-collapse the `Rep` constructor case-match *first*, then β-reduce the method
+collapse the `Rep` constructor case-match _first_, then β-reduce the method
 lambda, then re-collapse. If you inline before collapsing, the size/fuel budget
 sees the unfolded `Rep` tree and rejects the fusion. The cycle is
 `case_of_known_constructor → inline_known_impl_body → case_of_known_constructor`,
@@ -472,13 +606,13 @@ Verified against the worktree:
    dependency fixpoint (Phase 3); dict-argument pruning (Phase 7).
 
 3. **Generic-branch-collapse ordering** (`lower_selective/direct.rs`,
-   `lower_selective/known_values.rs`): collapse known-constructor case *before*
+   `lower_selective/known_values.rs`): collapse known-constructor case _before_
    the inliner's size budget runs (Phase 4). Rewrite the algorithm on elaborated
    AST; the **sequencing and termination guards** are the salvage, not the code.
 
 4. **Fixtures** (pure `.saga`, no IR coupling — port directly):
    `examples/optimization/cross-module-dict-specialization/{06-imported-derived-dict-chain,
-   07-imported-dict-private-helper, 08-imported-derived-impl-ladder}` (Phase 3/5);
+07-imported-dict-private-helper, 08-imported-derived-impl-ladder}` (Phase 3/5);
    `selective-uniform/{34-effectful-trait-method, 35-generic-effectful-trait-method}`
    (Phase 2 "evidence still threads" acceptance).
 
@@ -492,7 +626,7 @@ Core merge; the direct/uniform dict-adapter lattice; imported-fact reconstructio
 by re-translating modules.
 
 **On the branch's benchmark verdict:** its "specialization didn't beat main on
-no-effect JSON" was the CPS-everywhere substrate tax, *not* evidence against
+no-effect JSON" was the CPS-everywhere substrate tax, _not_ evidence against
 specialization. Discard the verdict; **keep its failure-mode checklist** as
 Phase 5 acceptance gates: does the optimization reach the hot path? does it emit
 worse Core? do fallback adapters reintroduce dynamic dispatch? does inlining

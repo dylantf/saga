@@ -590,7 +590,16 @@ fn resolve_expr(
                             map.insert(expr.id, scoped_to_resolved(scoped));
                         }
                     }
-                    None => {}
+                    // No front-end entry for this id. This is the normal case for
+                    // a node the generic fold synthesized by inlining (fresh
+                    // NodeId, so the id-keyed front resolution misses). Fall back
+                    // to name-based resolution in the current scope — sound
+                    // because the inlined reference lives in this module's scope.
+                    None => {
+                        if let Some(scoped) = scope.resolve_unqualified(name) {
+                            map.insert(expr.id, scoped_to_resolved(scoped));
+                        }
+                    }
                 }
             }
             // If locally bound or not in module scope -> not in map ->
