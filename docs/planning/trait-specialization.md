@@ -1,6 +1,75 @@
 # Trait Specialization And Generic Folding
 
-Status: **draft plan**.
+Status: **Phases 0–3 implemented; Phase 4 next.**
+
+## Implementation Status & Handoff (2026-06-10)
+
+Phases 0–3 are done and committed (`a4fd655`, `85fa3b4`, `05ed117`, `d5a4b63`,
+`b88fe38`). Phase 4 (the trait-neutral rewrites) is the next step.
+
+| Phase | What it does | Status |
+| --- | --- | --- |
+| 0 Facts shell | `DictDispatchMap` in `OptimizationFacts` | done (committed) |
+| 1 Classify | shape-based `KnownImpl`/`Dynamic` | done (committed) |
+| 2 Local direct call | hoist local nullary methods; `FunRef` call | done (committed) |
+| 3 Cross-module | export hoisted methods; remote `call` | done (committed) |
+| 4 Inline + case-of-ctor | collapse the `parameterized` walk | **next** |
+
+### Code map
+
+- **Classification** — `src/codegen/trait_dispatch.rs`:
+  `DictDispatch { Dynamic, KnownImpl { dict_constructor, method_index, sub_dicts } }`,
+  `DictValue`, `analyze()`. Keyed by the **outer `App` `NodeId`** (same key as
+  `call_effects`). `SAGA_DEBUG_TRAIT_DISPATCH` traces it.
+- **Hoisting (producer)** — `src/codegen/lower/module.rs`:
+  `plan_dict_method_hoists` (supply-driven — hoists **all** local nullary dict
+  methods, exported), `method_cps_shape`; dict-constructor lowering emits
+  `__saga_dictmethod_<dict>_<idx>`, exports it, and references it (`FunRef`) from
+  the dict tuple. `dict_method_hoists: HashMap<(dict, idx), HoistedDictMethod {
+  fn_name, user_arity, is_cps }>` lives on the `Lowerer`.
+- **Specialization (consumer)** — `src/codegen/lower/calls.rs`:
+  `specialized_dict_method_callee` (records stats) → `classify_dict_specialization`
+  (pure decision). `CpsCallee { Value, Remote }` threads through
+  `lower_runtime_cps_apply` (`.apply()` emits `Apply` or `Call`). Local →
+  `FunRef`; imported → `call 'mod':'__saga_dictmethod_...'`. Saturation guard via
+  `trait_method_user_arity`; producer module via `imported_dict_erlang_mod`
+  (resolves the `DictRef`). The two hook sites: CPS path in
+  `lower_dict_method_call`, pure path in `lower_app_expr` (guarded
+  `!expr_is_effectful_call`). `collect_dict_method_call` (util.rs) now also
+  returns `trait_name`.
+- **Stats** — `src/codegen/lower/trait_spec_stats.rs`: `SAGA_STATS=trait-spec`;
+  `FallbackReason { Imported, Parameterized, Unsaturated, AbiMismatch }`. See the
+  README "Diagnostics" section.
+
+### Invariants & findings (don't re-derive)
+
+- Hoisted name `__saga_dictmethod_<full canonical dict name>_<idx>` is
+  deterministic and globally canonical, so the consumer reconstructs it with no
+  exported fact (this is why Phase 3 needed **no** `TraitImplMethodInfo`).
+- Anchor 2 holds: specialization swaps only the *callee*; arg/evidence/return-K
+  threading is unchanged. `cps` comes from `CallEffectInfo`.
+- Only **nullary** dicts hoist (capture-free). Parameterized dicts (non-empty
+  `sub_dicts`) are the Phase 4 target.
+- **Eta soundness**: impl methods must carry the full parameter list — the
+  typechecker rejects eta-reduced/point-free impls (`greet n = prepend n` →
+  type error). So `trait_method_user_arity == impl arity == hoisted arity`, and
+  the saturation guard is sound.
+- **Pre-existing bug (NOT ours), track separately**: an over-applied
+  function-returning dict method (`mk 10 5` where `mk : a -> (Int -> Int)`)
+  `badarity`s — confirmed identical on the committed base. Specialization
+  correctly falls back (`unsaturated`); it does not regress this. Root cause:
+  `collect_dict_method_call` greedily collects all `App` args.
+
+### Stats baselines (regression watch — all remaining fallbacks are `parameterized`)
+
+- `examples/99f-generic-derived-tojson`: `32 known | 22 specialized | 10 fell
+  back (10 parameterized)`.
+- saga_json `EncodeDerive`: `21 | 18 | 3 parameterized`;
+  `EncodeDeriveCustom`: `33 | 28 | 5 parameterized`.
+- `cross-module-dict-specialization/02-imported-concrete-method`: `Lib 1/1`,
+  `Main 1/1`, runtime `"15"`.
+
+---
 
 This is the implementation plan for the trait-specialization optimizer track
 referenced as "Stage 6 / Stage 7" in
