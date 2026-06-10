@@ -622,6 +622,9 @@ impl<'a> Lowerer<'a> {
                         arity: hoisted_arity,
                         body: ce,
                     });
+                    // Export the hoisted method so importing modules can call it
+                    // directly cross-module (Phase 3).
+                    exports.push((hoist.fn_name.clone(), hoisted_arity));
                     CExpr::FunRef(hoist.fn_name, hoisted_arity)
                 } else {
                     ce
@@ -784,35 +787,21 @@ impl<'a> Lowerer<'a> {
         (is_cps, static_effects, is_open_row)
     }
 
-    /// Plan Phase 2 trait specialization: for each statically-known dispatch
-    /// site (`DictDispatch::KnownImpl`) on a local, nullary (non-parameterized)
-    /// dict, record the method to hoist into a top-level function. Only local
-    /// dicts qualify (their `DictConstructor` is in this module) and only
-    /// nullary ones (their methods capture no dict params, so hoisting is
-    /// capture-free). Imported and parameterized dicts stay on the `element/2`
-    /// path until later phases.
+    /// Plan trait specialization: hoist every nullary (non-parameterized) dict
+    /// method into a top-level function for direct dispatch.
+    ///
+    /// Hoisting is **supply-driven**: we hoist all local nullary dict methods,
+    /// not just the ones with a local statically-known call site. The extra
+    /// hoisted functions are exported (see dict-constructor lowering) so that
+    /// *importing* modules can call them directly cross-module — the producer
+    /// can't know which of its dicts an importer will specialize, and separate
+    /// compilation means we can't go back and add them later. The body stays in
+    /// its defining module (called remotely), so this needs no body cloning or
+    /// private-helper policy. Only nullary dicts qualify: their methods capture
+    /// no dict params, so hoisting to a top-level function is capture-free.
+    /// Parameterized dicts stay on the `element/2` path until a later phase.
     fn plan_dict_method_hoists(&mut self, dict_constructors: &[DictCtorMeta<'_>]) {
         self.dict_method_hoists.clear();
-        if self.optimization.dict_dispatch.is_empty() {
-            return;
-        }
-        // Collect (dict_constructor, method_index) referenced by a fully-known
-        // (no dynamic sub-dict) dispatch site.
-        let mut targets: std::collections::HashSet<(String, usize)> = std::collections::HashSet::new();
-        for dispatch in self.optimization.dict_dispatch.values() {
-            if let super::super::trait_dispatch::DictDispatch::KnownImpl {
-                dict_constructor,
-                method_index,
-                sub_dicts,
-            } = dispatch
-                && sub_dicts.is_empty()
-            {
-                targets.insert((dict_constructor.clone(), *method_index));
-            }
-        }
-        if targets.is_empty() {
-            return;
-        }
         let mut hoists = HashMap::new();
         for &(name, dict_params, methods, method_effects, method_open_rows, impl_effects) in
             dict_constructors
@@ -821,9 +810,6 @@ impl<'a> Lowerer<'a> {
                 continue; // parameterized dict: method captures sub-dicts (later phase)
             }
             for (idx, m) in methods.iter().enumerate() {
-                if !targets.contains(&(name.to_string(), idx)) {
-                    continue;
-                }
                 let ExprKind::Lambda { params, .. } = &m.kind else {
                     continue;
                 };

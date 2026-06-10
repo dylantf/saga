@@ -2458,9 +2458,11 @@ main () = show (Animal { name: \"Rex\", species: \"Dog\" })
     let program = typecheck_source(main_src, &mut checker);
     let out = emit_from_program(&program, "main", &checker);
 
-    // The dict should be referenced as a cross-module call to animals module
+    // Phase 3: `show` on the imported `Show Animal` impl is specialized to a
+    // direct cross-module call to the hoisted dict method in the animals module
+    // (instead of building the dict via `call 'animals':'<dict>'()` + element/2).
     let dict = typechecker::make_dict_name("Std.Base.Show", &[], "animals", "Animals.Animal");
-    assert_contains(&out, &format!("call 'animals':'{dict}'"));
+    assert_contains(&out, &format!("call 'animals':'__saga_dictmethod_{dict}_0'"));
 }
 
 #[test]

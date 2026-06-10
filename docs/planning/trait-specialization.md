@@ -195,44 +195,63 @@ Acceptance:
 
 ### Phase 3 — Cross-module known impls
 
-- **Extend `TraitImplDict`
-  ([src/typechecker/check_module.rs:356](../../src/typechecker/check_module.rs#L356))
-  with per-method info.** Port selective-uniform's `TraitImplMethodInfo` (see
-  Salvage §1) — it is IR-independent and near copy-paste:
-  ```rust
-  pub struct TraitImplMethodInfo {
-      pub name: String,
-      pub source_arity: usize,
-      pub trait_effects: Vec<String>,
-      pub trait_open_row: bool,   // maps 1:1 onto main's open-row semantics
-  }
-  ```
-  Take `name` / `source_arity` / `trait_effects` / `trait_open_row`. **Drop**
-  selective-uniform's `runtime_shape: { Direct | Cps{adapter_arity, …} }` field —
-  precomputing the ABI in the typechecker is exactly what anchor 3 avoids. We
-  join `CallEffectInfo` at lowering time instead. (The producer already exists in
-  main's elaboration since per-method effect rows now flow through; this is the
-  export shape.) This also closes the optimizer matrix's standing "open design
-  question" — per-method is the right boundary, impl-level `needs` is not.
-- Export impl-method identity (hoisted `__method_{dict}_{i}` names, arities,
-  capture lists) alongside `TraitImplMethodInfo`.
-- Admit imported `KnownImpl`; emit a remote direct call.
-- **Private-helper policy** (the matrix lists this as a hard guard;
-  selective-uniform found a working policy — Salvage §2): when an imported
-  method body calls a *private* (unexported) helper, **clone that helper
-  caller-local** rather than emit an invalid remote call to an unexported
-  function. Helper collection is a conservative dependency fixpoint; an ambiguous
-  dependency graph makes the constructor ineligible (fall back to `Dynamic`).
-- This is the gate that makes `SagaJson.Codec`'s building-block impls reachable
-  as `KnownImpl` from user code — a prerequisite for folding.
+**Status: done.** Built via **hoist-and-remote-call**, which diverges from the
+clone-caller-local approach this section originally inherited from
+selective-uniform. The divergence falls out of how Phase 2 turned out: Phase 2
+hoists each nullary dict method into a top-level function (`__saga_dictmethod_
+<dict>_<idx>`) and references it from the dict tuple. Phase 3 just **exports**
+those functions and has importers **call them remotely**.
 
-Acceptance:
+What was actually implemented:
 
-- `cross-module-dict-specialization/{02-imported-concrete-method,
-  06-imported-derived-dict-chain, 07-imported-dict-private-helper,
-  08-imported-derived-impl-ladder}` specialize (ported as fixtures).
-- saga_json library building-block impls show as `KnownImpl` from
-  `EncodeDerive`.
+- **Producer (supply-driven hoisting).** `plan_dict_method_hoists` now hoists
+  *every* local nullary dict method, not only the ones with a local call site,
+  and the dict-constructor lowering **exports** each hoisted function. A producer
+  can't know which of its dicts an importer will specialize, and separate
+  compilation means we can't add the function later — so it hoists all of them
+  proactively. Empirically behavior-neutral and comparable Core size (an inline
+  closure just becomes a named top-level fn).
+- **Consumer (remote call).** `classify_dict_specialization` admits an imported
+  `KnownImpl`: it resolves the dict's `DictRef` to the producer's Erlang module,
+  reconstructs the deterministic hoisted name, and emits a direct
+  `call 'mod':'__saga_dictmethod_<dict>_<idx>'(args…, _Evidence, _ReturnK)` via a
+  new `CpsCallee::Remote` threaded through `lower_runtime_cps_apply`. A
+  saturation guard (`trait_method_user_arity == supplied`, from the cross-module
+  trait signature) keeps partial applications on the dict path.
+
+Why this is simpler than the plan's original shape:
+
+- **No `TraitImplMethodInfo` export needed.** The consumer *derives* everything:
+  the hoisted name is deterministic from the (globally canonical) dict name + the
+  method index; the Erlang module comes from resolving the `DictRef`; the arity
+  is `supplied + (cps ? 2 : 0)`, where `cps` comes from `CallEffectInfo` (which
+  already reflects the impl's per-method effects cross-module). So anchor 3 holds
+  without a new fact.
+- **No private-helper policy.** Because the body stays in its defining module and
+  is called remotely (not cloned into the caller), private helpers it calls are
+  always in scope. The whole private-helper-cloning problem evaporates. (Body
+  *inlining* — and with it the private-helper question — only returns at
+  Phase 4/5, where the Generic fold genuinely needs the body caller-local.)
+- The open design question is still resolved the same way: per-method effects are
+  the boundary (`cps` is per-method via `CallEffectInfo`/`method_cps_shape`), not
+  impl-level `needs`.
+
+Tradeoff vs. clone-caller-local: a remote call has marginally more overhead than
+an inlined body, but it is still a *direct* call (no dict tuple build, no
+`element/2`), which is Phase 3's whole point. Inlining for further speedup is the
+Phase 5 fusion track.
+
+Acceptance (met):
+
+- `99f-generic-derived-tojson`: imported-fallback count `14 → 0` (`8 → 22`
+  specialized; the remaining 10 fallbacks are all `parameterized`, Phase 4).
+- `cross-module-dict-specialization/02-imported-concrete-method`: both `Lib` and
+  `Main` report `1 specialized | 0 fell back`; runtime output unchanged (`"15"`).
+- `cross_module_trait_dict_compiles_with_erlc` links the importer's remote call
+  against the producer module — proof the call resolves to a real exported fun.
+- saga_json building-block leaf impls (`ToJson Int/String/…`) now specialize
+  cross-module from `EncodeDerive`; the parameterized `Record`/`And`/`Labeled`
+  walk remains for Phase 4.
 
 ### Phase 4 — The two trait-neutral rewrites
 

@@ -16,9 +16,27 @@ enum RuntimeCpsArgLowering {
     EtaReduced,
 }
 
+/// How a CPS call reaches its callee. `Value` applies a runtime function value
+/// (closure, `FunRef`, or var); `Remote` emits a direct `call 'mod':'fun'(...)`
+/// to a known exported function (a cross-module specialized dict method).
+enum CpsCallee {
+    Value(CExpr),
+    Remote { erlang_mod: String, name: String },
+}
+
+impl CpsCallee {
+    /// Emit the call: apply a value, or a direct remote call to a known fun.
+    fn apply(self, args: Vec<CExpr>) -> CExpr {
+        match self {
+            CpsCallee::Value(f) => CExpr::Apply(Box::new(f), args),
+            CpsCallee::Remote { erlang_mod, name } => CExpr::Call(erlang_mod, name, args),
+        }
+    }
+}
+
 struct RuntimeCpsApplySite<'a> {
     plan: super::super::call_effects::CpsCallPlan,
-    callee: CExpr,
+    callee: CpsCallee,
     args: &'a [&'a Expr],
     return_k: Option<CExpr>,
     nested_pure_arg_lowering: RuntimeCpsArgLowering,
@@ -298,7 +316,7 @@ impl<'a> Lowerer<'a> {
             let (rk_var, rk_ce) = self.effectful_call_return_k_binding(return_k);
             call_args.push(CExpr::Var(rk_var.clone()));
 
-            let outer_call = CExpr::Apply(Box::new(callee), call_args);
+            let outer_call = callee.apply(call_args);
             let mut body = CExpr::Let(rk_var, Box::new(rk_ce), Box::new(outer_call));
             body = CExpr::Let(ev_var, Box::new(ev_ce), Box::new(body));
 
@@ -325,10 +343,7 @@ impl<'a> Lowerer<'a> {
         let (rk_var, rk_ce) = self.effectful_call_return_k_binding(return_k);
         bindings.push((rk_var.clone(), rk_ce));
         arg_vars.push(rk_var);
-        let call = CExpr::Apply(
-            Box::new(callee),
-            arg_vars.iter().map(|v| CExpr::Var(v.clone())).collect(),
-        );
+        let call = callee.apply(arg_vars.iter().map(|v| CExpr::Var(v.clone())).collect());
         self.wrap_let_bindings(bindings, call)
     }
 
@@ -365,7 +380,7 @@ impl<'a> Lowerer<'a> {
             .and_then(|info| info.cps_call_plan())?;
         Some(self.lower_runtime_cps_apply(RuntimeCpsApplySite {
             plan,
-            callee: CExpr::Var(core_var(var_name)),
+            callee: CpsCallee::Value(CExpr::Var(core_var(var_name))),
             args,
             return_k,
             nested_pure_arg_lowering: RuntimeCpsArgLowering::EtaReduced,
@@ -373,24 +388,49 @@ impl<'a> Lowerer<'a> {
         }))
     }
 
-    /// If the trait method call at `app_id` dispatches on a statically-known,
-    /// locally-hoisted dict method, return a direct `FunRef` callee to the
-    /// hoisted top-level function (Phase 2 trait specialization). `supplied` is
-    /// the user-arg count and `cps` the call site's ABI; both must match the
-    /// hoist plan or this returns `None` and lowering falls back to the normal
-    /// `element/2` dispatch. This only chooses the callee — argument, evidence,
-    /// and return-continuation threading at the call site is unchanged.
+    /// If the trait method call at `app_id` dispatches on a statically-known
+    /// impl whose method is hoisted to a top-level function, return a direct
+    /// callee — a local `FunRef` (Phase 2) or a cross-module `call` (Phase 3) —
+    /// and record the specialization. Returns `None` (and records the fallback
+    /// reason) when the site stays on the normal `element/2` dispatch. This only
+    /// chooses the callee; argument/evidence/return-continuation threading is
+    /// unchanged. `supplied` is the user-arg count and `cps` the call-site ABI.
     fn specialized_dict_method_callee(
         &mut self,
         app_id: NodeId,
+        dict: &Expr,
+        trait_name: &str,
         method_index: usize,
         supplied: usize,
         cps: bool,
-    ) -> Option<CExpr> {
+    ) -> Option<CpsCallee> {
+        match self.classify_dict_specialization(app_id, dict, trait_name, method_index, supplied, cps)?
+        {
+            Ok(callee) => {
+                self.trait_spec_stats.record_specialized(app_id);
+                Some(callee)
+            }
+            Err(reason) => {
+                self.trait_spec_stats.record_fallback(app_id, reason);
+                None
+            }
+        }
+    }
+
+    /// Decide a known dispatch site's specialization outcome (no stats / no
+    /// mutation). `None` => not a statically-known site (not counted); `Some` =>
+    /// a known site, either specialized (`Ok`) or a fallback (`Err(reason)`).
+    fn classify_dict_specialization(
+        &self,
+        app_id: NodeId,
+        dict: &Expr,
+        trait_name: &str,
+        method_index: usize,
+        supplied: usize,
+        cps: bool,
+    ) -> Option<Result<CpsCallee, super::trait_spec_stats::FallbackReason>> {
         use super::trait_spec_stats::FallbackReason;
 
-        // Read the classification fact. A missing/`Dynamic` fact means this is
-        // not a statically-known dispatch site, so it is not counted at all.
         let (dict_constructor, sub_dicts_empty) =
             match self.optimization.dict_dispatch.get(&app_id)? {
                 super::super::trait_dispatch::DictDispatch::KnownImpl {
@@ -401,36 +441,66 @@ impl<'a> Lowerer<'a> {
                 _ => return None,
             };
 
-        // Decide the outcome for this known site, then record it for stats.
-        let outcome: Result<CExpr, FallbackReason> = if !sub_dicts_empty {
+        Some(if !sub_dicts_empty {
             Err(FallbackReason::Parameterized)
-        } else if let Some(hoist) = self
-            .dict_method_hoists
-            .get(&(dict_constructor, method_index))
-            .cloned()
+        } else if self.trait_method_user_arity(trait_name, method_index) != Some(supplied) {
+            // Partial/over-application: the hoisted function's arity would not
+            // match. (Saturated trait calls are the norm; guard anyway.)
+            Err(FallbackReason::Unsaturated)
+        } else if let Some(hoist) = self.dict_method_hoists.get(&(dict_constructor.clone(), method_index))
         {
+            // Local hoisted method: direct `FunRef` apply.
             if hoist.is_cps != cps {
                 Err(FallbackReason::AbiMismatch)
-            } else if hoist.user_arity != supplied {
-                Err(FallbackReason::Unsaturated)
             } else {
-                let arity = hoist.user_arity + if cps { 2 } else { 0 };
-                Ok(CExpr::FunRef(hoist.fn_name, arity))
+                let arity = supplied + if cps { 2 } else { 0 };
+                Ok(CpsCallee::Value(CExpr::FunRef(hoist.fn_name.clone(), arity)))
             }
+        } else if let Some(erlang_mod) = self.imported_dict_erlang_mod(dict) {
+            // Imported hoisted method: direct cross-module call. Every module
+            // hoists all its nullary dict methods with this deterministic name,
+            // and the call's CPS shape derives from the same impl-effect data as
+            // the producer's, so the remote function's arity matches.
+            let name = format!("__saga_dictmethod_{dict_constructor}_{method_index}");
+            Ok(CpsCallee::Remote { erlang_mod, name })
         } else {
-            // Known impl, but not a locally-hoisted method — an imported dict.
+            // Known impl on a dict we cannot resolve to a module — leave it on
+            // the dict-passing path rather than emit an unresolved call.
             Err(FallbackReason::Imported)
-        };
+        })
+    }
 
-        match outcome {
-            Ok(callee) => {
-                self.trait_spec_stats.record_specialized(app_id);
-                Some(callee)
-            }
-            Err(reason) => {
-                self.trait_spec_stats.record_fallback(app_id, reason);
-                None
-            }
+    /// The trait method's user-argument arity (excludes `_Evidence`/`_ReturnK`),
+    /// from the trait signature. Available cross-module for imported traits.
+    fn trait_method_user_arity(&self, trait_name: &str, method_index: usize) -> Option<usize> {
+        self.check_result
+            .traits
+            .get(trait_name)
+            .and_then(|info| info.methods.get(method_index))
+            .map(|m| m.param_types.len())
+    }
+
+    /// The Erlang module that defines an imported dict's hoisted methods, by
+    /// resolving the dict expression's `DictRef`. `None` for a local dict (which
+    /// uses the local `FunRef` path) or an unresolved/non-`DictRef` dict.
+    fn imported_dict_erlang_mod(&self, dict: &Expr) -> Option<String> {
+        let mut head = dict;
+        while let ExprKind::App { func, .. } = &head.kind {
+            head = func;
+        }
+        if !matches!(head.kind, ExprKind::DictRef { .. }) {
+            return None;
+        }
+        match &self.resolved.get(&head.id)?.kind {
+            super::super::resolve::ResolvedCodegenKind::BeamFunction {
+                erlang_mod: Some(m),
+                ..
+            } => Some(m.clone()),
+            super::super::resolve::ResolvedCodegenKind::ExternalFunction {
+                target_erlang_mod,
+                ..
+            } => Some(target_erlang_mod.clone()),
+            _ => None,
         }
     }
 
@@ -443,6 +513,7 @@ impl<'a> Lowerer<'a> {
         &mut self,
         app_id: NodeId,
         dict: &Expr,
+        trait_name: &str,
         method_index: usize,
         args: &[&Expr],
         return_k: Option<CExpr>,
@@ -452,11 +523,12 @@ impl<'a> Lowerer<'a> {
             .get(&app_id)
             .and_then(|info| info.cps_call_plan())?;
 
-        // Phase 2: statically-known impl with a locally-hoisted method — call
-        // it directly, skipping the dict tuple build and `element/2`. Only the
-        // callee changes; evidence/return-continuation threading is unchanged.
+        // Statically-known impl with a hoisted method — call it directly,
+        // skipping the dict tuple build and `element/2`: a local `FunRef`
+        // (Phase 2) or a cross-module call (Phase 3). Only the callee changes;
+        // evidence/return-continuation threading is unchanged.
         if let Some(callee) =
-            self.specialized_dict_method_callee(app_id, method_index, args.len(), true)
+            self.specialized_dict_method_callee(app_id, dict, trait_name, method_index, args.len(), true)
         {
             return Some(self.lower_runtime_cps_apply(RuntimeCpsApplySite {
                 plan,
@@ -482,7 +554,7 @@ impl<'a> Lowerer<'a> {
 
         let body = self.lower_runtime_cps_apply(RuntimeCpsApplySite {
             plan,
-            callee: CExpr::Var(method_var.clone()),
+            callee: CpsCallee::Value(CExpr::Var(method_var.clone())),
             args,
             return_k,
             nested_pure_arg_lowering: RuntimeCpsArgLowering::Value,
@@ -526,7 +598,7 @@ impl<'a> Lowerer<'a> {
         let func_var = self.fresh();
         let body = self.lower_runtime_cps_apply(RuntimeCpsApplySite {
             plan,
-            callee: CExpr::Var(func_var.clone()),
+            callee: CpsCallee::Value(CExpr::Var(func_var.clone())),
             args,
             return_k,
             nested_pure_arg_lowering: RuntimeCpsArgLowering::Value,
@@ -691,13 +763,19 @@ impl<'a> Lowerer<'a> {
         // pure calls (effectful dict calls specialize via the CPS path), so the
         // pure ABI (`cps = false`) is the right one to ask for here.
         if !self.expr_is_effectful_call(expr)
-            && let Some((_dict, method_index, dm_args)) =
+            && let Some((dict, trait_name, method_index, dm_args)) =
                 super::util::collect_dict_method_call(expr)
-            && let Some(callee) =
-                self.specialized_dict_method_callee(expr.id, method_index, dm_args.len(), false)
+            && let Some(callee) = self.specialized_dict_method_callee(
+                expr.id,
+                dict,
+                trait_name,
+                method_index,
+                dm_args.len(),
+                false,
+            )
         {
             let arg_ces: Vec<CExpr> = dm_args.iter().map(|a| self.lower_expr_value(a)).collect();
-            return CExpr::Apply(Box::new(callee), arg_ces);
+            return callee.apply(arg_ces);
         }
 
         let mut callee = expr;

@@ -834,22 +834,67 @@ main () = compute 5 with options_10
     );
 }
 
+#[test]
+fn nullary_dict_method_is_hoisted_and_exported_without_local_use() {
+    // Supply-driven hoisting (Phase 3): a module exports a hoisted top-level
+    // function for every nullary dict method so importers can call it directly
+    // cross-module — even when the defining module never calls it itself.
+    let src = "
+type Color = Red | Green
+trait Describe a { fun describe : (x: a) -> String }
+impl Describe for Color {
+  describe c = case c {
+    Red -> \"r\"
+    Green -> \"g\"
+  }
+}
+main () = 1
+";
+    let out = emit_elaborated(src);
+    let export_line = out.lines().next().expect("empty module");
+    assert!(
+        export_line.contains("__saga_dictmethod___dict_Describe_Color_0"),
+        "expected the hoisted Describe/Color method to be exported\n{export_line}"
+    );
+}
+
+#[test]
+fn multi_arg_trait_method_specializes_with_correct_arity() {
+    // A method with >1 user param specializes to a direct call of the matching
+    // arity. Impl methods must carry the full parameter list (eta-reduced impls
+    // are rejected at typecheck), so the trait-signature arity used for the
+    // saturation guard always equals the hoisted function's arity — no risk of
+    // a wrong-arity direct call from a point-free impl.
+    let src = "
+fun prepend : Int -> String -> String
+prepend n s = show n <> s
+trait Greet a { fun greet : (x: a) -> (s: String) -> String }
+impl Greet for Int {
+  greet n s = prepend n s
+}
+main () = greet 42 \"hi\"
+";
+    let out = emit_elaborated(src);
+    assert!(
+        out.contains("'__saga_dictmethod___dict_Greet_Std_Int_Int_0'/2"),
+        "expected a 2-arity direct call to the hoisted Greet/Int method\n{out}"
+    );
+}
+
 // --- Built-in Show dispatch ---
 
 #[test]
-fn show_int_uses_dict_dispatch() {
+fn show_int_specializes_to_direct_cross_module_call() {
     let src = "main () = show 42";
     let out = emit_elaborated(src);
-    // Hardcoded check: validates the exact dict name format (canonical trait + mangled type).
-    // Other tests use make_dict_name helper to avoid brittleness.
+    // Phase 3: `show 42` on the imported `Show Int` impl is specialized to a
+    // direct cross-module call to the hoisted dict method (the producer exports
+    // `__saga_dictmethod_<dict>_<idx>`), instead of building the dict tuple and
+    // dispatching via element/2. The canonical dict name is preserved as a
+    // substring of the hoisted method name.
     assert!(
-        out.contains("__dict_Std_Base_Show_std_int_Std_Int_Int"),
-        "expected Show/Int dict reference\n{out}"
-    );
-    // main should call the dict via element() dispatch
-    assert!(
-        out.contains("'erlang':'element'"),
-        "expected element() for dict method access\n{out}"
+        out.contains("__saga_dictmethod___dict_Std_Base_Show_std_int_Std_Int_Int"),
+        "expected a direct call to the hoisted Show/Int method\n{out}"
     );
 }
 

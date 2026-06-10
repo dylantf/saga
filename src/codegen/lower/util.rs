@@ -158,10 +158,10 @@ pub(super) fn collect_fun_call(expr: &Expr) -> Option<(&str, &Expr, Vec<&Expr>)>
 }
 
 /// Peel a chain of App nodes to find a `DictMethodAccess` head and its arguments.
-/// Returns `Some((dict_expr, method_index, args))` if the head is a `DictMethodAccess`,
-/// `None` otherwise. Used to recognize trait method calls (post-elaboration shape)
-/// for evidence-threaded emission.
-pub(super) fn collect_dict_method_call(expr: &Expr) -> Option<(&Expr, usize, Vec<&Expr>)> {
+/// Returns `Some((dict_expr, trait_name, method_index, args))` if the head is a
+/// `DictMethodAccess`, `None` otherwise. Used to recognize trait method calls
+/// (post-elaboration shape) for evidence-threaded emission.
+pub(super) fn collect_dict_method_call(expr: &Expr) -> Option<(&Expr, &str, usize, Vec<&Expr>)> {
     let mut args: Vec<&Expr> = Vec::new();
     let mut current = expr;
     loop {
@@ -171,10 +171,12 @@ pub(super) fn collect_dict_method_call(expr: &Expr) -> Option<(&Expr, usize, Vec
                 current = func;
             }
             ExprKind::DictMethodAccess {
-                dict, method_index, ..
+                dict,
+                trait_name,
+                method_index,
             } => {
                 args.reverse();
-                return Some((dict.as_ref(), *method_index, args));
+                return Some((dict.as_ref(), trait_name.as_str(), *method_index, args));
             }
             _ => return None,
         }
