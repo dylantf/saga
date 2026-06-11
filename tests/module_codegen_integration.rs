@@ -1077,6 +1077,91 @@ main () = {
     });
 }
 
+// A dispatch-shaped helper library shared by the inline-to-cancel tests below.
+const STYLE_LIB: &str = r#"module Style
+
+pub type NameStyle =
+  | AsIs
+  | Camel
+
+pub fun apply_style : NameStyle -> String -> String
+apply_style ns s = case ns {
+  AsIs -> s
+  Camel -> s
+}
+
+pub fun pick : Int -> NameStyle
+pick n = if n == 0 then AsIs else Camel
+"#;
+
+#[test]
+fn constant_arg_inlines_cross_module_dispatch_fn_to_cancel() {
+    // Blocker-2 Unit B: `apply_style (Opts { rename: AsIs }).rename "id"` — the
+    // constant record projects to `AsIs` (Unit A), then the cross-module
+    // dispatch-shaped `apply_style` is inlined-to-cancel: `case AsIs { AsIs -> s;
+    // Camel -> s }` collapses to the literal key. No remote `style:apply_style` call
+    // and no residual NameStyle `case` should survive. The `deriving (Show)` record
+    // is only here so the generic fold runs at all.
+    let main_src = r#"module Main
+
+import Style (NameStyle, AsIs, apply_style)
+
+record Opts { rename: NameStyle }
+record Tag { v: Int } deriving (Show)
+
+fun key : Unit -> String
+key () = apply_style (Opts { rename: AsIs }).rename "id"
+
+main () = dbg (key ())
+"#;
+    with_temp_project_files(&[("lib/Style.saga", STYLE_LIB)], main_src, |checker, program| {
+        let out = emit_from_program(program, "main", checker);
+        let key_fn = emitted_function(&out, "key", 1);
+        assert!(
+            key_fn.contains("#<105>") && key_fn.contains("#<100>"),
+            "key/1 should fold to the literal \"id\":\n{key_fn}"
+        );
+        assert!(
+            !out.contains("'style':'apply_style'"),
+            "apply_style should be inlined away, not a remote call:\n{out}"
+        );
+        assert!(
+            !key_fn.contains("case"),
+            "the inlined NameStyle case should have collapsed in key/1:\n{key_fn}"
+        );
+        assert_erlc_compiles(&out, "main");
+    });
+}
+
+#[test]
+fn runtime_arg_does_not_inline_dispatch_fn() {
+    // Blocker-2 Unit B negative gate: when the style argument is *not* a literal
+    // constructor (`pick n` is computed at runtime), the collapse gate fails and
+    // `apply_style` must stay a remote call — never speculatively inlined.
+    let main_src = r#"module Main
+
+import Std.IO (console)
+import Style (NameStyle, apply_style, pick)
+
+record Tag { v: Int } deriving (Show)
+
+fun key : Int -> String
+key n = apply_style (pick n) "id"
+
+main () = {
+  println (key 0)
+} with console
+"#;
+    with_temp_project_files(&[("lib/Style.saga", STYLE_LIB)], main_src, |checker, program| {
+        let out = emit_from_program(program, "main", checker);
+        assert!(
+            out.contains("'style':'apply_style'"),
+            "apply_style must remain a remote call when its style arg is runtime:\n{out}"
+        );
+        assert_erlc_compiles(&out, "main");
+    });
+}
+
 #[test]
 fn no_module_decl_exports_everything() {
     // Single-file (no module declaration) should export all functions

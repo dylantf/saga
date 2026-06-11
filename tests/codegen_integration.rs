@@ -3713,6 +3713,93 @@ main () = symbol_name (Proxy : Proxy 'Foo)
 }
 
 #[test]
+fn symbol_name_proxy_closure_is_beta_reduced() {
+    // `symbol_name (Proxy : …)` elaborates to an immediately-applied reflection
+    // closure `(fun __proxy -> "Foo")(Proxy)`. The generic-fold β-reduction must
+    // collapse it: the literal key is exposed and the phantom `Proxy` closure —
+    // a per-field allocation in every derived record codec — is gone. (Item 1 of
+    // the post-fusion runtime-cost work; precondition for folding `apply_name_style`.)
+    //
+    // The `deriving (Show)` is load-bearing for the test, not the assertion: the
+    // generic fold (which carries the β-reduction) short-circuits in a module with
+    // no dict constructors, and a derived record is the realistic setting where
+    // these reflection closures actually occur.
+    let src = r#"
+record Tag { v: Int } deriving (Show)
+
+main () = symbol_name (Proxy : Proxy 'Foo)
+"#;
+    let out = emit_elaborated(src);
+    assert!(
+        out.contains("#<70>") && out.contains("#<111>"),
+        "expected the literal 'Foo' bytes to survive β-reduction:\n{out}"
+    );
+    assert!(
+        !out.to_lowercase().contains("proxy"),
+        "the `symbol_name` reflection closure should be β-reduced away, but a \
+         residual proxy lambda/apply survived:\n{out}"
+    );
+}
+
+#[test]
+fn constant_record_field_projection_collapses_case() {
+    // Blocker-2 Unit A: a field projected out of a *constant* record literal folds
+    // to the field value, so `case (Opts {…}).fmt of { Tagged -> "T"; Untagged ->
+    // "U" }` collapses to just `"T"` — no `element` projection, no dead `Untagged`
+    // arm. The `deriving (Show)` record is only here so the generic fold runs at all
+    // (it short-circuits in a module with no dict constructors).
+    let src = r#"
+type Fmt = | Tagged | Untagged
+
+record Opts { fmt: Fmt, name: String }
+
+record Tag { v: Int } deriving (Show)
+
+main () = case (Opts { fmt: Tagged, name: "x" }).fmt {
+  Tagged -> "T"
+  Untagged -> "U"
+}
+"#;
+    let main_fn = emitted_function(&emit_elaborated(src), "main", 1);
+    // 'T' = 84 survives; 'U' = 85 (the dead Untagged arm) is gone; the field read
+    // never lowers to element/2 because the projection folded first.
+    assert!(
+        main_fn.contains("#<84>"),
+        "expected the folded 'T' result in main:\n{main_fn}"
+    );
+    assert!(
+        !main_fn.contains("#<85>"),
+        "the dead `Untagged -> \"U\"` arm should be gone (case collapsed):\n{main_fn}"
+    );
+    assert!(
+        !main_fn.contains("element"),
+        "the `.fmt` projection should fold, not lower to erlang:element:\n{main_fn}"
+    );
+}
+
+#[test]
+fn constant_record_substituted_through_lambda_then_projected() {
+    // Blocker-2 Unit A: a record literal is now duplicable, so an immediately-applied
+    // lambda binding it β-reduces (Item 1's machinery) and the body's `o.fmt` then
+    // projects + collapses. This is the in-an-inlined-body path the real codec hits
+    // (opts arrives as a substituted constant), exercised without dict machinery.
+    let src = r#"
+type Fmt = | Tagged | Untagged
+
+record Opts { fmt: Fmt, name: String }
+
+record Tag { v: Int } deriving (Show)
+
+main () = (fun o -> case o.fmt { Tagged -> "T"; Untagged -> "U" }) (Opts { fmt: Tagged, name: "x" })
+"#;
+    let main_fn = emitted_function(&emit_elaborated(src), "main", 1);
+    assert!(
+        main_fn.contains("#<84>") && !main_fn.contains("#<85>"),
+        "expected the lambda+projection chain to collapse to 'T':\n{main_fn}"
+    );
+}
+
+#[test]
 fn known_symbol_polymorphic_dict_passing_e2e() {
     // A single polymorphic describe function multiplexes across three call
     // sites via dict passing: each call sees its own symbol string.

@@ -68,6 +68,11 @@ use std::collections::HashMap;
 /// (bounded by field/constructor nesting), so this is generous in practice.
 const INLINE_FUEL: u32 = 64;
 
+/// Maximum body size (expression node count) of a plain function eligible for
+/// "inline-to-cancel" carry. Keeps the carried-function set small (dispatch
+/// helpers like `apply_name_style`) and bounds the code a single inline can add.
+const FUN_INLINE_SIZE_CAP: usize = 64;
+
 /// The `Generic` routing trait and its `to` method index. The fusion driver
 /// inlines `to` (the `Rep` builder) so its constructor result can be cancelled
 /// against the codec's case-matches. (`from`, the decode direction, is Phase 6.)
@@ -106,6 +111,20 @@ pub struct ExternalCtor<'a> {
 
 /// External dict constructors keyed by dict-constructor name.
 pub type ExternalCtors<'a> = HashMap<String, ExternalCtor<'a>>;
+
+/// A plain function from another compiled module, carried for "inline-to-cancel"
+/// (see [`Folder::try_inline_fun`]). Only single-clause, guardless, dispatch-shaped,
+/// non-self-recursive functions are carried (see [`carryable_fun`]). Keyed by bare
+/// function name; a name defined as a carryable function in more than one module is
+/// dropped (see [`external_funs_from_modules`]), so a bare-name match is unambiguous.
+pub struct ExternalFun<'a> {
+    pub params: &'a [Pat],
+    pub body: &'a Expr,
+    pub resolution: &'a ResolutionMap,
+}
+
+/// External carryable plain functions keyed by bare function name.
+pub type ExternalFuns<'a> = HashMap<String, ExternalFun<'a>>;
 
 /// Result of folding a module: the rewritten program plus resolution entries for
 /// inlined cross-module nodes (keyed by their fresh NodeId), to be merged into
@@ -156,6 +175,114 @@ pub fn external_ctors_from_modules(
     map
 }
 
+/// Collect carryable plain functions ([`carryable_fun`]) from every compiled
+/// module, borrowing each producer's resolution map. A bare name defined as a
+/// carryable function more than once anywhere (a multi-clause function — separate
+/// `FunBinding` decls — or two modules defining the same name) is **dropped**, so
+/// the resulting bare-name keying is unambiguous. Used at consumer emit time.
+pub fn external_funs_from_modules(
+    modules: &HashMap<String, super::CompiledModule>,
+) -> ExternalFuns<'_> {
+    let mut map = ExternalFuns::new();
+    let mut dropped: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for compiled in modules.values() {
+        for decl in &compiled.elaborated {
+            let Some((name, params, body)) = carryable_fun(decl) else {
+                continue;
+            };
+            if dropped.contains(name) {
+                continue;
+            }
+            if map.contains_key(name) {
+                // A second definition of this name — ambiguous; drop it entirely.
+                map.remove(name);
+                dropped.insert(name.to_string());
+                continue;
+            }
+            map.insert(
+                name.to_string(),
+                ExternalFun {
+                    params,
+                    body,
+                    resolution: &compiled.resolution,
+                },
+            );
+        }
+    }
+    map
+}
+
+/// If `decl` is a plain function eligible for "inline-to-cancel" carry, return its
+/// `(name, params, body)`. Eligibility: a `FunBinding` with **no guard**, a body
+/// that **dispatches on one of its own parameters** (`case Var(param) of …`, the
+/// `apply_name_style`/`get_field` shape), **no self-reference** (so inlining can't
+/// recurse — bounds depth without a stack guard), and a **bounded body size**.
+/// Single-clause-ness is enforced by callers, which drop any name with more than
+/// one carryable definition.
+fn carryable_fun(decl: &Decl) -> Option<(&str, &[Pat], &Expr)> {
+    let Decl::FunBinding {
+        name,
+        params,
+        guard,
+        body,
+        ..
+    } = decl
+    else {
+        return None;
+    };
+    if guard.is_some() {
+        return None;
+    }
+    body_dispatch_param(params, body)?;
+    if expr_node_count(body) > FUN_INLINE_SIZE_CAP {
+        return None;
+    }
+    // Self-recursive bodies could inline without bound — exclude them.
+    let bound: Vec<String> = Vec::new();
+    let mut frees = std::collections::HashSet::new();
+    collect_free_vars(body, &bound, &mut frees);
+    if frees.contains(name) {
+        return None;
+    }
+    Some((name, params, body))
+}
+
+/// The block tail (the value of a `Block` is its last `Stmt::Expr`) or `expr`
+/// itself for a non-block — i.e. the expression in result position.
+fn result_expr(expr: &Expr) -> &Expr {
+    match &expr.kind {
+        ExprKind::Block { stmts, .. } => match stmts.last().map(|s| &s.node) {
+            Some(Stmt::Expr(e)) => e,
+            _ => expr,
+        },
+        _ => expr,
+    }
+}
+
+/// If `body`'s result expression is a `case` scrutinizing one of `params`
+/// directly (`case Var(p) of …`), return that parameter's name.
+fn body_dispatch_param<'a>(params: &'a [Pat], body: &Expr) -> Option<&'a str> {
+    let ExprKind::Case { scrutinee, .. } = &result_expr(body).kind else {
+        return None;
+    };
+    let ExprKind::Var { name } = &scrutinee.kind else {
+        return None;
+    };
+    params.iter().find_map(|p| match p {
+        Pat::Var { name: pn, .. } if pn == name => Some(pn.as_str()),
+        _ => None,
+    })
+}
+
+/// Number of expression nodes in `expr` (a cheap size bound for the carry filter).
+fn expr_node_count(expr: &Expr) -> usize {
+    let mut e = expr.clone();
+    1 + child_exprs_mut(&mut e)
+        .into_iter()
+        .map(|c| expr_node_count(c))
+        .sum::<usize>()
+}
+
 /// One dict constructor available for inlining — local (`resolution: None`) or
 /// external (carry the producer's resolution).
 struct CtorView<'a> {
@@ -164,17 +291,30 @@ struct CtorView<'a> {
     resolution: Option<&'a ResolutionMap>,
 }
 
+/// One plain function available for "inline-to-cancel" — local (`resolution: None`)
+/// or external (carry the producer's resolution).
+struct FunView<'a> {
+    params: &'a [Pat],
+    body: &'a Expr,
+    resolution: Option<&'a ResolutionMap>,
+}
+
 struct Folder<'a> {
     ctors: HashMap<&'a str, CtorView<'a>>,
+    funs: HashMap<&'a str, FunView<'a>>,
     carried: ResolutionMap,
     carried_names: HashMap<String, ResolvedSymbol>,
 }
 
 /// Inline known dict-method calls throughout a module's function and
 /// dict-constructor bodies, cancelling `Generic` `Rep` constructors where they
-/// become statically visible. `externals` supplies cross-module impls; pass an
-/// empty map for local-only folding.
-pub fn fold_program(program: &Program, externals: &ExternalCtors<'_>) -> FoldOutput {
+/// become statically visible. `externals`/`external_funs` supply cross-module
+/// impls and carryable plain functions; pass empty maps for local-only folding.
+pub fn fold_program(
+    program: &Program,
+    externals: &ExternalCtors<'_>,
+    external_funs: &ExternalFuns<'_>,
+) -> FoldOutput {
     let mut ctors: HashMap<&str, CtorView<'_>> = HashMap::new();
     // Externals first; a local impl of the same name (shouldn't happen — dict
     // names are globally unique) would take precedence.
@@ -207,6 +347,9 @@ pub fn fold_program(program: &Program, externals: &ExternalCtors<'_>) -> FoldOut
         }
     }
 
+    // The fold only does anything in a module with dict constructors (a deriving
+    // module). Keep that short-circuit on `ctors`, so plain-function inlining never
+    // forces a fold of a non-deriving module — and `funs` is only built here.
     if ctors.is_empty() {
         return FoldOutput {
             program: program.clone(),
@@ -215,8 +358,45 @@ pub fn fold_program(program: &Program, externals: &ExternalCtors<'_>) -> FoldOut
         };
     }
 
+    // Carryable plain functions: external (carry producer resolution) plus local
+    // (resolution by name in this module's scope). Local definitions are bare-name
+    // keyed too, so a name carryable both locally and externally, or defined by more
+    // than one local clause, is dropped to keep the keying unambiguous.
+    let mut funs: HashMap<&str, FunView<'_>> = HashMap::new();
+    let mut dropped_funs: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    for (name, ext) in external_funs {
+        funs.insert(
+            name.as_str(),
+            FunView {
+                params: ext.params,
+                body: ext.body,
+                resolution: Some(ext.resolution),
+            },
+        );
+    }
+    for decl in program {
+        if let Some((name, params, body)) = carryable_fun(decl) {
+            if dropped_funs.contains(name) {
+                continue;
+            }
+            if funs.remove(name).is_some() {
+                dropped_funs.insert(name);
+                continue;
+            }
+            funs.insert(
+                name,
+                FunView {
+                    params,
+                    body,
+                    resolution: None,
+                },
+            );
+        }
+    }
+
     let mut folder = Folder {
         ctors,
+        funs,
         carried: ResolutionMap::new(),
         carried_names: HashMap::new(),
     };
@@ -276,6 +456,20 @@ impl Folder<'_> {
         if let ExprKind::Ascription { expr: inner, .. } = &expr.kind {
             return Some((**inner).clone());
         }
+        // Project a field out of a constant record literal: `(Options {…}).field`
+        // ⟶ the field value. Exposes `opts.<field>` as a known constructor for the
+        // case-collapse below once a constant `opts` is substituted into a codec.
+        if let Some(e) = project_record_field(expr) {
+            return Some(e);
+        }
+        // β-reduce a saturated application of a literal lambda. The load-bearing
+        // case is `symbol_name`'s reflection closure `(fun __proxy -> "field")(Proxy)`
+        // — elaboration emits one per derived record field; reducing it drops the
+        // phantom `Proxy` and exposes the literal key (the precondition for folding
+        // `apply_name_style` and any later key→iodata fusion).
+        if let Some(e) = beta_reduce_lambda_app(expr) {
+            return Some(e);
+        }
         if let Some(e) = case_of_known_constructor(expr) {
             return Some(e);
         }
@@ -291,6 +485,11 @@ impl Folder<'_> {
         // of a case, so its `Ok (RepCtor …)` result becomes a literal ctor under
         // that case (which `case_of_case` + cancellation then collapse).
         if let Some(e) = self.inline_codec_scrutinee(expr) {
+            return Some(e);
+        }
+        // Inline-to-cancel a dispatch-shaped plain function (e.g. `apply_name_style
+        // AsIs "id"`) when a constructor argument makes its body's `case` collapse.
+        if let Some(e) = self.try_inline_fun(expr) {
             return Some(e);
         }
         self.try_inline(expr)
@@ -426,48 +625,9 @@ impl Folder<'_> {
             return None; // Partial/over-application — leave on the dispatch path.
         }
 
-        // Clone the method body and freshen its NodeIds. For a cross-module body,
-        // remap the producer's resolution entries onto the fresh ids so its
-        // references lower as direct cross-module calls. For a local body,
-        // freshening orphans the id-keyed front resolution, but backend
-        // `resolve_names` falls back to name-based resolution in this module's
-        // scope (so no carry is needed).
-        let mut new_body = body.as_ref().clone();
-        match resolution {
-            Some(producer_res) => {
-                let mut old_ids = Vec::new();
-                collect_expr_ids(&mut new_body, &mut old_ids);
-                freshen_expr_ids(&mut new_body);
-                let mut new_ids = Vec::new();
-                collect_expr_ids(&mut new_body, &mut new_ids);
-                debug_assert_eq!(
-                    old_ids.len(),
-                    new_ids.len(),
-                    "id collection must be structurally stable across freshening"
-                );
-                for (old, new) in old_ids.iter().zip(&new_ids) {
-                    if let Some(sym) = producer_res.get(old) {
-                        // Anchor producer-local `BeamFunction`s (`erlang_mod:
-                        // None`) to the producer module so they lower as remote
-                        // calls in the consumer instead of unbound variables.
-                        let anchored = sym.anchored_to_source_module();
-                        // Also index function references by name (see
-                        // `FoldOutput::carried_names`): the id-keyed entry above is
-                        // orphaned when a later rewrite re-freshens/duplicates this
-                        // node, but the name survives. First write wins (a private
-                        // helper name colliding across two inlined producer modules
-                        // is vanishingly rare and would only leave it unresolved).
-                        if is_fn_ref(&anchored.kind) {
-                            self.carried_names
-                                .entry(anchored.name.clone())
-                                .or_insert_with(|| anchored.clone());
-                        }
-                        self.carried.insert(*new, anchored);
-                    }
-                }
-            }
-            None => freshen_expr_ids(&mut new_body),
-        }
+        // Clone the method body and freshen its NodeIds, carrying the producer's
+        // resolution for a cross-module body.
+        let mut new_body = self.freshen_with_carry(body, resolution);
 
         // Substitute the `where`-bound dict params with the concrete sub-dicts.
         let subst: HashMap<&str, &Expr> = dict_params
@@ -484,6 +644,92 @@ impl Folder<'_> {
         // parameter becomes a single-arm `case`. Patterns are exhaustive for the
         // dispatched type (the impl method typechecked).
         Some(bind_subpats(params, args, &new_body))
+    }
+
+    /// Clone `body` and freshen its NodeIds. For a cross-module body
+    /// (`resolution: Some`), remap the producer's resolution entries onto the
+    /// fresh ids so the body's references (private helpers, other functions) lower
+    /// as direct cross-module calls — both id-keyed (`carried`) and name-keyed
+    /// (`carried_names`, robust to later re-freshening). For a local body
+    /// (`None`), freshening orphans the id-keyed front resolution, but backend
+    /// `resolve_names` re-resolves by name in this module's scope, so no carry is
+    /// needed. Shared by dict-method and plain-function inlining.
+    fn freshen_with_carry(&mut self, body: &Expr, resolution: Option<&ResolutionMap>) -> Expr {
+        let mut new_body = body.clone();
+        match resolution {
+            Some(producer_res) => {
+                let mut old_ids = Vec::new();
+                collect_expr_ids(&mut new_body, &mut old_ids);
+                freshen_expr_ids(&mut new_body);
+                let mut new_ids = Vec::new();
+                collect_expr_ids(&mut new_body, &mut new_ids);
+                debug_assert_eq!(
+                    old_ids.len(),
+                    new_ids.len(),
+                    "id collection must be structurally stable across freshening"
+                );
+                for (old, new) in old_ids.iter().zip(&new_ids) {
+                    if let Some(sym) = producer_res.get(old) {
+                        // Anchor producer-local `BeamFunction`s (`erlang_mod: None`)
+                        // to the producer module so they lower as remote calls in
+                        // the consumer instead of unbound variables.
+                        let anchored = sym.anchored_to_source_module();
+                        if is_fn_ref(&anchored.kind) {
+                            self.carried_names
+                                .entry(anchored.name.clone())
+                                .or_insert_with(|| anchored.clone());
+                        }
+                        self.carried.insert(*new, anchored);
+                    }
+                }
+            }
+            None => freshen_expr_ids(&mut new_body),
+        }
+        new_body
+    }
+
+    /// Inline a saturated call to a known dispatch-shaped plain function when an
+    /// argument is a literal constructor that makes the function body's `case`
+    /// collapse — "inline-to-cancel". The canonical case is `apply_name_style AsIs
+    /// "id"`: `apply_name_style`'s body is `case ns { AsIs -> s; … }`, so inlining
+    /// it with `ns := AsIs` yields `case AsIs { AsIs -> "id"; … }`, which
+    /// [`case_of_known_constructor`] collapses to `"id"` on the next round.
+    ///
+    /// Tightly gated to avoid bloat / divergence: the function must be in `self.funs`
+    /// (only single-clause, guardless, dispatch-shaped, **non-self-recursive**
+    /// functions are carried there — see [`carryable_fun`]), fully saturated, and *some*
+    /// argument must be a `known_ctor` whose parameter is scrutinized by a `case`
+    /// that decides against it ([`body_cancels_with`]). A call whose arg is a
+    /// constructor the body doesn't decide on (e.g. `snake_to_camel "id"`) is left
+    /// alone. The non-recursive carry filter bounds inlining depth; `INLINE_FUEL`
+    /// (the outer per-node budget) backstops any pathological mutual recursion.
+    fn try_inline_fun(&mut self, expr: &Expr) -> Option<Expr> {
+        let (head, args) = peel_app(expr);
+        let name = match &head.kind {
+            ExprKind::Var { name } => name.as_str(),
+            ExprKind::QualifiedName { name, .. } => base_name(name),
+            _ => return None,
+        };
+        let (params, body, resolution) = {
+            let fun = self.funs.get(name)?;
+            (fun.params, fun.body, fun.resolution)
+        };
+        if params.len() != args.len() {
+            return None; // Partial/over-application — leave it.
+        }
+        // The collapse gate: some arg is a literal ctor whose param the body decides
+        // on. Reject otherwise so we never inline a call that won't immediately fold.
+        let collapses = params.iter().zip(&args).any(|(p, a)| {
+            let Pat::Var { name: pname, .. } = p else {
+                return false;
+            };
+            known_ctor(a).is_some_and(|(cname, _)| body_cancels_with(pname, cname, body))
+        });
+        if !collapses {
+            return None;
+        }
+        let fresh_body = self.freshen_with_carry(body, resolution);
+        Some(bind_subpats(params, &args, &fresh_body))
     }
 }
 
@@ -566,6 +812,51 @@ fn known_ctor(expr: &Expr) -> Option<(&str, Vec<&Expr>)> {
 /// and bounded for arbitrary constructors because it only matches a scrutinee
 /// that is a *literal* constructor application — a shape that arises from the
 /// fold's own inlining/commuting, not from ordinary source.
+/// Project a field out of a compile-time-constant record literal:
+/// `(Options { rename_all: AsIs, … }).rename_all` ⟶ `AsIs`. This is what makes a
+/// constant `opts` argument, once substituted into an inlined codec body, fold to
+/// the literal field value — exposing e.g. `case opts.tag_format of { … }` as a
+/// `case <known ctor> of { … }` that [`case_of_known_constructor`] then collapses.
+///
+/// Handles `RecordUpdate` by returning the updated field if present, else
+/// re-projecting through the base record. Gated on the whole record being
+/// [`is_duplicable`]: projecting one field discards the sibling field exprs, which
+/// is only sound when those siblings are pure (no dropped effects). A non-pure
+/// record is left as a `FieldAccess` for lowering, unchanged from today.
+fn project_record_field(expr: &Expr) -> Option<Expr> {
+    let ExprKind::FieldAccess {
+        expr: inner, field, ..
+    } = &expr.kind
+    else {
+        return None;
+    };
+    if !is_duplicable(inner) {
+        return None;
+    }
+    match &inner.kind {
+        ExprKind::RecordCreate { fields, .. } | ExprKind::AnonRecordCreate { fields } => fields
+            .iter()
+            .find(|(name, _, _)| name == field)
+            .map(|(_, _, value)| value.clone()),
+        ExprKind::RecordUpdate { record, fields, .. } => {
+            if let Some((_, _, value)) = fields.iter().find(|(name, _, _)| name == field) {
+                Some(value.clone())
+            } else {
+                // Field not overridden by the update — project through the base.
+                Some(Expr::synth(
+                    expr.span,
+                    ExprKind::FieldAccess {
+                        expr: record.clone(),
+                        field: field.clone(),
+                        record_name: None,
+                    },
+                ))
+            }
+        }
+        _ => None,
+    }
+}
+
 fn case_of_known_constructor(expr: &Expr) -> Option<Expr> {
     let ExprKind::Case {
         scrutinee, arms, ..
@@ -595,6 +886,47 @@ fn case_of_known_constructor(expr: &Expr) -> Option<Expr> {
         }
     }
     None
+}
+
+/// True if `body`'s result `case` would statically commit to one arm when its
+/// scrutinee parameter `param` is known to be the nullary constructor `ctor_name`.
+/// This is the "will inlining this function immediately collapse?" gate for
+/// [`Folder::try_inline_fun`] — it mirrors the arm-scan in
+/// [`case_of_known_constructor`] over a synthetic `ctor_name` value.
+fn body_cancels_with(param: &str, ctor_name: &str, body: &Expr) -> bool {
+    let ExprKind::Case {
+        scrutinee, arms, ..
+    } = &result_expr(body).kind
+    else {
+        return false;
+    };
+    let ExprKind::Var { name } = &scrutinee.kind else {
+        return false;
+    };
+    if name != param {
+        return false;
+    }
+    let synthetic = Expr::synth(
+        scrutinee.span,
+        ExprKind::Constructor {
+            name: ctor_name.to_string(),
+        },
+    );
+    decides_against(arms, &synthetic)
+}
+
+/// True if a `case` over the known constructor `value` statically commits to one
+/// arm (some arm `static_match`es `Yes` with no guard, and no earlier arm is
+/// `Unknown`). The bool half of [`case_of_known_constructor`]'s arm scan.
+fn decides_against(arms: &[Annotated<CaseArm>], value: &Expr) -> bool {
+    for ann in arms {
+        match static_match(&ann.node.pattern, value) {
+            Match::No => continue,
+            Match::Unknown => return false,
+            Match::Yes => return ann.node.guard.is_none(),
+        }
+    }
+    false
 }
 
 /// Result of statically deciding whether `pat` matches a (partially) known value.
@@ -726,6 +1058,17 @@ fn is_duplicable(expr: &Expr) -> bool {
             is_duplicable(inner)
         }
         ExprKind::Tuple { elements } => elements.iter().all(is_duplicable),
+        // A record literal is a pure build (it lowers to a tagged tuple), the exact
+        // analogue of a saturated data-constructor application below — duplicable
+        // when every field value is. This lets a constant `Options { … }` argument
+        // substitute inline rather than be hidden behind a `bind_subpats` case-bound
+        // `Var`, which is what lets `project_record_field` see it.
+        ExprKind::RecordCreate { fields, .. } | ExprKind::AnonRecordCreate { fields } => {
+            fields.iter().all(|(_, _, v)| is_duplicable(v))
+        }
+        ExprKind::RecordUpdate { record, fields, .. } => {
+            is_duplicable(record) && fields.iter().all(|(_, _, v)| is_duplicable(v))
+        }
         // A saturated data-constructor application is a pure build; allow it when
         // every argument is duplicable. A non-constructor application (a function
         // call) may be effectful, so `known_ctor` returning `None` rejects it.
@@ -1345,6 +1688,49 @@ fn collect_free_vars(expr: &Expr, bound: &[String], acc: &mut std::collections::
 
 /// Peel a chain of `App` nodes, returning the innermost non-`App` head and the
 /// applied arguments in source order.
+/// β-reduce a saturated application of a *literal* lambda:
+/// `(fun p… -> body)(a…)` ⟶ `body` with each `p` bound to its `a`.
+///
+/// Reuses [`bind_subpats`]: each duplicable argument is substituted inline (so
+/// the phantom `Proxy` arg of a `symbol_name` closure is dropped and the body's
+/// literal symbol is exposed). The substitution is capture-avoiding
+/// ([`substitute_var`]) and the lambda body keeps its NodeIds (the node appears
+/// once and is replaced in place, never duplicated), so resolution entries stay
+/// valid.
+///
+/// **Only fires when every argument is [`is_duplicable`]** (pure: vars, literals,
+/// constructors, field accesses). This is the soundness boundary, not just a
+/// heuristic: a non-duplicable arg (a callback lambda, an effectful call) would
+/// be `bind_subpats`-freshened into a `case` scrutinee, and freshening orphans
+/// the NodeId-keyed effect-operation resolution computed upstream — so reducing
+/// `(fun f -> f ())(fun () -> log! "x")` would lose the `log!` evidence. Pure
+/// args carry no such state, and substituting them (even at several use sites)
+/// duplicates no effects.
+///
+/// Fires only on full saturation (`params.len() == args.len()`): a partial
+/// application is a closure and must stay un-reduced, and an over-application
+/// (`params.len() < args.len()`) means the lambda returns a function — leave it
+/// for a later pass.
+///
+/// Note this runs as part of the generic fold, which short-circuits in a module
+/// with **no dict constructors** ([`fold_program`]'s `ctors.is_empty()` guard).
+/// That is exactly the right scope: derived reflection closures only exist in a
+/// module that derives something (so its dict constructors are present), and a
+/// bare `symbol_name (Proxy …)` in a deriving-free module is not worth folding.
+fn beta_reduce_lambda_app(expr: &Expr) -> Option<Expr> {
+    let (head, args) = peel_app(expr);
+    let ExprKind::Lambda { params, body } = &head.kind else {
+        return None;
+    };
+    if params.is_empty() || params.len() != args.len() {
+        return None;
+    }
+    if !args.iter().all(|a| is_duplicable(a)) {
+        return None;
+    }
+    Some(bind_subpats(params, &args, body))
+}
+
 fn peel_app(expr: &Expr) -> (&Expr, Vec<&Expr>) {
     let mut args: Vec<&Expr> = Vec::new();
     let mut current = expr;

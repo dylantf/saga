@@ -270,6 +270,195 @@ on a *literal* ctor scrutinee, which parser code never produces.)
 `examples/…/08-generic-fusion-decode.saga`,
 `tests/e2e/tests/generic_fromjson_fusion_test.saga`.
 
+---
+
+## Post-fusion runtime-cost investigation (2026-06-10) — what's left for hand-impl parity
+
+After Phases 5/6, the derived codec is still ~1.8–2× slower than the hand-written
+one. To find out *why*, emitted the real bench (`CodecPathDerived` →
+`_build/dev/main.core`, freshly built) and read the derived `User.to_json`.
+
+**The `Rep` tree is already gone.** Zero `Adt`/`Record`/`And`/`Labeled`/`Leaf`
+constructors survive in the hot consumer module — Phases 5/6 deforested it. So
+"deforest the `Rep`" is **done**; the remaining gap is narrower. The derived
+`User.to_json` builds the field list directly. Here is the literal Core for one
+field (`id`):
+
+```erlang
+let <Name> =
+  let <_Cor903> =
+    let <_Cor904> = fun (___proxy) -> #{#<105>,#<100>}#   %% literal "id", trapped in a closure
+    let <_Cor905> = {'std_base_Proxy'}                    %% allocate a Proxy tuple
+    apply _Cor904(_Cor905)                                %% ...just to apply it back out
+  call 'sagajson':'apply_name_style'(element(2,___p0), _Cor903)   %% runtime no-op for AsIs/SnakeCase
+in
+{ Name, call 'sagajson_codec':'__saga_dictmethod_..._Std_Int_Int_0'(___p0, element(2,___p1)) }
+```
+
+This *one small module* has **36 proxy-closures, 36 Proxy allocs, 36
+`apply_name_style` calls** — one per field. For the bench (~700k fields/run on
+encode) that is ~1.4M needless allocations plus ~700k `apply_name_style` calls,
+all to reproduce compile-time-constant key strings.
+
+Three surviving costs, all **compiler-addressable** and **general** (no
+JSON-specific logic). Ordered by do-first leverage:
+
+### Item 1 — β-reduce the symbol-name proxy closures to literal keys — **DONE (uncommitted)**
+
+**Landed** in `src/codegen/generic_fold.rs`: a `beta_reduce_lambda_app` arm in
+`rewrite_once` reducing a saturated literal-lambda application
+`(fun p… -> body)(a…)` via the existing `bind_subpats`. Regression test
+`symbol_name_proxy_closure_is_beta_reduced` (`tests/codegen_integration.rs`).
+Bench: derived `User.to_json` proxy-closures + `Proxy` allocs both **36 → 0**;
+the literal key `#{"id"}#` is now passed straight to `apply_name_style`.
+
+Two findings worth keeping:
+
+- **Effect-safety gate**: only reduce when every argument is `is_duplicable`
+  (pure). A non-duplicable arg (a callback lambda, an effectful call) would be
+  `bind_subpats`-freshened into a `case` scrutinee, and freshening orphans the
+  NodeId-keyed effect-operation resolution — `(fun f -> f ())(fun () -> log! "x")`
+  lost its `log!` evidence and `erlc`-panicked until the gate was added (caught by
+  `lambda_head_open_row_call_forwards_evidence`). Pure args carry no such state.
+- **Scope**: the fold short-circuits in a module with no dict constructors
+  (`fold_program`'s `ctors.is_empty()`), so β-reduction only runs where deriving
+  is present — exactly where these reflection closures occur. A bare
+  `symbol_name (Proxy …)` in a deriving-free module is left un-reduced (a
+  negligible missed cleanup), so the regression test carries a `deriving (Show)`.
+- **Wall-clock**: encode median **unchanged** (255 → 258 ms, noise), as predicted
+  — Item 1 *exposes* the literal but the per-field `apply_name_style` remote call
+  still fires. The wall-clock win is **Item 2** (fold that call away). Item 1 is
+  the necessary precondition, not itself the speedup.
+
+**Original analysis (kept for the design rationale):**
+
+#### Item 1 — β-reduce the symbol-name proxy closures to literal keys (do first)
+
+`symbol_name` elaborates to `fun(__proxy) -> SymbolIntrinsic{ "id" }`
+([`elaborate.rs:1663`](../../src/elaborate.rs#L1663) `try_symbol_intrinsic_lambda`),
+then is applied to a `Proxy`. The lambda **ignores** its argument and its body is
+a compile-time literal, so `apply (fun(__proxy)->"id")(Proxy)` should β-reduce to
+`"id"`. It doesn't: `generic_fold`'s `rewrite_once`
+([`generic_fold.rs:273`](../../src/codegen/generic_fold.rs#L273)) has **no
+β-reduction arm for `App { func: Lambda }`**. Per field this costs a closure
+alloc + a Proxy alloc + an apply, purely to recover a constant string.
+
+- **Fix**: add a `rewrite_once` arm for `App { func: Lambda { params, body }, arg }`
+  that substitutes when the param is unused, or the arg is pure/`is_duplicable`
+  (reuse the existing capture-avoiding `substitute_var` + `is_duplicable`).
+- **Why first**: local, unconditional, always valid. Removes ~1.4M allocs/run
+  *and* turns every field key into a literal — the precondition for Items 2 and 3
+  and any later list→iodata fusion.
+- **Validity**: `__proxy` is phantom (always ignored), so substitution is trivially
+  capture-free here; the general arm still needs the capture-avoiding path for
+  the where-bound `__dict_KnownSymbol_n` variant (body is a `Var`, also pure).
+
+### Item 2 — fold `apply_name_style` ("blocker 2") — **DONE (uncommitted), but inert until "blocker 1"**
+
+**Correction to the analysis below:** `___p0` is *not* a derived dict — it's the
+`Options` record, threaded as the `to_json : Options -> a -> Iodata` parameter, and
+on the defaults path it is delivered by the **`json_defaults` tail-resumptive
+effect** (`get_json_options!` resumes `default_options`), *not* as a syntactic
+constant. So a constant never reaches the codec today. The work splits into:
+- **blocker 2** (the function boundary — make a constant `opts` *argument* fold
+  through the recursive codec): **DONE**, below.
+- **blocker 1** (make the defaults `opts` a *visible* constant — bypass the effect
+  for the defaults entry, e.g. `serialize x = to_string (to_json default_options x)`,
+  since `to_json` reads `opts` only as a parameter): **not yet done**. Until it
+  lands the bench is unmoved — the derived codec still has its 36 `apply_name_style`
+  calls (verified) because `opts.rename_all` stays a runtime `element/2`, so the
+  gate below correctly declines to fire.
+
+**What landed (general, no JSON-specific code), in `src/codegen/generic_fold.rs`:**
+- *Unit A — record-field projection.* `is_duplicable` now accepts pure record
+  literals (`RecordCreate`/`AnonRecordCreate`/`RecordUpdate`), so a constant `opts`
+  argument substitutes inline rather than hiding behind a `bind_subpats` case-bound
+  `Var`; a new `project_record_field` `rewrite_once` arm folds
+  `(Options {…}).field` → the field value (gated on the whole record being
+  duplicable, so no effectful sibling is dropped). This alone collapses any
+  `case opts.<field> of {…}` (e.g. `tag_format`) sitting *inside* an inlined codec
+  body, via the existing `case_of_known_constructor`.
+- *Unit B — constant-arg "inline-to-cancel".* Carries small, single-clause,
+  guardless, dispatch-shaped, non-self-recursive plain functions cross-module
+  (`ExternalFun`/`external_funs_from_modules`, bare-name keyed with a global-
+  uniqueness drop), and `try_inline_fun` inlines such a call **only when** an
+  argument is a `known_ctor` whose parameter the body decides on
+  (`body_cancels_with`). So `apply_name_style AsIs "id"` → inline → `case AsIs {…}`
+  → collapse → `"id"`; `snake_to_camel "id"` and runtime-style args are left alone.
+  Reuses the dict-method freshen+resolution-carry (refactored to `freshen_with_carry`).
+
+**Tests:** `constant_record_field_projection_collapses_case`,
+`constant_record_substituted_through_lambda_then_projected`
+(`tests/codegen_integration.rs`); `constant_arg_inlines_cross_module_dispatch_fn_to_cancel`,
+`runtime_arg_does_not_inline_dispatch_fn` (`tests/module_codegen_integration.rs`).
+Full suite + e2e fusion green, clippy clean, saga_json 280 unchanged, derived bench
+unchanged (still 36 `apply_name_style`, correct output).
+
+**Next:** blocker 1 to actually feed the constant in and move the bench, then re-measure.
+
+**Original analysis (kept for the design rationale; note the `___p0`-is-a-dict
+framing is the misread corrected above):**
+
+`apply_name_style(Ns, S)` returns `S` unchanged for `AsIs` and `SnakeCase` (the
+default), and transforms for the other styles. The style arg is
+`element(2, ___p0)` — a projection of the **constant** derived dict. Today it is a
+runtime call every field.
+
+- **Fix**: fold `element(k, <known-constant tuple/dict>)` → the constant element
+  (here `'sagajson_AsIs'`), after which the whole `case` in `apply_name_style`
+  collapses to the (now-literal, post–Item 1) field name.
+- **Dependency**: needs Item 1 (literal key) **and** the dict to be statically
+  visible at the projection. Within the dict-*method* body `___p0` is a parameter,
+  so this only fires where the method is inlined at a call site that supplies the
+  constant dict, or where the derived dict's name-style projection is specialized
+  in. General tuple-projection-on-known-constant folding.
+- **Must key off a genuine compile-time-constant dict at the call site.** It is
+  constant for `serialize` / `json_defaults` (the derived nullary dict flows in
+  directly), but a `serialize_with` under a *runtime* handler/options value has no
+  statically-known style — there `element(2, ___p0)` is a real runtime projection.
+  The fold must **degrade gracefully** to the current runtime `apply_name_style`
+  call in that case, never assume the constant. So the rewrite fires only when the
+  projected tuple is itself a known constant at that site, not whenever the shape
+  matches.
+
+### Item 3 — inline the leaf value encoders (smaller, independent)
+
+Each field value is `call 'sagajson_codec':'__saga_dictmethod_..._Std_Int_Int_0'(...)`
+— a real **remote** call per field. Dispatch is already devirtualized (a direct
+`call`, not a virtual `apply` through a dict tuple — good), but the leaf
+`Int`/`String`/`Bool` encoders are not inlined.
+
+- **Fix**: inline small leaf dict-method bodies cross-module (the fold engine
+  already carries producer resolution; this extends inlining from the
+  `Generic`-routing methods to the concrete leaf encoders).
+- **Independent** of Items 1/2; smaller win.
+
+### Decode path — Items 1/2 pay off symmetrically, but are necessary-not-sufficient
+
+The investigation Core above is all `to_json`. The **same** `apply_name_style ∘
+symbol_name (Proxy n)` proxy-closure shape appears in the decode `Labeled`
+(`from_fields`) arm, so Items 1/2 fold the keys there too — symmetric win.
+
+But decode has a second cost Items 1/2 **don't** touch, and it is library-side:
+`parse_object_raw` materializes the `List (String, BitString)` of fields and
+**double-scans every value** (`skip_value` to slice the raw span, then re-parse
+the slice). That double-scan — not the `Rep` walk (already deforested) and not the
+keys — is why decode sits at ~2× while encode is ~1.8×.
+
+So sequence decode as: **land Items 1/2, re-measure, then** do the library-side
+single-pass builder rewrite in `Codec.saga` (a `Maybe`-slot builder keyed on the
+now-literal field names, parsing each value once instead of slice-then-reparse).
+β-reduction alone will *not* close decode — it is the precondition that makes the
+literal-keyed single-pass builder worthwhile, not the fix itself.
+
+### Not in scope here (library + compiler, later)
+
+The encode field list (`[{Name,Value}|…]`) handed to `sagajson_codec:object`
+(`intersperse_commas`/`concat`) is the encode cousin of decode's pairs-list. It
+only becomes fusable to straight-line iodata *after* Items 1/2 make keys+values
+literal, and the `object` shape is partly library-side. Revisit after Items 1/2,
+alongside the decode single-pass builder above.
+
 ### Code map
 
 - **Classification** — `src/codegen/trait_dispatch.rs`:

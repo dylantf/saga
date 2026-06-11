@@ -972,6 +972,7 @@ pub fn build_project_ext(
         let normalized = codegen::generic_fold::fold_program(
             &codegen::normalize::normalize_effects(&elaborated),
             &codegen::generic_fold::ExternalCtors::new(),
+            &codegen::generic_fold::ExternalFuns::new(),
         )
         .program;
         let resolution = codegen::resolve::resolve_names(

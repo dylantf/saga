@@ -110,6 +110,7 @@ pub fn compile_module_from_result(
     let normalized = generic_fold::fold_program(
         &normalize::normalize_effects(&elaborated),
         &generic_fold::ExternalCtors::new(),
+        &generic_fold::ExternalFuns::new(),
     )
     .program;
     let resolution = resolve::resolve_names(
@@ -152,7 +153,12 @@ pub fn emit_module_with_context(
     // modules. Inlined cross-module nodes carry the producer's resolution, merged
     // below after `resolve_names`.
     let externals = generic_fold::external_ctors_from_modules(&ctx.modules);
-    let fold_out = generic_fold::fold_program(&normalize::normalize_effects(program), &externals);
+    let external_funs = generic_fold::external_funs_from_modules(&ctx.modules);
+    let fold_out = generic_fold::fold_program(
+        &normalize::normalize_effects(program),
+        &externals,
+        &external_funs,
+    );
     let generic_fold::FoldOutput {
         program,
         carried_resolution,
