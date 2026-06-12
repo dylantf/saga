@@ -237,17 +237,53 @@ pub fn import_modules_for_program(program: &[crate::ast::Decl]) -> Vec<String> {
 pub fn build_module_graph(module_map: &ModuleMap) -> Result<ModuleGraph, String> {
     let mut adjacency = HashMap::new();
     for (module_name, path) in module_map {
-        let source = std::fs::read_to_string(path)
-            .map_err(|e| format!("cannot read module '{}': {}", module_name, e))?;
-        let tokens = crate::lexer::Lexer::new(&source)
-            .lex()
-            .map_err(|e| format!("lex error in module '{}': {}", module_name, e.message))?;
-        let program = crate::parser::Parser::new(tokens)
-            .parse_program()
-            .map_err(|e| format!("parse error in module '{}': {}", module_name, e.message))?;
-        adjacency.insert(module_name.clone(), import_modules_for_program(&program));
+        adjacency.insert(
+            module_name.clone(),
+            module_dependencies_from_file(module_name, path)?,
+        );
     }
     Ok(ModuleGraph { adjacency })
+}
+
+pub fn build_reachable_module_graph(
+    module_map: &ModuleMap,
+    root_module: &str,
+) -> Result<ModuleGraph, String> {
+    let mut adjacency = HashMap::new();
+    let mut stack = vec![root_module.to_string()];
+    let mut seen = HashSet::new();
+    while let Some(module_name) = stack.pop() {
+        if !seen.insert(module_name.clone()) {
+            continue;
+        }
+        let Some(path) = module_map.get(&module_name) else {
+            adjacency.insert(module_name, Vec::new());
+            continue;
+        };
+        let dependencies = module_dependencies_from_file(&module_name, path)?;
+        for dependency in &dependencies {
+            if module_map.contains_key(dependency) && !seen.contains(dependency) {
+                stack.push(dependency.clone());
+            }
+        }
+        adjacency.insert(module_name, dependencies);
+    }
+    Ok(ModuleGraph { adjacency })
+}
+
+fn module_dependencies_from_file(
+    module_name: &str,
+    path: &std::path::Path,
+) -> Result<Vec<String>, String> {
+    let source = std::fs::read_to_string(path)
+        .map_err(|e| format!("cannot read module '{}': {}", module_name, e))?;
+    let tokens = crate::lexer::Lexer::new(&source)
+        .lex()
+        .map_err(|e| format!("lex error in module '{}': {}", module_name, e.message))?;
+    let program = crate::parser::Parser::new(tokens)
+        .parse_program()
+        .map_err(|e| format!("parse error in module '{}': {}", module_name, e.message))?;
+    Ok(import_modules_for_program(&program))
 }
 
 #[cfg(test)]

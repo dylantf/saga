@@ -6966,6 +6966,7 @@ pub type AThing = AThing
     let b = r#"
 module B
 import A (AThing)
+import C
 pub type BThing = BThing
 "#;
     let c = r#"

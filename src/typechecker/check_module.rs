@@ -12,6 +12,7 @@ mod header_register;
 mod header_scope;
 mod import_scope;
 mod scan;
+mod scc;
 
 pub use codegen_info::{EffectDef, EffectOpDef, ModuleCodegenInfo, TraitImplDict};
 pub use exports::ModuleExports;
@@ -337,34 +338,6 @@ impl Checker {
         }
 
         Ok(exports)
-    }
-
-    fn cyclic_component_containing(
-        &mut self,
-        module_name: &str,
-    ) -> Result<Option<Vec<String>>, String> {
-        if self.modules.module_graph.is_none() {
-            let Some(map) = self.modules.map.as_ref() else {
-                return Ok(None);
-            };
-            self.modules.module_graph = Some(build_module_graph(map)?);
-        }
-        let graph = self
-            .modules
-            .module_graph
-            .as_ref()
-            .expect("cached module graph");
-        Ok(graph
-            .strongly_connected_components()
-            .into_iter()
-            .find(|component| {
-                component.modules.iter().any(|module| module == module_name)
-                    && (component.is_cycle()
-                        || graph
-                            .dependencies(module_name)
-                            .is_some_and(|deps| deps.iter().any(|dep| dep == module_name)))
-            })
-            .map(|component| component.modules))
     }
 
     fn ensure_prelude_snapshot(&mut self, project_root: &Option<PathBuf>) {
