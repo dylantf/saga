@@ -945,6 +945,102 @@ main () = plus 10 20
 }
 
 #[test]
+fn reexported_aliased_import_emits_origin_module_call() {
+    let lib_src = r#"module Lib
+
+pub fun inc : Int -> Int
+inc x = x + 1
+"#;
+    let facade_src = r#"module Facade
+
+import Lib (pub inc as plus_one)
+"#;
+    let main_src = r#"module Main
+
+import Facade (plus_one)
+
+main () = plus_one 41
+"#;
+
+    with_temp_project_files(
+        &[("lib/Lib.saga", lib_src), ("lib/Facade.saga", facade_src)],
+        main_src,
+        |checker, program| {
+            let out = emit_from_program(program, "main", checker);
+            assert_contains(&out, "call 'lib':'inc'");
+            assert!(
+                !out.contains("call 'facade':'plus_one'"),
+                "re-exported call should target the origin module\n{out}"
+            );
+        },
+    );
+}
+
+#[test]
+fn qualified_reexported_alias_emits_origin_module_call() {
+    let lib_src = r#"module Lib
+
+pub fun inc : Int -> Int
+inc x = x + 1
+"#;
+    let facade_src = r#"module Facade
+
+import Lib (pub inc as plus_one)
+"#;
+    let main_src = r#"module Main
+
+import Facade
+
+main () = Facade.plus_one 41
+"#;
+
+    with_temp_project_files(
+        &[("lib/Lib.saga", lib_src), ("lib/Facade.saga", facade_src)],
+        main_src,
+        |checker, program| {
+            let out = emit_from_program(program, "main", checker);
+            assert_contains(&out, "call 'lib':'inc'");
+            assert!(
+                !out.contains("call 'facade':'plus_one'"),
+                "qualified re-exported call should target the origin module\n{out}"
+            );
+        },
+    );
+}
+
+#[test]
+fn reexport_all_import_emits_origin_module_call() {
+    let lib_src = r#"module Lib
+
+pub fun inc : Int -> Int
+inc x = x + 1
+"#;
+    let facade_src = r#"module Facade
+
+import Lib (pub ..)
+"#;
+    let main_src = r#"module Main
+
+import Facade (inc)
+
+main () = inc 41
+"#;
+
+    with_temp_project_files(
+        &[("lib/Lib.saga", lib_src), ("lib/Facade.saga", facade_src)],
+        main_src,
+        |checker, program| {
+            let out = emit_from_program(program, "main", checker);
+            assert_contains(&out, "call 'lib':'inc'");
+            assert!(
+                !out.contains("call 'facade':'inc'"),
+                "pub .. re-exported call should target the origin module\n{out}"
+            );
+        },
+    );
+}
+
+#[test]
 fn exposed_and_qualified_same_module() {
     let main_src = "
 module Main

@@ -1132,6 +1132,22 @@ fn build_imported_fun_scoped(
     }
 }
 
+fn split_canonical_fun(canonical: &str) -> Option<(&str, &str)> {
+    canonical.rsplit_once('.')
+}
+
+fn export_origin<'a>(
+    exporting_module: &'a str,
+    info: &'a ModuleCodegenInfo,
+    surface_name: &'a str,
+) -> (&'a str, &'a str) {
+    info.export_origins
+        .iter()
+        .find(|(surface, _)| surface == surface_name)
+        .and_then(|(_, origin)| split_canonical_fun(origin))
+        .unwrap_or((exporting_module, surface_name))
+}
+
 /// Register canonical-form (`Module.name`) entries in `qualified_scope` for
 /// every loaded module. Driven purely by `codegen_info` — the set of modules
 /// the front end has loaded — not by the program's `Decl::Import` nodes.
@@ -1152,21 +1168,23 @@ fn register_canonical_qualified_scope(
         if mod_name == source_module_name {
             continue;
         }
-        let mod_path: Vec<String> = mod_name.split('.').map(String::from).collect();
-        let erlang_mod = module_name_to_erlang(&mod_path);
-        let fun_effects_map: HashMap<&str, &Vec<String>> = info
-            .fun_effects
-            .iter()
-            .map(|(n, effs)| (n.as_str(), effs))
-            .collect();
         for (name, scheme) in &info.exports {
+            let (origin_mod, origin_name) = export_origin(mod_name, info, name);
+            let origin_info = codegen_info.get(origin_mod).unwrap_or(info);
+            let origin_path: Vec<String> = origin_mod.split('.').map(String::from).collect();
+            let origin_erlang_mod = module_name_to_erlang(&origin_path);
+            let origin_fun_effects_map: HashMap<&str, &Vec<String>> = origin_info
+                .fun_effects
+                .iter()
+                .map(|(n, effs)| (n.as_str(), effs))
+                .collect();
             let scoped = build_imported_fun_scoped(
-                mod_name,
-                &erlang_mod,
-                name,
+                origin_mod,
+                &origin_erlang_mod,
+                origin_name,
                 scheme,
-                info,
-                &fun_effects_map,
+                origin_info,
+                &origin_fun_effects_map,
                 effect_op_counts,
             );
             let canonical = format!("{}.{}", mod_name, name);
@@ -1203,7 +1221,6 @@ fn register_import_aliases(
         } = decl
         {
             let mod_name = module_path.join(".");
-            let erlang_mod = module_name_to_erlang(module_path);
             let alias = import_alias
                 .as_deref()
                 .unwrap_or_else(|| module_path.last().map(|s| s.as_str()).unwrap_or(""));
@@ -1221,24 +1238,27 @@ fn register_import_aliases(
                 }
             };
 
-            let fun_effects_map: HashMap<&str, &Vec<String>> = info
-                .fun_effects
-                .iter()
-                .map(|(n, effs)| (n.as_str(), effs))
-                .collect();
-
             for (name, scheme) in &info.exports {
                 let exposed_surface = exposed_surface(name);
                 if !alias_differs && exposed_surface.is_none() {
                     continue;
                 }
+                let (origin_mod, origin_name) = export_origin(&mod_name, info, name);
+                let origin_info = codegen_info.get(origin_mod).unwrap_or(info);
+                let origin_path: Vec<String> = origin_mod.split('.').map(String::from).collect();
+                let origin_erlang_mod = module_name_to_erlang(&origin_path);
+                let origin_fun_effects_map: HashMap<&str, &Vec<String>> = origin_info
+                    .fun_effects
+                    .iter()
+                    .map(|(n, effs)| (n.as_str(), effs))
+                    .collect();
                 let scoped = build_imported_fun_scoped(
-                    &mod_name,
-                    &erlang_mod,
-                    name,
+                    origin_mod,
+                    &origin_erlang_mod,
+                    origin_name,
                     scheme,
-                    info,
-                    &fun_effects_map,
+                    origin_info,
+                    &origin_fun_effects_map,
                     effect_op_counts,
                 );
                 if alias_differs {

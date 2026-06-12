@@ -8,6 +8,22 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use super::util;
 use super::{EffectInfo, FunInfo, HandlerInfo, Lowerer};
 
+fn split_canonical_fun(canonical: &str) -> Option<(&str, &str)> {
+    canonical.rsplit_once('.')
+}
+
+fn export_origin<'a>(
+    exporting_module: &'a str,
+    info: &'a crate::typechecker::ModuleCodegenInfo,
+    surface_name: &'a str,
+) -> (&'a str, &'a str) {
+    info.export_origins
+        .iter()
+        .find(|(surface, _)| surface == surface_name)
+        .and_then(|(_, origin)| split_canonical_fun(origin))
+        .unwrap_or((exporting_module, surface_name))
+}
+
 fn count_lambda_params(body: &ast::Expr) -> usize {
     match &body.kind {
         ast::ExprKind::Lambda { params, body, .. } => params.len() + count_lambda_params(body),
@@ -605,8 +621,25 @@ impl<'a> Lowerer<'a> {
             info.exports.iter().map(|(n, _)| n.as_str()).collect();
 
         for (name, scheme) in &info.exports {
+            let (origin_mod, origin_name) = export_origin(module_name, info, name);
+            let origin_info = self
+                .ctx
+                .module_semantics(origin_mod)
+                .map(|module| module.codegen_info)
+                .unwrap_or(info);
             let (base_arity, effects) = util::arity_and_effects_from_type(&scheme.ty);
-            let effects = self.canonicalize_effects(effects);
+            let mut effects = self.canonicalize_effects(effects);
+            if let Some((_, ann_effs)) = origin_info
+                .fun_effects
+                .iter()
+                .find(|(fun_name, _)| fun_name == origin_name)
+            {
+                for eff in ann_effs {
+                    if !effects.contains(eff) {
+                        effects.push(eff.clone());
+                    }
+                }
+            }
             let shape = RuntimeFunctionShape::from_type(&scheme.ty, |effects| {
                 self.canonicalize_effects(effects)
             });
@@ -628,7 +661,7 @@ impl<'a> Lowerer<'a> {
                 param_types: util::param_types_from_type(&scheme.ty),
             };
             self.fun_info.insert(alias_qualified, fi.clone());
-            let canonical = format!("{}.{}", module_name, name);
+            let canonical = format!("{}.{}", origin_mod, origin_name);
             self.fun_info.entry(canonical).or_insert(fi);
 
             if let Some(surface) = exposed_surface(name)

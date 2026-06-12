@@ -14,6 +14,10 @@ use crate::token::Span;
 pub struct ModuleExports {
     /// Public type bindings: name -> scheme.
     pub bindings: Vec<(String, Scheme)>,
+    /// Public binding surface name -> canonical origin name.
+    /// Local exports map to `ThisModule.name`; re-exports retain their
+    /// defining module, e.g. `plus -> Math.add`.
+    pub binding_origins: HashMap<String, String>,
     /// Type name -> constructor names (empty vec for opaque types).
     pub type_constructors: HashMap<String, Vec<String>>,
     /// Record name -> record info (type params + field types).
@@ -52,15 +56,25 @@ impl ModuleExports {
 
         // Bindings: from env and constructors
         let mut bindings: Vec<(String, Scheme)> = Vec::new();
+        let mut binding_origins: HashMap<String, String> = HashMap::new();
         let mut def_ids: HashMap<String, crate::ast::NodeId> = HashMap::new();
+        let module_prefix = checker.current_module.as_deref().unwrap_or("");
         for name in &pub_names {
             if let Some(scheme) = checker.env.get(name) {
                 bindings.push((name.to_string(), scheme.clone()));
+                binding_origins.insert(
+                    name.to_string(),
+                    canonical_export_name(module_prefix, name),
+                );
                 if let Some(did) = checker.env.def_id(name) {
                     def_ids.insert(name.to_string(), did);
                 }
             } else if let Some(scheme) = checker.constructors.get(name) {
                 bindings.push((name.to_string(), scheme.clone()));
+                binding_origins.insert(
+                    name.to_string(),
+                    canonical_export_name(module_prefix, name),
+                );
                 if let Some(&did) = checker.lsp.constructor_def_ids.get(name) {
                     def_ids.insert(name.to_string(), did);
                 }
@@ -183,7 +197,6 @@ impl ModuleExports {
         // Collect type arities for all exported types.
         // The checker stores type_arity under canonical names, but exports use bare names.
         let mut type_arity: HashMap<String, usize> = HashMap::new();
-        let module_prefix = checker.current_module.as_deref().unwrap_or("");
         for name in type_constructors.keys() {
             let canonical = if module_prefix.is_empty() {
                 name.clone()
@@ -311,8 +324,20 @@ impl ModuleExports {
             }
         }
 
+        collect_value_reexports(
+            program,
+            checker,
+            &mut bindings,
+            &mut binding_origins,
+            &mut def_ids,
+            &mut doc_comments,
+        );
+
+        let effectful_funs = collect_effectful_reexports(program, checker, effectful_funs);
+
         ModuleExports {
             bindings,
+            binding_origins,
             type_constructors,
             record_defs,
             traits,
@@ -327,6 +352,109 @@ impl ModuleExports {
             doc_comments,
         }
     }
+}
+
+fn canonical_export_name(module_prefix: &str, name: &str) -> String {
+    if module_prefix.is_empty() {
+        name.to_string()
+    } else {
+        format!("{}.{}", module_prefix, name)
+    }
+}
+
+fn collect_effectful_reexports(
+    program: &[crate::ast::Decl],
+    checker: &Checker,
+    mut effectful_funs: HashSet<String>,
+) -> HashSet<String> {
+    for (module_name, item) in public_import_items(program, checker) {
+        let Some(exports) = checker.modules.exports.get(&module_name) else {
+            continue;
+        };
+        if exports.effectful_funs.contains(&item.name) {
+            effectful_funs.insert(item.surface_name().to_string());
+        }
+    }
+    effectful_funs
+}
+
+fn collect_value_reexports(
+    program: &[crate::ast::Decl],
+    checker: &Checker,
+    bindings: &mut Vec<(String, Scheme)>,
+    binding_origins: &mut HashMap<String, String>,
+    def_ids: &mut HashMap<String, crate::ast::NodeId>,
+    doc_comments: &mut HashMap<String, Vec<String>>,
+) {
+    for (module_name, item) in public_import_items(program, checker) {
+        let Some(exports) = checker.modules.exports.get(&module_name) else {
+            continue;
+        };
+        let origin_name = item.name.as_str();
+        let surface = item.surface_name();
+        let Some((_, scheme)) = exports.bindings.iter().find(|(name, _)| name == origin_name)
+        else {
+            continue;
+        };
+        if bindings.iter().any(|(name, _)| name == surface) {
+            continue;
+        }
+        bindings.push((surface.to_string(), scheme.clone()));
+        let origin = exports
+            .binding_origins
+            .get(origin_name)
+            .cloned()
+            .unwrap_or_else(|| format!("{}.{}", module_name, origin_name));
+        binding_origins.insert(surface.to_string(), origin);
+        if let Some(&did) = exports.def_ids.get(origin_name) {
+            def_ids.insert(surface.to_string(), did);
+        }
+        if let Some(doc) = exports.doc_comments.get(origin_name) {
+            doc_comments
+                .entry(surface.to_string())
+                .or_insert_with(|| doc.clone());
+        }
+    }
+}
+
+fn public_import_items<'a>(
+    program: &'a [crate::ast::Decl],
+    checker: &'a Checker,
+) -> Vec<(String, crate::ast::ExposedItem)> {
+    let mut out = Vec::new();
+    for decl in program {
+        let crate::ast::Decl::Import {
+            module_path,
+            exposing,
+            ..
+        } = decl
+        else {
+            continue;
+        };
+        let module_name = module_path.join(".");
+        match exposing {
+            Some(crate::ast::Exposing::Items(items)) => {
+                out.extend(
+                    items
+                        .iter()
+                        .filter(|item| item.public)
+                        .cloned()
+                        .map(|item| (module_name.clone(), item)),
+                );
+            }
+            Some(crate::ast::Exposing::All { public: true, .. }) => {
+                if let Some(exports) = checker.modules.exports.get(&module_name) {
+                    out.extend(
+                        synthesize_all_exposed(exports, true)
+                            .into_iter()
+                            .map(|item| (module_name.clone(), item)),
+                    );
+                }
+            }
+            _ => {}
+        }
+    }
+    out
 }
 
 /// An effect operation definition for codegen: operation name and parameter count.
@@ -378,6 +506,8 @@ pub struct TraitImplDict {
 pub struct ModuleCodegenInfo {
     /// Public type bindings: name -> scheme.
     pub exports: Vec<(String, Scheme)>,
+    /// Public binding surface name -> canonical origin name.
+    pub export_origins: Vec<(String, String)>,
     /// Public effect definitions.
     pub effect_defs: Vec<EffectDef>,
     /// Public record definitions: record name -> ordered field names.
@@ -1135,6 +1265,7 @@ impl Checker {
         }
         let ModuleExports {
             bindings,
+            binding_origins,
             type_constructors,
             record_defs,
             traits,
@@ -1270,7 +1401,10 @@ impl Checker {
 
         for (name, scheme) in bindings {
             // Canonical: always register under full module path (e.g. "Std.String.replace")
-            let canonical = format!("{}.{}", module_name, name);
+            let canonical = binding_origins
+                .get(name)
+                .cloned()
+                .unwrap_or_else(|| format!("{}.{}", module_name, name));
             if let Some(&did) = def_ids.get(name.as_str()) {
                 self.env
                     .insert_with_def(canonical.clone(), scheme.clone(), did);
@@ -1396,6 +1530,13 @@ pub(super) fn resolve_import(
         .iter()
         .map(|(n, s)| (n.as_str(), s))
         .collect();
+    let binding_origin = |name: &str| -> String {
+        exports
+            .binding_origins
+            .get(name)
+            .cloned()
+            .unwrap_or_else(|| super::canonical_join(module_name, name))
+    };
 
     // Build reverse map: constructor name -> type name
     let mut ctor_to_type: std::collections::HashMap<&str, &str> = std::collections::HashMap::new();
@@ -1451,7 +1592,17 @@ pub(super) fn resolve_import(
 
     // Value bindings: canonical + aliased
     for (name, _) in &exports.bindings {
-        ScopeMap::register_qualified(&mut scope.values, module_name, prefix, name);
+        let canonical = binding_origin(name);
+        scope
+            .values
+            .entry(canonical.clone())
+            .or_insert_with(|| canonical.clone());
+        let qualified = super::canonical_join(module_name, name);
+        scope.values.entry(qualified).or_insert_with(|| canonical.clone());
+        if prefix != module_name {
+            let aliased = super::canonical_join(prefix, name);
+            scope.values.entry(aliased).or_insert(canonical);
+        }
     }
 
     // Constructors: canonical + aliased
@@ -1488,7 +1639,7 @@ pub(super) fn resolve_import(
                 let mut found = binding_map.contains_key(name);
                 // Bare type value -> canonical
                 if found {
-                    let type_canonical = format!("{}.{}", module_name, name);
+                    let type_canonical = binding_origin(name);
                     scope
                         .values
                         .entry(surface.to_string())
@@ -1525,7 +1676,7 @@ pub(super) fn resolve_import(
                 if ctor_to_type.contains_key(name)
                     && binding_map.contains_key(name)
                 {
-                    let ctor_canonical = format!("{}.{}", module_name, name);
+                    let ctor_canonical = binding_origin(name);
                     scope
                         .constructors
                         .entry(surface.to_string())
@@ -1567,7 +1718,7 @@ pub(super) fn resolve_import(
                 }
             } else {
                 // Bare value -> canonical
-                let canonical = super::canonical_join(module_name, name);
+                let canonical = binding_origin(name);
                 // Validate: must be a function/value in scope, or a handler
                 // name. Trait method canonical entries also live in
                 // scope.values (so qualified Module.Trait.method resolves),
@@ -1579,10 +1730,10 @@ pub(super) fn resolve_import(
                     .traits
                     .values()
                     .any(|info| info.methods.iter().any(|m| m.name == name));
-                if (is_trait_method || !scope.values.contains_key(&canonical)) && !is_handler {
+                if (is_trait_method || !binding_map.contains_key(name)) && !is_handler {
                     return Err(format!("'{}' is not exported by module '{}'", name, prefix));
                 }
-                if scope.values.contains_key(&canonical) {
+                if binding_map.contains_key(name) {
                     scope
                         .values
                         .entry(surface.to_string())
@@ -1930,6 +2081,11 @@ fn collect_codegen_info(
 
     ModuleCodegenInfo {
         exports: exports.bindings.clone(),
+        export_origins: exports
+            .binding_origins
+            .iter()
+            .map(|(surface, origin)| (surface.clone(), origin.clone()))
+            .collect(),
         effect_defs,
         record_fields,
         handler_defs,

@@ -65,6 +65,10 @@ It is primarily:
 - a way to map user-visible import forms to canonical names
 - a helper for diagnostics, tooling, and a few remaining specialized lookups
 
+For item aliases, the user-visible key is the alias and the canonical value is
+the origin name. For example, `import Math (add as plus)` records `plus ->
+Math.add`, so later phases see the call target as the defining module's export.
+
 It is **not** the main semantic lookup path for ordinary source expressions
 during lowering anymore.
 
@@ -183,6 +187,14 @@ Examples:
 | Trait method | `Std.Base.Show.show` |
 | Effect | `Std.Fail.Fail` |
 | Handler | `Std.Test.exec_handler` |
+
+Import aliases do not change canonical names. `import Std.List (map as fmap)`
+makes `fmap` a local surface name for `Std.List.map`; the semantic identity
+remains the origin export.
+
+Value/function re-exports keep the same rule across another module boundary.
+If `Facade` writes `import Math (pub add as plus)`, then importers may use
+`Facade.plus` or expose `plus`, but the canonical identity remains `Math.add`.
 
 Types are still a special case in a few places: some type-related tables use
 the existing canonical/bare conventions already present in the typechecker.
