@@ -1,6 +1,9 @@
 use std::collections::{BTreeSet, HashMap, HashSet};
 
-use super::{HeaderExposedItem, HeaderExposing, HeaderReExport, HeaderTypeDecl, ModuleHeader};
+use super::{
+    HeaderExposedItem, HeaderExposing, HeaderFunction, HeaderReExport, HeaderTypeDecl,
+    HeaderTypeExpr, ModuleHeader,
+};
 use crate::typechecker::{ScopeMap, canonical_join};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -112,9 +115,6 @@ fn insert_header_qualified_entries(
     for (name, canonical) in &surface.values {
         insert_qualified(&mut scope.values, canonical, module_name, prefix, name);
     }
-    for (name, canonical) in &surface.handlers {
-        insert_qualified(&mut scope.handlers, canonical, module_name, prefix, name);
-    }
     for (name, info) in &surface.types {
         insert_qualified(&mut scope.types, &info.canonical, module_name, prefix, name);
     }
@@ -126,43 +126,6 @@ fn insert_header_qualified_entries(
             prefix,
             name,
         );
-    }
-    for (name, info) in &surface.effects {
-        insert_qualified(
-            &mut scope.effects,
-            &info.canonical,
-            module_name,
-            prefix,
-            name,
-        );
-    }
-    for (name, info) in &surface.traits {
-        insert_qualified(
-            &mut scope.traits,
-            &info.canonical,
-            module_name,
-            prefix,
-            name,
-        );
-        for method in &info.methods {
-            let method_canonical = canonical_join(&info.canonical, method);
-            scope
-                .values
-                .entry(method_canonical.clone())
-                .or_insert_with(|| method_canonical.clone());
-            let qualified_trait = canonical_join(module_name, name);
-            scope
-                .values
-                .entry(canonical_join(&qualified_trait, method))
-                .or_insert_with(|| method_canonical.clone());
-            if prefix != module_name {
-                let aliased_trait = canonical_join(prefix, name);
-                scope
-                    .values
-                    .entry(canonical_join(&aliased_trait, method))
-                    .or_insert_with(|| method_canonical.clone());
-            }
-        }
     }
 }
 
@@ -190,13 +153,6 @@ fn insert_header_default_bare_entries(scope: &mut ScopeMap, surface: &HeaderSurf
             .entry(name.clone())
             .or_insert_with(|| info.canonical.clone());
     }
-    for (name, info) in &surface.traits {
-        scope
-            .traits
-            .entry(name.clone())
-            .or_insert_with(|| info.canonical.clone());
-        scope.register_trait_methods(&info.canonical, info.methods.iter().map(String::as_str));
-    }
 }
 
 fn insert_header_exposed_item(
@@ -209,19 +165,24 @@ fn insert_header_exposed_item(
     let surface = item.surface_name();
     let mut found = false;
 
+    if resolve_header_surface_name(headers, module_name, name, HeaderNamespace::Handler)?.is_some()
+    {
+        return Err(unsupported_cycle_import(name, module_name, "handler"));
+    }
+    if resolve_header_surface_name(headers, module_name, name, HeaderNamespace::Trait)?.is_some() {
+        return Err(unsupported_cycle_import(name, module_name, "trait"));
+    }
+    if resolve_header_surface_name(headers, module_name, name, HeaderNamespace::Effect)?.is_some() {
+        return Err(unsupported_cycle_import(name, module_name, "effect"));
+    }
+
     if let Some(HeaderResolved::Canonical(canonical)) =
         resolve_header_surface_name(headers, module_name, name, HeaderNamespace::Value)?
     {
+        if let Some(error) = unsupported_function_boundary(headers, &canonical) {
+            return Err(error);
+        }
         scope.values.entry(surface.to_string()).or_insert(canonical);
-        found = true;
-    }
-    if let Some(HeaderResolved::Canonical(canonical)) =
-        resolve_header_surface_name(headers, module_name, name, HeaderNamespace::Handler)?
-    {
-        scope
-            .handlers
-            .entry(surface.to_string())
-            .or_insert(canonical);
         found = true;
     }
     if let Some(HeaderResolved::Canonical(canonical)) =
@@ -253,29 +214,16 @@ fn insert_header_exposed_item(
         }
         found = true;
     }
-    if let Some(HeaderResolved::Trait(info)) =
-        resolve_header_surface_name(headers, module_name, name, HeaderNamespace::Trait)?
-    {
-        scope
-            .traits
-            .entry(surface.to_string())
-            .or_insert_with(|| info.canonical.clone());
-        scope.register_trait_methods(&info.canonical, info.methods.iter().map(String::as_str));
-        found = true;
-    }
-    if let Some(HeaderResolved::Effect(info)) =
-        resolve_header_surface_name(headers, module_name, name, HeaderNamespace::Effect)?
-    {
-        scope
-            .effects
-            .entry(surface.to_string())
-            .or_insert_with(|| info.canonical.clone());
-        scope.register_effect_ops(&info.canonical, info.ops.iter().map(String::as_str));
-        found = true;
-    }
-
     if found {
         Ok(())
+    } else if headers
+        .get(module_name)
+        .is_some_and(|header| header.unannotated_functions.iter().any(|fun| fun == name))
+    {
+        Err(format!(
+            "function '{}' from module '{}' needs a type annotation to be used across a circular import boundary",
+            name, module_name
+        ))
     } else {
         Err(format!(
             "'{}' is not exported by module '{}'",
@@ -287,10 +235,7 @@ fn insert_header_exposed_item(
 fn exposed_items_for_surface(surface: &HeaderSurface) -> Vec<HeaderExposedItem> {
     let mut names = BTreeSet::new();
     names.extend(surface.values.keys().cloned());
-    names.extend(surface.handlers.keys().cloned());
     names.extend(surface.types.keys().cloned());
-    names.extend(surface.traits.keys().cloned());
-    names.extend(surface.effects.keys().cloned());
     names
         .into_iter()
         .map(|name| HeaderExposedItem {
@@ -483,7 +428,7 @@ fn resolve_header_surface_name(
     namespace: HeaderNamespace,
 ) -> Result<Option<HeaderResolved>, String> {
     let mut path = Vec::new();
-    resolve_header_surface_name_inner(headers, module_name, name, namespace, &mut path)
+    resolve_header_surface_name_inner(headers, module_name, name, namespace, &mut path, true)
 }
 
 fn resolve_header_surface_name_inner(
@@ -492,13 +437,17 @@ fn resolve_header_surface_name_inner(
     name: &str,
     namespace: HeaderNamespace,
     path: &mut Vec<(String, String, HeaderNamespace)>,
+    strict_cycles: bool,
 ) -> Result<Option<HeaderResolved>, String> {
     let key = (module_name.to_string(), name.to_string(), namespace);
     if path.contains(&key) {
-        return Err(format!(
-            "re-export cycle for '{}' through module '{}'",
-            name, module_name
-        ));
+        if strict_cycles {
+            return Err(format!(
+                "re-export cycle while resolving '{}' from module '{}'",
+                name, module_name
+            ));
+        }
+        return Ok(None);
     }
     path.push(key);
 
@@ -518,6 +467,7 @@ fn resolve_header_surface_name_inner(
                 &edge.origin_name,
                 namespace,
                 path,
+                true,
             )?
         {
             path.pop();
@@ -525,9 +475,14 @@ fn resolve_header_surface_name_inner(
         }
     }
     for edge in &header.re_export_all {
-        if let Some(resolved) =
-            resolve_header_surface_name_inner(headers, &edge.origin_module, name, namespace, path)?
-        {
+        if let Some(resolved) = resolve_header_surface_name_inner(
+            headers,
+            &edge.origin_module,
+            name,
+            namespace,
+            path,
+            false,
+        )? {
             path.pop();
             return Ok(Some(resolved));
         }
@@ -535,6 +490,71 @@ fn resolve_header_surface_name_inner(
 
     path.pop();
     Ok(None)
+}
+
+fn unsupported_cycle_import(name: &str, module_name: &str, kind: &str) -> String {
+    format!(
+        "{} '{}' from module '{}' cannot be used across a circular import boundary; move it to a shared module",
+        kind, name, module_name
+    )
+}
+
+fn unsupported_function_boundary(
+    headers: &HashMap<String, ModuleHeader>,
+    canonical: &str,
+) -> Option<String> {
+    let (module_name, name) = canonical.rsplit_once('.')?;
+    let function = headers.get(module_name)?.functions.get(name)?;
+    if !function.public {
+        return None;
+    }
+    if !function.where_clause.is_empty() {
+        return Some(format!(
+            "function '{}' from module '{}' uses trait constraints that cannot cross a circular import boundary; move it to a shared module",
+            name, module_name
+        ));
+    }
+    if header_function_uses_effects(function) {
+        return Some(format!(
+            "function '{}' from module '{}' uses effects that cannot cross a circular import boundary; move it to a shared module",
+            name, module_name
+        ));
+    }
+    None
+}
+
+fn header_function_uses_effects(function: &HeaderFunction) -> bool {
+    !function.effects.is_empty()
+        || !function.effect_row_vars.is_empty()
+        || function
+            .params
+            .iter()
+            .any(|(_, ty)| header_type_expr_uses_effects(ty))
+        || header_type_expr_uses_effects(&function.return_type)
+}
+
+fn header_type_expr_uses_effects(ty: &HeaderTypeExpr) -> bool {
+    match ty {
+        HeaderTypeExpr::Arrow {
+            from,
+            to,
+            effects,
+            effect_row_vars,
+        } => {
+            !effects.is_empty()
+                || !effect_row_vars.is_empty()
+                || header_type_expr_uses_effects(from)
+                || header_type_expr_uses_effects(to)
+        }
+        HeaderTypeExpr::App { func, arg } => {
+            header_type_expr_uses_effects(func) || header_type_expr_uses_effects(arg)
+        }
+        HeaderTypeExpr::Record(fields) => fields
+            .iter()
+            .any(|(_, ty)| header_type_expr_uses_effects(ty)),
+        HeaderTypeExpr::Labeled { inner, .. } => header_type_expr_uses_effects(inner),
+        HeaderTypeExpr::Named(_) | HeaderTypeExpr::Var(_) | HeaderTypeExpr::Symbol(_) => false,
+    }
 }
 
 impl HeaderSurface {
@@ -666,18 +686,6 @@ make () = Left
 
 pub type Choice = Left | Right
 pub record User { name: String }
-
-pub trait Label a {
-  fun label : a -> String
-}
-
-pub effect Log {
-  fun log : String -> Unit
-}
-
-pub handler run_log for Log {
-  log _ = resume ()
-}
 "#,
         )]);
 
@@ -685,7 +693,23 @@ pub handler run_log for Log {
             &headers,
             "B",
             "B",
-            Some(&HeaderExposing::All { public: false }),
+            Some(&HeaderExposing::Items(vec![
+                HeaderExposedItem {
+                    name: "make".to_string(),
+                    alias: None,
+                    public: false,
+                },
+                HeaderExposedItem {
+                    name: "Choice".to_string(),
+                    alias: None,
+                    public: false,
+                },
+                HeaderExposedItem {
+                    name: "User".to_string(),
+                    alias: None,
+                    public: false,
+                },
+            ])),
         )
         .expect("header scope");
 
@@ -693,17 +717,6 @@ pub handler run_log for Log {
         assert_eq!(scope.resolve_type("Choice"), Some("B.Choice"));
         assert_eq!(scope.resolve_constructor("Left"), Some("B.Left"));
         assert_eq!(scope.resolve_constructor("User"), Some("B.User"));
-        assert_eq!(scope.resolve_trait("Label"), Some("B.Label"));
-        assert_eq!(scope.resolve_effect("Log"), Some("B.Log"));
-        assert_eq!(scope.resolve_handler("run_log"), Some("B.run_log"));
-        assert_eq!(
-            scope.trait_methods.get("label").cloned().unwrap(),
-            HashSet::from(["B.Label".to_string()])
-        );
-        assert_eq!(
-            scope.effect_ops.get("log").cloned().unwrap(),
-            HashSet::from(["B.Log".to_string()])
-        );
     }
 
     #[test]
@@ -775,5 +788,39 @@ import A (pub x)
         .expect_err("cycle");
 
         assert!(err.contains("re-export cycle"));
+    }
+
+    #[test]
+    fn header_scope_treats_pub_dot_dot_cycle_as_not_found() {
+        let headers = headers(&[
+            (
+                "B",
+                r#"
+module B
+import C (pub ..)
+"#,
+            ),
+            (
+                "C",
+                r#"
+module C
+import B (pub ..)
+"#,
+            ),
+        ]);
+
+        let err = resolve_header_import(
+            &headers,
+            "B",
+            "B",
+            Some(&HeaderExposing::Items(vec![HeaderExposedItem {
+                name: "Missing".to_string(),
+                alias: None,
+                public: false,
+            }])),
+        )
+        .expect_err("missing export");
+
+        assert!(err.contains("'Missing' is not exported by module 'B'"));
     }
 }

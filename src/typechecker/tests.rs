@@ -6720,6 +6720,195 @@ main () = ()
 }
 
 #[test]
+fn cyclic_import_of_unannotated_function_requests_annotation() {
+    let a = r#"
+module A
+import B (helper)
+
+pub type AThing = AThing
+
+pub fun make_a : Unit -> AThing
+make_a () = helper ()
+"#;
+    let b = r#"
+module B
+import A (AThing)
+
+helper () = AThing
+"#;
+    let main = "module Main\nimport A (make_a)\nmain () = ()\n";
+
+    let err = match check_with_project_files(&[("src/A.saga", a), ("src/B.saga", b)], main) {
+        Ok(_) => panic!("unannotated cross-cycle function must be rejected"),
+        Err(err) => err,
+    };
+    assert!(
+        err.to_string().contains("needs a type annotation"),
+        "expected annotation diagnostic, got: {}",
+        err
+    );
+}
+
+#[test]
+fn cyclic_import_rejects_unsupported_trait_effect_and_handler_surfaces() {
+    let a_trait = "module A\nimport B (Describe)\npub type AThing = AThing\n";
+    let b_trait = r#"
+module B
+import A (AThing)
+pub trait Describe a {
+  fun describe : a -> String
+}
+"#;
+    let main = "module Main\nimport A\nmain () = ()\n";
+    let err =
+        match check_with_project_files(&[("src/A.saga", a_trait), ("src/B.saga", b_trait)], main) {
+            Ok(_) => panic!("trait import across cycle must be rejected"),
+            Err(err) => err,
+        };
+    assert!(
+        err.to_string().contains("trait 'Describe'")
+            && err.to_string().contains("circular import boundary"),
+        "expected trait cycle-boundary diagnostic, got: {}",
+        err
+    );
+
+    let a_effect = "module A\nimport B (Log)\npub type AThing = AThing\n";
+    let b_effect = r#"
+module B
+import A (AThing)
+pub effect Log {
+  fun log : String -> Unit
+}
+"#;
+    let err =
+        match check_with_project_files(&[("src/A.saga", a_effect), ("src/B.saga", b_effect)], main)
+        {
+            Ok(_) => panic!("effect import across cycle must be rejected"),
+            Err(err) => err,
+        };
+    assert!(
+        err.to_string().contains("effect 'Log'")
+            && err.to_string().contains("circular import boundary"),
+        "expected effect cycle-boundary diagnostic, got: {}",
+        err
+    );
+
+    let a_handler = "module A\nimport B (run_log)\npub type AThing = AThing\n";
+    let b_handler = r#"
+module B
+import A (AThing)
+pub effect Log {
+  fun log : String -> Unit
+}
+pub handler run_log for Log {
+  log _ = resume ()
+}
+"#;
+    let err = match check_with_project_files(
+        &[("src/A.saga", a_handler), ("src/B.saga", b_handler)],
+        main,
+    ) {
+        Ok(_) => panic!("handler import across cycle must be rejected"),
+        Err(err) => err,
+    };
+    assert!(
+        err.to_string().contains("handler 'run_log'")
+            && err.to_string().contains("circular import boundary"),
+        "expected handler cycle-boundary diagnostic, got: {}",
+        err
+    );
+
+    let a_trait_function = "module A\nimport B (describe_thing)\npub type AThing = AThing\n";
+    let b_trait_function = r#"
+module B
+import A (AThing)
+pub trait Describe a {
+  fun describe : a -> String
+}
+pub fun describe_thing : a -> String where {a: Describe}
+describe_thing _ = ""
+"#;
+    let err = match check_with_project_files(
+        &[
+            ("src/A.saga", a_trait_function),
+            ("src/B.saga", b_trait_function),
+        ],
+        main,
+    ) {
+        Ok(_) => panic!("trait-constrained function import across cycle must be rejected"),
+        Err(err) => err,
+    };
+    assert!(
+        err.to_string().contains("function 'describe_thing'")
+            && err.to_string().contains("trait constraints")
+            && err.to_string().contains("circular import boundary"),
+        "expected trait-constrained function diagnostic, got: {}",
+        err
+    );
+
+    let a_effect_function = "module A\nimport B (accept)\npub type AThing = AThing\n";
+    let b_effect_function = r#"
+module B
+import A (AThing)
+pub effect Log {
+  fun log : String -> Unit
+}
+pub fun accept : (Unit -> Unit needs {Log}) -> Unit
+accept _ = ()
+"#;
+    let err = match check_with_project_files(
+        &[
+            ("src/A.saga", a_effect_function),
+            ("src/B.saga", b_effect_function),
+        ],
+        main,
+    ) {
+        Ok(_) => panic!("effectful-signature function import across cycle must be rejected"),
+        Err(err) => err,
+    };
+    assert!(
+        err.to_string().contains("function 'accept'")
+            && err.to_string().contains("uses effects")
+            && err.to_string().contains("circular import boundary"),
+        "expected effectful-signature function diagnostic, got: {}",
+        err
+    );
+}
+
+#[test]
+fn cyclic_import_graph_reports_parse_errors() {
+    let a = r#"
+module A
+import B (BThing)
+pub type AThing = AThing
+"#;
+    let b = r#"
+module B
+import A (AThing)
+pub type BThing = BThing
+"#;
+    let c = r#"
+module C
+pub fun broken : Unit -> Unit
+broken () =
+"#;
+    let main = "module Main\nimport A (AThing)\nmain () = ()\n";
+
+    let err = match check_with_project_files(
+        &[("src/A.saga", a), ("src/B.saga", b), ("src/C.saga", c)],
+        main,
+    ) {
+        Ok(_) => panic!("parse error during graph construction must be reported"),
+        Err(err) => err,
+    };
+    assert!(
+        err.to_string().contains("parse error in module 'C'"),
+        "expected graph parse diagnostic, got: {}",
+        err
+    );
+}
+
+#[test]
 fn auto_load_does_not_inject_alias_prefix_into_scope() {
     // Pinned-down version of the scope-leak prevention. After a canonical
     // reference loads Std.IO.Unsafe, the alias-prefix form `Unsafe.print_stdout`

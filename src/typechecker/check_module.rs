@@ -102,7 +102,9 @@ impl Checker {
         if self.modules.loading.contains(&module_name) {
             return Err(Diagnostic::error_at(
                 span,
-                format!("circular import: {}", module_name),
+                format!(
+                    "internal error: module '{module_name}' is already loading outside the active import SCC"
+                ),
             ));
         }
 
@@ -170,7 +172,9 @@ impl Checker {
 
         if !is_builtin
             && self.modules.active_scc_headers.is_none()
-            && let Some(component) = self.cyclic_component_containing(&module_name)
+            && let Some(component) = self
+                .cyclic_component_containing(&module_name)
+                .map_err(|msg| Diagnostic::error_at(span, msg))?
         {
             self.load_module_scc(&component, span)?;
             return self
@@ -215,19 +219,13 @@ impl Checker {
         crate::derive::expand_derives(&mut program, &imported);
         crate::desugar::desugar_program(&mut program);
 
-        // Cache the parsed program so the build step can skip re-parsing
         self.modules
             .programs
             .insert(module_name.clone(), program.clone());
 
         self.modules.loading.insert(module_name.clone());
 
-        // Create a module checker. For non-builtin modules, clone the prelude
-        // snapshot so we don't re-parse/re-check the prelude for every import.
-        // For builtin Std modules, start from a fresh checker with the parent's
-        // traits copied in (they can't load the prelude due to circular imports).
         let mut mod_checker = if !is_builtin {
-            // Build or reuse the prelude snapshot
             self.ensure_prelude_snapshot(&project_root);
             let mut mc = *self.modules.prelude_snapshot.as_ref().unwrap().clone();
             mc.next_var = self.next_var;
@@ -247,11 +245,9 @@ impl Checker {
         mod_checker.modules.codegen_info = self.modules.codegen_info.clone();
         mod_checker.modules.programs = self.modules.programs.clone();
         mod_checker.modules.map = self.modules.map.clone();
+        mod_checker.modules.module_graph = self.modules.module_graph.clone();
         mod_checker.modules.visibility = self.modules.visibility.clone();
         mod_checker.modules.private_modules = self.modules.private_modules.clone();
-        // Share the loading set so circular imports are detected across
-        // nested typecheck_import calls (child checkers need to see which
-        // modules are mid-load in their ancestors).
         mod_checker.modules.loading = self.modules.loading.clone();
         mod_checker.current_module = Some(module_name.clone());
         mod_checker
@@ -341,10 +337,22 @@ impl Checker {
         Ok(exports)
     }
 
-    fn cyclic_component_containing(&self, module_name: &str) -> Option<Vec<String>> {
-        let map = self.modules.map.as_ref()?;
-        let graph = build_module_graph(map).ok()?;
-        graph
+    fn cyclic_component_containing(
+        &mut self,
+        module_name: &str,
+    ) -> Result<Option<Vec<String>>, String> {
+        if self.modules.module_graph.is_none() {
+            let Some(map) = self.modules.map.as_ref() else {
+                return Ok(None);
+            };
+            self.modules.module_graph = Some(build_module_graph(map)?);
+        }
+        let graph = self
+            .modules
+            .module_graph
+            .as_ref()
+            .expect("cached module graph");
+        Ok(graph
             .strongly_connected_components()
             .into_iter()
             .find(|component| {
@@ -354,7 +362,7 @@ impl Checker {
                             .dependencies(module_name)
                             .is_some_and(|deps| deps.iter().any(|dep| dep == module_name)))
             })
-            .map(|component| component.modules)
+            .map(|component| component.modules))
     }
 
     fn ensure_prelude_snapshot(&mut self, project_root: &Option<PathBuf>) {
@@ -366,6 +374,7 @@ impl Checker {
             None => super::Checker::new(),
         };
         snapshot.modules.map = self.modules.map.clone();
+        snapshot.modules.module_graph = self.modules.module_graph.clone();
         snapshot.modules.visibility = self.modules.visibility.clone();
         snapshot.modules.private_modules = self.modules.private_modules.clone();
         let prelude_src = include_str!("../stdlib/prelude.saga");
@@ -613,6 +622,7 @@ impl Checker {
         mc.modules.codegen_info = self.modules.codegen_info.clone();
         mc.modules.programs = self.modules.programs.clone();
         mc.modules.map = self.modules.map.clone();
+        mc.modules.module_graph = self.modules.module_graph.clone();
         mc.modules.visibility = self.modules.visibility.clone();
         mc.modules.private_modules = self.modules.private_modules.clone();
         mc.modules.base_trait_impls = self.modules.base_trait_impls.clone();

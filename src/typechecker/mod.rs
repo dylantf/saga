@@ -21,8 +21,8 @@ mod resolve;
 mod result;
 mod state;
 mod unify;
-pub use core::*;
 pub use check_module::{EffectDef, EffectOpDef, ModuleCodegenInfo, ModuleExports, TraitImplDict};
+pub use core::*;
 pub(crate) use resolve::{ResolutionResult, ResolvedValue};
 pub use result::{CheckResult, LetDictInfo};
 pub use state::*;
@@ -401,6 +401,7 @@ impl Checker {
 
     pub fn set_module_map(&mut self, map: check_module::ModuleMap) {
         self.modules.map = Some(map);
+        self.modules.module_graph = None;
     }
 
     pub fn module_map(&self) -> Option<&check_module::ModuleMap> {
@@ -408,6 +409,7 @@ impl Checker {
     }
 
     pub fn module_map_mut(&mut self) -> Option<&mut check_module::ModuleMap> {
+        self.modules.module_graph = None;
         self.modules.map.as_mut()
     }
 

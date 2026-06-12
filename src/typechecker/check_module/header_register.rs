@@ -2,17 +2,14 @@ use std::collections::HashMap;
 
 use super::header_scope::scope_for_header_imports;
 use super::{
-    HeaderEffectRef, HeaderFunction, HeaderHandlerDecl, HeaderTraitBound, HeaderTraitDecl,
-    HeaderTraitMethod, HeaderTraitRef, HeaderTypeDecl, HeaderTypeExpr, HeaderTypeParam,
-    ModuleHeader,
+    HeaderEffectRef, HeaderFunction, HeaderTraitBound, HeaderTraitRef, HeaderTypeDecl,
+    HeaderTypeExpr, HeaderTypeParam, ModuleHeader,
 };
 use crate::ast::Kind;
 use crate::token::Span;
 use crate::typechecker::{
-    Checker, EffectDefInfo, EffectEntry, EffectOpSig, EffectRow, HandlerInfo,
-    HandlerWhereConstraints, RecordInfo, Scheme, ScopeMap, TraitInfo, TraitMethodEffectSig,
-    TraitMethodInfo, Type, TypeAliasInfo, canonical_join, canonicalize_type_name,
-    check_traits::FUNCTIONAL_TRAITS, collect_free_vars,
+    Checker, EffectEntry, EffectRow, RecordInfo, Scheme, ScopeMap, Type, TypeAliasInfo,
+    canonical_join, canonicalize_type_name, collect_free_vars,
 };
 
 const HEADER_SPAN: Span = Span { start: 0, end: 0 };
@@ -34,17 +31,13 @@ impl Checker {
         for (module_name, header) in &headers {
             let scope = HeaderRegistrationScope::new(module_name, header, &headers)?;
             self.register_header_type_stubs(module_name, header);
-            self.register_header_effect_stubs(module_name, header);
-            self.register_header_trait_stubs(module_name, header);
             self.register_header_records_and_adts(module_name, header, &scope);
             self.register_header_aliases(module_name, header, &scope);
         }
 
         for (module_name, header) in &headers {
             let scope = HeaderRegistrationScope::new(module_name, header, &headers)?;
-            self.register_header_effect_ops(module_name, header, &scope);
-            self.register_header_traits(module_name, header, &scope);
-            self.register_header_functions_and_handlers(module_name, header, &scope);
+            self.register_header_functions(module_name, header, &scope);
         }
 
         self.modules
@@ -80,49 +73,6 @@ impl Checker {
             self.type_param_kinds
                 .entry(canonical)
                 .or_insert_with(|| header_type_param_kinds(&record.type_params));
-        }
-    }
-
-    fn register_header_effect_stubs(&mut self, module_name: &str, header: &ModuleHeader) {
-        for (name, effect) in &header.effects {
-            if !effect.public {
-                continue;
-            }
-            let canonical = canonical_join(module_name, name);
-            let type_params = header_type_param_vars(self, &effect.type_params);
-            self.type_arity
-                .entry(canonical.clone())
-                .or_insert(effect.type_params.len());
-            self.type_param_kinds
-                .entry(canonical.clone())
-                .or_insert_with(|| header_type_param_kinds(&effect.type_params));
-            self.effects
-                .entry(canonical.clone())
-                .or_insert_with(|| EffectDefInfo {
-                    type_params: type_params.iter().map(|(_, id)| *id).collect(),
-                    ops: Vec::new(),
-                    op_spans: HashMap::new(),
-                    source_module: Some(module_name.to_string()),
-                });
-        }
-    }
-
-    fn register_header_trait_stubs(&mut self, module_name: &str, header: &ModuleHeader) {
-        for (name, trait_decl) in &header.traits {
-            if !trait_decl.public {
-                continue;
-            }
-            let canonical = canonical_join(module_name, name);
-            self.scope_map
-                .traits
-                .entry(canonical.clone())
-                .or_insert_with(|| canonical.clone());
-            self.type_arity
-                .entry(canonical.clone())
-                .or_insert(trait_decl.type_params.len());
-            self.type_param_kinds
-                .entry(canonical)
-                .or_insert_with(|| header_type_param_kinds(&trait_decl.type_params));
         }
     }
 
@@ -258,114 +208,7 @@ impl Checker {
         }
     }
 
-    fn register_header_effect_ops(
-        &mut self,
-        module_name: &str,
-        header: &ModuleHeader,
-        scope: &HeaderRegistrationScope,
-    ) {
-        for (name, effect) in &header.effects {
-            if !effect.public {
-                continue;
-            }
-            let canonical = canonical_join(module_name, name);
-            let effect_param_ids = self
-                .effects
-                .get(&canonical)
-                .map(|info| info.type_params.clone())
-                .unwrap_or_default();
-            let shared_params: Vec<(String, u32)> = effect
-                .type_params
-                .iter()
-                .zip(effect_param_ids.iter())
-                .map(|(tp, id)| (tp.name.clone(), *id))
-                .collect();
-            let ops: Vec<EffectOpSig> = effect
-                .operations
-                .iter()
-                .map(|op| {
-                    let mut params = shared_params.clone();
-                    let params_tys = op
-                        .params
-                        .iter()
-                        .map(|(label, ty)| {
-                            (
-                                label.clone(),
-                                self.header_type_expr_to_type(ty, &mut params, scope),
-                            )
-                        })
-                        .collect();
-                    let return_type =
-                        self.header_type_expr_to_type(&op.return_type, &mut params, scope);
-                    let needs = self.header_effect_row(
-                        &op.effects,
-                        &op.effect_row_vars,
-                        &mut params,
-                        scope,
-                    );
-                    EffectOpSig {
-                        name: op.name.clone(),
-                        effect_name: canonical.clone(),
-                        params: params_tys,
-                        return_type,
-                        needs,
-                    }
-                })
-                .collect();
-            self.scope_map
-                .register_effect_ops(&canonical, ops.iter().map(|op| op.name.as_str()));
-            if let Some(info) = self.effects.get_mut(&canonical) {
-                info.ops = ops;
-            }
-        }
-    }
-
-    fn register_header_traits(
-        &mut self,
-        module_name: &str,
-        header: &ModuleHeader,
-        scope: &HeaderRegistrationScope,
-    ) {
-        for (name, trait_decl) in &header.traits {
-            if !trait_decl.public {
-                continue;
-            }
-            let canonical = canonical_join(module_name, name);
-            let methods: Vec<TraitMethodInfo> = trait_decl
-                .methods
-                .iter()
-                .map(|method| self.header_trait_method_info(&canonical, trait_decl, method, scope))
-                .collect();
-            for method in &methods {
-                self.env.entry_insert(
-                    canonical_join(&canonical, &method.name),
-                    method.scheme.clone(),
-                );
-            }
-            self.scope_map
-                .register_trait_methods(&canonical, methods.iter().map(|m| m.name.as_str()));
-            let supertraits = trait_decl
-                .supertraits
-                .iter()
-                .map(|tr| self.resolve_header_trait_ref(tr, scope))
-                .collect();
-            self.trait_state
-                .traits
-                .entry(canonical.clone())
-                .or_insert_with(|| TraitInfo {
-                    type_params: trait_decl
-                        .type_params
-                        .iter()
-                        .map(|tp| (tp.name.clone(), tp.kind))
-                        .collect(),
-                    supertraits,
-                    methods,
-                    is_functional: FUNCTIONAL_TRAITS.contains(&canonical.as_str()),
-                });
-        }
-    }
-
-    fn register_header_functions_and_handlers(
+    fn register_header_functions(
         &mut self,
         module_name: &str,
         header: &ModuleHeader,
@@ -377,114 +220,10 @@ impl Checker {
             }
             let scheme = self.header_function_scheme(function, scope);
             let canonical = canonical_join(module_name, name);
-            self.env.entry_insert(canonical.clone(), scheme);
-            if !function.effects.is_empty() {
-                self.effect_meta.known_funs.insert(canonical);
+            if type_contains_effects(&scheme.ty) {
+                self.effect_meta.known_funs.insert(canonical.clone());
             }
-        }
-
-        for (name, handler) in &header.handlers {
-            if !handler.public {
-                continue;
-            }
-            let canonical = canonical_join(module_name, name);
-            let info = self.header_handler_info(handler, scope);
-            self.handlers
-                .entry(canonical.clone())
-                .or_insert_with(|| info.clone());
-            let handler_ty = Type::Con(
-                canonicalize_type_name("Handler").to_string(),
-                handler
-                    .effects
-                    .iter()
-                    .map(|effect| {
-                        Type::Con(
-                            self.resolve_header_effect_name(&effect.name, scope),
-                            effect
-                                .type_args
-                                .iter()
-                                .map(|arg| {
-                                    self.header_type_expr_to_type(arg, &mut Vec::new(), scope)
-                                })
-                                .collect(),
-                        )
-                    })
-                    .collect(),
-            );
-            self.env.entry_insert(
-                canonical,
-                Scheme {
-                    forall: Vec::new(),
-                    constraints: Vec::new(),
-                    ty: handler_ty,
-                },
-            );
-        }
-    }
-
-    fn header_trait_method_info(
-        &mut self,
-        canonical_trait: &str,
-        trait_decl: &HeaderTraitDecl,
-        method: &HeaderTraitMethod,
-        scope: &HeaderRegistrationScope,
-    ) -> TraitMethodInfo {
-        let mut params = header_type_param_vars(self, &trait_decl.type_params);
-        let self_param = trait_decl
-            .type_params
-            .first()
-            .map(|tp| tp.name.as_str())
-            .unwrap_or("a");
-        let param_types: Vec<Type> = method
-            .params
-            .iter()
-            .map(|(_, ty)| self.header_type_expr_to_type(ty, &mut params, scope))
-            .collect();
-        let return_type = self.header_type_expr_to_type(&method.return_type, &mut params, scope);
-        let effect_row =
-            self.header_effect_row(&method.effects, &method.effect_row_vars, &mut params, scope);
-        let fun_ty = self.function_type_with_innermost_effects(
-            &param_types,
-            return_type.clone(),
-            effect_row,
-        );
-        let mut forall = Vec::new();
-        collect_free_vars(&fun_ty, &mut forall);
-        for (_, id) in &params {
-            if !forall.contains(id) {
-                forall.push(*id);
-            }
-        }
-        let self_id = params
-            .iter()
-            .find(|(name, _)| name == self_param)
-            .map(|(_, id)| *id);
-        let extra_types = trait_decl
-            .type_params
-            .iter()
-            .skip(1)
-            .filter_map(|tp| {
-                params
-                    .iter()
-                    .find(|(name, _)| name == &tp.name)
-                    .map(|(_, id)| Type::Var(*id))
-            })
-            .collect();
-        let constraints = self_id
-            .map(|id| vec![(canonical_trait.to_string(), id, extra_types)])
-            .unwrap_or_default();
-        let scheme = Scheme {
-            forall,
-            constraints,
-            ty: fun_ty.clone(),
-        };
-        TraitMethodInfo {
-            name: method.name.clone(),
-            param_types,
-            return_type,
-            trait_param_id: self_id,
-            scheme,
-            effect_sig: header_trait_method_effect_sig(&fun_ty),
+            self.env.entry_insert(canonical, scheme);
         }
     }
 
@@ -523,29 +262,6 @@ impl Checker {
             forall,
             constraints,
             ty,
-        }
-    }
-
-    fn header_handler_info(
-        &mut self,
-        handler: &HeaderHandlerDecl,
-        scope: &HeaderRegistrationScope,
-    ) -> HandlerInfo {
-        let mut params = Vec::new();
-        let effects = handler
-            .effects
-            .iter()
-            .map(|effect| self.resolve_header_effect_name(&effect.name, scope))
-            .collect();
-        let needs_effects = self.header_effect_row(&handler.needs, &Vec::new(), &mut params, scope);
-        HandlerInfo {
-            effects,
-            return_type: None,
-            needs_effects,
-            forall: params.iter().map(|(_, id)| *id).collect(),
-            arm_spans: HashMap::new(),
-            where_constraints: HandlerWhereConstraints::new(),
-            source_module: Some(scope.module_name.clone()),
         }
     }
 
@@ -787,30 +503,19 @@ fn header_trait_constraints(
     constraints
 }
 
-fn header_trait_method_effect_sig(ty: &Type) -> TraitMethodEffectSig {
-    let mut user_arity = 0;
-    let mut effects = std::collections::BTreeSet::new();
-    let mut is_open_row = false;
-    let mut current = ty;
-    while let Type::Fun(_, ret, row) = current {
-        user_arity += 1;
-        for entry in &row.effects {
-            effects.insert(entry.name.clone());
-        }
-        if row.is_open() {
-            is_open_row = true;
-        }
-        current = ret;
-    }
-    TraitMethodEffectSig {
-        effects: effects.into_iter().collect(),
-        is_open_row,
-        user_arity,
-    }
-}
-
 trait TypeEnvEntryInsert {
     fn entry_insert(&mut self, name: String, scheme: Scheme);
+}
+
+fn type_contains_effects(ty: &Type) -> bool {
+    match ty {
+        Type::Fun(param, ret, row) => {
+            !row.is_empty() || type_contains_effects(param) || type_contains_effects(ret)
+        }
+        Type::Con(_, args) => args.iter().any(type_contains_effects),
+        Type::Record(fields) => fields.iter().any(|(_, ty)| type_contains_effects(ty)),
+        Type::Var(_) | Type::Symbol(_) | Type::Error => false,
+    }
 }
 
 impl TypeEnvEntryInsert for crate::typechecker::TypeEnv {

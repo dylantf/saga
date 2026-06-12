@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 
 use crate::token::Span;
 
@@ -14,6 +14,7 @@ pub struct ModuleHeader {
     pub module_name: Option<String>,
     pub imports: Vec<HeaderImport>,
     pub functions: HashMap<String, HeaderFunction>,
+    pub unannotated_functions: Vec<String>,
     pub types: HashMap<String, HeaderTypeDecl>,
     pub records: HashMap<String, HeaderRecordDecl>,
     pub traits: HashMap<String, HeaderTraitDecl>,
@@ -273,6 +274,9 @@ impl ModuleHeader {
                         },
                     );
                 }
+                Decl::FunBinding { name, .. } => {
+                    header.unannotated_functions.push(name.clone());
+                }
                 Decl::TypeDef {
                     public,
                     opaque,
@@ -435,6 +439,14 @@ impl ModuleHeader {
                 _ => {}
             }
         }
+        let annotated = header.functions.keys().cloned().collect::<BTreeSet<_>>();
+        header.unannotated_functions = header
+            .unannotated_functions
+            .into_iter()
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .filter(|name| !annotated.contains(name))
+            .collect();
         header
     }
 

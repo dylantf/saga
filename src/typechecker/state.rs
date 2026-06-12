@@ -578,6 +578,8 @@ pub struct ModuleContext {
     pub(crate) project_root: Option<std::path::PathBuf>,
     /// Map from declared module name to file path. Built by scanning the project at startup.
     pub map: Option<check_module::ModuleMap>,
+    /// Cached import graph for `map`. Invalidated whenever the module map is replaced or mutated.
+    pub(crate) module_graph: Option<check_module::ModuleGraph>,
     /// Per-module visibility metadata for dependency modules. Used to identify
     /// which package a module belongs to so internal cross-imports within a
     /// dependency can resolve. Local project modules have no entry.
