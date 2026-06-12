@@ -1,6 +1,5 @@
-use std::collections::{BTreeSet, HashMap};
+use std::collections::HashMap;
 
-use super::ModuleMap;
 use crate::token::Span;
 
 // --- Module export types ---
@@ -556,78 +555,6 @@ fn header_type_expr(ty: &crate::ast::TypeExpr) -> HeaderTypeExpr {
     }
 }
 
-/// Explicit module dependency graph built from import declarations.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct ModuleGraph {
-    pub adjacency: HashMap<String, Vec<String>>,
-}
-
-impl ModuleGraph {
-    pub fn from_headers<'a>(headers: impl IntoIterator<Item = &'a ModuleHeader>) -> Self {
-        let mut adjacency = HashMap::new();
-        for header in headers {
-            if let Some(module) = &header.module_name {
-                adjacency.insert(module.clone(), header.import_modules());
-            }
-        }
-        ModuleGraph { adjacency }
-    }
-
-    pub fn from_programs<'a>(
-        programs: impl IntoIterator<Item = (&'a str, &'a [crate::ast::Decl])>,
-    ) -> Self {
-        let mut adjacency = HashMap::new();
-        for (module, program) in programs {
-            adjacency.insert(module.to_string(), import_modules_for_program(program));
-        }
-        ModuleGraph { adjacency }
-    }
-
-    pub fn dependencies(&self, module: &str) -> Option<&[String]> {
-        self.adjacency.get(module).map(Vec::as_slice)
-    }
-}
-
-impl ModuleHeader {
-    fn import_modules(&self) -> Vec<String> {
-        let mut modules: Vec<String> = self
-            .imports
-            .iter()
-            .map(|import| import.module.clone())
-            .collect::<BTreeSet<_>>()
-            .into_iter()
-            .collect();
-        modules.sort();
-        modules
-    }
-}
-
-pub fn import_modules_for_program(program: &[crate::ast::Decl]) -> Vec<String> {
-    let mut modules = BTreeSet::new();
-    for decl in program {
-        if let crate::ast::Decl::Import { module_path, .. } = decl {
-            modules.insert(module_path.join("."));
-        }
-    }
-    modules.into_iter().collect()
-}
-
-pub fn build_module_graph(module_map: &ModuleMap) -> Result<ModuleGraph, String> {
-    let mut adjacency = HashMap::new();
-    for (module_name, path) in module_map {
-        let source = std::fs::read_to_string(path)
-            .map_err(|e| format!("cannot read module '{}': {}", module_name, e))?;
-        let tokens = crate::lexer::Lexer::new(&source)
-            .lex()
-            .map_err(|e| format!("lex error in module '{}': {}", module_name, e.message))?;
-        let program = crate::parser::Parser::new(tokens)
-            .parse_program()
-            .map_err(|e| format!("parse error in module '{}': {}", module_name, e.message))?;
-        adjacency.insert(module_name.clone(), import_modules_for_program(&program));
-    }
-    Ok(ModuleGraph { adjacency })
-}
-
 #[cfg(test)]
 mod module_header_tests {
     use super::*;
@@ -748,49 +675,5 @@ pub handler ask_once for Ask String needs {Log} {
         let handler = header.handlers.get("ask_once").expect("handler");
         assert_eq!(handler.effects[0].name, "Ask");
         assert_eq!(handler.needs[0].name, "Log");
-    }
-
-    #[test]
-    fn module_graph_records_import_edges_without_typechecking() {
-        let a = parse("module A\nimport B\npub type AType = AType\n");
-        let b = parse("module B\nimport A\nimport C (pub value)\npub type BType = BType\n");
-        let c = parse("module C\npub fun value : Unit -> Unit\nvalue () = ()\n");
-
-        let graph = ModuleGraph::from_programs([
-            ("A", a.as_slice()),
-            ("B", b.as_slice()),
-            ("C", c.as_slice()),
-        ]);
-
-        assert_eq!(graph.dependencies("A"), Some(&["B".to_string()][..]));
-        assert_eq!(
-            graph.dependencies("B"),
-            Some(&["A".to_string(), "C".to_string()][..])
-        );
-        assert_eq!(graph.dependencies("C"), Some(&[][..]));
-    }
-
-    #[test]
-    fn build_module_graph_reads_project_module_map() {
-        let root = std::env::temp_dir().join(format!(
-            "saga_module_graph_test_{}_{}",
-            std::process::id(),
-            crate::ast::NodeId::fresh().0
-        ));
-        std::fs::create_dir_all(&root).expect("create temp module dir");
-        let a_path = root.join("A.saga");
-        let b_path = root.join("B.saga");
-        std::fs::write(&a_path, "module A\nimport B\npub type AType = AType\n").expect("write A");
-        std::fs::write(&b_path, "module B\nimport A\npub type BType = BType\n").expect("write B");
-
-        let mut map = ModuleMap::new();
-        map.insert("A".to_string(), a_path);
-        map.insert("B".to_string(), b_path);
-
-        let graph = build_module_graph(&map).expect("graph");
-        assert_eq!(graph.dependencies("A"), Some(&["B".to_string()][..]));
-        assert_eq!(graph.dependencies("B"), Some(&["A".to_string()][..]));
-
-        let _ = std::fs::remove_dir_all(root);
     }
 }

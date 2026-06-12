@@ -5,12 +5,16 @@ use crate::token::Span;
 
 mod codegen_info;
 mod exports;
+mod graph;
 mod header;
+#[allow(dead_code)]
+mod header_scope;
 mod import_scope;
 mod scan;
 
 pub use codegen_info::{EffectDef, EffectOpDef, ModuleCodegenInfo, TraitImplDict};
 pub use exports::ModuleExports;
+pub use graph::*;
 pub use header::*;
 pub use scan::{
     BUILTIN_MODULES, ModuleMap, ModuleVisibility, ModuleVisibilityMap, builtin_module_source,
