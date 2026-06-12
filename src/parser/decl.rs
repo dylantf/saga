@@ -1553,11 +1553,19 @@ impl Parser {
             None
         };
 
-        // Optional: (name1, Name2, ...) or (..) - unqualified imports
+        // Optional: (name1, Name2 as Alias, ...) or (..) - unqualified imports
         // Capital names are inferred as types and hoist their constructors automatically.
         let exposing = if matches!(self.peek(), Token::LParen) {
             let lparen_span = self.tokens[self.pos].span;
             self.advance(); // consume '('
+            let pub_dotdot = matches!(self.peek(), Token::Pub)
+                && matches!(self.peek_at(1), Token::DotDot);
+            let all_public = if pub_dotdot {
+                self.advance(); // consume 'pub'
+                true
+            } else {
+                false
+            };
             if matches!(self.peek(), Token::DotDot) {
                 let dotdot_span = self.tokens[self.pos].span;
                 self.advance(); // consume '..'
@@ -1570,19 +1578,27 @@ impl Parser {
                 }
                 self.expect(Token::RParen)?;
                 Some(crate::ast::Exposing::All {
+                    public: all_public,
                     span: lparen_span.to(dotdot_span),
                 })
             } else {
                 let mut items = Vec::new();
                 while !matches!(self.peek(), Token::RParen | Token::Eof) {
-                    let name = match self.peek().clone() {
+                    let public = if matches!(self.peek(), Token::Pub) {
+                        self.advance(); // consume 'pub'
+                        true
+                    } else {
+                        false
+                    };
+                    let name_start = self.tokens[self.pos].span;
+                    let (name, is_upper) = match self.peek().clone() {
                         Token::Ident(n) => {
                             self.advance();
-                            n
+                            (n, false)
                         }
                         Token::UpperIdent(n) => {
                             self.advance();
-                            n
+                            (n, true)
                         }
                         tok => {
                             return Err(ParseError {
@@ -1594,7 +1610,52 @@ impl Parser {
                             });
                         }
                     };
-                    items.push(name);
+                    let mut item_end = self.tokens[self.pos - 1].span;
+                    let alias = if matches!(self.peek(), Token::As) {
+                        self.advance(); // consume 'as'
+                        let alias_span = self.tokens[self.pos].span;
+                        let alias = match (is_upper, self.peek().clone()) {
+                            (false, Token::Ident(n)) | (true, Token::UpperIdent(n)) => {
+                                self.advance();
+                                n
+                            }
+                            (false, Token::UpperIdent(_)) => {
+                                return Err(ParseError {
+                                    message:
+                                        "import alias for a lowercase item must be lowercase"
+                                            .to_string(),
+                                    span: alias_span,
+                                });
+                            }
+                            (true, Token::Ident(_)) => {
+                                return Err(ParseError {
+                                    message:
+                                        "import alias for an uppercase item must be uppercase"
+                                            .to_string(),
+                                    span: alias_span,
+                                });
+                            }
+                            (_, tok) => {
+                                return Err(ParseError {
+                                    message: format!(
+                                        "expected identifier after `as` in import list, got {:?}",
+                                        tok
+                                    ),
+                                    span: alias_span,
+                                });
+                            }
+                        };
+                        item_end = self.tokens[self.pos - 1].span;
+                        Some(alias)
+                    } else {
+                        None
+                    };
+                    items.push(crate::ast::ExposedItem {
+                        name,
+                        alias,
+                        public,
+                        span: name_start.to(item_end),
+                    });
                     if matches!(self.peek(), Token::Comma) {
                         self.advance();
                     }

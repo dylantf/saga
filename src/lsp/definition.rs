@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use saga::ast::{Decl, Expr, ExprKind, Pat, Stmt};
+use saga::ast::{Decl, Exposing, Expr, ExprKind, Pat, Stmt};
 use saga::token::Span;
 use saga::typechecker::CheckResult;
 
@@ -249,15 +249,20 @@ fn find_cross_module(
                 continue;
             }
 
-            // Check if this import could expose the name
-            let exposes_name = match exposing {
-                Some(e) => e.exposes(name),
-                None => false, // No exposing list means qualified-only import
+            // Check if this import could expose the name and recover the
+            // origin-module spelling for aliased imports.
+            let origin_name = match exposing {
+                Some(Exposing::All { .. }) => Some(name),
+                Some(Exposing::Items(items)) => items
+                    .iter()
+                    .find(|item| item.surface_name() == name)
+                    .map(|item| item.name.as_str()),
+                None => None, // No exposing list means qualified-only import
             };
 
-            if !exposes_name {
+            let Some(origin_name) = origin_name else {
                 continue;
-            }
+            };
 
             // Look up the module's AST and file path
             let Some(file_path) = result
@@ -273,7 +278,7 @@ fn find_cross_module(
             };
 
             // Search for the definition in that module
-            if let Some(span) = find_local(module_program, name) {
+            if let Some(span) = find_local(module_program, origin_name) {
                 return Some(DefinitionResult {
                     span,
                     file_path: Some(file_path),

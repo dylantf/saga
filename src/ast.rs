@@ -247,25 +247,61 @@ pub struct Annotation {
 
 // --- Declarations ---
 
-/// An item in an import exposing list: `import Foo (bar, Baz)`.
+/// An item in an import exposing list: `import Foo (bar, Baz as B)`.
 /// Capital names are treated as types and hoist their constructors automatically.
-pub type ExposedItem = String;
+#[derive(Debug, Clone, PartialEq)]
+pub struct ExposedItem {
+    /// Name exported by the origin module.
+    pub name: String,
+    /// Local/surface name for this import.
+    pub alias: Option<String>,
+    /// Whether this imported name is part of this module's public surface.
+    pub public: bool,
+    pub span: Span,
+}
+
+impl ExposedItem {
+    pub fn surface_name(&self) -> &str {
+        self.alias.as_deref().unwrap_or(&self.name)
+    }
+}
 
 /// The shape of an import's exposing clause.
 /// `import Foo (..)` exposes every public export; `import Foo (a, B)` exposes
 /// just the listed items.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Exposing {
-    All { span: Span },
+    All { public: bool, span: Span },
     Items(Vec<ExposedItem>),
 }
 
 impl Exposing {
-    /// Returns true if this clause exposes the given name. For `All`, always true.
+    /// Returns true if this clause exposes the given user-visible surface name.
+    /// For `All`, always true.
     pub fn exposes(&self, name: &str) -> bool {
         match self {
             Exposing::All { .. } => true,
-            Exposing::Items(items) => items.iter().any(|i| i == name),
+            Exposing::Items(items) => items.iter().any(|i| i.surface_name() == name),
+        }
+    }
+
+    /// Returns true if this clause imports the given origin-module name.
+    /// For `All`, always true.
+    pub fn exposes_origin(&self, name: &str) -> bool {
+        match self {
+            Exposing::All { .. } => true,
+            Exposing::Items(items) => items.iter().any(|i| i.name == name),
+        }
+    }
+
+    /// Returns the user-visible surface name for an origin-module export.
+    pub fn surface_name_for_origin(&self, name: &str) -> Option<String> {
+        match self {
+            Exposing::All { .. } => Some(name.to_string()),
+            Exposing::Items(items) => items
+                .iter()
+                .find(|i| i.name == name)
+                .map(|i| i.surface_name().to_string()),
         }
     }
 }

@@ -18,10 +18,28 @@ pub fn format_import(path: &[String], alias: &Option<String>, exposing: &Option<
     match exposing {
         None => {}
         Some(Exposing::All { .. }) => {
-            d = d.append(Doc::text(" (..)"));
+            let text = match exposing {
+                Some(Exposing::All { public: true, .. }) => " (pub ..)",
+                _ => " (..)",
+            };
+            d = d.append(Doc::text(text));
         }
         Some(Exposing::Items(items)) => {
-            let item_docs: Vec<Doc> = items.iter().map(|i| Doc::text(i.as_str())).collect();
+            let item_docs: Vec<Doc> = items
+                .iter()
+                .map(|i| {
+                    let mut text = String::new();
+                    if i.public {
+                        text.push_str("pub ");
+                    }
+                    text.push_str(&i.name);
+                    if let Some(alias) = &i.alias {
+                        text.push_str(" as ");
+                        text.push_str(alias);
+                    }
+                    Doc::text(text)
+                })
+                .collect();
             let items_joined = Doc::join(docs![Doc::text(","), Doc::line()], item_docs);
             d = Doc::group(docs![
                 d,

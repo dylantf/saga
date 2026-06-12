@@ -595,9 +595,11 @@ impl<'a> Lowerer<'a> {
         exposing: Option<&crate::ast::Exposing>,
         info: &crate::typechecker::ModuleCodegenInfo,
     ) {
-        let is_exposed = |name: &str| match exposing {
-            None => false,
-            Some(e) => e.exposes(name),
+        let exposed_surface = |name: &str| -> Option<String> {
+            match exposing {
+                None => None,
+                Some(e) => e.surface_name_for_origin(name),
+            }
         };
         let exported_names: std::collections::HashSet<&str> =
             info.exports.iter().map(|(n, _)| n.as_str()).collect();
@@ -629,8 +631,10 @@ impl<'a> Lowerer<'a> {
             let canonical = format!("{}.{}", module_name, name);
             self.fun_info.entry(canonical).or_insert(fi);
 
-            if is_exposed(name) && exported_names.contains(name.as_str()) {
-                self.fun_info.entry(name.clone()).or_insert(FunInfo {
+            if let Some(surface) = exposed_surface(name)
+                && exported_names.contains(name.as_str())
+            {
+                self.fun_info.entry(surface).or_insert(FunInfo {
                     arity: expanded_arity,
                     effects,
                     is_open_row,

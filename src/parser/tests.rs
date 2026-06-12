@@ -3193,13 +3193,86 @@ fn import_with_explicit_items() {
             assert_eq!(alias, &None);
             match exposing {
                 Some(Exposing::Items(items)) => {
-                    assert_eq!(items, &vec!["bar".to_string(), "Baz".to_string()]);
+                    assert_eq!(items.len(), 2);
+                    assert_eq!(items[0].name, "bar");
+                    assert_eq!(items[0].alias, None);
+                    assert!(!items[0].public);
+                    assert_eq!(items[1].name, "Baz");
+                    assert_eq!(items[1].alias, None);
+                    assert!(!items[1].public);
                 }
                 other => panic!("expected Items, got {:?}", other),
             }
         }
         other => panic!("expected Decl::Import, got {:?}", other),
     }
+}
+
+#[test]
+fn import_with_aliased_items() {
+    let prog = parse("import Foo (bar as baz, Baz as Qux)");
+    match &prog[0] {
+        Decl::Import { exposing, .. } => match exposing {
+            Some(Exposing::Items(items)) => {
+                assert_eq!(items.len(), 2);
+                assert_eq!(items[0].name, "bar");
+                assert_eq!(items[0].alias.as_deref(), Some("baz"));
+                assert_eq!(items[0].surface_name(), "baz");
+                assert_eq!(items[1].name, "Baz");
+                assert_eq!(items[1].alias.as_deref(), Some("Qux"));
+                assert_eq!(items[1].surface_name(), "Qux");
+            }
+            other => panic!("expected Items, got {:?}", other),
+        },
+        other => panic!("expected Decl::Import, got {:?}", other),
+    }
+}
+
+#[test]
+fn import_with_public_items_and_public_dotdot() {
+    let prog = parse("import Foo (pub bar as baz, pub Baz)");
+    match &prog[0] {
+        Decl::Import { exposing, .. } => match exposing {
+            Some(Exposing::Items(items)) => {
+                assert_eq!(items.len(), 2);
+                assert!(items[0].public);
+                assert_eq!(items[0].name, "bar");
+                assert_eq!(items[0].alias.as_deref(), Some("baz"));
+                assert!(items[1].public);
+                assert_eq!(items[1].name, "Baz");
+            }
+            other => panic!("expected Items, got {:?}", other),
+        },
+        other => panic!("expected Decl::Import, got {:?}", other),
+    }
+
+    let prog = parse("import Foo (pub ..)");
+    match &prog[0] {
+        Decl::Import { exposing, .. } => {
+            assert!(matches!(
+                exposing,
+                Some(Exposing::All { public: true, .. })
+            ));
+        }
+        other => panic!("expected Decl::Import, got {:?}", other),
+    }
+}
+
+#[test]
+fn import_item_alias_must_match_name_kind() {
+    let err = parse_program_error("import Foo (bar as Baz)");
+    assert!(
+        err.message.contains("lowercase"),
+        "expected lowercase alias error, got: {}",
+        err.message
+    );
+
+    let err = parse_program_error("import Foo (Bar as baz)");
+    assert!(
+        err.message.contains("uppercase"),
+        "expected uppercase alias error, got: {}",
+        err.message
+    );
 }
 
 #[test]

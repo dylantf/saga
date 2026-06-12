@@ -633,7 +633,9 @@ impl Checker {
         // of the import pipeline can treat all-exposing imports as if they had
         // listed every name. This makes `(..)` equivalent by construction.
         let expanded: Option<Vec<crate::ast::ExposedItem>> = match exposing {
-            Some(crate::ast::Exposing::All { .. }) => Some(synthesize_all_exposed(&exports)),
+            Some(crate::ast::Exposing::All { public, .. }) => {
+                Some(synthesize_all_exposed(&exports, *public))
+            }
             _ => None,
         };
         let exposing_items: Option<&[crate::ast::ExposedItem]> = match (exposing, &expanded) {
@@ -1057,14 +1059,16 @@ impl Checker {
                 }
             }
 
-            for name in exposed {
+            for item in exposed {
+                let name = item.name.as_str();
+                let surface = item.surface_name();
                 let is_type = name.starts_with(|c: char| c.is_uppercase());
                 if is_type {
-                    if let Some(fields) = exports.record_defs.get(name.as_str()) {
+                    if let Some(fields) = exports.record_defs.get(name) {
                         let record_canonical = format!("{}.{}", module_name, name);
                         self.records.insert(record_canonical, fields.clone());
                     }
-                    if let Some(ctors) = exports.type_constructors.get(name.as_str()) {
+                    if let Some(ctors) = exports.type_constructors.get(name) {
                         let mut variants = Vec::new();
                         for ctor in ctors {
                             if let Some(&scheme) = binding_map.get(ctor.as_str()) {
@@ -1080,23 +1084,23 @@ impl Checker {
                         }
                         if !variants.is_empty() {
                             self.adt_variants
-                                .entry(name.to_string())
+                                .entry(surface.to_string())
                                 .or_insert(variants);
                         }
                     }
-                    if ctor_to_type.contains_key(name.as_str())
-                        && let Some(&did) = exports.def_ids.get(name.as_str())
+                    if ctor_to_type.contains_key(name)
+                        && let Some(&did) = exports.def_ids.get(name)
                     {
                         self.lsp
                             .constructor_def_ids
-                            .entry(name.to_string())
+                            .entry(surface.to_string())
                             .or_insert(did);
                     }
                 }
-                if let Some(doc) = exports.doc_comments.get(name.as_str()) {
+                if let Some(doc) = exports.doc_comments.get(name) {
                     self.lsp
                         .imported_docs
-                        .entry(name.to_string())
+                        .entry(surface.to_string())
                         .or_insert_with(|| doc.clone());
                 }
             }
@@ -1193,8 +1197,12 @@ impl Checker {
         // self.effects (the bare form is needed for internal type checking —
         // the type system stores bare effect names in EffectRows). The
         // scope_map controls which names users can write in `needs` clauses.
-        let is_exposed =
-            |item: &str| -> bool { exposing.is_some_and(|list| list.iter().any(|e| e == item)) };
+        let exposed_surface =
+            |item: &str| -> Option<&str> { exposing.and_then(|list| {
+                list.iter()
+                    .find(|e| e.name == item)
+                    .map(|e| e.surface_name())
+            }) };
         for (name, info) in effects {
             // One canonical entry: Module.Effect (e.g. Std.Fail.Fail)
             let canonical = format!("{}.{}", module_name, name);
@@ -1216,9 +1224,9 @@ impl Checker {
             self.handlers
                 .entry(canonical)
                 .or_insert_with(|| info.clone());
-            if is_exposed(name) {
+            if let Some(surface) = exposed_surface(name) {
                 self.handlers
-                    .entry(name.clone())
+                    .entry(surface.to_string())
                     .or_insert_with(|| info.clone());
             }
             if let Some(doc) = doc_comments.get(name) {
@@ -1332,12 +1340,22 @@ impl Checker {
 /// given module's exports. Includes every public value binding, type and
 /// record name (with their constructors flowing through the existing types
 /// branch in `resolve_import`), trait, effect, and handler.
-fn synthesize_all_exposed(exports: &ModuleExports) -> Vec<crate::ast::ExposedItem> {
-    let mut items: Vec<String> = Vec::new();
+fn synthesize_all_exposed(
+    exports: &ModuleExports,
+    public: bool,
+) -> Vec<crate::ast::ExposedItem> {
+    let mut items: Vec<crate::ast::ExposedItem> = Vec::new();
     let mut seen: HashSet<String> = HashSet::new();
-    let push = |name: &str, items: &mut Vec<String>, seen: &mut HashSet<String>| {
+    let push = |name: &str,
+                items: &mut Vec<crate::ast::ExposedItem>,
+                seen: &mut HashSet<String>| {
         if seen.insert(name.to_string()) {
-            items.push(name.to_string());
+            items.push(crate::ast::ExposedItem {
+                name: name.to_string(),
+                alias: None,
+                public,
+                span: Span { start: 0, end: 0 },
+            });
         }
     };
 
@@ -1462,20 +1480,31 @@ pub(super) fn resolve_import(
 
     // Exposed items: bare -> canonical, with validation
     if let Some(exposed) = exposing {
-        for name in exposed {
+        for item in exposed {
+            let name = item.name.as_str();
+            let surface = item.surface_name();
             let is_type = name.starts_with(|c: char| c.is_uppercase());
             if is_type {
-                let mut found = binding_map.contains_key(name.as_str());
+                let mut found = binding_map.contains_key(name);
                 // Bare type value -> canonical
                 if found {
                     let type_canonical = format!("{}.{}", module_name, name);
-                    scope.values.entry(name.clone()).or_insert(type_canonical);
+                    scope
+                        .values
+                        .entry(surface.to_string())
+                        .or_insert(type_canonical);
                 }
                 // Bare type name resolves to canonical
                 let type_canonical = format!("{}.{}", module_name, name);
-                scope.types.entry(name.clone()).or_insert(type_canonical);
+                scope
+                    .types
+                    .entry(surface.to_string())
+                    .or_insert(type_canonical);
+                if exports.type_arity.contains_key(name) {
+                    found = true;
+                }
                 // Record types count as found
-                if exports.record_defs.contains_key(name.as_str()) {
+                if exports.record_defs.contains_key(name) {
                     found = true;
                 }
                 // Constructors belonging to this type
@@ -1493,15 +1522,18 @@ pub(super) fn resolve_import(
                     }
                 }
                 // Exposed constructor-as-name
-                if ctor_to_type.contains_key(name.as_str())
-                    && binding_map.contains_key(name.as_str())
+                if ctor_to_type.contains_key(name)
+                    && binding_map.contains_key(name)
                 {
                     let ctor_canonical = format!("{}.{}", module_name, name);
                     scope
                         .constructors
-                        .entry(name.clone())
+                        .entry(surface.to_string())
                         .or_insert_with(|| ctor_canonical.clone());
-                    scope.values.entry(name.clone()).or_insert(ctor_canonical);
+                    scope
+                        .values
+                        .entry(surface.to_string())
+                        .or_insert(ctor_canonical);
                     found = true;
                 }
                 // Effects can be exposed by name
@@ -1509,7 +1541,7 @@ pub(super) fn resolve_import(
                     let effect_canonical = format!("{}.{}", module_name, name);
                     scope
                         .effects
-                        .entry(name.clone())
+                        .entry(surface.to_string())
                         .or_insert(effect_canonical.clone());
                     scope.register_effect_ops(
                         &effect_canonical,
@@ -1522,7 +1554,7 @@ pub(super) fn resolve_import(
                     let trait_canonical = super::canonical_join(module_name, name);
                     scope
                         .traits
-                        .entry(name.clone())
+                        .entry(surface.to_string())
                         .or_insert(trait_canonical.clone());
                     scope.register_trait_methods(
                         &trait_canonical,
@@ -1546,18 +1578,21 @@ pub(super) fn resolve_import(
                 let is_trait_method = exports
                     .traits
                     .values()
-                    .any(|info| info.methods.iter().any(|m| &m.name == name));
+                    .any(|info| info.methods.iter().any(|m| m.name == name));
                 if (is_trait_method || !scope.values.contains_key(&canonical)) && !is_handler {
                     return Err(format!("'{}' is not exported by module '{}'", name, prefix));
                 }
                 if scope.values.contains_key(&canonical) {
-                    scope.values.entry(name.clone()).or_insert(canonical);
+                    scope
+                        .values
+                        .entry(surface.to_string())
+                        .or_insert(canonical);
                 }
                 if is_handler {
                     let handler_canonical = format!("{}.{}", module_name, name);
                     scope
                         .handlers
-                        .entry(name.clone())
+                        .entry(surface.to_string())
                         .or_insert(handler_canonical);
                 }
             }

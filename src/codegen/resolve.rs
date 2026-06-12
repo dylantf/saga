@@ -1214,10 +1214,10 @@ fn register_import_aliases(
                 None => continue,
             };
 
-            let is_exposed = |name: &str| -> bool {
+            let exposed_surface = |name: &str| -> Option<String> {
                 match exposing {
-                    None => false,
-                    Some(e) => e.exposes(name),
+                    None => None,
+                    Some(e) => e.surface_name_for_origin(name),
                 }
             };
 
@@ -1228,7 +1228,8 @@ fn register_import_aliases(
                 .collect();
 
             for (name, scheme) in &info.exports {
-                if !alias_differs && !is_exposed(name) {
+                let exposed_surface = exposed_surface(name);
+                if !alias_differs && exposed_surface.is_none() {
                     continue;
                 }
                 let scoped = build_imported_fun_scoped(
@@ -1246,8 +1247,10 @@ fn register_import_aliases(
                         .entry(aliased)
                         .or_insert_with(|| scoped.clone());
                 }
-                if is_exposed(name) && !local_funs.contains_key(name) {
-                    scope.entry(name.clone()).or_insert(scoped);
+                if let Some(surface) = exposed_surface
+                    && !local_funs.contains_key(&surface)
+                {
+                    scope.entry(surface).or_insert(scoped);
                 }
             }
         }

@@ -334,7 +334,12 @@ fn merge_summary_import(
     exposing: Option<&crate::ast::Exposing>,
     summary: &ModuleSummary,
 ) {
-    let exposes = |name: &str| exposing.is_none() || exposing.is_some_and(|e| e.exposes(name));
+    let exposed_surface = |name: &str| -> Option<String> {
+        match exposing {
+            None => Some(name.to_string()),
+            Some(e) => e.surface_name_for_origin(name),
+        }
+    };
     for (name, info) in &summary.traits {
         register_summary_entry(
             &mut out.traits,
@@ -352,8 +357,8 @@ fn merge_summary_import(
                 info,
             );
         }
-        if exposes(name) {
-            register_summary_entry(&mut out.traits, name, module_name, name, info);
+        if let Some(surface) = exposed_surface(name) {
+            register_summary_entry(&mut out.traits, &surface, module_name, name, info);
         }
     }
     for (name, info) in &summary.types {
@@ -373,8 +378,8 @@ fn merge_summary_import(
                 info,
             );
         }
-        if exposes(name) {
-            register_summary_entry(&mut out.types, name, module_name, name, info);
+        if let Some(surface) = exposed_surface(name) {
+            register_summary_entry(&mut out.types, &surface, module_name, name, info);
         }
     }
     for (name, info) in &summary.records {
@@ -394,8 +399,8 @@ fn merge_summary_import(
                 info,
             );
         }
-        if exposes(name) {
-            register_summary_entry(&mut out.records, name, module_name, name, info);
+        if let Some(surface) = exposed_surface(name) {
+            register_summary_entry(&mut out.records, &surface, module_name, name, info);
         }
     }
 }

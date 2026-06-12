@@ -926,6 +926,25 @@ main () = add 10 20
 }
 
 #[test]
+fn aliased_exposed_import_emits_origin_module_call() {
+    let main_src = "
+module Main
+import Math (add as plus)
+
+main () = plus 10 20
+";
+    let mut checker = make_project_checker();
+    let program = typecheck_source(main_src, &mut checker);
+    let out = emit_from_program(&program, "main", &checker);
+
+    assert_contains(&out, "call 'math':'add'");
+    assert!(
+        !out.contains("apply 'plus'"),
+        "aliased import should not lower as a local function\n{out}"
+    );
+}
+
+#[test]
 fn exposed_and_qualified_same_module() {
     let main_src = "
 module Main
