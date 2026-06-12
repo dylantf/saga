@@ -2,6 +2,8 @@
 # representation value, then an effectful ToJson-style method consumes it.
 # This mirrors the residual saga_json shape more closely than levels 1-5.
 
+import Std.Generic (Generic, Leaf, Variant, Adt)
+
 effect Options {
   fun get_options : Unit -> Int
 }

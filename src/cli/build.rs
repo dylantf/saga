@@ -967,13 +967,21 @@ pub fn build_project_ext(
         }
 
         let elaborated = elaborate::elaborate_module(&program, &mod_result, module_name);
-        let normalized = codegen::normalize::normalize_effects(&elaborated);
+        // Local-only fold here; the cross-module fold runs at emit with the full
+        // set of compiled modules supplied as externals.
+        let normalized = codegen::generic_fold::fold_program(
+            &codegen::normalize::normalize_effects(&elaborated),
+            &codegen::generic_fold::ExternalCtors::new(),
+            &codegen::generic_fold::ExternalFuns::new(),
+        )
+        .program;
         let resolution = codegen::resolve::resolve_names(
             module_name,
             &normalized,
             codegen_info_map,
             &result.prelude_imports,
             &mod_result.resolution,
+            &std::collections::HashMap::new(),
         );
         let optimization = codegen::optimize::analyze(module_name, &normalized, &resolution);
         compiled_modules.insert(

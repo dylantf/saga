@@ -1209,3 +1209,117 @@ fn no_annotations_without_source_info() {
         "Expected no annotations without source info in:\n{out}"
     );
 }
+
+// --- Trait dispatch classification (Phase 1) ---
+
+/// Run a single-file script through parse/derive/desugar/typecheck/elaborate/
+/// normalize, then classify trait dictionary dispatch. Returns the fact values
+/// (NodeId keys are not stable across runs, so tests assert on the values).
+/// `analyze` is shape-based and does not consult resolution, so an empty
+/// resolution map is sufficient here.
+fn dispatch_facts(src: &str) -> Vec<super::trait_dispatch::DictDispatch> {
+    let tokens = Lexer::new(src).lex().expect("lex error");
+    let mut program = Parser::new(tokens).parse_program().expect("parse error");
+    derive::expand_derives(&mut program, &derive::ImportedDecls::empty());
+    desugar::desugar_program(&mut program);
+    let mut checker = typechecker::Checker::with_prelude(None).expect("prelude error");
+    let result = checker.check_program(&mut program);
+    assert!(!result.has_errors(), "Type errors: {:?}", result.errors());
+    let elaborated = elaborate::elaborate(&program, &result);
+    let normalized = super::normalize::normalize_effects(&elaborated);
+    let resolution = super::resolve::ResolutionMap::new();
+    super::trait_dispatch::analyze("_script", &normalized, &resolution)
+        .into_values()
+        .collect()
+}
+
+fn known_constructors(facts: &[super::trait_dispatch::DictDispatch]) -> Vec<String> {
+    use super::trait_dispatch::DictDispatch;
+    let mut names: Vec<String> = facts
+        .iter()
+        .filter_map(|d| match d {
+            DictDispatch::KnownImpl {
+                dict_constructor, ..
+            } => Some(dict_constructor.clone()),
+            DictDispatch::Dynamic => None,
+        })
+        .collect();
+    names.sort();
+    names
+}
+
+#[test]
+fn concrete_method_call_classifies_known() {
+    let facts = dispatch_facts(
+        r#"
+trait Enc a { fun enc : a -> Int }
+impl Enc for Int { enc x = x }
+main () = enc 5
+"#,
+    );
+    // `enc 5` dispatches on the concrete `Enc Int` impl.
+    assert!(
+        known_constructors(&facts)
+            .iter()
+            .any(|c| c.contains("Enc") && c.contains("Int")),
+        "expected a KnownImpl for Enc Int, got {:?}",
+        known_constructors(&facts)
+    );
+}
+
+#[test]
+fn parameterized_method_call_classifies_known_with_sub_dict() {
+    use super::trait_dispatch::{DictDispatch, DictValue};
+    let facts = dispatch_facts(
+        r#"
+type Box a = Box a
+trait Enc a { fun enc : a -> Int }
+impl Enc for Int { enc x = x }
+impl Enc for Box a where {a: Enc} {
+  enc b = case b { Box v -> enc v }
+}
+main () = enc (Box 5)
+"#,
+    );
+    // `enc (Box 5)` dispatches on `Enc (Box a)` with the `Enc Int` element dict
+    // threaded as a known sub-dictionary.
+    let parameterized = facts.iter().find(|d| {
+        matches!(d, DictDispatch::KnownImpl { dict_constructor, sub_dicts, .. }
+            if dict_constructor.contains("Box") && !sub_dicts.is_empty())
+    });
+    let Some(DictDispatch::KnownImpl { sub_dicts, .. }) = parameterized else {
+        panic!(
+            "expected a parameterized KnownImpl for Box, got {:?}",
+            known_constructors(&facts)
+        );
+    };
+    assert!(
+        matches!(&sub_dicts[0], DictValue::Known { constructor, .. } if constructor.contains("Int")),
+        "expected Int sub-dict, got {sub_dicts:?}"
+    );
+}
+
+#[test]
+fn polymorphic_method_call_classifies_dynamic() {
+    use super::trait_dispatch::DictDispatch;
+    let facts = dispatch_facts(
+        r#"
+trait Enc a { fun enc : a -> Int }
+impl Enc for Int { enc x = x }
+fun serialize : (x: a) -> Int where {a: Enc}
+serialize x = enc x
+main () = serialize 5
+"#,
+    );
+    // The only dict method call is `enc x` inside `serialize`, dispatched on the
+    // where-bound dict param — no concrete impl is known at that site.
+    assert!(
+        facts.iter().any(|d| matches!(d, DictDispatch::Dynamic)),
+        "expected a Dynamic dispatch for the polymorphic call"
+    );
+    assert!(
+        known_constructors(&facts).is_empty(),
+        "polymorphic call should not resolve any concrete impl, got {:?}",
+        known_constructors(&facts)
+    );
+}

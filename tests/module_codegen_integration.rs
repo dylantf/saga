@@ -957,21 +957,209 @@ fn pub_functions_exported() {
 }
 
 #[test]
-fn private_functions_not_exported() {
+fn private_functions_are_exported_in_core() {
+    // Privacy is a front-end concern (the typechecker/resolver rejects illegal
+    // cross-module references in source). At the Core level we export *every*
+    // function so codegen optimizations — notably the cross-module generic fold,
+    // which inlines a producer impl body whose private helpers then lower to
+    // `call 'producer':'helper'` — can reach any function without computing a
+    // per-callee export set. So a private `secret` is both defined and exported.
     let math_src = std::fs::read_to_string(fixtures_root().join("Math.saga")).unwrap();
     let mut checker = make_project_checker();
     let program = typecheck_source(&math_src, &mut checker);
     let out = emit_from_program(&program, "math", &checker);
 
-    // 'secret' is private -- should be defined but not exported
-    // The export list is on the first line between [ ]
     let export_line = out.lines().next().unwrap();
     assert!(
-        !export_line.contains("'secret'"),
-        "private function 'secret' should not be in exports\n{export_line}"
+        export_line.contains("'secret'/"),
+        "private function 'secret' should be exported in Core (export-all)\n{export_line}"
     );
-    // But it should still be defined in the module body
     assert_contains(&out, "'secret'/");
+}
+
+#[test]
+fn cross_module_derived_dict_inlines_producer_private_helper() {
+    // Regression: a `deriving (ToJson)` record forces a specialized dict method
+    // (`__saga_dictmethod_..._Rep__Foo`) whose body the generic fold builds by
+    // inlining the producer module's `ToJson Record` impl. That impl references a
+    // producer-*private* helper (`io_open`). The reference is freshened (and the
+    // surrounding fold rewrites re-freshen/duplicate it), orphaning the id-keyed
+    // cross-module resolution carry; without the name-keyed carry it lowered to an
+    // unbound Erlang variable `Io_open` and `erlc` rejected the module.
+    //
+    // The triggering body shape (a hand-written object-encoder rewrite) is the
+    // load-bearing part: a trait method with a tuple return + a threaded
+    // accumulator, whose caller seeds the accumulator from a private-helper call
+    // and destructures the tuple result, with branching inside.
+    let codec = r#"module Codec
+
+import Std.Generic (Generic, Leaf, Labeled, And, Record)
+import Std.List as List
+
+opaque type Iodata = Iodata
+
+@external("erlang", "std_bitstring_bridge", "from_string")
+pub fun raw : String -> Iodata
+
+@external("erlang", "std_bitstring_bridge", "concat")
+pub fun concat : List Iodata -> Iodata
+
+fun io_open : Iodata
+io_open = raw "{"
+
+fun io_close : Iodata
+io_close = raw "}"
+
+fun io_comma : Iodata
+io_comma = raw ","
+
+pub trait ToJson a {
+  fun to_json : a -> Iodata
+}
+
+pub trait ToJsonFields a {
+  fun emit_fields : a -> Bool -> List Iodata -> (Bool, List Iodata)
+}
+
+impl ToJson for Int {
+  to_json _ = raw "0"
+}
+
+impl ToJson for Leaf a where {a: ToJson} {
+  to_json (Leaf x) = to_json x
+}
+
+impl ToJson for Record a where {a: ToJsonFields} {
+  to_json (Record _ inner) = {
+    let (_, frags) = emit_fields inner False [io_open]
+    concat (List.reverse (io_close :: frags))
+  }
+}
+
+impl ToJsonFields for Labeled (n : Symbol) a where {a: ToJson} {
+  emit_fields (Labeled x) need_comma acc = {
+    let v = to_json x
+    let acc1 = if need_comma then io_comma :: acc else acc
+    (True, v :: acc1)
+  }
+}
+
+impl ToJsonFields for And l r where {l: ToJsonFields, r: ToJsonFields} {
+  emit_fields (And l r) need_comma acc = {
+    let (nc1, acc1) = emit_fields l need_comma acc
+    emit_fields r nc1 acc1
+  }
+}
+"#;
+
+    let main_src = r#"module Main
+
+import Codec (ToJson, ToJsonFields)
+
+record Foo {
+  a: Int,
+  b: Int,
+} deriving (ToJson)
+
+main () = {
+  let _ = to_json (Foo { a: 1, b: 2 })
+  dbg "ok"
+}
+"#;
+
+    with_temp_project_files(&[("lib/Codec.saga", codec)], main_src, |checker, program| {
+        let out = emit_from_program(program, "main", checker);
+        // The producer-private helper must lower to a remote call, never an
+        // unbound variable.
+        assert_contains(&out, "call 'codec':'io_open'");
+        // `erlc` is the real assertion: it rejects an unbound `Io_open`.
+        assert_erlc_compiles(&out, "main");
+    });
+}
+
+// A dispatch-shaped helper library shared by the inline-to-cancel tests below.
+const STYLE_LIB: &str = r#"module Style
+
+pub type NameStyle =
+  | AsIs
+  | Camel
+
+pub fun apply_style : NameStyle -> String -> String
+apply_style ns s = case ns {
+  AsIs -> s
+  Camel -> s
+}
+
+pub fun pick : Int -> NameStyle
+pick n = if n == 0 then AsIs else Camel
+"#;
+
+#[test]
+fn constant_arg_inlines_cross_module_dispatch_fn_to_cancel() {
+    // Blocker-2 Unit B: `apply_style (Opts { rename: AsIs }).rename "id"` — the
+    // constant record projects to `AsIs` (Unit A), then the cross-module
+    // dispatch-shaped `apply_style` is inlined-to-cancel: `case AsIs { AsIs -> s;
+    // Camel -> s }` collapses to the literal key. No remote `style:apply_style` call
+    // and no residual NameStyle `case` should survive. The `deriving (Show)` record
+    // is only here so the generic fold runs at all.
+    let main_src = r#"module Main
+
+import Style (NameStyle, AsIs, apply_style)
+
+record Opts { rename: NameStyle }
+record Tag { v: Int } deriving (Show)
+
+fun key : Unit -> String
+key () = apply_style (Opts { rename: AsIs }).rename "id"
+
+main () = dbg (key ())
+"#;
+    with_temp_project_files(&[("lib/Style.saga", STYLE_LIB)], main_src, |checker, program| {
+        let out = emit_from_program(program, "main", checker);
+        let key_fn = emitted_function(&out, "key", 1);
+        assert!(
+            key_fn.contains("#<105>") && key_fn.contains("#<100>"),
+            "key/1 should fold to the literal \"id\":\n{key_fn}"
+        );
+        assert!(
+            !out.contains("'style':'apply_style'"),
+            "apply_style should be inlined away, not a remote call:\n{out}"
+        );
+        assert!(
+            !key_fn.contains("case"),
+            "the inlined NameStyle case should have collapsed in key/1:\n{key_fn}"
+        );
+        assert_erlc_compiles(&out, "main");
+    });
+}
+
+#[test]
+fn runtime_arg_does_not_inline_dispatch_fn() {
+    // Blocker-2 Unit B negative gate: when the style argument is *not* a literal
+    // constructor (`pick n` is computed at runtime), the collapse gate fails and
+    // `apply_style` must stay a remote call — never speculatively inlined.
+    let main_src = r#"module Main
+
+import Std.IO (console)
+import Style (NameStyle, apply_style, pick)
+
+record Tag { v: Int } deriving (Show)
+
+fun key : Int -> String
+key n = apply_style (pick n) "id"
+
+main () = {
+  println (key 0)
+} with console
+"#;
+    with_temp_project_files(&[("lib/Style.saga", STYLE_LIB)], main_src, |checker, program| {
+        let out = emit_from_program(program, "main", checker);
+        assert!(
+            out.contains("'style':'apply_style'"),
+            "apply_style must remain a remote call when its style arg is runtime:\n{out}"
+        );
+        assert_erlc_compiles(&out, "main");
+    });
 }
 
 #[test]
@@ -2458,9 +2646,11 @@ main () = show (Animal { name: \"Rex\", species: \"Dog\" })
     let program = typecheck_source(main_src, &mut checker);
     let out = emit_from_program(&program, "main", &checker);
 
-    // The dict should be referenced as a cross-module call to animals module
+    // Phase 3: `show` on the imported `Show Animal` impl is specialized to a
+    // direct cross-module call to the hoisted dict method in the animals module
+    // (instead of building the dict via `call 'animals':'<dict>'()` + element/2).
     let dict = typechecker::make_dict_name("Std.Base.Show", &[], "animals", "Animals.Animal");
-    assert_contains(&out, &format!("call 'animals':'{dict}'"));
+    assert_contains(&out, &format!("call 'animals':'__saga_dictmethod_{dict}_0'"));
 }
 
 #[test]
@@ -2485,6 +2675,132 @@ main () = show (Animal { name: \"Rex\", species: \"Dog\" })
     let main_core = emit_from_program(&main_program, "main", &checker);
 
     let dir = assert_erlc_compiles(&animals_core, "animals");
+    let main_core_path = dir.join("main.core");
+    std::fs::write(&main_core_path, &main_core).unwrap();
+    let output = std::process::Command::new("erlc")
+        .arg("-o")
+        .arg(&dir)
+        .arg(&main_core_path)
+        .output()
+        .expect("failed to run erlc");
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(
+        output.status.success(),
+        "erlc failed on main:\n{main_core}\nstderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn cross_module_parameterized_dict_chain_inlines_with_private_helper() {
+    // Container.saga defines a parameterized `impl Encodable for Box a where
+    // {a: Encodable}` whose body calls a private helper `wrap_value`. Importing
+    // it and calling `encode` on a `Box Int` inlines the producer impl body into
+    // Main (cross-module generic fold), collapsing the dict chain into a `case`
+    // on Box. The private helper lowers to a direct cross-module call
+    // (`call 'container':'wrap_value'`) — possible because every function is
+    // exported in Core and the inlined node carries the producer's resolution.
+    let main_src = "
+module Main
+import Container (Encodable, Box)
+
+fun run : (b: Box Int) -> Int
+run b = encode b
+
+main () = run (Box 5)
+";
+    let mut checker = make_project_checker();
+    let program = typecheck_source(main_src, &mut checker);
+    let out = emit_from_program(&program, "main", &checker);
+
+    // The Box impl body was inlined: a `case` destructuring Box appears in Main.
+    assert_contains(&out, "'container_Box'");
+    // Its private helper is reached by a direct cross-module call, not a local
+    // (undefined-here) reference.
+    assert_contains(&out, "call 'container':'wrap_value'");
+}
+
+#[test]
+fn cross_module_fold_specializes_method_of_unimported_trait() {
+    // Box's impl body calls `tag`, a method of Container's `Tag` trait that Main
+    // never imports. After inlining the impl body into Main, the `tag` call on
+    // the nullary `Tag Int` dict must still specialize: the saturation guard
+    // reads the method arity from the dict constructor (via the compiled
+    // modules), since `Tag` is absent from Main's own trait registry. Without
+    // that fallback the call would fall back to `element/2` dispatch.
+    let main_src = "
+module Main
+import Container (Encodable, Box)
+
+fun run : (b: Box Int) -> Int
+run b = encode b
+
+main () = run (Box 5)
+";
+    let mut checker = make_project_checker();
+    let program = typecheck_source(main_src, &mut checker);
+    let out = emit_from_program(&program, "main", &checker);
+
+    let dict = typechecker::make_dict_name("Container.Tag", &[], "container", "Std.Int.Int");
+    assert_contains(
+        &out,
+        &format!("call 'container':'__saga_dictmethod_{dict}_0'"),
+    );
+}
+
+#[test]
+fn cross_module_fold_resolves_field_access_on_unimported_record() {
+    // Box's impl body reads `o.scale` on Container's private `Opts` record. After
+    // the body is inlined into Main, lowering the field access needs Opts's field
+    // layout to compute the tuple index — but Opts is non-`pub` and never
+    // imported, so it isn't in Main's public codegen info. Emit must still
+    // succeed (the layout comes from the all-modules record pass); previously
+    // this panicked with "could not resolve record type for field access".
+    let main_src = "
+module Main
+import Container (Encodable, Box)
+
+fun run : (b: Box Int) -> Int
+run b = encode b
+
+main () = run (Box 5)
+";
+    let mut checker = make_project_checker();
+    let program = typecheck_source(main_src, &mut checker);
+    let out = emit_from_program(&program, "main", &checker);
+    let run_fn = emitted_function(&out, "run", 1);
+    // The field access lowered to an element/2 projection (index 2 = first field
+    // after the tag), inside the inlined body — not a panic.
+    assert!(
+        run_fn.contains("call 'erlang':'element'"),
+        "expected the inlined `o.scale` to lower to an element/2 projection\n{run_fn}"
+    );
+}
+
+#[test]
+fn cross_module_parameterized_fold_compiles_with_erlc() {
+    // Proves the inlined cross-module body (with its private-helper and hoisted
+    // leaf calls) links: emit both modules and run erlc over the importer.
+    let main_src = "
+module Main
+import Container (Encodable, Box)
+
+fun run : (b: Box Int) -> Int
+run b = encode b
+
+main () = run (Box 5)
+";
+    let mut checker = make_project_checker();
+    let main_program = typecheck_source(main_src, &mut checker);
+    let result = checker.to_result();
+    let container_program = result
+        .programs()
+        .get("Container")
+        .expect("Container module not found");
+    let container_core = emit_from_program(container_program, "container", &checker);
+    let main_core = emit_from_program(&main_program, "main", &checker);
+
+    let dir = assert_erlc_compiles(&container_core, "container");
     let main_core_path = dir.join("main.core");
     std::fs::write(&main_core_path, &main_core).unwrap();
     let output = std::process::Command::new("erlc")
@@ -2545,13 +2861,19 @@ fn bare_method_dispatches_via_resolved_trait_when_imports_collide() {
                 .map(|i| main_body_start + i)
                 .unwrap_or(out.len());
             let main_body_slice = &out[main_body_start..main_body_end];
+            // `pp 1` is a saturated pure call to the local `Foo Int` impl, so
+            // Phase 2 may specialize it to a direct call to that impl's hoisted
+            // method (`__saga_dictmethod_<A.Foo dict>_0`). Either way — dict
+            // application or hoisted-method call — the A.Foo dict name must
+            // appear in main/1 and the B.Bar dict name must not. Substring
+            // matching covers both forms (the hoisted name embeds the dict name).
             assert!(
-                main_body_slice.contains(&format!("'{foo_dict}'")),
-                "main/1 should apply the A.Foo dict\n{main_body_slice}"
+                main_body_slice.contains(&foo_dict),
+                "main/1 should dispatch via the A.Foo impl\n{main_body_slice}"
             );
             assert!(
-                !main_body_slice.contains(&format!("'{bar_dict}'")),
-                "main/1 must not apply the B.Bar dict (only A.Foo is exposed)\n{main_body_slice}"
+                !main_body_slice.contains(&bar_dict),
+                "main/1 must not dispatch via the B.Bar impl (only A.Foo is exposed)\n{main_body_slice}"
             );
         },
     );
@@ -2635,10 +2957,16 @@ main () = {
 
 #[test]
 fn prelude_constructors_mangled_with_std_prefix() {
+    // The scrutinee is a function call (not a literal `Just(42)`), so the generic
+    // fold's constructor cancellation can't constant-fold the case away — keeping
+    // the constructor atoms in the output for this mangling check.
     let main_src = "
 module Main
 
-main () = case Just(42) {
+fun mk : Int -> Maybe Int
+mk n = Just n
+
+main () = case mk 42 {
   Just(x) -> x
   Nothing -> 0
 }

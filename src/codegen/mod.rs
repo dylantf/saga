@@ -1,11 +1,13 @@
 pub mod call_effects;
 pub mod cerl;
+pub mod generic_fold;
 pub mod handler_analysis;
 pub mod lower;
 pub mod normalize;
 pub mod optimize;
 pub mod resolve;
 pub mod runtime_shape;
+pub mod trait_dispatch;
 #[cfg(test)]
 mod tests;
 
@@ -103,13 +105,21 @@ pub fn compile_module_from_result(
     let codegen_info = result.codegen_info();
     let info = codegen_info.get(module_name).cloned().unwrap_or_default();
     let elaborated = crate::elaborate::elaborate_module(program, mod_result, module_name);
-    let normalized = normalize::normalize_effects(&elaborated);
+    // Local-only fold here (no cross-module context); the cross-module fold runs
+    // at emit, which re-folds with `ctx.modules` supplied.
+    let normalized = generic_fold::fold_program(
+        &normalize::normalize_effects(&elaborated),
+        &generic_fold::ExternalCtors::new(),
+        &generic_fold::ExternalFuns::new(),
+    )
+    .program;
     let resolution = resolve::resolve_names(
         module_name,
         &normalized,
         codegen_info,
         &result.prelude_imports,
         &mod_result.resolution,
+        &HashMap::new(),
     );
     let optimization = optimize::analyze(module_name, &normalized, &resolution);
     Some(CompiledModule {
@@ -139,7 +149,21 @@ pub fn emit_module_with_context(
     entry_export: Option<&str>,
 ) -> String {
     let codegen_info = ctx.codegen_info();
-    let program = normalize::normalize_effects(program);
+    // Generic fold, with cross-module impls supplied from the other compiled
+    // modules. Inlined cross-module nodes carry the producer's resolution, merged
+    // below after `resolve_names`.
+    let externals = generic_fold::external_ctors_from_modules(&ctx.modules);
+    let external_funs = generic_fold::external_funs_from_modules(&ctx.modules);
+    let fold_out = generic_fold::fold_program(
+        &normalize::normalize_effects(program),
+        &externals,
+        &external_funs,
+    );
+    let generic_fold::FoldOutput {
+        program,
+        carried_resolution,
+        carried_names,
+    } = fold_out;
     let constructor_atoms = resolve::build_constructor_atoms(
         module_name,
         &program,
@@ -157,12 +181,17 @@ pub fn emit_module_with_context(
         &codegen_info,
         &ctx.prelude_imports,
         front_resolution,
+        &carried_names,
     );
     // Merge in pre-computed resolution maps from all compiled modules.
     // Their NodeIds don't overlap with ours, so this is a simple extend.
     for compiled in ctx.modules.values() {
         resolution_map.extend(compiled.resolution.iter().map(|(k, v)| (*k, v.clone())));
     }
+    // Carried resolution for inlined cross-module nodes: keyed by fresh NodeIds,
+    // so this overrides any consumer-scope resolution `resolve_names` guessed for
+    // them (e.g. a producer-private helper unknown in this module's scope).
+    resolution_map.extend(carried_resolution);
     let optimization = optimize::analyze(module_name, &program, &resolution_map);
     let source_info =
         source_file.map(|sf| lower::errors::SourceInfo::new(sf.path.clone(), &sf.source));

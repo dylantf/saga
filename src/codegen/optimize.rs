@@ -25,6 +25,9 @@ pub struct OptimizationFacts {
     /// Higher-order functions with a generated direct entry that may be used
     /// when callback arguments are externally direct.
     pub hof_direct_specializations: HashMap<String, HofDirectSpecialization>,
+    /// Trait dictionary dispatch facts, keyed by `DictMethodAccess` App node.
+    /// A `Dynamic` (or absent) entry keeps the normal `element/2` dispatch.
+    pub dict_dispatch: super::trait_dispatch::DictDispatchMap,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -43,12 +46,13 @@ pub struct HofCallbackParam {
 pub fn analyze(
     module_name: &str,
     program: &ast::Program,
-    _resolution: &super::resolve::ResolutionMap,
+    resolution: &super::resolve::ResolutionMap,
 ) -> OptimizationFacts {
     OptimizationFacts {
         handler_analysis: super::handler_analysis::analyze(program),
         public_helpers: collect_public_helper_facts(module_name, program),
         hof_direct_specializations: collect_hof_direct_specializations(module_name, program),
+        dict_dispatch: super::trait_dispatch::analyze(module_name, program, resolution),
     }
 }
 
@@ -268,7 +272,10 @@ fn hof_body_supported(expr: &Expr) -> bool {
     }
 }
 
-fn walk_expr(expr: &Expr, visit: &mut impl FnMut(&Expr)) {
+/// Visit an expression's immediate sub-expressions. Shared with sibling
+/// optimizer-fact passes (e.g. `trait_dispatch`) so AST traversal stays in one
+/// place rather than drifting across copies.
+pub(super) fn walk_expr(expr: &Expr, visit: &mut impl FnMut(&Expr)) {
     match &expr.kind {
         ExprKind::App { func, arg } => {
             visit(func);

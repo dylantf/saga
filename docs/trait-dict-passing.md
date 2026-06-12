@@ -344,3 +344,155 @@ The triple underscore in Core Erlang comes from `core_var()` prefixing names tha
 3. **Evidence keyed by NodeId.** The typechecker records evidence at the specific AST node (call site) that triggered the constraint, and the elaborator looks it up by the same NodeId. If NodeIds change between typechecking and elaboration (e.g., due to AST cloning with fresh IDs), evidence lookups fail silently and fall through to the less-precise `current_dict_params` fallback.
 
 4. **Substitution-aware var name resolution.** Type variable IDs may be remapped by unification between where-clause registration and constraint solving. `resolve_where_var_name()` resolves through substitution to find the original bound ID, ensuring `type_var_name` is correctly set on evidence.
+
+---
+
+## Optimization: Trait Specialization & Generic Folding
+
+Source: `src/codegen/trait_dispatch.rs`, `src/codegen/generic_fold.rs`, `src/codegen/lower/{calls,module}.rs`
+
+The dict-passing scheme above is the *baseline* calling convention. A codegen
+optimization layer rewrites statically-known dispatch into direct calls and
+fuses `Generic`-derived `Rep` walks, so hot codecs do not build, dispatch
+through, and re-traverse dictionary tuples and `Rep` constructor trees at
+runtime. It is purely a backend concern — the typechecker and elaborator are
+untouched.
+
+The deep, phase-by-phase working record (history, fixtures, per-phase
+measurements) lives in
+[planning/trait-specialization.md](planning/trait-specialization.md). This
+section is the navigable reference; that doc is the archaeology.
+
+### Three design anchors (load-bearing — every change must preserve them)
+
+1. **Optimizer fact, not correctness fact.** Dispatch facts live in
+   `OptimizationFacts` (`src/codegen/optimize.rs`), alongside `handler_analysis`.
+   They are optional and fallback-safe: `Dynamic` is always a legal
+   classification, and a missing fact keeps the baseline `element/2` dispatch.
+   Runtime correctness may never depend on a fact being present.
+
+2. **Specialization rewrites only the callee expression.** A trait call lowers
+   (conceptually) to `apply (element(i, <dict ctor>)) (args…, _Evidence,
+   _ReturnK)`. Specialization changes *only* the `element(i, <dict ctor>)`
+   sub-expression into a direct function reference; all user-argument, evidence,
+   and return-continuation threading in `lower_runtime_cps_apply` stays
+   identical. This is how the optimization honors "trait methods carry effect
+   rows": an effectful `PostgresRow` method specializes exactly like a pure
+   `ToJson` one — same evidence ABI, cheaper callee.
+
+3. **Facts say _which_ impl; lowering joins _what_ shape.** `DictDispatch`
+   carries impl identity only. At lowering the consumer cross-references the
+   existing `CallEffectInfo` (`src/codegen/call_effects.rs`) for the same `App`
+   `NodeId` to recover the call shape. No effect logic is duplicated.
+
+### The substrate — `DictDispatchMap`
+
+`src/codegen/trait_dispatch.rs::analyze()` classifies every dict-method call site
+(keyed by the **outer `App` `NodeId`** — the same key as `call_effects`) as:
+
+- `KnownImpl { dict_constructor, method_index, sub_dicts }` — the dict resolves
+  to a statically-known impl.
+- `Dynamic` — the dict is a runtime value (an escaping where-bound dict param,
+  etc.); stays on the `element/2` path.
+
+`SAGA_DEBUG_TRAIT_DISPATCH` traces classification.
+
+### Specialization — devirtualize known dict-method calls
+
+Turns a `KnownImpl` site from `apply (element(i, dict))(…)` into a direct call.
+
+- **Producer side (hoist):**
+  `src/codegen/lower/module.rs::plan_dict_method_hoists` hoists *all* local
+  nullary dict methods out of their tuple into top-level functions named
+  `__saga_dictmethod_<dict>_<idx>`, exports them, and references them by `FunRef`
+  from the dict tuple (so the dict still works dynamically).
+- **Consumer side (specialize):**
+  `src/codegen/lower/calls.rs::specialized_dict_method_callee` →
+  `classify_dict_specialization` emits the direct callee — a local `FunRef`, or
+  for an imported impl a `call 'producer':'__saga_dictmethod_…'`. A **saturation
+  guard** (`trait_method_user_arity`) requires the call be fully applied first.
+- **Cross-module enabler:** every function is exported in Core (privacy is a
+  front-end concern), so an inlined producer body's private-helper calls can
+  lower to `call 'producer':'helper'`. This is the GHC "ship the unfolding,
+  specialize at the consumer" move — BEAM won't inline across modules, so we do
+  it at the AST level.
+
+### Generic folding — fuse the `Rep` walk
+
+`src/codegen/generic_fold.rs` is a **fuel-bounded bottom-up fixpoint AST
+rewriter** (`fold_program` → `FoldOutput { program, carried_resolution }`). It
+runs **after `normalize_effects`, before `resolve`**, so every NodeId-keyed
+analysis (resolution, `call_effects`, optimizer) recomputes over the rewritten
+tree, and it is meaning-preserving (Anchor 2: the effect ABI is untouched).
+
+- **Parameterized inline (4a / 4a-x).** β-reduces a statically-known
+  *parameterized* dict-method call: the conditional impl's method lambda is
+  inlined with its `where`-bound dict params substituted by the concrete
+  sub-dicts, producing nested single-arm `case`s that bottom out at a
+  nullary dict call. 4a-x does this **cross-module** — external impl bodies are
+  inlined, freshened, and the producer's resolution remapped onto the fresh
+  NodeIds (`carried_resolution`, merged after `resolve_names`).
+- **Rep-cancellation fusion (encode, "Phase 5").** Inlines `to x` together with
+  the codec and cancels the `Rep` constructor tree via
+  `case_of_known_constructor` / `case_of_case`, so the encoder never allocates
+  the `Adt/Variant/And/Labeled/Leaf` tree it would immediately destructure.
+- **Decode/from fusion ("Phase 6").** The mirror for the `from`/decode direction
+  (Rep-anchored — see the gates in the planning doc; do not loosen them).
+- **Literal-key β-reduction (Items 1/2).** Reduces the `apply_name_style ∘
+  symbol_name (Proxy n)` proxy closures to literal field-name keys and
+  propagates a constant `opts` through the recursive codec.
+
+### Two correctness findings — do not regress
+
+1. **Capture-avoiding substitution is mandatory.** Bottom-up folding nests
+   inlined bodies that all reuse the same binder name (every building-block codec
+   names its payload `inner`/`x`; freshening refreshes NodeIds, not names), so
+   one name is shadowed at several depths. `substitute_var` stops at any
+   sub-scope that re-binds the name (`Case` arms, `Lambda`/handler params,
+   `Block` `let`/`letfun`, `Do`, `ListComprehension`, `Receive` — via
+   `pat_binds`). Without this, a shadowed scrutinee is rewritten and badmatches
+   at runtime (the original Phase 5 blocker).
+2. **`bind_subpats` preserves effect semantics.** It *substitutes* a
+   `Var`/`Wildcard` parameter only when the argument `is_duplicable` (pure &
+   cheap — var, literal, field access, constructor app of duplicables); a
+   non-duplicable argument is let-bound (single-arm `case`) so its effects run
+   exactly once. `to`'s `Rep` trees are field accesses / literals / ctor apps →
+   duplicable, which is what lets fusion proceed without changing effects.
+
+### Measuring & debugging
+
+- `SAGA_STATS=trait-spec` — per-module summary of specialized vs fallback
+  dispatch sites, one reason per fallback
+  (`src/codegen/lower/trait_spec_stats.rs`). Keyed by `App` `NodeId`; reports
+  what lowering actually decided.
+  ```
+  SAGA_STATS=trait-spec saga build 2>&1 >/dev/null | grep trait-spec
+  trait-spec[EncodeDerive]: 26 known | 26 specialized | 0 fell back
+  ```
+  The invariant for fully-foldable `saga_json` codecs is **zero fallbacks**
+  (`N | N | 0`), *not* a fixed site count (Phase 5 raises the count by inlining
+  the nullary `Generic.to` and the codec walk).
+- `SAGA_DEBUG_TRAIT_DISPATCH` — classification trace (the upstream view).
+
+### Scope — and where codec perf actually lives
+
+The fold **deforests the `Rep` tree**: a derived codec's runtime has no
+`Leaf`/`Labeled`/`And` allocations — profiling confirms zero such calls in the
+decode trace (the `FromJson` dict fires once per record). So this layer is a
+**devirtualization + deforestation** win; do **not** re-chase the `Rep`
+machinery for codec speed — it is already gone.
+
+The remaining derived-vs-hand codec gap is **library-side**, not compiler:
+
+- decode's ~2× is `Codec.saga`'s `parse_object_raw` **double-scanning every
+  value** (slice the raw span via `skip_value`, then re-parse the slice) — a
+  single-pass-builder rewrite, not a fold.
+- encode's ~2× is the `object` field-list → iodata framing.
+- the benchmark's large absolute numbers were dominated by **GC over a
+  pathological live working set** (holding the whole dataset resident), fixed by
+  spawning per phase — not by any codec change.
+
+Unstarted, low-priority polish (see planning doc): **Phase 7** (prune dict params
+made dead by specialization) and **Item 3** (inline the concrete leaf
+`Int`/`String` encoders cross-module). Both tidy the emitted Core but target
+costs profiling showed are not the bottleneck.

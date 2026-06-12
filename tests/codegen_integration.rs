@@ -103,6 +103,7 @@ fn emit_elaborated_inner(src: &str, include_std_modules: bool) -> String {
             codegen_info_map,
             prelude_imports,
             &front_resolution,
+            &std::collections::HashMap::new(),
         );
         let entry = modules.entry(name.clone()).or_default();
         entry.elaborated = normalized;
@@ -774,7 +775,7 @@ main () = describe Red
 }
 
 #[test]
-fn trait_method_call_uses_dict() {
+fn trait_method_call_specializes_known_local_impl() {
     let src = "
 type Color = Red | Green | Blue
 
@@ -793,29 +794,159 @@ impl Describe for Color {
 main () = describe Red
 ";
     let out = emit_elaborated(src);
-    // The call to `describe` should use element() to extract the method from the dict
+    // Phase 2 trait specialization: a saturated call to a statically-known
+    // local, nullary impl is lowered to a direct call to the hoisted method
+    // function, instead of building the dict tuple and extracting via
+    // `element/2`.
     assert!(
-        out.contains("call 'erlang':'element'"),
-        "expected element() call for dict method access\n{out}"
+        out.contains("apply '__saga_dictmethod"),
+        "expected a direct hoisted-method call for the known impl\n{out}"
     );
+    // The dict constructor is still emitted (its tuple now references the
+    // hoisted method) so dynamic/polymorphic dispatch keeps working.
+    assert!(
+        out.contains("'__dict_Describe_Color'/0"),
+        "expected the dict constructor to still be emitted\n{out}"
+    );
+}
+
+#[test]
+fn effectful_trait_method_specialization_threads_evidence() {
+    // The effectful `encode` call is specialized to a direct hoisted-method
+    // call, but the call must still thread `_Evidence`/`_ReturnK` (a 3-arity
+    // call: one user arg plus the two CPS params). This pins the anchor that
+    // specialization swaps only the callee, never the effect ABI.
+    let src = "
+effect Options { fun get_options : Unit -> Int }
+handler options_10 for Options { get_options () = resume 10 }
+
+trait Encodable a { fun encode : a -> Int needs {Options} }
+impl Encodable for Int needs {Options} { encode x = x + get_options! () }
+
+fun compute : (x: Int) -> Int needs {Options}
+compute x = encode x
+
+main () = compute 5 with options_10
+";
+    let out = emit_elaborated(src);
+    assert!(
+        out.contains("apply '__saga_dictmethod") && out.contains("_0'/3("),
+        "expected a 3-arity direct hoisted-method call (arg + evidence + return_k)\n{out}"
+    );
+}
+
+#[test]
+fn nullary_dict_method_is_hoisted_and_exported_without_local_use() {
+    // Supply-driven hoisting (Phase 3): a module exports a hoisted top-level
+    // function for every nullary dict method so importers can call it directly
+    // cross-module — even when the defining module never calls it itself.
+    let src = "
+type Color = Red | Green
+trait Describe a { fun describe : (x: a) -> String }
+impl Describe for Color {
+  describe c = case c {
+    Red -> \"r\"
+    Green -> \"g\"
+  }
+}
+main () = 1
+";
+    let out = emit_elaborated(src);
+    let export_line = out.lines().next().expect("empty module");
+    assert!(
+        export_line.contains("__saga_dictmethod___dict_Describe_Color_0"),
+        "expected the hoisted Describe/Color method to be exported\n{export_line}"
+    );
+}
+
+#[test]
+fn multi_arg_trait_method_specializes_with_correct_arity() {
+    // A method with >1 user param specializes to a direct call of the matching
+    // arity. Impl methods must carry the full parameter list (eta-reduced impls
+    // are rejected at typecheck), so the trait-signature arity used for the
+    // saturation guard always equals the hoisted function's arity — no risk of
+    // a wrong-arity direct call from a point-free impl.
+    let src = "
+fun prepend : Int -> String -> String
+prepend n s = show n <> s
+trait Greet a { fun greet : (x: a) -> (s: String) -> String }
+impl Greet for Int {
+  greet n s = prepend n s
+}
+main () = greet 42 \"hi\"
+";
+    let out = emit_elaborated(src);
+    assert!(
+        out.contains("'__saga_dictmethod___dict_Greet_Std_Int_Int_0'/2"),
+        "expected a 2-arity direct call to the hoisted Greet/Int method\n{out}"
+    );
+}
+
+#[test]
+fn parameterized_dict_chain_is_inlined_in_module() {
+    // Phase 4a (generic fold): a statically-known *parameterized* dict-method
+    // call on a local impl is inlined — the conditional impl's method body is
+    // beta-reduced into a `case` over the argument whose body dispatches through
+    // the concrete sub-dictionary, collapsing the dict chain. Here `encode b`
+    // with `b : Box Int` dispatches `__dict_Encodable_Box(__dict_Encodable_Int)`;
+    // after folding it becomes `case b of Box x -> <direct Int-method call>`,
+    // with no dict tuple build and no `element/2` projection for the chain.
+    let src = "
+trait Encodable a { fun encode : (x: a) -> Int }
+type Box a = Box a
+impl Encodable for Int { encode x = x }
+impl Encodable for Box a where {a: Encodable} { encode (Box x) = encode x }
+fun run : (b: Box Int) -> Int
+run b = encode b
+main () = run (Box 5)
+";
+    let out = emit_elaborated(src);
+    let run_fn = emitted_function(&out, "run", 1);
+    assert!(
+        run_fn.contains("_script_Box")
+            && run_fn.contains("apply '__saga_dictmethod___dict_Encodable_Std_Int_Int_0'/1("),
+        "expected `run` to destructure Box and call the Int method directly\n{run_fn}"
+    );
+    assert!(
+        !run_fn.contains("element("),
+        "expected no element/2 dict projection in the inlined chain\n{run_fn}"
+    );
+}
+
+#[test]
+fn effectful_parameterized_dict_chain_threads_evidence_through_inline() {
+    // The inlined parameterized chain must still thread evidence: an effectful
+    // conditional impl folded into nested cases keeps `_Evidence`/`_ReturnK`
+    // flowing to the leaf call (Anchor 2: specialization swaps callees, never the
+    // effect ABI). Runs on BEAM to prove the fold is sound, not just shaped right.
+    let src = "
+effect Options { fun get_options : Unit -> Int }
+handler options_10 for Options { get_options () = resume 10 }
+trait Encodable a { fun encode : (x: a) -> Int needs {Options} }
+type Box a = Box a
+impl Encodable for Int needs {Options} { encode x = x + get_options! () }
+impl Encodable for Box a where {a: Encodable} needs {Options} { encode (Box x) = encode x }
+fun run : (b: Box Int) -> Int needs {Options}
+run b = encode b
+main () = run (Box 5) with options_10
+";
+    assert_runs_and_stdout_contains(src, &["15"]);
 }
 
 // --- Built-in Show dispatch ---
 
 #[test]
-fn show_int_uses_dict_dispatch() {
+fn show_int_specializes_to_direct_cross_module_call() {
     let src = "main () = show 42";
     let out = emit_elaborated(src);
-    // Hardcoded check: validates the exact dict name format (canonical trait + mangled type).
-    // Other tests use make_dict_name helper to avoid brittleness.
+    // Phase 3: `show 42` on the imported `Show Int` impl is specialized to a
+    // direct cross-module call to the hoisted dict method (the producer exports
+    // `__saga_dictmethod_<dict>_<idx>`), instead of building the dict tuple and
+    // dispatching via element/2. The canonical dict name is preserved as a
+    // substring of the hoisted method name.
     assert!(
-        out.contains("__dict_Std_Base_Show_std_int_Std_Int_Int"),
-        "expected Show/Int dict reference\n{out}"
-    );
-    // main should call the dict via element() dispatch
-    assert!(
-        out.contains("'erlang':'element'"),
-        "expected element() for dict method access\n{out}"
+        out.contains("__saga_dictmethod___dict_Std_Base_Show_std_int_Std_Int_Int"),
+        "expected a direct call to the hoisted Show/Int method\n{out}"
     );
 }
 
@@ -3579,6 +3710,93 @@ main () = symbol_name (Proxy : Proxy 'Foo)
         "expected binary bytes for 'Foo' in output:\n{out}"
     );
     assert_runs_and_stdout_contains(src, &["Foo"]);
+}
+
+#[test]
+fn symbol_name_proxy_closure_is_beta_reduced() {
+    // `symbol_name (Proxy : …)` elaborates to an immediately-applied reflection
+    // closure `(fun __proxy -> "Foo")(Proxy)`. The generic-fold β-reduction must
+    // collapse it: the literal key is exposed and the phantom `Proxy` closure —
+    // a per-field allocation in every derived record codec — is gone. (Item 1 of
+    // the post-fusion runtime-cost work; precondition for folding `apply_name_style`.)
+    //
+    // The `deriving (Show)` is load-bearing for the test, not the assertion: the
+    // generic fold (which carries the β-reduction) short-circuits in a module with
+    // no dict constructors, and a derived record is the realistic setting where
+    // these reflection closures actually occur.
+    let src = r#"
+record Tag { v: Int } deriving (Show)
+
+main () = symbol_name (Proxy : Proxy 'Foo)
+"#;
+    let out = emit_elaborated(src);
+    assert!(
+        out.contains("#<70>") && out.contains("#<111>"),
+        "expected the literal 'Foo' bytes to survive β-reduction:\n{out}"
+    );
+    assert!(
+        !out.to_lowercase().contains("proxy"),
+        "the `symbol_name` reflection closure should be β-reduced away, but a \
+         residual proxy lambda/apply survived:\n{out}"
+    );
+}
+
+#[test]
+fn constant_record_field_projection_collapses_case() {
+    // Blocker-2 Unit A: a field projected out of a *constant* record literal folds
+    // to the field value, so `case (Opts {…}).fmt of { Tagged -> "T"; Untagged ->
+    // "U" }` collapses to just `"T"` — no `element` projection, no dead `Untagged`
+    // arm. The `deriving (Show)` record is only here so the generic fold runs at all
+    // (it short-circuits in a module with no dict constructors).
+    let src = r#"
+type Fmt = | Tagged | Untagged
+
+record Opts { fmt: Fmt, name: String }
+
+record Tag { v: Int } deriving (Show)
+
+main () = case (Opts { fmt: Tagged, name: "x" }).fmt {
+  Tagged -> "T"
+  Untagged -> "U"
+}
+"#;
+    let main_fn = emitted_function(&emit_elaborated(src), "main", 1);
+    // 'T' = 84 survives; 'U' = 85 (the dead Untagged arm) is gone; the field read
+    // never lowers to element/2 because the projection folded first.
+    assert!(
+        main_fn.contains("#<84>"),
+        "expected the folded 'T' result in main:\n{main_fn}"
+    );
+    assert!(
+        !main_fn.contains("#<85>"),
+        "the dead `Untagged -> \"U\"` arm should be gone (case collapsed):\n{main_fn}"
+    );
+    assert!(
+        !main_fn.contains("element"),
+        "the `.fmt` projection should fold, not lower to erlang:element:\n{main_fn}"
+    );
+}
+
+#[test]
+fn constant_record_substituted_through_lambda_then_projected() {
+    // Blocker-2 Unit A: a record literal is now duplicable, so an immediately-applied
+    // lambda binding it β-reduces (Item 1's machinery) and the body's `o.fmt` then
+    // projects + collapses. This is the in-an-inlined-body path the real codec hits
+    // (opts arrives as a substituted constant), exercised without dict machinery.
+    let src = r#"
+type Fmt = | Tagged | Untagged
+
+record Opts { fmt: Fmt, name: String }
+
+record Tag { v: Int } deriving (Show)
+
+main () = (fun o -> case o.fmt { Tagged -> "T"; Untagged -> "U" }) (Opts { fmt: Tagged, name: "x" })
+"#;
+    let main_fn = emitted_function(&emit_elaborated(src), "main", 1);
+    assert!(
+        main_fn.contains("#<84>") && !main_fn.contains("#<85>"),
+        "expected the lambda+projection chain to collapse to 'T':\n{main_fn}"
+    );
 }
 
 #[test]

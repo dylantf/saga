@@ -50,6 +50,8 @@ cargo run --bin saga -- docs --dir <path> # Document every .saga module under <p
 
 Requires `erlc` and `erl` on PATH (Erlang/OTP) for `run`/`build`/`test` commands. Hex packages with NIFs require `rebar3` on PATH.
 
+`emit` only works in single-file mode (one `.saga` file, no project/imports). To inspect the Core Erlang for a module in a multi-file project, run `build` and read the generated `_build/<dev|release>/<ModuleName>.core` instead.
+
 ## Architecture
 
 ### Compiler Pipeline

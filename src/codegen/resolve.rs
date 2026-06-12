@@ -231,6 +231,28 @@ impl ResolvedSymbol {
     pub fn effects(&self) -> &[String] {
         self.kind.effects()
     }
+
+    /// Make this resolution portable across modules. A `BeamFunction` with
+    /// `erlang_mod: None` means "the current emitted module" — only meaningful in
+    /// the module that resolved it. When an inlined cross-module body carries its
+    /// resolution into a *different* consumer module (the generic fold's
+    /// cross-module path), a producer-local function's `None` would be misread as
+    /// the consumer's module and lower to an unbound variable. Resolve `None` to
+    /// the symbol's own `source_module` so the consumer emits a remote call.
+    /// (`ExternalFunction` already carries an explicit `erlang_mod`, and
+    /// `Intrinsic` is module-independent, so both are returned unchanged.)
+    pub fn anchored_to_source_module(&self) -> ResolvedSymbol {
+        let mut out = self.clone();
+        if let ResolvedCodegenKind::BeamFunction { erlang_mod, .. } = &mut out.kind
+            && erlang_mod.is_none()
+            && let Some(src) = &self.source_module
+        {
+            *erlang_mod = Some(module_name_to_erlang(
+                &src.split('.').map(String::from).collect::<Vec<_>>(),
+            ));
+        }
+        out
+    }
 }
 
 /// Resolution table: maps each AST NodeId to its resolved meaning.
@@ -454,6 +476,7 @@ pub fn resolve_names(
     codegen_info: &HashMap<String, ModuleCodegenInfo>,
     prelude_imports: &[Decl],
     front_resolution: &FrontResolutionResult,
+    extra_module_funs: &HashMap<String, ResolvedSymbol>,
 ) -> ResolutionMap {
     let source_module_name = source_module_name(program, module_name);
     let mut scope: HashMap<String, ScopedName> = HashMap::new();
@@ -485,6 +508,21 @@ pub fn resolve_names(
         &mut qualified_scope,
     );
     register_trait_impl_dicts(codegen_info, &mut scope);
+
+    // Cross-module producer-local functions pulled in by the generic fold's
+    // inlining. Registered last and only into empty slots, so the consumer's own
+    // names always win; these only resolve references that have no other binding
+    // (a re-freshened inlined reference to a producer-private helper).
+    for (name, sym) in extra_module_funs {
+        scope
+            .entry(name.clone())
+            .or_insert_with(|| ScopedName::Symbol {
+                name: sym.name.clone(),
+                source_module: sym.source_module.clone(),
+                canonical_name: sym.canonical_name.clone(),
+                kind: sym.kind.clone(),
+            });
+    }
 
     // Step 4: Walk the AST with scope-aware resolution.
     let mut lexical = Scope::new(&scope, &qualified_scope);
@@ -590,7 +628,16 @@ fn resolve_expr(
                             map.insert(expr.id, scoped_to_resolved(scoped));
                         }
                     }
-                    None => {}
+                    // No front-end entry for this id. This is the normal case for
+                    // a node the generic fold synthesized by inlining (fresh
+                    // NodeId, so the id-keyed front resolution misses). Fall back
+                    // to name-based resolution in the current scope — sound
+                    // because the inlined reference lives in this module's scope.
+                    None => {
+                        if let Some(scoped) = scope.resolve_unqualified(name) {
+                            map.insert(expr.id, scoped_to_resolved(scoped));
+                        }
+                    }
                 }
             }
             // If locally bound or not in module scope -> not in map ->
