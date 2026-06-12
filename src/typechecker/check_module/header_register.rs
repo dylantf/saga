@@ -5,7 +5,7 @@ use super::{
     HeaderEffectRef, HeaderFunction, HeaderTraitBound, HeaderTraitRef, HeaderTypeDecl,
     HeaderTypeExpr, HeaderTypeParam, ModuleHeader,
 };
-use crate::ast::Kind;
+use crate::ast::{Decl, Kind, NodeId};
 use crate::token::Span;
 use crate::typechecker::{
     Checker, EffectEntry, EffectRow, RecordInfo, Scheme, ScopeMap, Type, TypeAliasInfo,
@@ -22,28 +22,65 @@ struct HeaderRegistrationScope {
     local_effects: HashMap<String, String>,
 }
 
+#[derive(Debug, Clone, Default)]
+struct HeaderLspInfo {
+    defs: HashMap<String, (NodeId, Span)>,
+    constructors: HashMap<String, (NodeId, Span)>,
+    docs: HashMap<String, Vec<String>>,
+}
+
 impl Checker {
     pub(crate) fn register_active_scc_headers(&mut self) -> Result<(), String> {
         let Some(headers) = self.modules.active_scc_headers.clone() else {
             return Ok(());
         };
+        let lsp_info = self.active_header_lsp_info(&headers);
 
         for (module_name, header) in &headers {
             let scope = HeaderRegistrationScope::new(module_name, header, &headers)?;
+            let lsp = lsp_info.get(module_name);
             self.register_header_type_stubs(module_name, header);
-            self.register_header_records_and_adts(module_name, header, &scope);
+            self.register_header_docs(module_name, lsp);
+            self.register_header_records_and_adts(module_name, header, &scope, lsp);
             self.register_header_aliases(module_name, header, &scope);
         }
 
         for (module_name, header) in &headers {
             let scope = HeaderRegistrationScope::new(module_name, header, &headers)?;
-            self.register_header_functions(module_name, header, &scope);
+            self.register_header_functions(module_name, header, &scope, lsp_info.get(module_name));
         }
 
         self.modules
             .registered_canonical
             .extend(headers.keys().cloned());
         Ok(())
+    }
+
+    fn active_header_lsp_info(
+        &self,
+        headers: &HashMap<String, ModuleHeader>,
+    ) -> HashMap<String, HeaderLspInfo> {
+        headers
+            .keys()
+            .filter_map(|module| {
+                self.modules
+                    .programs
+                    .get(module)
+                    .map(|program| (module.clone(), collect_header_lsp_info(program)))
+            })
+            .collect()
+    }
+
+    fn register_header_docs(&mut self, module_name: &str, lsp: Option<&HeaderLspInfo>) {
+        let Some(lsp) = lsp else {
+            return;
+        };
+        for (name, doc) in &lsp.docs {
+            self.lsp
+                .imported_docs
+                .entry(canonical_join(module_name, name))
+                .or_insert_with(|| doc.clone());
+        }
     }
 
     fn register_header_type_stubs(&mut self, module_name: &str, header: &ModuleHeader) {
@@ -81,6 +118,7 @@ impl Checker {
         module_name: &str,
         header: &ModuleHeader,
         scope: &HeaderRegistrationScope,
+        lsp: Option<&HeaderLspInfo>,
     ) {
         for (name, decl) in &header.types {
             let HeaderTypeDecl::Adt {
@@ -120,8 +158,22 @@ impl Checker {
                     self.constructors
                         .entry(ctor_canonical.clone())
                         .or_insert_with(|| scheme.clone());
-                    self.env
-                        .entry_insert(ctor_canonical.clone(), scheme.clone());
+                    if let Some(&(def_id, _)) =
+                        lsp.and_then(|info| info.constructors.get(&ctor.name))
+                    {
+                        self.lsp
+                            .constructor_def_ids
+                            .entry(ctor_canonical.clone())
+                            .or_insert(def_id);
+                        self.env.entry_insert_with_def(
+                            ctor_canonical.clone(),
+                            scheme.clone(),
+                            def_id,
+                        );
+                    } else {
+                        self.env
+                            .entry_insert(ctor_canonical.clone(), scheme.clone());
+                    }
                     variants.push((ctor_canonical, ctor.fields.len()));
                 }
             }
@@ -169,7 +221,16 @@ impl Checker {
             self.constructors
                 .entry(canonical.clone())
                 .or_insert_with(|| scheme.clone());
-            self.env.entry_insert(canonical.clone(), scheme);
+            if let Some(&(def_id, _)) = lsp.and_then(|info| info.constructors.get(name)) {
+                self.lsp
+                    .constructor_def_ids
+                    .entry(canonical.clone())
+                    .or_insert(def_id);
+                self.env
+                    .entry_insert_with_def(canonical.clone(), scheme, def_id);
+            } else {
+                self.env.entry_insert(canonical.clone(), scheme);
+            }
             self.adt_variants
                 .entry(canonical.clone())
                 .or_insert_with(|| vec![(canonical, fields.len())]);
@@ -213,6 +274,7 @@ impl Checker {
         module_name: &str,
         header: &ModuleHeader,
         scope: &HeaderRegistrationScope,
+        lsp: Option<&HeaderLspInfo>,
     ) {
         for (name, function) in &header.functions {
             if !function.public {
@@ -223,7 +285,11 @@ impl Checker {
             if type_contains_effects(&scheme.ty) {
                 self.effect_meta.known_funs.insert(canonical.clone());
             }
-            self.env.entry_insert(canonical, scheme);
+            if let Some(&(def_id, _)) = lsp.and_then(|info| info.defs.get(name)) {
+                self.env.entry_insert_with_def(canonical, scheme, def_id);
+            } else {
+                self.env.entry_insert(canonical, scheme);
+            }
         }
     }
 
@@ -505,6 +571,7 @@ fn header_trait_constraints(
 
 trait TypeEnvEntryInsert {
     fn entry_insert(&mut self, name: String, scheme: Scheme);
+    fn entry_insert_with_def(&mut self, name: String, scheme: Scheme, def_id: NodeId);
 }
 
 fn type_contains_effects(ty: &Type) -> bool {
@@ -523,5 +590,88 @@ impl TypeEnvEntryInsert for crate::typechecker::TypeEnv {
         if self.get(&name).is_none() {
             self.insert(name, scheme);
         }
+    }
+
+    fn entry_insert_with_def(&mut self, name: String, scheme: Scheme, def_id: NodeId) {
+        if self.get(&name).is_none() {
+            self.insert_with_def(name, scheme, def_id);
+        }
+    }
+}
+
+fn collect_header_lsp_info(program: &[Decl]) -> HeaderLspInfo {
+    let mut info = HeaderLspInfo::default();
+    for decl in program {
+        match decl {
+            Decl::FunSignature {
+                id,
+                public: true,
+                name,
+                name_span,
+                doc,
+                ..
+            } => {
+                info.defs.insert(name.clone(), (*id, *name_span));
+                insert_doc(&mut info, name, doc);
+            }
+            Decl::TypeDef {
+                public: true,
+                name,
+                variants,
+                doc,
+                ..
+            } => {
+                insert_doc(&mut info, name, doc);
+                for variant in variants {
+                    info.constructors.insert(
+                        variant.node.name.clone(),
+                        (variant.node.id, variant.node.span),
+                    );
+                }
+            }
+            Decl::TypeAlias {
+                public: true,
+                name,
+                doc,
+                ..
+            }
+            | Decl::EffectDef {
+                public: true,
+                name,
+                doc,
+                ..
+            }
+            | Decl::HandlerDef {
+                public: true,
+                name,
+                doc,
+                ..
+            }
+            | Decl::TraitDef {
+                public: true,
+                name,
+                doc,
+                ..
+            } => insert_doc(&mut info, name, doc),
+            Decl::RecordDef {
+                id,
+                public: true,
+                name,
+                name_span,
+                doc,
+                ..
+            } => {
+                info.constructors.insert(name.clone(), (*id, *name_span));
+                insert_doc(&mut info, name, doc);
+            }
+            _ => {}
+        }
+    }
+    info
+}
+
+fn insert_doc(info: &mut HeaderLspInfo, name: &str, doc: &[String]) {
+    if !doc.is_empty() {
+        info.docs.insert(name.to_string(), doc.to_vec());
     }
 }

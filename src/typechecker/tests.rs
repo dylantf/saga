@@ -6687,6 +6687,87 @@ main () = ()
 }
 
 #[test]
+fn cyclic_imports_preserve_lsp_metadata_for_sibling_headers() {
+    let a = r#"
+module A
+import B (BThing, make_b)
+
+pub fun use_b : Unit -> BThing
+use_b () = make_b ()
+
+pub fun make_ctor : Unit -> BThing
+make_ctor () = BThing
+"#;
+    let b = r#"
+module B
+import A (use_b)
+
+#@ A cyclic test type.
+pub type BThing = BThing
+
+#@ Build a BThing.
+pub fun make_b : Unit -> BThing
+make_b () = BThing
+"#;
+    let main = r#"
+module Main
+import A (use_b)
+
+fun main : Unit -> Unit
+main () = ()
+"#;
+
+    let checker = check_with_project_files(&[("src/A.saga", a), ("src/B.saga", b)], main)
+        .expect("mutually importing modules should typecheck through headers");
+    let a_result = checker
+        .modules
+        .check_results
+        .get("A")
+        .expect("A check result");
+
+    let make_b_def = a_result
+        .env
+        .def_id("B.make_b")
+        .expect("B.make_b should carry a definition id");
+    assert!(
+        a_result
+            .references
+            .values()
+            .any(|def_id| *def_id == make_b_def),
+        "expected use of make_b to reference B.make_b's definition"
+    );
+    let bthing_def = a_result
+        .constructor_def_ids
+        .get("B.BThing")
+        .copied()
+        .expect("B.BThing constructor should carry a definition id");
+    assert!(
+        a_result
+            .references
+            .values()
+            .any(|def_id| *def_id == bthing_def),
+        "expected BThing constructor use to reference the imported definition"
+    );
+    assert!(
+        a_result.constructor_def_ids.contains_key("BThing"),
+        "expected exposed constructor surface name to carry a definition id"
+    );
+
+    assert_eq!(
+        a_result.imported_docs.get("B.make_b"),
+        Some(&vec!["Build a BThing.".to_string()])
+    );
+    assert_eq!(
+        a_result.imported_docs.get("make_b"),
+        Some(&vec!["Build a BThing.".to_string()])
+    );
+    assert_eq!(
+        a_result.imported_docs.get("BThing"),
+        Some(&vec!["A cyclic test type.".to_string()])
+    );
+}
+
+#[test]
 fn cyclic_imports_follow_re_exports_to_origin() {
     let a = r#"
 module A

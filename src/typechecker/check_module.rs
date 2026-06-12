@@ -7,6 +7,7 @@ mod codegen_info;
 mod exports;
 mod graph;
 mod header;
+mod header_lsp;
 mod header_register;
 mod header_scope;
 mod import_scope;
@@ -47,6 +48,7 @@ impl Checker {
             let import_scope =
                 resolve_header_import(headers, &module_name, &prefix, header_exposing.as_ref())
                     .map_err(|msg| Diagnostic::error_at(span, msg))?;
+            self.merge_header_lsp_scope(&import_scope);
             self.scope_map.merge(&import_scope);
             return Ok(());
         }
