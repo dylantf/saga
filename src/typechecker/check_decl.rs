@@ -186,6 +186,12 @@ impl Checker {
                 self.scope_map.types.insert(name.clone(), canonical);
             }
         }
+        self.register_active_scc_headers().map_err(|msg| {
+            vec![Diagnostic::error_at(
+                Span { start: 0, end: 0 },
+                format!("module header error: {msg}"),
+            )]
+        })?;
         self.process_imports(program)?;
         self.auto_load_referenced_modules(program);
         self.resolution =

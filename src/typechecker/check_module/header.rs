@@ -36,6 +36,12 @@ pub enum HeaderExposing {
     Items(Vec<HeaderExposedItem>),
 }
 
+impl HeaderExposing {
+    pub fn from_ast(exposing: &crate::ast::Exposing) -> Self {
+        header_exposing(exposing)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HeaderExposedItem {
     pub name: String,

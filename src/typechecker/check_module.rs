@@ -7,7 +7,7 @@ mod codegen_info;
 mod exports;
 mod graph;
 mod header;
-#[allow(dead_code)]
+mod header_register;
 mod header_scope;
 mod import_scope;
 mod scan;
@@ -22,6 +22,7 @@ pub use scan::{
 };
 
 use codegen_info::{collect_codegen_info, ctor_arity};
+use header_scope::resolve_header_import;
 use import_scope::{resolve_import, synthesize_all_exposed};
 
 impl Checker {
@@ -38,6 +39,18 @@ impl Checker {
         let prefix = alias
             .map(|a| a.to_string())
             .unwrap_or_else(|| module_path.last().unwrap().to_string());
+
+        if let Some(headers) = &self.modules.active_scc_headers
+            && headers.contains_key(&module_name)
+        {
+            let header_exposing = exposing.map(HeaderExposing::from_ast);
+            let import_scope =
+                resolve_header_import(headers, &module_name, &prefix, header_exposing.as_ref())
+                    .map_err(|msg| Diagnostic::error_at(span, msg))?;
+            self.scope_map.merge(&import_scope);
+            return Ok(());
+        }
+
         let exports = self.load_module(module_path, span)?;
         // Expand `(..)` to an explicit list of every public export so the rest
         // of the import pipeline can treat all-exposing imports as if they had
@@ -155,6 +168,24 @@ impl Checker {
             return Ok(exports);
         }
 
+        if !is_builtin
+            && self.modules.active_scc_headers.is_none()
+            && let Some(component) = self.cyclic_component_containing(&module_name)
+        {
+            self.load_module_scc(&component, span)?;
+            return self
+                .modules
+                .exports
+                .get(&module_name)
+                .cloned()
+                .ok_or_else(|| {
+                    Diagnostic::error_at(
+                        span,
+                        format!("internal error: SCC did not produce exports for '{module_name}'"),
+                    )
+                });
+        }
+
         // Resolve source: builtin modules are embedded, others read from the
         // file path resolved above.
         let source = if let Some(src) = builtin_module_source(module_path) {
@@ -197,32 +228,7 @@ impl Checker {
         // traits copied in (they can't load the prelude due to circular imports).
         let mut mod_checker = if !is_builtin {
             // Build or reuse the prelude snapshot
-            if self.modules.prelude_snapshot.is_none() {
-                let mut snapshot = match &project_root {
-                    Some(root) => super::Checker::with_project_root(root.clone()),
-                    None => super::Checker::new(),
-                };
-                snapshot.modules.map = self.modules.map.clone();
-                snapshot.modules.visibility = self.modules.visibility.clone();
-                snapshot.modules.private_modules = self.modules.private_modules.clone();
-                // Load prelude (which imports Std first, then stdlib modules)
-                let prelude_src = include_str!("../stdlib/prelude.saga");
-                let prelude_tokens = crate::lexer::Lexer::new(prelude_src)
-                    .lex()
-                    .expect("prelude lex error");
-                let mut prelude_program = crate::parser::Parser::new(prelude_tokens)
-                    .parse_program()
-                    .expect("prelude parse error");
-                crate::derive::expand_derives(
-                    &mut prelude_program,
-                    &crate::derive::ImportedDecls::empty(),
-                );
-                crate::desugar::desugar_program(&mut prelude_program);
-                snapshot
-                    .check_program_inner(&mut prelude_program)
-                    .expect("prelude type errors");
-                self.modules.prelude_snapshot = Some(Box::new(snapshot));
-            }
+            self.ensure_prelude_snapshot(&project_root);
             let mut mc = *self.modules.prelude_snapshot.as_ref().unwrap().clone();
             mc.next_var = self.next_var;
             mc
@@ -333,6 +339,199 @@ impl Checker {
         }
 
         Ok(exports)
+    }
+
+    fn cyclic_component_containing(&self, module_name: &str) -> Option<Vec<String>> {
+        let map = self.modules.map.as_ref()?;
+        let graph = build_module_graph(map).ok()?;
+        graph
+            .strongly_connected_components()
+            .into_iter()
+            .find(|component| {
+                component.modules.iter().any(|module| module == module_name)
+                    && (component.is_cycle()
+                        || graph
+                            .dependencies(module_name)
+                            .is_some_and(|deps| deps.iter().any(|dep| dep == module_name)))
+            })
+            .map(|component| component.modules)
+    }
+
+    fn ensure_prelude_snapshot(&mut self, project_root: &Option<PathBuf>) {
+        if self.modules.prelude_snapshot.is_some() {
+            return;
+        }
+        let mut snapshot = match project_root {
+            Some(root) => super::Checker::with_project_root(root.clone()),
+            None => super::Checker::new(),
+        };
+        snapshot.modules.map = self.modules.map.clone();
+        snapshot.modules.visibility = self.modules.visibility.clone();
+        snapshot.modules.private_modules = self.modules.private_modules.clone();
+        let prelude_src = include_str!("../stdlib/prelude.saga");
+        let prelude_tokens = crate::lexer::Lexer::new(prelude_src)
+            .lex()
+            .expect("prelude lex error");
+        let mut prelude_program = crate::parser::Parser::new(prelude_tokens)
+            .parse_program()
+            .expect("prelude parse error");
+        crate::derive::expand_derives(&mut prelude_program, &crate::derive::ImportedDecls::empty());
+        crate::desugar::desugar_program(&mut prelude_program);
+        snapshot
+            .check_program_inner(&mut prelude_program)
+            .expect("prelude type errors");
+        self.modules.prelude_snapshot = Some(Box::new(snapshot));
+    }
+
+    fn load_module_scc(&mut self, modules: &[String], span: Span) -> Result<(), Diagnostic> {
+        let project_root = self.modules.project_root.clone();
+        self.ensure_prelude_snapshot(&project_root);
+
+        let mut programs: std::collections::HashMap<String, crate::ast::Program> =
+            std::collections::HashMap::new();
+        let module_map = self.modules.map.clone().ok_or_else(|| {
+            Diagnostic::error_at(span, "internal error: SCC loading requires a module map")
+        })?;
+
+        for module_name in modules {
+            if self.modules.exports.contains_key(module_name) {
+                continue;
+            }
+            let path = module_map.get(module_name).ok_or_else(|| {
+                Diagnostic::error_at(
+                    span,
+                    format!("unknown module '{}' in import cycle", module_name),
+                )
+            })?;
+            let source = std::fs::read_to_string(path).map_err(|e| {
+                Diagnostic::error_at(span, format!("cannot read module '{}': {}", module_name, e))
+            })?;
+            let tokens = crate::lexer::Lexer::new(&source).lex().map_err(|e| {
+                Diagnostic::error_at(
+                    span,
+                    format!("lex error in module '{}': {}", module_name, e.message),
+                )
+            })?;
+            let mut program = crate::parser::Parser::new(tokens)
+                .parse_program()
+                .map_err(|e| {
+                    Diagnostic::error_at(
+                        span,
+                        format!("parse error in module '{}': {}", module_name, e.message),
+                    )
+                })?;
+            let imported =
+                crate::derive::collect_imported_decls(&program, self.modules.map.as_ref());
+            crate::derive::expand_derives(&mut program, &imported);
+            crate::desugar::desugar_program(&mut program);
+            self.modules
+                .programs
+                .insert(module_name.clone(), program.clone());
+            programs.insert(module_name.clone(), program);
+        }
+
+        let headers: std::collections::HashMap<String, ModuleHeader> = programs
+            .iter()
+            .map(|(module, program)| (module.clone(), ModuleHeader::from_program(program)))
+            .collect();
+
+        for module_name in modules {
+            self.modules.loading.insert(module_name.clone());
+        }
+
+        let mut checked_modules = Vec::new();
+        for module_name in modules {
+            if self.modules.exports.contains_key(module_name) {
+                continue;
+            }
+            let mut program = programs
+                .remove(module_name)
+                .expect("SCC program missing for uncached module");
+            let mut mod_checker = self.seeded_module_checker(project_root.clone(), false);
+            mod_checker.modules.active_scc_headers = Some(headers.clone());
+            mod_checker.modules.loading = self.modules.loading.clone();
+            mod_checker.current_module = Some(module_name.clone());
+            if let Err(errors) = mod_checker.check_program_inner(&mut program) {
+                for module in modules {
+                    self.modules.loading.remove(module);
+                }
+                return Err(Diagnostic::error_at(
+                    span,
+                    format!("type error in module '{}': {}", module_name, errors[0]),
+                ));
+            }
+
+            if mod_checker.next_var > self.next_var {
+                self.next_var = mod_checker.next_var;
+            }
+            for (id, kind) in &mod_checker.var_kinds {
+                self.var_kinds.entry(*id).or_insert(*kind);
+            }
+            for (k, v) in &mod_checker.modules.programs {
+                self.modules.programs.entry(k.clone()).or_insert(v.clone());
+            }
+            for (k, v) in &mod_checker.modules.exports {
+                self.modules.exports.entry(k.clone()).or_insert(v.clone());
+            }
+            for (k, v) in &mod_checker.modules.codegen_info {
+                self.modules
+                    .codegen_info
+                    .entry(k.clone())
+                    .or_insert(v.clone());
+            }
+            for (k, v) in &mod_checker.modules.check_results {
+                self.modules
+                    .check_results
+                    .entry(k.clone())
+                    .or_insert(v.clone());
+            }
+            checked_modules.push((module_name.clone(), program, mod_checker));
+        }
+
+        for _ in 0..=checked_modules.len() {
+            for (module_name, program, mod_checker) in &mut checked_modules {
+                mod_checker.modules.exports = self.modules.exports.clone();
+                let exports = ModuleExports::collect(program, mod_checker);
+                self.modules.exports.insert(module_name.clone(), exports);
+            }
+        }
+
+        for (module_name, program, mod_checker) in checked_modules {
+            let exports = self
+                .modules
+                .exports
+                .get(&module_name)
+                .cloned()
+                .ok_or_else(|| {
+                    Diagnostic::error_at(
+                        span,
+                        format!("internal error: missing finalized exports for '{module_name}'"),
+                    )
+                })?;
+            self.modules
+                .programs
+                .insert(module_name.clone(), program.clone());
+            self.modules
+                .check_results
+                .insert(module_name.clone(), mod_checker.to_result());
+            let codegen_info = collect_codegen_info(
+                &module_name,
+                &program,
+                &exports,
+                &mod_checker.effects,
+                &mod_checker.scope_map,
+                &mod_checker.trait_state.traits,
+            );
+            self.modules
+                .codegen_info
+                .insert(module_name.clone(), codegen_info);
+            self.modules.exports.insert(module_name.clone(), exports);
+        }
+
+        for module in modules {
+            self.modules.loading.remove(module);
+        }
+        Ok(())
     }
 
     /// Seed a builtin (Std.*) module checker with the parent's trait definitions,

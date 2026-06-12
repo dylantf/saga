@@ -56,7 +56,7 @@ enum HeaderResolved {
 }
 
 /// Build scope entries for an import using only pre-inference module headers.
-pub(super) fn resolve_header_import(
+pub(crate) fn resolve_header_import(
     headers: &HashMap<String, ModuleHeader>,
     module_name: &str,
     prefix: &str,
@@ -86,7 +86,7 @@ pub(super) fn resolve_header_import(
 /// Build a module's imported scope from its imports and the already-extracted
 /// headers around it. This is intentionally pure data plumbing: no checker
 /// state, no inference, no `NodeId`s.
-pub(super) fn scope_for_header_imports(
+pub(crate) fn scope_for_header_imports(
     header: &ModuleHeader,
     headers: &HashMap<String, ModuleHeader>,
 ) -> Result<ScopeMap, String> {

@@ -603,6 +603,10 @@ pub struct ModuleContext {
     pub(crate) base_trait_impls: HashMap<(String, Vec<String>, String), ImplInfo>,
     /// Modules currently being typechecked (cycle detection).
     pub(crate) loading: HashSet<String>,
+    /// Pre-inference headers for the SCC currently being checked. While this
+    /// is set, imports of modules in the map are resolved from headers instead
+    /// of recursively loading the module.
+    pub(crate) active_scc_headers: Option<HashMap<String, check_module::ModuleHeader>>,
     /// Modules whose canonical exports have been registered into this
     /// checker's `env`/`constructors`/`effects`/etc. Tracks both explicit
     /// imports (via `inject_exports`) and auto-loaded canonical references

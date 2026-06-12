@@ -6651,6 +6651,75 @@ fn auto_load_project_module_qualified_typechecks_without_explicit_import() {
 }
 
 #[test]
+fn cyclic_imports_share_annotated_types_and_functions() {
+    let a = r#"
+module A
+import B (BThing, make_b)
+
+pub type AThing = AThing BThing
+
+pub fun make_a : Unit -> AThing
+make_a () = AThing (make_b ())
+"#;
+    let b = r#"
+module B
+import A (AThing, make_a)
+
+pub type BThing = BThing
+
+pub fun make_b : Unit -> BThing
+make_b () = BThing
+
+pub fun bounce : Unit -> AThing
+bounce () = make_a ()
+"#;
+    let main = r#"
+module Main
+import A (make_a)
+import B (bounce)
+
+fun main : Unit -> Unit
+main () = ()
+"#;
+
+    check_with_project_files(&[("src/A.saga", a), ("src/B.saga", b)], main)
+        .expect("mutually importing modules should typecheck through headers");
+}
+
+#[test]
+fn cyclic_imports_follow_re_exports_to_origin() {
+    let a = r#"
+module A
+import B (pub BThing as SharedThing, make_b)
+
+pub fun make_shared : Unit -> SharedThing
+make_shared () = make_b ()
+"#;
+    let b = r#"
+module B
+import A (make_shared)
+
+pub type BThing = BThing
+
+pub fun make_b : Unit -> BThing
+make_b () = BThing
+
+pub fun bounce : Unit -> BThing
+bounce () = make_shared ()
+"#;
+    let main = r#"
+module Main
+import A (SharedThing, make_shared)
+
+fun main : Unit -> Unit
+main () = ()
+"#;
+
+    check_with_project_files(&[("src/A.saga", a), ("src/B.saga", b)], main)
+        .expect("re-exported names in a cycle should resolve to their origin header");
+}
+
+#[test]
 fn auto_load_does_not_inject_alias_prefix_into_scope() {
     // Pinned-down version of the scope-leak prevention. After a canonical
     // reference loads Std.IO.Unsafe, the alias-prefix form `Unsafe.print_stdout`
