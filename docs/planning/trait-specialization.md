@@ -1,15 +1,19 @@
 # Trait Specialization And Generic Folding
 
-Status: **Phases 0–6 done. Phases 5 (encode `Rep`-cancellation) and 6 (decode
-mirror) both fuse the `Rep` tree; both are implemented and validated but **not yet
-committed** (pending review). Phase 7 (dict-arg pruning) is next.**
+Status: **Phases 0–6 done and committed; Items 1/2 (literal-key β-reduction,
+constant-`opts` propagation) committed. Phase 7 (dict-arg pruning) and Item 3
+(leaf-encoder inlining) are unstarted, low-priority polish.** A navigable
+reference for the whole layer now lives at the bottom of
+[../trait-dict-passing.md](../trait-dict-passing.md) ("Optimization: Trait
+Specialization & Generic Folding"); this doc is the deep working record.
 
 ## Implementation Status & Handoff (2026-06-10)
 
-Phases 0–4a-x are done and committed (`a4fd655`, `85fa3b4`, `05ed117`, `d5a4b63`,
-`b88fe38`, `dd282b9`, `631f7a2`, `40b5b13`, `18c03c1`). Phases 5 and 6 are
-implemented and validated but **not yet committed** (see the Phase 5 / Phase 6
-sections below).
+Phases 0–4a-x are committed (`a4fd655`, `85fa3b4`, `05ed117`, `d5a4b63`,
+`b88fe38`, `dd282b9`, `631f7a2`, `40b5b13`, `18c03c1`). Phase 5 (`2c251bb`),
+Phase 6 (`a0e910c`), and Items 1/2 (`7104d94`) are also committed. The "DONE
+(uncommitted)" notes in the Phase 5/6 and Item sections below are historical —
+all are committed as of the trait-specialization branch.
 
 | Phase                                    | What it does                                                       | Status                                         |
 | ---------------------------------------- | ------------------------------------------------------------------ | ---------------------------------------------- |
@@ -19,9 +23,11 @@ sections below).
 | 3 Cross-module                           | export hoisted methods; remote `call`                              | done (committed)                               |
 | 4a Inline parameterized (local)          | `generic_fold.rs`: inline local parameterized dict chains          | done (committed `dd282b9`)                     |
 | 4a-x Inline parameterized (cross-module) | inline external impl bodies; carry producer resolution; export-all | done (committed `631f7a2`,`40b5b13`,`18c03c1`) |
-| 5 Rep-cancellation fusion                | inline `to x` + codec, cancel `Rep` tree (encode/`to` direction)   | done (uncommitted — see Phase 5 section)       |
-| 6 Decode mirror                          | same for `from`/decode direction (parse-bound: fuses, small win)   | done (uncommitted — see Phase 6 section)       |
-| 7 Dict-arg pruning                       | drop dead dict args after fusion                                   | not started                                    |
+| 5 Rep-cancellation fusion                | inline `to x` + codec, cancel `Rep` tree (encode/`to` direction)   | done (committed `2c251bb`)                     |
+| 6 Decode mirror                          | same for `from`/decode direction (parse-bound: fuses, small win)   | done (committed `a0e910c`)                     |
+| Items 1/2 Literal keys + const `opts`    | β-reduce symbol-name proxies; propagate constant `opts` through codec | done (committed `7104d94`)                  |
+| 7 Dict-arg pruning                       | drop dead dict args after fusion                                   | not started (low-priority polish)              |
+| Item 3 Leaf-encoder inlining             | inline concrete `Int`/`String` leaf encoders cross-module          | not started (low-priority polish)              |
 
 **Phase 4a-x** (cross-module) extends the fold to inline parameterized impl
 bodies defined in _other_ modules. Two enabling changes: (1) **export-all in
@@ -208,7 +214,7 @@ monadic wrapping encode didn't have.
 
 1. **Inline `Generic.from`** — `is_generic_from` gate (trait `Std.Generic.Generic`,
    method index 1), symmetric to `is_generic_to`.
-2. **`inline_codec_scrutinee`** — inline a *nullary* producer codec that is the
+2. **`inline_codec_scrutinee`** — inline a _nullary_ producer codec that is the
    scrutinee of a `case`, so its `Ok (Rep__T …)` becomes a literal ctor under the
    case. Gated on `body_is_rep_producing_case` (the codec body is a `case` whose
    arm produces a `Rep`, i.e. the routed-from bridge) — the parameterized codec
@@ -216,7 +222,7 @@ monadic wrapping encode didn't have.
 3. **`case_of_case`** commuting conversion —
    `case (case S { p_i -> e_i }) { outer }` → `case S { p_i -> case e_i { outer } }`,
    pushing the consuming `{Ok f -> Ok (from f); Err e -> Err e}` down to the
-   produced `Rep`. Two guards: it fires only when an inner arm's *subtree*
+   produced `Rep`. Two guards: it fires only when an inner arm's _subtree_
    produces a `Rep` (`subtree_produces_rep` — records build `And` deep, so a
    top-level check misses them), and it is **capture-avoiding** (skips when an
    inner pattern binds a name free in `outer`, via binder-aware `free_vars_arms`).
@@ -233,17 +239,17 @@ Capture-avoidance + `is_duplicable` carry over unchanged.
 
 ### Rep-anchoring is load-bearing (don't loosen the gates)
 
-The first cut gated 2 & 3 on *any* constructor (literal Option A). That was both
+The first cut gated 2 & 3 on _any_ constructor (literal Option A). That was both
 unsound-for-performance and worse: on saga_json's real decode — which parses by
 object-key lookup (`parse_object_raw` → `lookup_raw` → field decode), threading
-`Ok (value, rest)` *tuples*, not a clean `Rep`-map — the loose gates commuted the
+`Ok (value, rest)` _tuples_, not a clean `Rep`-map — the loose gates commuted the
 parser's `Result` threading without ever cancelling, exploding
-`FromJson_User` to **2229 lines** *and* tangling the fixpoint so the genuine
+`FromJson_User` to **2229 lines** _and_ tangling the fixpoint so the genuine
 `Rep` cancellation never completed. Anchoring 2 & 3 on actual `Rep` production
 (`body_is_rep_producing_case` / `subtree_produces_rep`) skips the parser threading
 and lets the real fusion finish: **`FromJson_User` → 66 lines, `Rep` cancelled.**
 (`case_of_known_constructor`'s broadening is fine unanchored — it only ever fires
-on a *literal* ctor scrutinee, which parser code never produces.)
+on a _literal_ ctor scrutinee, which parser code never produces.)
 
 ### Result
 
@@ -258,7 +264,7 @@ on a *literal* ctor scrutinee, which parser code never produces.)
 - **Wall-clock**: json_bench decode is **~unchanged** (476 → 467 ms, noise) even
   though the code fused. Decode is **parse-dominated** — `Rep` traversal is a
   small fraction of decode cost (string/int parsing, `lookup_raw`, `List`
-  building dominate), unlike encode where the `Rep` walk *was* the bottleneck
+  building dominate), unlike encode where the `Rep` walk _was_ the bottleneck
   (Phase 5: 283 → 209 ms). So Phase 6's payoff is correctness + code size, not
   decode throughput on this workload. The reaching-hand-written-shape gap is, as
   for encode, the in-library representation step (out of scope).
@@ -275,7 +281,7 @@ on a *literal* ctor scrutinee, which parser code never produces.)
 ## Post-fusion runtime-cost investigation (2026-06-10) — what's left for hand-impl parity
 
 After Phases 5/6, the derived codec is still ~1.8–2× slower than the hand-written
-one. To find out *why*, emitted the real bench (`CodecPathDerived` →
+one. To find out _why_, emitted the real bench (`CodecPathDerived` →
 `_build/dev/main.core`, freshly built) and read the derived `User.to_json`.
 
 **The `Rep` tree is already gone.** Zero `Adt`/`Record`/`And`/`Labeled`/`Leaf`
@@ -295,7 +301,7 @@ in
 { Name, call 'sagajson_codec':'__saga_dictmethod_..._Std_Int_Int_0'(___p0, element(2,___p1)) }
 ```
 
-This *one small module* has **36 proxy-closures, 36 Proxy allocs, 36
+This _one small module_ has **36 proxy-closures, 36 Proxy allocs, 36
 `apply_name_style` calls** — one per field. For the bench (~700k fields/run on
 encode) that is ~1.4M needless allocations plus ~700k `apply_name_style` calls,
 all to reproduce compile-time-constant key strings.
@@ -326,7 +332,7 @@ Two findings worth keeping:
   `symbol_name (Proxy …)` in a deriving-free module is left un-reduced (a
   negligible missed cleanup), so the regression test carries a `deriving (Show)`.
 - **Wall-clock**: encode median **unchanged** (255 → 258 ms, noise), as predicted
-  — Item 1 *exposes* the literal but the per-field `apply_name_style` remote call
+  — Item 1 _exposes_ the literal but the per-field `apply_name_style` remote call
   still fires. The wall-clock win is **Item 2** (fold that call away). Item 1 is
   the necessary precondition, not itself the speedup.
 
@@ -347,7 +353,7 @@ alloc + a Proxy alloc + an apply, purely to recover a constant string.
   that substitutes when the param is unused, or the arg is pure/`is_duplicable`
   (reuse the existing capture-avoiding `substitute_var` + `is_duplicable`).
 - **Why first**: local, unconditional, always valid. Removes ~1.4M allocs/run
-  *and* turns every field key into a literal — the precondition for Items 2 and 3
+  _and_ turns every field key into a literal — the precondition for Items 2 and 3
   and any later list→iodata fusion.
 - **Validity**: `__proxy` is phantom (always ignored), so substitution is trivially
   capture-free here; the general arm still needs the capture-avoiding path for
@@ -355,14 +361,15 @@ alloc + a Proxy alloc + an apply, purely to recover a constant string.
 
 ### Item 2 — fold `apply_name_style` ("blocker 2") — **DONE (uncommitted), but inert until "blocker 1"**
 
-**Correction to the analysis below:** `___p0` is *not* a derived dict — it's the
+**Correction to the analysis below:** `___p0` is _not_ a derived dict — it's the
 `Options` record, threaded as the `to_json : Options -> a -> Iodata` parameter, and
 on the defaults path it is delivered by the **`json_defaults` tail-resumptive
-effect** (`get_json_options!` resumes `default_options`), *not* as a syntactic
+effect** (`get_json_options!` resumes `default_options`), _not_ as a syntactic
 constant. So a constant never reaches the codec today. The work splits into:
-- **blocker 2** (the function boundary — make a constant `opts` *argument* fold
+
+- **blocker 2** (the function boundary — make a constant `opts` _argument_ fold
   through the recursive codec): **DONE**, below.
-- **blocker 1** (make the defaults `opts` a *visible* constant — bypass the effect
+- **blocker 1** (make the defaults `opts` a _visible_ constant — bypass the effect
   for the defaults entry, e.g. `serialize x = to_string (to_json default_options x)`,
   since `to_json` reads `opts` only as a parameter): **not yet done**. Until it
   lands the bench is unmoved — the derived codec still has its 36 `apply_name_style`
@@ -370,15 +377,16 @@ constant. So a constant never reaches the codec today. The work splits into:
   gate below correctly declines to fire.
 
 **What landed (general, no JSON-specific code), in `src/codegen/generic_fold.rs`:**
-- *Unit A — record-field projection.* `is_duplicable` now accepts pure record
+
+- _Unit A — record-field projection._ `is_duplicable` now accepts pure record
   literals (`RecordCreate`/`AnonRecordCreate`/`RecordUpdate`), so a constant `opts`
   argument substitutes inline rather than hiding behind a `bind_subpats` case-bound
   `Var`; a new `project_record_field` `rewrite_once` arm folds
   `(Options {…}).field` → the field value (gated on the whole record being
   duplicable, so no effectful sibling is dropped). This alone collapses any
-  `case opts.<field> of {…}` (e.g. `tag_format`) sitting *inside* an inlined codec
+  `case opts.<field> of {…}` (e.g. `tag_format`) sitting _inside_ an inlined codec
   body, via the existing `case_of_known_constructor`.
-- *Unit B — constant-arg "inline-to-cancel".* Carries small, single-clause,
+- _Unit B — constant-arg "inline-to-cancel"._ Carries small, single-clause,
   guardless, dispatch-shaped, non-self-recursive plain functions cross-module
   (`ExternalFun`/`external_funs_from_modules`, bare-name keyed with a global-
   uniqueness drop), and `try_inline_fun` inlines such a call **only when** an
@@ -408,13 +416,13 @@ runtime call every field.
   (here `'sagajson_AsIs'`), after which the whole `case` in `apply_name_style`
   collapses to the (now-literal, post–Item 1) field name.
 - **Dependency**: needs Item 1 (literal key) **and** the dict to be statically
-  visible at the projection. Within the dict-*method* body `___p0` is a parameter,
+  visible at the projection. Within the dict-_method_ body `___p0` is a parameter,
   so this only fires where the method is inlined at a call site that supplies the
   constant dict, or where the derived dict's name-style projection is specialized
   in. General tuple-projection-on-known-constant folding.
 - **Must key off a genuine compile-time-constant dict at the call site.** It is
   constant for `serialize` / `json_defaults` (the derived nullary dict flows in
-  directly), but a `serialize_with` under a *runtime* handler/options value has no
+  directly), but a `serialize_with` under a _runtime_ handler/options value has no
   statically-known style — there `element(2, ___p0)` is a real runtime projection.
   The fold must **degrade gracefully** to the current runtime `apply_name_style`
   call in that case, never assume the constant. So the rewrite fires only when the
@@ -448,14 +456,14 @@ keys — is why decode sits at ~2× while encode is ~1.8×.
 So sequence decode as: **land Items 1/2, re-measure, then** do the library-side
 single-pass builder rewrite in `Codec.saga` (a `Maybe`-slot builder keyed on the
 now-literal field names, parsing each value once instead of slice-then-reparse).
-β-reduction alone will *not* close decode — it is the precondition that makes the
+β-reduction alone will _not_ close decode — it is the precondition that makes the
 literal-keyed single-pass builder worthwhile, not the fix itself.
 
 ### Not in scope here (library + compiler, later)
 
 The encode field list (`[{Name,Value}|…]`) handed to `sagajson_codec:object`
 (`intersperse_commas`/`concat`) is the encode cousin of decode's pairs-list. It
-only becomes fusable to straight-line iodata *after* Items 1/2 make keys+values
+only becomes fusable to straight-line iodata _after_ Items 1/2 make keys+values
 literal, and the `object` shape is partly library-side. Revisit after Items 1/2,
 alongside the decode single-pass builder above.
 
