@@ -124,9 +124,9 @@ pub fn build_constructor_atoms(
                 // Register bare name (e.g. "NotFound") if not already taken by a local def
                 if !atoms.contains_key(ctor) {
                     if let Some(atom) = beam_override(ctor) {
-                        atoms.insert(ctor.clone(), atom.to_string());
+                        atoms.insert(ctor.to_string(), atom.to_string());
                     } else {
-                        atoms.insert(ctor.clone(), format!("{}_{}", ctor_erlang_name, ctor));
+                        atoms.insert(ctor.to_string(), format!("{}_{}", ctor_erlang_name, ctor));
                     }
                 }
                 // Register qualified forms for disambiguation:

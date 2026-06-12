@@ -1,0 +1,425 @@
+use std::collections::HashMap;
+
+use super::ModuleExports;
+use crate::typechecker::{
+    EffectDefInfo, EffectOpSig, Scheme, ScopeMap, TraitInfo, Type, arity_keyed_target_name,
+    canonicalize_type_name, make_dict_name,
+};
+
+/// An effect operation definition for codegen: operation name and parameter count.
+#[derive(Debug, Clone)]
+pub struct EffectOpDef {
+    pub name: String,
+    /// Source-level parameter count before erasing `Unit` placeholders.
+    pub source_param_count: usize,
+    /// Runtime handler arity after erasing `Unit` placeholder parameters.
+    pub runtime_param_count: usize,
+    /// Indices of source params that survive runtime erasure.
+    pub runtime_param_positions: Vec<usize>,
+    /// For callback parameters, the effects absorbed by that parameter.
+    pub param_absorbed_effects: HashMap<usize, Vec<String>>,
+}
+
+/// An effect definition for codegen: effect name, its operations, and type parameter count.
+#[derive(Debug, Clone)]
+pub struct EffectDef {
+    pub name: String,
+    pub ops: Vec<EffectOpDef>,
+    pub type_param_count: usize,
+}
+
+/// A trait impl dict exported by a module.
+#[derive(Debug, Clone)]
+pub struct TraitImplDict {
+    pub trait_name: String,
+    /// Extra type arguments applied to the trait (e.g. ["NOK"] in `impl ConvertTo NOK for USD`).
+    pub trait_type_args: Vec<String>,
+    pub target_type: String,
+    /// Module-qualified dict name (e.g. `__dict_Show_animals_Animal`).
+    pub dict_name: String,
+    /// Number of dict parameters (from where clause).
+    pub arity: usize,
+    /// Where-clause constraints as (constraint_trait, param_index) pairs.
+    /// Used by the elaborator to pass correct sub-dicts for parameterized impls.
+    pub param_constraints: Vec<(String, usize)>,
+    /// Sorted, canonical effect names declared in the impl's `needs` clause.
+    /// Applies uniformly to every method dispatched through this dict — codegen
+    /// uses it to thread evidence at trait method call sites that elaborated
+    /// to `DictMethodAccess`. Empty when the impl has no `needs` clause.
+    pub impl_effects: Vec<String>,
+}
+
+/// Information about a module's exports needed by the lowerer/codegen.
+/// Populated during typechecking alongside `tc_modules`.
+#[derive(Debug, Clone, Default)]
+pub struct ModuleCodegenInfo {
+    /// Public type bindings: name -> scheme.
+    pub exports: Vec<(String, Scheme)>,
+    /// Public binding surface name -> canonical origin name.
+    pub export_origins: Vec<(String, String)>,
+    /// Public effect surface name -> canonical origin effect name.
+    pub effect_origins: Vec<(String, String)>,
+    /// Public effect definitions.
+    pub effect_defs: Vec<EffectDef>,
+    /// Public record definitions: record name -> ordered field names.
+    pub record_fields: Vec<(String, Vec<String>)>,
+    /// Public handler names.
+    pub handler_defs: Vec<String>,
+    /// Public handler surface name -> canonical origin handler name.
+    pub handler_origins: Vec<(String, String)>,
+    /// Public function effect annotations: name -> sorted effect names.
+    pub fun_effects: Vec<(String, Vec<String>)>,
+    /// Public type constructors: type name -> [constructor names].
+    pub type_constructors: Vec<(String, Vec<String>)>,
+    /// Trait impl dicts exported by this module.
+    pub trait_impl_dicts: Vec<TraitImplDict>,
+    /// External function mappings: (saga_name, erlang_module, erlang_func, arity).
+    /// Includes both public and private externals (private ones are needed for handler inlining).
+    pub external_funs: Vec<(String, String, String, usize)>,
+    /// Compiler intrinsic exports: source name -> intrinsic id.
+    pub intrinsic_exports: Vec<(String, crate::intrinsics::IntrinsicId)>,
+}
+
+fn collect_effects_from_fun_type(ty: &Type) -> Vec<String> {
+    let mut effects = std::collections::BTreeSet::new();
+    let mut current = ty;
+    while let Type::Fun(_, ret, row) = current {
+        for entry in &row.effects {
+            effects.insert(entry.name.clone());
+        }
+        current = ret;
+    }
+    effects.into_iter().collect()
+}
+
+fn effect_param_absorbed_effects(op: &EffectOpSig) -> HashMap<usize, Vec<String>> {
+    op.params
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, (_, ty))| {
+            let effs = collect_effects_from_fun_type(ty);
+            (!effs.is_empty()).then_some((idx, effs))
+        })
+        .collect()
+}
+
+/// Count the arity of a constructor from its type (number of Fun levels).
+pub(super) fn ctor_arity(ty: &Type) -> usize {
+    match ty {
+        Type::Fun(_, ret, _) => 1 + ctor_arity(ret),
+        _ => 0,
+    }
+}
+
+/// Collect codegen-relevant info from a module's public declarations.
+pub(super) fn collect_codegen_info(
+    module_name: &str,
+    program: &[crate::ast::Decl],
+    exports: &ModuleExports,
+    effects_map: &std::collections::HashMap<String, EffectDefInfo>,
+    scope_map: &ScopeMap,
+    traits_map: &std::collections::HashMap<String, TraitInfo>,
+) -> ModuleCodegenInfo {
+    use crate::ast::Decl;
+    fn is_runtime_unit_param(ty: &crate::ast::TypeExpr) -> bool {
+        match ty {
+            crate::ast::TypeExpr::Named { name, .. } => {
+                canonicalize_type_name(name) == canonicalize_type_name("Unit")
+            }
+            crate::ast::TypeExpr::Labeled { inner, .. } => is_runtime_unit_param(inner),
+            _ => false,
+        }
+    }
+
+    let canonical_type_name = |name: &str| -> String {
+        scope_map
+            .resolve_type(name)
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| canonicalize_type_name(name).to_string())
+    };
+
+    let canonical_trait_type_args = |args: &[String]| -> Vec<String> {
+        args.iter()
+            .map(|arg| {
+                if arg.starts_with(|c: char| c.is_uppercase()) || arg.contains('.') {
+                    canonical_type_name(arg)
+                } else {
+                    arg.clone()
+                }
+            })
+            .collect()
+    };
+
+    let mut effect_defs = Vec::new();
+    let mut record_fields = Vec::new();
+    let mut handler_defs = Vec::new();
+    let mut fun_effects = Vec::new();
+    let mut trait_impl_dicts = Vec::new();
+    let mut external_funs = Vec::new();
+    let mut intrinsic_exports = Vec::new();
+
+    // Erlang module name: "Foo.Bar" -> "foo_bar"
+    let erlang_module = module_name
+        .split('.')
+        .map(|s| s.to_lowercase())
+        .collect::<Vec<_>>()
+        .join("_");
+
+    for decl in program {
+        match decl {
+            Decl::EffectDef {
+                name,
+                type_params,
+                operations,
+                ..
+            } => {
+                let canonical_effect = format!("{}.{}", module_name, name);
+                let effect_info = effects_map
+                    .get(&canonical_effect)
+                    .unwrap_or_else(|| panic!("missing effect info for {canonical_effect}"));
+                let ops = operations
+                    .iter()
+                    .map(|op| EffectOpDef {
+                        name: op.node.name.clone(),
+                        source_param_count: op.node.params.len(),
+                        runtime_param_positions: op
+                            .node
+                            .params
+                            .iter()
+                            .enumerate()
+                            .filter_map(|(idx, (_, ty))| {
+                                (!is_runtime_unit_param(ty)).then_some(idx)
+                            })
+                            .collect(),
+                        runtime_param_count: op
+                            .node
+                            .params
+                            .iter()
+                            .filter(|(_, ty)| !is_runtime_unit_param(ty))
+                            .count(),
+                        param_absorbed_effects: effect_info
+                            .ops
+                            .iter()
+                            .find(|sig| sig.name == op.node.name)
+                            .map(effect_param_absorbed_effects)
+                            .unwrap_or_default(),
+                    })
+                    .collect();
+                // Codegen metadata is internal compiler state, so keep effect
+                // op counts even for private effects. Public functions can
+                // still `needs {PrivateEffect}`, and imported call sites need
+                // the effect's runtime op arity to thread handler callbacks.
+                effect_defs.push(EffectDef {
+                    name: canonical_effect,
+                    ops,
+                    type_param_count: type_params.len(),
+                });
+            }
+            Decl::RecordDef {
+                public: true,
+                name,
+                fields,
+                ..
+            } => {
+                let field_names: Vec<String> = fields.iter().map(|f| f.node.0.clone()).collect();
+                record_fields.push((name.clone(), field_names));
+            }
+            Decl::HandlerDef {
+                public: true, name, ..
+            } => {
+                handler_defs.push(format!("{}.{}", module_name, name));
+            }
+            Decl::FunSignature {
+                public: true,
+                name,
+                effects,
+                ..
+            } if !effects.is_empty() => {
+                // Strip beam-native effects (same as elaboration), canonicalize names
+                let mut sorted: Vec<String> = effects
+                    .iter()
+                    .filter(|e| {
+                        !matches!(
+                            e.name.as_str(),
+                            "Actor" | "Process" | "Monitor" | "Link" | "Timer"
+                        )
+                    })
+                    .map(|e| {
+                        // Resolve effect name to canonical via scope_map
+                        scope_map
+                            .resolve_effect(&e.name)
+                            .map(|s| s.to_string())
+                            .unwrap_or_else(|| {
+                                // Fallback: try effects_map directly, or qualify with module
+                                if effects_map.contains_key(&e.name) {
+                                    e.name.clone()
+                                } else {
+                                    format!("{}.{}", module_name, e.name)
+                                }
+                            })
+                    })
+                    .collect();
+                sorted.sort();
+                if !sorted.is_empty() {
+                    fun_effects.push((name.clone(), sorted));
+                }
+            }
+            Decl::FunSignature {
+                name,
+                params,
+                annotations,
+                ..
+            } => {
+                if annotations.iter().any(|a| a.name == "builtin") {
+                    let canonical = format!("{}.{}", module_name, name);
+                    let intrinsic = crate::intrinsics::intrinsic_id_for_canonical_name(&canonical)
+                        .unwrap_or_else(|| {
+                            panic!("@builtin declaration has no IntrinsicId mapping: {canonical}")
+                        });
+                    intrinsic_exports.push((name.clone(), intrinsic));
+                }
+                // Collect @external annotations for both public and private functions.
+                // Private externals are needed for handler body inlining.
+                if let Some(ext) = annotations.iter().find(|a| a.name == "external")
+                    && ext.args.len() >= 3
+                    && let (
+                        crate::ast::Lit::String(erl_mod, _),
+                        crate::ast::Lit::String(erl_func, _),
+                    ) = (&ext.args[1], &ext.args[2])
+                {
+                    external_funs.push((
+                        name.clone(),
+                        erl_mod.clone(),
+                        erl_func.clone(),
+                        params.len(),
+                    ));
+                }
+            }
+            Decl::ImplDef {
+                trait_name,
+                trait_type_args,
+                target_type,
+                type_params,
+                where_clause,
+                needs,
+                methods,
+                routed_derive_info,
+                ..
+            } => {
+                // Resolve trait name to canonical form via scope_map
+                let canonical_trait = scope_map
+                    .resolve_trait(trait_name)
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| format!("{}.{}", module_name, trait_name));
+                let trait_type_arg_names: Vec<String> = trait_type_args
+                    .iter()
+                    .map(|te| {
+                        // Use the head name of an App chain so parameterized
+                        // Rep types like `Rep__Box a` reduce to `Rep__Box`
+                        // for the dict-name key.
+                        let head = te.head_name().unwrap_or("");
+                        match te {
+                            crate::ast::TypeExpr::Var { name, .. } => name.clone(),
+                            _ => scope_map
+                                .resolve_type(head)
+                                .map(|s| s.to_string())
+                                .unwrap_or_else(|| canonical_type_name(head)),
+                        }
+                    })
+                    .collect();
+                let canonical_trait_type_args = canonical_trait_type_args(&trait_type_arg_names);
+                let canonical_target_type = canonical_type_name(target_type);
+                let canonical_target_type =
+                    arity_keyed_target_name(&canonical_target_type, type_params.len());
+                let dict_name = make_dict_name(
+                    &canonical_trait,
+                    &canonical_trait_type_args,
+                    &erlang_module,
+                    &canonical_target_type,
+                );
+                let arity = where_clause.iter().map(|b| b.traits.len()).sum::<usize>();
+                let var_to_idx: std::collections::HashMap<&str, usize> = type_params
+                    .iter()
+                    .enumerate()
+                    .map(|(i, tp)| (tp.name.as_str(), i))
+                    .collect();
+                let param_constraints: Vec<(String, usize)> = where_clause
+                    .iter()
+                    .flat_map(|bound| {
+                        let idx = var_to_idx
+                            .get(bound.type_var.as_str())
+                            .copied()
+                            .unwrap_or(0);
+                        bound.traits.iter().map(move |tr| {
+                            let resolved = scope_map
+                                .resolve_trait(&tr.name)
+                                .unwrap_or(tr.name.as_str())
+                                .to_string();
+                            (resolved, idx)
+                        })
+                    })
+                    .collect();
+                let mut impl_effects: Vec<String> = needs
+                    .iter()
+                    .map(|e| {
+                        scope_map
+                            .resolve_effect(&e.name)
+                            .map(|s| s.to_string())
+                            .unwrap_or_else(|| e.name.clone())
+                    })
+                    .collect();
+                // Routed-derive impls are synthesized with `needs: vec![]`.
+                // Source the impl's effect set from the trait method
+                // signatures' canonical effect_sigs instead.
+                if routed_derive_info.is_some()
+                    && let Some(info) = traits_map.get(&canonical_trait)
+                {
+                    for trait_method in &info.methods {
+                        if methods.iter().any(|m| m.node.name == trait_method.name) {
+                            impl_effects.extend(trait_method.effect_sig.effects.iter().cloned());
+                        }
+                    }
+                }
+                impl_effects.sort();
+                impl_effects.dedup();
+                trait_impl_dicts.push(TraitImplDict {
+                    trait_name: canonical_trait,
+                    trait_type_args: canonical_trait_type_args,
+                    target_type: canonical_target_type,
+                    dict_name,
+                    arity,
+                    param_constraints,
+                    impl_effects,
+                });
+            }
+            _ => {}
+        }
+    }
+
+    ModuleCodegenInfo {
+        exports: exports.bindings.clone(),
+        export_origins: exports
+            .binding_origins
+            .iter()
+            .map(|(surface, origin)| (surface.clone(), origin.clone()))
+            .collect(),
+        effect_origins: exports
+            .effect_origins
+            .iter()
+            .map(|(surface, origin)| (surface.clone(), origin.clone()))
+            .collect(),
+        effect_defs,
+        record_fields,
+        handler_defs,
+        handler_origins: exports
+            .handler_origins
+            .iter()
+            .map(|(surface, origin)| (surface.clone(), origin.clone()))
+            .collect(),
+        fun_effects,
+        type_constructors: exports.type_constructors.clone().into_iter().collect(),
+        trait_impl_dicts,
+        external_funs,
+        intrinsic_exports,
+    }
+}
