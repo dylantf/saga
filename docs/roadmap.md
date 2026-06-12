@@ -86,7 +86,7 @@ Checkbox = implemented and working. Unchecked = not yet done.
 
 - [x] `module Foo` declarations
 - [x] Module map: scan all `.saga` files at startup, resolve imports by declared module name (not file path)
-- [x] `import Foo`, `import Foo as F`, `import Foo (a, b)`
+- [x] `import Foo`, `import Foo as F`, `import Foo (a, b)`, `import Foo (a as b)`
 - [x] Qualified names (`Math.abs`)
 - [x] `pub` exports
 - [x] Cycle detection
@@ -168,6 +168,8 @@ Checkbox = implemented and working. Unchecked = not yet done.
 - [x] Multi-module builds (resolve imports, compile dependency order)
 - [x] Qualified calls (`Math.abs x` -> `call 'math':'abs'(X)`)
 - [x] Exposed imports (`import Math (add)` -> `call 'math':'add'(...)`)
+- [x] Item aliases in exposed imports (`import Math (add as plus)` -> `plus` resolves to `Math.add`)
+- [x] Function/type/trait/effect/handler re-exports (`import Math (pub add as plus)` and `import Math (pub ..)` preserve origin identities)
 - [x] `pub` export filtering (only pub functions exported in module mode)
 - [x] Cross-module effectful calls (handler params + `_ReturnK` threaded across module boundaries)
 - [x] Constructor atom mangling (prefix with module name to avoid cross-module collisions)

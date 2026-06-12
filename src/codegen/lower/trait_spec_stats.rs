@@ -82,8 +82,10 @@ impl TraitSpecStats {
             for reason in self.fell_back.values() {
                 *counts.entry(reason.label()).or_default() += 1;
             }
-            let parts: Vec<String> =
-                counts.iter().map(|(label, n)| format!("{n} {label}")).collect();
+            let parts: Vec<String> = counts
+                .iter()
+                .map(|(label, n)| format!("{n} {label}"))
+                .collect();
             out.push_str(&format!(" ({})", parts.join(", ")));
         }
         out

@@ -926,6 +926,234 @@ main () = add 10 20
 }
 
 #[test]
+fn aliased_exposed_import_emits_origin_module_call() {
+    let main_src = "
+module Main
+import Math (add as plus)
+
+main () = plus 10 20
+";
+    let mut checker = make_project_checker();
+    let program = typecheck_source(main_src, &mut checker);
+    let out = emit_from_program(&program, "main", &checker);
+
+    assert_contains(&out, "call 'math':'add'");
+    assert!(
+        !out.contains("apply 'plus'"),
+        "aliased import should not lower as a local function\n{out}"
+    );
+}
+
+#[test]
+fn reexported_aliased_import_emits_origin_module_call() {
+    let lib_src = r#"module Lib
+
+pub fun inc : Int -> Int
+inc x = x + 1
+"#;
+    let facade_src = r#"module Facade
+
+import Lib (pub inc as plus_one)
+"#;
+    let main_src = r#"module Main
+
+import Facade (plus_one)
+
+main () = plus_one 41
+"#;
+
+    with_temp_project_files(
+        &[("lib/Lib.saga", lib_src), ("lib/Facade.saga", facade_src)],
+        main_src,
+        |checker, program| {
+            let out = emit_from_program(program, "main", checker);
+            assert_contains(&out, "call 'lib':'inc'");
+            assert!(
+                !out.contains("call 'facade':'plus_one'"),
+                "re-exported call should target the origin module\n{out}"
+            );
+        },
+    );
+}
+
+#[test]
+fn qualified_reexported_alias_emits_origin_module_call() {
+    let lib_src = r#"module Lib
+
+pub fun inc : Int -> Int
+inc x = x + 1
+"#;
+    let facade_src = r#"module Facade
+
+import Lib (pub inc as plus_one)
+"#;
+    let main_src = r#"module Main
+
+import Facade
+
+main () = Facade.plus_one 41
+"#;
+
+    with_temp_project_files(
+        &[("lib/Lib.saga", lib_src), ("lib/Facade.saga", facade_src)],
+        main_src,
+        |checker, program| {
+            let out = emit_from_program(program, "main", checker);
+            assert_contains(&out, "call 'lib':'inc'");
+            assert!(
+                !out.contains("call 'facade':'plus_one'"),
+                "qualified re-exported call should target the origin module\n{out}"
+            );
+        },
+    );
+}
+
+#[test]
+fn reexport_all_import_emits_origin_module_call() {
+    let lib_src = r#"module Lib
+
+pub fun inc : Int -> Int
+inc x = x + 1
+"#;
+    let facade_src = r#"module Facade
+
+import Lib (pub ..)
+"#;
+    let main_src = r#"module Main
+
+import Facade (inc)
+
+main () = inc 41
+"#;
+
+    with_temp_project_files(
+        &[("lib/Lib.saga", lib_src), ("lib/Facade.saga", facade_src)],
+        main_src,
+        |checker, program| {
+            let out = emit_from_program(program, "main", checker);
+            assert_contains(&out, "call 'lib':'inc'");
+            assert!(
+                !out.contains("call 'facade':'inc'"),
+                "pub .. re-exported call should target the origin module\n{out}"
+            );
+        },
+    );
+}
+
+#[test]
+fn reexported_type_exposes_origin_constructors() {
+    let lib_src = r#"module Lib
+
+pub type Choice
+  = Lefty Int
+  | Righty Int
+"#;
+    let facade_src = r#"module Facade
+
+import Lib (pub Choice)
+"#;
+    let main_src = r#"module Main
+
+import Facade (Choice)
+
+main () = Lefty 41
+"#;
+
+    with_temp_project_files(
+        &[("lib/Lib.saga", lib_src), ("lib/Facade.saga", facade_src)],
+        main_src,
+        |checker, program| {
+            let out = emit_from_program(program, "main", checker);
+            assert_contains(&out, "lib_Lefty");
+            assert!(
+                !out.contains("facade_Lefty"),
+                "re-exported constructors should keep origin-module atoms\n{out}"
+            );
+        },
+    );
+}
+
+#[test]
+fn reexported_trait_uses_origin_impl() {
+    let lib_src = r#"module Lib
+
+pub trait Label a {
+  fun label : a -> String
+}
+
+impl Label for Int {
+  label _ = "int"
+}
+"#;
+    let facade_src = r#"module Facade
+
+import Lib (pub Label)
+"#;
+    let main_src = r#"module Main
+
+import Facade (Label)
+
+main () = label 1
+"#;
+
+    with_temp_project_files(
+        &[("lib/Lib.saga", lib_src), ("lib/Facade.saga", facade_src)],
+        main_src,
+        |checker, program| {
+            let out = emit_from_program(program, "main", checker);
+            assert_contains(&out, "call 'lib':'__saga_dictmethod");
+            assert!(
+                !out.contains("call 'facade':'__saga_dictmethod"),
+                "re-exported trait impl dispatch should target the origin module\n{out}"
+            );
+        },
+    );
+}
+
+#[test]
+fn reexported_effect_and_handler_use_origin_identities() {
+    let lib_src = r#"module Lib
+
+pub effect Ask {
+  fun ask : Unit -> Int
+}
+
+pub handler answer_42 for Ask {
+  ask = resume 42
+}
+
+pub fun use_ask : Unit -> Int needs {Ask}
+use_ask () = ask! ()
+"#;
+    let facade_src = r#"module Facade
+
+import Lib (pub Ask as Query, pub answer_42 as answer, pub use_ask as run_query)
+"#;
+    let main_src = r#"module Main
+
+import Facade (Query, answer, run_query)
+
+fun ask_here : Unit -> Int needs {Query}
+ask_here () = ask! ()
+
+main () = (run_query () with answer) + (ask_here () with answer)
+"#;
+
+    with_temp_project_files(
+        &[("lib/Lib.saga", lib_src), ("lib/Facade.saga", facade_src)],
+        main_src,
+        |checker, program| {
+            let out = emit_from_program(program, "main", checker);
+            assert_contains(&out, "call 'lib':'use_ask'");
+            assert!(
+                !out.contains("call 'facade':'run_query'"),
+                "re-exported effectful calls should target the origin module\n{out}"
+            );
+        },
+    );
+}
+
+#[test]
 fn exposed_and_qualified_same_module() {
     let main_src = "
 module Main
@@ -1067,14 +1295,18 @@ main () = {
 }
 "#;
 
-    with_temp_project_files(&[("lib/Codec.saga", codec)], main_src, |checker, program| {
-        let out = emit_from_program(program, "main", checker);
-        // The producer-private helper must lower to a remote call, never an
-        // unbound variable.
-        assert_contains(&out, "call 'codec':'io_open'");
-        // `erlc` is the real assertion: it rejects an unbound `Io_open`.
-        assert_erlc_compiles(&out, "main");
-    });
+    with_temp_project_files(
+        &[("lib/Codec.saga", codec)],
+        main_src,
+        |checker, program| {
+            let out = emit_from_program(program, "main", checker);
+            // The producer-private helper must lower to a remote call, never an
+            // unbound variable.
+            assert_contains(&out, "call 'codec':'io_open'");
+            // `erlc` is the real assertion: it rejects an unbound `Io_open`.
+            assert_erlc_compiles(&out, "main");
+        },
+    );
 }
 
 // A dispatch-shaped helper library shared by the inline-to-cancel tests below.
@@ -1114,23 +1346,27 @@ key () = apply_style (Opts { rename: AsIs }).rename "id"
 
 main () = dbg (key ())
 "#;
-    with_temp_project_files(&[("lib/Style.saga", STYLE_LIB)], main_src, |checker, program| {
-        let out = emit_from_program(program, "main", checker);
-        let key_fn = emitted_function(&out, "key", 1);
-        assert!(
-            key_fn.contains("#<105>") && key_fn.contains("#<100>"),
-            "key/1 should fold to the literal \"id\":\n{key_fn}"
-        );
-        assert!(
-            !out.contains("'style':'apply_style'"),
-            "apply_style should be inlined away, not a remote call:\n{out}"
-        );
-        assert!(
-            !key_fn.contains("case"),
-            "the inlined NameStyle case should have collapsed in key/1:\n{key_fn}"
-        );
-        assert_erlc_compiles(&out, "main");
-    });
+    with_temp_project_files(
+        &[("lib/Style.saga", STYLE_LIB)],
+        main_src,
+        |checker, program| {
+            let out = emit_from_program(program, "main", checker);
+            let key_fn = emitted_function(&out, "key", 1);
+            assert!(
+                key_fn.contains("#<105>") && key_fn.contains("#<100>"),
+                "key/1 should fold to the literal \"id\":\n{key_fn}"
+            );
+            assert!(
+                !out.contains("'style':'apply_style'"),
+                "apply_style should be inlined away, not a remote call:\n{out}"
+            );
+            assert!(
+                !key_fn.contains("case"),
+                "the inlined NameStyle case should have collapsed in key/1:\n{key_fn}"
+            );
+            assert_erlc_compiles(&out, "main");
+        },
+    );
 }
 
 #[test]
@@ -1152,14 +1388,18 @@ main () = {
   println (key 0)
 } with console
 "#;
-    with_temp_project_files(&[("lib/Style.saga", STYLE_LIB)], main_src, |checker, program| {
-        let out = emit_from_program(program, "main", checker);
-        assert!(
-            out.contains("'style':'apply_style'"),
-            "apply_style must remain a remote call when its style arg is runtime:\n{out}"
-        );
-        assert_erlc_compiles(&out, "main");
-    });
+    with_temp_project_files(
+        &[("lib/Style.saga", STYLE_LIB)],
+        main_src,
+        |checker, program| {
+            let out = emit_from_program(program, "main", checker);
+            assert!(
+                out.contains("'style':'apply_style'"),
+                "apply_style must remain a remote call when its style arg is runtime:\n{out}"
+            );
+            assert_erlc_compiles(&out, "main");
+        },
+    );
 }
 
 #[test]
@@ -2650,7 +2890,10 @@ main () = show (Animal { name: \"Rex\", species: \"Dog\" })
     // direct cross-module call to the hoisted dict method in the animals module
     // (instead of building the dict via `call 'animals':'<dict>'()` + element/2).
     let dict = typechecker::make_dict_name("Std.Base.Show", &[], "animals", "Animals.Animal");
-    assert_contains(&out, &format!("call 'animals':'__saga_dictmethod_{dict}_0'"));
+    assert_contains(
+        &out,
+        &format!("call 'animals':'__saga_dictmethod_{dict}_0'"),
+    );
 }
 
 #[test]

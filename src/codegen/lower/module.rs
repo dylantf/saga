@@ -609,8 +609,10 @@ impl<'a> Lowerer<'a> {
                 // reference to it in the dict tuple (so dynamic dispatch still
                 // works via `element/2`). Direct call sites call the hoisted
                 // function instead, skipping the tuple build and extraction.
-                let slot = if let Some(hoist) =
-                    self.dict_method_hoists.get(&(name.to_string(), idx)).cloned()
+                let slot = if let Some(hoist) = self
+                    .dict_method_hoists
+                    .get(&(name.to_string(), idx))
+                    .cloned()
                 {
                     let hoisted_arity = hoist.user_arity + if hoist.is_cps { 2 } else { 0 };
                     debug_assert!(
@@ -682,7 +684,10 @@ impl<'a> Lowerer<'a> {
         }
 
         if super::trait_spec_stats::stats_enabled_for(&self.current_source_module) {
-            eprintln!("{}", self.trait_spec_stats.report(&self.current_source_module));
+            eprintln!(
+                "{}",
+                self.trait_spec_stats.report(&self.current_source_module)
+            );
         }
 
         CModule {

@@ -8,6 +8,22 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use super::util;
 use super::{EffectInfo, FunInfo, HandlerInfo, Lowerer};
 
+fn split_canonical_fun(canonical: &str) -> Option<(&str, &str)> {
+    canonical.rsplit_once('.')
+}
+
+fn export_origin<'a>(
+    exporting_module: &'a str,
+    info: &'a crate::typechecker::ModuleCodegenInfo,
+    surface_name: &'a str,
+) -> (&'a str, &'a str) {
+    info.export_origins
+        .iter()
+        .find(|(surface, _)| surface == surface_name)
+        .and_then(|(_, origin)| split_canonical_fun(origin))
+        .unwrap_or((exporting_module, surface_name))
+}
+
 fn count_lambda_params(body: &ast::Expr) -> usize {
     match &body.kind {
         ast::ExprKind::Lambda { params, body, .. } => params.len() + count_lambda_params(body),
@@ -595,16 +611,35 @@ impl<'a> Lowerer<'a> {
         exposing: Option<&crate::ast::Exposing>,
         info: &crate::typechecker::ModuleCodegenInfo,
     ) {
-        let is_exposed = |name: &str| match exposing {
-            None => false,
-            Some(e) => e.exposes(name),
+        let exposed_surface = |name: &str| -> Option<String> {
+            match exposing {
+                None => None,
+                Some(e) => e.surface_name_for_origin(name),
+            }
         };
         let exported_names: std::collections::HashSet<&str> =
             info.exports.iter().map(|(n, _)| n.as_str()).collect();
 
         for (name, scheme) in &info.exports {
+            let (origin_mod, origin_name) = export_origin(module_name, info, name);
+            let origin_info = self
+                .ctx
+                .module_semantics(origin_mod)
+                .map(|module| module.codegen_info)
+                .unwrap_or(info);
             let (base_arity, effects) = util::arity_and_effects_from_type(&scheme.ty);
-            let effects = self.canonicalize_effects(effects);
+            let mut effects = self.canonicalize_effects(effects);
+            if let Some((_, ann_effs)) = origin_info
+                .fun_effects
+                .iter()
+                .find(|(fun_name, _)| fun_name == origin_name)
+            {
+                for eff in ann_effs {
+                    if !effects.contains(eff) {
+                        effects.push(eff.clone());
+                    }
+                }
+            }
             let shape = RuntimeFunctionShape::from_type(&scheme.ty, |effects| {
                 self.canonicalize_effects(effects)
             });
@@ -626,11 +661,13 @@ impl<'a> Lowerer<'a> {
                 param_types: util::param_types_from_type(&scheme.ty),
             };
             self.fun_info.insert(alias_qualified, fi.clone());
-            let canonical = format!("{}.{}", module_name, name);
+            let canonical = format!("{}.{}", origin_mod, origin_name);
             self.fun_info.entry(canonical).or_insert(fi);
 
-            if is_exposed(name) && exported_names.contains(name.as_str()) {
-                self.fun_info.entry(name.clone()).or_insert(FunInfo {
+            if let Some(surface) = exposed_surface(name)
+                && exported_names.contains(name.as_str())
+            {
+                self.fun_info.entry(surface).or_insert(FunInfo {
                     arity: expanded_arity,
                     effects,
                     is_open_row,
@@ -699,6 +736,42 @@ impl<'a> Lowerer<'a> {
                 }
                 _ => {}
             }
+        }
+    }
+
+    fn register_reexport_origin_modules(
+        &mut self,
+        exporting_module: &str,
+        info: &crate::typechecker::ModuleCodegenInfo,
+    ) {
+        let mut origin_modules = HashSet::new();
+        for (_, origin) in info
+            .export_origins
+            .iter()
+            .chain(info.effect_origins.iter())
+            .chain(info.handler_origins.iter())
+        {
+            if let Some((origin_module, _)) = split_canonical_fun(origin)
+                && origin_module != exporting_module
+            {
+                origin_modules.insert(origin_module.to_string());
+            }
+        }
+
+        for origin_module in origin_modules {
+            let Some((origin_info, origin_program)) =
+                self.ctx.module_semantics(&origin_module).map(|semantics| {
+                    (
+                        (*semantics.codegen_info).clone(),
+                        (*semantics.elaborated).clone(),
+                    )
+                })
+            else {
+                continue;
+            };
+            self.register_imported_effect_defs(&origin_info);
+            self.register_imported_records_and_dicts(&origin_module, &origin_info);
+            self.register_imported_handler_defs(&origin_module, &origin_program);
         }
     }
 
@@ -892,6 +965,7 @@ impl<'a> Lowerer<'a> {
         self.register_imported_exports(&module_name, &prefix, exposing.as_ref(), info);
         self.register_imported_records_and_dicts(&module_name, info);
         self.register_imported_handler_defs(&module_name, module_semantics.elaborated);
+        self.register_reexport_origin_modules(&module_name, info);
     }
 
     /// Walk the AST to find anonymous record types and register them in record_fields.

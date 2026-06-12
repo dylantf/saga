@@ -83,6 +83,12 @@ This pass:
 - Loads, parses, derives, desugars, and typechecks imported modules on demand
 - Caches module exports and codegen metadata
 - Merges imported names into the current checker state
+- Maps exposed import aliases to their origin identities, e.g.
+  `import Math (add as plus)` makes the user-visible `plus` resolve to
+  canonical `Math.add`
+- Collects function, type, trait, effect, and handler re-exports from `pub` import items,
+  preserving origin identities so facades do not create duplicate semantic
+  definitions
 
 Important detail:
 
@@ -96,11 +102,13 @@ After imports are processed and definitions are registered, the checker runs the
 - `src/typechecker/resolve.rs`
   - `resolve_names`
 
-This rewrites the AST in place to canonicalize imported names using the accumulated `ScopeMap`.
+This records semantic identities in `ResolutionResult` using the accumulated
+`ScopeMap`. The AST stays mostly source-shaped; imported aliases resolve by
+mapping the user-visible spelling to the origin's canonical identity.
 
 Purpose:
 
-- Rewrite imported values, constructors, traits, and effect qualifiers to canonical names
+- Resolve imported values, constructors, traits, and effect qualifiers to canonical names
 - Preserve shadowing by leaving local bindings alone
 
 This is a real pass, but it is narrow in scope: it prepares the AST for inference rather than performing type inference itself.

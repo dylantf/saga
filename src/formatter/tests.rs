@@ -272,9 +272,22 @@ fn normalize_decl(d: &mut Decl) {
                 normalize_annotated(m, normalize_impl_method);
             }
         }
-        Decl::Import { id, span, .. } => {
+        Decl::Import {
+            id, exposing, span, ..
+        } => {
             *id = NID;
             *span = S;
+            match exposing {
+                Some(Exposing::Items(items)) => {
+                    for item in items {
+                        item.span = S;
+                    }
+                }
+                Some(Exposing::All { span, .. }) => {
+                    *span = S;
+                }
+                None => {}
+            }
         }
         Decl::ModuleDecl { id, span, .. } => {
             *id = NID;

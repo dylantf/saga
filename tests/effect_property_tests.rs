@@ -683,7 +683,11 @@ a_string () = default
 pub fun result : Unit -> String
 result () = show (an_int ()) <> ";" <> a_string ()
 "#;
-    check_result_string("nullary_trait_method_dispatches_by_return_type", src, "8;hi");
+    check_result_string(
+        "nullary_trait_method_dispatches_by_return_type",
+        src,
+        "8;hi",
+    );
 }
 
 #[test]

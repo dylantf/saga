@@ -404,8 +404,14 @@ impl<'a> Lowerer<'a> {
         supplied: usize,
         cps: bool,
     ) -> Option<CpsCallee> {
-        match self.classify_dict_specialization(app_id, dict, trait_name, method_index, supplied, cps)?
-        {
+        match self.classify_dict_specialization(
+            app_id,
+            dict,
+            trait_name,
+            method_index,
+            supplied,
+            cps,
+        )? {
             Ok(callee) => {
                 self.trait_spec_stats.record_specialized(app_id);
                 Some(callee)
@@ -437,7 +443,9 @@ impl<'a> Lowerer<'a> {
                     dict_constructor,
                     method_index: known_index,
                     sub_dicts,
-                } if *known_index == method_index => (dict_constructor.clone(), sub_dicts.is_empty()),
+                } if *known_index == method_index => {
+                    (dict_constructor.clone(), sub_dicts.is_empty())
+                }
                 _ => return None,
             };
 
@@ -449,14 +457,19 @@ impl<'a> Lowerer<'a> {
             // Partial/over-application: the hoisted function's arity would not
             // match. (Saturated trait calls are the norm; guard anyway.)
             Err(FallbackReason::Unsaturated)
-        } else if let Some(hoist) = self.dict_method_hoists.get(&(dict_constructor.clone(), method_index))
+        } else if let Some(hoist) = self
+            .dict_method_hoists
+            .get(&(dict_constructor.clone(), method_index))
         {
             // Local hoisted method: direct `FunRef` apply.
             if hoist.is_cps != cps {
                 Err(FallbackReason::AbiMismatch)
             } else {
                 let arity = supplied + if cps { 2 } else { 0 };
-                Ok(CpsCallee::Value(CExpr::FunRef(hoist.fn_name.clone(), arity)))
+                Ok(CpsCallee::Value(CExpr::FunRef(
+                    hoist.fn_name.clone(),
+                    arity,
+                )))
             }
         } else if let Some(erlang_mod) = self.imported_dict_erlang_mod(dict) {
             // Imported hoisted method: direct cross-module call. Every module
@@ -569,9 +582,14 @@ impl<'a> Lowerer<'a> {
         // skipping the dict tuple build and `element/2`: a local `FunRef`
         // (Phase 2) or a cross-module call (Phase 3). Only the callee changes;
         // evidence/return-continuation threading is unchanged.
-        if let Some(callee) =
-            self.specialized_dict_method_callee(app_id, dict, trait_name, method_index, args.len(), true)
-        {
+        if let Some(callee) = self.specialized_dict_method_callee(
+            app_id,
+            dict,
+            trait_name,
+            method_index,
+            args.len(),
+            true,
+        ) {
             return Some(self.lower_runtime_cps_apply(RuntimeCpsApplySite {
                 plan,
                 callee,

@@ -111,18 +111,28 @@ pub fn build_constructor_atoms(
 
         for (type_name, ctors) in &info.type_constructors {
             for ctor in ctors {
+                let ctor_erlang_name = info
+                    .export_origins
+                    .iter()
+                    .find(|(surface, _)| surface == ctor)
+                    .and_then(|(_, origin)| origin.rsplit_once('.').map(|(module, _)| module))
+                    .map(|module| {
+                        let path: Vec<String> = module.split('.').map(String::from).collect();
+                        module_name_to_erlang(&path)
+                    })
+                    .unwrap_or_else(|| erlang_name.clone());
                 // Register bare name (e.g. "NotFound") if not already taken by a local def
                 if !atoms.contains_key(ctor) {
                     if let Some(atom) = beam_override(ctor) {
                         atoms.insert(ctor.clone(), atom.to_string());
                     } else {
-                        atoms.insert(ctor.clone(), format!("{}_{}", erlang_name, ctor));
+                        atoms.insert(ctor.clone(), format!("{}_{}", ctor_erlang_name, ctor));
                     }
                 }
                 // Register qualified forms for disambiguation:
                 // "Std.File.NotFound" and "File.NotFound"
                 if beam_override(ctor).is_none() {
-                    let mangled = format!("{}_{}", erlang_name, ctor);
+                    let mangled = format!("{}_{}", ctor_erlang_name, ctor);
                     atoms.insert(format!("{}.{}", mod_name, ctor), mangled.clone());
                     // Also register alias-qualified: "File.NotFound"
                     if !alias.is_empty() {
@@ -1132,6 +1142,22 @@ fn build_imported_fun_scoped(
     }
 }
 
+fn split_canonical_fun(canonical: &str) -> Option<(&str, &str)> {
+    canonical.rsplit_once('.')
+}
+
+fn export_origin<'a>(
+    exporting_module: &'a str,
+    info: &'a ModuleCodegenInfo,
+    surface_name: &'a str,
+) -> (&'a str, &'a str) {
+    info.export_origins
+        .iter()
+        .find(|(surface, _)| surface == surface_name)
+        .and_then(|(_, origin)| split_canonical_fun(origin))
+        .unwrap_or((exporting_module, surface_name))
+}
+
 /// Register canonical-form (`Module.name`) entries in `qualified_scope` for
 /// every loaded module. Driven purely by `codegen_info` — the set of modules
 /// the front end has loaded — not by the program's `Decl::Import` nodes.
@@ -1152,21 +1178,23 @@ fn register_canonical_qualified_scope(
         if mod_name == source_module_name {
             continue;
         }
-        let mod_path: Vec<String> = mod_name.split('.').map(String::from).collect();
-        let erlang_mod = module_name_to_erlang(&mod_path);
-        let fun_effects_map: HashMap<&str, &Vec<String>> = info
-            .fun_effects
-            .iter()
-            .map(|(n, effs)| (n.as_str(), effs))
-            .collect();
         for (name, scheme) in &info.exports {
+            let (origin_mod, origin_name) = export_origin(mod_name, info, name);
+            let origin_info = codegen_info.get(origin_mod).unwrap_or(info);
+            let origin_path: Vec<String> = origin_mod.split('.').map(String::from).collect();
+            let origin_erlang_mod = module_name_to_erlang(&origin_path);
+            let origin_fun_effects_map: HashMap<&str, &Vec<String>> = origin_info
+                .fun_effects
+                .iter()
+                .map(|(n, effs)| (n.as_str(), effs))
+                .collect();
             let scoped = build_imported_fun_scoped(
-                mod_name,
-                &erlang_mod,
-                name,
+                origin_mod,
+                &origin_erlang_mod,
+                origin_name,
                 scheme,
-                info,
-                &fun_effects_map,
+                origin_info,
+                &origin_fun_effects_map,
                 effect_op_counts,
             );
             let canonical = format!("{}.{}", mod_name, name);
@@ -1203,7 +1231,6 @@ fn register_import_aliases(
         } = decl
         {
             let mod_name = module_path.join(".");
-            let erlang_mod = module_name_to_erlang(module_path);
             let alias = import_alias
                 .as_deref()
                 .unwrap_or_else(|| module_path.last().map(|s| s.as_str()).unwrap_or(""));
@@ -1214,30 +1241,34 @@ fn register_import_aliases(
                 None => continue,
             };
 
-            let is_exposed = |name: &str| -> bool {
+            let exposed_surface = |name: &str| -> Option<String> {
                 match exposing {
-                    None => false,
-                    Some(e) => e.exposes(name),
+                    None => None,
+                    Some(e) => e.surface_name_for_origin(name),
                 }
             };
 
-            let fun_effects_map: HashMap<&str, &Vec<String>> = info
-                .fun_effects
-                .iter()
-                .map(|(n, effs)| (n.as_str(), effs))
-                .collect();
-
             for (name, scheme) in &info.exports {
-                if !alias_differs && !is_exposed(name) {
+                let exposed_surface = exposed_surface(name);
+                if !alias_differs && exposed_surface.is_none() {
                     continue;
                 }
+                let (origin_mod, origin_name) = export_origin(&mod_name, info, name);
+                let origin_info = codegen_info.get(origin_mod).unwrap_or(info);
+                let origin_path: Vec<String> = origin_mod.split('.').map(String::from).collect();
+                let origin_erlang_mod = module_name_to_erlang(&origin_path);
+                let origin_fun_effects_map: HashMap<&str, &Vec<String>> = origin_info
+                    .fun_effects
+                    .iter()
+                    .map(|(n, effs)| (n.as_str(), effs))
+                    .collect();
                 let scoped = build_imported_fun_scoped(
-                    &mod_name,
-                    &erlang_mod,
-                    name,
+                    origin_mod,
+                    &origin_erlang_mod,
+                    origin_name,
                     scheme,
-                    info,
-                    &fun_effects_map,
+                    origin_info,
+                    &origin_fun_effects_map,
                     effect_op_counts,
                 );
                 if alias_differs {
@@ -1246,8 +1277,10 @@ fn register_import_aliases(
                         .entry(aliased)
                         .or_insert_with(|| scoped.clone());
                 }
-                if is_exposed(name) && !local_funs.contains_key(name) {
-                    scope.entry(name.clone()).or_insert(scoped);
+                if let Some(surface) = exposed_surface
+                    && !local_funs.contains_key(&surface)
+                {
+                    scope.entry(surface).or_insert(scoped);
                 }
             }
         }

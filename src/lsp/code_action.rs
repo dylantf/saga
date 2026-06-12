@@ -453,7 +453,7 @@ fn collect_missing_import_actions(
                                 // Already exposes everything — nothing to suggest.
                             }
                             Some(Exposing::Items(exposed)) => {
-                                if !exposed.contains(&name) {
+                                if !exposed.iter().any(|item| item.surface_name() == name) {
                                     add_to_exposing_action(
                                         existing, &name, source, line_index, uri, actions,
                                     );
