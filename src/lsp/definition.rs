@@ -234,6 +234,10 @@ fn find_cross_module(
     name: &str,
     result: &CheckResult,
 ) -> Option<DefinitionResult> {
+    if let Some(definition) = find_resolved_cross_module(name, result) {
+        return Some(definition);
+    }
+
     // Collect all imports that could have brought this name into scope
     for decl in program {
         if let Decl::Import {
@@ -287,4 +291,27 @@ fn find_cross_module(
         }
     }
     None
+}
+
+fn find_resolved_cross_module(name: &str, result: &CheckResult) -> Option<DefinitionResult> {
+    let canonical = result
+        .scope_map
+        .values
+        .get(name)
+        .or_else(|| result.scope_map.constructors.get(name))
+        .or_else(|| result.scope_map.types.get(name))
+        .or_else(|| result.scope_map.handlers.get(name))
+        .or_else(|| result.scope_map.effects.get(name))
+        .or_else(|| result.scope_map.traits.get(name))?;
+    let origin_module = result.scope_map.origin_of(name)?;
+    let origin_name = canonical
+        .strip_prefix(origin_module)
+        .and_then(|rest| rest.strip_prefix('.'))
+        .unwrap_or(canonical);
+    let file_path = result.module_map()?.get(origin_module)?.clone();
+    let module_program = result.programs().get(origin_module)?;
+    find_local(module_program, origin_name).map(|span| DefinitionResult {
+        span,
+        file_path: Some(file_path),
+    })
 }

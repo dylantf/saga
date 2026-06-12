@@ -665,7 +665,7 @@ impl<'a> Lowerer<'a> {
             self.fun_info.entry(canonical).or_insert(fi);
 
             if let Some(surface) = exposed_surface(name)
-                && exported_names.contains(name.as_str())
+                && exported_names.iter().any(|exported| *exported == name)
             {
                 self.fun_info.entry(surface).or_insert(FunInfo {
                     arity: expanded_arity,
