@@ -739,6 +739,42 @@ impl<'a> Lowerer<'a> {
         }
     }
 
+    fn register_reexport_origin_modules(
+        &mut self,
+        exporting_module: &str,
+        info: &crate::typechecker::ModuleCodegenInfo,
+    ) {
+        let mut origin_modules = HashSet::new();
+        for (_, origin) in info
+            .export_origins
+            .iter()
+            .chain(info.effect_origins.iter())
+            .chain(info.handler_origins.iter())
+        {
+            if let Some((origin_module, _)) = split_canonical_fun(origin)
+                && origin_module != exporting_module
+            {
+                origin_modules.insert(origin_module.to_string());
+            }
+        }
+
+        for origin_module in origin_modules {
+            let Some((origin_info, origin_program)) =
+                self.ctx.module_semantics(&origin_module).map(|semantics| {
+                    (
+                        (*semantics.codegen_info).clone(),
+                        (*semantics.elaborated).clone(),
+                    )
+                })
+            else {
+                continue;
+            };
+            self.register_imported_effect_defs(&origin_info);
+            self.register_imported_records_and_dicts(&origin_module, &origin_info);
+            self.register_imported_handler_defs(&origin_module, &origin_program);
+        }
+    }
+
     fn register_imported_module_local_funs(&mut self, module_name: &str, program: &ast::Program) {
         let (_, source_module_name) = Self::source_module_info(program, module_name);
 
@@ -929,6 +965,7 @@ impl<'a> Lowerer<'a> {
         self.register_imported_exports(&module_name, &prefix, exposing.as_ref(), info);
         self.register_imported_records_and_dicts(&module_name, info);
         self.register_imported_handler_defs(&module_name, module_semantics.elaborated);
+        self.register_reexport_origin_modules(&module_name, info);
     }
 
     /// Walk the AST to find anonymous record types and register them in record_fields.

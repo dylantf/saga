@@ -1762,7 +1762,10 @@ fn classify_sum_wrapper(
             call_args.len()
         ));
     }
-    if !call_args.iter().any(|a| type_expr_contains_var(a, self_var)) {
+    if !call_args
+        .iter()
+        .any(|a| type_expr_contains_var(a, self_var))
+    {
         return Err(format!(
             "wrapper `{}` doesn't carry the trait's self type at any type-argument position",
             name
@@ -1779,12 +1782,7 @@ fn classify_sum_wrapper(
             let resolved = subst_type_params(fty, &subst);
             let mut visiting = Vec::new();
             let path = classify_splice_path(&resolved, self_var, scope, &mut visiting).map_err(
-                |reason| {
-                    format!(
-                        "wrapper `{}` variant `{}`: {}",
-                        name, variant.name, reason
-                    )
-                },
+                |reason| format!("wrapper `{}` variant `{}`: {}", name, variant.name, reason),
             )?;
             if path.is_some() {
                 any_a_position = true;
@@ -1824,7 +1822,10 @@ fn classify_record_wrapper(
             call_args.len()
         ));
     }
-    if !call_args.iter().any(|a| type_expr_contains_var(a, self_var)) {
+    if !call_args
+        .iter()
+        .any(|a| type_expr_contains_var(a, self_var))
+    {
         return Err(format!(
             "wrapper record `{}` doesn't carry the trait's self type at any type-argument \
              position",
@@ -1884,7 +1885,10 @@ fn subst_type_params(te: &TypeExpr, subst: &[(String, TypeExpr)]) -> TypeExpr {
             .unwrap_or_else(|| te.clone()),
         TypeExpr::Named { .. } | TypeExpr::Symbol { .. } => te.clone(),
         TypeExpr::App {
-            id, func, arg, span,
+            id,
+            func,
+            arg,
+            span,
         } => TypeExpr::App {
             id: *id,
             func: Box::new(subst_type_params(func, subst)),
@@ -2048,9 +2052,12 @@ fn apply_splice_path(
                 .iter()
                 .enumerate()
                 .map(|(i, sub)| {
-                    let v = Expr::synth(span, ExprKind::Var {
-                        name: vars[i].clone(),
-                    });
+                    let v = Expr::synth(
+                        span,
+                        ExprKind::Var {
+                            name: vars[i].clone(),
+                        },
+                    );
                     match sub {
                         Some(p) => apply_splice_path(p, v, leaf_op, span),
                         None => v,
@@ -2073,9 +2080,12 @@ fn apply_splice_path(
             let body_fields: Vec<(String, Span, Expr)> = fields
                 .iter()
                 .map(|(label, sub)| {
-                    let v = Expr::synth(span, ExprKind::Var {
-                        name: label.clone(),
-                    });
+                    let v = Expr::synth(
+                        span,
+                        ExprKind::Var {
+                            name: label.clone(),
+                        },
+                    );
                     let value = match sub {
                         Some(p) => apply_splice_path(p, v, leaf_op, span),
                         None => v,
@@ -2172,9 +2182,12 @@ fn build_splice_pattern(
                         expr_fields.push((
                             label.clone(),
                             zero_span,
-                            Expr::synth(span, ExprKind::Var {
-                                name: label.clone(),
-                            }),
+                            Expr::synth(
+                                span,
+                                ExprKind::Var {
+                                    name: label.clone(),
+                                },
+                            ),
                         ));
                     }
                 }

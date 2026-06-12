@@ -400,8 +400,7 @@ impl Parser {
         let name_span = self.tokens[self.pos - 1].span;
 
         self.expect(Token::Colon)?;
-        let (params, return_type, effects, effect_row_var) =
-            self.parse_annotated_signature()?;
+        let (params, return_type, effects, effect_row_var) = self.parse_annotated_signature()?;
 
         // Parse optional `where {a: Show + Eq, b: Ord}`
         let (where_clause, where_apps) = self.parse_where_clause()?;
@@ -1558,8 +1557,8 @@ impl Parser {
         let exposing = if matches!(self.peek(), Token::LParen) {
             let lparen_span = self.tokens[self.pos].span;
             self.advance(); // consume '('
-            let pub_dotdot = matches!(self.peek(), Token::Pub)
-                && matches!(self.peek_at(1), Token::DotDot);
+            let pub_dotdot =
+                matches!(self.peek(), Token::Pub) && matches!(self.peek_at(1), Token::DotDot);
             let all_public = if pub_dotdot {
                 self.advance(); // consume 'pub'
                 true
@@ -1621,17 +1620,15 @@ impl Parser {
                             }
                             (false, Token::UpperIdent(_)) => {
                                 return Err(ParseError {
-                                    message:
-                                        "import alias for a lowercase item must be lowercase"
-                                            .to_string(),
+                                    message: "import alias for a lowercase item must be lowercase"
+                                        .to_string(),
                                     span: alias_span,
                                 });
                             }
                             (true, Token::Ident(_)) => {
                                 return Err(ParseError {
-                                    message:
-                                        "import alias for an uppercase item must be uppercase"
-                                            .to_string(),
+                                    message: "import alias for an uppercase item must be uppercase"
+                                        .to_string(),
                                     span: alias_span,
                                 });
                             }

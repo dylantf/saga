@@ -192,9 +192,11 @@ Import aliases do not change canonical names. `import Std.List (map as fmap)`
 makes `fmap` a local surface name for `Std.List.map`; the semantic identity
 remains the origin export.
 
-Value/function re-exports keep the same rule across another module boundary.
-If `Facade` writes `import Math (pub add as plus)`, then importers may use
-`Facade.plus` or expose `plus`, but the canonical identity remains `Math.add`.
+Re-exports keep the same rule across another module boundary. If `Facade`
+writes `import Math (pub add as plus)`, then importers may use `Facade.plus` or
+expose `plus`, but the canonical identity remains `Math.add`. Re-exported
+types, traits, effects, and handlers likewise keep their origin identities;
+trait impls stay keyed to the origin trait, not the facade surface.
 
 Types are still a special case in a few places: some type-related tables use
 the existing canonical/bare conventions already present in the typechecker.

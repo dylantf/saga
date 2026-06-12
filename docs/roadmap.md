@@ -169,7 +169,7 @@ Checkbox = implemented and working. Unchecked = not yet done.
 - [x] Qualified calls (`Math.abs x` -> `call 'math':'abs'(X)`)
 - [x] Exposed imports (`import Math (add)` -> `call 'math':'add'(...)`)
 - [x] Item aliases in exposed imports (`import Math (add as plus)` -> `plus` resolves to `Math.add`)
-- [x] Value/function re-exports (`import Math (pub add as plus)` and `import Math (pub ..)` keep calls pointed at `Math.add`)
+- [x] Function/type/trait/effect/handler re-exports (`import Math (pub add as plus)` and `import Math (pub ..)` preserve origin identities)
 - [x] `pub` export filtering (only pub functions exported in module mode)
 - [x] Cross-module effectful calls (handler params + `_ReturnK` threaded across module boundaries)
 - [x] Constructor atom mangling (prefix with module name to avoid cross-module collisions)

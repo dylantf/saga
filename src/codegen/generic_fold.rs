@@ -1016,9 +1016,7 @@ fn bind_subpats(subpats: &[Pat], cargs: &[&Expr], body: &Expr) -> Expr {
     for (subpat, carg) in subpats.iter().zip(cargs).rev() {
         match subpat {
             Pat::Wildcard { .. } if is_duplicable(carg) => {}
-            Pat::Var { name, .. } if is_duplicable(carg) => {
-                substitute_var(&mut result, name, carg)
-            }
+            Pat::Var { name, .. } if is_duplicable(carg) => substitute_var(&mut result, name, carg),
             _ => {
                 let mut scrut = (*carg).clone();
                 freshen_expr_ids(&mut scrut);
@@ -1265,15 +1263,11 @@ fn pat_binds(pat: &Pat, name: &str) -> bool {
         // aliased field (`{ code: c }`) binds the alias pattern's vars.
         Pat::Record {
             fields, as_name, ..
-        } => {
-            as_name.as_deref() == Some(name) || record_fields_bind(fields, name)
-        }
+        } => as_name.as_deref() == Some(name) || record_fields_bind(fields, name),
         Pat::AnonRecord { fields, .. } => record_fields_bind(fields, name),
         Pat::StringPrefix { rest, .. } => pat_binds(rest, name),
         Pat::ConsPat { head, tail, .. } => pat_binds(head, name) || pat_binds(tail, name),
-        Pat::BitStringPat { segments, .. } => {
-            segments.iter().any(|s| pat_binds(&s.value, name))
-        }
+        Pat::BitStringPat { segments, .. } => segments.iter().any(|s| pat_binds(&s.value, name)),
     }
 }
 
@@ -1438,8 +1432,10 @@ fn case_of_case(expr: &Expr) -> Option<Expr> {
             let arm = &ann.node;
             // Duplicate `outer` into this arm (fresh ids per copy), wrapping the
             // inner arm body as the new scrutinee.
-            let outer_copy: Vec<Annotated<CaseArm>> =
-                outer_arms.iter().map(|a| clone_fresh_arm(&a.node)).collect();
+            let outer_copy: Vec<Annotated<CaseArm>> = outer_arms
+                .iter()
+                .map(|a| clone_fresh_arm(&a.node))
+                .collect();
             let wrapped = Expr::synth(
                 arm.body.span,
                 ExprKind::Case {
@@ -1953,4 +1949,3 @@ fn push_handler_arm_child_exprs<'e>(arm: &'e mut HandlerArm, out: &mut Vec<&'e m
         out.push(fb);
     }
 }
-

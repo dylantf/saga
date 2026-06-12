@@ -86,8 +86,9 @@ This pass:
 - Maps exposed import aliases to their origin identities, e.g.
   `import Math (add as plus)` makes the user-visible `plus` resolve to
   canonical `Math.add`
-- Collects function re-exports from `pub` import items, preserving the
-  origin identity so `import Facade (plus)` can still call `Math.add`
+- Collects function, type, trait, effect, and handler re-exports from `pub` import items,
+  preserving origin identities so facades do not create duplicate semantic
+  definitions
 
 Important detail:
 

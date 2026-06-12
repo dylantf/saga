@@ -3249,10 +3249,7 @@ fn import_with_public_items_and_public_dotdot() {
     let prog = parse("import Foo (pub ..)");
     match &prog[0] {
         Decl::Import { exposing, .. } => {
-            assert!(matches!(
-                exposing,
-                Some(Exposing::All { public: true, .. })
-            ));
+            assert!(matches!(exposing, Some(Exposing::All { public: true, .. })));
         }
         other => panic!("expected Decl::Import, got {:?}", other),
     }

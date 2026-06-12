@@ -2,8 +2,8 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use super::{
-    Checker, Diagnostic, EffectDefInfo, HandlerInfo, ImplInfo, RecordInfo, Scheme, ScopeMap,
-    TraitInfo, Type, TypeAliasInfo,
+    Checker, Diagnostic, EffectDefInfo, HandlerInfo, ImplInfo, RecordInfo, Scheme, TraitInfo, Type,
+    TypeAliasInfo,
 };
 use crate::token::Span;
 
@@ -20,16 +20,24 @@ pub struct ModuleExports {
     pub binding_origins: HashMap<String, String>,
     /// Type name -> constructor names (empty vec for opaque types).
     pub type_constructors: HashMap<String, Vec<String>>,
+    /// Public type surface name -> canonical origin type name.
+    pub type_origins: HashMap<String, String>,
     /// Record name -> record info (type params + field types).
     pub record_defs: HashMap<String, RecordInfo>,
     /// Trait name -> trait info.
     pub traits: HashMap<String, TraitInfo>,
+    /// Public trait surface name -> canonical origin trait name.
+    pub trait_origins: HashMap<String, String>,
     /// (trait_name, trait_type_args, target_type) -> impl info.
     pub trait_impls: HashMap<(String, Vec<String>, String), ImplInfo>,
     /// Effect name -> effect def info.
     pub effects: HashMap<String, EffectDefInfo>,
+    /// Public effect surface name -> canonical origin effect name.
+    pub effect_origins: HashMap<String, String>,
     /// Handler name -> handler info.
     pub handlers: HashMap<String, HandlerInfo>,
+    /// Public handler surface name -> canonical origin handler name.
+    pub handler_origins: HashMap<String, String>,
     /// Type name -> declared parameter count (for arity checking across modules).
     pub type_arity: HashMap<String, usize>,
     /// Type name -> declared kinds of each type parameter (for kind checking
@@ -62,19 +70,15 @@ impl ModuleExports {
         for name in &pub_names {
             if let Some(scheme) = checker.env.get(name) {
                 bindings.push((name.to_string(), scheme.clone()));
-                binding_origins.insert(
-                    name.to_string(),
-                    canonical_export_name(module_prefix, name),
-                );
+                binding_origins
+                    .insert(name.to_string(), canonical_export_name(module_prefix, name));
                 if let Some(did) = checker.env.def_id(name) {
                     def_ids.insert(name.to_string(), did);
                 }
             } else if let Some(scheme) = checker.constructors.get(name) {
                 bindings.push((name.to_string(), scheme.clone()));
-                binding_origins.insert(
-                    name.to_string(),
-                    canonical_export_name(module_prefix, name),
-                );
+                binding_origins
+                    .insert(name.to_string(), canonical_export_name(module_prefix, name));
                 if let Some(&did) = checker.lsp.constructor_def_ids.get(name) {
                     def_ids.insert(name.to_string(), did);
                 }
@@ -83,6 +87,7 @@ impl ModuleExports {
 
         // Type constructors
         let mut type_constructors: HashMap<String, Vec<String>> = HashMap::new();
+        let mut type_origins: HashMap<String, String> = HashMap::new();
         for decl in program {
             match decl {
                 Decl::TypeDef {
@@ -92,6 +97,7 @@ impl ModuleExports {
                     variants,
                     ..
                 } => {
+                    type_origins.insert(name.clone(), canonical_export_name(module_prefix, name));
                     if *opaque {
                         type_constructors.insert(name.clone(), vec![]);
                     } else {
@@ -103,6 +109,7 @@ impl ModuleExports {
                 Decl::RecordDef {
                     public: true, name, ..
                 } => {
+                    type_origins.insert(name.clone(), canonical_export_name(module_prefix, name));
                     type_constructors.insert(name.clone(), vec![name.clone()]);
                 }
                 _ => {}
@@ -112,9 +119,12 @@ impl ModuleExports {
         // Records, traits, trait impls, effects, handlers: all from AST + checker state
         let mut record_defs: HashMap<String, RecordInfo> = HashMap::new();
         let mut traits: HashMap<String, TraitInfo> = HashMap::new();
+        let mut trait_origins: HashMap<String, String> = HashMap::new();
         let mut trait_impls: HashMap<(String, Vec<String>, String), ImplInfo> = HashMap::new();
         let mut effects: HashMap<String, EffectDefInfo> = HashMap::new();
+        let mut effect_origins: HashMap<String, String> = HashMap::new();
         let mut handlers: HashMap<String, HandlerInfo> = HashMap::new();
+        let mut handler_origins: HashMap<String, String> = HashMap::new();
 
         for decl in program {
             match decl {
@@ -142,6 +152,7 @@ impl ModuleExports {
                         .unwrap_or_else(|| name.clone());
                     if let Some(info) = checker.trait_state.traits.get(&canonical) {
                         traits.insert(name.clone(), info.clone());
+                        trait_origins.insert(name.clone(), canonical);
                     }
                 }
                 Decl::ImplDef {
@@ -176,6 +187,7 @@ impl ModuleExports {
                         .unwrap_or_else(|| name.clone());
                     if let Some(info) = checker.effects.get(&canonical) {
                         effects.insert(name.clone(), info.clone());
+                        effect_origins.insert(name.clone(), canonical);
                     }
                 }
                 Decl::HandlerDef {
@@ -188,6 +200,7 @@ impl ModuleExports {
                         .unwrap_or_else(|| name.clone());
                     if let Some(info) = checker.handlers.get(&canonical) {
                         handlers.insert(name.clone(), info.clone());
+                        handler_origins.insert(name.clone(), canonical);
                     }
                 }
                 _ => {}
@@ -232,6 +245,7 @@ impl ModuleExports {
                     format!("{}.{}", module_prefix, name)
                 };
                 if let Some(info) = checker.type_aliases.get(&canonical) {
+                    type_origins.insert(name.clone(), canonical.clone());
                     type_aliases_out.insert(name.clone(), info.clone());
                     // Also pick up arity/kinds so importer arity/kind-checks
                     // work. The kinds map is filled below from
@@ -332,6 +346,32 @@ impl ModuleExports {
             &mut def_ids,
             &mut doc_comments,
         );
+        collect_type_and_trait_reexports(
+            program,
+            checker,
+            &mut bindings,
+            &mut binding_origins,
+            &mut def_ids,
+            &mut type_constructors,
+            &mut type_origins,
+            &mut record_defs,
+            &mut traits,
+            &mut trait_origins,
+            &mut trait_impls,
+            &mut type_arity,
+            &mut type_param_kinds,
+            &mut type_aliases_out,
+            &mut doc_comments,
+        );
+        collect_effect_and_handler_reexports(
+            program,
+            checker,
+            &mut effects,
+            &mut effect_origins,
+            &mut handlers,
+            &mut handler_origins,
+            &mut doc_comments,
+        );
 
         let effectful_funs = collect_effectful_reexports(program, checker, effectful_funs);
 
@@ -339,11 +379,15 @@ impl ModuleExports {
             bindings,
             binding_origins,
             type_constructors,
+            type_origins,
             record_defs,
             traits,
+            trait_origins,
             trait_impls,
             effects,
+            effect_origins,
             handlers,
+            handler_origins,
             type_arity,
             type_param_kinds,
             type_aliases: type_aliases_out,
@@ -392,7 +436,10 @@ fn collect_value_reexports(
         };
         let origin_name = item.name.as_str();
         let surface = item.surface_name();
-        let Some((_, scheme)) = exports.bindings.iter().find(|(name, _)| name == origin_name)
+        let Some((_, scheme)) = exports
+            .bindings
+            .iter()
+            .find(|(name, _)| name == origin_name)
         else {
             continue;
         };
@@ -413,6 +460,168 @@ fn collect_value_reexports(
             doc_comments
                 .entry(surface.to_string())
                 .or_insert_with(|| doc.clone());
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn collect_type_and_trait_reexports(
+    program: &[crate::ast::Decl],
+    checker: &Checker,
+    bindings: &mut Vec<(String, Scheme)>,
+    binding_origins: &mut HashMap<String, String>,
+    def_ids: &mut HashMap<String, crate::ast::NodeId>,
+    type_constructors: &mut HashMap<String, Vec<String>>,
+    type_origins: &mut HashMap<String, String>,
+    record_defs: &mut HashMap<String, RecordInfo>,
+    traits: &mut HashMap<String, TraitInfo>,
+    trait_origins: &mut HashMap<String, String>,
+    trait_impls: &mut HashMap<(String, Vec<String>, String), ImplInfo>,
+    type_arity: &mut HashMap<String, usize>,
+    type_param_kinds: &mut HashMap<String, Vec<crate::ast::Kind>>,
+    type_aliases: &mut HashMap<String, TypeAliasInfo>,
+    doc_comments: &mut HashMap<String, Vec<String>>,
+) {
+    for (module_name, item) in public_import_items(program, checker) {
+        let Some(exports) = checker.modules.exports.get(&module_name) else {
+            continue;
+        };
+        let origin_name = item.name.as_str();
+        let surface = item.surface_name();
+
+        if let Some(&arity) = exports.type_arity.get(origin_name)
+            && !type_arity.contains_key(surface)
+        {
+            type_arity.insert(surface.to_string(), arity);
+            let origin = exports
+                .type_origins
+                .get(origin_name)
+                .cloned()
+                .unwrap_or_else(|| format!("{}.{}", module_name, origin_name));
+            type_origins.insert(surface.to_string(), origin);
+            if let Some(kinds) = exports.type_param_kinds.get(origin_name) {
+                type_param_kinds.insert(surface.to_string(), kinds.clone());
+            }
+            if let Some(info) = exports.type_aliases.get(origin_name) {
+                type_aliases.insert(surface.to_string(), info.clone());
+            }
+            if let Some(info) = exports.record_defs.get(origin_name) {
+                record_defs.insert(surface.to_string(), info.clone());
+            }
+            if let Some(ctors) = exports.type_constructors.get(origin_name) {
+                let surfaced_ctors: Vec<String> = ctors
+                    .iter()
+                    .map(|ctor| {
+                        if ctor == origin_name {
+                            surface.to_string()
+                        } else {
+                            ctor.clone()
+                        }
+                    })
+                    .collect();
+                type_constructors.insert(surface.to_string(), surfaced_ctors);
+                for ctor in ctors {
+                    let ctor_surface = if ctor == origin_name { surface } else { ctor };
+                    if bindings.iter().any(|(name, _)| name == ctor_surface) {
+                        continue;
+                    }
+                    if let Some((_, scheme)) =
+                        exports.bindings.iter().find(|(name, _)| name == ctor)
+                    {
+                        bindings.push((ctor_surface.to_string(), scheme.clone()));
+                        let origin = exports
+                            .binding_origins
+                            .get(ctor)
+                            .cloned()
+                            .unwrap_or_else(|| format!("{}.{}", module_name, ctor));
+                        binding_origins.insert(ctor_surface.to_string(), origin);
+                        if let Some(&did) = exports.def_ids.get(ctor) {
+                            def_ids.insert(ctor_surface.to_string(), did);
+                        }
+                    }
+                }
+            }
+            if let Some(doc) = exports.doc_comments.get(origin_name) {
+                doc_comments
+                    .entry(surface.to_string())
+                    .or_insert_with(|| doc.clone());
+            }
+        }
+
+        if let Some(info) = exports.traits.get(origin_name)
+            && !traits.contains_key(surface)
+        {
+            traits.insert(surface.to_string(), info.clone());
+            let origin = exports
+                .trait_origins
+                .get(origin_name)
+                .cloned()
+                .unwrap_or_else(|| format!("{}.{}", module_name, origin_name));
+            trait_origins.insert(surface.to_string(), origin.clone());
+            for (key, impl_info) in &exports.trait_impls {
+                if key.0 == origin {
+                    trait_impls
+                        .entry(key.clone())
+                        .or_insert_with(|| impl_info.clone());
+                }
+            }
+            if let Some(doc) = exports.doc_comments.get(origin_name) {
+                doc_comments
+                    .entry(surface.to_string())
+                    .or_insert_with(|| doc.clone());
+            }
+        }
+    }
+}
+
+fn collect_effect_and_handler_reexports(
+    program: &[crate::ast::Decl],
+    checker: &Checker,
+    effects: &mut HashMap<String, EffectDefInfo>,
+    effect_origins: &mut HashMap<String, String>,
+    handlers: &mut HashMap<String, HandlerInfo>,
+    handler_origins: &mut HashMap<String, String>,
+    doc_comments: &mut HashMap<String, Vec<String>>,
+) {
+    for (module_name, item) in public_import_items(program, checker) {
+        let Some(exports) = checker.modules.exports.get(&module_name) else {
+            continue;
+        };
+        let origin_name = item.name.as_str();
+        let surface = item.surface_name();
+
+        if let Some(info) = exports.effects.get(origin_name)
+            && !effects.contains_key(surface)
+        {
+            effects.insert(surface.to_string(), info.clone());
+            let origin = exports
+                .effect_origins
+                .get(origin_name)
+                .cloned()
+                .unwrap_or_else(|| format!("{}.{}", module_name, origin_name));
+            effect_origins.insert(surface.to_string(), origin);
+            if let Some(doc) = exports.doc_comments.get(origin_name) {
+                doc_comments
+                    .entry(surface.to_string())
+                    .or_insert_with(|| doc.clone());
+            }
+        }
+
+        if let Some(info) = exports.handlers.get(origin_name)
+            && !handlers.contains_key(surface)
+        {
+            handlers.insert(surface.to_string(), info.clone());
+            let origin = exports
+                .handler_origins
+                .get(origin_name)
+                .cloned()
+                .unwrap_or_else(|| format!("{}.{}", module_name, origin_name));
+            handler_origins.insert(surface.to_string(), origin);
+            if let Some(doc) = exports.doc_comments.get(origin_name) {
+                doc_comments
+                    .entry(surface.to_string())
+                    .or_insert_with(|| doc.clone());
+            }
         }
     }
 }
@@ -508,12 +717,16 @@ pub struct ModuleCodegenInfo {
     pub exports: Vec<(String, Scheme)>,
     /// Public binding surface name -> canonical origin name.
     pub export_origins: Vec<(String, String)>,
+    /// Public effect surface name -> canonical origin effect name.
+    pub effect_origins: Vec<(String, String)>,
     /// Public effect definitions.
     pub effect_defs: Vec<EffectDef>,
     /// Public record definitions: record name -> ordered field names.
     pub record_fields: Vec<(String, Vec<String>)>,
     /// Public handler names.
     pub handler_defs: Vec<String>,
+    /// Public handler surface name -> canonical origin handler name.
+    pub handler_origins: Vec<(String, String)>,
     /// Public function effect annotations: name -> sorted effect names.
     pub fun_effects: Vec<(String, Vec<String>)>,
     /// Public type constructors: type name -> [constructor names].
@@ -1181,6 +1394,20 @@ impl Checker {
                 .iter()
                 .map(|(n, s)| (n.as_str(), s))
                 .collect();
+            let binding_origin = |name: &str| -> String {
+                exports
+                    .binding_origins
+                    .get(name)
+                    .cloned()
+                    .unwrap_or_else(|| super::canonical_join(module_name, name))
+            };
+            let type_origin = |name: &str| -> String {
+                exports
+                    .type_origins
+                    .get(name)
+                    .cloned()
+                    .unwrap_or_else(|| super::canonical_join(module_name, name))
+            };
             let mut ctor_to_type: std::collections::HashMap<&str, &str> =
                 std::collections::HashMap::new();
             for (type_name, ctors) in &exports.type_constructors {
@@ -1195,14 +1422,14 @@ impl Checker {
                 let is_type = name.starts_with(|c: char| c.is_uppercase());
                 if is_type {
                     if let Some(fields) = exports.record_defs.get(name) {
-                        let record_canonical = format!("{}.{}", module_name, name);
+                        let record_canonical = type_origin(name);
                         self.records.insert(record_canonical, fields.clone());
                     }
                     if let Some(ctors) = exports.type_constructors.get(name) {
                         let mut variants = Vec::new();
                         for ctor in ctors {
                             if let Some(&scheme) = binding_map.get(ctor.as_str()) {
-                                let canonical_ctor = format!("{}.{}", module_name, ctor);
+                                let canonical_ctor = binding_origin(ctor);
                                 if let Some(&did) = exports.def_ids.get(ctor.as_str()) {
                                     self.lsp
                                         .constructor_def_ids
@@ -1267,11 +1494,15 @@ impl Checker {
             bindings,
             binding_origins,
             type_constructors,
+            type_origins,
             record_defs,
             traits,
+            trait_origins,
             trait_impls,
             effects,
+            effect_origins,
             handlers,
+            handler_origins,
             type_arity,
             type_param_kinds,
             type_aliases,
@@ -1286,7 +1517,10 @@ impl Checker {
         let binding_map: std::collections::HashMap<&str, &Scheme> =
             bindings.iter().map(|(n, s)| (n.as_str(), s)).collect();
         for (name, info) in traits {
-            let trait_canonical = super::canonical_join(module_name, name);
+            let trait_canonical = trait_origins
+                .get(name)
+                .cloned()
+                .unwrap_or_else(|| super::canonical_join(module_name, name));
             self.trait_state
                 .traits
                 .entry(trait_canonical.clone())
@@ -1328,15 +1562,19 @@ impl Checker {
         // self.effects (the bare form is needed for internal type checking —
         // the type system stores bare effect names in EffectRows). The
         // scope_map controls which names users can write in `needs` clauses.
-        let exposed_surface =
-            |item: &str| -> Option<&str> { exposing.and_then(|list| {
+        let exposed_surface = |item: &str| -> Option<&str> {
+            exposing.and_then(|list| {
                 list.iter()
                     .find(|e| e.name == item)
                     .map(|e| e.surface_name())
-            }) };
+            })
+        };
         for (name, info) in effects {
             // One canonical entry: Module.Effect (e.g. Std.Fail.Fail)
-            let canonical = format!("{}.{}", module_name, name);
+            let canonical = effect_origins
+                .get(name)
+                .cloned()
+                .unwrap_or_else(|| format!("{}.{}", module_name, name));
             self.effects
                 .entry(canonical)
                 .or_insert_with(|| info.clone());
@@ -1351,7 +1589,10 @@ impl Checker {
         // Handlers: canonical always, bare only when exposed.
         // Uses module_name (canonical) not prefix (alias), matching effects.
         for (name, info) in handlers {
-            let canonical = format!("{}.{}", module_name, name);
+            let canonical = handler_origins
+                .get(name)
+                .cloned()
+                .unwrap_or_else(|| format!("{}.{}", module_name, name));
             self.handlers
                 .entry(canonical)
                 .or_insert_with(|| info.clone());
@@ -1370,11 +1611,17 @@ impl Checker {
 
         // Type arities: register under canonical (module-qualified) name
         for (name, arity) in type_arity {
-            let canonical = format!("{}.{}", module_name, name);
+            let canonical = type_origins
+                .get(name)
+                .cloned()
+                .unwrap_or_else(|| format!("{}.{}", module_name, name));
             self.type_arity.entry(canonical).or_insert(*arity);
         }
         for (name, kinds) in type_param_kinds {
-            let canonical = format!("{}.{}", module_name, name);
+            let canonical = type_origins
+                .get(name)
+                .cloned()
+                .unwrap_or_else(|| format!("{}.{}", module_name, name));
             self.type_param_kinds
                 .entry(canonical)
                 .or_insert_with(|| kinds.clone());
@@ -1384,7 +1631,10 @@ impl Checker {
         // Body uses the source module's var IDs; that's fine because those
         // ids are only used as positional placeholders during substitution.
         for (name, info) in type_aliases {
-            let canonical = format!("{}.{}", module_name, name);
+            let canonical = type_origins
+                .get(name)
+                .cloned()
+                .unwrap_or_else(|| format!("{}.{}", module_name, name));
             self.type_aliases
                 .entry(canonical)
                 .or_insert_with(|| info.clone());
@@ -1393,7 +1643,10 @@ impl Checker {
         // Function effects (for cross-module `with` validation and effect propagation).
         // Only the canonical form is registered; scope_map resolves aliases/bare names.
         for name in effectful_funs {
-            let canonical = format!("{}.{}", module_name, name);
+            let canonical = binding_origins
+                .get(name)
+                .cloned()
+                .unwrap_or_else(|| format!("{}.{}", module_name, name));
             self.effect_meta.known_funs.insert(canonical);
         }
 
@@ -1433,7 +1686,10 @@ impl Checker {
         for (type_name, ctors) in type_constructors {
             let mut variants = Vec::new();
             for ctor in ctors {
-                let canonical = format!("{}.{}", module_name, ctor);
+                let canonical = binding_origins
+                    .get(ctor)
+                    .cloned()
+                    .unwrap_or_else(|| format!("{}.{}", module_name, ctor));
                 if let Some(&scheme) = binding_map.get(ctor.as_str()) {
                     self.constructors.insert(canonical.clone(), scheme.clone());
                     if let Some(&did) = def_ids.get(ctor.as_str()) {
@@ -1449,7 +1705,10 @@ impl Checker {
 
         // Record definitions (canonical key)
         for (rec_name, fields) in record_defs {
-            let canonical = format!("{}.{}", module_name, rec_name);
+            let canonical = type_origins
+                .get(rec_name)
+                .cloned()
+                .unwrap_or_else(|| format!("{}.{}", module_name, rec_name));
             self.records
                 .entry(canonical)
                 .or_insert_with(|| fields.clone());
@@ -1474,24 +1733,20 @@ impl Checker {
 /// given module's exports. Includes every public value binding, type and
 /// record name (with their constructors flowing through the existing types
 /// branch in `resolve_import`), trait, effect, and handler.
-fn synthesize_all_exposed(
-    exports: &ModuleExports,
-    public: bool,
-) -> Vec<crate::ast::ExposedItem> {
+fn synthesize_all_exposed(exports: &ModuleExports, public: bool) -> Vec<crate::ast::ExposedItem> {
     let mut items: Vec<crate::ast::ExposedItem> = Vec::new();
     let mut seen: HashSet<String> = HashSet::new();
-    let push = |name: &str,
-                items: &mut Vec<crate::ast::ExposedItem>,
-                seen: &mut HashSet<String>| {
-        if seen.insert(name.to_string()) {
-            items.push(crate::ast::ExposedItem {
-                name: name.to_string(),
-                alias: None,
-                public,
-                span: Span { start: 0, end: 0 },
-            });
-        }
-    };
+    let push =
+        |name: &str, items: &mut Vec<crate::ast::ExposedItem>, seen: &mut HashSet<String>| {
+            if seen.insert(name.to_string()) {
+                items.push(crate::ast::ExposedItem {
+                    name: name.to_string(),
+                    alias: None,
+                    public,
+                    span: Span { start: 0, end: 0 },
+                });
+            }
+        };
 
     // Bindings (values + bare constructors that live in the values namespace)
     for (name, _) in &exports.bindings {
@@ -1537,6 +1792,34 @@ pub(super) fn resolve_import(
             .cloned()
             .unwrap_or_else(|| super::canonical_join(module_name, name))
     };
+    let type_origin = |name: &str| -> String {
+        exports
+            .type_origins
+            .get(name)
+            .cloned()
+            .unwrap_or_else(|| super::canonical_join(module_name, name))
+    };
+    let trait_origin = |name: &str| -> String {
+        exports
+            .trait_origins
+            .get(name)
+            .cloned()
+            .unwrap_or_else(|| super::canonical_join(module_name, name))
+    };
+    let effect_origin = |name: &str| -> String {
+        exports
+            .effect_origins
+            .get(name)
+            .cloned()
+            .unwrap_or_else(|| super::canonical_join(module_name, name))
+    };
+    let handler_origin = |name: &str| -> String {
+        exports
+            .handler_origins
+            .get(name)
+            .cloned()
+            .unwrap_or_else(|| super::canonical_join(module_name, name))
+    };
 
     // Build reverse map: constructor name -> type name
     let mut ctor_to_type: std::collections::HashMap<&str, &str> = std::collections::HashMap::new();
@@ -1551,10 +1834,24 @@ pub(super) fn resolve_import(
     // there is no exposing clause; an explicit exposing list adds bare
     // entries for the named traits below.
     for (trait_name, info) in &exports.traits {
-        ScopeMap::register_qualified(&mut scope.traits, module_name, prefix, trait_name);
-        let trait_canonical = super::canonical_join(module_name, trait_name);
+        let trait_canonical = trait_origin(trait_name);
+        scope
+            .traits
+            .entry(trait_canonical.clone())
+            .or_insert_with(|| trait_canonical.clone());
+        let module_qualified = super::canonical_join(module_name, trait_name);
+        scope
+            .traits
+            .entry(module_qualified.clone())
+            .or_insert_with(|| trait_canonical.clone());
         let alias_prefix =
             (prefix != module_name).then(|| super::canonical_join(prefix, trait_name));
+        if let Some(alias_trait) = &alias_prefix {
+            scope
+                .traits
+                .entry(alias_trait.clone())
+                .or_insert_with(|| trait_canonical.clone());
+        }
         // Trait method canonical names live in scope.values so qualified
         // (Module.Trait.method) lookups resolve regardless of exposing.
         for method in &info.methods {
@@ -1562,6 +1859,11 @@ pub(super) fn resolve_import(
             scope
                 .values
                 .entry(method_canonical.clone())
+                .or_insert_with(|| method_canonical.clone());
+            let module_method = super::canonical_join(&module_qualified, &method.name);
+            scope
+                .values
+                .entry(module_method)
                 .or_insert_with(|| method_canonical.clone());
             if let Some(prefix_canonical) = &alias_prefix {
                 let aliased = super::canonical_join(prefix_canonical, &method.name);
@@ -1582,12 +1884,38 @@ pub(super) fn resolve_import(
 
     // Effects: canonical + aliased qualified forms
     for effect_name in exports.effects.keys() {
-        ScopeMap::register_qualified(&mut scope.effects, module_name, prefix, effect_name);
+        let effect_canonical = effect_origin(effect_name);
+        scope
+            .effects
+            .entry(effect_canonical.clone())
+            .or_insert_with(|| effect_canonical.clone());
+        let qualified = super::canonical_join(module_name, effect_name);
+        scope
+            .effects
+            .entry(qualified)
+            .or_insert_with(|| effect_canonical.clone());
+        if prefix != module_name {
+            let aliased = super::canonical_join(prefix, effect_name);
+            scope.effects.entry(aliased).or_insert(effect_canonical);
+        }
     }
 
     // Handlers: canonical + aliased qualified forms
     for handler_name in exports.handlers.keys() {
-        ScopeMap::register_qualified(&mut scope.handlers, module_name, prefix, handler_name);
+        let handler_canonical = handler_origin(handler_name);
+        scope
+            .handlers
+            .entry(handler_canonical.clone())
+            .or_insert_with(|| handler_canonical.clone());
+        let qualified = super::canonical_join(module_name, handler_name);
+        scope
+            .handlers
+            .entry(qualified)
+            .or_insert_with(|| handler_canonical.clone());
+        if prefix != module_name {
+            let aliased = super::canonical_join(prefix, handler_name);
+            scope.handlers.entry(aliased).or_insert(handler_canonical);
+        }
     }
 
     // Value bindings: canonical + aliased
@@ -1598,7 +1926,10 @@ pub(super) fn resolve_import(
             .entry(canonical.clone())
             .or_insert_with(|| canonical.clone());
         let qualified = super::canonical_join(module_name, name);
-        scope.values.entry(qualified).or_insert_with(|| canonical.clone());
+        scope
+            .values
+            .entry(qualified)
+            .or_insert_with(|| canonical.clone());
         if prefix != module_name {
             let aliased = super::canonical_join(prefix, name);
             scope.values.entry(aliased).or_insert(canonical);
@@ -1609,7 +1940,20 @@ pub(super) fn resolve_import(
     for ctors in exports.type_constructors.values() {
         for ctor in ctors {
             if binding_map.contains_key(ctor.as_str()) {
-                ScopeMap::register_qualified(&mut scope.constructors, module_name, prefix, ctor);
+                let canonical = binding_origin(ctor);
+                scope
+                    .constructors
+                    .entry(canonical.clone())
+                    .or_insert_with(|| canonical.clone());
+                let qualified = super::canonical_join(module_name, ctor);
+                scope
+                    .constructors
+                    .entry(qualified)
+                    .or_insert_with(|| canonical.clone());
+                if prefix != module_name {
+                    let aliased = super::canonical_join(prefix, ctor);
+                    scope.constructors.entry(aliased).or_insert(canonical);
+                }
             }
         }
     }
@@ -1619,9 +1963,24 @@ pub(super) fn resolve_import(
     // (i.e. `import Foo` makes all types available, but `import Foo (Bar)`
     // only makes `Bar` available as a bare name).
     for name in exports.type_arity.keys() {
-        ScopeMap::register_qualified(&mut scope.types, module_name, prefix, name);
+        let type_canonical = type_origin(name);
+        scope
+            .types
+            .entry(type_canonical.clone())
+            .or_insert_with(|| type_canonical.clone());
+        let qualified = super::canonical_join(module_name, name);
+        scope
+            .types
+            .entry(qualified)
+            .or_insert_with(|| type_canonical.clone());
+        if prefix != module_name {
+            let aliased = super::canonical_join(prefix, name);
+            scope
+                .types
+                .entry(aliased)
+                .or_insert_with(|| type_canonical.clone());
+        }
         if exposing.is_none() {
-            let type_canonical = format!("{}.{}", module_name, name);
             scope
                 .types
                 .entry(name.clone())
@@ -1646,7 +2005,7 @@ pub(super) fn resolve_import(
                         .or_insert(type_canonical);
                 }
                 // Bare type name resolves to canonical
-                let type_canonical = format!("{}.{}", module_name, name);
+                let type_canonical = type_origin(name);
                 scope
                     .types
                     .entry(surface.to_string())
@@ -1663,7 +2022,7 @@ pub(super) fn resolve_import(
                     found = true;
                     for ctor in ctors {
                         if binding_map.contains_key(ctor.as_str()) {
-                            let ctor_canonical = format!("{}.{}", module_name, ctor);
+                            let ctor_canonical = binding_origin(ctor);
                             scope
                                 .constructors
                                 .entry(ctor.clone())
@@ -1673,9 +2032,7 @@ pub(super) fn resolve_import(
                     }
                 }
                 // Exposed constructor-as-name
-                if ctor_to_type.contains_key(name)
-                    && binding_map.contains_key(name)
-                {
+                if ctor_to_type.contains_key(name) && binding_map.contains_key(name) {
                     let ctor_canonical = binding_origin(name);
                     scope
                         .constructors
@@ -1689,7 +2046,7 @@ pub(super) fn resolve_import(
                 }
                 // Effects can be exposed by name
                 if let Some(info) = exports.effects.get(name) {
-                    let effect_canonical = format!("{}.{}", module_name, name);
+                    let effect_canonical = effect_origin(name);
                     scope
                         .effects
                         .entry(surface.to_string())
@@ -1702,7 +2059,7 @@ pub(super) fn resolve_import(
                 }
                 // Traits can be exposed by name
                 if let Some(info) = exports.traits.get(name) {
-                    let trait_canonical = super::canonical_join(module_name, name);
+                    let trait_canonical = trait_origin(name);
                     scope
                         .traits
                         .entry(surface.to_string())
@@ -1734,13 +2091,10 @@ pub(super) fn resolve_import(
                     return Err(format!("'{}' is not exported by module '{}'", name, prefix));
                 }
                 if binding_map.contains_key(name) {
-                    scope
-                        .values
-                        .entry(surface.to_string())
-                        .or_insert(canonical);
+                    scope.values.entry(surface.to_string()).or_insert(canonical);
                 }
                 if is_handler {
-                    let handler_canonical = format!("{}.{}", module_name, name);
+                    let handler_canonical = handler_origin(name);
                     scope
                         .handlers
                         .entry(surface.to_string())
@@ -2086,9 +2440,19 @@ fn collect_codegen_info(
             .iter()
             .map(|(surface, origin)| (surface.clone(), origin.clone()))
             .collect(),
+        effect_origins: exports
+            .effect_origins
+            .iter()
+            .map(|(surface, origin)| (surface.clone(), origin.clone()))
+            .collect(),
         effect_defs,
         record_fields,
         handler_defs,
+        handler_origins: exports
+            .handler_origins
+            .iter()
+            .map(|(surface, origin)| (surface.clone(), origin.clone()))
+            .collect(),
         fun_effects,
         type_constructors: exports.type_constructors.clone().into_iter().collect(),
         trait_impl_dicts,

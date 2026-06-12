@@ -111,18 +111,28 @@ pub fn build_constructor_atoms(
 
         for (type_name, ctors) in &info.type_constructors {
             for ctor in ctors {
+                let ctor_erlang_name = info
+                    .export_origins
+                    .iter()
+                    .find(|(surface, _)| surface == ctor)
+                    .and_then(|(_, origin)| origin.rsplit_once('.').map(|(module, _)| module))
+                    .map(|module| {
+                        let path: Vec<String> = module.split('.').map(String::from).collect();
+                        module_name_to_erlang(&path)
+                    })
+                    .unwrap_or_else(|| erlang_name.clone());
                 // Register bare name (e.g. "NotFound") if not already taken by a local def
                 if !atoms.contains_key(ctor) {
                     if let Some(atom) = beam_override(ctor) {
                         atoms.insert(ctor.clone(), atom.to_string());
                     } else {
-                        atoms.insert(ctor.clone(), format!("{}_{}", erlang_name, ctor));
+                        atoms.insert(ctor.clone(), format!("{}_{}", ctor_erlang_name, ctor));
                     }
                 }
                 // Register qualified forms for disambiguation:
                 // "Std.File.NotFound" and "File.NotFound"
                 if beam_override(ctor).is_none() {
-                    let mangled = format!("{}_{}", erlang_name, ctor);
+                    let mangled = format!("{}_{}", ctor_erlang_name, ctor);
                     atoms.insert(format!("{}.{}", mod_name, ctor), mangled.clone());
                     // Also register alias-qualified: "File.NotFound"
                     if !alias.is_empty() {
