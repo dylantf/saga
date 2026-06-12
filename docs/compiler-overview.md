@@ -61,6 +61,9 @@ resolution keyed by source identity, then typecheck against that.”
 For the typechecker pipeline in more detail, including rough pass counts, see
 `docs/typechecking.md`.
 
+For module loading, import surfaces, re-exports, and cyclic-import SCC handling,
+see `docs/module-system.md`.
+
 For the resolver architecture specifically, see `docs/name-resolution.md`.
 
 Key outputs:

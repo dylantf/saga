@@ -80,7 +80,9 @@ Implemented by `process_imports` in `src/typechecker/check_decl.rs`, which calls
 This pass:
 
 - Resolves each import
-- Loads, parses, derives, desugars, and typechecks imported modules on demand
+- Loads, parses, derives, desugars, and typechecks acyclic imported modules on demand
+- Detects cyclic import SCCs and resolves sibling imports through pre-inference
+  `ModuleHeader`s before typechecking bodies
 - Caches module exports and codegen metadata
 - Merges imported names into the current checker state
 - Maps exposed import aliases to their origin identities, e.g.
@@ -92,8 +94,14 @@ This pass:
 
 Important detail:
 
-- Imported modules recursively run the same typechecking pipeline
+- Acyclic imported modules recursively run the same typechecking pipeline
+- Cyclic sibling modules share only the header-supported surface across the
+  cycle: types, constructors, records, grounded re-exports, and explicitly
+  annotated functions that do not carry trait/effect/handler requirements
 - A cached prelude snapshot is reused so imports do not repeatedly rebuild the prelude
+
+For the full module-system rules and cyclic-boundary limitations, see
+`docs/module-system.md`.
 
 ### 3. Name Resolution
 
