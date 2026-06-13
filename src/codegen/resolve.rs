@@ -585,7 +585,14 @@ fn resolve_decl(
                 scope.pop();
             }
         }
-        Decl::DictConstructor { methods, .. } => {
+        Decl::DictConstructor {
+            super_dicts,
+            methods,
+            ..
+        } => {
+            for super_dict in super_dicts {
+                resolve_expr(super_dict, scope, map, front_resolution);
+            }
             for method in methods {
                 resolve_expr(method, scope, map, front_resolution);
             }
@@ -870,7 +877,7 @@ fn resolve_expr(
         ExprKind::HandlerExpr { body } => {
             resolve_handler_body_names(body, scope, map, front_resolution);
         }
-        ExprKind::DictMethodAccess { dict, .. } => {
+        ExprKind::DictMethodAccess { dict, .. } | ExprKind::DictSuperAccess { dict, .. } => {
             resolve_expr(dict, scope, map, front_resolution);
         }
         ExprKind::DictRef { name, .. } => {

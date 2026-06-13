@@ -18,6 +18,7 @@ pub mod util;
 use crate::ast::{self, Expr, ExprKind, HandlerArm, Lit, NodeId, Pat, Stmt};
 use crate::codegen::cerl::{CExpr, CLit};
 use crate::codegen::runtime_shape::CpsShape;
+use crate::typechecker::TraitInfo;
 use std::collections::HashMap;
 
 use errors::{ErrorInfo, ErrorKind, SourceInfo};
@@ -849,11 +850,27 @@ impl<'a> Lowerer<'a> {
     /// parameters (e.g. `fun default : a`). Such methods are stored in the dict
     /// as zero-arity thunks and must be applied when accessed.
     pub(super) fn trait_method_is_nullary(&self, trait_name: &str, method_index: usize) -> bool {
-        self.check_result
-            .traits
-            .get(trait_name)
+        self.trait_info(trait_name)
             .and_then(|info| info.methods.get(method_index))
             .is_some_and(|m| m.param_types.is_empty())
+    }
+
+    pub(super) fn trait_method_tuple_index(&self, trait_name: &str, method_index: usize) -> usize {
+        self.trait_info(trait_name)
+            .map(|info| info.supertraits.len() + method_index)
+            .unwrap_or(method_index)
+    }
+
+    pub(super) fn trait_info(&self, trait_name: &str) -> Option<&TraitInfo> {
+        if let Some(info) = self.check_result.traits.get(trait_name) {
+            return Some(info);
+        }
+
+        let mut matches = self.check_result.traits.iter().filter_map(|(name, info)| {
+            (name.rsplit('.').next() == Some(trait_name)).then_some(info)
+        });
+        let info = matches.next()?;
+        matches.next().is_none().then_some(info)
     }
 
     /// Get a function's effects.

@@ -1,13 +1,17 @@
 #@ Optional values: a type-safe alternative to null.
 module Std.Maybe
 
-import Std.Base (Show, Debug, Ord, Semigroup, Enum)
+import Std.Base (Show, Debug, Ord, Semigroup, Default, Enum)
 
 impl Debug for Maybe a where {a: Debug} {
   debug m = case m {
     Nothing -> "Nothing"
     Just x -> "Just(" <> debug x <> ")"
   }
+}
+
+impl Default for Maybe a {
+  default = Nothing
 }
 
 #@ A value that is either present (Just) or absent (Nothing).

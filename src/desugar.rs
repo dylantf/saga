@@ -324,6 +324,7 @@ fn desugar_expr(expr: &mut Expr) {
         | ExprKind::Constructor { .. }
         | ExprKind::QualifiedName { .. }
         | ExprKind::DictMethodAccess { .. }
+        | ExprKind::DictSuperAccess { .. }
         | ExprKind::DictRef { .. }
         | ExprKind::ForeignCall { .. }
         | ExprKind::SymbolIntrinsic { .. } => {}
@@ -679,6 +680,7 @@ pub fn freshen_expr_ids(expr: &mut Expr) {
         | ExprKind::Constructor { .. }
         | ExprKind::QualifiedName { .. }
         | ExprKind::DictMethodAccess { .. }
+        | ExprKind::DictSuperAccess { .. }
         | ExprKind::DictRef { .. }
         | ExprKind::SymbolIntrinsic { .. } => {}
 
@@ -983,6 +985,7 @@ pub fn retarget_expr_spans(expr: &mut Expr, target: Span) {
         | ExprKind::Constructor { .. }
         | ExprKind::QualifiedName { .. }
         | ExprKind::DictMethodAccess { .. }
+        | ExprKind::DictSuperAccess { .. }
         | ExprKind::DictRef { .. }
         | ExprKind::SymbolIntrinsic { .. } => {}
 

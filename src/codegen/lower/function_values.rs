@@ -93,7 +93,7 @@ impl<'a> Lowerer<'a> {
         else {
             return None;
         };
-        let info = self.check_result.traits.get(trait_name)?;
+        let info = self.trait_info(trait_name)?;
         let method = info.methods.get(*method_index)?;
         let effects = self.canonicalize_effects(method.effect_sig.effects.clone());
         let is_open_row = method.effect_sig.is_open_row;

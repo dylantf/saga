@@ -339,7 +339,7 @@ impl<'a> Lowerer<'a> {
                     self.static_helper_expr_contains_covered_effect(expr, stack)
                 }
             }),
-            ExprKind::DictMethodAccess { dict, .. } => {
+            ExprKind::DictMethodAccess { dict, .. } | ExprKind::DictSuperAccess { dict, .. } => {
                 self.static_helper_expr_contains_covered_effect(dict, stack)
             }
             ExprKind::ForeignCall { args, .. } => args
@@ -457,7 +457,7 @@ impl<'a> Lowerer<'a> {
                 ast::StringPart::Lit(_) => true,
                 ast::StringPart::Expr(expr) => self.static_helper_expr_supported(expr, stack),
             }),
-            ExprKind::DictMethodAccess { dict, .. } => {
+            ExprKind::DictMethodAccess { dict, .. } | ExprKind::DictSuperAccess { dict, .. } => {
                 self.static_helper_expr_supported(dict, stack)
             }
             ExprKind::ForeignCall { args, .. } => args
@@ -754,8 +754,14 @@ impl<'a> Lowerer<'a> {
                 }
                 Some(())
             }
-            ExprKind::DictMethodAccess { dict, .. } => self
-                .imported_static_helper_expr_used_static_ops(dict, source_module, stack, used_ops),
+            ExprKind::DictMethodAccess { dict, .. } | ExprKind::DictSuperAccess { dict, .. } => {
+                self.imported_static_helper_expr_used_static_ops(
+                    dict,
+                    source_module,
+                    stack,
+                    used_ops,
+                )
+            }
             ExprKind::ForeignCall { args, .. } => {
                 for arg in args {
                     self.imported_static_helper_expr_used_static_ops(
@@ -866,7 +872,7 @@ impl<'a> Lowerer<'a> {
                     Self::imported_static_helper_pure_expr_supported(expr)
                 }
             }),
-            ExprKind::DictMethodAccess { dict, .. } => {
+            ExprKind::DictMethodAccess { dict, .. } | ExprKind::DictSuperAccess { dict, .. } => {
                 Self::imported_static_helper_pure_expr_supported(dict)
             }
             ExprKind::ForeignCall { args, .. } => args
@@ -977,7 +983,7 @@ impl<'a> Lowerer<'a> {
                     self.imported_static_helper_expr_supported(expr, source_module, stack)
                 }
             }),
-            ExprKind::DictMethodAccess { dict, .. } => {
+            ExprKind::DictMethodAccess { dict, .. } | ExprKind::DictSuperAccess { dict, .. } => {
                 self.imported_static_helper_expr_supported(dict, source_module, stack)
             }
             ExprKind::ForeignCall { args, .. } => args

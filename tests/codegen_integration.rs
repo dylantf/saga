@@ -3932,6 +3932,44 @@ main () = {
     assert_runs_and_stdout_contains(src, &["145"]);
 }
 
+#[test]
+fn supertrait_bound_projects_parent_dictionary_e2e() {
+    let src = r#"
+trait Parent a {
+  fun parent : a -> Int
+}
+
+trait Child a where {a: Parent} {
+  fun child : a -> Int
+}
+
+impl Parent for Int {
+  parent x = x + 1
+}
+
+impl Child for Int {
+  child x = x + 10
+}
+
+type Box a = Box a
+
+impl Parent for Box a where {a: Parent} {
+  parent (Box x) = parent x + 100
+}
+
+impl Child for Box a where {a: Child} {
+  child (Box x) = child x + 1000
+}
+
+fun both : a -> Int where {a: Child}
+both x = parent x + child x
+
+main () = both (Box 2)
+"#;
+
+    assert_runs_and_stdout_contains(src, &["1115"]);
+}
+
 // Phase B sum-type FromJson bug repro lives in
 // `tests/e2e/tests/generic_fromjson_test.saga` — it needs `<>`
 // (Semigroup) and Std.Test, neither of which this harness links against.

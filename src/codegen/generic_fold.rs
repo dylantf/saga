@@ -1754,7 +1754,9 @@ fn child_exprs_mut(expr: &mut Expr) -> Vec<&mut Expr> {
         | ExprKind::DictRef { .. }
         | ExprKind::SymbolIntrinsic { .. } => {}
 
-        ExprKind::DictMethodAccess { dict, .. } => out.push(dict),
+        ExprKind::DictMethodAccess { dict, .. } | ExprKind::DictSuperAccess { dict, .. } => {
+            out.push(dict)
+        }
 
         ExprKind::App { func, arg } => {
             out.push(func);

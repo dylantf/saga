@@ -506,7 +506,14 @@ impl<'a> Populator<'a> {
                     self.pop_scope();
                 }
             }
-            Decl::DictConstructor { methods, .. } => {
+            Decl::DictConstructor {
+                super_dicts,
+                methods,
+                ..
+            } => {
+                for super_dict in super_dicts {
+                    self.walk_expr(super_dict);
+                }
                 for m in methods {
                     self.push_scope();
                     self.walk_expr(m);
@@ -847,7 +854,9 @@ impl<'a> Populator<'a> {
                     self.pop_scope();
                 }
             }
-            ExprKind::DictMethodAccess { dict, .. } => self.walk_expr(dict),
+            ExprKind::DictMethodAccess { dict, .. } | ExprKind::DictSuperAccess { dict, .. } => {
+                self.walk_expr(dict)
+            }
             ExprKind::ForeignCall { args, .. } => {
                 for a in args {
                     self.walk_expr(a);
@@ -1277,9 +1286,12 @@ impl<'a> Populator<'a> {
             check: &CheckResult,
             candidates: &[&str],
         ) -> Option<crate::typechecker::Type> {
-            candidates
-                .iter()
-                .find_map(|name| check.env.get(name).map(|scheme| check.sub.apply(&scheme.ty)))
+            candidates.iter().find_map(|name| {
+                check
+                    .env
+                    .get(name)
+                    .map(|scheme| check.sub.apply(&scheme.ty))
+            })
         }
 
         let ty = lookup_type(self.inputs.check_result, &candidates).or_else(|| {
@@ -1331,6 +1343,11 @@ fn head_debug_label(head: &Expr) -> String {
             method_index,
             ..
         } => format!("dict-method({trait_name}#{method_index})"),
+        ExprKind::DictSuperAccess {
+            trait_name,
+            supertrait_index,
+            ..
+        } => format!("dict-super({trait_name}#{supertrait_index})"),
         ExprKind::Lambda { params, .. } => format!("lambda/{}", params.len()),
         ExprKind::Constructor { name } => format!("ctor({name})"),
         ExprKind::DictRef { name } => format!("dict-ref({name})"),

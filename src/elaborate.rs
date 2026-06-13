@@ -444,9 +444,9 @@ impl Elaborator {
                 } => {
                     let canonical_trait = self.resolved_impl_trait_name(*id, trait_name);
                     let canonical_trait_type_args = self.resolved_trait_type_args(trait_type_args);
-                    let canonical_target_type = self.resolved_impl_target_type(*id, target_type);
+                    let canonical_target_base = self.resolved_impl_target_type(*id, target_type);
                     let canonical_target_type = crate::typechecker::arity_keyed_target_name(
-                        &canonical_target_type,
+                        &canonical_target_base,
                         type_params.len(),
                     );
                     let dict_name = self
@@ -471,6 +471,39 @@ impl Elaborator {
 
                     // Set up current dict params for elaborating method bodies
                     let saved = self.setup_dict_params(where_clause);
+
+                    let mut super_dicts = Vec::new();
+                    if let Some(ref info) = trait_info {
+                        let mut saved_param_names = Vec::new();
+                        let target_args: Vec<Type> = type_params
+                            .iter()
+                            .enumerate()
+                            .map(|(idx, param)| {
+                                let var_id = u32::MAX - idx as u32;
+                                saved_param_names.push((
+                                    var_id,
+                                    self.where_bound_var_names
+                                        .insert(var_id, param.name.clone()),
+                                ));
+                                Type::Var(var_id)
+                            })
+                            .collect();
+                        let target_ty = Type::Con(canonical_target_base.clone(), target_args);
+                        for supertrait in &info.supertraits {
+                            if let Some(super_dict) =
+                                self.dict_for_type(supertrait, &[], &target_ty, *span)
+                            {
+                                super_dicts.push(super_dict);
+                            }
+                        }
+                        for (var_id, previous) in saved_param_names {
+                            if let Some(previous) = previous {
+                                self.where_bound_var_names.insert(var_id, previous);
+                            } else {
+                                self.where_bound_var_names.remove(&var_id);
+                            }
+                        }
+                    }
 
                     // Order methods by trait declaration order
                     let mut ordered_methods = Vec::new();
@@ -532,6 +565,7 @@ impl Elaborator {
                         id: NodeId::fresh(),
                         name: dict_name,
                         dict_params,
+                        super_dicts,
                         methods: ordered_methods,
                         method_effects,
                         method_open_rows,
@@ -1477,6 +1511,7 @@ impl Elaborator {
 
             // Elaboration-only variants (shouldn't appear in input)
             ExprKind::DictMethodAccess { .. }
+            | ExprKind::DictSuperAccess { .. }
             | ExprKind::DictRef { .. }
             | ExprKind::SymbolIntrinsic { .. } => expr.clone(),
 
@@ -1758,13 +1793,9 @@ impl Elaborator {
                             // specific dict param name (handles multiple where-clause
                             // bounds for the same trait, e.g. `where {e: Show, a: Show}`).
                             if let Some(ref var_name) = ev.type_var_name {
-                                let bare = trait_name.rsplit('.').next().unwrap_or(trait_name);
-                                let param_name = format!("__dict_{}_{}", bare, var_name);
-                                Some(Expr::synth(span, ExprKind::Var { name: param_name }))
+                                self.dict_param_for_trait_var(trait_name, var_name, span)
                             } else {
-                                self.current_dict_params.get(trait_name).map(|name| {
-                                    Expr::synth(span, ExprKind::Var { name: name.clone() })
-                                })
+                                self.current_dict_param_or_supertrait(trait_name, span)
                             }
                         }
                     };
@@ -1775,12 +1806,103 @@ impl Elaborator {
         // No evidence at this node -- fall back to current function's dict param
         // (handles inferred constraints where the typechecker absorbed the constraint
         // into the function's scheme rather than recording node-level evidence).
-        if let Some(name) = self.current_dict_params.get(trait_name) {
-            return Some(Expr::synth(span, ExprKind::Var { name: name.clone() }));
+        if let Some(expr) = self.current_dict_param_or_supertrait(trait_name, span) {
+            return Some(expr);
         }
 
         // No matching evidence for this trait. Might be a built-in trait
         // (Num, Eq) that uses direct BEAM BIF dispatch rather than dictionary dispatch.
+        None
+    }
+
+    fn supertrait_index(&self, subtrait: &str, required_supertrait: &str) -> Option<usize> {
+        self.traits.get(subtrait).and_then(|info| {
+            info.supertraits
+                .iter()
+                .position(|supertrait| supertrait == required_supertrait)
+        })
+    }
+
+    fn project_supertrait_dict(
+        &self,
+        subtrait: &str,
+        required_supertrait: &str,
+        dict: Expr,
+        span: Span,
+    ) -> Option<Expr> {
+        self.supertrait_index(subtrait, required_supertrait)
+            .map(|supertrait_index| {
+                Expr::synth(
+                    span,
+                    ExprKind::DictSuperAccess {
+                        dict: Box::new(dict),
+                        trait_name: subtrait.to_string(),
+                        supertrait_index,
+                    },
+                )
+            })
+    }
+
+    fn dict_param_for_trait_var(
+        &self,
+        trait_name: &str,
+        var_name: &str,
+        span: Span,
+    ) -> Option<Expr> {
+        if let Some(param_name) = self
+            .current_dict_params_by_var
+            .get(&(trait_name.to_string(), var_name.to_string()))
+        {
+            return Some(Expr::synth(
+                span,
+                ExprKind::Var {
+                    name: param_name.clone(),
+                },
+            ));
+        }
+
+        for ((bound_trait, bound_var), param_name) in &self.current_dict_params_by_var {
+            if bound_var == var_name
+                && let Some(projected) = self.project_supertrait_dict(
+                    bound_trait,
+                    trait_name,
+                    Expr::synth(
+                        span,
+                        ExprKind::Var {
+                            name: param_name.clone(),
+                        },
+                    ),
+                    span,
+                )
+            {
+                return Some(projected);
+            }
+        }
+
+        None
+    }
+
+    fn current_dict_param_or_supertrait(&self, trait_name: &str, span: Span) -> Option<Expr> {
+        if let Some(name) = self.current_dict_params.get(trait_name) {
+            return Some(Expr::synth(span, ExprKind::Var { name: name.clone() }));
+        }
+
+        for (bound_trait, param_name) in &self.current_dict_params {
+            if let Some(projected) = self.project_supertrait_dict(
+                bound_trait,
+                trait_name,
+                Expr::synth(
+                    span,
+                    ExprKind::Var {
+                        name: param_name.clone(),
+                    },
+                ),
+                span,
+            ) {
+                return Some(projected);
+            }
+        }
+
         None
     }
 
@@ -1807,6 +1929,10 @@ impl Elaborator {
         ty: &Type,
         span: Span,
     ) -> Option<Expr> {
+        if matches!(trait_name, "Num" | "Eq") {
+            return Some(Expr::synth(span, ExprKind::Tuple { elements: vec![] }));
+        }
+
         match ty {
             Type::Con(name, args)
                 if name == crate::typechecker::canonicalize_type_name("Tuple")
@@ -1883,33 +2009,16 @@ impl Elaborator {
                 // through to the single-trait fallback and resolve to the
                 // last-inserted dict.
                 let var_key = format!("v{}", id);
-                if let Some(param_name) = self
-                    .current_dict_params_by_var
-                    .get(&(trait_name.into(), var_key))
-                {
-                    return Some(Expr::synth(
-                        span,
-                        ExprKind::Var {
-                            name: param_name.clone(),
-                        },
-                    ));
+                if let Some(expr) = self.dict_param_for_trait_var(trait_name, &var_key, span) {
+                    return Some(expr);
                 }
                 if let Some(src_name) = self.where_bound_var_names.get(id)
-                    && let Some(param_name) = self
-                        .current_dict_params_by_var
-                        .get(&(trait_name.into(), src_name.clone()))
+                    && let Some(expr) = self.dict_param_for_trait_var(trait_name, src_name, span)
                 {
-                    return Some(Expr::synth(
-                        span,
-                        ExprKind::Var {
-                            name: param_name.clone(),
-                        },
-                    ));
+                    return Some(expr);
                 }
                 // Fall back to single-trait lookup
-                self.current_dict_params
-                    .get(trait_name)
-                    .map(|name| Expr::synth(span, ExprKind::Var { name: name.clone() }))
+                self.current_dict_param_or_supertrait(trait_name, span)
             }
             Type::Symbol(name) => {
                 // KnownSymbol's "dict" is the symbol's source name as a String.

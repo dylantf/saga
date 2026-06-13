@@ -616,6 +616,7 @@ impl Checker {
             }
 
             ExprKind::DictMethodAccess { .. }
+            | ExprKind::DictSuperAccess { .. }
             | ExprKind::DictRef { .. }
             | ExprKind::ForeignCall { .. }
             | ExprKind::SymbolIntrinsic { .. } => {

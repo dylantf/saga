@@ -421,6 +421,22 @@ impl Normalizer {
                 )
             }
 
+            ExprKind::DictSuperAccess {
+                dict,
+                trait_name,
+                supertrait_index,
+            } => {
+                let new_dict = self.normalize_and_lift(dict, lifted);
+                Expr::rebuild_like(
+                    expr,
+                    ExprKind::DictSuperAccess {
+                        dict: Box::new(new_dict),
+                        trait_name: trait_name.clone(),
+                        supertrait_index: *supertrait_index,
+                    },
+                )
+            }
+
             ExprKind::ForeignCall { module, func, args } => {
                 let new_args = args
                     .iter()
@@ -695,7 +711,14 @@ mod tests {
                     walk(&method.node.body, ids);
                 }
             }
-            Decl::DictConstructor { methods, .. } => {
+            Decl::DictConstructor {
+                super_dicts,
+                methods,
+                ..
+            } => {
+                for super_dict in super_dicts {
+                    walk(super_dict, ids);
+                }
                 for method in methods {
                     walk(method, ids);
                 }
@@ -897,7 +920,9 @@ mod tests {
                     }
                 }
             }
-            ExprKind::DictMethodAccess { dict, .. } => walk(dict, ids),
+            ExprKind::DictMethodAccess { dict, .. } | ExprKind::DictSuperAccess { dict, .. } => {
+                walk(dict, ids)
+            }
             ExprKind::ForeignCall { args, .. } => {
                 for arg in args {
                     walk(arg, ids);

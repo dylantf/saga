@@ -226,7 +226,9 @@ fn visit_expr_for_arms(expr: &Expr, out: &mut HandlerAnalysis) {
                 visit_expr_for_arms(arg, out);
             }
         }
-        ExprKind::DictMethodAccess { dict, .. } => visit_expr_for_arms(dict, out),
+        ExprKind::DictMethodAccess { dict, .. } | ExprKind::DictSuperAccess { dict, .. } => {
+            visit_expr_for_arms(dict, out)
+        }
         ExprKind::Lit { .. }
         | ExprKind::Var { .. }
         | ExprKind::Constructor { .. }
@@ -467,7 +469,9 @@ fn walk_count(expr: &Expr, count: &mut usize) {
                 walk_count(arg, count);
             }
         }
-        ExprKind::DictMethodAccess { dict, .. } => walk_count(dict, count),
+        ExprKind::DictMethodAccess { dict, .. } | ExprKind::DictSuperAccess { dict, .. } => {
+            walk_count(dict, count)
+        }
         ExprKind::Lit { .. }
         | ExprKind::Var { .. }
         | ExprKind::Constructor { .. }

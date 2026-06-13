@@ -14,11 +14,12 @@ use super::{EvidenceCtx, FunInfo, GeneratedHelperVariant, HoistedDictMethod, Low
 type Clause<'a> = (&'a [Pat], &'a Option<Box<Expr>>, &'a Expr);
 
 /// Borrowed metadata for one `DictConstructor` decl, in the field order the
-/// dict-lowering and hoist planner consume: name, dict params, method bodies,
-/// per-method effects, per-method open-row flags, impl-level effects.
+/// dict-lowering and hoist planner consume: name, dict params, superclass dicts,
+/// method bodies, per-method effects, per-method open-row flags, impl-level effects.
 type DictCtorMeta<'a> = (
     &'a str,
     &'a [String],
+    &'a [Expr],
     &'a [Expr],
     &'a [Vec<String>],
     &'a [bool],
@@ -41,6 +42,11 @@ pub(super) fn lower_head_debug_label(head: &Expr) -> String {
             method_index,
             ..
         } => format!("dict-method({trait_name}#{method_index})"),
+        ExprKind::DictSuperAccess {
+            trait_name,
+            supertrait_index,
+            ..
+        } => format!("dict-super({trait_name}#{supertrait_index})"),
         ExprKind::Lambda { params, .. } => format!("lambda/{}", params.len()),
         ExprKind::Constructor { name } => format!("ctor({name})"),
         ExprKind::DictRef { name } => format!("dict-ref({name})"),
@@ -232,6 +238,7 @@ impl<'a> Lowerer<'a> {
                 Decl::DictConstructor {
                     name,
                     dict_params,
+                    super_dicts,
                     methods,
                     method_effects,
                     method_open_rows,
@@ -248,6 +255,7 @@ impl<'a> Lowerer<'a> {
                     dict_constructors.push((
                         name,
                         dict_params,
+                        super_dicts,
                         methods,
                         method_effects,
                         method_open_rows,
@@ -272,7 +280,7 @@ impl<'a> Lowerer<'a> {
         // impl has an effectful method.
         self.impl_effects_by_dict.clear();
         self.impl_method_effects_by_dict.clear();
-        for (name, _, methods, method_effects, _, impl_effects) in &dict_constructors {
+        for (name, _, _, methods, method_effects, _, impl_effects) in &dict_constructors {
             let impl_effects = self.canonicalize_effects(impl_effects.to_vec());
             self.impl_effects_by_dict
                 .insert((*name).to_string(), impl_effects.clone());
@@ -582,8 +590,15 @@ impl<'a> Lowerer<'a> {
         }
 
         // Emit dictionary constructor functions
-        for (name, dict_params, methods, method_effects, method_open_rows, impl_effects) in
-            dict_constructors
+        for (
+            name,
+            dict_params,
+            super_dicts,
+            methods,
+            method_effects,
+            method_open_rows,
+            impl_effects,
+        ) in dict_constructors
         {
             let arity = dict_params.len();
             let params: Vec<String> = dict_params.iter().map(|p| core_var(p)).collect();
@@ -592,7 +607,11 @@ impl<'a> Lowerer<'a> {
             // impl may use overall, but call sites dispatch by method
             // signature; leaking impl effects into pure sibling methods makes
             // those closures CPS-shaped while callers apply them directly.
-            let mut method_exprs: Vec<CExpr> = Vec::with_capacity(methods.len());
+            let mut method_exprs: Vec<CExpr> =
+                Vec::with_capacity(super_dicts.len() + methods.len());
+            for super_dict in super_dicts {
+                method_exprs.push(self.lower_expr_value(super_dict));
+            }
             for (idx, m) in methods.iter().enumerate() {
                 let (is_cps, static_effects, is_open_row) =
                     self.method_cps_shape(m, method_effects, method_open_rows, impl_effects, idx);
@@ -808,7 +827,7 @@ impl<'a> Lowerer<'a> {
     fn plan_dict_method_hoists(&mut self, dict_constructors: &[DictCtorMeta<'_>]) {
         self.dict_method_hoists.clear();
         let mut hoists = HashMap::new();
-        for &(name, dict_params, methods, method_effects, method_open_rows, impl_effects) in
+        for &(name, dict_params, _, methods, method_effects, method_open_rows, impl_effects) in
             dict_constructors
         {
             if !dict_params.is_empty() {

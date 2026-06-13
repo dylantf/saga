@@ -294,10 +294,17 @@ fn normalize_decl(d: &mut Decl) {
             *span = S;
         }
         Decl::DictConstructor {
-            id, methods, span, ..
+            id,
+            super_dicts,
+            methods,
+            span,
+            ..
         } => {
             *id = NID;
             *span = S;
+            for d in super_dicts.iter_mut() {
+                normalize_expr(d);
+            }
             for m in methods.iter_mut() {
                 normalize_expr(m);
             }
@@ -487,7 +494,9 @@ fn normalize_expr_kind(ek: &mut ExprKind) {
                 normalize_handler_arm(rc);
             }
         }
-        ExprKind::DictMethodAccess { dict, .. } => normalize_expr(dict),
+        ExprKind::DictMethodAccess { dict, .. } | ExprKind::DictSuperAccess { dict, .. } => {
+            normalize_expr(dict)
+        }
         ExprKind::ForeignCall { args, .. } => {
             for a in args.iter_mut() {
                 normalize_expr(a);

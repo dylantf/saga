@@ -488,9 +488,7 @@ impl<'a> Lowerer<'a> {
     /// The trait method's user-argument arity (excludes `_Evidence`/`_ReturnK`),
     /// from the trait signature. Available cross-module for imported traits.
     fn trait_method_user_arity(&self, trait_name: &str, method_index: usize) -> Option<usize> {
-        self.check_result
-            .traits
-            .get(trait_name)
+        self.trait_info(trait_name)
             .and_then(|info| info.methods.get(method_index))
             .map(|m| m.param_types.len())
     }
@@ -603,11 +601,12 @@ impl<'a> Lowerer<'a> {
         let dict_var = self.fresh();
         let dict_ce = self.lower_expr_value(dict);
         let method_var = self.fresh();
+        let tuple_index = self.trait_method_tuple_index(trait_name, method_index);
         let extract = cerl_call(
             "erlang",
             "element",
             vec![
-                CExpr::Lit(CLit::Int(method_index as i64 + 1)),
+                CExpr::Lit(CLit::Int(tuple_index as i64 + 1)),
                 CExpr::Var(dict_var.clone()),
             ],
         );

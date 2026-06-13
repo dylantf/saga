@@ -762,6 +762,7 @@ fn qualify_free_vars(
         | ExprKind::Constructor { .. }
         | ExprKind::QualifiedName { .. }
         | ExprKind::DictMethodAccess { .. }
+        | ExprKind::DictSuperAccess { .. }
         | ExprKind::DictRef { .. }
         | ExprKind::SymbolIntrinsic { .. } => {}
         ExprKind::App { func, arg } => {
@@ -1190,7 +1191,10 @@ fn lookup_summary<'a, T>(
 }
 
 fn is_hardcoded_derive(bare: &str) -> bool {
-    matches!(bare, "Show" | "Debug" | "Eq" | "Ord" | "Enum" | "Generic")
+    matches!(
+        bare,
+        "Show" | "Debug" | "Eq" | "Ord" | "Enum" | "Generic" | "Default"
+    )
 }
 
 /// Synthesize the delegating impl for a user-defined derivable trait.
@@ -2444,6 +2448,12 @@ fn generate_record_derive(
             type_params,
             span,
         )]),
+        "Default" => Ok(vec![derive_record_default(
+            record_name,
+            type_params,
+            fields,
+            span,
+        )]),
         "Generic" => derive_record_generic(record_name, type_params, fields, span),
         _ => Err(None),
     }
@@ -3251,6 +3261,79 @@ fn derive_record_stringify(
                 name: param_name,
                 span,
             }],
+            body,
+        })],
+        routed_derive_info: None,
+        span,
+        dangling_trivia: vec![],
+    }
+}
+
+/// Generate `impl Default for R { default = R { field: default, ... } }`.
+fn derive_record_default(
+    record_name: &str,
+    type_params: &[TypeParam],
+    fields: &[Annotated<(String, TypeExpr)>],
+    span: Span,
+) -> Decl {
+    let plain_fields: Vec<(String, TypeExpr)> = fields.iter().map(|a| a.node.clone()).collect();
+    let body_fields: Vec<(String, Span, Expr)> = plain_fields
+        .iter()
+        .map(|(field_name, _)| {
+            (
+                field_name.clone(),
+                Span { start: 0, end: 0 },
+                Expr::synth(
+                    span,
+                    ExprKind::Var {
+                        name: "default".into(),
+                    },
+                ),
+            )
+        })
+        .collect();
+    let body = Expr::synth(
+        span,
+        ExprKind::RecordCreate {
+            name: record_name.into(),
+            fields: body_fields,
+        },
+    );
+
+    let where_clause: Vec<TraitBound> = type_params
+        .iter()
+        .filter(|tp| {
+            plain_fields
+                .iter()
+                .any(|(_, ty)| type_expr_contains_var(ty, &tp.name))
+        })
+        .map(|tp| TraitBound {
+            type_var: tp.name.clone(),
+            traits: vec![TraitRef {
+                id: NodeId::fresh(),
+                name: "Default".into(),
+                type_args: vec![],
+                span: Span { start: 0, end: 0 },
+            }],
+        })
+        .collect();
+
+    Decl::ImplDef {
+        trait_name_span: crate::token::Span { start: 0, end: 0 },
+        target_type_span: crate::token::Span { start: 0, end: 0 },
+        id: NodeId::fresh(),
+        doc: vec![],
+        trait_name: "Default".into(),
+        trait_type_args: vec![],
+        target_type: record_name.into(),
+        type_params: type_params.to_vec(),
+        where_clause,
+        where_apps: vec![],
+        needs: vec![],
+        methods: vec![Annotated::bare(ImplMethod {
+            name: "default".into(),
+            name_span: Span { start: 0, end: 0 },
+            params: vec![],
             body,
         })],
         routed_derive_info: None,

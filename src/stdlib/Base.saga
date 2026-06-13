@@ -17,6 +17,16 @@ pub trait Semigroup a {
   fun combine : a -> a -> a
 }
 
+#@ Types with an identity value for their associative combine operation.
+pub trait Monoid a where {a: Semigroup} {
+  fun empty : a
+}
+
+#@ Types that have a conventional default value.
+pub trait Default a {
+  fun default : a
+}
+
 @external("erlang", "std_string_bridge", "append")
 fun semigroup_string_combine : String -> String -> String
 
@@ -36,6 +46,46 @@ impl Semigroup for List a {
 
 impl Semigroup for BitString {
   combine a b = semigroup_bitstring_combine a b
+}
+
+impl Monoid for String {
+  empty = ""
+}
+
+impl Monoid for List a {
+  empty = []
+}
+
+impl Monoid for BitString {
+  empty = <<>>
+}
+
+impl Default for Int {
+  default = 0
+}
+
+impl Default for Float {
+  default = 0.0
+}
+
+impl Default for Bool {
+  default = False
+}
+
+impl Default for Unit {
+  default = ()
+}
+
+impl Default for String {
+  default = ""
+}
+
+impl Default for List a {
+  default = []
+}
+
+impl Default for BitString {
+  default = <<>>
 }
 
 #@ Result of comparing two values.

@@ -292,14 +292,14 @@ impl<'a> Resolver<'a> {
                 return Some(resolved.clone());
             }
         }
-        if let Some(canonical_trait) = self.resolve_bare_trait_method_name(name) {
-            return Some(ResolvedValue::Global {
-                lookup_name: super::canonical_join(&canonical_trait, name),
-            });
-        }
         if self.locals.top_level_values.contains(name) {
             return Some(ResolvedValue::Global {
                 lookup_name: name.to_string(),
+            });
+        }
+        if let Some(canonical_trait) = self.resolve_bare_trait_method_name(name) {
+            return Some(ResolvedValue::Global {
+                lookup_name: super::canonical_join(&canonical_trait, name),
             });
         }
         self.scope
@@ -783,6 +783,7 @@ impl<'a> Resolver<'a> {
             ExprKind::Lit { .. } => {}
             ExprKind::Var { name } => {
                 if !self.is_locally_bound(name)
+                    && !self.locals.top_level_values.contains(name)
                     && let Some(canonical_trait) = self.resolve_bare_trait_method_name(name)
                 {
                     self.result.trait_methods.insert(
@@ -932,7 +933,9 @@ impl<'a> Resolver<'a> {
             | ExprKind::ListComprehension { .. } => {
                 unreachable!("surface syntax should be desugared before resolution")
             }
-            ExprKind::DictMethodAccess { dict, .. } => self.resolve_expr(dict),
+            ExprKind::DictMethodAccess { dict, .. } | ExprKind::DictSuperAccess { dict, .. } => {
+                self.resolve_expr(dict)
+            }
             ExprKind::DictRef { .. }
             | ExprKind::ForeignCall { .. }
             | ExprKind::SymbolIntrinsic { .. } => {}
@@ -1261,7 +1264,9 @@ fn walk_expr(expr: &Expr, out: &mut HashMap<String, crate::token::Span>) {
                 walk_expr(a, out);
             }
         }
-        ExprKind::DictMethodAccess { dict, .. } => walk_expr(dict, out),
+        ExprKind::DictMethodAccess { dict, .. } | ExprKind::DictSuperAccess { dict, .. } => {
+            walk_expr(dict, out)
+        }
         ExprKind::Lit { .. }
         | ExprKind::Var { .. }
         | ExprKind::Constructor { .. }

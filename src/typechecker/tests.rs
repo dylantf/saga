@@ -1694,6 +1694,28 @@ main () = compare (Foo { x: 1 }) (Foo { x: 2 })",
 }
 
 #[test]
+fn supertrait_bound_provides_parent_methods() {
+    let result = check(
+        "trait Parent a {
+  fun parent : a -> Int
+}
+trait Child a where {a: Parent} {
+  fun child : a -> Int
+}
+impl Parent for Int {
+  parent x = x + 1
+}
+impl Child for Int {
+  child x = x + 10
+}
+fun both : a -> Int where {a: Child}
+both x = parent x + child x
+let answer = both 2",
+    );
+    assert!(result.is_ok(), "got: {:?}", result.err());
+}
+
+#[test]
 fn supertrait_missing_impl_fails() {
     let result = check(
         "trait Eq a {
@@ -1974,6 +1996,21 @@ main () = combine_all [\"hello\"] [\"world\"]"
         )
         .is_ok()
     );
+}
+
+#[test]
+fn monoid_empty_for_stdlib_semigroups() {
+    let result = check(
+        r#"
+fun combine_empty : a -> a where {a: Monoid}
+combine_empty x = combine empty x
+
+let s : String = combine_empty "hello"
+let xs : List Int = combine_empty [1, 2]
+let bs : BitString = combine_empty <<1, 2>>
+"#,
+    );
+    assert!(result.is_ok(), "got: {:?}", result.err());
 }
 
 // --- Eq constraint tests ---
@@ -3967,6 +4004,43 @@ fn derive_show_polymorphic() {
         r#"
 type Box a = Box(a) | Empty deriving (Show)
 let x = show (Box 42)
+"#,
+    )
+    .unwrap();
+}
+
+#[test]
+fn derive_default_record() {
+    check(
+        r#"
+record Settings { retries: Int, name: String, enabled: Bool } deriving (Default)
+let x : Settings = default
+let y = x.retries + 1
+"#,
+    )
+    .unwrap();
+}
+
+#[test]
+fn derive_default_parameterized_record() {
+    check(
+        r#"
+record Box a { value: a, label: String } deriving (Default)
+let x : Box Int = default
+let y = x.value + 1
+"#,
+    )
+    .unwrap();
+}
+
+#[test]
+fn derive_default_record_does_not_require_phantom_param_default() {
+    check(
+        r#"
+type Marker = Marker
+record Phantom a { value: Int } deriving (Default)
+let x : Phantom Marker = default
+let y = x.value + 1
 "#,
     )
     .unwrap();

@@ -272,6 +272,13 @@ fn typecheck_source(
     let mut program = parser::Parser::new(tokens)
         .parse_program()
         .unwrap_or_else(|e| panic!("[{fixture}] parse error: {e:?}"));
+    let imported = saga::derive::collect_imported_decls(&program, checker.module_map());
+    let derive_errors = saga::derive::expand_derives(&mut program, &imported);
+    assert!(
+        derive_errors.is_empty(),
+        "[{fixture}] derive error: {:?}",
+        derive_errors
+    );
     saga::desugar::desugar_program(&mut program);
     if let Some(module_name) = program.iter().find_map(|d| {
         if let saga::ast::Decl::ModuleDecl { path, .. } = d {
@@ -662,15 +669,15 @@ fn nullary_trait_method_dispatches_by_return_type() {
     // must apply the thunk so the call yields the value, not the closure.
     let src = r#"module Main
 
-trait Default a {
+trait LocalDefault a {
   fun default : a
 }
 
-impl Default for Int {
+impl LocalDefault for Int {
   default = 7
 }
 
-impl Default for String {
+impl LocalDefault for String {
   default = "hi"
 }
 
@@ -687,6 +694,39 @@ result () = show (an_int ()) <> ";" <> a_string ()
         "nullary_trait_method_dispatches_by_return_type",
         src,
         "8;hi",
+    );
+}
+
+#[test]
+fn derived_record_default_uses_field_defaults() {
+    let src = r#"module Main
+
+record Settings {
+  retries: Int,
+  name: String,
+  enabled: Bool,
+  labels: List String,
+  fallback: Maybe Int
+} deriving (Default)
+
+pub fun result : Unit -> String
+result () = {
+  let settings : Settings = default
+  show settings.retries
+    <> "|"
+    <> settings.name
+    <> "|"
+    <> show settings.enabled
+    <> "|"
+    <> debug settings.labels
+    <> "|"
+    <> debug settings.fallback
+}
+"#;
+    check_result_string(
+        "derived_record_default_uses_field_defaults",
+        src,
+        "0||False|[]|Nothing",
     );
 }
 

@@ -442,7 +442,9 @@ pub(super) fn walk_expr(expr: &Expr, visit: &mut impl FnMut(&Expr)) {
                 visit(arg);
             }
         }
-        ExprKind::DictMethodAccess { dict, .. } => visit(dict),
+        ExprKind::DictMethodAccess { dict, .. } | ExprKind::DictSuperAccess { dict, .. } => {
+            visit(dict)
+        }
         ExprKind::Lit { .. }
         | ExprKind::Var { .. }
         | ExprKind::Constructor { .. }

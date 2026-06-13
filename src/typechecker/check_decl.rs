@@ -1496,7 +1496,10 @@ impl Checker {
             .where_bounds
             .iter()
             .find_map(|(bound_id, traits)| {
-                if traits.contains(trait_name) {
+                if traits
+                    .iter()
+                    .any(|bound_trait| self.trait_implies(bound_trait, trait_name))
+                {
                     match self.sub.apply(&Type::Var(*bound_id)) {
                         Type::Var(r) if r == resolved_id => self
                             .trait_state
@@ -1514,6 +1517,38 @@ impl Checker {
                     .where_bound_var_names
                     .get(&resolved_id)
                     .cloned()
+            })
+    }
+
+    fn trait_implies(&self, bound_trait: &str, required_trait: &str) -> bool {
+        let bound = self
+            .resolve_trait_name(bound_trait)
+            .unwrap_or_else(|| bound_trait.to_string());
+        let required = self
+            .resolve_trait_name(required_trait)
+            .unwrap_or_else(|| required_trait.to_string());
+        self.trait_implies_canonical(&bound, &required, &mut std::collections::HashSet::new())
+    }
+
+    fn trait_implies_canonical(
+        &self,
+        bound_trait: &str,
+        required_trait: &str,
+        seen: &mut std::collections::HashSet<String>,
+    ) -> bool {
+        if bound_trait == required_trait {
+            return true;
+        }
+        if !seen.insert(bound_trait.to_string()) {
+            return false;
+        }
+        self.trait_state
+            .traits
+            .get(bound_trait)
+            .is_some_and(|info| {
+                info.supertraits.iter().any(|supertrait| {
+                    self.trait_implies_canonical(supertrait, required_trait, seen)
+                })
             })
     }
 
@@ -1549,7 +1584,9 @@ impl Checker {
                             .where_bounds
                             .iter()
                             .any(|(bound_id, traits)| {
-                                traits.contains(&trait_name)
+                                traits
+                                    .iter()
+                                    .any(|bound_trait| self.trait_implies(bound_trait, &trait_name))
                                     && match self.sub.apply(&Type::Var(*bound_id)) {
                                         Type::Var(resolved) => resolved == id,
                                         _ => false,
@@ -3076,9 +3113,11 @@ impl Checker {
                     }
                     // Still a type variable: check where clause bounds
                     Type::Var(id) => {
-                        let covered = resolved_bounds
-                            .get(id)
-                            .is_some_and(|b| b.contains(&trait_name));
+                        let covered = resolved_bounds.get(id).is_some_and(|bounds| {
+                            bounds
+                                .iter()
+                                .any(|bound_trait| self.trait_implies(bound_trait, &trait_name))
+                        });
                         if !covered {
                             let display = trait_name.rsplit('.').next().unwrap_or(&trait_name);
                             return Err(rewrite_diag(

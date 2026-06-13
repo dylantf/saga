@@ -2648,11 +2648,12 @@ impl<'a> Lowerer<'a> {
                 // Lower to: let D = <dict> in element(idx+1, D)
                 let dict_var = self.fresh();
                 let dict_ce = self.lower_expr_value(dict);
+                let tuple_index = self.trait_method_tuple_index(trait_name, *method_index);
                 let extract_method = cerl_call(
                     "erlang",
                     "element",
                     vec![
-                        CExpr::Lit(CLit::Int(*method_index as i64 + 1)),
+                        CExpr::Lit(CLit::Int(tuple_index as i64 + 1)),
                         CExpr::Var(dict_var.clone()),
                     ],
                 );
@@ -2665,6 +2666,24 @@ impl<'a> Lowerer<'a> {
                 } else {
                     extract_method
                 };
+                CExpr::Let(dict_var, Box::new(dict_ce), Box::new(body))
+            }
+
+            ExprKind::DictSuperAccess {
+                dict,
+                supertrait_index,
+                ..
+            } => {
+                let dict_var = self.fresh();
+                let dict_ce = self.lower_expr_value(dict);
+                let body = cerl_call(
+                    "erlang",
+                    "element",
+                    vec![
+                        CExpr::Lit(CLit::Int(*supertrait_index as i64 + 1)),
+                        CExpr::Var(dict_var.clone()),
+                    ],
+                );
                 CExpr::Let(dict_var, Box::new(dict_ce), Box::new(body))
             }
 

@@ -504,6 +504,8 @@ pub enum Decl {
         name: String,
         /// Parameters for sub-dictionaries (conditional impls like `Show for List a where {a: Show}`)
         dict_params: Vec<String>,
+        /// Hidden superclass dictionaries, ordered by the trait's supertrait list.
+        super_dicts: Vec<Expr>,
         /// Method implementations as lambda expressions, ordered by trait method declaration order
         methods: Vec<Expr>,
         /// Per-method trait-declared effects, ordered with `methods`.
@@ -755,6 +757,14 @@ pub enum ExprKind {
         trait_name: String,
         method_index: usize,
     },
+
+    /// Project a hidden superclass dictionary out of a subtrait dictionary.
+    /// Lowered to `erlang:element(supertrait_index+1, dict)`.
+    DictSuperAccess {
+        dict: Box<Expr>,
+        trait_name: String,
+        supertrait_index: usize,
+    },
     /// Reference to a dictionary value (a variable holding a dict, or a dict constructor name).
     DictRef { name: String },
     /// Call an Erlang BIF. Only produced by elaboration, never by the parser.
@@ -852,7 +862,9 @@ impl Expr {
                     })
             }
             ExprKind::ForeignCall { args, .. } => args.iter().any(|e| e.contains_resume()),
-            ExprKind::DictMethodAccess { dict, .. } => dict.contains_resume(),
+            ExprKind::DictMethodAccess { dict, .. } | ExprKind::DictSuperAccess { dict, .. } => {
+                dict.contains_resume()
+            }
             ExprKind::Lit { .. }
             | ExprKind::Var { .. }
             | ExprKind::Constructor { .. }
