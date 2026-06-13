@@ -3719,6 +3719,91 @@ run_ok () = {
     );
 }
 
+/// Regression: a module can define a local helper with the same bare name as
+/// an imported qualified open-row function (`Spec.route` builder vs
+/// `Edda.route` router). Call classification must use the resolved canonical
+/// name for `E.route`; otherwise it grabs the local pure builder's arity and
+/// lowers the saturated router call as a residual closure returned to `_ReturnK`.
+#[test]
+fn qualified_open_row_call_prefers_canonical_fun_sig_over_local_bare_name() {
+    let edda = r#"module Edda
+
+pub type Method = GET deriving (Eq)
+
+pub record Request {
+  path: String,
+}
+
+pub record Response {
+  status: Int,
+  body: String,
+}
+
+pub effect Skip {
+  fun skip : Unit -> a
+}
+
+pub fun route : Method -> String -> (Request -> Response needs {..e}) -> Request -> Response
+  needs {Skip, ..e}
+route m pattern h req =
+  if m == GET && req.path == pattern then h req else skip! ()
+"#;
+
+    let spec = r#"module Spec
+
+import Edda (Method, Request, Response, Skip)
+import Edda as E
+
+pub record RouteBuilder {
+  method: Method,
+  path: String,
+}
+
+pub record RouteSchema {
+  method: Method,
+  path: String,
+  action: Request -> Response,
+}
+
+pub fun route : Method -> String -> RouteBuilder
+route method path = RouteBuilder { method: method, path: path }
+
+pub fun performed_by : (Request -> Response) -> RouteBuilder -> RouteSchema
+performed_by action builder = RouteSchema {
+  method: builder.method,
+  path: builder.path,
+  action: action,
+}
+
+pub fun as_route : RouteSchema -> Request -> Response needs {Skip}
+as_route schema req = E.route schema.method schema.path schema.action req
+"#;
+
+    let main = r#"module Main
+
+import Spec
+
+main () = ()
+"#;
+
+    let out = with_temp_project_files(
+        &[("Edda.saga", edda), ("Spec.saga", spec)],
+        main,
+        |checker, _program| emit_project_module(spec, "spec", checker),
+    );
+    let as_route = out
+        .split("'as_route'/4 =")
+        .nth(1)
+        .and_then(|rest| rest.split("\n\n").next())
+        .expect("expected as_route/4 in emitted Core");
+
+    assert_contains(as_route, "call 'edda':'route'");
+    assert!(
+        !as_route.contains(") ->\n        ( call 'edda':'route'"),
+        "as_route returned a residual route closure instead of calling route with evidence:\n{as_route}"
+    );
+}
+
 /// Regression: an eta-reduced reference to an effectful function bound to a
 /// local. `let g = Lib.f` (no application) followed by `g x` is the
 /// first-class-callback shape: the binder's type carries the effect row, so

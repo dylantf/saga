@@ -1069,8 +1069,18 @@ impl<'a> Populator<'a> {
         if matches!(resolved_shape, Some(RuntimeFunctionShape::Intrinsic)) {
             return pure();
         }
+        let resolved_env_shape =
+            resolved.and_then(|resolved| self.runtime_shape_from_resolved_env(resolved, name));
+        let resolved_cps_shape = resolved_shape
+            .as_ref()
+            .and_then(|shape| shape.cps_shape())
+            .or_else(|| {
+                resolved_env_shape
+                    .as_ref()
+                    .and_then(|shape| shape.cps_shape())
+            });
         let canonical_name = resolved.map(|resolved| resolved.canonical_name.clone());
-        let effects: Vec<String> = match resolved {
+        let mut effects: Vec<String> = match resolved {
             Some(resolved) if !resolved.effects().is_empty() => resolved.effects().to_vec(),
             Some(_) => self
                 .lookup_fun_sig(name, canonical_name.as_deref())
@@ -1110,13 +1120,17 @@ impl<'a> Populator<'a> {
                 return pure();
             }
         };
+        if effects.is_empty()
+            && let Some(shape) = &resolved_cps_shape
+        {
+            effects = shape.static_effects.clone();
+        }
 
         // Need expanded arity from fun_sigs to compute user_arity.
         let Some(sig) = self.lookup_fun_sig(name, canonical_name.as_deref()) else {
             let ops = self.collect_op_keys(&effects);
-            let is_open_row = resolved_shape
+            let is_open_row = resolved_cps_shape
                 .as_ref()
-                .and_then(|shape| shape.cps_shape())
                 .map(|shape| shape.is_open_row)
                 .unwrap_or_else(|| self.head_open_row.get(&head_id).copied().unwrap_or(false));
             // No FunSig snapshot. Effectful only if the effects canonicalized
@@ -1142,7 +1156,9 @@ impl<'a> Populator<'a> {
             .head_open_row
             .get(&head_id)
             .copied()
-            .unwrap_or(sig.is_open_row);
+            .unwrap_or_else(|| {
+                sig.is_open_row || resolved_cps_shape.is_some_and(|shape| shape.is_open_row)
+            });
         if effects.is_empty() && !is_open_row {
             return pure();
         }
@@ -1164,19 +1180,21 @@ impl<'a> Populator<'a> {
     }
 
     fn lookup_fun_sig(&self, name: &str, canonical_name: Option<&str>) -> Option<&FunSig> {
-        // Lookup order mirrors the lowerer: local LetFun frames (innermost
-        // first), then the module-level fun_info table by bare name and then
-        // by canonical name.
+        // Lookup order mirrors resolved identity first: local LetFun frames
+        // (innermost first), then canonical module identity, then the bare
+        // spelling as a final fallback for unresolved/local surfaces.
         for frame in self.local_fun_sigs.iter().rev() {
             if let Some(s) = frame.get(name) {
                 return Some(s);
             }
         }
-        if let Some(s) = self.inputs.fun_sigs.get(name) {
+        if let Some(c) = canonical_name
+            && let Some(s) = self.inputs.fun_sigs.get(c)
+        {
             return Some(s);
         }
-        if let Some(c) = canonical_name {
-            return self.inputs.fun_sigs.get(c);
+        if let Some(s) = self.inputs.fun_sigs.get(name) {
+            return Some(s);
         }
         None
     }
@@ -1242,6 +1260,37 @@ impl<'a> Populator<'a> {
         RuntimeFunctionShape::from_resolved_symbol(resolved, fallback_ty.as_ref(), |effects| {
             self.canonicalize_effects(effects)
         })
+    }
+
+    fn runtime_shape_from_resolved_env(
+        &self,
+        resolved: &crate::codegen::resolve::ResolvedSymbol,
+        fallback_name: &str,
+    ) -> Option<RuntimeFunctionShape> {
+        let candidates = [
+            resolved.canonical_name.as_str(),
+            resolved.name.as_str(),
+            fallback_name,
+        ];
+
+        fn lookup_type(
+            check: &CheckResult,
+            candidates: &[&str],
+        ) -> Option<crate::typechecker::Type> {
+            candidates
+                .iter()
+                .find_map(|name| check.env.get(name).map(|scheme| check.sub.apply(&scheme.ty)))
+        }
+
+        let ty = lookup_type(self.inputs.check_result, &candidates).or_else(|| {
+            resolved
+                .source_module
+                .as_deref()
+                .and_then(|module| self.inputs.check_result.module_check_results().get(module))
+                .and_then(|check| lookup_type(check, &candidates))
+        })?;
+
+        Some(self.runtime_shape_from_type(&ty))
     }
 
     fn call_kind_from_cps_shape(&self, shape: &CpsShape) -> Option<CallEffectKind> {

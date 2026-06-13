@@ -1101,6 +1101,7 @@ fn build_imported_fun_scoped(
 ) -> ScopedName {
     let (arity, mut effects) = crate::codegen::lower::util::arity_and_effects_from_type(&scheme.ty);
     let dict_params = crate::codegen::lower::util::dict_param_count(&scheme.constraints);
+    let is_open_row = crate::codegen::lower::util::has_open_effect_row(&scheme.ty);
     // Merge with fun_effects (which strips beam-native effects in
     // check_module.rs but is otherwise the authoritative annotation list).
     // Effects from the type include beam-native ones; the lowered function
@@ -1118,9 +1119,14 @@ fn build_imported_fun_scoped(
         .iter()
         .map(|eff| effect_op_counts.get(eff).copied().unwrap_or(0))
         .sum();
-    // Effectful callees take an `_Evidence` parameter and a `_ReturnK`
-    // (gated together by `has_effects`).
-    let extras = if handler_param_count > 0 { 2 } else { 0 };
+    // Effectful/open-row callees take `_Evidence` and `_ReturnK`. Open-row
+    // functions may have no statically named effects, but they still use the
+    // CPS ABI so callers can forward ambient evidence through the row tail.
+    let extras = if handler_param_count > 0 || is_open_row {
+        2
+    } else {
+        0
+    };
     let expanded_arity = arity + dict_params + extras;
     let canonical_name = format!("{}.{}", mod_name, name);
 
