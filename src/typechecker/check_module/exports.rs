@@ -166,7 +166,10 @@ impl ModuleExports {
                         arity_keyed_target_name(&resolved_target, type_params.len());
                     let resolved_trait_type_args: Vec<String> = trait_type_args
                         .iter()
-                        .map(|te| checker.resolved_type_name(te.id(), te.simple_name()))
+                        .map(|te| {
+                            let head = te.head_name().unwrap_or("");
+                            checker.resolved_type_name(te.head_id().unwrap_or(te.id()), head)
+                        })
                         .collect();
                     let key = (resolved_trait, resolved_trait_type_args, resolved_target);
                     if let Some(info) = checker.trait_state.impls.get(&key) {

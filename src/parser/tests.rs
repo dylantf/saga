@@ -2449,6 +2449,49 @@ fn impl_def_with_trait_type_args() {
 }
 
 #[test]
+fn impl_def_with_parenthesized_trait_type_arg() {
+    let decls = parse(
+        "impl Selectable (Selected2 a b) for Select2 a b {\n  to_projection selection = selection\n}",
+    );
+    assert_eq!(decls.len(), 1);
+    match &decls[0] {
+        Decl::ImplDef {
+            trait_name,
+            trait_type_args,
+            target_type,
+            type_params,
+            ..
+        } => {
+            assert_eq!(trait_name, "Selectable");
+            assert_eq!(trait_type_args.len(), 1);
+            assert_eq!(trait_type_args[0].head_name(), Some("Selected2"));
+            assert!(matches!(trait_type_args[0], TypeExpr::App { .. }));
+            assert_eq!(target_type, "Select2");
+            let param_names: Vec<&str> = type_params.iter().map(|tp| tp.name.as_str()).collect();
+            assert_eq!(param_names, vec!["a", "b"]);
+        }
+        _ => panic!("expected ImplDef, got {:?}", decls[0]),
+    }
+}
+
+#[test]
+fn impl_def_with_tuple_trait_type_arg() {
+    let decls =
+        parse("impl Selectable (a, b) for Select2 a b {\n  to_projection selection = selection\n}");
+    assert_eq!(decls.len(), 1);
+    match &decls[0] {
+        Decl::ImplDef {
+            trait_type_args, ..
+        } => {
+            assert_eq!(trait_type_args.len(), 1);
+            assert_eq!(trait_type_args[0].head_name(), Some("Tuple"));
+            assert!(matches!(trait_type_args[0], TypeExpr::App { .. }));
+        }
+        _ => panic!("expected ImplDef, got {:?}", decls[0]),
+    }
+}
+
+#[test]
 fn impl_def_with_needs() {
     let decls = parse("impl Store for Redis needs {Http, Fail} {\n  get key = http_get key\n}");
     assert_eq!(decls.len(), 1);

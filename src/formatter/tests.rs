@@ -1603,6 +1603,16 @@ fn trait_default_method_body_preserved() {
 }
 
 #[test]
+fn impl_parenthesized_trait_type_arg_round_trips() {
+    assert_eq!(
+        fmt80(
+            "impl Selectable (Selected2 a b) for Select2 a b {\n  to_projection selection = selection\n}"
+        ),
+        "impl Selectable (Selected2 a b) for Select2 a b {\n  to_projection selection = selection\n}\n"
+    );
+}
+
+#[test]
 fn fun_sig_nested_arrow_param_gets_parens() {
     assert_eq!(
         fmt80("fun foo : ((a -> b) -> c) -> c"),

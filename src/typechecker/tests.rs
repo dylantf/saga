@@ -6454,6 +6454,25 @@ fn multi_param_trait_def_and_impl() {
 }
 
 #[test]
+fn impl_with_parenthesized_parameterized_trait_type_arg_typechecks() {
+    check(
+        "trait Selectable row selection {\n\
+           fun to_projection : selection -> row\n\
+         }\n\
+         type Selected2 a b = Selected2 a b\n\
+         type Select2 a b = Select2 a b\n\
+         impl Selectable (Selected2 a b) for Select2 a b {\n\
+           to_projection selection = case selection {\n\
+             Selected2 x y -> Select2 x y\n\
+           }\n\
+         }\n\
+         fun use_it : Unit -> Select2 Int String\n\
+         use_it () = to_projection (Selected2 1 \"title\")\n",
+    )
+    .unwrap();
+}
+
+#[test]
 fn multi_param_trait_arity_mismatch() {
     let result = check(
         "trait ConvertTo a b {\n\

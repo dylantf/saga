@@ -121,7 +121,7 @@ impl Elaborator {
         args.iter()
             .map(|te| {
                 let head = te.head_name().unwrap_or("");
-                self.resolved_type_name(te.id(), head)
+                self.resolved_type_name(te.head_id().unwrap_or(te.id()), head)
             })
             .collect()
     }

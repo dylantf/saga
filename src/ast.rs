@@ -1151,6 +1151,16 @@ impl TypeExpr {
             _ => None,
         }
     }
+
+    /// Extract the NodeId of the head of a type expression. This is the id
+    /// whose resolver entry belongs with `head_name`.
+    pub fn head_id(&self) -> Option<NodeId> {
+        match self {
+            TypeExpr::Named { id, .. } | TypeExpr::Var { id, .. } => Some(*id),
+            TypeExpr::App { func, .. } => func.head_id(),
+            _ => None,
+        }
+    }
 }
 
 /// PartialEq compares structure only, ignoring spans (same as Expr).

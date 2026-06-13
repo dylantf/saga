@@ -393,7 +393,7 @@ impl Checker {
             .iter()
             .map(|te| {
                 let head = te.head_name().unwrap_or("");
-                self.resolved_type_name(te.id(), head)
+                self.resolved_type_name(te.head_id().unwrap_or(te.id()), head)
             })
             .collect();
         let trait_type_args_names = &trait_type_arg_names;
@@ -634,7 +634,9 @@ impl Checker {
                     }
                     ast::TypeExpr::App { .. } => {
                         let head = te.head_name().unwrap_or("");
-                        resolved_names.push(Some(self.resolved_type_name(te.id(), head)));
+                        resolved_names.push(Some(
+                            self.resolved_type_name(te.head_id().unwrap_or(te.id()), head),
+                        ));
                     }
                     ast::TypeExpr::Var { name, .. } => {
                         if let Some(resolved) = local_subst.get(name) {

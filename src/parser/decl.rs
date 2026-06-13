@@ -999,30 +999,16 @@ impl Parser {
         let trait_name = self.parse_upper_name()?;
         let trait_name_span = self.tokens[self.pos - 1].span;
 
-        // Parse optional trait type args: `impl ConvertTo NOK for USD`
-        // These are type names (concrete or variable) before `for`
+        // Parse optional trait type args: `impl ConvertTo NOK for USD`.
+        // Bare adjacent atoms remain separate trait arguments, while
+        // parenthesized type expressions count as one argument:
+        // `impl Generic (Box a) for Foo`.
         let mut trait_type_args = Vec::new();
         while !matches!(self.peek(), Token::For) {
-            match self.peek() {
-                Token::UpperIdent(_) => {
-                    let name = self.parse_upper_name()?;
-                    let span = self.tokens[self.pos - 1].span;
-                    trait_type_args.push(TypeExpr::Named {
-                        id: NodeId::fresh(),
-                        name,
-                        span,
-                    });
-                }
-                Token::Ident(_) => {
-                    let name = self.expect_ident()?;
-                    let span = self.tokens[self.pos - 1].span;
-                    trait_type_args.push(TypeExpr::Var {
-                        id: NodeId::fresh(),
-                        name,
-                        span,
-                    });
-                }
-                _ => break,
+            if self.can_start_type_atom_no_brace() {
+                trait_type_args.push(self.parse_type_atom()?);
+            } else {
+                break;
             }
         }
 
