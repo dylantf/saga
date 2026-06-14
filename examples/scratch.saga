@@ -57,12 +57,28 @@ trait Selectable selection row | selection -> row {
   fun to_row : selection -> row
 }
 
+trait Dummy a {
+  fun dummy : Unit -> a
+}
+
+impl Dummy for Int {
+  dummy () = 0
+}
+
+impl Dummy for String {
+  dummy () = ""
+}
+
+impl Dummy for Bool {
+  dummy () = False
+}
+
 # Desired library shape:
 # - columns are selectable directly
 # - any selectable thing can be lifted through Generic.Leaf
 # - table scope records can select into their domain row record
-impl Selectable a for (Column source name a) where {a: PgType} {
-  to_row _ = panic "not evaluated"
+impl Selectable a for (Column source name a) where {a: PgType, a: Dummy} {
+  to_row _ = dummy ()
 }
 
 impl Selectable (Leaf row) for (Leaf selection) where {selection: Selectable row} {

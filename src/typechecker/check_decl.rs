@@ -3106,6 +3106,52 @@ impl Checker {
                             }
                         }
 
+                        if impl_info.is_none() {
+                            let matches: Vec<super::ImplInfo> = self
+                                .trait_state
+                                .impls
+                                .iter()
+                                .filter(|((tn, _, tt), info)| {
+                                    if tn != &resolved_trait || tt != &arity_keyed_name {
+                                        return false;
+                                    }
+                                    let mut pattern_subst = std::collections::HashMap::new();
+                                    let Some(pattern) = &info.target_pattern else {
+                                        return false;
+                                    };
+                                    if !super::check_traits::match_type_pattern(
+                                        pattern,
+                                        &resolved,
+                                        &mut pattern_subst,
+                                    ) {
+                                        return false;
+                                    }
+                                    if trait_type_arg_types.len() != info.trait_type_args.len() {
+                                        return false;
+                                    }
+                                    trait_type_arg_types.iter().zip(info.trait_type_args.iter()).all(
+                                        |(actual_extra, pattern_extra)| {
+                                            let expected_extra =
+                                                super::check_traits::substitute_pattern_vars(
+                                                    pattern_extra,
+                                                    &pattern_subst,
+                                                );
+                                            let resolved_actual = self.sub.apply(actual_extra);
+                                            super::check_traits::match_type_pattern(
+                                                &expected_extra,
+                                                &resolved_actual,
+                                                &mut pattern_subst,
+                                            )
+                                        },
+                                    )
+                                })
+                                .map(|(_, info)| info.clone())
+                                .collect();
+                            if matches.len() == 1 {
+                                impl_info = Some(matches[0].clone());
+                            }
+                        }
+
                         // Functional-trait coherence fallback: if extras are
                         // unresolved (and direct lookup missed), scan for the
                         // unique impl with the matching self-type and pin the

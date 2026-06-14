@@ -9985,6 +9985,92 @@ fn impl_for_structured_tuple_target_requires_nested_constraints() {
 }
 
 #[test]
+fn structured_phantom_impl_uses_expected_result_to_improve_extra_arg() {
+    check(
+        "trait PgType a {}\n\
+         impl PgType for Int {}\n\
+         impl PgType for String {}\n\
+         type Column source (name : Symbol) a = Column\n\
+         record User { id: Int, name: String }\n\
+         type UsersScope = UsersScope\n\
+         record Users source {\n\
+           id: Column source 'id Int,\n\
+           name: Column source 'name String,\n\
+         }\n\
+         fun users : Users UsersScope\n\
+         users = Users { id: Column, name: Column }\n\
+         trait Selectable selection row | selection -> row {\n\
+           fun to_row : selection -> row\n\
+         }\n\
+         impl Selectable a for (Column source name a) where {a: PgType} {\n\
+           to_row _ = todo ()\n\
+         }\n\
+         impl Selectable User for Users source {\n\
+           to_row u = User {\n\
+             id: to_row u.id,\n\
+             name: to_row u.name,\n\
+           }\n\
+         }\n",
+    )
+    .unwrap();
+}
+
+#[test]
+fn generic_lifted_phantom_column_preserves_where_bound_extra_arg() {
+    check(
+        "import Std.Generic (Generic, Leaf, Labeled, And, Record)\n\
+         trait PgType a {}\n\
+         impl PgType for Int {}\n\
+         impl PgType for String {}\n\
+         type Column source (name : Symbol) a = Column\n\
+         record User { id: Int, name: String }\n\
+         type UsersScope = UsersScope\n\
+         type PostsScope = PostsScope\n\
+         record Users source {\n\
+           id: Column source 'id Int,\n\
+           name: Column source 'name String,\n\
+         }\n\
+         fun users : Users UsersScope\n\
+         users = Users { id: Column, name: Column }\n\
+         trait Selectable selection row | selection -> row {\n\
+           fun to_row : selection -> row\n\
+         }\n\
+         impl Selectable a for (Column source name a) where {a: PgType} {\n\
+           to_row _ = todo ()\n\
+         }\n\
+         impl Selectable (Leaf row) for (Leaf selection) where {selection: Selectable row} {\n\
+           to_row selection = case selection { Leaf value -> Leaf (to_row value) }\n\
+         }\n\
+         impl Selectable (Labeled n out) for (Labeled n field) where {field: Selectable out} {\n\
+           to_row selection = case selection { Labeled field -> Labeled (to_row field) }\n\
+         }\n\
+         impl Selectable (And left_out right_out) for (And left right)\n\
+           where {left: Selectable left_out, right: Selectable right_out}\n\
+         {\n\
+           to_row selection = case selection { And left right -> And (to_row left) (to_row right) }\n\
+         }\n\
+         impl Selectable (Record out) for (Record fields) where {fields: Selectable out} {\n\
+           to_row selection = case selection { Record name fields -> Record name (to_row fields) }\n\
+         }\n\
+         impl Selectable User for Users source {\n\
+           to_row u = User {\n\
+             id: to_row u.id,\n\
+             name: to_row u.name,\n\
+           }\n\
+         }\n\
+         fun project : selection -> row\n\
+           where {selection: Generic selection_rep, selection_rep: Selectable row_rep, row: Generic row_rep}\n\
+         project selection = from (to_row (to selection))\n\
+         fun q : Unit -> { post_title: String, user: User }\n\
+         q () = project {\n\
+           user: users,\n\
+           post_title: (Column : Column PostsScope 'title String),\n\
+         }\n",
+    )
+    .unwrap();
+}
+
+#[test]
 fn anonymous_record_generic_shape_can_drive_selectable_output_record() {
     check(
         "import Std.Generic (Generic, Leaf, Labeled, And, Record)\n\
