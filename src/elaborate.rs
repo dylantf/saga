@@ -11,7 +11,9 @@ use std::collections::{HashMap, HashSet};
 
 use crate::ast::*;
 use crate::token::{Span, StringKind};
-use crate::typechecker::{CheckResult, KNOWN_SYMBOL_TRAIT, TraitEvidence, TraitInfo, Type};
+use crate::typechecker::{
+    CheckResult, ImplInfo, KNOWN_SYMBOL_TRAIT, TraitEvidence, TraitInfo, Type,
+};
 
 /// Only invoke the symbol-intrinsic lambda fast-path for the `KnownSymbol`
 /// trait's own `symbol_name` method. Without this guard, a `to_json` call
@@ -20,6 +22,28 @@ use crate::typechecker::{CheckResult, KNOWN_SYMBOL_TRAIT, TraitEvidence, TraitIn
 /// rewritten to a symbol-name lookup, silently dropping the real dispatch.
 fn is_known_symbol_trait(trait_name: &str) -> bool {
     trait_name == KNOWN_SYMBOL_TRAIT
+}
+
+fn match_type_pattern(pattern: &Type, actual: &Type, subst: &mut HashMap<u32, Type>) -> bool {
+    match (pattern, actual) {
+        (Type::Var(id), actual) => match subst.get(id).cloned() {
+            Some(existing) => existing == *actual,
+            None => {
+                subst.insert(*id, actual.clone());
+                true
+            }
+        },
+        (Type::Con(pn, pa), Type::Con(an, aa)) => {
+            pn == an
+                && pa.len() == aa.len()
+                && pa
+                    .iter()
+                    .zip(aa.iter())
+                    .all(|(p, a)| match_type_pattern(p, a, subst))
+        }
+        (Type::Symbol(a), Type::Symbol(b)) => a == b,
+        _ => false,
+    }
 }
 
 const SHOW: &str = "Std.Base.Show";
@@ -55,6 +79,8 @@ struct Elaborator {
     /// impl key -> ordered list of (constraint_trait, param_index) for dict params.
     /// Used to pass the correct sub-dicts when building parameterized dicts.
     impl_dict_params: HashMap<ImplKey, Vec<(String, usize)>>,
+    /// impl key -> registered impl info, including structured target pattern metadata.
+    impl_infos: HashMap<ImplKey, ImplInfo>,
     /// trait_name -> TraitInfo
     traits: HashMap<String, TraitInfo>,
     /// Evidence from typechecking: node_id -> Vec<TraitEvidence>
@@ -124,6 +150,19 @@ impl Elaborator {
                 self.resolved_type_name(te.head_id().unwrap_or(te.id()), head)
             })
             .collect()
+    }
+
+    fn impl_target_key(
+        &self,
+        canonical_target: &str,
+        target_type_expr: Option<&crate::ast::TypeExpr>,
+        type_params: &[crate::ast::TypeParam],
+    ) -> String {
+        let arity = target_type_expr
+            .filter(|expr| expr.head_name() == Some("Tuple"))
+            .map(|expr| expr.app_arg_count())
+            .unwrap_or(type_params.len());
+        crate::typechecker::arity_keyed_target_name(canonical_target, arity)
     }
 
     fn new(result: &CheckResult, module_name: &str) -> Self {
@@ -228,6 +267,7 @@ impl Elaborator {
             handler_dict_params: HashMap::new(),
             dict_names,
             impl_dict_params: impl_dict_params_from_imports,
+            impl_infos: result.trait_impls.clone(),
             traits: result.traits.clone(),
             evidence_by_node,
             current_fun: None,
@@ -331,6 +371,7 @@ impl Elaborator {
                     trait_name,
                     trait_type_args,
                     target_type,
+                    target_type_expr,
                     type_params,
                     where_clause,
                     ..
@@ -341,9 +382,10 @@ impl Elaborator {
                     // Tuples are arity-distinguished: `(a, b)` and `(a, b, c)`
                     // both canonicalize to "Std.Base.Tuple", so suffix arity to
                     // keep their dict names and lookup keys distinct.
-                    let canonical_target_type = crate::typechecker::arity_keyed_target_name(
+                    let canonical_target_type = self.impl_target_key(
                         &canonical_target_type,
-                        type_params.len(),
+                        target_type_expr.as_ref(),
+                        type_params,
                     );
                     let dict_name = crate::typechecker::make_dict_name(
                         &canonical_trait,
@@ -434,6 +476,7 @@ impl Elaborator {
                     trait_name,
                     trait_type_args,
                     target_type,
+                    target_type_expr,
                     type_params,
                     where_clause,
                     methods,
@@ -445,9 +488,10 @@ impl Elaborator {
                     let canonical_trait = self.resolved_impl_trait_name(*id, trait_name);
                     let canonical_trait_type_args = self.resolved_trait_type_args(trait_type_args);
                     let canonical_target_base = self.resolved_impl_target_type(*id, target_type);
-                    let canonical_target_type = crate::typechecker::arity_keyed_target_name(
+                    let canonical_target_type = self.impl_target_key(
                         &canonical_target_base,
-                        type_params.len(),
+                        target_type_expr.as_ref(),
+                        type_params,
                     );
                     let dict_name = self
                         .dict_names
@@ -1955,13 +1999,32 @@ impl Elaborator {
                 let keyed_name = crate::typechecker::arity_keyed_target_name(name, args.len());
                 let key = (trait_name.to_string(), trait_type_args.to_vec(), keyed_name);
                 let dict_name = self.dict_names.get(&key)?;
+                let impl_info = self.impl_infos.get(&key);
                 let mut dict_expr: Expr = Expr::synth(
                     span,
                     ExprKind::DictRef {
                         name: dict_name.clone(),
                     },
                 );
-                if let Some(constraints) = self.impl_dict_params.get(&key) {
+                if let Some(info) = impl_info
+                    && let Some(pattern) = &info.target_pattern
+                {
+                    let mut subst = HashMap::new();
+                    if !match_type_pattern(pattern, ty, &mut subst) {
+                        return None;
+                    }
+                    for (constraint_trait, var_id) in &info.param_constraints_by_var {
+                        let arg_ty = subst.get(var_id)?;
+                        let sub_dict = self.dict_for_type(constraint_trait, &[], arg_ty, span)?;
+                        dict_expr = Expr::synth(
+                            span,
+                            ExprKind::App {
+                                func: Box::new(dict_expr),
+                                arg: Box::new(sub_dict),
+                            },
+                        );
+                    }
+                } else if let Some(constraints) = self.impl_dict_params.get(&key) {
                     // Use explicit where-clause constraints (handles cases like
                     // Ord where the impl needs both Ord and Eq dicts per type param).
                     for (constraint_trait, param_idx) in constraints {

@@ -28,6 +28,18 @@ pub struct EffectDef {
     pub type_param_count: usize,
 }
 
+fn impl_target_key(
+    canonical_target: &str,
+    target_type_expr: Option<&crate::ast::TypeExpr>,
+    type_params: &[crate::ast::TypeParam],
+) -> String {
+    let arity = target_type_expr
+        .filter(|expr| expr.head_name() == Some("Tuple"))
+        .map(|expr| expr.app_arg_count())
+        .unwrap_or(type_params.len());
+    arity_keyed_target_name(canonical_target, arity)
+}
+
 /// A trait impl dict exported by a module.
 #[derive(Debug, Clone)]
 pub struct TraitImplDict {
@@ -299,6 +311,7 @@ pub(super) fn collect_codegen_info(
                 trait_name,
                 trait_type_args,
                 target_type,
+                target_type_expr,
                 type_params,
                 where_clause,
                 needs,
@@ -329,8 +342,11 @@ pub(super) fn collect_codegen_info(
                     .collect();
                 let canonical_trait_type_args = canonical_trait_type_args(&trait_type_arg_names);
                 let canonical_target_type = canonical_type_name(target_type);
-                let canonical_target_type =
-                    arity_keyed_target_name(&canonical_target_type, type_params.len());
+                let canonical_target_type = impl_target_key(
+                    &canonical_target_type,
+                    target_type_expr.as_ref(),
+                    type_params,
+                );
                 let dict_name = make_dict_name(
                     &canonical_trait,
                     &canonical_trait_type_args,

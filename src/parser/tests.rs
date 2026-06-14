@@ -2492,6 +2492,29 @@ fn impl_def_with_tuple_trait_type_arg() {
 }
 
 #[test]
+fn impl_def_with_structured_tuple_target() {
+    let decls = parse(
+        "impl Selectable (a, b) for (Column sa na a, Column sb nb b) where {a: PgType, b: PgType} {\n  to_projection pair = pair\n}",
+    );
+    assert_eq!(decls.len(), 1);
+    match &decls[0] {
+        Decl::ImplDef {
+            target_type,
+            target_type_expr,
+            type_params,
+            ..
+        } => {
+            assert_eq!(target_type, "Tuple");
+            assert!(type_params.is_empty());
+            let target_type_expr = target_type_expr.as_ref().expect("target expr");
+            assert_eq!(target_type_expr.head_name(), Some("Tuple"));
+            assert_eq!(target_type_expr.app_arg_count(), 2);
+        }
+        _ => panic!("expected ImplDef, got {:?}", decls[0]),
+    }
+}
+
+#[test]
 fn impl_def_with_needs() {
     let decls = parse("impl Store for Redis needs {Http, Fail} {\n  get key = http_get key\n}");
     assert_eq!(decls.len(), 1);

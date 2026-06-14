@@ -39,6 +39,74 @@ fn trait_method_effect_sig(ty: &Type) -> TraitMethodEffectSig {
     }
 }
 
+pub(crate) fn target_key_for_type(ty: &Type) -> Option<String> {
+    match ty {
+        Type::Con(name, args) => Some(super::arity_keyed_target_name(name, args.len())),
+        _ => None,
+    }
+}
+
+pub(crate) fn match_type_pattern(
+    pattern: &Type,
+    actual: &Type,
+    subst: &mut std::collections::HashMap<u32, Type>,
+) -> bool {
+    match (pattern, actual) {
+        (Type::Var(id), actual) => match subst.get(id).cloned() {
+            Some(existing) => existing == *actual,
+            None => {
+                subst.insert(*id, actual.clone());
+                true
+            }
+        },
+        (Type::Con(pn, pa), Type::Con(an, aa)) => {
+            pn == an
+                && pa.len() == aa.len()
+                && pa
+                    .iter()
+                    .zip(aa.iter())
+                    .all(|(p, a)| match_type_pattern(p, a, subst))
+        }
+        (Type::Symbol(a), Type::Symbol(b)) => a == b,
+        _ => false,
+    }
+}
+
+pub(crate) fn substitute_pattern_vars(
+    ty: &Type,
+    subst: &std::collections::HashMap<u32, Type>,
+) -> Type {
+    match ty {
+        Type::Var(id) => subst.get(id).cloned().unwrap_or(Type::Var(*id)),
+        Type::Con(name, args) => Type::Con(
+            name.clone(),
+            args.iter()
+                .map(|arg| substitute_pattern_vars(arg, subst))
+                .collect(),
+        ),
+        Type::Fun(a, b, row) => Type::Fun(
+            Box::new(substitute_pattern_vars(a, subst)),
+            Box::new(substitute_pattern_vars(b, subst)),
+            row.clone(),
+        ),
+        Type::Record(fields) => Type::Record(
+            fields
+                .iter()
+                .map(|(name, ty)| (name.clone(), substitute_pattern_vars(ty, subst)))
+                .collect(),
+        ),
+        other => other.clone(),
+    }
+}
+
+fn direct_target_var_index(target: &Type, var_id: u32) -> Option<usize> {
+    let Type::Con(_, args) = target else {
+        return None;
+    };
+    args.iter()
+        .position(|arg| matches!(arg, Type::Var(id) if *id == var_id))
+}
+
 impl Checker {
     // --- Trait & impl helpers ---
 
@@ -69,78 +137,6 @@ impl Checker {
                 kind_name(*expected_kind),
             ),
         ))
-    }
-
-    /// Replace occurrences of the trait's type param variable with a concrete type.
-    /// Used when checking impl bodies: if the trait says `(x: a) -> String`
-    /// and the impl is `for User`, we substitute a -> User to get `(x: User) -> String`.
-    /// `trait_param_id` identifies which specific var to replace; other free vars are left alone.
-    pub(crate) fn substitute_trait_param(
-        &self,
-        trait_param_id: Option<u32>,
-        replacement: &Type,
-        ty: &Type,
-    ) -> Type {
-        match ty {
-            Type::Var(id) => {
-                let resolved = self.sub.apply(ty);
-                if resolved == *ty {
-                    // Unresolved var -- only replace if it's the trait's own type param
-                    match trait_param_id {
-                        Some(param_id) if *id == param_id => replacement.clone(),
-                        Some(_) => ty.clone(),
-                        // Fallback: no param ID tracked, replace all (legacy behavior)
-                        None => replacement.clone(),
-                    }
-                } else {
-                    resolved
-                }
-            }
-            Type::Fun(a, b, row) => Type::Fun(
-                Box::new(self.substitute_trait_param(trait_param_id, replacement, a)),
-                Box::new(self.substitute_trait_param(trait_param_id, replacement, b)),
-                super::EffectRow {
-                    effects: row
-                        .effects
-                        .iter()
-                        .map(|entry| super::EffectEntry {
-                            name: entry.name.clone(),
-                            args: entry
-                                .args
-                                .iter()
-                                .map(|t| {
-                                    self.substitute_trait_param(trait_param_id, replacement, t)
-                                })
-                                .collect(),
-                        })
-                        .collect(),
-                    tails: row
-                        .tails
-                        .iter()
-                        .map(|t| self.substitute_trait_param(trait_param_id, replacement, t))
-                        .collect(),
-                },
-            ),
-            Type::Con(name, args) => Type::Con(
-                name.clone(),
-                args.iter()
-                    .map(|a| self.substitute_trait_param(trait_param_id, replacement, a))
-                    .collect(),
-            ),
-            Type::Record(fields) => Type::Record(
-                fields
-                    .iter()
-                    .map(|(fname, ty)| {
-                        (
-                            fname.clone(),
-                            self.substitute_trait_param(trait_param_id, replacement, ty),
-                        )
-                    })
-                    .collect(),
-            ),
-            Type::Symbol(name) => Type::Symbol(name.clone()),
-            Type::Error => Type::Error,
-        }
     }
 
     /// Resolve a trait name to its canonical form.
@@ -380,6 +376,7 @@ impl Checker {
         trait_type_args: &[ast::TypeExpr],
         target_type: &str,
         type_params: &[TypeParam],
+        target_type_expr: Option<&ast::TypeExpr>,
         where_clause: &[ast::TraitBound],
         where_apps: &[ast::TraitApp],
         needs: &[ast::EffectRef],
@@ -486,11 +483,31 @@ impl Checker {
                 ),
             ));
         }
-        // For tuple targets, key the impl by arity so `(a, b)` and `(a, b, c)`
-        // coexist as distinct concrete impls. The real Type::Con name stays
-        // bare ("Std.Base.Tuple") so impl body type-checking and call-site
-        // unification still work — only the lookup key carries arity.
-        let target_key = super::arity_keyed_target_name(&resolved_target_type, type_params.len());
+        // Convert the full target pattern first. Parsed source impls provide
+        // `target_type_expr`; synthesized impls fall back to the legacy
+        // `target_type + type_params` representation.
+        let mut impl_type_vars: Vec<(String, u32)> = Vec::new();
+        let target = if let Some(target_expr) = target_type_expr {
+            self.convert_type_expr(target_expr, &mut impl_type_vars)
+        } else if type_params.is_empty() {
+            Type::Con(resolved_target_type.clone(), vec![])
+        } else {
+            let mut param_vars = Vec::new();
+            for tp in type_params {
+                let fresh = self.fresh_var_of_kind(tp.kind);
+                if let Type::Var(id) = fresh {
+                    impl_type_vars.push((tp.name.clone(), id));
+                }
+                param_vars.push(fresh);
+            }
+            Type::Con(resolved_target_type.clone(), param_vars)
+        };
+        let Some(target_key) = target_key_for_type(&target) else {
+            return Err(Diagnostic::error_at(
+                span,
+                "impl target must be a named or tuple type".to_string(),
+            ));
+        };
         let dup_key = (
             trait_name.to_string(),
             trait_type_args_names.clone(),
@@ -535,54 +552,47 @@ impl Checker {
             }
         }
 
-        // Type-check each method body against the trait's expected signature.
-        // Substitute the trait's type param with the concrete target type.
-        // For parameterized impls (e.g. `impl Show for Box a`), use fresh vars for type params.
-        let mut target_type_param_ids: Vec<u32> = Vec::new();
-        let target = if type_params.is_empty() {
-            Type::Con(resolved_target_type.clone(), vec![])
-        } else {
-            let param_vars: Vec<Type> = type_params
+        // Convert each TypeExpr trait_type_arg into a Type, reusing the
+        // impl target's pattern variables so extras like `(a, b)` share vars
+        // with nested target positions like `Column _ _ a`.
+        let trait_type_args_types: Vec<Type> = trait_type_args
+            .iter()
+            .map(|te| self.convert_type_expr(te, &mut impl_type_vars))
+            .collect();
+        let target_type_param_ids: Vec<u32> = impl_type_vars.iter().map(|(_, id)| *id).collect();
+        let impl_var_id = |name: &str| {
+            impl_type_vars
                 .iter()
-                .map(|tp| self.fresh_var_of_kind(tp.kind))
-                .collect();
-            target_type_param_ids = param_vars
-                .iter()
-                .map(|t| match t {
-                    Type::Var(id) => *id,
-                    _ => unreachable!(),
-                })
-                .collect();
-            // Register where clause bounds on the fresh type vars so method bodies
-            // can use trait methods on those vars (e.g. `show x` where `x: a` and `a: Show`).
-            for bound in where_clause {
-                if let Some(idx) = type_params.iter().position(|p| p == &bound.type_var)
-                    && let Some(Type::Var(var_id)) = param_vars.get(idx)
-                {
+                .find(|(n, _)| n == name)
+                .map(|(_, id)| *id)
+        };
+
+        // Register where clause bounds on impl pattern vars so method bodies
+        // can use trait methods on those vars.
+        for bound in where_clause {
+            if let Some(var_id) = impl_var_id(&bound.type_var) {
+                self.trait_state
+                    .where_bound_var_names
+                    .insert(var_id, bound.type_var.clone());
+                for tr in &bound.traits {
+                    let resolved_req = self.resolved_trait_name_at(tr.id, &tr.name);
+                    self.validate_trait_bound_kind(
+                        &resolved_req,
+                        &bound.type_var,
+                        var_id,
+                        tr.span,
+                    )?;
+                    self.lsp
+                        .type_references
+                        .push((tr.span, resolved_req.clone()));
                     self.trait_state
-                        .where_bound_var_names
-                        .insert(*var_id, bound.type_var.clone());
-                    for tr in &bound.traits {
-                        let resolved_req = self.resolved_trait_name_at(tr.id, &tr.name);
-                        self.validate_trait_bound_kind(
-                            &resolved_req,
-                            &bound.type_var,
-                            *var_id,
-                            tr.span,
-                        )?;
-                        self.lsp
-                            .type_references
-                            .push((tr.span, resolved_req.clone()));
-                        self.trait_state
-                            .where_bounds
-                            .entry(*var_id)
-                            .or_default()
-                            .insert(resolved_req);
-                    }
+                        .where_bounds
+                        .entry(var_id)
+                        .or_default()
+                        .insert(resolved_req);
                 }
             }
-            Type::Con(resolved_target_type.clone(), param_vars)
-        };
+        }
 
         // Validate new-form `where {Trait arg1 arg2 ...}` constraints.
         // Process source-order; later constraints can reference fresh vars
@@ -838,12 +848,30 @@ impl Checker {
                 .map(|t| Self::replace_vars(t, &fresh_mapping))
                 .collect();
             let freshened_return = Self::replace_vars(&trait_method.return_type, &fresh_mapping);
+            let mut impl_trait_param_mapping: std::collections::HashMap<u32, Type> =
+                std::collections::HashMap::new();
+            if let Some(self_id) = trait_param_id {
+                impl_trait_param_mapping.insert(self_id, target.clone());
+            }
+            if let Some((_, _, extra_types)) = trait_method
+                .scheme
+                .constraints
+                .iter()
+                .find(|(constraint_trait, _, _)| constraint_trait == trait_name)
+            {
+                for (extra_ty, impl_arg_ty) in extra_types.iter().zip(trait_type_args_types.iter())
+                {
+                    let fresh_extra = Self::replace_vars(extra_ty, &fresh_mapping);
+                    if let Type::Var(id) = fresh_extra {
+                        impl_trait_param_mapping.insert(id, impl_arg_ty.clone());
+                    }
+                }
+            }
             let expected_params: Vec<Type> = freshened_params
                 .iter()
-                .map(|t| self.substitute_trait_param(trait_param_id, &target, t))
+                .map(|t| Self::replace_vars(t, &impl_trait_param_mapping))
                 .collect();
-            let expected_return =
-                self.substitute_trait_param(trait_param_id, &target, &freshened_return);
+            let expected_return = Self::replace_vars(&freshened_return, &impl_trait_param_mapping);
 
             let saved_env = self.env.clone();
             let body_scope = self.enter_scope();
@@ -996,23 +1024,27 @@ impl Checker {
 
         self.outer_named_type_vars = saved_outer;
 
-        // Build param_constraints from where clause
+        // Build param_constraints from where clause. Keep the old
+        // index-based shape when a constrained var is a direct target arg,
+        // and also store the variable-id form for structured targets.
         let mut param_constraints = Vec::new();
+        let mut param_constraints_by_var = Vec::new();
         for bound in where_clause {
-            let param_idx = type_params.iter().position(|p| p == &bound.type_var);
-            match param_idx {
-                Some(idx) => {
+            let var_id = impl_var_id(&bound.type_var);
+            match var_id {
+                Some(var_id) => {
                     for tr in &bound.traits {
                         let resolved_req = self.resolved_trait_name_at(tr.id, &tr.name);
-                        if let Some(var_id) = target_type_param_ids.get(idx) {
-                            self.validate_trait_bound_kind(
-                                &resolved_req,
-                                &bound.type_var,
-                                *var_id,
-                                tr.span,
-                            )?;
+                        self.validate_trait_bound_kind(
+                            &resolved_req,
+                            &bound.type_var,
+                            var_id,
+                            tr.span,
+                        )?;
+                        param_constraints_by_var.push((resolved_req.clone(), var_id));
+                        if let Some(idx) = direct_target_var_index(&target, var_id) {
+                            param_constraints.push((resolved_req, idx));
                         }
-                        param_constraints.push((resolved_req, idx));
                     }
                 }
                 None => {
@@ -1028,24 +1060,12 @@ impl Checker {
         }
         param_constraints.extend(where_app_param_constraints);
 
-        // Convert each TypeExpr trait_type_arg into a Type, reusing the
-        // impl's type-param fresh-var ids so that the stored extras share
-        // tvars with `target_type_param_ids`. Call sites substitute those
-        // tvars from the concrete args of the target type.
-        let mut conv_params: Vec<(String, u32)> = type_params
-            .iter()
-            .map(|tp| tp.name.clone())
-            .zip(target_type_param_ids.iter().copied())
-            .collect();
-        let trait_type_args_types: Vec<Type> = trait_type_args
-            .iter()
-            .map(|te| self.convert_type_expr(te, &mut conv_params))
-            .collect();
-
         self.trait_state.impls.insert(
             dup_key,
             ImplInfo {
                 param_constraints,
+                param_constraints_by_var,
+                target_pattern: Some(target.clone()),
                 trait_type_args: trait_type_args_types,
                 target_type_param_ids,
                 span: Some(span),

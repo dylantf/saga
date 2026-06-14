@@ -543,6 +543,7 @@ pub fn format_impl_def(decl: &Decl) -> Doc {
         trait_name,
         trait_type_args,
         target_type,
+        target_type_expr,
         type_params,
         where_clause,
         needs,
@@ -565,12 +566,12 @@ pub fn format_impl_def(decl: &Decl) -> Doc {
                 .to_string()
         })
         .collect();
-    // Tuple impls (`impl Trait for (a, b, ...)`) are parsed into
-    // target_type="Tuple" with one type_param per element. Render them with
-    // the original parenthesized syntax. Bare "Tuple" with no params can't be
-    // produced by the parser, so type_params.len() >= 2 is the discriminator.
     let is_tuple_target = target_type == "Tuple" && type_params.len() >= 2;
-    let target_rendered = if is_tuple_target {
+    let target_rendered = if let Some(target_type_expr) = target_type_expr {
+        pretty(1000, &format_type_expr(target_type_expr))
+            .trim_end()
+            .to_string()
+    } else if is_tuple_target {
         let params: Vec<String> = type_params.iter().map(|tp| tp.to_string()).collect();
         format!("({})", params.join(", "))
     } else {
@@ -586,7 +587,7 @@ pub fn format_impl_def(decl: &Decl) -> Doc {
             target_rendered
         )
     };
-    if !is_tuple_target {
+    if target_type_expr.is_none() && !is_tuple_target {
         for tp in type_params {
             header.push(' ');
             write!(header, "{}", tp).unwrap();

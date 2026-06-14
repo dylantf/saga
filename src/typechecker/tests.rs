@@ -6647,9 +6647,9 @@ fn phantom_and_non_phantom_methods_in_same_trait() {
          }\n\
          impl ConvertTo Int for Float {\n\
          rate () = 2.5\n\
-         convert x = x\n\
+         convert _ = 0\n\
          }\n\
-         fun use_both : a -> a where {a: ConvertTo Int}\n\
+         fun use_both : a -> Int where {a: ConvertTo Int}\n\
          use_both x = {\n\
          let _ = rate ()\n\
          convert x\n\
@@ -9751,6 +9751,80 @@ fn impl_for_tuple_pair_typechecks() {
          use_it () = to_json (1, 2)\n",
     )
     .unwrap();
+}
+
+#[test]
+fn impl_for_structured_tuple_target_typechecks() {
+    check(
+        "trait PgType a { fun pg : a -> String }\n\
+         impl PgType for Int { pg _ = \"int\" }\n\
+         impl PgType for String { pg _ = \"string\" }\n\
+         type Column source name a = Column a\n\
+         type Projection row = Projection row\n\
+         trait Selectable selection row {\n\
+           fun to_projection : selection -> Projection row\n\
+         }\n\
+         impl Selectable (a, b) for (Column sa na a, Column sb nb b) where {a: PgType, b: PgType} {\n\
+           to_projection pair = {\n\
+             let (Column x, Column y) = pair\n\
+             Projection (x, y)\n\
+           }\n\
+         }\n\
+         fun use_it : Unit -> Projection (Int, String)\n\
+         use_it () = to_projection (Column 1, Column \"title\")\n",
+    )
+    .unwrap();
+}
+
+#[test]
+fn impl_for_structured_tuple_target_requires_nested_constraints() {
+    let err = check(
+        "trait PgType a { fun pg : a -> String }\n\
+         impl PgType for Int { pg _ = \"int\" }\n\
+         type Column source name a = Column a\n\
+         type Projection row = Projection row\n\
+         trait Selectable selection row {\n\
+           fun to_projection : selection -> Projection row\n\
+         }\n\
+         impl Selectable (a, b) for (Column sa na a, Column sb nb b) where {a: PgType, b: PgType} {\n\
+           to_projection pair = {\n\
+             let (Column x, Column y) = pair\n\
+             Projection (x, y)\n\
+           }\n\
+         }\n\
+         fun use_it : Unit -> Projection (Int, String)\n\
+         use_it () = to_projection (Column 1, Column \"title\")\n",
+    )
+    .err()
+    .expect("expected missing PgType String");
+    assert!(
+        err.message.contains("no impl") && err.message.contains("PgType"),
+        "expected missing PgType diagnostic, got: {}",
+        err.message
+    );
+}
+
+#[test]
+fn impl_for_structured_tuple_target_overlaps_generic_tuple_impl() {
+    let err = check(
+        "trait Selectable selection row {\n\
+           fun to_projection : selection -> row\n\
+         }\n\
+         type Column source name a = Column a\n\
+         impl Selectable (a, b) for (a, b) {\n\
+           to_projection pair = pair\n\
+         }\n\
+         impl Selectable (a, b) for (Column sa na a, Column sb nb b) {\n\
+           to_projection pair = pair\n\
+         }\n",
+    )
+    .err()
+    .expect("expected overlapping impl diagnostic");
+    assert!(
+        err.message.contains("duplicate impl") || err.message.contains("already implemented"),
+        "expected overlap/duplicate diagnostic, got: {}",
+        err.message
+    );
 }
 
 #[test]

@@ -28,6 +28,8 @@ impl Checker {
                 ImplInfo {
                     param_constraints: vec![],
                     trait_type_args: vec![],
+                    param_constraints_by_var: vec![],
+                    target_pattern: None,
                     target_type_param_ids: vec![],
                     span: None,
                     method_effects: std::collections::HashMap::new(),
@@ -51,6 +53,8 @@ impl Checker {
                 ImplInfo {
                     param_constraints: vec![],
                     trait_type_args: vec![],
+                    param_constraints_by_var: vec![],
+                    target_pattern: None,
                     target_type_param_ids: vec![],
                     span: None,
                     method_effects: std::collections::HashMap::new(),
@@ -159,6 +163,8 @@ impl Checker {
             ImplInfo {
                 param_constraints: vec![],
                 trait_type_args: vec![],
+                param_constraints_by_var: vec![],
+                target_pattern: None,
                 target_type_param_ids: vec![],
                 span: None,
                 method_effects: std::collections::HashMap::new(),
@@ -169,6 +175,8 @@ impl Checker {
             ImplInfo {
                 param_constraints: vec![],
                 trait_type_args: vec![],
+                param_constraints_by_var: vec![],
+                target_pattern: None,
                 target_type_param_ids: vec![],
                 span: None,
                 method_effects: std::collections::HashMap::new(),
@@ -179,6 +187,8 @@ impl Checker {
             ImplInfo {
                 param_constraints: vec![],
                 trait_type_args: vec![],
+                param_constraints_by_var: vec![],
+                target_pattern: None,
                 target_type_param_ids: vec![],
                 span: None,
                 method_effects: std::collections::HashMap::new(),
@@ -191,6 +201,8 @@ impl Checker {
             ImplInfo {
                 param_constraints: vec![("Eq".into(), 0)],
                 trait_type_args: vec![],
+                param_constraints_by_var: vec![],
+                target_pattern: None,
                 target_type_param_ids: vec![],
                 span: None,
                 method_effects: std::collections::HashMap::new(),
@@ -203,6 +215,8 @@ impl Checker {
             ImplInfo {
                 param_constraints: vec![("Eq".into(), 0)],
                 trait_type_args: vec![],
+                param_constraints_by_var: vec![],
+                target_pattern: None,
                 target_type_param_ids: vec![],
                 span: None,
                 method_effects: std::collections::HashMap::new(),
@@ -215,6 +229,8 @@ impl Checker {
             ImplInfo {
                 param_constraints: vec![("Eq".into(), 0), ("Eq".into(), 1)],
                 trait_type_args: vec![],
+                param_constraints_by_var: vec![],
+                target_pattern: None,
                 target_type_param_ids: vec![],
                 span: None,
                 method_effects: std::collections::HashMap::new(),
@@ -227,6 +243,8 @@ impl Checker {
             ImplInfo {
                 param_constraints: vec![("Eq".into(), 0), ("Eq".into(), 1)],
                 trait_type_args: vec![],
+                param_constraints_by_var: vec![],
+                target_pattern: None,
                 target_type_param_ids: vec![],
                 span: None,
                 method_effects: std::collections::HashMap::new(),
@@ -239,6 +257,8 @@ impl Checker {
             ImplInfo {
                 param_constraints: vec![("Eq".into(), 0)],
                 trait_type_args: vec![],
+                param_constraints_by_var: vec![],
+                target_pattern: None,
                 target_type_param_ids: vec![],
                 span: None,
                 method_effects: std::collections::HashMap::new(),
