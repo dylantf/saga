@@ -1,18 +1,155 @@
-trait Fooable a {
-  fun foo : a -> String
+import Std.Generic (Generic, Leaf, Labeled, And, Record)
+import Std.IO (console)
+
+trait PgType a {}
+
+impl PgType for Int {}
+impl PgType for String {}
+impl PgType for Bool {}
+
+type Column source (name : Symbol) a = Column
+
+record User {
+  id: Int,
+  name: String,
+  age: Int,
 }
 
-impl Fooable for String {
-  foo s = s
+record Post {
+  id: Int,
+  author_id: Int,
+  title: String,
+  published: Bool,
 }
 
-effect Foo {
-  fun do_the_foo : a -> String where {a: Fooable}
+type UsersScope = UsersScope
+type PostsScope = PostsScope
+
+record Users source {
+  id: Column source 'id Int,
+  name: Column source 'name String,
+  age: Column source 'age Int,
 }
+
+record Posts source {
+  id: Column source 'id Int,
+  author_id: Column source 'author_id Int,
+  title: Column source 'title String,
+  published: Column source 'published Bool,
+}
+
+fun users : Users UsersScope
+users = Users {
+  id: Column,
+  name: Column,
+  age: Column,
+}
+
+fun posts : Posts PostsScope
+posts = Posts {
+  id: Column,
+  author_id: Column,
+  title: Column,
+  published: Column,
+}
+
+trait Selectable selection row | selection -> row {
+  fun to_row : selection -> row
+}
+
+# Desired library shape:
+# - columns are selectable directly
+# - any selectable thing can be lifted through Generic.Leaf
+# - table scope records can select into their domain row record
+impl Selectable a for (Column source name a) where {a: PgType} {
+  to_row _ = panic "not evaluated"
+}
+
+impl Selectable (Leaf row) for (Leaf selection) where {selection: Selectable row} {
+  to_row selection = case selection {
+    Leaf value -> Leaf (to_row value)
+  }
+}
+
+impl Selectable (Labeled n out) for (Labeled n field)
+  where {Selectable field out}
+{
+  to_row selection = case selection {
+    Labeled field -> Labeled (to_row field)
+  }
+}
+
+impl Selectable (And left_out right_out) for (And left right)
+  where {Selectable left left_out, Selectable right right_out}
+{
+  to_row selection = case selection {
+    And left right -> And (to_row left) (to_row right)
+  }
+}
+
+impl Selectable (Record out) for (Record fields) where {Selectable fields out} {
+  to_row selection = case selection {
+    Record name fields -> Record name (to_row fields)
+  }
+}
+
+fun project : selection -> row
+  where {
+    selection: Generic selection_rep,
+    selection_rep: Selectable row_rep,
+    row: Generic row_rep,
+  }
+project selection =
+  from (to_row (to selection))
+
+impl Selectable User for Users source {
+  to_row u =
+    User {
+      id: to_row u.id,
+      name: to_row u.name,
+      age: to_row u.age,
+    }
+}
+
+effect QueryBuild selection {
+  fun select : selection -> selection
+}
+
+type Step a = Step (Unit -> a)
+
+handler collect_query for QueryBuild selection {
+  select selection = {
+    Step (fun () -> {
+      let Step run_rest = resume selection
+      run_rest ()
+    })
+  }
+
+  return value = Step (fun () -> value)
+}
+
+fun query : (Unit -> selection needs {QueryBuild selection}) -> row
+  where {
+    selection: Generic selection_rep,
+    selection_rep: Selectable row_rep,
+    row: Generic row_rep,
+  }
+query make = {
+  let Step run_query = make () with collect_query
+  project (run_query ())
+}
+
+fun user_posts_query : Unit -> {
+  user: User,
+  post_title: String,
+}
+user_posts_query () = query (fun () -> {
+  let u = users
+  let p = posts
+  select! ({ user: u, post_title: p.title })
+})
 
 main () = {
-  let result = do_the_foo! "Hello"
-  dbg result
-} with {
-  do_the_foo str = resume foo (str : String)
-}
+  let row = user_posts_query ()
+  println $"{show row.user.id}: {row.user.name} / {row.post_title}"
+} with console
