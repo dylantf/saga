@@ -10104,6 +10104,58 @@ fn anonymous_record_generic_shape_can_drive_selectable_output_record() {
 }
 
 #[test]
+fn inferred_query_result_bubbles_anonymous_select_record_to_prepared() {
+    let checker = check(
+        "import Std.Generic (Generic, Leaf, Labeled, And, Record)\n\
+         type Column (n : Symbol) a = Column a\n\
+         type Prepared row = Prepared row\n\
+         trait Selectable selection row | selection -> row {\n\
+           fun selected : selection -> row\n\
+         }\n\
+         impl Selectable (Leaf a) for (Leaf (Column n a)) {\n\
+           selected _ = todo ()\n\
+         }\n\
+         impl Selectable (Labeled n out) for (Labeled n field) where {Selectable field out} {\n\
+           selected _ = todo ()\n\
+         }\n\
+         impl Selectable (And lo ro) for (And l r) where {Selectable l lo, Selectable r ro} {\n\
+           selected _ = todo ()\n\
+         }\n\
+         impl Selectable (Record out) for (Record fields) where {Selectable fields out} {\n\
+           selected _ = todo ()\n\
+         }\n\
+         effect QueryBuild selection {\n\
+           fun select : selection -> selection\n\
+         }\n\
+         type Step a = Step (Unit -> a)\n\
+         handler collect_query for QueryBuild selection {\n\
+           select selection = {\n\
+             Step (fun () -> {\n\
+               let Step run_rest = resume selection\n\
+               run_rest ()\n\
+             })\n\
+           }\n\
+           return value = Step (fun () -> value)\n\
+         }\n\
+         fun query : (Unit -> selection needs {QueryBuild selection}) -> Prepared row\n\
+           where {selection: Generic selection_rep, selection_rep: Selectable row_rep, row: Generic row_rep}\n\
+         query make = {\n\
+           let Step run_query = make () with collect_query\n\
+           Prepared (from (selected (to (run_query ()))))\n\
+         }\n\
+         q () = query (fun () -> select! {\n\
+           user_id: Column 42,\n\
+           post_title: Column \"title\",\n\
+         })\n",
+    )
+    .unwrap();
+
+    let scheme = checker.env.get("q").expect("q not in env");
+    let ty = scheme.display_with_constraints(&checker.sub);
+    assert_eq!(ty, "Unit -> Prepared { post_title: String, user_id: Int }");
+}
+
+#[test]
 fn imported_anonymous_record_generic_selectable_shape_typechecks() {
     let db = "module Db
 
