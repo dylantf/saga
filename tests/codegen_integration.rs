@@ -320,6 +320,22 @@ main () = render_payload (Box (Leaf "y")) with ask_default
 }
 
 #[test]
+fn adt_constructor_as_higher_order_function_runs() {
+    let src = r#"
+type Leaf a = Leaf a
+
+fun map : (a -> b) -> a -> b
+map f value = f value
+
+main () = case map Leaf 42 {
+  Leaf n -> n
+}
+"#;
+
+    assert_runs_and_stdout_contains(src, &["42"]);
+}
+
+#[test]
 fn inner_dynamic_handler_is_kept_when_outer_static_handler_handles_same_effect() {
     let src = r#"
 effect Log {

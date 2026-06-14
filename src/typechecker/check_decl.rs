@@ -1036,12 +1036,17 @@ impl Checker {
         }
 
         // Register where clause bounds on type variable IDs
-        for (trait_name, var_id, _extra_var_ids) in where_constraints {
+        for (trait_name, var_id, extra_types) in where_constraints {
             self.trait_state
                 .where_bounds
                 .entry(*var_id)
                 .or_default()
                 .insert(trait_name.clone());
+            if !extra_types.is_empty() {
+                self.trait_state
+                    .where_bound_trait_args
+                    .insert((*var_id, trait_name.clone()), extra_types.clone());
+            }
         }
 
         // Snapshot pending constraints so we can partition new ones after body checking
@@ -2916,6 +2921,8 @@ impl Checker {
         // Also resolve var names through substitution
         let mut resolved_var_names: std::collections::HashMap<u32, String> =
             std::collections::HashMap::new();
+        let mut resolved_bound_trait_args: std::collections::HashMap<(u32, String), Vec<Type>> =
+            std::collections::HashMap::new();
         for (&var_id, traits) in &self.trait_state.where_bounds {
             if let Type::Var(resolved_id) = self.sub.apply(&Type::Var(var_id)) {
                 resolved_bounds
@@ -2924,6 +2931,18 @@ impl Checker {
                     .extend(traits.iter().cloned());
                 if let Some(name) = self.trait_state.where_bound_var_names.get(&var_id) {
                     resolved_var_names.insert(resolved_id, name.clone());
+                }
+                for trait_name in traits {
+                    if let Some(extras) = self
+                        .trait_state
+                        .where_bound_trait_args
+                        .get(&(var_id, trait_name.clone()))
+                    {
+                        resolved_bound_trait_args.insert(
+                            (resolved_id, trait_name.clone()),
+                            extras.iter().map(|ty| self.sub.apply(ty)).collect(),
+                        );
+                    }
                 }
             }
         }
@@ -3103,7 +3122,13 @@ impl Checker {
                                     pattern_extra,
                                     &pattern_subst,
                                 );
-                                if self.unify(actual_extra, &expected_extra).is_err() {
+                                let resolved_actual = self.sub.apply(actual_extra);
+                                if !super::check_traits::match_type_pattern(
+                                    &expected_extra,
+                                    &resolved_actual,
+                                    &mut pattern_subst,
+                                ) && self.unify(actual_extra, &expected_extra).is_err()
+                                {
                                     return None;
                                 }
                             }
@@ -3239,12 +3264,13 @@ impl Checker {
                     }
                     // Still a type variable: check where clause bounds
                     Type::Var(id) => {
-                        let covered = resolved_bounds.get(id).is_some_and(|bounds| {
+                        let covering_trait = resolved_bounds.get(id).and_then(|bounds| {
                             bounds
                                 .iter()
-                                .any(|bound_trait| self.trait_implies(bound_trait, &trait_name))
+                                .find(|bound_trait| self.trait_implies(bound_trait, &trait_name))
+                                .cloned()
                         });
-                        if !covered {
+                        let Some(covering_trait) = covering_trait else {
                             let display = trait_name.rsplit('.').next().unwrap_or(&trait_name);
                             return Err(rewrite_diag(
                                 format!(
@@ -3253,6 +3279,15 @@ impl Checker {
                                 ),
                                 span,
                             ));
+                        };
+                        if let Some(bound_extras) =
+                            resolved_bound_trait_args.get(&(*id, covering_trait))
+                        {
+                            for (required, bound) in
+                                trait_type_arg_types.iter().zip(bound_extras.iter())
+                            {
+                                self.unify_at(required, bound, span)?;
+                            }
                         }
                         // Record evidence for polymorphic passthrough
                         let var_name = resolved_var_names.get(id).cloned();

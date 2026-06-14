@@ -621,10 +621,7 @@ impl Checker {
             .collect();
         let target_type_param_ids: Vec<u32> = impl_type_vars.iter().map(|(_, id)| *id).collect();
         let impl_var_id = |vars: &[(String, u32)], name: &str| {
-            vars
-                .iter()
-                .find(|(n, _)| n == name)
-                .map(|(_, id)| *id)
+            vars.iter().find(|(n, _)| n == name).map(|(_, id)| *id)
         };
 
         // Register where clause bounds on impl pattern vars so method bodies
@@ -649,7 +646,17 @@ impl Checker {
                         .where_bounds
                         .entry(var_id)
                         .or_default()
-                        .insert(resolved_req);
+                        .insert(resolved_req.clone());
+                    if !tr.type_args.is_empty() {
+                        let extra_types: Vec<Type> = tr
+                            .type_args
+                            .iter()
+                            .map(|te| self.convert_type_expr(te, &mut impl_type_vars))
+                            .collect();
+                        self.trait_state
+                            .where_bound_trait_args
+                            .insert((var_id, resolved_req), extra_types);
+                    }
                 }
             }
         }
@@ -771,6 +778,11 @@ impl Checker {
                     .entry(self_var_id)
                     .or_default()
                     .insert(resolved_trait.clone());
+                if !extra_types.is_empty() {
+                    self.trait_state
+                        .where_bound_trait_args
+                        .insert((self_var_id, resolved_trait.clone()), extra_types.clone());
+                }
                 where_app_param_constraints.push((
                     resolved_trait.clone(),
                     self_var_id,

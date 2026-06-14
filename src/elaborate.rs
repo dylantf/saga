@@ -54,6 +54,39 @@ fn match_type_pattern(pattern: &Type, actual: &Type, subst: &mut HashMap<u32, Ty
     }
 }
 
+fn substitute_pattern_vars(ty: &Type, subst: &HashMap<u32, Type>) -> Type {
+    match ty {
+        Type::Var(id) => subst.get(id).cloned().unwrap_or(Type::Var(*id)),
+        Type::Con(name, args) => Type::Con(
+            name.clone(),
+            args.iter()
+                .map(|arg| substitute_pattern_vars(arg, subst))
+                .collect(),
+        ),
+        Type::Fun(a, b, row) => Type::Fun(
+            Box::new(substitute_pattern_vars(a, subst)),
+            Box::new(substitute_pattern_vars(b, subst)),
+            row.clone(),
+        ),
+        Type::Record(fields) => Type::Record(
+            fields
+                .iter()
+                .map(|(name, ty)| (name.clone(), substitute_pattern_vars(ty, subst)))
+                .collect(),
+        ),
+        other => other.clone(),
+    }
+}
+
+fn trait_type_arg_names(args: &[Type]) -> Vec<String> {
+    args.iter()
+        .filter_map(|ty| match ty {
+            Type::Con(name, _) => Some(name.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
 const SHOW: &str = "Std.Base.Show";
 const DEBUG: &str = "Std.Base.Debug";
 const ORD: &str = "Std.Base.Ord";
@@ -312,29 +345,48 @@ impl Elaborator {
         dict_params
     }
 
+    fn dict_params_from_where_apps(&self, where_apps: &[TraitApp]) -> Vec<(String, String)> {
+        let mut dict_params = Vec::new();
+        for app in where_apps {
+            if matches!(app.trait_name.as_str(), "Num" | "Eq") {
+                continue;
+            }
+            let Some(TypeExpr::Var { name, .. }) = app.type_args.first() else {
+                continue;
+            };
+            let resolved = self.resolved_trait_name(app.id, &app.trait_name);
+            dict_params.push((resolved, name.clone()));
+        }
+        dict_params
+    }
+
     /// Set up `current_dict_params` from a where clause, saving the previous state.
     /// Returns the saved state to be restored later via `restore_dict_params`.
-    fn setup_dict_params(
+    fn setup_dict_params_from_pairs(
         &mut self,
-        where_clause: &[TraitBound],
+        dict_params: &[(String, String)],
     ) -> (HashMap<String, String>, HashMap<(String, String), String>) {
         let saved = (
             std::mem::take(&mut self.current_dict_params),
             std::mem::take(&mut self.current_dict_params_by_var),
         );
-        for bound in where_clause {
-            for tr in &bound.traits {
-                let resolved = self.resolved_trait_name(tr.id, &tr.name);
-                // Use bare trait name in param name to avoid dots in Erlang identifiers
-                let bare = tr.name.rsplit('.').next().unwrap_or(&tr.name);
-                let param_name = format!("__dict_{}_{}", bare, bound.type_var);
-                self.current_dict_params
-                    .insert(resolved.clone(), param_name.clone());
-                self.current_dict_params_by_var
-                    .insert((resolved, bound.type_var.clone()), param_name);
-            }
+        for (resolved, type_var) in dict_params {
+            let bare = resolved.rsplit('.').next().unwrap_or(resolved);
+            let param_name = format!("__dict_{}_{}", bare, type_var);
+            self.current_dict_params
+                .insert(resolved.clone(), param_name.clone());
+            self.current_dict_params_by_var
+                .insert((resolved.clone(), type_var.clone()), param_name);
         }
         saved
+    }
+
+    fn setup_dict_params(
+        &mut self,
+        where_clause: &[TraitBound],
+    ) -> (HashMap<String, String>, HashMap<(String, String), String>) {
+        let dict_params = self.dict_params_from_where(where_clause);
+        self.setup_dict_params_from_pairs(&dict_params)
     }
 
     /// Restore `current_dict_params` from a previous `setup_dict_params` call.
@@ -487,6 +539,7 @@ impl Elaborator {
                     target_type_expr,
                     type_params,
                     where_clause,
+                    where_apps,
                     methods,
                     needs,
                     routed_derive_info,
@@ -514,15 +567,18 @@ impl Elaborator {
                     let trait_info = self.traits.get(&canonical_trait).cloned();
 
                     // Build dict_params for conditional impls
-                    let mut dict_params = Vec::new();
-                    for bound in where_clause {
-                        for tr in &bound.traits {
-                            dict_params.push(format!("__dict_{}_{}", tr.name, bound.type_var));
-                        }
-                    }
+                    let mut dict_param_pairs = self.dict_params_from_where_apps(where_apps);
+                    dict_param_pairs.extend(self.dict_params_from_where(where_clause));
+                    let dict_params: Vec<String> = dict_param_pairs
+                        .iter()
+                        .map(|(trait_name, type_var)| {
+                            let bare = trait_name.rsplit('.').next().unwrap_or(trait_name);
+                            format!("__dict_{}_{}", bare, type_var)
+                        })
+                        .collect();
 
                     // Set up current dict params for elaborating method bodies
-                    let saved = self.setup_dict_params(where_clause);
+                    let saved = self.setup_dict_params_from_pairs(&dict_param_pairs);
 
                     let mut super_dicts = Vec::new();
                     if let Some(ref info) = trait_info {
@@ -1824,31 +1880,19 @@ impl Elaborator {
                         ));
                     }
                     if let Some(record_ty) = &ev.resolved_record_type {
-                        let resolved_type_args: Vec<String> = ev
-                            .trait_type_args
-                            .iter()
-                            .filter_map(|t| match t {
-                                Type::Con(name, _) => Some(name.clone()),
-                                _ => None,
-                            })
-                            .collect();
-                        return self.dict_for_type(trait_name, &resolved_type_args, record_ty, span);
+                        return self.dict_for_type(
+                            trait_name,
+                            &ev.trait_type_args,
+                            record_ty,
+                            span,
+                        );
                     }
                     return match &ev.resolved_type {
                         Some((type_name, args)) => {
                             // Concrete type: build the dict via dict_for_type,
                             // which handles where-clause constraints correctly.
-                            // Resolve extra type args to concrete type names for dict key.
-                            let resolved_type_args: Vec<String> = ev
-                                .trait_type_args
-                                .iter()
-                                .filter_map(|t| match t {
-                                    Type::Con(name, _) => Some(name.clone()),
-                                    _ => None,
-                                })
-                                .collect();
                             let ty = Type::Con(type_name.clone(), args.clone());
-                            self.dict_for_type(trait_name, &resolved_type_args, &ty, span)
+                            self.dict_for_type(trait_name, &ev.trait_type_args, &ty, span)
                         }
                         None => {
                             // Polymorphic: use the dict param from current function.
@@ -1988,7 +2032,7 @@ impl Elaborator {
     fn dict_for_type(
         &self,
         trait_name: &str,
-        trait_type_args: &[String],
+        trait_type_args: &[Type],
         ty: &Type,
         span: Span,
     ) -> Option<Expr> {
@@ -2019,7 +2063,11 @@ impl Elaborator {
                 // tuple lookup we synthesize that name from the args. Non-
                 // tuple names pass through `arity_keyed_target_name` unchanged.
                 let keyed_name = crate::typechecker::arity_keyed_target_name(name, args.len());
-                let key = (trait_name.to_string(), trait_type_args.to_vec(), keyed_name);
+                let key = (
+                    trait_name.to_string(),
+                    trait_type_arg_names(trait_type_args),
+                    keyed_name,
+                );
                 let dict_name = self.dict_names.get(&key)?;
                 let impl_info = self.impl_infos.get(&key);
                 let mut dict_expr: Expr = Expr::synth(
@@ -2034,6 +2082,38 @@ impl Elaborator {
                     let mut subst = HashMap::new();
                     if !match_type_pattern(pattern, ty, &mut subst) {
                         return None;
+                    }
+                    if info.trait_type_args.len() != trait_type_args.len() {
+                        return None;
+                    }
+                    for (pattern_arg, actual_arg) in
+                        info.trait_type_args.iter().zip(trait_type_args.iter())
+                    {
+                        if !match_type_pattern(pattern_arg, actual_arg, &mut subst) {
+                            return None;
+                        }
+                    }
+                    for (constraint_trait, var_id, extra_types) in
+                        &info.param_constraints_by_var_with_args
+                    {
+                        let arg_ty = subst.get(var_id)?;
+                        let resolved_extra_types: Vec<Type> = extra_types
+                            .iter()
+                            .map(|extra| substitute_pattern_vars(extra, &subst))
+                            .collect();
+                        let sub_dict = self.dict_for_type(
+                            constraint_trait,
+                            &resolved_extra_types,
+                            arg_ty,
+                            span,
+                        )?;
+                        dict_expr = Expr::synth(
+                            span,
+                            ExprKind::App {
+                                func: Box::new(dict_expr),
+                                arg: Box::new(sub_dict),
+                            },
+                        );
                     }
                     for (constraint_trait, var_id) in &info.param_constraints_by_var {
                         let arg_ty = subst.get(var_id)?;

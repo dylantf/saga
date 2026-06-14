@@ -9,6 +9,42 @@ use super::util::{self, collect_ctor_call};
 use super::{EvidenceCtx, Lowerer};
 
 impl<'a> Lowerer<'a> {
+    fn lower_constructor_function_value(
+        &mut self,
+        name: &str,
+        expected_ty: &crate::typechecker::Type,
+    ) -> Option<CExpr> {
+        let mut params = Vec::new();
+        let mut current = expected_ty;
+        while let crate::typechecker::Type::Fun(_, ret, _) = current {
+            params.push(self.fresh());
+            current = ret;
+        }
+        if params.is_empty() {
+            return None;
+        }
+
+        let atom =
+            util::mangle_ctor_atom(name, &self.constructor_atoms, self.handler_origin_module());
+        let value = if name == "Cons" && params.len() == 2 {
+            CExpr::Cons(
+                Box::new(CExpr::Var(params[0].clone())),
+                Box::new(CExpr::Var(params[1].clone())),
+            )
+        } else {
+            let mut elems = vec![CExpr::Lit(CLit::Atom(atom))];
+            elems.extend(params.iter().map(|param| CExpr::Var(param.clone())));
+            CExpr::Tuple(elems)
+        };
+
+        Some(
+            params
+                .into_iter()
+                .rev()
+                .fold(value, |body, param| CExpr::Fun(vec![param], Box::new(body))),
+        )
+    }
+
     pub(super) fn cps_function_shape_from_type(
         &self,
         ty: &crate::typechecker::Type,
@@ -268,6 +304,13 @@ impl<'a> Lowerer<'a> {
         expected_ty: Option<&crate::typechecker::Type>,
     ) -> CExpr {
         if let Some(expected_ty) = expected_ty {
+            if let ExprKind::Constructor { name, .. } = &expr.kind
+                && matches!(expected_ty, crate::typechecker::Type::Fun(_, _, _))
+                && let Some(ctor_fun) = self.lower_constructor_function_value(name, expected_ty)
+            {
+                return ctor_fun;
+            }
+
             if let Some((ctor_name, args)) = collect_ctor_call(expr) {
                 let bare = crate::typechecker::bare_type_name(match expected_ty {
                     crate::typechecker::Type::Con(name, _) => name,

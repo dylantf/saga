@@ -314,6 +314,7 @@ pub(super) fn collect_codegen_info(
                 target_type_expr,
                 type_params,
                 where_clause,
+                where_apps,
                 needs,
                 methods,
                 routed_derive_info,
@@ -353,7 +354,8 @@ pub(super) fn collect_codegen_info(
                     &erlang_module,
                     &canonical_target_type,
                 );
-                let arity = where_clause.iter().map(|b| b.traits.len()).sum::<usize>();
+                let arity =
+                    where_apps.len() + where_clause.iter().map(|b| b.traits.len()).sum::<usize>();
                 let var_to_idx: std::collections::HashMap<&str, usize> = type_params
                     .iter()
                     .enumerate()

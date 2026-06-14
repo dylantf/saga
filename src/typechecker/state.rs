@@ -525,6 +525,9 @@ pub(crate) struct TraitState {
     pub routed_constraint_origins: HashMap<crate::ast::NodeId, crate::ast::RoutedDeriveInfo>,
     /// Where clause bounds: var_id -> set of trait names assumed satisfied.
     pub where_bounds: HashMap<u32, HashSet<String>>,
+    /// Extra type arguments for multi-parameter where bounds, keyed by
+    /// (var_id, trait_name). For `where {a: ConvertTo b}` this stores `b`.
+    pub where_bound_trait_args: HashMap<(u32, String), Vec<Type>>,
     /// Reverse map from type var ID to original type parameter name (for polymorphic evidence).
     pub where_bound_var_names: HashMap<u32, String>,
 }
