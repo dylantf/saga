@@ -2431,6 +2431,41 @@ impl Checker {
             } else {
                 EffectRow::empty()
             };
+            let mut constraints = Vec::new();
+            for bound in &op.where_clause {
+                for tr in &bound.traits {
+                    let resolved = self.resolved_trait_name_at(tr.id, &tr.name);
+                    self.lsp.type_references.push((tr.span, resolved));
+                }
+                let Some(var_id) = params_list
+                    .iter()
+                    .find(|(n, _)| *n == bound.type_var)
+                    .map(|(_, id)| *id)
+                else {
+                    return Err(Diagnostic::error_at(
+                        op.span,
+                        format!(
+                            "where clause references unknown type variable '{}' in effect operation '{}'",
+                            bound.type_var, op.name
+                        ),
+                    ));
+                };
+                for tr in &bound.traits {
+                    let resolved_trait = self.resolved_trait_name_at(tr.id, &tr.name);
+                    self.validate_trait_bound_kind(
+                        &resolved_trait,
+                        &bound.type_var,
+                        var_id,
+                        tr.span,
+                    )?;
+                    let extra_types: Vec<Type> = tr
+                        .type_args
+                        .iter()
+                        .map(|te| self.convert_user_type_expr(te, &mut params_list))
+                        .collect();
+                    constraints.push((resolved_trait, var_id, extra_types));
+                }
+            }
             op_spans.insert(op.name.clone(), op.span);
             ops.push(EffectOpSig {
                 name: op.name.clone(),
@@ -2438,6 +2473,7 @@ impl Checker {
                 params: param_types,
                 return_type,
                 needs,
+                constraints,
             });
         }
         self.scope_map
@@ -2607,6 +2643,21 @@ impl Checker {
                             .collect(),
                         return_type: Self::replace_vars(&op.return_type, &handler_type_mapping),
                         needs: op.needs.clone(),
+                        constraints: op
+                            .constraints
+                            .iter()
+                            .map(|(trait_name, var_id, extra_types)| {
+                                let mapped_id = match handler_type_mapping.get(var_id) {
+                                    Some(Type::Var(id)) => *id,
+                                    _ => *var_id,
+                                };
+                                let mapped_extras = extra_types
+                                    .iter()
+                                    .map(|ty| Self::replace_vars(ty, &handler_type_mapping))
+                                    .collect();
+                                (trait_name.clone(), mapped_id, mapped_extras)
+                            })
+                            .collect(),
                     };
                     matched_op = Some(specialized);
                 }

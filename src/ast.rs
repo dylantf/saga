@@ -1330,6 +1330,7 @@ pub struct EffectOp {
     pub return_type: TypeExpr,
     pub effects: Vec<EffectRef>,
     pub effect_row_var: Vec<(String, Span)>,
+    pub where_clause: Vec<TraitBound>,
     pub span: Span,
 }
 

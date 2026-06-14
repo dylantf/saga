@@ -690,6 +690,7 @@ impl<'a> Resolver<'a> {
                     for effect_ref in &op.node.effects {
                         self.record_effect_ref(effect_ref);
                     }
+                    self.resolve_where_clause(&op.node.where_clause);
                 }
             }
             Decl::HandlerDef { body, .. } => self.resolve_handler_body(body),

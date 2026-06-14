@@ -1527,6 +1527,62 @@ main () = show_it (User { name: \"Alice\" })",
 }
 
 #[test]
+fn effect_op_where_clause_satisfied_by_impl() {
+    check(
+        "record User { name: String }
+trait Fooable a {
+  fun foo_name : a -> String
+}
+impl Fooable for User {
+  foo_name user = user.name
+}
+effect Foo {
+  fun do_the_foo : a -> String where {a: Fooable}
+}
+fun use_it : User -> String needs {Foo}
+use_it user = do_the_foo! user",
+    )
+    .unwrap();
+}
+
+#[test]
+fn effect_op_where_clause_satisfied_by_function_where_bound() {
+    check(
+        "trait Fooable a {
+  fun foo_name : a -> String
+}
+effect Foo {
+  fun do_the_foo : a -> String where {a: Fooable}
+}
+fun use_it : a -> String needs {Foo} where {a: Fooable}
+use_it x = do_the_foo! x",
+    )
+    .unwrap();
+}
+
+#[test]
+fn effect_op_where_clause_missing_impl_fails() {
+    let result = check(
+        "record User { name: String }
+trait Fooable a {
+  fun foo_name : a -> String
+}
+effect Foo {
+  fun do_the_foo : a -> String where {a: Fooable}
+}
+fun use_it : User -> String needs {Foo}
+use_it user = do_the_foo! user",
+    );
+    assert!(result.is_err());
+    let err = result.err().unwrap();
+    assert!(
+        err.message.contains("no impl of Fooable for User"),
+        "got: {}",
+        err.message
+    );
+}
+
+#[test]
 fn where_clause_multiple_bounds() {
     check(
         "trait Describe a {

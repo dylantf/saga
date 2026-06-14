@@ -1,22 +1,18 @@
-effect Foo {
-  fun foo : Unit -> Int
-}
-effect Bar {
-  fun bar : Unit -> Int
+trait Fooable a {
+  fun foo : a -> String
 }
 
-fun do_work : (Unit -> Int needs {..a}) -> (Unit -> Int needs {..b}) -> Int
-  needs {..a, ..b}
-do_work a b = {
-  let res_a = a ()
-  let res_b = b ()
-  res_a + res_b
+impl Fooable for String {
+  foo s = s
+}
+
+effect Foo {
+  fun do_the_foo : a -> String where {a: Fooable}
 }
 
 main () = {
-  let res = do_work (fun () -> foo! ()) (fun () -> bar! ())
-  dbg res
+  let result = do_the_foo! "Hello"
+  dbg result
 } with {
-  foo () = resume 42
-  bar () = resume 3
+  do_the_foo str = resume foo (str : String)
 }
