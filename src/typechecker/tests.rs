@@ -1527,6 +1527,62 @@ main () = show_it (User { name: \"Alice\" })",
 }
 
 #[test]
+fn effect_op_where_clause_satisfied_by_impl() {
+    check(
+        "record User { name: String }
+trait Fooable a {
+  fun foo_name : a -> String
+}
+impl Fooable for User {
+  foo_name user = user.name
+}
+effect Foo {
+  fun do_the_foo : a -> String where {a: Fooable}
+}
+fun use_it : User -> String needs {Foo}
+use_it user = do_the_foo! user",
+    )
+    .unwrap();
+}
+
+#[test]
+fn effect_op_where_clause_satisfied_by_function_where_bound() {
+    check(
+        "trait Fooable a {
+  fun foo_name : a -> String
+}
+effect Foo {
+  fun do_the_foo : a -> String where {a: Fooable}
+}
+fun use_it : a -> String needs {Foo} where {a: Fooable}
+use_it x = do_the_foo! x",
+    )
+    .unwrap();
+}
+
+#[test]
+fn effect_op_where_clause_missing_impl_fails() {
+    let result = check(
+        "record User { name: String }
+trait Fooable a {
+  fun foo_name : a -> String
+}
+effect Foo {
+  fun do_the_foo : a -> String where {a: Fooable}
+}
+fun use_it : User -> String needs {Foo}
+use_it user = do_the_foo! user",
+    );
+    assert!(result.is_err());
+    let err = result.err().unwrap();
+    assert!(
+        err.message.contains("no impl of Fooable for User"),
+        "got: {}",
+        err.message
+    );
+}
+
+#[test]
 fn where_clause_multiple_bounds() {
     check(
         "trait Describe a {
@@ -9929,6 +9985,92 @@ fn impl_for_structured_tuple_target_requires_nested_constraints() {
 }
 
 #[test]
+fn structured_phantom_impl_uses_expected_result_to_improve_extra_arg() {
+    check(
+        "trait PgType a {}\n\
+         impl PgType for Int {}\n\
+         impl PgType for String {}\n\
+         type Column source (name : Symbol) a = Column\n\
+         record User { id: Int, name: String }\n\
+         type UsersScope = UsersScope\n\
+         record Users source {\n\
+           id: Column source 'id Int,\n\
+           name: Column source 'name String,\n\
+         }\n\
+         fun users : Users UsersScope\n\
+         users = Users { id: Column, name: Column }\n\
+         trait Selectable selection row | selection -> row {\n\
+           fun to_row : selection -> row\n\
+         }\n\
+         impl Selectable a for (Column source name a) where {a: PgType} {\n\
+           to_row _ = todo ()\n\
+         }\n\
+         impl Selectable User for Users source {\n\
+           to_row u = User {\n\
+             id: to_row u.id,\n\
+             name: to_row u.name,\n\
+           }\n\
+         }\n",
+    )
+    .unwrap();
+}
+
+#[test]
+fn generic_lifted_phantom_column_preserves_where_bound_extra_arg() {
+    check(
+        "import Std.Generic (Generic, Leaf, Labeled, And, Record)\n\
+         trait PgType a {}\n\
+         impl PgType for Int {}\n\
+         impl PgType for String {}\n\
+         type Column source (name : Symbol) a = Column\n\
+         record User { id: Int, name: String }\n\
+         type UsersScope = UsersScope\n\
+         type PostsScope = PostsScope\n\
+         record Users source {\n\
+           id: Column source 'id Int,\n\
+           name: Column source 'name String,\n\
+         }\n\
+         fun users : Users UsersScope\n\
+         users = Users { id: Column, name: Column }\n\
+         trait Selectable selection row | selection -> row {\n\
+           fun to_row : selection -> row\n\
+         }\n\
+         impl Selectable a for (Column source name a) where {a: PgType} {\n\
+           to_row _ = todo ()\n\
+         }\n\
+         impl Selectable (Leaf row) for (Leaf selection) where {selection: Selectable row} {\n\
+           to_row selection = case selection { Leaf value -> Leaf (to_row value) }\n\
+         }\n\
+         impl Selectable (Labeled n out) for (Labeled n field) where {field: Selectable out} {\n\
+           to_row selection = case selection { Labeled field -> Labeled (to_row field) }\n\
+         }\n\
+         impl Selectable (And left_out right_out) for (And left right)\n\
+           where {left: Selectable left_out, right: Selectable right_out}\n\
+         {\n\
+           to_row selection = case selection { And left right -> And (to_row left) (to_row right) }\n\
+         }\n\
+         impl Selectable (Record out) for (Record fields) where {fields: Selectable out} {\n\
+           to_row selection = case selection { Record name fields -> Record name (to_row fields) }\n\
+         }\n\
+         impl Selectable User for Users source {\n\
+           to_row u = User {\n\
+             id: to_row u.id,\n\
+             name: to_row u.name,\n\
+           }\n\
+         }\n\
+         fun project : selection -> row\n\
+           where {selection: Generic selection_rep, selection_rep: Selectable row_rep, row: Generic row_rep}\n\
+         project selection = from (to_row (to selection))\n\
+         fun q : Unit -> { post_title: String, user: User }\n\
+         q () = project {\n\
+           user: users,\n\
+           post_title: (Column : Column PostsScope 'title String),\n\
+         }\n",
+    )
+    .unwrap();
+}
+
+#[test]
 fn anonymous_record_generic_shape_can_drive_selectable_output_record() {
     check(
         "import Std.Generic (Generic, Leaf, Labeled, And, Record)\n\
@@ -9959,6 +10101,58 @@ fn anonymous_record_generic_shape_can_drive_selectable_output_record() {
          }\n",
     )
     .unwrap();
+}
+
+#[test]
+fn inferred_query_result_bubbles_anonymous_select_record_to_prepared() {
+    let checker = check(
+        "import Std.Generic (Generic, Leaf, Labeled, And, Record)\n\
+         type Column (n : Symbol) a = Column a\n\
+         type Prepared row = Prepared row\n\
+         trait Selectable selection row | selection -> row {\n\
+           fun selected : selection -> row\n\
+         }\n\
+         impl Selectable (Leaf a) for (Leaf (Column n a)) {\n\
+           selected _ = todo ()\n\
+         }\n\
+         impl Selectable (Labeled n out) for (Labeled n field) where {Selectable field out} {\n\
+           selected _ = todo ()\n\
+         }\n\
+         impl Selectable (And lo ro) for (And l r) where {Selectable l lo, Selectable r ro} {\n\
+           selected _ = todo ()\n\
+         }\n\
+         impl Selectable (Record out) for (Record fields) where {Selectable fields out} {\n\
+           selected _ = todo ()\n\
+         }\n\
+         effect QueryBuild selection {\n\
+           fun select : selection -> selection\n\
+         }\n\
+         type Step a = Step (Unit -> a)\n\
+         handler collect_query for QueryBuild selection {\n\
+           select selection = {\n\
+             Step (fun () -> {\n\
+               let Step run_rest = resume selection\n\
+               run_rest ()\n\
+             })\n\
+           }\n\
+           return value = Step (fun () -> value)\n\
+         }\n\
+         fun query : (Unit -> selection needs {QueryBuild selection}) -> Prepared row\n\
+           where {selection: Generic selection_rep, selection_rep: Selectable row_rep, row: Generic row_rep}\n\
+         query make = {\n\
+           let Step run_query = make () with collect_query\n\
+           Prepared (from (selected (to (run_query ()))))\n\
+         }\n\
+         q () = query (fun () -> select! {\n\
+           user_id: Column 42,\n\
+           post_title: Column \"title\",\n\
+         })\n",
+    )
+    .unwrap();
+
+    let scheme = checker.env.get("q").expect("q not in env");
+    let ty = scheme.display_with_constraints(&checker.sub);
+    assert_eq!(ty, "Unit -> Prepared { post_title: String, user_id: Int }");
 }
 
 #[test]

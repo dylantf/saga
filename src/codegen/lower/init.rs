@@ -444,6 +444,12 @@ impl<'a> Lowerer<'a> {
                                 is_open_row,
                                 param_absorbed_effects: HashMap::new(),
                                 param_types: Vec::new(),
+                                dict_param_count: self
+                                    .check_result
+                                    .env
+                                    .get(name)
+                                    .map(|scheme| util::dict_param_count(&scheme.constraints))
+                                    .unwrap_or(0),
                             },
                         );
                     } else {
@@ -553,6 +559,7 @@ impl<'a> Lowerer<'a> {
                         is_open_row,
                         param_absorbed_effects: param_absorbed,
                         param_types: util::param_types_from_type(&scheme.ty),
+                        dict_param_count,
                     };
                     let alias_qualified = format!("{}.{}", mod_path.last().unwrap(), name);
                     self.fun_info.entry(alias_qualified).or_insert(fi.clone());
@@ -659,6 +666,7 @@ impl<'a> Lowerer<'a> {
                 is_open_row,
                 param_absorbed_effects: param_effs.clone(),
                 param_types: util::param_types_from_type(&scheme.ty),
+                dict_param_count,
             };
             self.fun_info.insert(alias_qualified, fi.clone());
             let canonical = format!("{}.{}", origin_mod, origin_name);
@@ -673,6 +681,7 @@ impl<'a> Lowerer<'a> {
                     is_open_row,
                     param_absorbed_effects: param_effs,
                     param_types: util::param_types_from_type(&scheme.ty),
+                    dict_param_count,
                 });
             }
         }
@@ -876,6 +885,12 @@ impl<'a> Lowerer<'a> {
                     is_open_row,
                     param_absorbed_effects,
                     param_types,
+                    dict_param_count: self
+                        .check_result
+                        .env
+                        .get(name)
+                        .map(|scheme| util::dict_param_count(&scheme.constraints))
+                        .unwrap_or(0),
                 });
             }
         }

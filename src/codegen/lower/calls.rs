@@ -126,13 +126,9 @@ impl<'a> Lowerer<'a> {
                 return Some(variant_call);
             }
 
-            let param_types = self.resolved_fun_info(head.id, lookup_name).map(|f| {
-                f.param_types
-                    .iter()
-                    .take(args.len())
-                    .cloned()
-                    .collect::<Vec<_>>()
-            });
+            let param_types = self
+                .resolved_fun_info(head.id, lookup_name)
+                .map(|f| f.expected_arg_types(args.len()));
 
             let is_effectful_outer = is_effectful;
             let effectful_arg_idxs: Vec<usize> = if is_effectful_outer {
@@ -221,13 +217,9 @@ impl<'a> Lowerer<'a> {
             let user_slots = arity.saturating_sub(extras);
             if args.len() < user_slots {
                 let remaining_user = user_slots - args.len();
-                let param_types = self.resolved_fun_info(head.id, lookup_name).map(|f| {
-                    f.param_types
-                        .iter()
-                        .take(args.len())
-                        .cloned()
-                        .collect::<Vec<_>>()
-                });
+                let param_types = self
+                    .resolved_fun_info(head.id, lookup_name)
+                    .map(|f| f.expected_arg_types(args.len()));
                 let (arg_vars, bindings) =
                     self.lower_call_args_with_expected_types(args, param_types.as_deref());
                 let mut params: Vec<String> = Vec::new();

@@ -1145,6 +1145,7 @@ impl<'a> Lowerer<'a> {
                         is_open_row,
                         param_absorbed_effects: param_absorbed_effects.clone(),
                         param_types: param_types.clone(),
+                        dict_param_count: 0,
                     },
                 );
 

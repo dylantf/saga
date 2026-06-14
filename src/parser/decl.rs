@@ -565,6 +565,15 @@ impl Parser {
             self.expect(Token::Colon)?;
             let (params, return_type, effects, effect_row_var) =
                 self.parse_annotated_signature()?;
+            let (where_clause, where_apps) = self.parse_where_clause()?;
+            if !where_apps.is_empty() {
+                return Err(ParseError {
+                    message:
+                        "bare trait-application where clauses are only allowed on `impl` declarations"
+                            .to_string(),
+                    span: where_apps[0].span,
+                });
+            }
             let op_end = self.tokens[self.pos - 1].span;
 
             let trailing_comment = self.take_trailing_comment(self.pos - 1);
@@ -576,6 +585,7 @@ impl Parser {
                     return_type,
                     effects,
                     effect_row_var,
+                    where_clause,
                     span: op_start.to(op_end),
                 },
                 leading_trivia: self.take_leading_trivia(start),

@@ -1115,6 +1115,7 @@ impl Checker {
         // and also store the variable-id form for structured targets.
         let mut param_constraints = Vec::new();
         let mut param_constraints_by_var = Vec::new();
+        let mut param_constraints_by_var_with_args = where_app_param_constraints;
         for bound in where_clause {
             let var_id = impl_var_id(&impl_type_vars, &bound.type_var);
             match var_id {
@@ -1127,9 +1128,22 @@ impl Checker {
                             var_id,
                             tr.span,
                         )?;
-                        param_constraints_by_var.push((resolved_req.clone(), var_id));
-                        if let Some(idx) = direct_target_var_index(&target, var_id) {
-                            param_constraints.push((resolved_req, idx));
+                        if tr.type_args.is_empty() {
+                            param_constraints_by_var.push((resolved_req.clone(), var_id));
+                            if let Some(idx) = direct_target_var_index(&target, var_id) {
+                                param_constraints.push((resolved_req, idx));
+                            }
+                        } else {
+                            let extra_types: Vec<Type> = tr
+                                .type_args
+                                .iter()
+                                .map(|te| self.convert_type_expr(te, &mut impl_type_vars))
+                                .collect();
+                            param_constraints_by_var_with_args.push((
+                                resolved_req.clone(),
+                                var_id,
+                                extra_types,
+                            ));
                         }
                     }
                 }
@@ -1144,7 +1158,6 @@ impl Checker {
                 }
             }
         }
-        let param_constraints_by_var_with_args = where_app_param_constraints;
 
         self.trait_state.impls.insert(
             dup_key,

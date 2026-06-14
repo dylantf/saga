@@ -18,6 +18,8 @@ pub struct EffectOpSig {
     pub return_type: Type,
     /// Effect requirements declared on this op (e.g. `spawn` needs `{Actor msg, ..e}`).
     pub needs: EffectRow,
+    /// Trait constraints declared on this op, e.g. `where {a: Show}`.
+    pub constraints: Vec<(String, u32, Vec<Type>)>,
 }
 
 /// Record definition info: type parameter var IDs + field types (with those vars).

@@ -1740,6 +1740,21 @@ fn effect_def_multiple_ops() {
     }
 }
 
+#[test]
+fn effect_op_where_clause() {
+    let decls = parse("effect Foo {\n  fun do_the_foo : a -> String where {a: Fooable}\n}");
+    match &decls[0] {
+        Decl::EffectDef { operations, .. } => {
+            let op = &operations[0].node;
+            assert_eq!(op.name, "do_the_foo");
+            assert_eq!(op.where_clause.len(), 1);
+            assert_eq!(op.where_clause[0].type_var, "a");
+            assert_eq!(op.where_clause[0].traits[0].name, "Fooable");
+        }
+        _ => panic!("expected EffectDef, got {:?}", decls[0]),
+    }
+}
+
 // --- Handler definitions ---
 
 #[test]
@@ -2544,9 +2559,7 @@ fn impl_def_with_structured_tuple_target() {
 
 #[test]
 fn impl_def_with_nested_structured_target() {
-    let decls = parse(
-        "impl Selectable (Leaf a) for (Leaf (Column n a)) {\n  selected x = x\n}",
-    );
+    let decls = parse("impl Selectable (Leaf a) for (Leaf (Column n a)) {\n  selected x = x\n}");
     assert_eq!(decls.len(), 1);
     match &decls[0] {
         Decl::ImplDef {

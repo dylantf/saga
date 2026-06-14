@@ -55,13 +55,9 @@ impl<'a> Lowerer<'a> {
             return None;
         }
 
-        let param_types = self.resolved_fun_info(head.id, lookup_name).map(|f| {
-            f.param_types
-                .iter()
-                .take(args.len())
-                .cloned()
-                .collect::<Vec<_>>()
-        });
+        let param_types = self
+            .resolved_fun_info(head.id, lookup_name)
+            .map(|f| f.expected_arg_types(args.len()));
         let (arg_vars, arg_bindings) =
             self.lower_call_args_with_expected_types(args, param_types.as_deref());
         let params = pats::lower_params(&helper.params);

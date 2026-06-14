@@ -343,6 +343,12 @@ impl Checker {
             for tail in &op.needs.tails {
                 collect_vars(tail, &mut free_vars);
             }
+            for (_, var_id, extra_types) in &op.constraints {
+                free_vars.insert(*var_id);
+                for ty in extra_types {
+                    collect_vars(ty, &mut free_vars);
+                }
+            }
             if free_vars.is_empty() {
                 return op.clone();
             }
@@ -358,6 +364,24 @@ impl Checker {
                     .collect(),
                 return_type: Self::replace_vars(&op.return_type, &mapping),
                 needs: self.replace_vars_in_effect_row(&op.needs, &mapping),
+                constraints: op
+                    .constraints
+                    .iter()
+                    .map(|(trait_name, var_id, extra_types)| {
+                        let fresh = mapping
+                            .get(var_id)
+                            .and_then(|ty| match ty {
+                                Type::Var(id) => Some(*id),
+                                _ => None,
+                            })
+                            .unwrap_or(*var_id);
+                        let extra_fresh = extra_types
+                            .iter()
+                            .map(|ty| Self::replace_vars(ty, &mapping))
+                            .collect();
+                        (trait_name.clone(), fresh, extra_fresh)
+                    })
+                    .collect(),
             };
         }
         // Reuse cached mapping or create fresh vars for effect-level type params
@@ -421,6 +445,12 @@ impl Checker {
         for tail in &op.needs.tails {
             collect_vars2(tail, &mut free_vars);
         }
+        for (_, var_id, extra_types) in &op.constraints {
+            free_vars.insert(*var_id);
+            for ty in extra_types {
+                collect_vars2(ty, &mut free_vars);
+            }
+        }
         for id in free_vars {
             if !type_param_set.contains(&id) && !mapping.contains_key(&id) {
                 mapping.insert(id, self.fresh_var());
@@ -436,6 +466,24 @@ impl Checker {
                 .collect(),
             return_type: Self::replace_vars(&op.return_type, &mapping),
             needs: self.replace_vars_in_effect_row(&op.needs, &mapping),
+            constraints: op
+                .constraints
+                .iter()
+                .map(|(trait_name, var_id, extra_types)| {
+                    let fresh = mapping
+                        .get(var_id)
+                        .and_then(|ty| match ty {
+                            Type::Var(id) => Some(*id),
+                            _ => None,
+                        })
+                        .unwrap_or(*var_id);
+                    let extra_fresh = extra_types
+                        .iter()
+                        .map(|ty| Self::replace_vars(ty, &mapping))
+                        .collect();
+                    (trait_name.clone(), fresh, extra_fresh)
+                })
+                .collect(),
         }
     }
 

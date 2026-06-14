@@ -400,10 +400,16 @@ pub fn format_effect_def(
     let body = format_annotated_body(
         operations,
         |op| {
-            docs![
+            let mut sig = docs![
                 Doc::text(format!("fun {} : ", op.name)),
                 format_fun_type(&op.params, &op.return_type, &op.effects, &op.effect_row_var)
-            ]
+            ];
+            if !op.where_clause.is_empty() {
+                sig = sig
+                    .append(Doc::text(" "))
+                    .append(format_where_clause(&op.where_clause));
+            }
+            sig
         },
         dangling,
     );

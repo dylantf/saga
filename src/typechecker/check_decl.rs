@@ -42,6 +42,59 @@ fn anon_record_generic_rep(fields: &[(String, Type)]) -> Type {
     generic_type("Record", vec![anon_record_generic_inner(fields)])
 }
 
+fn is_generic_type(ty: &Type, name: &str) -> bool {
+    match ty {
+        Type::Con(type_name, _) => type_name == name || type_name == &format!("Std.Generic.{name}"),
+        _ => false,
+    }
+}
+
+fn anon_record_from_generic_rep(rep: &Type) -> Option<Type> {
+    let Type::Con(name, args) = rep else {
+        return None;
+    };
+    if name != "Record" && name != "Std.Generic.Record" {
+        return None;
+    }
+    let [inner] = args.as_slice() else {
+        return None;
+    };
+    let fields = anon_record_fields_from_generic_inner(inner)?;
+    Some(Type::Record(fields))
+}
+
+fn anon_record_fields_from_generic_inner(inner: &Type) -> Option<Vec<(String, Type)>> {
+    if is_generic_type(inner, "U1") {
+        return Some(vec![]);
+    }
+    match inner {
+        Type::Con(name, args) if name == "Labeled" || name == "Std.Generic.Labeled" => {
+            let [Type::Symbol(label), leaf] = args.as_slice() else {
+                return None;
+            };
+            let Type::Con(leaf_name, leaf_args) = leaf else {
+                return None;
+            };
+            if leaf_name != "Leaf" && leaf_name != "Std.Generic.Leaf" {
+                return None;
+            }
+            let [field_ty] = leaf_args.as_slice() else {
+                return None;
+            };
+            Some(vec![(label.clone(), field_ty.clone())])
+        }
+        Type::Con(name, args) if name == "And" || name == "Std.Generic.And" => {
+            let [left, right] = args.as_slice() else {
+                return None;
+            };
+            let mut fields = anon_record_fields_from_generic_inner(left)?;
+            fields.extend(anon_record_fields_from_generic_inner(right)?);
+            Some(fields)
+        }
+        _ => None,
+    }
+}
+
 fn anon_record_generic_inner(fields: &[(String, Type)]) -> Type {
     if fields.is_empty() {
         return generic_type("U1", vec![]);
@@ -1621,11 +1674,44 @@ impl Checker {
         let mut type_vars = Vec::new();
         super::collect_free_vars(&self.sub.apply(&fun_ty), &mut type_vars);
 
-        let mut scheme_constraints: Vec<(String, u32, Span)> = Vec::new();
+        let mut scheme_constraints: Vec<(String, u32, Vec<Type>, Span)> = Vec::new();
         for (trait_name, trait_type_arg_types, ty, span, node_id) in new_constraints {
             let resolved = self.sub.apply(&ty);
             match resolved {
                 Type::Var(id) => {
+                    if is_generic_trait_name(&trait_name)
+                        && let Some(rep_ty) = trait_type_arg_types.first()
+                        && let Some(record_ty) =
+                            anon_record_from_generic_rep(&self.sub.apply(rep_ty))
+                    {
+                        self.unify_at(&Type::Var(id), &record_ty, span)?;
+                        self.trait_state.pending_constraints.push((
+                            trait_name,
+                            trait_type_arg_types,
+                            Type::Var(id),
+                            span,
+                            node_id,
+                        ));
+                        continue;
+                    }
+
+                    if is_generic_trait_name(&trait_name) {
+                        let mut extra_vars = Vec::new();
+                        for extra in &trait_type_arg_types {
+                            super::collect_free_vars(&self.sub.apply(extra), &mut extra_vars);
+                        }
+                        if extra_vars.iter().any(|extra| !type_vars.contains(extra)) {
+                            self.trait_state.pending_constraints.push((
+                                trait_name,
+                                trait_type_arg_types,
+                                Type::Var(id),
+                                span,
+                                node_id,
+                            ));
+                            continue;
+                        }
+                    }
+
                     // Check where_bounds, resolving bound var IDs through
                     // substitution so they match after annotation unification.
                     let in_where =
@@ -1734,7 +1820,11 @@ impl Checker {
                         trait_type_args: trait_type_arg_types.clone(),
                         resolved_symbol: None,
                     });
-                    scheme_constraints.push((trait_name, id, span));
+                    let resolved_extras = trait_type_arg_types
+                        .iter()
+                        .map(|ty| self.sub.apply(ty))
+                        .collect();
+                    scheme_constraints.push((trait_name, id, resolved_extras, span));
                 }
                 _ => {
                     self.trait_state.pending_constraints.push((
@@ -1798,7 +1888,7 @@ impl Checker {
                 .push((trait_name.clone(), resolved_id, resolved_extras));
         }
 
-        for (trait_name, var_id, span) in scheme_constraints {
+        for (trait_name, var_id, extra_types, span) in scheme_constraints {
             // An inferred constraint var is "covered" if it appears in the
             // visible function type OR if it's a where-clause existential that
             // will be pinned at the call site.
@@ -1819,9 +1909,16 @@ impl Checker {
                     .iter()
                     .any(|(t, v, _)| t == &trait_name && *v == var_id)
             {
-                // Inferred constraints (from operators) are always single-param traits.
-                // Multi-param constraints only enter through where clauses (handled above).
-                scheme.constraints.push((trait_name, var_id, vec![]));
+                for extra in &extra_types {
+                    let mut vs = Vec::new();
+                    super::collect_free_vars(extra, &mut vs);
+                    for v in vs {
+                        if !scheme.forall.contains(&v) {
+                            scheme.forall.push(v);
+                        }
+                    }
+                }
+                scheme.constraints.push((trait_name, var_id, extra_types));
             }
         }
 
@@ -2431,6 +2528,41 @@ impl Checker {
             } else {
                 EffectRow::empty()
             };
+            let mut constraints = Vec::new();
+            for bound in &op.where_clause {
+                for tr in &bound.traits {
+                    let resolved = self.resolved_trait_name_at(tr.id, &tr.name);
+                    self.lsp.type_references.push((tr.span, resolved));
+                }
+                let Some(var_id) = params_list
+                    .iter()
+                    .find(|(n, _)| *n == bound.type_var)
+                    .map(|(_, id)| *id)
+                else {
+                    return Err(Diagnostic::error_at(
+                        op.span,
+                        format!(
+                            "where clause references unknown type variable '{}' in effect operation '{}'",
+                            bound.type_var, op.name
+                        ),
+                    ));
+                };
+                for tr in &bound.traits {
+                    let resolved_trait = self.resolved_trait_name_at(tr.id, &tr.name);
+                    self.validate_trait_bound_kind(
+                        &resolved_trait,
+                        &bound.type_var,
+                        var_id,
+                        tr.span,
+                    )?;
+                    let extra_types: Vec<Type> = tr
+                        .type_args
+                        .iter()
+                        .map(|te| self.convert_user_type_expr(te, &mut params_list))
+                        .collect();
+                    constraints.push((resolved_trait, var_id, extra_types));
+                }
+            }
             op_spans.insert(op.name.clone(), op.span);
             ops.push(EffectOpSig {
                 name: op.name.clone(),
@@ -2438,6 +2570,7 @@ impl Checker {
                 params: param_types,
                 return_type,
                 needs,
+                constraints,
             });
         }
         self.scope_map
@@ -2607,6 +2740,21 @@ impl Checker {
                             .collect(),
                         return_type: Self::replace_vars(&op.return_type, &handler_type_mapping),
                         needs: op.needs.clone(),
+                        constraints: op
+                            .constraints
+                            .iter()
+                            .map(|(trait_name, var_id, extra_types)| {
+                                let mapped_id = match handler_type_mapping.get(var_id) {
+                                    Some(Type::Var(id)) => *id,
+                                    _ => *var_id,
+                                };
+                                let mapped_extras = extra_types
+                                    .iter()
+                                    .map(|ty| Self::replace_vars(ty, &handler_type_mapping))
+                                    .collect();
+                                (trait_name.clone(), mapped_id, mapped_extras)
+                            })
+                            .collect(),
                     };
                     matched_op = Some(specialized);
                 }
@@ -3055,6 +3203,53 @@ impl Checker {
                             }
                         }
 
+                        if impl_info.is_none() {
+                            let matches: Vec<super::ImplInfo> = self
+                                .trait_state
+                                .impls
+                                .iter()
+                                .filter(|((tn, _, tt), info)| {
+                                    if tn != &resolved_trait || tt != &arity_keyed_name {
+                                        return false;
+                                    }
+                                    let mut pattern_subst = std::collections::HashMap::new();
+                                    let Some(pattern) = &info.target_pattern else {
+                                        return false;
+                                    };
+                                    if !super::check_traits::match_type_pattern(
+                                        pattern,
+                                        &resolved,
+                                        &mut pattern_subst,
+                                    ) {
+                                        return false;
+                                    }
+                                    if trait_type_arg_types.len() != info.trait_type_args.len() {
+                                        return false;
+                                    }
+                                    trait_type_arg_types
+                                        .iter()
+                                        .zip(info.trait_type_args.iter())
+                                        .all(|(actual_extra, pattern_extra)| {
+                                            let expected_extra =
+                                                super::check_traits::substitute_pattern_vars(
+                                                    pattern_extra,
+                                                    &pattern_subst,
+                                                );
+                                            let resolved_actual = self.sub.apply(actual_extra);
+                                            super::check_traits::match_type_pattern(
+                                                &expected_extra,
+                                                &resolved_actual,
+                                                &mut pattern_subst,
+                                            )
+                                        })
+                                })
+                                .map(|(_, info)| info.clone())
+                                .collect();
+                            if matches.len() == 1 {
+                                impl_info = Some(matches[0].clone());
+                            }
+                        }
+
                         // Functional-trait coherence fallback: if extras are
                         // unresolved (and direct lookup missed), scan for the
                         // unique impl with the matching self-type and pin the
@@ -3069,38 +3264,80 @@ impl Checker {
                                 .map(|ti| ti.is_functional)
                                 .unwrap_or(false)
                         {
-                            let matches: Vec<super::ImplInfo> = self
+                            let matches: Vec<(
+                                super::ImplInfo,
+                                std::collections::HashMap<u32, Type>,
+                            )> = self
                                 .trait_state
                                 .impls
                                 .iter()
-                                .filter(|((tn, _, tt), _)| tn == &resolved_trait && tt == type_name)
-                                .map(|(_, info)| info.clone())
+                                .filter_map(|((tn, _, tt), info)| {
+                                    if tn != &resolved_trait || tt != &arity_keyed_name {
+                                        return None;
+                                    }
+                                    let mut pattern_subst = std::collections::HashMap::new();
+                                    if let Some(pattern) = &info.target_pattern
+                                        && !super::check_traits::match_type_pattern(
+                                            pattern,
+                                            &resolved,
+                                            &mut pattern_subst,
+                                        )
+                                    {
+                                        return None;
+                                    }
+                                    Some((info.clone(), pattern_subst))
+                                })
                                 .collect();
                             if matches.len() == 1 {
-                                let info = &matches[0];
-                                // Substitute the impl's type-param vars with
-                                // the call-site target's concrete arg types,
-                                // so a parameterized impl like
-                                // `impl Generic (Box a) (Rep__Box a)` produces
-                                // `Rep__Box Int` when the call site is `Box Int`.
-                                let mut sub: std::collections::HashMap<u32, Type> = info
-                                    .target_type_param_ids
-                                    .iter()
-                                    .zip(args.iter())
-                                    .map(|(id, t)| (*id, t.clone()))
-                                    .collect();
+                                let (info, mut pattern_subst) = matches[0].clone();
+                                // Substitute the impl's type-param vars with the
+                                // call-site target. For structured targets such
+                                // as `Leaf (Column n a)`, the determined vars
+                                // live inside the target pattern, so prefer the
+                                // full pattern substitution. For legacy/builtin
+                                // impls without a pattern, fall back to top-level
+                                // argument zipping.
+                                if pattern_subst.is_empty() {
+                                    pattern_subst.extend(
+                                        info.target_type_param_ids
+                                            .iter()
+                                            .zip(args.iter())
+                                            .map(|(id, t)| (*id, t.clone())),
+                                    );
+                                }
+                                let mut impl_vars = Vec::new();
+                                for extra in &info.trait_type_args {
+                                    super::collect_free_vars(extra, &mut impl_vars);
+                                }
+                                for (_, _, extra_types) in &info.param_constraints_by_var_with_args
+                                {
+                                    for extra in extra_types {
+                                        super::collect_free_vars(extra, &mut impl_vars);
+                                    }
+                                }
+                                for var_id in impl_vars {
+                                    if let std::collections::hash_map::Entry::Vacant(entry) =
+                                        pattern_subst.entry(var_id)
+                                    {
+                                        entry.insert(self.fresh_var());
+                                    }
+                                }
                                 let pinned: Vec<Type> = info
                                     .trait_type_args
                                     .iter()
-                                    .map(|t| super::Checker::replace_vars(t, &sub))
+                                    .map(|t| {
+                                        super::check_traits::substitute_pattern_vars(
+                                            t,
+                                            &pattern_subst,
+                                        )
+                                    })
                                     .collect();
-                                let _ = &mut sub;
                                 for (var_ty, pinned_ty) in
                                     trait_type_arg_types.iter().zip(pinned.iter())
                                 {
                                     let _ = self.unify(var_ty, pinned_ty);
                                 }
-                                impl_info = Some(info.clone());
+                                impl_info = Some(info);
                             }
                         }
 
@@ -3114,6 +3351,22 @@ impl Checker {
                                 )
                             {
                                 return None;
+                            }
+                            let mut impl_vars = Vec::new();
+                            for extra in &info.trait_type_args {
+                                super::collect_free_vars(extra, &mut impl_vars);
+                            }
+                            for (_, _, extra_types) in &info.param_constraints_by_var_with_args {
+                                for extra in extra_types {
+                                    super::collect_free_vars(extra, &mut impl_vars);
+                                }
+                            }
+                            for var_id in impl_vars {
+                                if let std::collections::hash_map::Entry::Vacant(entry) =
+                                    pattern_subst.entry(var_id)
+                                {
+                                    entry.insert(self.fresh_var());
+                                }
                             }
                             for (actual_extra, pattern_extra) in
                                 trait_type_arg_types.iter().zip(info.trait_type_args.iter())
@@ -3264,6 +3517,41 @@ impl Checker {
                     }
                     // Still a type variable: check where clause bounds
                     Type::Var(id) => {
+                        if is_generic_trait_name(&trait_name)
+                            && let Some(rep_ty) = trait_type_arg_types.first()
+                            && let Some(record_ty) =
+                                anon_record_from_generic_rep(&self.sub.apply(rep_ty))
+                        {
+                            self.unify_at(&Type::Var(*id), &record_ty, span)?;
+                            self.trait_state.pending_constraints.push((
+                                trait_name,
+                                trait_type_arg_types,
+                                Type::Var(*id),
+                                span,
+                                node_id,
+                            ));
+                            continue;
+                        }
+
+                        if is_generic_trait_name(&trait_name) {
+                            let mut extra_vars = Vec::new();
+                            for extra in &trait_type_arg_types {
+                                super::collect_free_vars(&self.sub.apply(extra), &mut extra_vars);
+                            }
+                            if !extra_vars.is_empty()
+                                && !self.trait_state.pending_constraints.is_empty()
+                            {
+                                self.trait_state.pending_constraints.push((
+                                    trait_name,
+                                    trait_type_arg_types,
+                                    Type::Var(*id),
+                                    span,
+                                    node_id,
+                                ));
+                                continue;
+                            }
+                        }
+
                         let covering_trait = resolved_bounds.get(id).and_then(|bounds| {
                             bounds
                                 .iter()

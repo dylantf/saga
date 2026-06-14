@@ -3213,6 +3213,206 @@ main () = {
 }
 
 #[test]
+fn imported_constrained_hof_threads_effectful_callback_evidence() {
+    let lib_src = r#"module NoEvidence.Lib
+
+pub effect Build a {
+  fun select : a -> a
+}
+
+type Step a = Step (Unit -> a)
+
+pub handler collect for Build a {
+  select value = {
+    Step (fun () -> {
+      let Step run_rest = resume value
+      run_rest ()
+    })
+  }
+
+  return value = Step (fun () -> value)
+}
+
+pub trait Project selection row | selection -> row {
+  fun project : selection -> row
+}
+
+pub record Prepared row {
+  row: row,
+}
+
+pub fun query : (Unit -> selection needs {Build selection}) -> Prepared row
+  where {selection: Project row}
+query make = {
+  let Step run_query = make () with collect
+  let selection = run_query ()
+  Prepared { row: project selection }
+}
+"#;
+
+    let main_src = r#"module Main
+
+import NoEvidence.Lib as Lib
+import NoEvidence.Lib (Build)
+
+record Selected {
+  id: Int,
+  name: String,
+}
+
+impl Lib.Project Selected for Selected {
+  project value = value
+}
+
+fun prepared : Unit -> Lib.Prepared Selected
+prepared () = Lib.query (fun () -> {
+  select! Selected {
+    id: 1,
+    name: "Alice",
+  }
+})
+
+main () = {
+  let value = prepared ()
+  value.row.name
+}
+"#;
+
+    with_temp_project_files(
+        &[("src/NoEvidence/Lib.saga", lib_src)],
+        main_src,
+        |checker, program| {
+            let result = checker.to_result();
+            let lib_program = result
+                .programs()
+                .get("NoEvidence.Lib")
+                .expect("NoEvidence.Lib module not found");
+            let lib_core = emit_from_program(lib_program, "noevidence_lib", checker);
+            let main_core = emit_from_program(program, "main", checker);
+            assert_project_modules_run(
+                &[("noevidence_lib", &lib_core), ("main", &main_core)],
+                "io:format(\"~ts~n\", [main:main(unit)]), init:stop().",
+                &["Alice"],
+            );
+        },
+    );
+}
+
+#[test]
+fn local_constrained_let_inside_generic_query_keeps_outer_evidence() {
+    let lib_src = r#"module Repro.Lib
+
+pub effect Build selection {
+  fun select : selection -> selection
+}
+
+type Step a = Step (Unit -> a)
+
+pub handler collect for Build selection {
+  select value = {
+    Step (fun () -> {
+      let Step run_rest = resume value
+      run_rest ()
+    })
+  }
+
+  return value = Step (fun () -> value)
+}
+
+pub trait ToRep selection selection_rep | selection -> selection_rep {
+  fun to_rep : selection -> selection_rep
+}
+
+pub trait Selectable selection_rep row_rep | selection_rep -> row_rep {
+  fun select_rep : selection_rep -> row_rep
+}
+
+pub trait FromRep row row_rep | row -> row_rep {
+  fun from_rep : row_rep -> row
+}
+
+pub record Prepared row {
+  row: row,
+}
+
+pub fun project : selection -> row
+  where {
+    selection: ToRep selection_rep,
+    selection_rep: Selectable row_rep,
+    row: FromRep row_rep,
+  }
+project selection =
+  select_rep (to_rep selection)
+  |> from_rep
+
+pub fun query : (Unit -> selection needs {Build selection}) -> Prepared row
+  where {
+    selection: ToRep selection_rep,
+    selection_rep: Selectable row_rep,
+    row: FromRep row_rep,
+  }
+query make = {
+  let Step run_query = make () with collect
+  let (selection, _) = (run_query (), ())
+  let row : row = project selection
+  Prepared { row: row }
+}
+"#;
+
+    let main_src = r#"module Main
+
+import Repro.Lib as Lib
+import Repro.Lib (Build)
+
+record Selected { id: Int }
+record Row { id: Int }
+record SelectedRep { id: Int }
+record RowRep { id: Int }
+
+impl Lib.ToRep SelectedRep for Selected {
+  to_rep selected = SelectedRep { id: selected.id }
+}
+
+impl Lib.Selectable RowRep for SelectedRep {
+  select_rep rep = RowRep { id: rep.id }
+}
+
+impl Lib.FromRep RowRep for Row {
+  from_rep rep = Row { id: rep.id }
+}
+
+fun prepared : Unit -> Lib.Prepared Row
+prepared () = Lib.query (fun () ->
+  select! Selected { id: 1 }
+)
+
+main () = {
+  let prepared = prepared ()
+  prepared.row.id
+}
+"#;
+
+    with_temp_project_files(
+        &[("src/Repro/Lib.saga", lib_src)],
+        main_src,
+        |checker, program| {
+            let result = checker.to_result();
+            let lib_program = result
+                .programs()
+                .get("Repro.Lib")
+                .expect("Repro.Lib module not found");
+            let lib_core = emit_from_program(lib_program, "repro_lib", checker);
+            let main_core = emit_from_program(program, "main", checker);
+            assert_project_modules_run(
+                &[("repro_lib", &lib_core), ("main", &main_core)],
+                "io:format(\"~p~n\", [main:main(unit)]), init:stop().",
+                &["1"],
+            );
+        },
+    );
+}
+
+#[test]
 fn local_dict_names_are_module_qualified() {
     // When Animals.saga defines impl Show for Animal, the dict should be
     // named with canonical trait + module-qualified type (not bare __dict_Show_Animal)

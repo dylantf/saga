@@ -174,6 +174,7 @@ pub struct HeaderEffectOp {
     pub return_type: HeaderTypeExpr,
     pub effects: Vec<HeaderEffectRef>,
     pub effect_row_vars: Vec<String>,
+    pub where_clause: Vec<HeaderTraitBound>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -417,6 +418,12 @@ impl ModuleHeader {
                                         .map(header_effect_ref)
                                         .collect(),
                                     effect_row_vars: row_var_names(&op.node.effect_row_var),
+                                    where_clause: op
+                                        .node
+                                        .where_clause
+                                        .iter()
+                                        .map(header_trait_bound)
+                                        .collect(),
                                 })
                                 .collect(),
                         },

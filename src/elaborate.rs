@@ -1295,12 +1295,15 @@ impl Elaborator {
 
                                     if let Some(dict_param_info) = dict_info {
                                         // Set up dict params for elaborating the value.
+                                        // Keep enclosing dicts visible: a constrained local
+                                        // binding may call helpers that also need the outer
+                                        // function's where-clause evidence.
                                         // Eta-expand: `let f = value` becomes
                                         // `let f = fun (dict, __arg) -> (elaborated_val)(__arg)`
                                         // so the lowerer sees a single function of arity N+1.
                                         let saved = (
-                                            std::mem::take(&mut self.current_dict_params),
-                                            std::mem::take(&mut self.current_dict_params_by_var),
+                                            self.current_dict_params.clone(),
+                                            self.current_dict_params_by_var.clone(),
                                         );
                                         let mut lambda_params = Vec::new();
 

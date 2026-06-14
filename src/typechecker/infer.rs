@@ -372,6 +372,15 @@ impl Checker {
                     .or(qualifier.as_deref())
                     .map(|s| s.to_string());
                 let op_sig = self.lookup_effect_op(name, resolved_qualifier.as_deref(), span)?;
+                for (trait_name, var_id, extra_types) in &op_sig.constraints {
+                    self.trait_state.pending_constraints.push((
+                        trait_name.clone(),
+                        extra_types.clone(),
+                        Type::Var(*var_id),
+                        span,
+                        node_id,
+                    ));
+                }
 
                 // Record call site -> handler arm for LSP go-to-def
                 if let Some((arm_span, arm_module)) = self

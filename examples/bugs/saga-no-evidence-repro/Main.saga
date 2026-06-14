@@ -1,0 +1,31 @@
+module Main
+
+import Std.IO (console)
+
+effect Build a {
+  fun select : a -> a
+}
+
+type Step a = Step (Unit -> a)
+
+handler collect for Build a {
+  select value = {
+    Step (fun () -> {
+      let Step run_rest = resume value
+      run_rest ()
+    })
+  }
+
+  return value = Step (fun () -> value)
+}
+
+fun query : (Unit -> a needs {Build a}) -> a
+query make = {
+  let Step run_query = make () with collect
+  run_query ()
+}
+
+main () = {
+  let value = query (fun () -> select! 123)
+  println (show value)
+} with console

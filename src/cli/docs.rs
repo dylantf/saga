@@ -367,6 +367,15 @@ fn render_effect_decl(out: &mut String, decl: &Decl) {
         }
         write!(out, "{}", format_type_expr(&op.node.return_type)).unwrap();
         write_needs_row(out, &op.node.effects, &op.node.effect_row_var);
+        if !op.node.where_clause.is_empty() {
+            let bounds: Vec<String> = op
+                .node
+                .where_clause
+                .iter()
+                .map(format_trait_bound)
+                .collect();
+            write!(out, " where {{{}}}", bounds.join(", ")).unwrap();
+        }
         writeln!(out).unwrap();
     }
     writeln!(out, "}}").unwrap();
