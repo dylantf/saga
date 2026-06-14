@@ -169,6 +169,7 @@ impl Checker {
         &mut self,
         name: &str,
         type_params: &[TypeParam],
+        functional_dependency: Option<&ast::TraitFunctionalDependency>,
         supertraits: &[ast::TraitRef],
         methods: &[&ast::TraitMethod],
     ) -> Result<(), Diagnostic> {
@@ -351,7 +352,66 @@ impl Checker {
             .iter()
             .map(|tr| self.resolved_trait_name_at(tr.id, &tr.name))
             .collect();
-        let is_functional = FUNCTIONAL_TRAITS.contains(&canonical_name.as_str());
+        let has_builtin_functional_rule = FUNCTIONAL_TRAITS.contains(&canonical_name.as_str());
+        let has_declared_functional_rule = functional_dependency.is_some();
+        if let Some(fd) = functional_dependency {
+            let Some(first_param) = type_params.first() else {
+                return Err(Diagnostic::error_at(
+                    fd.span,
+                    "functional dependency requires a trait self parameter".to_string(),
+                ));
+            };
+            if fd.determinant != first_param.name {
+                return Err(Diagnostic::error_at(
+                    fd.span,
+                    format!(
+                        "unsupported functional dependency: `{}` must be the trait's first parameter `{}`",
+                        fd.determinant, first_param.name
+                    ),
+                ));
+            }
+            if fd.determined.is_empty() {
+                return Err(Diagnostic::error_at(
+                    fd.span,
+                    "functional dependency must determine at least one parameter".to_string(),
+                ));
+            }
+            for determined in &fd.determined {
+                if determined == &first_param.name {
+                    return Err(Diagnostic::error_at(
+                        fd.span,
+                        "functional dependency cannot determine the first parameter from itself"
+                            .to_string(),
+                    ));
+                }
+                if !type_params.iter().any(|tp| &tp.name == determined) {
+                    return Err(Diagnostic::error_at(
+                        fd.span,
+                        format!(
+                            "functional dependency mentions unknown trait parameter `{}`",
+                            determined
+                        ),
+                    ));
+                }
+            }
+            let expected: Vec<&str> = type_params
+                .iter()
+                .skip(1)
+                .map(|tp| tp.name.as_str())
+                .collect();
+            let actual: Vec<&str> = fd.determined.iter().map(|name| name.as_str()).collect();
+            if actual != expected {
+                return Err(Diagnostic::error_at(
+                    fd.span,
+                    format!(
+                        "unsupported functional dependency: `{}` must determine all non-self parameters in declaration order ({})",
+                        fd.determinant,
+                        expected.join(" ")
+                    ),
+                ));
+            }
+        }
+        let is_functional = has_builtin_functional_rule || has_declared_functional_rule;
         self.trait_state.traits.insert(
             canonical_name,
             super::TraitInfo {

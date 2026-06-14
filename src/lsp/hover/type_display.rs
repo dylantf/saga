@@ -199,10 +199,15 @@ pub fn type_definition_summary(
                 name: def_name,
                 doc,
                 type_params,
+                functional_dependency,
                 supertraits,
                 methods,
                 ..
             } if def_name == name => {
+                let fundep = functional_dependency
+                    .as_ref()
+                    .map(|fd| format!(" | {} -> {}", fd.determinant, fd.determined.join(" ")))
+                    .unwrap_or_default();
                 let supers = if supertraits.is_empty() {
                     String::new()
                 } else {
@@ -217,13 +222,14 @@ pub fn type_definition_summary(
                     })
                     .collect();
                 let code = format!(
-                    "trait {} {}{} {{\n{}\n}}",
+                    "trait {} {}{}{} {{\n{}\n}}",
                     name,
                     type_params
                         .iter()
                         .map(|p| p.to_string())
                         .collect::<Vec<_>>()
                         .join(" "),
+                    fundep,
                     supers,
                     method_strs.join("\n")
                 );

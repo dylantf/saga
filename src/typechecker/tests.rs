@@ -4831,6 +4831,100 @@ impl ToJson for Person where {Generic Person r, ToJson r} {
 }
 
 #[test]
+fn where_app_resolves_fresh_var_via_declared_functional_dependency() {
+    check(
+        "trait Selectable input row | input -> row {
+  fun prepare : (x: input) -> row
+}
+trait Sink a {
+  fun sink : (x: a) -> String
+}
+type Foo = Foo
+type FooRow = FooRow
+impl Selectable FooRow for Foo {
+  prepare _ = FooRow
+}
+impl Sink for FooRow {
+  sink _ = \"row\"
+}
+impl Sink for Foo where {Selectable Foo row, Sink row} {
+  sink _ = \"foo\"
+}",
+    )
+    .unwrap();
+}
+
+#[test]
+fn declared_functional_dependency_rejects_same_first_param_different_rest() {
+    let result = check(
+        "trait Selectable input row | input -> row {
+  fun prepare : (x: input) -> row
+}
+type Foo = Foo
+type RowA = RowA
+type RowB = RowB
+impl Selectable RowA for Foo {
+  prepare _ = RowA
+}
+impl Selectable RowB for Foo {
+  prepare _ = RowB
+}",
+    );
+    assert!(result.is_err(), "expected coherence violation");
+    let err = result.err().unwrap();
+    assert!(
+        err.message.contains("coherence") || err.message.contains("functionally determines"),
+        "expected coherence violation, got: {}",
+        err.message
+    );
+}
+
+#[test]
+fn declared_functional_dependency_must_cover_all_extra_params() {
+    let result = check(
+        "trait Bad a b c | a -> b {
+  fun bad : (x: a) -> b
+}",
+    );
+    assert!(result.is_err(), "expected unsupported fundep error");
+    let err = result.err().unwrap();
+    assert!(
+        err.message
+            .contains("must determine all non-self parameters"),
+        "expected all-extra-params error, got: {}",
+        err.message
+    );
+}
+
+#[test]
+fn imported_declared_functional_dependency_resolves_fresh_var() {
+    let lib = "module Lib
+pub trait Selectable input row | input -> row {
+  fun prepare : (x: input) -> row
+}
+pub type Foo = Foo
+pub type FooRow = FooRow
+impl Selectable FooRow for Foo {
+  prepare _ = FooRow
+}
+";
+    let main = "module Main
+import Lib (Selectable, Foo, FooRow)
+trait Sink a {
+  fun sink : (x: a) -> String
+}
+impl Sink for FooRow {
+  sink _ = \"row\"
+}
+impl Sink for Foo where {Selectable Foo row, Sink row} {
+  sink _ = \"foo\"
+}
+main () = ()
+";
+    check_with_project_files(&[("src/Lib.saga", lib)], main).unwrap();
+}
+
+#[test]
 fn free_function_with_existential_where_clause_typechecks() {
     // `fun via_generic : a -> String where {a: Generic r, r: ToJson}`
     // introduces `r` as an existential — it's not free in `a -> String`.
