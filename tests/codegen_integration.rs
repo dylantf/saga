@@ -336,6 +336,18 @@ main () = case map Leaf 42 {
 }
 
 #[test]
+fn anonymous_record_layout_from_function_signature_lowers_field_access() {
+    let src = r#"
+fun pick_id : { id: Int, name: String } -> Int
+pick_id row = row.id
+
+main () = pick_id { id: 42, name: "Alice" }
+"#;
+
+    assert_runs_and_stdout_contains(src, &["42"]);
+}
+
+#[test]
 fn inner_dynamic_handler_is_kept_when_outer_static_handler_handles_same_effect() {
     let src = r#"
 effect Log {

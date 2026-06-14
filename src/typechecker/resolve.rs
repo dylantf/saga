@@ -799,6 +799,14 @@ impl<'a> Resolver<'a> {
                     );
                 }
                 if let Some(resolved) = self.resolve_value_name(name) {
+                    if let ResolvedValue::Global { lookup_name } = &resolved
+                        && let Some(trait_method) = self.qualified_trait_method(lookup_name)
+                    {
+                        self.result
+                            .trait_methods
+                            .entry(expr.id)
+                            .or_insert(trait_method);
+                    }
                     self.result.values.insert(expr.id, resolved);
                 }
             }

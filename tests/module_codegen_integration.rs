@@ -3296,6 +3296,170 @@ fn qualified_trait_method_call_lowers_to_dict_dispatch() {
     });
 }
 
+#[test]
+fn exposed_trait_method_bare_call_lowers_to_dict_dispatch() {
+    let db_src = r#"module Kraken.Query
+
+pub type Projection row = Projection row
+
+pub trait Selectable selection row | selection -> row {
+  fun to_projection : selection -> Projection row
+}
+"#;
+
+    let main_src = r#"module Main
+
+import Kraken.Query as Db (Projection, Selectable)
+
+type Users = Users Int
+
+impl Selectable Int for Users {
+  to_projection users = case users {
+    Users n -> Projection n
+  }
+}
+
+main () = case to_projection (Users 7) {
+  Projection n -> n
+}
+"#;
+
+    with_temp_project_files(
+        &[("src/Kraken/Query.saga", db_src)],
+        main_src,
+        |checker, program| {
+            let main_core = emit_from_program(program, "main", checker);
+            assert!(
+                !main_core.contains("To_projection") && !main_core.contains("'to_projection'"),
+                "bare imported trait method should lower through dictionary dispatch\n{main_core}"
+            );
+            assert_project_modules_run(
+                &[("main", &main_core)],
+                "io:format(\"~p~n\", [main:main(unit)]), init:stop().",
+                &["7"],
+            );
+        },
+    );
+}
+
+#[test]
+fn imported_constrained_wrapper_passes_dicts_before_user_args() {
+    let db_src = r#"module Kraken.Query
+
+pub type Projection row = Projection row
+
+pub trait Selectable selection row | selection -> row {
+  fun to_projection : selection -> Projection row
+}
+
+pub fun select_all : selection -> Projection row where {selection: Selectable row}
+select_all selection = to_projection selection
+"#;
+
+    let main_src = r#"module Main
+
+import Kraken.Query as Db (Projection, Selectable, select_all)
+
+type Users = Users Int
+
+impl Selectable Int for Users {
+  to_projection users = case users {
+    Users n -> Projection n
+  }
+}
+
+main () = case Db.select_all (Users 11) {
+  Projection n -> n
+}
+"#;
+
+    with_temp_project_files(
+        &[("src/Kraken/Query.saga", db_src)],
+        main_src,
+        |checker, program| {
+            let result = checker.to_result();
+            let db_program = result
+                .programs()
+                .get("Kraken.Query")
+                .expect("Kraken.Query module not found");
+            let db_core = emit_from_program(db_program, "kraken_query", checker);
+            let main_core = emit_from_program(program, "main", checker);
+            assert_project_modules_run(
+                &[("kraken_query", &db_core), ("main", &main_core)],
+                "io:format(\"~p~n\", [main:main(unit)]), init:stop().",
+                &["11"],
+            );
+        },
+    );
+}
+
+#[test]
+fn imported_constrained_wrapper_inside_callback_uses_dict_for_parameterized_arg() {
+    let db_src = r#"module Kraken.Query
+
+pub type Projection row = Projection row
+pub type Prepared row = Prepared row
+
+pub trait Selectable selection row | selection -> row {
+  fun to_projection : selection -> Projection row
+}
+
+pub fun select_all : selection -> Projection row where {selection: Selectable row}
+select_all selection = to_projection selection
+
+pub fun query : (Unit -> Projection row) -> Prepared row
+query run = case run () {
+  Projection row -> Prepared row
+}
+"#;
+
+    let main_src = r#"module Main
+
+import Kraken.Query as Db (Projection, Prepared, Selectable, select_all, query)
+
+type Scope = Scope
+
+record Users source {
+  id: Int,
+}
+
+impl Selectable Int for Users source {
+  to_projection users = Projection users.id
+}
+
+fun users : Users Scope
+users = Users { id: 17 }
+
+main () = case Db.query (fun () -> Db.select_all users) {
+  Prepared row -> row
+}
+"#;
+
+    with_temp_project_files(
+        &[("src/Kraken/Query.saga", db_src)],
+        main_src,
+        |checker, program| {
+            let result = checker.to_result();
+            let db_program = result
+                .programs()
+                .get("Kraken.Query")
+                .expect("Kraken.Query module not found");
+            let db_core = emit_from_program(db_program, "kraken_query", checker);
+            let main_core = emit_from_program(program, "main", checker);
+            assert!(
+                main_core.contains("__dict_Kraken_Query_Selectable")
+                    && main_core.contains("main_Main_Users"),
+                "select_all should receive the Selectable Users dictionary\n{main_core}"
+            );
+            assert_project_modules_run(
+                &[("kraken_query", &db_core), ("main", &main_core)],
+                "io:format(\"~p~n\", [main:main(unit)]), init:stop().",
+                &["17"],
+            );
+        },
+    );
+}
+
 // ---- Constructor atom mangling ----
 
 #[test]

@@ -12,7 +12,7 @@ use std::collections::{HashMap, HashSet};
 use crate::ast::*;
 use crate::token::{Span, StringKind};
 use crate::typechecker::{
-    CheckResult, ImplInfo, KNOWN_SYMBOL_TRAIT, TraitEvidence, TraitInfo, Type,
+    CheckResult, ImplInfo, KNOWN_SYMBOL_TRAIT, ResolvedValue, TraitEvidence, TraitInfo, Type,
 };
 
 /// Only invoke the symbol-intrinsic lambda fast-path for the `KnownSymbol`
@@ -181,6 +181,34 @@ impl Elaborator {
         self.resolution.type_ref(id).unwrap_or(source).to_string()
     }
 
+    fn resolved_global_value_name(&self, id: crate::ast::NodeId) -> Option<&str> {
+        match self.resolution.value(id) {
+            Some(ResolvedValue::Global { lookup_name }) => Some(lookup_name.as_str()),
+            _ => None,
+        }
+    }
+
+    fn fun_dict_params_for_callee(
+        &self,
+        source_name: &str,
+        node_id: crate::ast::NodeId,
+    ) -> Option<Vec<(String, String)>> {
+        if let Some(params) = self.fun_dict_params.get(source_name).cloned() {
+            return Some(params);
+        }
+        if let Some(resolved_name) = self.resolved_global_value_name(node_id)
+            && let Some(params) = self.fun_dict_params.get(resolved_name).cloned()
+        {
+            return Some(params);
+        }
+        if let Some(canonical) = self.scope_map_values.get(source_name)
+            && let Some(params) = self.fun_dict_params.get(canonical).cloned()
+        {
+            return Some(params);
+        }
+        None
+    }
+
     /// Resolve trait type args via the resolution map. For App heads (e.g.
     /// `Rep__Box a`), uses the head name — only the head identifies the impl
     /// for dict-name purposes.
@@ -213,17 +241,42 @@ impl Elaborator {
         // These should not generate dict params.
         let operator_traits: std::collections::HashSet<&str> = ["Num", "Eq"].into_iter().collect();
 
+        let scheme_dict_params = |scheme: &crate::typechecker::Scheme| -> Vec<(String, String)> {
+            scheme
+                .constraints
+                .iter()
+                .filter(|(trait_name, _, _)| !operator_traits.contains(trait_name.as_str()))
+                .map(|(trait_name, var_id, _)| (trait_name.clone(), format!("v{}", var_id)))
+                .collect()
+        };
+
         let mut inferred_dict_params: HashMap<String, Vec<(String, String)>> = HashMap::new();
         for (name, scheme) in result.env.iter() {
-            if !scheme.constraints.is_empty() {
-                let dict_params: Vec<(String, String)> = scheme
-                    .constraints
-                    .iter()
-                    .filter(|(trait_name, _, _)| !operator_traits.contains(trait_name.as_str()))
-                    .map(|(trait_name, var_id, _)| (trait_name.clone(), format!("v{}", var_id)))
-                    .collect();
-                if !dict_params.is_empty() {
-                    inferred_dict_params.insert(name.to_string(), dict_params);
+            let dict_params = scheme_dict_params(scheme);
+            if !dict_params.is_empty() {
+                inferred_dict_params.insert(name.to_string(), dict_params);
+            }
+        }
+        for info in result.codegen_info().values() {
+            let origins: HashMap<&str, &str> = info
+                .export_origins
+                .iter()
+                .map(|(surface, origin)| (surface.as_str(), origin.as_str()))
+                .collect();
+            for (name, scheme) in &info.exports {
+                let dict_params = scheme_dict_params(scheme);
+                if dict_params.is_empty() {
+                    continue;
+                }
+                if let Some(origin) = origins.get(name.as_str()) {
+                    inferred_dict_params
+                        .entry((*origin).to_string())
+                        .or_insert_with(|| dict_params.clone());
+                }
+                if name.contains('.') {
+                    inferred_dict_params
+                        .entry(name.clone())
+                        .or_insert_with(|| dict_params.clone());
                 }
             }
         }
@@ -239,7 +292,6 @@ impl Elaborator {
                     .or_insert(params);
             }
         }
-
         // Merge let-binding dict params (from local let bindings with trait constraints).
         // Keyed by (name, pat_id) to avoid collisions between same-named bindings
         // in different scopes. We store the pat_id set so the elaborator can check
@@ -707,10 +759,10 @@ impl Elaborator {
                     );
                     let mut extra_params = Vec::new();
 
-                    if let Some(dict_param_info) = self.fun_dict_params.get(name) {
+                    if let Some(dict_param_info) = self.fun_dict_params.get(name).cloned() {
                         for (trait_name, type_var) in dict_param_info {
                             // Use bare trait name in param name to avoid dots in Erlang identifiers
-                            let bare = trait_name.rsplit('.').next().unwrap_or(trait_name);
+                            let bare = trait_name.rsplit('.').next().unwrap_or(&trait_name);
                             let param_name = format!("__dict_{}_{}", bare, type_var);
                             self.current_dict_params
                                 .insert(trait_name.clone(), param_name.clone());
@@ -869,7 +921,7 @@ impl Elaborator {
                 // Dict-parameterized function used as a bare value (not directly applied).
                 // Partially apply the dict args so it can be passed as a first-class function.
                 // e.g. `let p = print` becomes `let p = print __dict_Show_String`
-                if let Some(dict_param_info) = self.fun_dict_params.get(name).cloned() {
+                if let Some(dict_param_info) = self.fun_dict_params_for_callee(name, node_id) {
                     let mut result: Expr = expr.clone();
                     let mut trait_occurrences: HashMap<&str, usize> = HashMap::new();
                     for (trait_name, _type_var) in &dict_param_info {
@@ -915,7 +967,11 @@ impl Elaborator {
                                 },
                             );
                         }
-                        if let Some(dict_expr) = self.resolve_dict(&trait_name, func.id, func.span)
+                        if let Some(dict_expr) = self
+                            .resolve_call_dict_nth(&trait_name, func.id, node_id, func.span, 0)
+                            .or_else(|| {
+                                self.resolve_dict_from_arg_type(&trait_name, arg, func.span)
+                            })
                         {
                             let elab_arg = self.elaborate_expr(arg);
                             let method = Expr::synth(
@@ -950,7 +1006,7 @@ impl Elaborator {
                     }
 
                     // If calling a function that has dict params, insert them
-                    if let Some(dict_param_info) = self.fun_dict_params.get(name).cloned() {
+                    if let Some(dict_param_info) = self.fun_dict_params_for_callee(name, func.id) {
                         let elab_arg = self.elaborate_expr(arg);
                         // Build the call with dict args prepended
                         let mut result: Expr =
@@ -958,8 +1014,19 @@ impl Elaborator {
                         let mut trait_occurrences: HashMap<&str, usize> = HashMap::new();
                         for (trait_name, _type_var) in &dict_param_info {
                             let occ = trait_occurrences.entry(trait_name).or_insert(0);
-                            if let Some(dict_expr) =
-                                self.resolve_dict_nth(trait_name, func.id, func.span, *occ)
+                            if let Some(dict_expr) = self
+                                .resolve_call_dict_nth(
+                                    trait_name, func.id, node_id, func.span, *occ,
+                                )
+                                .or_else(|| {
+                                    (*occ == 0)
+                                        .then(|| {
+                                            self.resolve_dict_from_arg_type(
+                                                trait_name, arg, func.span,
+                                            )
+                                        })
+                                        .flatten()
+                                })
                             {
                                 result = Expr::synth(
                                     span,
@@ -988,7 +1055,11 @@ impl Elaborator {
                     // Evidence-first: trait method via qualified name
                     if let Some((trait_name, method_index)) =
                         self.resolve_trait_method(&qualified, func.id)
-                        && let Some(dict_expr) = self.resolve_dict(&trait_name, func.id, func.span)
+                        && let Some(dict_expr) = self
+                            .resolve_call_dict_nth(&trait_name, func.id, node_id, func.span, 0)
+                            .or_else(|| {
+                                self.resolve_dict_from_arg_type(&trait_name, arg, func.span)
+                            })
                     {
                         let elab_arg = self.elaborate_expr(arg);
                         let method = Expr::synth(
@@ -1009,14 +1080,27 @@ impl Elaborator {
                     }
 
                     // Dict-parameterized function via qualified name
-                    if let Some(dict_param_info) = self.fun_dict_params.get(&qualified).cloned() {
+                    if let Some(dict_param_info) =
+                        self.fun_dict_params_for_callee(&qualified, func.id)
+                    {
                         let elab_arg = self.elaborate_expr(arg);
                         let mut result: Expr = func.as_ref().clone();
                         let mut trait_occurrences: HashMap<&str, usize> = HashMap::new();
                         for (trait_name, _type_var) in &dict_param_info {
                             let occ = trait_occurrences.entry(trait_name).or_insert(0);
-                            if let Some(dict_expr) =
-                                self.resolve_dict_nth(trait_name, func.id, func.span, *occ)
+                            if let Some(dict_expr) = self
+                                .resolve_call_dict_nth(
+                                    trait_name, func.id, node_id, func.span, *occ,
+                                )
+                                .or_else(|| {
+                                    (*occ == 0)
+                                        .then(|| {
+                                            self.resolve_dict_from_arg_type(
+                                                trait_name, arg, func.span,
+                                            )
+                                        })
+                                        .flatten()
+                                })
                             {
                                 result = Expr::synth(
                                     span,
@@ -1201,7 +1285,7 @@ impl Elaborator {
                                             .get(name.as_str())
                                             .is_some_and(|ids| ids.contains(id));
                                         if is_this_binding {
-                                            self.fun_dict_params.get(name).cloned()
+                                            self.fun_dict_params_for_callee(name, *id)
                                         } else {
                                             None
                                         }
@@ -1421,7 +1505,8 @@ impl Elaborator {
             ExprKind::QualifiedName { module, name, .. } => {
                 let qualified = format!("{}.{}", module, name);
                 // Dict-parameterized function used as a bare value (not directly applied).
-                if let Some(dict_param_info) = self.fun_dict_params.get(&qualified).cloned() {
+                if let Some(dict_param_info) = self.fun_dict_params_for_callee(&qualified, node_id)
+                {
                     let mut result: Expr = expr.clone();
                     let mut trait_occurrences: HashMap<&str, usize> = HashMap::new();
                     for (trait_name, _type_var) in &dict_param_info {
@@ -1693,6 +1778,13 @@ impl Elaborator {
         {
             return Some((resolved.trait_name.clone(), idx));
         }
+        if let Some(canonical) = self.resolved_global_value_name(node_id)
+            && let Some((trait_name, method)) = canonical.rsplit_once('.')
+            && let Some(info) = self.traits.get(trait_name)
+            && let Some(idx) = info.methods.iter().position(|m| m.name == method)
+        {
+            return Some((trait_name.to_string(), idx));
+        }
         None
     }
 
@@ -1846,6 +1938,27 @@ impl Elaborator {
         span: Span,
     ) -> Option<Expr> {
         self.resolve_dict_nth(trait_name, node_id, span, 0)
+    }
+
+    fn resolve_call_dict_nth(
+        &self,
+        trait_name: &str,
+        callee_id: crate::ast::NodeId,
+        call_id: crate::ast::NodeId,
+        span: Span,
+        occurrence: usize,
+    ) -> Option<Expr> {
+        self.resolve_dict_nth(trait_name, callee_id, span, occurrence)
+            .or_else(|| {
+                (callee_id != call_id)
+                    .then(|| self.resolve_dict_nth(trait_name, call_id, span, occurrence))
+                    .flatten()
+            })
+    }
+
+    fn resolve_dict_from_arg_type(&self, trait_name: &str, arg: &Expr, span: Span) -> Option<Expr> {
+        let ty = self.type_at_node.get(&arg.id)?.clone();
+        self.dict_for_type(trait_name, &[], &ty, span)
     }
 
     /// Resolve the `occurrence`-th evidence entry for `trait_name` at `node_id`.
@@ -2068,6 +2181,23 @@ impl Elaborator {
                     trait_type_arg_names(trait_type_args),
                     keyed_name,
                 );
+                let (key, inferred_trait_args_from_target) = if self.dict_names.contains_key(&key) {
+                    (key, false)
+                } else {
+                    let matches: Vec<_> = self
+                        .dict_names
+                        .keys()
+                        .filter(|(candidate_trait, _, candidate_target)| {
+                            candidate_trait == trait_name && candidate_target == &key.2
+                        })
+                        .cloned()
+                        .collect();
+                    if matches.len() == 1 {
+                        (matches.into_iter().next().unwrap(), true)
+                    } else {
+                        return None;
+                    }
+                };
                 let dict_name = self.dict_names.get(&key)?;
                 let impl_info = self.impl_infos.get(&key);
                 let mut dict_expr: Expr = Expr::synth(
@@ -2083,14 +2213,16 @@ impl Elaborator {
                     if !match_type_pattern(pattern, ty, &mut subst) {
                         return None;
                     }
-                    if info.trait_type_args.len() != trait_type_args.len() {
-                        return None;
-                    }
-                    for (pattern_arg, actual_arg) in
-                        info.trait_type_args.iter().zip(trait_type_args.iter())
-                    {
-                        if !match_type_pattern(pattern_arg, actual_arg, &mut subst) {
+                    if !inferred_trait_args_from_target {
+                        if info.trait_type_args.len() != trait_type_args.len() {
                             return None;
+                        }
+                        for (pattern_arg, actual_arg) in
+                            info.trait_type_args.iter().zip(trait_type_args.iter())
+                        {
+                            if !match_type_pattern(pattern_arg, actual_arg, &mut subst) {
+                                return None;
+                            }
                         }
                     }
                     for (constraint_trait, var_id, extra_types) in
