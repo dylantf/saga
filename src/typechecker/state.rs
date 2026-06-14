@@ -110,6 +110,13 @@ pub struct ImplInfo {
     /// Constraints on type parameters: (trait_name, param_index)
     /// e.g. Show for List requires Show on param 0 (the element type)
     pub param_constraints: Vec<(String, usize)>,
+    /// Constraints on impl pattern variables: (trait_name, pattern_var_id).
+    /// This supports structured targets where a constrained variable may be
+    /// nested inside the target, e.g. `Column sa na a` in a tuple element.
+    pub param_constraints_by_var: Vec<(String, u32)>,
+    /// Full target pattern for user-written structured impls. `None` means
+    /// legacy/builtin impl matching by coarse target key only.
+    pub target_pattern: Option<Type>,
     /// Extra type arguments applied to the trait, as full Types.
     /// For parameterized impls (e.g. `impl Generic (Box a) (Rep__Box a)`),
     /// these reference the impl's target type-parameter Type::Vars listed

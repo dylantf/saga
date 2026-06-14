@@ -867,6 +867,7 @@ impl Checker {
                 trait_type_args,
                 target_type,
                 target_type_span,
+                target_type_expr,
                 type_params,
                 where_clause,
                 where_apps,
@@ -900,6 +901,7 @@ impl Checker {
                     trait_type_args,
                     target_type,
                     type_params,
+                    target_type_expr.as_ref(),
                     where_clause,
                     where_apps,
                     needs,
@@ -2972,6 +2974,22 @@ impl Checker {
                                 ))
                                 .cloned();
                         }
+                        if impl_info.is_none()
+                            && resolved_trait_type_args.len() != trait_type_arg_types.len()
+                        {
+                            let matches: Vec<super::ImplInfo> = self
+                                .trait_state
+                                .impls
+                                .iter()
+                                .filter(|((tn, _, tt), _)| {
+                                    tn == &resolved_trait && tt == &arity_keyed_name
+                                })
+                                .map(|(_, info)| info.clone())
+                                .collect();
+                            if matches.len() == 1 {
+                                impl_info = Some(matches[0].clone());
+                            }
+                        }
 
                         // Functional-trait coherence fallback: if extras are
                         // unresolved (and direct lookup missed), scan for the
@@ -3022,8 +3040,31 @@ impl Checker {
                             }
                         }
 
-                        let impl_info = impl_info.as_ref();
-                        match impl_info {
+                        let mut pattern_subst = std::collections::HashMap::new();
+                        let impl_info = impl_info.and_then(|info| {
+                            if let Some(pattern) = &info.target_pattern
+                                && !super::check_traits::match_type_pattern(
+                                    pattern,
+                                    &resolved,
+                                    &mut pattern_subst,
+                                )
+                            {
+                                return None;
+                            }
+                            for (actual_extra, pattern_extra) in
+                                trait_type_arg_types.iter().zip(info.trait_type_args.iter())
+                            {
+                                let expected_extra = super::check_traits::substitute_pattern_vars(
+                                    pattern_extra,
+                                    &pattern_subst,
+                                );
+                                if self.unify(actual_extra, &expected_extra).is_err() {
+                                    return None;
+                                }
+                            }
+                            Some(info)
+                        });
+                        match impl_info.as_ref() {
                             None => {
                                 // Check if this might be caused by a user function
                                 // shadowing a trait method that would have worked.
@@ -3084,7 +3125,9 @@ impl Checker {
                                     resolved_symbol: None,
                                 });
                                 // Push conditional constraints for type parameters
-                                if type_name == super::canonicalize_type_name("Tuple") {
+                                if type_name == super::canonicalize_type_name("Tuple")
+                                    && info.target_pattern.is_none()
+                                {
                                     // Tuples: propagate the trait to all elements
                                     for arg_ty in args {
                                         self.trait_state.pending_constraints.push((
@@ -3094,6 +3137,18 @@ impl Checker {
                                             span,
                                             node_id,
                                         ));
+                                    }
+                                } else if !info.param_constraints_by_var.is_empty() {
+                                    for (req_trait, var_id) in &info.param_constraints_by_var {
+                                        if let Some(arg_ty) = pattern_subst.get(var_id) {
+                                            self.trait_state.pending_constraints.push((
+                                                req_trait.clone(),
+                                                vec![],
+                                                arg_ty.clone(),
+                                                span,
+                                                node_id,
+                                            ));
+                                        }
                                     }
                                 } else {
                                     for (req_trait, param_idx) in &info.param_constraints {

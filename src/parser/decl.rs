@@ -18,6 +18,55 @@ type AnnotatedSignature = (
     Vec<(String, Span)>,
 );
 
+fn impl_target_expr_from_parts(name: &str, span: Span, params: &[TypeParam]) -> TypeExpr {
+    let mut expr = TypeExpr::Named {
+        id: NodeId::fresh(),
+        name: name.to_string(),
+        span,
+    };
+    for param in params {
+        let arg = TypeExpr::Var {
+            id: NodeId::fresh(),
+            name: param.name.clone(),
+            span: param.span,
+        };
+        expr = TypeExpr::App {
+            id: NodeId::fresh(),
+            span: expr.span().to(arg.span()),
+            func: Box::new(expr),
+            arg: Box::new(arg),
+        };
+    }
+    expr
+}
+
+fn type_app_args<'a>(expr: &'a TypeExpr, out: &mut Vec<&'a TypeExpr>) -> &'a TypeExpr {
+    match expr {
+        TypeExpr::App { func, arg, .. } => {
+            let head = type_app_args(func, out);
+            out.push(arg);
+            head
+        }
+        other => other,
+    }
+}
+
+fn direct_tuple_type_params(expr: &TypeExpr) -> Option<Vec<TypeParam>> {
+    let mut args = Vec::new();
+    let head = type_app_args(expr, &mut args);
+    if !matches!(head, TypeExpr::Named { name, .. } if name == "Tuple") || args.len() < 2 {
+        return None;
+    }
+    let mut params = Vec::new();
+    for arg in args {
+        let TypeExpr::Var { name, span, .. } = arg else {
+            return None;
+        };
+        params.push(TypeParam::star(name.clone(), *span));
+    }
+    Some(params)
+}
+
 impl Parser {
     // Parse `Name` or `Module.Name`, returning the full qualified string.
     // Used where we want to preserve the qualification (e.g. needs lists).
@@ -999,81 +1048,51 @@ impl Parser {
         let trait_name = self.parse_upper_name()?;
         let trait_name_span = self.tokens[self.pos - 1].span;
 
-        // Parse optional trait type args: `impl ConvertTo NOK for USD`
-        // These are type names (concrete or variable) before `for`
+        // Parse optional trait type args: `impl ConvertTo NOK for USD`.
+        // Bare adjacent atoms remain separate trait arguments, while
+        // parenthesized type expressions count as one argument:
+        // `impl Generic (Box a) for Foo`.
         let mut trait_type_args = Vec::new();
         while !matches!(self.peek(), Token::For) {
-            match self.peek() {
-                Token::UpperIdent(_) => {
-                    let name = self.parse_upper_name()?;
-                    let span = self.tokens[self.pos - 1].span;
-                    trait_type_args.push(TypeExpr::Named {
-                        id: NodeId::fresh(),
-                        name,
-                        span,
-                    });
-                }
-                Token::Ident(_) => {
-                    let name = self.expect_ident()?;
-                    let span = self.tokens[self.pos - 1].span;
-                    trait_type_args.push(TypeExpr::Var {
-                        id: NodeId::fresh(),
-                        name,
-                        span,
-                    });
-                }
-                _ => break,
+            if self.can_start_type_atom_no_brace() {
+                trait_type_args.push(self.parse_type_atom()?);
+            } else {
+                break;
             }
         }
 
         self.expect(Token::For)?;
 
-        // Tuple target: `impl Show for (a, b) where {...}` — lower to
-        // target_type="Tuple" with one type_param per element. Each element
-        // must be a bare lowercase ident (type variable); richer forms like
-        // `(Maybe a, b)` are not supported in this first pass.
-        let (target_type, target_type_span, mut type_params) =
+        let (target_type, target_type_span, target_type_expr, type_params) =
             if matches!(self.peek(), Token::LParen) {
                 let start = self.tokens[self.pos].span;
-                let lparen_pos = self.pos;
-                self.advance(); // consume '('
-                // Empty tuple `()` in impl target is not meaningful — Unit has
-                // its own canonical name; reject it.
-                if matches!(self.peek(), Token::RParen) {
+                if matches!(self.peek_at(1), Token::RParen) {
                     return Err(ParseError {
                         message: "empty tuple `()` is not a valid impl target; use `Unit` instead"
                             .to_string(),
-                        span: self.tokens[lparen_pos].span,
+                        span: start,
                     });
                 }
-                let mut params: Vec<crate::ast::TypeParam> = Vec::new();
-                params.push(self.parse_type_param()?);
-                while matches!(self.peek(), Token::Comma) {
-                    self.advance();
-                    if matches!(self.peek(), Token::RParen) {
-                        break; // trailing comma
-                    }
-                    params.push(self.parse_type_param()?);
-                }
-                let end = self.tokens[self.pos].span;
-                self.expect(Token::RParen)?;
-                if params.len() < 2 {
+                let expr = self.parse_type_expr_no_brace_app()?;
+                let Some("Tuple") = expr.head_name() else {
                     return Err(ParseError {
-                        message: "tuple impl target needs at least two type parameters".to_string(),
-                        span: start.to(end),
+                        message: "parenthesized impl target must be a tuple type".to_string(),
+                        span: expr.span(),
                     });
-                }
-                ("Tuple".to_string(), start.to(end), params)
+                };
+                let params = direct_tuple_type_params(&expr).unwrap_or_default();
+                ("Tuple".to_string(), expr.span(), Some(expr), params)
             } else {
                 let name = self.parse_upper_name()?;
                 let span = self.tokens[self.pos - 1].span;
-                (name, span, Vec::new())
+                let mut params = Vec::new();
+                // Parse optional type params: `impl Show for Box a b`
+                while matches!(self.peek(), Token::Ident(_) | Token::LParen) {
+                    params.push(self.parse_type_param()?);
+                }
+                let expr = impl_target_expr_from_parts(&name, span, &params);
+                (name, span, Some(expr), params)
             };
-
-        // Parse optional type params: `impl Show for Box a b`
-        while matches!(self.peek(), Token::Ident(_) | Token::LParen) {
-            type_params.push(self.parse_type_param()?);
-        }
 
         let (where_clause, where_apps) = self.parse_where_clause()?;
 
@@ -1132,6 +1151,7 @@ impl Parser {
             trait_type_args,
             target_type,
             target_type_span,
+            target_type_expr,
             type_params,
             where_clause,
             where_apps,
@@ -1385,6 +1405,45 @@ impl Parser {
                 effects: needs,
                 effect_row_var: row_var,
                 span,
+            })
+        } else {
+            Ok(left)
+        }
+    }
+
+    fn parse_type_expr_no_brace_app(&mut self) -> Result<TypeExpr, ParseError> {
+        let start = self.tokens[self.pos].span;
+        let mut left = self.parse_type_atom()?;
+        while self.can_start_type_atom_no_brace() && !self.next_on_new_line() {
+            let arg = self.parse_type_atom()?;
+            let span = start.to(arg.span());
+            left = TypeExpr::App {
+                id: NodeId::fresh(),
+                func: Box::new(left),
+                arg: Box::new(arg),
+                span,
+            };
+        }
+
+        if matches!(self.peek(), Token::Arrow) {
+            self.advance();
+            let right = self.parse_type_expr_no_brace_app()?;
+            let mut needs = Vec::new();
+            let mut row_var = Vec::new();
+            if matches!(self.peek(), Token::Needs) {
+                self.advance();
+                let (effs, row_vars) = self.parse_needs_row()?;
+                needs = effs;
+                row_var = row_vars;
+            }
+            let end = self.tokens[self.pos - 1].span;
+            Ok(TypeExpr::Arrow {
+                id: NodeId::fresh(),
+                from: Box::new(left),
+                to: Box::new(right),
+                effects: needs,
+                effect_row_var: row_var,
+                span: start.to(end),
             })
         } else {
             Ok(left)

@@ -719,6 +719,7 @@ impl<'a> Resolver<'a> {
                 trait_name,
                 trait_type_args,
                 target_type,
+                target_type_expr,
                 type_params,
                 where_clause,
                 where_apps,
@@ -734,6 +735,9 @@ impl<'a> Resolver<'a> {
                 }
                 self.record_trait_ref(*id, trait_name);
                 self.record_type_ref(*id, target_type);
+                if let Some(target_type_expr) = target_type_expr {
+                    self.resolve_type_expr(target_type_expr);
+                }
                 // Resolve types appearing in the impl's trait_type_args
                 // (e.g. `impl Generic (Box a) (Rep__Box a)` → resolve Rep__Box).
                 // TypeExpr::Var (lowercase ident) is treated as a type variable

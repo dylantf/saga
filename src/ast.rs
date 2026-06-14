@@ -459,6 +459,10 @@ pub enum Decl {
         trait_type_args: Vec<TypeExpr>,
         target_type: String,
         target_type_span: Span,
+        /// Full target type pattern when parsed from source.
+        /// Existing `target_type`/`type_params` are retained as the coarse
+        /// constructor/index view used by older compiler paths and synthetic impls.
+        target_type_expr: Option<TypeExpr>,
         type_params: Vec<TypeParam>,
         where_clause: Vec<TraitBound>,
         /// Bare trait-application constraints, e.g. `Generic Person r` in
@@ -1149,6 +1153,23 @@ impl TypeExpr {
             TypeExpr::Named { name, .. } | TypeExpr::Var { name, .. } => Some(name),
             TypeExpr::App { func, .. } => func.head_name(),
             _ => None,
+        }
+    }
+
+    /// Extract the NodeId of the head of a type expression. This is the id
+    /// whose resolver entry belongs with `head_name`.
+    pub fn head_id(&self) -> Option<NodeId> {
+        match self {
+            TypeExpr::Named { id, .. } | TypeExpr::Var { id, .. } => Some(*id),
+            TypeExpr::App { func, .. } => func.head_id(),
+            _ => None,
+        }
+    }
+
+    pub fn app_arg_count(&self) -> usize {
+        match self {
+            TypeExpr::App { func, .. } => 1 + func.app_arg_count(),
+            _ => 0,
         }
     }
 }

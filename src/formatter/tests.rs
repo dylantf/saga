@@ -247,6 +247,7 @@ fn normalize_decl(d: &mut Decl) {
             trait_name_span,
             trait_type_args,
             target_type_span,
+            target_type_expr,
             where_clause,
             needs,
             methods,
@@ -261,6 +262,9 @@ fn normalize_decl(d: &mut Decl) {
             dangling_trivia.clear();
             for te in trait_type_args.iter_mut() {
                 normalize_type_expr(te);
+            }
+            if let Some(target_type_expr) = target_type_expr {
+                normalize_type_expr(target_type_expr);
             }
             for tb in where_clause.iter_mut() {
                 normalize_trait_bound(tb);
@@ -1599,6 +1603,26 @@ fn trait_default_method_body_preserved() {
         result.contains("to_json x = to_json_with default_options x"),
         "default body should be preserved: {}",
         result
+    );
+}
+
+#[test]
+fn impl_parenthesized_trait_type_arg_round_trips() {
+    assert_eq!(
+        fmt80(
+            "impl Selectable (Selected2 a b) for Select2 a b {\n  to_projection selection = selection\n}"
+        ),
+        "impl Selectable (Selected2 a b) for Select2 a b {\n  to_projection selection = selection\n}\n"
+    );
+}
+
+#[test]
+fn impl_structured_tuple_target_round_trips() {
+    assert_eq!(
+        fmt80(
+            "impl Selectable (a, b) for (Column sa na a, Column sb nb b) where {a: PgType, b: PgType} {\n  to_projection pair = pair\n}"
+        ),
+        "impl Selectable (a, b) for (Column sa na a, Column sb nb b) where {a: PgType, b: PgType} {\n  to_projection pair = pair\n}\n"
     );
 }
 

@@ -47,6 +47,8 @@ pub struct CheckResult {
     pub(crate) modules: ModuleContext,
     /// Trait definitions (for elaboration).
     pub traits: HashMap<String, TraitInfo>,
+    /// Trait impl registry (for elaboration dictionary construction).
+    pub trait_impls: HashMap<(String, Vec<String>, String), super::ImplInfo>,
     /// Effect definitions (for LSP completion, lowerer).
     pub effects: HashMap<String, EffectDefInfo>,
     /// Handler definitions (for LSP completion, lowerer).
@@ -353,6 +355,7 @@ impl Checker {
             diagnostics,
             modules: self.modules.clone(),
             traits: self.trait_state.traits.clone(),
+            trait_impls: self.trait_state.impls.clone(),
             effects: self.effects.clone(),
             handlers: self.handlers.clone(),
             let_binding_handlers: self.let_binding_handlers.clone(),

@@ -52,6 +52,18 @@ pub struct ModuleExports {
     pub doc_comments: HashMap<String, Vec<String>>,
 }
 
+fn impl_target_key(
+    canonical_target: &str,
+    target_type_expr: Option<&crate::ast::TypeExpr>,
+    type_params: &[crate::ast::TypeParam],
+) -> String {
+    let arity = target_type_expr
+        .filter(|expr| expr.head_name() == Some("Tuple"))
+        .map(|expr| expr.app_arg_count())
+        .unwrap_or(type_params.len());
+    arity_keyed_target_name(canonical_target, arity)
+}
+
 impl ModuleExports {
     /// Collect all public exports from a typechecked module.
     pub fn collect(program: &[crate::ast::Decl], checker: &Checker) -> Self {
@@ -157,16 +169,20 @@ impl ModuleExports {
                     trait_name,
                     trait_type_args,
                     target_type,
+                    target_type_expr,
                     type_params,
                     ..
                 } => {
                     let resolved_trait = checker.resolved_impl_trait_name(*id, trait_name);
                     let resolved_target = checker.resolved_impl_target_type_name(*id, target_type);
                     let resolved_target =
-                        arity_keyed_target_name(&resolved_target, type_params.len());
+                        impl_target_key(&resolved_target, target_type_expr.as_ref(), type_params);
                     let resolved_trait_type_args: Vec<String> = trait_type_args
                         .iter()
-                        .map(|te| checker.resolved_type_name(te.id(), te.simple_name()))
+                        .map(|te| {
+                            let head = te.head_name().unwrap_or("");
+                            checker.resolved_type_name(te.head_id().unwrap_or(te.id()), head)
+                        })
                         .collect();
                     let key = (resolved_trait, resolved_trait_type_args, resolved_target);
                     if let Some(info) = checker.trait_state.impls.get(&key) {
