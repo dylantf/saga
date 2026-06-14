@@ -24,6 +24,14 @@ fn is_known_symbol_trait(trait_name: &str) -> bool {
     trait_name == KNOWN_SYMBOL_TRAIT
 }
 
+fn is_generic_trait(trait_name: &str) -> bool {
+    matches!(trait_name, "Generic" | "Std.Generic.Generic")
+}
+
+fn generic_ctor(name: &str) -> String {
+    format!("Std.Generic.{name}")
+}
+
 fn match_type_pattern(pattern: &Type, actual: &Type, subst: &mut HashMap<u32, Type>) -> bool {
     match (pattern, actual) {
         (Type::Var(id), actual) => match subst.get(id).cloned() {
@@ -1815,6 +1823,17 @@ impl Elaborator {
                             },
                         ));
                     }
+                    if let Some(record_ty) = &ev.resolved_record_type {
+                        let resolved_type_args: Vec<String> = ev
+                            .trait_type_args
+                            .iter()
+                            .filter_map(|t| match t {
+                                Type::Con(name, _) => Some(name.clone()),
+                                _ => None,
+                            })
+                            .collect();
+                        return self.dict_for_type(trait_name, &resolved_type_args, record_ty, span);
+                    }
                     return match &ev.resolved_type {
                         Some((type_name, args)) => {
                             // Concrete type: build the dict via dict_for_type,
@@ -1978,6 +1997,9 @@ impl Elaborator {
         }
 
         match ty {
+            Type::Record(fields) if is_generic_trait(trait_name) => {
+                Some(self.build_anon_record_generic_dict(fields, span))
+            }
             Type::Con(name, args)
                 if name == crate::typechecker::canonicalize_type_name("Tuple")
                     && (trait_name == SHOW || trait_name == DEBUG) =>
@@ -2098,6 +2120,217 @@ impl Elaborator {
             }
             _ => None,
         }
+    }
+
+    fn build_anon_record_generic_dict(&self, fields: &[(String, Type)], span: Span) -> Expr {
+        Expr::synth(
+            span,
+            ExprKind::Tuple {
+                elements: vec![
+                    self.build_anon_record_generic_to(fields, span),
+                    self.build_anon_record_generic_from(fields, span),
+                ],
+            },
+        )
+    }
+
+    fn build_anon_record_generic_to(&self, fields: &[(String, Type)], span: Span) -> Expr {
+        let record_var_name = "__anon_rec".to_string();
+        let record_var = Expr::synth(
+            span,
+            ExprKind::Var {
+                name: record_var_name.clone(),
+            },
+        );
+        let names: Vec<&str> = fields.iter().map(|(name, _)| name.as_str()).collect();
+        let tag = crate::ast::anon_record_tag(&names);
+        let inner = self.build_anon_record_rep_to_inner(fields, &record_var, &tag, span);
+        let body = self.apply2(
+            &generic_ctor("Record"),
+            self.string_lit(&tag, span),
+            inner,
+            span,
+        );
+        Expr::synth(
+            span,
+            ExprKind::Lambda {
+                params: vec![Pat::Var {
+                    id: NodeId::fresh(),
+                    name: record_var_name,
+                    span,
+                }],
+                body: Box::new(body),
+            },
+        )
+    }
+
+    fn build_anon_record_generic_from(&self, fields: &[(String, Type)], span: Span) -> Expr {
+        let field_var_names: Vec<String> = (0..fields.len()).map(|i| format!("__f{i}")).collect();
+        let inner_pat = self.build_anon_record_rep_from_inner(&field_var_names, span);
+        let record_pat = Pat::Constructor {
+            id: NodeId::fresh(),
+            name: generic_ctor("Record"),
+            args: vec![
+                Pat::Wildcard {
+                    id: NodeId::fresh(),
+                    span,
+                },
+                inner_pat,
+            ],
+            span,
+        };
+        let record_fields: Vec<(String, Span, Expr)> = fields
+            .iter()
+            .zip(field_var_names.iter())
+            .map(|((field_name, _), var_name)| {
+                (
+                    field_name.clone(),
+                    span,
+                    Expr::synth(
+                        span,
+                        ExprKind::Var {
+                            name: var_name.clone(),
+                        },
+                    ),
+                )
+            })
+            .collect();
+        Expr::synth(
+            span,
+            ExprKind::Lambda {
+                params: vec![record_pat],
+                body: Box::new(Expr::synth(
+                    span,
+                    ExprKind::AnonRecordCreate {
+                        fields: record_fields,
+                    },
+                )),
+            },
+        )
+    }
+
+    fn build_anon_record_rep_to_inner(
+        &self,
+        fields: &[(String, Type)],
+        record_var: &Expr,
+        record_tag: &str,
+        span: Span,
+    ) -> Expr {
+        if fields.is_empty() {
+            return Expr::synth(
+                span,
+                ExprKind::Constructor {
+                    name: generic_ctor("U1"),
+                },
+            );
+        }
+        let mut iter = fields.iter().rev();
+        let (last_name, _) = iter.next().expect("non-empty fields");
+        let mut acc = self.build_anon_record_field_to(last_name, record_var, record_tag, span);
+        for (field_name, _) in iter {
+            acc = self.apply2(
+                &generic_ctor("And"),
+                self.build_anon_record_field_to(field_name, record_var, record_tag, span),
+                acc,
+                span,
+            );
+        }
+        acc
+    }
+
+    fn build_anon_record_field_to(
+        &self,
+        field_name: &str,
+        record_var: &Expr,
+        record_tag: &str,
+        span: Span,
+    ) -> Expr {
+        let access = Expr::synth(
+            span,
+            ExprKind::FieldAccess {
+                expr: Box::new(record_var.clone()),
+                field: field_name.to_string(),
+                record_name: Some(record_tag.to_string()),
+            },
+        );
+        self.apply1(
+            &generic_ctor("Labeled"),
+            self.apply1(&generic_ctor("Leaf"), access, span),
+            span,
+        )
+    }
+
+    fn build_anon_record_rep_from_inner(&self, field_vars: &[String], span: Span) -> Pat {
+        if field_vars.is_empty() {
+            return Pat::Constructor {
+                id: NodeId::fresh(),
+                name: generic_ctor("U1"),
+                args: vec![],
+                span,
+            };
+        }
+        let mut iter = field_vars.iter().rev();
+        let last = iter.next().expect("non-empty field vars");
+        let mut acc = self.build_anon_record_field_from(last, span);
+        for var_name in iter {
+            acc = Pat::Constructor {
+                id: NodeId::fresh(),
+                name: generic_ctor("And"),
+                args: vec![self.build_anon_record_field_from(var_name, span), acc],
+                span,
+            };
+        }
+        acc
+    }
+
+    fn build_anon_record_field_from(&self, var_name: &str, span: Span) -> Pat {
+        Pat::Constructor {
+            id: NodeId::fresh(),
+            name: generic_ctor("Labeled"),
+            args: vec![Pat::Constructor {
+                id: NodeId::fresh(),
+                name: generic_ctor("Leaf"),
+                args: vec![Pat::Var {
+                    id: NodeId::fresh(),
+                    name: var_name.to_string(),
+                    span,
+                }],
+                span,
+            }],
+            span,
+        }
+    }
+
+    fn apply1(&self, func: &str, arg: Expr, span: Span) -> Expr {
+        Expr::synth(
+            span,
+            ExprKind::App {
+                func: Box::new(Expr::synth(
+                    span,
+                    ExprKind::Constructor { name: func.into() },
+                )),
+                arg: Box::new(arg),
+            },
+        )
+    }
+
+    fn apply2(&self, func: &str, a: Expr, b: Expr, span: Span) -> Expr {
+        Expr::synth(
+            span,
+            ExprKind::App {
+                func: Box::new(self.apply1(func, a, span)),
+                arg: Box::new(b),
+            },
+        )
+    }
+
+    fn string_lit(&self, value: &str, span: Span) -> Expr {
+        Expr::synth(
+            span,
+            ExprKind::Lit {
+                value: Lit::String(value.into(), StringKind::Normal),
+            },
+        )
     }
 
     /// Check if the evidence at a node indicates Show for a Tuple type.

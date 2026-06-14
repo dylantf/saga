@@ -620,8 +620,8 @@ impl Checker {
             .map(|te| self.convert_type_expr(te, &mut impl_type_vars))
             .collect();
         let target_type_param_ids: Vec<u32> = impl_type_vars.iter().map(|(_, id)| *id).collect();
-        let impl_var_id = |name: &str| {
-            impl_type_vars
+        let impl_var_id = |vars: &[(String, u32)], name: &str| {
+            vars
                 .iter()
                 .find(|(n, _)| n == name)
                 .map(|(_, id)| *id)
@@ -630,7 +630,7 @@ impl Checker {
         // Register where clause bounds on impl pattern vars so method bodies
         // can use trait methods on those vars.
         for bound in where_clause {
-            if let Some(var_id) = impl_var_id(&bound.type_var) {
+            if let Some(var_id) = impl_var_id(&impl_type_vars, &bound.type_var) {
                 self.trait_state
                     .where_bound_var_names
                     .insert(var_id, bound.type_var.clone());
@@ -661,7 +661,7 @@ impl Checker {
         // rule; for non-functional traits, all args must be already bound.
         let mut local_subst: std::collections::HashMap<String, String> =
             std::collections::HashMap::new();
-        let mut where_app_param_constraints: Vec<(String, usize)> = Vec::new();
+        let mut where_app_param_constraints: Vec<(String, u32, Vec<Type>)> = Vec::new();
         for app in where_apps {
             let resolved_trait = self
                 .resolve_trait_name(&app.trait_name)
@@ -711,7 +711,7 @@ impl Checker {
                     ast::TypeExpr::Var { name, .. } => {
                         if let Some(resolved) = local_subst.get(name) {
                             resolved_names.push(Some(resolved.clone()));
-                        } else if type_params.iter().any(|tp| &tp.name == name) {
+                        } else if impl_var_id(&impl_type_vars, name).is_some() {
                             resolved_names.push(Some(format!("$impl_param:{name}")));
                             impl_param_positions.push((i, name.clone()));
                         } else {
@@ -739,29 +739,43 @@ impl Checker {
                             .to_string(),
                     ));
                 }
-                if app.type_args.len() != 1 {
+                let ast::TypeExpr::Var {
+                    name: self_param_name,
+                    ..
+                } = &app.type_args[0]
+                else {
                     return Err(Diagnostic::error_at(
                         app.span,
-                        "TraitApp constraints on impl type parameters currently support \
-                         single-parameter traits only"
+                        "TraitApp constraints on impl type parameters must constrain the first \
+                         trait argument"
                             .to_string(),
                     ));
-                }
-                let (_, param_name) = &impl_param_positions[0];
-                let Some(param_idx) = type_params.iter().position(|p| p == param_name) else {
-                    continue;
                 };
-                if let Some(var_id) = target_type_param_ids.get(param_idx) {
-                    self.trait_state
-                        .where_bound_var_names
-                        .insert(*var_id, param_name.clone());
-                    self.trait_state
-                        .where_bounds
-                        .entry(*var_id)
-                        .or_default()
-                        .insert(resolved_trait.clone());
-                }
-                where_app_param_constraints.push((resolved_trait.clone(), param_idx));
+                let Some(self_var_id) = impl_var_id(&impl_type_vars, self_param_name) else {
+                    return Err(Diagnostic::error_at(
+                        app.span,
+                        "TraitApp constraints on impl type parameters must constrain the first \
+                         trait argument"
+                            .to_string(),
+                    ));
+                };
+                let extra_types: Vec<Type> = app.type_args[1..]
+                    .iter()
+                    .map(|te| self.convert_type_expr(te, &mut impl_type_vars))
+                    .collect();
+                self.trait_state
+                    .where_bound_var_names
+                    .insert(self_var_id, self_param_name.clone());
+                self.trait_state
+                    .where_bounds
+                    .entry(self_var_id)
+                    .or_default()
+                    .insert(resolved_trait.clone());
+                where_app_param_constraints.push((
+                    resolved_trait.clone(),
+                    self_var_id,
+                    extra_types,
+                ));
                 continue;
             }
 
@@ -1090,7 +1104,7 @@ impl Checker {
         let mut param_constraints = Vec::new();
         let mut param_constraints_by_var = Vec::new();
         for bound in where_clause {
-            let var_id = impl_var_id(&bound.type_var);
+            let var_id = impl_var_id(&impl_type_vars, &bound.type_var);
             match var_id {
                 Some(var_id) => {
                     for tr in &bound.traits {
@@ -1118,13 +1132,14 @@ impl Checker {
                 }
             }
         }
-        param_constraints.extend(where_app_param_constraints);
+        let param_constraints_by_var_with_args = where_app_param_constraints;
 
         self.trait_state.impls.insert(
             dup_key,
             ImplInfo {
                 param_constraints,
                 param_constraints_by_var,
+                param_constraints_by_var_with_args,
                 target_pattern: Some(target.clone()),
                 trait_type_args: trait_type_args_types,
                 target_type_param_ids,

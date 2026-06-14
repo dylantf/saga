@@ -30,6 +30,41 @@ fn collect_arrow_effects(ty: &Type, out: &mut std::collections::HashSet<String>)
     }
 }
 
+fn is_generic_trait_name(name: &str) -> bool {
+    matches!(name, "Generic" | "Std.Generic.Generic")
+}
+
+fn generic_type(name: &str, args: Vec<Type>) -> Type {
+    Type::Con(format!("Std.Generic.{name}"), args)
+}
+
+fn anon_record_generic_rep(fields: &[(String, Type)]) -> Type {
+    generic_type("Record", vec![anon_record_generic_inner(fields)])
+}
+
+fn anon_record_generic_inner(fields: &[(String, Type)]) -> Type {
+    if fields.is_empty() {
+        return generic_type("U1", vec![]);
+    }
+    let mut iter = fields.iter().rev();
+    let (last_name, last_ty) = iter.next().expect("non-empty fields");
+    let mut acc = anon_record_field_rep(last_name, last_ty);
+    for (name, ty) in iter {
+        acc = generic_type("And", vec![anon_record_field_rep(name, ty), acc]);
+    }
+    acc
+}
+
+fn anon_record_field_rep(name: &str, ty: &Type) -> Type {
+    generic_type(
+        "Labeled",
+        vec![
+            Type::Symbol(name.to_string()),
+            generic_type("Leaf", vec![ty.clone()]),
+        ],
+    )
+}
+
 /// Annotations collected from FunAnnotation declarations:
 /// (name -> (type, span)) and (name -> where clause constraints).
 type Annotations = (
@@ -1607,6 +1642,7 @@ impl Checker {
                             node_id,
                             trait_name: trait_name.clone(),
                             resolved_type: None,
+                            resolved_record_type: None,
                             type_var_name: var_name,
                             trait_type_args: trait_type_arg_types.clone(),
                             resolved_symbol: None,
@@ -1643,6 +1679,7 @@ impl Checker {
                                 node_id,
                                 trait_name: trait_name.clone(),
                                 resolved_type: None,
+                                resolved_record_type: None,
                                 type_var_name: var_name,
                                 trait_type_args: trait_type_arg_types.clone(),
                                 resolved_symbol: None,
@@ -1687,6 +1724,7 @@ impl Checker {
                         node_id,
                         trait_name: trait_name.clone(),
                         resolved_type: None,
+                        resolved_record_type: None,
                         type_var_name: var_name,
                         trait_type_args: trait_type_arg_types.clone(),
                         resolved_symbol: None,
@@ -3127,6 +3165,7 @@ impl Checker {
                                     node_id,
                                     trait_name: trait_name.clone(),
                                     resolved_type: Some((type_name.clone(), args.clone())),
+                                    resolved_record_type: None,
                                     type_var_name: None,
                                     trait_type_args: resolved_extra_types,
                                     resolved_symbol: None,
@@ -3145,7 +3184,29 @@ impl Checker {
                                             node_id,
                                         ));
                                     }
-                                } else if !info.param_constraints_by_var.is_empty() {
+                                } else {
+                                    for (req_trait, var_id, extra_types) in
+                                        &info.param_constraints_by_var_with_args
+                                    {
+                                        if let Some(arg_ty) = pattern_subst.get(var_id) {
+                                            let resolved_extras = extra_types
+                                                .iter()
+                                                .map(|extra| {
+                                                    super::check_traits::substitute_pattern_vars(
+                                                        extra,
+                                                        &pattern_subst,
+                                                    )
+                                                })
+                                                .collect();
+                                            self.trait_state.pending_constraints.push((
+                                                req_trait.clone(),
+                                                resolved_extras,
+                                                arg_ty.clone(),
+                                                span,
+                                                node_id,
+                                            ));
+                                        }
+                                    }
                                     for (req_trait, var_id) in &info.param_constraints_by_var {
                                         if let Some(arg_ty) = pattern_subst.get(var_id) {
                                             self.trait_state.pending_constraints.push((
@@ -3157,16 +3218,19 @@ impl Checker {
                                             ));
                                         }
                                     }
-                                } else {
-                                    for (req_trait, param_idx) in &info.param_constraints {
-                                        if let Some(arg_ty) = args.get(*param_idx) {
-                                            self.trait_state.pending_constraints.push((
-                                                req_trait.clone(),
-                                                vec![],
-                                                arg_ty.clone(),
-                                                span,
-                                                node_id,
-                                            ));
+                                    if info.param_constraints_by_var_with_args.is_empty()
+                                        && info.param_constraints_by_var.is_empty()
+                                    {
+                                        for (req_trait, param_idx) in &info.param_constraints {
+                                            if let Some(arg_ty) = args.get(*param_idx) {
+                                                self.trait_state.pending_constraints.push((
+                                                    req_trait.clone(),
+                                                    vec![],
+                                                    arg_ty.clone(),
+                                                    span,
+                                                    node_id,
+                                                ));
+                                            }
                                         }
                                     }
                                 }
@@ -3196,6 +3260,7 @@ impl Checker {
                             node_id,
                             trait_name: trait_name.clone(),
                             resolved_type: None,
+                            resolved_record_type: None,
                             type_var_name: var_name,
                             trait_type_args: trait_type_arg_types.clone(),
                             resolved_symbol: None,
@@ -3208,7 +3273,30 @@ impl Checker {
                             span,
                         ));
                     }
-                    Type::Record(_) => {
+                    Type::Record(fields) => {
+                        let resolved_trait = self
+                            .resolve_trait_name(&trait_name)
+                            .unwrap_or_else(|| trait_name.clone());
+                        if is_generic_trait_name(&resolved_trait) {
+                            let rep_ty = anon_record_generic_rep(fields);
+                            for extra in &trait_type_arg_types {
+                                self.unify_at(extra, &rep_ty, span)?;
+                            }
+                            let resolved_extra_types: Vec<Type> = trait_type_arg_types
+                                .iter()
+                                .map(|t| self.sub.apply(t))
+                                .collect();
+                            self.evidence.push(super::TraitEvidence {
+                                node_id,
+                                trait_name: trait_name.clone(),
+                                resolved_type: None,
+                                resolved_record_type: Some(resolved.clone()),
+                                type_var_name: None,
+                                trait_type_args: resolved_extra_types,
+                                resolved_symbol: None,
+                            });
+                            continue;
+                        }
                         let display = trait_name.rsplit('.').next().unwrap_or(&trait_name);
                         return Err(rewrite_diag(
                             format!("no impl of {} for anonymous record type", display),
@@ -3224,6 +3312,7 @@ impl Checker {
                                 node_id,
                                 trait_name: resolved_trait,
                                 resolved_type: None,
+                                resolved_record_type: None,
                                 type_var_name: None,
                                 trait_type_args: vec![],
                                 resolved_symbol: Some(name.clone()),

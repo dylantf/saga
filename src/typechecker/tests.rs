@@ -7457,6 +7457,36 @@ fn derive_generic_roundtrip_without_ascription() {
 }
 
 #[test]
+fn generic_constraint_resolves_for_anonymous_record() {
+    check(
+        "import Std.Generic (Generic, U1, Leaf, Labeled, And, Record)
+
+trait ToJson a {
+  fun to_json : (x: a) -> String
+}
+
+impl ToJson for U1 { to_json _ = \"\" }
+impl ToJson for String { to_json s = s }
+impl ToJson for Int { to_json n = show n }
+impl ToJson for Leaf a where {a: ToJson} { to_json (Leaf x) = to_json x }
+impl ToJson for Labeled (n : Symbol) a where {n: KnownSymbol, a: ToJson} {
+  to_json (Labeled x) = symbol_name (Proxy : Proxy n) <> \"=\" <> to_json x
+}
+impl ToJson for And l r where {l: ToJson, r: ToJson} {
+  to_json (And l r) = to_json l <> \",\" <> to_json r
+}
+impl ToJson for Record a where {a: ToJson} {
+  to_json (Record _ inner) = \"{\" <> to_json inner <> \"}\"
+}
+
+fun anon_json : Unit -> String
+anon_json () = to_json (to { name: \"alice\", age: 42 })
+",
+    )
+    .unwrap();
+}
+
+#[test]
 fn derive_generic_parameterized_record_roundtrip_int() {
     // Phase 2e: parameterized records now derive Generic.
     check(
@@ -9896,6 +9926,39 @@ fn impl_for_structured_tuple_target_requires_nested_constraints() {
         "expected missing PgType diagnostic, got: {}",
         err.message
     );
+}
+
+#[test]
+fn anonymous_record_generic_shape_can_drive_selectable_output_record() {
+    check(
+        "import Std.Generic (Generic, Leaf, Labeled, And, Record)\n\
+         type Column (n : Symbol) a = Column String\n\
+         type Prepared row = Prepared row\n\
+         trait Selectable selection row | selection -> row {\n\
+           fun selected : selection -> row\n\
+         }\n\
+         impl Selectable (Leaf a) for (Leaf (Column n a)) {\n\
+           selected _ = todo ()\n\
+         }\n\
+         impl Selectable (Labeled n out) for (Labeled n field) where {Selectable field out} {\n\
+           selected _ = todo ()\n\
+         }\n\
+         impl Selectable (And lo ro) for (And l r) where {Selectable l lo, Selectable r ro} {\n\
+           selected _ = todo ()\n\
+         }\n\
+         impl Selectable (Record out) for (Record fields) where {Selectable fields out} {\n\
+           selected _ = todo ()\n\
+         }\n\
+         fun db_select : selection -> Prepared row\n\
+           where {selection: Generic selection_rep, selection_rep: Selectable row_rep, row: Generic row_rep}\n\
+         db_select selection = Prepared (from (selected (to selection)))\n\
+         fun q : Unit -> Prepared { post_title: String, user_name: String }\n\
+         q () = db_select {\n\
+           user_name: Column \"name\",\n\
+           post_title: Column \"title\",\n\
+         }\n",
+    )
+    .unwrap();
 }
 
 #[test]

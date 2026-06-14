@@ -2532,10 +2532,34 @@ fn impl_def_with_structured_tuple_target() {
             ..
         } => {
             assert_eq!(target_type, "Tuple");
-            assert!(type_params.is_empty());
+            let param_names: Vec<&str> = type_params.iter().map(|tp| tp.name.as_str()).collect();
+            assert_eq!(param_names, vec!["sa", "na", "a", "sb", "nb", "b"]);
             let target_type_expr = target_type_expr.as_ref().expect("target expr");
             assert_eq!(target_type_expr.head_name(), Some("Tuple"));
             assert_eq!(target_type_expr.app_arg_count(), 2);
+        }
+        _ => panic!("expected ImplDef, got {:?}", decls[0]),
+    }
+}
+
+#[test]
+fn impl_def_with_nested_structured_target() {
+    let decls = parse(
+        "impl Selectable (Leaf a) for (Leaf (Column n a)) {\n  selected x = x\n}",
+    );
+    assert_eq!(decls.len(), 1);
+    match &decls[0] {
+        Decl::ImplDef {
+            target_type,
+            target_type_expr,
+            type_params,
+            ..
+        } => {
+            assert_eq!(target_type, "Leaf");
+            let param_names: Vec<&str> = type_params.iter().map(|tp| tp.name.as_str()).collect();
+            assert_eq!(param_names, vec!["n", "a"]);
+            let target_type_expr = target_type_expr.as_ref().expect("target expr");
+            assert_eq!(target_type_expr.head_name(), Some("Leaf"));
         }
         _ => panic!("expected ImplDef, got {:?}", decls[0]),
     }

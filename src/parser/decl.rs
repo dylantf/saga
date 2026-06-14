@@ -40,31 +40,35 @@ fn impl_target_expr_from_parts(name: &str, span: Span, params: &[TypeParam]) -> 
     expr
 }
 
-fn type_app_args<'a>(expr: &'a TypeExpr, out: &mut Vec<&'a TypeExpr>) -> &'a TypeExpr {
-    match expr {
-        TypeExpr::App { func, arg, .. } => {
-            let head = type_app_args(func, out);
-            out.push(arg);
-            head
+fn type_params_in_type_expr(expr: &TypeExpr) -> Vec<TypeParam> {
+    fn visit(expr: &TypeExpr, out: &mut Vec<TypeParam>) {
+        match expr {
+            TypeExpr::Var { name, span, .. } => {
+                if !out.iter().any(|tp| tp.name == *name) {
+                    out.push(TypeParam::star(name.clone(), *span));
+                }
+            }
+            TypeExpr::App { func, arg, .. } => {
+                visit(func, out);
+                visit(arg, out);
+            }
+            TypeExpr::Arrow { from, to, .. } => {
+                visit(from, out);
+                visit(to, out);
+            }
+            TypeExpr::Record { fields, .. } => {
+                for (_, ty) in fields {
+                    visit(ty, out);
+                }
+            }
+            TypeExpr::Labeled { inner, .. } => visit(inner, out),
+            TypeExpr::Named { .. } | TypeExpr::Symbol { .. } => {}
         }
-        other => other,
     }
-}
 
-fn direct_tuple_type_params(expr: &TypeExpr) -> Option<Vec<TypeParam>> {
-    let mut args = Vec::new();
-    let head = type_app_args(expr, &mut args);
-    if !matches!(head, TypeExpr::Named { name, .. } if name == "Tuple") || args.len() < 2 {
-        return None;
-    }
     let mut params = Vec::new();
-    for arg in args {
-        let TypeExpr::Var { name, span, .. } = arg else {
-            return None;
-        };
-        params.push(TypeParam::star(name.clone(), *span));
-    }
-    Some(params)
+    visit(expr, &mut params);
+    params
 }
 
 impl Parser {
@@ -1096,14 +1100,15 @@ impl Parser {
                     });
                 }
                 let expr = self.parse_type_expr_no_brace_app()?;
-                let Some("Tuple") = expr.head_name() else {
+                let Some(head) = expr.head_name() else {
                     return Err(ParseError {
-                        message: "parenthesized impl target must be a tuple type".to_string(),
+                        message: "parenthesized impl target must have a named type head"
+                            .to_string(),
                         span: expr.span(),
                     });
                 };
-                let params = direct_tuple_type_params(&expr).unwrap_or_default();
-                ("Tuple".to_string(), expr.span(), Some(expr), params)
+                let params = type_params_in_type_expr(&expr);
+                (head.to_string(), expr.span(), Some(expr), params)
             } else {
                 let name = self.parse_upper_name()?;
                 let span = self.tokens[self.pos - 1].span;

@@ -3713,6 +3713,16 @@ main () = symbol_name (Proxy : Proxy 'Foo)
 }
 
 #[test]
+fn anonymous_record_generic_to_lowers_and_runs() {
+    let src = r#"
+fun main : Unit -> Int
+main () = (from (to { name: "alice", age: 42 }) : { age: Int, name: String }).age
+"#;
+
+    assert_runs_and_stdout_contains(src, &["42"]);
+}
+
+#[test]
 fn symbol_name_proxy_closure_is_beta_reduced() {
     // `symbol_name (Proxy : …)` elaborates to an immediately-applied reflection
     // closure `(fun __proxy -> "Foo")(Proxy)`. The generic-fold β-reduction must
