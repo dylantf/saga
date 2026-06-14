@@ -225,6 +225,12 @@ impl<'a> Lowerer<'a> {
                                 is_open_row,
                                 param_absorbed_effects,
                                 param_types,
+                                dict_param_count: self
+                                    .check_result
+                                    .env
+                                    .get(name)
+                                    .map(|scheme| util::dict_param_count(&scheme.constraints))
+                                    .unwrap_or(0),
                             },
                         );
                         clause_groups.push((

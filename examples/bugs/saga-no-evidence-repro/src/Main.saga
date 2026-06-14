@@ -1,0 +1,27 @@
+module Main
+
+import NoEvidence.Lib as Lib
+import NoEvidence.Lib (Build)
+import Std.IO (console)
+
+record Selected {
+  id: Int,
+  name: String,
+}
+
+impl Lib.Project Selected for Selected {
+  project value = value
+}
+
+fun prepared : Unit -> Lib.Prepared Selected
+prepared () = Lib.query (fun () -> {
+  select! Selected {
+    id: 1,
+    name: "Alice",
+  }
+})
+
+main () = {
+  let value = prepared ()
+  println "ok"
+} with console

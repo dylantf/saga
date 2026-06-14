@@ -312,6 +312,9 @@ pub struct FunSig {
     /// CPS threading at call sites even though `param_absorbed_effects`
     /// (named-effects only) misses them.
     pub param_types: Vec<crate::typechecker::Type>,
+    /// Number of dictionary params prepended by elaboration before source
+    /// parameters. Callback metadata is keyed by source parameter index.
+    pub dict_param_count: usize,
 }
 
 /// Read-only inputs the populator consults during its walk. Bundled into a
@@ -535,7 +538,8 @@ impl<'a> Populator<'a> {
             return (effects, open_row);
         };
         for (idx, effs) in &info.param_absorbed_effects {
-            if let Some(Pat::Var { name: pname, .. }) = params.get(*idx) {
+            let param_idx = idx + info.dict_param_count;
+            if let Some(Pat::Var { name: pname, .. }) = params.get(param_idx) {
                 effects.insert(pname.clone(), effs.clone());
             }
         }
@@ -545,7 +549,8 @@ impl<'a> Populator<'a> {
         // forwarded into them. `param_absorbed_effects` only tracks named
         // effects, so detect the open-row tail directly off the param types.
         for (idx, pty) in info.param_types.iter().enumerate() {
-            if let Some(Pat::Var { name: pname, .. }) = params.get(idx)
+            let param_idx = idx + info.dict_param_count;
+            if let Some(Pat::Var { name: pname, .. }) = params.get(param_idx)
                 && util::has_open_effect_row(pty)
             {
                 open_row.insert(pname.clone());
@@ -1230,6 +1235,7 @@ impl<'a> Populator<'a> {
                 param_absorbed_effects,
                 is_open_row,
                 param_types: util::param_types_from_type(&ty),
+                dict_param_count: 0,
             });
         }
 

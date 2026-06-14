@@ -67,13 +67,9 @@ impl<'a> Lowerer<'a> {
             .iter()
             .map(|param| param.index)
             .collect();
-        let param_types = self.resolved_fun_info(head.id, lookup_name).map(|f| {
-            f.param_types
-                .iter()
-                .take(args.len())
-                .cloned()
-                .collect::<Vec<_>>()
-        });
+        let param_types = self
+            .resolved_fun_info(head.id, lookup_name)
+            .map(|f| f.expected_arg_types(args.len()));
 
         let mut arg_vars = Vec::with_capacity(args.len());
         let mut bindings = Vec::with_capacity(args.len());

@@ -179,6 +179,24 @@ struct FunInfo {
     /// Used to propagate expected callback shapes through containers at call sites
     /// without depending on fully specialized row-polymorphic instantiations.
     param_types: Vec<crate::typechecker::Type>,
+    /// Number of dictionary arguments prepended by elaboration for `where`
+    /// clauses. These runtime arguments are not present in the source-level
+    /// function type, so expected user parameter types start after this offset.
+    dict_param_count: usize,
+}
+
+impl FunInfo {
+    fn expected_arg_types(&self, arg_count: usize) -> Vec<crate::typechecker::Type> {
+        let mut out = Vec::with_capacity(arg_count);
+        for idx in 0..arg_count {
+            if idx < self.dict_param_count {
+                out.push(crate::typechecker::Type::Error);
+            } else if let Some(ty) = self.param_types.get(idx - self.dict_param_count) {
+                out.push(ty.clone());
+            }
+        }
+        out
+    }
 }
 
 /// Tracks the evidence vector currently in scope during lowering.
@@ -798,6 +816,7 @@ impl<'a> Lowerer<'a> {
                         param_absorbed_effects: info.param_absorbed_effects.clone(),
                         is_open_row: info.is_open_row,
                         param_types: info.param_types.clone(),
+                        dict_param_count: info.dict_param_count,
                     },
                 )
             })

@@ -3213,6 +3213,92 @@ main () = {
 }
 
 #[test]
+fn imported_constrained_hof_threads_effectful_callback_evidence() {
+    let lib_src = r#"module NoEvidence.Lib
+
+pub effect Build a {
+  fun select : a -> a
+}
+
+type Step a = Step (Unit -> a)
+
+pub handler collect for Build a {
+  select value = {
+    Step (fun () -> {
+      let Step run_rest = resume value
+      run_rest ()
+    })
+  }
+
+  return value = Step (fun () -> value)
+}
+
+pub trait Project selection row | selection -> row {
+  fun project : selection -> row
+}
+
+pub record Prepared row {
+  row: row,
+}
+
+pub fun query : (Unit -> selection needs {Build selection}) -> Prepared row
+  where {selection: Project row}
+query make = {
+  let Step run_query = make () with collect
+  let selection = run_query ()
+  Prepared { row: project selection }
+}
+"#;
+
+    let main_src = r#"module Main
+
+import NoEvidence.Lib as Lib
+import NoEvidence.Lib (Build)
+
+record Selected {
+  id: Int,
+  name: String,
+}
+
+impl Lib.Project Selected for Selected {
+  project value = value
+}
+
+fun prepared : Unit -> Lib.Prepared Selected
+prepared () = Lib.query (fun () -> {
+  select! Selected {
+    id: 1,
+    name: "Alice",
+  }
+})
+
+main () = {
+  let value = prepared ()
+  value.row.name
+}
+"#;
+
+    with_temp_project_files(
+        &[("src/NoEvidence/Lib.saga", lib_src)],
+        main_src,
+        |checker, program| {
+            let result = checker.to_result();
+            let lib_program = result
+                .programs()
+                .get("NoEvidence.Lib")
+                .expect("NoEvidence.Lib module not found");
+            let lib_core = emit_from_program(lib_program, "noevidence_lib", checker);
+            let main_core = emit_from_program(program, "main", checker);
+            assert_project_modules_run(
+                &[("noevidence_lib", &lib_core), ("main", &main_core)],
+                "io:format(\"~ts~n\", [main:main(unit)]), init:stop().",
+                &["Alice"],
+            );
+        },
+    );
+}
+
+#[test]
 fn local_dict_names_are_module_qualified() {
     // When Animals.saga defines impl Show for Animal, the dict should be
     // named with canonical trait + module-qualified type (not bare __dict_Show_Animal)
