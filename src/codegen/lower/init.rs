@@ -974,11 +974,25 @@ impl<'a> Lowerer<'a> {
         record_fields: &mut HashMap<String, Vec<String>>,
     ) {
         for decl in program {
+            if let Decl::TypeAlias { body, .. } = decl {
+                Self::collect_anon_records_from_type_expr(body, record_fields);
+            }
             if let Decl::RecordDef { fields, .. } = decl {
                 for a in fields {
                     let (_, type_expr) = &a.node;
                     Self::collect_anon_records_from_type_expr(type_expr, record_fields);
                 }
+            }
+            if let Decl::FunSignature {
+                params,
+                return_type,
+                ..
+            } = decl
+            {
+                for (_, type_expr) in params {
+                    Self::collect_anon_records_from_type_expr(type_expr, record_fields);
+                }
+                Self::collect_anon_records_from_type_expr(return_type, record_fields);
             }
             // Also walk function bodies for AnonRecordCreate expressions
             if let Decl::FunBinding { body, .. } = decl {

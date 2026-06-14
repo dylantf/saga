@@ -1788,6 +1788,7 @@ impl Checker {
                         node_id: *node_id,
                         trait_name: trait_name.clone(),
                         resolved_type: None,
+                        resolved_record_type: None,
                         type_var_name: None,
                         trait_type_args: _trait_type_args.clone(),
                         resolved_symbol: None,

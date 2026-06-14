@@ -12,7 +12,7 @@ use std::collections::{HashMap, HashSet};
 use crate::ast::*;
 use crate::token::{Span, StringKind};
 use crate::typechecker::{
-    CheckResult, ImplInfo, KNOWN_SYMBOL_TRAIT, TraitEvidence, TraitInfo, Type,
+    CheckResult, ImplInfo, KNOWN_SYMBOL_TRAIT, ResolvedValue, TraitEvidence, TraitInfo, Type,
 };
 
 /// Only invoke the symbol-intrinsic lambda fast-path for the `KnownSymbol`
@@ -22,6 +22,14 @@ use crate::typechecker::{
 /// rewritten to a symbol-name lookup, silently dropping the real dispatch.
 fn is_known_symbol_trait(trait_name: &str) -> bool {
     trait_name == KNOWN_SYMBOL_TRAIT
+}
+
+fn is_generic_trait(trait_name: &str) -> bool {
+    matches!(trait_name, "Generic" | "Std.Generic.Generic")
+}
+
+fn generic_ctor(name: &str) -> String {
+    format!("Std.Generic.{name}")
 }
 
 fn match_type_pattern(pattern: &Type, actual: &Type, subst: &mut HashMap<u32, Type>) -> bool {
@@ -44,6 +52,39 @@ fn match_type_pattern(pattern: &Type, actual: &Type, subst: &mut HashMap<u32, Ty
         (Type::Symbol(a), Type::Symbol(b)) => a == b,
         _ => false,
     }
+}
+
+fn substitute_pattern_vars(ty: &Type, subst: &HashMap<u32, Type>) -> Type {
+    match ty {
+        Type::Var(id) => subst.get(id).cloned().unwrap_or(Type::Var(*id)),
+        Type::Con(name, args) => Type::Con(
+            name.clone(),
+            args.iter()
+                .map(|arg| substitute_pattern_vars(arg, subst))
+                .collect(),
+        ),
+        Type::Fun(a, b, row) => Type::Fun(
+            Box::new(substitute_pattern_vars(a, subst)),
+            Box::new(substitute_pattern_vars(b, subst)),
+            row.clone(),
+        ),
+        Type::Record(fields) => Type::Record(
+            fields
+                .iter()
+                .map(|(name, ty)| (name.clone(), substitute_pattern_vars(ty, subst)))
+                .collect(),
+        ),
+        other => other.clone(),
+    }
+}
+
+fn trait_type_arg_names(args: &[Type]) -> Vec<String> {
+    args.iter()
+        .filter_map(|ty| match ty {
+            Type::Con(name, _) => Some(name.clone()),
+            _ => None,
+        })
+        .collect()
 }
 
 const SHOW: &str = "Std.Base.Show";
@@ -140,6 +181,34 @@ impl Elaborator {
         self.resolution.type_ref(id).unwrap_or(source).to_string()
     }
 
+    fn resolved_global_value_name(&self, id: crate::ast::NodeId) -> Option<&str> {
+        match self.resolution.value(id) {
+            Some(ResolvedValue::Global { lookup_name }) => Some(lookup_name.as_str()),
+            _ => None,
+        }
+    }
+
+    fn fun_dict_params_for_callee(
+        &self,
+        source_name: &str,
+        node_id: crate::ast::NodeId,
+    ) -> Option<Vec<(String, String)>> {
+        if let Some(params) = self.fun_dict_params.get(source_name).cloned() {
+            return Some(params);
+        }
+        if let Some(resolved_name) = self.resolved_global_value_name(node_id)
+            && let Some(params) = self.fun_dict_params.get(resolved_name).cloned()
+        {
+            return Some(params);
+        }
+        if let Some(canonical) = self.scope_map_values.get(source_name)
+            && let Some(params) = self.fun_dict_params.get(canonical).cloned()
+        {
+            return Some(params);
+        }
+        None
+    }
+
     /// Resolve trait type args via the resolution map. For App heads (e.g.
     /// `Rep__Box a`), uses the head name — only the head identifies the impl
     /// for dict-name purposes.
@@ -172,17 +241,42 @@ impl Elaborator {
         // These should not generate dict params.
         let operator_traits: std::collections::HashSet<&str> = ["Num", "Eq"].into_iter().collect();
 
+        let scheme_dict_params = |scheme: &crate::typechecker::Scheme| -> Vec<(String, String)> {
+            scheme
+                .constraints
+                .iter()
+                .filter(|(trait_name, _, _)| !operator_traits.contains(trait_name.as_str()))
+                .map(|(trait_name, var_id, _)| (trait_name.clone(), format!("v{}", var_id)))
+                .collect()
+        };
+
         let mut inferred_dict_params: HashMap<String, Vec<(String, String)>> = HashMap::new();
         for (name, scheme) in result.env.iter() {
-            if !scheme.constraints.is_empty() {
-                let dict_params: Vec<(String, String)> = scheme
-                    .constraints
-                    .iter()
-                    .filter(|(trait_name, _, _)| !operator_traits.contains(trait_name.as_str()))
-                    .map(|(trait_name, var_id, _)| (trait_name.clone(), format!("v{}", var_id)))
-                    .collect();
-                if !dict_params.is_empty() {
-                    inferred_dict_params.insert(name.to_string(), dict_params);
+            let dict_params = scheme_dict_params(scheme);
+            if !dict_params.is_empty() {
+                inferred_dict_params.insert(name.to_string(), dict_params);
+            }
+        }
+        for info in result.codegen_info().values() {
+            let origins: HashMap<&str, &str> = info
+                .export_origins
+                .iter()
+                .map(|(surface, origin)| (surface.as_str(), origin.as_str()))
+                .collect();
+            for (name, scheme) in &info.exports {
+                let dict_params = scheme_dict_params(scheme);
+                if dict_params.is_empty() {
+                    continue;
+                }
+                if let Some(origin) = origins.get(name.as_str()) {
+                    inferred_dict_params
+                        .entry((*origin).to_string())
+                        .or_insert_with(|| dict_params.clone());
+                }
+                if name.contains('.') {
+                    inferred_dict_params
+                        .entry(name.clone())
+                        .or_insert_with(|| dict_params.clone());
                 }
             }
         }
@@ -198,7 +292,6 @@ impl Elaborator {
                     .or_insert(params);
             }
         }
-
         // Merge let-binding dict params (from local let bindings with trait constraints).
         // Keyed by (name, pat_id) to avoid collisions between same-named bindings
         // in different scopes. We store the pat_id set so the elaborator can check
@@ -304,29 +397,48 @@ impl Elaborator {
         dict_params
     }
 
+    fn dict_params_from_where_apps(&self, where_apps: &[TraitApp]) -> Vec<(String, String)> {
+        let mut dict_params = Vec::new();
+        for app in where_apps {
+            if matches!(app.trait_name.as_str(), "Num" | "Eq") {
+                continue;
+            }
+            let Some(TypeExpr::Var { name, .. }) = app.type_args.first() else {
+                continue;
+            };
+            let resolved = self.resolved_trait_name(app.id, &app.trait_name);
+            dict_params.push((resolved, name.clone()));
+        }
+        dict_params
+    }
+
     /// Set up `current_dict_params` from a where clause, saving the previous state.
     /// Returns the saved state to be restored later via `restore_dict_params`.
-    fn setup_dict_params(
+    fn setup_dict_params_from_pairs(
         &mut self,
-        where_clause: &[TraitBound],
+        dict_params: &[(String, String)],
     ) -> (HashMap<String, String>, HashMap<(String, String), String>) {
         let saved = (
             std::mem::take(&mut self.current_dict_params),
             std::mem::take(&mut self.current_dict_params_by_var),
         );
-        for bound in where_clause {
-            for tr in &bound.traits {
-                let resolved = self.resolved_trait_name(tr.id, &tr.name);
-                // Use bare trait name in param name to avoid dots in Erlang identifiers
-                let bare = tr.name.rsplit('.').next().unwrap_or(&tr.name);
-                let param_name = format!("__dict_{}_{}", bare, bound.type_var);
-                self.current_dict_params
-                    .insert(resolved.clone(), param_name.clone());
-                self.current_dict_params_by_var
-                    .insert((resolved, bound.type_var.clone()), param_name);
-            }
+        for (resolved, type_var) in dict_params {
+            let bare = resolved.rsplit('.').next().unwrap_or(resolved);
+            let param_name = format!("__dict_{}_{}", bare, type_var);
+            self.current_dict_params
+                .insert(resolved.clone(), param_name.clone());
+            self.current_dict_params_by_var
+                .insert((resolved.clone(), type_var.clone()), param_name);
         }
         saved
+    }
+
+    fn setup_dict_params(
+        &mut self,
+        where_clause: &[TraitBound],
+    ) -> (HashMap<String, String>, HashMap<(String, String), String>) {
+        let dict_params = self.dict_params_from_where(where_clause);
+        self.setup_dict_params_from_pairs(&dict_params)
     }
 
     /// Restore `current_dict_params` from a previous `setup_dict_params` call.
@@ -479,6 +591,7 @@ impl Elaborator {
                     target_type_expr,
                     type_params,
                     where_clause,
+                    where_apps,
                     methods,
                     needs,
                     routed_derive_info,
@@ -506,15 +619,18 @@ impl Elaborator {
                     let trait_info = self.traits.get(&canonical_trait).cloned();
 
                     // Build dict_params for conditional impls
-                    let mut dict_params = Vec::new();
-                    for bound in where_clause {
-                        for tr in &bound.traits {
-                            dict_params.push(format!("__dict_{}_{}", tr.name, bound.type_var));
-                        }
-                    }
+                    let mut dict_param_pairs = self.dict_params_from_where_apps(where_apps);
+                    dict_param_pairs.extend(self.dict_params_from_where(where_clause));
+                    let dict_params: Vec<String> = dict_param_pairs
+                        .iter()
+                        .map(|(trait_name, type_var)| {
+                            let bare = trait_name.rsplit('.').next().unwrap_or(trait_name);
+                            format!("__dict_{}_{}", bare, type_var)
+                        })
+                        .collect();
 
                     // Set up current dict params for elaborating method bodies
-                    let saved = self.setup_dict_params(where_clause);
+                    let saved = self.setup_dict_params_from_pairs(&dict_param_pairs);
 
                     let mut super_dicts = Vec::new();
                     if let Some(ref info) = trait_info {
@@ -643,10 +759,10 @@ impl Elaborator {
                     );
                     let mut extra_params = Vec::new();
 
-                    if let Some(dict_param_info) = self.fun_dict_params.get(name) {
+                    if let Some(dict_param_info) = self.fun_dict_params.get(name).cloned() {
                         for (trait_name, type_var) in dict_param_info {
                             // Use bare trait name in param name to avoid dots in Erlang identifiers
-                            let bare = trait_name.rsplit('.').next().unwrap_or(trait_name);
+                            let bare = trait_name.rsplit('.').next().unwrap_or(&trait_name);
                             let param_name = format!("__dict_{}_{}", bare, type_var);
                             self.current_dict_params
                                 .insert(trait_name.clone(), param_name.clone());
@@ -805,7 +921,7 @@ impl Elaborator {
                 // Dict-parameterized function used as a bare value (not directly applied).
                 // Partially apply the dict args so it can be passed as a first-class function.
                 // e.g. `let p = print` becomes `let p = print __dict_Show_String`
-                if let Some(dict_param_info) = self.fun_dict_params.get(name).cloned() {
+                if let Some(dict_param_info) = self.fun_dict_params_for_callee(name, node_id) {
                     let mut result: Expr = expr.clone();
                     let mut trait_occurrences: HashMap<&str, usize> = HashMap::new();
                     for (trait_name, _type_var) in &dict_param_info {
@@ -851,7 +967,11 @@ impl Elaborator {
                                 },
                             );
                         }
-                        if let Some(dict_expr) = self.resolve_dict(&trait_name, func.id, func.span)
+                        if let Some(dict_expr) = self
+                            .resolve_call_dict_nth(&trait_name, func.id, node_id, func.span, 0)
+                            .or_else(|| {
+                                self.resolve_dict_from_arg_type(&trait_name, arg, func.span)
+                            })
                         {
                             let elab_arg = self.elaborate_expr(arg);
                             let method = Expr::synth(
@@ -886,7 +1006,7 @@ impl Elaborator {
                     }
 
                     // If calling a function that has dict params, insert them
-                    if let Some(dict_param_info) = self.fun_dict_params.get(name).cloned() {
+                    if let Some(dict_param_info) = self.fun_dict_params_for_callee(name, func.id) {
                         let elab_arg = self.elaborate_expr(arg);
                         // Build the call with dict args prepended
                         let mut result: Expr =
@@ -894,8 +1014,19 @@ impl Elaborator {
                         let mut trait_occurrences: HashMap<&str, usize> = HashMap::new();
                         for (trait_name, _type_var) in &dict_param_info {
                             let occ = trait_occurrences.entry(trait_name).or_insert(0);
-                            if let Some(dict_expr) =
-                                self.resolve_dict_nth(trait_name, func.id, func.span, *occ)
+                            if let Some(dict_expr) = self
+                                .resolve_call_dict_nth(
+                                    trait_name, func.id, node_id, func.span, *occ,
+                                )
+                                .or_else(|| {
+                                    (*occ == 0)
+                                        .then(|| {
+                                            self.resolve_dict_from_arg_type(
+                                                trait_name, arg, func.span,
+                                            )
+                                        })
+                                        .flatten()
+                                })
                             {
                                 result = Expr::synth(
                                     span,
@@ -924,7 +1055,11 @@ impl Elaborator {
                     // Evidence-first: trait method via qualified name
                     if let Some((trait_name, method_index)) =
                         self.resolve_trait_method(&qualified, func.id)
-                        && let Some(dict_expr) = self.resolve_dict(&trait_name, func.id, func.span)
+                        && let Some(dict_expr) = self
+                            .resolve_call_dict_nth(&trait_name, func.id, node_id, func.span, 0)
+                            .or_else(|| {
+                                self.resolve_dict_from_arg_type(&trait_name, arg, func.span)
+                            })
                     {
                         let elab_arg = self.elaborate_expr(arg);
                         let method = Expr::synth(
@@ -945,14 +1080,27 @@ impl Elaborator {
                     }
 
                     // Dict-parameterized function via qualified name
-                    if let Some(dict_param_info) = self.fun_dict_params.get(&qualified).cloned() {
+                    if let Some(dict_param_info) =
+                        self.fun_dict_params_for_callee(&qualified, func.id)
+                    {
                         let elab_arg = self.elaborate_expr(arg);
                         let mut result: Expr = func.as_ref().clone();
                         let mut trait_occurrences: HashMap<&str, usize> = HashMap::new();
                         for (trait_name, _type_var) in &dict_param_info {
                             let occ = trait_occurrences.entry(trait_name).or_insert(0);
-                            if let Some(dict_expr) =
-                                self.resolve_dict_nth(trait_name, func.id, func.span, *occ)
+                            if let Some(dict_expr) = self
+                                .resolve_call_dict_nth(
+                                    trait_name, func.id, node_id, func.span, *occ,
+                                )
+                                .or_else(|| {
+                                    (*occ == 0)
+                                        .then(|| {
+                                            self.resolve_dict_from_arg_type(
+                                                trait_name, arg, func.span,
+                                            )
+                                        })
+                                        .flatten()
+                                })
                             {
                                 result = Expr::synth(
                                     span,
@@ -1137,7 +1285,7 @@ impl Elaborator {
                                             .get(name.as_str())
                                             .is_some_and(|ids| ids.contains(id));
                                         if is_this_binding {
-                                            self.fun_dict_params.get(name).cloned()
+                                            self.fun_dict_params_for_callee(name, *id)
                                         } else {
                                             None
                                         }
@@ -1357,7 +1505,8 @@ impl Elaborator {
             ExprKind::QualifiedName { module, name, .. } => {
                 let qualified = format!("{}.{}", module, name);
                 // Dict-parameterized function used as a bare value (not directly applied).
-                if let Some(dict_param_info) = self.fun_dict_params.get(&qualified).cloned() {
+                if let Some(dict_param_info) = self.fun_dict_params_for_callee(&qualified, node_id)
+                {
                     let mut result: Expr = expr.clone();
                     let mut trait_occurrences: HashMap<&str, usize> = HashMap::new();
                     for (trait_name, _type_var) in &dict_param_info {
@@ -1629,6 +1778,13 @@ impl Elaborator {
         {
             return Some((resolved.trait_name.clone(), idx));
         }
+        if let Some(canonical) = self.resolved_global_value_name(node_id)
+            && let Some((trait_name, method)) = canonical.rsplit_once('.')
+            && let Some(info) = self.traits.get(trait_name)
+            && let Some(idx) = info.methods.iter().position(|m| m.name == method)
+        {
+            return Some((trait_name.to_string(), idx));
+        }
         None
     }
 
@@ -1784,6 +1940,27 @@ impl Elaborator {
         self.resolve_dict_nth(trait_name, node_id, span, 0)
     }
 
+    fn resolve_call_dict_nth(
+        &self,
+        trait_name: &str,
+        callee_id: crate::ast::NodeId,
+        call_id: crate::ast::NodeId,
+        span: Span,
+        occurrence: usize,
+    ) -> Option<Expr> {
+        self.resolve_dict_nth(trait_name, callee_id, span, occurrence)
+            .or_else(|| {
+                (callee_id != call_id)
+                    .then(|| self.resolve_dict_nth(trait_name, call_id, span, occurrence))
+                    .flatten()
+            })
+    }
+
+    fn resolve_dict_from_arg_type(&self, trait_name: &str, arg: &Expr, span: Span) -> Option<Expr> {
+        let ty = self.type_at_node.get(&arg.id)?.clone();
+        self.dict_for_type(trait_name, &[], &ty, span)
+    }
+
     /// Resolve the `occurrence`-th evidence entry for `trait_name` at `node_id`.
     /// When a function has multiple where-clause bounds for the same trait
     /// (e.g. `where {a: Debug, b: Debug}`), each dict param needs a different
@@ -1815,21 +1992,20 @@ impl Elaborator {
                             },
                         ));
                     }
+                    if let Some(record_ty) = &ev.resolved_record_type {
+                        return self.dict_for_type(
+                            trait_name,
+                            &ev.trait_type_args,
+                            record_ty,
+                            span,
+                        );
+                    }
                     return match &ev.resolved_type {
                         Some((type_name, args)) => {
                             // Concrete type: build the dict via dict_for_type,
                             // which handles where-clause constraints correctly.
-                            // Resolve extra type args to concrete type names for dict key.
-                            let resolved_type_args: Vec<String> = ev
-                                .trait_type_args
-                                .iter()
-                                .filter_map(|t| match t {
-                                    Type::Con(name, _) => Some(name.clone()),
-                                    _ => None,
-                                })
-                                .collect();
                             let ty = Type::Con(type_name.clone(), args.clone());
-                            self.dict_for_type(trait_name, &resolved_type_args, &ty, span)
+                            self.dict_for_type(trait_name, &ev.trait_type_args, &ty, span)
                         }
                         None => {
                             // Polymorphic: use the dict param from current function.
@@ -1969,7 +2145,7 @@ impl Elaborator {
     fn dict_for_type(
         &self,
         trait_name: &str,
-        trait_type_args: &[String],
+        trait_type_args: &[Type],
         ty: &Type,
         span: Span,
     ) -> Option<Expr> {
@@ -1978,6 +2154,9 @@ impl Elaborator {
         }
 
         match ty {
+            Type::Record(fields) if is_generic_trait(trait_name) => {
+                Some(self.build_anon_record_generic_dict(fields, span))
+            }
             Type::Con(name, args)
                 if name == crate::typechecker::canonicalize_type_name("Tuple")
                     && (trait_name == SHOW || trait_name == DEBUG) =>
@@ -1997,7 +2176,28 @@ impl Elaborator {
                 // tuple lookup we synthesize that name from the args. Non-
                 // tuple names pass through `arity_keyed_target_name` unchanged.
                 let keyed_name = crate::typechecker::arity_keyed_target_name(name, args.len());
-                let key = (trait_name.to_string(), trait_type_args.to_vec(), keyed_name);
+                let key = (
+                    trait_name.to_string(),
+                    trait_type_arg_names(trait_type_args),
+                    keyed_name,
+                );
+                let (key, inferred_trait_args_from_target) = if self.dict_names.contains_key(&key) {
+                    (key, false)
+                } else {
+                    let matches: Vec<_> = self
+                        .dict_names
+                        .keys()
+                        .filter(|(candidate_trait, _, candidate_target)| {
+                            candidate_trait == trait_name && candidate_target == &key.2
+                        })
+                        .cloned()
+                        .collect();
+                    if matches.len() == 1 {
+                        (matches.into_iter().next().unwrap(), true)
+                    } else {
+                        return None;
+                    }
+                };
                 let dict_name = self.dict_names.get(&key)?;
                 let impl_info = self.impl_infos.get(&key);
                 let mut dict_expr: Expr = Expr::synth(
@@ -2012,6 +2212,40 @@ impl Elaborator {
                     let mut subst = HashMap::new();
                     if !match_type_pattern(pattern, ty, &mut subst) {
                         return None;
+                    }
+                    if !inferred_trait_args_from_target {
+                        if info.trait_type_args.len() != trait_type_args.len() {
+                            return None;
+                        }
+                        for (pattern_arg, actual_arg) in
+                            info.trait_type_args.iter().zip(trait_type_args.iter())
+                        {
+                            if !match_type_pattern(pattern_arg, actual_arg, &mut subst) {
+                                return None;
+                            }
+                        }
+                    }
+                    for (constraint_trait, var_id, extra_types) in
+                        &info.param_constraints_by_var_with_args
+                    {
+                        let arg_ty = subst.get(var_id)?;
+                        let resolved_extra_types: Vec<Type> = extra_types
+                            .iter()
+                            .map(|extra| substitute_pattern_vars(extra, &subst))
+                            .collect();
+                        let sub_dict = self.dict_for_type(
+                            constraint_trait,
+                            &resolved_extra_types,
+                            arg_ty,
+                            span,
+                        )?;
+                        dict_expr = Expr::synth(
+                            span,
+                            ExprKind::App {
+                                func: Box::new(dict_expr),
+                                arg: Box::new(sub_dict),
+                            },
+                        );
                     }
                     for (constraint_trait, var_id) in &info.param_constraints_by_var {
                         let arg_ty = subst.get(var_id)?;
@@ -2098,6 +2332,217 @@ impl Elaborator {
             }
             _ => None,
         }
+    }
+
+    fn build_anon_record_generic_dict(&self, fields: &[(String, Type)], span: Span) -> Expr {
+        Expr::synth(
+            span,
+            ExprKind::Tuple {
+                elements: vec![
+                    self.build_anon_record_generic_to(fields, span),
+                    self.build_anon_record_generic_from(fields, span),
+                ],
+            },
+        )
+    }
+
+    fn build_anon_record_generic_to(&self, fields: &[(String, Type)], span: Span) -> Expr {
+        let record_var_name = "__anon_rec".to_string();
+        let record_var = Expr::synth(
+            span,
+            ExprKind::Var {
+                name: record_var_name.clone(),
+            },
+        );
+        let names: Vec<&str> = fields.iter().map(|(name, _)| name.as_str()).collect();
+        let tag = crate::ast::anon_record_tag(&names);
+        let inner = self.build_anon_record_rep_to_inner(fields, &record_var, &tag, span);
+        let body = self.apply2(
+            &generic_ctor("Record"),
+            self.string_lit(&tag, span),
+            inner,
+            span,
+        );
+        Expr::synth(
+            span,
+            ExprKind::Lambda {
+                params: vec![Pat::Var {
+                    id: NodeId::fresh(),
+                    name: record_var_name,
+                    span,
+                }],
+                body: Box::new(body),
+            },
+        )
+    }
+
+    fn build_anon_record_generic_from(&self, fields: &[(String, Type)], span: Span) -> Expr {
+        let field_var_names: Vec<String> = (0..fields.len()).map(|i| format!("__f{i}")).collect();
+        let inner_pat = self.build_anon_record_rep_from_inner(&field_var_names, span);
+        let record_pat = Pat::Constructor {
+            id: NodeId::fresh(),
+            name: generic_ctor("Record"),
+            args: vec![
+                Pat::Wildcard {
+                    id: NodeId::fresh(),
+                    span,
+                },
+                inner_pat,
+            ],
+            span,
+        };
+        let record_fields: Vec<(String, Span, Expr)> = fields
+            .iter()
+            .zip(field_var_names.iter())
+            .map(|((field_name, _), var_name)| {
+                (
+                    field_name.clone(),
+                    span,
+                    Expr::synth(
+                        span,
+                        ExprKind::Var {
+                            name: var_name.clone(),
+                        },
+                    ),
+                )
+            })
+            .collect();
+        Expr::synth(
+            span,
+            ExprKind::Lambda {
+                params: vec![record_pat],
+                body: Box::new(Expr::synth(
+                    span,
+                    ExprKind::AnonRecordCreate {
+                        fields: record_fields,
+                    },
+                )),
+            },
+        )
+    }
+
+    fn build_anon_record_rep_to_inner(
+        &self,
+        fields: &[(String, Type)],
+        record_var: &Expr,
+        record_tag: &str,
+        span: Span,
+    ) -> Expr {
+        if fields.is_empty() {
+            return Expr::synth(
+                span,
+                ExprKind::Constructor {
+                    name: generic_ctor("U1"),
+                },
+            );
+        }
+        let mut iter = fields.iter().rev();
+        let (last_name, _) = iter.next().expect("non-empty fields");
+        let mut acc = self.build_anon_record_field_to(last_name, record_var, record_tag, span);
+        for (field_name, _) in iter {
+            acc = self.apply2(
+                &generic_ctor("And"),
+                self.build_anon_record_field_to(field_name, record_var, record_tag, span),
+                acc,
+                span,
+            );
+        }
+        acc
+    }
+
+    fn build_anon_record_field_to(
+        &self,
+        field_name: &str,
+        record_var: &Expr,
+        record_tag: &str,
+        span: Span,
+    ) -> Expr {
+        let access = Expr::synth(
+            span,
+            ExprKind::FieldAccess {
+                expr: Box::new(record_var.clone()),
+                field: field_name.to_string(),
+                record_name: Some(record_tag.to_string()),
+            },
+        );
+        self.apply1(
+            &generic_ctor("Labeled"),
+            self.apply1(&generic_ctor("Leaf"), access, span),
+            span,
+        )
+    }
+
+    fn build_anon_record_rep_from_inner(&self, field_vars: &[String], span: Span) -> Pat {
+        if field_vars.is_empty() {
+            return Pat::Constructor {
+                id: NodeId::fresh(),
+                name: generic_ctor("U1"),
+                args: vec![],
+                span,
+            };
+        }
+        let mut iter = field_vars.iter().rev();
+        let last = iter.next().expect("non-empty field vars");
+        let mut acc = self.build_anon_record_field_from(last, span);
+        for var_name in iter {
+            acc = Pat::Constructor {
+                id: NodeId::fresh(),
+                name: generic_ctor("And"),
+                args: vec![self.build_anon_record_field_from(var_name, span), acc],
+                span,
+            };
+        }
+        acc
+    }
+
+    fn build_anon_record_field_from(&self, var_name: &str, span: Span) -> Pat {
+        Pat::Constructor {
+            id: NodeId::fresh(),
+            name: generic_ctor("Labeled"),
+            args: vec![Pat::Constructor {
+                id: NodeId::fresh(),
+                name: generic_ctor("Leaf"),
+                args: vec![Pat::Var {
+                    id: NodeId::fresh(),
+                    name: var_name.to_string(),
+                    span,
+                }],
+                span,
+            }],
+            span,
+        }
+    }
+
+    fn apply1(&self, func: &str, arg: Expr, span: Span) -> Expr {
+        Expr::synth(
+            span,
+            ExprKind::App {
+                func: Box::new(Expr::synth(
+                    span,
+                    ExprKind::Constructor { name: func.into() },
+                )),
+                arg: Box::new(arg),
+            },
+        )
+    }
+
+    fn apply2(&self, func: &str, a: Expr, b: Expr, span: Span) -> Expr {
+        Expr::synth(
+            span,
+            ExprKind::App {
+                func: Box::new(self.apply1(func, a, span)),
+                arg: Box::new(b),
+            },
+        )
+    }
+
+    fn string_lit(&self, value: &str, span: Span) -> Expr {
+        Expr::synth(
+            span,
+            ExprKind::Lit {
+                value: Lit::String(value.into(), StringKind::Normal),
+            },
+        )
     }
 
     /// Check if the evidence at a node indicates Show for a Tuple type.

@@ -1,0 +1,31 @@
+module Main
+
+import Db
+
+record User {
+  id: Int,
+  name: String,
+  age: Int,
+}
+
+type Scope = Scope
+
+record Users source {
+  id: Db.Column source 'id Int,
+  name: Db.Column source 'name String,
+  age: Db.Column source 'age Int,
+}
+
+fun user_from_selected : { id: Int, name: String, age: Int } -> User
+user_from_selected row = User { id: row.id, name: row.name, age: row.age }
+
+impl Db.Selectable User for Users source {
+  to_projection u =
+    Db.select ({ id: u.id, name: u.name, age: u.age })
+    |> Db.map user_from_selected
+}
+
+fun users : Users Scope
+users = Users { id: Db.col 1, name: Db.col "Alice", age: Db.col 42 }
+
+main () = Db.select_all users

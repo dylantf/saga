@@ -413,11 +413,13 @@ pub fn format_effect_def(
     docs_from_vec(parts)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn format_trait_def(
     doc: &[String],
     public: bool,
     name: &str,
     type_params: &[TypeParam],
+    functional_dependency: Option<&TraitFunctionalDependency>,
     supertraits: &[TraitRef],
     methods: &[Annotated<TraitMethod>],
     dangling: &[Trivia],
@@ -434,6 +436,12 @@ pub fn format_trait_def(
     for tp in type_params {
         header.push(' ');
         write!(header, "{}", tp).unwrap();
+    }
+    if let Some(fd) = functional_dependency {
+        header.push_str(" | ");
+        header.push_str(&fd.determinant);
+        header.push_str(" -> ");
+        header.push_str(&fd.determined.join(" "));
     }
     parts.push(Doc::text(header));
 

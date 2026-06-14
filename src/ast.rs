@@ -440,6 +440,7 @@ pub enum Decl {
         /// Type parameters: first is the self type, rest are extras.
         /// e.g. `trait ConvertTo a b` -> ["a", "b"]
         type_params: Vec<TypeParam>,
+        functional_dependency: Option<TraitFunctionalDependency>,
         supertraits: Vec<TraitRef>,
         methods: Vec<Annotated<TraitMethod>>,
         /// Comments before the closing `}` with no following sibling
@@ -1365,6 +1366,15 @@ pub struct TraitBound {
     pub type_var: String,
     /// The required traits, e.g. `Show`, `ConvertTo b`
     pub traits: Vec<TraitRef>,
+}
+
+/// Functional dependency on a trait declaration, e.g.
+/// `trait Selectable selection row | selection -> row`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TraitFunctionalDependency {
+    pub determinant: String,
+    pub determined: Vec<String>,
+    pub span: Span,
 }
 
 /// Bare trait-application constraint: `Generic Person r` in a `where` clause.

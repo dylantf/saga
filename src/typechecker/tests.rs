@@ -4831,6 +4831,100 @@ impl ToJson for Person where {Generic Person r, ToJson r} {
 }
 
 #[test]
+fn where_app_resolves_fresh_var_via_declared_functional_dependency() {
+    check(
+        "trait Selectable input row | input -> row {
+  fun prepare : (x: input) -> row
+}
+trait Sink a {
+  fun sink : (x: a) -> String
+}
+type Foo = Foo
+type FooRow = FooRow
+impl Selectable FooRow for Foo {
+  prepare _ = FooRow
+}
+impl Sink for FooRow {
+  sink _ = \"row\"
+}
+impl Sink for Foo where {Selectable Foo row, Sink row} {
+  sink _ = \"foo\"
+}",
+    )
+    .unwrap();
+}
+
+#[test]
+fn declared_functional_dependency_rejects_same_first_param_different_rest() {
+    let result = check(
+        "trait Selectable input row | input -> row {
+  fun prepare : (x: input) -> row
+}
+type Foo = Foo
+type RowA = RowA
+type RowB = RowB
+impl Selectable RowA for Foo {
+  prepare _ = RowA
+}
+impl Selectable RowB for Foo {
+  prepare _ = RowB
+}",
+    );
+    assert!(result.is_err(), "expected coherence violation");
+    let err = result.err().unwrap();
+    assert!(
+        err.message.contains("coherence") || err.message.contains("functionally determines"),
+        "expected coherence violation, got: {}",
+        err.message
+    );
+}
+
+#[test]
+fn declared_functional_dependency_must_cover_all_extra_params() {
+    let result = check(
+        "trait Bad a b c | a -> b {
+  fun bad : (x: a) -> b
+}",
+    );
+    assert!(result.is_err(), "expected unsupported fundep error");
+    let err = result.err().unwrap();
+    assert!(
+        err.message
+            .contains("must determine all non-self parameters"),
+        "expected all-extra-params error, got: {}",
+        err.message
+    );
+}
+
+#[test]
+fn imported_declared_functional_dependency_resolves_fresh_var() {
+    let lib = "module Lib
+pub trait Selectable input row | input -> row {
+  fun prepare : (x: input) -> row
+}
+pub type Foo = Foo
+pub type FooRow = FooRow
+impl Selectable FooRow for Foo {
+  prepare _ = FooRow
+}
+";
+    let main = "module Main
+import Lib (Selectable, Foo, FooRow)
+trait Sink a {
+  fun sink : (x: a) -> String
+}
+impl Sink for FooRow {
+  sink _ = \"row\"
+}
+impl Sink for Foo where {Selectable Foo row, Sink row} {
+  sink _ = \"foo\"
+}
+main () = ()
+";
+    check_with_project_files(&[("src/Lib.saga", lib)], main).unwrap();
+}
+
+#[test]
 fn free_function_with_existential_where_clause_typechecks() {
     // `fun via_generic : a -> String where {a: Generic r, r: ToJson}`
     // introduces `r` as an existential — it's not free in `a -> String`.
@@ -7363,6 +7457,36 @@ fn derive_generic_roundtrip_without_ascription() {
 }
 
 #[test]
+fn generic_constraint_resolves_for_anonymous_record() {
+    check(
+        "import Std.Generic (Generic, U1, Leaf, Labeled, And, Record)
+
+trait ToJson a {
+  fun to_json : (x: a) -> String
+}
+
+impl ToJson for U1 { to_json _ = \"\" }
+impl ToJson for String { to_json s = s }
+impl ToJson for Int { to_json n = show n }
+impl ToJson for Leaf a where {a: ToJson} { to_json (Leaf x) = to_json x }
+impl ToJson for Labeled (n : Symbol) a where {n: KnownSymbol, a: ToJson} {
+  to_json (Labeled x) = symbol_name (Proxy : Proxy n) <> \"=\" <> to_json x
+}
+impl ToJson for And l r where {l: ToJson, r: ToJson} {
+  to_json (And l r) = to_json l <> \",\" <> to_json r
+}
+impl ToJson for Record a where {a: ToJson} {
+  to_json (Record _ inner) = \"{\" <> to_json inner <> \"}\"
+}
+
+fun anon_json : Unit -> String
+anon_json () = to_json (to { name: \"alice\", age: 42 })
+",
+    )
+    .unwrap();
+}
+
+#[test]
 fn derive_generic_parameterized_record_roundtrip_int() {
     // Phase 2e: parameterized records now derive Generic.
     check(
@@ -9802,6 +9926,158 @@ fn impl_for_structured_tuple_target_requires_nested_constraints() {
         "expected missing PgType diagnostic, got: {}",
         err.message
     );
+}
+
+#[test]
+fn anonymous_record_generic_shape_can_drive_selectable_output_record() {
+    check(
+        "import Std.Generic (Generic, Leaf, Labeled, And, Record)\n\
+         type Column (n : Symbol) a = Column a\n\
+         type Prepared row = Prepared row\n\
+         trait Selectable selection row | selection -> row {\n\
+           fun selected : selection -> row\n\
+         }\n\
+         impl Selectable (Leaf a) for (Leaf (Column n a)) {\n\
+           selected _ = todo ()\n\
+         }\n\
+         impl Selectable (Labeled n out) for (Labeled n field) where {Selectable field out} {\n\
+           selected _ = todo ()\n\
+         }\n\
+         impl Selectable (And lo ro) for (And l r) where {Selectable l lo, Selectable r ro} {\n\
+           selected _ = todo ()\n\
+         }\n\
+         impl Selectable (Record out) for (Record fields) where {Selectable fields out} {\n\
+           selected _ = todo ()\n\
+         }\n\
+         fun db_select : selection -> Prepared row\n\
+           where {selection: Generic selection_rep, selection_rep: Selectable row_rep, row: Generic row_rep}\n\
+         db_select selection = Prepared (from (selected (to selection)))\n\
+         fun q : Unit -> Prepared { post_title: String, user_id: Int }\n\
+         q () = db_select {\n\
+           user_id: Column 42,\n\
+           post_title: Column \"title\",\n\
+         }\n",
+    )
+    .unwrap();
+}
+
+#[test]
+fn imported_anonymous_record_generic_selectable_shape_typechecks() {
+    let db = "module Db
+
+import Std.Generic (Generic, Leaf, Labeled, And, Record)
+
+pub type Column (n : Symbol) a = Column a
+pub type Prepared row = Prepared row
+
+pub trait Selectable selection row | selection -> row {
+  fun selected : selection -> row
+}
+
+impl Selectable (Leaf a) for (Leaf (Column n a)) {
+  selected _ = todo ()
+}
+
+impl Selectable (Labeled n out) for (Labeled n field)
+  where {Selectable field out}
+{
+  selected _ = todo ()
+}
+
+impl Selectable (And lo ro) for (And l r)
+  where {Selectable l lo, Selectable r ro}
+{
+  selected _ = todo ()
+}
+
+impl Selectable (Record out) for (Record fields)
+  where {Selectable fields out}
+{
+  selected _ = todo ()
+}
+
+pub fun db_select : selection -> Prepared row
+  where {selection: Generic selection_rep, selection_rep: Selectable row_rep, row: Generic row_rep}
+db_select selection = Prepared (from (selected (to selection)))
+";
+    let main = "module Main
+
+import Db (Column, Prepared, db_select)
+
+fun q : Unit -> Prepared { post_title: String, user_id: Int }
+q () = db_select {
+  user_id: Column 42,
+  post_title: Column \"title\",
+}
+
+main () = ()
+";
+    check_with_project_files(&[("src/Db.saga", db)], main).unwrap();
+}
+
+#[test]
+fn imported_anonymous_record_generic_selectable_with_extra_column_phantoms_typechecks() {
+    let db = "module Db
+
+import Std.Generic (Generic, Leaf, Labeled, And, Record)
+
+pub type Column source (name : Symbol) a = Column String
+pub type Prepared row = Prepared row
+
+pub trait PgType a {
+  fun pg : a -> String
+}
+
+impl PgType for Int { pg _ = \"int\" }
+impl PgType for String { pg _ = \"string\" }
+
+pub trait Selectable selection row | selection -> row {
+  fun selected : selection -> row
+}
+
+impl Selectable (Leaf a) for (Leaf (Column source name a)) where {a: PgType} {
+  selected _ = todo ()
+}
+
+impl Selectable (Labeled n out) for (Labeled n field)
+  where {Selectable field out}
+{
+  selected _ = todo ()
+}
+
+impl Selectable (And lo ro) for (And l r)
+  where {Selectable l lo, Selectable r ro}
+{
+  selected _ = todo ()
+}
+
+impl Selectable (Record out) for (Record fields)
+  where {Selectable fields out}
+{
+  selected _ = todo ()
+}
+
+pub fun db_select : selection -> Prepared row
+  where {selection: Generic selection_rep, selection_rep: Selectable row_rep, row: Generic row_rep}
+db_select selection = Prepared (from (selected (to selection)))
+";
+    let main = "module Main
+
+import Db (Column, Prepared, db_select)
+
+type Users = Users
+type Posts = Posts
+
+fun q : Unit -> Prepared { post_title: String, user_id: Int, user_name: String }
+q () = db_select {
+  user_id: Column \"id\" : Column Users 'id Int,
+  user_name: Column \"name\" : Column Users 'name String,
+  post_title: Column \"title\" : Column Posts 'title String,
+}
+
+main () = ()
+";
+    check_with_project_files(&[("src/Db.saga", db)], main).unwrap();
 }
 
 #[test]

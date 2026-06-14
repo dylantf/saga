@@ -169,6 +169,7 @@ impl Checker {
         &mut self,
         name: &str,
         type_params: &[TypeParam],
+        functional_dependency: Option<&ast::TraitFunctionalDependency>,
         supertraits: &[ast::TraitRef],
         methods: &[&ast::TraitMethod],
     ) -> Result<(), Diagnostic> {
@@ -351,7 +352,66 @@ impl Checker {
             .iter()
             .map(|tr| self.resolved_trait_name_at(tr.id, &tr.name))
             .collect();
-        let is_functional = FUNCTIONAL_TRAITS.contains(&canonical_name.as_str());
+        let has_builtin_functional_rule = FUNCTIONAL_TRAITS.contains(&canonical_name.as_str());
+        let has_declared_functional_rule = functional_dependency.is_some();
+        if let Some(fd) = functional_dependency {
+            let Some(first_param) = type_params.first() else {
+                return Err(Diagnostic::error_at(
+                    fd.span,
+                    "functional dependency requires a trait self parameter".to_string(),
+                ));
+            };
+            if fd.determinant != first_param.name {
+                return Err(Diagnostic::error_at(
+                    fd.span,
+                    format!(
+                        "unsupported functional dependency: `{}` must be the trait's first parameter `{}`",
+                        fd.determinant, first_param.name
+                    ),
+                ));
+            }
+            if fd.determined.is_empty() {
+                return Err(Diagnostic::error_at(
+                    fd.span,
+                    "functional dependency must determine at least one parameter".to_string(),
+                ));
+            }
+            for determined in &fd.determined {
+                if determined == &first_param.name {
+                    return Err(Diagnostic::error_at(
+                        fd.span,
+                        "functional dependency cannot determine the first parameter from itself"
+                            .to_string(),
+                    ));
+                }
+                if !type_params.iter().any(|tp| &tp.name == determined) {
+                    return Err(Diagnostic::error_at(
+                        fd.span,
+                        format!(
+                            "functional dependency mentions unknown trait parameter `{}`",
+                            determined
+                        ),
+                    ));
+                }
+            }
+            let expected: Vec<&str> = type_params
+                .iter()
+                .skip(1)
+                .map(|tp| tp.name.as_str())
+                .collect();
+            let actual: Vec<&str> = fd.determined.iter().map(|name| name.as_str()).collect();
+            if actual != expected {
+                return Err(Diagnostic::error_at(
+                    fd.span,
+                    format!(
+                        "unsupported functional dependency: `{}` must determine all non-self parameters in declaration order ({})",
+                        fd.determinant,
+                        expected.join(" ")
+                    ),
+                ));
+            }
+        }
+        let is_functional = has_builtin_functional_rule || has_declared_functional_rule;
         self.trait_state.traits.insert(
             canonical_name,
             super::TraitInfo {
@@ -560,17 +620,14 @@ impl Checker {
             .map(|te| self.convert_type_expr(te, &mut impl_type_vars))
             .collect();
         let target_type_param_ids: Vec<u32> = impl_type_vars.iter().map(|(_, id)| *id).collect();
-        let impl_var_id = |name: &str| {
-            impl_type_vars
-                .iter()
-                .find(|(n, _)| n == name)
-                .map(|(_, id)| *id)
+        let impl_var_id = |vars: &[(String, u32)], name: &str| {
+            vars.iter().find(|(n, _)| n == name).map(|(_, id)| *id)
         };
 
         // Register where clause bounds on impl pattern vars so method bodies
         // can use trait methods on those vars.
         for bound in where_clause {
-            if let Some(var_id) = impl_var_id(&bound.type_var) {
+            if let Some(var_id) = impl_var_id(&impl_type_vars, &bound.type_var) {
                 self.trait_state
                     .where_bound_var_names
                     .insert(var_id, bound.type_var.clone());
@@ -589,7 +646,17 @@ impl Checker {
                         .where_bounds
                         .entry(var_id)
                         .or_default()
-                        .insert(resolved_req);
+                        .insert(resolved_req.clone());
+                    if !tr.type_args.is_empty() {
+                        let extra_types: Vec<Type> = tr
+                            .type_args
+                            .iter()
+                            .map(|te| self.convert_type_expr(te, &mut impl_type_vars))
+                            .collect();
+                        self.trait_state
+                            .where_bound_trait_args
+                            .insert((var_id, resolved_req), extra_types);
+                    }
                 }
             }
         }
@@ -601,7 +668,7 @@ impl Checker {
         // rule; for non-functional traits, all args must be already bound.
         let mut local_subst: std::collections::HashMap<String, String> =
             std::collections::HashMap::new();
-        let mut where_app_param_constraints: Vec<(String, usize)> = Vec::new();
+        let mut where_app_param_constraints: Vec<(String, u32, Vec<Type>)> = Vec::new();
         for app in where_apps {
             let resolved_trait = self
                 .resolve_trait_name(&app.trait_name)
@@ -651,7 +718,7 @@ impl Checker {
                     ast::TypeExpr::Var { name, .. } => {
                         if let Some(resolved) = local_subst.get(name) {
                             resolved_names.push(Some(resolved.clone()));
-                        } else if type_params.iter().any(|tp| &tp.name == name) {
+                        } else if impl_var_id(&impl_type_vars, name).is_some() {
                             resolved_names.push(Some(format!("$impl_param:{name}")));
                             impl_param_positions.push((i, name.clone()));
                         } else {
@@ -679,29 +746,48 @@ impl Checker {
                             .to_string(),
                     ));
                 }
-                if app.type_args.len() != 1 {
+                let ast::TypeExpr::Var {
+                    name: self_param_name,
+                    ..
+                } = &app.type_args[0]
+                else {
                     return Err(Diagnostic::error_at(
                         app.span,
-                        "TraitApp constraints on impl type parameters currently support \
-                         single-parameter traits only"
+                        "TraitApp constraints on impl type parameters must constrain the first \
+                         trait argument"
                             .to_string(),
                     ));
-                }
-                let (_, param_name) = &impl_param_positions[0];
-                let Some(param_idx) = type_params.iter().position(|p| p == param_name) else {
-                    continue;
                 };
-                if let Some(var_id) = target_type_param_ids.get(param_idx) {
+                let Some(self_var_id) = impl_var_id(&impl_type_vars, self_param_name) else {
+                    return Err(Diagnostic::error_at(
+                        app.span,
+                        "TraitApp constraints on impl type parameters must constrain the first \
+                         trait argument"
+                            .to_string(),
+                    ));
+                };
+                let extra_types: Vec<Type> = app.type_args[1..]
+                    .iter()
+                    .map(|te| self.convert_type_expr(te, &mut impl_type_vars))
+                    .collect();
+                self.trait_state
+                    .where_bound_var_names
+                    .insert(self_var_id, self_param_name.clone());
+                self.trait_state
+                    .where_bounds
+                    .entry(self_var_id)
+                    .or_default()
+                    .insert(resolved_trait.clone());
+                if !extra_types.is_empty() {
                     self.trait_state
-                        .where_bound_var_names
-                        .insert(*var_id, param_name.clone());
-                    self.trait_state
-                        .where_bounds
-                        .entry(*var_id)
-                        .or_default()
-                        .insert(resolved_trait.clone());
+                        .where_bound_trait_args
+                        .insert((self_var_id, resolved_trait.clone()), extra_types.clone());
                 }
-                where_app_param_constraints.push((resolved_trait.clone(), param_idx));
+                where_app_param_constraints.push((
+                    resolved_trait.clone(),
+                    self_var_id,
+                    extra_types,
+                ));
                 continue;
             }
 
@@ -1030,7 +1116,7 @@ impl Checker {
         let mut param_constraints = Vec::new();
         let mut param_constraints_by_var = Vec::new();
         for bound in where_clause {
-            let var_id = impl_var_id(&bound.type_var);
+            let var_id = impl_var_id(&impl_type_vars, &bound.type_var);
             match var_id {
                 Some(var_id) => {
                     for tr in &bound.traits {
@@ -1058,13 +1144,14 @@ impl Checker {
                 }
             }
         }
-        param_constraints.extend(where_app_param_constraints);
+        let param_constraints_by_var_with_args = where_app_param_constraints;
 
         self.trait_state.impls.insert(
             dup_key,
             ImplInfo {
                 param_constraints,
                 param_constraints_by_var,
+                param_constraints_by_var_with_args,
                 target_pattern: Some(target.clone()),
                 trait_type_args: trait_type_args_types,
                 target_type_param_ids,

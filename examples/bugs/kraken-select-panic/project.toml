@@ -1,0 +1,12 @@
+[project]
+name = "kraken-select-panic"
+
+[bin]
+main = "src/Main.saga"
+
+[library]
+module = "Db"
+expose = ["Db"]
+
+# [deps]
+# some-lib = { path = "../some-lib" }

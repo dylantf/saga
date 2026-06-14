@@ -320,6 +320,34 @@ main () = render_payload (Box (Leaf "y")) with ask_default
 }
 
 #[test]
+fn adt_constructor_as_higher_order_function_runs() {
+    let src = r#"
+type Leaf a = Leaf a
+
+fun map : (a -> b) -> a -> b
+map f value = f value
+
+main () = case map Leaf 42 {
+  Leaf n -> n
+}
+"#;
+
+    assert_runs_and_stdout_contains(src, &["42"]);
+}
+
+#[test]
+fn anonymous_record_layout_from_function_signature_lowers_field_access() {
+    let src = r#"
+fun pick_id : { id: Int, name: String } -> Int
+pick_id row = row.id
+
+main () = pick_id { id: 42, name: "Alice" }
+"#;
+
+    assert_runs_and_stdout_contains(src, &["42"]);
+}
+
+#[test]
 fn inner_dynamic_handler_is_kept_when_outer_static_handler_handles_same_effect() {
     let src = r#"
 effect Log {
@@ -3710,6 +3738,16 @@ main () = symbol_name (Proxy : Proxy 'Foo)
         "expected binary bytes for 'Foo' in output:\n{out}"
     );
     assert_runs_and_stdout_contains(src, &["Foo"]);
+}
+
+#[test]
+fn anonymous_record_generic_to_lowers_and_runs() {
+    let src = r#"
+fun main : Unit -> Int
+main () = (from (to { name: "alice", age: 42 }) : { age: Int, name: String }).age
+"#;
+
+    assert_runs_and_stdout_contains(src, &["42"]);
 }
 
 #[test]

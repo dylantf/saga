@@ -146,6 +146,7 @@ pub struct HeaderRecordDecl {
 pub struct HeaderTraitDecl {
     pub public: bool,
     pub type_params: Vec<HeaderTypeParam>,
+    pub is_functional: bool,
     pub supertraits: Vec<HeaderTraitRef>,
     pub methods: Vec<HeaderTraitMethod>,
 }
@@ -351,6 +352,7 @@ impl ModuleHeader {
                     public,
                     name,
                     type_params,
+                    functional_dependency,
                     supertraits,
                     methods,
                     ..
@@ -360,6 +362,7 @@ impl ModuleHeader {
                         HeaderTraitDecl {
                             public: *public,
                             type_params: header_type_params(type_params),
+                            is_functional: functional_dependency.is_some(),
                             supertraits: supertraits.iter().map(header_trait_ref).collect(),
                             methods: methods
                                 .iter()

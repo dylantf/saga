@@ -114,6 +114,11 @@ pub struct ImplInfo {
     /// This supports structured targets where a constrained variable may be
     /// nested inside the target, e.g. `Column sa na a` in a tuple element.
     pub param_constraints_by_var: Vec<(String, u32)>,
+    /// Constraints on impl pattern variables with extra trait arguments:
+    /// (trait_name, self_pattern_var_id, extra_type_args).
+    /// Used for multi-parameter traits in structured impls, e.g.
+    /// `Selectable field out` in an impl whose target contains `field`.
+    pub param_constraints_by_var_with_args: Vec<(String, u32, Vec<Type>)>,
     /// Full target pattern for user-written structured impls. `None` means
     /// legacy/builtin impl matching by coarse target key only.
     pub target_pattern: Option<Type>,
@@ -147,6 +152,10 @@ pub struct TraitEvidence {
     /// The concrete type that satisfied the constraint.
     /// None if resolved via a where-bound type variable (polymorphic passthrough).
     pub resolved_type: Option<(String, Vec<Type>)>,
+    /// The concrete anonymous record type that satisfied the constraint.
+    /// Kept separate from `resolved_type` because anonymous records have no
+    /// named impl key.
+    pub resolved_record_type: Option<Type>,
     /// For polymorphic evidence, the name of the type variable that was bounded.
     /// Used to select the correct dict param when multiple where-clause bounds
     /// exist for the same trait (e.g. `where {e: Show, a: Show}`).
@@ -516,6 +525,9 @@ pub(crate) struct TraitState {
     pub routed_constraint_origins: HashMap<crate::ast::NodeId, crate::ast::RoutedDeriveInfo>,
     /// Where clause bounds: var_id -> set of trait names assumed satisfied.
     pub where_bounds: HashMap<u32, HashSet<String>>,
+    /// Extra type arguments for multi-parameter where bounds, keyed by
+    /// (var_id, trait_name). For `where {a: ConvertTo b}` this stores `b`.
+    pub where_bound_trait_args: HashMap<(u32, String), Vec<Type>>,
     /// Reverse map from type var ID to original type parameter name (for polymorphic evidence).
     pub where_bound_var_names: HashMap<u32, String>,
 }

@@ -232,6 +232,58 @@ fn assert_erlc_compiles(core_src: &str, module_name: &str) -> PathBuf {
     dir
 }
 
+fn compile_core_into(dir: &Path, core_src: &str, module_name: &str) {
+    let core_path = dir.join(format!("{module_name}.core"));
+    std::fs::write(&core_path, core_src).unwrap();
+    let output = std::process::Command::new("erlc")
+        .arg("-o")
+        .arg(dir)
+        .arg(&core_path)
+        .output()
+        .expect("failed to run erlc");
+    assert!(
+        output.status.success(),
+        "erlc failed on {module_name}:\n{core_src}\nstderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+fn assert_project_modules_run(modules: &[(&str, &str)], eval: &str, needles: &[&str]) {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    static COUNTER: AtomicUsize = AtomicUsize::new(0);
+
+    let id = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!("saga_modrun_{}_{id}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    for (module_name, core_src) in modules {
+        compile_core_into(&dir, core_src, module_name);
+    }
+    compile_evidence_bridge_into(&dir);
+
+    let run_output = std::process::Command::new("erl")
+        .arg("-noshell")
+        .arg("-pa")
+        .arg(&dir)
+        .arg("-eval")
+        .arg(eval)
+        .output()
+        .expect("failed to run erl");
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(
+        run_output.status.success(),
+        "erl failed:\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&run_output.stdout),
+        String::from_utf8_lossy(&run_output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&run_output.stdout);
+    for needle in needles {
+        assert!(
+            stdout.contains(needle),
+            "expected '{needle}' in output, got: {stdout}"
+        );
+    }
+}
+
 fn assert_contains(out: &str, needle: &str) {
     assert!(
         out.contains(needle),
@@ -3061,6 +3113,106 @@ main () = run (Box 5)
 }
 
 #[test]
+fn cross_module_anonymous_record_generic_selectable_passes_all_dicts() {
+    let db_src = r#"module Db
+
+import Std.Generic (Generic, Leaf, Labeled, And, Record)
+
+pub type Column source (name : Symbol) a = Column a
+pub type Projection row = Projection row
+
+pub trait Selectable selection row | selection -> row {
+  fun to_projection : selection -> Projection row
+}
+
+pub fun map : (a -> b) -> Projection a -> Projection b
+map f projection = case projection {
+  Projection row -> Projection (f row)
+}
+
+impl Selectable (Leaf a) for (Leaf (Column source name a)) {
+  to_projection selection = case selection {
+    Leaf (Column value) -> Projection (Leaf value)
+  }
+}
+
+impl Selectable (Labeled n out) for (Labeled n field)
+  where {Selectable field out}
+{
+  to_projection selection = case selection {
+    Labeled field -> case to_projection field {
+      Projection out -> Projection (Labeled out)
+    }
+  }
+}
+
+impl Selectable (And lo ro) for (And l r)
+  where {Selectable l lo, Selectable r ro}
+{
+  to_projection selection = case selection {
+    And l r -> case to_projection l {
+      Projection lo -> case to_projection r {
+        Projection ro -> Projection (And lo ro)
+      }
+    }
+  }
+}
+
+impl Selectable (Record out) for (Record fields)
+  where {Selectable fields out}
+{
+  to_projection selection = case selection {
+    Record name fields -> case to_projection fields {
+      Projection out -> Projection (Record name out)
+    }
+  }
+}
+
+pub fun db_select : selection -> Projection row
+  where {selection: Generic selection_rep, selection_rep: Selectable row_rep, row: Generic row_rep}
+db_select selection =
+  to_projection (to selection)
+  |> map from
+"#;
+
+    let main_src = r#"module Main
+
+import Db (Column, Projection, db_select)
+
+type Users = Users
+type Posts = Posts
+
+fun q : Unit -> Projection { post_title: String, user_id: Int, user_name: String }
+q () = db_select {
+    user_id: Column 7 : Column Users 'id Int,
+    user_name: Column "Alice" : Column Users 'name String,
+    post_title: Column "Hello" : Column Posts 'title String,
+}
+
+main () = {
+  let Projection row = q ()
+  row.post_title
+}
+"#;
+
+    with_temp_project_files(&[("src/Db.saga", db_src)], main_src, |checker, program| {
+        let result = checker.to_result();
+        let db_program = result.programs().get("Db").expect("Db module not found");
+        let db_core = emit_from_program(db_program, "db", checker);
+        let main_core = emit_from_program(program, "main", checker);
+        assert!(
+            main_core.contains("__dict_Db_Selectable"),
+            "expected db_select call to receive a Selectable dictionary argument\n{main_core}"
+        );
+        assert_project_modules_run(
+            &[("db", &db_core), ("main", &main_core)],
+            "io:format(\"~p~n\", [main:main(unit)]), init:stop().",
+            &["Hello"],
+        );
+    });
+}
+
+#[test]
 fn local_dict_names_are_module_qualified() {
     // When Animals.saga defines impl Show for Animal, the dict should be
     // named with canonical trait + module-qualified type (not bare __dict_Show_Animal)
@@ -3142,6 +3294,170 @@ fn qualified_trait_method_call_lowers_to_dict_dispatch() {
         );
         assert_erlc_compiles(&out, "main");
     });
+}
+
+#[test]
+fn exposed_trait_method_bare_call_lowers_to_dict_dispatch() {
+    let db_src = r#"module Kraken.Query
+
+pub type Projection row = Projection row
+
+pub trait Selectable selection row | selection -> row {
+  fun to_projection : selection -> Projection row
+}
+"#;
+
+    let main_src = r#"module Main
+
+import Kraken.Query as Db (Projection, Selectable)
+
+type Users = Users Int
+
+impl Selectable Int for Users {
+  to_projection users = case users {
+    Users n -> Projection n
+  }
+}
+
+main () = case to_projection (Users 7) {
+  Projection n -> n
+}
+"#;
+
+    with_temp_project_files(
+        &[("src/Kraken/Query.saga", db_src)],
+        main_src,
+        |checker, program| {
+            let main_core = emit_from_program(program, "main", checker);
+            assert!(
+                !main_core.contains("To_projection") && !main_core.contains("'to_projection'"),
+                "bare imported trait method should lower through dictionary dispatch\n{main_core}"
+            );
+            assert_project_modules_run(
+                &[("main", &main_core)],
+                "io:format(\"~p~n\", [main:main(unit)]), init:stop().",
+                &["7"],
+            );
+        },
+    );
+}
+
+#[test]
+fn imported_constrained_wrapper_passes_dicts_before_user_args() {
+    let db_src = r#"module Kraken.Query
+
+pub type Projection row = Projection row
+
+pub trait Selectable selection row | selection -> row {
+  fun to_projection : selection -> Projection row
+}
+
+pub fun select_all : selection -> Projection row where {selection: Selectable row}
+select_all selection = to_projection selection
+"#;
+
+    let main_src = r#"module Main
+
+import Kraken.Query as Db (Projection, Selectable, select_all)
+
+type Users = Users Int
+
+impl Selectable Int for Users {
+  to_projection users = case users {
+    Users n -> Projection n
+  }
+}
+
+main () = case Db.select_all (Users 11) {
+  Projection n -> n
+}
+"#;
+
+    with_temp_project_files(
+        &[("src/Kraken/Query.saga", db_src)],
+        main_src,
+        |checker, program| {
+            let result = checker.to_result();
+            let db_program = result
+                .programs()
+                .get("Kraken.Query")
+                .expect("Kraken.Query module not found");
+            let db_core = emit_from_program(db_program, "kraken_query", checker);
+            let main_core = emit_from_program(program, "main", checker);
+            assert_project_modules_run(
+                &[("kraken_query", &db_core), ("main", &main_core)],
+                "io:format(\"~p~n\", [main:main(unit)]), init:stop().",
+                &["11"],
+            );
+        },
+    );
+}
+
+#[test]
+fn imported_constrained_wrapper_inside_callback_uses_dict_for_parameterized_arg() {
+    let db_src = r#"module Kraken.Query
+
+pub type Projection row = Projection row
+pub type Prepared row = Prepared row
+
+pub trait Selectable selection row | selection -> row {
+  fun to_projection : selection -> Projection row
+}
+
+pub fun select_all : selection -> Projection row where {selection: Selectable row}
+select_all selection = to_projection selection
+
+pub fun query : (Unit -> Projection row) -> Prepared row
+query run = case run () {
+  Projection row -> Prepared row
+}
+"#;
+
+    let main_src = r#"module Main
+
+import Kraken.Query as Db (Projection, Prepared, Selectable, select_all, query)
+
+type Scope = Scope
+
+record Users source {
+  id: Int,
+}
+
+impl Selectable Int for Users source {
+  to_projection users = Projection users.id
+}
+
+fun users : Users Scope
+users = Users { id: 17 }
+
+main () = case Db.query (fun () -> Db.select_all users) {
+  Prepared row -> row
+}
+"#;
+
+    with_temp_project_files(
+        &[("src/Kraken/Query.saga", db_src)],
+        main_src,
+        |checker, program| {
+            let result = checker.to_result();
+            let db_program = result
+                .programs()
+                .get("Kraken.Query")
+                .expect("Kraken.Query module not found");
+            let db_core = emit_from_program(db_program, "kraken_query", checker);
+            let main_core = emit_from_program(program, "main", checker);
+            assert!(
+                main_core.contains("__dict_Kraken_Query_Selectable")
+                    && main_core.contains("main_Main_Users"),
+                "select_all should receive the Selectable Users dictionary\n{main_core}"
+            );
+            assert_project_modules_run(
+                &[("kraken_query", &db_core), ("main", &main_core)],
+                "io:format(\"~p~n\", [main:main(unit)]), init:stop().",
+                &["17"],
+            );
+        },
+    );
 }
 
 // ---- Constructor atom mangling ----
