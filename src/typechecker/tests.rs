@@ -4765,6 +4765,73 @@ impl Generic RepB for Foo {
 }
 
 #[test]
+fn coherence_disjoint_applied_target_heads_coexist() {
+    // Two impls whose determining parameter shares the outer head `Column`
+    // but differs in a concrete argument position (`Required` vs `Optional`)
+    // are disjoint, so they may coexist under a functional-dependency trait
+    // even though their trait arguments differ.
+    let result = check(
+        "type Required = Required
+type Optional = Optional
+type Column source meta (name : Symbol) a = Column
+
+trait PgType a {}
+impl PgType for Int {}
+impl PgType for String {}
+
+trait Selectable selection row | selection -> row {
+  fun select : selection -> row
+}
+
+impl Selectable a for (Column source Required name a) where {a: PgType} {
+  select _ = todo
+}
+
+impl Selectable (Maybe a) for (Column source Optional name a) where {a: PgType} {
+  select _ = Nothing
+}",
+    );
+    assert!(
+        result.is_ok(),
+        "expected disjoint applied targets to coexist, got: {:?}",
+        result.err().map(|e| e.message)
+    );
+}
+
+#[test]
+fn coherence_overlapping_applied_target_heads_violate() {
+    // Same as above but both impls fix the *same* concrete `Required` in the
+    // determining position, so the targets genuinely overlap and the
+    // functional-dependency coherence rule must reject the differing rows.
+    let result = check(
+        "type Required = Required
+type Column source meta (name : Symbol) a = Column
+
+trait PgType a {}
+impl PgType for Int {}
+
+trait Selectable selection row | selection -> row {
+  fun select : selection -> row
+}
+
+impl Selectable a for (Column source Required name a) where {a: PgType} {
+  select _ = todo
+}
+
+impl Selectable (Maybe a) for (Column source Required name a) where {a: PgType} {
+  select _ = Nothing
+}",
+    );
+    assert!(result.is_err(), "expected coherence violation");
+    let err = result.err().unwrap();
+    assert!(
+        err.message.contains("coherence") || err.message.contains("functionally determines"),
+        "expected coherence violation message, got: {}",
+        err.message
+    );
+}
+
+#[test]
 fn coherence_identical_args_caught_by_overlap() {
     let result = check(
         "trait Generic a r {

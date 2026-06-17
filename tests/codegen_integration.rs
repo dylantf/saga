@@ -4074,3 +4074,78 @@ main () = both (Box 2)
 // Phase B sum-type FromJson bug repro lives in
 // `tests/e2e/tests/generic_fromjson_test.saga` — it needs `<>`
 // (Semigroup) and Std.Test, neither of which this harness links against.
+
+#[test]
+fn local_param_shadowing_dict_parameterized_global_is_not_dict_wrapped() {
+    // A parameter named `value` shares its name with a top-level
+    // dict-parameterized function `value : a -> _ where {a: Enc}`. Elaboration
+    // must NOT treat the local parameter as that global and wrap it with a dict
+    // argument — doing so emitted `apply 18(dict)` and crashed with
+    // `{badfun,18}` at runtime. The local must resolve to its binding.
+    let src = r#"
+trait Enc a {
+  fun enc : a -> Int
+}
+impl Enc for Int {
+  enc v = v
+}
+
+fun value : a -> Int where {a: Enc}
+value input = enc input
+
+fun gt : a -> Int where {a: Enc}
+gt value = enc value
+
+main () = gt 18
+"#;
+
+    assert_runs_and_stdout_contains(src, &["18"]);
+}
+
+#[test]
+fn disjoint_impls_on_same_head_resolve_through_recursive_dict() {
+    // `Column Required a` and `Column Optional a` are disjoint `Sel` impls that
+    // coexist (the determining position differs). When a dict for `Sel` is
+    // built recursively through a wrapper whose trait args are unresolved
+    // out-vars, the exact-key dict lookup misses and the fuzzy fallback finds
+    // two impls sharing the `Column` head — it must disambiguate by matching
+    // each impl's full target pattern against the concrete type, not bail.
+    let src = r#"
+type Required = Required
+type Optional = Optional
+type Column meta a = Column a
+
+trait PgType a {}
+impl PgType for Int {}
+
+trait Sel s r | s -> r {
+  fun sel : s -> r
+}
+
+type Wrap a = Wrap a
+
+impl Sel a for (Column Required a) where {a: PgType} {
+  sel c = case c { Column v -> v }
+}
+
+impl Sel (Maybe a) for (Column Optional a) where {a: PgType} {
+  sel _ = Nothing
+}
+
+impl Sel (Wrap r) for (Wrap s) where {s: Sel r} {
+  sel w = case w { Wrap inner -> Wrap (sel inner) }
+}
+
+fun run_sel : s -> r where {s: Sel r}
+run_sel x = sel x
+
+fun req : Wrap (Column Required Int)
+req = Wrap (Column 7)
+
+main () = case run_sel req {
+  Wrap n -> n
+}
+"#;
+
+    assert_runs_and_stdout_contains(src, &["7"]);
+}
