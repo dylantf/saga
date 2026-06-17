@@ -2448,6 +2448,39 @@ main () = $"val: {Foo}""#,
     assert!(result.is_err());
 }
 
+#[test]
+fn tagged_interp_uses_protocol_instead_of_show() {
+    check(
+        r#"type Tag = Tag
+type Sql = Sql String
+type Column = Column String
+
+effect Query {
+  fun select : Sql -> Sql
+}
+
+fun sql : Tag
+sql = Tag
+
+fun interpolate_text : Tag -> String -> Sql
+interpolate_text _ text = Sql text
+
+fun interpolate_hole : Tag -> Column -> Sql
+interpolate_hole _ (Column name) = Sql name
+
+fun interpolate_append : Tag -> Sql -> Sql -> Sql
+interpolate_append _ (Sql left) (Sql right) = Sql (left <> right)
+
+fun interpolate_finish : Tag -> Sql -> Sql
+interpolate_finish _ chunk = chunk
+
+fun build : Unit -> Sql needs {Query}
+build () = select! sql$"select {Column "name"}"
+"#,
+    )
+    .unwrap();
+}
+
 // --- Exhaustiveness checking ---
 
 #[test]

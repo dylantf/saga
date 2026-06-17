@@ -2805,6 +2805,27 @@ fn interp_literal_and_hole() {
 }
 
 #[test]
+fn tagged_interp_groups_as_single_effect_argument() {
+    let expr = parse_expr(r#"select! sql$"select {column}""#);
+    match expr.kind {
+        ExprKind::App { func, arg } => {
+            assert!(matches!(func.kind, ExprKind::EffectCall { ref name, .. } if name == "select"));
+            match arg.kind {
+                ExprKind::StringInterp { tag, parts, .. } => {
+                    assert_eq!(tag.as_deref(), Some("sql"));
+                    assert!(matches!(
+                        parts.as_slice(),
+                        [StringPart::Lit(_), StringPart::Expr(_)]
+                    ));
+                }
+                other => panic!("expected grouped tagged interpolation, got {:?}", other),
+            }
+        }
+        other => panic!("expected select! application, got {:?}", other),
+    }
+}
+
+#[test]
 fn interp_escaped_braces() {
     // $"\{" -> StringInterp with literal "{"
     let expr = parse_expr("$\"\\{\"");

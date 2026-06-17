@@ -174,6 +174,7 @@ impl Parser {
                 | Token::Float(..)
                 | Token::String(..)
                 | Token::InterpolatedString(..)
+                | Token::TaggedInterpolatedString(..)
                 | Token::True
                 | Token::False
                 | Token::Ident(_)

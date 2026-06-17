@@ -1,0 +1,92 @@
+# Tagged interpolation prototype
+#
+# Plain $"..." still desugars holes through `show`. A tagged string like
+# sql$"..." desugars through the four interpolate_* functions below, so each
+# hole can be typed by a library protocol instead.
+
+type SqlTag = SqlTag
+type Sql = Sql String
+type Raw = Raw String
+
+type UsersSource = UsersSource
+type IdName = IdName
+type NameName = NameName
+
+type Table source = Table String
+type Column source name a = Column String
+type Count source name a =
+  | Count (Column source name a)
+
+record Users source {
+  table: Table source,
+  id: Column source IdName Int,
+  name: Column source NameName String,
+}
+
+trait ToSql a {
+  fun to_sql : a -> Sql
+}
+
+fun render_sql : Sql -> String
+render_sql (Sql text) = text
+
+fun sql : SqlTag
+sql = SqlTag
+
+fun users : Users UsersSource
+users = Users {
+  table: Table "users",
+  id: Column "users.id",
+  name: Column "users.name",
+}
+
+fun count : Column source name a -> Count source name a
+count column = Count column
+
+impl ToSql for Sql {
+  to_sql chunk = chunk
+}
+
+impl ToSql for Raw {
+  to_sql (Raw text) = Sql text
+}
+
+impl ToSql for Table source {
+  to_sql (Table name) = Sql name
+}
+
+impl ToSql for Users source {
+  to_sql u = to_sql u.table
+}
+
+impl ToSql for Column source name a {
+  to_sql (Column name) = Sql name
+}
+
+impl ToSql for Count source name a {
+  to_sql (Count column) = Sql ("count(" <> render_sql (to_sql column) <> ")")
+}
+
+fun interpolate_text : SqlTag -> String -> Sql
+interpolate_text _ text = Sql text
+
+fun interpolate_hole : SqlTag -> a -> Sql where {a: ToSql}
+interpolate_hole _ value = to_sql value
+
+fun interpolate_append : SqlTag -> Sql -> Sql -> Sql
+interpolate_append _ (Sql left) (Sql right) = Sql (left <> right)
+
+fun interpolate_finish : SqlTag -> Sql -> Sql
+interpolate_finish _ chunk = chunk
+
+effect Query {
+  fun select : Sql -> Sql
+}
+
+main () = {
+  let query = select! sql$"select {count users.name} from {users} where {users.id} = {Raw "$1"}" with {
+    select fragment = resume fragment
+  }
+
+  println (render_sql query)
+} with console

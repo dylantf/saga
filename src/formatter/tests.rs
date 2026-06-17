@@ -1458,6 +1458,24 @@ fn interpolated_string_preserved() {
 }
 
 #[test]
+fn tagged_interpolated_string_preserved() {
+    let src = "let x = sql$\"select {column}\"";
+    let result = fmt80(src);
+    assert!(
+        result.contains("sql$\""),
+        "should contain tagged interp prefix: {}",
+        result
+    );
+    assert!(
+        result.contains("{column}"),
+        "should contain hole: {}",
+        result
+    );
+    let second = fmt80(&result);
+    assert_eq!(result, second, "tagged interpolated string not idempotent");
+}
+
+#[test]
 fn interpolated_multiline_string_preserved() {
     let src = "let x = $\"\"\"\n  x = {show x}\n  y = {show y}\n  \"\"\"";
     let result = fmt80(src);

@@ -565,7 +565,9 @@ pub fn format_expr(expr: &Expr) -> Doc {
                 format_comma_list(Doc::text("["), "]", elem_docs)
             }
         }
-        ExprKind::StringInterp { parts, kind } => format_interp_string(parts, *kind),
+        ExprKind::StringInterp { tag, parts, kind } => {
+            format_interp_string(tag.as_deref(), parts, *kind)
+        }
         ExprKind::ListComprehension { body, qualifiers } => {
             let mut parts = vec![Doc::text("["), format_expr(body), Doc::text(" | ")];
             let qual_docs: Vec<Doc> = qualifiers
@@ -804,10 +806,14 @@ pub fn format_stmt(stmt: &Stmt) -> Doc {
 }
 
 /// Format an interpolated string, choosing single-line or triple-quoted form.
-fn format_interp_string(parts: &[StringPart], kind: StringKind) -> Doc {
-    match kind {
+fn format_interp_string(tag: Option<&str>, parts: &[StringPart], kind: StringKind) -> Doc {
+    let string = match kind {
         StringKind::InterpolatedMultiline => format_interp_multiline(parts),
         _ => format_interp_single_line(parts),
+    };
+    match tag {
+        Some(tag) => Doc::text(tag.to_string()).append(string),
+        None => string,
     }
 }
 

@@ -63,6 +63,116 @@ fn wrap_test_body_in_lambda(func: &Expr, arg: &mut Expr) {
     };
 }
 
+fn empty_span_at_end(span: Span) -> Span {
+    Span {
+        start: span.end,
+        end: span.end,
+    }
+}
+
+fn generated_call_expr(
+    name: &str,
+    args: Vec<Expr>,
+    source_span: Span,
+    exposed_id: Option<NodeId>,
+) -> Expr {
+    let hidden_span = empty_span_at_end(source_span);
+    let mut args = args.into_iter().peekable();
+    let mut acc = Expr::synth(
+        hidden_span,
+        ExprKind::Var {
+            name: name.to_string(),
+        },
+    );
+    while let Some(arg) = args.next() {
+        let is_last = args.peek().is_none();
+        let app_span = if exposed_id.is_some() && is_last {
+            source_span
+        } else {
+            hidden_span
+        };
+        let id = if is_last {
+            exposed_id.unwrap_or_else(NodeId::fresh)
+        } else {
+            NodeId::fresh()
+        };
+        acc = Expr {
+            id,
+            span: app_span,
+            kind: ExprKind::App {
+                func: Box::new(acc),
+                arg: Box::new(arg),
+            },
+        };
+    }
+    acc
+}
+
+fn fresh_tag(tag: &Expr) -> Expr {
+    let mut tag = tag.clone();
+    freshen_expr_ids(&mut tag);
+    tag
+}
+
+fn tagged_text(tag: &Expr, text: String, span: Span) -> Expr {
+    generated_call_expr(
+        "interpolate_text",
+        vec![
+            fresh_tag(tag),
+            Expr::synth(
+                span,
+                ExprKind::Lit {
+                    value: Lit::String(text, StringKind::Normal),
+                },
+            ),
+        ],
+        span,
+        None,
+    )
+}
+
+fn tagged_hole(tag: &Expr, hole: Expr, span: Span) -> Expr {
+    generated_call_expr("interpolate_hole", vec![fresh_tag(tag), hole], span, None)
+}
+
+fn tagged_append(tag: &Expr, left: Expr, right: Expr, span: Span) -> Expr {
+    generated_call_expr(
+        "interpolate_append",
+        vec![fresh_tag(tag), left, right],
+        span,
+        None,
+    )
+}
+
+fn desugar_tagged_string(
+    tag_name: String,
+    parts: Vec<StringPart>,
+    span: Span,
+    root_id: NodeId,
+) -> Expr {
+    let tag = Expr::synth(span, ExprKind::Var { name: tag_name });
+    let mut segments: Vec<Expr> = Vec::new();
+    for part in parts {
+        match part {
+            StringPart::Lit(s) => {
+                if !s.is_empty() {
+                    segments.push(tagged_text(&tag, s, span));
+                }
+            }
+            StringPart::Expr(hole_expr) => {
+                segments.push(tagged_hole(&tag, hole_expr, span));
+            }
+        }
+    }
+
+    let body = segments
+        .into_iter()
+        .reduce(|left, right| tagged_append(&tag, left, right, span))
+        .unwrap_or_else(|| tagged_text(&tag, String::new(), span));
+
+    generated_call_expr("interpolate_finish", vec![tag, body], span, Some(root_id))
+}
+
 /// Desugar all surface syntax in a program, in place.
 #[allow(clippy::ptr_arg)]
 pub fn desugar_program(program: &mut Vec<Decl>) {
@@ -480,11 +590,15 @@ fn desugar_expr(expr: &mut Expr) {
             }
         }
         ExprKind::StringInterp { .. } => {
-            let ExprKind::StringInterp { parts, .. } =
+            let ExprKind::StringInterp { tag, parts, .. } =
                 std::mem::replace(&mut expr.kind, ExprKind::Lit { value: Lit::Unit })
             else {
                 unreachable!()
             };
+            if let Some(tag) = tag {
+                *expr = desugar_tagged_string(tag, parts, span, expr.id);
+                return;
+            }
             let mut segments: Vec<Expr> = Vec::new();
             for part in parts {
                 match part {
