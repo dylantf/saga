@@ -839,6 +839,30 @@ main () = describe Red
 }
 
 #[test]
+fn dict_arg_insertion_respects_param_shadowing() {
+    let src = r#"
+trait Enc a {
+  fun enc : a -> Int
+}
+
+impl Enc for Int {
+  enc n = n
+}
+
+type Box a = Box a
+
+fun value : a -> Box a where {a: Enc}
+value input = Box input
+
+fun use_enc : a -> Int where {a: Enc}
+use_enc value = enc value
+
+main () = use_enc 18
+"#;
+    assert_runs_and_stdout_contains(src, &["18"]);
+}
+
+#[test]
 fn effectful_trait_method_specialization_threads_evidence() {
     // The effectful `encode` call is specialized to a direct hoisted-method
     // call, but the call must still thread `_Evidence`/`_ReturnK` (a 3-arity

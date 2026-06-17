@@ -15,6 +15,9 @@ use crate::typechecker::{
     CheckResult, ImplInfo, KNOWN_SYMBOL_TRAIT, ResolvedValue, TraitEvidence, TraitInfo, Type,
 };
 
+type DictParamInfo = Vec<(String, String)>;
+type LocalCalleeBinding = Option<DictParamInfo>;
+
 /// Only invoke the symbol-intrinsic lambda fast-path for the `KnownSymbol`
 /// trait's own `symbol_name` method. Without this guard, a `to_json` call
 /// whose node also carries KnownSymbol evidence (from a parameterized
@@ -150,6 +153,10 @@ struct Elaborator {
     /// Pat node IDs of let bindings that actually need dict wrapping.
     /// Used to avoid wrapping same-named bindings in different scopes.
     let_dict_pat_ids: HashMap<String, HashSet<crate::ast::NodeId>>,
+    /// Local value scopes used while inserting dictionary arguments.
+    /// `Some(params)` means a local constrained function value, while `None`
+    /// means an ordinary local binding that shadows same-named globals.
+    local_callee_scopes: Vec<HashMap<String, LocalCalleeBinding>>,
     /// Scope map values for canonical name bridging (user name -> canonical)
     scope_map_values: HashMap<String, String>,
     /// Scope map effects for canonical name bridging (user name -> canonical
@@ -203,6 +210,15 @@ impl Elaborator {
         source_name: &str,
         node_id: crate::ast::NodeId,
     ) -> Option<Vec<(String, String)>> {
+        if let Some(local) = self.local_callee_binding(source_name) {
+            return local.clone();
+        }
+        if matches!(
+            self.resolution.value(node_id),
+            Some(ResolvedValue::Local { .. })
+        ) {
+            return None;
+        }
         if let Some(params) = self.fun_dict_params.get(source_name).cloned() {
             return Some(params);
         }
@@ -217,6 +233,88 @@ impl Elaborator {
             return Some(params);
         }
         None
+    }
+
+    fn push_local_callee_scope(&mut self) {
+        self.local_callee_scopes.push(HashMap::new());
+    }
+
+    fn pop_local_callee_scope(&mut self) {
+        self.local_callee_scopes.pop();
+    }
+
+    fn local_callee_binding(&self, name: &str) -> Option<&LocalCalleeBinding> {
+        self.local_callee_scopes
+            .iter()
+            .rev()
+            .find_map(|scope| scope.get(name))
+    }
+
+    fn bind_local_callee(&mut self, name: String, dict_params: LocalCalleeBinding) {
+        if let Some(scope) = self.local_callee_scopes.last_mut() {
+            scope.insert(name, dict_params);
+        }
+    }
+
+    fn bind_pattern_callee_shadows(&mut self, pattern: &Pat) {
+        Self::visit_pattern_vars(pattern, &mut |name| {
+            self.bind_local_callee(name.to_string(), None);
+        });
+    }
+
+    fn visit_pattern_vars<'a>(pattern: &'a Pat, f: &mut impl FnMut(&'a str)) {
+        match pattern {
+            Pat::Var { name, .. } => f(name),
+            Pat::Constructor { args, .. } => {
+                for arg in args {
+                    Self::visit_pattern_vars(arg, f);
+                }
+            }
+            Pat::Record {
+                fields, as_name, ..
+            } => {
+                for (field, alias) in fields {
+                    if let Some(pat) = alias {
+                        Self::visit_pattern_vars(pat, f);
+                    } else {
+                        f(field);
+                    }
+                }
+                if let Some(name) = as_name {
+                    f(name);
+                }
+            }
+            Pat::AnonRecord { fields, .. } => {
+                for (field, alias) in fields {
+                    if let Some(pat) = alias {
+                        Self::visit_pattern_vars(pat, f);
+                    } else {
+                        f(field);
+                    }
+                }
+            }
+            Pat::Tuple { elements, .. } | Pat::ListPat { elements, .. } => {
+                for element in elements {
+                    Self::visit_pattern_vars(element, f);
+                }
+            }
+            Pat::Or { patterns, .. } => {
+                for pattern in patterns {
+                    Self::visit_pattern_vars(pattern, f);
+                }
+            }
+            Pat::StringPrefix { rest, .. } => Self::visit_pattern_vars(rest, f),
+            Pat::BitStringPat { segments, .. } => {
+                for segment in segments {
+                    Self::visit_pattern_vars(&segment.value, f);
+                }
+            }
+            Pat::ConsPat { head, tail, .. } => {
+                Self::visit_pattern_vars(head, f);
+                Self::visit_pattern_vars(tail, f);
+            }
+            Pat::Wildcard { .. } | Pat::Lit { .. } => {}
+        }
     }
 
     /// Resolve trait type args via the resolution map. For App heads (e.g.
@@ -380,6 +478,7 @@ impl Elaborator {
             erlang_module,
             let_binding_arities,
             let_dict_pat_ids,
+            local_callee_scopes: Vec::new(),
             scope_map_values: result.scope_map.values.clone(),
             scope_map_effects: result.scope_map.effects.clone(),
             resolution: result.resolution.clone(),
@@ -943,8 +1042,15 @@ impl Elaborator {
                         }
                     }
 
+                    self.push_local_callee_scope();
+                    for param in params {
+                        self.bind_pattern_callee_shadows(param);
+                    }
+
                     let elab_body = self.elaborate_expr(body);
                     let elab_guard = guard.as_ref().map(|g| Box::new(self.elaborate_expr(g)));
+
+                    self.pop_local_callee_scope();
 
                     // Prepend dict params to the function's params
                     let mut full_params = extra_params;
@@ -1407,186 +1513,219 @@ impl Elaborator {
 
             ExprKind::Case {
                 scrutinee, arms, ..
-            } => Expr::rebuild_like(
-                expr,
-                ExprKind::Case {
-                    dangling_trivia: vec![],
-                    scrutinee: Box::new(self.elaborate_expr(scrutinee)),
-                    arms: arms
-                        .iter()
-                        .map(|ann| {
-                            let arm = &ann.node;
-                            Annotated::bare(CaseArm {
-                                pattern: arm.pattern.clone(),
-                                guard: arm.guard.as_ref().map(|g| self.elaborate_expr(g)),
-                                body: self.elaborate_expr(&arm.body),
-                                span: arm.span,
-                            })
+            } => {
+                let scrutinee = self.elaborate_expr(scrutinee);
+                let arms = arms
+                    .iter()
+                    .map(|ann| {
+                        let arm = &ann.node;
+                        self.push_local_callee_scope();
+                        self.bind_pattern_callee_shadows(&arm.pattern);
+                        let guard = arm.guard.as_ref().map(|g| self.elaborate_expr(g));
+                        let body = self.elaborate_expr(&arm.body);
+                        self.pop_local_callee_scope();
+                        Annotated::bare(CaseArm {
+                            pattern: arm.pattern.clone(),
+                            guard,
+                            body,
+                            span: arm.span,
                         })
-                        .collect(),
-                },
-            ),
+                    })
+                    .collect();
+                Expr::rebuild_like(
+                    expr,
+                    ExprKind::Case {
+                        dangling_trivia: vec![],
+                        scrutinee: Box::new(scrutinee),
+                        arms,
+                    },
+                )
+            }
 
-            ExprKind::Block { stmts, .. } => Expr::rebuild_like(
-                expr,
-                ExprKind::Block {
-                    dangling_trivia: vec![],
-                    stmts: stmts
-                        .iter()
-                        .map(|ann| {
-                            let s = &ann.node;
-                            Annotated::bare(match s {
-                                Stmt::Let {
-                                    pattern,
-                                    annotation,
-                                    value,
-                                    assert,
-                                    span,
-                                } => {
-                                    // Check if this specific let binding has trait constraints.
-                                    // Use pat_id to distinguish same-named bindings in
-                                    // different scopes (e.g. `result` in multiple test bodies).
-                                    let dict_info = if let Pat::Var { name, id, .. } = pattern {
-                                        let is_this_binding = self
-                                            .let_dict_pat_ids
-                                            .get(name.as_str())
-                                            .is_some_and(|ids| ids.contains(id));
-                                        if is_this_binding {
-                                            self.fun_dict_params_for_callee(name, *id)
-                                        } else {
-                                            None
-                                        }
-                                    } else {
-                                        None
-                                    };
-
-                                    if let Some(dict_param_info) = dict_info {
-                                        // Set up dict params for elaborating the value.
-                                        // Keep enclosing dicts visible: a constrained local
-                                        // binding may call helpers that also need the outer
-                                        // function's where-clause evidence.
-                                        // Eta-expand: `let f = value` becomes
-                                        // `let f = fun (dict, __arg) -> (elaborated_val)(__arg)`
-                                        // so the lowerer sees a single function of arity N+1.
-                                        let saved = (
-                                            self.current_dict_params.clone(),
-                                            self.current_dict_params_by_var.clone(),
-                                        );
-                                        let mut lambda_params = Vec::new();
-
-                                        for (trait_name, type_var) in &dict_param_info {
-                                            let bare =
-                                                trait_name.rsplit('.').next().unwrap_or(trait_name);
-                                            let param_name =
-                                                format!("__dict_{}_{}", bare, type_var);
-                                            self.current_dict_params
-                                                .insert(trait_name.clone(), param_name.clone());
-                                            self.current_dict_params_by_var.insert(
-                                                (trait_name.clone(), type_var.clone()),
-                                                param_name.clone(),
-                                            );
-                                            lambda_params.push(Pat::Var {
-                                                id: NodeId::fresh(),
-                                                name: param_name,
-                                                span: *span,
-                                            });
-                                        }
-
-                                        let elab_value = self.elaborate_expr(value);
-
-                                        self.restore_dict_params(saved);
-
-                                        // Eta-expand with the correct arity
-                                        let let_name = if let Pat::Var { name: n, .. } = pattern {
-                                            n
-                                        } else {
-                                            ""
-                                        };
-                                        let arity = self
-                                            .let_binding_arities
-                                            .get(let_name)
-                                            .copied()
-                                            .unwrap_or(1);
-                                        let eta_params: Vec<String> =
-                                            (0..arity).map(|i| format!("__let_arg{}", i)).collect();
-                                        for p in &eta_params {
-                                            lambda_params.push(Pat::Var {
-                                                id: NodeId::fresh(),
-                                                name: p.clone(),
-                                                span: *span,
-                                            });
-                                        }
-                                        // Apply the elaborated value to each eta param
-                                        let mut body = elab_value;
-                                        for p in &eta_params {
-                                            body = Expr::synth(
-                                                *span,
-                                                ExprKind::App {
-                                                    func: Box::new(body),
-                                                    arg: Box::new(Expr::synth(
-                                                        *span,
-                                                        ExprKind::Var { name: p.clone() },
-                                                    )),
-                                                },
-                                            );
-                                        }
-                                        let wrapped = Expr::synth(
-                                            *span,
-                                            ExprKind::Lambda {
-                                                params: lambda_params,
-                                                body: Box::new(body),
-                                            },
-                                        );
-
-                                        Stmt::Let {
-                                            pattern: pattern.clone(),
-                                            annotation: annotation.clone(),
-                                            value: wrapped,
-                                            assert: *assert,
-                                            span: *span,
-                                        }
-                                    } else {
-                                        Stmt::Let {
-                                            pattern: pattern.clone(),
-                                            annotation: annotation.clone(),
-                                            value: self.elaborate_expr(value),
-                                            assert: *assert,
-                                            span: *span,
-                                        }
-                                    }
+            ExprKind::Block { stmts, .. } => {
+                self.push_local_callee_scope();
+                let mut out = Vec::with_capacity(stmts.len());
+                for ann in stmts {
+                    let s = &ann.node;
+                    let stmt = match s {
+                        Stmt::Let {
+                            pattern,
+                            annotation,
+                            value,
+                            assert,
+                            span,
+                        } => {
+                            // Check if this specific let binding has trait constraints.
+                            // Use pat_id to distinguish same-named bindings in
+                            // different scopes (e.g. `result` in multiple test bodies).
+                            let dict_info = if let Pat::Var { name, id, .. } = pattern {
+                                let is_this_binding = self
+                                    .let_dict_pat_ids
+                                    .get(name.as_str())
+                                    .is_some_and(|ids| ids.contains(id));
+                                if is_this_binding {
+                                    self.fun_dict_params_for_callee(name, *id)
+                                } else {
+                                    None
                                 }
-                                Stmt::LetFun {
-                                    id,
-                                    name,
-                                    name_span,
-                                    params,
-                                    guard,
-                                    body,
-                                    span,
-                                } => Stmt::LetFun {
-                                    id: *id,
-                                    name: name.clone(),
-                                    name_span: *name_span,
-                                    params: params.clone(),
-                                    guard: guard.as_ref().map(|g| Box::new(self.elaborate_expr(g))),
-                                    body: self.elaborate_expr(body),
+                            } else {
+                                None
+                            };
+
+                            let stmt = if let Some(dict_param_info) = dict_info.clone() {
+                                // Set up dict params for elaborating the value.
+                                // Keep enclosing dicts visible: a constrained local
+                                // binding may call helpers that also need the outer
+                                // function's where-clause evidence.
+                                // Eta-expand: `let f = value` becomes
+                                // `let f = fun (dict, __arg) -> (elaborated_val)(__arg)`
+                                // so the lowerer sees a single function of arity N+1.
+                                let saved = (
+                                    self.current_dict_params.clone(),
+                                    self.current_dict_params_by_var.clone(),
+                                );
+                                let mut lambda_params = Vec::new();
+
+                                for (trait_name, type_var) in &dict_param_info {
+                                    let bare = trait_name.rsplit('.').next().unwrap_or(trait_name);
+                                    let param_name = format!("__dict_{}_{}", bare, type_var);
+                                    self.current_dict_params
+                                        .insert(trait_name.clone(), param_name.clone());
+                                    self.current_dict_params_by_var.insert(
+                                        (trait_name.clone(), type_var.clone()),
+                                        param_name.clone(),
+                                    );
+                                    lambda_params.push(Pat::Var {
+                                        id: NodeId::fresh(),
+                                        name: param_name,
+                                        span: *span,
+                                    });
+                                }
+
+                                let elab_value = self.elaborate_expr(value);
+
+                                self.restore_dict_params(saved);
+
+                                // Eta-expand with the correct arity.
+                                let let_name = if let Pat::Var { name: n, .. } = pattern {
+                                    n
+                                } else {
+                                    ""
+                                };
+                                let arity =
+                                    self.let_binding_arities.get(let_name).copied().unwrap_or(1);
+                                let eta_params: Vec<String> =
+                                    (0..arity).map(|i| format!("__let_arg{}", i)).collect();
+                                for p in &eta_params {
+                                    lambda_params.push(Pat::Var {
+                                        id: NodeId::fresh(),
+                                        name: p.clone(),
+                                        span: *span,
+                                    });
+                                }
+
+                                let mut body = elab_value;
+                                for p in &eta_params {
+                                    body = Expr::synth(
+                                        *span,
+                                        ExprKind::App {
+                                            func: Box::new(body),
+                                            arg: Box::new(Expr::synth(
+                                                *span,
+                                                ExprKind::Var { name: p.clone() },
+                                            )),
+                                        },
+                                    );
+                                }
+                                let wrapped = Expr::synth(
+                                    *span,
+                                    ExprKind::Lambda {
+                                        params: lambda_params,
+                                        body: Box::new(body),
+                                    },
+                                );
+
+                                Stmt::Let {
+                                    pattern: pattern.clone(),
+                                    annotation: annotation.clone(),
+                                    value: wrapped,
+                                    assert: *assert,
                                     span: *span,
-                                },
+                                }
+                            } else {
+                                Stmt::Let {
+                                    pattern: pattern.clone(),
+                                    annotation: annotation.clone(),
+                                    value: self.elaborate_expr(value),
+                                    assert: *assert,
+                                    span: *span,
+                                }
+                            };
 
-                                Stmt::Expr(e) => Stmt::Expr(self.elaborate_expr(e)),
-                            })
-                        })
-                        .collect(),
-                },
-            ),
+                            if let Pat::Var { name, .. } = pattern {
+                                self.bind_local_callee(name.clone(), dict_info);
+                            } else {
+                                self.bind_pattern_callee_shadows(pattern);
+                            }
 
-            ExprKind::Lambda { params, body } => Expr::rebuild_like(
-                expr,
-                ExprKind::Lambda {
-                    params: params.clone(),
-                    body: Box::new(self.elaborate_expr(body)),
-                },
-            ),
+                            stmt
+                        }
+                        Stmt::LetFun {
+                            id,
+                            name,
+                            name_span,
+                            params,
+                            guard,
+                            body,
+                            span,
+                        } => {
+                            self.push_local_callee_scope();
+                            for param in params {
+                                self.bind_pattern_callee_shadows(param);
+                            }
+                            let guard = guard.as_ref().map(|g| Box::new(self.elaborate_expr(g)));
+                            let body = self.elaborate_expr(body);
+                            self.pop_local_callee_scope();
+                            self.bind_local_callee(name.clone(), None);
+                            Stmt::LetFun {
+                                id: *id,
+                                name: name.clone(),
+                                name_span: *name_span,
+                                params: params.clone(),
+                                guard,
+                                body,
+                                span: *span,
+                            }
+                        }
+                        Stmt::Expr(e) => Stmt::Expr(self.elaborate_expr(e)),
+                    };
+                    out.push(Annotated::bare(stmt));
+                }
+                self.pop_local_callee_scope();
+                Expr::rebuild_like(
+                    expr,
+                    ExprKind::Block {
+                        dangling_trivia: vec![],
+                        stmts: out,
+                    },
+                )
+            }
+
+            ExprKind::Lambda { params, body } => {
+                self.push_local_callee_scope();
+                for param in params {
+                    self.bind_pattern_callee_shadows(param);
+                }
+                let body = self.elaborate_expr(body);
+                self.pop_local_callee_scope();
+                Expr::rebuild_like(
+                    expr,
+                    ExprKind::Lambda {
+                        params: params.clone(),
+                        body: Box::new(body),
+                    },
+                )
+            }
 
             ExprKind::FieldAccess { expr: e, field, .. } => {
                 let record_name = self.resolve_record_name(e.id);

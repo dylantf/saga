@@ -67,6 +67,9 @@ impl ToSql for Count source name a {
   to_sql (Count column) = Sql ("count(" <> render_sql (to_sql column) <> ")")
 }
 
+fun sql_fragment : a -> Sql where {a: ToSql}
+sql_fragment value = sql$"{value}"
+
 fun interpolate_text : SqlTag -> String -> Sql
 interpolate_text _ text = Sql text
 
@@ -84,7 +87,8 @@ effect Query {
 }
 
 main () = {
-  let query = select! sql$"select {count users.name} from {users} where {users.id} = {Raw "$1"}" with {
+  let to_fragment = sql_fragment
+  let query = select! sql$"select {to_fragment (count users.name)} from {users} where {users.id} = {Raw "$1"}" with {
     select fragment = resume fragment
   }
 
