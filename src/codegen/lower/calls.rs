@@ -5,7 +5,7 @@ use crate::codegen::runtime_shape::CpsShape;
 use super::errors::ErrorKind;
 use super::evidence;
 use super::util::{
-    cerl_call, collect_ctor_call, collect_effect_call_expr, collect_fun_call,
+    cerl_call, collect_ctor_call_with_head, collect_effect_call_expr, collect_fun_call,
     collect_qualified_call, core_var, lower_string_to_binary,
 };
 use super::{Lowerer, QualifiedCallSite, ResolvedCallSite};
@@ -723,8 +723,11 @@ impl<'a> Lowerer<'a> {
     }
 
     pub(super) fn lower_app_expr(&mut self, expr: &Expr) -> CExpr {
-        if let Some((ctor_name, args)) = collect_ctor_call(expr) {
-            return self.lower_ctor(ctor_name, args);
+        if let Some((head, ctor_name, args)) = collect_ctor_call_with_head(expr) {
+            let origin = self
+                .constructor_origin_module_for(head.id, ctor_name)
+                .map(str::to_string);
+            return self.lower_ctor_with_origin(ctor_name, args, origin.as_deref());
         }
 
         if let Some((head_expr, op_name, qualifier, args)) = collect_effect_call_expr(expr) {
@@ -741,7 +744,10 @@ impl<'a> Lowerer<'a> {
         if let Some((module, func_name, head, args)) = qualified_call {
             let qualified = format!("{}.{}", module, func_name);
             if self.is_known_constructor(&qualified) || self.is_known_constructor(func_name) {
-                return self.lower_ctor(func_name, args);
+                let origin = self
+                    .constructor_origin_module_for(head.id, func_name)
+                    .map(str::to_string);
+                return self.lower_ctor_with_origin(func_name, args, origin.as_deref());
             }
             if let Some(resolved) = self.resolved.get(&head.id)
                 && let super::super::resolve::ResolvedCodegenKind::Intrinsic { id, .. } =

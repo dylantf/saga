@@ -223,6 +223,42 @@ impl<'a> Lowerer<'a> {
             .filter(|m| *m != self.current_source_module)
     }
 
+    pub(super) fn carried_constructor_origin_module(
+        &self,
+        node_id: crate::ast::NodeId,
+    ) -> Option<&str> {
+        self.carried_constructors
+            .get(&node_id)
+            .and_then(|canonical| canonical.rsplit_once('.').map(|(module, _)| module))
+            .filter(|module| *module != self.current_source_module)
+    }
+
+    pub(super) fn carried_constructor_name_origin_module(&self, name: &str) -> Option<&str> {
+        let bare = name.rsplit('.').next().unwrap_or(name);
+        if matches!(bare, "Nil" | "Cons" | "True" | "False")
+            || super::beam_interop::exit_reason_bare_atom(bare).is_some()
+        {
+            return None;
+        }
+        if self.constructor_atoms.contains_key(bare) {
+            return None;
+        }
+        self.carried_constructor_names
+            .get(bare)
+            .map(String::as_str)
+            .filter(|module| *module != self.current_source_module)
+    }
+
+    pub(super) fn constructor_origin_module_for(
+        &self,
+        node_id: crate::ast::NodeId,
+        name: &str,
+    ) -> Option<&str> {
+        self.carried_constructor_origin_module(node_id)
+            .or_else(|| self.carried_constructor_name_origin_module(name))
+            .or_else(|| self.handler_origin_module())
+    }
+
     /// Check whether a name refers to a known constructor, accounting for
     /// the current handler origin module if lowering imported handler code.
     pub(super) fn is_known_constructor(&self, name: &str) -> bool {

@@ -10206,6 +10206,95 @@ fn applied_functional_bridge_derive_supports_non_selectable_trait_with_multiple_
 }
 
 #[test]
+fn applied_functional_bridge_derive_supports_unary_wrapper_return() {
+    check(
+        "import Std.Generic (Generic, Leaf, Labeled, And, Record)\n\
+         type Column source (name : Symbol) a = Column\n\
+         type Projection a = Projection a\n\
+         record User { id: Int, name: String }\n  deriving (Generic)\n\
+         type UsersScope = UsersScope\n\
+         record Users source {\n\
+           id: Column source 'id Int,\n\
+           name: Column source 'name String,\n\
+         }\n  deriving (Generic, Selectable User)\n\
+         fun users : Users UsersScope\n\
+         users = Users { id: Column, name: Column }\n\
+         trait Selectable selection row | selection -> row {\n\
+           fun to_projection : selection -> Projection row\n\
+         }\n\
+         impl Selectable a for Column source name a {\n\
+           to_projection _ = todo ()\n\
+         }\n\
+         impl Selectable (Leaf row) for (Leaf selection) where {Selectable selection row} {\n\
+           to_projection selection = case selection { Leaf value -> case to_projection value { Projection out -> Projection (Leaf out) } }\n\
+         }\n\
+         impl Selectable (Labeled n out) for (Labeled n field) where {Selectable field out} {\n\
+           to_projection selection = case selection { Labeled field -> case to_projection field { Projection out -> Projection (Labeled out) } }\n\
+         }\n\
+         impl Selectable (And left_out right_out) for (And left right)\n\
+           where {Selectable left left_out, Selectable right right_out}\n\
+         {\n\
+           to_projection selection = case selection { And left right -> case to_projection left { Projection left_out -> case to_projection right { Projection right_out -> Projection (And left_out right_out) } } }\n\
+         }\n\
+         impl Selectable (Record out) for (Record fields) where {Selectable fields out} {\n\
+           to_projection selection = case selection { Record name fields -> case to_projection fields { Projection out -> Projection (Record name out) } }\n\
+         }\n\
+         fun project : selection -> row\n\
+           where {selection: Generic selection_rep, selection_rep: Selectable row_rep, row: Generic row_rep}\n\
+         project selection = case to_projection (to selection) { Projection row_rep -> from row_rep }\n\
+         fun q : Unit -> User\n\
+         q () = project users\n",
+    )
+    .unwrap();
+}
+
+#[test]
+fn applied_functional_bridge_derive_supports_map_based_wrapper_return() {
+    check(
+        "import Std.Generic (Generic, Leaf, Labeled, And, Record)\n\
+         type Column source (name : Symbol) a = Column\n\
+         type ProjectionDef a = ProjectionDef a\n\
+         type Projection a = Projection (ProjectionDef a)\n\
+         fun map : (a -> b) -> Projection a -> Projection b\n\
+         map f projection = case projection { Projection (ProjectionDef value) -> Projection (ProjectionDef (f value)) }\n\
+         record User { id: Int, name: String }\n  deriving (Generic)\n\
+         type UsersScope = UsersScope\n\
+         record Users source {\n\
+           id: Column source 'id Int,\n\
+           name: Column source 'name String,\n\
+         }\n  deriving (Generic, Selectable User)\n\
+         fun users : Users UsersScope\n\
+         users = Users { id: Column, name: Column }\n\
+         trait Selectable selection row | selection -> row {\n\
+           fun to_projection : selection -> Projection row\n\
+         }\n\
+         impl Selectable a for Column source name a {\n\
+           to_projection _ = todo ()\n\
+         }\n\
+         impl Selectable (Leaf row) for (Leaf selection) where {Selectable selection row} {\n\
+           to_projection selection = map Leaf (case selection { Leaf value -> to_projection value })\n\
+         }\n\
+         impl Selectable (Labeled n out) for (Labeled n field) where {Selectable field out} {\n\
+           to_projection selection = map Labeled (case selection { Labeled field -> to_projection field })\n\
+         }\n\
+         impl Selectable (And left_out right_out) for (And left right)\n\
+           where {Selectable left left_out, Selectable right right_out}\n\
+         {\n\
+           to_projection selection = case selection { And left right -> case to_projection left { Projection (ProjectionDef left_out) -> case to_projection right { Projection (ProjectionDef right_out) -> Projection (ProjectionDef (And left_out right_out)) } } }\n\
+         }\n\
+         impl Selectable (Record out) for (Record fields) where {Selectable fields out} {\n\
+           to_projection selection = case selection { Record name fields -> map (fun out -> Record name out) (to_projection fields) }\n\
+         }\n\
+         fun project : selection -> row\n\
+           where {selection: Generic selection_rep, selection_rep: Selectable row_rep, row: Generic row_rep}\n\
+         project selection = case to_projection (to selection) { Projection (ProjectionDef row_rep) -> from row_rep }\n\
+         fun q : Unit -> User\n\
+         q () = project users\n",
+    )
+    .unwrap();
+}
+
+#[test]
 fn applied_selectable_derive_reports_missing_output_generic() {
     let err = check(
         "import Std.Generic (Generic, Leaf, Labeled, Record)\n\

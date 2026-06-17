@@ -30,6 +30,7 @@ pub struct WrapperTypeInfo {
     pub type_params: Vec<TypeParam>,
     pub variants: Vec<TypeConstructor>,
     pub derives_generic: bool,
+    pub opaque: bool,
 }
 
 #[derive(Clone)]
@@ -141,15 +142,20 @@ fn module_summary(program: &[Decl]) -> ModuleSummary {
                 variants,
                 deriving,
                 public: true,
-                opaque: false,
+                opaque,
                 ..
             } => {
                 summary.types.insert(
                     name.clone(),
                     WrapperTypeInfo {
                         type_params: type_params.clone(),
-                        variants: variants.iter().map(|v| v.node.clone()).collect(),
+                        variants: if *opaque {
+                            vec![]
+                        } else {
+                            variants.iter().map(|v| v.node.clone()).collect()
+                        },
                         derives_generic: deriving.iter().any(|d| d.is_plain_named("Generic")),
+                        opaque: *opaque,
                     },
                 );
             }
@@ -496,6 +502,7 @@ pub fn expand_derives(program: &mut Vec<Decl>, imported: &ImportedDecls) -> Vec<
                 type_params,
                 variants,
                 deriving,
+                opaque,
                 ..
             } => {
                 scope.add_local_type(
@@ -504,6 +511,7 @@ pub fn expand_derives(program: &mut Vec<Decl>, imported: &ImportedDecls) -> Vec<
                         type_params: type_params.clone(),
                         variants: variants.iter().map(|v| v.node.clone()).collect(),
                         derives_generic: deriving.iter().any(|d| d.is_plain_named("Generic")),
+                        opaque: *opaque,
                     },
                 );
             }
@@ -1332,17 +1340,21 @@ fn derive_applied_functional_bridge(
         if method.default_body.is_some() {
             continue;
         }
-        if !is_applied_bridge_method(method, self_var, row_var) {
-            return Err(Diagnostic {
-                severity: Severity::Error,
-                message: format!(
-                    "cannot derive `{trait_display}` for `{type_name}`: method `{}` must have shape `{self_var} -> {row_var}` with no effects",
-                    method.name
-                ),
-                span: Some(method.span),
-            });
-        }
-        methods.push(method.clone());
+        let return_shape = match classify_applied_bridge_return(&method.return_type, row_var, scope)
+        {
+            Ok(shape) if is_applied_bridge_method(method, self_var) => shape,
+            Ok(_) | Err(_) => {
+                return Err(Diagnostic {
+                    severity: Severity::Error,
+                    message: format!(
+                        "cannot derive `{trait_display}` for `{type_name}`: method `{}` must have shape `{self_var} -> {row_var}` or `{self_var} -> Wrapper {row_var}` with no effects",
+                        method.name
+                    ),
+                    span: Some(method.span),
+                });
+            }
+        };
+        methods.push((method.clone(), return_shape));
     }
     if methods.is_empty() {
         return Err(Diagnostic {
@@ -1370,9 +1382,10 @@ fn derive_applied_functional_bridge(
 
     let bridge_methods = methods
         .iter()
-        .map(|method| {
+        .map(|(method, return_shape)| {
             Annotated::bare(synth_applied_bridge_method(
                 method,
+                return_shape,
                 &source_rep_name,
                 &row_rep_ctor,
                 span,
@@ -1448,7 +1461,9 @@ fn derive_applied_functional_bridge(
     ];
     let delegating_methods = methods
         .iter()
-        .map(|method| Annotated::bare(synth_applied_delegating_method(method, span)))
+        .map(|(method, return_shape)| {
+            Annotated::bare(synth_applied_delegating_method(method, return_shape, span))
+        })
         .collect();
     let delegating_impl = Decl::ImplDef {
         id: NodeId::fresh(),
@@ -1561,12 +1576,98 @@ fn canonicalize_applied_row_type(ty: &TypeExpr, scope: &DeriveScope<'_>) -> Type
     }
 }
 
-fn is_applied_bridge_method(method: &TraitMethod, self_var: &str, row_var: &str) -> bool {
+#[derive(Clone)]
+enum AppliedBridgeReturn {
+    Bare,
+    TransparentUnaryWrapper { ctor_name: String },
+    MappedWrapper { map_name: String },
+}
+
+enum AppliedRowWrap {
+    Constructor(String),
+    Function(String),
+}
+
+fn classify_applied_bridge_return(
+    return_type: &TypeExpr,
+    row_var: &str,
+    scope: &DeriveScope<'_>,
+) -> Result<AppliedBridgeReturn, String> {
+    if matches!(return_type, TypeExpr::Var { name, .. } if name == row_var) {
+        return Ok(AppliedBridgeReturn::Bare);
+    }
+
+    let (head, args) = extract_head_and_args(return_type).ok_or_else(|| {
+        "return type must be the row variable or a named unary wrapper applied to the row variable"
+            .to_string()
+    })?;
+    if args.len() != 1 || !matches!(&args[0], TypeExpr::Var { name, .. } if name == row_var) {
+        return Err("return type wrapper must be applied directly to the row variable".to_string());
+    }
+    if let Some(ctor_name) = transparent_unary_wrapper_ctor(&head, scope)? {
+        return Ok(AppliedBridgeReturn::TransparentUnaryWrapper { ctor_name });
+    }
+    Ok(AppliedBridgeReturn::MappedWrapper {
+        map_name: map_name_for_wrapper_head(&head),
+    })
+}
+
+fn transparent_unary_wrapper_ctor(
+    head: &str,
+    scope: &DeriveScope<'_>,
+) -> Result<Option<String>, String> {
+    if let Some(entry) = scope.type_entry(head)? {
+        if entry.info.opaque || entry.info.type_params.len() != 1 || entry.info.variants.len() != 1
+        {
+            return Ok(None);
+        }
+        let variant = &entry.info.variants[0];
+        if variant.fields.len() != 1
+            || !is_type_param_ref(&variant.fields[0].1, &entry.info.type_params[0].name)
+        {
+            return Ok(None);
+        }
+        return Ok(Some(qualify_ctor_like(&entry.canonical, &variant.name)));
+    }
+
+    if let Some(entry) = scope.record_entry(head)? {
+        if entry.info.type_params.len() != 1
+            || entry.info.fields.len() != 1
+            || !is_type_param_ref(&entry.info.fields[0].1, &entry.info.type_params[0].name)
+        {
+            return Ok(None);
+        }
+        return Ok(Some(entry.canonical.clone()));
+    }
+
+    Err(format!("return wrapper `{head}` is not in scope"))
+}
+
+fn map_name_for_wrapper_head(head: &str) -> String {
+    head.rsplit_once('.')
+        .map(|(module, _)| format!("{module}.map"))
+        .unwrap_or_else(|| "map".to_string())
+}
+
+fn qualify_ctor_like(type_canonical: &str, ctor_name: &str) -> String {
+    if ctor_name.contains('.') {
+        ctor_name.to_string()
+    } else if let Some((module, _)) = type_canonical.rsplit_once('.') {
+        format!("{module}.{ctor_name}")
+    } else {
+        ctor_name.to_string()
+    }
+}
+
+fn is_type_param_ref(ty: &TypeExpr, param_name: &str) -> bool {
+    matches!(ty, TypeExpr::Var { name, .. } if name == param_name)
+}
+
+fn is_applied_bridge_method(method: &TraitMethod, self_var: &str) -> bool {
     method.params.len() == 1
         && method.effects.is_empty()
         && method.effect_row_var.is_empty()
         && matches!(&method.params[0].1, TypeExpr::Var { name, .. } if name == self_var)
-        && matches!(&method.return_type, TypeExpr::Var { name, .. } if name == row_var)
 }
 
 fn is_supported_applied_row_type(ty: &TypeExpr) -> bool {
@@ -1610,12 +1711,19 @@ fn rep_name_for_type_head(head: &str) -> String {
 
 fn synth_applied_bridge_method(
     method: &TraitMethod,
+    return_shape: &AppliedBridgeReturn,
     source_rep_name: &str,
     row_rep_ctor: &str,
     span: Span,
 ) -> ImplMethod {
     let inner = "__inner".to_string();
     let method_call = app_expr(var_expr(&method.name, span), var_expr(&inner, span), span);
+    let body = synth_applied_return_wrap(
+        return_shape,
+        method_call,
+        AppliedRowWrap::Constructor(row_rep_ctor.to_string()),
+        span,
+    );
     ImplMethod {
         name: method.name.clone(),
         name_span: Span { start: 0, end: 0 },
@@ -1629,15 +1737,24 @@ fn synth_applied_bridge_method(
             }],
             span,
         }],
-        body: apply_ctor(row_rep_ctor, method_call, span),
+        body,
     }
 }
 
-fn synth_applied_delegating_method(method: &TraitMethod, span: Span) -> ImplMethod {
+fn synth_applied_delegating_method(
+    method: &TraitMethod,
+    return_shape: &AppliedBridgeReturn,
+    span: Span,
+) -> ImplMethod {
     let value = "__val".to_string();
     let to_call = app_expr(var_expr("to", span), var_expr(&value, span), span);
     let method_call = app_expr(var_expr(&method.name, span), to_call, span);
-    let from_call = app_expr(var_expr("from", span), method_call, span);
+    let body = synth_applied_return_wrap(
+        return_shape,
+        method_call,
+        AppliedRowWrap::Function("from".to_string()),
+        span,
+    );
     ImplMethod {
         name: method.name.clone(),
         name_span: Span { start: 0, end: 0 },
@@ -1646,12 +1763,89 @@ fn synth_applied_delegating_method(method: &TraitMethod, span: Span) -> ImplMeth
             name: value,
             span,
         }],
-        body: from_call,
+        body,
+    }
+}
+
+fn synth_applied_return_wrap(
+    return_shape: &AppliedBridgeReturn,
+    method_call: Expr,
+    row_wrap: AppliedRowWrap,
+    span: Span,
+) -> Expr {
+    match return_shape {
+        AppliedBridgeReturn::Bare => apply_applied_row_wrap(&row_wrap, method_call, span),
+        AppliedBridgeReturn::MappedWrapper { map_name } => app_expr(
+            app_expr(value_expr(map_name, span), row_wrap.into_expr(span), span),
+            method_call,
+            span,
+        ),
+        AppliedBridgeReturn::TransparentUnaryWrapper { ctor_name } => {
+            let out = "__applied_row_out".to_string();
+            let wrapped = apply_applied_row_wrap(&row_wrap, var_expr(&out, span), span);
+            Expr::synth(
+                span,
+                ExprKind::Case {
+                    scrutinee: Box::new(method_call),
+                    arms: vec![Annotated::bare(CaseArm {
+                        pattern: Pat::Constructor {
+                            id: NodeId::fresh(),
+                            name: ctor_name.clone(),
+                            args: vec![Pat::Var {
+                                id: NodeId::fresh(),
+                                name: out,
+                                span,
+                            }],
+                            span,
+                        },
+                        guard: None,
+                        body: apply_ctor(ctor_name, wrapped, span),
+                        span,
+                    })],
+                    dangling_trivia: vec![],
+                },
+            )
+        }
+    }
+}
+
+fn apply_applied_row_wrap(wrap: &AppliedRowWrap, value: Expr, span: Span) -> Expr {
+    match wrap {
+        AppliedRowWrap::Constructor(name) => apply_ctor(name, value, span),
+        AppliedRowWrap::Function(name) => app_expr(value_expr(name, span), value, span),
+    }
+}
+
+impl AppliedRowWrap {
+    fn into_expr(self, span: Span) -> Expr {
+        match self {
+            AppliedRowWrap::Constructor(name) => ctor_expr(&name, span),
+            AppliedRowWrap::Function(name) => value_expr(&name, span),
+        }
     }
 }
 
 fn var_expr(name: &str, span: Span) -> Expr {
     Expr::synth(span, ExprKind::Var { name: name.into() })
+}
+
+fn value_expr(name: &str, span: Span) -> Expr {
+    if let Some((module, name)) = name.rsplit_once('.') {
+        Expr::synth(
+            span,
+            ExprKind::QualifiedName {
+                module: module.to_string(),
+                name: name.to_string(),
+                canonical_module: Some(module.to_string()),
+            },
+        )
+    } else {
+        var_expr(name, span)
+    }
+}
+
+fn ctor_expr(name: &str, span: Span) -> Expr {
+    Expr::synth(span, ExprKind::Constructor { name: name.into() })
 }
 
 fn app_expr(func: Expr, arg: Expr, span: Span) -> Expr {

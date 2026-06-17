@@ -104,10 +104,12 @@ fn is_fn_ref(kind: &ResolvedCodegenKind) -> bool {
 /// A parameterized `DictConstructor` defined in another compiled module, with
 /// the producer's resolution map for carrying its body's name resolutions.
 pub struct ExternalCtor<'a> {
+    pub source_module: &'a str,
     pub dict_params: &'a [String],
     pub methods: &'a [Expr],
     pub resolution: &'a ResolutionMap,
     pub record_types: &'a HashMap<NodeId, String>,
+    pub constructors: &'a HashMap<NodeId, String>,
 }
 
 /// External dict constructors keyed by dict-constructor name.
@@ -119,10 +121,12 @@ pub type ExternalCtors<'a> = HashMap<String, ExternalCtor<'a>>;
 /// function name; a name defined as a carryable function in more than one module is
 /// dropped (see [`external_funs_from_modules`]), so a bare-name match is unambiguous.
 pub struct ExternalFun<'a> {
+    pub source_module: &'a str,
     pub params: &'a [Pat],
     pub body: &'a Expr,
     pub resolution: &'a ResolutionMap,
     pub record_types: &'a HashMap<NodeId, String>,
+    pub constructors: &'a HashMap<NodeId, String>,
 }
 
 /// External carryable plain functions keyed by bare function name.
@@ -136,6 +140,8 @@ pub struct FoldOutput {
     pub program: Program,
     pub carried_resolution: ResolutionMap,
     pub carried_record_types: HashMap<NodeId, String>,
+    pub carried_constructors: HashMap<NodeId, String>,
+    pub carried_constructor_names: HashMap<String, String>,
     /// Resolution for **cross-module producer-local functions** referenced by an
     /// inlined body, keyed by unqualified name (anchored to the producer module).
     /// The id-keyed `carried_resolution` is fragile: subsequent fold rewrites
@@ -155,7 +161,7 @@ pub fn external_ctors_from_modules(
     modules: &HashMap<String, super::CompiledModule>,
 ) -> ExternalCtors<'_> {
     let mut map = ExternalCtors::new();
-    for compiled in modules.values() {
+    for (source_module, compiled) in modules {
         for decl in &compiled.elaborated {
             if let Decl::DictConstructor {
                 name,
@@ -167,10 +173,12 @@ pub fn external_ctors_from_modules(
                 map.insert(
                     name.clone(),
                     ExternalCtor {
+                        source_module,
                         dict_params,
                         methods,
                         resolution: &compiled.resolution,
                         record_types: &compiled.front_resolution.record_types,
+                        constructors: &compiled.front_resolution.constructors,
                     },
                 );
             }
@@ -189,7 +197,7 @@ pub fn external_funs_from_modules(
 ) -> ExternalFuns<'_> {
     let mut map = ExternalFuns::new();
     let mut dropped: std::collections::HashSet<String> = std::collections::HashSet::new();
-    for compiled in modules.values() {
+    for (source_module, compiled) in modules {
         for decl in &compiled.elaborated {
             let Some((name, params, body)) = carryable_fun(decl) else {
                 continue;
@@ -206,10 +214,12 @@ pub fn external_funs_from_modules(
             map.insert(
                 name.to_string(),
                 ExternalFun {
+                    source_module,
                     params,
                     body,
                     resolution: &compiled.resolution,
                     record_types: &compiled.front_resolution.record_types,
+                    constructors: &compiled.front_resolution.constructors,
                 },
             );
         }
@@ -291,19 +301,23 @@ fn expr_node_count(expr: &Expr) -> usize {
 /// One dict constructor available for inlining — local (`resolution: None`) or
 /// external (carry the producer's resolution).
 struct CtorView<'a> {
+    source_module: Option<&'a str>,
     dict_params: &'a [String],
     methods: &'a [Expr],
     resolution: Option<&'a ResolutionMap>,
     record_types: Option<&'a HashMap<NodeId, String>>,
+    constructors: Option<&'a HashMap<NodeId, String>>,
 }
 
 /// One plain function available for "inline-to-cancel" — local (`resolution: None`)
 /// or external (carry the producer's resolution).
 struct FunView<'a> {
+    source_module: Option<&'a str>,
     params: &'a [Pat],
     body: &'a Expr,
     resolution: Option<&'a ResolutionMap>,
     record_types: Option<&'a HashMap<NodeId, String>>,
+    constructors: Option<&'a HashMap<NodeId, String>>,
 }
 
 struct Folder<'a> {
@@ -311,6 +325,8 @@ struct Folder<'a> {
     funs: HashMap<&'a str, FunView<'a>>,
     carried: ResolutionMap,
     carried_record_types: HashMap<NodeId, String>,
+    carried_constructors: HashMap<NodeId, String>,
+    carried_constructor_names: HashMap<String, String>,
     carried_names: HashMap<String, ResolvedSymbol>,
 }
 
@@ -330,10 +346,12 @@ pub fn fold_program(
         ctors.insert(
             name.as_str(),
             CtorView {
+                source_module: Some(ext.source_module),
                 dict_params: ext.dict_params,
                 methods: ext.methods,
                 resolution: Some(ext.resolution),
                 record_types: Some(ext.record_types),
+                constructors: Some(ext.constructors),
             },
         );
     }
@@ -348,10 +366,12 @@ pub fn fold_program(
             ctors.insert(
                 name.as_str(),
                 CtorView {
+                    source_module: None,
                     dict_params,
                     methods,
                     resolution: None,
                     record_types: None,
+                    constructors: None,
                 },
             );
         }
@@ -365,6 +385,8 @@ pub fn fold_program(
             program: program.clone(),
             carried_resolution: ResolutionMap::new(),
             carried_record_types: HashMap::new(),
+            carried_constructors: HashMap::new(),
+            carried_constructor_names: HashMap::new(),
             carried_names: HashMap::new(),
         };
     }
@@ -379,10 +401,12 @@ pub fn fold_program(
         funs.insert(
             name.as_str(),
             FunView {
+                source_module: Some(ext.source_module),
                 params: ext.params,
                 body: ext.body,
                 resolution: Some(ext.resolution),
                 record_types: Some(ext.record_types),
+                constructors: Some(ext.constructors),
             },
         );
     }
@@ -398,10 +422,12 @@ pub fn fold_program(
             funs.insert(
                 name,
                 FunView {
+                    source_module: None,
                     params,
                     body,
                     resolution: None,
                     record_types: None,
+                    constructors: None,
                 },
             );
         }
@@ -412,6 +438,8 @@ pub fn fold_program(
         funs,
         carried: ResolutionMap::new(),
         carried_record_types: HashMap::new(),
+        carried_constructors: HashMap::new(),
+        carried_constructor_names: HashMap::new(),
         carried_names: HashMap::new(),
     };
     let mut out = program.clone();
@@ -422,6 +450,8 @@ pub fn fold_program(
         program: out,
         carried_resolution: folder.carried,
         carried_record_types: folder.carried_record_types,
+        carried_constructors: folder.carried_constructors,
+        carried_constructor_names: folder.carried_constructor_names,
         carried_names: folder.carried_names,
     }
 }
@@ -625,13 +655,15 @@ impl Folder<'_> {
     ) -> Option<Expr> {
         // Copy out the borrowed ctor fields (all `&'a`) so the `&self.ctors`
         // borrow ends before we mutate `self.carried` below.
-        let (dict_params, methods, resolution, record_types) = {
+        let (dict_params, methods, resolution, record_types, constructors, source_module) = {
             let ctor = self.ctors.get(name)?;
             (
                 ctor.dict_params,
                 ctor.methods,
                 ctor.resolution,
                 ctor.record_types,
+                ctor.constructors,
+                ctor.source_module,
             )
         };
         if dict_params.len() != sub_dicts.len() {
@@ -647,7 +679,8 @@ impl Folder<'_> {
 
         // Clone the method body and freshen its NodeIds, carrying the producer's
         // resolution for a cross-module body.
-        let mut new_body = self.freshen_with_carry(body, resolution, record_types);
+        let mut new_body =
+            self.freshen_with_carry(body, resolution, record_types, constructors, source_module);
 
         // Substitute the `where`-bound dict params with the concrete sub-dicts.
         let subst: HashMap<&str, &Expr> = dict_params
@@ -679,15 +712,17 @@ impl Folder<'_> {
         body: &Expr,
         resolution: Option<&ResolutionMap>,
         record_types: Option<&HashMap<NodeId, String>>,
+        constructors: Option<&HashMap<NodeId, String>>,
+        source_module: Option<&str>,
     ) -> Expr {
         let mut new_body = body.clone();
         match resolution {
             Some(producer_res) => {
                 let mut old_ids = Vec::new();
-                collect_expr_ids(&mut new_body, &mut old_ids);
+                collect_carried_ids(&mut new_body, &mut old_ids);
                 freshen_expr_ids(&mut new_body);
                 let mut new_ids = Vec::new();
-                collect_expr_ids(&mut new_body, &mut new_ids);
+                collect_carried_ids(&mut new_body, &mut new_ids);
                 debug_assert_eq!(
                     old_ids.len(),
                     new_ids.len(),
@@ -710,6 +745,24 @@ impl Folder<'_> {
                         && let Some(record_type) = producer_record_types.get(old)
                     {
                         self.carried_record_types.insert(*new, record_type.clone());
+                    }
+                    if let Some(producer_constructors) = constructors
+                        && let Some(constructor) = producer_constructors.get(old)
+                    {
+                        self.carried_constructors.insert(*new, constructor.clone());
+                    } else if let Some(module) = source_module {
+                        self.carried_constructors
+                            .entry(*new)
+                            .or_insert_with(|| format!("{module}.__origin"));
+                    }
+                }
+                if let Some(module) = source_module {
+                    let mut ctor_names = Vec::new();
+                    collect_constructor_names(&mut new_body, &mut ctor_names);
+                    for name in ctor_names {
+                        self.carried_constructor_names
+                            .entry(name)
+                            .or_insert_with(|| module.to_string());
                     }
                 }
             }
@@ -740,9 +793,16 @@ impl Folder<'_> {
             ExprKind::QualifiedName { name, .. } => base_name(name),
             _ => return None,
         };
-        let (params, body, resolution, record_types) = {
+        let (params, body, resolution, record_types, constructors, source_module) = {
             let fun = self.funs.get(name)?;
-            (fun.params, fun.body, fun.resolution, fun.record_types)
+            (
+                fun.params,
+                fun.body,
+                fun.resolution,
+                fun.record_types,
+                fun.constructors,
+                fun.source_module,
+            )
         };
         if params.len() != args.len() {
             return None; // Partial/over-application — leave it.
@@ -758,7 +818,8 @@ impl Folder<'_> {
         if !collapses {
             return None;
         }
-        let fresh_body = self.freshen_with_carry(body, resolution, record_types);
+        let fresh_body =
+            self.freshen_with_carry(body, resolution, record_types, constructors, source_module);
         Some(bind_subpats(params, &args, &fresh_body))
     }
 }
@@ -779,13 +840,155 @@ fn substitute_dict_vars(expr: &mut Expr, subst: &HashMap<&str, &Expr>) {
     }
 }
 
-/// Collect the NodeId of `expr` and all descendant expressions in a
+/// Collect carried side-table ids from `expr` and descendant patterns in a
 /// deterministic pre-order. Run before and after `freshen_expr_ids` on the same
-/// (structurally unchanged) tree to build an old→new id mapping by position.
-fn collect_expr_ids(expr: &mut Expr, out: &mut Vec<NodeId>) {
+/// structurally unchanged tree to build an old->new id mapping by position.
+fn collect_carried_ids(expr: &mut Expr, out: &mut Vec<NodeId>) {
     out.push(expr.id);
+    match &mut expr.kind {
+        ExprKind::Lambda { params, .. } => {
+            for pat in params {
+                collect_pat_ids(pat, out);
+            }
+        }
+        ExprKind::Case { arms, .. } | ExprKind::Receive { arms, .. } => {
+            for arm in arms {
+                collect_pat_ids(&mut arm.node.pattern, out);
+            }
+        }
+        ExprKind::Do {
+            bindings,
+            else_arms,
+            ..
+        } => {
+            for (pat, _) in bindings {
+                collect_pat_ids(pat, out);
+            }
+            for arm in else_arms {
+                collect_pat_ids(&mut arm.node.pattern, out);
+            }
+        }
+        _ => {}
+    }
     for child in child_exprs_mut(expr) {
-        collect_expr_ids(child, out);
+        collect_carried_ids(child, out);
+    }
+}
+
+fn collect_pat_ids(pat: &mut Pat, out: &mut Vec<NodeId>) {
+    out.push(pat.id());
+    match pat {
+        Pat::Constructor { args, .. } => {
+            for arg in args {
+                collect_pat_ids(arg, out);
+            }
+        }
+        Pat::Record { fields, .. } | Pat::AnonRecord { fields, .. } => {
+            for (_, maybe_pat) in fields {
+                if let Some(field_pat) = maybe_pat {
+                    collect_pat_ids(field_pat, out);
+                }
+            }
+        }
+        Pat::Tuple { elements, .. }
+        | Pat::ListPat { elements, .. }
+        | Pat::Or {
+            patterns: elements, ..
+        } => {
+            for element in elements {
+                collect_pat_ids(element, out);
+            }
+        }
+        Pat::StringPrefix { rest, .. } => collect_pat_ids(rest, out),
+        Pat::BitStringPat { segments, .. } => {
+            for segment in segments {
+                collect_pat_ids(&mut segment.value, out);
+            }
+        }
+        Pat::ConsPat { head, tail, .. } => {
+            collect_pat_ids(head, out);
+            collect_pat_ids(tail, out);
+        }
+        Pat::Wildcard { .. } | Pat::Var { .. } | Pat::Lit { .. } => {}
+    }
+}
+
+fn collect_constructor_names(expr: &mut Expr, out: &mut Vec<String>) {
+    match &mut expr.kind {
+        ExprKind::Constructor { name } => out.push(base_name(name).to_string()),
+        ExprKind::RecordCreate { name, .. } => out.push(base_name(name).to_string()),
+        ExprKind::Lambda { params, .. } => {
+            for pat in params {
+                collect_pat_constructor_names(pat, out);
+            }
+        }
+        ExprKind::Case { arms, .. } | ExprKind::Receive { arms, .. } => {
+            for arm in arms {
+                collect_pat_constructor_names(&mut arm.node.pattern, out);
+            }
+        }
+        ExprKind::Do {
+            bindings,
+            else_arms,
+            ..
+        } => {
+            for (pat, _) in bindings {
+                collect_pat_constructor_names(pat, out);
+            }
+            for arm in else_arms {
+                collect_pat_constructor_names(&mut arm.node.pattern, out);
+            }
+        }
+        _ => {}
+    }
+    for child in child_exprs_mut(expr) {
+        collect_constructor_names(child, out);
+    }
+}
+
+fn collect_pat_constructor_names(pat: &mut Pat, out: &mut Vec<String>) {
+    match pat {
+        Pat::Constructor { name, args, .. } => {
+            out.push(base_name(name).to_string());
+            for arg in args {
+                collect_pat_constructor_names(arg, out);
+            }
+        }
+        Pat::Record { name, fields, .. } => {
+            out.push(base_name(name).to_string());
+            for (_, maybe_pat) in fields {
+                if let Some(field_pat) = maybe_pat {
+                    collect_pat_constructor_names(field_pat, out);
+                }
+            }
+        }
+        Pat::AnonRecord { fields, .. } => {
+            for (_, maybe_pat) in fields {
+                if let Some(field_pat) = maybe_pat {
+                    collect_pat_constructor_names(field_pat, out);
+                }
+            }
+        }
+        Pat::Tuple { elements, .. }
+        | Pat::ListPat { elements, .. }
+        | Pat::Or {
+            patterns: elements, ..
+        } => {
+            for element in elements {
+                collect_pat_constructor_names(element, out);
+            }
+        }
+        Pat::StringPrefix { rest, .. } => collect_pat_constructor_names(rest, out),
+        Pat::BitStringPat { segments, .. } => {
+            for segment in segments {
+                collect_pat_constructor_names(&mut segment.value, out);
+            }
+        }
+        Pat::ConsPat { head, tail, .. } => {
+            collect_pat_constructor_names(head, out);
+            collect_pat_constructor_names(tail, out);
+        }
+        Pat::Wildcard { .. } | Pat::Var { .. } | Pat::Lit { .. } => {}
     }
 }
 

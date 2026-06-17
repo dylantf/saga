@@ -231,6 +231,8 @@ pub(super) enum LowerMode {
 pub(super) struct LowererResolution {
     pub(super) symbols: super::resolve::ResolutionMap,
     pub(super) carried_record_types: HashMap<crate::ast::NodeId, String>,
+    pub(super) carried_constructors: HashMap<crate::ast::NodeId, String>,
+    pub(super) carried_constructor_names: HashMap<String, String>,
 }
 
 pub struct Lowerer<'a> {
@@ -334,6 +336,14 @@ pub struct Lowerer<'a> {
     /// These mirror typechecker `record_types` entries that would otherwise be
     /// lost when generic folding freshens producer AST into the consumer module.
     carried_record_types: HashMap<crate::ast::NodeId, String>,
+    /// Constructor facts carried for fresh cross-module inlined nodes.
+    /// These preserve producer-module constructor atoms for inlined private or
+    /// opaque constructors whose bare names would otherwise resolve locally.
+    carried_constructors: HashMap<crate::ast::NodeId, String>,
+    /// Name-level fallback for constructor facts carried through generic fold.
+    /// Some later fold rewrites duplicate/freshen AST nodes after the id-keyed
+    /// carry; the bare constructor name survives those rewrites.
+    carried_constructor_names: HashMap<String, String>,
     /// Bare handler name -> canonical handler name (e.g. "collect_handler" -> "Std.Test.collect_handler").
     /// Built during init_module for resolving handler references in `with` expressions.
     handler_canonical: HashMap<String, String>,
@@ -419,6 +429,8 @@ impl<'a> Lowerer<'a> {
             constructor_atoms,
             resolved: resolution.symbols,
             carried_record_types: resolution.carried_record_types,
+            carried_constructors: resolution.carried_constructors,
+            carried_constructor_names: resolution.carried_constructor_names,
             current_handler_k: None,
             current_handler_finally: None,
             current_handler_source_module: None,

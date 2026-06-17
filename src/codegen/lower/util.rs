@@ -230,6 +230,12 @@ pub(super) fn collect_qualified_call(expr: &Expr) -> Option<(&str, &str, &Expr, 
 
 /// Peel a chain of App nodes to find a Constructor head and its arguments.
 pub(super) fn collect_ctor_call(expr: &Expr) -> Option<(&str, Vec<&Expr>)> {
+    collect_ctor_call_with_head(expr).map(|(_, name, args)| (name, args))
+}
+
+/// Peel a chain of App nodes to find a Constructor head and its arguments,
+/// returning the head expression so callers can inspect its NodeId.
+pub(super) fn collect_ctor_call_with_head(expr: &Expr) -> Option<(&Expr, &str, Vec<&Expr>)> {
     let mut args: Vec<&Expr> = Vec::new();
     let mut current = expr;
     loop {
@@ -240,7 +246,7 @@ pub(super) fn collect_ctor_call(expr: &Expr) -> Option<(&str, Vec<&Expr>)> {
             }
             ExprKind::Constructor { name, .. } => {
                 args.reverse();
-                return Some((name.as_str(), args));
+                return Some((current, name.as_str(), args));
             }
             _ => return None,
         }

@@ -163,6 +163,8 @@ pub fn emit_module_with_context(
         program,
         carried_resolution,
         carried_record_types,
+        carried_constructors,
+        carried_constructor_names,
         carried_names,
     } = fold_out;
     let constructor_atoms = resolve::build_constructor_atoms(
@@ -202,6 +204,8 @@ pub fn emit_module_with_context(
         lower::LowererResolution {
             symbols: resolution_map,
             carried_record_types,
+            carried_constructors,
+            carried_constructor_names,
         },
         check_result,
         optimization,

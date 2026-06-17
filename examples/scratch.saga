@@ -1,21 +1,36 @@
 import Std.Generic (Generic, Leaf, Labeled, And, Record)
 import Std.IO (console)
 
-# Kraken selectable-bridge spike.
+# Kraken remaining applied-derive issue.
 #
-# What Kraken wants:
+# The narrow applied derive works for traits shaped like:
 #
-#   record User { id: Int, name: String, age: Int } deriving (Generic)
-#   record Users source { ... Column source 'field T ... } deriving (Generic, Selectable User)
+#   trait Selectable selection row | selection -> row {
+#     fun to_row : selection -> row
+#   }
 #
-# Then the library can now derive:
+# Kraken's real trait returns a wrapper:
 #
-#   impl Selectable User for Users source
+#   fun to_projection : selection -> Projection row
 #
-# without the user spelling every field. The generic field walk handles the
-# inner shape; applied deriving generates the named-wrapper bridge:
+# `deriving (Selectable User)` currently rejects this with:
 #
-#   Rep__Users source -> Rep__User
+#   method `to_projection` must have shape `selection -> row` with no effects
+#
+# The desired generated bridge is not:
+#
+#   Rep__User (to_projection inner)
+#
+# but:
+#
+#   to_projection inner |> map_projection Rep__User
+#
+# In Kraken, the wrapper/map pair is:
+#
+#   Db.Projection row
+#   Db.map : (a -> b) -> Projection a -> Projection b
+#
+# This scratch file is intentionally the failing case.
 
 trait PgType a {}
 
@@ -24,6 +39,13 @@ impl PgType for String {}
 impl PgType for Bool {}
 
 type Column source (name : Symbol) a = Column
+
+type Projection a = Projection a
+
+fun map_projection : (a -> b) -> Projection a -> Projection b
+map_projection f projection = case projection {
+  Projection value -> Projection (f value)
+}
 
 record User {
   id: Int,
@@ -43,7 +65,7 @@ fun users : Users UsersScope
 users = Users { id: Column, name: Column, age: Column }
 
 trait Selectable selection row | selection -> row {
-  fun to_row : selection -> row
+  fun to_projection : selection -> Projection row
 }
 
 trait Dummy a {
@@ -63,42 +85,63 @@ impl Dummy for Bool {
 }
 
 impl Selectable a for Column source name a where {a: PgType, a: Dummy} {
-  to_row _ = dummy ()
+  to_projection _ = Projection (dummy ())
 }
 
 impl Selectable (Leaf row) for Leaf selection where {selection: Selectable row} {
-  to_row selection = case selection {
-    Leaf value -> Leaf (to_row value)
+  to_projection selection = case selection {
+    Leaf value -> map_projection Leaf (to_projection value)
   }
 }
 
 impl Selectable (Labeled n out) for Labeled n field
   where {Selectable field out}
 {
-  to_row selection = case selection {
-    Labeled field -> Labeled (to_row field)
+  to_projection selection = case selection {
+    Labeled field -> map_projection Labeled (to_projection field)
   }
 }
 
 impl Selectable (And left_out right_out) for And left right
   where {Selectable left left_out, Selectable right right_out}
 {
-  to_row selection = case selection {
-    And left right -> And (to_row left) (to_row right)
+  to_projection selection = case selection {
+    And left right -> case to_projection left {
+      Projection left_value -> case to_projection right {
+        Projection right_value -> Projection (And left_value right_value)
+      }
+    }
   }
 }
 
 impl Selectable (Record out) for Record fields
   where {Selectable fields out}
 {
-  to_row selection = case selection {
-    Record name fields -> Record name (to_row fields)
+  to_projection selection = case selection {
+    Record name fields -> map_projection (fun out -> Record name out) (to_projection fields)
   }
 }
 
 fun project : selection -> row
   where {selection: Generic selection_rep, selection_rep: Selectable row_rep, row: Generic row_rep}
-project selection = from (to_row (to selection))
+project selection = case to_projection (to selection) {
+  Projection row_rep -> from row_rep
+}
+
+# Manual bridge that works today, shown for reference. Uncommenting this and
+# removing `Selectable User` from the deriving clause above makes the file pass.
+#
+# impl Selectable Rep__User for Rep__Users source {
+#   to_projection rep = case rep {
+#     Rep__Users inner -> map_projection Rep__User (to_projection inner)
+#   }
+# }
+#
+# impl Selectable User for Users source {
+#   to_projection users = case to_projection (to users) {
+#     Projection row_rep -> Projection (from row_rep)
+#   }
+# }
 
 main () = {
   let row: User = project users
