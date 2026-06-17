@@ -902,6 +902,34 @@ impl Lexer {
                 }
                 Some(ch) if ch.is_alphabetic() || ch == '_' => {
                     let mut tok = self.read_identifier();
+                    if let Token::Ident(ref name) = tok
+                        && self.peek() == Some('$')
+                        && self.peek_next() == Some('"')
+                    {
+                        let name = name.clone();
+                        tok = if self.peek_ahead(2) == Some('"') && self.peek_ahead(3) == Some('"')
+                        {
+                            self.advance(); // $
+                            self.advance(); // "
+                            self.advance(); // "
+                            self.advance(); // "
+                            match self.read_multiline_interp_string(start)? {
+                                Token::InterpolatedString(parts, kind) => {
+                                    Token::TaggedInterpolatedString(name, parts, kind)
+                                }
+                                _ => unreachable!(),
+                            }
+                        } else {
+                            self.advance(); // $
+                            self.advance(); // "
+                            match self.read_interp_string(start)? {
+                                Token::InterpolatedString(parts, kind) => {
+                                    Token::TaggedInterpolatedString(name, parts, kind)
+                                }
+                                _ => unreachable!(),
+                            }
+                        };
+                    }
                     // ident! (no space) -> EffectCall, but not ident!=
                     if let Token::Ident(ref name) = tok
                         && self.peek() == Some('!')

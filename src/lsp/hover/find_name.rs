@@ -375,9 +375,9 @@ fn find_in_expr(expr: &Expr, offset: usize) -> Found {
                 Some((name.clone(), span, Some(node_id)))
             }
         }
-        ExprKind::App { func, arg, .. } => {
-            find_in_expr(func, offset).or_else(|| find_in_expr(arg, offset))
-        }
+        ExprKind::App { func, arg, .. } => find_in_expr(func, offset)
+            .or_else(|| find_in_expr(arg, offset))
+            .or_else(|| Some(("<expr>".to_string(), span, Some(node_id)))),
         ExprKind::BinOp { left, right, .. } => {
             find_in_expr(left, offset).or_else(|| find_in_expr(right, offset))
         }

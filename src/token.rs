@@ -6,6 +6,8 @@ pub enum Token {
     String(String, StringKind),
     /// `$"hello {name}"` -- pre-tokenized interpolated string
     InterpolatedString(Vec<InterpPart>, StringKind),
+    /// `tag$"hello {name}"` -- tagged interpolated string, grouped as one primary expr.
+    TaggedInterpolatedString(String, Vec<InterpPart>, StringKind),
 
     // Identifiers
     Ident(String),

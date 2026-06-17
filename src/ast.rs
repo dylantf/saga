@@ -744,6 +744,8 @@ pub enum ExprKind {
 
     /// `$"hello {name}"` -- interpolated string (desugars to show/concat chain)
     StringInterp {
+        /// `sql` in `sql$"..."`. None keeps the ordinary Show-based interpolation.
+        tag: Option<String>,
         parts: Vec<StringPart>,
         kind: StringKind,
     },

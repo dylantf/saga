@@ -880,6 +880,41 @@ impl Parser {
                     id: self.next_id(),
                     span,
                     kind: ExprKind::StringInterp {
+                        tag: None,
+                        parts: string_parts,
+                        kind,
+                    },
+                })
+            }
+            Token::TaggedInterpolatedString(tag, parts, kind) => {
+                use crate::token::InterpPart;
+                let mut string_parts: Vec<StringPart> = Vec::new();
+                for part in parts {
+                    match part {
+                        InterpPart::Literal(s) => {
+                            if !s.is_empty() {
+                                string_parts.push(StringPart::Lit(s));
+                            }
+                        }
+                        InterpPart::Hole(mut tokens) => {
+                            tokens.push(crate::token::Spanned {
+                                token: crate::token::Token::Eof,
+                                span,
+                                leading_trivia: Vec::new(),
+                                trailing_comment: None,
+                                preceded_by_newline: false,
+                            });
+                            let mut sub = crate::parser::Parser::new(tokens);
+                            let hole_expr = sub.parse_expr(0)?;
+                            string_parts.push(StringPart::Expr(hole_expr));
+                        }
+                    }
+                }
+                Ok(Expr {
+                    id: self.next_id(),
+                    span,
+                    kind: ExprKind::StringInterp {
+                        tag: Some(tag),
                         parts: string_parts,
                         kind,
                     },
