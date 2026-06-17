@@ -586,8 +586,13 @@ pub fn expand_derives(program: &mut Vec<Decl>, imported: &ImportedDecls) -> Vec<
                                 span: Some(spec.span),
                             });
                         } else {
-                            match derive_applied_selectable(spec, name, type_params, *span, &scope)
-                            {
+                            match derive_applied_functional_bridge(
+                                spec,
+                                name,
+                                type_params,
+                                *span,
+                                &scope,
+                            ) {
                                 Ok(decls) => extra.extend(decls),
                                 Err(diag) => errors.push(diag),
                             }
@@ -661,8 +666,13 @@ pub fn expand_derives(program: &mut Vec<Decl>, imported: &ImportedDecls) -> Vec<
                                 span: Some(spec.span),
                             });
                         } else {
-                            match derive_applied_selectable(spec, name, type_params, *span, &scope)
-                            {
+                            match derive_applied_functional_bridge(
+                                spec,
+                                name,
+                                type_params,
+                                *span,
+                                &scope,
+                            ) {
                                 Ok(decls) => extra.extend(decls),
                                 Err(diag) => errors.push(diag),
                             }
@@ -1251,7 +1261,7 @@ fn is_hardcoded_derive(bare: &str) -> bool {
     )
 }
 
-fn derive_applied_selectable(
+fn derive_applied_functional_bridge(
     spec: &DeriveSpec,
     type_name: &str,
     type_params: &[TypeParam],
@@ -1322,7 +1332,7 @@ fn derive_applied_selectable(
         if method.default_body.is_some() {
             continue;
         }
-        if !is_selectable_shaped_method(method, self_var, row_var) {
+        if !is_applied_bridge_method(method, self_var, row_var) {
             return Err(Diagnostic {
                 severity: Severity::Error,
                 message: format!(
@@ -1361,7 +1371,7 @@ fn derive_applied_selectable(
     let bridge_methods = methods
         .iter()
         .map(|method| {
-            Annotated::bare(synth_selectable_bridge_method(
+            Annotated::bare(synth_applied_bridge_method(
                 method,
                 &source_rep_name,
                 &row_rep_ctor,
@@ -1438,7 +1448,7 @@ fn derive_applied_selectable(
     ];
     let delegating_methods = methods
         .iter()
-        .map(|method| Annotated::bare(synth_selectable_delegating_method(method, span)))
+        .map(|method| Annotated::bare(synth_applied_delegating_method(method, span)))
         .collect();
     let delegating_impl = Decl::ImplDef {
         id: NodeId::fresh(),
@@ -1551,7 +1561,7 @@ fn canonicalize_applied_row_type(ty: &TypeExpr, scope: &DeriveScope<'_>) -> Type
     }
 }
 
-fn is_selectable_shaped_method(method: &TraitMethod, self_var: &str, row_var: &str) -> bool {
+fn is_applied_bridge_method(method: &TraitMethod, self_var: &str, row_var: &str) -> bool {
     method.params.len() == 1
         && method.effects.is_empty()
         && method.effect_row_var.is_empty()
@@ -1598,7 +1608,7 @@ fn rep_name_for_type_head(head: &str) -> String {
     }
 }
 
-fn synth_selectable_bridge_method(
+fn synth_applied_bridge_method(
     method: &TraitMethod,
     source_rep_name: &str,
     row_rep_ctor: &str,
@@ -1623,7 +1633,7 @@ fn synth_selectable_bridge_method(
     }
 }
 
-fn synth_selectable_delegating_method(method: &TraitMethod, span: Span) -> ImplMethod {
+fn synth_applied_delegating_method(method: &TraitMethod, span: Span) -> ImplMethod {
     let value = "__val".to_string();
     let to_call = app_expr(var_expr("to", span), var_expr(&value, span), span);
     let method_call = app_expr(var_expr(&method.name, span), to_call, span);

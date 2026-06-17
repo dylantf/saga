@@ -182,11 +182,11 @@ Source: `src/derive.rs`
 3. **Anything else** (user-defined traits like `ToJson`): route through Generic
    via `derive_routed`, which synthesizes a bridge impl and a delegating impl.
    Auto-includes `Generic` if not already listed.
-4. **Applied `Selectable`-shaped derives** (`deriving (Selectable User)`):
+4. **Applied functional bridge derives** (`deriving (Selectable User)`):
    synthesize the named-representation bridge for a functional two-parameter
-   trait whose routed method has shape `selection -> row`. This is the v1
-   surface for schema-selection records that need to derive
-   `impl Selectable User for Users source`.
+   trait whose required methods have shape `selection -> row`. `Selectable`
+   is the motivating Kraken bridge use case, but the compiler path is
+   trait-name agnostic.
 
 Synthetic decls are **spliced after their parent decl**, not appended to the
 end of the program. Earlier behavior appended at end-of-program but that
@@ -401,9 +401,9 @@ If the deriving list contains a non-hardcoded trait and doesn't already
 include `Generic`, `Generic` is implicitly added. Same pattern as the
 existing "Ord auto-includes Eq" logic.
 
-### Applied Selectable-Shaped Derives
+### Applied Functional Bridge Derives
 
-Applied derives are intentionally narrow in v1. A derive like:
+Applied derives are intentionally narrow. A derive like:
 
 ```saga
 record User { id: Int, name: String } deriving (Generic)
@@ -440,16 +440,22 @@ impl Selectable User for Users source
 }
 ```
 
-The inner `Selectable` walk is still provided by the library's normal
+The compiler generates this shape for any trait that satisfies the same
+contract, not just a trait literally named `Selectable`. Every non-default
+method must be pure and have shape `selection -> row`; defaulted methods are
+left alone. If a trait has multiple required methods, the derive synthesizes a
+bridge/delegating body for each one.
+
+The inner structural walk is still provided by the library's normal
 `Leaf`/`Labeled`/`And`/`Record` impls. The applied derive only supplies the
 named-wrapper bridge that ordinary structural routing cannot infer.
 
-V1 accepts one named row type argument (`User` or a parenthesized named
-application such as `(Box Int)`). It rejects hardcoded derives with arguments,
-non-functional traits, traits whose non-default methods are not pure
-`selection -> row`, and anonymous/tuple/function/symbol row arguments. The row
-type must already expose a `Generic` representation, usually via
-`deriving (Generic)`.
+Applied bridge derives accept one named row type argument (`User` or a
+parenthesized named application such as `(Box Int)`). They reject hardcoded
+derives with arguments, non-functional traits, traits whose non-default methods
+are not pure `selection -> row`, and anonymous/tuple/function/symbol row
+arguments. The row type must already expose a `Generic` representation, usually
+via `deriving (Generic)`.
 
 ---
 

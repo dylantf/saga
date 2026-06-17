@@ -10159,6 +10159,53 @@ q () = to_row users\n";
 }
 
 #[test]
+fn applied_functional_bridge_derive_supports_non_selectable_trait_with_multiple_methods() {
+    check(
+        "import Std.Generic (Generic, Leaf, Labeled, And, Record)\n\
+         type Column source (name : Symbol) a = Column\n\
+         record User { id: Int, name: String }\n  deriving (Generic)\n\
+         type UsersScope = UsersScope\n\
+         record Users source {\n\
+           id: Column source 'id Int,\n\
+           name: Column source 'name String,\n\
+         }\n  deriving (Generic, Projectable User)\n\
+         fun users : Users UsersScope\n\
+         users = Users { id: Column, name: Column }\n\
+         trait Projectable selection row | selection -> row {\n\
+           fun project_row : selection -> row\n\
+           fun preview_row : selection -> row\n\
+         }\n\
+         impl Projectable a for Column source name a {\n\
+           project_row _ = todo ()\n\
+           preview_row _ = todo ()\n\
+         }\n\
+         impl Projectable (Leaf row) for (Leaf selection) where {Projectable selection row} {\n\
+           project_row selection = case selection { Leaf value -> Leaf (project_row value) }\n\
+           preview_row selection = case selection { Leaf value -> Leaf (preview_row value) }\n\
+         }\n\
+         impl Projectable (Labeled n out) for (Labeled n field) where {Projectable field out} {\n\
+           project_row selection = case selection { Labeled field -> Labeled (project_row field) }\n\
+           preview_row selection = case selection { Labeled field -> Labeled (preview_row field) }\n\
+         }\n\
+         impl Projectable (And left_out right_out) for (And left right)\n\
+           where {Projectable left left_out, Projectable right right_out}\n\
+         {\n\
+           project_row selection = case selection { And left right -> And (project_row left) (project_row right) }\n\
+           preview_row selection = case selection { And left right -> And (preview_row left) (preview_row right) }\n\
+         }\n\
+         impl Projectable (Record out) for (Record fields) where {Projectable fields out} {\n\
+           project_row selection = case selection { Record name fields -> Record name (project_row fields) }\n\
+           preview_row selection = case selection { Record name fields -> Record name (preview_row fields) }\n\
+         }\n\
+         fun q : Unit -> User\n\
+         q () = project_row users\n\
+         fun r : Unit -> User\n\
+         r () = preview_row users\n",
+    )
+    .unwrap();
+}
+
+#[test]
 fn applied_selectable_derive_reports_missing_output_generic() {
     let err = check(
         "import Std.Generic (Generic, Leaf, Labeled, Record)\n\
