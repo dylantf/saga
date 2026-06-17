@@ -331,6 +331,152 @@ Trait constraints are generated throughout inference, especially for:
 
 Many of these constraints are pushed into `trait_state.pending_constraints` during inference and solved later.
 
+### Multi-Parameter Traits and Functional Dependencies
+
+Saga traits may have more than one type parameter:
+
+```saga
+trait Selectable selection row | selection -> row {
+  fun to_row : selection -> row
+}
+```
+
+In source, the `| selection -> row` part is a functional dependency. In the
+compiler this currently means one specific rule:
+
+- the first trait parameter is the "self" parameter
+- the first parameter determines every remaining parameter
+- the determined parameters must be listed in declaration order
+
+So `trait Selectable selection row | selection -> row` is supported, but an
+arbitrary dependency like `a b -> c` is not. `Generic` also participates in
+this rule through a legacy hardcoded entry in
+`check_traits::FUNCTIONAL_TRAITS`, because `Std.Generic.Generic` predates
+user-written fundep syntax.
+
+#### Representation
+
+Trait registration stores the rule as `TraitInfo.is_functional`. The full
+fundep declaration is validated in `register_trait_def`:
+
+- the determinant must be the first type parameter
+- it must determine at least one parameter
+- it must determine all non-self parameters in order
+
+Impl registration stores multi-parameter information in `ImplInfo`:
+
+- `trait_type_args`: the non-self trait arguments as full `Type`s
+- `target_pattern`: the structured impl target pattern, if the impl target is
+  not just a plain named type
+- `param_constraints_by_var_with_args`: conditional impl constraints whose
+  required trait also has extra arguments
+
+For example:
+
+```saga
+impl Selectable a for (Column source name a) where {a: PgType} { ... }
+
+impl Selectable (Labeled n out) for (Labeled n field)
+  where {field: Selectable out}
+{ ... }
+```
+
+The first impl stores `a` as the `Selectable` extra argument and also inside
+the `Column ... a` target pattern. The second stores a conditional constraint
+that must later push `Selectable field out`; preserving the `out` extra is
+important when the field is a phantom type such as `Column source 'title
+String`.
+
+Both conditional-constraint syntaxes feed the same metadata:
+
+```saga
+where {field: Selectable out}
+where {Selectable field out}
+```
+
+The old bound form (`field: Selectable out`) is still common in hand-written
+code. The bare where-app form (`Selectable field out`) is useful when a fresh
+existential type variable appears only in a constraint chain.
+
+#### Pending Constraints
+
+During inference, trait method instantiation and where-bound calls produce
+pending constraints shaped roughly as:
+
+```rust
+(trait_name, trait_type_arg_types, self_type, span, node_id)
+```
+
+For `to_row u.id` under the `Selectable` trait, the self type might be
+`Column UsersScope 'id Int` and the extra trait argument might be `Int`.
+For `Generic Person r`, the self type is `Person` and the extra is the
+representation variable `r`.
+
+`check_pending_constraints` solves these constraints after the relevant
+expression or declaration has had a chance to push more unifications into the
+substitution. This delay is important: result annotations and record field
+expectations often determine the extra parameter only after the method call has
+been inferred.
+
+#### Concrete-Self Solving
+
+When the self type resolves to a concrete `Type::Con`, the solver tries impl
+selection in layers:
+
+1. Exact impl-table lookup by `(trait, extra arg heads, self type head)`.
+2. Structured-pattern lookup for impls with the same trait and self head. This
+   matches `target_pattern` against the concrete self type, substitutes
+   pattern variables into `trait_type_args`, and checks the requested extras.
+   This is what lets `Selectable Int for Column source 'id Int` resolve even
+   when `Column`'s useful information is phantom.
+3. Functional-trait fallback. If the trait is functional and an extra argument
+   is still unresolved, scan for the unique impl with the matching self type
+   and pin the extra arguments from that impl.
+
+After an impl is selected, its conditional constraints are pushed back into
+`pending_constraints`. For structured targets, the stored pattern substitution
+is used so a constraint like `where {field: Selectable out}` becomes a concrete
+child constraint such as `Selectable (Column PostsScope 'title String) String`.
+
+#### Abstract-Self Solving
+
+When the self type is still a type variable, the solver checks whether the
+variable is covered by the enclosing function's where bounds. For
+multi-parameter bounds, `where_bound_trait_args` stores the extra arguments, so
+the required extras at the call site can be unified with the extras promised by
+the function signature.
+
+For example:
+
+```saga
+fun project : selection -> row
+  where {
+    selection: Generic selection_rep,
+    selection_rep: Selectable row_rep,
+    row: Generic row_rep,
+  }
+```
+
+Inside `project`, calls can discharge `Selectable selection_rep row_rep`
+against the where-bound evidence instead of selecting a concrete impl. The
+elaborator will later turn that evidence into a dictionary parameter.
+
+#### Evidence and Runtime Shape
+
+Functional dependencies are a typechecker feature. They do not change runtime
+dictionary layout. Once a constraint is solved, `TraitEvidence` records:
+
+- the trait name
+- the self type or polymorphic where-bound variable
+- the resolved extra trait arguments
+- the source `NodeId` that needs the evidence
+
+Elaboration uses the extra arguments as part of the dictionary key. A concrete
+`Selectable (Column PostsScope 'title String) String` and a polymorphic
+`Selectable selection_rep row_rep` both lower through normal dictionary
+passing; the fundep only helped the typechecker determine which extra argument
+belongs to the constraint.
+
 ### 9. Post-Body Validation Inside `check_program_inner`
 
 After the main declaration/body pass, `check_program_inner` runs several validation steps.

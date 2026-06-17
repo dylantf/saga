@@ -66,7 +66,7 @@ Checkbox = implemented and working. Unchecked = not yet done.
 - [x] `needs` on impl blocks (parsing + type checking)
 - [x] `deriving` syntax to auto-generate trait impls from ADT structure (e.g. `type Color = Red | Green deriving (Show)`)
 - [x] `deriving (Eq, Ord)` for ADTs (constructor declaration order defines ordering, then fields lexicographically)
-- [x] Trait type parameters (`trait ConvertTo b { ... }`, `impl ConvertTo NOK for USD { ... }`, `where {a: ConvertTo b}`) - enables multi-param trait patterns without full multi-param traits or fundeps
+- [x] Multi-parameter trait constraints and first-parameter functional dependencies (`trait Selectable selection row | selection -> row`, `impl Selectable Row for Selection`, `where {selection: Selectable row}`)
 
 ## Type System
 

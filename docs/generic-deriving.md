@@ -90,8 +90,8 @@ These are the structural pieces every Rep is built from:
 The module is auto-imported via the prelude (`src/stdlib/prelude.saga`).
 `deriving (Generic)` works without an explicit import.
 
-`Generic` is registered in `FUNCTIONAL_TRAITS` (`src/typechecker/check_traits.rs:17`)
-— see "Trait System Features Generic Depends On" below.
+`Generic` is a functional multi-parameter trait: the user type determines its
+representation type. See "Trait System Features Generic Depends On" below.
 
 ### Disambiguation: Labeled vs Variant, Record vs Adt
 
@@ -409,14 +409,28 @@ Phases 1-2:
 in `src/elaborate.rs` already supported this (the dict-table key is
 `(trait_name, trait_type_args, target_type)`).
 
-### Functional-Trait Coherence Rule
+### Functional Dependencies
 
-`src/typechecker/check_traits.rs:17` defines `FUNCTIONAL_TRAITS`, a hardcoded
-set of trait names (currently `Generic` and `Std.Generic.Generic`). For
-traits in this set, impl registration enforces that the first parameter
-determines the rest — there can be at most one `Generic Person ?` impl.
-This gives us the practical guarantee of associated types without the
-type-system machinery.
+`Generic` relies on the same functional-dependency rule now available to
+user-written multi-parameter traits: the first parameter determines every
+remaining parameter. This gives us the practical guarantee of associated types
+without the type-system machinery. For example, there can be at most one
+`Generic Person ?` impl, so `Generic Person r` can pin `r` to `Rep__Person`.
+
+Historically this was hardcoded through `check_traits::FUNCTIONAL_TRAITS`;
+`Generic` and `Std.Generic.Generic` still live in that legacy list because the
+stdlib declaration predates the source-level `| a -> r` syntax. New traits can
+declare the rule directly:
+
+```saga
+trait Selectable selection row | selection -> row {
+  fun to_row : selection -> row
+}
+```
+
+See
+[`docs/typechecking.md`](typechecking.md#multi-parameter-traits-and-functional-dependencies)
+for the general solver behavior.
 
 ### Free Type Variables in Impl Where Clauses (Phase 1c)
 
@@ -427,7 +441,7 @@ variables that don't appear in the impl head. Stored as
 
 Solver behavior (`check_pending_constraints` in `check_decl.rs`):
 - Constraints with all-concrete args resolve normally.
-- Constraints with fresh vars look up by bound args; for `FUNCTIONAL_TRAITS`
+- Constraints with fresh vars look up by bound args; for functional traits,
   the coherence rule pins the fresh args uniquely.
 - Per-impl substitutions inherit bindings from earlier constraints in the
   same chain. Source order; no fixed-point iteration.
@@ -444,7 +458,7 @@ type variables for the trait's non-self params. See `register_impl` in
 
 When constraint solving at a call site sees an unresolved trait extra (e.g.
 `Generic Person ?r` with `?r` unbound), it consults the impls table by
-self-type-only. For `FUNCTIONAL_TRAITS` with exactly one match, the extra is
+self-type-only. For functional traits with exactly one match, the extra is
 pinned to the impl's stored args.
 
 `ImplInfo.trait_type_args` is `Vec<Type>` (widened from `Vec<String>` in
@@ -624,7 +638,7 @@ referential containers makes it deferred work, not blocked work.
 - `src/ast.rs` — `Decl::ImplDef.where_apps`, `Decl::ImplDef.routed_derive_info`,
   `TraitApp`, `RoutedDeriveInfo`
 - `src/typechecker/check_traits.rs` — `FUNCTIONAL_TRAITS`,
-  `register_impl`, `is_functional_trait`
+  `register_trait_def`, `register_impl`, `TraitInfo.is_functional`
 - `src/typechecker/check_decl.rs` — `check_pending_constraints` (constraint
   ordering, call-site coherence fallback)
 - `src/typechecker/mod.rs` — `ImplInfo` (with `trait_type_args: Vec<Type>`

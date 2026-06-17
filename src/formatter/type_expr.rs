@@ -188,7 +188,14 @@ pub fn format_arrow_chain(params: &[(String, TypeExpr)], return_type: &TypeExpr)
         _ => format_type_expr(return_type),
     };
     parts.push(ret_doc);
-    Doc::join(Doc::text(" -> "), parts)
+    let mut iter = parts.into_iter();
+    let Some(first) = iter.next() else {
+        return Doc::Nil;
+    };
+    let tail = iter.fold(Doc::Nil, |acc, part| {
+        docs![acc, Doc::line(), Doc::text("-> "), part]
+    });
+    Doc::group(docs![first, Doc::nest(2, tail)])
 }
 
 /// Format `needs {Effect1, Effect2}` if non-empty.
@@ -253,6 +260,49 @@ pub fn format_where_clause(bounds: &[TraitBound]) -> Doc {
     docs![
         Doc::text("where {"),
         Doc::join(Doc::text(", "), bound_docs),
+        Doc::text("}")
+    ]
+}
+
+pub fn format_trait_app(app: &TraitApp) -> Doc {
+    if app.type_args.is_empty() {
+        Doc::text(app.trait_name.clone())
+    } else {
+        let args: Vec<Doc> = app.type_args.iter().map(format_type_expr).collect();
+        docs![
+            Doc::text(format!("{} ", app.trait_name)),
+            Doc::join(Doc::text(" "), args)
+        ]
+    }
+}
+
+pub fn format_impl_where_clause(bounds: &[TraitBound], apps: &[TraitApp]) -> Doc {
+    let mut items: Vec<Doc> = Vec::new();
+    for bound in bounds {
+        let trait_docs: Vec<Doc> = bound
+            .traits
+            .iter()
+            .map(|tr| {
+                if tr.type_args.is_empty() {
+                    Doc::text(tr.name.clone())
+                } else {
+                    let args: Vec<Doc> = tr.type_args.iter().map(format_type_expr).collect();
+                    docs![
+                        Doc::text(format!("{} ", tr.name)),
+                        Doc::join(Doc::text(" "), args)
+                    ]
+                }
+            })
+            .collect();
+        items.push(docs![
+            Doc::text(format!("{}: ", bound.type_var)),
+            Doc::join(Doc::text(" + "), trait_docs)
+        ]);
+    }
+    items.extend(apps.iter().map(format_trait_app));
+    docs![
+        Doc::text("where {"),
+        Doc::join(Doc::text(", "), items),
         Doc::text("}")
     ]
 }

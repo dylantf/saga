@@ -464,6 +464,11 @@ pub fn format_trait_def(
         )));
     }
 
+    if methods.is_empty() && dangling.is_empty() {
+        parts.push(Doc::text(" {}"));
+        return docs_from_vec(parts);
+    }
+
     parts.push(Doc::text(" {"));
 
     let body = format_annotated_body(
@@ -560,6 +565,7 @@ pub fn format_impl_def(decl: &Decl) -> Doc {
         target_type_expr,
         type_params,
         where_clause,
+        where_apps,
         needs,
         methods,
         dangling_trivia: dangling,
@@ -609,16 +615,33 @@ pub fn format_impl_def(decl: &Decl) -> Doc {
     }
     parts.push(Doc::text(header));
 
-    if !where_clause.is_empty() {
-        parts.push(Doc::text(" "));
-        parts.push(format_where_clause(where_clause));
-    }
-    if !needs.is_empty() {
-        parts.push(Doc::text(" "));
-        parts.push(format_needs(needs, &[]));
+    let multiline_where = !where_apps.is_empty();
+    if multiline_where {
+        parts.push(Doc::hardline());
+        parts.push(Doc::text("  "));
+        parts.push(format_impl_where_clause(where_clause, where_apps));
+        if !needs.is_empty() {
+            parts.push(Doc::text(" "));
+            parts.push(format_needs(needs, &[]));
+        }
+        parts.push(Doc::hardline());
+        parts.push(Doc::text("{"));
+    } else {
+        if !where_clause.is_empty() {
+            parts.push(Doc::text(" "));
+            parts.push(format_impl_where_clause(where_clause, where_apps));
+        }
+        if !needs.is_empty() {
+            parts.push(Doc::text(" "));
+            parts.push(format_needs(needs, &[]));
+        }
+        parts.push(Doc::text(" {"));
     }
 
-    parts.push(Doc::text(" {"));
+    if methods.is_empty() && dangling.is_empty() {
+        parts.push(Doc::text("}"));
+        return docs_from_vec(parts);
+    }
 
     let body = format_annotated_body(
         methods,

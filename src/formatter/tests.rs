@@ -1010,6 +1010,29 @@ fn fun_sig_long_breaks_needs() {
     assert!(result.contains("\n  needs {"), "result: {}", result);
 }
 
+#[test]
+fn fun_sig_long_arrow_chain_breaks_arrows() {
+    assert_eq!(
+        fmt80(
+            "pub fun table_as : String -> Table table row insert required_cols optional_cols -> Table table row insert required_cols optional_cols"
+        ),
+        "pub fun table_as : String\n  -> Table table row insert required_cols optional_cols\n  -> Table table row insert required_cols optional_cols\n"
+    );
+}
+
+#[test]
+fn fun_sig_breaks_bonus_clause_before_arrow_chain() {
+    let src = "fun table_as : String -> Table table row insert required_cols optional_cols needs {Log, Process}";
+    let result = fmt(src, 80);
+    assert!(
+        result.starts_with(
+            "fun table_as : String -> Table table row insert required_cols optional_cols\n  needs {"
+        ),
+        "result: {}",
+        result
+    );
+}
+
 // --- Application ---
 
 #[test]
@@ -1607,6 +1630,19 @@ fn trait_default_method_body_preserved() {
 }
 
 #[test]
+fn empty_trait_body_stays_inline() {
+    assert_eq!(fmt80("trait PgType a {\n}"), "trait PgType a {}\n");
+}
+
+#[test]
+fn empty_impl_body_stays_inline() {
+    assert_eq!(
+        fmt80("impl PgType for Int {\n}"),
+        "impl PgType for Int {}\n"
+    );
+}
+
+#[test]
 fn impl_parenthesized_trait_type_arg_round_trips() {
     assert_eq!(
         fmt80(
@@ -1623,6 +1659,26 @@ fn impl_structured_tuple_target_round_trips() {
             "impl Selectable (a, b) for (Column sa na a, Column sb nb b) where {a: PgType, b: PgType} {\n  to_projection pair = pair\n}"
         ),
         "impl Selectable (a, b) for (Column sa na a, Column sb nb b) where {a: PgType, b: PgType} {\n  to_projection pair = pair\n}\n"
+    );
+}
+
+#[test]
+fn impl_where_app_round_trips() {
+    assert_eq!(
+        fmt80(
+            "impl Selectable (Labeled n out) for (Labeled n field)\n  where {Selectable field out}\n{\n  to_row selection = selection\n}"
+        ),
+        "impl Selectable (Labeled n out) for Labeled n field\n  where {Selectable field out}\n{\n  to_row selection = selection\n}\n"
+    );
+}
+
+#[test]
+fn impl_mixed_where_bounds_and_apps_round_trips() {
+    assert_eq!(
+        fmt80(
+            "impl Selectable (Record out) for (Record fields) where {fields: HasLabel, Selectable fields out} {\n  to_row selection = selection\n}"
+        ),
+        "impl Selectable (Record out) for Record fields\n  where {fields: HasLabel, Selectable fields out}\n{\n  to_row selection = selection\n}\n"
     );
 }
 

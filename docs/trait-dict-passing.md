@@ -100,6 +100,14 @@ During `build_fun_scheme`, pending constraints from the function body are partit
 
 - **Type variable** (`Type::Var`): The typechecker checks if the variable is in `where_bounds` for the required trait. If so, it records evidence with `resolved_type: None` and `type_var_name: Some("a")`.
 
+Multi-parameter traits add `trait_type_args` to the same process. If a trait
+declares a supported functional dependency, such as `trait Selectable selection
+row | selection -> row`, the typechecker may use the self type to improve or
+pin the extra arguments before recording evidence. See
+[`docs/typechecking.md`](typechecking.md#multi-parameter-traits-and-functional-dependencies)
+for the solver details; dictionary passing itself only consumes the resolved
+evidence.
+
 ### TraitEvidence
 
 Each resolved constraint produces a `TraitEvidence` entry keyed by call-site `NodeId`:
