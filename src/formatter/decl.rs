@@ -10,6 +10,27 @@ use crate::ast::*;
 use crate::docs;
 use std::fmt::Write;
 
+fn format_derive_spec(spec: &DeriveSpec) -> String {
+    if spec.type_args.is_empty() {
+        return spec.trait_name.clone();
+    }
+    let args = spec
+        .type_args
+        .iter()
+        .map(|arg| pretty(1000, &format_type_expr_atom(arg)).trim_end().to_string())
+        .collect::<Vec<_>>()
+        .join(" ");
+    format!("{} {}", spec.trait_name, args)
+}
+
+fn format_deriving_clause(deriving: &[DeriveSpec]) -> String {
+    deriving
+        .iter()
+        .map(format_derive_spec)
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 pub fn format_import(path: &[String], alias: &Option<String>, exposing: &Option<Exposing>) -> Doc {
     let mut d = Doc::text(format!("import {}", path.join(".")));
     if let Some(a) = alias {
@@ -174,7 +195,7 @@ pub fn format_type_def(decl: &Decl) -> Doc {
     parts.push(Doc::text(header));
 
     let deriving_doc = if !deriving.is_empty() {
-        Doc::text(format!(" deriving ({})", deriving.join(", ")))
+        Doc::text(format!(" deriving ({})", format_deriving_clause(deriving)))
     } else {
         Doc::Nil
     };
@@ -206,7 +227,7 @@ pub fn format_type_def(decl: &Decl) -> Doc {
     };
 
     let deriving_bare = if !deriving.is_empty() {
-        Doc::text(format!("deriving ({})", deriving.join(", ")))
+        Doc::text(format!("deriving ({})", format_deriving_clause(deriving)))
     } else {
         Doc::Nil
     };
@@ -325,7 +346,7 @@ pub fn format_record_def(decl: &Decl) -> Doc {
     parts.push(Doc::text(header));
 
     let deriving_doc = if !deriving.is_empty() {
-        Doc::text(format!(" deriving ({})", deriving.join(", ")))
+        Doc::text(format!(" deriving ({})", format_deriving_clause(deriving)))
     } else {
         Doc::Nil
     };

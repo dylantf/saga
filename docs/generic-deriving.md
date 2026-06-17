@@ -182,6 +182,11 @@ Source: `src/derive.rs`
 3. **Anything else** (user-defined traits like `ToJson`): route through Generic
    via `derive_routed`, which synthesizes a bridge impl and a delegating impl.
    Auto-includes `Generic` if not already listed.
+4. **Applied `Selectable`-shaped derives** (`deriving (Selectable User)`):
+   synthesize the named-representation bridge for a functional two-parameter
+   trait whose routed method has shape `selection -> row`. This is the v1
+   surface for schema-selection records that need to derive
+   `impl Selectable User for Users source`.
 
 Synthetic decls are **spliced after their parent decl**, not appended to the
 end of the program. Earlier behavior appended at end-of-program but that
@@ -395,6 +400,56 @@ correct for parameterized ones.
 If the deriving list contains a non-hardcoded trait and doesn't already
 include `Generic`, `Generic` is implicitly added. Same pattern as the
 existing "Ord auto-includes Eq" logic.
+
+### Applied Selectable-Shaped Derives
+
+Applied derives are intentionally narrow in v1. A derive like:
+
+```saga
+record User { id: Int, name: String } deriving (Generic)
+
+record Users source {
+  id: Column source 'id Int,
+  name: Column source 'name String,
+} deriving (Generic, Selectable User)
+```
+
+requires `Selectable` to be a functional two-parameter trait:
+
+```saga
+trait Selectable selection row | selection -> row {
+  fun to_row : selection -> row
+}
+```
+
+The compiler generates two impls:
+
+```saga
+impl Selectable Rep__User for Rep__Users source {
+  to_row (Rep__Users inner) = Rep__User (to_row inner)
+}
+
+impl Selectable User for Users source
+  where {
+    Generic (Users source) selection_rep,
+    Generic User row_rep,
+    Selectable selection_rep row_rep,
+  }
+{
+  to_row value = from (to_row (to value))
+}
+```
+
+The inner `Selectable` walk is still provided by the library's normal
+`Leaf`/`Labeled`/`And`/`Record` impls. The applied derive only supplies the
+named-wrapper bridge that ordinary structural routing cannot infer.
+
+V1 accepts one named row type argument (`User` or a parenthesized named
+application such as `(Box Int)`). It rejects hardcoded derives with arguments,
+non-functional traits, traits whose non-default methods are not pure
+`selection -> row`, and anonymous/tuple/function/symbol row arguments. The row
+type must already expose a `Generic` representation, usually via
+`deriving (Generic)`.
 
 ---
 

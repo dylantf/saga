@@ -10071,6 +10071,129 @@ fn generic_lifted_phantom_column_preserves_where_bound_extra_arg() {
 }
 
 #[test]
+fn applied_selectable_derive_generates_named_rep_bridge() {
+    check(
+        "import Std.Generic (Generic, Leaf, Labeled, And, Record)\n\
+         trait PgType a {}\n\
+         impl PgType for Int {}\n\
+         impl PgType for String {}\n\
+         type Column source (name : Symbol) a = Column\n\
+         record User { id: Int, name: String }\n  deriving (Generic)\n\
+         type UsersScope = UsersScope\n\
+         record Users source {\n\
+           id: Column source 'id Int,\n\
+           name: Column source 'name String,\n\
+         }\n  deriving (Generic, Selectable User)\n\
+         fun users : Users UsersScope\n\
+         users = Users { id: Column, name: Column }\n\
+         trait Selectable selection row | selection -> row {\n\
+           fun to_row : selection -> row\n\
+         }\n\
+         impl Selectable a for (Column source name a) where {a: PgType} {\n\
+           to_row _ = todo ()\n\
+         }\n\
+         impl Selectable (Leaf row) for (Leaf selection) where {selection: Selectable row} {\n\
+           to_row selection = case selection { Leaf value -> Leaf (to_row value) }\n\
+         }\n\
+         impl Selectable (Labeled n out) for (Labeled n field) where {Selectable field out} {\n\
+           to_row selection = case selection { Labeled field -> Labeled (to_row field) }\n\
+         }\n\
+         impl Selectable (And left_out right_out) for (And left right)\n\
+           where {Selectable left left_out, Selectable right right_out}\n\
+         {\n\
+           to_row selection = case selection { And left right -> And (to_row left) (to_row right) }\n\
+         }\n\
+         impl Selectable (Record out) for (Record fields) where {Selectable fields out} {\n\
+           to_row selection = case selection { Record name fields -> Record name (to_row fields) }\n\
+         }\n\
+         fun project : selection -> row\n\
+           where {selection: Generic selection_rep, selection_rep: Selectable row_rep, row: Generic row_rep}\n\
+         project selection = from (to_row (to selection))\n\
+         fun q : Unit -> User\n\
+         q () = project users\n",
+    )
+    .unwrap();
+}
+
+#[test]
+fn applied_selectable_derive_reports_missing_output_generic() {
+    let err = check(
+        "import Std.Generic (Generic, Leaf, Labeled, Record)\n\
+         type Column source (name : Symbol) a = Column\n\
+         record User { id: Int }\n\
+         record Users source { id: Column source 'id Int }\n  deriving (Generic, Selectable User)\n\
+         trait Selectable selection row | selection -> row {\n\
+           fun to_row : selection -> row\n\
+         }\n\
+         impl Selectable (Record out) for (Record fields) where {Selectable fields out} {\n\
+           to_row selection = todo ()\n\
+         }\n",
+    )
+    .err()
+    .expect("expected missing Generic output row");
+    assert!(
+        err.message.contains("cannot derive `Selectable`")
+            && err.message.contains("Generic")
+            && err.message.contains("User"),
+        "expected derive-anchored missing Generic diagnostic, got: {}",
+        err.message
+    );
+}
+
+#[test]
+fn applied_selectable_derive_rejects_non_functional_trait() {
+    let err = check(
+        "record User { id: Int } deriving (Generic)\n\
+         record Users { id: Int } deriving (Selectable User)\n\
+         trait Selectable selection row {\n\
+           fun to_row : selection -> row\n\
+         }\n",
+    )
+    .err()
+    .expect("expected non-functional trait diagnostic");
+    assert!(
+        err.message.contains("functional two-parameter trait"),
+        "expected functional-trait diagnostic, got: {}",
+        err.message
+    );
+}
+
+#[test]
+fn applied_selectable_derive_rejects_wrong_method_shape() {
+    let err = check(
+        "record User { id: Int } deriving (Generic)\n\
+         record Users { id: Int } deriving (Selectable User)\n\
+         trait Selectable selection row | selection -> row {\n\
+           fun to_row : selection -> Int\n\
+         }\n",
+    )
+    .err()
+    .expect("expected method-shape diagnostic");
+    assert!(
+        err.message.contains("method `to_row` must have shape"),
+        "expected method-shape diagnostic, got: {}",
+        err.message
+    );
+}
+
+#[test]
+fn applied_selectable_derive_rejects_tuple_row_argument() {
+    let err = check(
+        "record Users { id: Int } deriving (Selectable (Int, String))\n\
+         trait Selectable selection row | selection -> row {\n\
+           fun to_row : selection -> row\n\
+         }\n",
+    )
+    .err()
+    .expect("expected row argument diagnostic");
+    assert!(
+        err.message.contains("row argument must be a named type"),
+        "expected row argument diagnostic, got: {}",
+        err.message
+    );
+}
+
+#[test]
 fn anonymous_record_generic_shape_can_drive_selectable_output_record() {
     check(
         "import Std.Generic (Generic, Leaf, Labeled, And, Record)\n\
