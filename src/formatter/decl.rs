@@ -17,7 +17,11 @@ fn format_derive_spec(spec: &DeriveSpec) -> String {
     let args = spec
         .type_args
         .iter()
-        .map(|arg| pretty(1000, &format_type_expr_atom(arg)).trim_end().to_string())
+        .map(|arg| {
+            pretty(1000, &format_type_expr_atom(arg))
+                .trim_end()
+                .to_string()
+        })
         .collect::<Vec<_>>()
         .join(" ");
     format!("{} {}", spec.trait_name, args)

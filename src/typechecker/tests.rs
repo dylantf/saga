@@ -10116,6 +10116,49 @@ fn applied_selectable_derive_generates_named_rep_bridge() {
 }
 
 #[test]
+fn applied_selectable_derive_supports_imported_trait_and_row_type() {
+    let rows = "module Rows\n\
+pub record User { id: Int, name: String }\n  deriving (Generic)\n";
+    let db = "module Db\n\
+import Std.Generic (Leaf, Labeled, And, Record)\n\
+pub type Column source (name : Symbol) a = Column\n\
+pub trait Selectable selection row | selection -> row {\n\
+  fun to_row : selection -> row\n\
+}\n\
+impl Selectable a for Column source name a {\n\
+  to_row _ = todo ()\n\
+}\n\
+impl Selectable (Leaf row) for (Leaf selection) where {Selectable selection row} {\n\
+  to_row selection = case selection { Leaf value -> Leaf (to_row value) }\n\
+}\n\
+impl Selectable (Labeled n out) for (Labeled n field) where {Selectable field out} {\n\
+  to_row selection = case selection { Labeled field -> Labeled (to_row field) }\n\
+}\n\
+impl Selectable (And left_out right_out) for (And left right)\n\
+  where {Selectable left left_out, Selectable right right_out}\n\
+{\n\
+  to_row selection = case selection { And left right -> And (to_row left) (to_row right) }\n\
+}\n\
+impl Selectable (Record out) for (Record fields) where {Selectable fields out} {\n\
+  to_row selection = case selection { Record name fields -> Record name (to_row fields) }\n\
+}\n";
+    let main = "module Main\n\
+import Db (Column, Selectable)\n\
+import Rows (User)\n\
+type UsersScope = UsersScope\n\
+record Users source {\n\
+  id: Column source 'id Int,\n\
+  name: Column source 'name String,\n\
+}\n  deriving (Generic, Selectable User)\n\
+fun users : Users UsersScope\n\
+users = Users { id: Column, name: Column }\n\
+fun q : Unit -> User\n\
+q () = to_row users\n";
+
+    check_with_project_files(&[("src/Rows.saga", rows), ("src/Db.saga", db)], main).unwrap();
+}
+
+#[test]
 fn applied_selectable_derive_reports_missing_output_generic() {
     let err = check(
         "import Std.Generic (Generic, Leaf, Labeled, Record)\n\

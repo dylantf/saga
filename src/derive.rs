@@ -535,6 +535,7 @@ pub fn expand_derives(program: &mut Vec<Decl>, imported: &ImportedDecls) -> Vec<
         let mut extra: Vec<Decl> = Vec::new();
         match decl {
             Decl::TypeDef {
+                public,
                 name,
                 type_params,
                 variants,
@@ -556,12 +557,12 @@ pub fn expand_derives(program: &mut Vec<Decl>, imported: &ImportedDecls) -> Vec<
 
                 // Auto-include Generic: if any non-hardcoded derive is requested
                 // and Generic isn't explicitly listed, synthesize it first.
-                let has_routed = deriving.iter().any(|d| {
-                    !d.type_args.is_empty() || !is_hardcoded_derive(d.bare_name())
-                });
+                let has_routed = deriving
+                    .iter()
+                    .any(|d| !d.type_args.is_empty() || !is_hardcoded_derive(d.bare_name()));
                 let has_generic = deriving.iter().any(|d| d.is_plain_named("Generic"));
                 if has_routed && !has_generic {
-                    match derive_adt_generic(name, type_params, variants, *span) {
+                    match derive_adt_generic(*public, name, type_params, variants, *span) {
                         Ok(decls) => extra.extend(decls),
                         Err(Some(diag)) => errors.push(diag),
                         Err(None) => errors.push(Diagnostic {
@@ -594,7 +595,7 @@ pub fn expand_derives(program: &mut Vec<Decl>, imported: &ImportedDecls) -> Vec<
                         continue;
                     }
                     if bare == "Generic" {
-                        match derive_adt_generic(name, type_params, variants, *span) {
+                        match derive_adt_generic(*public, name, type_params, variants, *span) {
                             Ok(decls) => extra.extend(decls),
                             Err(Some(diag)) => errors.push(diag),
                             Err(None) => errors.push(Diagnostic {
@@ -623,6 +624,7 @@ pub fn expand_derives(program: &mut Vec<Decl>, imported: &ImportedDecls) -> Vec<
                 }
             }
             Decl::RecordDef {
+                public,
                 name,
                 type_params,
                 fields,
@@ -630,12 +632,12 @@ pub fn expand_derives(program: &mut Vec<Decl>, imported: &ImportedDecls) -> Vec<
                 span,
                 ..
             } => {
-                let has_routed = deriving.iter().any(|d| {
-                    !d.type_args.is_empty() || !is_hardcoded_derive(d.bare_name())
-                });
+                let has_routed = deriving
+                    .iter()
+                    .any(|d| !d.type_args.is_empty() || !is_hardcoded_derive(d.bare_name()));
                 let has_generic = deriving.iter().any(|d| d.is_plain_named("Generic"));
                 if has_routed && !has_generic {
-                    match derive_record_generic(name, type_params, fields, *span) {
+                    match derive_record_generic(*public, name, type_params, fields, *span) {
                         Ok(decls) => extra.extend(decls),
                         Err(Some(diag)) => errors.push(diag),
                         Err(None) => errors.push(Diagnostic {
@@ -674,7 +676,14 @@ pub fn expand_derives(program: &mut Vec<Decl>, imported: &ImportedDecls) -> Vec<
                         }
                         continue;
                     }
-                    match generate_record_derive(trait_name, name, type_params, fields, *span) {
+                    match generate_record_derive(
+                        *public,
+                        trait_name,
+                        name,
+                        type_params,
+                        fields,
+                        *span,
+                    ) {
                         Ok(decls) => extra.extend(decls),
                         Err(Some(diag)) => errors.push(diag),
                         Err(None) => errors.push(Diagnostic {
@@ -1268,7 +1277,11 @@ fn derive_applied_selectable(
     };
     let trait_info = &trait_entry.info;
     let trait_syntax = trait_entry.canonical.clone();
-    let trait_display = spec.trait_name.rsplit('.').next().unwrap_or(&spec.trait_name);
+    let trait_display = spec
+        .trait_name
+        .rsplit('.')
+        .next()
+        .unwrap_or(&spec.trait_name);
 
     if spec.type_args.len() != 1 {
         return Err(Diagnostic {
@@ -1290,7 +1303,8 @@ fn derive_applied_selectable(
             span: Some(row_type.span()),
         });
     }
-    ensure_row_generic_available(trait_display, row_type, spec.span, scope)?;
+    let row_type = canonicalize_applied_row_type(row_type, scope);
+    ensure_row_generic_available(trait_display, &row_type, spec.span, scope)?;
     if trait_info.type_params.len() != 2 || !trait_info.is_functional {
         return Err(Diagnostic {
             severity: Severity::Error,
@@ -1332,7 +1346,7 @@ fn derive_applied_selectable(
 
     let zero_span = Span { start: 0, end: 0 };
     let source_rep_name = format!("Rep__{type_name}");
-    let row_rep_type = rep_type_for_named_type(row_type).expect("validated row type");
+    let row_rep_type = rep_type_for_named_type(&row_type).expect("validated row type");
     let row_rep_ctor = row_type
         .head_name()
         .map(rep_name_for_type_head)
@@ -1500,6 +1514,43 @@ fn ensure_row_generic_available(
     }
 }
 
+fn canonicalize_applied_row_type(ty: &TypeExpr, scope: &DeriveScope<'_>) -> TypeExpr {
+    match ty {
+        TypeExpr::Named { id, name, span } => {
+            let canonical = scope
+                .record_entry(name)
+                .ok()
+                .flatten()
+                .map(|entry| entry.canonical.clone())
+                .or_else(|| {
+                    scope
+                        .type_entry(name)
+                        .ok()
+                        .flatten()
+                        .map(|entry| entry.canonical.clone())
+                })
+                .unwrap_or_else(|| name.clone());
+            TypeExpr::Named {
+                id: *id,
+                name: canonical,
+                span: *span,
+            }
+        }
+        TypeExpr::App {
+            id,
+            func,
+            arg,
+            span,
+        } => TypeExpr::App {
+            id: *id,
+            func: Box::new(canonicalize_applied_row_type(func, scope)),
+            arg: Box::new(canonicalize_applied_row_type(arg, scope)),
+            span: *span,
+        },
+        other => other.clone(),
+    }
+}
+
 fn is_selectable_shaped_method(method: &TraitMethod, self_var: &str, row_var: &str) -> bool {
     method.params.len() == 1
         && method.effects.is_empty()
@@ -1554,11 +1605,7 @@ fn synth_selectable_bridge_method(
     span: Span,
 ) -> ImplMethod {
     let inner = "__inner".to_string();
-    let method_call = app_expr(
-        var_expr(&method.name, span),
-        var_expr(&inner, span),
-        span,
-    );
+    let method_call = app_expr(var_expr(&method.name, span), var_expr(&inner, span), span);
     ImplMethod {
         name: method.name.clone(),
         name_span: Span { start: 0, end: 0 },
@@ -2838,6 +2885,7 @@ fn type_expr_contains_var(te: &TypeExpr, name: &str) -> bool {
 ///   - `Err(None)` for "unsupported trait, use the default cannot-derive error"
 ///   - `Err(Some(diag))` for a specific diagnostic
 fn generate_record_derive(
+    public: bool,
     trait_name: &str,
     record_name: &str,
     type_params: &[TypeParam],
@@ -2866,7 +2914,7 @@ fn generate_record_derive(
             fields,
             span,
         )]),
-        "Generic" => derive_record_generic(record_name, type_params, fields, span),
+        "Generic" => derive_record_generic(public, record_name, type_params, fields, span),
         _ => Err(None),
     }
 }
@@ -2877,6 +2925,7 @@ fn generate_record_derive(
 /// type round-trip naturally through the runtime dictionary (no special
 /// recursion handling in the Rep shape).
 fn derive_record_generic(
+    public: bool,
     record_name: &str,
     type_params: &[TypeParam],
     fields: &[Annotated<(String, TypeExpr)>],
@@ -2897,7 +2946,7 @@ fn derive_record_generic(
     let rep_typedef = Decl::TypeDef {
         id: NodeId::fresh(),
         doc: vec![],
-        public: false,
+        public,
         opaque: false,
         name: rep_name.clone(),
         name_span: Span { start: 0, end: 0 },
@@ -3055,6 +3104,7 @@ fn apply_type_params(name: &str, type_params: &[TypeParam]) -> TypeExpr {
 /// Direct self-reference detection only — indirect recursion via other types
 /// is rare and deferred to Phase 2d alongside true recursive support.
 fn derive_adt_generic(
+    public: bool,
     type_name: &str,
     type_params: &[TypeParam],
     variants: &[Annotated<TypeConstructor>],
@@ -3078,7 +3128,7 @@ fn derive_adt_generic(
     let rep_typedef = Decl::TypeDef {
         id: NodeId::fresh(),
         doc: vec![],
-        public: false,
+        public,
         opaque: false,
         name: rep_name.clone(),
         name_span: Span { start: 0, end: 0 },

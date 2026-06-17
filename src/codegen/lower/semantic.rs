@@ -263,8 +263,13 @@ impl<'a> Lowerer<'a> {
     }
 
     pub(super) fn current_record_type_name(&self, node_id: crate::ast::NodeId) -> Option<&str> {
-        self.front_resolution_for_module(self.current_semantic_module_name())
-            .and_then(|r| r.record_type(node_id))
+        self.carried_record_types
+            .get(&node_id)
+            .map(String::as_str)
+            .or_else(|| {
+                self.front_resolution_for_module(self.current_semantic_module_name())
+                    .and_then(|r| r.record_type(node_id))
+            })
     }
 
     pub(super) fn handler_arm_effect_for_module(

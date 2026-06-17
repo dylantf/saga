@@ -4842,6 +4842,107 @@ main () = println (to_json (User { name: "Alice", age: 30 })) with {console}
 }
 
 #[test]
+fn cross_module_applied_selectable_derive_compiles_and_lowers() {
+    let rows = r#"module Rows
+
+pub record User { id: Int, name: String }
+  deriving (Generic)
+"#;
+
+    let db = r#"module Db
+
+import Std.Generic (Leaf, Labeled, And, Record)
+
+pub type Column source (name : Symbol) a = Column a
+
+pub trait Selectable selection row | selection -> row {
+  fun to_row : selection -> row
+}
+
+impl Selectable a for Column source name a {
+  to_row column = case column {
+    Column value -> value
+  }
+}
+
+impl Selectable (Leaf row) for (Leaf selection)
+  where {Selectable selection row}
+{
+  to_row selection = case selection {
+    Leaf value -> Leaf (to_row value)
+  }
+}
+
+impl Selectable (Labeled name out) for (Labeled name field)
+  where {Selectable field out}
+{
+  to_row selection = case selection {
+    Labeled field -> Labeled (to_row field)
+  }
+}
+
+impl Selectable (And left_out right_out) for (And left right)
+  where {Selectable left left_out, Selectable right right_out}
+{
+  to_row selection = case selection {
+    And left right -> And (to_row left) (to_row right)
+  }
+}
+
+impl Selectable (Record out) for (Record fields)
+  where {Selectable fields out}
+{
+  to_row selection = case selection {
+    Record name fields -> Record name (to_row fields)
+  }
+}
+"#;
+
+    let main = r#"module Main
+
+import Db (Column, Selectable)
+import Rows (User)
+
+type UsersScope = UsersScope
+
+record Users source {
+  id: Column source 'id Int,
+  name: Column source 'name String,
+}
+  deriving (Generic, Selectable User)
+
+fun users : Users UsersScope
+users = Users { id: Column 7, name: Column "Ada" }
+
+main () = {
+  let row: User = to_row users
+  row.name
+}
+"#;
+
+    with_temp_project_files(
+        &[("lib/Rows.saga", rows), ("lib/Db.saga", db)],
+        main,
+        |checker, program| {
+            let result = checker.to_result();
+            let rows_program = result
+                .programs()
+                .get("Rows")
+                .expect("Rows module not found");
+            let db_program = result.programs().get("Db").expect("Db module not found");
+            let rows_core = emit_from_program(rows_program, "rows", checker);
+            let db_core = emit_from_program(db_program, "db", checker);
+            let main_core = emit_from_program(program, "main", checker);
+            assert_project_modules_run(
+                &[("rows", &rows_core), ("db", &db_core), ("main", &main_core)],
+                "io:format(\"~s~n\", [main:main(unit)]), init:stop().",
+                &["Ada"],
+            );
+        },
+    );
+}
+
+#[test]
 fn cross_module_trait_default_body_resolves_in_trait_module() {
     // Regression: when a trait's default-method body references an
     // identifier defined alongside the trait (here `default_cfg`), and a

@@ -107,6 +107,7 @@ pub struct ExternalCtor<'a> {
     pub dict_params: &'a [String],
     pub methods: &'a [Expr],
     pub resolution: &'a ResolutionMap,
+    pub record_types: &'a HashMap<NodeId, String>,
 }
 
 /// External dict constructors keyed by dict-constructor name.
@@ -121,6 +122,7 @@ pub struct ExternalFun<'a> {
     pub params: &'a [Pat],
     pub body: &'a Expr,
     pub resolution: &'a ResolutionMap,
+    pub record_types: &'a HashMap<NodeId, String>,
 }
 
 /// External carryable plain functions keyed by bare function name.
@@ -133,6 +135,7 @@ pub type ExternalFuns<'a> = HashMap<String, ExternalFun<'a>>;
 pub struct FoldOutput {
     pub program: Program,
     pub carried_resolution: ResolutionMap,
+    pub carried_record_types: HashMap<NodeId, String>,
     /// Resolution for **cross-module producer-local functions** referenced by an
     /// inlined body, keyed by unqualified name (anchored to the producer module).
     /// The id-keyed `carried_resolution` is fragile: subsequent fold rewrites
@@ -167,6 +170,7 @@ pub fn external_ctors_from_modules(
                         dict_params,
                         methods,
                         resolution: &compiled.resolution,
+                        record_types: &compiled.front_resolution.record_types,
                     },
                 );
             }
@@ -205,6 +209,7 @@ pub fn external_funs_from_modules(
                     params,
                     body,
                     resolution: &compiled.resolution,
+                    record_types: &compiled.front_resolution.record_types,
                 },
             );
         }
@@ -289,6 +294,7 @@ struct CtorView<'a> {
     dict_params: &'a [String],
     methods: &'a [Expr],
     resolution: Option<&'a ResolutionMap>,
+    record_types: Option<&'a HashMap<NodeId, String>>,
 }
 
 /// One plain function available for "inline-to-cancel" — local (`resolution: None`)
@@ -297,12 +303,14 @@ struct FunView<'a> {
     params: &'a [Pat],
     body: &'a Expr,
     resolution: Option<&'a ResolutionMap>,
+    record_types: Option<&'a HashMap<NodeId, String>>,
 }
 
 struct Folder<'a> {
     ctors: HashMap<&'a str, CtorView<'a>>,
     funs: HashMap<&'a str, FunView<'a>>,
     carried: ResolutionMap,
+    carried_record_types: HashMap<NodeId, String>,
     carried_names: HashMap<String, ResolvedSymbol>,
 }
 
@@ -325,6 +333,7 @@ pub fn fold_program(
                 dict_params: ext.dict_params,
                 methods: ext.methods,
                 resolution: Some(ext.resolution),
+                record_types: Some(ext.record_types),
             },
         );
     }
@@ -342,6 +351,7 @@ pub fn fold_program(
                     dict_params,
                     methods,
                     resolution: None,
+                    record_types: None,
                 },
             );
         }
@@ -354,6 +364,7 @@ pub fn fold_program(
         return FoldOutput {
             program: program.clone(),
             carried_resolution: ResolutionMap::new(),
+            carried_record_types: HashMap::new(),
             carried_names: HashMap::new(),
         };
     }
@@ -371,6 +382,7 @@ pub fn fold_program(
                 params: ext.params,
                 body: ext.body,
                 resolution: Some(ext.resolution),
+                record_types: Some(ext.record_types),
             },
         );
     }
@@ -389,6 +401,7 @@ pub fn fold_program(
                     params,
                     body,
                     resolution: None,
+                    record_types: None,
                 },
             );
         }
@@ -398,6 +411,7 @@ pub fn fold_program(
         ctors,
         funs,
         carried: ResolutionMap::new(),
+        carried_record_types: HashMap::new(),
         carried_names: HashMap::new(),
     };
     let mut out = program.clone();
@@ -407,6 +421,7 @@ pub fn fold_program(
     FoldOutput {
         program: out,
         carried_resolution: folder.carried,
+        carried_record_types: folder.carried_record_types,
         carried_names: folder.carried_names,
     }
 }
@@ -610,9 +625,14 @@ impl Folder<'_> {
     ) -> Option<Expr> {
         // Copy out the borrowed ctor fields (all `&'a`) so the `&self.ctors`
         // borrow ends before we mutate `self.carried` below.
-        let (dict_params, methods, resolution) = {
+        let (dict_params, methods, resolution, record_types) = {
             let ctor = self.ctors.get(name)?;
-            (ctor.dict_params, ctor.methods, ctor.resolution)
+            (
+                ctor.dict_params,
+                ctor.methods,
+                ctor.resolution,
+                ctor.record_types,
+            )
         };
         if dict_params.len() != sub_dicts.len() {
             return None;
@@ -627,7 +647,7 @@ impl Folder<'_> {
 
         // Clone the method body and freshen its NodeIds, carrying the producer's
         // resolution for a cross-module body.
-        let mut new_body = self.freshen_with_carry(body, resolution);
+        let mut new_body = self.freshen_with_carry(body, resolution, record_types);
 
         // Substitute the `where`-bound dict params with the concrete sub-dicts.
         let subst: HashMap<&str, &Expr> = dict_params
@@ -654,7 +674,12 @@ impl Folder<'_> {
     /// (`None`), freshening orphans the id-keyed front resolution, but backend
     /// `resolve_names` re-resolves by name in this module's scope, so no carry is
     /// needed. Shared by dict-method and plain-function inlining.
-    fn freshen_with_carry(&mut self, body: &Expr, resolution: Option<&ResolutionMap>) -> Expr {
+    fn freshen_with_carry(
+        &mut self,
+        body: &Expr,
+        resolution: Option<&ResolutionMap>,
+        record_types: Option<&HashMap<NodeId, String>>,
+    ) -> Expr {
         let mut new_body = body.clone();
         match resolution {
             Some(producer_res) => {
@@ -680,6 +705,11 @@ impl Folder<'_> {
                                 .or_insert_with(|| anchored.clone());
                         }
                         self.carried.insert(*new, anchored);
+                    }
+                    if let Some(producer_record_types) = record_types
+                        && let Some(record_type) = producer_record_types.get(old)
+                    {
+                        self.carried_record_types.insert(*new, record_type.clone());
                     }
                 }
             }
@@ -710,9 +740,9 @@ impl Folder<'_> {
             ExprKind::QualifiedName { name, .. } => base_name(name),
             _ => return None,
         };
-        let (params, body, resolution) = {
+        let (params, body, resolution, record_types) = {
             let fun = self.funs.get(name)?;
-            (fun.params, fun.body, fun.resolution)
+            (fun.params, fun.body, fun.resolution, fun.record_types)
         };
         if params.len() != args.len() {
             return None; // Partial/over-application — leave it.
@@ -728,7 +758,7 @@ impl Folder<'_> {
         if !collapses {
             return None;
         }
-        let fresh_body = self.freshen_with_carry(body, resolution);
+        let fresh_body = self.freshen_with_carry(body, resolution, record_types);
         Some(bind_subpats(params, &args, &fresh_body))
     }
 }

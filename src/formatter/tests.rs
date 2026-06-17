@@ -42,11 +42,17 @@ fn formats_plain_deriving_clause_unchanged() {
 #[test]
 fn formats_applied_deriving_clause() {
     assert_eq!(
-        fmt("record Users source { id: Int } deriving (Generic, Selectable User)\n", 80),
+        fmt(
+            "record Users source { id: Int } deriving (Generic, Selectable User)\n",
+            80
+        ),
         "record Users source { id: Int } deriving (Generic, Selectable User)\n"
     );
     assert_eq!(
-        fmt("record Users source { id: Int } deriving (Selectable (Box Int))\n", 80),
+        fmt(
+            "record Users source { id: Int } deriving (Selectable (Box Int))\n",
+            80
+        ),
         "record Users source { id: Int } deriving (Selectable (Box Int))\n"
     );
 }

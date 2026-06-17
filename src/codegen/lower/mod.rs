@@ -227,6 +227,12 @@ pub(super) enum LowerMode {
     Tail(CExpr),
 }
 
+#[derive(Default)]
+pub(super) struct LowererResolution {
+    pub(super) symbols: super::resolve::ResolutionMap,
+    pub(super) carried_record_types: HashMap<crate::ast::NodeId, String>,
+}
+
 pub struct Lowerer<'a> {
     counter: usize,
     /// Cross-module codegen context (compiled modules, effect bindings, prelude imports).
@@ -324,6 +330,10 @@ pub struct Lowerer<'a> {
     /// Pre-resolved name resolution map: NodeId -> ResolvedSymbol.
     /// Built by resolve::resolve_names before lowering.
     resolved: super::resolve::ResolutionMap,
+    /// Record type facts carried for fresh cross-module inlined nodes.
+    /// These mirror typechecker `record_types` entries that would otherwise be
+    /// lost when generic folding freshens producer AST into the consumer module.
+    carried_record_types: HashMap<crate::ast::NodeId, String>,
     /// Bare handler name -> canonical handler name (e.g. "collect_handler" -> "Std.Test.collect_handler").
     /// Built during init_module for resolving handler references in `with` expressions.
     handler_canonical: HashMap<String, String>,
@@ -369,10 +379,10 @@ pub struct Lowerer<'a> {
 }
 
 impl<'a> Lowerer<'a> {
-    pub fn new(
+    pub(super) fn new(
         ctx: &'a super::CodegenContext,
         constructor_atoms: super::resolve::ConstructorAtoms,
-        resolved: super::resolve::ResolutionMap,
+        resolution: LowererResolution,
         check_result: &crate::typechecker::CheckResult,
         optimization: super::optimize::OptimizationFacts,
         source_info: Option<SourceInfo>,
@@ -407,7 +417,8 @@ impl<'a> Lowerer<'a> {
             direct_hof_value_bindings: HashMap::new(),
             lambda_effect_context: None,
             constructor_atoms,
-            resolved,
+            resolved: resolution.symbols,
+            carried_record_types: resolution.carried_record_types,
             current_handler_k: None,
             current_handler_finally: None,
             current_handler_source_module: None,
@@ -914,7 +925,7 @@ mod tests {
         let mut lowerer = Lowerer::new(
             &ctx,
             std::collections::HashMap::new(),
-            std::collections::HashMap::new(),
+            LowererResolution::default(),
             &check_result,
             super::super::optimize::OptimizationFacts::default(),
             None,
