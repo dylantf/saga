@@ -942,6 +942,69 @@ main () = run (Box 5)
 }
 
 #[test]
+fn routed_derive_with_fresh_rep_dict_does_not_fake_nullary_hoist() {
+    // A routed `FromJson` derive generates:
+    //
+    //   impl FromJson for Boxed where {Boxed: Generic r, r: FromJson}
+    //
+    // The `r: FromJson` evidence is a fresh representation dictionary, not an
+    // impl type parameter. The concrete `FromJson Boxed` dict therefore has one
+    // captured sub-dict and must not lower as if it had a nullary hoisted method.
+    let src = r#"
+import Std.Generic (U1, Leaf, Variant, Adt)
+
+trait FromJson a {
+  fun from_json : String -> Result a String
+}
+
+impl FromJson for Int {
+  from_json _ = Ok 7
+}
+
+impl FromJson for U1 {
+  from_json _ = Ok U1
+}
+
+impl FromJson for Leaf a where {a: FromJson} {
+  from_json s = case from_json s {
+    Ok x -> Ok (Leaf x)
+    Err e -> Err e
+  }
+}
+
+impl FromJson for Variant (n : Symbol) a where {a: FromJson} {
+  from_json s = case from_json s {
+    Ok x -> Ok (Variant x)
+    Err e -> Err e
+  }
+}
+
+impl FromJson for Adt a where {a: FromJson} {
+  from_json s = case from_json s {
+    Ok x -> Ok (Adt "" x)
+    Err e -> Err e
+  }
+}
+
+type Boxed = Boxed Int
+  deriving (FromJson)
+
+main () = from_json "x" : Result Boxed String
+"#;
+
+    let out = emit_elaborated(src);
+    assert!(
+        out.contains("'__dict_FromJson_Boxed'/1"),
+        "expected derived FromJson/Boxed dict to capture the Rep dictionary\n{out}"
+    );
+    assert!(
+        !out.contains("__saga_dictmethod___dict_FromJson_Boxed_0"),
+        "parameterized derived dict must not be lowered as a nullary hoist\n{out}"
+    );
+    assert_core_compiles(&out);
+}
+
+#[test]
 fn effectful_parameterized_dict_chain_threads_evidence_through_inline() {
     // The inlined parameterized chain must still thread evidence: an effectful
     // conditional impl folded into nested cases keeps `_Evidence`/`_ReturnK`

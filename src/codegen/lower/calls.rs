@@ -463,7 +463,9 @@ impl<'a> Lowerer<'a> {
                     arity,
                 )))
             }
-        } else if let Some(erlang_mod) = self.imported_dict_erlang_mod(dict) {
+        } else if self.external_dict_constructor_arity(&dict_constructor) == Some(0)
+            && let Some(erlang_mod) = self.imported_dict_erlang_mod(dict)
+        {
             // Imported hoisted method: direct cross-module call. Every module
             // hoists all its nullary dict methods with this deterministic name,
             // and the call's CPS shape derives from the same impl-effect data as
@@ -519,6 +521,26 @@ impl<'a> Lowerer<'a> {
                     && let crate::ast::ExprKind::Lambda { params, .. } = &method.kind
                 {
                     return Some(params.len());
+                }
+            }
+        }
+        None
+    }
+
+    fn external_dict_constructor_arity(&self, dict_constructor: &str) -> Option<usize> {
+        for compiled in self.ctx.modules.values() {
+            for decl in &compiled.elaborated {
+                if let crate::ast::Decl::DictConstructor {
+                    name, dict_params, ..
+                } = decl
+                    && name == dict_constructor
+                {
+                    return Some(dict_params.len());
+                }
+            }
+            for dict in &compiled.codegen_info.trait_impl_dicts {
+                if dict.dict_name == dict_constructor {
+                    return Some(dict.arity);
                 }
             }
         }

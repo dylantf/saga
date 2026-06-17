@@ -96,6 +96,13 @@ const SEMIGROUP: &str = "Std.Base.Semigroup";
 /// e.g. ("ConvertTo", ["NOK"], "USD") or ("Show", [], "Int").
 type ImplKey = (String, Vec<String>, String);
 
+#[derive(Clone, Debug)]
+struct ImplWhereAppDictParam {
+    trait_name: String,
+    trait_type_args: Vec<Type>,
+    self_type: Type,
+}
+
 /// Elaborate a program using typechecker results.
 /// Returns a new program with dictionary passing made explicit.
 pub fn elaborate(program: &Program, result: &CheckResult) -> Program {
@@ -120,6 +127,9 @@ struct Elaborator {
     /// impl key -> ordered list of (constraint_trait, param_index) for dict params.
     /// Used to pass the correct sub-dicts when building parameterized dicts.
     impl_dict_params: HashMap<ImplKey, Vec<(String, usize)>>,
+    /// impl key -> ordered list of fresh/existential where-app constraints that
+    /// become dict params but are not tied directly to an impl type parameter.
+    impl_where_app_dict_params: HashMap<ImplKey, Vec<ImplWhereAppDictParam>>,
     /// impl key -> registered impl info, including structured target pattern metadata.
     impl_infos: HashMap<ImplKey, ImplInfo>,
     /// trait_name -> TraitInfo
@@ -360,6 +370,7 @@ impl Elaborator {
             handler_dict_params: HashMap::new(),
             dict_names,
             impl_dict_params: impl_dict_params_from_imports,
+            impl_where_app_dict_params: HashMap::new(),
             impl_infos: result.trait_impls.clone(),
             traits: result.traits.clone(),
             evidence_by_node,
@@ -410,6 +421,157 @@ impl Elaborator {
             dict_params.push((resolved, name.clone()));
         }
         dict_params
+    }
+
+    fn impl_type_param_id(type_params: &[TypeParam], name: &str) -> Option<u32> {
+        type_params
+            .iter()
+            .position(|tp| tp.name == name)
+            .map(|idx| u32::MAX - idx as u32)
+    }
+
+    fn impl_type_param_subst(args: &[Type]) -> HashMap<u32, Type> {
+        args.iter()
+            .enumerate()
+            .map(|(idx, arg)| (u32::MAX - idx as u32, arg.clone()))
+            .collect()
+    }
+
+    fn type_expr_to_constraint_type(
+        &self,
+        expr: &TypeExpr,
+        type_params: &[TypeParam],
+        local_subst: &HashMap<String, Type>,
+    ) -> Option<Type> {
+        match expr {
+            TypeExpr::Named { id, name, .. } => {
+                Some(Type::Con(self.resolved_type_name(*id, name), vec![]))
+            }
+            TypeExpr::Var { name, .. } => local_subst
+                .get(name)
+                .cloned()
+                .or_else(|| Self::impl_type_param_id(type_params, name).map(Type::Var)),
+            TypeExpr::App { .. } => {
+                let head = expr.head_name()?;
+                let head_id = expr.head_id().unwrap_or(expr.id());
+                let mut args = Vec::new();
+                let mut current = expr;
+                while let TypeExpr::App { func, arg, .. } = current {
+                    args.push(self.type_expr_to_constraint_type(arg, type_params, local_subst)?);
+                    current = func;
+                }
+                args.reverse();
+                Some(Type::Con(self.resolved_type_name(head_id, head), args))
+            }
+            TypeExpr::Symbol { name, .. } => Some(Type::Symbol(name.clone())),
+            TypeExpr::Labeled { inner, .. } => {
+                self.type_expr_to_constraint_type(inner, type_params, local_subst)
+            }
+            TypeExpr::Record { fields, .. } => fields
+                .iter()
+                .map(|(name, ty)| {
+                    self.type_expr_to_constraint_type(ty, type_params, local_subst)
+                        .map(|ty| (name.clone(), ty))
+                })
+                .collect::<Option<Vec<_>>>()
+                .map(Type::Record),
+            TypeExpr::Arrow { .. } => None,
+        }
+    }
+
+    fn resolve_functional_where_app_fresh_vars(
+        &self,
+        app: &TraitApp,
+        resolved_trait: &str,
+        self_type: &Type,
+        type_params: &[TypeParam],
+        local_subst: &mut HashMap<String, Type>,
+    ) {
+        let Some(info) = self.traits.get(resolved_trait) else {
+            return;
+        };
+        if !info.is_functional {
+            return;
+        }
+        let Type::Con(self_name, self_args) = self_type else {
+            return;
+        };
+        let Some((_, impl_info)) = self.impl_infos.iter().find(|((trait_name, _, target), _)| {
+            trait_name == resolved_trait && target == self_name
+        }) else {
+            return;
+        };
+        let mut subst = HashMap::new();
+        for (var_id, arg) in impl_info.target_type_param_ids.iter().zip(self_args.iter()) {
+            subst.insert(*var_id, arg.clone());
+        }
+        for (idx, arg) in app.type_args.iter().enumerate().skip(1) {
+            let TypeExpr::Var { name, .. } = arg else {
+                continue;
+            };
+            if Self::impl_type_param_id(type_params, name).is_some()
+                || local_subst.contains_key(name)
+            {
+                continue;
+            }
+            if let Some(extra) = impl_info.trait_type_args.get(idx - 1) {
+                local_subst.insert(name.clone(), substitute_pattern_vars(extra, &subst));
+            }
+        }
+    }
+
+    fn where_app_dict_params_for_impl(
+        &self,
+        where_apps: &[TraitApp],
+        type_params: &[TypeParam],
+    ) -> Vec<ImplWhereAppDictParam> {
+        let mut params = Vec::new();
+        let mut local_subst = HashMap::new();
+        for app in where_apps {
+            if matches!(app.trait_name.as_str(), "Num" | "Eq") {
+                continue;
+            }
+            let resolved_trait = self.resolved_trait_name(app.id, &app.trait_name);
+            let Some(first_arg) = app.type_args.first() else {
+                continue;
+            };
+            let Some(self_type) =
+                self.type_expr_to_constraint_type(first_arg, type_params, &local_subst)
+            else {
+                continue;
+            };
+
+            self.resolve_functional_where_app_fresh_vars(
+                app,
+                &resolved_trait,
+                &self_type,
+                type_params,
+                &mut local_subst,
+            );
+
+            let TypeExpr::Var { name, .. } = first_arg else {
+                continue;
+            };
+            if Self::impl_type_param_id(type_params, name).is_some() {
+                continue;
+            }
+            let Some(self_type) = local_subst.get(name).cloned() else {
+                continue;
+            };
+            let Some(trait_type_args) = app.type_args[1..]
+                .iter()
+                .map(|arg| self.type_expr_to_constraint_type(arg, type_params, &local_subst))
+                .collect::<Option<Vec<_>>>()
+            else {
+                continue;
+            };
+            params.push(ImplWhereAppDictParam {
+                trait_name: resolved_trait,
+                trait_type_args,
+                self_type,
+            });
+        }
+        params
     }
 
     /// Set up `current_dict_params` from a where clause, saving the previous state.
@@ -486,6 +648,7 @@ impl Elaborator {
                     target_type_expr,
                     type_params,
                     where_clause,
+                    where_apps,
                     ..
                 } => {
                     let canonical_trait = self.resolved_impl_trait_name(*id, trait_name);
@@ -537,14 +700,18 @@ impl Elaborator {
                             params.push((resolved, idx));
                         }
                     }
-                    self.impl_dict_params.insert(
-                        (
-                            canonical_trait,
-                            canonical_trait_type_args,
-                            canonical_target_type,
-                        ),
-                        params,
+                    let key = (
+                        canonical_trait,
+                        canonical_trait_type_args,
+                        canonical_target_type,
                     );
+                    let where_app_params =
+                        self.where_app_dict_params_for_impl(where_apps, type_params);
+                    self.impl_dict_params.insert(key.clone(), params);
+                    if !where_app_params.is_empty() {
+                        self.impl_where_app_dict_params
+                            .insert(key, where_app_params);
+                    }
                 }
                 Decl::HandlerDef { name, body, .. } => {
                     let dict_params = self.dict_params_from_where(&body.where_clause);
@@ -2209,6 +2376,31 @@ impl Elaborator {
                         name: dict_name.clone(),
                     },
                 );
+                if let Some(params) = self.impl_where_app_dict_params.get(&key) {
+                    let target_arg_subst = Self::impl_type_param_subst(args);
+                    for param in params {
+                        let self_type =
+                            substitute_pattern_vars(&param.self_type, &target_arg_subst);
+                        let trait_type_args: Vec<Type> = param
+                            .trait_type_args
+                            .iter()
+                            .map(|arg| substitute_pattern_vars(arg, &target_arg_subst))
+                            .collect();
+                        let sub_dict = self.dict_for_type(
+                            &param.trait_name,
+                            &trait_type_args,
+                            &self_type,
+                            span,
+                        )?;
+                        dict_expr = Expr::synth(
+                            span,
+                            ExprKind::App {
+                                func: Box::new(dict_expr),
+                                arg: Box::new(sub_dict),
+                            },
+                        );
+                    }
+                }
                 if let Some(info) = impl_info
                     && let Some(pattern) = &info.target_pattern
                 {
