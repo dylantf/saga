@@ -157,6 +157,43 @@ pub struct RoutedDeriveInfo {
     pub deriving_span: Span,
 }
 
+/// One entry in a `deriving (...)` clause.
+///
+/// Plain derives are represented with an empty `type_args` list:
+/// `deriving (Show)` -> `DeriveSpec { trait_name: "Show", type_args: [] }`.
+/// Applied derives use the arguments after the trait name:
+/// `deriving (Selectable User)` -> `type_args: [User]`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DeriveSpec {
+    pub trait_name: String,
+    pub trait_name_span: Span,
+    pub type_args: Vec<TypeExpr>,
+    pub span: Span,
+}
+
+impl DeriveSpec {
+    pub fn plain(name: impl Into<String>) -> Self {
+        let span = Span { start: 0, end: 0 };
+        Self {
+            trait_name: name.into(),
+            trait_name_span: span,
+            type_args: vec![],
+            span,
+        }
+    }
+
+    pub fn bare_name(&self) -> &str {
+        self.trait_name
+            .rsplit('.')
+            .next()
+            .unwrap_or(self.trait_name.as_str())
+    }
+
+    pub fn is_plain_named(&self, name: &str) -> bool {
+        self.type_args.is_empty() && self.bare_name() == name
+    }
+}
+
 /// Strip trivia annotations, returning plain declarations.
 /// Transfers `Trivia::DocComment` items into each decl's `doc` field.
 pub fn strip_annotations(annotated: AnnotatedProgram) -> Program {
@@ -359,7 +396,7 @@ pub enum Decl {
         name_span: Span,
         type_params: Vec<TypeParam>,
         variants: Vec<Annotated<TypeConstructor>>,
-        deriving: Vec<String>,
+        deriving: Vec<DeriveSpec>,
         /// True if any `|` was on a new line - preserve multi-line layout.
         multiline: bool,
         span: Span,
@@ -389,7 +426,7 @@ pub enum Decl {
         name_span: Span,
         type_params: Vec<TypeParam>,
         fields: Vec<Annotated<(String, TypeExpr)>>,
-        deriving: Vec<String>,
+        deriving: Vec<DeriveSpec>,
         /// True if any field was on a new line — preserve multi-line layout.
         multiline: bool,
         /// Comments before the closing `}` with no following sibling

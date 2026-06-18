@@ -46,6 +46,27 @@ pub(crate) fn target_key_for_type(ty: &Type) -> Option<String> {
     }
 }
 
+/// Conservatively decide whether two impl target patterns can never describe
+/// the same type. Used by the functional-dependency coherence check: two impls
+/// whose determining parameter (the `for` target) shares an arity-keyed head
+/// (e.g. both `Column`) may still be perfectly disjoint when some concrete
+/// argument position differs — e.g. `Column src Required n a` vs
+/// `Column src Optional n a`, where `Required` and `Optional` are distinct
+/// nullary constructors. Returns `true` only when we are certain there is a
+/// definite clash; pattern variables match anything and so are never disjoint.
+pub(crate) fn types_disjoint(a: &Type, b: &Type) -> bool {
+    match (a, b) {
+        (Type::Var(_), _) | (_, Type::Var(_)) => false,
+        (Type::Con(n1, a1), Type::Con(n2, a2)) => {
+            n1 != n2
+                || a1.len() != a2.len()
+                || a1.iter().zip(a2).any(|(x, y)| types_disjoint(x, y))
+        }
+        (Type::Symbol(s1), Type::Symbol(s2)) => s1 != s2,
+        _ => false,
+    }
+}
+
 pub(crate) fn match_type_pattern(
     pattern: &Type,
     actual: &Type,
@@ -595,6 +616,17 @@ impl Checker {
                     && existing_target == &target_key
                     && existing_args != trait_type_args_names
                 {
+                    // The two impls share an arity-keyed target head, but the
+                    // functional dependency is only violated if their
+                    // determining parameters can actually overlap. Compare the
+                    // full target patterns: distinct concrete constructors in
+                    // the same argument position (e.g. `Required` vs `Optional`)
+                    // make the targets disjoint, so both impls may coexist.
+                    if let Some(existing_pattern) = &existing_info.target_pattern
+                        && types_disjoint(existing_pattern, &target)
+                    {
+                        continue;
+                    }
                     let prev_loc = match existing_info.span {
                         Some(s) => format!(" (previous impl at byte {})", s.start),
                         None => String::new(),

@@ -50,7 +50,7 @@ impl Lowerer<'_> {
                     .map(|p| self.lower_pat(p, constructor_atoms, origin_module))
                     .collect(),
             ),
-            Pat::Constructor { name, args, .. } => match name.as_str() {
+            Pat::Constructor { id, name, args, .. } => match name.as_str() {
                 "Cons" if args.len() == 2 => CPat::Cons(
                     Box::new(self.lower_pat(&args[0], constructor_atoms, origin_module)),
                     Box::new(self.lower_pat(&args[1], constructor_atoms, origin_module)),
@@ -69,7 +69,13 @@ impl Lowerer<'_> {
                     ))
                 }
                 _ => {
-                    let atom = mangle_ctor_atom(name, constructor_atoms, origin_module);
+                    let atom = mangle_ctor_atom(
+                        name,
+                        constructor_atoms,
+                        self.carried_constructor_origin_module(*id)
+                            .or_else(|| self.carried_constructor_name_origin_module(name))
+                            .or(origin_module),
+                    );
                     let mut elems = vec![CPat::Lit(CLit::Atom(atom))];
                     elems.extend(
                         args.iter()
@@ -86,7 +92,13 @@ impl Lowerer<'_> {
                 ..
             } => {
                 // Records are tagged tuples in declared field order.
-                let atom = mangle_ctor_atom(name, constructor_atoms, origin_module);
+                let atom = mangle_ctor_atom(
+                    name,
+                    constructor_atoms,
+                    self.carried_constructor_origin_module(*id)
+                        .or_else(|| self.carried_constructor_name_origin_module(name))
+                        .or(origin_module),
+                );
                 let mut elems = vec![CPat::Lit(CLit::Atom(atom))];
                 if let Some(order) = self.resolved_record_fields(*id, name) {
                     let field_map: HashMap<&str, Option<&Pat>> = fields

@@ -523,7 +523,12 @@ impl<'a> Lowerer<'a> {
     }
 
     /// Lower a saturated constructor call to the appropriate Core Erlang form.
-    pub(super) fn lower_ctor(&mut self, name: &str, args: Vec<&Expr>) -> CExpr {
+    pub(super) fn lower_ctor_with_origin(
+        &mut self,
+        name: &str,
+        args: Vec<&Expr>,
+        origin_module: Option<&str>,
+    ) -> CExpr {
         let bare_name = name.rsplit('.').next().unwrap_or(name);
         match bare_name {
             "Nil" if args.is_empty() => return CExpr::Nil,
@@ -590,8 +595,11 @@ impl<'a> Lowerer<'a> {
                     vars.push(var.clone());
                     bindings.push((var, val));
                 }
-                let atom =
-                    mangle_ctor_atom(name, &self.constructor_atoms, self.handler_origin_module());
+                let atom = mangle_ctor_atom(
+                    name,
+                    &self.constructor_atoms,
+                    origin_module.or_else(|| self.handler_origin_module()),
+                );
                 let mut elems = vec![CExpr::Lit(CLit::Atom(atom))];
                 elems.extend(vars.iter().map(|v| CExpr::Var(v.clone())));
                 let tuple = CExpr::Tuple(elems);
@@ -670,7 +678,13 @@ impl<'a> Lowerer<'a> {
     /// into a constructor slot.
     ///
     /// Mirrors [`lower_record_create_with_k`] for ADT constructors.
-    pub(super) fn lower_ctor_with_k(&mut self, name: &str, args: Vec<&Expr>, k_var: &str) -> CExpr {
+    pub(super) fn lower_ctor_with_k_origin(
+        &mut self,
+        name: &str,
+        args: Vec<&Expr>,
+        k_var: &str,
+        origin_module: Option<&str>,
+    ) -> CExpr {
         let bare = name.rsplit('.').next().unwrap_or(name);
         let is_cons = name == "Cons" && args.len() == 2;
         let is_bare_atom = args.is_empty()
@@ -679,7 +693,7 @@ impl<'a> Lowerer<'a> {
 
         // For bare-atom/empty-arg ctors there's nothing to CPS-chain; defer.
         if is_bare_atom {
-            let ce = self.lower_ctor(name, args);
+            let ce = self.lower_ctor_with_origin(name, args, origin_module);
             return self.lower_value_to_k_with_ce(ce, k_var);
         }
 
@@ -718,7 +732,7 @@ impl<'a> Lowerer<'a> {
                 let atom = mangle_ctor_atom(
                     &name_owned,
                     &this.constructor_atoms,
-                    this.handler_origin_module(),
+                    origin_module.or_else(|| this.handler_origin_module()),
                 );
                 let mut elems = vec![CExpr::Lit(CLit::Atom(atom))];
                 elems.extend(vars.iter().map(|v| CExpr::Var(v.clone())));
@@ -1532,12 +1546,21 @@ impl<'a> Lowerer<'a> {
                 self.lower_record_update_with_k(rec_expr, order, fields, k_var)
             }
             _ => {
-                if let Some((ctor_name, args)) = super::util::collect_ctor_call(expr)
+                if let Some((head, ctor_name, args)) =
+                    super::util::collect_ctor_call_with_head(expr)
                     && args.iter().any(|a| {
                         self.expr_is_effectful_call(a) || self.has_nested_effectful_expr(a)
                     })
                 {
-                    return self.lower_ctor_with_k(ctor_name, args, k_var);
+                    let origin = self
+                        .constructor_origin_module_for(head.id, ctor_name)
+                        .map(str::to_string);
+                    return self.lower_ctor_with_k_origin(
+                        ctor_name,
+                        args,
+                        k_var,
+                        origin.as_deref(),
+                    );
                 }
                 // Non-constructor App whose outer call is pure but whose
                 // args contain effectful sub-calls — e.g. `from (decode x)`
@@ -2232,7 +2255,12 @@ impl<'a> Lowerer<'a> {
 
             ExprKind::App { .. } => self.lower_app_expr(expr),
 
-            ExprKind::Constructor { name, .. } => self.lower_ctor(name, vec![]),
+            ExprKind::Constructor { name, .. } => {
+                let origin = self
+                    .constructor_origin_module_for(expr.id, name)
+                    .map(str::to_string);
+                self.lower_ctor_with_origin(name, vec![], origin.as_deref())
+            }
 
             ExprKind::BinOp {
                 op, left, right, ..
@@ -2483,7 +2511,10 @@ impl<'a> Lowerer<'a> {
                 // Check if this is a qualified constructor with no args (e.g. M.Nothing)
                 let qualified = format!("{}.{}", module, name);
                 if self.is_known_constructor(&qualified) || self.is_known_constructor(name) {
-                    return self.lower_ctor(name, vec![]);
+                    let origin = self
+                        .constructor_origin_module_for(expr.id, name)
+                        .map(str::to_string);
+                    return self.lower_ctor_with_origin(name, vec![], origin.as_deref());
                 }
                 if let Some(resolved) = self.resolved.get(&expr.id).cloned() {
                     self.lower_resolved_value_ref(expr.id, resolved)

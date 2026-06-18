@@ -241,21 +241,7 @@ impl Parser {
         let end = self.tokens[self.pos].span;
         self.expect(Token::RBrace)?;
 
-        // Parse optional `deriving (Debug, Show, ...)`
-        let mut deriving = Vec::new();
-        if matches!(self.peek(), Token::Deriving) {
-            self.advance();
-            self.expect(Token::LParen)?;
-            loop {
-                deriving.push(self.parse_upper_name()?);
-                if matches!(self.peek(), Token::Comma) {
-                    self.advance();
-                } else {
-                    break;
-                }
-            }
-            self.expect(Token::RParen)?;
-        }
+        let deriving = self.parse_deriving_clause()?;
 
         Ok(Decl::RecordDef {
             id: NodeId::fresh(),
@@ -338,21 +324,9 @@ impl Parser {
             });
         }
 
-        // Parse optional `deriving (Show, Eq, ...)`
-        let mut deriving = Vec::new();
-        if matches!(self.peek(), Token::Deriving) {
-            self.advance(); // consume 'deriving'
-            self.expect(Token::LParen)?;
-            loop {
-                deriving.push(self.parse_upper_name()?);
-                if matches!(self.peek(), Token::Comma) {
-                    self.advance();
-                } else {
-                    break;
-                }
-            }
-            end = self.tokens[self.pos].span;
-            self.expect(Token::RParen)?;
+        let deriving = self.parse_deriving_clause()?;
+        if !deriving.is_empty() {
+            end = self.tokens[self.pos - 1].span;
         }
 
         Ok(Decl::TypeDef {
@@ -368,6 +342,48 @@ impl Parser {
             multiline,
             span: start.to(end),
         })
+    }
+
+    fn parse_deriving_clause(&mut self) -> Result<Vec<DeriveSpec>, ParseError> {
+        let mut deriving = Vec::new();
+        if !matches!(self.peek(), Token::Deriving) {
+            return Ok(deriving);
+        }
+
+        self.advance(); // consume 'deriving'
+        self.expect(Token::LParen)?;
+        loop {
+            let start = self.tokens[self.pos].span;
+            let trait_name = self.parse_upper_name()?;
+            let trait_name_span = self.tokens[self.pos - 1].span;
+            let mut type_args = Vec::new();
+            while !matches!(self.peek(), Token::Comma | Token::RParen | Token::Eof) {
+                if !self.can_start_type_atom_no_brace() {
+                    return Err(ParseError {
+                        message: "expected type argument or `,` in deriving clause".to_string(),
+                        span: self.tokens[self.pos].span,
+                    });
+                }
+                type_args.push(self.parse_type_atom()?);
+            }
+            let end = self.tokens[self.pos - 1].span;
+            deriving.push(DeriveSpec {
+                trait_name,
+                trait_name_span,
+                type_args,
+                span: start.to(end),
+            });
+            if matches!(self.peek(), Token::Comma) {
+                self.advance();
+                if matches!(self.peek(), Token::RParen) {
+                    break;
+                }
+            } else {
+                break;
+            }
+        }
+        self.expect(Token::RParen)?;
+        Ok(deriving)
     }
 
     // Parses: type alias <Name> [params...] = <TypeExpr>

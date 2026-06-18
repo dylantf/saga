@@ -330,11 +330,21 @@ fn render_type_decl(out: &mut String, decl: &Decl) {
 }
 
 /// Render a ` deriving (...)` line when the type derives any traits.
-fn write_deriving(out: &mut String, deriving: &[String]) {
+fn write_deriving(out: &mut String, deriving: &[DeriveSpec]) {
     if deriving.is_empty() {
         return;
     }
-    writeln!(out, "  deriving ({})", deriving.join(", ")).unwrap();
+    let specs: Vec<String> = deriving.iter().map(format_derive_spec).collect();
+    writeln!(out, "  deriving ({})", specs.join(", ")).unwrap();
+}
+
+fn format_derive_spec(spec: &DeriveSpec) -> String {
+    if spec.type_args.is_empty() {
+        spec.trait_name.clone()
+    } else {
+        let args: Vec<String> = spec.type_args.iter().map(format_type_expr_atom).collect();
+        format!("{} {}", spec.trait_name, args.join(" "))
+    }
 }
 
 fn render_effect_decl(out: &mut String, decl: &Decl) {

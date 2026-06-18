@@ -3221,7 +3221,9 @@ fn type_def_deriving_show() {
     match &decls[0] {
         Decl::TypeDef { name, deriving, .. } => {
             assert_eq!(name, "Color");
-            assert_eq!(deriving, &vec!["Show".to_string()]);
+            assert_eq!(deriving.len(), 1);
+            assert_eq!(deriving[0].trait_name, "Show");
+            assert!(deriving[0].type_args.is_empty());
         }
         _ => panic!("expected TypeDef"),
     }
@@ -3234,7 +3236,67 @@ fn type_def_deriving_multiple() {
     assert_eq!(decls.len(), 1);
     match &decls[0] {
         Decl::TypeDef { deriving, .. } => {
-            assert_eq!(deriving, &vec!["Show".to_string(), "Eq".to_string()]);
+            let names: Vec<&str> = deriving.iter().map(|d| d.trait_name.as_str()).collect();
+            assert_eq!(names, vec!["Show", "Eq"]);
+            assert!(deriving.iter().all(|d| d.type_args.is_empty()));
+        }
+        _ => panic!("expected TypeDef"),
+    }
+}
+
+#[test]
+fn type_def_deriving_applied_trait() {
+    let decls = parse("type Foo = A deriving (Selectable User)");
+    match &decls[0] {
+        Decl::TypeDef { deriving, .. } => {
+            assert_eq!(deriving.len(), 1);
+            assert_eq!(deriving[0].trait_name, "Selectable");
+            assert_eq!(deriving[0].type_args.len(), 1);
+            match &deriving[0].type_args[0] {
+                TypeExpr::Named { name, .. } => assert_eq!(name, "User"),
+                other => panic!("expected named type arg, got {other:?}"),
+            }
+        }
+        _ => panic!("expected TypeDef"),
+    }
+}
+
+#[test]
+fn type_def_deriving_mixed_plain_and_applied_preserves_order() {
+    let decls = parse("type Foo = A deriving (Generic, Selectable User)");
+    match &decls[0] {
+        Decl::TypeDef { deriving, .. } => {
+            assert_eq!(deriving.len(), 2);
+            assert_eq!(deriving[0].trait_name, "Generic");
+            assert!(deriving[0].type_args.is_empty());
+            assert_eq!(deriving[1].trait_name, "Selectable");
+            assert_eq!(deriving[1].type_args.len(), 1);
+        }
+        _ => panic!("expected TypeDef"),
+    }
+}
+
+#[test]
+fn type_def_deriving_parenthesized_applied_type_arg() {
+    let decls = parse("type Foo = A deriving (Selectable (Box Int))");
+    match &decls[0] {
+        Decl::TypeDef { deriving, .. } => {
+            assert_eq!(deriving.len(), 1);
+            assert_eq!(deriving[0].trait_name, "Selectable");
+            assert_eq!(deriving[0].type_args.len(), 1);
+            match &deriving[0].type_args[0] {
+                TypeExpr::App { func, arg, .. } => {
+                    match func.as_ref() {
+                        TypeExpr::Named { name, .. } => assert_eq!(name, "Box"),
+                        other => panic!("expected Box head, got {other:?}"),
+                    }
+                    match arg.as_ref() {
+                        TypeExpr::Named { name, .. } => assert_eq!(name, "Int"),
+                        other => panic!("expected Int arg, got {other:?}"),
+                    }
+                }
+                other => panic!("expected applied type arg, got {other:?}"),
+            }
         }
         _ => panic!("expected TypeDef"),
     }

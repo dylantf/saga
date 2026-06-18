@@ -31,6 +31,32 @@ fn try_parse_normalized(source: &str) -> Option<Vec<Decl>> {
     Some(decls)
 }
 
+#[test]
+fn formats_plain_deriving_clause_unchanged() {
+    assert_eq!(
+        fmt("record User { id: Int } deriving (Generic, ToJson)\n", 80),
+        "record User { id: Int } deriving (Generic, ToJson)\n"
+    );
+}
+
+#[test]
+fn formats_applied_deriving_clause() {
+    assert_eq!(
+        fmt(
+            "record Users source { id: Int } deriving (Generic, Selectable User)\n",
+            80
+        ),
+        "record Users source { id: Int } deriving (Generic, Selectable User)\n"
+    );
+    assert_eq!(
+        fmt(
+            "record Users source { id: Int } deriving (Selectable (Box Int))\n",
+            80
+        ),
+        "record Users source { id: Int } deriving (Selectable (Box Int))\n"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // AST normalization: replace all NodeId, Span, dangling trivia, and layout
 // hints with dummy values so structural comparison ignores metadata.
@@ -137,6 +163,7 @@ fn normalize_decl(d: &mut Decl) {
             id,
             name_span,
             variants,
+            deriving,
             multiline,
             span,
             ..
@@ -145,6 +172,7 @@ fn normalize_decl(d: &mut Decl) {
             *name_span = S;
             *span = S;
             *multiline = false;
+            normalize_derive_specs(deriving);
             for v in variants.iter_mut() {
                 normalize_annotated(v, normalize_type_constructor);
             }
@@ -165,6 +193,7 @@ fn normalize_decl(d: &mut Decl) {
             id,
             name_span,
             fields,
+            deriving,
             multiline,
             dangling_trivia,
             span,
@@ -175,6 +204,7 @@ fn normalize_decl(d: &mut Decl) {
             *span = S;
             *multiline = false;
             dangling_trivia.clear();
+            normalize_derive_specs(deriving);
             for f in fields.iter_mut() {
                 normalize_annotated(f, |(_name, te)| normalize_type_expr(te));
             }
@@ -312,6 +342,16 @@ fn normalize_decl(d: &mut Decl) {
             for m in methods.iter_mut() {
                 normalize_expr(m);
             }
+        }
+    }
+}
+
+fn normalize_derive_specs(specs: &mut [DeriveSpec]) {
+    for spec in specs {
+        spec.trait_name_span = S;
+        spec.span = S;
+        for arg in &mut spec.type_args {
+            normalize_type_expr(arg);
         }
     }
 }

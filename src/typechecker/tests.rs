@@ -4765,6 +4765,73 @@ impl Generic RepB for Foo {
 }
 
 #[test]
+fn coherence_disjoint_applied_target_heads_coexist() {
+    // Two impls whose determining parameter shares the outer head `Column`
+    // but differs in a concrete argument position (`Required` vs `Optional`)
+    // are disjoint, so they may coexist under a functional-dependency trait
+    // even though their trait arguments differ.
+    let result = check(
+        "type Required = Required
+type Optional = Optional
+type Column source meta (name : Symbol) a = Column
+
+trait PgType a {}
+impl PgType for Int {}
+impl PgType for String {}
+
+trait Selectable selection row | selection -> row {
+  fun select : selection -> row
+}
+
+impl Selectable a for (Column source Required name a) where {a: PgType} {
+  select _ = todo
+}
+
+impl Selectable (Maybe a) for (Column source Optional name a) where {a: PgType} {
+  select _ = Nothing
+}",
+    );
+    assert!(
+        result.is_ok(),
+        "expected disjoint applied targets to coexist, got: {:?}",
+        result.err().map(|e| e.message)
+    );
+}
+
+#[test]
+fn coherence_overlapping_applied_target_heads_violate() {
+    // Same as above but both impls fix the *same* concrete `Required` in the
+    // determining position, so the targets genuinely overlap and the
+    // functional-dependency coherence rule must reject the differing rows.
+    let result = check(
+        "type Required = Required
+type Column source meta (name : Symbol) a = Column
+
+trait PgType a {}
+impl PgType for Int {}
+
+trait Selectable selection row | selection -> row {
+  fun select : selection -> row
+}
+
+impl Selectable a for (Column source Required name a) where {a: PgType} {
+  select _ = todo
+}
+
+impl Selectable (Maybe a) for (Column source Required name a) where {a: PgType} {
+  select _ = Nothing
+}",
+    );
+    assert!(result.is_err(), "expected coherence violation");
+    let err = result.err().unwrap();
+    assert!(
+        err.message.contains("coherence") || err.message.contains("functionally determines"),
+        "expected coherence violation message, got: {}",
+        err.message
+    );
+}
+
+#[test]
 fn coherence_identical_args_caught_by_overlap() {
     let result = check(
         "trait Generic a r {
@@ -10068,6 +10135,308 @@ fn generic_lifted_phantom_column_preserves_where_bound_extra_arg() {
          }\n",
     )
     .unwrap();
+}
+
+#[test]
+fn applied_selectable_derive_generates_named_rep_bridge() {
+    check(
+        "import Std.Generic (Generic, Leaf, Labeled, And, Record)\n\
+         trait PgType a {}\n\
+         impl PgType for Int {}\n\
+         impl PgType for String {}\n\
+         type Column source (name : Symbol) a = Column\n\
+         record User { id: Int, name: String }\n  deriving (Generic)\n\
+         type UsersScope = UsersScope\n\
+         record Users source {\n\
+           id: Column source 'id Int,\n\
+           name: Column source 'name String,\n\
+         }\n  deriving (Generic, Selectable User)\n\
+         fun users : Users UsersScope\n\
+         users = Users { id: Column, name: Column }\n\
+         trait Selectable selection row | selection -> row {\n\
+           fun to_row : selection -> row\n\
+         }\n\
+         impl Selectable a for (Column source name a) where {a: PgType} {\n\
+           to_row _ = todo ()\n\
+         }\n\
+         impl Selectable (Leaf row) for (Leaf selection) where {selection: Selectable row} {\n\
+           to_row selection = case selection { Leaf value -> Leaf (to_row value) }\n\
+         }\n\
+         impl Selectable (Labeled n out) for (Labeled n field) where {Selectable field out} {\n\
+           to_row selection = case selection { Labeled field -> Labeled (to_row field) }\n\
+         }\n\
+         impl Selectable (And left_out right_out) for (And left right)\n\
+           where {Selectable left left_out, Selectable right right_out}\n\
+         {\n\
+           to_row selection = case selection { And left right -> And (to_row left) (to_row right) }\n\
+         }\n\
+         impl Selectable (Record out) for (Record fields) where {Selectable fields out} {\n\
+           to_row selection = case selection { Record name fields -> Record name (to_row fields) }\n\
+         }\n\
+         fun project : selection -> row\n\
+           where {selection: Generic selection_rep, selection_rep: Selectable row_rep, row: Generic row_rep}\n\
+         project selection = from (to_row (to selection))\n\
+         fun q : Unit -> User\n\
+         q () = project users\n",
+    )
+    .unwrap();
+}
+
+#[test]
+fn applied_selectable_derive_supports_imported_trait_and_row_type() {
+    let rows = "module Rows\n\
+pub record User { id: Int, name: String }\n  deriving (Generic)\n";
+    let db = "module Db\n\
+import Std.Generic (Leaf, Labeled, And, Record)\n\
+pub type Column source (name : Symbol) a = Column\n\
+pub trait Selectable selection row | selection -> row {\n\
+  fun to_row : selection -> row\n\
+}\n\
+impl Selectable a for Column source name a {\n\
+  to_row _ = todo ()\n\
+}\n\
+impl Selectable (Leaf row) for (Leaf selection) where {Selectable selection row} {\n\
+  to_row selection = case selection { Leaf value -> Leaf (to_row value) }\n\
+}\n\
+impl Selectable (Labeled n out) for (Labeled n field) where {Selectable field out} {\n\
+  to_row selection = case selection { Labeled field -> Labeled (to_row field) }\n\
+}\n\
+impl Selectable (And left_out right_out) for (And left right)\n\
+  where {Selectable left left_out, Selectable right right_out}\n\
+{\n\
+  to_row selection = case selection { And left right -> And (to_row left) (to_row right) }\n\
+}\n\
+impl Selectable (Record out) for (Record fields) where {Selectable fields out} {\n\
+  to_row selection = case selection { Record name fields -> Record name (to_row fields) }\n\
+}\n";
+    let main = "module Main\n\
+import Db (Column, Selectable)\n\
+import Rows (User)\n\
+type UsersScope = UsersScope\n\
+record Users source {\n\
+  id: Column source 'id Int,\n\
+  name: Column source 'name String,\n\
+}\n  deriving (Generic, Selectable User)\n\
+fun users : Users UsersScope\n\
+users = Users { id: Column, name: Column }\n\
+fun q : Unit -> User\n\
+q () = to_row users\n";
+
+    check_with_project_files(&[("src/Rows.saga", rows), ("src/Db.saga", db)], main).unwrap();
+}
+
+#[test]
+fn applied_functional_bridge_derive_supports_non_selectable_trait_with_multiple_methods() {
+    check(
+        "import Std.Generic (Generic, Leaf, Labeled, And, Record)\n\
+         type Column source (name : Symbol) a = Column\n\
+         record User { id: Int, name: String }\n  deriving (Generic)\n\
+         type UsersScope = UsersScope\n\
+         record Users source {\n\
+           id: Column source 'id Int,\n\
+           name: Column source 'name String,\n\
+         }\n  deriving (Generic, Projectable User)\n\
+         fun users : Users UsersScope\n\
+         users = Users { id: Column, name: Column }\n\
+         trait Projectable selection row | selection -> row {\n\
+           fun project_row : selection -> row\n\
+           fun preview_row : selection -> row\n\
+         }\n\
+         impl Projectable a for Column source name a {\n\
+           project_row _ = todo ()\n\
+           preview_row _ = todo ()\n\
+         }\n\
+         impl Projectable (Leaf row) for (Leaf selection) where {Projectable selection row} {\n\
+           project_row selection = case selection { Leaf value -> Leaf (project_row value) }\n\
+           preview_row selection = case selection { Leaf value -> Leaf (preview_row value) }\n\
+         }\n\
+         impl Projectable (Labeled n out) for (Labeled n field) where {Projectable field out} {\n\
+           project_row selection = case selection { Labeled field -> Labeled (project_row field) }\n\
+           preview_row selection = case selection { Labeled field -> Labeled (preview_row field) }\n\
+         }\n\
+         impl Projectable (And left_out right_out) for (And left right)\n\
+           where {Projectable left left_out, Projectable right right_out}\n\
+         {\n\
+           project_row selection = case selection { And left right -> And (project_row left) (project_row right) }\n\
+           preview_row selection = case selection { And left right -> And (preview_row left) (preview_row right) }\n\
+         }\n\
+         impl Projectable (Record out) for (Record fields) where {Projectable fields out} {\n\
+           project_row selection = case selection { Record name fields -> Record name (project_row fields) }\n\
+           preview_row selection = case selection { Record name fields -> Record name (preview_row fields) }\n\
+         }\n\
+         fun q : Unit -> User\n\
+         q () = project_row users\n\
+         fun r : Unit -> User\n\
+         r () = preview_row users\n",
+    )
+    .unwrap();
+}
+
+#[test]
+fn applied_functional_bridge_derive_supports_unary_wrapper_return() {
+    check(
+        "import Std.Generic (Generic, Leaf, Labeled, And, Record)\n\
+         type Column source (name : Symbol) a = Column\n\
+         type Projection a = Projection a\n\
+         record User { id: Int, name: String }\n  deriving (Generic)\n\
+         type UsersScope = UsersScope\n\
+         record Users source {\n\
+           id: Column source 'id Int,\n\
+           name: Column source 'name String,\n\
+         }\n  deriving (Generic, Selectable User)\n\
+         fun users : Users UsersScope\n\
+         users = Users { id: Column, name: Column }\n\
+         trait Selectable selection row | selection -> row {\n\
+           fun to_projection : selection -> Projection row\n\
+         }\n\
+         impl Selectable a for Column source name a {\n\
+           to_projection _ = todo ()\n\
+         }\n\
+         impl Selectable (Leaf row) for (Leaf selection) where {Selectable selection row} {\n\
+           to_projection selection = case selection { Leaf value -> case to_projection value { Projection out -> Projection (Leaf out) } }\n\
+         }\n\
+         impl Selectable (Labeled n out) for (Labeled n field) where {Selectable field out} {\n\
+           to_projection selection = case selection { Labeled field -> case to_projection field { Projection out -> Projection (Labeled out) } }\n\
+         }\n\
+         impl Selectable (And left_out right_out) for (And left right)\n\
+           where {Selectable left left_out, Selectable right right_out}\n\
+         {\n\
+           to_projection selection = case selection { And left right -> case to_projection left { Projection left_out -> case to_projection right { Projection right_out -> Projection (And left_out right_out) } } }\n\
+         }\n\
+         impl Selectable (Record out) for (Record fields) where {Selectable fields out} {\n\
+           to_projection selection = case selection { Record name fields -> case to_projection fields { Projection out -> Projection (Record name out) } }\n\
+         }\n\
+         fun project : selection -> row\n\
+           where {selection: Generic selection_rep, selection_rep: Selectable row_rep, row: Generic row_rep}\n\
+         project selection = case to_projection (to selection) { Projection row_rep -> from row_rep }\n\
+         fun q : Unit -> User\n\
+         q () = project users\n",
+    )
+    .unwrap();
+}
+
+#[test]
+fn applied_functional_bridge_derive_supports_map_based_wrapper_return() {
+    check(
+        "import Std.Generic (Generic, Leaf, Labeled, And, Record)\n\
+         type Column source (name : Symbol) a = Column\n\
+         type ProjectionDef a = ProjectionDef a\n\
+         type Projection a = Projection (ProjectionDef a)\n\
+         fun map : (a -> b) -> Projection a -> Projection b\n\
+         map f projection = case projection { Projection (ProjectionDef value) -> Projection (ProjectionDef (f value)) }\n\
+         record User { id: Int, name: String }\n  deriving (Generic)\n\
+         type UsersScope = UsersScope\n\
+         record Users source {\n\
+           id: Column source 'id Int,\n\
+           name: Column source 'name String,\n\
+         }\n  deriving (Generic, Selectable User)\n\
+         fun users : Users UsersScope\n\
+         users = Users { id: Column, name: Column }\n\
+         trait Selectable selection row | selection -> row {\n\
+           fun to_projection : selection -> Projection row\n\
+         }\n\
+         impl Selectable a for Column source name a {\n\
+           to_projection _ = todo ()\n\
+         }\n\
+         impl Selectable (Leaf row) for (Leaf selection) where {Selectable selection row} {\n\
+           to_projection selection = map Leaf (case selection { Leaf value -> to_projection value })\n\
+         }\n\
+         impl Selectable (Labeled n out) for (Labeled n field) where {Selectable field out} {\n\
+           to_projection selection = map Labeled (case selection { Labeled field -> to_projection field })\n\
+         }\n\
+         impl Selectable (And left_out right_out) for (And left right)\n\
+           where {Selectable left left_out, Selectable right right_out}\n\
+         {\n\
+           to_projection selection = case selection { And left right -> case to_projection left { Projection (ProjectionDef left_out) -> case to_projection right { Projection (ProjectionDef right_out) -> Projection (ProjectionDef (And left_out right_out)) } } }\n\
+         }\n\
+         impl Selectable (Record out) for (Record fields) where {Selectable fields out} {\n\
+           to_projection selection = case selection { Record name fields -> map (fun out -> Record name out) (to_projection fields) }\n\
+         }\n\
+         fun project : selection -> row\n\
+           where {selection: Generic selection_rep, selection_rep: Selectable row_rep, row: Generic row_rep}\n\
+         project selection = case to_projection (to selection) { Projection (ProjectionDef row_rep) -> from row_rep }\n\
+         fun q : Unit -> User\n\
+         q () = project users\n",
+    )
+    .unwrap();
+}
+
+#[test]
+fn applied_selectable_derive_reports_missing_output_generic() {
+    let err = check(
+        "import Std.Generic (Generic, Leaf, Labeled, Record)\n\
+         type Column source (name : Symbol) a = Column\n\
+         record User { id: Int }\n\
+         record Users source { id: Column source 'id Int }\n  deriving (Generic, Selectable User)\n\
+         trait Selectable selection row | selection -> row {\n\
+           fun to_row : selection -> row\n\
+         }\n\
+         impl Selectable (Record out) for (Record fields) where {Selectable fields out} {\n\
+           to_row selection = todo ()\n\
+         }\n",
+    )
+    .err()
+    .expect("expected missing Generic output row");
+    assert!(
+        err.message.contains("cannot derive `Selectable`")
+            && err.message.contains("Generic")
+            && err.message.contains("User"),
+        "expected derive-anchored missing Generic diagnostic, got: {}",
+        err.message
+    );
+}
+
+#[test]
+fn applied_selectable_derive_rejects_non_functional_trait() {
+    let err = check(
+        "record User { id: Int } deriving (Generic)\n\
+         record Users { id: Int } deriving (Selectable User)\n\
+         trait Selectable selection row {\n\
+           fun to_row : selection -> row\n\
+         }\n",
+    )
+    .err()
+    .expect("expected non-functional trait diagnostic");
+    assert!(
+        err.message.contains("functional two-parameter trait"),
+        "expected functional-trait diagnostic, got: {}",
+        err.message
+    );
+}
+
+#[test]
+fn applied_selectable_derive_rejects_wrong_method_shape() {
+    let err = check(
+        "record User { id: Int } deriving (Generic)\n\
+         record Users { id: Int } deriving (Selectable User)\n\
+         trait Selectable selection row | selection -> row {\n\
+           fun to_row : selection -> Int\n\
+         }\n",
+    )
+    .err()
+    .expect("expected method-shape diagnostic");
+    assert!(
+        err.message.contains("method `to_row` must have shape"),
+        "expected method-shape diagnostic, got: {}",
+        err.message
+    );
+}
+
+#[test]
+fn applied_selectable_derive_rejects_tuple_row_argument() {
+    let err = check(
+        "record Users { id: Int } deriving (Selectable (Int, String))\n\
+         trait Selectable selection row | selection -> row {\n\
+           fun to_row : selection -> row\n\
+         }\n",
+    )
+    .err()
+    .expect("expected row argument diagnostic");
+    assert!(
+        err.message.contains("row argument must be a named type"),
+        "expected row argument diagnostic, got: {}",
+        err.message
+    );
 }
 
 #[test]

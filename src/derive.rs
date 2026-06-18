@@ -29,12 +29,15 @@ pub struct SummaryEntry<T> {
 pub struct WrapperTypeInfo {
     pub type_params: Vec<TypeParam>,
     pub variants: Vec<TypeConstructor>,
+    pub derives_generic: bool,
+    pub opaque: bool,
 }
 
 #[derive(Clone)]
 pub struct WrapperRecordInfo {
     pub type_params: Vec<TypeParam>,
     pub fields: Vec<(String, TypeExpr)>,
+    pub derives_generic: bool,
 }
 
 impl ImportedDecls {
@@ -137,15 +140,22 @@ fn module_summary(program: &[Decl]) -> ModuleSummary {
                 name,
                 type_params,
                 variants,
+                deriving,
                 public: true,
-                opaque: false,
+                opaque,
                 ..
             } => {
                 summary.types.insert(
                     name.clone(),
                     WrapperTypeInfo {
                         type_params: type_params.clone(),
-                        variants: variants.iter().map(|v| v.node.clone()).collect(),
+                        variants: if *opaque {
+                            vec![]
+                        } else {
+                            variants.iter().map(|v| v.node.clone()).collect()
+                        },
+                        derives_generic: deriving.iter().any(|d| d.is_plain_named("Generic")),
+                        opaque: *opaque,
                     },
                 );
             }
@@ -153,6 +163,7 @@ fn module_summary(program: &[Decl]) -> ModuleSummary {
                 name,
                 type_params,
                 fields,
+                deriving,
                 public: true,
                 ..
             } => {
@@ -164,6 +175,7 @@ fn module_summary(program: &[Decl]) -> ModuleSummary {
                             .iter()
                             .map(|f| (f.node.0.clone(), f.node.1.clone()))
                             .collect(),
+                        derives_generic: deriving.iter().any(|d| d.is_plain_named("Generic")),
                     },
                 );
             }
@@ -189,6 +201,7 @@ fn module_summary(program: &[Decl]) -> ModuleSummary {
         if let Decl::TraitDef {
             name,
             type_params,
+            functional_dependency,
             methods,
             public: true,
             ..
@@ -198,6 +211,7 @@ fn module_summary(program: &[Decl]) -> ModuleSummary {
                 name.clone(),
                 RoutedTraitInfo {
                     type_params: type_params.clone(),
+                    is_functional: functional_dependency.is_some(),
                     methods: methods
                         .iter()
                         .map(|m| {
@@ -468,6 +482,7 @@ pub fn expand_derives(program: &mut Vec<Decl>, imported: &ImportedDecls) -> Vec<
             Decl::TraitDef {
                 name,
                 type_params,
+                functional_dependency,
                 methods,
                 ..
             } => {
@@ -475,6 +490,7 @@ pub fn expand_derives(program: &mut Vec<Decl>, imported: &ImportedDecls) -> Vec<
                     name.clone(),
                     RoutedTraitInfo {
                         type_params: type_params.clone(),
+                        is_functional: functional_dependency.is_some(),
                         methods: methods.iter().map(|m| m.node.clone()).collect(),
                         defining_module: current_module.clone(),
                         defining_module_values: local_defining_values.clone(),
@@ -485,6 +501,8 @@ pub fn expand_derives(program: &mut Vec<Decl>, imported: &ImportedDecls) -> Vec<
                 name,
                 type_params,
                 variants,
+                deriving,
+                opaque,
                 ..
             } => {
                 scope.add_local_type(
@@ -492,6 +510,8 @@ pub fn expand_derives(program: &mut Vec<Decl>, imported: &ImportedDecls) -> Vec<
                     WrapperTypeInfo {
                         type_params: type_params.clone(),
                         variants: variants.iter().map(|v| v.node.clone()).collect(),
+                        derives_generic: deriving.iter().any(|d| d.is_plain_named("Generic")),
+                        opaque: *opaque,
                     },
                 );
             }
@@ -499,6 +519,7 @@ pub fn expand_derives(program: &mut Vec<Decl>, imported: &ImportedDecls) -> Vec<
                 name,
                 type_params,
                 fields,
+                deriving,
                 ..
             } => {
                 scope.add_local_record(
@@ -509,6 +530,7 @@ pub fn expand_derives(program: &mut Vec<Decl>, imported: &ImportedDecls) -> Vec<
                             .iter()
                             .map(|f| (f.node.0.clone(), f.node.1.clone()))
                             .collect(),
+                        derives_generic: deriving.iter().any(|d| d.is_plain_named("Generic")),
                     },
                 );
             }
@@ -521,6 +543,7 @@ pub fn expand_derives(program: &mut Vec<Decl>, imported: &ImportedDecls) -> Vec<
         let mut extra: Vec<Decl> = Vec::new();
         match decl {
             Decl::TypeDef {
+                public,
                 name,
                 type_params,
                 variants,
@@ -530,8 +553,8 @@ pub fn expand_derives(program: &mut Vec<Decl>, imported: &ImportedDecls) -> Vec<
             } => {
                 // Ord requires Eq (supertrait). Automatically derive Eq if Ord
                 // is requested but Eq isn't explicitly listed.
-                let needs_eq =
-                    deriving.iter().any(|t| t == "Ord") && !deriving.iter().any(|t| t == "Eq");
+                let needs_eq = deriving.iter().any(|d| d.is_plain_named("Ord"))
+                    && !deriving.iter().any(|d| d.is_plain_named("Eq"));
 
                 if needs_eq
                     && let Some(impl_def) =
@@ -542,16 +565,12 @@ pub fn expand_derives(program: &mut Vec<Decl>, imported: &ImportedDecls) -> Vec<
 
                 // Auto-include Generic: if any non-hardcoded derive is requested
                 // and Generic isn't explicitly listed, synthesize it first.
-                let has_routed = deriving.iter().any(|t| {
-                    let bare = t.rsplit('.').next().unwrap_or(t);
-                    !is_hardcoded_derive(bare)
-                });
-                let has_generic = deriving.iter().any(|t| {
-                    let bare = t.rsplit('.').next().unwrap_or(t);
-                    bare == "Generic"
-                });
+                let has_routed = deriving
+                    .iter()
+                    .any(|d| !d.type_args.is_empty() || !is_hardcoded_derive(d.bare_name()));
+                let has_generic = deriving.iter().any(|d| d.is_plain_named("Generic"));
                 if has_routed && !has_generic {
-                    match derive_adt_generic(name, type_params, variants, *span) {
+                    match derive_adt_generic(*public, name, type_params, variants, *span) {
                         Ok(decls) => extra.extend(decls),
                         Err(Some(diag)) => errors.push(diag),
                         Err(None) => errors.push(Diagnostic {
@@ -562,10 +581,34 @@ pub fn expand_derives(program: &mut Vec<Decl>, imported: &ImportedDecls) -> Vec<
                     }
                 }
 
-                for trait_name in deriving {
-                    let bare = trait_name.rsplit('.').next().unwrap_or(trait_name);
+                for spec in deriving {
+                    let trait_name = &spec.trait_name;
+                    let bare = spec.bare_name();
+                    if !spec.type_args.is_empty() {
+                        if is_hardcoded_derive(bare) {
+                            errors.push(Diagnostic {
+                                severity: Severity::Error,
+                                message: format!(
+                                    "cannot derive `{trait_name}` with type arguments"
+                                ),
+                                span: Some(spec.span),
+                            });
+                        } else {
+                            match derive_applied_functional_bridge(
+                                spec,
+                                name,
+                                type_params,
+                                *span,
+                                &scope,
+                            ) {
+                                Ok(decls) => extra.extend(decls),
+                                Err(diag) => errors.push(diag),
+                            }
+                        }
+                        continue;
+                    }
                     if bare == "Generic" {
-                        match derive_adt_generic(name, type_params, variants, *span) {
+                        match derive_adt_generic(*public, name, type_params, variants, *span) {
                             Ok(decls) => extra.extend(decls),
                             Err(Some(diag)) => errors.push(diag),
                             Err(None) => errors.push(Diagnostic {
@@ -594,6 +637,7 @@ pub fn expand_derives(program: &mut Vec<Decl>, imported: &ImportedDecls) -> Vec<
                 }
             }
             Decl::RecordDef {
+                public,
                 name,
                 type_params,
                 fields,
@@ -601,16 +645,12 @@ pub fn expand_derives(program: &mut Vec<Decl>, imported: &ImportedDecls) -> Vec<
                 span,
                 ..
             } => {
-                let has_routed = deriving.iter().any(|t| {
-                    let bare = t.rsplit('.').next().unwrap_or(t);
-                    !is_hardcoded_derive(bare)
-                });
-                let has_generic = deriving.iter().any(|t| {
-                    let bare = t.rsplit('.').next().unwrap_or(t);
-                    bare == "Generic"
-                });
+                let has_routed = deriving
+                    .iter()
+                    .any(|d| !d.type_args.is_empty() || !is_hardcoded_derive(d.bare_name()));
+                let has_generic = deriving.iter().any(|d| d.is_plain_named("Generic"));
                 if has_routed && !has_generic {
-                    match derive_record_generic(name, type_params, fields, *span) {
+                    match derive_record_generic(*public, name, type_params, fields, *span) {
                         Ok(decls) => extra.extend(decls),
                         Err(Some(diag)) => errors.push(diag),
                         Err(None) => errors.push(Diagnostic {
@@ -621,8 +661,32 @@ pub fn expand_derives(program: &mut Vec<Decl>, imported: &ImportedDecls) -> Vec<
                     }
                 }
 
-                for trait_name in deriving {
-                    let bare = trait_name.rsplit('.').next().unwrap_or(trait_name);
+                for spec in deriving {
+                    let trait_name = &spec.trait_name;
+                    let bare = spec.bare_name();
+                    if !spec.type_args.is_empty() {
+                        if is_hardcoded_derive(bare) {
+                            errors.push(Diagnostic {
+                                severity: Severity::Error,
+                                message: format!(
+                                    "cannot derive `{trait_name}` with type arguments"
+                                ),
+                                span: Some(spec.span),
+                            });
+                        } else {
+                            match derive_applied_functional_bridge(
+                                spec,
+                                name,
+                                type_params,
+                                *span,
+                                &scope,
+                            ) {
+                                Ok(decls) => extra.extend(decls),
+                                Err(diag) => errors.push(diag),
+                            }
+                        }
+                        continue;
+                    }
                     if !is_hardcoded_derive(bare) && bare != "Generic" {
                         match derive_routed(trait_name, name, type_params, *span, &scope) {
                             Ok(decls) => extra.extend(decls),
@@ -630,7 +694,14 @@ pub fn expand_derives(program: &mut Vec<Decl>, imported: &ImportedDecls) -> Vec<
                         }
                         continue;
                     }
-                    match generate_record_derive(trait_name, name, type_params, fields, *span) {
+                    match generate_record_derive(
+                        *public,
+                        trait_name,
+                        name,
+                        type_params,
+                        fields,
+                        *span,
+                    ) {
                         Ok(decls) => extra.extend(decls),
                         Err(Some(diag)) => errors.push(diag),
                         Err(None) => errors.push(Diagnostic {
@@ -1079,6 +1150,7 @@ fn collect_pat_bindings(pat: &Pat, out: &mut std::collections::HashSet<String>) 
 #[derive(Clone)]
 pub struct RoutedTraitInfo {
     pub type_params: Vec<TypeParam>,
+    pub is_functional: bool,
     pub methods: Vec<TraitMethod>,
     /// Module that defines this trait, e.g. "Lib" or "Std.Generic". Used to
     /// retarget free identifiers in cloned default-method bodies so they
@@ -1194,6 +1266,595 @@ fn is_hardcoded_derive(bare: &str) -> bool {
     matches!(
         bare,
         "Show" | "Debug" | "Eq" | "Ord" | "Enum" | "Generic" | "Default"
+    )
+}
+
+fn derive_applied_functional_bridge(
+    spec: &DeriveSpec,
+    type_name: &str,
+    type_params: &[TypeParam],
+    span: Span,
+    scope: &DeriveScope<'_>,
+) -> Result<Vec<Decl>, Diagnostic> {
+    let trait_entry = match scope.trait_entry(&spec.trait_name) {
+        Ok(Some(entry)) => entry,
+        Ok(None) => {
+            return Err(Diagnostic {
+                severity: Severity::Error,
+                message: format!("cannot derive `{}`: trait is not in scope", spec.trait_name),
+                span: Some(spec.span),
+            });
+        }
+        Err(reason) => {
+            return Err(Diagnostic {
+                severity: Severity::Error,
+                message: format!("cannot derive `{}`: {reason}", spec.trait_name),
+                span: Some(spec.span),
+            });
+        }
+    };
+    let trait_info = &trait_entry.info;
+    let trait_syntax = trait_entry.canonical.clone();
+    let trait_display = spec
+        .trait_name
+        .rsplit('.')
+        .next()
+        .unwrap_or(&spec.trait_name);
+
+    if spec.type_args.len() != 1 {
+        return Err(Diagnostic {
+            severity: Severity::Error,
+            message: format!(
+                "cannot derive `{trait_display}` with {} type arguments; applied derives support exactly one row type",
+                spec.type_args.len()
+            ),
+            span: Some(spec.span),
+        });
+    }
+    let row_type = &spec.type_args[0];
+    if !is_supported_applied_row_type(row_type) {
+        return Err(Diagnostic {
+            severity: Severity::Error,
+            message: format!(
+                "cannot derive `{trait_display}`: row argument must be a named type or named type application"
+            ),
+            span: Some(row_type.span()),
+        });
+    }
+    let row_type = canonicalize_applied_row_type(row_type, scope);
+    ensure_row_generic_available(trait_display, &row_type, spec.span, scope)?;
+    if trait_info.type_params.len() != 2 || !trait_info.is_functional {
+        return Err(Diagnostic {
+            severity: Severity::Error,
+            message: format!(
+                "cannot derive `{trait_display}` with a row argument: trait must be a functional two-parameter trait"
+            ),
+            span: Some(spec.span),
+        });
+    }
+
+    let self_var = &trait_info.type_params[0].name;
+    let row_var = &trait_info.type_params[1].name;
+    let mut methods = Vec::new();
+    for method in &trait_info.methods {
+        if method.default_body.is_some() {
+            continue;
+        }
+        let return_shape = match classify_applied_bridge_return(&method.return_type, row_var, scope)
+        {
+            Ok(shape) if is_applied_bridge_method(method, self_var) => shape,
+            Ok(_) | Err(_) => {
+                return Err(Diagnostic {
+                    severity: Severity::Error,
+                    message: format!(
+                        "cannot derive `{trait_display}` for `{type_name}`: method `{}` must have shape `{self_var} -> {row_var}` or `{self_var} -> Wrapper {row_var}` with no effects",
+                        method.name
+                    ),
+                    span: Some(method.span),
+                });
+            }
+        };
+        methods.push((method.clone(), return_shape));
+    }
+    if methods.is_empty() {
+        return Err(Diagnostic {
+            severity: Severity::Error,
+            message: format!(
+                "cannot derive `{trait_display}` for `{type_name}`: every method has a default body, so there is nothing to synthesize"
+            ),
+            span: Some(spec.span),
+        });
+    }
+
+    let zero_span = Span { start: 0, end: 0 };
+    let source_rep_name = format!("Rep__{type_name}");
+    let row_rep_type = rep_type_for_named_type(&row_type).expect("validated row type");
+    let row_rep_ctor = row_type
+        .head_name()
+        .map(rep_name_for_type_head)
+        .expect("validated row type");
+
+    let routed_info = RoutedDeriveInfo {
+        trait_name: trait_display.to_string(),
+        target_type: type_name.to_string(),
+        deriving_span: spec.span,
+    };
+
+    let bridge_methods = methods
+        .iter()
+        .map(|(method, return_shape)| {
+            Annotated::bare(synth_applied_bridge_method(
+                method,
+                return_shape,
+                &source_rep_name,
+                &row_rep_ctor,
+                span,
+            ))
+        })
+        .collect();
+    let bridge_impl = Decl::ImplDef {
+        id: NodeId::fresh(),
+        doc: vec![],
+        trait_name: trait_syntax.clone(),
+        trait_name_span: zero_span,
+        trait_type_args: vec![row_rep_type.clone()],
+        target_type: source_rep_name,
+        target_type_span: zero_span,
+        target_type_expr: None,
+        type_params: type_params.to_vec(),
+        where_clause: vec![],
+        where_apps: vec![],
+        needs: vec![],
+        methods: bridge_methods,
+        routed_derive_info: Some(routed_info.clone()),
+        span,
+        dangling_trivia: vec![],
+    };
+
+    let source_rep_var = "__selection_rep".to_string();
+    let row_rep_var = "__row_rep".to_string();
+    let source_applied = apply_type_params(type_name, type_params);
+    let where_apps = vec![
+        TraitApp {
+            id: NodeId::fresh(),
+            trait_name: "Std.Generic.Generic".into(),
+            type_args: vec![
+                source_applied,
+                TypeExpr::Var {
+                    id: NodeId::fresh(),
+                    name: source_rep_var.clone(),
+                    span: zero_span,
+                },
+            ],
+            span: zero_span,
+        },
+        TraitApp {
+            id: NodeId::fresh(),
+            trait_name: "Std.Generic.Generic".into(),
+            type_args: vec![
+                row_type.clone(),
+                TypeExpr::Var {
+                    id: NodeId::fresh(),
+                    name: row_rep_var.clone(),
+                    span: zero_span,
+                },
+            ],
+            span: zero_span,
+        },
+        TraitApp {
+            id: NodeId::fresh(),
+            trait_name: trait_syntax.clone(),
+            type_args: vec![
+                TypeExpr::Var {
+                    id: NodeId::fresh(),
+                    name: source_rep_var,
+                    span: zero_span,
+                },
+                TypeExpr::Var {
+                    id: NodeId::fresh(),
+                    name: row_rep_var,
+                    span: zero_span,
+                },
+            ],
+            span: zero_span,
+        },
+    ];
+    let delegating_methods = methods
+        .iter()
+        .map(|(method, return_shape)| {
+            Annotated::bare(synth_applied_delegating_method(method, return_shape, span))
+        })
+        .collect();
+    let delegating_impl = Decl::ImplDef {
+        id: NodeId::fresh(),
+        doc: vec![],
+        trait_name: trait_syntax,
+        trait_name_span: zero_span,
+        trait_type_args: vec![row_type.clone()],
+        target_type: type_name.into(),
+        target_type_span: zero_span,
+        target_type_expr: None,
+        type_params: type_params.to_vec(),
+        where_clause: vec![],
+        where_apps,
+        needs: vec![],
+        methods: delegating_methods,
+        routed_derive_info: Some(routed_info),
+        span,
+        dangling_trivia: vec![],
+    };
+
+    Ok(vec![bridge_impl, delegating_impl])
+}
+
+fn ensure_row_generic_available(
+    trait_display: &str,
+    row_type: &TypeExpr,
+    derive_span: Span,
+    scope: &DeriveScope<'_>,
+) -> Result<(), Diagnostic> {
+    let Some(row_head) = row_type.head_name() else {
+        return Ok(());
+    };
+    let rep_head = rep_name_for_type_head(row_head);
+    let has_explicit_rep = matches!(scope.type_entry(&rep_head), Ok(Some(_)))
+        || matches!(scope.record_entry(&rep_head), Ok(Some(_)));
+
+    match scope.record_entry(row_head) {
+        Ok(Some(entry)) if entry.info.derives_generic || has_explicit_rep => return Ok(()),
+        Ok(Some(_)) => {
+            return Err(Diagnostic {
+                severity: Severity::Error,
+                message: format!(
+                    "cannot derive `{trait_display}`: row type `{row_head}` must derive `Generic`"
+                ),
+                span: Some(derive_span),
+            });
+        }
+        Err(reason) => {
+            return Err(Diagnostic {
+                severity: Severity::Error,
+                message: format!("cannot derive `{trait_display}`: {reason}"),
+                span: Some(derive_span),
+            });
+        }
+        Ok(None) => {}
+    }
+
+    match scope.type_entry(row_head) {
+        Ok(Some(entry)) if entry.info.derives_generic || has_explicit_rep => Ok(()),
+        Ok(Some(_)) => Err(Diagnostic {
+            severity: Severity::Error,
+            message: format!(
+                "cannot derive `{trait_display}`: row type `{row_head}` must derive `Generic`"
+            ),
+            span: Some(derive_span),
+        }),
+        Err(reason) => Err(Diagnostic {
+            severity: Severity::Error,
+            message: format!("cannot derive `{trait_display}`: {reason}"),
+            span: Some(derive_span),
+        }),
+        Ok(None) => Ok(()),
+    }
+}
+
+fn canonicalize_applied_row_type(ty: &TypeExpr, scope: &DeriveScope<'_>) -> TypeExpr {
+    match ty {
+        TypeExpr::Named { id, name, span } => {
+            let canonical = scope
+                .record_entry(name)
+                .ok()
+                .flatten()
+                .map(|entry| entry.canonical.clone())
+                .or_else(|| {
+                    scope
+                        .type_entry(name)
+                        .ok()
+                        .flatten()
+                        .map(|entry| entry.canonical.clone())
+                })
+                .unwrap_or_else(|| name.clone());
+            TypeExpr::Named {
+                id: *id,
+                name: canonical,
+                span: *span,
+            }
+        }
+        TypeExpr::App {
+            id,
+            func,
+            arg,
+            span,
+        } => TypeExpr::App {
+            id: *id,
+            func: Box::new(canonicalize_applied_row_type(func, scope)),
+            arg: Box::new(canonicalize_applied_row_type(arg, scope)),
+            span: *span,
+        },
+        other => other.clone(),
+    }
+}
+
+#[derive(Clone)]
+enum AppliedBridgeReturn {
+    Bare,
+    TransparentUnaryWrapper { ctor_name: String },
+    MappedWrapper { map_name: String },
+}
+
+enum AppliedRowWrap {
+    Constructor(String),
+    Function(String),
+}
+
+fn classify_applied_bridge_return(
+    return_type: &TypeExpr,
+    row_var: &str,
+    scope: &DeriveScope<'_>,
+) -> Result<AppliedBridgeReturn, String> {
+    if matches!(return_type, TypeExpr::Var { name, .. } if name == row_var) {
+        return Ok(AppliedBridgeReturn::Bare);
+    }
+
+    let (head, args) = extract_head_and_args(return_type).ok_or_else(|| {
+        "return type must be the row variable or a named unary wrapper applied to the row variable"
+            .to_string()
+    })?;
+    if args.len() != 1 || !matches!(&args[0], TypeExpr::Var { name, .. } if name == row_var) {
+        return Err("return type wrapper must be applied directly to the row variable".to_string());
+    }
+    if let Some(ctor_name) = transparent_unary_wrapper_ctor(&head, scope)? {
+        return Ok(AppliedBridgeReturn::TransparentUnaryWrapper { ctor_name });
+    }
+    Ok(AppliedBridgeReturn::MappedWrapper {
+        map_name: map_name_for_wrapper_head(&head),
+    })
+}
+
+fn transparent_unary_wrapper_ctor(
+    head: &str,
+    scope: &DeriveScope<'_>,
+) -> Result<Option<String>, String> {
+    if let Some(entry) = scope.type_entry(head)? {
+        if entry.info.opaque || entry.info.type_params.len() != 1 || entry.info.variants.len() != 1
+        {
+            return Ok(None);
+        }
+        let variant = &entry.info.variants[0];
+        if variant.fields.len() != 1
+            || !is_type_param_ref(&variant.fields[0].1, &entry.info.type_params[0].name)
+        {
+            return Ok(None);
+        }
+        return Ok(Some(qualify_ctor_like(&entry.canonical, &variant.name)));
+    }
+
+    if let Some(entry) = scope.record_entry(head)? {
+        if entry.info.type_params.len() != 1
+            || entry.info.fields.len() != 1
+            || !is_type_param_ref(&entry.info.fields[0].1, &entry.info.type_params[0].name)
+        {
+            return Ok(None);
+        }
+        return Ok(Some(entry.canonical.clone()));
+    }
+
+    Err(format!("return wrapper `{head}` is not in scope"))
+}
+
+fn map_name_for_wrapper_head(head: &str) -> String {
+    head.rsplit_once('.')
+        .map(|(module, _)| format!("{module}.map"))
+        .unwrap_or_else(|| "map".to_string())
+}
+
+fn qualify_ctor_like(type_canonical: &str, ctor_name: &str) -> String {
+    if ctor_name.contains('.') {
+        ctor_name.to_string()
+    } else if let Some((module, _)) = type_canonical.rsplit_once('.') {
+        format!("{module}.{ctor_name}")
+    } else {
+        ctor_name.to_string()
+    }
+}
+
+fn is_type_param_ref(ty: &TypeExpr, param_name: &str) -> bool {
+    matches!(ty, TypeExpr::Var { name, .. } if name == param_name)
+}
+
+fn is_applied_bridge_method(method: &TraitMethod, self_var: &str) -> bool {
+    method.params.len() == 1
+        && method.effects.is_empty()
+        && method.effect_row_var.is_empty()
+        && matches!(&method.params[0].1, TypeExpr::Var { name, .. } if name == self_var)
+}
+
+fn is_supported_applied_row_type(ty: &TypeExpr) -> bool {
+    if ty.head_name().is_some_and(|head| head == "Tuple") {
+        return false;
+    }
+    match ty {
+        TypeExpr::Named { .. } => true,
+        TypeExpr::App { func, arg, .. } => {
+            is_supported_applied_row_type(func) && is_supported_applied_row_type(arg)
+        }
+        _ => false,
+    }
+}
+
+fn rep_type_for_named_type(ty: &TypeExpr) -> Option<TypeExpr> {
+    let zero_span = Span { start: 0, end: 0 };
+    match ty {
+        TypeExpr::Named { name, .. } => Some(TypeExpr::Named {
+            id: NodeId::fresh(),
+            name: rep_name_for_type_head(name),
+            span: zero_span,
+        }),
+        TypeExpr::App { func, arg, .. } => Some(TypeExpr::App {
+            id: NodeId::fresh(),
+            func: Box::new(rep_type_for_named_type(func)?),
+            arg: Box::new((**arg).clone()),
+            span: zero_span,
+        }),
+        _ => None,
+    }
+}
+
+fn rep_name_for_type_head(head: &str) -> String {
+    if let Some((module, name)) = head.rsplit_once('.') {
+        format!("{module}.Rep__{name}")
+    } else {
+        format!("Rep__{head}")
+    }
+}
+
+fn synth_applied_bridge_method(
+    method: &TraitMethod,
+    return_shape: &AppliedBridgeReturn,
+    source_rep_name: &str,
+    row_rep_ctor: &str,
+    span: Span,
+) -> ImplMethod {
+    let inner = "__inner".to_string();
+    let method_call = app_expr(var_expr(&method.name, span), var_expr(&inner, span), span);
+    let body = synth_applied_return_wrap(
+        return_shape,
+        method_call,
+        AppliedRowWrap::Constructor(row_rep_ctor.to_string()),
+        span,
+    );
+    ImplMethod {
+        name: method.name.clone(),
+        name_span: Span { start: 0, end: 0 },
+        params: vec![Pat::Constructor {
+            id: NodeId::fresh(),
+            name: source_rep_name.to_string(),
+            args: vec![Pat::Var {
+                id: NodeId::fresh(),
+                name: inner,
+                span,
+            }],
+            span,
+        }],
+        body,
+    }
+}
+
+fn synth_applied_delegating_method(
+    method: &TraitMethod,
+    return_shape: &AppliedBridgeReturn,
+    span: Span,
+) -> ImplMethod {
+    let value = "__val".to_string();
+    let to_call = app_expr(var_expr("to", span), var_expr(&value, span), span);
+    let method_call = app_expr(var_expr(&method.name, span), to_call, span);
+    let body = synth_applied_return_wrap(
+        return_shape,
+        method_call,
+        AppliedRowWrap::Function("from".to_string()),
+        span,
+    );
+    ImplMethod {
+        name: method.name.clone(),
+        name_span: Span { start: 0, end: 0 },
+        params: vec![Pat::Var {
+            id: NodeId::fresh(),
+            name: value,
+            span,
+        }],
+        body,
+    }
+}
+
+fn synth_applied_return_wrap(
+    return_shape: &AppliedBridgeReturn,
+    method_call: Expr,
+    row_wrap: AppliedRowWrap,
+    span: Span,
+) -> Expr {
+    match return_shape {
+        AppliedBridgeReturn::Bare => apply_applied_row_wrap(&row_wrap, method_call, span),
+        AppliedBridgeReturn::MappedWrapper { map_name } => app_expr(
+            app_expr(value_expr(map_name, span), row_wrap.into_expr(span), span),
+            method_call,
+            span,
+        ),
+        AppliedBridgeReturn::TransparentUnaryWrapper { ctor_name } => {
+            let out = "__applied_row_out".to_string();
+            let wrapped = apply_applied_row_wrap(&row_wrap, var_expr(&out, span), span);
+            Expr::synth(
+                span,
+                ExprKind::Case {
+                    scrutinee: Box::new(method_call),
+                    arms: vec![Annotated::bare(CaseArm {
+                        pattern: Pat::Constructor {
+                            id: NodeId::fresh(),
+                            name: ctor_name.clone(),
+                            args: vec![Pat::Var {
+                                id: NodeId::fresh(),
+                                name: out,
+                                span,
+                            }],
+                            span,
+                        },
+                        guard: None,
+                        body: apply_ctor(ctor_name, wrapped, span),
+                        span,
+                    })],
+                    dangling_trivia: vec![],
+                },
+            )
+        }
+    }
+}
+
+fn apply_applied_row_wrap(wrap: &AppliedRowWrap, value: Expr, span: Span) -> Expr {
+    match wrap {
+        AppliedRowWrap::Constructor(name) => apply_ctor(name, value, span),
+        AppliedRowWrap::Function(name) => app_expr(value_expr(name, span), value, span),
+    }
+}
+
+impl AppliedRowWrap {
+    fn into_expr(self, span: Span) -> Expr {
+        match self {
+            AppliedRowWrap::Constructor(name) => ctor_expr(&name, span),
+            AppliedRowWrap::Function(name) => value_expr(&name, span),
+        }
+    }
+}
+
+fn var_expr(name: &str, span: Span) -> Expr {
+    Expr::synth(span, ExprKind::Var { name: name.into() })
+}
+
+fn value_expr(name: &str, span: Span) -> Expr {
+    if let Some((module, name)) = name.rsplit_once('.') {
+        Expr::synth(
+            span,
+            ExprKind::QualifiedName {
+                module: module.to_string(),
+                name: name.to_string(),
+                canonical_module: Some(module.to_string()),
+            },
+        )
+    } else {
+        var_expr(name, span)
+    }
+}
+
+fn ctor_expr(name: &str, span: Span) -> Expr {
+    Expr::synth(span, ExprKind::Constructor { name: name.into() })
+}
+
+fn app_expr(func: Expr, arg: Expr, span: Span) -> Expr {
+    Expr::synth(
+        span,
+        ExprKind::App {
+            func: Box::new(func),
+            arg: Box::new(arg),
+        },
     )
 }
 
@@ -2428,6 +3089,7 @@ fn type_expr_contains_var(te: &TypeExpr, name: &str) -> bool {
 ///   - `Err(None)` for "unsupported trait, use the default cannot-derive error"
 ///   - `Err(Some(diag))` for a specific diagnostic
 fn generate_record_derive(
+    public: bool,
     trait_name: &str,
     record_name: &str,
     type_params: &[TypeParam],
@@ -2456,7 +3118,7 @@ fn generate_record_derive(
             fields,
             span,
         )]),
-        "Generic" => derive_record_generic(record_name, type_params, fields, span),
+        "Generic" => derive_record_generic(public, record_name, type_params, fields, span),
         _ => Err(None),
     }
 }
@@ -2467,6 +3129,7 @@ fn generate_record_derive(
 /// type round-trip naturally through the runtime dictionary (no special
 /// recursion handling in the Rep shape).
 fn derive_record_generic(
+    public: bool,
     record_name: &str,
     type_params: &[TypeParam],
     fields: &[Annotated<(String, TypeExpr)>],
@@ -2487,7 +3150,7 @@ fn derive_record_generic(
     let rep_typedef = Decl::TypeDef {
         id: NodeId::fresh(),
         doc: vec![],
-        public: false,
+        public,
         opaque: false,
         name: rep_name.clone(),
         name_span: Span { start: 0, end: 0 },
@@ -2645,6 +3308,7 @@ fn apply_type_params(name: &str, type_params: &[TypeParam]) -> TypeExpr {
 /// Direct self-reference detection only — indirect recursion via other types
 /// is rare and deferred to Phase 2d alongside true recursive support.
 fn derive_adt_generic(
+    public: bool,
     type_name: &str,
     type_params: &[TypeParam],
     variants: &[Annotated<TypeConstructor>],
@@ -2668,7 +3332,7 @@ fn derive_adt_generic(
     let rep_typedef = Decl::TypeDef {
         id: NodeId::fresh(),
         doc: vec![],
-        public: false,
+        public,
         opaque: false,
         name: rep_name.clone(),
         name_span: Span { start: 0, end: 0 },
