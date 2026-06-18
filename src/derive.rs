@@ -534,6 +534,18 @@ pub fn expand_derives(program: &mut Vec<Decl>, imported: &ImportedDecls) -> Vec<
                     },
                 );
             }
+            Decl::ImplDef {
+                trait_name,
+                trait_type_args,
+                target_type_expr: Some(target),
+                ..
+            } if trait_type_args.len() == 1 => {
+                scope.local_impls.push(DeriveImplInfo {
+                    trait_bare: trait_name.rsplit('.').next().unwrap_or(trait_name).to_string(),
+                    target: target.clone(),
+                    row: trait_type_args[0].clone(),
+                });
+            }
             _ => {}
         }
     }
@@ -1166,12 +1178,26 @@ pub struct RoutedTraitInfo {
     pub defining_module_values: std::collections::HashSet<String>,
 }
 
+/// A trait impl captured at derive time, used to resolve the scope parameter of
+/// a parameterized record when applying a routed functional derive (see
+/// `determine_scope_specialization`). Only impls with a structured target are
+/// kept, since those are the ones a record field can match against.
+#[derive(Clone)]
+struct DeriveImplInfo {
+    trait_bare: String,
+    target: TypeExpr,
+    /// The single non-self trait argument (the determined "row" of a functional
+    /// two-parameter trait).
+    row: TypeExpr,
+}
+
 struct DeriveScope<'a> {
     imported: &'a ImportedDecls,
     current_module: Option<&'a str>,
     local_traits: HashMap<String, SummaryEntry<RoutedTraitInfo>>,
     local_types: HashMap<String, SummaryEntry<WrapperTypeInfo>>,
     local_records: HashMap<String, SummaryEntry<WrapperRecordInfo>>,
+    local_impls: Vec<DeriveImplInfo>,
 }
 
 impl<'a> DeriveScope<'a> {
@@ -1182,6 +1208,7 @@ impl<'a> DeriveScope<'a> {
             local_traits: HashMap::new(),
             local_types: HashMap::new(),
             local_records: HashMap::new(),
+            local_impls: Vec::new(),
         }
     }
 
@@ -1269,6 +1296,252 @@ fn is_hardcoded_derive(bare: &str) -> bool {
     )
 }
 
+// --- Derive-time TypeExpr matching (for scope specialization) ---------------
+//
+// A small Robinson-style unifier over `TypeExpr`, used to figure out the
+// concrete value a parameterized record's scope variable must take so that each
+// field column is `Selectable` to the requested row's field. All `Var` nodes
+// are treated as unification holes; `Named`/`Symbol` are rigid constructors.
+// Callers rename each side's variables with a distinct prefix so the two
+// namespaces don't collide.
+
+fn te_head(te: &TypeExpr) -> Option<String> {
+    match te {
+        TypeExpr::Named { name, .. } => Some(name.rsplit('.').next().unwrap_or(name).to_string()),
+        TypeExpr::App { func, .. } => te_head(func),
+        TypeExpr::Labeled { inner, .. } => te_head(inner),
+        _ => None,
+    }
+}
+
+/// Prefix every type variable's name so two type expressions can be unified in a
+/// shared substitution without their variables colliding.
+fn te_rename_vars(te: &TypeExpr, prefix: &str) -> TypeExpr {
+    match te {
+        TypeExpr::Var { id, name, span } => TypeExpr::Var {
+            id: *id,
+            name: format!("{prefix}{name}"),
+            span: *span,
+        },
+        TypeExpr::App {
+            id,
+            func,
+            arg,
+            span,
+        } => TypeExpr::App {
+            id: *id,
+            func: Box::new(te_rename_vars(func, prefix)),
+            arg: Box::new(te_rename_vars(arg, prefix)),
+            span: *span,
+        },
+        TypeExpr::Labeled { inner, .. } => te_rename_vars(inner, prefix),
+        other => other.clone(),
+    }
+}
+
+fn te_resolve(te: &TypeExpr, subst: &HashMap<String, TypeExpr>) -> TypeExpr {
+    match te {
+        TypeExpr::Var { name, .. } => match subst.get(name) {
+            Some(bound) => te_resolve(bound, subst),
+            None => te.clone(),
+        },
+        _ => te.clone(),
+    }
+}
+
+fn te_unify(a: &TypeExpr, b: &TypeExpr, subst: &mut HashMap<String, TypeExpr>) -> bool {
+    let a = te_resolve(a, subst);
+    let b = te_resolve(b, subst);
+    match (&a, &b) {
+        (TypeExpr::Var { name: na, .. }, TypeExpr::Var { name: nb, .. }) if na == nb => true,
+        (TypeExpr::Var { name, .. }, _) => {
+            subst.insert(name.clone(), b.clone());
+            true
+        }
+        (_, TypeExpr::Var { name, .. }) => {
+            subst.insert(name.clone(), a.clone());
+            true
+        }
+        (TypeExpr::Named { name: na, .. }, TypeExpr::Named { name: nb, .. }) => {
+            na.rsplit('.').next() == nb.rsplit('.').next()
+        }
+        (TypeExpr::Symbol { name: na, .. }, TypeExpr::Symbol { name: nb, .. }) => na == nb,
+        (
+            TypeExpr::App {
+                func: fa, arg: aa, ..
+            },
+            TypeExpr::App {
+                func: fb, arg: ab, ..
+            },
+        ) => te_unify(fa, fb, subst) && te_unify(aa, ab, subst),
+        (TypeExpr::Labeled { inner, .. }, _) => te_unify(inner, &b, subst),
+        (_, TypeExpr::Labeled { inner, .. }) => te_unify(&a, inner, subst),
+        _ => false,
+    }
+}
+
+fn te_apply(te: &TypeExpr, subst: &HashMap<String, TypeExpr>) -> TypeExpr {
+    match te {
+        TypeExpr::Var { name, .. } => match subst.get(name) {
+            Some(bound) => te_apply(bound, subst),
+            None => te.clone(),
+        },
+        TypeExpr::App {
+            id,
+            func,
+            arg,
+            span,
+        } => TypeExpr::App {
+            id: *id,
+            func: Box::new(te_apply(func, subst)),
+            arg: Box::new(te_apply(arg, subst)),
+            span: *span,
+        },
+        TypeExpr::Labeled { inner, .. } => te_apply(inner, subst),
+        other => other.clone(),
+    }
+}
+
+fn te_is_concrete(te: &TypeExpr) -> bool {
+    match te {
+        TypeExpr::Var { .. } => false,
+        TypeExpr::App { func, arg, .. } => te_is_concrete(func) && te_is_concrete(arg),
+        TypeExpr::Labeled { inner, .. } => te_is_concrete(inner),
+        _ => true,
+    }
+}
+
+/// Determine concrete values for a parameterized record's type parameters when
+/// applying a routed functional derive. For each record field, find the unique
+/// trait impl whose target matches the field *and* whose determined row matches
+/// the corresponding field of the requested row type; read off which record
+/// parameters that forces to a concrete type. Returns the map of record
+/// parameter name -> concrete `TypeExpr` (empty if nothing can be pinned, in
+/// which case the caller falls back to leaving the parameters polymorphic).
+fn determine_scope_specialization(
+    trait_bare: &str,
+    type_name: &str,
+    type_params: &[TypeParam],
+    row_type: &TypeExpr,
+    scope: &DeriveScope<'_>,
+) -> HashMap<String, TypeExpr> {
+    let mut bindings: HashMap<String, TypeExpr> = HashMap::new();
+    if type_params.is_empty() {
+        return bindings;
+    }
+    let param_names: std::collections::HashSet<&str> =
+        type_params.iter().map(|p| p.name.as_str()).collect();
+
+    let Ok(Some(source_entry)) = scope.record_entry(type_name) else {
+        return bindings;
+    };
+    let Some(row_head) = row_type.head_name() else {
+        return bindings;
+    };
+    let Ok(Some(row_entry)) = scope.record_entry(row_head) else {
+        return bindings;
+    };
+    // The row type must be unparameterized for a direct field-type comparison.
+    if !row_entry.info.type_params.is_empty() {
+        return bindings;
+    }
+    let row_fields: HashMap<&str, &TypeExpr> = row_entry
+        .info
+        .fields
+        .iter()
+        .map(|(n, t)| (n.as_str(), t))
+        .collect();
+
+    for (fname, col_te) in &source_entry.info.fields {
+        let Some(row_te) = row_fields.get(fname.as_str()) else {
+            continue;
+        };
+        let Some(col_head) = te_head(col_te) else {
+            continue;
+        };
+        let col_renamed = te_rename_vars(col_te, "s$");
+        let row_renamed = te_rename_vars(row_te, "w$");
+
+        let mut field_bindings: Option<HashMap<String, TypeExpr>> = None;
+        let mut ambiguous = false;
+        for imp in &scope.local_impls {
+            if imp.trait_bare != trait_bare {
+                continue;
+            }
+            if te_head(&imp.target).as_deref() != Some(col_head.as_str()) {
+                continue;
+            }
+            let target_renamed = te_rename_vars(&imp.target, "i$");
+            let impl_row_renamed = te_rename_vars(&imp.row, "i$");
+            let mut subst = HashMap::new();
+            if !te_unify(&col_renamed, &target_renamed, &mut subst) {
+                continue;
+            }
+            if !te_unify(&row_renamed, &impl_row_renamed, &mut subst) {
+                continue;
+            }
+            // Read off which record parameters this impl forces concrete.
+            let mut here: HashMap<String, TypeExpr> = HashMap::new();
+            for p in &param_names {
+                let resolved = te_apply(
+                    &TypeExpr::Var {
+                        id: NodeId::fresh(),
+                        name: format!("s${p}"),
+                        span: Span { start: 0, end: 0 },
+                    },
+                    &subst,
+                );
+                if te_is_concrete(&resolved) {
+                    here.insert((*p).to_string(), resolved);
+                }
+            }
+            if field_bindings.is_some() {
+                ambiguous = true;
+                break;
+            }
+            field_bindings = Some(here);
+        }
+        if ambiguous {
+            continue;
+        }
+        if let Some(here) = field_bindings {
+            for (k, v) in here {
+                match bindings.get(&k) {
+                    Some(existing) if !te_structural_eq(existing, &v) => {
+                        // Conflicting requirements across fields — give up on
+                        // specializing this parameter.
+                        bindings.remove(&k);
+                    }
+                    Some(_) => {}
+                    None => {
+                        bindings.insert(k, v);
+                    }
+                }
+            }
+        }
+    }
+    bindings
+}
+
+fn te_structural_eq(a: &TypeExpr, b: &TypeExpr) -> bool {
+    match (a, b) {
+        (TypeExpr::Named { name: na, .. }, TypeExpr::Named { name: nb, .. }) => {
+            na.rsplit('.').next() == nb.rsplit('.').next()
+        }
+        (TypeExpr::Var { name: na, .. }, TypeExpr::Var { name: nb, .. }) => na == nb,
+        (TypeExpr::Symbol { name: na, .. }, TypeExpr::Symbol { name: nb, .. }) => na == nb,
+        (
+            TypeExpr::App {
+                func: fa, arg: aa, ..
+            },
+            TypeExpr::App {
+                func: fb, arg: ab, ..
+            },
+        ) => te_structural_eq(fa, fb) && te_structural_eq(aa, ab),
+        _ => false,
+    }
+}
+
 fn derive_applied_functional_bridge(
     spec: &DeriveSpec,
     type_name: &str,
@@ -1323,6 +1596,18 @@ fn derive_applied_functional_bridge(
     }
     let row_type = canonicalize_applied_row_type(row_type, scope);
     ensure_row_generic_available(trait_display, &row_type, spec.span, scope)?;
+    // A parameterized record (e.g. `Users source meta`) may only be `Selectable`
+    // at a specific scope: each column field's impl pins which scope makes its
+    // selected type equal the requested row's field. Resolve those bindings so
+    // the generated impls target `Users source Required` rather than leaving the
+    // scope polymorphic (which can't be proven for every scope).
+    let scope_bindings =
+        determine_scope_specialization(trait_display, type_name, type_params, &row_type, scope);
+    let specialized_params: Vec<TypeParam> = type_params
+        .iter()
+        .filter(|tp| !scope_bindings.contains_key(&tp.name))
+        .cloned()
+        .collect();
     if trait_info.type_params.len() != 2 || !trait_info.is_functional {
         return Err(Diagnostic {
             severity: Severity::Error,
@@ -1392,6 +1677,11 @@ fn derive_applied_functional_bridge(
             ))
         })
         .collect();
+    // When the record's scope is pinned, target the specialized rep
+    // (`Rep__Users source Required`) so the bridge body's column constraints
+    // resolve against a concrete scope.
+    let bridge_target_expr = (!scope_bindings.is_empty())
+        .then(|| apply_type_params_specialized(&source_rep_name, type_params, &scope_bindings));
     let bridge_impl = Decl::ImplDef {
         id: NodeId::fresh(),
         doc: vec![],
@@ -1400,8 +1690,8 @@ fn derive_applied_functional_bridge(
         trait_type_args: vec![row_rep_type.clone()],
         target_type: source_rep_name,
         target_type_span: zero_span,
-        target_type_expr: None,
-        type_params: type_params.to_vec(),
+        target_type_expr: bridge_target_expr,
+        type_params: specialized_params.clone(),
         where_clause: vec![],
         where_apps: vec![],
         needs: vec![],
@@ -1413,7 +1703,7 @@ fn derive_applied_functional_bridge(
 
     let source_rep_var = "__selection_rep".to_string();
     let row_rep_var = "__row_rep".to_string();
-    let source_applied = apply_type_params(type_name, type_params);
+    let source_applied = apply_type_params_specialized(type_name, type_params, &scope_bindings);
     let where_apps = vec![
         TraitApp {
             id: NodeId::fresh(),
@@ -1465,6 +1755,8 @@ fn derive_applied_functional_bridge(
             Annotated::bare(synth_applied_delegating_method(method, return_shape, span))
         })
         .collect();
+    let delegating_target_expr = (!scope_bindings.is_empty())
+        .then(|| apply_type_params_specialized(type_name, type_params, &scope_bindings));
     let delegating_impl = Decl::ImplDef {
         id: NodeId::fresh(),
         doc: vec![],
@@ -1473,8 +1765,8 @@ fn derive_applied_functional_bridge(
         trait_type_args: vec![row_type.clone()],
         target_type: type_name.into(),
         target_type_span: zero_span,
-        target_type_expr: None,
-        type_params: type_params.to_vec(),
+        target_type_expr: delegating_target_expr,
+        type_params: specialized_params,
         where_clause: vec![],
         where_apps,
         needs: vec![],
@@ -3281,20 +3573,32 @@ fn derive_record_generic(
 /// Build a TypeExpr that applies `name` to each of `type_params` as a Var.
 /// e.g. (`Rep__Box`, `["a"]`) -> `App(Named(Rep__Box), Var(a))`.
 fn apply_type_params(name: &str, type_params: &[TypeParam]) -> TypeExpr {
+    apply_type_params_specialized(name, type_params, &HashMap::new())
+}
+
+/// Like `apply_type_params`, but substitutes any parameter present in
+/// `bindings` with its concrete type (used to pin a parameterized record's
+/// scope variable, e.g. `Users source meta` -> `Users source Required`).
+fn apply_type_params_specialized(
+    name: &str,
+    type_params: &[TypeParam],
+    bindings: &HashMap<String, TypeExpr>,
+) -> TypeExpr {
     let mut acc = TypeExpr::Named {
         id: NodeId::fresh(),
         name: name.into(),
         span: Span { start: 0, end: 0 },
     };
     for tp in type_params {
+        let arg = bindings.get(&tp.name).cloned().unwrap_or(TypeExpr::Var {
+            id: NodeId::fresh(),
+            name: tp.name.clone(),
+            span: Span { start: 0, end: 0 },
+        });
         acc = TypeExpr::App {
             id: NodeId::fresh(),
             func: Box::new(acc),
-            arg: Box::new(TypeExpr::Var {
-                id: NodeId::fresh(),
-                name: tp.name.clone(),
-                span: Span { start: 0, end: 0 },
-            }),
+            arg: Box::new(arg),
             span: Span { start: 0, end: 0 },
         };
     }

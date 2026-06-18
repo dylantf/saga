@@ -336,6 +336,96 @@ main () = case map Leaf 42 {
 }
 
 #[test]
+fn parameterized_record_selectable_derive_specializes_scope() {
+    // Deriving `Selectable User` for a parameterized record `Users source meta`
+    // must pin the scope parameter (`meta = Required`) so each column selects the
+    // row's concrete field type. With `meta` left polymorphic the column
+    // constraints can't be proven; the derive resolves the scope by matching each
+    // field against the `Selectable Column` impls. Compiling (typecheck +
+    // elaborate + lower) without error exercises that specialization.
+    let src = r#"
+import Std.Generic (Generic, Leaf, Labeled, And, Record)
+
+type Required = Required
+type Optional = Optional
+
+trait PgType a {}
+impl PgType for Int {}
+impl PgType for String {}
+
+type Column source meta (name : Symbol) a = Column
+type Projection a = Projection a
+
+fun map_projection : (a -> b) -> Projection a -> Projection b
+map_projection f projection = case projection {
+  Projection value -> Projection (f value)
+}
+
+trait Selectable selection row | selection -> row {
+  fun to_projection : selection -> Projection row
+}
+
+impl Selectable a for (Column source Required name a) where {a: PgType} {
+  to_projection _ = Projection (panic "stub")
+}
+impl Selectable (Maybe a) for (Column source Optional name a) where {a: PgType} {
+  to_projection _ = Projection Nothing
+}
+impl Selectable (Leaf row) for Leaf selection where {selection: Selectable row} {
+  to_projection selection = case selection {
+    Leaf value -> map_projection Leaf (to_projection value)
+  }
+}
+impl Selectable (Labeled n out) for Labeled n field where {Selectable field out} {
+  to_projection selection = case selection {
+    Labeled field -> map_projection Labeled (to_projection field)
+  }
+}
+impl Selectable (And lo ro) for And l r where {Selectable l lo, Selectable r ro} {
+  to_projection selection = case selection {
+    And l r -> case to_projection l {
+      Projection lv -> case to_projection r {
+        Projection rv -> Projection (And lv rv)
+      }
+    }
+  }
+}
+impl Selectable (Record out) for Record fields where {Selectable fields out} {
+  to_projection selection = case selection {
+    Record name fields -> map_projection (fun out -> Record name out) (to_projection fields)
+  }
+}
+
+record User {
+  id: Int,
+  name: String,
+} deriving (Generic)
+
+record Users source meta {
+  id: Column source meta 'id Int,
+  name: Column source meta 'name String,
+} deriving (Generic, Selectable User)
+
+type UsersTable = UsersTable
+
+fun users : Users UsersTable Required
+users = Users { id: Column, name: Column }
+
+fun project : selection -> row
+  where {selection: Generic selection_rep, selection_rep: Selectable row_rep, row: Generic row_rep}
+project selection = case to_projection (to selection) {
+  Projection row_rep -> from row_rep
+}
+
+fun run : Unit -> User
+run () = project users
+"#;
+
+    // Asserts typecheck succeeds (panics on error); the stub body is never run.
+    let _ = emit_elaborated_with_std(src);
+}
+
+#[test]
 fn multi_determinant_fundep_distinct_dicts_no_collision() {
     // A function with two where-bounds for the same trait and self var that
     // differ only in a determinant extra (`table Required -> ...` vs
