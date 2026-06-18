@@ -15,6 +15,74 @@ use crate::typechecker::{
     CheckResult, ImplInfo, KNOWN_SYMBOL_TRAIT, ResolvedValue, TraitEvidence, TraitInfo, Type,
 };
 
+fn bare_segment(name: &str) -> String {
+    name.rsplit('.').next().unwrap_or(name).to_string()
+}
+
+/// Disambiguating suffix for a dictionary parameter's variable component.
+///
+/// A trait with a multi-variable-determinant fundep (e.g.
+/// `TableScope table mode cols | table mode -> cols`) can be required twice on
+/// the *same* self variable, differing only in a determinant extra
+/// (`table Required -> ...` vs `table Optional -> ...`). The two dicts would
+/// otherwise collapse to the same `__dict_<Trait>_<var>` name and collide in
+/// codegen. We append the concrete determinant-extra heads (`_Required`) so the
+/// names stay distinct. Returns "" for traits without such a fundep, or when a
+/// determinant extra isn't a concrete head — keeping existing names unchanged
+/// and definition/use sites consistent.
+fn dict_var_suffix_from_types(
+    traits: &HashMap<String, TraitInfo>,
+    trait_name: &str,
+    extras: &[Type],
+) -> String {
+    let Some(fundep) = traits.get(trait_name).and_then(|i| i.fundep.as_ref()) else {
+        return String::new();
+    };
+    let positions = fundep.determinant_extra_positions();
+    if positions.is_empty() {
+        return String::new();
+    }
+    let mut parts = Vec::new();
+    for p in positions {
+        match extras.get(p) {
+            Some(Type::Con(name, _)) => parts.push(bare_segment(name)),
+            Some(Type::Symbol(s)) => parts.push(bare_segment(s)),
+            _ => return String::new(),
+        }
+    }
+    format!("_{}", parts.join("_"))
+}
+
+/// `dict_var_suffix_from_types` for the where-clause source form, where the
+/// determinant extras are `TypeExpr`s rather than resolved `Type`s. Renders the
+/// same bare heads so it agrees with the use-site (`Type`-based) computation.
+fn dict_var_suffix_from_type_exprs(
+    traits: &HashMap<String, TraitInfo>,
+    trait_name: &str,
+    extras: &[TypeExpr],
+) -> String {
+    let Some(fundep) = traits.get(trait_name).and_then(|i| i.fundep.as_ref()) else {
+        return String::new();
+    };
+    let positions = fundep.determinant_extra_positions();
+    if positions.is_empty() {
+        return String::new();
+    }
+    let mut parts = Vec::new();
+    for p in positions {
+        match extras.get(p) {
+            Some(TypeExpr::Named { name, .. }) => parts.push(bare_segment(name)),
+            Some(te @ TypeExpr::App { .. }) => match te.head_name() {
+                Some(h) => parts.push(bare_segment(h)),
+                None => return String::new(),
+            },
+            Some(TypeExpr::Symbol { name, .. }) => parts.push(bare_segment(name)),
+            _ => return String::new(),
+        }
+    }
+    format!("_{}", parts.join("_"))
+}
+
 /// Only invoke the symbol-intrinsic lambda fast-path for the `KnownSymbol`
 /// trait's own `symbol_name` method. Without this guard, a `to_json` call
 /// whose node also carries KnownSymbol evidence (from a parameterized
@@ -271,7 +339,13 @@ impl Elaborator {
                 .constraints
                 .iter()
                 .filter(|(trait_name, _, _)| !operator_traits.contains(trait_name.as_str()))
-                .map(|(trait_name, var_id, _)| (trait_name.clone(), format!("v{}", var_id)))
+                .map(|(trait_name, var_id, extras)| {
+                    // Same determinant-extra disambiguation as the where-clause
+                    // path, so inferred multi-determinant constraints on one var
+                    // get distinct dict-param names.
+                    let suffix = dict_var_suffix_from_types(&result.traits, trait_name, extras);
+                    (trait_name.clone(), format!("v{}{}", var_id, suffix))
+                })
                 .collect()
         };
 
@@ -416,7 +490,9 @@ impl Elaborator {
             for tr in &bound.traits {
                 if tr.name != "Num" && tr.name != "Eq" {
                     let resolved = self.resolved_trait_name(tr.id, &tr.name);
-                    dict_params.push((resolved, bound.type_var.clone()));
+                    let suffix =
+                        dict_var_suffix_from_type_exprs(&self.traits, &resolved, &tr.type_args);
+                    dict_params.push((resolved, format!("{}{}", bound.type_var, suffix)));
                 }
             }
         }
@@ -433,7 +509,10 @@ impl Elaborator {
                 continue;
             };
             let resolved = self.resolved_trait_name(app.id, &app.trait_name);
-            dict_params.push((resolved, name.clone()));
+            // `type_args[0]` is the self var; the determinant extras are the rest.
+            let suffix =
+                dict_var_suffix_from_type_exprs(&self.traits, &resolved, &app.type_args[1..]);
+            dict_params.push((resolved, format!("{}{}", name, suffix)));
         }
         dict_params
     }
@@ -505,9 +584,9 @@ impl Elaborator {
         let Some(info) = self.traits.get(resolved_trait) else {
             return;
         };
-        if !info.is_functional {
+        let Some(fundep) = &info.fundep else {
             return;
-        }
+        };
         let Type::Con(self_name, self_args) = self_type else {
             return;
         };
@@ -520,7 +599,13 @@ impl Elaborator {
         for (var_id, arg) in impl_info.target_type_param_ids.iter().zip(self_args.iter()) {
             subst.insert(*var_id, arg.clone());
         }
+        // Only the *determined* parameters are pinned from the impl; the
+        // determinant parameters are inputs, not outputs of the dependency.
+        let determined = fundep.determined_extra_positions();
         for (idx, arg) in app.type_args.iter().enumerate().skip(1) {
+            if !determined.contains(&(idx - 1)) {
+                continue;
+            }
             let TypeExpr::Var { name, .. } = arg else {
                 continue;
             };
@@ -2244,7 +2329,12 @@ impl Elaborator {
                             // specific dict param name (handles multiple where-clause
                             // bounds for the same trait, e.g. `where {e: Show, a: Show}`).
                             if let Some(ref var_name) = ev.type_var_name {
-                                self.dict_param_for_trait_var(trait_name, var_name, span)
+                                self.dict_param_for_trait_var(
+                                    trait_name,
+                                    var_name,
+                                    &ev.trait_type_args,
+                                    span,
+                                )
                             } else {
                                 self.current_dict_param_or_supertrait(trait_name, span)
                             }
@@ -2298,11 +2388,18 @@ impl Elaborator {
         &self,
         trait_name: &str,
         var_name: &str,
+        trait_type_args: &[Type],
         span: Span,
     ) -> Option<Expr> {
+        // For multi-variable-determinant fundeps, several constraints on the
+        // same self var are distinguished by a determinant suffix baked into
+        // the dict-param's var key. Try the qualified key first; for ordinary
+        // traits the suffix is empty so this is identical to the base lookup.
+        let suffix = dict_var_suffix_from_types(&self.traits, trait_name, trait_type_args);
+        let qualified_var = format!("{}{}", var_name, suffix);
         if let Some(param_name) = self
             .current_dict_params_by_var
-            .get(&(trait_name.to_string(), var_name.to_string()))
+            .get(&(trait_name.to_string(), qualified_var.clone()))
         {
             return Some(Expr::synth(
                 span,
@@ -2313,7 +2410,7 @@ impl Elaborator {
         }
 
         for ((bound_trait, bound_var), param_name) in &self.current_dict_params_by_var {
-            if bound_var == var_name
+            if bound_var == &qualified_var
                 && let Some(projected) = self.project_supertrait_dict(
                     bound_trait,
                     trait_name,
@@ -2588,11 +2685,14 @@ impl Elaborator {
                 // through to the single-trait fallback and resolve to the
                 // last-inserted dict.
                 let var_key = format!("v{}", id);
-                if let Some(expr) = self.dict_param_for_trait_var(trait_name, &var_key, span) {
+                if let Some(expr) =
+                    self.dict_param_for_trait_var(trait_name, &var_key, trait_type_args, span)
+                {
                     return Some(expr);
                 }
                 if let Some(src_name) = self.where_bound_var_names.get(id)
-                    && let Some(expr) = self.dict_param_for_trait_var(trait_name, src_name, span)
+                    && let Some(expr) =
+                        self.dict_param_for_trait_var(trait_name, src_name, trait_type_args, span)
                 {
                     return Some(expr);
                 }

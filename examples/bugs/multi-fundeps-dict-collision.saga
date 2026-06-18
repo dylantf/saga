@@ -1,0 +1,52 @@
+import Std.IO (console)
+# Minimal repro for duplicate generated dictionary variable names.
+#
+# Expected:
+#
+#   saga run dev/repros/duplicate_fundep_dict_codegen_repro.saga
+#
+# should print "required / optional".
+#
+# Actual in Kraken's `left_join` shape:
+#
+#   erlc failed with:
+#     duplicate variable '___dict_TableScope_table' in left_join/6
+#
+# The important bit is one function with two constraints for the same trait and
+# same self type variable, but different determinant extras:
+#
+#   table Required -> required_cols
+#   table Optional -> optional_cols
+type Required = Required
+type Optional = Optional
+type UsersTable = UsersTable
+type Table table = Table table
+trait TableScope table mode cols | table mode -> cols {
+  fun cols : (mode, table) -> cols
+}
+record RequiredCols {
+  value: String,
+}
+record OptionalCols {
+  value: String,
+}
+impl TableScope Required RequiredCols for UsersTable {
+  cols _ = RequiredCols { value: "required" }
+}
+impl TableScope Optional OptionalCols for UsersTable {
+  cols _ = OptionalCols { value: "optional" }
+}
+fun both : Table table -> (required_cols, optional_cols)
+  where {
+    table: TableScope Required required_cols,
+    table: TableScope Optional optional_cols,
+  }
+both table_value = case table_value {
+  Table table -> (cols (Required, table), cols (Optional, table))
+}
+fun users : Table UsersTable
+users = Table UsersTable
+main () = {
+  let (required, optional) = both users
+  println (required.value <> " / " <> optional.value)
+} with console

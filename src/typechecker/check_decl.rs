@@ -1735,7 +1735,7 @@ impl Checker {
                             resolved_type: None,
                             resolved_record_type: None,
                             type_var_name: var_name,
-                            trait_type_args: trait_type_arg_types.clone(),
+                            trait_type_args: trait_type_arg_types.iter().map(|t| self.sub.apply(t)).collect(),
                             resolved_symbol: None,
                         });
                         continue;
@@ -1772,7 +1772,7 @@ impl Checker {
                                 resolved_type: None,
                                 resolved_record_type: None,
                                 type_var_name: var_name,
-                                trait_type_args: trait_type_arg_types.clone(),
+                                trait_type_args: trait_type_arg_types.iter().map(|t| self.sub.apply(t)).collect(),
                                 resolved_symbol: None,
                             });
                             continue;
@@ -1817,7 +1817,10 @@ impl Checker {
                         resolved_type: None,
                         resolved_record_type: None,
                         type_var_name: var_name,
-                        trait_type_args: trait_type_arg_types.clone(),
+                        trait_type_args: trait_type_arg_types
+                            .iter()
+                            .map(|t| self.sub.apply(t))
+                            .collect(),
                         resolved_symbol: None,
                     });
                     let resolved_extras = trait_type_arg_types
@@ -3062,6 +3065,140 @@ impl Checker {
 
     // --- Trait constraint checking ---
 
+    /// Eagerly pin functional-dependency *determined* variables for any pending
+    /// constraint whose determinants are already concrete, by selecting the
+    /// unique matching impl and unifying the determined args. This only refines
+    /// the substitution — it neither consumes pending constraints nor reports
+    /// errors — so eager consumers (e.g. field-access disambiguation) can see a
+    /// determined record type before `check_pending_constraints` runs at the
+    /// end of the body. Coherence guarantees the match is unique, so committing
+    /// early is sound. Idempotent; loops to a fixpoint for chained fundeps.
+    pub(crate) fn improve_pending_fundeps(&mut self) {
+        loop {
+            let before = self.sub.solved_count();
+            let pending = self.trait_state.pending_constraints.clone();
+            for (trait_name, extras, self_ty, _, _) in &pending {
+                let resolved_trait = self
+                    .resolve_trait_name(trait_name)
+                    .unwrap_or_else(|| trait_name.clone());
+                let Some(fundep) = self
+                    .trait_state
+                    .traits
+                    .get(&resolved_trait)
+                    .and_then(|ti| ti.fundep.clone())
+                else {
+                    continue;
+                };
+                let resolved_self = self.sub.apply(self_ty);
+                let Type::Con(self_head, self_args) = &resolved_self else {
+                    continue;
+                };
+                let arity_keyed = super::arity_keyed_target_name(self_head, self_args.len());
+                let det_positions = fundep.determinant_extra_positions();
+                let determined_positions = fundep.determined_extra_positions();
+                // Every determinant extra must already be concrete, otherwise we
+                // can't pick the impl yet.
+                let dets_concrete = det_positions.iter().all(|&p| {
+                    extras
+                        .get(p)
+                        .map(|e| matches!(self.sub.apply(e), Type::Con(..) | Type::Symbol(_)))
+                        .unwrap_or(false)
+                });
+                if !dets_concrete {
+                    continue;
+                }
+                // Find the unique impl whose self type and determinant extras
+                // match this constraint.
+                let candidates: Vec<(super::ImplInfo, std::collections::HashMap<u32, Type>)> = self
+                    .trait_state
+                    .impls
+                    .iter()
+                    .filter_map(|((tn, _, tt), info)| {
+                        if tn != &resolved_trait || tt != &arity_keyed {
+                            return None;
+                        }
+                        let mut pattern_subst = std::collections::HashMap::new();
+                        if let Some(pattern) = &info.target_pattern
+                            && !super::check_traits::match_type_pattern(
+                                pattern,
+                                &resolved_self,
+                                &mut pattern_subst,
+                            )
+                        {
+                            return None;
+                        }
+                        for &p in &det_positions {
+                            let (Some(impl_extra), Some(call_extra)) =
+                                (info.trait_type_args.get(p), extras.get(p))
+                            else {
+                                continue;
+                            };
+                            let expected = super::check_traits::substitute_pattern_vars(
+                                impl_extra,
+                                &pattern_subst,
+                            );
+                            let actual = self.sub.apply(call_extra);
+                            if !super::check_traits::match_type_pattern(
+                                &expected,
+                                &actual,
+                                &mut pattern_subst,
+                            ) {
+                                return None;
+                            }
+                        }
+                        Some((info.clone(), pattern_subst))
+                    })
+                    .collect();
+                if candidates.len() != 1 {
+                    continue;
+                }
+                let (info, mut pattern_subst) = candidates.into_iter().next().unwrap();
+                // Only pin determined extras that are still unresolved. Re-pinning
+                // an already-resolved extra would mint a fresh impl var and bind
+                // it every pass, growing `solved_count` without bound — an
+                // infinite loop. Skipping resolved ones makes this converge.
+                let to_pin: Vec<usize> = determined_positions
+                    .iter()
+                    .copied()
+                    .filter(|&p| {
+                        extras
+                            .get(p)
+                            .map(|e| matches!(self.sub.apply(e), Type::Var(_)))
+                            .unwrap_or(false)
+                    })
+                    .collect();
+                if to_pin.is_empty() {
+                    continue;
+                }
+                // Bind any remaining impl pattern variables (not pinned by the
+                // determinant match) to fresh vars so the determined args are
+                // fully grounded.
+                let mut impl_vars = Vec::new();
+                for extra in &info.trait_type_args {
+                    super::collect_free_vars(extra, &mut impl_vars);
+                }
+                for var_id in impl_vars {
+                    pattern_subst
+                        .entry(var_id)
+                        .or_insert_with(|| self.fresh_var());
+                }
+                for p in to_pin {
+                    let (Some(call_extra), Some(impl_extra)) =
+                        (extras.get(p), info.trait_type_args.get(p))
+                    else {
+                        continue;
+                    };
+                    let pinned =
+                        super::check_traits::substitute_pattern_vars(impl_extra, &pattern_subst);
+                    let _ = self.unify(call_extra, &pinned);
+                }
+            }
+            if self.sub.solved_count() == before {
+                break;
+            }
+        }
+    }
+
     pub(crate) fn check_pending_constraints(&mut self) -> Result<(), Diagnostic> {
         // Build resolved where bounds (substitution may have chained var IDs)
         let mut resolved_bounds: std::collections::HashMap<u32, std::collections::HashSet<String>> =
@@ -3108,6 +3245,20 @@ impl Checker {
                 break;
             }
             constraints.sort_by_key(|(_, _, ty, _, _)| matches!(self.sub.apply(ty), Type::Var(_)));
+            // Worklist bookkeeping: a Var-self constraint that isn't resolvable
+            // this pass (e.g. `Show q` before the `Two c q` fundep has pinned
+            // `q`) is *deferred* rather than reported, because a sibling
+            // constraint processed later — or a later pass — may still pin it.
+            // The sort puts concrete-self constraints first, but it cannot
+            // topologically order the Var-self group by their mutual fundep
+            // dependencies, so deferral + progress retry is what makes solving
+            // order-independent.
+            let sub_before = self.sub.solved_count();
+            #[allow(clippy::type_complexity)]
+            let mut deferred: Vec<(
+                (String, Vec<Type>, Type, Span, crate::ast::NodeId),
+                Diagnostic,
+            )> = Vec::new();
             for (trait_name, trait_type_arg_types, ty, span, node_id) in constraints {
                 let resolved = self.sub.apply(&ty);
                 if matches!(resolved, Type::Error) {
@@ -3264,6 +3415,18 @@ impl Checker {
                                 .map(|ti| ti.is_functional)
                                 .unwrap_or(false)
                         {
+                            // Extra-arg positions that *determine* the rest. For
+                            // a multi-variable determinant (`a b -> c`), the
+                            // self type alone doesn't pick the impl — we must
+                            // also match the resolved determinant extras (`b`),
+                            // then pin the determined extras (`c`).
+                            let det_extra_positions = self
+                                .trait_state
+                                .traits
+                                .get(&resolved_trait)
+                                .and_then(|ti| ti.fundep.as_ref())
+                                .map(|fd| fd.determinant_extra_positions())
+                                .unwrap_or_default();
                             let matches: Vec<(
                                 super::ImplInfo,
                                 std::collections::HashMap<u32, Type>,
@@ -3284,6 +3447,34 @@ impl Checker {
                                         )
                                     {
                                         return None;
+                                    }
+                                    // Filter by the determinant extras: each must
+                                    // be resolved at the call site and match this
+                                    // impl's stored arg. An unresolved determinant
+                                    // means we can't commit yet, so drop the
+                                    // candidate and let the constraint defer.
+                                    for &p in &det_extra_positions {
+                                        let (Some(impl_extra), Some(call_extra)) = (
+                                            info.trait_type_args.get(p),
+                                            trait_type_arg_types.get(p),
+                                        ) else {
+                                            continue;
+                                        };
+                                        let actual = self.sub.apply(call_extra);
+                                        if matches!(actual, Type::Var(_)) {
+                                            return None;
+                                        }
+                                        let expected = super::check_traits::substitute_pattern_vars(
+                                            impl_extra,
+                                            &pattern_subst,
+                                        );
+                                        if !super::check_traits::match_type_pattern(
+                                            &expected,
+                                            &actual,
+                                            &mut pattern_subst,
+                                        ) {
+                                            return None;
+                                        }
                                     }
                                     Some((info.clone(), pattern_subst))
                                 })
@@ -3559,14 +3750,24 @@ impl Checker {
                                 .cloned()
                         });
                         let Some(covering_trait) = covering_trait else {
+                            // Not resolvable yet. Defer instead of erroring: a
+                            // later constraint (or a later worklist pass) may
+                            // still pin this variable. If nothing does, the
+                            // post-loop progress check re-raises this prebuilt
+                            // diagnostic.
                             let display = trait_name.rsplit('.').next().unwrap_or(&trait_name);
-                            return Err(rewrite_diag(
+                            let diag = rewrite_diag(
                                 format!(
                                     "ambiguous type variable requires {}. Add a type annotation to pin the unconstrained type variable",
                                     display
                                 ),
                                 span,
+                            );
+                            deferred.push((
+                                (trait_name, trait_type_arg_types, Type::Var(*id), span, node_id),
+                                diag,
                             ));
+                            continue;
                         };
                         if let Some(bound_extras) =
                             resolved_bound_trait_args.get(&(*id, covering_trait))
@@ -3585,7 +3786,7 @@ impl Checker {
                             resolved_type: None,
                             resolved_record_type: None,
                             type_var_name: var_name,
-                            trait_type_args: trait_type_arg_types.clone(),
+                            trait_type_args: trait_type_arg_types.iter().map(|t| self.sub.apply(t)).collect(),
                             resolved_symbol: None,
                         });
                     }
@@ -3650,6 +3851,23 @@ impl Checker {
                     }
                     // Error/Never type: skip trait checking
                     Type::Error => {}
+                }
+            }
+            // Retry deferred (not-yet-resolvable) constraints only if this pass
+            // made progress: the substitution grew, or sibling processing
+            // queued fresh constraints. Without progress the deferrals are
+            // genuinely ambiguous, so re-raise the first one's diagnostic. This
+            // bounds the loop — progress is monotone (the substitution only
+            // grows) — while making fundep solving order-independent.
+            if !deferred.is_empty() {
+                let progressed = self.sub.solved_count() > sub_before
+                    || !self.trait_state.pending_constraints.is_empty();
+                if progressed {
+                    self.trait_state
+                        .pending_constraints
+                        .extend(deferred.into_iter().map(|(constraint, _)| constraint));
+                } else {
+                    return Err(deferred.into_iter().next().unwrap().1);
                 }
             }
         }

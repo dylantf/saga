@@ -374,7 +374,10 @@ impl Checker {
             .map(|tr| self.resolved_trait_name_at(tr.id, &tr.name))
             .collect();
         let has_builtin_functional_rule = FUNCTIONAL_TRAITS.contains(&canonical_name.as_str());
-        let has_declared_functional_rule = functional_dependency.is_some();
+        // Resolve the parameter name -> index, used to build the fundep's
+        // index sets and validate that every mentioned name is a real param.
+        let param_index = |name: &str| type_params.iter().position(|tp| tp.name == name);
+        let mut fundep: Option<super::TraitFundep> = None;
         if let Some(fd) = functional_dependency {
             let Some(first_param) = type_params.first() else {
                 return Err(Diagnostic::error_at(
@@ -382,57 +385,95 @@ impl Checker {
                     "functional dependency requires a trait self parameter".to_string(),
                 ));
             };
-            if fd.determinant != first_param.name {
-                return Err(Diagnostic::error_at(
-                    fd.span,
-                    format!(
-                        "unsupported functional dependency: `{}` must be the trait's first parameter `{}`",
-                        fd.determinant, first_param.name
-                    ),
-                ));
-            }
             if fd.determined.is_empty() {
                 return Err(Diagnostic::error_at(
                     fd.span,
                     "functional dependency must determine at least one parameter".to_string(),
                 ));
             }
-            for determined in &fd.determined {
-                if determined == &first_param.name {
-                    return Err(Diagnostic::error_at(
-                        fd.span,
-                        "functional dependency cannot determine the first parameter from itself"
-                            .to_string(),
-                    ));
-                }
-                if !type_params.iter().any(|tp| &tp.name == determined) {
-                    return Err(Diagnostic::error_at(
-                        fd.span,
-                        format!(
-                            "functional dependency mentions unknown trait parameter `{}`",
-                            determined
-                        ),
-                    ));
-                }
-            }
-            let expected: Vec<&str> = type_params
-                .iter()
-                .skip(1)
-                .map(|tp| tp.name.as_str())
-                .collect();
-            let actual: Vec<&str> = fd.determined.iter().map(|name| name.as_str()).collect();
-            if actual != expected {
+            // The self/first parameter must be a determinant: concrete-self
+            // impl selection recovers the determined params from the self type,
+            // so the self type has to sit on the determining side.
+            if !fd.determinant.iter().any(|d| d == &first_param.name) {
                 return Err(Diagnostic::error_at(
                     fd.span,
                     format!(
-                        "unsupported functional dependency: `{}` must determine all non-self parameters in declaration order ({})",
-                        fd.determinant,
-                        expected.join(" ")
+                        "unsupported functional dependency: the trait's first parameter `{}` must appear on the determining side",
+                        first_param.name
                     ),
                 ));
             }
+            let mut determinant_idx = Vec::new();
+            for d in &fd.determinant {
+                let Some(idx) = param_index(d) else {
+                    return Err(Diagnostic::error_at(
+                        fd.span,
+                        format!("functional dependency mentions unknown trait parameter `{}`", d),
+                    ));
+                };
+                if determinant_idx.contains(&idx) {
+                    return Err(Diagnostic::error_at(
+                        fd.span,
+                        format!("functional dependency repeats determining parameter `{}`", d),
+                    ));
+                }
+                determinant_idx.push(idx);
+            }
+            let mut determined_idx = Vec::new();
+            for d in &fd.determined {
+                let Some(idx) = param_index(d) else {
+                    return Err(Diagnostic::error_at(
+                        fd.span,
+                        format!("functional dependency mentions unknown trait parameter `{}`", d),
+                    ));
+                };
+                if determinant_idx.contains(&idx) {
+                    return Err(Diagnostic::error_at(
+                        fd.span,
+                        format!(
+                            "functional dependency cannot determine `{}` from itself",
+                            d
+                        ),
+                    ));
+                }
+                if determined_idx.contains(&idx) {
+                    return Err(Diagnostic::error_at(
+                        fd.span,
+                        format!("functional dependency repeats determined parameter `{}`", d),
+                    ));
+                }
+                determined_idx.push(idx);
+            }
+            // Every parameter must be covered: a param that is neither
+            // determining nor determined would be left free, which breaks the
+            // coherence guarantee the rest of the compiler relies on.
+            if determinant_idx.len() + determined_idx.len() != type_params.len() {
+                let uncovered: Vec<&str> = type_params
+                    .iter()
+                    .enumerate()
+                    .filter(|(i, _)| !determinant_idx.contains(i) && !determined_idx.contains(i))
+                    .map(|(_, tp)| tp.name.as_str())
+                    .collect();
+                return Err(Diagnostic::error_at(
+                    fd.span,
+                    format!(
+                        "functional dependency must cover all trait parameters; `{}` left undetermined",
+                        uncovered.join(" ")
+                    ),
+                ));
+            }
+            fundep = Some(super::TraitFundep {
+                determinant: determinant_idx,
+                determined: determined_idx,
+            });
+        } else if has_builtin_functional_rule {
+            // Legacy builtin rule (Generic): first param determines the rest.
+            fundep = Some(super::TraitFundep {
+                determinant: vec![0],
+                determined: (1..type_params.len()).collect(),
+            });
         }
-        let is_functional = has_builtin_functional_rule || has_declared_functional_rule;
+        let is_functional = fundep.is_some();
         self.trait_state.traits.insert(
             canonical_name,
             super::TraitInfo {
@@ -443,6 +484,7 @@ impl Checker {
                 supertraits: resolved_supertraits,
                 methods: trait_method_sigs,
                 is_functional,
+                fundep,
             },
         );
         Ok(())
@@ -608,20 +650,31 @@ impl Checker {
                 ),
             ));
         }
-        if trait_info.is_functional {
+        if let Some(fundep) = &trait_info.fundep {
+            // Positions (within the extra trait args) of the determinant
+            // parameters other than self. Self is `target_key`, handled below.
+            let det_extra_positions = fundep.determinant_extra_positions();
             for ((existing_trait, existing_args, existing_target), existing_info) in
                 &self.trait_state.impls
             {
+                // Two impls clash only when their determining inputs coincide:
+                // the self head (`target_key`) and every determinant extra arg
+                // must match. Differing on a determinant arg means the impls
+                // determine outputs for distinct inputs, so they may coexist.
+                let determinants_agree = existing_target == &target_key
+                    && det_extra_positions.iter().all(|&p| {
+                        existing_args.get(p) == trait_type_args_names.get(p)
+                    });
                 if existing_trait == trait_name
-                    && existing_target == &target_key
+                    && determinants_agree
                     && existing_args != trait_type_args_names
                 {
-                    // The two impls share an arity-keyed target head, but the
-                    // functional dependency is only violated if their
-                    // determining parameters can actually overlap. Compare the
-                    // full target patterns: distinct concrete constructors in
-                    // the same argument position (e.g. `Required` vs `Optional`)
-                    // make the targets disjoint, so both impls may coexist.
+                    // The determining inputs coincide, but the functional
+                    // dependency is only violated if the targets can actually
+                    // overlap. Compare the full target patterns: distinct
+                    // concrete constructors in the same argument position (e.g.
+                    // `Required` vs `Optional`) make the targets disjoint, so
+                    // both impls may coexist.
                     if let Some(existing_pattern) = &existing_info.target_pattern
                         && types_disjoint(existing_pattern, &target)
                     {
@@ -634,9 +687,10 @@ impl Checker {
                     return Err(Diagnostic::error_at(
                         span,
                         format!(
-                            "coherence violation: trait {} requires that the first parameter \
-                             functionally determines the rest, but `{}` already has an impl with \
-                             different trait arguments ({:?} vs {:?}){}",
+                            "coherence violation: trait {} requires that the determining \
+                             parameters functionally determine the rest, but `{}` already has an \
+                             impl with the same determining arguments but different determined \
+                             arguments ({:?} vs {:?}){}",
                             trait_name, target_type, existing_args, trait_type_arg_names, prev_loc
                         ),
                     ));

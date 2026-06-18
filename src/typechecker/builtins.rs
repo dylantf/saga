@@ -20,6 +20,7 @@ impl Checker {
                 supertraits: vec![],
                 methods: vec![],
                 is_functional: false,
+                fundep: None,
             },
         );
         for prim in &["Int", "Float"] {
@@ -46,6 +47,7 @@ impl Checker {
                 supertraits: vec![],
                 methods: vec![],
                 is_functional: false,
+                fundep: None,
             },
         );
         for prim in &["Int", "Float", "String", "Bool", "Unit", "BitString"] {

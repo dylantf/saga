@@ -1100,6 +1100,21 @@ fn app_nested_calls_parenthesized() {
     );
 }
 
+#[test]
+fn field_access_on_application_keeps_parens() {
+    // `.sql` binds tighter than application, so the parens around the call are
+    // required: without them this reparses as `println (users_query (().sql))`.
+    assert_eq!(
+        fmt80("f x = println (users_query ()).sql"),
+        "f x = println (users_query ()).sql\n"
+    );
+}
+
+#[test]
+fn field_access_on_plain_var_stays_unparenthesized() {
+    assert_eq!(fmt80("f x = println user.name"), "f x = println user.name\n");
+}
+
 // --- Records ---
 
 #[test]
@@ -1689,6 +1704,18 @@ fn impl_parenthesized_trait_type_arg_round_trips() {
             "impl Selectable (Selected2 a b) for Select2 a b {\n  to_projection selection = selection\n}"
         ),
         "impl Selectable (Selected2 a b) for Select2 a b {\n  to_projection selection = selection\n}\n"
+    );
+}
+
+#[test]
+fn impl_for_target_with_concrete_arg_keeps_parens() {
+    // `Db.Required` is a concrete type argument, so the parens around the
+    // `for` target are required to round-trip and must be preserved.
+    assert_eq!(
+        fmt80(
+            "impl Selectable User for (Users source Db.Required) {\n  to_projection u = u\n}"
+        ),
+        "impl Selectable User for (Users source Db.Required) {\n  to_projection u = u\n}\n"
     );
 }
 

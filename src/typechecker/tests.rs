@@ -5012,9 +5012,235 @@ fn declared_functional_dependency_must_cover_all_extra_params() {
     assert!(result.is_err(), "expected unsupported fundep error");
     let err = result.err().unwrap();
     assert!(
-        err.message
-            .contains("must determine all non-self parameters"),
+        err.message.contains("must cover all trait parameters"),
         "expected all-extra-params error, got: {}",
+        err.message
+    );
+}
+
+#[test]
+fn multi_var_determinant_allows_impls_differing_in_a_determinant() {
+    // `a b -> c`: two impls share the self head `Foo` but differ in the
+    // *determinant* extra `b`, so they determine `c` for distinct inputs and
+    // must coexist.
+    check(
+        "trait Pair a b c | a b -> c {
+  fun mk : (x: a) -> c
+}
+type Foo = Foo
+type B1 = B1
+type B2 = B2
+type C1 = C1
+type C2 = C2
+impl Pair B1 C1 for Foo {
+  mk _ = C1
+}
+impl Pair B2 C2 for Foo {
+  mk _ = C2
+}",
+    )
+    .unwrap();
+}
+
+#[test]
+fn multi_var_determinant_rejects_same_determinants_different_determined() {
+    // Same self head `Foo` and same determinant extra `B1`, but different
+    // determined `c` — a coherence violation.
+    let result = check(
+        "trait Pair a b c | a b -> c {
+  fun mk : (x: a) -> c
+}
+type Foo = Foo
+type B1 = B1
+type C1 = C1
+type C2 = C2
+impl Pair B1 C1 for Foo {
+  mk _ = C1
+}
+impl Pair B1 C2 for Foo {
+  mk _ = C2
+}",
+    );
+    assert!(result.is_err(), "expected coherence violation");
+    let err = result.err().unwrap();
+    assert!(
+        err.message.contains("coherence"),
+        "expected coherence violation, got: {}",
+        err.message
+    );
+}
+
+#[test]
+fn fundep_determined_let_binding_resolves_without_annotation() {
+    // `let r = mk Foo` must keep `r`'s determined type variable monomorphic so
+    // the `One Foo c` fundep pins it to `C1`, letting `show r` resolve without
+    // an annotation. Previously let-generalization decoupled `r` from the
+    // pending constraint and produced a spurious "ambiguous type variable".
+    check(
+        "trait One a c | a -> c {
+  fun mk : (x: a) -> c
+}
+type Foo = Foo
+type C1 = C1
+impl One C1 for Foo {
+  mk _ = C1
+}
+impl Show for C1 {
+  show _ = \"C1\"
+}
+fun go : Unit -> String
+go () = {
+  let r = mk Foo
+  show r
+}",
+    )
+    .unwrap();
+}
+
+#[test]
+fn multi_var_determinant_let_binding_resolves_without_annotation() {
+    check(
+        "trait Pair a b c | a b -> c {
+  fun mk : (x: a) -> (y: b) -> c
+}
+type Foo = Foo
+type B1 = B1
+type C1 = C1
+impl Pair B1 C1 for Foo {
+  mk _ _ = C1
+}
+impl Show for C1 {
+  show _ = \"C1\"
+}
+fun go : Unit -> String
+go () = {
+  let r = mk Foo B1
+  show r
+}",
+    )
+    .unwrap();
+}
+
+#[test]
+fn fundep_determined_record_disambiguates_field_access() {
+    // `let u = from users; u.age`: `u`'s record type is the determined param of
+    // a multi-variable fundep (`table mode -> cols`) whose determinants are
+    // concrete at the call. Field access must see the pinned record type
+    // (`Users Required`) to disambiguate `age` between the two records that
+    // declare it, rather than reporting "ambiguous field".
+    check(
+        "type Required = Required
+type Optional = Optional
+type UsersTable = UsersTable
+type Table table = Table table
+trait TableScope table mode cols | table mode -> cols {
+  fun cols : (mode, table) -> cols
+}
+record User {
+  age: String,
+}
+record Users mode {
+  age: Int,
+}
+impl TableScope Required (Users Required) for UsersTable {
+  cols _ = Users { age: 42 }
+}
+impl TableScope Optional (Users Optional) for UsersTable {
+  cols _ = Users { age: 0 }
+}
+fun from : Table table -> required_cols
+  where {table: TableScope Required required_cols}
+from table_value = case table_value {
+  Table table -> cols (Required, table)
+}
+fun users : Table UsersTable
+users = Table UsersTable
+fun go : Unit -> Int
+go () = {
+  let u = from users
+  u.age
+}",
+    )
+    .unwrap();
+}
+
+#[test]
+fn fundep_chain_resolves_regardless_of_constraint_order() {
+    // `show (step (mk Foo))` pushes the outer `Show` constraint before the
+    // `Two`/`One` fundep constraints that pin its variable. The pending-
+    // constraint solver must defer the not-yet-resolvable `Show` and retry it
+    // after the fundeps fire, rather than reporting a spurious ambiguity.
+    check(
+        "trait One a c | a -> c {
+  fun mk : (x: a) -> c
+}
+trait Two p q | p -> q {
+  fun step : (x: p) -> q
+}
+type Foo = Foo
+type C1 = C1
+type D1 = D1
+impl One C1 for Foo {
+  mk _ = C1
+}
+impl Two D1 for C1 {
+  step _ = D1
+}
+impl Show for D1 {
+  show _ = \"D1\"
+}
+fun go : Unit -> String
+go () = show (step (mk Foo))",
+    )
+    .unwrap();
+}
+
+#[test]
+fn fundep_determined_chain_resolves_without_annotation() {
+    // Chained fundeps: `step`'s determinant `r` is only pinned transitively by
+    // the `mk` fundep. Both determined let-bindings must stay monomorphic so
+    // the chain resolves at constraint-solving time without annotations.
+    check(
+        "trait One a c | a -> c {
+  fun mk : (x: a) -> c
+}
+trait Two p q | p -> q {
+  fun step : (x: p) -> q
+}
+type Foo = Foo
+type C1 = C1
+type D1 = D1
+impl One C1 for Foo {
+  mk _ = C1
+}
+impl Two D1 for C1 {
+  step _ = D1
+}
+impl Show for D1 {
+  show _ = \"D1\"
+}
+fun go : Unit -> String
+go () = {
+  let r = mk Foo
+  let s = step r
+  show s
+}",
+    )
+    .unwrap();
+}
+
+#[test]
+fn multi_var_determinant_requires_self_on_determining_side() {
+    let result = check(
+        "trait Pair a b c | b -> c {
+  fun mk : (x: a) -> c
+}",
+    );
+    assert!(result.is_err(), "expected unsupported fundep error");
+    let err = result.err().unwrap();
+    assert!(
+        err.message.contains("must appear on the determining side"),
+        "expected self-on-determining-side error, got: {}",
         err.message
     );
 }

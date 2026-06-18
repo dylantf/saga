@@ -834,7 +834,11 @@ impl Parser {
         let functional_dependency = if *self.peek() == Token::Bar {
             let fd_start = self.tokens[self.pos].span;
             self.advance(); // consume '|'
-            let determinant = self.expect_ident()?;
+            let mut determinant = Vec::new();
+            determinant.push(self.expect_ident()?);
+            while matches!(self.peek(), Token::Ident(_)) {
+                determinant.push(self.expect_ident()?);
+            }
             self.expect(Token::Arrow)?;
             let mut determined = Vec::new();
             let first = self.expect_ident()?;

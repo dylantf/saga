@@ -319,7 +319,11 @@ pub fn format_expr(expr: &Expr) -> Doc {
         }
 
         ExprKind::FieldAccess { expr, field, .. } => {
-            docs![format_expr(expr), Doc::text(format!(".{}", field))]
+            // Field access binds tighter than application, so the target must be
+            // an atom: `(users_query ()).sql`, not `users_query ().sql` (which
+            // reparses as `users_query (().sql)`). format_expr_atom parenthesizes
+            // App/etc. while leaving Var/FieldAccess/Tuple/Block bare.
+            docs![format_expr_atom(expr), Doc::text(format!(".{}", field))]
         }
 
         ExprKind::RecordCreate { name, fields } => format_record_create(Some(name), fields),

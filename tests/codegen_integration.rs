@@ -336,6 +336,213 @@ main () = case map Leaf 42 {
 }
 
 #[test]
+fn parameterized_record_selectable_derive_specializes_scope() {
+    // Deriving `Selectable User` for a parameterized record `Users source meta`
+    // must pin the scope parameter (`meta = Required`) so each column selects the
+    // row's concrete field type. With `meta` left polymorphic the column
+    // constraints can't be proven; the derive resolves the scope by matching each
+    // field against the `Selectable Column` impls. Compiling (typecheck +
+    // elaborate + lower) without error exercises that specialization.
+    let src = r#"
+import Std.Generic (Generic, Leaf, Labeled, And, Record)
+
+type Required = Required
+type Optional = Optional
+
+trait PgType a {}
+impl PgType for Int {}
+impl PgType for String {}
+
+type Column source meta (name : Symbol) a = Column
+type Projection a = Projection a
+
+fun map_projection : (a -> b) -> Projection a -> Projection b
+map_projection f projection = case projection {
+  Projection value -> Projection (f value)
+}
+
+trait Selectable selection row | selection -> row {
+  fun to_projection : selection -> Projection row
+}
+
+impl Selectable a for (Column source Required name a) where {a: PgType} {
+  to_projection _ = Projection (panic "stub")
+}
+impl Selectable (Maybe a) for (Column source Optional name a) where {a: PgType} {
+  to_projection _ = Projection Nothing
+}
+impl Selectable (Leaf row) for Leaf selection where {selection: Selectable row} {
+  to_projection selection = case selection {
+    Leaf value -> map_projection Leaf (to_projection value)
+  }
+}
+impl Selectable (Labeled n out) for Labeled n field where {Selectable field out} {
+  to_projection selection = case selection {
+    Labeled field -> map_projection Labeled (to_projection field)
+  }
+}
+impl Selectable (And lo ro) for And l r where {Selectable l lo, Selectable r ro} {
+  to_projection selection = case selection {
+    And l r -> case to_projection l {
+      Projection lv -> case to_projection r {
+        Projection rv -> Projection (And lv rv)
+      }
+    }
+  }
+}
+impl Selectable (Record out) for Record fields where {Selectable fields out} {
+  to_projection selection = case selection {
+    Record name fields -> map_projection (fun out -> Record name out) (to_projection fields)
+  }
+}
+
+record User {
+  id: Int,
+  name: String,
+} deriving (Generic)
+
+record Users source meta {
+  id: Column source meta 'id Int,
+  name: Column source meta 'name String,
+} deriving (Generic, Selectable User)
+
+type UsersTable = UsersTable
+
+fun users : Users UsersTable Required
+users = Users { id: Column, name: Column }
+
+fun project : selection -> row
+  where {selection: Generic selection_rep, selection_rep: Selectable row_rep, row: Generic row_rep}
+project selection = case to_projection (to selection) {
+  Projection row_rep -> from row_rep
+}
+
+fun run : Unit -> User
+run () = project users
+"#;
+
+    // Asserts typecheck succeeds (panics on error); the stub body is never run.
+    let _ = emit_elaborated_with_std(src);
+}
+
+#[test]
+fn routed_derive_auto_derives_generic_on_row_type() {
+    // `deriving (Selectable User)` must auto-derive `Generic` for the row type
+    // `User` (which has no `deriving` clause of its own) — the bridge needs
+    // `User: Generic` to decompose it. Neither record manually derives Generic.
+    let src = r#"
+import Std.Generic (Generic, Leaf, Labeled, And, Record)
+
+type Required = Required
+type Optional = Optional
+
+trait PgType a {}
+impl PgType for Int {}
+impl PgType for String {}
+
+type Column source meta (name : Symbol) a = Column
+type Projection a = Projection a
+
+fun map_projection : (a -> b) -> Projection a -> Projection b
+map_projection f projection = case projection {
+  Projection value -> Projection (f value)
+}
+
+trait Selectable selection row | selection -> row {
+  fun to_projection : selection -> Projection row
+}
+
+impl Selectable a for (Column source Required name a) where {a: PgType} {
+  to_projection _ = Projection (panic "stub")
+}
+impl Selectable (Maybe a) for (Column source Optional name a) where {a: PgType} {
+  to_projection _ = Projection Nothing
+}
+impl Selectable (Leaf row) for Leaf selection where {selection: Selectable row} {
+  to_projection selection = case selection {
+    Leaf value -> map_projection Leaf (to_projection value)
+  }
+}
+impl Selectable (Labeled n out) for Labeled n field where {Selectable field out} {
+  to_projection selection = case selection {
+    Labeled field -> map_projection Labeled (to_projection field)
+  }
+}
+impl Selectable (And lo ro) for And l r where {Selectable l lo, Selectable r ro} {
+  to_projection selection = case selection {
+    And l r -> case to_projection l {
+      Projection lv -> case to_projection r {
+        Projection rv -> Projection (And lv rv)
+      }
+    }
+  }
+}
+impl Selectable (Record out) for Record fields where {Selectable fields out} {
+  to_projection selection = case selection {
+    Record name fields -> map_projection (fun out -> Record name out) (to_projection fields)
+  }
+}
+
+record User {
+  id: Int,
+  name: String,
+}
+
+record Users source meta {
+  id: Column source meta 'id Int,
+  name: Column source meta 'name String,
+} deriving (Selectable User)
+"#;
+
+    // Compiles only if `Generic` was auto-derived for both `Users` (via the
+    // routed derive) and `User` (via being a routed derive's row type).
+    let _ = emit_elaborated_with_std(src);
+}
+
+#[test]
+fn multi_determinant_fundep_distinct_dicts_no_collision() {
+    // A function with two where-bounds for the same trait and self var that
+    // differ only in a determinant extra (`table Required -> ...` vs
+    // `table Optional -> ...`). The two dict params must get distinct names
+    // (else erlc rejects "duplicate variable") and each call site must select
+    // the matching impl, so the result is "required / optional" not "optional /
+    // optional".
+    let src = r#"
+type Required = Required
+type Optional = Optional
+type UsersTable = UsersTable
+type Table table = Table table
+trait TableScope table mode cols | table mode -> cols {
+  fun cols : (mode, table) -> cols
+}
+record RequiredCols { value: String }
+record OptionalCols { value: String }
+impl TableScope Required RequiredCols for UsersTable {
+  cols _ = RequiredCols { value: "required" }
+}
+impl TableScope Optional OptionalCols for UsersTable {
+  cols _ = OptionalCols { value: "optional" }
+}
+fun both : Table table -> (required_cols, optional_cols)
+  where {
+    table: TableScope Required required_cols,
+    table: TableScope Optional optional_cols,
+  }
+both table_value = case table_value {
+  Table table -> (cols (Required, table), cols (Optional, table))
+}
+fun users : Table UsersTable
+users = Table UsersTable
+main () = {
+  let (required, optional) = both users
+  (required.value, optional.value)
+}
+"#;
+
+    assert_runs_and_stdout_contains(src, &["required", "optional"]);
+}
+
+#[test]
 fn anonymous_record_layout_from_function_signature_lowers_field_access() {
     let src = r#"
 fun pick_id : { id: Int, name: String } -> Int

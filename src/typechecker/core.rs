@@ -378,6 +378,13 @@ impl Substitution {
         Self::default()
     }
 
+    /// Number of solved type-variable bindings. Grows monotonically as
+    /// inference progresses, so it doubles as a cheap "did the solver make
+    /// progress?" signal for the pending-constraint worklist.
+    pub fn solved_count(&self) -> usize {
+        self.map.len()
+    }
+
     /// Apply the substitution to a type, following chains of variables.
     pub fn apply(&self, ty: &Type) -> Type {
         match ty {
