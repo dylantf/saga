@@ -1121,6 +1121,52 @@ impl Elaborator {
                         }
                         *occ += 1;
                     }
+                    // A dict-parameterized *local* let-binding is eta-expanded to a
+                    // closure taking leading dict params plus its user args
+                    // (`fun (dict, arg) -> ...`). Applying only the dicts here leaves
+                    // an under-saturated closure, and Core Erlang's `apply` cannot
+                    // partially apply a local closure — the runtime aborts with
+                    // "called with 1 argument(s), but expects 2". Eta-abstract the
+                    // remaining user args so the inner application is saturated:
+                    //   g  -->  fun (__p0, ..) -> g(dict.., __p0, ..)
+                    // Top-level functions don't need this: their under-saturated
+                    // call sites are turned into partial-application closures during
+                    // lowering (`lower_resolved_fun_call`).
+                    if matches!(
+                        self.resolution.value(node_id),
+                        Some(ResolvedValue::Local { .. })
+                    ) && let Some(&value_arity) = self.let_binding_arities.get(name)
+                        && value_arity > 0
+                    {
+                        let eta_params: Vec<Pat> = (0..value_arity)
+                            .map(|i| Pat::Var {
+                                id: NodeId::fresh(),
+                                name: format!("__partial_arg{}", i),
+                                span,
+                            })
+                            .collect();
+                        for p in &eta_params {
+                            if let Pat::Var { name: pname, .. } = p {
+                                result = Expr::synth(
+                                    span,
+                                    ExprKind::App {
+                                        func: Box::new(result),
+                                        arg: Box::new(Expr::synth(
+                                            span,
+                                            ExprKind::Var { name: pname.clone() },
+                                        )),
+                                    },
+                                );
+                            }
+                        }
+                        return Expr::synth(
+                            span,
+                            ExprKind::Lambda {
+                                params: eta_params,
+                                body: Box::new(result),
+                            },
+                        );
+                    }
                     return result;
                 }
 

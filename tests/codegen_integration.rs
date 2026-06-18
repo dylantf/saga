@@ -4149,3 +4149,92 @@ main () = case run_sel req {
 
     assert_runs_and_stdout_contains(src, &["7"]);
 }
+
+#[test]
+fn dict_parameterized_value_passed_as_first_class_function_is_saturated() {
+    // A dict-parameterized function bound to a local and passed as a value (not
+    // applied at the binding site) is eta-expanded to take a leading dict param.
+    // Its value-use must be wrapped in a partial-application closure so the
+    // inner call is saturated — otherwise lowering emits an under-saturated
+    // `apply g(dict)` and the runtime aborts with
+    // "called with 1 argument(s), but expects 2".
+    let src = r#"
+trait Enc a {
+  fun enc : a -> Int
+}
+impl Enc for Int {
+  enc v = v
+}
+
+fun encode : a -> Int where {a: Enc}
+encode x = enc x
+
+fun apply_to_5 : (Int -> Int) -> Int
+apply_to_5 f = f 5
+
+main () = {
+  let g = encode
+  apply_to_5 g
+}
+"#;
+
+    assert_runs_and_stdout_contains(src, &["5"]);
+}
+
+#[test]
+fn closure_capturing_trait_method_stored_and_called_has_correct_arity() {
+    // A closure built inside a `where`-constrained function captures a trait
+    // method (`schema_cols`) and is stored in a record, then called later. The
+    // closure binding is dict-parameterized; passing it as a value must yield a
+    // saturated partial application (regression for `table_for/2` aborting with
+    // an arity error).
+    let src = r#"
+type TableRef table = TableRef
+type UsersTable = UsersTable
+type Required = Required
+
+record TableDef cols {
+  make_cols: String -> cols,
+}
+type Table table cols = Table (TableDef cols)
+
+trait TableScope cols table | cols -> table {
+  fun schema_cols : (TableRef table, String) -> cols
+}
+
+fun table_ref : TableRef table
+table_ref = TableRef
+
+fun table : (String -> cols) -> Table table cols
+table make_cols = Table (TableDef { make_cols: make_cols })
+
+fun table_for : TableRef table -> Table table cols where {cols: TableScope table}
+table_for ref = {
+  let make: String -> cols = fun source -> schema_cols (ref, source)
+  table make
+}
+
+fun table_cols : String -> Table table cols -> cols
+table_cols source table_value = case table_value {
+  Table def -> def.make_cols source
+}
+
+record Users meta {
+  name: String,
+}
+
+impl TableScope UsersTable for Users meta {
+  schema_cols (_, source) = Users { name: source }
+}
+
+fun users : Table UsersTable (Users Required)
+users = table_for table_ref
+
+main () = {
+  let cols = table_cols "t0" users
+  cols.name
+}
+"#;
+
+    assert_runs_and_stdout_contains(src, &["t0"]);
+}
