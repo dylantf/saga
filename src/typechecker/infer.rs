@@ -1765,6 +1765,89 @@ impl Checker {
         }
     }
 
+    /// Collect type-variable IDs that are *determined* by a pending functional
+    /// dependency whose determinants are (or will be) concrete. These variables
+    /// are effectively monomorphic — the fundep pins them at
+    /// `check_pending_constraints` time — so they must be excluded from
+    /// let-generalization, which would otherwise hand each use site a fresh
+    /// variable the constraint never reaches ("ambiguous type variable").
+    ///
+    /// This is computed as a fixpoint: a determinant counts as satisfied when
+    /// it already resolves to a concrete head *or* it is itself a variable
+    /// determined by another such fundep. That covers chains like
+    /// `let r = mk Foo; let s = step r`, where `step`'s determinant `r` is only
+    /// pinned transitively by the `mk` fundep.
+    fn fundep_determined_vars(&self) -> std::collections::HashSet<u32> {
+        // Snapshot the functional constraints once: (self_ty, determinant
+        // extras, determined extras), all resolved through the substitution.
+        struct FunConstraint {
+            self_ty: Type,
+            determinant_extras: Vec<Type>,
+            determined_extras: Vec<Type>,
+        }
+        let mut funcs = Vec::new();
+        for (trait_name, extras, self_ty, _, _) in &self.trait_state.pending_constraints {
+            let resolved_trait = self
+                .resolve_trait_name(trait_name)
+                .unwrap_or_else(|| trait_name.clone());
+            let Some(info) = self.trait_state.traits.get(&resolved_trait) else {
+                continue;
+            };
+            let Some(fundep) = &info.fundep else {
+                continue;
+            };
+            let pick = |positions: Vec<usize>| -> Vec<Type> {
+                positions
+                    .iter()
+                    .filter_map(|&p| extras.get(p))
+                    .map(|e| self.sub.apply(e))
+                    .collect()
+            };
+            funcs.push(FunConstraint {
+                self_ty: self.sub.apply(self_ty),
+                determinant_extras: pick(fundep.determinant_extra_positions()),
+                determined_extras: pick(fundep.determined_extra_positions()),
+            });
+        }
+
+        let mut determined = std::collections::HashSet::new();
+        // A determinant is satisfied if it has a concrete head, or every free
+        // variable in it is already known to be fundep-determined.
+        let satisfied = |ty: &Type, determined: &std::collections::HashSet<u32>| -> bool {
+            match ty {
+                Type::Con(..) | Type::Symbol(_) => true,
+                Type::Var(id) => determined.contains(id),
+                _ => false,
+            }
+        };
+        loop {
+            let mut changed = false;
+            for f in &funcs {
+                if !satisfied(&f.self_ty, &determined)
+                    || !f
+                        .determinant_extras
+                        .iter()
+                        .all(|e| satisfied(e, &determined))
+                {
+                    continue;
+                }
+                for e in &f.determined_extras {
+                    let mut vs = Vec::new();
+                    super::collect_free_vars(e, &mut vs);
+                    for v in vs {
+                        if determined.insert(v) {
+                            changed = true;
+                        }
+                    }
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
+        determined
+    }
+
     fn generalize_let_binding(
         &mut self,
         name: &str,
@@ -1774,6 +1857,19 @@ impl Checker {
         has_deferred_effects: bool,
     ) {
         let mut scheme = self.generalize(ty);
+
+        // A functional-dependency *determined* variable must not be
+        // generalized when its determinants are already concrete: the pending
+        // fundep constraint will pin it to a concrete type later. Generalizing
+        // it hands each use of this binding a fresh variable that the
+        // constraint never reaches, yielding spurious "ambiguous type
+        // variable" errors. Keep such variables monomorphic so the eventual
+        // improvement propagates to every use site (matching the inline,
+        // un-let-bound behavior).
+        let determined_vars = self.fundep_determined_vars();
+        if !determined_vars.is_empty() {
+            scheme.forall.retain(|id| !determined_vars.contains(id));
+        }
 
         self.trait_state.pending_constraints.retain(
             |(trait_name, _trait_type_args, cty, _span, node_id)| {

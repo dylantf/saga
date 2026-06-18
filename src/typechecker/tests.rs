@@ -5071,6 +5071,122 @@ impl Pair B1 C2 for Foo {
 }
 
 #[test]
+fn fundep_determined_let_binding_resolves_without_annotation() {
+    // `let r = mk Foo` must keep `r`'s determined type variable monomorphic so
+    // the `One Foo c` fundep pins it to `C1`, letting `show r` resolve without
+    // an annotation. Previously let-generalization decoupled `r` from the
+    // pending constraint and produced a spurious "ambiguous type variable".
+    check(
+        "trait One a c | a -> c {
+  fun mk : (x: a) -> c
+}
+type Foo = Foo
+type C1 = C1
+impl One C1 for Foo {
+  mk _ = C1
+}
+impl Show for C1 {
+  show _ = \"C1\"
+}
+fun go : Unit -> String
+go () = {
+  let r = mk Foo
+  show r
+}",
+    )
+    .unwrap();
+}
+
+#[test]
+fn multi_var_determinant_let_binding_resolves_without_annotation() {
+    check(
+        "trait Pair a b c | a b -> c {
+  fun mk : (x: a) -> (y: b) -> c
+}
+type Foo = Foo
+type B1 = B1
+type C1 = C1
+impl Pair B1 C1 for Foo {
+  mk _ _ = C1
+}
+impl Show for C1 {
+  show _ = \"C1\"
+}
+fun go : Unit -> String
+go () = {
+  let r = mk Foo B1
+  show r
+}",
+    )
+    .unwrap();
+}
+
+#[test]
+fn fundep_chain_resolves_regardless_of_constraint_order() {
+    // `show (step (mk Foo))` pushes the outer `Show` constraint before the
+    // `Two`/`One` fundep constraints that pin its variable. The pending-
+    // constraint solver must defer the not-yet-resolvable `Show` and retry it
+    // after the fundeps fire, rather than reporting a spurious ambiguity.
+    check(
+        "trait One a c | a -> c {
+  fun mk : (x: a) -> c
+}
+trait Two p q | p -> q {
+  fun step : (x: p) -> q
+}
+type Foo = Foo
+type C1 = C1
+type D1 = D1
+impl One C1 for Foo {
+  mk _ = C1
+}
+impl Two D1 for C1 {
+  step _ = D1
+}
+impl Show for D1 {
+  show _ = \"D1\"
+}
+fun go : Unit -> String
+go () = show (step (mk Foo))",
+    )
+    .unwrap();
+}
+
+#[test]
+fn fundep_determined_chain_resolves_without_annotation() {
+    // Chained fundeps: `step`'s determinant `r` is only pinned transitively by
+    // the `mk` fundep. Both determined let-bindings must stay monomorphic so
+    // the chain resolves at constraint-solving time without annotations.
+    check(
+        "trait One a c | a -> c {
+  fun mk : (x: a) -> c
+}
+trait Two p q | p -> q {
+  fun step : (x: p) -> q
+}
+type Foo = Foo
+type C1 = C1
+type D1 = D1
+impl One C1 for Foo {
+  mk _ = C1
+}
+impl Two D1 for C1 {
+  step _ = D1
+}
+impl Show for D1 {
+  show _ = \"D1\"
+}
+fun go : Unit -> String
+go () = {
+  let r = mk Foo
+  let s = step r
+  show s
+}",
+    )
+    .unwrap();
+}
+
+#[test]
 fn multi_var_determinant_requires_self_on_determining_side() {
     let result = check(
         "trait Pair a b c | b -> c {

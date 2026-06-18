@@ -3108,6 +3108,20 @@ impl Checker {
                 break;
             }
             constraints.sort_by_key(|(_, _, ty, _, _)| matches!(self.sub.apply(ty), Type::Var(_)));
+            // Worklist bookkeeping: a Var-self constraint that isn't resolvable
+            // this pass (e.g. `Show q` before the `Two c q` fundep has pinned
+            // `q`) is *deferred* rather than reported, because a sibling
+            // constraint processed later — or a later pass — may still pin it.
+            // The sort puts concrete-self constraints first, but it cannot
+            // topologically order the Var-self group by their mutual fundep
+            // dependencies, so deferral + progress retry is what makes solving
+            // order-independent.
+            let sub_before = self.sub.solved_count();
+            #[allow(clippy::type_complexity)]
+            let mut deferred: Vec<(
+                (String, Vec<Type>, Type, Span, crate::ast::NodeId),
+                Diagnostic,
+            )> = Vec::new();
             for (trait_name, trait_type_arg_types, ty, span, node_id) in constraints {
                 let resolved = self.sub.apply(&ty);
                 if matches!(resolved, Type::Error) {
@@ -3599,14 +3613,24 @@ impl Checker {
                                 .cloned()
                         });
                         let Some(covering_trait) = covering_trait else {
+                            // Not resolvable yet. Defer instead of erroring: a
+                            // later constraint (or a later worklist pass) may
+                            // still pin this variable. If nothing does, the
+                            // post-loop progress check re-raises this prebuilt
+                            // diagnostic.
                             let display = trait_name.rsplit('.').next().unwrap_or(&trait_name);
-                            return Err(rewrite_diag(
+                            let diag = rewrite_diag(
                                 format!(
                                     "ambiguous type variable requires {}. Add a type annotation to pin the unconstrained type variable",
                                     display
                                 ),
                                 span,
+                            );
+                            deferred.push((
+                                (trait_name, trait_type_arg_types, Type::Var(*id), span, node_id),
+                                diag,
                             ));
+                            continue;
                         };
                         if let Some(bound_extras) =
                             resolved_bound_trait_args.get(&(*id, covering_trait))
@@ -3690,6 +3714,23 @@ impl Checker {
                     }
                     // Error/Never type: skip trait checking
                     Type::Error => {}
+                }
+            }
+            // Retry deferred (not-yet-resolvable) constraints only if this pass
+            // made progress: the substitution grew, or sibling processing
+            // queued fresh constraints. Without progress the deferrals are
+            // genuinely ambiguous, so re-raise the first one's diagnostic. This
+            // bounds the loop — progress is monotone (the substitution only
+            // grows) — while making fundep solving order-independent.
+            if !deferred.is_empty() {
+                let progressed = self.sub.solved_count() > sub_before
+                    || !self.trait_state.pending_constraints.is_empty();
+                if progressed {
+                    self.trait_state
+                        .pending_constraints
+                        .extend(deferred.into_iter().map(|(constraint, _)| constraint));
+                } else {
+                    return Err(deferred.into_iter().next().unwrap().1);
                 }
             }
         }
