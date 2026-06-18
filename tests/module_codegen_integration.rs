@@ -291,6 +291,99 @@ fn assert_contains(out: &str, needle: &str) {
     );
 }
 
+#[test]
+fn routed_derive_specializes_scope_from_imported_impls() {
+    // The `Selectable`/`Column` impls live in an imported module. Deriving
+    // `Selectable User` for a parameterized record `Users meta` must consult
+    // those imported impls (not just local ones) to pin `meta = Required`.
+    // `typecheck_source` asserts no errors, so a regression (imported impls
+    // ignored) surfaces as a derive failure.
+    let core = r#"
+module Core
+import Std.Generic (Generic, Leaf, Labeled, And, Record)
+
+pub type Required = Required
+pub type Optional = Optional
+
+pub trait PgType a {}
+impl PgType for Int {}
+impl PgType for String {}
+
+pub type Column meta (name : Symbol) a = Column
+pub type Projection a = Projection a
+
+pub fun map_projection : (a -> b) -> Projection a -> Projection b
+map_projection f projection = case projection {
+  Projection value -> Projection (f value)
+}
+
+pub trait Selectable selection row | selection -> row {
+  fun to_projection : selection -> Projection row
+}
+
+impl Selectable a for (Column Required name a) where {a: PgType} {
+  to_projection _ = Projection (panic "stub")
+}
+impl Selectable (Maybe a) for (Column Optional name a) where {a: PgType} {
+  to_projection _ = Projection Nothing
+}
+impl Selectable (Leaf row) for Leaf selection where {selection: Selectable row} {
+  to_projection selection = case selection {
+    Leaf value -> map_projection Leaf (to_projection value)
+  }
+}
+impl Selectable (Labeled n out) for Labeled n field where {Selectable field out} {
+  to_projection selection = case selection {
+    Labeled field -> map_projection Labeled (to_projection field)
+  }
+}
+impl Selectable (And lo ro) for And l r where {Selectable l lo, Selectable r ro} {
+  to_projection selection = case selection {
+    And l r -> case to_projection l {
+      Projection lv -> case to_projection r {
+        Projection rv -> Projection (And lv rv)
+      }
+    }
+  }
+}
+impl Selectable (Record out) for Record fields where {Selectable fields out} {
+  to_projection selection = case selection {
+    Record name fields -> map_projection (fun out -> Record name out) (to_projection fields)
+  }
+}
+"#;
+
+    let main_src = r#"
+module Main
+import Std.Generic (Generic)
+import Core (Selectable, Column, Required, Projection)
+
+record User {
+  id: Int,
+  name: String,
+} deriving (Generic)
+
+record Users meta {
+  id: Column meta 'id Int,
+  name: Column meta 'name String,
+} deriving (Generic, Selectable User)
+
+fun mk_users : Unit -> Users Required
+mk_users () = Users { id: Column, name: Column }
+
+fun project : selection -> row
+  where {selection: Generic selection_rep, selection_rep: Selectable row_rep, row: Generic row_rep}
+project selection = case to_projection (to selection) {
+  Projection row_rep -> from row_rep
+}
+
+fun run : Unit -> User
+run () = project (mk_users ())
+"#;
+
+    with_temp_project_files(&[("lib/Core.saga", core)], main_src, |_checker, _program| {});
+}
+
 fn emitted_function(out: &str, name: &str, arity: usize) -> String {
     let marker = format!("'{}'/{} =", name, arity);
     let start = out

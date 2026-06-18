@@ -17,6 +17,10 @@ pub struct ImportedDecls {
     pub traits: HashMap<String, Vec<SummaryEntry<RoutedTraitInfo>>>,
     pub types: HashMap<String, Vec<SummaryEntry<WrapperTypeInfo>>>,
     pub records: HashMap<String, Vec<SummaryEntry<WrapperRecordInfo>>>,
+    /// Impls visible from imports. Impls are coherence-global, so they are kept
+    /// as a flat list (not keyed by surface name) and brought in whenever their
+    /// module is imported. Used by routed-derive scope specialization.
+    pub(crate) impls: Vec<DeriveImplInfo>,
 }
 
 #[derive(Clone)]
@@ -51,6 +55,7 @@ struct ModuleSummary {
     traits: HashMap<String, RoutedTraitInfo>,
     types: HashMap<String, WrapperTypeInfo>,
     records: HashMap<String, WrapperRecordInfo>,
+    impls: Vec<DeriveImplInfo>,
 }
 
 /// Walk a program's imports and gather the structural summaries visible to
@@ -198,6 +203,31 @@ fn module_summary(program: &[Decl]) -> ModuleSummary {
         })
         .collect();
     for d in program {
+        if let Decl::ImplDef {
+            trait_name,
+            trait_type_args,
+            target_type_expr: Some(target),
+            ..
+        } = d
+            && trait_type_args.len() == 1
+        {
+            // Qualify the impl's type names with their defining module so the
+            // bindings read off during scope specialization resolve correctly
+            // when emitted into the importing module.
+            summary.impls.push(DeriveImplInfo {
+                trait_bare: trait_name.rsplit('.').next().unwrap_or(trait_name).to_string(),
+                target: qualify_summary_type_expr(
+                    target.clone(),
+                    module_name.as_deref(),
+                    &local_type_names,
+                ),
+                row: qualify_summary_type_expr(
+                    trait_type_args[0].clone(),
+                    module_name.as_deref(),
+                    &local_type_names,
+                ),
+            });
+        }
         if let Decl::TraitDef {
             name,
             type_params,
@@ -415,6 +445,18 @@ fn merge_summary_import(
         }
         if let Some(surface) = exposed_surface(name) {
             register_summary_entry(&mut out.records, &surface, module_name, name, info);
+        }
+    }
+    // Impls are coherence-global: importing a module brings all its impls into
+    // scope regardless of the `exposing` list. Dedup by structural identity so
+    // repeated imports (e.g. via the prelude) don't accumulate duplicates.
+    for imp in &summary.impls {
+        if !out.impls.iter().any(|existing| {
+            existing.trait_bare == imp.trait_bare
+                && te_structural_eq(&existing.target, &imp.target)
+                && te_structural_eq(&existing.row, &imp.row)
+        }) {
+            out.impls.push(imp.clone());
         }
     }
 }
@@ -1183,7 +1225,7 @@ pub struct RoutedTraitInfo {
 /// `determine_scope_specialization`). Only impls with a structured target are
 /// kept, since those are the ones a record field can match against.
 #[derive(Clone)]
-struct DeriveImplInfo {
+pub(crate) struct DeriveImplInfo {
     trait_bare: String,
     target: TypeExpr,
     /// The single non-self trait argument (the determined "row" of a functional
@@ -1464,7 +1506,7 @@ fn determine_scope_specialization(
 
         let mut field_bindings: Option<HashMap<String, TypeExpr>> = None;
         let mut ambiguous = false;
-        for imp in &scope.local_impls {
+        for imp in scope.local_impls.iter().chain(scope.imported.impls.iter()) {
             if imp.trait_bare != trait_bare {
                 continue;
             }
