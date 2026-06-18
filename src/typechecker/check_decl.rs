@@ -3153,6 +3153,23 @@ impl Checker {
                     continue;
                 }
                 let (info, mut pattern_subst) = candidates.into_iter().next().unwrap();
+                // Only pin determined extras that are still unresolved. Re-pinning
+                // an already-resolved extra would mint a fresh impl var and bind
+                // it every pass, growing `solved_count` without bound — an
+                // infinite loop. Skipping resolved ones makes this converge.
+                let to_pin: Vec<usize> = determined_positions
+                    .iter()
+                    .copied()
+                    .filter(|&p| {
+                        extras
+                            .get(p)
+                            .map(|e| matches!(self.sub.apply(e), Type::Var(_)))
+                            .unwrap_or(false)
+                    })
+                    .collect();
+                if to_pin.is_empty() {
+                    continue;
+                }
                 // Bind any remaining impl pattern variables (not pinned by the
                 // determinant match) to fresh vars so the determined args are
                 // fully grounded.
@@ -3165,7 +3182,7 @@ impl Checker {
                         .entry(var_id)
                         .or_insert_with(|| self.fresh_var());
                 }
-                for &p in &determined_positions {
+                for p in to_pin {
                     let (Some(call_extra), Some(impl_extra)) =
                         (extras.get(p), info.trait_type_args.get(p))
                     else {

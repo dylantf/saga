@@ -613,9 +613,14 @@ pub fn format_impl_def(decl: &Decl) -> Doc {
         .collect();
     let is_tuple_target = target_type == "Tuple" && type_params.len() >= 2;
     let target_rendered = if let Some(target_type_expr) = target_type_expr {
-        pretty(1000, &format_type_expr(target_type_expr))
+        let rendered = pretty(1000, &format_type_expr(target_type_expr))
             .trim_end()
-            .to_string()
+            .to_string();
+        if impl_target_needs_parens(target_type_expr) {
+            format!("({})", rendered)
+        } else {
+            rendered
+        }
     } else if is_tuple_target {
         let params: Vec<String> = type_params.iter().map(|tp| tp.to_string()).collect();
         format!("({})", params.join(", "))

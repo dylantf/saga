@@ -23,6 +23,28 @@ fn collect_tuple_args(ty: &TypeExpr) -> Option<Vec<&TypeExpr>> {
     }
 }
 
+/// Whether an `impl ... for <target>` target must be parenthesized to round-trip.
+///
+/// The non-parenthesized impl-target grammar only accepts type *variables* as
+/// application arguments (`impl Show for Box a b`). When an argument is a
+/// concrete type — a named type, a nested application, etc. — the user had to
+/// write parens (`impl S for (Users source Db.Required)`), and dropping them
+/// changes how the target reparses. Tuples carry their own parens already.
+pub fn impl_target_needs_parens(ty: &TypeExpr) -> bool {
+    if collect_tuple_args(ty).is_some() {
+        return false;
+    }
+    let mut cur = ty;
+    let mut has_non_var_arg = false;
+    while let TypeExpr::App { func, arg, .. } = cur {
+        if !matches!(arg.as_ref(), TypeExpr::Var { .. }) {
+            has_non_var_arg = true;
+        }
+        cur = func.as_ref();
+    }
+    has_non_var_arg
+}
+
 pub fn format_type_expr(ty: &TypeExpr) -> Doc {
     // Tuple sugar: Tuple applied to args -> (A, B, ...)
     if let Some(args) = collect_tuple_args(ty) {

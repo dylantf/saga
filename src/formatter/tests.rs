@@ -1693,6 +1693,18 @@ fn impl_parenthesized_trait_type_arg_round_trips() {
 }
 
 #[test]
+fn impl_for_target_with_concrete_arg_keeps_parens() {
+    // `Db.Required` is a concrete type argument, so the parens around the
+    // `for` target are required to round-trip and must be preserved.
+    assert_eq!(
+        fmt80(
+            "impl Selectable User for (Users source Db.Required) {\n  to_projection u = u\n}"
+        ),
+        "impl Selectable User for (Users source Db.Required) {\n  to_projection u = u\n}\n"
+    );
+}
+
+#[test]
 fn impl_structured_tuple_target_round_trips() {
     assert_eq!(
         fmt80(
