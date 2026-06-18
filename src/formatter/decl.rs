@@ -470,7 +470,7 @@ pub fn format_trait_def(
     }
     if let Some(fd) = functional_dependency {
         header.push_str(" | ");
-        header.push_str(&fd.determinant);
+        header.push_str(&fd.determinant.join(" "));
         header.push_str(" -> ");
         header.push_str(&fd.determined.join(" "));
     }

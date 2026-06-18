@@ -463,7 +463,13 @@ fn render_trait_decl(out: &mut String, decl: &Decl) {
         write!(out, " {}", p).unwrap();
     }
     if let Some(fd) = functional_dependency {
-        write!(out, " | {} -> {}", fd.determinant, fd.determined.join(" ")).unwrap();
+        write!(
+            out,
+            " | {} -> {}",
+            fd.determinant.join(" "),
+            fd.determined.join(" ")
+        )
+        .unwrap();
     }
     if !supertraits.is_empty() {
         let supers: Vec<String> = supertraits

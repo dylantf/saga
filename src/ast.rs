@@ -1407,10 +1407,13 @@ pub struct TraitBound {
 }
 
 /// Functional dependency on a trait declaration, e.g.
-/// `trait Selectable selection row | selection -> row`.
+/// `trait Selectable selection row | selection -> row` or a multi-variable
+/// determinant like `trait T a b c | a b -> c`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TraitFunctionalDependency {
-    pub determinant: String,
+    /// One or more determining type parameters (left of the `->`).
+    pub determinant: Vec<String>,
+    /// The determined type parameters (right of the `->`).
     pub determined: Vec<String>,
     pub span: Span,
 }

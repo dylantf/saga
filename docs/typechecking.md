@@ -341,27 +341,36 @@ trait Selectable selection row | selection -> row {
 }
 ```
 
-In source, the `| selection -> row` part is a functional dependency. In the
-compiler this currently means one specific rule:
+In source, the `| selection -> row` part is a functional dependency. A single
+clause is supported, and its determining side may list more than one parameter,
+e.g. `trait T a b c | a b -> c`. The rules are:
 
-- the first trait parameter is the "self" parameter
-- the first parameter determines every remaining parameter
-- the determined parameters must be listed in declaration order
+- the first trait parameter is the "self" parameter and must appear on the
+  determining (left) side, because concrete-self impl selection recovers the
+  determined parameters from the self type
+- the determining and determined sides are disjoint
+- together they must cover every trait parameter (no parameter may be left
+  undetermined)
 
-So `trait Selectable selection row | selection -> row` is supported, but an
-arbitrary dependency like `a b -> c` is not. `Generic` also participates in
-this rule through a legacy hardcoded entry in
-`check_traits::FUNCTIONAL_TRAITS`, because `Std.Generic.Generic` predates
-user-written fundep syntax.
+So `trait Selectable selection row | selection -> row` and
+`trait T a b c | a b -> c` are both supported. `Generic` also participates
+through a legacy hardcoded entry in `check_traits::FUNCTIONAL_TRAITS`, because
+`Std.Generic.Generic` predates user-written fundep syntax; it is treated as
+`self -> (every other parameter)`.
 
 #### Representation
 
-Trait registration stores the rule as `TraitInfo.is_functional`. The full
-fundep declaration is validated in `register_trait_def`:
+Trait registration stores the rule as `TraitInfo.fundep: Option<TraitFundep>`
+(with `is_functional` kept as the convenience boolean `fundep.is_some()`). A
+`TraitFundep` holds the determinant/determined parameter *indices* into
+`type_params`, so improvement and coherence know which positions are inputs and
+which are outputs. The full fundep declaration is validated in
+`register_trait_def`:
 
-- the determinant must be the first type parameter
+- the self/first parameter must be on the determining side
 - it must determine at least one parameter
-- it must determine all non-self parameters in order
+- determining and determined sides are disjoint and together cover all
+  parameters
 
 Impl registration stores multi-parameter information in `ImplInfo`:
 
@@ -429,9 +438,13 @@ selection in layers:
    pattern variables into `trait_type_args`, and checks the requested extras.
    This is what lets `Selectable Int for Column source 'id Int` resolve even
    when `Column`'s useful information is phantom.
-3. Functional-trait fallback. If the trait is functional and an extra argument
-   is still unresolved, scan for the unique impl with the matching self type
-   and pin the extra arguments from that impl.
+3. Functional-trait fallback. If the trait is functional and a *determined*
+   extra argument is still unresolved, scan for the unique impl whose self type
+   and *determinant* extra arguments match the call site, then pin the
+   determined arguments from that impl. For a single-variable determinant the
+   self type alone selects the impl; for a multi-variable determinant
+   (`a b -> c`) the determinant extras must also be resolved and matched before
+   the dependency fires.
 
 After an impl is selected, its conditional constraints are pushed back into
 `pending_constraints`. For structured targets, the stored pattern substitution

@@ -3264,6 +3264,18 @@ impl Checker {
                                 .map(|ti| ti.is_functional)
                                 .unwrap_or(false)
                         {
+                            // Extra-arg positions that *determine* the rest. For
+                            // a multi-variable determinant (`a b -> c`), the
+                            // self type alone doesn't pick the impl — we must
+                            // also match the resolved determinant extras (`b`),
+                            // then pin the determined extras (`c`).
+                            let det_extra_positions = self
+                                .trait_state
+                                .traits
+                                .get(&resolved_trait)
+                                .and_then(|ti| ti.fundep.as_ref())
+                                .map(|fd| fd.determinant_extra_positions())
+                                .unwrap_or_default();
                             let matches: Vec<(
                                 super::ImplInfo,
                                 std::collections::HashMap<u32, Type>,
@@ -3284,6 +3296,34 @@ impl Checker {
                                         )
                                     {
                                         return None;
+                                    }
+                                    // Filter by the determinant extras: each must
+                                    // be resolved at the call site and match this
+                                    // impl's stored arg. An unresolved determinant
+                                    // means we can't commit yet, so drop the
+                                    // candidate and let the constraint defer.
+                                    for &p in &det_extra_positions {
+                                        let (Some(impl_extra), Some(call_extra)) = (
+                                            info.trait_type_args.get(p),
+                                            trait_type_arg_types.get(p),
+                                        ) else {
+                                            continue;
+                                        };
+                                        let actual = self.sub.apply(call_extra);
+                                        if matches!(actual, Type::Var(_)) {
+                                            return None;
+                                        }
+                                        let expected = super::check_traits::substitute_pattern_vars(
+                                            impl_extra,
+                                            &pattern_subst,
+                                        );
+                                        if !super::check_traits::match_type_pattern(
+                                            &expected,
+                                            &actual,
+                                            &mut pattern_subst,
+                                        ) {
+                                            return None;
+                                        }
                                     }
                                     Some((info.clone(), pattern_subst))
                                 })

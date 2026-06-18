@@ -2436,7 +2436,7 @@ fn trait_def_with_functional_dependency() {
             let fd = functional_dependency
                 .as_ref()
                 .expect("expected functional dependency");
-            assert_eq!(fd.determinant, "selection");
+            assert_eq!(fd.determinant, vec!["selection"]);
             assert_eq!(fd.determined, vec!["row"]);
             assert_eq!(methods.len(), 1);
         }

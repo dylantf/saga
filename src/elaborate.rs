@@ -505,9 +505,9 @@ impl Elaborator {
         let Some(info) = self.traits.get(resolved_trait) else {
             return;
         };
-        if !info.is_functional {
+        let Some(fundep) = &info.fundep else {
             return;
-        }
+        };
         let Type::Con(self_name, self_args) = self_type else {
             return;
         };
@@ -520,7 +520,13 @@ impl Elaborator {
         for (var_id, arg) in impl_info.target_type_param_ids.iter().zip(self_args.iter()) {
             subst.insert(*var_id, arg.clone());
         }
+        // Only the *determined* parameters are pinned from the impl; the
+        // determinant parameters are inputs, not outputs of the dependency.
+        let determined = fundep.determined_extra_positions();
         for (idx, arg) in app.type_args.iter().enumerate().skip(1) {
+            if !determined.contains(&(idx - 1)) {
+                continue;
+            }
             let TypeExpr::Var { name, .. } = arg else {
                 continue;
             };

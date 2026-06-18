@@ -93,6 +93,39 @@ pub struct TraitMethodInfo {
     pub effect_sig: TraitMethodEffectSig,
 }
 
+/// A functional dependency on a trait, stored as parameter *indices* into
+/// `TraitInfo.type_params`. The determinant always contains index 0 (the
+/// self parameter) so that concrete-self impl selection can recover the
+/// determined parameters. e.g. `trait T a b c | a b -> c` stores
+/// `determinant = [0, 1]`, `determined = [2]`.
+#[derive(Debug, Clone)]
+pub struct TraitFundep {
+    pub determinant: Vec<usize>,
+    pub determined: Vec<usize>,
+}
+
+impl TraitFundep {
+    /// Positions of determinant parameters within the *extra* trait args
+    /// (`trait_type_args`, which correspond to params `1..n`). The self
+    /// parameter (index 0) is not an extra and is excluded.
+    pub fn determinant_extra_positions(&self) -> Vec<usize> {
+        self.determinant
+            .iter()
+            .filter(|&&i| i >= 1)
+            .map(|&i| i - 1)
+            .collect()
+    }
+
+    /// Positions of determined parameters within the extra trait args.
+    pub fn determined_extra_positions(&self) -> Vec<usize> {
+        self.determined
+            .iter()
+            .filter(|&&i| i >= 1)
+            .map(|&i| i - 1)
+            .collect()
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct TraitInfo {
     /// Type parameters: first is self, rest are extras.
@@ -101,10 +134,16 @@ pub struct TraitInfo {
     pub type_params: Vec<(String, Kind)>,
     pub supertraits: Vec<String>,
     pub methods: Vec<TraitMethodInfo>,
-    /// `true` if the trait's self/first parameter functionally determines
-    /// the remaining trait parameters. Set at registration time from a
-    /// hardcoded canonical-name list (see `check_traits::FUNCTIONAL_TRAITS`).
+    /// `true` if the trait's determinant parameters functionally determine
+    /// the determined parameters. Equivalent to `fundep.is_some()`; kept as a
+    /// flag for the many boolean call sites. Set at registration time from a
+    /// declared `| ... -> ...` clause or a hardcoded canonical-name list
+    /// (see `check_traits::FUNCTIONAL_TRAITS`).
     pub is_functional: bool,
+    /// The functional dependency's determinant/determined parameter indices,
+    /// when the trait is functional. Drives improvement and coherence so they
+    /// know which positions are pinned by which.
+    pub fundep: Option<TraitFundep>,
 }
 
 #[derive(Debug, Clone, Default)]

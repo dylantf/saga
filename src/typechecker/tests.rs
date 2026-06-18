@@ -5012,9 +5012,76 @@ fn declared_functional_dependency_must_cover_all_extra_params() {
     assert!(result.is_err(), "expected unsupported fundep error");
     let err = result.err().unwrap();
     assert!(
-        err.message
-            .contains("must determine all non-self parameters"),
+        err.message.contains("must cover all trait parameters"),
         "expected all-extra-params error, got: {}",
+        err.message
+    );
+}
+
+#[test]
+fn multi_var_determinant_allows_impls_differing_in_a_determinant() {
+    // `a b -> c`: two impls share the self head `Foo` but differ in the
+    // *determinant* extra `b`, so they determine `c` for distinct inputs and
+    // must coexist.
+    check(
+        "trait Pair a b c | a b -> c {
+  fun mk : (x: a) -> c
+}
+type Foo = Foo
+type B1 = B1
+type B2 = B2
+type C1 = C1
+type C2 = C2
+impl Pair B1 C1 for Foo {
+  mk _ = C1
+}
+impl Pair B2 C2 for Foo {
+  mk _ = C2
+}",
+    )
+    .unwrap();
+}
+
+#[test]
+fn multi_var_determinant_rejects_same_determinants_different_determined() {
+    // Same self head `Foo` and same determinant extra `B1`, but different
+    // determined `c` — a coherence violation.
+    let result = check(
+        "trait Pair a b c | a b -> c {
+  fun mk : (x: a) -> c
+}
+type Foo = Foo
+type B1 = B1
+type C1 = C1
+type C2 = C2
+impl Pair B1 C1 for Foo {
+  mk _ = C1
+}
+impl Pair B1 C2 for Foo {
+  mk _ = C2
+}",
+    );
+    assert!(result.is_err(), "expected coherence violation");
+    let err = result.err().unwrap();
+    assert!(
+        err.message.contains("coherence"),
+        "expected coherence violation, got: {}",
+        err.message
+    );
+}
+
+#[test]
+fn multi_var_determinant_requires_self_on_determining_side() {
+    let result = check(
+        "trait Pair a b c | b -> c {
+  fun mk : (x: a) -> c
+}",
+    );
+    assert!(result.is_err(), "expected unsupported fundep error");
+    let err = result.err().unwrap();
+    assert!(
+        err.message.contains("must appear on the determining side"),
+        "expected self-on-determining-side error, got: {}",
         err.message
     );
 }

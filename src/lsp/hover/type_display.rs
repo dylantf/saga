@@ -206,7 +206,13 @@ pub fn type_definition_summary(
             } if def_name == name => {
                 let fundep = functional_dependency
                     .as_ref()
-                    .map(|fd| format!(" | {} -> {}", fd.determinant, fd.determined.join(" ")))
+                    .map(|fd| {
+                        format!(
+                            " | {} -> {}",
+                            fd.determinant.join(" "),
+                            fd.determined.join(" ")
+                        )
+                    })
                     .unwrap_or_default();
                 let supers = if supertraits.is_empty() {
                     String::new()
