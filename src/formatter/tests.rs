@@ -1100,6 +1100,21 @@ fn app_nested_calls_parenthesized() {
     );
 }
 
+#[test]
+fn field_access_on_application_keeps_parens() {
+    // `.sql` binds tighter than application, so the parens around the call are
+    // required: without them this reparses as `println (users_query (().sql))`.
+    assert_eq!(
+        fmt80("f x = println (users_query ()).sql"),
+        "f x = println (users_query ()).sql\n"
+    );
+}
+
+#[test]
+fn field_access_on_plain_var_stays_unparenthesized() {
+    assert_eq!(fmt80("f x = println user.name"), "f x = println user.name\n");
+}
+
 // --- Records ---
 
 #[test]
