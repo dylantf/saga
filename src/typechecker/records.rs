@@ -170,7 +170,18 @@ impl Checker {
             return Ok(self.fresh_var());
         }
 
-        let resolved = self.sub.apply(&expr_ty);
+        let mut resolved = self.sub.apply(&expr_ty);
+
+        // If the receiver type is still an unsolved variable, it may be the
+        // *determined* parameter of a functional dependency whose determinants
+        // are already concrete (e.g. `let u = from users; u.age` where `from`'s
+        // fundep pins `u`'s record type). That improvement is normally deferred
+        // to `check_pending_constraints`, but field disambiguation needs the
+        // concrete record type now — so eagerly pin it here.
+        if matches!(resolved, Type::Var(_)) {
+            self.improve_pending_fundeps();
+            resolved = self.sub.apply(&expr_ty);
+        }
 
         match &resolved {
             Type::Con(name, _) => {

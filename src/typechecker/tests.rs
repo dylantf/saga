@@ -5122,6 +5122,49 @@ go () = {
 }
 
 #[test]
+fn fundep_determined_record_disambiguates_field_access() {
+    // `let u = from users; u.age`: `u`'s record type is the determined param of
+    // a multi-variable fundep (`table mode -> cols`) whose determinants are
+    // concrete at the call. Field access must see the pinned record type
+    // (`Users Required`) to disambiguate `age` between the two records that
+    // declare it, rather than reporting "ambiguous field".
+    check(
+        "type Required = Required
+type Optional = Optional
+type UsersTable = UsersTable
+type Table table = Table table
+trait TableScope table mode cols | table mode -> cols {
+  fun cols : (mode, table) -> cols
+}
+record User {
+  age: String,
+}
+record Users mode {
+  age: Int,
+}
+impl TableScope Required (Users Required) for UsersTable {
+  cols _ = Users { age: 42 }
+}
+impl TableScope Optional (Users Optional) for UsersTable {
+  cols _ = Users { age: 0 }
+}
+fun from : Table table -> required_cols
+  where {table: TableScope Required required_cols}
+from table_value = case table_value {
+  Table table -> cols (Required, table)
+}
+fun users : Table UsersTable
+users = Table UsersTable
+fun go : Unit -> Int
+go () = {
+  let u = from users
+  u.age
+}",
+    )
+    .unwrap();
+}
+
+#[test]
 fn fundep_chain_resolves_regardless_of_constraint_order() {
     // `show (step (mk Foo))` pushes the outer `Show` constraint before the
     // `Two`/`One` fundep constraints that pin its variable. The pending-

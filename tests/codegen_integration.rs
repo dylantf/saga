@@ -336,6 +336,49 @@ main () = case map Leaf 42 {
 }
 
 #[test]
+fn multi_determinant_fundep_distinct_dicts_no_collision() {
+    // A function with two where-bounds for the same trait and self var that
+    // differ only in a determinant extra (`table Required -> ...` vs
+    // `table Optional -> ...`). The two dict params must get distinct names
+    // (else erlc rejects "duplicate variable") and each call site must select
+    // the matching impl, so the result is "required / optional" not "optional /
+    // optional".
+    let src = r#"
+type Required = Required
+type Optional = Optional
+type UsersTable = UsersTable
+type Table table = Table table
+trait TableScope table mode cols | table mode -> cols {
+  fun cols : (mode, table) -> cols
+}
+record RequiredCols { value: String }
+record OptionalCols { value: String }
+impl TableScope Required RequiredCols for UsersTable {
+  cols _ = RequiredCols { value: "required" }
+}
+impl TableScope Optional OptionalCols for UsersTable {
+  cols _ = OptionalCols { value: "optional" }
+}
+fun both : Table table -> (required_cols, optional_cols)
+  where {
+    table: TableScope Required required_cols,
+    table: TableScope Optional optional_cols,
+  }
+both table_value = case table_value {
+  Table table -> (cols (Required, table), cols (Optional, table))
+}
+fun users : Table UsersTable
+users = Table UsersTable
+main () = {
+  let (required, optional) = both users
+  (required.value, optional.value)
+}
+"#;
+
+    assert_runs_and_stdout_contains(src, &["required", "optional"]);
+}
+
+#[test]
 fn anonymous_record_layout_from_function_signature_lowers_field_access() {
     let src = r#"
 fun pick_id : { id: Int, name: String } -> Int

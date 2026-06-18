@@ -1735,7 +1735,7 @@ impl Checker {
                             resolved_type: None,
                             resolved_record_type: None,
                             type_var_name: var_name,
-                            trait_type_args: trait_type_arg_types.clone(),
+                            trait_type_args: trait_type_arg_types.iter().map(|t| self.sub.apply(t)).collect(),
                             resolved_symbol: None,
                         });
                         continue;
@@ -1772,7 +1772,7 @@ impl Checker {
                                 resolved_type: None,
                                 resolved_record_type: None,
                                 type_var_name: var_name,
-                                trait_type_args: trait_type_arg_types.clone(),
+                                trait_type_args: trait_type_arg_types.iter().map(|t| self.sub.apply(t)).collect(),
                                 resolved_symbol: None,
                             });
                             continue;
@@ -1817,7 +1817,10 @@ impl Checker {
                         resolved_type: None,
                         resolved_record_type: None,
                         type_var_name: var_name,
-                        trait_type_args: trait_type_arg_types.clone(),
+                        trait_type_args: trait_type_arg_types
+                            .iter()
+                            .map(|t| self.sub.apply(t))
+                            .collect(),
                         resolved_symbol: None,
                     });
                     let resolved_extras = trait_type_arg_types
@@ -3062,6 +3065,123 @@ impl Checker {
 
     // --- Trait constraint checking ---
 
+    /// Eagerly pin functional-dependency *determined* variables for any pending
+    /// constraint whose determinants are already concrete, by selecting the
+    /// unique matching impl and unifying the determined args. This only refines
+    /// the substitution — it neither consumes pending constraints nor reports
+    /// errors — so eager consumers (e.g. field-access disambiguation) can see a
+    /// determined record type before `check_pending_constraints` runs at the
+    /// end of the body. Coherence guarantees the match is unique, so committing
+    /// early is sound. Idempotent; loops to a fixpoint for chained fundeps.
+    pub(crate) fn improve_pending_fundeps(&mut self) {
+        loop {
+            let before = self.sub.solved_count();
+            let pending = self.trait_state.pending_constraints.clone();
+            for (trait_name, extras, self_ty, _, _) in &pending {
+                let resolved_trait = self
+                    .resolve_trait_name(trait_name)
+                    .unwrap_or_else(|| trait_name.clone());
+                let Some(fundep) = self
+                    .trait_state
+                    .traits
+                    .get(&resolved_trait)
+                    .and_then(|ti| ti.fundep.clone())
+                else {
+                    continue;
+                };
+                let resolved_self = self.sub.apply(self_ty);
+                let Type::Con(self_head, self_args) = &resolved_self else {
+                    continue;
+                };
+                let arity_keyed = super::arity_keyed_target_name(self_head, self_args.len());
+                let det_positions = fundep.determinant_extra_positions();
+                let determined_positions = fundep.determined_extra_positions();
+                // Every determinant extra must already be concrete, otherwise we
+                // can't pick the impl yet.
+                let dets_concrete = det_positions.iter().all(|&p| {
+                    extras
+                        .get(p)
+                        .map(|e| matches!(self.sub.apply(e), Type::Con(..) | Type::Symbol(_)))
+                        .unwrap_or(false)
+                });
+                if !dets_concrete {
+                    continue;
+                }
+                // Find the unique impl whose self type and determinant extras
+                // match this constraint.
+                let candidates: Vec<(super::ImplInfo, std::collections::HashMap<u32, Type>)> = self
+                    .trait_state
+                    .impls
+                    .iter()
+                    .filter_map(|((tn, _, tt), info)| {
+                        if tn != &resolved_trait || tt != &arity_keyed {
+                            return None;
+                        }
+                        let mut pattern_subst = std::collections::HashMap::new();
+                        if let Some(pattern) = &info.target_pattern
+                            && !super::check_traits::match_type_pattern(
+                                pattern,
+                                &resolved_self,
+                                &mut pattern_subst,
+                            )
+                        {
+                            return None;
+                        }
+                        for &p in &det_positions {
+                            let (Some(impl_extra), Some(call_extra)) =
+                                (info.trait_type_args.get(p), extras.get(p))
+                            else {
+                                continue;
+                            };
+                            let expected = super::check_traits::substitute_pattern_vars(
+                                impl_extra,
+                                &pattern_subst,
+                            );
+                            let actual = self.sub.apply(call_extra);
+                            if !super::check_traits::match_type_pattern(
+                                &expected,
+                                &actual,
+                                &mut pattern_subst,
+                            ) {
+                                return None;
+                            }
+                        }
+                        Some((info.clone(), pattern_subst))
+                    })
+                    .collect();
+                if candidates.len() != 1 {
+                    continue;
+                }
+                let (info, mut pattern_subst) = candidates.into_iter().next().unwrap();
+                // Bind any remaining impl pattern variables (not pinned by the
+                // determinant match) to fresh vars so the determined args are
+                // fully grounded.
+                let mut impl_vars = Vec::new();
+                for extra in &info.trait_type_args {
+                    super::collect_free_vars(extra, &mut impl_vars);
+                }
+                for var_id in impl_vars {
+                    pattern_subst
+                        .entry(var_id)
+                        .or_insert_with(|| self.fresh_var());
+                }
+                for &p in &determined_positions {
+                    let (Some(call_extra), Some(impl_extra)) =
+                        (extras.get(p), info.trait_type_args.get(p))
+                    else {
+                        continue;
+                    };
+                    let pinned =
+                        super::check_traits::substitute_pattern_vars(impl_extra, &pattern_subst);
+                    let _ = self.unify(call_extra, &pinned);
+                }
+            }
+            if self.sub.solved_count() == before {
+                break;
+            }
+        }
+    }
+
     pub(crate) fn check_pending_constraints(&mut self) -> Result<(), Diagnostic> {
         // Build resolved where bounds (substitution may have chained var IDs)
         let mut resolved_bounds: std::collections::HashMap<u32, std::collections::HashSet<String>> =
@@ -3649,7 +3769,7 @@ impl Checker {
                             resolved_type: None,
                             resolved_record_type: None,
                             type_var_name: var_name,
-                            trait_type_args: trait_type_arg_types.clone(),
+                            trait_type_args: trait_type_arg_types.iter().map(|t| self.sub.apply(t)).collect(),
                             resolved_symbol: None,
                         });
                     }
