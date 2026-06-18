@@ -426,6 +426,80 @@ run () = project users
 }
 
 #[test]
+fn routed_derive_auto_derives_generic_on_row_type() {
+    // `deriving (Selectable User)` must auto-derive `Generic` for the row type
+    // `User` (which has no `deriving` clause of its own) — the bridge needs
+    // `User: Generic` to decompose it. Neither record manually derives Generic.
+    let src = r#"
+import Std.Generic (Generic, Leaf, Labeled, And, Record)
+
+type Required = Required
+type Optional = Optional
+
+trait PgType a {}
+impl PgType for Int {}
+impl PgType for String {}
+
+type Column source meta (name : Symbol) a = Column
+type Projection a = Projection a
+
+fun map_projection : (a -> b) -> Projection a -> Projection b
+map_projection f projection = case projection {
+  Projection value -> Projection (f value)
+}
+
+trait Selectable selection row | selection -> row {
+  fun to_projection : selection -> Projection row
+}
+
+impl Selectable a for (Column source Required name a) where {a: PgType} {
+  to_projection _ = Projection (panic "stub")
+}
+impl Selectable (Maybe a) for (Column source Optional name a) where {a: PgType} {
+  to_projection _ = Projection Nothing
+}
+impl Selectable (Leaf row) for Leaf selection where {selection: Selectable row} {
+  to_projection selection = case selection {
+    Leaf value -> map_projection Leaf (to_projection value)
+  }
+}
+impl Selectable (Labeled n out) for Labeled n field where {Selectable field out} {
+  to_projection selection = case selection {
+    Labeled field -> map_projection Labeled (to_projection field)
+  }
+}
+impl Selectable (And lo ro) for And l r where {Selectable l lo, Selectable r ro} {
+  to_projection selection = case selection {
+    And l r -> case to_projection l {
+      Projection lv -> case to_projection r {
+        Projection rv -> Projection (And lv rv)
+      }
+    }
+  }
+}
+impl Selectable (Record out) for Record fields where {Selectable fields out} {
+  to_projection selection = case selection {
+    Record name fields -> map_projection (fun out -> Record name out) (to_projection fields)
+  }
+}
+
+record User {
+  id: Int,
+  name: String,
+}
+
+record Users source meta {
+  id: Column source meta 'id Int,
+  name: Column source meta 'name String,
+} deriving (Selectable User)
+"#;
+
+    // Compiles only if `Generic` was auto-derived for both `Users` (via the
+    // routed derive) and `User` (via being a routed derive's row type).
+    let _ = emit_elaborated_with_std(src);
+}
+
+#[test]
 fn multi_determinant_fundep_distinct_dicts_no_collision() {
     // A function with two where-bounds for the same trait and self var that
     // differ only in a determinant extra (`table Required -> ...` vs

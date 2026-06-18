@@ -519,6 +519,34 @@ pub fn expand_derives(program: &mut Vec<Decl>, imported: &ImportedDecls) -> Vec<
             _ => None,
         })
         .collect();
+
+    // A routed functional derive (`deriving (Selectable User)`) needs its *row*
+    // type (`User`) to be `Generic` so the bridge can decompose it. The row type
+    // is a separate declaration, so collect every such row head up front and
+    // auto-derive `Generic` for the matching local types/records — the same
+    // convenience already applied to the type carrying the derive. Computed
+    // before the scope is built so row types report as `Generic`-deriving (which
+    // `ensure_row_generic_available` consults).
+    let routed_row_heads: std::collections::HashSet<String> = original
+        .iter()
+        .flat_map(|d| match d {
+            Decl::TypeDef { deriving, .. } | Decl::RecordDef { deriving, .. } => deriving.as_slice(),
+            _ => &[],
+        })
+        .filter_map(|spec| spec.type_args.first().and_then(|row| row.head_name()))
+        .map(|head| head.rsplit('.').next().unwrap_or(head).to_string())
+        .collect();
+    // Whether a local type/record will end up with a `Generic` impl after derive
+    // expansion: explicitly listed, implied by another routed derive on it, or
+    // referenced as a routed derive's row type.
+    let will_derive_generic = |name: &str, deriving: &[DeriveSpec]| -> bool {
+        deriving.iter().any(|d| d.is_plain_named("Generic"))
+            || deriving
+                .iter()
+                .any(|d| !d.type_args.is_empty() || !is_hardcoded_derive(d.bare_name()))
+            || routed_row_heads.contains(name)
+    };
+
     for d in &original {
         match d {
             Decl::TraitDef {
@@ -552,7 +580,7 @@ pub fn expand_derives(program: &mut Vec<Decl>, imported: &ImportedDecls) -> Vec<
                     WrapperTypeInfo {
                         type_params: type_params.clone(),
                         variants: variants.iter().map(|v| v.node.clone()).collect(),
-                        derives_generic: deriving.iter().any(|d| d.is_plain_named("Generic")),
+                        derives_generic: will_derive_generic(name, deriving),
                         opaque: *opaque,
                     },
                 );
@@ -572,7 +600,7 @@ pub fn expand_derives(program: &mut Vec<Decl>, imported: &ImportedDecls) -> Vec<
                             .iter()
                             .map(|f| (f.node.0.clone(), f.node.1.clone()))
                             .collect(),
-                        derives_generic: deriving.iter().any(|d| d.is_plain_named("Generic")),
+                        derives_generic: will_derive_generic(name, deriving),
                     },
                 );
             }
@@ -623,7 +651,8 @@ pub fn expand_derives(program: &mut Vec<Decl>, imported: &ImportedDecls) -> Vec<
                     .iter()
                     .any(|d| !d.type_args.is_empty() || !is_hardcoded_derive(d.bare_name()));
                 let has_generic = deriving.iter().any(|d| d.is_plain_named("Generic"));
-                if has_routed && !has_generic {
+                let referenced_as_row = routed_row_heads.contains(name);
+                if (has_routed || referenced_as_row) && !has_generic {
                     match derive_adt_generic(*public, name, type_params, variants, *span) {
                         Ok(decls) => extra.extend(decls),
                         Err(Some(diag)) => errors.push(diag),
@@ -703,7 +732,8 @@ pub fn expand_derives(program: &mut Vec<Decl>, imported: &ImportedDecls) -> Vec<
                     .iter()
                     .any(|d| !d.type_args.is_empty() || !is_hardcoded_derive(d.bare_name()));
                 let has_generic = deriving.iter().any(|d| d.is_plain_named("Generic"));
-                if has_routed && !has_generic {
+                let referenced_as_row = routed_row_heads.contains(name);
+                if (has_routed || referenced_as_row) && !has_generic {
                     match derive_record_generic(*public, name, type_params, fields, *span) {
                         Ok(decls) => extra.extend(decls),
                         Err(Some(diag)) => errors.push(diag),
