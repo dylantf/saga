@@ -17,6 +17,13 @@ pub struct ModuleExports {
     pub binding_origins: HashMap<String, String>,
     /// Type name -> constructor names (empty vec for opaque types).
     pub type_constructors: HashMap<String, Vec<String>>,
+    /// Canonical constructors of *non-exported* types in this module, keyed by
+    /// canonical type name -> [(canonical ctor name, scheme)]. A public trait's
+    /// default-method body may construct values of a type the module keeps
+    /// private; when that body is inlined into a downstream impl it refers to
+    /// those constructors by canonical name, so the importer needs their
+    /// schemes even though name resolution never exposes them.
+    pub inlinable_constructors: HashMap<String, Vec<(String, Scheme)>>,
     /// Public type surface name -> canonical origin type name.
     pub type_origins: HashMap<String, String>,
     /// Record name -> record info (type params + field types).
@@ -120,6 +127,53 @@ impl ModuleExports {
                 } => {
                     type_origins.insert(name.clone(), canonical_export_name(module_prefix, name));
                     type_constructors.insert(name.clone(), vec![name.clone()]);
+                }
+                _ => {}
+            }
+        }
+
+        // Constructors of private (non-exported) types, so default-method
+        // bodies that construct or match them keep working when inlined into a
+        // downstream module. These are keyed canonically and never enter the
+        // importer's scope, so privacy is preserved for ordinary references.
+        let mut inlinable_constructors: HashMap<String, Vec<(String, Scheme)>> = HashMap::new();
+        for decl in program {
+            match decl {
+                Decl::TypeDef {
+                    public: false,
+                    opaque: false,
+                    name,
+                    variants,
+                    ..
+                } => {
+                    let type_canonical = canonical_export_name(module_prefix, name);
+                    let ctors: Vec<(String, Scheme)> = variants
+                        .iter()
+                        .filter_map(|v| {
+                            checker.constructors.get(&v.node.name).map(|scheme| {
+                                (
+                                    canonical_export_name(module_prefix, &v.node.name),
+                                    scheme.clone(),
+                                )
+                            })
+                        })
+                        .collect();
+                    if !ctors.is_empty() {
+                        inlinable_constructors.insert(type_canonical, ctors);
+                    }
+                }
+                Decl::RecordDef {
+                    public: false,
+                    name,
+                    ..
+                } => {
+                    if let Some(scheme) = checker.constructors.get(name) {
+                        let type_canonical = canonical_export_name(module_prefix, name);
+                        inlinable_constructors.insert(
+                            type_canonical.clone(),
+                            vec![(type_canonical, scheme.clone())],
+                        );
+                    }
                 }
                 _ => {}
             }
@@ -392,6 +446,7 @@ impl ModuleExports {
             bindings,
             binding_origins,
             type_constructors,
+            inlinable_constructors,
             type_origins,
             record_defs,
             traits,

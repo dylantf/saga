@@ -9666,6 +9666,40 @@ fn trait_default_body_cross_module() {
 }
 
 #[test]
+fn trait_default_body_cross_module_references_own_constructor() {
+    // A default body that constructs a value of a type declared (and exported)
+    // alongside the trait: the constructor reference must be qualified to the
+    // trait's module when the body is inlined into a downstream impl.
+    let lib = "module BoxLib\n\
+               pub type Boxed a = Boxed a\n\
+               pub trait Boxable a {\n\
+               fun box_it : a -> Boxed a\n\
+               box_it x = Boxed x\n\
+               }\n";
+    let main = "import BoxLib (Boxable)\n\
+                impl Boxable for Int {}\n\
+                let b = box_it 42\n";
+    check_with_project_files(&[("lib/BoxLib.saga", lib)], main).unwrap();
+}
+
+#[test]
+fn trait_default_body_cross_module_references_private_constructor() {
+    // Same as above, but the constructed type is NOT exported. The downstream
+    // impl can never name the type, yet the inlined default body still needs
+    // the constructor's scheme to typecheck.
+    let lib = "module BoxLib\n\
+               type Boxed a = Boxed a\n\
+               pub trait Boxable a {\n\
+               fun box_it : a -> Boxed a\n\
+               box_it x = Boxed x\n\
+               }\n";
+    let main = "import BoxLib (Boxable)\n\
+                impl Boxable for Int {}\n\
+                let b = box_it 42\n";
+    check_with_project_files(&[("lib/BoxLib.saga", lib)], main).unwrap();
+}
+
+#[test]
 fn trait_default_body_with_where_constraint() {
     // The defaulted method's signature carries an extra constraint that the
     // default body must rely on (here implicitly through trait dispatch).

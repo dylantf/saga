@@ -84,10 +84,13 @@ impl Checker {
     }
 
     fn register_header_type_stubs(&mut self, module_name: &str, header: &ModuleHeader) {
+        // Register private types too: a public trait's default-method body may
+        // construct values of a type the module keeps private, and the cloned
+        // body (inlined into a downstream impl) refers to that type/its
+        // constructors by canonical name. Name-resolution privacy is enforced
+        // separately (only public items enter the importer's scope), so these
+        // canonical-keyed entries don't leak private names to user code.
         for (name, decl) in &header.types {
-            if !decl.public() {
-                continue;
-            }
             let canonical = canonical_join(module_name, name);
             self.type_arity
                 .entry(canonical.clone())
@@ -100,9 +103,6 @@ impl Checker {
             });
         }
         for (name, record) in &header.records {
-            if !record.public {
-                continue;
-            }
             let canonical = canonical_join(module_name, name);
             self.type_arity
                 .entry(canonical.clone())
@@ -122,7 +122,7 @@ impl Checker {
     ) {
         for (name, decl) in &header.types {
             let HeaderTypeDecl::Adt {
-                public,
+                public: _,
                 opaque,
                 type_params,
                 constructors,
@@ -130,9 +130,6 @@ impl Checker {
             else {
                 continue;
             };
-            if !public {
-                continue;
-            }
 
             let mut params = header_type_param_vars(self, type_params);
             let forall: Vec<u32> = params.iter().map(|(_, id)| *id).collect();
@@ -183,9 +180,6 @@ impl Checker {
         }
 
         for (name, record) in &header.records {
-            if !record.public {
-                continue;
-            }
             let mut params = header_type_param_vars(self, &record.type_params);
             let forall: Vec<u32> = params.iter().map(|(_, id)| *id).collect();
             let fields: Vec<(String, Type)> = record

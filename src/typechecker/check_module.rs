@@ -745,6 +745,7 @@ impl Checker {
             bindings,
             binding_origins,
             type_constructors,
+            inlinable_constructors,
             type_origins,
             record_defs,
             traits,
@@ -951,6 +952,22 @@ impl Checker {
             }
             if !self.adt_variants.contains_key(type_name) && !variants.is_empty() {
                 self.adt_variants.insert(type_name.clone(), variants);
+            }
+        }
+
+        // Private-type constructors referenced by inlined default-method
+        // bodies. Registered by canonical name only — never surfaced in scope —
+        // so privacy holds for ordinary references.
+        for (type_canonical, ctors) in inlinable_constructors {
+            let mut variants = Vec::new();
+            for (ctor_canonical, scheme) in ctors {
+                self.constructors
+                    .entry(ctor_canonical.clone())
+                    .or_insert_with(|| scheme.clone());
+                variants.push((ctor_canonical.clone(), ctor_arity(&scheme.ty)));
+            }
+            if !self.adt_variants.contains_key(type_canonical) && !variants.is_empty() {
+                self.adt_variants.insert(type_canonical.clone(), variants);
             }
         }
 

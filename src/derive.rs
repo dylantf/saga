@@ -202,6 +202,20 @@ fn module_summary(program: &[Decl]) -> ModuleSummary {
             _ => None,
         })
         .collect();
+    // Collect every data constructor declared in this module, public or not:
+    // a default body may construct a value of a type that the module keeps
+    // private (the downstream impl never names the type, it just gets the
+    // value back), so privacy doesn't gate which constructors a default body
+    // can reference.
+    let defining_module_constructors: std::collections::HashSet<String> = program
+        .iter()
+        .flat_map(|d| match d {
+            Decl::TypeDef { variants, .. } => {
+                variants.iter().map(|v| v.node.name.clone()).collect()
+            }
+            _ => Vec::new(),
+        })
+        .collect();
     for d in program {
         if let Decl::ImplDef {
             trait_name,
@@ -270,6 +284,7 @@ fn module_summary(program: &[Decl]) -> ModuleSummary {
                         .collect(),
                     defining_module: module_name.clone(),
                     defining_module_values: defining_module_values.clone(),
+                    defining_module_constructors: defining_module_constructors.clone(),
                 },
             );
         }
@@ -519,6 +534,15 @@ pub fn expand_derives(program: &mut Vec<Decl>, imported: &ImportedDecls) -> Vec<
             _ => None,
         })
         .collect();
+    let local_defining_constructors: std::collections::HashSet<String> = original
+        .iter()
+        .flat_map(|d| match d {
+            Decl::TypeDef { variants, .. } => {
+                variants.iter().map(|v| v.node.name.clone()).collect()
+            }
+            _ => Vec::new(),
+        })
+        .collect();
 
     // A routed functional derive (`deriving (Selectable User)`) needs its *row*
     // type (`User`) to be `Generic` so the bridge can decompose it. The row type
@@ -564,6 +588,7 @@ pub fn expand_derives(program: &mut Vec<Decl>, imported: &ImportedDecls) -> Vec<
                         methods: methods.iter().map(|m| m.node.clone()).collect(),
                         defining_module: current_module.clone(),
                         defining_module_values: local_defining_values.clone(),
+                        defining_module_constructors: local_defining_constructors.clone(),
                     },
                 );
             }
@@ -877,6 +902,10 @@ fn inherit_trait_defaults(program: &mut [Decl], scope: &DeriveScope<'_>) {
                     &trait_method_names,
                     &mut bound,
                 );
+                // Constructors live in their own namespace and are never
+                // shadowed by the value bindings tracked above, so qualify
+                // them in a separate, scope-insensitive walk.
+                qualify_ctor_refs(&mut body, module, &entry.info.defining_module_constructors);
             }
             methods.push(Annotated::bare(ImplMethod {
                 name: tm.name.clone(),
@@ -1164,6 +1193,264 @@ fn qualify_stmt_free_vars(
     }
 }
 
+/// Rewrite bare data-constructor references inside a cloned default-method
+/// body to their module-qualified canonical name, so they resolve against the
+/// trait's defining module rather than the downstream impl-site module.
+/// Constructors occupy their own namespace and are never shadowed by local
+/// value bindings, so this walk is scope-insensitive (no `bound` tracking).
+fn qualify_ctor_refs(
+    expr: &mut Expr,
+    module: &str,
+    module_constructors: &std::collections::HashSet<String>,
+) {
+    match &mut expr.kind {
+        ExprKind::Constructor { name } => {
+            if !name.contains('.') && module_constructors.contains(name) {
+                *name = format!("{}.{}", module, name);
+            }
+        }
+        ExprKind::Lit { .. }
+        | ExprKind::Var { .. }
+        | ExprKind::QualifiedName { .. }
+        | ExprKind::DictMethodAccess { .. }
+        | ExprKind::DictSuperAccess { .. }
+        | ExprKind::DictRef { .. }
+        | ExprKind::SymbolIntrinsic { .. }
+        | ExprKind::HandlerExpr { .. } => {}
+        ExprKind::App { func, arg } => {
+            qualify_ctor_refs(func, module, module_constructors);
+            qualify_ctor_refs(arg, module, module_constructors);
+        }
+        ExprKind::BinOp { left, right, .. } => {
+            qualify_ctor_refs(left, module, module_constructors);
+            qualify_ctor_refs(right, module, module_constructors);
+        }
+        ExprKind::UnaryMinus { expr: inner } => {
+            qualify_ctor_refs(inner, module, module_constructors);
+        }
+        ExprKind::If {
+            cond,
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            qualify_ctor_refs(cond, module, module_constructors);
+            qualify_ctor_refs(then_branch, module, module_constructors);
+            qualify_ctor_refs(else_branch, module, module_constructors);
+        }
+        ExprKind::Case {
+            scrutinee, arms, ..
+        } => {
+            qualify_ctor_refs(scrutinee, module, module_constructors);
+            for ann_arm in arms {
+                qualify_ctor_pat(&mut ann_arm.node.pattern, module, module_constructors);
+                if let Some(g) = &mut ann_arm.node.guard {
+                    qualify_ctor_refs(g, module, module_constructors);
+                }
+                qualify_ctor_refs(&mut ann_arm.node.body, module, module_constructors);
+            }
+        }
+        ExprKind::Block { stmts, .. } => {
+            for ann_stmt in stmts {
+                match &mut ann_stmt.node {
+                    Stmt::Let { pattern, value, .. } => {
+                        qualify_ctor_pat(pattern, module, module_constructors);
+                        qualify_ctor_refs(value, module, module_constructors);
+                    }
+                    Stmt::LetFun {
+                        params,
+                        guard,
+                        body,
+                        ..
+                    } => {
+                        for p in params.iter_mut() {
+                            qualify_ctor_pat(p, module, module_constructors);
+                        }
+                        if let Some(g) = guard {
+                            qualify_ctor_refs(g, module, module_constructors);
+                        }
+                        qualify_ctor_refs(body, module, module_constructors);
+                    }
+                    Stmt::Expr(e) => qualify_ctor_refs(e, module, module_constructors),
+                }
+            }
+        }
+        ExprKind::Lambda { params, body } => {
+            for p in params.iter_mut() {
+                qualify_ctor_pat(p, module, module_constructors);
+            }
+            qualify_ctor_refs(body, module, module_constructors);
+        }
+        ExprKind::FieldAccess { expr: inner, .. } => {
+            qualify_ctor_refs(inner, module, module_constructors);
+        }
+        ExprKind::RecordCreate { fields, .. } | ExprKind::AnonRecordCreate { fields, .. } => {
+            for (_, _, val) in fields {
+                qualify_ctor_refs(val, module, module_constructors);
+            }
+        }
+        ExprKind::RecordUpdate { record, fields, .. } => {
+            qualify_ctor_refs(record, module, module_constructors);
+            for (_, _, val) in fields {
+                qualify_ctor_refs(val, module, module_constructors);
+            }
+        }
+        ExprKind::EffectCall { args, .. } => {
+            for arg in args {
+                qualify_ctor_refs(arg, module, module_constructors);
+            }
+        }
+        ExprKind::With { expr: inner, .. } => {
+            qualify_ctor_refs(inner, module, module_constructors);
+        }
+        ExprKind::Resume { value } => qualify_ctor_refs(value, module, module_constructors),
+        ExprKind::Tuple { elements } => {
+            for e in elements {
+                qualify_ctor_refs(e, module, module_constructors);
+            }
+        }
+        ExprKind::Do {
+            bindings,
+            success,
+            else_arms,
+            ..
+        } => {
+            for (p, e) in bindings {
+                qualify_ctor_pat(p, module, module_constructors);
+                qualify_ctor_refs(e, module, module_constructors);
+            }
+            qualify_ctor_refs(success, module, module_constructors);
+            for ann_arm in else_arms {
+                qualify_ctor_pat(&mut ann_arm.node.pattern, module, module_constructors);
+                if let Some(g) = &mut ann_arm.node.guard {
+                    qualify_ctor_refs(g, module, module_constructors);
+                }
+                qualify_ctor_refs(&mut ann_arm.node.body, module, module_constructors);
+            }
+        }
+        ExprKind::Receive {
+            arms, after_clause, ..
+        } => {
+            for ann_arm in arms {
+                qualify_ctor_pat(&mut ann_arm.node.pattern, module, module_constructors);
+                if let Some(g) = &mut ann_arm.node.guard {
+                    qualify_ctor_refs(g, module, module_constructors);
+                }
+                qualify_ctor_refs(&mut ann_arm.node.body, module, module_constructors);
+            }
+            if let Some((timeout, body)) = after_clause {
+                qualify_ctor_refs(timeout, module, module_constructors);
+                qualify_ctor_refs(body, module, module_constructors);
+            }
+        }
+        ExprKind::Ascription { expr: inner, .. } => {
+            qualify_ctor_refs(inner, module, module_constructors);
+        }
+        ExprKind::BitString { segments } => {
+            for seg in segments {
+                qualify_ctor_refs(&mut seg.value, module, module_constructors);
+                if let Some(size) = &mut seg.size {
+                    qualify_ctor_refs(size, module, module_constructors);
+                }
+            }
+        }
+        ExprKind::Pipe { segments, .. } | ExprKind::BinOpChain { segments, .. } => {
+            for seg in segments {
+                qualify_ctor_refs(&mut seg.node, module, module_constructors);
+            }
+        }
+        ExprKind::PipeBack { segments } | ExprKind::ComposeForward { segments } => {
+            for seg in segments {
+                qualify_ctor_refs(&mut seg.node, module, module_constructors);
+            }
+        }
+        ExprKind::Cons { head, tail } => {
+            qualify_ctor_refs(head, module, module_constructors);
+            qualify_ctor_refs(tail, module, module_constructors);
+        }
+        ExprKind::ListLit { elements } => {
+            for e in elements {
+                qualify_ctor_refs(e, module, module_constructors);
+            }
+        }
+        ExprKind::StringInterp { parts, .. } => {
+            for part in parts {
+                if let StringPart::Expr(e) = part {
+                    qualify_ctor_refs(e, module, module_constructors);
+                }
+            }
+        }
+        ExprKind::ListComprehension { body, qualifiers } => {
+            for q in qualifiers {
+                match q {
+                    ComprehensionQualifier::Generator(p, e)
+                    | ComprehensionQualifier::Let(p, e) => {
+                        qualify_ctor_pat(p, module, module_constructors);
+                        qualify_ctor_refs(e, module, module_constructors);
+                    }
+                    ComprehensionQualifier::Guard(e) => {
+                        qualify_ctor_refs(e, module, module_constructors);
+                    }
+                }
+            }
+            qualify_ctor_refs(body, module, module_constructors);
+        }
+        ExprKind::ForeignCall { args, .. } => {
+            for arg in args {
+                qualify_ctor_refs(arg, module, module_constructors);
+            }
+        }
+    }
+}
+
+/// Companion to `qualify_ctor_refs` for constructor references that appear in
+/// patterns (e.g. a default body that destructures one of the trait module's
+/// own types).
+fn qualify_ctor_pat(
+    pat: &mut Pat,
+    module: &str,
+    module_constructors: &std::collections::HashSet<String>,
+) {
+    match pat {
+        Pat::Wildcard { .. } | Pat::Lit { .. } | Pat::Var { .. } => {}
+        Pat::Constructor { name, args, .. } => {
+            if !name.contains('.') && module_constructors.contains(name) {
+                *name = format!("{}.{}", module, name);
+            }
+            for a in args {
+                qualify_ctor_pat(a, module, module_constructors);
+            }
+        }
+        Pat::Record { fields, .. } | Pat::AnonRecord { fields, .. } => {
+            for (_, alias) in fields {
+                if let Some(p) = alias {
+                    qualify_ctor_pat(p, module, module_constructors);
+                }
+            }
+        }
+        Pat::Tuple { elements, .. } | Pat::ListPat { elements, .. } => {
+            for e in elements {
+                qualify_ctor_pat(e, module, module_constructors);
+            }
+        }
+        Pat::StringPrefix { rest, .. } => qualify_ctor_pat(rest, module, module_constructors),
+        Pat::BitStringPat { segments, .. } => {
+            for seg in segments {
+                qualify_ctor_pat(&mut seg.value, module, module_constructors);
+            }
+        }
+        Pat::ConsPat { head, tail, .. } => {
+            qualify_ctor_pat(head, module, module_constructors);
+            qualify_ctor_pat(tail, module, module_constructors);
+        }
+        Pat::Or { patterns, .. } => {
+            for p in patterns {
+                qualify_ctor_pat(p, module, module_constructors);
+            }
+        }
+    }
+}
+
 fn collect_pat_bindings(pat: &Pat, out: &mut std::collections::HashSet<String>) {
     match pat {
         Pat::Wildcard { .. } | Pat::Lit { .. } => {}
@@ -1248,6 +1535,13 @@ pub struct RoutedTraitInfo {
     /// "undefined variable" errors for identifiers defined alongside the
     /// trait.
     pub defining_module_values: std::collections::HashSet<String>,
+    /// Names of data constructors (ADT variants) declared in
+    /// `defining_module`, regardless of whether their type is exported. A
+    /// constructor reference inside a cloned default body that matches one of
+    /// these is rewritten to its module-qualified canonical name, so
+    /// cross-module impls don't see "undefined constructor" errors for
+    /// constructors defined alongside the trait.
+    pub defining_module_constructors: std::collections::HashSet<String>,
 }
 
 /// A trait impl captured at derive time, used to resolve the scope parameter of
