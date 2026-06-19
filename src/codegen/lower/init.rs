@@ -385,6 +385,9 @@ impl<'a> Lowerer<'a> {
                                     })
                                     .collect(),
                                 param_absorbed_effects,
+                                dict_param_names: crate::ast::op_dict_param_names(
+                                    &op.node.where_clause,
+                                ),
                             },
                         );
                     }
@@ -531,6 +534,7 @@ impl<'a> Lowerer<'a> {
                                 runtime_param_count: op.runtime_param_count,
                                 runtime_param_positions: op.runtime_param_positions.clone(),
                                 param_absorbed_effects: op.param_absorbed_effects.clone(),
+                                dict_param_names: op.dict_param_names.clone(),
                             },
                         );
                     }
@@ -603,6 +607,7 @@ impl<'a> Lowerer<'a> {
                         runtime_param_count: op.runtime_param_count,
                         runtime_param_positions: op.runtime_param_positions.clone(),
                         param_absorbed_effects: op.param_absorbed_effects.clone(),
+                        dict_param_names: op.dict_param_names.clone(),
                     },
                 );
             }

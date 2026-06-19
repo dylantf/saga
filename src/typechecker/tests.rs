@@ -1561,6 +1561,47 @@ use_it x = do_the_foo! x",
 }
 
 #[test]
+fn effect_op_where_clause_usable_in_named_handler_arm() {
+    // A handler implementing an op may use the op's own `where` constraint as an
+    // assumption on the op's abstract type var, just like a function body uses
+    // its own where-bounds. Previously this reported a spurious "ambiguous type
+    // variable requires Fooable".
+    check(
+        "trait Fooable a {
+  fun foo_name : a -> String
+}
+effect Foo {
+  fun do_the_foo : a -> String where {a: Fooable}
+}
+handler use_foo for Foo {
+  do_the_foo x = resume (foo_name x)
+}",
+    )
+    .unwrap();
+}
+
+#[test]
+fn effect_op_where_clause_usable_in_inline_handler_arm() {
+    check(
+        "trait Fooable a {
+  fun foo_name : a -> String
+}
+effect Foo {
+  fun do_the_foo : a -> String where {a: Fooable}
+}
+impl Fooable for Int {
+  foo_name n = show n
+}
+main () = {
+  do_the_foo! 1 with {
+    do_the_foo x = resume (foo_name x)
+  }
+}",
+    )
+    .unwrap();
+}
+
+#[test]
 fn effect_op_where_clause_missing_impl_fails() {
     let result = check(
         "record User { name: String }

@@ -380,6 +380,10 @@ impl Checker {
                             };
                             self.bind_pattern(pat, &param_ty)?;
                         }
+                        // Bring the op's own `where` constraints into scope as
+                        // assumptions so the arm body may use the trait on the
+                        // op's abstract type var (mirrors the named-handler path).
+                        self.add_op_constraint_where_bounds(&sig.constraints);
                     } else {
                         for pat in &arm.params {
                             let param_ty = self.fresh_var();

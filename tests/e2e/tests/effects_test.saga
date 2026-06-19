@@ -30,6 +30,25 @@ effect Validate {
   fun invalid : String -> Unit
 }
 
+# An operation whose own `where` clause constrains its abstract type variable.
+# The dictionary is threaded per call, so a single handler installation can
+# serve calls at different concrete types (Int and String below).
+trait Encodable a {
+  fun encode : a -> String
+}
+
+impl Encodable for Int {
+  encode n = $"i{show n}"
+}
+
+impl Encodable for String {
+  encode s = $"s{s}"
+}
+
+effect Encode {
+  fun push : a -> String where {a: Encodable}
+}
+
 # --- Named handlers ---
 
 handler console_log for Log {
@@ -41,6 +60,10 @@ handler console_log for Log {
 
 handler silent_log for Log {
   log _ = resume ()
+}
+
+handler encoder for Encode {
+  push val = resume (encode val)
 }
 
 handler swallow_fail for Fail String {
@@ -402,6 +425,27 @@ tests () = {
           log _ = resume ()
         }
         assert_eq result 30
+      })
+    })
+
+    describe "operation where-clause constraints" (fun () -> {
+      test "named handler threads per-call dict for differing types" (fun () -> {
+        let result = {
+          let a = push! 7
+          let b = push! "x"
+          a <> b
+        } with encoder
+        assert_eq result "i7sx"
+      })
+      test "inline handler threads per-call dict" (fun () -> {
+        let result = {
+          let a = push! 7
+          let b = push! "x"
+          a <> b
+        } with {
+          push val = resume (encode val)
+        }
+        assert_eq result "i7sx"
       })
     })
 

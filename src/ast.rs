@@ -1406,6 +1406,29 @@ pub struct TraitBound {
     pub traits: Vec<TraitRef>,
 }
 
+/// Dictionary parameter names for an effect operation's own `where` clause,
+/// e.g. `set : a -> Unit where {a: PgType}` yields `["__dict_PgType_a"]`.
+///
+/// These dicts are threaded per call as trailing op arguments (inserted by the
+/// elaborator at each `op!` site) and received as trailing closure params in the
+/// handler arm (added by the lowerer). Both the typechecker (when emitting
+/// codegen info) and the lowerer compute the names this way so call site and
+/// handler agree. `Num`/`Eq` use BIF dispatch, not dictionaries, so they are
+/// skipped — matching the elaborator's `dict_params_from_where`.
+pub fn op_dict_param_names(where_clause: &[TraitBound]) -> Vec<String> {
+    let mut names = Vec::new();
+    for bound in where_clause {
+        for tr in &bound.traits {
+            if tr.name == "Num" || tr.name == "Eq" {
+                continue;
+            }
+            let bare = tr.name.rsplit('.').next().unwrap_or(&tr.name);
+            names.push(format!("__dict_{}_{}", bare, bound.type_var));
+        }
+    }
+    names
+}
+
 /// Functional dependency on a trait declaration, e.g.
 /// `trait Selectable selection row | selection -> row` or a multi-variable
 /// determinant like `trait T a b c | a b -> c`.

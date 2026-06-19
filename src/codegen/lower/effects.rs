@@ -211,6 +211,30 @@ impl<'a> Lowerer<'a> {
             param_vars,
             runtime_param_positions,
         )?;
+
+        // The op's own `where`-constraint dicts are passed as trailing args
+        // (after the user params). The closure path binds them via fun params;
+        // here we inline the arm body, so bind them explicitly from the trailing
+        // `param_vars` slots so `DictMethodAccess` references in the body resolve.
+        let dict_names: Vec<String> = self
+            .effect_for_handler_arm(&plan.arm, plan.source_module.as_deref())
+            .and_then(|eff| {
+                self.effect_defs
+                    .get(&eff)
+                    .and_then(|info| info.ops.get(&plan.arm.op_name))
+            })
+            .map(|op| op.dict_param_names.clone())
+            .unwrap_or_default();
+        let dict_bindings: Vec<(String, CExpr)> = dict_names
+            .iter()
+            .enumerate()
+            .filter_map(|(i, name)| {
+                let idx = param_vars.len().checked_sub(dict_names.len())? + i;
+                param_vars
+                    .get(idx)
+                    .map(|var| (super::core_var(name), CExpr::Var(var.clone())))
+            })
+            .collect();
         let capture_bindings: Vec<(String, CExpr)> = plan
             .captures
             .iter()
@@ -240,6 +264,7 @@ impl<'a> Lowerer<'a> {
                 .into_iter()
                 .chain(variant_capture_bindings)
                 .chain(param_bindings)
+                .chain(dict_bindings)
                 .rev()
                 .fold(lowered_body, |body, (var, val)| {
                     CExpr::Let(var, Box::new(val), Box::new(body))
@@ -550,7 +575,13 @@ impl<'a> Lowerer<'a> {
                 Some(op.param_absorbed_effects.clone())
             }
         });
-        let mut unit_args_to_erase = args.len().saturating_sub(runtime_param_count);
+        // Trailing dictionary args appended by the elaborator for the op's own
+        // `where` constraints are real runtime values (never `Unit` placeholders),
+        // so they must not be counted toward unit-arg erasure.
+        let dict_param_count = op_info.map(|op| op.dict_param_names.len()).unwrap_or(0);
+        let mut unit_args_to_erase = args
+            .len()
+            .saturating_sub(runtime_param_count + dict_param_count);
         let mut param_vars = Vec::new();
         let mut bindings = Vec::new();
         for (source_idx, arg) in args.iter().enumerate() {
@@ -1299,7 +1330,17 @@ impl<'a> Lowerer<'a> {
             .map(|i| format!("_HArg{}", i))
             .collect();
 
+        // The op's own `where`-constraint dicts arrive as trailing args (after
+        // the user runtime params, before the continuation), matching the order
+        // the elaborator appends them at the call site. Name them so the body's
+        // `DictMethodAccess` references (`__dict_<Trait>_<var>`) bind here.
+        let dict_param_vars: Vec<String> = op_info
+            .as_ref()
+            .map(|op| op.dict_param_names.iter().map(|n| super::core_var(n)).collect())
+            .unwrap_or_default();
+
         let mut fun_params: Vec<String> = param_vars.clone();
+        fun_params.extend(dict_param_vars);
         fun_params.push(k_var.clone());
 
         // Set up K for resume references in the body.

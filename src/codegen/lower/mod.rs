@@ -150,6 +150,11 @@ struct EffectOpInfo {
     runtime_param_positions: Vec<usize>,
     /// For callback parameters, the effects absorbed by that parameter.
     param_absorbed_effects: HashMap<usize, Vec<String>>,
+    /// Dictionary parameter names for the operation's own `where` constraints
+    /// (e.g. `set : a -> Unit where {a: PgType}` yields `["__dict_PgType_a"]`).
+    /// These are threaded as trailing op arguments at each call site and bound
+    /// as trailing closure params in the handler arm (before the continuation).
+    dict_param_names: Vec<String>,
 }
 
 /// CPS metadata for a top-level function. Used by the lowerer to determine

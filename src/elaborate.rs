@@ -190,6 +190,12 @@ struct Elaborator {
     fun_dict_params: HashMap<String, Vec<(String, String)>>,
     /// handler_name -> [(trait_name, type_var_name)] from handler where clauses
     handler_dict_params: HashMap<String, Vec<(String, String)>>,
+    /// (canonical_effect_name, op_name) -> [(trait_name, type_var_name)] from the
+    /// operation's own `where` clause (e.g. `set : a -> Unit where {a: PgType}`).
+    /// Used to (a) set up dict params when elaborating the handler arm body and
+    /// (b) append dict arguments at `op!` call sites, so the dict for the op's
+    /// trait constraint is threaded per call from caller to handler.
+    op_dict_params: HashMap<(String, String), Vec<(String, String)>>,
     /// impl key -> dict constructor name
     dict_names: HashMap<ImplKey, String>,
     /// impl key -> ordered list of (constraint_trait, param_index) for dict params.
@@ -453,10 +459,33 @@ impl Elaborator {
             }
         }
 
+        // Per-operation `where` constraints, keyed by (effect, op). The op
+        // signature stores constraints as (trait, var_id, _); translate the var
+        // id back to its source name via `where_bound_var_names` so the dict
+        // param name matches what the handler arm body and call site resolve to.
+        let mut op_dict_params: HashMap<(String, String), Vec<(String, String)>> = HashMap::new();
+        for (effect_name, info) in &result.effects {
+            for op in &info.ops {
+                let mut pairs = Vec::new();
+                for (trait_name, var_id, _) in &op.constraints {
+                    if trait_name == "Num" || trait_name == "Eq" {
+                        continue;
+                    }
+                    if let Some(var_name) = result.where_bound_var_names.get(var_id) {
+                        pairs.push((trait_name.clone(), var_name.clone()));
+                    }
+                }
+                if !pairs.is_empty() {
+                    op_dict_params.insert((effect_name.clone(), op.name.clone()), pairs);
+                }
+            }
+        }
+
         Elaborator {
             trait_methods: HashMap::new(),
             fun_dict_params: inferred_dict_params,
             handler_dict_params: HashMap::new(),
+            op_dict_params,
             dict_names,
             impl_dict_params: impl_dict_params_from_imports,
             impl_where_app_dict_params: HashMap::new(),
@@ -475,6 +504,105 @@ impl Elaborator {
             type_at_node: result.type_at_node.clone(),
             where_bound_var_names: result.where_bound_var_names.clone(),
         }
+    }
+
+    /// Per-operation dict params for a handler arm, looked up by the arm's
+    /// resolved (or qualified) effect and op name. Empty when the op has no
+    /// `where` constraints of its own.
+    fn op_dict_params_for_arm(&self, arm: &HandlerArm) -> Vec<(String, String)> {
+        let effect = self
+            .resolution
+            .handler_arm(arm.id)
+            .map(|r| r.effect.clone())
+            .or_else(|| arm.qualifier.clone());
+        self.op_dict_params_lookup(effect.as_deref(), &arm.op_name)
+    }
+
+    /// Per-operation dict params for an `op!` call site, looked up by the call's
+    /// resolved (or qualified) effect and op name.
+    fn op_dict_params_for_call(
+        &self,
+        node_id: crate::ast::NodeId,
+        op_name: &str,
+        qualifier: Option<&str>,
+    ) -> Vec<(String, String)> {
+        let effect = self
+            .resolution
+            .effect_call(node_id)
+            .map(|r| r.effect.clone())
+            .or_else(|| qualifier.map(str::to_string));
+        self.op_dict_params_lookup(effect.as_deref(), op_name)
+    }
+
+    /// If `expr` is an App spine whose head is an `EffectCall` for an operation
+    /// with its own `where` constraints, elaborate it and append the per-call
+    /// dictionary arguments (outermost, so they follow the user args). Returns
+    /// `None` for any other expression, leaving normal App elaboration to run.
+    fn elaborate_effect_call_spine(&mut self, expr: &Expr) -> Option<Expr> {
+        // Peel App nodes to find the EffectCall head and the user args (in order).
+        let mut user_args: Vec<&Expr> = Vec::new();
+        let mut current = expr;
+        let (head, op_name, qualifier) = loop {
+            match &current.kind {
+                ExprKind::App { func, arg } => {
+                    user_args.push(arg);
+                    current = func;
+                }
+                ExprKind::EffectCall { name, qualifier, .. } => {
+                    break (current, name.clone(), qualifier.clone());
+                }
+                _ => return None,
+            }
+        };
+        user_args.reverse();
+
+        let op_pairs = self.op_dict_params_for_call(head.id, &op_name, qualifier.as_deref());
+        if op_pairs.is_empty() {
+            return None;
+        }
+
+        // Rebuild the call spine with elaborated head and user args.
+        let mut result = self.elaborate_expr(head);
+        for arg in &user_args {
+            let elab_arg = self.elaborate_expr(arg);
+            result = Expr::synth(
+                expr.span,
+                ExprKind::App {
+                    func: Box::new(result),
+                    arg: Box::new(elab_arg),
+                },
+            );
+        }
+
+        // Append a dict arg per op constraint, resolved from the EffectCall
+        // node's evidence (the concrete type is known at the call site).
+        let mut trait_occurrences: HashMap<&str, usize> = HashMap::new();
+        for (trait_name, _) in &op_pairs {
+            let occ = trait_occurrences.entry(trait_name.as_str()).or_insert(0);
+            if let Some(dict_expr) =
+                self.resolve_dict_nth(trait_name, head.id, head.span, *occ)
+            {
+                result = Expr::synth(
+                    expr.span,
+                    ExprKind::App {
+                        func: Box::new(result),
+                        arg: Box::new(dict_expr),
+                    },
+                );
+            }
+            *occ += 1;
+        }
+        Some(result)
+    }
+
+    fn op_dict_params_lookup(&self, effect: Option<&str>, op_name: &str) -> Vec<(String, String)> {
+        let Some(effect) = effect else {
+            return Vec::new();
+        };
+        self.op_dict_params
+            .get(&(effect.to_string(), op_name.to_string()))
+            .cloned()
+            .unwrap_or_default()
     }
 
     /// Extract dict param info from a where clause: [(trait_name, type_var_name)]
@@ -701,6 +829,28 @@ impl Elaborator {
     ) -> (HashMap<String, String>, HashMap<(String, String), String>) {
         let dict_params = self.dict_params_from_where(where_clause);
         self.setup_dict_params_from_pairs(&dict_params)
+    }
+
+    /// Add dict params on top of the current ones (without clearing), returning
+    /// the prior maps so the caller can restore them. Used for handler arms
+    /// nested inside a function whose own dict params must stay in scope.
+    fn push_dict_params_from_pairs(
+        &mut self,
+        dict_params: &[(String, String)],
+    ) -> (HashMap<String, String>, HashMap<(String, String), String>) {
+        let saved = (
+            self.current_dict_params.clone(),
+            self.current_dict_params_by_var.clone(),
+        );
+        for (resolved, type_var) in dict_params {
+            let bare = resolved.rsplit('.').next().unwrap_or(resolved);
+            let param_name = format!("__dict_{}_{}", bare, type_var);
+            self.current_dict_params
+                .insert(resolved.clone(), param_name.clone());
+            self.current_dict_params_by_var
+                .insert((resolved.clone(), type_var.clone()), param_name);
+        }
+        saved
     }
 
     /// Restore `current_dict_params` from a previous `setup_dict_params` call.
@@ -1075,7 +1225,10 @@ impl Elaborator {
                     ..
                 } => {
                     // Set up dict params from where clause so arm bodies can
-                    // reference trait dicts (e.g. `show entity` -> `__dict_Show_a`)
+                    // reference trait dicts (e.g. `show entity` -> `__dict_Show_a`).
+                    // Each arm additionally gets the dict params from its own
+                    // operation's `where` clause, threaded per call.
+                    let handler_pairs = self.dict_params_from_where(&body.where_clause);
                     let saved = self.setup_dict_params(&body.where_clause);
 
                     let elab_arms: Vec<Annotated<HandlerArm>> = body
@@ -1083,7 +1236,10 @@ impl Elaborator {
                         .iter()
                         .map(|ann| {
                             let arm = &ann.node;
-                            Annotated::bare(HandlerArm {
+                            let mut arm_pairs = handler_pairs.clone();
+                            arm_pairs.extend(self.op_dict_params_for_arm(arm));
+                            let arm_saved = self.setup_dict_params_from_pairs(&arm_pairs);
+                            let elab = Annotated::bare(HandlerArm {
                                 id: arm.id,
                                 op_name: arm.op_name.clone(),
                                 qualifier: arm.qualifier.clone(),
@@ -1094,7 +1250,9 @@ impl Elaborator {
                                     .as_ref()
                                     .map(|fb| Box::new(self.elaborate_expr(fb))),
                                 span: arm.span,
-                            })
+                            });
+                            self.restore_dict_params(arm_saved);
+                            elab
                         })
                         .collect();
                     let elab_return = body.return_clause.as_ref().map(|rc| {
@@ -1260,6 +1418,16 @@ impl Elaborator {
 
             // Function application: check if we need to insert dict args
             ExprKind::App { func, arg } => {
+                // An `op!` call is represented as an App spine over an EffectCall
+                // head. If the operation has its own `where` constraints, append a
+                // dictionary argument (resolved from the call-site evidence) for
+                // each, as the outermost applications so they arrive *after* the
+                // user args — matching the handler arm closure's trailing dict
+                // params. Handle the whole spine here so dicts are appended once.
+                if let Some(elaborated) = self.elaborate_effect_call_spine(expr) {
+                    return elaborated;
+                }
+
                 // Check if this is a direct call to a function with where clauses
                 if let ExprKind::Var { name, .. } = &func.kind {
                     // Evidence-first: check if the typechecker identified this as
@@ -1924,25 +2092,32 @@ impl Elaborator {
                         effects: body.effects.clone(),
                         needs: body.needs.clone(),
                         where_clause: body.where_clause.clone(),
-                        arms: body
-                            .arms
-                            .iter()
-                            .map(|ann| {
-                                Annotated::bare(HandlerArm {
-                                    id: ann.node.id,
-                                    op_name: ann.node.op_name.clone(),
-                                    qualifier: ann.node.qualifier.clone(),
-                                    params: ann.node.params.clone(),
-                                    body: Box::new(self.elaborate_expr(&ann.node.body)),
-                                    finally_block: ann
-                                        .node
-                                        .finally_block
-                                        .as_ref()
-                                        .map(|fb| Box::new(self.elaborate_expr(fb))),
-                                    span: ann.node.span,
+                        arms: {
+                            let handler_pairs = self.dict_params_from_where(&body.where_clause);
+                            body.arms
+                                .iter()
+                                .map(|ann| {
+                                    let arm = &ann.node;
+                                    let mut arm_pairs = handler_pairs.clone();
+                                    arm_pairs.extend(self.op_dict_params_for_arm(arm));
+                                    let saved = self.push_dict_params_from_pairs(&arm_pairs);
+                                    let elab = Annotated::bare(HandlerArm {
+                                        id: arm.id,
+                                        op_name: arm.op_name.clone(),
+                                        qualifier: arm.qualifier.clone(),
+                                        params: arm.params.clone(),
+                                        body: Box::new(self.elaborate_expr(&arm.body)),
+                                        finally_block: arm
+                                            .finally_block
+                                            .as_ref()
+                                            .map(|fb| Box::new(self.elaborate_expr(fb))),
+                                        span: arm.span,
+                                    });
+                                    self.restore_dict_params(saved);
+                                    elab
                                 })
-                            })
-                            .collect(),
+                                .collect()
+                        },
                         return_clause: body.return_clause.as_ref().map(|rc| {
                             Box::new(HandlerArm {
                                 id: rc.id,
@@ -2045,17 +2220,26 @@ impl Elaborator {
                 items: items
                     .iter()
                     .map(|ann| {
-                        let mut elaborate_arm = |arm: &HandlerArm| HandlerArm {
-                            id: arm.id,
-                            op_name: arm.op_name.clone(),
-                            qualifier: arm.qualifier.clone(),
-                            params: arm.params.clone(),
-                            body: Box::new(self.elaborate_expr(&arm.body)),
-                            finally_block: arm
-                                .finally_block
-                                .as_ref()
-                                .map(|fb| Box::new(self.elaborate_expr(fb))),
-                            span: arm.span,
+                        let mut elaborate_arm = |arm: &HandlerArm| {
+                            // Bring the op's own `where`-constraint dicts into
+                            // scope so trait calls in the arm body resolve to the
+                            // per-call dict threaded as a trailing op arg.
+                            let arm_pairs = self.op_dict_params_for_arm(arm);
+                            let saved = self.push_dict_params_from_pairs(&arm_pairs);
+                            let elab = HandlerArm {
+                                id: arm.id,
+                                op_name: arm.op_name.clone(),
+                                qualifier: arm.qualifier.clone(),
+                                params: arm.params.clone(),
+                                body: Box::new(self.elaborate_expr(&arm.body)),
+                                finally_block: arm
+                                    .finally_block
+                                    .as_ref()
+                                    .map(|fb| Box::new(self.elaborate_expr(fb))),
+                                span: arm.span,
+                            };
+                            self.restore_dict_params(saved);
+                            elab
                         };
                         match &ann.node {
                             HandlerItem::Named(_) => ann.clone(),

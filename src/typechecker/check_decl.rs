@@ -2550,6 +2550,13 @@ impl Checker {
                         ),
                     ));
                 };
+                // Remember the source name of this op type variable so handler
+                // arm bodies (and elaboration) can name the dictionary param
+                // consistently (`__dict_<Trait>_<var>`). The var id is globally
+                // unique to this op, so this never collides with other bindings.
+                self.trait_state
+                    .where_bound_var_names
+                    .insert(var_id, bound.type_var.clone());
                 for tr in &bound.traits {
                     let resolved_trait = self.resolved_trait_name_at(tr.id, &tr.name);
                     self.validate_trait_bound_kind(
@@ -2583,6 +2590,27 @@ impl Checker {
             info.op_spans = op_spans;
         }
         Ok(())
+    }
+
+    /// Register an effect operation's own `where` constraints as where-bound
+    /// assumptions, so a handler arm body implementing that operation may use
+    /// the trait on the operation's abstract type variable.
+    pub(crate) fn add_op_constraint_where_bounds(
+        &mut self,
+        constraints: &[(String, u32, Vec<Type>)],
+    ) {
+        for (trait_name, var_id, extra_types) in constraints {
+            self.trait_state
+                .where_bounds
+                .entry(*var_id)
+                .or_default()
+                .insert(trait_name.clone());
+            if !extra_types.is_empty() {
+                self.trait_state
+                    .where_bound_trait_args
+                    .insert((*var_id, trait_name.clone()), extra_types.clone());
+            }
+        }
     }
 
     pub(crate) fn register_handler(&mut self, decl: &ast::Decl) -> Result<(), Diagnostic> {
@@ -2794,6 +2822,18 @@ impl Checker {
                 };
                 self.bind_pattern(pat, &param_ty)?;
             }
+
+            // The operation's own `where` constraints (e.g. `set : a -> a -> Unit
+            // where {a: PgType}`) hold as *assumptions* inside the arm body: the
+            // handler is implementing the op, so it may use the trait on the
+            // op's abstract type var just like a function body may use its own
+            // where-bounds. Register them as where-bounds so trait method calls
+            // in the body discharge against them. Like the handler's own
+            // `where_clause` bounds above, these persist until the global
+            // `check_pending_constraints` pass (which snapshots `where_bounds`);
+            // they key off the op signature's own var ids, which are globally
+            // unique and never appear at call sites (those instantiate fresh).
+            self.add_op_constraint_where_bounds(&op_sig.constraints);
 
             let body_ty = self.infer_expr(&arm.body)?;
             if let Err(e) = self.unify(&answer_ty, &body_ty) {

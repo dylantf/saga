@@ -18,6 +18,9 @@ pub struct EffectOpDef {
     pub runtime_param_positions: Vec<usize>,
     /// For callback parameters, the effects absorbed by that parameter.
     pub param_absorbed_effects: HashMap<usize, Vec<String>>,
+    /// Dictionary parameter names for the op's own `where` constraints
+    /// (e.g. `["__dict_PgType_a"]`). Threaded per call as trailing op args.
+    pub dict_param_names: Vec<String>,
 }
 
 /// An effect definition for codegen: effect name, its operations, and type parameter count.
@@ -215,6 +218,7 @@ pub(super) fn collect_codegen_info(
                             .find(|sig| sig.name == op.node.name)
                             .map(effect_param_absorbed_effects)
                             .unwrap_or_default(),
+                        dict_param_names: crate::ast::op_dict_param_names(&op.node.where_clause),
                     })
                     .collect();
                 // Codegen metadata is internal compiler state, so keep effect

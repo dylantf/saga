@@ -354,6 +354,7 @@ impl Checker {
             }
             let mapping: std::collections::HashMap<u32, Type> =
                 free_vars.iter().map(|&id| (id, self.fresh_var())).collect();
+            self.propagate_op_constraint_var_names(op, &mapping);
             return EffectOpSig {
                 name: op.name.clone(),
                 effect_name: effect_name.to_string(),
@@ -456,6 +457,7 @@ impl Checker {
                 mapping.insert(id, self.fresh_var());
             }
         }
+        self.propagate_op_constraint_var_names(op, &mapping);
         EffectOpSig {
             name: op.name.clone(),
             effect_name: effect_name.to_string(),
@@ -484,6 +486,28 @@ impl Checker {
                     (trait_name.clone(), fresh, extra_fresh)
                 })
                 .collect(),
+        }
+    }
+
+    /// Carry an op constraint's source type-variable name (`where {a: PgType}`)
+    /// from the original op var id onto the freshly-instantiated var id, so a
+    /// handler arm checked against this instantiation can name the dictionary
+    /// param consistently (`__dict_PgType_a`). Keyed by globally-unique var ids,
+    /// so this never disturbs unrelated bindings.
+    fn propagate_op_constraint_var_names(
+        &mut self,
+        op: &EffectOpSig,
+        mapping: &std::collections::HashMap<u32, Type>,
+    ) {
+        for (_, var_id, _) in &op.constraints {
+            let Some(name) = self.trait_state.where_bound_var_names.get(var_id).cloned() else {
+                continue;
+            };
+            if let Some(Type::Var(fresh)) = mapping.get(var_id) {
+                self.trait_state
+                    .where_bound_var_names
+                    .insert(*fresh, name);
+            }
         }
     }
 
