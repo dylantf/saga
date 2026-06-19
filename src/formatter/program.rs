@@ -233,6 +233,7 @@ fn format_decl(decl: &Decl) -> Doc {
             type_params,
             functional_dependency,
             supertraits,
+            synthesis,
             methods,
             dangling_trivia,
             ..
@@ -243,6 +244,7 @@ fn format_decl(decl: &Decl) -> Doc {
             type_params,
             functional_dependency.as_ref(),
             supertraits,
+            synthesis.as_ref(),
             methods,
             dangling_trivia,
         ),

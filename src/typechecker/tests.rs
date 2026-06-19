@@ -10526,6 +10526,292 @@ q () = to_row users\n";
     check_with_project_files(&[("src/Rows.saga", rows), ("src/Db.saga", db)], main).unwrap();
 }
 
+/// Shared mock of the Kraken `Db` column/insert primitives, defined entirely in
+/// library code — the compiler holds no knowledge of any of these names:
+/// `Col a` / `Generated a` column wrappers and the `Writable a` insert leaf; an
+/// `InsertField col ins` field-map trait whose impls declare the per-field-type
+/// rewrite; the `Insertable cols ins` link trait that *declares* its synthesis
+/// (`synthesizes via InsertField deriving (InsertRow)`); and a minimal
+/// single-param `InsertRow` encoder (a fold over the Generic rep, like `ToJson`)
+/// with rep building-block impls.
+const INSERTABLE_MOCK: &str = "import Std.Generic (U1, Leaf, Labeled, And, Record)\n\
+type Col a = Col a\n\
+type Generated a = Generated a\n\
+type Writable a = Auto | Provide a\n\
+type Table cols = Table String\n\
+trait InsertField col ins | col -> ins {}\n\
+impl InsertField a for (Col a) {}\n\
+impl InsertField (Writable a) for (Generated a) {}\n\
+trait Insertable cols ins | cols -> ins\n\
+  synthesizes via InsertField deriving (InsertRow)\n\
+trait InsertRow a {\n\
+  fun insert_row : a -> String\n\
+}\n\
+impl InsertRow for U1 { insert_row _ = \"\" }\n\
+impl InsertRow for Int { insert_row n = show n }\n\
+impl InsertRow for String { insert_row s = s }\n\
+impl InsertRow for Writable a where {a: InsertRow} {\n\
+  insert_row w = case w {\n\
+    Auto -> \"auto\"\n\
+    Provide x -> insert_row x\n\
+  }\n\
+}\n\
+impl InsertRow for Leaf a where {a: InsertRow} {\n\
+  insert_row leaf = case leaf { Leaf x -> insert_row x }\n\
+}\n\
+impl InsertRow for Labeled (n : Symbol) a where {a: InsertRow} {\n\
+  insert_row lab = case lab { Labeled x -> insert_row x }\n\
+}\n\
+impl InsertRow for And l r where {l: InsertRow, r: InsertRow} {\n\
+  insert_row pair = case pair { And l r -> insert_row l <> insert_row r }\n\
+}\n\
+impl InsertRow for Record a where {a: InsertRow} {\n\
+  insert_row rec = case rec { Record _ inner -> insert_row inner }\n\
+}\n\
+record Users {\n\
+  id: Generated Int,\n\
+  name: Col String,\n\
+  age: Col Int,\n\
+}\n  deriving (Insertable UsersInsert)\n";
+
+#[test]
+fn insertable_derive_synthesizes_record_and_typechecks() {
+    // The derive must synthesize `UsersInsert { id: Writable Int, name: String,
+    // age: Int }` — `Col a -> a`, `Generated a -> Writable a` — and make it
+    // constructible like a hand-written record.
+    check(&format!(
+        "{INSERTABLE_MOCK}\
+         fun mk : Unit -> UsersInsert\n\
+         mk _ = UsersInsert {{ id: Auto, name: \"Carol\", age: 31 }}\n\
+         fun mk_override : Unit -> UsersInsert\n\
+         mk_override _ = UsersInsert {{ id: Provide 7, name: \"Dave\", age: 40 }}\n"
+    ))
+    .unwrap();
+}
+
+#[test]
+fn insertable_derive_rejects_wrong_field_type() {
+    // `name` came from `Col String`, so a non-String value is a compile error —
+    // proof the generated record is real and field-checked, not a rubber stamp.
+    let result = check(&format!(
+        "{INSERTABLE_MOCK}\
+         fun mk : Unit -> UsersInsert\n\
+         mk _ = UsersInsert {{ id: Auto, name: 31, age: 31 }}\n"
+    ));
+    assert!(result.is_err(), "expected a field-type error");
+    let msg = result.err().unwrap().message;
+    assert!(
+        msg.contains("String") || msg.contains("Int"),
+        "expected a String/Int mismatch, got: {msg}"
+    );
+}
+
+#[test]
+fn insertable_derive_generated_field_rejects_bare_value() {
+    // `id` came from `Generated Int`, so its insert type is `Writable Int`, not
+    // `Int`: a bare `7` must not typecheck (it needs `Provide 7` or `Auto`).
+    let result = check(&format!(
+        "{INSERTABLE_MOCK}\
+         fun mk : Unit -> UsersInsert\n\
+         mk _ = UsersInsert {{ id: 7, name: \"Carol\", age: 31 }}\n"
+    ));
+    assert!(result.is_err(), "expected a Writable-vs-Int error");
+}
+
+#[test]
+fn synthesize_derive_is_library_agnostic() {
+    // The mechanism has no built-in vocabulary: a different library, using its
+    // own trait/type names and a `synthesizes` clause with no attached derives,
+    // synthesizes a record just the same. Proves nothing is hardcoded.
+    // Positive: the synthesized `ThingView { x: Int, y: String }` constructs.
+    check(
+        "type Boxed a = Boxed a\n\
+         trait FieldOf src out | src -> out {}\n\
+         impl FieldOf a for (Boxed a) {}\n\
+         trait Mirror src out | src -> out\n\
+           synthesizes via FieldOf\n\
+         record Thing {\n\
+           x: Boxed Int,\n\
+           y: Boxed String,\n\
+         }\n  deriving (Mirror ThingView)\n\
+         fun mk : Unit -> ThingView\n\
+         mk _ = ThingView { x: 1, y: \"hi\" }\n",
+    )
+    .unwrap();
+    // Negative: `y` came from `Boxed String`, so `y: 2` must be rejected.
+    let bad = check(
+        "type Boxed a = Boxed a\n\
+         trait FieldOf src out | src -> out {}\n\
+         impl FieldOf a for (Boxed a) {}\n\
+         trait Mirror src out | src -> out\n\
+           synthesizes via FieldOf\n\
+         record Thing {\n\
+           x: Boxed Int,\n\
+           y: Boxed String,\n\
+         }\n  deriving (Mirror ThingView)\n\
+         fun reject : Unit -> ThingView\n\
+         reject _ = ThingView { x: 1, y: 2 }\n",
+    );
+    assert!(bad.is_err(), "expected `y: 2` to be rejected");
+}
+
+#[test]
+fn synthesize_derive_errors_on_unmapped_field() {
+    // A field whose type matches no `via`-trait impl has no mapping; the derive
+    // reports it rather than silently dropping or miscompiling the field.
+    let result = check(&format!(
+        "{INSERTABLE_MOCK}\
+         record Bad {{ raw: Int }}\n  deriving (Insertable BadInsert)\n"
+    ));
+    assert!(result.is_err(), "expected an unmapped-field error");
+    let msg = result.err().unwrap().message;
+    assert!(
+        msg.contains("InsertField") && msg.contains("mapping"),
+        "expected a missing-mapping diagnostic, got: {msg}"
+    );
+}
+
+#[test]
+fn insertable_derive_record_participates_in_generic() {
+    // The generated record gets its own `Generic`/`Rep__`, so it folds through
+    // the existing codec machinery (`to`/`from`) exactly like a hand-written
+    // record — this is what lets Kraken derive `InsertRow` over its Rep.
+    check(&format!(
+        "{INSERTABLE_MOCK}\
+         fun roundtrip : Unit -> UsersInsert\n\
+         roundtrip _ = from (to (UsersInsert {{ id: Auto, name: \"Carol\", age: 31 }}))\n"
+    ))
+    .unwrap();
+}
+
+#[test]
+fn insertable_derive_links_cols_to_insert_via_fundep() {
+    // `Dml.insert`-shaped caller: given only `Table cols`, the `cols -> ins`
+    // functional dependency recovers the insert type, so a `UsersInsert` value
+    // is accepted for a `Table Users`.
+    check(&format!(
+        "{INSERTABLE_MOCK}\
+         fun do_insert : Table cols -> ins -> Int where {{cols: Insertable ins}}\n\
+         do_insert t row = 0\n\
+         fun users_table : Unit -> Table Users\n\
+         users_table _ = Table \"users\"\n\
+         fun run : Unit -> Int\n\
+         run _ = do_insert (users_table ()) (UsersInsert {{ id: Auto, name: \"Carol\", age: 31 }})\n"
+    ))
+    .unwrap();
+}
+
+#[test]
+fn insertable_derive_fundep_rejects_unrelated_record() {
+    // The same caller must reject a record that is not `Users`' insert type:
+    // no `Insertable Users Other` impl exists.
+    let result = check(&format!(
+        "{INSERTABLE_MOCK}\
+         record Other {{ foo: Int }}\n\
+         fun do_insert : Table cols -> ins -> Int where {{cols: Insertable ins}}\n\
+         do_insert t row = 0\n\
+         fun users_table : Unit -> Table Users\n\
+         users_table _ = Table \"users\"\n\
+         fun run : Unit -> Int\n\
+         run _ = do_insert (users_table ()) (Other {{ foo: 1 }})\n"
+    ));
+    assert!(result.is_err(), "expected unrelated record to be rejected");
+}
+
+/// Cross-module `Db` library for the Insertable derive tests. Same library code
+/// as `INSERTABLE_MOCK`, in its own module, referenced qualified from siblings so
+/// the tests exercise the `Module.` qualifier path through the synthesis spec and
+/// the field map. The compiler holds none of these names.
+const CROSS_DB: &str = "module Db\n\
+import Std.Generic (U1, Leaf, Labeled, And, Record)\n\
+pub type Col a = Col a\n\
+pub type Generated a = Generated a\n\
+pub type Writable a = Auto | Provide a\n\
+pub type Table cols = Table String\n\
+pub trait InsertField col ins | col -> ins {}\n\
+impl InsertField a for (Col a) {}\n\
+impl InsertField (Writable a) for (Generated a) {}\n\
+pub trait Insertable cols ins | cols -> ins\n\
+  synthesizes via InsertField deriving (InsertRow)\n\
+pub trait InsertRow a {\n\
+  fun insert_row : a -> String\n\
+}\n\
+impl InsertRow for U1 { insert_row _ = \"\" }\n\
+impl InsertRow for Int { insert_row n = show n }\n\
+impl InsertRow for String { insert_row s = s }\n\
+impl InsertRow for Writable a where {a: InsertRow} {\n\
+  insert_row w = case w {\n\
+    Auto -> \"auto\"\n\
+    Provide x -> insert_row x\n\
+  }\n\
+}\n\
+impl InsertRow for Leaf a where {a: InsertRow} {\n\
+  insert_row leaf = case leaf { Leaf x -> insert_row x }\n\
+}\n\
+impl InsertRow for Labeled (n : Symbol) a where {a: InsertRow} {\n\
+  insert_row lab = case lab { Labeled x -> insert_row x }\n\
+}\n\
+impl InsertRow for And l r where {l: InsertRow, r: InsertRow} {\n\
+  insert_row pair = case pair { And l r -> insert_row l <> insert_row r }\n\
+}\n\
+impl InsertRow for Record a where {a: InsertRow} {\n\
+  insert_row rec = case rec { Record _ inner -> insert_row inner }\n\
+}\n\
+pub fun do_insert : Table cols -> ins -> Int where {cols: Insertable ins}\n\
+do_insert t row = 0\n";
+
+/// Schema module: a column record carrying the synthesizing derive, referencing
+/// `Db` qualified. The insert type `UsersInsert` is synthesized here.
+const CROSS_SCHEMA: &str = "module Schema\n\
+import Db\n\
+pub record Users {\n\
+  id: Db.Generated Int,\n\
+  name: Db.Col String,\n\
+  age: Db.Col Int,\n\
+}\n  deriving (Db.Insertable UsersInsert)\n";
+
+#[test]
+fn insertable_derive_record_usable_from_another_module() {
+    // The synthesized insert type is exported from the schema's module and can be
+    // imported and constructed by a sibling module, and the `cols -> ins` link
+    // resolves at a cross-module `do_insert` call site.
+    let main = "module Main\n\
+import Db\n\
+import Schema (Users, UsersInsert)\n\
+fun users_table : Unit -> Db.Table Users\n\
+users_table _ = todo ()\n\
+fun a_row : Unit -> UsersInsert\n\
+a_row _ = UsersInsert { id: Db.Auto, name: \"Carol\", age: 31 }\n\
+fun run : Unit -> Int\n\
+run _ = Db.do_insert (users_table ()) (a_row ())\n";
+
+    check_with_project_files(
+        &[("src/Db.saga", CROSS_DB), ("src/Schema.saga", CROSS_SCHEMA)],
+        main,
+    )
+    .unwrap();
+}
+
+#[test]
+fn insertable_derive_cross_module_rejects_wrong_insert_record() {
+    // Cross-module negative: an unrelated imported record is not accepted where
+    // `Users`' synthesized insert type is required.
+    let main = "module Main\n\
+import Db\n\
+import Schema (Users)\n\
+record Other { foo: Int }\n\
+fun users_table : Unit -> Db.Table Users\n\
+users_table _ = todo ()\n\
+fun run : Unit -> Int\n\
+run _ = Db.do_insert (users_table ()) (Other { foo: 1 })\n";
+
+    let result = check_with_project_files(
+        &[("src/Db.saga", CROSS_DB), ("src/Schema.saga", CROSS_SCHEMA)],
+        main,
+    );
+    assert!(result.is_err(), "expected unrelated record to be rejected");
+}
+
 #[test]
 fn applied_functional_bridge_derive_supports_non_selectable_trait_with_multiple_methods() {
     check(

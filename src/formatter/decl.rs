@@ -452,6 +452,7 @@ pub fn format_trait_def(
     type_params: &[TypeParam],
     functional_dependency: Option<&TraitFunctionalDependency>,
     supertraits: &[TraitRef],
+    synthesis: Option<&crate::ast::SynthesisSpec>,
     methods: &[Annotated<TraitMethod>],
     dangling: &[Trivia],
 ) -> Doc {
@@ -489,8 +490,21 @@ pub fn format_trait_def(
         )));
     }
 
+    // `synthesizes via <Trait> [deriving (...)]` on its own indented line.
+    if let Some(s) = synthesis {
+        let mut clause = format!("synthesizes via {}", s.via_trait);
+        if !s.attach_derives.is_empty() {
+            write!(clause, " deriving ({})", format_deriving_clause(&s.attach_derives)).unwrap();
+        }
+        parts.push(Doc::hardline());
+        parts.push(Doc::text(format!("  {clause}")));
+    }
+
     if methods.is_empty() && dangling.is_empty() {
-        parts.push(Doc::text(" {}"));
+        // A synthesizing trait may stand alone without a `{ }` body.
+        if synthesis.is_none() {
+            parts.push(Doc::text(" {}"));
+        }
         return docs_from_vec(parts);
     }
 

@@ -824,9 +824,14 @@ impl Parser {
         let name = self.expect_upper_ident()?;
         // Parse type parameters: first is self, rest are extras
         // e.g. `trait ConvertTo a b` -> type_params = ["a", "b"]
+        // `synthesizes` is a soft keyword: it introduces the trait-synthesis
+        // clause (parsed below), so the header's ident-run loops must stop at it
+        // rather than swallow it as a type parameter.
+        let is_synthesizes = |p: &Self| matches!(p.peek(), Token::Ident(s) if s == "synthesizes");
         let mut type_params = vec![self.parse_type_param()?];
         while matches!(self.peek(), Token::Ident(_) | Token::LParen)
             && !matches!(self.peek(), Token::Where | Token::Bar)
+            && !is_synthesizes(self)
         {
             type_params.push(self.parse_type_param()?);
         }
@@ -836,14 +841,14 @@ impl Parser {
             self.advance(); // consume '|'
             let mut determinant = Vec::new();
             determinant.push(self.expect_ident()?);
-            while matches!(self.peek(), Token::Ident(_)) {
+            while matches!(self.peek(), Token::Ident(_)) && !is_synthesizes(self) {
                 determinant.push(self.expect_ident()?);
             }
             self.expect(Token::Arrow)?;
             let mut determined = Vec::new();
             let first = self.expect_ident()?;
             determined.push(first);
-            while matches!(self.peek(), Token::Ident(_)) {
+            while matches!(self.peek(), Token::Ident(_)) && !is_synthesizes(self) {
                 determined.push(self.expect_ident()?);
             }
             let fd_end = self.tokens[self.pos.saturating_sub(1)].span;
@@ -895,6 +900,57 @@ impl Parser {
             }
 
             self.expect(Token::RBrace)?;
+        }
+
+        // Optional `synthesizes via <Trait> deriving (...)` clause: marks the
+        // trait as a record-synthesizing link (see SynthesisSpec). A trait with
+        // this clause may omit its `{ }` body (it is typically method-less).
+        let synthesis = if matches!(self.peek(), Token::Ident(kw) if kw == "synthesizes") {
+            let synth_start = self.tokens[self.pos].span;
+            self.advance(); // consume 'synthesizes'
+            match self.peek() {
+                Token::Ident(kw) if kw == "via" => {
+                    self.advance();
+                }
+                _ => {
+                    return Err(ParseError {
+                        message: "expected `via <Trait>` after `synthesizes`".to_string(),
+                        span: self.tokens[self.pos].span,
+                    });
+                }
+            }
+            let via_trait = self.parse_upper_name()?;
+            let via_trait_span = self.tokens[self.pos - 1].span;
+            // Optional `deriving (...)` list to attach to the synthesized record.
+            let attach_derives = self.parse_deriving_clause()?;
+            let synth_end = self.tokens[self.pos.saturating_sub(1)].span;
+            Some(crate::ast::SynthesisSpec {
+                via_trait,
+                via_trait_span,
+                attach_derives,
+                span: synth_start.to(synth_end),
+            })
+        } else {
+            None
+        };
+
+        // A synthesizing trait may have no body; everything else requires `{ }`.
+        if synthesis.is_some() && !matches!(self.peek(), Token::LBrace) {
+            let end = self.tokens[self.pos.saturating_sub(1)].span;
+            return Ok(Decl::TraitDef {
+                id: NodeId::fresh(),
+                doc: vec![],
+                public,
+                name,
+                name_span,
+                type_params,
+                functional_dependency,
+                supertraits,
+                synthesis,
+                methods: Vec::new(),
+                dangling_trivia: Vec::new(),
+                span: start.to(end),
+            });
         }
 
         self.expect(Token::LBrace)?;
@@ -966,6 +1022,7 @@ impl Parser {
             type_params,
             functional_dependency,
             supertraits,
+            synthesis,
             methods,
             dangling_trivia,
             span: start.to(end),

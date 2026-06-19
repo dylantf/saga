@@ -104,11 +104,11 @@
         },
         {
           "name": "keyword.declaration.saga",
-          "match": "\\b(let|val|fun|pub|type|alias|opaque|record|effect|handler|trait|impl|module|import|needs|where|resume)\\b"
+          "match": "\\b(let|val|fun|pub|type|alias|opaque|record|effect|handler|trait|impl|module|import|needs|where|resume|deriving|synthesizes)\\b"
         },
         {
           "name": "keyword.other.saga",
-          "match": "\\b(as|for)\\b"
+          "match": "\\b(as|for|via)\\b"
         }
       ]
     },

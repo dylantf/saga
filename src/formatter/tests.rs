@@ -1690,6 +1690,20 @@ fn empty_trait_body_stays_inline() {
 }
 
 #[test]
+fn synthesizing_trait_clause_round_trips() {
+    // The `synthesizes via … deriving (…)` clause is preserved (no body) and
+    // re-emitted on its own indented line.
+    let src = "trait Insertable cols ins | cols -> ins\n  synthesizes via InsertField deriving (InsertRow)\n";
+    assert_eq!(fmt80(src), src);
+}
+
+#[test]
+fn synthesizing_trait_clause_without_deriving_round_trips() {
+    let src = "trait Mirror src out | src -> out\n  synthesizes via FieldOf\n";
+    assert_eq!(fmt80(src), src);
+}
+
+#[test]
 fn empty_impl_body_stays_inline() {
     assert_eq!(
         fmt80("impl PgType for Int {\n}"),

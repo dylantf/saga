@@ -246,6 +246,7 @@ fn module_summary(program: &[Decl]) -> ModuleSummary {
             name,
             type_params,
             functional_dependency,
+            synthesis,
             methods,
             public: true,
             ..
@@ -256,6 +257,10 @@ fn module_summary(program: &[Decl]) -> ModuleSummary {
                 RoutedTraitInfo {
                     type_params: type_params.clone(),
                     is_functional: functional_dependency.is_some(),
+                    fundep: functional_dependency.clone(),
+                    synthesis: synthesis
+                        .as_ref()
+                        .map(|s| qualify_synthesis_spec(s, module_name.as_deref())),
                     methods: methods
                         .iter()
                         .map(|m| {
@@ -577,6 +582,7 @@ pub fn expand_derives(program: &mut Vec<Decl>, imported: &ImportedDecls) -> Vec<
                 name,
                 type_params,
                 functional_dependency,
+                synthesis,
                 methods,
                 ..
             } => {
@@ -585,6 +591,10 @@ pub fn expand_derives(program: &mut Vec<Decl>, imported: &ImportedDecls) -> Vec<
                     RoutedTraitInfo {
                         type_params: type_params.clone(),
                         is_functional: functional_dependency.is_some(),
+                        fundep: functional_dependency.clone(),
+                        synthesis: synthesis
+                            .as_ref()
+                            .map(|s| qualify_synthesis_spec(s, current_module.as_deref())),
                         methods: methods.iter().map(|m| m.node.clone()).collect(),
                         defining_module: current_module.clone(),
                         defining_module_values: local_defining_values.clone(),
@@ -782,6 +792,31 @@ pub fn expand_derives(program: &mut Vec<Decl>, imported: &ImportedDecls) -> Vec<
                                 ),
                                 span: Some(spec.span),
                             });
+                        } else if let Some((trait_info, trait_syntax)) = scope
+                            .trait_entry(trait_name)
+                            .ok()
+                            .flatten()
+                            .filter(|e| e.info.synthesis.is_some())
+                            .map(|e| (e.info.clone(), e.canonical.clone()))
+                        {
+                            // The trait declares `synthesizes …`: the argument
+                            // names a record to *generate* from this carrier,
+                            // not an existing row type. All policy is library-
+                            // supplied; nothing here is library-specific.
+                            match derive_synthesize(
+                                spec,
+                                name,
+                                type_params,
+                                fields,
+                                *public,
+                                *span,
+                                &trait_info,
+                                &trait_syntax,
+                                &scope,
+                            ) {
+                                Ok(decls) => extra.extend(decls),
+                                Err(diag) => errors.push(diag),
+                            }
                         } else {
                             match derive_applied_functional_bridge(
                                 spec,
@@ -1522,6 +1557,14 @@ fn collect_pat_bindings(pat: &Pat, out: &mut std::collections::HashSet<String>) 
 pub struct RoutedTraitInfo {
     pub type_params: Vec<TypeParam>,
     pub is_functional: bool,
+    /// The trait's functional dependency, if any. A record-synthesizing trait
+    /// reads carrier vs. synthesized roles from it (determinant = carrier,
+    /// determined = synthesized type).
+    pub fundep: Option<TraitFunctionalDependency>,
+    /// `synthesizes via <Trait> deriving (...)` metadata, if this is a
+    /// record-synthesizing link trait. Trait names within are qualified to the
+    /// trait's defining module so they resolve at any derive site.
+    pub synthesis: Option<SynthesisSpec>,
     pub methods: Vec<TraitMethod>,
     /// Module that defines this trait, e.g. "Lib" or "Std.Generic". Used to
     /// retarget free identifiers in cloned default-method bodies so they
@@ -1610,6 +1653,37 @@ impl<'a> DeriveScope<'a> {
             &self.imported.records,
             "wrapper record",
         )
+    }
+}
+
+/// Qualify a bare trait name in a `synthesizes` clause to the trait's defining
+/// module, so it resolves at any derive site (imported modules register every
+/// public trait under its `Module.Name` key regardless of the `exposing` list).
+/// Already-qualified names are left as written.
+fn qualify_synthesis_spec(
+    spec: &SynthesisSpec,
+    defining_module: Option<&str>,
+) -> SynthesisSpec {
+    let qualify = |name: &str| -> String {
+        match defining_module {
+            Some(m) if !name.contains('.') => format!("{m}.{name}"),
+            _ => name.to_string(),
+        }
+    };
+    SynthesisSpec {
+        via_trait: qualify(&spec.via_trait),
+        via_trait_span: spec.via_trait_span,
+        attach_derives: spec
+            .attach_derives
+            .iter()
+            .map(|d| DeriveSpec {
+                trait_name: qualify(&d.trait_name),
+                trait_name_span: d.trait_name_span,
+                type_args: d.type_args.clone(),
+                span: d.span,
+            })
+            .collect(),
+        span: spec.span,
     }
 }
 
@@ -2143,6 +2217,303 @@ fn derive_applied_functional_bridge(
     };
 
     Ok(vec![bridge_impl, delegating_impl])
+}
+
+/// A record-synthesizing derive: `deriving (Trait NewName)` on a carrier record,
+/// where `Trait` carries a `synthesizes via <Map> deriving (...)` clause. Unlike
+/// the applied functional bridge above, the argument names a type that does
+/// **not** exist yet — this derive *synthesizes* it. Nothing here is specific to
+/// any library: the field transform, the encoder to attach, and the link trait
+/// all come from the trait's declared metadata and the map trait's impls.
+///
+/// Given a carrier like
+///
+/// ```text
+/// record Users {
+///   id: Generated Int,
+///   name: Col String,
+///   age: Col Int,
+/// } deriving (Insertable UsersInsert)
+/// ```
+///
+/// where the library declares
+///
+/// ```text
+/// trait InsertField col ins | col -> ins
+/// impl InsertField a            for (Col a)        {}
+/// impl InsertField (Writable a) for (Generated a)  {}
+/// trait Insertable cols ins | cols -> ins
+///   synthesizes via InsertField deriving (InsertRow)
+/// ```
+///
+/// it emits, spliced after the carrier:
+///
+/// 1. A synthetic `record UsersInsert { id: Writable Int, name: String, age: Int }`
+///    — each field type is rewritten by matching it against the `via` map trait's
+///    impls (`Col a -> a`, `Generated a -> Writable a`), preserving field names
+///    and order, inheriting the carrier's visibility.
+/// 2. That record's `Generic`/`Rep__` (via `derive_record_generic`).
+/// 3. The `synthesizes … deriving (…)` derives (e.g. `InsertRow`) routed onto the
+///    new record, so it folds through the library's encoder — the user can't
+///    attach those derives to a type they never see, so the derive does it.
+/// 4. A method-less functional-dependency link `impl Insertable UsersInsert for
+///    Users`, so a caller constrained `where {cols: Insertable ins}` recovers the
+///    synthesized type from the carrier alone (`cols -> ins`).
+///
+/// Carrier vs. synthesized roles are read from the trait's functional dependency
+/// (determinant = carrier, determined = synthesized).
+#[allow(clippy::too_many_arguments)]
+fn derive_synthesize(
+    spec: &DeriveSpec,
+    carrier_name: &str,
+    carrier_params: &[TypeParam],
+    carrier_fields: &[Annotated<(String, TypeExpr)>],
+    public: bool,
+    span: Span,
+    trait_info: &RoutedTraitInfo,
+    trait_syntax: &str,
+    scope: &DeriveScope<'_>,
+) -> Result<Vec<Decl>, Diagnostic> {
+    let zero_span = Span { start: 0, end: 0 };
+    let trait_display = spec.bare_name();
+    let synth = trait_info
+        .synthesis
+        .as_ref()
+        .expect("derive_synthesize called only when synthesis metadata is present");
+
+    // Roles come from the functional dependency: determinant = carrier (the
+    // record the derive sits on), determined = the synthesized type.
+    let Some(fundep) = &trait_info.fundep else {
+        return Err(Diagnostic {
+            severity: Severity::Error,
+            message: format!(
+                "cannot derive `{trait_display}`: a record-synthesizing trait must declare a \
+                 functional dependency (`carrier synthesized | carrier -> synthesized`)"
+            ),
+            span: Some(spec.span),
+        });
+    };
+    if trait_info.type_params.len() != 2 {
+        return Err(Diagnostic {
+            severity: Severity::Error,
+            message: format!(
+                "cannot derive `{trait_display}`: record synthesis requires a two-parameter trait"
+            ),
+            span: Some(spec.span),
+        });
+    }
+    let carrier_param = &trait_info.type_params[0].name;
+    let synth_param = &trait_info.type_params[1].name;
+    if !fundep.determinant.contains(carrier_param) || !fundep.determined.contains(synth_param) {
+        return Err(Diagnostic {
+            severity: Severity::Error,
+            message: format!(
+                "cannot derive `{trait_display}`: the functional dependency must determine the \
+                 second parameter from the first (`{carrier_param} -> {synth_param}`)"
+            ),
+            span: Some(spec.span),
+        });
+    }
+
+    // The single argument names the record to create; it must be a bare name.
+    if spec.type_args.len() != 1 {
+        return Err(Diagnostic {
+            severity: Severity::Error,
+            message: format!(
+                "cannot derive `{trait_display}`: expected exactly one type argument naming the \
+                 record to synthesize"
+            ),
+            span: Some(spec.span),
+        });
+    }
+    let new_name = match &spec.type_args[0] {
+        TypeExpr::Named { name, .. } => name.rsplit('.').next().unwrap_or(name).to_string(),
+        other => {
+            return Err(Diagnostic {
+                severity: Severity::Error,
+                message: format!(
+                    "cannot derive `{trait_display}`: the argument must be a bare type name to \
+                     generate, not a compound type"
+                ),
+                span: Some(other.span()),
+            });
+        }
+    };
+
+    // A parameterized carrier needs scope specialization the syntactic field map
+    // below cannot express; reject it rather than miscompile.
+    if !carrier_params.is_empty() {
+        return Err(Diagnostic {
+            severity: Severity::Error,
+            message: format!(
+                "cannot derive `{trait_display}` for parameterized record `{carrier_name}`: record \
+                 synthesis currently supports non-parameterized carriers"
+            ),
+            span: Some(spec.span),
+        });
+    }
+
+    // Map each carrier field through the `via` trait's impls (read syntactically).
+    let via_bare = synth
+        .via_trait
+        .rsplit('.')
+        .next()
+        .unwrap_or(&synth.via_trait);
+    let mut new_fields: Vec<Annotated<(String, TypeExpr)>> = Vec::with_capacity(carrier_fields.len());
+    for field in carrier_fields {
+        let (fname, fty) = &field.node;
+        let mapped = map_field_via_trait(fty, via_bare, scope).map_err(|reason| Diagnostic {
+            severity: Severity::Error,
+            message: format!(
+                "cannot synthesize `{new_name}` for `{carrier_name}`: field `{fname}` {reason}"
+            ),
+            span: Some(fty.span()),
+        })?;
+        new_fields.push(Annotated::bare((fname.clone(), mapped)));
+    }
+
+    // 1. The synthesized record.
+    let record_def = Decl::RecordDef {
+        id: NodeId::fresh(),
+        doc: vec![],
+        public,
+        name: new_name.clone(),
+        name_span: zero_span,
+        type_params: vec![],
+        fields: new_fields.clone(),
+        deriving: vec![],
+        multiline: true,
+        dangling_trivia: vec![],
+        span,
+    };
+    let mut decls = vec![record_def];
+
+    // 2. Its Generic / Rep__.
+    match derive_record_generic(public, &new_name, &[], &new_fields, span) {
+        Ok(generic_decls) => decls.extend(generic_decls),
+        Err(Some(diag)) => return Err(diag),
+        Err(None) => {
+            return Err(Diagnostic {
+                severity: Severity::Error,
+                message: format!(
+                    "cannot derive `{trait_display}` for `{carrier_name}`: failed to derive \
+                     `Generic` for the generated record `{new_name}`"
+                ),
+                span: Some(spec.span),
+            });
+        }
+    }
+
+    // 3. The `synthesizes … deriving (…)` derives, routed onto the new record the
+    // same way `deriving (…)` on a hand-written record would. Must follow Generic.
+    for d in &synth.attach_derives {
+        let bare = d.bare_name();
+        if bare == "Generic" {
+            continue; // already derived above
+        }
+        if !d.type_args.is_empty() {
+            return Err(Diagnostic {
+                severity: Severity::Error,
+                message: format!(
+                    "cannot derive `{trait_display}`: `synthesizes … deriving (…)` entries must be \
+                     plain derives; `{}` has type arguments",
+                    d.trait_name
+                ),
+                span: Some(d.span),
+            });
+        }
+        if is_hardcoded_derive(bare) {
+            match generate_record_derive(public, &d.trait_name, &new_name, &[], &new_fields, span) {
+                Ok(extra) => decls.extend(extra),
+                Err(Some(diag)) => return Err(diag),
+                Err(None) => {
+                    return Err(Diagnostic {
+                        severity: Severity::Error,
+                        message: format!(
+                            "cannot attach `deriving ({})` to synthesized record `{new_name}`",
+                            d.trait_name
+                        ),
+                        span: Some(d.span),
+                    });
+                }
+            }
+        } else {
+            match derive_routed(&d.trait_name, &new_name, &[], span, scope) {
+                Ok(routed) => decls.extend(routed),
+                Err(diag) => return Err(diag),
+            }
+        }
+    }
+
+    // 4. The functional-dependency link `impl Trait <synthesized> for <carrier>`.
+    // The determinant (carrier) is the impl target; the determined parameter (the
+    // synthesized type) is the single extra trait argument. Method-less: the link
+    // exists only so `where {carrier: Trait synthesized}` recovers the type.
+    let new_type = TypeExpr::Named {
+        id: NodeId::fresh(),
+        name: new_name,
+        span: zero_span,
+    };
+    let link_impl = Decl::ImplDef {
+        id: NodeId::fresh(),
+        doc: vec![],
+        trait_name: trait_syntax.to_string(),
+        trait_name_span: zero_span,
+        trait_type_args: vec![new_type],
+        target_type: carrier_name.into(),
+        target_type_span: zero_span,
+        target_type_expr: None,
+        type_params: vec![],
+        where_clause: vec![],
+        where_apps: vec![],
+        needs: vec![],
+        methods: vec![],
+        routed_derive_info: None,
+        span,
+        dangling_trivia: vec![],
+    };
+    decls.push(link_impl);
+
+    Ok(decls)
+}
+
+/// Rewrite one field type through a field-map trait's impls, read syntactically:
+/// find the impl whose target pattern (the `for` type) unifies with the field
+/// type and return its substituted row (the other trait argument). E.g. with
+/// `impl InsertField (Writable a) for (Generated a)`, `Generated Int` maps to
+/// `Writable Int`. Errors if no impl matches or more than one does.
+fn map_field_via_trait(
+    fty: &TypeExpr,
+    via_bare: &str,
+    scope: &DeriveScope<'_>,
+) -> Result<TypeExpr, String> {
+    let field_head = te_head(fty);
+    let mut result: Option<TypeExpr> = None;
+    for imp in scope.local_impls.iter().chain(scope.imported.impls.iter()) {
+        if imp.trait_bare != via_bare {
+            continue;
+        }
+        if field_head.is_some() && te_head(&imp.target) != field_head {
+            continue;
+        }
+        // The field is concrete (non-parameterized carrier), so only the impl's
+        // own variables are unification holes; rename them to avoid any collision.
+        let target_renamed = te_rename_vars(&imp.target, "i$");
+        let row_renamed = te_rename_vars(&imp.row, "i$");
+        let mut subst = HashMap::new();
+        if !te_unify(fty, &target_renamed, &mut subst) {
+            continue;
+        }
+        if result.is_some() {
+            return Err(format!(
+                "matches more than one `{via_bare}` impl (overlapping field map)"
+            ));
+        }
+        result = Some(te_apply(&row_renamed, &subst));
+    }
+    result.ok_or_else(|| {
+        format!("has no `{via_bare}` mapping (no impl's `for` type matches its column type)")
+    })
 }
 
 fn ensure_row_generic_available(

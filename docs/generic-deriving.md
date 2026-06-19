@@ -187,6 +187,13 @@ Source: `src/derive.rs`
    trait whose required methods have shape `selection -> row` or
    `selection -> Wrapper row`. `Selectable` is the motivating Kraken bridge
    use case, but the compiler path is trait-name agnostic.
+5. **Record synthesis** (`deriving (Trait NewName)` where `Trait` declares a
+   `synthesizes` clause): *synthesize a new record type* by mapping the carrier
+   record's fields through a library-defined field-map trait, plus its `Generic`,
+   any attached derives, and a functional-dependency link impl. Unlike (4), the
+   type argument names a type that does **not** exist yet, and the whole transform
+   is library-defined — the compiler hardcodes no trait or type names. See
+   [Record Synthesis](#record-synthesis).
 
 Synthetic decls are **spliced after their parent decl**, not appended to the
 end of the program. Earlier behavior appended at end-of-program but that
@@ -598,6 +605,118 @@ in the same batch had a chance to pin `r`.
 
 ---
 
+## Record Synthesis
+
+Source: `src/derive.rs` (`derive_synthesize`, `map_field_via_trait`),
+`src/parser/decl.rs` (`synthesizes` clause), `src/ast.rs` (`SynthesisSpec`).
+
+Every other derive *relates the derive to existing types*. This one is the
+exception: it **synthesizes a brand-new user-facing record type** from a per-field
+transform of another record, and makes that synthetic type behave like a
+hand-written one for the rest of the pipeline.
+
+The key design constraint: **the compiler hardcodes no trait or type names.** The
+entire policy — which fields map to what, which encoder to attach, which trait
+links the carrier to the result — is declared *in library code*. The compiler
+provides only the general mechanism. (An earlier cut hardcoded Kraken's
+`Insertable`/`Col`/`Generated`/`Writable`/`InsertRow`; this replaces that.)
+
+### The library declares the synthesis
+
+A trait opts in with a `synthesizes via <FieldMap> deriving (...)` clause. The
+motivating Kraken use case — generating a table's "insert shape" from its
+column-record schema:
+
+```saga
+-- field-type map: a functional `col -> ins` relation; its impls ARE the
+-- per-field rewrite table. Method-less; read syntactically at derive time.
+trait InsertField col ins | col -> ins
+impl InsertField a            for (Col a)        {}
+impl InsertField (Writable a) for (Generated a)  {}
+
+-- the link trait declares the synthesis
+trait Insertable cols ins | cols -> ins
+  synthesizes via InsertField deriving (InsertRow)
+```
+
+The carrier opts in with the familiar `deriving (Trait Arg)` surface, where the
+argument **names a type that does not exist yet and is created by the derive**:
+
+```saga
+record Users { id: Generated Int, name: Col String, age: Col Int }
+  deriving (Insertable UsersInsert)
+```
+
+Carrier vs. synthesized roles come from the link trait's functional dependency:
+the determinant (`cols`) is the carrier, the determined parameter (`ins`) is the
+synthesized type.
+
+### What `derive_synthesize` emits
+
+Four declarations, spliced after the carrier (in this order):
+
+1. **The synthetic record.** Each field type is rewritten by
+   `map_field_via_trait`: it finds the `via`-trait impl whose `for` pattern
+   unifies with the field type and returns its substituted other argument
+   (`Generated Int` matches `… for (Generated a)`, `a = Int`, output `Writable a`
+   ⇒ `Writable Int`). This reuses the same `te_unify`/`te_apply` the applied
+   bridge uses for scope specialization, over the impls `DeriveScope` already
+   collects. Field names/order preserved; visibility inherited from the carrier.
+
+   ```saga
+   record UsersInsert { id: Writable Int, name: String, age: Int }
+   ```
+
+2. **Its `Generic`/`Rep__`** via `derive_record_generic` — the same path a
+   hand-written `deriving (Generic)` takes.
+
+3. **The attached derives** (`deriving (InsertRow)` from the clause), each routed
+   onto the new record via `derive_routed`/`generate_record_derive` exactly as on
+   a hand-written record. The user cannot attach `deriving (InsertRow)` to a type
+   they never see, so the synthesis does it for them. Must follow the Generic
+   decls (the routed bridge targets the just-emitted `Rep__`).
+
+4. **A functional-dependency link** `impl Insertable UsersInsert for Users`. The
+   determinant (`cols`) is the impl target; the determined parameter (`ins`) is
+   the single extra trait argument. Method-less — it exists only so a caller typed
+   `Dml.insert : Table cols -> ins -> _ where {cols: Insertable ins}` recovers the
+   synthesized type from `cols` alone via the existing fundep-improvement path
+   (`improve_pending_fundeps`). No improvement logic is duplicated.
+
+### Cross-module name resolution
+
+The `synthesizes` clause's trait names (`InsertField`, `InsertRow`) are qualified
+to the link trait's defining module when collected (`qualify_synthesis_spec`), so
+they resolve at any derive site: an imported module registers every public trait
+under its `Module.Name` key regardless of the `exposing` list, and the carrier's
+module must import the link trait's module to name the trait at all. The field-map
+impls are matched by bare trait name against the impls `DeriveScope` collects
+(coherence-global, brought in on import).
+
+### Why a new `RecordDef` flows through the pipeline
+
+`expand_derives` already splices synthetic `TypeDef`s (every `Rep__T`) into the
+program, and it runs **per-module before that module is typechecked and before
+its exports are computed**. So an appended `Decl::RecordDef` is registered in the
+type environment, field-checked, and — when `public` — exported from
+`build_module_exports` (which iterates the post-expansion program) exactly like a
+hand-written record. Cross-module *use* of the synthesized type works; cross-module
+*`deriving` on* it does not, because `collect_imported_decls` re-parses other
+modules' source, which never contains the synthetic decl.
+
+### Limitations
+
+- **Non-parameterized carriers only.** A parameterized schema (e.g.
+  `Users source meta` with `Column source meta name a` fields) needs scope
+  specialization the syntactic field map can't express; `derive_synthesize`
+  rejects it with a diagnostic rather than miscompiling.
+- A field whose type matches no (or more than one) `via`-trait impl is a derive
+  error, not a silent drop — which column types are insertable is library-defined.
+- `synthesizes` is a contextual soft keyword (only special in a trait header), so
+  a trait type parameter literally named `synthesizes` is not allowed.
+
+---
+
 ## Why Recursion Is Free
 
 For `type IntList = Nil | Cons Int IntList deriving (Generic)`:
@@ -750,10 +869,14 @@ referential containers makes it deferred work, not blocked work.
 - `src/stdlib/Generic.saga` — building blocks and `Generic` trait
 - `src/stdlib/prelude.saga` — auto-imports `Std.Generic`
 - `src/derive.rs` — `expand_derives`, `derive_record_generic`,
-  `derive_adt_generic`, `derive_routed`, `classify_method_direction`,
+  `derive_adt_generic`, `derive_routed`, `derive_synthesize`,
+  `map_field_via_trait`, `qualify_synthesis_spec`, `classify_method_direction`,
   `synth_method_pair`, `build_from_body`, `classify_from_return`,
   `collect_imported_decls`, `collect_decls_from_imports`,
   `extract_head_and_args`
+- `src/ast.rs` — `SynthesisSpec`, `TraitDef.synthesis`
+- `src/parser/decl.rs` — `parse_trait_def` (the `synthesizes` soft keyword)
+- `src/formatter/decl.rs` — `format_trait_def` (re-emits the `synthesizes` clause)
 - `src/ast.rs` — `Decl::ImplDef.where_apps`, `Decl::ImplDef.routed_derive_info`,
   `TraitApp`, `RoutedDeriveInfo`
 - `src/typechecker/check_traits.rs` — `FUNCTIONAL_TRAITS`,

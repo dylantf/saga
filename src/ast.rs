@@ -479,6 +479,9 @@ pub enum Decl {
         type_params: Vec<TypeParam>,
         functional_dependency: Option<TraitFunctionalDependency>,
         supertraits: Vec<TraitRef>,
+        /// `synthesizes via <Trait> deriving (...)` clause, if present. Marks the
+        /// trait as a record-synthesizing link. See [SynthesisSpec].
+        synthesis: Option<SynthesisSpec>,
         methods: Vec<Annotated<TraitMethod>>,
         /// Comments before the closing `}` with no following sibling
         dangling_trivia: Vec<Trivia>,
@@ -1438,6 +1441,28 @@ pub struct TraitFunctionalDependency {
     pub determinant: Vec<String>,
     /// The determined type parameters (right of the `->`).
     pub determined: Vec<String>,
+    pub span: Span,
+}
+
+/// A trait's `synthesizes via <Trait> deriving (...)` clause. Marks the trait as
+/// a *record-synthesizing* link: `deriving (Trait NewName)` on a carrier record
+/// generates a new record `NewName` whose fields are the carrier's fields mapped
+/// through the `via` field-map trait, plus a link `impl Trait NewName for Carrier`.
+///
+/// Which parameter is the carrier vs. the synthesized type is read from the
+/// trait's functional dependency: the determinant is the carrier (the record the
+/// derive sits on), the determined parameter is the synthesized type. This keeps
+/// the whole transform library-defined — the compiler holds only the names the
+/// library chose, as data.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SynthesisSpec {
+    /// The field-map trait (a functional `field -> field` relation whose impls
+    /// declare the per-field-type rewrite, e.g. `Col a -> a`).
+    pub via_trait: String,
+    pub via_trait_span: Span,
+    /// Derives to attach to the synthesized record (e.g. `InsertRow`). `Generic`
+    /// is auto-included, as with any routed derive.
+    pub attach_derives: Vec<DeriveSpec>,
     pub span: Span,
 }
 
