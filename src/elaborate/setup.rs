@@ -238,9 +238,24 @@ impl Elaborator {
                     if trait_name == "Num" || trait_name == "Eq" {
                         continue;
                     }
-                    if let Some(var_name) = result.where_bound_var_names.get(var_id) {
-                        pairs.push((trait_name.clone(), var_name.clone()));
-                    }
+                    // The source var name (`where {cols: Link …}` → "cols")
+                    // lives in `where_bound_var_names`, keyed by var id. For an
+                    // *imported* effect the op's constraint var ids were minted
+                    // in the defining module, so this importer's map lacks them.
+                    // The name only shapes a handler arm's dict-param name
+                    // (imported-effect arms are elaborated in the defining
+                    // module, where the name is present); at an `op!` call site —
+                    // the cross-module case — only the constraint's trait and
+                    // its position matter, since dicts are appended positionally.
+                    // So fall back to a stable per-var name, keeping the full
+                    // constraint set rather than silently dropping it (which left
+                    // the call site short of dict args → an arity crash).
+                    let var_name = result
+                        .where_bound_var_names
+                        .get(var_id)
+                        .cloned()
+                        .unwrap_or_else(|| format!("v{var_id}"));
+                    pairs.push((trait_name.clone(), var_name));
                 }
                 if !pairs.is_empty() {
                     op_dict_params.insert((effect_name.clone(), op.name.clone()), pairs);

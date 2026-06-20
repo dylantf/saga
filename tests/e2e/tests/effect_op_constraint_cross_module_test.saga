@@ -1,0 +1,27 @@
+module EffectOpConstraintCrossModuleTest
+
+import EffectOpConstraintLibTest (Describe, show_it)
+import Std.Test (Testing, describe, test, assert_eq)
+
+# Regression: an `op!` call to an *imported* effect whose operation has a
+# method-level `where` constraint must thread the constraint's dictionary at the
+# call site. The op's constraint variable name is minted in the defining module,
+# so the importer's `where_bound_var_names` lacks it; the elaborator used to drop
+# the constraint, leaving the handler called with too few arguments
+# ("function called with N argument(s), but expects M").
+
+fun prog : Unit -> String needs {Describe}
+prog () = {
+  let s = describe! 42
+  s
+}
+
+pub fun tests : Unit -> Unit needs {Testing}
+tests () = {
+  describe "imported effect op with method-level constraint" (fun () -> {
+    test "threads the op's dictionary across the module boundary" (fun () -> {
+      let s = prog () with show_it
+      assert_eq s "42"
+    })
+  })
+}
