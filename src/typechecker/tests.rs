@@ -10656,6 +10656,33 @@ fn synthesize_derive_is_library_agnostic() {
 }
 
 #[test]
+fn synthesize_derive_cross_module_via_last_segment_prefix() {
+    // Regression: a record-synthesizing trait imported from a multi-segment
+    // module (`import Schema.Db`) and referenced by its last-segment prefix
+    // (`Db.Mirror`) must still be recognized as synthesizing. The derive scope
+    // only registered the full path and bare name, so `Db.Mirror` missed the
+    // synthesis metadata and silently fell through to the non-synthesizing
+    // path — the synthesized `ThingView` (and its `Rep__ThingView`) then never
+    // existed, surfacing downstream as "unknown type". Exactly the kraken
+    // `Db.NullableColumns` / `Db.Insertable` failure.
+    let lib = "module Schema.Db\n\
+               pub type Boxed a = Boxed a\n\
+               pub trait FieldOf src out | src -> out {}\n\
+               impl FieldOf a for (Boxed a) {}\n\
+               pub trait Mirror src out | src -> out\n\
+                 synthesizes via FieldOf\n";
+    let main = "import Schema.Db\n\
+                record Thing {\n\
+                  x: Db.Boxed Int,\n\
+                  y: Db.Boxed String,\n\
+                }\n  deriving (Db.Mirror ThingView)\n\
+                fun mk : Unit -> ThingView\n\
+                mk _ = ThingView { x: 1, y: \"hi\" }\n";
+    check_with_project_files(&[("lib/Schema/Db.saga", lib)], main)
+        .expect("cross-module synthesizing derive via last-segment prefix should synthesize");
+}
+
+#[test]
 fn synthesize_derive_errors_on_unmapped_field() {
     // A field whose type matches no `via`-trait impl has no mapping; the derive
     // reports it rather than silently dropping or miscompiling the field.
