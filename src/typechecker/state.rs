@@ -146,6 +146,22 @@ pub struct TraitInfo {
     pub fundep: Option<TraitFundep>,
 }
 
+/// A dictionary parameter a conditional impl requires from a `where`-app
+/// constraint whose self position is a fresh/existential variable determined by
+/// a functional dependency (rather than an impl type parameter). Carries the
+/// fully fundep-resolved trait, extra trait args, and self type so the
+/// elaborator can build the sub-dict at a call site — including cross-module,
+/// where the importer never sees the impl's AST. Mirrors the elaborator's
+/// `ImplWhereAppDictParam`; the resolved `Type`s use the `u32::MAX - idx`
+/// impl-type-parameter convention so `dict_for_type`'s positional substitution
+/// applies uniformly to local and imported impls.
+#[derive(Debug, Clone)]
+pub struct WhereAppDictParam {
+    pub trait_name: String,
+    pub trait_type_args: Vec<Type>,
+    pub self_type: Type,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct ImplInfo {
     /// Constraints on type parameters: (trait_name, param_index)
@@ -182,6 +198,11 @@ pub struct ImplInfo {
     /// caller (the trait-effect-propagation bugfix). Travels cross-module via
     /// `ModuleExports.trait_impls`. See docs/planning/effect-polymorphic-traits.md.
     pub method_effects: HashMap<String, Vec<String>>,
+    /// Dict params required by fundep-determined `where`-app constraints (see
+    /// [`WhereAppDictParam`]). Computed at registration and read by the
+    /// elaborator for imported impls, whose AST the importer cannot re-derive
+    /// these from. Empty for impls without such constraints.
+    pub where_app_dict_params: Vec<WhereAppDictParam>,
 }
 
 /// Evidence that a trait constraint was resolved during typechecking.

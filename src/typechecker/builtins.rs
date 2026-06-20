@@ -1,4 +1,4 @@
-use super::{Checker, ImplInfo, Scheme, TraitInfo, Type, canonicalize_type_name};
+use super::{canonicalize_type_name, Checker, ImplInfo, Scheme, TraitInfo, Type};
 
 impl Checker {
     /// Helper to get the canonical name of a builtin type.
@@ -35,6 +35,7 @@ impl Checker {
                     target_type_param_ids: vec![],
                     span: None,
                     method_effects: std::collections::HashMap::new(),
+                    where_app_dict_params: vec![],
                 },
             );
         }
@@ -62,6 +63,7 @@ impl Checker {
                     target_type_param_ids: vec![],
                     span: None,
                     method_effects: std::collections::HashMap::new(),
+                    where_app_dict_params: vec![],
                 },
             );
         }
@@ -173,6 +175,7 @@ impl Checker {
                 target_type_param_ids: vec![],
                 span: None,
                 method_effects: std::collections::HashMap::new(),
+                where_app_dict_params: vec![],
             },
         );
         self.trait_state.impls.insert(
@@ -186,6 +189,7 @@ impl Checker {
                 target_type_param_ids: vec![],
                 span: None,
                 method_effects: std::collections::HashMap::new(),
+                where_app_dict_params: vec![],
             },
         );
         self.trait_state.impls.insert(
@@ -199,6 +203,7 @@ impl Checker {
                 target_type_param_ids: vec![],
                 span: None,
                 method_effects: std::collections::HashMap::new(),
+                where_app_dict_params: vec![],
             },
         );
 
@@ -214,6 +219,7 @@ impl Checker {
                 target_type_param_ids: vec![],
                 span: None,
                 method_effects: std::collections::HashMap::new(),
+                where_app_dict_params: vec![],
             },
         );
 
@@ -229,6 +235,7 @@ impl Checker {
                 target_type_param_ids: vec![],
                 span: None,
                 method_effects: std::collections::HashMap::new(),
+                where_app_dict_params: vec![],
             },
         );
 
@@ -244,6 +251,7 @@ impl Checker {
                 target_type_param_ids: vec![],
                 span: None,
                 method_effects: std::collections::HashMap::new(),
+                where_app_dict_params: vec![],
             },
         );
 
@@ -259,6 +267,7 @@ impl Checker {
                 target_type_param_ids: vec![],
                 span: None,
                 method_effects: std::collections::HashMap::new(),
+                where_app_dict_params: vec![],
             },
         );
 
@@ -274,6 +283,7 @@ impl Checker {
                 target_type_param_ids: vec![],
                 span: None,
                 method_effects: std::collections::HashMap::new(),
+                where_app_dict_params: vec![],
             },
         );
     }

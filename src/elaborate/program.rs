@@ -97,10 +97,13 @@ impl Elaborator {
                     let where_app_params =
                         self.where_app_dict_params_for_impl(where_apps, type_params);
                     self.impl_dict_params.insert(key.clone(), params);
-                    if !where_app_params.is_empty() {
-                        self.impl_where_app_dict_params
-                            .insert(key, where_app_params);
-                    }
+                    // Insert unconditionally (even when empty): a present key
+                    // marks this impl as local, so `dict_for_type` trusts this
+                    // computation and only falls back to the typechecker-
+                    // resolved `ImplInfo.where_app_dict_params` for imported
+                    // impls (whose AST this module never sees).
+                    self.impl_where_app_dict_params
+                        .insert(key, where_app_params);
                 }
                 Decl::HandlerDef { name, body, .. } => {
                     let dict_params = self.dict_params_from_where(&body.where_clause);

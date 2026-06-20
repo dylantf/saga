@@ -1245,6 +1245,13 @@ impl Checker {
             }
         }
 
+        // Resolve the fundep-determined `where`-app dict params now, while the
+        // full impl registry is in scope, and stash them on the ImplInfo. The
+        // elaborator recomputes these for impls in its own module, but an
+        // importing module never sees this impl's AST, so it relies on this
+        // pre-resolved copy (which travels via `ModuleExports.trait_impls`).
+        let where_app_dict_params = self.compute_where_app_dict_params(where_apps, type_params);
+
         self.trait_state.impls.insert(
             dup_key,
             ImplInfo {
@@ -1256,8 +1263,170 @@ impl Checker {
                 target_type_param_ids,
                 span: Some(span),
                 method_effects: impl_method_effects,
+                where_app_dict_params,
             },
         );
         Ok(())
+    }
+
+    fn impl_tparam_id(type_params: &[TypeParam], name: &str) -> Option<u32> {
+        type_params
+            .iter()
+            .position(|tp| tp.name == name)
+            .map(|idx| u32::MAX - idx as u32)
+    }
+
+    /// Typechecker-side mirror of the elaborator's
+    /// `Elaborator::type_expr_to_constraint_type`: convert a `where`-app type
+    /// argument into a `Type`, using the `u32::MAX - idx` convention for impl
+    /// type parameters so the result matches what `dict_for_type` expects.
+    fn where_app_constraint_type(
+        &self,
+        expr: &ast::TypeExpr,
+        type_params: &[TypeParam],
+        local_subst: &std::collections::HashMap<String, Type>,
+    ) -> Option<Type> {
+        match expr {
+            ast::TypeExpr::Named { id, name, .. } => {
+                Some(Type::Con(self.resolved_type_name(*id, name), vec![]))
+            }
+            ast::TypeExpr::Var { name, .. } => local_subst
+                .get(name)
+                .cloned()
+                .or_else(|| Self::impl_tparam_id(type_params, name).map(Type::Var)),
+            ast::TypeExpr::App { .. } => {
+                let head = expr.head_name()?;
+                let head_id = expr.head_id().unwrap_or(expr.id());
+                let mut args = Vec::new();
+                let mut current = expr;
+                while let ast::TypeExpr::App { func, arg, .. } = current {
+                    args.push(self.where_app_constraint_type(arg, type_params, local_subst)?);
+                    current = func;
+                }
+                args.reverse();
+                Some(Type::Con(self.resolved_type_name(head_id, head), args))
+            }
+            ast::TypeExpr::Symbol { name, .. } => Some(Type::Symbol(name.clone())),
+            ast::TypeExpr::Labeled { inner, .. } => {
+                self.where_app_constraint_type(inner, type_params, local_subst)
+            }
+            ast::TypeExpr::Record { fields, .. } => fields
+                .iter()
+                .map(|(name, ty)| {
+                    self.where_app_constraint_type(ty, type_params, local_subst)
+                        .map(|ty| (name.clone(), ty))
+                })
+                .collect::<Option<Vec<_>>>()
+                .map(Type::Record),
+            ast::TypeExpr::Arrow { .. } => None,
+        }
+    }
+
+    /// Mirror of the elaborator's `resolve_functional_where_app_fresh_vars`:
+    /// pin the determined extra params of a fundep `where`-app from the matching
+    /// impl, recording them in `local_subst` so later args (and the self
+    /// position) resolve to concrete types.
+    fn resolve_fundep_where_app(
+        &self,
+        app: &ast::TraitApp,
+        resolved_trait: &str,
+        self_type: &Type,
+        type_params: &[TypeParam],
+        local_subst: &mut std::collections::HashMap<String, Type>,
+    ) {
+        let Some(info) = self.trait_state.traits.get(resolved_trait) else {
+            return;
+        };
+        let Some(fundep) = &info.fundep else {
+            return;
+        };
+        let Type::Con(self_name, self_args) = self_type else {
+            return;
+        };
+        let Some((_, impl_info)) = self
+            .trait_state
+            .impls
+            .iter()
+            .find(|((trait_name, _, target), _)| trait_name == resolved_trait && target == self_name)
+        else {
+            return;
+        };
+        let mut subst = std::collections::HashMap::new();
+        for (var_id, arg) in impl_info.target_type_param_ids.iter().zip(self_args.iter()) {
+            subst.insert(*var_id, arg.clone());
+        }
+        let determined = fundep.determined_extra_positions();
+        for (idx, arg) in app.type_args.iter().enumerate().skip(1) {
+            if !determined.contains(&(idx - 1)) {
+                continue;
+            }
+            let ast::TypeExpr::Var { name, .. } = arg else {
+                continue;
+            };
+            if Self::impl_tparam_id(type_params, name).is_some() || local_subst.contains_key(name) {
+                continue;
+            }
+            if let Some(extra) = impl_info.trait_type_args.get(idx - 1) {
+                local_subst.insert(name.clone(), substitute_pattern_vars(extra, &subst));
+            }
+        }
+    }
+
+    /// Mirror of the elaborator's `where_app_dict_params_for_impl`, run at
+    /// registration so the resolved params travel cross-module on `ImplInfo`.
+    fn compute_where_app_dict_params(
+        &self,
+        where_apps: &[ast::TraitApp],
+        type_params: &[TypeParam],
+    ) -> Vec<crate::typechecker::state::WhereAppDictParam> {
+        use crate::typechecker::state::WhereAppDictParam;
+        let mut params = Vec::new();
+        let mut local_subst: std::collections::HashMap<String, Type> =
+            std::collections::HashMap::new();
+        for app in where_apps {
+            if matches!(app.trait_name.as_str(), "Num" | "Eq") {
+                continue;
+            }
+            let resolved_trait = self
+                .resolve_trait_name(&app.trait_name)
+                .unwrap_or_else(|| app.trait_name.clone());
+            let Some(first_arg) = app.type_args.first() else {
+                continue;
+            };
+            let Some(self_type) =
+                self.where_app_constraint_type(first_arg, type_params, &local_subst)
+            else {
+                continue;
+            };
+            self.resolve_fundep_where_app(
+                app,
+                &resolved_trait,
+                &self_type,
+                type_params,
+                &mut local_subst,
+            );
+            let ast::TypeExpr::Var { name, .. } = first_arg else {
+                continue;
+            };
+            if Self::impl_tparam_id(type_params, name).is_some() {
+                continue;
+            }
+            let Some(self_type) = local_subst.get(name).cloned() else {
+                continue;
+            };
+            let Some(trait_type_args) = app.type_args[1..]
+                .iter()
+                .map(|arg| self.where_app_constraint_type(arg, type_params, &local_subst))
+                .collect::<Option<Vec<_>>>()
+            else {
+                continue;
+            };
+            params.push(WhereAppDictParam {
+                trait_name: resolved_trait,
+                trait_type_args,
+                self_type,
+            });
+        }
+        params
     }
 }

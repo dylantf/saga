@@ -325,7 +325,15 @@ impl Elaborator {
                         name: dict_name.clone(),
                     },
                 );
-                if let Some(params) = self.impl_where_app_dict_params.get(&key) {
+                // Local impls are recorded in `impl_where_app_dict_params`
+                // (always, even empty). Imported impls are not — the importing
+                // module never sees their AST — so fall back to the resolved
+                // copy the typechecker stashed on `ImplInfo`.
+                if let Some(params) = self
+                    .impl_where_app_dict_params
+                    .get(&key)
+                    .or_else(|| self.impl_infos.get(&key).map(|i| &i.where_app_dict_params))
+                {
                     let target_arg_subst = Self::impl_type_param_subst(args);
                     for param in params {
                         let self_type =

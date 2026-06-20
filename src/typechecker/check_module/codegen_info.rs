@@ -358,8 +358,37 @@ pub(super) fn collect_codegen_info(
                     &erlang_module,
                     &canonical_target_type,
                 );
-                let arity =
-                    where_apps.len() + where_clause.iter().map(|b| b.traits.len()).sum::<usize>();
+                // Cross-module dict-constructor arity. This MUST equal the
+                // number of dict parameters the elaborator emits for the
+                // constructor (`Elaborator::dict_params_from_where_apps` +
+                // `dict_params_from_where`, consumed in `program.rs`), since the
+                // emitted constructor's arity is `dict_params.len()` and an
+                // importing module references it via `make_fun(..., arity)`.
+                //
+                // A naive `where_apps.len()` overcounts: a where-app whose first
+                // type argument is *concrete* (not a type variable) carries no
+                // runtime dict — e.g. a routed `deriving (Selectable User)`
+                // synthesizes `Generic Users __rep` / `Generic User __rep`
+                // bounds, which the elaborator skips. Counting them inflated the
+                // exported arity, so `make_fun` referenced the dict at the wrong
+                // arity and crashed at runtime. Num/Eq bounds likewise use BIFs,
+                // not dicts, and are skipped on both sides.
+                let where_app_arity = where_apps
+                    .iter()
+                    .filter(|app| {
+                        !matches!(app.trait_name.as_str(), "Num" | "Eq")
+                            && matches!(
+                                app.type_args.first(),
+                                Some(crate::ast::TypeExpr::Var { .. })
+                            )
+                    })
+                    .count();
+                let where_clause_arity = where_clause
+                    .iter()
+                    .flat_map(|b| b.traits.iter())
+                    .filter(|tr| tr.name != "Num" && tr.name != "Eq")
+                    .count();
+                let arity = where_app_arity + where_clause_arity;
                 let var_to_idx: std::collections::HashMap<&str, usize> = type_params
                     .iter()
                     .enumerate()

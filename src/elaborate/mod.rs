@@ -24,6 +24,7 @@ pub(crate) use crate::ast::*;
 pub(crate) use crate::token::{Span, StringKind};
 pub(crate) use crate::typechecker::{
     CheckResult, ImplInfo, KNOWN_SYMBOL_TRAIT, ResolvedValue, TraitEvidence, TraitInfo, Type,
+    WhereAppDictParam,
 };
 
 mod anon_record;
@@ -182,12 +183,11 @@ pub(crate) const SEMIGROUP: &str = "Std.Base.Semigroup";
 /// e.g. ("ConvertTo", ["NOK"], "USD") or ("Show", [], "Int").
 pub(crate) type ImplKey = (String, Vec<String>, String);
 
-#[derive(Clone, Debug)]
-pub(crate) struct ImplWhereAppDictParam {
-    pub(crate) trait_name: String,
-    pub(crate) trait_type_args: Vec<Type>,
-    pub(crate) self_type: Type,
-}
+/// The where-app dict param the elaborator threads into conditional dict
+/// constructors. Defined on the typechecker side ([`WhereAppDictParam`]) so the
+/// resolved form can ride along on `ImplInfo` for imported impls; aliased here
+/// for the elaborator's local computation and call-site consumption.
+pub(crate) type ImplWhereAppDictParam = WhereAppDictParam;
 
 /// Elaborate a program using typechecker results.
 /// Returns a new program with dictionary passing made explicit.
