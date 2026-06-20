@@ -225,7 +225,7 @@ pub(super) struct EvidenceCtx {
 
 /// Explicit lowering context for value-producing vs terminal positions.
 #[derive(Clone)]
-pub(super) enum LowerMode {
+pub(crate) enum LowerMode {
     /// Lower as a value-producing subexpression.
     Value,
     /// Lower as a terminal computation whose successful result should flow to K.
