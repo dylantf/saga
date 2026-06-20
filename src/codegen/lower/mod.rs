@@ -67,7 +67,7 @@ pub(super) struct QualifiedCallSite<'a> {
 }
 
 #[derive(Clone)]
-struct StaticTailResumeOp {
+pub(crate) struct StaticTailResumeOp {
     arm: HandlerArm,
     source_module: Option<String>,
     captures: Vec<(String, Expr)>,
@@ -75,7 +75,7 @@ struct StaticTailResumeOp {
 
 /// Stored handler definition for CPS inlining at `with` sites.
 #[derive(Clone)]
-struct HandlerInfo {
+pub(crate) struct HandlerInfo {
     effects: Vec<String>,
     arms: Vec<HandlerArm>,
     return_clause: Option<Box<HandlerArm>>,
