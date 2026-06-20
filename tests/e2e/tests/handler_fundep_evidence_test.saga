@@ -1,0 +1,75 @@
+module HandlerFundepEvidenceTest
+
+import Std.Generic (Generic, Leaf, Labeled, Record)
+import Std.Test (Testing, describe, test, assert_eq)
+
+# Regression: a `let` inside a handler arm that binds the result of a helper
+# carrying two same-trait constraints (`cols: Generic cols_rep`,
+# `nullable: Generic nullable_rep`). The op-bound vars `cols`/`nullable` are
+# abstract but rigid; the determined `nullable` used to be generalized by the
+# `let`, recording its dictionary evidence out of order and unnamed. The two
+# `Generic` dicts then arrived swapped — `Generic.to` ran the nullable record's
+# dictionary on the non-null value, producing the wrong shape and a case_clause.
+
+type Col a = Col a
+type LeftCol a = LeftCol a
+
+record Users { id: Col Int } deriving (Generic)
+record UsersLeft { id: LeftCol Int } deriving (Generic)
+
+trait Link cols nullable | cols -> nullable {}
+impl Link UsersLeft for Users {}
+
+trait Field col out | col -> out { fun field : col -> out }
+impl Field (LeftCol a) for Col a { field col = case col { Col value -> LeftCol value } }
+
+trait LiftRep rep out | rep -> out { fun lift_rep : rep -> out }
+fun lift_rep_value : rep -> out where {rep: LiftRep out}
+lift_rep_value rep = lift_rep rep
+
+impl LiftRep (Leaf out) for Leaf col where {col: Field out} {
+  lift_rep rep = case rep { Leaf value -> Leaf (field value) }
+}
+impl LiftRep (Labeled n out) for Labeled n field where {field: LiftRep out} {
+  lift_rep rep = case rep { Labeled value -> Labeled (lift_rep value) }
+}
+impl LiftRep (Record out) for Record fields where {fields: LiftRep out} {
+  lift_rep rep = case rep { Record name fields -> Record name (lift_rep fields) }
+}
+impl LiftRep Rep__UsersLeft for Rep__Users {
+  lift_rep rep = case rep { Rep__Users inner -> Rep__UsersLeft (lift_rep_value inner) }
+}
+
+fun lift_cols : cols -> nullable
+  where { cols: Link nullable, cols: Generic cols_rep, cols_rep: LiftRep nullable_rep, nullable: Generic nullable_rep }
+lift_cols cols = cols |> to |> lift_rep_value |> from
+
+effect Build {
+  fun join : cols -> (cols -> Unit) -> nullable
+    where { cols: Link nullable, cols: Generic cols_rep, cols_rep: LiftRep nullable_rep, nullable: Generic nullable_rep }
+}
+
+handler collect for Build {
+  join cols callback = {
+    let _ = callback cols
+    let nullable = lift_cols cols
+    resume nullable
+  }
+}
+
+fun program : Unit -> UsersLeft needs {Build}
+program () = {
+  let u = Users { id: Col 123 }
+  let left = join! u (fun _ -> ())
+  left
+}
+
+pub fun tests : Unit -> Unit needs {Testing}
+tests () = {
+  describe "handler arm helper with duplicate fundep evidence" (fun () -> {
+    test "threads the two Generic dicts in the right order" (fun () -> {
+      let UsersLeft { id: LeftCol value } = program () with collect
+      assert_eq value 123
+    })
+  })
+}

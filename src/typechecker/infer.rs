@@ -1811,6 +1811,20 @@ impl Checker {
         }
 
         let mut determined = std::collections::HashSet::new();
+        // Seed with the enclosing scope's where-bound variables (resolved
+        // through substitution). These are rigid — a `let` cannot generalize a
+        // variable the surrounding function/handler holds fixed — so a fundep
+        // whose determinant is such a variable fires just as it would for a
+        // concrete head. Without this, `let nullable = lift_cols cols` inside a
+        // handler arm (where `cols`/`nullable` are op-bound, hence abstract but
+        // rigid) would generalize the fundep-determined `nullable`, recording
+        // its dictionary evidence out of order and under the wrong name — the
+        // two `Generic` dicts then arrive swapped at the call site.
+        for &bound_id in self.trait_state.where_bounds.keys() {
+            if let Type::Var(resolved) = self.sub.apply(&Type::Var(bound_id)) {
+                determined.insert(resolved);
+            }
+        }
         // A determinant is satisfied if it has a concrete head, or every free
         // variable in it is already known to be fundep-determined.
         let satisfied = |ty: &Type, determined: &std::collections::HashSet<u32>| -> bool {
