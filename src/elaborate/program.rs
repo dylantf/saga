@@ -174,9 +174,13 @@ impl Elaborator {
 
                     let trait_info = self.traits.get(&canonical_trait).cloned();
 
-                    // Build dict_params for conditional impls
+                    // Build dict_params for conditional impls. The where-clause
+                    // bounds must follow the call site's apply order (with-args
+                    // bounds before no-args bounds) so the constructor's params
+                    // line up positionally with the sub-dicts passed in by
+                    // `dict_for_type`. See `dict_params_from_where_call_order`.
                     let mut dict_param_pairs = self.dict_params_from_where_apps(where_apps);
-                    dict_param_pairs.extend(self.dict_params_from_where(where_clause));
+                    dict_param_pairs.extend(self.dict_params_from_where_call_order(where_clause));
                     let dict_params: Vec<String> = dict_param_pairs
                         .iter()
                         .map(|(trait_name, type_var)| {

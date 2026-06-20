@@ -1,0 +1,87 @@
+module FundepWhereOrderTest
+
+import Std.Generic (Generic, Leaf, Labeled, And, Record)
+import Std.Test (Testing, describe, test, assert_eq)
+
+# Regression: a conditional impl whose `where` clause interleaves a single-
+# parameter bound (`n: KnownSymbol`) with a multi-parameter / fundep bound
+# (`field: ReadLeft out`) used to crash at runtime. The dict constructor laid
+# its parameters out in source order — `(KnownSymbol_n, ReadLeft_field)` — but
+# the call site applied the sub-dicts with the with-args bound first —
+# `(ReadLeft_field, KnownSymbol_n)`. The KnownSymbol dict (carried at runtime as
+# the field-name String) and the ReadLeft dict tuple were swapped, so appending
+# the symbol name blew up with `bad argument` inside the Labeled impl.
+#
+# Codecs over single-parameter traits (all bounds in `param_constraints_by_var`)
+# never hit this, which is why the derived `saga_json` path stayed healthy.
+
+type LeftCol a = LeftCol a
+
+record LeftUserCols {
+  id: LeftCol Int,
+  name: LeftCol String,
+} deriving (Generic)
+
+type alias UserRowRep =
+  Record (And
+    (Labeled 'id (Leaf Int))
+    (Labeled 'name (Leaf String)))
+
+trait ReadLeft rep out | rep -> out {
+  fun read_left : rep -> String
+}
+
+fun read_left_value : rep -> String where {rep: ReadLeft out}
+read_left_value rep = read_left rep
+
+impl ReadLeft (Leaf a) for (Leaf (LeftCol a)) {
+  read_left rep = case rep {
+    Leaf _ -> "leaf"
+  }
+}
+
+# The load-bearing impl: `n: KnownSymbol` (no trait args) is written *before*
+# `field: ReadLeft out` (with trait args), so the two dict-param orderings only
+# agree once the constructor follows the call site's with-args-first order.
+impl ReadLeft (Labeled n out) for Labeled n field
+  where {n: KnownSymbol, field: ReadLeft out}
+{
+  read_left rep = case rep {
+    Labeled field -> symbol_name (Proxy : Proxy n) <> ":" <> read_left field
+  }
+}
+
+impl ReadLeft (And lo ro) for And l r
+  where {l: ReadLeft lo, r: ReadLeft ro}
+{
+  read_left rep = case rep {
+    And l r -> read_left l <> "," <> read_left r
+  }
+}
+
+impl ReadLeft (Record out) for Record fields
+  where {fields: ReadLeft out}
+{
+  read_left rep = case rep {
+    Record _ fields -> read_left fields
+  }
+}
+
+impl ReadLeft UserRowRep for Rep__LeftUserCols {
+  read_left rep = case rep {
+    Rep__LeftUserCols inner -> read_left_value inner
+  }
+}
+
+fun show_left_cols : LeftUserCols -> String
+show_left_cols cols = cols |> to |> read_left_value
+
+pub fun tests : Unit -> Unit needs {Testing}
+tests () = {
+  describe "fundep impl with interleaved where-clause dict params" (fun () -> {
+    test "walks the derived Generic rep, reflecting each field's symbol name" (fun () -> {
+      let cols = LeftUserCols { id: LeftCol 1, name: LeftCol "Alice" }
+      assert_eq (show_left_cols cols) "id:leaf,name:leaf"
+    })
+  })
+}

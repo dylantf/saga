@@ -127,6 +127,51 @@ impl Elaborator {
     }
 
 
+    /// Like [`dict_params_from_where`], but emits bounds that carry trait type
+    /// arguments (multi-parameter traits, e.g. `field: ReadLeft out`) ahead of
+    /// those that don't (e.g. `n: KnownSymbol`). This mirrors the order in
+    /// which the call site applies sub-dictionaries: `dict_for_type`
+    /// ([`dict_resolve`]) runs `param_constraints_by_var_with_args` before
+    /// `param_constraints_by_var`, so a conditional impl's dict-constructor
+    /// parameters must line up positionally with the args passed to it.
+    ///
+    /// Without this split, a where clause that *interleaves* the two kinds —
+    /// `where {n: KnownSymbol, field: ReadLeft out}` — builds a constructor
+    /// `(__dict_KnownSymbol_n, __dict_ReadLeft_field)` (source order) but is
+    /// called with `(ReadLeft_field, KnownSymbol_n)`, binding the symbol-name
+    /// String to `__dict_ReadLeft_field` and the ReadLeft dict tuple to
+    /// `__dict_KnownSymbol_n` — a runtime crash when the latter is appended as
+    /// a String. The where-clause order matters for any impl mixing a single-
+    /// param bound with a multi-param bound; codecs over single-param traits
+    /// (all bounds in `param_constraints_by_var`) are unaffected, which is why
+    /// the derived `saga_json` path never hit this.
+    pub(crate) fn dict_params_from_where_call_order(
+        &self,
+        where_clause: &[TraitBound],
+    ) -> Vec<(String, String)> {
+        let mut with_args = Vec::new();
+        let mut without_args = Vec::new();
+        for bound in where_clause {
+            for tr in &bound.traits {
+                if tr.name == "Num" || tr.name == "Eq" {
+                    continue;
+                }
+                let resolved = self.resolved_trait_name(tr.id, &tr.name);
+                let suffix =
+                    dict_var_suffix_from_type_exprs(&self.traits, &resolved, &tr.type_args);
+                let pair = (resolved, format!("{}{}", bound.type_var, suffix));
+                if tr.type_args.is_empty() {
+                    without_args.push(pair);
+                } else {
+                    with_args.push(pair);
+                }
+            }
+        }
+        with_args.extend(without_args);
+        with_args
+    }
+
+
     pub(crate) fn dict_params_from_where_apps(&self, where_apps: &[TraitApp]) -> Vec<(String, String)> {
         let mut dict_params = Vec::new();
         for app in where_apps {
