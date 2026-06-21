@@ -359,10 +359,23 @@ impl<'a> Lowerer<'a> {
             }
 
             ExprKind::RecordCreate { name, fields, .. } => {
+                // The field *order* (the tuple slot layout) must come from the
+                // record's declared type. If it can't be resolved we must NOT fall
+                // back to an empty order — that silently emits a fieldless `{tag}`
+                // tuple, and any later field access (`element(2, …)`) crashes at
+                // runtime with `bad argument`. Fail loudly at compile time instead.
                 let order = self
                     .resolved_record_fields(expr.id, name)
                     .cloned()
-                    .unwrap_or_default();
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "codegen: cannot resolve field layout for record `{name}` \
+                             (node {:?}, module `{}`). The record's type could not be \
+                             determined here, so its tuple layout is unknown.",
+                            expr.id,
+                            self.current_semantic_module_name(),
+                        )
+                    });
                 let field_map: HashMap<&str, &Expr> =
                     fields.iter().map(|(n, _, e)| (n.as_str(), e)).collect();
                 let mut vars: Vec<String> = Vec::new();

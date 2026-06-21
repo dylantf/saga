@@ -458,6 +458,33 @@ impl<'a> Lowerer<'a> {
                 let local_name = format!("{}.{}", module_name, source_name);
                 self.record_fields_for_name(&local_name)
             })
+            // Last resort: resolve by the constructor's surface name alone. A
+            // record's field layout is intrinsic to its named type, but the
+            // lookups above are keyed by NodeId / the *current* module — both of
+            // which can be lost when a record literal is inlined across modules
+            // (the fold freshens the argument's NodeIds and re-bases lowering to
+            // the consumer module, orphaning the producer-qualified entry). The
+            // constructor *tag* survives this via name-based `constructor_atoms`;
+            // mirror that here for the field layout. Only a *unique* `<mod>.<Name>`
+            // match is accepted — an ambiguous bare name falls through so the
+            // caller errors loudly rather than guess a wrong field order.
+            .or_else(|| self.record_fields_by_unique_suffix(source_name))
+    }
+
+    /// Find a record's field layout by its bare constructor name, scanning every
+    /// registered `<module>.<Name>` key. Returns the layout only when exactly one
+    /// module defines a record with that name; `None` when there is no match or
+    /// the name is ambiguous across modules.
+    fn record_fields_by_unique_suffix(&self, source_name: &str) -> Option<&Vec<String>> {
+        let suffix = format!(".{source_name}");
+        let mut matches = self
+            .record_fields
+            .iter()
+            .filter(|(key, _)| key.ends_with(&suffix));
+        match (matches.next(), matches.next()) {
+            (Some((_, fields)), None) => Some(fields),
+            _ => None,
+        }
     }
 
     pub(super) fn resolved_handler_arm_effect_for_module(
