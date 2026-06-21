@@ -724,6 +724,10 @@ impl<'a> Lowerer<'a> {
                 ..Default::default()
             });
         }
+
+        for (_, scheme) in &info.exports {
+            Self::collect_anon_records_from_type(&scheme.ty, &mut self.record_fields);
+        }
     }
 
     fn register_imported_handler_defs(&mut self, module_name: &str, program: &ast::Program) {
@@ -1051,6 +1055,45 @@ impl<'a> Lowerer<'a> {
             ast::TypeExpr::Named { .. }
             | ast::TypeExpr::Var { .. }
             | ast::TypeExpr::Symbol { .. } => {}
+        }
+    }
+
+    fn collect_anon_records_from_type(
+        ty: &crate::typechecker::Type,
+        record_fields: &mut HashMap<String, Vec<String>>,
+    ) {
+        match ty {
+            crate::typechecker::Type::Record(fields) => {
+                let names: Vec<&str> = fields.iter().map(|(name, _)| name.as_str()).collect();
+                let tag = ast::anon_record_tag(&names);
+                let mut sorted_names: Vec<String> =
+                    names.iter().map(|name| name.to_string()).collect();
+                sorted_names.sort();
+                record_fields.entry(tag).or_insert(sorted_names);
+                for (_, field_ty) in fields {
+                    Self::collect_anon_records_from_type(field_ty, record_fields);
+                }
+            }
+            crate::typechecker::Type::Fun(param, ret, row) => {
+                Self::collect_anon_records_from_type(param, record_fields);
+                Self::collect_anon_records_from_type(ret, record_fields);
+                for effect in &row.effects {
+                    for arg in &effect.args {
+                        Self::collect_anon_records_from_type(arg, record_fields);
+                    }
+                }
+                for tail in &row.tails {
+                    Self::collect_anon_records_from_type(tail, record_fields);
+                }
+            }
+            crate::typechecker::Type::Con(_, args) => {
+                for arg in args {
+                    Self::collect_anon_records_from_type(arg, record_fields);
+                }
+            }
+            crate::typechecker::Type::Var(_)
+            | crate::typechecker::Type::Symbol(_)
+            | crate::typechecker::Type::Error => {}
         }
     }
 

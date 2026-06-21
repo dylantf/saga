@@ -4875,6 +4875,35 @@ main () = Lib.greet "world"
     );
 }
 
+#[test]
+fn imported_anonymous_record_return_registers_layout_for_field_access() {
+    let lib = r#"module Lib
+
+pub fun make : Unit -> { id: Int, name: String }
+make () = { id: 1, name: "alice" }
+"#;
+    let main = r#"module Main
+
+import Lib
+
+main () = {
+  let r = Lib.make ()
+  r.id
+}
+"#;
+    with_temp_project_files(&[("src/Lib.saga", lib)], main, |checker, program| {
+        let result = checker.to_result();
+        let lib_program = result.programs().get("Lib").expect("Lib module not found");
+        let lib_core = emit_from_program(lib_program, "lib", checker);
+        let main_core = emit_from_program(program, "main", checker);
+        assert_project_modules_run(
+            &[("lib", &lib_core), ("main", &main_core)],
+            "io:format(\"~p~n\", [main:main(unit)]), init:stop().",
+            &["1"],
+        );
+    });
+}
+
 /// Phase 6.5: a routed-derivable trait (here `ToJson`) shipped in a library
 /// module can be derived on a user record in another module. Before Phase
 /// 6.5, expand_derives only saw trait defs in the current program and
