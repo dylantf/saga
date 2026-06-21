@@ -826,6 +826,7 @@ pub(crate) fn apply_splice_path(
                 ExprKind::RecordCreate {
                     name: name.clone(),
                     fields: body_fields,
+                    record_name: None,
                 },
             );
             single_arm_case(value, pat, body, span)
@@ -936,6 +937,7 @@ pub(crate) fn build_splice_pattern(
                     ExprKind::RecordCreate {
                         name: name.clone(),
                         fields: expr_fields,
+                        record_name: None,
                     },
                 ),
             )
@@ -1125,6 +1127,7 @@ pub(crate) fn build_record_arm(
         ExprKind::RecordCreate {
             name: wrapper_name.to_string(),
             fields: body_fields,
+            record_name: None,
         },
     );
     CaseArm {

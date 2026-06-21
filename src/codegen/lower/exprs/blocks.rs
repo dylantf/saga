@@ -415,11 +415,19 @@ impl<'a> Lowerer<'a> {
                 handler,
                 Some(CExpr::Var(k_var.to_string())),
             ),
-            ExprKind::RecordCreate { name, fields, .. } => {
-                self.lower_record_create_with_k(Some(name.as_str()), expr.id, fields, k_var)
-            }
+            ExprKind::RecordCreate {
+                name,
+                fields,
+                record_name,
+            } => self.lower_record_create_with_k(
+                Some(name.as_str()),
+                record_name.as_deref(),
+                expr.id,
+                fields,
+                k_var,
+            ),
             ExprKind::AnonRecordCreate { fields } => {
-                self.lower_record_create_with_k(None, expr.id, fields, k_var)
+                self.lower_record_create_with_k(None, None, expr.id, fields, k_var)
             }
             ExprKind::Tuple { elements, .. }
                 if elements.iter().any(|e| {
@@ -559,6 +567,7 @@ impl<'a> Lowerer<'a> {
     pub(crate) fn lower_record_create_with_k(
         &mut self,
         name: Option<&str>,
+        record_name: Option<&str>,
         node_id: crate::ast::NodeId,
         fields: &[(String, crate::token::Span, Expr)],
         k_var: &str,
@@ -566,10 +575,21 @@ impl<'a> Lowerer<'a> {
         use std::collections::HashMap;
 
         let order: Vec<String> = match name {
+            // Must use the declared field order, not source order: a record
+            // literal that lists its fields in a different order than the type
+            // declares would otherwise build a tuple with values in the wrong
+            // slots — a silent miscompile. Fail loudly if the type is unresolvable.
             Some(rname) => self
-                .resolved_record_fields(node_id, rname)
+                .record_create_field_order(record_name, node_id, rname)
                 .cloned()
-                .unwrap_or_else(|| fields.iter().map(|(n, _, _)| n.clone()).collect()),
+                .unwrap_or_else(|| {
+                    panic!(
+                        "codegen: cannot resolve field layout for record `{rname}` \
+                         (node {node_id:?}, module `{}`). The record's type could not \
+                         be determined here, so its tuple layout is unknown.",
+                        self.current_semantic_module_name(),
+                    )
+                }),
             None => {
                 let names: Vec<&str> = fields.iter().map(|(n, _, _)| n.as_str()).collect();
                 let mut sorted: Vec<String> = names.iter().map(|s| s.to_string()).collect();

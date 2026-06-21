@@ -458,17 +458,39 @@ impl<'a> Lowerer<'a> {
                 let local_name = format!("{}.{}", module_name, source_name);
                 self.record_fields_for_name(&local_name)
             })
-            // Last resort: resolve by the constructor's surface name alone. A
-            // record's field layout is intrinsic to its named type, but the
-            // lookups above are keyed by NodeId / the *current* module — both of
-            // which can be lost when a record literal is inlined across modules
-            // (the fold freshens the argument's NodeIds and re-bases lowering to
-            // the consumer module, orphaning the producer-qualified entry). The
-            // constructor *tag* survives this via name-based `constructor_atoms`;
-            // mirror that here for the field layout. Only a *unique* `<mod>.<Name>`
-            // match is accepted — an ambiguous bare name falls through so the
-            // caller errors loudly rather than guess a wrong field order.
+            // Last-resort safety net for nodes that reach lowering without a
+            // pinned `record_name` (record patterns, and any RecordCreate node
+            // elaboration didn't annotate): resolve by the constructor's surface
+            // name alone. A record's field layout is intrinsic to its named type,
+            // but the lookups above are keyed by NodeId / the *current* module —
+            // both lost when a record is inlined across modules (the fold freshens
+            // the argument's NodeIds and re-bases lowering to the consumer module).
+            // The constructor *tag* survives this via name-based `constructor_atoms`;
+            // mirror that for the field layout. Only a *unique* `<mod>.<Name>` match
+            // is accepted — an ambiguous bare name falls through so the caller errors
+            // loudly rather than guess a wrong field order. RecordCreate now prefers
+            // the pinned `record_name` (see `record_create_field_order`), so this is
+            // the pattern path's resolver plus belt-and-suspenders for creates.
             .or_else(|| self.record_fields_by_unique_suffix(source_name))
+    }
+
+    /// Resolve the tuple field order for a `RecordCreate`. Prefers the canonical
+    /// `record_name` pinned on the node by elaboration — that name travels *with*
+    /// the node, so it survives the NodeId freshening that cross-module inlining
+    /// does (the failure that dropped `insert_all`'s fields). Falls back to the
+    /// NodeId / current-module / unique-name path for nodes elaboration didn't
+    /// reach (e.g. some derive-synthesized nodes). `None` only when the record's
+    /// type is wholly unresolvable — callers must treat that as a compiler bug and
+    /// fail loudly, never emit a fieldless or source-ordered tuple.
+    pub(super) fn record_create_field_order(
+        &self,
+        record_name: Option<&str>,
+        node_id: crate::ast::NodeId,
+        source_name: &str,
+    ) -> Option<&Vec<String>> {
+        record_name
+            .and_then(|rn| self.record_fields_for_name(rn))
+            .or_else(|| self.resolved_record_fields(node_id, source_name))
     }
 
     /// Find a record's field layout by its bare constructor name, scanning every

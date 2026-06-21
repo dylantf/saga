@@ -100,29 +100,29 @@ impl Lowerer<'_> {
                         .or(origin_module),
                 );
                 let mut elems = vec![CPat::Lit(CLit::Atom(atom))];
-                if let Some(order) = self.resolved_record_fields(*id, name) {
-                    let field_map: HashMap<&str, Option<&Pat>> = fields
-                        .iter()
-                        .map(|(n, p)| (n.as_str(), p.as_ref()))
-                        .collect();
-                    for field_name in order {
-                        match field_map.get(field_name.as_str()) {
-                            Some(Some(p)) => {
-                                elems.push(self.lower_pat(p, constructor_atoms, origin_module))
-                            }
-                            // Field without alias: bind to a var named after the field
-                            Some(None) => elems.push(CPat::Var(core_var(field_name))),
-                            None => elems.push(CPat::Wildcard),
+                // The field order must come from the record's declared type, so a
+                // partial / reordered field pattern lands on the right tuple slots.
+                // Source order would silently mismatch; fail loudly if unresolvable.
+                let order = self.resolved_record_fields(*id, name).unwrap_or_else(|| {
+                    panic!(
+                        "codegen: cannot resolve field layout for record pattern `{name}` \
+                         (node {id:?}, module `{}`). The record's type could not be \
+                         determined here, so its tuple layout is unknown.",
+                        self.current_semantic_module_name(),
+                    )
+                });
+                let field_map: HashMap<&str, Option<&Pat>> = fields
+                    .iter()
+                    .map(|(n, p)| (n.as_str(), p.as_ref()))
+                    .collect();
+                for field_name in order {
+                    match field_map.get(field_name.as_str()) {
+                        Some(Some(p)) => {
+                            elems.push(self.lower_pat(p, constructor_atoms, origin_module))
                         }
-                    }
-                } else {
-                    for (_, alias) in fields {
-                        match alias {
-                            Some(p) => {
-                                elems.push(self.lower_pat(p, constructor_atoms, origin_module))
-                            }
-                            None => elems.push(CPat::Wildcard),
-                        }
+                        // Field without alias: bind to a var named after the field
+                        Some(None) => elems.push(CPat::Var(core_var(field_name))),
+                        None => elems.push(CPat::Wildcard),
                     }
                 }
                 let tuple_pat = CPat::Tuple(elems);

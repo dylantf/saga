@@ -156,6 +156,7 @@ pub(crate) fn derive_record_generic(
             ExprKind::RecordCreate {
                 name: record_name.into(),
                 fields: vec![],
+                record_name: None,
             },
         )
     } else {
@@ -164,6 +165,7 @@ pub(crate) fn derive_record_generic(
             ExprKind::RecordCreate {
                 name: record_name.into(),
                 fields: record_fields,
+                record_name: None,
             },
         )
     };

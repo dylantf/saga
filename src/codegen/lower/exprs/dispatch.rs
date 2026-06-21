@@ -358,14 +358,18 @@ impl<'a> Lowerer<'a> {
                 }
             }
 
-            ExprKind::RecordCreate { name, fields, .. } => {
+            ExprKind::RecordCreate {
+                name,
+                fields,
+                record_name,
+            } => {
                 // The field *order* (the tuple slot layout) must come from the
                 // record's declared type. If it can't be resolved we must NOT fall
                 // back to an empty order — that silently emits a fieldless `{tag}`
                 // tuple, and any later field access (`element(2, …)`) crashes at
                 // runtime with `bad argument`. Fail loudly at compile time instead.
                 let order = self
-                    .resolved_record_fields(expr.id, name)
+                    .record_create_field_order(record_name.as_deref(), expr.id, name)
                     .cloned()
                     .unwrap_or_else(|| {
                         panic!(

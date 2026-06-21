@@ -95,6 +95,7 @@ pub(crate) fn derive_record_default(
         ExprKind::RecordCreate {
             name: record_name.into(),
             fields: body_fields,
+            record_name: None,
         },
     );
 

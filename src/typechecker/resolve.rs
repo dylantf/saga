@@ -867,7 +867,7 @@ impl<'a> Resolver<'a> {
                 self.resolve_scoped_params_body(params, body, None);
             }
             ExprKind::FieldAccess { expr, .. } => self.resolve_expr(expr),
-            ExprKind::RecordCreate { name, fields } => {
+            ExprKind::RecordCreate { name, fields, .. } => {
                 if let Some(resolved) = self.resolve_type_name(name) {
                     self.result.record_types.insert(expr.id, resolved);
                 }

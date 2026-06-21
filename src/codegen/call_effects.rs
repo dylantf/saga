@@ -1375,7 +1375,7 @@ fn head_debug_label(head: &Expr) -> String {
         ),
         ExprKind::Lit { value } => format!("lit({value:?})"),
         ExprKind::Tuple { elements } => format!("tuple/{}", elements.len()),
-        ExprKind::RecordCreate { name, fields } => format!("record({name}/{})", fields.len()),
+        ExprKind::RecordCreate { name, fields, .. } => format!("record({name}/{})", fields.len()),
         ExprKind::AnonRecordCreate { fields } => format!("anon-record/{}", fields.len()),
         ExprKind::HandlerExpr { .. } => "handler-expr".to_string(),
         ExprKind::SymbolIntrinsic { symbol } => format!("symbol({symbol})"),

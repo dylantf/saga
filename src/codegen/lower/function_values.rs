@@ -443,14 +443,26 @@ impl<'a> Lowerer<'a> {
             }
 
             match &expr.kind {
-                ExprKind::RecordCreate { name, fields, .. } => {
+                ExprKind::RecordCreate {
+                    name,
+                    fields,
+                    record_name,
+                } => {
                     let Some(field_tys) = self.record_field_types_from_expected(expected_ty) else {
                         return self.lower_expr_value(expr);
                     };
                     let order = self
-                        .resolved_record_fields(expr.id, name)
+                        .record_create_field_order(record_name.as_deref(), expr.id, name)
                         .cloned()
-                        .unwrap_or_default();
+                        .unwrap_or_else(|| {
+                            panic!(
+                                "codegen: cannot resolve field layout for record `{name}` \
+                                 (node {:?}, module `{}`). The record's type could not be \
+                                 determined here, so its tuple layout is unknown.",
+                                expr.id,
+                                self.current_semantic_module_name(),
+                            )
+                        });
                     let field_map: HashMap<&str, &Expr> =
                         fields.iter().map(|(n, _, e)| (n.as_str(), e)).collect();
                     let mut vars = Vec::new();

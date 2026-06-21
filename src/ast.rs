@@ -673,6 +673,13 @@ pub enum ExprKind {
     RecordCreate {
         name: String,
         fields: Vec<(String, Span, Expr)>,
+        /// Resolved record type name (filled in by elaboration). Carries the
+        /// declared type's canonical name on the node itself so the tuple field
+        /// order survives NodeId freshening during cross-module inlining — the
+        /// same robustness `FieldAccess`/`RecordUpdate` get from their
+        /// `record_name`. `None` until elaboration (or for derive-synthesized
+        /// nodes that have no inferred type yet).
+        record_name: Option<String>,
     },
 
     /// `{ street: "Main St", city: "Portland" }` (anonymous record)

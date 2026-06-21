@@ -461,7 +461,11 @@ impl Parser {
                     expr = Expr {
                         id: self.next_id(),
                         span,
-                        kind: ExprKind::RecordCreate { name, fields },
+                        kind: ExprKind::RecordCreate {
+                            name,
+                            fields,
+                            record_name: None,
+                        },
                     };
                     continue;
                 }
@@ -534,7 +538,11 @@ impl Parser {
                     expr = Expr {
                         id: self.next_id(),
                         span,
-                        kind: ExprKind::RecordCreate { name, fields },
+                        kind: ExprKind::RecordCreate {
+                            name,
+                            fields,
+                            record_name: None,
+                        },
                     };
                     continue;
                 }
@@ -903,7 +911,11 @@ impl Parser {
                     Ok(Expr {
                         id: self.next_id(),
                         span: span.to(end),
-                        kind: ExprKind::RecordCreate { name: i, fields },
+                        kind: ExprKind::RecordCreate {
+                            name: i,
+                            fields,
+                            record_name: None,
+                        },
                     })
                 } else {
                     // Bare constructor — application is handled by parse_application

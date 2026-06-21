@@ -326,7 +326,7 @@ pub fn format_expr(expr: &Expr) -> Doc {
             docs![format_expr_atom(expr), Doc::text(format!(".{}", field))]
         }
 
-        ExprKind::RecordCreate { name, fields } => format_record_create(Some(name), fields),
+        ExprKind::RecordCreate { name, fields, .. } => format_record_create(Some(name), fields),
         ExprKind::AnonRecordCreate { fields } => format_record_create(None, fields),
 
         ExprKind::RecordUpdate { record, fields, .. } => {

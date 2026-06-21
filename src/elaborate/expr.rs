@@ -606,16 +606,25 @@ impl Elaborator {
                 )
             }
 
-            ExprKind::RecordCreate { name, fields } => Expr::rebuild_like(
-                expr,
-                ExprKind::RecordCreate {
-                    name: name.clone(),
-                    fields: fields
-                        .iter()
-                        .map(|(n, s, e)| (n.clone(), *s, self.elaborate_expr(e)))
-                        .collect(),
-                },
-            ),
+            ExprKind::RecordCreate { name, fields, .. } => {
+                // Pin the constructed record's canonical type name on the node, from
+                // the name-resolver's per-node record-type map (the same source the
+                // codegen NodeId path reads). Carrying it on the node makes the tuple
+                // field order survive NodeId freshening during cross-module inlining
+                // — the fragile path that dropped insert_all's fields.
+                let record_name = self.resolution.record_type(expr.id).map(str::to_string);
+                Expr::rebuild_like(
+                    expr,
+                    ExprKind::RecordCreate {
+                        name: name.clone(),
+                        fields: fields
+                            .iter()
+                            .map(|(n, s, e)| (n.clone(), *s, self.elaborate_expr(e)))
+                            .collect(),
+                        record_name,
+                    },
+                )
+            }
 
             ExprKind::AnonRecordCreate { fields } => Expr::rebuild_like(
                 expr,

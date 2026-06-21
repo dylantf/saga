@@ -328,7 +328,11 @@ impl Normalizer {
             }
 
             // RecordCreate: normalize field values.
-            ExprKind::RecordCreate { name, fields } => {
+            ExprKind::RecordCreate {
+                name,
+                fields,
+                record_name,
+            } => {
                 let new_fields = fields
                     .iter()
                     .map(|(n, s, e)| (n.clone(), *s, self.normalize_and_lift(e, lifted)))
@@ -338,6 +342,7 @@ impl Normalizer {
                     ExprKind::RecordCreate {
                         name: name.clone(),
                         fields: new_fields,
+                        record_name: record_name.clone(),
                     },
                 )
             }
