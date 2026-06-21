@@ -584,6 +584,45 @@ main () = run ()
 }
 
 #[test]
+fn closed_callback_row_does_not_absorb_effect_the_callee_re_performs() {
+    // Call-site HOF effect absorption must not cancel an effect the callee
+    // still performs in its own result. `runner` takes a *closed*-row
+    // effectful callback (`Unit -> Int needs {Tick}`), handles it with a
+    // nested same-effect handler, then performs its own `tick!` to the OUTER
+    // handler — so its result genuinely `needs {Tick}`. Passing the callback
+    // previously absorbed `{Tick}` unconditionally, so `caller` (whose effect
+    // row is inferred, not annotated) was compiled as PURE and handed `runner`
+    // an empty evidence tuple `{}`, crashing the op dispatch with "bad
+    // argument". Only an *open* callback row (`{E, ..e}`, e.g. `spawn`) is a
+    // row-polymorphic runner that absorbs unconditionally.
+    let src = r#"
+effect Tick {
+  fun tick : Unit -> Int
+}
+
+handler th for Tick {
+  tick () = resume 1
+}
+
+fun runner : (Unit -> Int needs {Tick}) -> Int needs {Tick}
+runner make = {
+  let inner = make () with th
+  let outer = tick! ()
+  inner + outer
+}
+
+caller () = runner (fun () -> tick! ())
+
+main () = {
+  let r = caller () with th
+  r
+}
+"#;
+
+    assert_runs_and_stdout_contains(src, &["2"]);
+}
+
+#[test]
 fn inner_dynamic_handler_is_kept_when_outer_static_handler_handles_same_effect() {
     let src = r#"
 effect Log {

@@ -771,6 +771,7 @@ impl Checker {
             callee_ty: Type,
             ret_ty: Type,
             is_last: bool,
+            callback_open: bool,
         }
 
         let mut args = Vec::new();
@@ -785,6 +786,10 @@ impl Checker {
                 self.expect_function_type_for_app(&callee_ty, app_expr.span, app_expr)?;
             let resolved_param = self.sub.apply(&param_ty);
             let is_last = idx + 1 == args.len();
+            // Capture the *declared* callback-row openness now, before the
+            // argument unifies any row-variable tail away (post-unification a
+            // runner's `{E, ..e}` can collapse to a closed `{E}`).
+            let callback_open = self.fun_spine_has_open_row(&param_ty);
 
             if let ExprKind::Lambda { params, body } = &arg.kind
                 && matches!(resolved_param, Type::Fun(_, _, _))
@@ -797,6 +802,7 @@ impl Checker {
                     callee_ty: callee_ty.clone(),
                     ret_ty: ret_ty.clone(),
                     is_last,
+                    callback_open,
                 });
                 self.record_type(app_expr.id, &ret_ty);
                 current_ty = ret_ty;
@@ -806,8 +812,13 @@ impl Checker {
             let arg_ty = self.infer_arg_against(arg, &param_ty)?;
             let arg_ty_pre = arg_ty.clone();
             self.unify_arg_with_param(&arg_ty, &arg_ty_pre, &param_ty, arg.span)?;
-            let absorbed_entries =
-                self.apply_callback_argument_effects(&arg_ty_pre, &param_ty, arg.span)?;
+            let absorbed_entries = self.apply_callback_argument_effects(
+                &arg_ty_pre,
+                &param_ty,
+                &callee_ty,
+                callback_open,
+                arg.span,
+            )?;
             self.record_type(app_expr.id, &ret_ty);
             current_ty = ret_ty.clone();
 
@@ -841,6 +852,8 @@ impl Checker {
             let absorbed_entries = self.apply_callback_argument_effects(
                 &arg_ty_pre,
                 &deferred_lambda.param_ty,
+                &deferred_lambda.callee_ty,
+                deferred_lambda.callback_open,
                 deferred_lambda.arg_expr.span,
             )?;
             if deferred_lambda.is_last
@@ -1192,10 +1205,51 @@ impl Checker {
         Ok(())
     }
 
+    /// Effect names the callee still performs once fully applied: every
+    /// effect row along its own arrow spine. Used to decide whether a
+    /// callback-declared effect is genuinely discharged by the callee or just
+    /// re-performed by it (see the call-site absorption in
+    /// `apply_callback_argument_effects`). Walks only the top-level spine (not
+    /// into parameter types).
+    fn callee_performed_effect_names(
+        &self,
+        callee_ty: &Type,
+    ) -> std::collections::HashSet<String> {
+        let mut names = std::collections::HashSet::new();
+        let mut ty = self.sub.apply(callee_ty);
+        while let Type::Fun(_, ret, row) = ty {
+            for entry in &row.effects {
+                names.insert(entry.name.clone());
+            }
+            ty = self.sub.apply(&ret);
+        }
+        names
+    }
+
+    /// Whether any effect row along a function type's arrow spine is open
+    /// (has a row-variable tail). An open callback row (`{E, ..e}`) marks a
+    /// row-polymorphic *runner* — e.g. `spawn`/`run_with_log` — that accepts a
+    /// callback performing `E` plus arbitrary forwarded effects and discharges
+    /// `E` even though `E` may reappear in its own result row. A closed
+    /// callback row (`{E}`) carries no such intent. Must be evaluated against
+    /// the *declared* param type before the argument unifies the tail away.
+    fn fun_spine_has_open_row(&self, ty: &Type) -> bool {
+        let mut t = self.sub.apply(ty);
+        while let Type::Fun(_, ret, row) = t {
+            if !row.tails.is_empty() {
+                return true;
+            }
+            t = self.sub.apply(&ret);
+        }
+        false
+    }
+
     fn apply_callback_argument_effects(
         &mut self,
         actual_arg: &Type,
         expected_param: &Type,
+        callee_ty: &Type,
+        callback_open: bool,
         arg_span: Span,
     ) -> Result<Vec<super::EffectEntry>, Diagnostic> {
         let resolved_param = self.sub.apply(expected_param);
@@ -1229,6 +1283,19 @@ impl Checker {
                 }
             }
             collect_declared_entries_applied(self, param_shallow, &mut absorbed_entries);
+            // For a *closed* callback row, an effect the callee re-performs in
+            // its own result is not discharged by passing the callback — the
+            // caller must still perform it. This is the `from_sub : (Unit ->
+            // sel needs {QB}) -> scope needs {QB}` shape: `from_sub` handles
+            // the callback's `QB` with a nested handler but performs its own
+            // `QB` to the outer handler, so the caller keeps `QB`. An *open*
+            // callback row (`{E, ..e}`) is a row-polymorphic runner (`spawn`,
+            // `run_with_log`) that discharges `E` regardless of whether `E`
+            // reappears in its result, so it keeps the unconditional behavior.
+            if !callback_open {
+                let performed = self.callee_performed_effect_names(callee_ty);
+                absorbed_entries.retain(|entry| !performed.contains(&entry.name));
+            }
             for entry in &absorbed_entries {
                 self.call_site_absorbed.insert(entry.name.clone());
             }

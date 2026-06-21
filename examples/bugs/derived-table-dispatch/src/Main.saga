@@ -1,0 +1,30 @@
+module Main
+
+import Std.IO (console)
+import Lib (QB, Step, Tbl, Col2, from_sub, from_sub_direct, col2_name, col2)
+
+# BUG: from_sub runs a nested `with h` (same effect) and THEN performs bindd!,
+# whose DT argument captures a closure using from_sub's trait-dictionary params
+# (from the BScope/Generic constraints). bindd! fails to dispatch -> bad argument.
+run_bug () = {
+  let t : { x: Col2 Int } = from_sub (fun () -> {
+    let p = from_! (Tbl ({ x: col2 "id" }))
+    sel_! ({ x: p.x })
+  })
+  col2_name t.x
+}
+
+# CONTROL: identical, but from_sub_direct has NO nested handler. Works.
+run_ok () = {
+  let t : { x: Col2 Int } = from_sub_direct ({ x: col2 "id" })
+  col2_name t.x
+}
+
+main () = {
+  let Step go_ok = run_ok () with Lib.h
+  let (ok, _) = go_ok 0
+  println ("control (no nested handler): " <> ok)
+  let Step go_bug = run_bug () with Lib.h
+  let (bug, _) = go_bug 0
+  println ("bug (nested handler): " <> bug)
+} with console
