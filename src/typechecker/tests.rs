@@ -5271,6 +5271,59 @@ go () = {
 }
 
 #[test]
+fn generic_anon_record_rebuilt_via_fundep_chain_resolves_field_access() {
+    // A value rebuilt from a *transformed* Generic representation —
+    // `from (map_rep (to x))` — recovers its anonymous record type with no
+    // annotation. `Generic`'s fundep only runs forward (type -> rep), so
+    // `output` in `output: Generic out_rep` is never pinned by the fundep;
+    // the only thing that determines it is the anonymous-record bijection
+    // run in reverse (rep -> record type). For the field access `out.a` to
+    // disambiguate mid-inference, `improve_pending_fundeps` must (a) drive
+    // the recursive `MapRep`/`MapLeaf`/`FieldMap` walk that grounds
+    // `out_rep` via each selected impl's `where`-apps, and (b) recover the
+    // record type from the now-concrete rep. Without that, this reported
+    // "no record has field 'a'". Mirrors Kraken's derived-table rebuild.
+    check(
+        "import Std.Generic (Generic, Leaf, Labeled, Record)
+import Std.Base (KnownSymbol, Proxy)
+type Src a = Src a
+type Dst a = Dst String
+fun make_dst : String -> Dst a
+make_dst name = Dst name
+trait FieldMap inp out | inp -> out {}
+impl FieldMap (Dst a) for Src a {}
+trait MapLeaf rep_in rep_out | rep_in -> rep_out {
+  fun map_leaf : rep_in -> String -> rep_out
+}
+impl MapLeaf (Leaf out) for Leaf value where {value: FieldMap out} {
+  map_leaf _leaf name = Leaf (make_dst name)
+}
+trait MapRep rep_in rep_out | rep_in -> rep_out {
+  fun map_rep : rep_in -> rep_out
+}
+impl MapRep (Record out) for Record fields where {fields: MapRep out} {
+  map_rep rep = case rep { Record name fields -> Record name (map_rep fields) }
+}
+impl MapRep (Labeled n out) for Labeled n field where {n: KnownSymbol, field: MapLeaf out} {
+  map_rep rep = case rep {
+    Labeled inner -> Labeled (map_leaf inner (symbol_name (Proxy : Proxy n)))
+  }
+}
+fun rebuild : input -> output
+  where {input: Generic in_rep, in_rep: MapRep out_rep, output: Generic out_rep}
+rebuild x = from (map_rep (to x))
+fun go : Unit -> String
+go () = {
+  let src = { a: Src 1 }
+  let out = rebuild src
+  let Dst name = out.a
+  name
+}",
+    )
+    .unwrap();
+}
+
+#[test]
 fn multi_var_determinant_requires_self_on_determining_side() {
     let result = check(
         "trait Pair a b c | b -> c {

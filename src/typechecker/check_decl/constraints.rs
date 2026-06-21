@@ -13,10 +13,42 @@ impl Checker {
         loop {
             let before = self.sub.solved_count();
             let pending = self.trait_state.pending_constraints.clone();
-            for (trait_name, extras, self_ty, _, _) in &pending {
+            for (trait_name, extras, self_ty, span, node_id) in &pending {
                 let resolved_trait = self
                     .resolve_trait_name(trait_name)
                     .unwrap_or_else(|| trait_name.clone());
+                // `Generic`'s anonymous-record fundep runs in both directions
+                // here, mirroring `check_pending_constraints` — field-access
+                // disambiguation needs the concrete record type before the
+                // end-of-body constraint solve. There is no named impl for an
+                // anonymous record, so the structural rep is the bridge:
+                //   forward:  `Generic {record} r`   pins `r` to the rep.
+                //   reverse:  `Generic out rep`       pins `out` to the rep's
+                //             record type, once `rep` is a fully concrete
+                //             anonymous-record representation.
+                // The reverse direction is what lets a value rebuilt from a
+                // transformed Generic rep (`from (map_rep (to x))`) recover its
+                // anonymous record type without an annotation.
+                if is_generic_trait_name(&resolved_trait) {
+                    let resolved_self = self.sub.apply(self_ty);
+                    if let Type::Record(fields) = &resolved_self {
+                        let rep = anon_record_generic_rep(fields);
+                        for extra in extras {
+                            if matches!(self.sub.apply(extra), Type::Var(_)) {
+                                let _ = self.unify(extra, &rep);
+                            }
+                        }
+                        continue;
+                    }
+                    if matches!(resolved_self, Type::Var(_))
+                        && let Some(rep_ty) = extras.first()
+                        && let Some(record_ty) =
+                            anon_record_from_generic_rep(&self.sub.apply(rep_ty))
+                    {
+                        let _ = self.unify(self_ty, &record_ty);
+                        continue;
+                    }
+                }
                 let Some(fundep) = self
                     .trait_state
                     .traits
@@ -113,6 +145,11 @@ impl Checker {
                 for extra in &info.trait_type_args {
                     crate::typechecker::collect_free_vars(extra, &mut impl_vars);
                 }
+                for (_, _, extra_types) in &info.param_constraints_by_var_with_args {
+                    for extra in extra_types {
+                        crate::typechecker::collect_free_vars(extra, &mut impl_vars);
+                    }
+                }
                 for var_id in impl_vars {
                     pattern_subst
                         .entry(var_id)
@@ -127,6 +164,35 @@ impl Checker {
                     let pinned =
                         crate::typechecker::check_traits::substitute_pattern_vars(impl_extra, &pattern_subst);
                     let _ = self.unify(call_extra, &pinned);
+                }
+                // Register the selected impl's fundep-bearing `where`-app
+                // constraints so later passes can keep evaluating a recursive
+                // type-level function (e.g. the structural `MapRep` walk over a
+                // Generic rep, whose determined extra at each level is fixed by
+                // a nested `where`-app on the field/subtree). These are pushed
+                // exactly once — when this constraint's determined extras are
+                // first pinned (`to_pin` non-empty); on later passes those
+                // extras are concrete, so `to_pin` is empty and we return above
+                // before reaching here, keeping the fixpoint bounded.
+                for (req_trait, var_id, extra_types) in &info.param_constraints_by_var_with_args {
+                    if let Some(self_arg) = pattern_subst.get(var_id) {
+                        let resolved_extras: Vec<Type> = extra_types
+                            .iter()
+                            .map(|e| {
+                                crate::typechecker::check_traits::substitute_pattern_vars(
+                                    e,
+                                    &pattern_subst,
+                                )
+                            })
+                            .collect();
+                        self.trait_state.pending_constraints.push((
+                            req_trait.clone(),
+                            resolved_extras,
+                            self_arg.clone(),
+                            *span,
+                            *node_id,
+                        ));
+                    }
                 }
             }
             if self.sub.solved_count() == before {

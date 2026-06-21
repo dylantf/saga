@@ -1058,79 +1058,22 @@ impl<'a> Lowerer<'a> {
         expr: &ast::Expr,
         record_fields: &mut HashMap<String, Vec<String>>,
     ) {
-        match &expr.kind {
-            ast::ExprKind::AnonRecordCreate { fields } => {
-                let names: Vec<&str> = fields.iter().map(|(n, _, _)| n.as_str()).collect();
-                let tag = ast::anon_record_tag(&names);
-                let mut sorted_names: Vec<String> = names.iter().map(|n| n.to_string()).collect();
-                sorted_names.sort();
-                record_fields.entry(tag).or_insert(sorted_names);
-                for (_, _, e) in fields {
-                    Self::collect_anon_records_from_expr(e, record_fields);
-                }
-            }
-            ast::ExprKind::RecordCreate { fields, .. } => {
-                for (_, _, e) in fields {
-                    Self::collect_anon_records_from_expr(e, record_fields);
-                }
-            }
-            ast::ExprKind::RecordUpdate { record, fields, .. } => {
-                Self::collect_anon_records_from_expr(record, record_fields);
-                for (_, _, e) in fields {
-                    Self::collect_anon_records_from_expr(e, record_fields);
-                }
-            }
-            ast::ExprKind::Block { stmts, .. } => {
-                for stmt in stmts {
-                    match &stmt.node {
-                        ast::Stmt::Expr(e) | ast::Stmt::Let { value: e, .. } => {
-                            Self::collect_anon_records_from_expr(e, record_fields);
-                        }
-                        ast::Stmt::LetFun { body, .. } => {
-                            Self::collect_anon_records_from_expr(body, record_fields);
-                        }
-                    }
-                }
-            }
-            ast::ExprKind::App { func, arg, .. } => {
-                Self::collect_anon_records_from_expr(func, record_fields);
-                Self::collect_anon_records_from_expr(arg, record_fields);
-            }
-            ast::ExprKind::If {
-                cond,
-                then_branch,
-                else_branch,
-                ..
-            } => {
-                Self::collect_anon_records_from_expr(cond, record_fields);
-                Self::collect_anon_records_from_expr(then_branch, record_fields);
-                Self::collect_anon_records_from_expr(else_branch, record_fields);
-            }
-            ast::ExprKind::Case {
-                scrutinee, arms, ..
-            } => {
-                Self::collect_anon_records_from_expr(scrutinee, record_fields);
-                for arm in arms {
-                    Self::collect_anon_records_from_expr(&arm.node.body, record_fields);
-                }
-            }
-            ast::ExprKind::Lambda { body, .. } => {
-                Self::collect_anon_records_from_expr(body, record_fields);
-            }
-            ast::ExprKind::FieldAccess { expr, .. } => {
-                Self::collect_anon_records_from_expr(expr, record_fields);
-            }
-            ast::ExprKind::Tuple { elements, .. } => {
-                for e in elements {
-                    Self::collect_anon_records_from_expr(e, record_fields);
-                }
-            }
-            ast::ExprKind::BinOp { left, right, .. } => {
-                Self::collect_anon_records_from_expr(left, record_fields);
-                Self::collect_anon_records_from_expr(right, record_fields);
-            }
-            _ => {}
+        if let ast::ExprKind::AnonRecordCreate { fields } = &expr.kind {
+            let names: Vec<&str> = fields.iter().map(|(n, _, _)| n.as_str()).collect();
+            let tag = ast::anon_record_tag(&names);
+            let mut sorted_names: Vec<String> = names.iter().map(|n| n.to_string()).collect();
+            sorted_names.sort();
+            record_fields.entry(tag).or_insert(sorted_names);
         }
+        // Recurse into every child expression. Using the shared exhaustive
+        // walker (rather than a hand-rolled match) ensures anon records nested
+        // under any expression form — `with`/handler bodies, `do`, `receive`,
+        // pipes, comprehensions, etc. — are registered. A missing arm here
+        // silently drops the field layout and crashes lowering at the eventual
+        // `.field` access.
+        crate::codegen::optimize::walk_expr(expr, &mut |child| {
+            Self::collect_anon_records_from_expr(child, record_fields);
+        });
     }
 
     fn register_all_module_ctors(&mut self) {

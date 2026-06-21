@@ -555,6 +555,35 @@ main () = pick_id { id: 42, name: "Alice" }
 }
 
 #[test]
+fn anonymous_record_created_inside_with_body_lowers_field_access() {
+    // The pass that registers anonymous-record field layouts for lowering must
+    // recurse through `with`/handler bodies (and every other expression form).
+    // It previously used a hand-rolled match with no `With` arm, so an anon
+    // record created inside a `} with { ... }` body was never registered and
+    // the `.field` access crashed lowering with "could not resolve record
+    // type for field access". The walker now reuses the shared exhaustive
+    // child-expr visitor.
+    let src = r#"
+effect Tick {
+  fun tick : Unit -> Int
+}
+
+fun run : Unit -> Int
+run () = {
+  let n = tick! ()
+  let r = { a: n, b: 99 }
+  r.a
+} with {
+  tick () = resume 7
+}
+
+main () = run ()
+"#;
+
+    assert_runs_and_stdout_contains(src, &["7"]);
+}
+
+#[test]
 fn inner_dynamic_handler_is_kept_when_outer_static_handler_handles_same_effect() {
     let src = r#"
 effect Log {
