@@ -595,6 +595,98 @@ result () = maybe_fail False with to_result_str
 }
 
 #[test]
+fn unannotated_derived_subquery_result_is_not_generalized() {
+    // Kraken `from_subquery` shape. `from_sub` carries trait-dict params
+    // (BScope/Generic), runs a nested handler of the same effect, then performs
+    // `bindd!` whose DT arg captures a closure using those dicts. Its result is
+    // bound UNANNOTATED (`let t = from_sub ...`) and used by a trailing op.
+    //
+    // The result type is determined only by `Generic`'s *reverse* (rep ->
+    // record type) bijection. Without modelling that in the let-generalization
+    // guard, `t` was generalized over its Generic dictionary into a dict-lambda,
+    // which puts `from_sub` in value position — lowered with an identity
+    // continuation, so `bindd!` returns its raw `Step` instead of running the
+    // closure, and `t.x` is garbage (`case_clause` at runtime). The guard now
+    // also pins the self of a `Generic self rep` whose `rep` is determined, and
+    // treats an anonymous record as a concrete fundep determinant.
+    let src = r#"module Main
+
+import Std.Generic (Generic, Leaf, Labeled, Record)
+import Std.Base (Proxy, KnownSymbol)
+
+type Col2 a = Col2 String
+fun col2 : String -> Col2 a
+col2 name = Col2 name
+fun col2_name : Col2 a -> String
+col2_name c = case c { Col2 n -> n }
+
+trait BLeaf rep_in rep_out | rep_in -> rep_out {
+  fun bleaf : rep_in -> String -> rep_out
+}
+impl BLeaf (Leaf (Col2 a)) for Leaf value {
+  bleaf _l name = Leaf (col2 name)
+}
+trait BScope rep_in rep_out | rep_in -> rep_out {
+  fun bscope : rep_in -> rep_out
+}
+impl BScope (Record out) for Record fields where {fields: BScope out} {
+  bscope rep = case rep { Record name fields -> Record name (bscope fields) }
+}
+impl BScope (Labeled n out) for Labeled n field where {n: KnownSymbol, field: BLeaf out} {
+  bscope rep = case rep {
+    Labeled inner -> Labeled (bleaf inner (symbol_name (Proxy : Proxy n)))
+  }
+}
+fun derived_cols : sel -> scope
+  where {sel: Generic sr, sr: BScope scoper, scope: Generic scoper}
+derived_cols selection = from (bscope (to selection))
+
+type Tbl cols = Tbl cols
+record DT scope { make: String -> scope }
+type Step a = Step (Int -> (a, Int))
+effect QB {
+  fun from_ : Tbl cols -> cols
+  fun bindd : DT scope -> scope
+  fun sel_ : sel -> sel
+}
+handler h for QB {
+  from_ tbl = Step (fun s -> { let Tbl c = tbl; let Step rr = resume c; rr (s + 1) })
+  bindd dt = Step (fun s -> { let scope = dt.make ("t" <> show s); let Step rr = resume scope; rr (s + 1) })
+  sel_ v = Step (fun s -> { let Step rr = resume v; rr s })
+  return v = Step (fun s -> (v, s))
+}
+
+fun from_sub : (Unit -> sel needs {QB}) -> scope needs {QB}
+  where {sel: Generic sr, sr: BScope scoper, scope: Generic scoper}
+from_sub make = {
+  let Step run_sub = make () with h
+  let (selection, _) = run_sub 0
+  bindd! (DT { make: fun _alias -> derived_cols selection })
+}
+
+fun query : (Unit -> a needs {QB}) -> a
+query make = {
+  let Step run = make () with h
+  let (out, _) = run 0
+  out
+}
+
+pub fun result : Unit -> String
+result () = {
+  let r = query (fun () -> {
+    let t = from_sub (fun () -> {
+      let p = from_! (Tbl ({ x: col2 "id" }))
+      sel_! ({ x: p.x })
+    })
+    sel_! ({ x: t.x })
+  })
+  col2_name r.x
+}
+"#;
+    check_result_string("unannotated_derived_subquery_result_is_not_generalized", src, "x");
+}
+
+#[test]
 fn dict_method_effectful_call_threads_evidence() {
     // Trait method calls elaborate to `App(DictMethodAccess, ...)`. When the
     // selected impl declares `needs`, the call must thread evidence/return_k

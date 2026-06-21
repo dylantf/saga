@@ -1,30 +1,31 @@
 module Main
 
 import Std.IO (console)
-import Lib (QB, Step, Tbl, Col2, from_sub, from_sub_direct, col2_name, col2)
+import Lib (QB, Step, Tbl, Col2, from_sub, query, col2_name, col2)
 
-# BUG: from_sub runs a nested `with h` (same effect) and THEN performs bindd!,
-# whose DT argument captures a closure using from_sub's trait-dictionary params
-# (from the BScope/Generic constraints). bindd! fails to dispatch -> bad argument.
-run_bug () = {
-  let t : { x: Col2 Int } = from_sub (fun () -> {
+# Faithful `prolific_authors_query` shape. The crash needs FOUR things together:
+#   1. `from_sub` carries trait-dictionary params (BScope/Generic constraints).
+#   2. `from_sub` runs a nested handler of the same effect (`make () with h`).
+#   3. it performs `bindd!` whose DT arg captures a closure using those dicts.
+#   4. `from_sub` is called inside a callback whose QB handler is installed by an
+#      OUTER hof (`query`), and its result is bound UNANNOTATED then used by a
+#      trailing op (`sel_!`).
+#
+# Without the fix, the unannotated `let t = from_sub (...)` is generalized over
+# its Generic dictionary into a dict-lambda; that puts `from_sub` in value
+# position, so it is lowered with an identity continuation, `bindd!` returns its
+# raw `Step` instead of running `make`, and `t.x` is garbage -> `case_clause` in
+# `col2_name`. Earlier minimal repros annotated the binding or handled QB
+# directly (no outer hof), so they masked it.
+probe () = query (fun () -> {
+  let t = from_sub (fun () -> {
     let p = from_! (Tbl ({ x: col2 "id" }))
     sel_! ({ x: p.x })
   })
-  col2_name t.x
-}
-
-# CONTROL: identical, but from_sub_direct has NO nested handler. Works.
-run_ok () = {
-  let t : { x: Col2 Int } = from_sub_direct ({ x: col2 "id" })
-  col2_name t.x
-}
+  sel_! ({ x: t.x })
+})
 
 main () = {
-  let Step go_ok = run_ok () with Lib.h
-  let (ok, _) = go_ok 0
-  println ("control (no nested handler): " <> ok)
-  let Step go_bug = run_bug () with Lib.h
-  let (bug, _) = go_bug 0
-  println ("bug (nested handler): " <> bug)
+  let result = probe ()
+  println ("derived subquery column: " <> col2_name result.x)
 } with console

@@ -110,7 +110,6 @@ impl Checker {
         }
 
         // Save effects and start fresh for this function body
-        let saved_absorbed = std::mem::take(&mut self.call_site_absorbed);
         let saved_trait_forward = std::mem::take(&mut self.trait_forward_row_vars);
         let saved_effs = self.save_effects();
         for clause in clauses {
@@ -257,12 +256,16 @@ impl Checker {
             }
         }
 
-        let all_body_effs = if absorbed.is_empty() {
-            all_body_effs
-        } else {
-            self.call_site_absorbed.extend(absorbed.iter().cloned());
-            all_body_effs.subtract(&absorbed)
-        };
+        // No boundary subtraction: `all_body_effs` already reflects exactly what
+        // this function performs. Calling a callback parameter (`f ()`) emits the
+        // callback's effects via the application; an internal `with` discharges
+        // them at its boundary; anything left is genuinely forwarded and belongs
+        // in this function's row. Subtracting the callback's *declared* effects
+        // here used to clobber the function's own/forwarded uses of the same
+        // effect (the definition-side twin of the call-site absorption bug), and
+        // then `call_site_absorbed` had to mute the resulting bogus "unused
+        // effect" warnings. Both are gone. (`absorbed` is still computed above —
+        // it drives the "callback effect neither handled nor forwarded" error.)
 
         // Check exhaustiveness of function clause patterns (multi-column Maranget)
         if clauses.len() > 1
@@ -426,10 +429,12 @@ impl Checker {
                 )?;
             }
 
-            // Check for effects declared but never used.
-            // Effects that were absorbed during call-site HOF absorption (e.g. Actor
-            // on spawn!) are excluded: absorption proves the effect was needed in scope
-            // even though it no longer appears in the accumulator.
+            // Check for effects declared but never used. `all_body_effs` now
+            // accurately reflects what the body performs (no absorption fudging),
+            // so an effect declared in `needs` but absent from the body is
+            // genuinely dead — including the case the old absorption hid: a HOF
+            // that declares an effect it actually discharges (e.g. the dead
+            // `Actor` that motivated `spawn`'s honest signature).
             let body_effect_names: std::collections::HashSet<String> = all_body_effs
                 .effects
                 .iter()
@@ -460,7 +465,6 @@ impl Checker {
             let unused: Vec<_> = declared_effects
                 .difference(&body_effect_names)
                 .filter(|name| !forwarded_effects.contains(*name))
-                .filter(|name| !self.call_site_absorbed.contains(*name))
                 .collect();
             if !unused.is_empty() {
                 let span = annotation_span.expect("unused effects implies annotation exists");
@@ -475,8 +479,6 @@ impl Checker {
             }
         }
 
-        // Restore call_site_absorbed for outer scope
-        self.call_site_absorbed = saved_absorbed;
         self.trait_forward_row_vars = saved_trait_forward;
 
         // Check for unresolved ambiguous field accesses. Any var still in field_candidates

@@ -692,8 +692,9 @@ impl Checker {
             ty = Type::Fun(a, b, body_effs.clone());
         }
 
-        // Lambda effects propagate to enclosing scope
-        self.emit_effects(&body_effs);
+        // SPIKE: a closure is a value — defining it performs nothing. Its
+        // effects live in the arrow type above and are realized only when it is
+        // applied. (Was: self.emit_effects(&body_effs), which leaked them.)
         Ok(ty)
     }
 
@@ -743,7 +744,7 @@ impl Checker {
             ty = Type::Fun(a, b, body_effs.clone());
         }
 
-        self.emit_effects(&body_effs);
+        // SPIKE: see infer_lambda — closures don't perform effects at definition.
         Ok(Some(ty))
     }
 
@@ -771,7 +772,6 @@ impl Checker {
             callee_ty: Type,
             ret_ty: Type,
             is_last: bool,
-            callback_open: bool,
         }
 
         let mut args = Vec::new();
@@ -786,10 +786,6 @@ impl Checker {
                 self.expect_function_type_for_app(&callee_ty, app_expr.span, app_expr)?;
             let resolved_param = self.sub.apply(&param_ty);
             let is_last = idx + 1 == args.len();
-            // Capture the *declared* callback-row openness now, before the
-            // argument unifies any row-variable tail away (post-unification a
-            // runner's `{E, ..e}` can collapse to a closed `{E}`).
-            let callback_open = self.fun_spine_has_open_row(&param_ty);
 
             if let ExprKind::Lambda { params, body } = &arg.kind
                 && matches!(resolved_param, Type::Fun(_, _, _))
@@ -802,7 +798,6 @@ impl Checker {
                     callee_ty: callee_ty.clone(),
                     ret_ty: ret_ty.clone(),
                     is_last,
-                    callback_open,
                 });
                 self.record_type(app_expr.id, &ret_ty);
                 current_ty = ret_ty;
@@ -812,13 +807,8 @@ impl Checker {
             let arg_ty = self.infer_arg_against(arg, &param_ty)?;
             let arg_ty_pre = arg_ty.clone();
             self.unify_arg_with_param(&arg_ty, &arg_ty_pre, &param_ty, arg.span)?;
-            let absorbed_entries = self.apply_callback_argument_effects(
-                &arg_ty_pre,
-                &param_ty,
-                &callee_ty,
-                callback_open,
-                arg.span,
-            )?;
+            let absorbed_entries =
+                self.apply_callback_argument_effects(&arg_ty_pre, &param_ty, arg.span)?;
             self.record_type(app_expr.id, &ret_ty);
             current_ty = ret_ty.clone();
 
@@ -852,8 +842,6 @@ impl Checker {
             let absorbed_entries = self.apply_callback_argument_effects(
                 &arg_ty_pre,
                 &deferred_lambda.param_ty,
-                &deferred_lambda.callee_ty,
-                deferred_lambda.callback_open,
                 deferred_lambda.arg_expr.span,
             )?;
             if deferred_lambda.is_last
@@ -897,38 +885,9 @@ impl Checker {
 
         let joined_elem = self.join_branch_types(&elem_tys, expr.span)?;
 
-        // Absorb effects declared on the joined element type from the
-        // ambient effect_row, matching what the pairwise Cons chain would
-        // do via `apply_callback_argument_effects` per element. Walks the
-        // joined type's `Type::Fun(_, ret, row)` chain and treats every
-        // row entry as a callback-declared effect.
-        let mut absorbed_entries: Vec<super::EffectEntry> = Vec::new();
-        fn collect_entries(checker: &Checker, ty: &Type, out: &mut Vec<super::EffectEntry>) {
-            if let Type::Fun(_, ret, row) = ty {
-                for entry in &row.effects {
-                    let applied = super::EffectEntry {
-                        name: entry.name.clone(),
-                        args: entry
-                            .args
-                            .iter()
-                            .map(|arg| checker.sub.apply(arg))
-                            .collect(),
-                    };
-                    if !out.iter().any(|seen| seen.same_instantiation(&applied)) {
-                        out.push(applied);
-                    }
-                }
-                collect_entries(checker, ret, out);
-            }
-        }
-        collect_entries(self, &self.sub.apply(&joined_elem), &mut absorbed_entries);
-        if !absorbed_entries.is_empty() {
-            for entry in &absorbed_entries {
-                self.call_site_absorbed.insert(entry.name.clone());
-            }
-            let normalized = self.sub.apply_effect_row(&self.effect_row);
-            self.effect_row = normalized.subtract_entries(&absorbed_entries);
-        }
+        // SPIKE: no element-effect absorption (closures no longer leak at
+        // definition, so list elements that are effectful closures contribute
+        // nothing to the ambient row just by being listed).
 
         let list_ty = Type::Con(
             super::canonicalize_type_name("List").into(),
@@ -1205,51 +1164,10 @@ impl Checker {
         Ok(())
     }
 
-    /// Effect names the callee still performs once fully applied: every
-    /// effect row along its own arrow spine. Used to decide whether a
-    /// callback-declared effect is genuinely discharged by the callee or just
-    /// re-performed by it (see the call-site absorption in
-    /// `apply_callback_argument_effects`). Walks only the top-level spine (not
-    /// into parameter types).
-    fn callee_performed_effect_names(
-        &self,
-        callee_ty: &Type,
-    ) -> std::collections::HashSet<String> {
-        let mut names = std::collections::HashSet::new();
-        let mut ty = self.sub.apply(callee_ty);
-        while let Type::Fun(_, ret, row) = ty {
-            for entry in &row.effects {
-                names.insert(entry.name.clone());
-            }
-            ty = self.sub.apply(&ret);
-        }
-        names
-    }
-
-    /// Whether any effect row along a function type's arrow spine is open
-    /// (has a row-variable tail). An open callback row (`{E, ..e}`) marks a
-    /// row-polymorphic *runner* — e.g. `spawn`/`run_with_log` — that accepts a
-    /// callback performing `E` plus arbitrary forwarded effects and discharges
-    /// `E` even though `E` may reappear in its own result row. A closed
-    /// callback row (`{E}`) carries no such intent. Must be evaluated against
-    /// the *declared* param type before the argument unifies the tail away.
-    fn fun_spine_has_open_row(&self, ty: &Type) -> bool {
-        let mut t = self.sub.apply(ty);
-        while let Type::Fun(_, ret, row) = t {
-            if !row.tails.is_empty() {
-                return true;
-            }
-            t = self.sub.apply(&ret);
-        }
-        false
-    }
-
     fn apply_callback_argument_effects(
         &mut self,
         actual_arg: &Type,
         expected_param: &Type,
-        callee_ty: &Type,
-        callback_open: bool,
         arg_span: Span,
     ) -> Result<Vec<super::EffectEntry>, Diagnostic> {
         let resolved_param = self.sub.apply(expected_param);
@@ -1257,53 +1175,48 @@ impl Checker {
             self.check_callback_effect_subtype(actual_arg, &resolved_param, arg_span)?;
         }
 
-        let mut absorbed_entries = Vec::new();
-        let param_shallow = self.sub.resolve_var(expected_param);
-        if let Type::Fun(_, _, _) = param_shallow {
-            fn collect_declared_entries_applied(
-                checker: &Checker,
-                ty: &Type,
-                out: &mut Vec<super::EffectEntry>,
-            ) {
-                if let Type::Fun(_, ret, row) = ty {
-                    for entry in &row.effects {
-                        let applied = super::EffectEntry {
-                            name: entry.name.clone(),
-                            args: entry
-                                .args
-                                .iter()
-                                .map(|arg| checker.sub.apply(arg))
-                                .collect(),
-                        };
-                        if !out.iter().any(|seen| seen.same_instantiation(&applied)) {
-                            out.push(applied);
-                        }
-                    }
-                    collect_declared_entries_applied(checker, ret, out);
+        // Closures no longer leak their effects at definition, so there is
+        // nothing to subtract from the *caller's* row. The one adjustment still
+        // required is to the HOF's *result* row: a HOF that names a concrete
+        // effect on both its callback parameter and its result (e.g.
+        // `run_forward : (Unit -> a needs {E,..e}) -> a needs {E,..e}`) only
+        // performs that effect by *running the callback*. If the actual lambda
+        // handled `E` internally (at a `with` inside the lambda), the HOF never
+        // performs `E` for this call, so `E` must be removed from the result
+        // row emitted at the saturated call site.
+        //
+        // Absorbed = effects the callback parameter is *declared* to accept
+        // minus effects the *actual* lambda still performs. Effects the lambda
+        // genuinely performs flow through the result row untouched; the caller's
+        // own direct uses of the same effect are never touched (we don't subtract
+        // from `effect_row`).
+        let declared = self.arrow_effect_entries(self.sub.resolve_var(expected_param));
+        let actual = self.arrow_effect_entries(self.sub.resolve_var(actual_arg));
+        let absorbed: Vec<super::EffectEntry> = declared
+            .into_iter()
+            .filter(|d| !actual.iter().any(|a| a.same_instantiation(d)))
+            .collect();
+        Ok(absorbed)
+    }
+
+    /// Collect the effect entries on every arrow along a function type's spine
+    /// (deduped by instantiation). Empty for non-function types.
+    fn arrow_effect_entries(&self, ty: &Type) -> Vec<super::EffectEntry> {
+        let mut out: Vec<super::EffectEntry> = Vec::new();
+        let mut t = self.sub.apply(ty);
+        while let Type::Fun(_, ret, row) = t {
+            for entry in &row.effects {
+                let applied = super::EffectEntry {
+                    name: entry.name.clone(),
+                    args: entry.args.iter().map(|arg| self.sub.apply(arg)).collect(),
+                };
+                if !out.iter().any(|seen| seen.same_instantiation(&applied)) {
+                    out.push(applied);
                 }
             }
-            collect_declared_entries_applied(self, param_shallow, &mut absorbed_entries);
-            // For a *closed* callback row, an effect the callee re-performs in
-            // its own result is not discharged by passing the callback — the
-            // caller must still perform it. This is the `from_sub : (Unit ->
-            // sel needs {QB}) -> scope needs {QB}` shape: `from_sub` handles
-            // the callback's `QB` with a nested handler but performs its own
-            // `QB` to the outer handler, so the caller keeps `QB`. An *open*
-            // callback row (`{E, ..e}`) is a row-polymorphic runner (`spawn`,
-            // `run_with_log`) that discharges `E` regardless of whether `E`
-            // reappears in its result, so it keeps the unconditional behavior.
-            if !callback_open {
-                let performed = self.callee_performed_effect_names(callee_ty);
-                absorbed_entries.retain(|entry| !performed.contains(&entry.name));
-            }
-            for entry in &absorbed_entries {
-                self.call_site_absorbed.insert(entry.name.clone());
-            }
-            let normalized_effect_row = self.sub.apply_effect_row(&self.effect_row);
-            self.effect_row = normalized_effect_row.subtract_entries(&absorbed_entries);
+            t = self.sub.apply(&ret);
         }
-
-        Ok(absorbed_entries)
+        out
     }
 
     fn emit_saturated_call_effects(
@@ -1851,6 +1764,15 @@ impl Checker {
             self_ty: Type,
             determinant_extras: Vec<Type>,
             determined_extras: Vec<Type>,
+            /// `Generic`'s representation is a *bijection*, so its fundep runs in
+            /// reverse too: once the representation extra is known, the self type
+            /// (the user/record type) is pinned by the anonymous-record reverse
+            /// or the call-site coherence fallback. A value rebuilt from a
+            /// transformed Generic rep — `from (map_rep (to x))` bound to a `let`
+            /// — has its result type determined *only* this way, so without the
+            /// reverse it gets generalized into a dictionary abstraction that
+            /// severs the effect continuation at the call site.
+            generic_reverse: bool,
         }
         let mut funcs = Vec::new();
         for (trait_name, extras, self_ty, _, _) in &self.trait_state.pending_constraints {
@@ -1874,6 +1796,9 @@ impl Checker {
                 self_ty: self.sub.apply(self_ty),
                 determinant_extras: pick(fundep.determinant_extra_positions()),
                 determined_extras: pick(fundep.determined_extra_positions()),
+                generic_reverse: crate::typechecker::check_decl::is_generic_trait_name(
+                    &resolved_trait,
+                ),
             });
         }
 
@@ -1893,33 +1818,50 @@ impl Checker {
             }
         }
         // A determinant is satisfied if it has a concrete head, or every free
-        // variable in it is already known to be fundep-determined.
+        // variable in it is already known to be fundep-determined. Anonymous
+        // records count as concrete heads: their structure (field set) fixes
+        // the determined parameter just as a named type constructor does — e.g.
+        // `Generic {a: _, b: _} r` pins `r` to the record's structural
+        // representation even when the field *types* are still variables.
         let satisfied = |ty: &Type, determined: &std::collections::HashSet<u32>| -> bool {
             match ty {
-                Type::Con(..) | Type::Symbol(_) => true,
+                Type::Con(..) | Type::Symbol(_) | Type::Record(_) => true,
                 Type::Var(id) => determined.contains(id),
                 _ => false,
             }
         };
+        let mark = |ty: &Type, determined: &mut std::collections::HashSet<u32>| -> bool {
+            let mut vs = Vec::new();
+            super::collect_free_vars(ty, &mut vs);
+            let mut changed = false;
+            for v in vs {
+                if determined.insert(v) {
+                    changed = true;
+                }
+            }
+            changed
+        };
         loop {
             let mut changed = false;
             for f in &funcs {
-                if !satisfied(&f.self_ty, &determined)
-                    || !f
-                        .determinant_extras
+                // Forward: determinant(s) satisfied -> determined extras pinned.
+                if satisfied(&f.self_ty, &determined)
+                    && f.determinant_extras
                         .iter()
                         .all(|e| satisfied(e, &determined))
                 {
-                    continue;
-                }
-                for e in &f.determined_extras {
-                    let mut vs = Vec::new();
-                    super::collect_free_vars(e, &mut vs);
-                    for v in vs {
-                        if determined.insert(v) {
-                            changed = true;
-                        }
+                    for e in &f.determined_extras {
+                        changed |= mark(e, &mut determined);
                     }
+                }
+                // Reverse (Generic only): representation extras satisfied -> the
+                // self type is pinned by the bijection.
+                if f.generic_reverse
+                    && f.determined_extras
+                        .iter()
+                        .all(|e| satisfied(e, &determined))
+                {
+                    changed |= mark(&f.self_ty, &mut determined);
                 }
             }
             if !changed {

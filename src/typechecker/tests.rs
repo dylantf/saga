@@ -6235,6 +6235,99 @@ fn effects_propagate_at_saturation_not_reference() {
     .unwrap();
 }
 
+#[test]
+fn defining_effectful_closure_does_not_leak_into_pure_function() {
+    // A closure is a value: defining it performs nothing, its effects live in
+    // its arrow type and are realized only when it is applied. A pure function
+    // that builds an effectful closure but never calls it must type-check.
+    // (Regression: lambda inference used to emit body effects at definition.)
+    check(
+        "effect Tick { fun tick : Unit -> Int }
+fun pure_fn : Unit -> Int
+pure_fn () = {
+  let _f = fun () -> tick! ()
+  42
+}",
+    )
+    .unwrap();
+}
+
+#[test]
+fn lambda_handling_own_effect_makes_hof_call_pure() {
+    // The callback discharges its own effect at an internal `with`, so a HOF
+    // that runs it inline performs nothing — even though the HOF's signature
+    // names the effect on both its callback parameter and its result. The
+    // caller is pure. (Absorbed = declared-callback minus actual-lambda effects,
+    // applied to the HOF's result row.)
+    check(
+        "effect Tick { fun tick : Unit -> Int }
+handler th for Tick { tick () = resume 1 }
+fun run_forward : (Unit -> Int needs {Tick, ..e}) -> Int needs {Tick, ..e}
+run_forward f = f ()
+fun caller : Unit -> Int
+caller () = run_forward (fun () -> tick! () with th)",
+    )
+    .unwrap();
+}
+
+#[test]
+fn dead_declared_effect_discharged_by_callback_warns() {
+    // `caller` declares {Tick} but only feeds a callback to a handler-HOF, so it
+    // performs no Tick — the declaration is dead and must warn. The old call-site
+    // absorption muted exactly this (it was the `spawn` dead-`Actor` wart).
+    let mut checker = check(
+        "effect Tick { fun tick : Unit -> Int }
+handler th for Tick { tick () = resume 1 }
+fun run_handled : (Unit -> Int needs {Tick}) -> Int
+run_handled f = f () with th
+fun caller : Unit -> Int needs {Tick}
+caller () = run_handled (fun () -> tick! ())",
+    )
+    .unwrap();
+    checker.zonk_warnings();
+    assert!(
+        checker.collected_diagnostics.iter().any(|d| {
+            matches!(d.severity, Severity::Warning)
+                && d.message.contains("caller")
+                && d.message.contains("Tick")
+                && d.message.contains("never uses")
+        }),
+        "expected unused-effect warning on `caller`, got: {:?}",
+        checker.collected_diagnostics
+    );
+}
+
+#[test]
+fn forwarded_and_own_callback_effects_are_not_flagged_unused() {
+    // `run_forward` forwards the callback's effect (calls it inline); `run_self`
+    // handles the callback's effect but performs its own. Both genuinely perform
+    // {Tick}, so neither may be flagged as declaring an unused effect. (The
+    // boundary absorption used to clobber these, then a suppression hid the
+    // resulting bogus warnings — both are gone.)
+    let mut checker = check(
+        "effect Tick { fun tick : Unit -> Int }
+handler th for Tick { tick () = resume 1 }
+fun run_forward : (Unit -> Int needs {Tick, ..e}) -> Int needs {Tick, ..e}
+run_forward f = f ()
+fun run_self : (Unit -> Int needs {Tick}) -> Int needs {Tick}
+run_self make = {
+  let inner = make () with th
+  let outer = tick! ()
+  inner + outer
+}",
+    )
+    .unwrap();
+    checker.zonk_warnings();
+    assert!(
+        !checker
+            .collected_diagnostics
+            .iter()
+            .any(|d| matches!(d.severity, Severity::Warning) && d.message.contains("never uses")),
+        "no unused-effect warning expected, got: {:?}",
+        checker.collected_diagnostics
+    );
+}
+
 // --- Effect row polymorphism ---
 
 #[test]

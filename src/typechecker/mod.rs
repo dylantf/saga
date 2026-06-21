@@ -82,7 +82,6 @@ impl Checker {
             resume_return_type: None,
             effect_meta: EffectMeta::default(),
             effect_row: EffectRow::empty(),
-            call_site_absorbed: std::collections::HashSet::new(),
             trait_forward_row_vars: std::collections::HashMap::new(),
             trait_state: TraitState::default(),
             field_candidates: HashMap::new(),

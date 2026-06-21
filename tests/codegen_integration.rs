@@ -584,17 +584,14 @@ main () = run ()
 }
 
 #[test]
-fn closed_callback_row_does_not_absorb_effect_the_callee_re_performs() {
-    // Call-site HOF effect absorption must not cancel an effect the callee
-    // still performs in its own result. `runner` takes a *closed*-row
-    // effectful callback (`Unit -> Int needs {Tick}`), handles it with a
-    // nested same-effect handler, then performs its own `tick!` to the OUTER
-    // handler — so its result genuinely `needs {Tick}`. Passing the callback
-    // previously absorbed `{Tick}` unconditionally, so `caller` (whose effect
-    // row is inferred, not annotated) was compiled as PURE and handed `runner`
-    // an empty evidence tuple `{}`, crashing the op dispatch with "bad
-    // argument". Only an *open* callback row (`{E, ..e}`, e.g. `spawn`) is a
-    // row-polymorphic runner that absorbs unconditionally.
+fn callback_passing_does_not_absorb_effect_the_hof_still_performs() {
+    // A HOF that handles a callback's effect with a nested same-effect handler
+    // but performs its OWN effect to the outer handler genuinely `needs {Tick}`
+    // in its result. Passing the callback must not cancel that: `caller` (effect
+    // row inferred, not annotated) used to be compiled PURE and handed `runner`
+    // an empty evidence tuple `{}`, crashing op dispatch with "bad argument".
+    // Absorbed = declared-callback minus actual-lambda effects; here the lambda
+    // genuinely performs Tick, so nothing is absorbed and Tick flows through.
     let src = r#"
 effect Tick {
   fun tick : Unit -> Int
@@ -612,6 +609,41 @@ runner make = {
 }
 
 caller () = runner (fun () -> tick! ())
+
+main () = {
+  let r = caller () with th
+  r
+}
+"#;
+
+    assert_runs_and_stdout_contains(src, &["2"]);
+}
+
+#[test]
+fn caller_keeps_own_effect_while_passing_callback_to_handler_hof() {
+    // `caller` performs `tick!` DIRECTLY and also passes a callback to a
+    // handler-HOF. The old absorption subtracted the callback's `{Tick}` from
+    // the caller's WHOLE row, clobbering the direct `tick!` -> the inferred row
+    // came out pure and the direct op dispatched against absent evidence ("no
+    // evidence in scope"). `caller` is unannotated, so inference alone must
+    // carry `{Tick}`. Returns 1 (direct) + 1 (via HOF) = 2.
+    let src = r#"
+effect Tick {
+  fun tick : Unit -> Int
+}
+
+handler th for Tick {
+  tick () = resume 1
+}
+
+fun run_handled : (Unit -> Int needs {Tick}) -> Int
+run_handled f = f () with th
+
+caller () = {
+  let x = tick! ()
+  let y = run_handled (fun () -> tick! ())
+  x + y
+}
 
 main () = {
   let r = caller () with th
