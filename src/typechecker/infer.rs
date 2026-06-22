@@ -1154,11 +1154,9 @@ impl Checker {
             if orig.message.contains("ambiguous effect row") {
                 return Err(orig);
             }
-            let expected = self.prettify_type(&self.sub.apply(param_ty));
-            let actual = self.prettify_type(arg_ty_pre);
             return Err(Diagnostic::error_at(
                 arg_span,
-                format!("type mismatch: expected {}, got {}", expected, actual),
+                self.format_type_mismatch(&self.sub.apply(param_ty), arg_ty_pre),
             ));
         }
         Ok(())

@@ -3242,6 +3242,62 @@ fn dict_new_typechecks() {
     assert!(check("import Std.Dict\nmain () = Dict.new ()").is_ok());
 }
 
+// `Dict` is a compiler builtin, not a type declared in Std.Dict. Qualifying it
+// through the module (`Dict.Dict`, an aliased prefix, or the fully-qualified
+// `Std.Dict.Dict`) must resolve to the one true builtin canonical rather than
+// minting a phantom `Type::Con("Dict.Dict", ..)` that fails to unify with the
+// real builtin while printing identically.
+#[test]
+fn qualified_builtin_type_in_annotation_resolves_to_builtin() {
+    check(
+        "import Std.Dict as Dict\n\
+         main () = {\n\
+           let d: Dict.Dict Int Int = Dict.from_list [(1, 2)]\n\
+           Dict.size d\n\
+         }",
+    )
+    .unwrap();
+}
+
+#[test]
+fn aliased_builtin_type_in_annotation_resolves_to_builtin() {
+    check(
+        "import Std.Dict as Dicts\n\
+         main () = {\n\
+           let d: Dicts.Dict Int Int = Dicts.from_list [(1, 2)]\n\
+           Dicts.size d\n\
+         }",
+    )
+    .unwrap();
+}
+
+#[test]
+fn fully_qualified_builtin_type_in_annotation_resolves_to_builtin() {
+    check(
+        "import Std.Dict as Dict\n\
+         main () = {\n\
+           let d: Std.Dict.Dict Int Int = Dict.from_list [(1, 2)]\n\
+           Dict.size d\n\
+         }",
+    )
+    .unwrap();
+}
+
+// Exposing a builtin type by name is legitimate — it must not error with
+// "'Dict' is not exported".
+#[test]
+fn exposing_builtin_type_does_not_error() {
+    check(
+        "import Std.Dict (Dict)\n\
+         import Std.Dict as Dict\n\
+         main () = {\n\
+           let d: Dict Int Int = Dict.from_list [(1, 2)]\n\
+           Dict.size d\n\
+         }",
+    )
+    .unwrap();
+}
+
 // Dict.put, Dict.keys, Dict.values, Dict.size, Dict.from_list, Dict.to_list,
 // Dict.member are now defined in Std/Dict.saga via @external declarations.
 // Their type checking is covered by module integration tests.

@@ -246,14 +246,7 @@ impl Checker {
                 Ok(())
             }
 
-            _ => {
-                let a_display = self.prettify_type(&a);
-                let b_display = self.prettify_type(&b);
-                Err(Diagnostic::error(format!(
-                    "type mismatch: expected {}, got {}",
-                    a_display, b_display
-                )))
-            }
+            _ => Err(Diagnostic::error(self.format_type_mismatch(&a, &b))),
         }
     }
 
@@ -449,6 +442,25 @@ impl Checker {
             })
             .collect();
         rename_vars(&resolved, &names)
+    }
+
+    /// Format an `expected … got …` type-mismatch message. When the two types
+    /// render identically under their bare names (e.g. `A.Foo` and `B.Foo` both
+    /// print as `Foo`), fall back to module-qualified rendering so the message
+    /// isn't the self-contradictory `expected Foo, got Foo`.
+    pub(crate) fn format_type_mismatch(&self, expected: &Type, actual: &Type) -> String {
+        let expected_p = self.prettify_type(expected);
+        let actual_p = self.prettify_type(actual);
+        let expected_str = expected_p.to_string();
+        let actual_str = actual_p.to_string();
+        if expected_str == actual_str {
+            let expected_q = super::render_type_qualified(&expected_p);
+            let actual_q = super::render_type_qualified(&actual_p);
+            if expected_q != actual_q {
+                return format!("type mismatch: expected {expected_q}, got {actual_q}");
+            }
+        }
+        format!("type mismatch: expected {expected_str}, got {actual_str}")
     }
 
     /// Unify with span context: if unification fails, attach the span to the error.

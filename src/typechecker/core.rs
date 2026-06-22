@@ -363,6 +363,50 @@ impl std::fmt::Display for Type {
     }
 }
 
+/// Render a type like `Display`, but with type constructors shown under their
+/// full canonical (module-qualified) names instead of their bare names. Used to
+/// disambiguate error messages when two structurally distinct types collapse to
+/// the same bare rendering — e.g. `A.Foo` vs `B.Foo`, both of which `Display` as
+/// `Foo`, or the builtin `Std.Dict.Dict` vs a stray same-named constructor.
+pub fn render_type_qualified(ty: &Type) -> String {
+    fn go(ty: &Type, out: &mut String) {
+        match ty {
+            Type::Con(name, args) => {
+                out.push_str(name);
+                for arg in args {
+                    out.push(' ');
+                    match arg {
+                        Type::Con(_, inner) if !inner.is_empty() => {
+                            out.push('(');
+                            go(arg, out);
+                            out.push(')');
+                        }
+                        _ => go(arg, out),
+                    }
+                }
+            }
+            Type::Fun(a, b, _) => {
+                match a.as_ref() {
+                    Type::Fun(_, _, _) => {
+                        out.push('(');
+                        go(a, out);
+                        out.push(')');
+                    }
+                    _ => go(a, out),
+                }
+                out.push_str(" -> ");
+                go(b, out);
+            }
+            // Other shapes don't collide on bare-vs-qualified names; defer to
+            // the standard Display so we don't reimplement records/rows/etc.
+            other => out.push_str(&other.to_string()),
+        }
+    }
+    let mut out = String::new();
+    go(ty, &mut out);
+    out
+}
+
 // --- Substitution ---
 
 /// Maps type variable IDs to their solved types.
@@ -787,5 +831,32 @@ impl Diagnostic {
 impl std::fmt::Display for Diagnostic {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.message)
+    }
+}
+
+#[cfg(test)]
+mod render_tests {
+    use super::*;
+
+    #[test]
+    fn qualified_render_distinguishes_same_bare_name() {
+        let a = Type::Con("A.Foo".into(), vec![]);
+        let b = Type::Con("B.Foo".into(), vec![]);
+        // Bare Display collapses both to `Foo`...
+        assert_eq!(a.to_string(), "Foo");
+        assert_eq!(b.to_string(), "Foo");
+        // ...but the qualified renderer keeps them distinct.
+        assert_eq!(render_type_qualified(&a), "A.Foo");
+        assert_eq!(render_type_qualified(&b), "B.Foo");
+    }
+
+    #[test]
+    fn qualified_render_recurses_into_args() {
+        let inner = Type::Con("Std.Int.Int".into(), vec![]);
+        let dict = Type::Con(
+            "Std.Dict.Dict".into(),
+            vec![inner.clone(), inner],
+        );
+        assert_eq!(render_type_qualified(&dict), "Std.Dict.Dict Std.Int.Int Std.Int.Int");
     }
 }

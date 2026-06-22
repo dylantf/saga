@@ -276,6 +276,47 @@ pub(super) fn resolve_import(
         }
     }
 
+    // Builtin types (Dict, Set, List, ...) are compiler builtins, not declared
+    // in any `.saga` file, so they never appear in `exports.type_arity`. Without
+    // this, a qualified reference like `Dict.Dict` (or `Std.Dict.Dict`) finds no
+    // scope entry and falls through to the resolver's `name.contains('.')`
+    // catch-all, minting a phantom `Type::Con("Dict.Dict", ..)` that is nominally
+    // distinct from the real builtin `Std.Dict.Dict` yet prints identically —
+    // producing the self-contradictory `expected Dict Int Int, got Dict Int Int`.
+    // Register the qualified/aliased (and, when not restricted by an exposing
+    // list, bare) forms for any builtin whose canonical home is this module so
+    // they resolve to the one true builtin canonical.
+    for (bare, canonical) in crate::typechecker::BUILTIN_TYPE_CANONICAL {
+        let Some((owner, _)) = canonical.rsplit_once('.') else {
+            continue;
+        };
+        if owner != module_name {
+            continue;
+        }
+        let canonical = (*canonical).to_string();
+        // Canonical/module-qualified form (e.g. `Std.Dict.Dict`).
+        scope
+            .types
+            .entry(canonical.clone())
+            .or_insert_with(|| canonical.clone());
+        // Aliased form (e.g. `Dict.Dict` when imported `as Dict`).
+        if prefix != module_name {
+            let aliased = canonical_join(prefix, bare);
+            scope
+                .types
+                .entry(aliased)
+                .or_insert_with(|| canonical.clone());
+        }
+        // Bare form is unrestricted only without an exposing list; an explicit
+        // exposing list adds the bare entry below if the builtin is named.
+        if exposing.is_none() {
+            scope
+                .types
+                .entry((*bare).to_string())
+                .or_insert_with(|| canonical.clone());
+        }
+    }
+
     // Exposed items: bare -> canonical, with validation
     if let Some(exposed) = exposing {
         for item in exposed {
@@ -303,6 +344,18 @@ pub(super) fn resolve_import(
                 }
                 // Record types count as found
                 if exports.record_defs.contains_key(name) {
+                    found = true;
+                }
+                // Builtin types (Dict, Set, ...) are compiler builtins whose
+                // canonical home is this module. They aren't in `type_arity`,
+                // but exposing them is legitimate — the bare registration above
+                // already mapped them to their canonical form.
+                if crate::typechecker::BUILTIN_TYPE_CANONICAL
+                    .iter()
+                    .any(|(bare, canonical)| {
+                        *bare == name && canonical.rsplit_once('.').map(|(m, _)| m) == Some(module_name)
+                    })
+                {
                     found = true;
                 }
                 // Constructors belonging to this type
