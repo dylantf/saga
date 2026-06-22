@@ -272,6 +272,18 @@ doubled () = {
   n * 2
 }
 
+# Pure consumers used to nest an effectful call *deeper* than the top-level
+# argument of an op: inside a list element and inside a record field. The
+# effectful call must still be sequenced before the enclosing op runs.
+record Cell { v: Int }
+fun first_of : List Int -> Int
+first_of xs = case xs {
+  [] -> -1
+  x :: _ -> x
+}
+fun uncell : Cell -> Int
+uncell c = c.v
+
 fun safe_div_g : Int -> Int -> Int needs {FailG String}
 safe_div_g _ 0 = failg! "division by zero"
 safe_div_g x y = x / y
@@ -640,6 +652,25 @@ tests () = {
           get! ()
         })
         assert_eq value 42
+        assert_eq final_state 42
+      })
+      test "effectful call nested in list element of op argument" (fun () -> {
+        # `doubled ()` is nested inside a list element passed to the pure
+        # `first_of`, whose result feeds `put!`. The effectful call must be
+        # sequenced at arbitrary depth, not just when it is the whole argument.
+        let (final_state, _) = run_state 21 (fun () -> {
+          put! (first_of [doubled ()])
+          get! ()
+        })
+        assert_eq final_state 42
+      })
+      test "effectful call nested in record field of op argument" (fun () -> {
+        # `doubled ()` is nested inside a record field, consumed by pure
+        # `uncell`, whose result feeds `put!`.
+        let (final_state, _) = run_state 21 (fun () -> {
+          put! (uncell (Cell { v: doubled () }))
+          get! ()
+        })
         assert_eq final_state 42
       })
     })

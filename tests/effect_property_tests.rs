@@ -936,9 +936,21 @@ result () = (fun x -> {
 #[test]
 fn lambda_head_effectful_call_nested_in_outer_effectful_call() {
     // Lambda-headed call appearing as the inner arg of an outer effectful
-    // call. Both calls thread evidence; the outer call CPS-chains the inner
+    // call. Both calls thread evidence; the outer call sequences the inner
     // call as an effectful argument so the inner lambda body's ops have
     // somewhere to resume to.
+    //
+    // Under a deep handler the inner op's continuation extends up to the
+    // `with echo` boundary — it includes the outer `log!`. So this is exactly
+    // equivalent to the direct form `log! (log! "inner")` and to the statement
+    // form `{ let a = log! "inner"; log! a }`, all of which yield
+    // "[inner][x]x":
+    //   inner log!"inner" -> "[inner]" <> resume "x"
+    //     resume "x" runs the outer log!"x" -> "[x]" <> resume "x" -> "[x]x"
+    //   => "[inner]" <> "[x]x" = "[inner][x]x"
+    // (An earlier lowering evaluated the inner arg as a *delimited*
+    // sub-computation — "[[inner]x]x" — which disagreed with the equivalent
+    // direct/statement forms; that inconsistency was the bug.)
     let src = r#"module Main
 
 effect Log {
@@ -952,12 +964,10 @@ handler echo for Log {
 pub fun result : Unit -> String
 result () = log! ((fun n -> log! n) "inner") with echo
 "#;
-    // Outer log! receives the inner result. Inner log!"inner" -> "[inner]x";
-    // outer log! "[inner]x" -> "[[inner]x]x".
     check_result_string(
         "lambda_head_effectful_call_nested_in_outer_effectful_call",
         src,
-        "[[inner]x]x",
+        "[inner][x]x",
     );
 }
 
