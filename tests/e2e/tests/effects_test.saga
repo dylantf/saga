@@ -284,6 +284,24 @@ first_of xs = case xs {
 fun uncell : Cell -> Int
 uncell c = c.v
 
+# An effectful function value stored in a record field, then pulled back out
+# and called via the field. Two distinct things must work: the record
+# constructor must lower the stored closure with the CPS evidence-passing
+# convention (`mk_adder`), and the field-access-headed call must thread
+# evidence + return continuation into it (`apply_bump`). Earlier these produced
+# `no evidence in scope` at codegen and an arity mismatch at runtime.
+record Adder { bump: Int -> Int needs {State Int} }
+fun mk_adder : Unit -> Adder
+mk_adder () = Adder { bump: fun n -> { let c = get! (); put! (c + 1); n + c } }
+fun apply_bump : Adder -> Int -> Int needs {State Int}
+apply_bump a n = a.bump n
+
+# Same, but the effectful function is held in an anonymous record field.
+fun mk_anon_adder : Unit -> { bump: Int -> Int needs {State Int} }
+mk_anon_adder () = { bump: fun n -> { let c = get! (); put! (c + 1); n + c } }
+fun apply_anon_bump : { bump: Int -> Int needs {State Int} } -> Int -> Int needs {State Int}
+apply_anon_bump a n = a.bump n
+
 fun safe_div_g : Int -> Int -> Int needs {FailG String}
 safe_div_g _ 0 = failg! "division by zero"
 safe_div_g x y = x / y
@@ -672,6 +690,18 @@ tests () = {
           get! ()
         })
         assert_eq final_state 42
+      })
+      test "effectful function value stored in a record field" (fun () -> {
+        # mk_adder stores an effectful closure; apply_bump calls it via the
+        # field. bump 5: c = get! () = 10; put! 11; returns 5 + 10 = 15.
+        let (result, final_state) = run_state 10 (fun () -> apply_bump (mk_adder ()) 5)
+        assert_eq result 15
+        assert_eq final_state 11
+      })
+      test "effectful function value stored in an anon record field" (fun () -> {
+        let (result, final_state) = run_state 10 (fun () -> apply_anon_bump (mk_anon_adder ()) 5)
+        assert_eq result 15
+        assert_eq final_state 11
       })
     })
 

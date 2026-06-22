@@ -680,6 +680,40 @@ impl<'a> Lowerer<'a> {
         Some(CExpr::Let(func_var, Box::new(func_ce), Box::new(body)))
     }
 
+    /// Lower a saturated effectful call whose head is a field access yielding a
+    /// function value — `s.run n` where `run: Int -> Int needs {Logger}` is a
+    /// record field holding an effectful closure. The closure was already built
+    /// with the CPS evidence-passing convention at the `RecordCreate` site, so
+    /// here we just lower the field access to that closure value and apply it
+    /// with `_Evidence`/`_ReturnK` threaded — the body resumes against the
+    /// *call-time* evidence supplied here, not creation-time evidence.
+    ///
+    /// Returns `None` when the call isn't classified as effectful, so the caller
+    /// falls through to the regular pure-apply path.
+    pub(super) fn lower_field_access_head_call(
+        &mut self,
+        app_id: NodeId,
+        head: &Expr,
+        args: &[&Expr],
+        return_k: Option<CExpr>,
+    ) -> Option<CExpr> {
+        let plan = self
+            .call_effects
+            .get(&app_id)
+            .and_then(|info| info.cps_call_plan())?;
+        let func_ce = self.lower_expr_value(head);
+        let func_var = self.fresh();
+        let body = self.lower_runtime_cps_apply(RuntimeCpsApplySite {
+            plan,
+            callee: CpsCallee::Value(CExpr::Var(func_var.clone())),
+            args,
+            return_k,
+            nested_pure_arg_lowering: RuntimeCpsArgLowering::Value,
+            flat_arg_lowering: RuntimeCpsArgLowering::EtaReduced,
+        });
+        Some(CExpr::Let(func_var, Box::new(func_ce), Box::new(body)))
+    }
+
     fn lower_generic_apply(&mut self, callee: &Expr, args: &[&Expr]) -> CExpr {
         let callee_arity = match &callee.kind {
             ExprKind::Var { name, .. } if self.resolved.contains_key(&callee.id) => {

@@ -958,7 +958,12 @@ impl<'a> Populator<'a> {
                 trait_name,
                 method_index,
             } => self.classify_dict_method_call(dict, trait_name, *method_index, arg_count),
-            ExprKind::Lambda { .. } => self.classify_lambda_call(head.id, arg_count),
+            ExprKind::Lambda { .. } => self.classify_typed_head_call(head.id, arg_count),
+            // A field access yielding a function value (e.g. `s.run` where
+            // `run: Int -> Int needs {Logger}` is a record field). The callee's
+            // effect row lives on the field-access node's resolved type, so it
+            // classifies exactly like a lambda head.
+            ExprKind::FieldAccess { .. } => self.classify_typed_head_call(head.id, arg_count),
             // Other head shapes have no callee identity that resolves to an
             // effect row, so they classify as Pure. Add a branch here when a
             // new effectful head shape is introduced.
@@ -966,17 +971,18 @@ impl<'a> Populator<'a> {
         }
     }
 
-    /// Classify a call whose head is a `Lambda`. The lambda's effect row is
-    /// derived from the typechecker's `type_at_node`. Pure lambdas yield
-    /// `Pure`; effectful lambdas yield `StaticOps` (closed) or `RowForwarded`
-    /// (open). Saturation isn't strictly required here — Saga's lambdas
+    /// Classify a call whose head is a typed value node (a `Lambda` literal or
+    /// a `FieldAccess` yielding a function value). The effect row is derived
+    /// from the typechecker's resolved type at that node. Pure heads yield
+    /// `Pure`; effectful heads yield `StaticOps` (closed) or `RowForwarded`
+    /// (open). Saturation isn't strictly required here — Saga's function values
     /// always match arrow arity at call sites; if `supplied == 0` we
     /// early-return Pure for safety.
-    fn classify_lambda_call(&self, lambda_id: NodeId, supplied: usize) -> CallEffectInfo {
+    fn classify_typed_head_call(&self, head_id: NodeId, supplied: usize) -> CallEffectInfo {
         if supplied == 0 {
             return CallEffectInfo::pure();
         }
-        let Some(shape) = self.lambda_head_shape(lambda_id) else {
+        let Some(shape) = self.lambda_head_shape(head_id) else {
             return CallEffectInfo::pure();
         };
         let Some(kind) = self.call_kind_from_cps_shape(&shape) else {

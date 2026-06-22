@@ -344,10 +344,21 @@ impl Checker {
 
             ExprKind::RecordCreate { name, fields, .. } => {
                 let resolved_name = self.resolved_record_type_name(node_id, name);
-                self.infer_record_create(&resolved_name, fields, span)
+                let ty = self.infer_record_create(&resolved_name, fields, span)?;
+                // Pin the node's record type so a field access directly on the
+                // literal (`Rec { ... }.f`) can resolve its record name during
+                // elaboration. Without this the field-access lowering can only
+                // resolve the field index for fully-constant literals that the
+                // optimizer folds away before lowering.
+                self.record_type(node_id, &ty);
+                Ok(ty)
             }
 
-            ExprKind::AnonRecordCreate { fields, .. } => self.infer_anon_record_create(fields),
+            ExprKind::AnonRecordCreate { fields, .. } => {
+                let ty = self.infer_anon_record_create(fields)?;
+                self.record_type(node_id, &ty);
+                Ok(ty)
+            }
 
             ExprKind::FieldAccess {
                 expr: inner, field, ..

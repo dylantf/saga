@@ -113,7 +113,13 @@ impl<'a> Lowerer<'a> {
                 return call;
             }
             if let Some((lambda, args)) = crate::codegen::lower::util::collect_lambda_head_call(expr)
-                && let Some(call) = self.lower_lambda_head_call(expr.id, lambda, &args, return_k)
+                && let Some(call) = self.lower_lambda_head_call(expr.id, lambda, &args, return_k.clone())
+            {
+                return call;
+            }
+            if let Some((head, args)) =
+                crate::codegen::lower::util::collect_field_access_head_call(expr)
+                && let Some(call) = self.lower_field_access_head_call(expr.id, head, &args, return_k)
             {
                 return call;
             }

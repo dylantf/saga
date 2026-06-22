@@ -63,6 +63,12 @@ usd amount = Currency amount
 fun nok : Float -> Currency NOK
 nok amount = Currency amount
 
+# Identity that the optimizer can't fold, used to keep a record field value
+# non-constant so `Rec { f: ... }.f` survives to lowering (a constant literal
+# would be folded away, hiding the field-access record-name resolution).
+fun keep : Int -> Int
+keep x = x
+
 # --- Val bindings ---
 
 greeting = "hello world"
@@ -221,6 +227,19 @@ tests () = {
       test "currency equality" (fun () -> {
         assert_false (usd 23.5 == usd 50.0)
         assert_true (usd 23.5 == usd 23.5)
+      })
+    })
+
+    describe "field access on a record literal" (fun () -> {
+      # `keep` keeps the field non-constant so the access isn't folded away
+      # before lowering. The record-create node must carry its type so the
+      # field index resolves; otherwise codegen panics with `record_name=None`.
+      test "nominal record literal" (fun () -> {
+        assert_eq (Point { x: keep 3, y: 4 }.x) 3
+      })
+
+      test "anonymous record literal" (fun () -> {
+        assert_eq ({ a: keep 7, b: 8 }.a) 7
       })
     })
   })

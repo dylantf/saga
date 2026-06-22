@@ -382,6 +382,11 @@ impl<'a> Lowerer<'a> {
                     });
                 let field_map: HashMap<&str, &Expr> =
                     fields.iter().map(|(n, _, e)| (n.as_str(), e)).collect();
+                // Per-field declared types let an effectful function-typed field
+                // (`f: A -> B needs {E}`) lower with the CPS evidence-passing
+                // convention instead of as a plain closure whose op calls have no
+                // evidence in scope.
+                let field_types = self.record_field_types_by_name(record_name.as_deref(), name);
                 let mut vars: Vec<String> = Vec::new();
                 let mut bindings: Vec<(String, CExpr)> = Vec::new();
                 for field_name in &order {
@@ -389,7 +394,15 @@ impl<'a> Lowerer<'a> {
                     let e = field_map
                         .get(field_name.as_str())
                         .expect("field missing in RecordCreate");
-                    let ce = self.lower_expr_value(e);
+                    // Prefer the record's declared field type; fall back to the
+                    // field value's own resolved type (e.g. when the record's
+                    // layout was recovered by name but its field types weren't).
+                    let expected = field_types
+                        .as_ref()
+                        .and_then(|m| m.get(field_name.as_str()))
+                        .cloned()
+                        .or_else(|| self.check_result.resolved_type_for_node(e.id));
+                    let ce = self.lower_expr_value_with_expected_type(e, expected.as_ref());
                     vars.push(v.clone());
                     bindings.push((v, ce));
                 }
@@ -413,6 +426,11 @@ impl<'a> Lowerer<'a> {
                 sorted_names.sort();
                 let field_map: HashMap<&str, &Expr> =
                     fields.iter().map(|(n, _, e)| (n.as_str(), e)).collect();
+                // Anon records have no nominal type to look up, so recover each
+                // field's type from the field *value's* own resolved type. This
+                // lets an effectful function-typed field lower with CPS evidence
+                // passing rather than as a plain closure (see the nominal
+                // `RecordCreate` arm for the rationale).
                 let mut vars: Vec<String> = Vec::new();
                 let mut bindings: Vec<(String, CExpr)> = Vec::new();
                 for field_name in &sorted_names {
@@ -420,7 +438,8 @@ impl<'a> Lowerer<'a> {
                     let e = field_map
                         .get(field_name.as_str())
                         .expect("field missing in AnonRecordCreate");
-                    let ce = self.lower_expr_value(e);
+                    let expected = self.check_result.resolved_type_for_node(e.id);
+                    let ce = self.lower_expr_value_with_expected_type(e, expected.as_ref());
                     vars.push(v.clone());
                     bindings.push((v, ce));
                 }

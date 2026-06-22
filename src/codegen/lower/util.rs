@@ -208,6 +208,30 @@ pub(super) fn collect_lambda_head_call(expr: &Expr) -> Option<(&Expr, Vec<&Expr>
     }
 }
 
+/// Like `collect_lambda_head_call`, but for a call whose head is a field access
+/// yielding a function value (`s.run arg1 arg2`). Returns the `FieldAccess` head
+/// expression and the supplied arguments.
+pub(super) fn collect_field_access_head_call(expr: &Expr) -> Option<(&Expr, Vec<&Expr>)> {
+    let mut args: Vec<&Expr> = Vec::new();
+    let mut current = expr;
+    loop {
+        match &current.kind {
+            ExprKind::App { func, arg, .. } => {
+                args.push(arg);
+                current = func;
+            }
+            ExprKind::FieldAccess { .. } => {
+                if args.is_empty() {
+                    return None;
+                }
+                args.reverse();
+                return Some((current, args));
+            }
+            _ => return None,
+        }
+    }
+}
+
 /// Like `collect_fun_call`, but for qualified names (`Module.func arg1 arg2`).
 /// Returns `Some((module, func_name, head_expr, args))` if the head is a QualifiedName.
 pub(super) fn collect_qualified_call(expr: &Expr) -> Option<(&str, &str, &Expr, Vec<&Expr>)> {

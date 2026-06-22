@@ -131,6 +131,36 @@ impl<'a> Lowerer<'a> {
         }
     }
 
+    /// Resolve a record's declared `field -> type` map from its name, trying the
+    /// canonical `record_name` pinned on a node first, then the surface name, then
+    /// a `<module>.<Name>` lookup. Used to recover per-field expected types at
+    /// `RecordCreate` so an effectful function-typed field (e.g.
+    /// `run: Int -> Int needs {Logger}`) is lowered with the evidence-passing CPS
+    /// convention rather than as a plain closure. The field types may still carry
+    /// the record's type-parameter vars (we don't substitute concrete args here),
+    /// which is sufficient since a field's effect row is independent of them.
+    pub(super) fn record_field_types_by_name(
+        &self,
+        record_name: Option<&str>,
+        source_name: &str,
+    ) -> Option<HashMap<String, crate::typechecker::Type>> {
+        let module_name = self.current_semantic_module_name();
+        let info = record_name
+            .and_then(|rn| self.check_result.records.get(rn))
+            .or_else(|| self.check_result.records.get(source_name))
+            .or_else(|| {
+                self.check_result
+                    .records
+                    .get(crate::typechecker::bare_type_name(source_name))
+            })
+            .or_else(|| {
+                self.check_result
+                    .records
+                    .get(&format!("{module_name}.{source_name}"))
+            })?;
+        Some(info.fields.iter().cloned().collect())
+    }
+
     pub(super) fn record_field_types_from_expected(
         &self,
         expected_ty: &crate::typechecker::Type,
