@@ -52,6 +52,14 @@ impl<'a> Lowerer<'a> {
             .saturating_sub(runtime_param_count + dict_param_count);
         let mut param_vars = Vec::new();
         let mut bindings = Vec::new();
+        // Effectful argument calls (e.g. `add! (make_frag ())`) cannot be lowered
+        // as plain values: a CPS-compiled function delivers its result through its
+        // own `_ReturnK`, not as the value of `apply`. Lowering one with an
+        // identity continuation would feed the *handler's* yielded value into the
+        // op call instead of the function's actual return value. Defer each such
+        // arg and CPS-chain it around the op call below, mirroring the resolved
+        // function-call path in `lower_resolved_fun_call`.
+        let mut effectful_chain: Vec<(String, &Expr)> = Vec::new();
         for (source_idx, arg) in args.iter().enumerate() {
             let is_unit_literal = matches!(
                 arg.kind,
@@ -65,6 +73,13 @@ impl<'a> Lowerer<'a> {
                 continue;
             }
             let v = self.fresh();
+            if self.expr_is_effectful_call(arg) {
+                // Real runtime param, but its value is supplied by the inner
+                // call's return continuation rather than a let-binding here.
+                param_vars.push(v.clone());
+                effectful_chain.push((v, arg));
+                continue;
+            }
             // Effect call args are generally not CPS-expanded — the handler
             // arm receives the callback as a plain value. However, if the op's
             // parameter declares effects that are NOT already available in the
@@ -125,7 +140,7 @@ impl<'a> Lowerer<'a> {
             param_vars.push(v);
         }
 
-        match self.effect_op_lowering_plan(&effect_key, &effect_name) {
+        let mut result = match self.effect_op_lowering_plan(&effect_key, &effect_name) {
             EffectOpLoweringPlan::DirectNative { handler_canonical } => {
                 // Direct path: ops that always resume exactly once can be
                 // inlined as `let Result = <native call> in <continuation
@@ -254,7 +269,16 @@ impl<'a> Lowerer<'a> {
                     CExpr::Let(var, Box::new(val), Box::new(body))
                 })
             }
+        };
+
+        // Sequence deferred effectful argument calls. Rightmost first so the
+        // outermost wrapper is the leftmost arg, preserving left-to-right
+        // evaluation: `arg0` resolves, binds its var, then `arg1`, then the op.
+        for (v, arg) in effectful_chain.into_iter().rev() {
+            let inner_k = CExpr::Fun(vec![v], Box::new(result));
+            result = self.lower_expr_with_call_return_k(arg, Some(inner_k));
         }
+        result
     }
 
 

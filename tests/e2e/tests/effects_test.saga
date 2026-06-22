@@ -260,6 +260,18 @@ build_msg () = {
   get! ()
 }
 
+# An effectful function (performs `get!`) that returns a computed value.
+# Used to exercise an effectful call in *argument position* of another effect
+# op, e.g. `put! (doubled ())`. CPS functions deliver their result through
+# their own `_ReturnK`, not as the value of `apply`, so lowering such an arg
+# with an identity continuation feeds the handler's yielded value into the
+# enclosing op instead of the function's real return value.
+fun doubled : Unit -> Int needs {State Int}
+doubled () = {
+  let n = get! ()
+  n * 2
+}
+
 fun safe_div_g : Int -> Int -> Int needs {FailG String}
 safe_div_g _ 0 = failg! "division by zero"
 safe_div_g x y = x / y
@@ -617,6 +629,18 @@ tests () = {
           get! ()
         })
         assert_eq value 99
+      })
+      test "effectful call in op argument position" (fun () -> {
+        # `doubled ()` is an effectful function consumed by `put!` in argument
+        # position. It reads 21 and returns 42 without mutating; `put! 42` then
+        # sets the state to 42. Before the arg-position CPS fix this crashed
+        # (the State handler's yielded closure reached `put!` instead of 42).
+        let (value, final_state) = run_state 21 (fun () -> {
+          put! (doubled ())
+          get! ()
+        })
+        assert_eq value 42
+        assert_eq final_state 42
       })
     })
 
