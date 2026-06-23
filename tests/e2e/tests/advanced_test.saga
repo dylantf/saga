@@ -44,6 +44,20 @@ impl Verbose for User {
   verbose user = $"User: {describe_it user}"
 }
 
+# Multi-parameter trait whose impl carries a `where {k: Eq}` constraint. Eq is
+# operator/BIF-dispatched, so it contributes no dictionary parameter to the
+# impl's dict constructor — the call site must not pass an Eq sub-dict, or it
+# over-applies the dict tuple and crashes with badfun.
+record EqBox k { ev: k }
+trait Doer rel out | rel -> out {
+  fun act : rel -> out
+}
+impl Doer (List k) for (EqBox k) where {k: Eq} {
+  act b = [b.ev]
+}
+fun via_doer : rel -> out where {rel: Doer out}
+via_doer x = act x
+
 # --- Phantom type / binop traits ---
 
 type USD = USD deriving (Debug, Eq)
@@ -215,6 +229,13 @@ tests () = {
       test "verbose uses describe" (fun () -> {
         let alice = User { name: "Alice", age: 30 }
         assert_eq (verbose alice) "User: Alice (age: 30)"
+      })
+    })
+
+    describe "where-constrained impl" (fun () -> {
+      test "Eq constraint excluded from impl dict" (fun () -> {
+        let xs = via_doer (EqBox { ev: 5 })
+        assert_eq (List.length xs) 1
       })
     })
 

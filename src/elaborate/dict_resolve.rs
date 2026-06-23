@@ -380,6 +380,13 @@ impl Elaborator {
                     for (constraint_trait, var_id, extra_types) in
                         &info.param_constraints_by_var_with_args
                     {
+                        // Num/Eq dispatch via BEAM BIFs, not dictionaries, so the
+                        // impl's dict constructor takes no parameter for them
+                        // (see `dict_params_from_where*`). Applying a `{}` here
+                        // would over-apply the constructor and crash with badfun.
+                        if matches!(constraint_trait.as_str(), "Num" | "Eq") {
+                            continue;
+                        }
                         let arg_ty = subst.get(var_id)?;
                         let resolved_extra_types: Vec<Type> = extra_types
                             .iter()
@@ -400,6 +407,9 @@ impl Elaborator {
                         );
                     }
                     for (constraint_trait, var_id) in &info.param_constraints_by_var {
+                        if matches!(constraint_trait.as_str(), "Num" | "Eq") {
+                            continue;
+                        }
                         let arg_ty = subst.get(var_id)?;
                         let sub_dict = self.dict_for_type(constraint_trait, &[], arg_ty, span)?;
                         dict_expr = Expr::synth(
@@ -414,6 +424,9 @@ impl Elaborator {
                     // Use explicit where-clause constraints (handles cases like
                     // Ord where the impl needs both Ord and Eq dicts per type param).
                     for (constraint_trait, param_idx) in constraints {
+                        if matches!(constraint_trait.as_str(), "Num" | "Eq") {
+                            continue;
+                        }
                         if let Some(arg_ty) = args.get(*param_idx) {
                             let sub_dict =
                                 self.dict_for_type(constraint_trait, &[], arg_ty, span)?;
