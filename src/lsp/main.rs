@@ -60,13 +60,18 @@ struct SemanticIndex {
     type_definition_locations: HashMap<String, Location>,
     type_occurrences_by_name: HashMap<String, Vec<SemanticOccurrence>>,
     type_occurrences: Vec<NamedLocation>,
+    module_definition_locations: HashMap<String, Location>,
+    module_occurrences_by_name: HashMap<String, Vec<SemanticOccurrence>>,
+    module_occurrences: Vec<NamedLocation>,
     symbol_definition_locations: HashMap<SemanticSymbolKey, Location>,
     symbol_occurrences_by_key: HashMap<SemanticSymbolKey, Vec<SemanticOccurrence>>,
     symbol_occurrences: Vec<SemanticSymbolLocation>,
+    docs_by_key: HashMap<SemanticDocKey, Vec<String>>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 enum SemanticSymbolKind {
+    Module,
     Trait,
     TraitMethod,
     Effect,
@@ -78,6 +83,13 @@ enum SemanticSymbolKind {
 struct SemanticSymbolKey {
     kind: SemanticSymbolKind,
     name: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+enum SemanticDocKey {
+    Value(ast::NodeId),
+    Type(String),
+    Symbol(SemanticSymbolKey),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -113,9 +125,13 @@ impl SemanticIndex {
             type_definition_locations: HashMap::new(),
             type_occurrences_by_name: HashMap::new(),
             type_occurrences: Vec::new(),
+            module_definition_locations: HashMap::new(),
+            module_occurrences_by_name: HashMap::new(),
+            module_occurrences: Vec::new(),
             symbol_definition_locations: HashMap::new(),
             symbol_occurrences_by_key: HashMap::new(),
             symbol_occurrences: Vec::new(),
+            docs_by_key: HashMap::new(),
         }
     }
 
@@ -168,6 +184,33 @@ impl SemanticIndex {
         self.type_occurrences.push(NamedLocation { name, location });
     }
 
+    fn add_module_definition(&mut self, name: String, location: Location) {
+        self.module_definition_locations
+            .entry(name.clone())
+            .or_insert_with(|| location.clone());
+        self.module_occurrences_by_name
+            .entry(name.clone())
+            .or_default()
+            .push(SemanticOccurrence {
+                kind: OccurrenceKind::Definition,
+                location: location.clone(),
+            });
+        self.module_occurrences
+            .push(NamedLocation { name, location });
+    }
+
+    fn add_module_reference(&mut self, name: String, location: Location) {
+        self.module_occurrences_by_name
+            .entry(name.clone())
+            .or_default()
+            .push(SemanticOccurrence {
+                kind: OccurrenceKind::Reference,
+                location: location.clone(),
+            });
+        self.module_occurrences
+            .push(NamedLocation { name, location });
+    }
+
     fn add_symbol_definition(
         &mut self,
         kind: SemanticSymbolKind,
@@ -202,7 +245,18 @@ impl SemanticIndex {
             .push(SemanticSymbolLocation { key, location });
     }
 
+    fn add_docs(&mut self, key: SemanticDocKey, docs: &[String]) {
+        if !docs.is_empty() {
+            self.docs_by_key.entry(key).or_insert_with(|| docs.to_vec());
+        }
+    }
+
     fn type_name_at_position(&self, uri: &Url, position: Position) -> Option<&str> {
+        self.type_occurrence_at_position(uri, position)
+            .map(|occurrence| occurrence.name.as_str())
+    }
+
+    fn type_occurrence_at_position(&self, uri: &Url, position: Position) -> Option<&NamedLocation> {
         self.type_occurrences
             .iter()
             .filter(|occurrence| {
@@ -210,12 +264,18 @@ impl SemanticIndex {
                     && range_contains_position(&occurrence.location.range, position)
             })
             .min_by_key(|occurrence| range_width(&occurrence.location.range))
-            .map(|occurrence| occurrence.name.as_str())
     }
 
     fn type_definition_location_at(&self, uri: &Url, position: Position) -> Option<Location> {
         let name = self.type_name_at_position(uri, position)?;
         self.type_definition_locations.get(name).cloned()
+    }
+
+    fn type_doc_at_position(&self, uri: &Url, position: Position) -> Option<&[String]> {
+        let name = self.type_name_at_position(uri, position)?;
+        self.docs_by_key
+            .get(&SemanticDocKey::Type(name.to_string()))
+            .map(Vec::as_slice)
     }
 
     fn type_reference_locations_at(
@@ -271,6 +331,66 @@ impl SemanticIndex {
         self.symbol_definition_locations.get(key).cloned()
     }
 
+    fn symbol_doc_at_position(&self, uri: &Url, position: Position) -> Option<&[String]> {
+        let key = self.symbol_key_at_position(uri, position)?;
+        self.docs_by_key
+            .get(&SemanticDocKey::Symbol(key.clone()))
+            .map(Vec::as_slice)
+    }
+
+    fn module_name_at_position(&self, uri: &Url, position: Position) -> Option<&str> {
+        self.module_occurrence_at_position(uri, position)
+            .map(|occurrence| occurrence.name.as_str())
+    }
+
+    fn module_occurrence_at_position(
+        &self,
+        uri: &Url,
+        position: Position,
+    ) -> Option<&NamedLocation> {
+        self.module_occurrences
+            .iter()
+            .filter(|occurrence| {
+                occurrence.location.uri == *uri
+                    && range_contains_position(&occurrence.location.range, position)
+            })
+            .min_by_key(|occurrence| range_width(&occurrence.location.range))
+    }
+
+    fn module_definition_location_at(&self, uri: &Url, position: Position) -> Option<Location> {
+        let name = self.module_name_at_position(uri, position)?;
+        self.module_definition_locations.get(name).cloned()
+    }
+
+    fn module_reference_locations_at(
+        &self,
+        uri: &Url,
+        position: Position,
+        include_declaration: bool,
+    ) -> Option<Vec<Location>> {
+        let name = self.module_name_at_position(uri, position)?;
+        Some(self.module_reference_locations_for_name(name, include_declaration))
+    }
+
+    fn module_reference_locations_for_name(
+        &self,
+        name: &str,
+        include_declaration: bool,
+    ) -> Vec<Location> {
+        let mut locations: Vec<Location> = self
+            .module_occurrences_by_name
+            .get(name)
+            .into_iter()
+            .flat_map(|occurrences| occurrences.iter())
+            .filter(|occurrence| {
+                include_declaration || occurrence.kind == OccurrenceKind::Reference
+            })
+            .map(|occurrence| occurrence.location.clone())
+            .collect();
+        sort_and_dedup_locations(&mut locations);
+        locations
+    }
+
     fn symbol_reference_locations_at(
         &self,
         uri: &Url,
@@ -307,6 +427,13 @@ impl SemanticIndex {
     fn definition_location_for_node(&self, node_id: ast::NodeId) -> Option<Location> {
         let definition_id = self.identity_for_node(node_id);
         self.definition_locations.get(&definition_id).cloned()
+    }
+
+    fn value_doc_for_node(&self, node_id: ast::NodeId) -> Option<&[String]> {
+        let definition_id = self.identity_for_node(node_id);
+        self.docs_by_key
+            .get(&SemanticDocKey::Value(definition_id))
+            .map(Vec::as_slice)
     }
 
     fn reference_locations_for_node(
@@ -508,6 +635,27 @@ impl ProjectSemanticStore {
                 cached
                     .index
                     .symbol_reference_locations_for_key(key, include_declaration),
+            );
+        }
+        sort_and_dedup_locations(&mut locations);
+        locations
+    }
+
+    fn project_module_reference_locations(
+        &self,
+        project_root: &Option<PathBuf>,
+        module_name: &str,
+        include_declaration: bool,
+    ) -> Vec<Location> {
+        let Some(project) = self.projects.get(project_root) else {
+            return Vec::new();
+        };
+        let mut locations = Vec::new();
+        for cached in project.semantic_indexes.values() {
+            locations.extend(
+                cached
+                    .index
+                    .module_reference_locations_for_name(module_name, include_declaration),
             );
         }
         sort_and_dedup_locations(&mut locations);
@@ -2084,6 +2232,21 @@ fn final_segment_name_range(
     }
 }
 
+fn path_name_range(
+    span: saga::token::Span,
+    path: &[String],
+    line_index: &LineIndex,
+    source: &str,
+) -> Range {
+    let name = path.join(".");
+    let haystack = source.get(span.start..span.end).unwrap_or_default();
+    if let Some(relative_start) = haystack.find(&name) {
+        name_range(span.start + relative_start, &name, line_index, source)
+    } else {
+        span_to_range(&span, line_index, source)
+    }
+}
+
 fn add_type_definition_symbol(
     index: &mut SemanticIndex,
     uri: &Url,
@@ -2100,6 +2263,22 @@ fn add_type_definition_symbol(
             range: span_to_range(&name_span, line_index, source),
         },
     );
+}
+
+fn add_type_definition_docs(
+    index: &mut SemanticIndex,
+    module_name: Option<&str>,
+    name: &str,
+    doc: &[String],
+) {
+    index.add_docs(
+        SemanticDocKey::Type(type_definition_name(module_name, name)),
+        doc,
+    );
+}
+
+fn add_value_docs(index: &mut SemanticIndex, node_id: ast::NodeId, doc: &[String]) {
+    index.add_docs(SemanticDocKey::Value(node_id), doc);
 }
 
 fn add_type_reference_symbol(index: &mut SemanticIndex, uri: &Url, name: String, range: Range) {
@@ -2123,11 +2302,23 @@ fn add_semantic_symbol_definition(
 ) {
     index.add_symbol_definition(
         kind,
-        name,
+        name.clone(),
         Location {
             uri: uri.clone(),
             range: span_to_range(&name_span, line_index, source),
         },
+    );
+}
+
+fn add_semantic_symbol_docs(
+    index: &mut SemanticIndex,
+    kind: SemanticSymbolKind,
+    name: String,
+    doc: &[String],
+) {
+    index.add_docs(
+        SemanticDocKey::Symbol(SemanticSymbolKey { kind, name }),
+        doc,
     );
 }
 
@@ -2168,6 +2359,12 @@ fn add_trait_method_definition_symbol(
             range: final_segment_name_range(method.span, &method.name, line_index, source),
         },
     );
+    add_semantic_symbol_docs(
+        index,
+        SemanticSymbolKind::TraitMethod,
+        member_symbol_name(trait_name, &method.name),
+        &method.doc,
+    );
 }
 
 fn add_effect_operation_definition_symbol(
@@ -2185,6 +2382,12 @@ fn add_effect_operation_definition_symbol(
             uri: uri.clone(),
             range: final_segment_name_range(op.span, &op.name, line_index, source),
         },
+    );
+    add_semantic_symbol_docs(
+        index,
+        SemanticSymbolKind::EffectOperation,
+        member_symbol_name(effect_name, &op.name),
+        &op.doc,
     );
 }
 
@@ -2321,12 +2524,15 @@ fn add_decl_type_symbols(
 ) {
     match decl {
         ast::Decl::FunSignature {
+            id,
+            doc,
             params,
             return_type,
             effects,
             where_clause,
             ..
         } => {
+            add_value_docs(index, *id, doc);
             for (_, type_expr) in params {
                 add_type_expr_symbols(index, uri, line_index, source, type_expr, check);
             }
@@ -2361,6 +2567,7 @@ fn add_decl_type_symbols(
         ast::Decl::TypeDef {
             name,
             name_span,
+            doc,
             variants,
             ..
         } => {
@@ -2373,6 +2580,7 @@ fn add_decl_type_symbols(
                 name,
                 *name_span,
             );
+            add_type_definition_docs(index, module_name, name, doc);
             for variant in variants {
                 for (_, type_expr) in &variant.node.fields {
                     add_type_expr_symbols(index, uri, line_index, source, type_expr, check);
@@ -2382,6 +2590,7 @@ fn add_decl_type_symbols(
         ast::Decl::TypeAlias {
             name,
             name_span,
+            doc,
             body,
             ..
         } => {
@@ -2394,11 +2603,13 @@ fn add_decl_type_symbols(
                 name,
                 *name_span,
             );
+            add_type_definition_docs(index, module_name, name, doc);
             add_type_expr_symbols(index, uri, line_index, source, body, check);
         }
         ast::Decl::RecordDef {
             name,
             name_span,
+            doc,
             fields,
             ..
         } => {
@@ -2411,6 +2622,7 @@ fn add_decl_type_symbols(
                 name,
                 *name_span,
             );
+            add_type_definition_docs(index, module_name, name, doc);
             for field in fields {
                 add_type_expr_symbols(index, uri, line_index, source, &field.node.1, check);
             }
@@ -2418,6 +2630,7 @@ fn add_decl_type_symbols(
         ast::Decl::EffectDef {
             name,
             name_span,
+            doc,
             operations,
             ..
         } => {
@@ -2431,6 +2644,7 @@ fn add_decl_type_symbols(
                 effect_name.clone(),
                 *name_span,
             );
+            add_semantic_symbol_docs(index, SemanticSymbolKind::Effect, effect_name.clone(), doc);
             for op in operations {
                 add_effect_operation_definition_symbol(
                     index,
@@ -2460,23 +2674,27 @@ fn add_decl_type_symbols(
         ast::Decl::HandlerDef {
             name,
             name_span,
+            doc,
             body,
             ..
         } => {
+            let handler_name = type_definition_name(module_name, name);
             add_semantic_symbol_definition(
                 index,
                 uri,
                 line_index,
                 source,
                 SemanticSymbolKind::Handler,
-                type_definition_name(module_name, name),
+                handler_name.clone(),
                 *name_span,
             );
+            add_semantic_symbol_docs(index, SemanticSymbolKind::Handler, handler_name, doc);
             add_handler_body_type_symbols(index, uri, line_index, source, body, check);
         }
         ast::Decl::TraitDef {
             name,
             name_span,
+            doc,
             supertraits,
             methods,
             ..
@@ -2491,6 +2709,7 @@ fn add_decl_type_symbols(
                 trait_name.clone(),
                 *name_span,
             );
+            add_semantic_symbol_docs(index, SemanticSymbolKind::Trait, trait_name.clone(), doc);
             for trait_ref in supertraits {
                 add_trait_ref_symbol(index, uri, line_index, source, trait_ref, check);
             }
@@ -2589,7 +2808,29 @@ fn add_decl_type_symbols(
                 add_expr_type_symbols(index, uri, line_index, source, method, check);
             }
         }
-        ast::Decl::Import { .. } | ast::Decl::ModuleDecl { .. } => {}
+        ast::Decl::Import {
+            module_path, span, ..
+        } => {
+            let module_name = module_path.join(".");
+            index.add_module_reference(
+                module_name,
+                Location {
+                    uri: uri.clone(),
+                    range: path_name_range(*span, module_path, line_index, source),
+                },
+            );
+        }
+        ast::Decl::ModuleDecl {
+            path, span, doc, ..
+        } => {
+            let module_name = path.join(".");
+            let location = Location {
+                uri: uri.clone(),
+                range: path_name_range(*span, path, line_index, source),
+            };
+            index.add_module_definition(module_name.clone(), location);
+            add_semantic_symbol_docs(index, SemanticSymbolKind::Module, module_name, doc);
+        }
     }
 }
 
@@ -4203,26 +4444,50 @@ fn source_text_at(source: &str, span: saga::token::Span) -> &str {
     }
 }
 
+fn docs_markdown(docs: &[String]) -> String {
+    docs.join("\n")
+}
+
+fn hover_markdown(docs: Option<&[String]>, code: Option<String>) -> String {
+    match (docs, code) {
+        (Some(docs), Some(code)) if !docs.is_empty() => {
+            format!("{}\n\n```saga\n{code}\n```", docs_markdown(docs))
+        }
+        (_, Some(code)) => format!("```saga\n{code}\n```"),
+        (Some(docs), None) => docs_markdown(docs),
+        (None, None) => String::new(),
+    }
+}
+
 fn hover_type_at(uri: &Url, semantic: &SemanticSnapshot, position: Position) -> Option<Hover> {
     if let Some(hover) = hover_semantic_symbol_at(uri, semantic, position) {
         return Some(hover);
+    }
+    if let Some(docs) = semantic.semantic_index.type_doc_at_position(uri, position) {
+        return Some(Hover {
+            contents: HoverContents::Markup(MarkupContent {
+                kind: MarkupKind::Markdown,
+                value: hover_markdown(Some(docs), None),
+            }),
+            range: None,
+        });
     }
 
     let offset = semantic
         .line_index
         .position_to_offset(position, &semantic.source);
-    let mut best: Option<(saga::token::Span, String)> = None;
+    let mut best: Option<(saga::token::Span, String, Option<ast::NodeId>)> = None;
 
     for span in semantic.check.type_at_span.keys() {
         if offset >= span.start
             && offset <= span.end
             && let Some(type_str) = semantic.check.type_at_span(span)
         {
-            let replace = best.as_ref().is_none_or(|(best_span, _)| {
+            let replace = best.as_ref().is_none_or(|(best_span, _, _)| {
                 span.end - span.start < best_span.end - best_span.start
             });
             if replace {
-                best = Some((*span, type_str));
+                best = Some((*span, type_str, None));
             }
         }
     }
@@ -4232,27 +4497,28 @@ fn hover_type_at(uri: &Url, semantic: &SemanticSnapshot, position: Position) -> 
             && offset <= span.end
             && let Some(type_str) = semantic.check.type_at_node(node_id)
         {
-            let replace = best.as_ref().is_none_or(|(best_span, _)| {
+            let replace = best.as_ref().is_none_or(|(best_span, _, _)| {
                 span.end - span.start < best_span.end - best_span.start
             });
             if replace {
-                best = Some((*span, type_str));
+                best = Some((*span, type_str, Some(*node_id)));
             }
         }
     }
 
-    let (span, type_str) = best?;
+    let (span, type_str, node_id) = best?;
     let name = source_text_at(&semantic.source, span);
     let code = if name.is_empty() {
         type_str
     } else {
         format!("{name}: {type_str}")
     };
+    let docs = node_id.and_then(|node_id| semantic.semantic_index.value_doc_for_node(node_id));
 
     Some(Hover {
         contents: HoverContents::Markup(MarkupContent {
             kind: MarkupKind::Markdown,
-            value: format!("```saga\n{code}\n```"),
+            value: hover_markdown(docs, Some(code)),
         }),
         range: Some(span_to_range(&span, &semantic.line_index, &semantic.source)),
     })
@@ -4266,21 +4532,34 @@ fn hover_semantic_symbol_at(
     let occurrence = semantic
         .semantic_index
         .symbol_location_at_position(uri, position)?;
-    let (owner, member) = occurrence.key.name.rsplit_once('.')?;
+    let docs = semantic
+        .semantic_index
+        .symbol_doc_at_position(uri, position);
     let signature = match occurrence.key.kind {
-        SemanticSymbolKind::TraitMethod => semantic.check.trait_method_signature(owner, member),
-        SemanticSymbolKind::EffectOperation => {
-            semantic.check.effect_operation_signature(owner, member)
-        }
-        SemanticSymbolKind::Trait | SemanticSymbolKind::Effect | SemanticSymbolKind::Handler => {
-            None
-        }
-    }?;
+        SemanticSymbolKind::TraitMethod => occurrence
+            .key
+            .name
+            .rsplit_once('.')
+            .and_then(|(owner, member)| semantic.check.trait_method_signature(owner, member)),
+        SemanticSymbolKind::EffectOperation => occurrence
+            .key
+            .name
+            .rsplit_once('.')
+            .and_then(|(owner, member)| semantic.check.effect_operation_signature(owner, member)),
+        SemanticSymbolKind::Module
+        | SemanticSymbolKind::Trait
+        | SemanticSymbolKind::Effect
+        | SemanticSymbolKind::Handler => None,
+    };
+    let value = hover_markdown(docs, signature);
+    if value.is_empty() {
+        return None;
+    }
 
     Some(Hover {
         contents: HoverContents::Markup(MarkupContent {
             kind: MarkupKind::Markdown,
-            value: format!("```saga\n{signature}\n```"),
+            value,
         }),
         range: Some(occurrence.location.range),
     })
@@ -4302,6 +4581,12 @@ fn local_definition_at(
     semantic: &SemanticSnapshot,
     position: Position,
 ) -> Option<Location> {
+    if let Some(location) = semantic
+        .semantic_index
+        .module_definition_location_at(uri, position)
+    {
+        return Some(location);
+    }
     if let Some(location) = semantic
         .semantic_index
         .type_definition_location_at(uri, position)
@@ -4341,6 +4626,13 @@ fn references_at(
     if let Some(locations) =
         semantic
             .semantic_index
+            .module_reference_locations_at(uri, position, include_declaration)
+    {
+        return locations;
+    }
+    if let Some(locations) =
+        semantic
+            .semantic_index
             .type_reference_locations_at(uri, position, include_declaration)
     {
         return locations;
@@ -4364,6 +4656,106 @@ fn references_at(
         .reference_locations_for_node(node_id, include_declaration)
 }
 
+#[derive(Clone)]
+enum RenameTarget {
+    Module(String),
+    Type(String),
+    Symbol(SemanticSymbolKey),
+    Value(ast::NodeId),
+}
+
+fn rename_target_at(
+    uri: &Url,
+    semantic: &SemanticSnapshot,
+    position: Position,
+) -> Option<(RenameTarget, Range)> {
+    if let Some(occurrence) = semantic
+        .semantic_index
+        .module_occurrence_at_position(uri, position)
+    {
+        return Some((
+            RenameTarget::Module(occurrence.name.clone()),
+            occurrence.location.range,
+        ));
+    }
+    if let Some(occurrence) = semantic
+        .semantic_index
+        .type_occurrence_at_position(uri, position)
+    {
+        return Some((
+            RenameTarget::Type(occurrence.name.clone()),
+            occurrence.location.range,
+        ));
+    }
+    if let Some(occurrence) = semantic
+        .semantic_index
+        .symbol_location_at_position(uri, position)
+    {
+        return Some((
+            RenameTarget::Symbol(occurrence.key.clone()),
+            occurrence.location.range,
+        ));
+    }
+
+    let offset = semantic
+        .line_index
+        .position_to_offset(position, &semantic.source);
+    let (node_id, span) = smallest_node_at_offset(&semantic.check.node_spans, offset)?;
+    let definition_id = semantic.semantic_index.identity_for_node(node_id);
+    Some((
+        RenameTarget::Value(definition_id),
+        span_to_range(&span, &semantic.line_index, &semantic.source),
+    ))
+}
+
+fn valid_rename_name(new_name: &str, target: &RenameTarget) -> bool {
+    match target {
+        RenameTarget::Module(_) => new_name
+            .split('.')
+            .all(|segment| !segment.is_empty() && valid_identifier(segment)),
+        RenameTarget::Type(_) | RenameTarget::Symbol(_) | RenameTarget::Value(_) => {
+            valid_identifier(new_name)
+        }
+    }
+}
+
+fn valid_identifier(name: &str) -> bool {
+    let mut chars = name.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    (first.is_ascii_alphabetic() || first == '_')
+        && chars.all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+}
+
+fn workspace_edit_from_locations(
+    locations: Vec<Location>,
+    new_name: String,
+) -> Option<WorkspaceEdit> {
+    if locations.is_empty() {
+        return None;
+    }
+    let mut changes: HashMap<Url, Vec<TextEdit>> = HashMap::new();
+    for location in locations {
+        changes
+            .entry(location.uri)
+            .or_default()
+            .push(TextEdit::new(location.range, new_name.clone()));
+    }
+    for edits in changes.values_mut() {
+        edits.sort_by(|a, b| {
+            a.range
+                .start
+                .line
+                .cmp(&b.range.start.line)
+                .then_with(|| a.range.start.character.cmp(&b.range.start.character))
+                .then_with(|| a.range.end.line.cmp(&b.range.end.line))
+                .then_with(|| a.range.end.character.cmp(&b.range.end.character))
+        });
+    }
+    Some(WorkspaceEdit::new(changes))
+}
+
 #[tower_lsp::async_trait]
 impl LanguageServer for Backend {
     async fn initialize(&self, _: InitializeParams) -> Result<InitializeResult> {
@@ -4377,6 +4769,10 @@ impl LanguageServer for Backend {
                 hover_provider: Some(HoverProviderCapability::Simple(true)),
                 definition_provider: Some(OneOf::Left(true)),
                 references_provider: Some(OneOf::Left(true)),
+                rename_provider: Some(OneOf::Right(RenameOptions {
+                    prepare_provider: Some(true),
+                    work_done_progress_options: WorkDoneProgressOptions::default(),
+                })),
                 ..Default::default()
             },
             ..Default::default()
@@ -4560,6 +4956,23 @@ impl LanguageServer for Backend {
             position,
             params.context.include_declaration,
         );
+        if let Some(module_name) = semantic
+            .semantic_index
+            .module_name_at_position(&uri, position)
+        {
+            let project_root = project_root_for_uri(&uri);
+            let projects = self
+                .shared
+                .projects
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            locations.extend(projects.project_module_reference_locations(
+                &project_root,
+                module_name,
+                params.context.include_declaration,
+            ));
+            sort_and_dedup_locations(&mut locations);
+        }
         if let Some(type_name) = semantic
             .semantic_index
             .type_name_at_position(&uri, position)
@@ -4599,6 +5012,108 @@ impl LanguageServer for Backend {
         } else {
             Ok(Some(locations))
         }
+    }
+
+    async fn prepare_rename(
+        &self,
+        params: TextDocumentPositionParams,
+    ) -> Result<Option<PrepareRenameResponse>> {
+        let uri = params.text_document.uri;
+        let position = params.position;
+        let Some(document) = current_document(&self.shared, &uri) else {
+            return Ok(None);
+        };
+        let Some(semantic) = document.semantic else {
+            return Ok(None);
+        };
+
+        if semantic.version != document.version {
+            return Ok(None);
+        }
+
+        Ok(rename_target_at(&uri, &semantic, position)
+            .map(|(_, range)| PrepareRenameResponse::Range(range)))
+    }
+
+    async fn rename(&self, params: RenameParams) -> Result<Option<WorkspaceEdit>> {
+        let uri = params.text_document_position.text_document.uri;
+        let position = params.text_document_position.position;
+        let Some(document) = current_document(&self.shared, &uri) else {
+            return Ok(None);
+        };
+        let Some(semantic) = document.semantic else {
+            return Ok(None);
+        };
+
+        if semantic.version != document.version {
+            return Ok(None);
+        }
+
+        let Some((target, _)) = rename_target_at(&uri, &semantic, position) else {
+            return Ok(None);
+        };
+        if !valid_rename_name(&params.new_name, &target) {
+            return Ok(None);
+        }
+
+        let project_root = project_root_for_uri(&uri);
+        let mut locations = match &target {
+            RenameTarget::Module(module_name) => semantic
+                .semantic_index
+                .module_reference_locations_for_name(module_name, true),
+            RenameTarget::Type(type_name) => semantic
+                .semantic_index
+                .type_reference_locations_for_name(type_name, true),
+            RenameTarget::Symbol(key) => semantic
+                .semantic_index
+                .symbol_reference_locations_for_key(key, true),
+            RenameTarget::Value(definition_id) => semantic
+                .semantic_index
+                .reference_locations_for_node(*definition_id, true),
+        };
+
+        match &target {
+            RenameTarget::Module(module_name) => {
+                let projects = self
+                    .shared
+                    .projects
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner());
+                locations.extend(projects.project_module_reference_locations(
+                    &project_root,
+                    module_name,
+                    true,
+                ));
+            }
+            RenameTarget::Type(type_name) => {
+                let projects = self
+                    .shared
+                    .projects
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner());
+                locations.extend(projects.project_type_reference_locations(
+                    &project_root,
+                    type_name,
+                    true,
+                ));
+            }
+            RenameTarget::Symbol(key) => {
+                let projects = self
+                    .shared
+                    .projects
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner());
+                locations.extend(projects.project_symbol_reference_locations(
+                    &project_root,
+                    key,
+                    true,
+                ));
+            }
+            RenameTarget::Value(_) => {}
+        }
+        sort_and_dedup_locations(&mut locations);
+
+        Ok(workspace_edit_from_locations(locations, params.new_name))
     }
 }
 

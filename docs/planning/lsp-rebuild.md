@@ -258,8 +258,8 @@ explicitly deferred until project typechecking is solid and fast.
   - [x] type/record definition name -> location
   - [x] type/record reference spans -> definition name
   - [x] effect/trait/handler references
-  - [ ] module name -> file
-  - [ ] docs by semantic key
+  - [x] module name -> file
+  - [x] docs by semantic key
 - [x] Port local go-to-definition to use `CheckResult.references` and
   `node_spans` through `SemanticIndex`.
 - [x] Port cross-module go-to-definition to use cached semantic definition
@@ -271,7 +271,7 @@ explicitly deferred until project typechecking is solid and fast.
   and ordinary references can be filtered precisely.
 - [x] Correct local value references with resolver lexical binding identity so
   shadowed locals stay separate.
-- Port rename only after references are trustworthy.
+- [x] Port rename only after references are trustworthy.
 
 Avoid copying the old "search AST by name, then guess module" approach.
 
@@ -287,14 +287,14 @@ Goal: make LSP project checking treat the prelude as a single shared semantic
 surface, not as a module that can be reloaded or re-registered through multiple
 paths during dependency/workspace analysis.
 
-- [ ] Audit how the LSP cached base checker, dependency module interface seeding,
+- [x] Audit how the LSP cached base checker, dependency module interface seeding,
   and workspace module checks each carry `Std.*` modules.
-- [ ] Reproduce the real-project failure:
+- [x] Reproduce the real-project failure:
   `type error in module 'Kraken.Core': type error in module 'Std.Base': duplicate impl: Std.Base.Semigroup is already implemented for String`.
-- [ ] Ensure prelude/std modules are loaded exactly once per project semantic
+- [x] Ensure prelude/std modules are loaded exactly once per project semantic
   generation, then reused as immutable compiler state by imported workspace and
   dependency checks.
-- [ ] Add a protocol or checker-level regression that opens a project importing
+- [x] Add a protocol or checker-level regression that opens a project importing
   dependency modules that themselves rely on stdlib/prelude impls.
 
 Done when:

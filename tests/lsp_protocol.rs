@@ -780,6 +780,72 @@ main () = forty_two ()
 }
 
 #[test]
+fn rename_uses_semantic_identity_and_skips_shadowed_locals() {
+    let mut lsp = LspHarness::start();
+    lsp.initialize();
+    let uri = saga_uri("rename-shadowed");
+    let source = "\
+module Main
+
+fun pick : Int -> Int
+pick value = {
+  let inner = (fun value -> value) 2
+  value + inner
+}
+";
+
+    lsp.send_notification(
+        "textDocument/didOpen",
+        json!({
+            "textDocument": {
+                "uri": uri,
+                "languageId": "saga",
+                "version": 1,
+                "text": source
+            }
+        }),
+    );
+    let params = wait_for_diagnostics(&lsp, &saga_uri("rename-shadowed"), 1, 2);
+    assert_eq!(
+        params["diagnostics"].as_array().map(Vec::len),
+        Some(0),
+        "fixture must typecheck before rename request, got {params:?}"
+    );
+
+    let rename_id = lsp.send_request(
+        "textDocument/rename",
+        json!({
+            "textDocument": {
+                "uri": saga_uri("rename-shadowed")
+            },
+            "position": {
+                "line": 3,
+                "character": 5
+            },
+            "newName": "outer_value"
+        }),
+    );
+    let result = lsp
+        .recv_until(Duration::from_secs(5), |message| {
+            message.get("id").and_then(Value::as_i64) == Some(rename_id)
+        })
+        .expect("rename response");
+
+    let edits = result["result"]["changes"][saga_uri("rename-shadowed").as_str()]
+        .as_array()
+        .expect("rename edits for file");
+    let edited_lines: Vec<_> = edits
+        .iter()
+        .map(|edit| edit["range"]["start"]["line"].as_u64().expect("line"))
+        .collect();
+    assert_eq!(
+        edited_lines,
+        vec![3, 5],
+        "rename should touch only the outer binding and use: {result:?}"
+    );
+}
+
+#[test]
 fn find_references_includes_imported_definition_location() {
     let root = temp_project("cross-module-references");
     let helper_path = root.join("src/Helper.saga");
@@ -994,6 +1060,169 @@ id_board board = board
                 && location["range"]["start"]["line"].as_u64() == Some(4)
         }),
         "expected local type annotation references: {references:?}"
+    );
+}
+
+#[test]
+fn goto_definition_on_import_uses_module_file_index() {
+    let root = temp_project("module-import-definition");
+    let helper_path = root.join("src/Helper.saga");
+    let main_path = root.join("src/Main.saga");
+
+    std::fs::write(
+        &helper_path,
+        "\
+module Helper
+
+pub fun answer : Unit -> Int
+answer () = 42
+",
+    )
+    .expect("write helper module");
+
+    let main_source = "\
+module Main
+
+import Helper
+
+fun main : Unit -> Int
+main () = Helper.answer ()
+";
+    std::fs::write(&main_path, main_source).expect("write main module");
+
+    let result = {
+        let mut lsp = LspHarness::start();
+        lsp.initialize();
+        let uri = file_uri(&main_path);
+
+        lsp.send_notification(
+            "textDocument/didOpen",
+            json!({
+                "textDocument": {
+                    "uri": uri,
+                    "languageId": "saga",
+                    "version": 1,
+                    "text": main_source
+                }
+            }),
+        );
+        let params = wait_for_diagnostics(&lsp, &uri, 1, 2);
+        assert_eq!(
+            params["diagnostics"].as_array().map(Vec::len),
+            Some(0),
+            "fixture must typecheck before definition request, got {params:?}"
+        );
+
+        let definition_id = lsp.send_request(
+            "textDocument/definition",
+            json!({
+                "textDocument": {
+                    "uri": file_uri(&main_path)
+                },
+                "position": {
+                    "line": 2,
+                    "character": 8
+                }
+            }),
+        );
+        lsp.recv_until(Duration::from_secs(5), |message| {
+            message.get("id").and_then(Value::as_i64) == Some(definition_id)
+        })
+        .expect("definition response")
+    };
+
+    let _ = std::fs::remove_dir_all(&root);
+
+    assert_eq!(
+        result["result"]["uri"].as_str(),
+        Some(file_uri(&helper_path).as_str()),
+        "expected module import to jump to module file: {result:?}"
+    );
+    assert_eq!(
+        result["result"]["range"]["start"]["line"].as_u64(),
+        Some(0),
+        "expected module declaration range: {result:?}"
+    );
+}
+
+#[test]
+fn hover_uses_docs_by_semantic_type_key() {
+    let root = temp_project("semantic-doc-hover");
+    let types_path = root.join("src/Types.saga");
+    let main_path = root.join("src/Main.saga");
+
+    std::fs::write(
+        &types_path,
+        "\
+module Types
+
+#@ Board docs from the defining module.
+pub type BoardType =
+  | Twintip
+  | Hydrofoil
+",
+    )
+    .expect("write types module");
+
+    let main_source = "\
+module Main
+
+import Types (BoardType)
+
+fun id_board : BoardType -> BoardType
+id_board board = board
+";
+    std::fs::write(&main_path, main_source).expect("write main module");
+
+    let result = {
+        let mut lsp = LspHarness::start();
+        lsp.initialize();
+        let uri = file_uri(&main_path);
+
+        lsp.send_notification(
+            "textDocument/didOpen",
+            json!({
+                "textDocument": {
+                    "uri": uri,
+                    "languageId": "saga",
+                    "version": 1,
+                    "text": main_source
+                }
+            }),
+        );
+        let params = wait_for_diagnostics(&lsp, &uri, 1, 2);
+        assert_eq!(
+            params["diagnostics"].as_array().map(Vec::len),
+            Some(0),
+            "fixture must typecheck before hover request, got {params:?}"
+        );
+
+        let hover_id = lsp.send_request(
+            "textDocument/hover",
+            json!({
+                "textDocument": {
+                    "uri": file_uri(&main_path)
+                },
+                "position": {
+                    "line": 4,
+                    "character": 15
+                }
+            }),
+        );
+        lsp.recv_until(Duration::from_secs(5), |message| {
+            message.get("id").and_then(Value::as_i64) == Some(hover_id)
+        })
+        .expect("hover response")
+    };
+
+    let _ = std::fs::remove_dir_all(&root);
+
+    let value = result["result"]["contents"]["value"]
+        .as_str()
+        .expect("hover markdown value");
+    assert!(
+        value.contains("Board docs from the defining module."),
+        "expected semantic-key docs hover: {result:?}"
     );
 }
 
