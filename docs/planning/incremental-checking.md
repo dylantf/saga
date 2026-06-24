@@ -252,7 +252,7 @@ Progress:
   before storing the base checker.
 - [x] Seed only modules directly imported by the checked file instead of every
   cached module in the project.
-- [ ] Replace the first conservative `ModuleExports` debug fingerprint with a
+- [x] Replace the first conservative `ModuleExports` debug fingerprint with a
   stable sorted interface projection.
 
 ### Step 1: Measure Before Cutting
@@ -342,7 +342,13 @@ recheck too much than to keep stale type information.
 Current first slice:
 
 - [x] Compute a conservative interface fingerprint from `ModuleExports`.
-- [ ] Replace debug-format hashing with a stable sorted projection.
+- [x] Replace debug-format hashing with a stable sorted projection.
+
+The LSP projection includes imported semantic surface such as schemes, origins,
+types, records, traits, impls, effects, handlers, aliases, arities, and
+effectful function metadata. It deliberately excludes spans, definition
+`NodeId`s, and doc comments so editor metadata can refresh without forcing
+dependent modules to typecheck again.
 
 Done when the LSP can distinguish "module changed" from "module interface
 changed."
@@ -519,6 +525,5 @@ embedded-source fingerprint and pathless cache entry. The remaining warm-edit
 cost is mostly the current file's own semantic pass at roughly 80ms plus the
 100ms debounce. Cold-open editor responsiveness is improved by applying the
 syntax snapshot before semantic analysis starts; the remaining cold-start work
-is project/dependency base warming. Next target that cold warmup path or replace
-the temporary debug-format interface fingerprint with a stable sorted interface
-projection.
+is project/dependency base warming. Next target that cold warmup path or move
+back to semantic completion/navigation polish.

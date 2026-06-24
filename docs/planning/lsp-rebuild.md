@@ -233,7 +233,7 @@ Goal: stop treating each file as an island.
   interfaces into project state instead of storing them inside the base checker.
 - [x] Skip repeated interface-cache updates for unchanged imported modules.
 - [x] Seed only direct imports for the file being checked.
-- Replace the first conservative interface fingerprint with a stable sorted
+- [x] Replace the first conservative interface fingerprint with a stable sorted
   projection.
 
 This phase should borrow from `docs/planning/incremental-checking.md`, but the
@@ -421,7 +421,7 @@ Scope and implement the first incremental project-checking slice from
     fingerprints
 14. [x] publish syntax diagnostics and parse snapshots before cold semantic
     warmup completes
-15. [ ] replace the temporary interface fingerprint with a stable sorted
+15. [x] replace the temporary interface fingerprint with a stable sorted
    projection
 
 Richer completion, references, and rename stay behind this work. Typechecking
