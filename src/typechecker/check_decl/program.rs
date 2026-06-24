@@ -1,5 +1,44 @@
 use super::*;
 
+fn typecheck_trace_enabled() -> bool {
+    std::env::var_os("SAGA_TYPECHECK_TRACE").is_some()
+}
+
+fn trace_typecheck_phase(module: Option<&str>, phase: &str, duration: std::time::Duration) {
+    if !typecheck_trace_enabled() {
+        return;
+    }
+
+    let line = format!(
+        "[saga-typecheck] module={} phase={} elapsed={:.1}ms",
+        module.unwrap_or("<unknown>"),
+        phase,
+        duration.as_secs_f64() * 1000.0,
+    );
+    if let Some(path) = std::env::var_os("SAGA_TYPECHECK_TRACE_FILE") {
+        use std::io::Write;
+        if let Ok(mut file) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+        {
+            let _ = writeln!(file, "{line}");
+        }
+    } else {
+        eprintln!("{line}");
+    }
+}
+
+fn timed_typecheck_phase<T>(module: Option<&str>, phase: &str, f: impl FnOnce() -> T) -> T {
+    if !typecheck_trace_enabled() {
+        return f();
+    }
+    let start = std::time::Instant::now();
+    let result = f();
+    trace_typecheck_phase(module, phase, start.elapsed());
+    result
+}
+
 impl Checker {
     pub(crate) fn build_effect_row_from_refs(
         &mut self,
@@ -67,7 +106,6 @@ impl Checker {
         })
     }
 
-
     pub(crate) fn function_type_with_innermost_effects(
         &self,
         param_types: &[Type],
@@ -93,21 +131,42 @@ impl Checker {
 
     // --- Top-level declarations ---
 
-
     /// Typecheck a program and return the public result.
     /// This is the main entry point for external callers.
     pub fn check_program(&mut self, program: &mut [Decl]) -> CheckResult {
+        self.check_program_with_result(program, Checker::to_result)
+    }
+
+    /// Typecheck a program and return a result optimized for editor use.
+    pub fn check_program_lsp(&mut self, program: &mut [Decl]) -> CheckResult {
+        self.check_program_with_result(program, Checker::to_lsp_result)
+    }
+
+    fn check_program_with_result(
+        &mut self,
+        program: &mut [Decl],
+        build_result: fn(&Checker) -> CheckResult,
+    ) -> CheckResult {
+        let total_start = typecheck_trace_enabled().then(std::time::Instant::now);
         if let Err(errors) = self.check_program_inner(program) {
             for e in errors {
                 self.collected_diagnostics.push(e);
             }
         }
-        self.check_unused_functions();
-        self.check_unused_variables();
-        self.zonk_warnings();
-        self.to_result()
+        let module = self.current_module.clone();
+        timed_typecheck_phase(module.as_deref(), "check_unused_functions", || {
+            self.check_unused_functions()
+        });
+        timed_typecheck_phase(module.as_deref(), "check_unused_variables", || {
+            self.check_unused_variables()
+        });
+        timed_typecheck_phase(module.as_deref(), "zonk_warnings", || self.zonk_warnings());
+        let result = timed_typecheck_phase(module.as_deref(), "to_result", || build_result(self));
+        if let Some(start) = total_start {
+            trace_typecheck_phase(module.as_deref(), "check_program_total", start.elapsed());
+        }
+        result
     }
-
 
     /// Internal implementation of check_program.
     /// Returns Err for fatal errors that prevent further checking.
@@ -116,215 +175,260 @@ impl Checker {
         &mut self,
         program: &mut [Decl],
     ) -> std::result::Result<(), Vec<Diagnostic>> {
-        // Infer current_module from the program's module declaration if not
-        // already set by the caller. This ensures type name canonicalization
-        // works regardless of which entry point invoked the checker.
-        if self.current_module.is_none() {
-            for decl in program.iter() {
-                if let Decl::ModuleDecl { path, .. } = decl {
-                    self.current_module = Some(path.join("."));
-                    break;
+        let initial_module = self.current_module.clone();
+        timed_typecheck_phase(initial_module.as_deref(), "infer_current_module", || {
+            // Infer current_module from the program's module declaration if not
+            // already set by the caller. This ensures type name canonicalization
+            // works regardless of which entry point invoked the checker.
+            if self.current_module.is_none() {
+                for decl in program.iter() {
+                    if let Decl::ModuleDecl { path, .. } = decl {
+                        self.current_module = Some(path.join("."));
+                        break;
+                    }
                 }
             }
-        }
+        });
+        let module = self.current_module.clone();
 
-        // Add local type names to scope_map BEFORE register_definitions, so that
-        // convert_type_expr can resolve local types during declaration registration.
-        // Local types shadow imported types (use `insert`, not `or_insert`).
-        for decl in program.iter() {
-            let type_name = match decl {
-                Decl::TypeDef { name, .. }
-                | Decl::RecordDef { name, .. }
-                | Decl::TypeAlias { name, .. } => Some(name),
-                _ => None,
-            };
-            if let Some(name) = type_name {
-                let canonical = match &self.current_module {
-                    Some(module) => format!("{}.{}", module, name),
-                    None => name.clone(),
+        timed_typecheck_phase(module.as_deref(), "seed_local_type_names", || {
+            // Add local type names to scope_map BEFORE register_definitions, so that
+            // convert_type_expr can resolve local types during declaration registration.
+            // Local types shadow imported types (use `insert`, not `or_insert`).
+            for decl in program.iter() {
+                let type_name = match decl {
+                    Decl::TypeDef { name, .. }
+                    | Decl::RecordDef { name, .. }
+                    | Decl::TypeAlias { name, .. } => Some(name),
+                    _ => None,
                 };
-                self.scope_map.types.insert(name.clone(), canonical);
+                if let Some(name) = type_name {
+                    let canonical = match &self.current_module {
+                        Some(module) => format!("{}.{}", module, name),
+                        None => name.clone(),
+                    };
+                    self.scope_map.types.insert(name.clone(), canonical);
+                }
             }
-        }
-        self.register_active_scc_headers().map_err(|msg| {
+        });
+        timed_typecheck_phase(module.as_deref(), "register_active_scc_headers", || {
+            self.register_active_scc_headers()
+        })
+        .map_err(|msg| {
             vec![Diagnostic::error_at(
                 Span { start: 0, end: 0 },
                 format!("module header error: {msg}"),
             )]
         })?;
-        self.process_imports(program)?;
-        self.auto_load_referenced_modules(program);
-        self.resolution =
-            crate::typechecker::resolve::resolve_names(program, &self.scope_map, self.current_module.as_deref());
-        self.register_definitions(program)?;
-        self.register_externals(program)?;
-        let (annotations, annotation_constraints) = self.collect_annotations(program)?;
-        let fun_vars = self.pre_bind_functions(program, &annotations);
-        if let Err(errors) = self.register_all_impls(program) {
+        timed_typecheck_phase(module.as_deref(), "process_imports", || {
+            self.process_imports(program)
+        })?;
+        timed_typecheck_phase(module.as_deref(), "auto_load_referenced_modules", || {
+            self.auto_load_referenced_modules(program)
+        });
+        self.resolution = timed_typecheck_phase(module.as_deref(), "resolve_names", || {
+            crate::typechecker::resolve::resolve_names(
+                program,
+                &self.scope_map,
+                self.current_module.as_deref(),
+            )
+        });
+        timed_typecheck_phase(module.as_deref(), "register_definitions", || {
+            self.register_definitions(program)
+        })?;
+        timed_typecheck_phase(module.as_deref(), "register_externals", || {
+            self.register_externals(program)
+        })?;
+        let (annotations, annotation_constraints) =
+            timed_typecheck_phase(module.as_deref(), "collect_annotations", || {
+                self.collect_annotations(program)
+            })?;
+        let fun_vars = timed_typecheck_phase(module.as_deref(), "pre_bind_functions", || {
+            self.pre_bind_functions(program, &annotations)
+        });
+        if let Err(errors) = timed_typecheck_phase(module.as_deref(), "register_all_impls", || {
+            self.register_all_impls(program)
+        }) {
             self.collected_diagnostics.extend(errors);
         }
-        if let Err(e) = self.check_supertrait_impls() {
+        if let Err(e) = timed_typecheck_phase(module.as_deref(), "check_supertrait_impls", || {
+            self.check_supertrait_impls()
+        }) {
             self.collected_diagnostics.push(e);
         }
 
         // Main pass: group multi-clause function bindings, then check everything.
         // Collect errors instead of failing on the first one.
         let mut errors: Vec<Diagnostic> = Vec::new();
-        let mut i = 0;
-        while i < program.len() {
-            if let Decl::FunBinding { name, .. } = &program[i] {
-                // Collect all consecutive clauses with the same name
-                let name = name.clone();
-                let start = i;
-                while i < program.len() {
-                    if let Decl::FunBinding { name: n, .. } = &program[i]
-                        && *n == name
-                    {
-                        i += 1;
-                        continue;
+        timed_typecheck_phase(module.as_deref(), "body_pass", || {
+            let mut i = 0;
+            while i < program.len() {
+                if let Decl::FunBinding { name, .. } = &program[i] {
+                    // Collect all consecutive clauses with the same name
+                    let name = name.clone();
+                    let start = i;
+                    while i < program.len() {
+                        if let Decl::FunBinding { name: n, .. } = &program[i]
+                            && *n == name
+                        {
+                            i += 1;
+                            continue;
+                        }
+                        break;
                     }
-                    break;
+                    let clauses: Vec<&Decl> = program[start..i].iter().collect();
+                    let fun_var = fun_vars[&name].clone();
+                    let annotation = match annotations.get(&name) {
+                        Some((ty, span, row)) => FunctionAnnotation {
+                            ty: Some(ty),
+                            span: Some(*span),
+                            effect_row: Some(row),
+                        },
+                        None => FunctionAnnotation {
+                            ty: None,
+                            span: None,
+                            effect_row: None,
+                        },
+                    };
+                    let where_cons = annotation_constraints
+                        .get(&name)
+                        .map(|v| v.as_slice())
+                        .unwrap_or(&[]);
+                    if let Err(e) =
+                        self.check_fun_clauses(&name, &clauses, &fun_var, annotation, where_cons)
+                    {
+                        errors.push(e);
+                        // Clear pending constraints for this function -- they may reference
+                        // unresolved types from the error site and would produce cascading errors
+                        self.trait_state.pending_constraints.clear();
+                    }
+                    // Drain any additional errors collected during block inference
+                    let has_errors = self
+                        .collected_diagnostics
+                        .iter()
+                        .any(|d| matches!(d.severity, crate::typechecker::Severity::Error));
+                    if has_errors {
+                        self.trait_state.pending_constraints.clear();
+                    }
+                    errors.extend(self.drain_errors());
+                } else {
+                    if let Err(e) = self.check_decl(&program[i]) {
+                        errors.push(e);
+                    }
+                    errors.extend(self.drain_errors());
+                    i += 1;
                 }
-                let clauses: Vec<&Decl> = program[start..i].iter().collect();
-                let fun_var = fun_vars[&name].clone();
-                let annotation = match annotations.get(&name) {
-                    Some((ty, span, row)) => FunctionAnnotation {
-                        ty: Some(ty),
-                        span: Some(*span),
-                        effect_row: Some(row),
-                    },
-                    None => FunctionAnnotation {
-                        ty: None,
-                        span: None,
-                        effect_row: None,
-                    },
-                };
-                let where_cons = annotation_constraints
-                    .get(&name)
-                    .map(|v| v.as_slice())
-                    .unwrap_or(&[]);
-                if let Err(e) =
-                    self.check_fun_clauses(&name, &clauses, &fun_var, annotation, where_cons)
-                {
-                    errors.push(e);
-                    // Clear pending constraints for this function -- they may reference
-                    // unresolved types from the error site and would produce cascading errors
-                    self.trait_state.pending_constraints.clear();
-                }
-                // Drain any additional errors collected during block inference
-                let has_errors = self
-                    .collected_diagnostics
-                    .iter()
-                    .any(|d| matches!(d.severity, crate::typechecker::Severity::Error));
-                if has_errors {
-                    self.trait_state.pending_constraints.clear();
-                }
-                errors.extend(self.drain_errors());
-            } else {
-                if let Err(e) = self.check_decl(&program[i]) {
-                    errors.push(e);
-                }
-                errors.extend(self.drain_errors());
-                i += 1;
             }
-        }
+        });
 
         // Validate that `main` does not declare effects (it's the top of the call stack,
         // there is no caller above to provide handlers)
-        let main_effects: Vec<String> = self
-            .env
-            .get("main")
-            .and_then(|s| innermost_effect_row(&self.sub.apply(&s.ty)))
-            .map(|r| r.effects.iter().map(|e| e.name.clone()).collect())
-            .unwrap_or_default();
-        if !main_effects.is_empty() {
-            let span = program.iter().find_map(|d| {
-                if let Decl::FunSignature { name, span, .. } = d
-                    && name == "main"
-                {
-                    Some(*span)
-                } else {
-                    None
-                }
-            });
-            errors.push(Diagnostic::error_at(
-                    span.unwrap_or(crate::token::Span { start: 0, end: 0 }),
-                    format!(
-                        "`main` cannot use `needs` -- it is the entry point and there is no caller to provide handlers for {{{}}}. Handle effects inside `main` using `with` instead.",
-                        main_effects.join(", ")
-                    ),
-                ));
-        }
-
-        // Validate that `main` does not have unresolved trait constraints
-        // (it is the entry point -- there is no caller to supply dictionaries)
-        if let Some(scheme) = self.env.get("main")
-            && !scheme.constraints.is_empty()
-        {
-            let traits: Vec<_> = scheme
-                .constraints
-                .iter()
-                .map(|(t, _, _)| t.as_str())
-                .collect();
-            let span = program
-                .iter()
-                .find_map(|d| {
-                    if let Decl::FunBinding { name, span, .. } = d
+        timed_typecheck_phase(module.as_deref(), "validate_main", || {
+            let main_effects: Vec<String> = self
+                .env
+                .get("main")
+                .and_then(|s| innermost_effect_row(&self.sub.apply(&s.ty)))
+                .map(|r| r.effects.iter().map(|e| e.name.clone()).collect())
+                .unwrap_or_default();
+            if !main_effects.is_empty() {
+                let span = program.iter().find_map(|d| {
+                    if let Decl::FunSignature { name, span, .. } = d
                         && name == "main"
                     {
                         Some(*span)
                     } else {
                         None
                     }
-                })
-                .unwrap_or(crate::token::Span { start: 0, end: 0 });
-            errors.push(Diagnostic::error_at(
-                span,
-                format!(
-                    "`main` cannot have unresolved trait constraints [{}] -- it is the entry point and there is no caller to supply dictionaries",
-                    traits.join(", ")
-                ),
-            ));
-        }
+                });
+                errors.push(Diagnostic::error_at(
+                    span.unwrap_or(crate::token::Span { start: 0, end: 0 }),
+                    format!(
+                        "`main` cannot use `needs` -- it is the entry point and there is no caller to provide handlers for {{{}}}. Handle effects inside `main` using `with` instead.",
+                        main_effects.join(", ")
+                    ),
+                ));
+            }
+
+            // Validate that `main` does not have unresolved trait constraints
+            // (it is the entry point -- there is no caller to supply dictionaries)
+            if let Some(scheme) = self.env.get("main")
+                && !scheme.constraints.is_empty()
+            {
+                let traits: Vec<_> = scheme
+                    .constraints
+                    .iter()
+                    .map(|(t, _, _)| t.as_str())
+                    .collect();
+                let span = program
+                    .iter()
+                    .find_map(|d| {
+                        if let Decl::FunBinding { name, span, .. } = d
+                            && name == "main"
+                        {
+                            Some(*span)
+                        } else {
+                            None
+                        }
+                    })
+                    .unwrap_or(crate::token::Span { start: 0, end: 0 });
+                errors.push(Diagnostic::error_at(
+                    span,
+                    format!(
+                        "`main` cannot have unresolved trait constraints [{}] -- it is the entry point and there is no caller to supply dictionaries",
+                        traits.join(", ")
+                    ),
+                ));
+            }
+        });
 
         // Check for annotations without a matching function binding
         // (skip @external and other bodyless annotations)
-        if !self.allow_bodyless_annotations {
-            let bound_names: std::collections::HashSet<&str> = program
-                .iter()
-                .filter_map(|d| match d {
-                    Decl::FunBinding { name, .. } => Some(name.as_str()),
-                    _ => None,
-                })
-                .collect();
-            let bodyless_names: std::collections::HashSet<&str> = program
-                .iter()
-                .filter_map(|d| match d {
-                    Decl::FunSignature {
-                        name,
-                        annotations: ann,
-                        ..
-                    } if ann
-                        .iter()
-                        .any(|a| a.name == "external" || a.name == "builtin") =>
+        timed_typecheck_phase(module.as_deref(), "check_bodyless_annotations", || {
+            if !self.allow_bodyless_annotations {
+                let bound_names: std::collections::HashSet<&str> = program
+                    .iter()
+                    .filter_map(|d| match d {
+                        Decl::FunBinding { name, .. } => Some(name.as_str()),
+                        _ => None,
+                    })
+                    .collect();
+                let bodyless_names: std::collections::HashSet<&str> = program
+                    .iter()
+                    .filter_map(|d| match d {
+                        Decl::FunSignature {
+                            name,
+                            annotations: ann,
+                            ..
+                        } if ann
+                            .iter()
+                            .any(|a| a.name == "external" || a.name == "builtin") =>
+                        {
+                            Some(name.as_str())
+                        }
+                        _ => None,
+                    })
+                    .collect();
+                for (name, (_, span, _)) in &annotations {
+                    if !bound_names.contains(name.as_str())
+                        && !bodyless_names.contains(name.as_str())
                     {
-                        Some(name.as_str())
+                        errors.push(Diagnostic::error_at(
+                            *span,
+                            format!(
+                                "type annotation for `{name}` has no matching function definition"
+                            ),
+                        ));
                     }
-                    _ => None,
-                })
-                .collect();
-            for (name, (_, span, _)) in &annotations {
-                if !bound_names.contains(name.as_str()) && !bodyless_names.contains(name.as_str()) {
-                    errors.push(Diagnostic::error_at(
-                        *span,
-                        format!("type annotation for `{name}` has no matching function definition"),
-                    ));
                 }
             }
-        }
+        });
 
         // Check all accumulated trait constraints now that types are resolved
-        if let Err(e) = self.check_pending_constraints() {
+        if let Err(e) =
+            timed_typecheck_phase(module.as_deref(), "check_pending_constraints", || {
+                self.check_pending_constraints()
+            })
+        {
             errors.push(e);
         }
 
@@ -334,7 +438,6 @@ impl Checker {
             Err(errors)
         }
     }
-
 
     pub(crate) fn check_decl(&mut self, decl: &Decl) -> Result<(), Diagnostic> {
         match decl {
@@ -378,7 +481,6 @@ impl Checker {
     }
 
     // --- check_program_inner passes ---
-
 
     /// Pass 1: Register type, record, effect, and trait definitions.
     /// Effects are registered in two sub-passes: stubs first (name + type params),
@@ -498,9 +600,11 @@ impl Checker {
         Ok(())
     }
 
-
     /// Pass 2: Process imports (before impls so imported traits are available).
-    pub(crate) fn process_imports(&mut self, program: &[Decl]) -> std::result::Result<(), Vec<Diagnostic>> {
+    pub(crate) fn process_imports(
+        &mut self,
+        program: &[Decl],
+    ) -> std::result::Result<(), Vec<Diagnostic>> {
         for decl in program {
             if let Decl::Import {
                 module_path,
@@ -510,13 +614,16 @@ impl Checker {
                 ..
             } = decl
             {
-                self.typecheck_import(module_path, alias.as_deref(), exposing.as_ref(), *span)
-                    .map_err(|e| vec![e])?;
+                let phase = format!("process_import:{}", module_path.join("."));
+                let current_module = self.current_module.clone();
+                timed_typecheck_phase(current_module.as_deref(), &phase, || {
+                    self.typecheck_import(module_path, alias.as_deref(), exposing.as_ref(), *span)
+                })
+                .map_err(|e| vec![e])?;
             }
         }
         Ok(())
     }
-
 
     /// For every module referenced via `Module.name` (canonical form) without
     /// an explicit `import`, load the module's exports so its canonical keys
@@ -555,9 +662,11 @@ impl Checker {
         }
     }
 
-
     /// Pass 3: Register external functions so they're available in impl bodies.
-    pub(crate) fn register_externals(&mut self, program: &[Decl]) -> std::result::Result<(), Vec<Diagnostic>> {
+    pub(crate) fn register_externals(
+        &mut self,
+        program: &[Decl],
+    ) -> std::result::Result<(), Vec<Diagnostic>> {
         for decl in program {
             if let Decl::FunSignature {
                 name,
@@ -637,7 +746,6 @@ impl Checker {
         }
         Ok(())
     }
-
 
     /// Pass 4: Collect function annotations and their where clause constraints.
     /// Returns (annotations, annotation_constraints) maps.
@@ -774,7 +882,6 @@ impl Checker {
         Ok((annotations, annotation_constraints))
     }
 
-
     /// Pass 5: Pre-bind all function names with fresh vars. This enables
     /// mutual recursion and lets trait/impl method bodies (checked in Pass 6)
     /// reference top-level zero-arity bindings declared anywhere in the module.
@@ -830,9 +937,11 @@ impl Checker {
         fun_vars
     }
 
-
     /// Pass 6: Register trait impls.
-    pub(crate) fn register_all_impls(&mut self, program: &[Decl]) -> std::result::Result<(), Vec<Diagnostic>> {
+    pub(crate) fn register_all_impls(
+        &mut self,
+        program: &[Decl],
+    ) -> std::result::Result<(), Vec<Diagnostic>> {
         let mut errors: Vec<Diagnostic> = Vec::new();
         for decl in program {
             if let Decl::ImplDef {
@@ -909,5 +1018,4 @@ impl Checker {
             Err(errors)
         }
     }
-
 }

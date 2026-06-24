@@ -310,12 +310,107 @@ impl CheckResult {
     }
 }
 
+impl ModuleContext {
+    fn clone_for_result_with_check_results(
+        &self,
+        check_results: HashMap<String, CheckResult>,
+    ) -> Self {
+        Self {
+            project_root: self.project_root.clone(),
+            map: self.map.clone(),
+            source_overlay: self.source_overlay.clone(),
+            module_graph: self.module_graph.clone(),
+            visibility: self.visibility.clone(),
+            private_modules: self.private_modules.clone(),
+            exports: self.exports.clone(),
+            codegen_info: self.codegen_info.clone(),
+            programs: self.programs.clone(),
+            check_results,
+            // CheckResult is a compiler output snapshot. These are live checker
+            // caches and cycle guards, so carrying them here only makes clones
+            // more expensive.
+            prelude_snapshot: None,
+            base_trait_impls: self.base_trait_impls.clone(),
+            loading: HashSet::new(),
+            active_scc_headers: None,
+            registered_canonical: HashSet::new(),
+        }
+    }
+
+    fn clone_for_result(&self) -> Self {
+        self.clone_for_result_with_check_results(self.check_results.clone())
+    }
+
+    fn clone_for_lsp_result(&self) -> Self {
+        let check_results = self
+            .check_results
+            .iter()
+            .map(|(name, result)| (name.clone(), result.clone_without_module_results()))
+            .collect();
+        self.clone_for_result_with_check_results(check_results)
+    }
+
+    fn clone_without_module_results(&self) -> Self {
+        self.clone_for_result_with_check_results(HashMap::new())
+    }
+}
+
+impl CheckResult {
+    fn clone_without_module_results(&self) -> Self {
+        Self {
+            env: self.env.clone(),
+            sub: self.sub.clone(),
+            constructors: self.constructors.clone(),
+            evidence: self.evidence.clone(),
+            where_bound_var_names: self.where_bound_var_names.clone(),
+            diagnostics: self.diagnostics.clone(),
+            modules: self.modules.clone_without_module_results(),
+            traits: self.traits.clone(),
+            trait_impls: self.trait_impls.clone(),
+            effects: self.effects.clone(),
+            handlers: self.handlers.clone(),
+            let_binding_handlers: self.let_binding_handlers.clone(),
+            fun_effects: self.fun_effects.clone(),
+            type_at_node: self.type_at_node.clone(),
+            type_at_span: self.type_at_span.clone(),
+            handler_arm_targets: self.handler_arm_targets.clone(),
+            effect_call_targets: self.effect_call_targets.clone(),
+            let_dict_params: self.let_dict_params.clone(),
+            let_effect_bindings: self.let_effect_bindings.clone(),
+            records: self.records.clone(),
+            references: self.references.clone(),
+            node_spans: self.node_spans.clone(),
+            type_references: self.type_references.clone(),
+            constructor_def_ids: self.constructor_def_ids.clone(),
+            imported_docs: self.imported_docs.clone(),
+            prelude_imports: self.prelude_imports.clone(),
+            scope_map: self.scope_map.clone(),
+            resolution: self.resolution.clone(),
+            needs_ets_ref_table: self.needs_ets_ref_table,
+            needs_vec_table: self.needs_vec_table,
+        }
+    }
+}
+
 impl Checker {
     /// Extract the public-facing result from the current checker state.
     /// Clones the output-relevant fields, leaving the Checker intact
     /// (needed because with_prelude continues using the Checker after
     /// checking the prelude).
     pub fn to_result(&self) -> CheckResult {
+        self.to_result_with_modules(self.modules.clone_for_result())
+    }
+
+    /// Extract a result optimized for LSP snapshots.
+    ///
+    /// The LSP only needs direct imported module facts for navigation and
+    /// hovers. Keeping recursively nested per-module CheckResults makes each
+    /// keystroke clone the transitive project graph.
+    pub fn to_lsp_result(&self) -> CheckResult {
+        self.to_result_with_modules(self.modules.clone_for_lsp_result())
+    }
+
+    fn to_result_with_modules(&self, modules: ModuleContext) -> CheckResult {
         let diagnostics = self.collected_diagnostics.clone();
         let type_at_node = self
             .lsp
@@ -353,7 +448,7 @@ impl Checker {
                 expanded
             },
             diagnostics,
-            modules: self.modules.clone(),
+            modules,
             traits: self.trait_state.traits.clone(),
             trait_impls: self.trait_state.impls.clone(),
             effects: self.effects.clone(),

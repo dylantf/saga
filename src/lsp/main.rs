@@ -1,11 +1,15 @@
 use std::collections::HashMap;
+use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration as StdDuration, Instant as StdInstant};
 
 use saga::{ast, derive, desugar, lexer, parser, project_config, typechecker};
 use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
 use tower_lsp::{Client, LanguageServer, LspService, Server};
+
+const SEMANTIC_DEBOUNCE_MS: u64 = 100;
 
 #[derive(Clone)]
 struct DocumentState {
@@ -29,6 +33,8 @@ struct ParseJobResult {
     parse: Option<ParseSnapshot>,
     semantic: Option<SemanticSnapshot>,
     diagnostics: Vec<Diagnostic>,
+    module_interfaces: Vec<ModuleInterfaceUpdate>,
+    force_dependents: bool,
 }
 
 struct AppliedParseResult {
@@ -48,8 +54,207 @@ struct SemanticSnapshot {
 #[derive(Default)]
 struct SharedState {
     documents: Mutex<HashMap<Url, DocumentState>>,
-    dep_graph: Mutex<DependencyGraph>,
-    base_checkers: Mutex<HashMap<Option<PathBuf>, typechecker::Checker>>,
+    projects: Mutex<ProjectSemanticStore>,
+}
+
+#[derive(Default)]
+struct ProjectSemanticStore {
+    projects: HashMap<Option<PathBuf>, ProjectSemanticState>,
+}
+
+struct ProjectSemanticState {
+    generation: u64,
+    dep_graph: DependencyGraph,
+    base_checker: Option<typechecker::Checker>,
+    module_interfaces: HashMap<String, CachedModuleInterface>,
+}
+
+#[derive(Clone)]
+struct CachedModuleInterface {
+    path: PathBuf,
+    source_fingerprint: u64,
+    interface_fingerprint: u64,
+    exports: typechecker::ModuleExports,
+    codegen_info: Option<typechecker::ModuleCodegenInfo>,
+    check_result: Option<typechecker::CheckResult>,
+}
+
+struct ModuleInterfaceUpdate {
+    module_name: String,
+    path: PathBuf,
+    source_fingerprint: u64,
+    interface_fingerprint: u64,
+    exports: typechecker::ModuleExports,
+    codegen_info: Option<typechecker::ModuleCodegenInfo>,
+    check_result: Option<typechecker::CheckResult>,
+    is_current: bool,
+}
+
+impl ProjectSemanticState {
+    fn new() -> Self {
+        Self {
+            generation: 0,
+            dep_graph: DependencyGraph::default(),
+            base_checker: None,
+            module_interfaces: HashMap::new(),
+        }
+    }
+}
+
+impl ProjectSemanticStore {
+    fn project_mut(&mut self, project_root: Option<PathBuf>) -> &mut ProjectSemanticState {
+        self.projects
+            .entry(project_root)
+            .or_insert_with(ProjectSemanticState::new)
+    }
+
+    fn base_checker(&self, project_root: &Option<PathBuf>) -> Option<typechecker::Checker> {
+        self.projects
+            .get(project_root)
+            .and_then(|project| project.base_checker.clone())
+    }
+
+    fn store_base_checker(
+        &mut self,
+        project_root: Option<PathBuf>,
+        checker: typechecker::Checker,
+    ) -> typechecker::Checker {
+        let project = self.project_mut(project_root);
+        project
+            .base_checker
+            .get_or_insert_with(|| checker.clone())
+            .clone()
+    }
+
+    fn update_file(
+        &mut self,
+        project_root: Option<PathBuf>,
+        uri: &Url,
+        module_name: Option<String>,
+        new_imports: std::collections::HashSet<String>,
+    ) -> u64 {
+        let project = self.project_mut(project_root);
+        project.dep_graph.update_file(uri, module_name, new_imports);
+        project.generation = project.generation.saturating_add(1);
+        project.generation
+    }
+
+    fn dependents_of(&self, project_root: &Option<PathBuf>, uri: &Url) -> Vec<Url> {
+        self.projects
+            .get(project_root)
+            .map(|project| project.dep_graph.dependents_of(uri))
+            .unwrap_or_default()
+    }
+
+    fn remove_file_from_all_projects(&mut self, uri: &Url) {
+        for project in self.projects.values_mut() {
+            project.dep_graph.remove_file(uri);
+            project.generation = project.generation.saturating_add(1);
+        }
+    }
+
+    fn seed_module_interfaces(
+        &self,
+        project_root: &Option<PathBuf>,
+        checker: &mut typechecker::Checker,
+        source_overlay: &HashMap<PathBuf, String>,
+        requested_modules: Option<&std::collections::HashSet<String>>,
+    ) -> usize {
+        let Some(project) = self.projects.get(project_root) else {
+            return 0;
+        };
+
+        let mut seeded = 0;
+        for (module_name, entry) in &project.module_interfaces {
+            if requested_modules.is_some_and(|modules| !modules.contains(module_name)) {
+                continue;
+            }
+            let Some(current_fingerprint) =
+                source_fingerprint_for_path(&entry.path, source_overlay)
+            else {
+                continue;
+            };
+            if current_fingerprint != entry.source_fingerprint {
+                continue;
+            }
+            checker.seed_module_cache(
+                module_name.clone(),
+                entry.exports.clone(),
+                entry.codegen_info.clone(),
+                None,
+                None,
+            );
+            seeded += 1;
+        }
+        seeded
+    }
+
+    fn apply_module_interface_updates(
+        &mut self,
+        project_root: Option<PathBuf>,
+        updates: Vec<ModuleInterfaceUpdate>,
+    ) -> ModuleInterfaceApplyResult {
+        let project = self.project_mut(project_root);
+        let mut updated = 0;
+        let mut current_changed = false;
+        let mut saw_current = false;
+
+        for update in updates {
+            let previous_fingerprint = project
+                .module_interfaces
+                .get(&update.module_name)
+                .map(|entry| entry.interface_fingerprint);
+            if update.is_current {
+                saw_current = true;
+                current_changed = previous_fingerprint != Some(update.interface_fingerprint);
+            }
+            let entry = CachedModuleInterface {
+                path: update.path,
+                source_fingerprint: update.source_fingerprint,
+                interface_fingerprint: update.interface_fingerprint,
+                exports: update.exports,
+                codegen_info: update.codegen_info,
+                check_result: update.check_result,
+            };
+            project.module_interfaces.insert(update.module_name, entry);
+            updated += 1;
+        }
+
+        ModuleInterfaceApplyResult {
+            updated,
+            current_changed,
+            saw_current,
+        }
+    }
+
+    fn cached_module_source_fingerprints(
+        &self,
+        project_root: &Option<PathBuf>,
+    ) -> HashMap<String, u64> {
+        self.projects
+            .get(project_root)
+            .map(|project| {
+                project
+                    .module_interfaces
+                    .iter()
+                    .map(|(module, entry)| (module.clone(), entry.source_fingerprint))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+}
+
+#[derive(Default)]
+struct ModuleInterfaceApplyResult {
+    updated: usize,
+    current_changed: bool,
+    saw_current: bool,
+}
+
+struct CachedDefinitionSources<'a> {
+    projects: &'a ProjectSemanticStore,
+    project_root: &'a Option<PathBuf>,
+    direct_imports: &'a std::collections::HashSet<String>,
 }
 
 struct CheckRequest {
@@ -194,6 +399,178 @@ fn clamp_to_char_boundary(source: &str, mut offset: usize) -> usize {
     offset
 }
 
+#[derive(Default)]
+struct AnalysisTimings {
+    lex: StdDuration,
+    parse: StdDuration,
+    checker: StdDuration,
+    derive_imports: StdDuration,
+    derive_expand: StdDuration,
+    desugar: StdDuration,
+    typecheck: StdDuration,
+    cache_update: StdDuration,
+    definitions: StdDuration,
+    total: StdDuration,
+}
+
+fn timed<T>(slot: &mut StdDuration, f: impl FnOnce() -> T) -> T {
+    let start = StdInstant::now();
+    let result = f();
+    *slot = start.elapsed();
+    result
+}
+
+fn duration_ms(duration: StdDuration) -> String {
+    format!("{:.1}ms", duration.as_secs_f64() * 1000.0)
+}
+
+fn trace_elapsed(label: impl AsRef<str>, start: StdInstant) {
+    trace(format!(
+        "{} elapsed={}",
+        label.as_ref(),
+        duration_ms(start.elapsed())
+    ));
+}
+
+fn trace(message: impl AsRef<str>) {
+    if std::env::var_os("SAGA_LSP_TRACE").is_none() {
+        return;
+    }
+
+    let line = format!("[saga-lsp] {}", message.as_ref());
+    if let Some(path) = std::env::var_os("SAGA_LSP_TRACE_FILE") {
+        use std::io::Write;
+        if let Ok(mut file) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+        {
+            let _ = writeln!(file, "{line}");
+        }
+    } else {
+        eprintln!("{line}");
+    }
+}
+
+fn display_project_root(root: Option<&PathBuf>) -> String {
+    root.map(|path| path.display().to_string())
+        .unwrap_or_else(|| "<loose>".to_string())
+}
+
+fn source_fingerprint(source: &str) -> u64 {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    source.hash(&mut hasher);
+    hasher.finish()
+}
+
+fn module_interface_fingerprint(exports: &typechecker::ModuleExports) -> u64 {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    // This is intentionally conservative for the first LSP slice. Different
+    // map iteration orders may over-invalidate, but changed public data should
+    // not hash as unchanged.
+    format!("{exports:?}").hash(&mut hasher);
+    hasher.finish()
+}
+
+fn source_fingerprint_for_path(
+    path: &Path,
+    source_overlay: &HashMap<PathBuf, String>,
+) -> Option<u64> {
+    if let Some(source) = source_overlay.get(path) {
+        return Some(source_fingerprint(source));
+    }
+    std::fs::read_to_string(path)
+        .ok()
+        .map(|source| source_fingerprint(&source))
+}
+
+fn collect_module_interface_updates(
+    current_uri: Option<&Url>,
+    current_program: &ast::Program,
+    checker: &typechecker::Checker,
+    check: &typechecker::CheckResult,
+    source_overlay: &HashMap<PathBuf, String>,
+    cached_source_fingerprints: &HashMap<String, u64>,
+    include_current: bool,
+) -> Vec<ModuleInterfaceUpdate> {
+    let mut updates = Vec::new();
+
+    for (module_name, exports) in check.module_exports() {
+        let Some(path) = check.resolve_module_path(module_name) else {
+            continue;
+        };
+        let Some(source_fingerprint) = source_fingerprint_for_path(&path, source_overlay) else {
+            continue;
+        };
+        if cached_source_fingerprints.get(module_name) == Some(&source_fingerprint) {
+            continue;
+        }
+        updates.push(ModuleInterfaceUpdate {
+            module_name: module_name.clone(),
+            path,
+            source_fingerprint,
+            interface_fingerprint: module_interface_fingerprint(exports),
+            exports: exports.clone(),
+            codegen_info: check.codegen_info().get(module_name).cloned(),
+            check_result: check.module_check_results().get(module_name).cloned(),
+            is_current: false,
+        });
+    }
+
+    if include_current {
+        let (Some(uri), (Some(module_name), _)) =
+            (current_uri, extract_module_info(current_program))
+        else {
+            return updates;
+        };
+        let Ok(path) = uri.to_file_path() else {
+            return updates;
+        };
+        let Some(source_fingerprint) = source_fingerprint_for_path(&path, source_overlay) else {
+            return updates;
+        };
+        let exports = typechecker::ModuleExports::collect(current_program, checker);
+        updates.push(ModuleInterfaceUpdate {
+            module_name,
+            path,
+            source_fingerprint,
+            interface_fingerprint: module_interface_fingerprint(&exports),
+            exports,
+            codegen_info: None,
+            check_result: Some(check.clone()),
+            is_current: true,
+        });
+    }
+
+    updates
+}
+
+fn trace_analysis(
+    uri: Option<&Url>,
+    version: i32,
+    project_root: Option<&PathBuf>,
+    stage: &str,
+    timings: &AnalysisTimings,
+    diagnostics: usize,
+) {
+    trace(format!(
+        "analysis {stage} uri={} version={version} root={} diagnostics={diagnostics} total={} lex={} parse={} checker={} derive_imports={} derive_expand={} desugar={} typecheck={} cache_update={} definitions={}",
+        uri.map(ToString::to_string)
+            .unwrap_or_else(|| "<unknown>".to_string()),
+        display_project_root(project_root),
+        duration_ms(timings.total),
+        duration_ms(timings.lex),
+        duration_ms(timings.parse),
+        duration_ms(timings.checker),
+        duration_ms(timings.derive_imports),
+        duration_ms(timings.derive_expand),
+        duration_ms(timings.desugar),
+        duration_ms(timings.typecheck),
+        duration_ms(timings.cache_update),
+        duration_ms(timings.definitions),
+    ));
+}
+
 fn diagnostic_at(
     line_index: &LineIndex,
     source: &str,
@@ -254,42 +631,148 @@ fn project_root_for_uri(uri: &Url) -> Option<PathBuf> {
 fn checker_for_analysis(
     shared: &SharedState,
     project_root: Option<PathBuf>,
+    requested_modules: Option<&std::collections::HashSet<String>>,
 ) -> std::result::Result<typechecker::Checker, typechecker::Diagnostic> {
+    trace(format!(
+        "checker prep start root={}",
+        display_project_root(project_root.as_ref())
+    ));
+    let overlay_start = StdInstant::now();
     let source_overlay = open_source_overlay(shared);
+    trace_elapsed("checker prep overlay-build", overlay_start);
+    trace(format!(
+        "checker prep overlay root={} count={}",
+        display_project_root(project_root.as_ref()),
+        source_overlay.len()
+    ));
+    let open_modules_start = StdInstant::now();
     let open_modules = open_module_map(shared, project_root.as_deref());
+    trace_elapsed("checker prep open-modules-build", open_modules_start);
+    trace(format!(
+        "checker prep open-modules root={} count={}",
+        display_project_root(project_root.as_ref()),
+        open_modules.len()
+    ));
 
-    if let Some(base) = shared
-        .base_checkers
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .get(&project_root)
-        .cloned()
-    {
-        return Ok(prepare_checker_for_analysis(
-            base,
-            project_root,
-            source_overlay,
-            open_modules,
+    let base_lookup_start = StdInstant::now();
+    let cached_base = {
+        let projects = shared.projects.lock().unwrap_or_else(|e| e.into_inner());
+        projects.base_checker(&project_root)
+    };
+    trace_elapsed("checker prep base-lookup", base_lookup_start);
+
+    if let Some(base) = cached_base {
+        trace(format!(
+            "checker prep base-cache-hit root={}",
+            display_project_root(project_root.as_ref())
         ));
+        let prepare_start = StdInstant::now();
+        let mut checker = prepare_checker_for_analysis(
+            base,
+            project_root.clone(),
+            source_overlay.clone(),
+            open_modules,
+        );
+        trace_elapsed("checker prep prepare-checker", prepare_start);
+        trace(format!(
+            "checker prep prepared root={}",
+            display_project_root(project_root.as_ref())
+        ));
+        let seed_start = StdInstant::now();
+        let seeded = shared
+            .projects
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .seed_module_interfaces(
+                &project_root,
+                &mut checker,
+                &source_overlay,
+                requested_modules,
+            );
+        trace_elapsed("checker prep seed-interfaces", seed_start);
+        if seeded > 0 {
+            trace(format!(
+                "seeded module interfaces root={} count={seeded}",
+                display_project_root(project_root.as_ref())
+            ));
+        }
+        trace(format!(
+            "checker prep finish root={}",
+            display_project_root(project_root.as_ref())
+        ));
+        return Ok(checker);
     }
 
-    let built = checker_base_for_project(project_root.clone())?;
-    let base = {
-        let mut base_checkers = shared
-            .base_checkers
+    trace(format!(
+        "checker prep base-cache-miss root={}",
+        display_project_root(project_root.as_ref())
+    ));
+    let mut built = checker_base_for_project(project_root.clone())?;
+    trace(format!(
+        "checker prep base-built root={}",
+        display_project_root(project_root.as_ref())
+    ));
+    let warmed_interfaces = collect_module_interface_updates(
+        None,
+        &Vec::new(),
+        &built,
+        &built.to_result(),
+        &source_overlay,
+        &HashMap::new(),
+        false,
+    );
+    if !warmed_interfaces.is_empty() {
+        let applied = shared
+            .projects
             .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        base_checkers
-            .entry(project_root.clone())
-            .or_insert_with(|| built.clone())
-            .clone()
+            .unwrap_or_else(|e| e.into_inner())
+            .apply_module_interface_updates(project_root.clone(), warmed_interfaces);
+        trace(format!(
+            "checker prep harvested warmed interfaces root={} count={}",
+            display_project_root(project_root.as_ref()),
+            applied.updated
+        ));
+    }
+    built.clear_module_semantic_caches();
+    let base = {
+        let mut projects = shared.projects.lock().unwrap_or_else(|e| e.into_inner());
+        projects.store_base_checker(project_root.clone(), built)
     };
-    Ok(prepare_checker_for_analysis(
+    trace(format!(
+        "checker prep base-stored root={}",
+        display_project_root(project_root.as_ref())
+    ));
+    let mut checker = prepare_checker_for_analysis(
         base,
-        project_root,
-        source_overlay,
+        project_root.clone(),
+        source_overlay.clone(),
         open_modules,
-    ))
+    );
+    trace(format!(
+        "checker prep prepared root={}",
+        display_project_root(project_root.as_ref())
+    ));
+    let seeded = shared
+        .projects
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .seed_module_interfaces(
+            &project_root,
+            &mut checker,
+            &source_overlay,
+            requested_modules,
+        );
+    if seeded > 0 {
+        trace(format!(
+            "seeded module interfaces root={} count={seeded}",
+            display_project_root(project_root.as_ref())
+        ));
+    }
+    trace(format!(
+        "checker prep finish root={}",
+        display_project_root(project_root.as_ref())
+    ));
+    Ok(checker)
 }
 
 fn checker_base_for_project(
@@ -384,23 +867,47 @@ fn analyze_document(
     text: &str,
     project_root: Option<PathBuf>,
 ) -> ParseJobResult {
+    let total_start = StdInstant::now();
+    let mut timings = AnalysisTimings::default();
     let line_index = LineIndex::new(text);
 
-    let tokens = match lexer::Lexer::new(text).lex() {
+    let tokens = match timed(&mut timings.lex, || lexer::Lexer::new(text).lex()) {
         Ok(tokens) => tokens,
         Err(e) => {
+            let diagnostics = vec![diagnostic_at(&line_index, text, e.pos, e.message)];
+            timings.total = total_start.elapsed();
+            trace_analysis(
+                uri,
+                version,
+                project_root.as_ref(),
+                "lex-error",
+                &timings,
+                diagnostics.len(),
+            );
             return ParseJobResult {
                 version,
                 parse: None,
                 semantic: None,
-                diagnostics: vec![diagnostic_at(&line_index, text, e.pos, e.message)],
+                diagnostics,
+                module_interfaces: Vec::new(),
+                force_dependents: true,
             };
         }
     };
+    trace(format!(
+        "analysis checkpoint uri={} version={version} stage=lex-ok",
+        uri.map(ToString::to_string)
+            .unwrap_or_else(|| "<unknown>".to_string())
+    ));
 
     let mut parser = parser::Parser::new(tokens);
-    match parser.parse_program() {
+    match timed(&mut timings.parse, || parser.parse_program()) {
         Ok(program) => {
+            trace(format!(
+                "analysis checkpoint uri={} version={version} stage=parse-ok",
+                uri.map(ToString::to_string)
+                    .unwrap_or_else(|| "<unknown>".to_string())
+            ));
             let source: Arc<str> = Arc::from(text);
             let parse = ParseSnapshot {
                 version,
@@ -408,31 +915,146 @@ fn analyze_document(
                 line_index: line_index.clone(),
                 program: program.clone(),
             };
+            let (_, direct_imports) = extract_module_info(&program);
 
-            let mut checker = match checker_for_analysis(shared, project_root) {
+            let mut checker = match timed(&mut timings.checker, || {
+                checker_for_analysis(shared, project_root.clone(), Some(&direct_imports))
+            }) {
                 Ok(checker) => checker,
                 Err(e) => {
+                    let diagnostics = vec![typechecker_diagnostic_at(&line_index, text, &e)];
+                    timings.total = total_start.elapsed();
+                    trace_analysis(
+                        uri,
+                        version,
+                        project_root.as_ref(),
+                        "checker-error",
+                        &timings,
+                        diagnostics.len(),
+                    );
                     return ParseJobResult {
                         version,
                         parse: Some(parse),
                         semantic: None,
-                        diagnostics: vec![typechecker_diagnostic_at(&line_index, text, &e)],
+                        diagnostics,
+                        module_interfaces: Vec::new(),
+                        force_dependents: true,
                     };
                 }
             };
+            trace(format!(
+                "analysis checkpoint uri={} version={version} stage=checker-ok",
+                uri.map(ToString::to_string)
+                    .unwrap_or_else(|| "<unknown>".to_string())
+            ));
 
             let source_overlay = open_source_overlay(shared);
-            let imported = derive::collect_imported_decls_with_sources(
-                &program,
-                checker.module_map(),
-                &source_overlay,
-            );
+            if let (Some(current_module), _) = extract_module_info(&program) {
+                checker.evict_module(&current_module);
+            }
+            let imported = timed(&mut timings.derive_imports, || {
+                derive::collect_imported_decls_with_sources(
+                    &program,
+                    checker.module_map(),
+                    &source_overlay,
+                )
+            });
+            trace(format!(
+                "analysis checkpoint uri={} version={version} stage=derive-imports-ok",
+                uri.map(ToString::to_string)
+                    .unwrap_or_else(|| "<unknown>".to_string())
+            ));
             let mut semantic_program = program;
-            let derive_errors = derive::expand_derives(&mut semantic_program, &imported);
-            desugar::desugar_program(&mut semantic_program);
-            let check = checker.check_program(&mut semantic_program);
-            let definition_locations =
-                build_definition_locations(uri, &line_index, text, &check, &source_overlay);
+            let derive_errors = timed(&mut timings.derive_expand, || {
+                derive::expand_derives(&mut semantic_program, &imported)
+            });
+            trace(format!(
+                "analysis checkpoint uri={} version={version} stage=derive-expand-ok",
+                uri.map(ToString::to_string)
+                    .unwrap_or_else(|| "<unknown>".to_string())
+            ));
+            timed(&mut timings.desugar, || {
+                desugar::desugar_program(&mut semantic_program)
+            });
+            trace(format!(
+                "analysis checkpoint uri={} version={version} stage=desugar-ok",
+                uri.map(ToString::to_string)
+                    .unwrap_or_else(|| "<unknown>".to_string())
+            ));
+            if !document_version_is_current(shared, uri, version) {
+                timings.total = total_start.elapsed();
+                trace_analysis(
+                    uri,
+                    version,
+                    project_root.as_ref(),
+                    "stale-before-typecheck",
+                    &timings,
+                    0,
+                );
+                return ParseJobResult {
+                    version,
+                    parse: Some(parse),
+                    semantic: None,
+                    diagnostics: Vec::new(),
+                    module_interfaces: Vec::new(),
+                    force_dependents: false,
+                };
+            }
+            let check = timed(&mut timings.typecheck, || {
+                checker.check_program_lsp(&mut semantic_program)
+            });
+            trace(format!(
+                "analysis checkpoint uri={} version={version} stage=typecheck-ok",
+                uri.map(ToString::to_string)
+                    .unwrap_or_else(|| "<unknown>".to_string())
+            ));
+            let include_current_interface = !check.has_errors()
+                && derive_errors
+                    .iter()
+                    .all(|diagnostic| !matches!(diagnostic.severity, typechecker::Severity::Error));
+            let cached_source_fingerprints = shared
+                .projects
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .cached_module_source_fingerprints(&project_root);
+            trace(format!(
+                "interface cache snapshot root={} count={}",
+                display_project_root(project_root.as_ref()),
+                cached_source_fingerprints.len()
+            ));
+            let module_interfaces = timed(&mut timings.cache_update, || {
+                collect_module_interface_updates(
+                    uri,
+                    &semantic_program,
+                    &checker,
+                    &check,
+                    &source_overlay,
+                    &cached_source_fingerprints,
+                    include_current_interface,
+                )
+            });
+            if !module_interfaces.is_empty() {
+                trace(format!(
+                    "prepared module interfaces root={} count={}",
+                    display_project_root(project_root.as_ref()),
+                    module_interfaces.len()
+                ));
+            }
+            let definition_locations = timed(&mut timings.definitions, || {
+                let projects = shared.projects.lock().unwrap_or_else(|e| e.into_inner());
+                build_definition_locations(
+                    uri,
+                    &line_index,
+                    text,
+                    &check,
+                    &source_overlay,
+                    CachedDefinitionSources {
+                        projects: &projects,
+                        project_root: &project_root,
+                        direct_imports: &direct_imports,
+                    },
+                )
+            });
 
             let mut diagnostics: Vec<Diagnostic> = derive_errors
                 .iter()
@@ -443,6 +1065,16 @@ fn analyze_document(
                     .diagnostics
                     .iter()
                     .map(|d| typechecker_diagnostic_at(&line_index, text, d)),
+            );
+
+            timings.total = total_start.elapsed();
+            trace_analysis(
+                uri,
+                version,
+                project_root.as_ref(),
+                "ok",
+                &timings,
+                diagnostics.len(),
             );
 
             ParseJobResult {
@@ -456,14 +1088,30 @@ fn analyze_document(
                     definition_locations,
                 }),
                 diagnostics,
+                module_interfaces,
+                force_dependents: !include_current_interface,
             }
         }
-        Err(e) => ParseJobResult {
-            version,
-            parse: None,
-            semantic: None,
-            diagnostics: vec![diagnostic_at(&line_index, text, e.span.start, e.message)],
-        },
+        Err(e) => {
+            let diagnostics = vec![diagnostic_at(&line_index, text, e.span.start, e.message)];
+            timings.total = total_start.elapsed();
+            trace_analysis(
+                uri,
+                version,
+                project_root.as_ref(),
+                "parse-error",
+                &timings,
+                diagnostics.len(),
+            );
+            ParseJobResult {
+                version,
+                parse: None,
+                semantic: None,
+                diagnostics,
+                module_interfaces: Vec::new(),
+                force_dependents: true,
+            }
+        }
     }
 }
 
@@ -473,6 +1121,7 @@ fn build_definition_locations(
     current_source: &str,
     check: &typechecker::CheckResult,
     source_overlay: &HashMap<PathBuf, String>,
+    cached: CachedDefinitionSources<'_>,
 ) -> HashMap<ast::NodeId, Location> {
     let mut locations = HashMap::new();
 
@@ -512,6 +1161,38 @@ fn build_definition_locations(
         }
     }
 
+    if let Some(project) = cached.projects.projects.get(cached.project_root) {
+        for module_name in cached.direct_imports {
+            if check.module_check_results().contains_key(module_name) {
+                continue;
+            }
+            let Some(entry) = project.module_interfaces.get(module_name) else {
+                continue;
+            };
+            let Some(module_result) = entry.check_result.as_ref() else {
+                continue;
+            };
+            let Ok(uri) = Url::from_file_path(&entry.path) else {
+                continue;
+            };
+            let source = source_overlay
+                .get(&entry.path)
+                .cloned()
+                .or_else(|| std::fs::read_to_string(&entry.path).ok());
+            let Some(source) = source else { continue };
+            let line_index = LineIndex::new(&source);
+            for (node_id, span) in &module_result.node_spans {
+                locations.insert(
+                    *node_id,
+                    Location {
+                        uri: uri.clone(),
+                        range: span_to_range(span, &line_index, &source),
+                    },
+                );
+            }
+        }
+    }
+
     locations
 }
 
@@ -539,6 +1220,10 @@ fn apply_parse_result(
     let mut documents = shared.documents.lock().ok()?;
     let document = documents.get_mut(uri)?;
     if document.version != result.version {
+        trace(format!(
+            "discard stale analysis uri={uri} result_version={} current_version={}",
+            result.version, document.version
+        ));
         return None;
     }
 
@@ -556,15 +1241,44 @@ fn apply_parse_result(
     document.diagnostics = result.diagnostics.clone();
     drop(documents);
 
-    if let Some(program) = parsed_program {
-        let (module_name, imports) = extract_module_info(&program);
-        let mut dep_graph = shared.dep_graph.lock().ok()?;
-        dep_graph.update_file(uri, module_name, imports);
+    let project_root = project_root_for_uri(uri);
+    let interface_apply = {
+        let mut projects = shared.projects.lock().ok()?;
+        projects.apply_module_interface_updates(project_root.clone(), result.module_interfaces)
+    };
+    if interface_apply.updated > 0 {
+        trace(format!(
+            "cached module interfaces root={} count={} current_changed={} saw_current={}",
+            display_project_root(project_root.as_ref()),
+            interface_apply.updated,
+            interface_apply.current_changed,
+            interface_apply.saw_current
+        ));
     }
 
-    let dependents = {
-        let dep_graph = shared.dep_graph.lock().ok()?;
-        dep_graph.dependents_of(uri)
+    if let Some(program) = parsed_program {
+        let (module_name, imports) = extract_module_info(&program);
+        let generation = {
+            let mut projects = shared.projects.lock().ok()?;
+            projects.update_file(project_root.clone(), uri, module_name, imports)
+        };
+        trace(format!(
+            "project graph updated uri={uri} root={} generation={generation}",
+            display_project_root(project_root.as_ref())
+        ));
+    }
+
+    let should_recheck_dependents =
+        result.force_dependents || !interface_apply.saw_current || interface_apply.current_changed;
+    let dependents = if should_recheck_dependents {
+        let projects = shared.projects.lock().ok()?;
+        projects.dependents_of(&project_root, uri)
+    } else {
+        trace(format!(
+            "skip dependents uri={uri} root={} reason=interface-unchanged",
+            display_project_root(project_root.as_ref())
+        ));
+        Vec::new()
     };
 
     Some(AppliedParseResult {
@@ -576,6 +1290,13 @@ fn apply_parse_result(
 fn current_document(shared: &SharedState, uri: &Url) -> Option<DocumentState> {
     let documents = shared.documents.lock().ok()?;
     documents.get(uri).cloned()
+}
+
+fn document_version_is_current(shared: &SharedState, uri: Option<&Url>, version: i32) -> bool {
+    let Some(uri) = uri else {
+        return true;
+    };
+    current_document(shared, uri).is_none_or(|document| document.version == version)
 }
 
 fn extract_module_info(
@@ -988,12 +1709,12 @@ impl LanguageServer for Backend {
             documents.remove(&uri);
         }
         {
-            let mut dep_graph = self
+            let mut projects = self
                 .shared
-                .dep_graph
+                .projects
                 .lock()
                 .unwrap_or_else(|e| e.into_inner());
-            dep_graph.remove_file(&uri);
+            projects.remove_file_from_all_projects(&uri);
         }
         self.client.publish_diagnostics(uri, Vec::new(), None).await;
     }
@@ -1079,58 +1800,65 @@ async fn debounce_loop(
 ) {
     use tokio::time::{Duration, Instant, sleep_until};
 
-    let debounce = Duration::from_millis(250);
+    let debounce = Duration::from_millis(SEMANTIC_DEBOUNCE_MS);
     let mut pending: HashMap<Url, (i32, String, Option<PathBuf>, bool, Instant)> = HashMap::new();
+    let mut in_flight: std::collections::HashSet<Url> = std::collections::HashSet::new();
+    let (done_tx, mut done_rx) = tokio::sync::mpsc::unbounded_channel::<Url>();
 
     loop {
-        if pending.is_empty() {
+        if pending.is_empty() && in_flight.is_empty() {
             match rx.recv().await {
                 Some(req) => {
-                    pending.insert(
-                        req.uri,
-                        (
-                            req.version,
-                            req.text,
-                            req.project_root,
-                            req.is_primary,
-                            Instant::now() + debounce,
-                        ),
-                    );
+                    queue_check_request(&mut pending, req, debounce);
                 }
                 None => break,
             }
         }
 
         let next_deadline = pending
-            .values()
-            .map(|(_, _, _, _, deadline)| *deadline)
-            .min()
-            .expect("pending is non-empty");
+            .iter()
+            .filter(|(uri, _)| !in_flight.contains(*uri))
+            .map(|(_, (_, _, _, _, deadline))| *deadline)
+            .min();
 
         tokio::select! {
             biased;
             result = rx.recv() => {
                 match result {
                     Some(req) => {
-                        pending.insert(
-                            req.uri,
-                            (
-                            req.version,
-                            req.text,
-                            req.project_root,
-                            req.is_primary,
-                            Instant::now() + debounce,
-                        ),
-                    );
+                        let uri = req.uri.clone();
+                        let version = req.version;
+                        queue_check_request(&mut pending, req, debounce);
+                        if in_flight.contains(&uri) {
+                            trace(format!(
+                                "coalesce analysis while in-flight uri={uri} latest_version={version}"
+                            ));
+                        }
                     }
                     None => break,
                 }
             }
-            _ = sleep_until(next_deadline) => {
+            done = done_rx.recv() => {
+                let Some(uri) = done else {
+                    break;
+                };
+                in_flight.remove(&uri);
+                trace(format!("analysis job complete uri={uri}"));
+                if let Some((_, _, _, _, deadline)) = pending.get_mut(&uri) {
+                    *deadline = Instant::now();
+                }
+            }
+            _ = async {
+                if let Some(deadline) = next_deadline {
+                    sleep_until(deadline).await;
+                } else {
+                    std::future::pending::<()>().await;
+                }
+            } => {
                 let now = Instant::now();
                 let expired: Vec<Url> = pending
                     .iter()
-                    .filter(|(_, (_, _, _, _, deadline))| *deadline <= now)
+                    .filter(|(uri, (_, _, _, _, deadline))| *deadline <= now && !in_flight.contains(*uri))
                     .map(|(uri, _)| uri.clone())
                     .collect();
 
@@ -1138,28 +1866,59 @@ async fn debounce_loop(
                     let Some((version, text, project_root, is_primary, _)) = pending.remove(&uri) else {
                         continue;
                     };
+                    let Some(current) = current_document(&shared, &uri) else {
+                        continue;
+                    };
+                    if current.version != version {
+                        trace(format!(
+                            "skip stale analysis before start uri={uri} request_version={version} current_version={}",
+                            current.version
+                        ));
+                        continue;
+                    }
+                    in_flight.insert(uri.clone());
                     let client = client.clone();
                     let shared = Arc::clone(&shared);
                     let analysis_shared = Arc::clone(&shared);
                     let tx = tx_for_dependents.clone();
+                    let done = done_tx.clone();
                     let analysis_uri = uri.clone();
+                    trace(format!(
+                        "analysis job start uri={uri} version={version} primary={is_primary}"
+                    ));
                     tokio::spawn(async move {
-                        let Ok(result) =
-                            tokio::task::spawn_blocking(move || {
-                                analyze_document(
-                                    &analysis_shared,
-                                    Some(&analysis_uri),
-                                    version,
-                                    &text,
-                                    project_root,
-                                )
-                            })
-                            .await
-                        else {
-                            return;
+                        let job_start = StdInstant::now();
+                        let join_result = tokio::task::spawn_blocking(move || {
+                            analyze_document(
+                                &analysis_shared,
+                                Some(&analysis_uri),
+                                version,
+                                &text,
+                                project_root,
+                            )
+                        })
+                        .await;
+                        let result = match join_result {
+                            Ok(result) => result,
+                            Err(error) => {
+                                trace(format!(
+                                    "analysis job failed uri={uri} version={version} error={error}"
+                                ));
+                                let _ = done.send(uri);
+                                return;
+                            }
                         };
+                        trace(format!(
+                            "analysis job finish uri={uri} version={} elapsed={}",
+                            result.version,
+                            duration_ms(job_start.elapsed())
+                        ));
 
                         if let Some(applied) = apply_parse_result(&shared, &uri, result) {
+                            trace(format!(
+                                "publish diagnostics uri={uri} version={version} count={}",
+                                applied.diagnostics.len()
+                            ));
                             client
                                 .publish_diagnostics(uri.clone(), applied.diagnostics, Some(version))
                                 .await;
@@ -1171,6 +1930,10 @@ async fn debounce_loop(
                                     let Some(dependent) = current_document(&shared, &dependent_uri) else {
                                         continue;
                                     };
+                                    trace(format!(
+                                        "enqueue dependent uri={dependent_uri} because={uri} version={}",
+                                        dependent.version
+                                    ));
                                     let _ = tx.send(CheckRequest {
                                         project_root: project_root_for_uri(&dependent_uri),
                                         uri: dependent_uri,
@@ -1181,11 +1944,44 @@ async fn debounce_loop(
                                 }
                             }
                         }
+                        let _ = done.send(uri);
                     });
                 }
             }
         }
     }
+}
+
+fn queue_check_request(
+    pending: &mut HashMap<Url, (i32, String, Option<PathBuf>, bool, tokio::time::Instant)>,
+    req: CheckRequest,
+    debounce: tokio::time::Duration,
+) {
+    let CheckRequest {
+        uri,
+        version,
+        text,
+        project_root,
+        is_primary,
+    } = req;
+    pending
+        .entry(uri)
+        .and_modify(|entry| {
+            entry.0 = version;
+            entry.1 = text.clone();
+            entry.2 = project_root.clone();
+            entry.3 |= is_primary;
+            entry.4 = tokio::time::Instant::now() + debounce;
+        })
+        .or_insert_with(|| {
+            (
+                version,
+                text,
+                project_root,
+                is_primary,
+                tokio::time::Instant::now() + debounce,
+            )
+        });
 }
 
 #[tokio::main]
@@ -1238,6 +2034,40 @@ mod tests {
         std::fs::create_dir_all(root.join("src")).expect("create temp project src");
         std::fs::write(root.join("project.toml"), "").expect("write project.toml");
         root
+    }
+
+    fn interface_update(module_name: &str, interface_fingerprint: u64) -> ModuleInterfaceUpdate {
+        ModuleInterfaceUpdate {
+            module_name: module_name.to_string(),
+            path: PathBuf::from(format!("/tmp/{module_name}.saga")),
+            source_fingerprint: 1,
+            interface_fingerprint,
+            exports: typechecker::ModuleExports::default(),
+            codegen_info: None,
+            check_result: None,
+            is_current: true,
+        }
+    }
+
+    #[test]
+    fn project_interface_apply_detects_current_interface_changes() {
+        let mut store = ProjectSemanticStore::default();
+        let root = Some(PathBuf::from("/tmp/project"));
+
+        let first = store
+            .apply_module_interface_updates(root.clone(), vec![interface_update("Helper", 10)]);
+        assert!(first.saw_current);
+        assert!(first.current_changed);
+
+        let unchanged = store
+            .apply_module_interface_updates(root.clone(), vec![interface_update("Helper", 10)]);
+        assert!(unchanged.saw_current);
+        assert!(!unchanged.current_changed);
+
+        let changed =
+            store.apply_module_interface_updates(root, vec![interface_update("Helper", 11)]);
+        assert!(changed.saw_current);
+        assert!(changed.current_changed);
     }
 
     #[test]

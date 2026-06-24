@@ -154,7 +154,7 @@ Goal: prove the new control loop.
 - [x] Store document text and version immediately on open/change.
 - [x] Debounce parse jobs.
 - [x] Publish diagnostics only when the job result matches the current version.
-- [ ] Add tracing/logging around job start, job finish, stale discard, and publish.
+- [x] Add tracing/logging around job start, job finish, stale discard, and publish.
 - [x] Add a subprocess JSON-RPC protocol harness for the real `saga-lsp`
   binary.
 
@@ -222,7 +222,19 @@ Goal: stop treating each file as an island.
 - [x] Recheck changed open files plus reverse open dependents.
 - [x] Add an open-document source overlay so unsaved edits in imported modules are
   used when checking dependents.
-- Cache clean dependency results at the project level.
+- [x] Cache clean dependency module interfaces at the project level.
+- [x] Cache clean workspace module interfaces at the project level.
+- [x] Use current-module interface changes to decide whether open reverse
+  dependents need rechecking.
+- [x] Coalesce analysis scheduling to one in-flight semantic job per file.
+- [x] Skip starting typecheck work when an analysis job is already stale before
+  the typechecker phase.
+- [x] Keep base checker clones lighter by moving warmed dependency module
+  interfaces into project state instead of storing them inside the base checker.
+- [x] Skip repeated interface-cache updates for unchanged imported modules.
+- [x] Seed only direct imports for the file being checked.
+- Replace the first conservative interface fingerprint with a stable sorted
+  projection.
 
 This phase should borrow from `docs/planning/incremental-checking.md`, but the
 new server should own the project database rather than hiding it inside cloned
@@ -364,9 +376,8 @@ Manual smoke tests:
 
 - Should the parser grow a recovery mode for top-level items, or should the LSP
   own a lighter pre-parser for module/import/declaration outlines?
-- Should project-mode typechecking accept an in-memory source overlay for open
-  unsaved modules? Current dependent rechecks handle saved/on-disk module
-  changes, but imported modules are still read from disk by the compiler.
+- Should the current in-memory source overlay move out of the LSP and become a
+  general compiler source-provider abstraction?
 - What semantic key should become the public LSP identity: `NodeId`, a new
   stable `DefId`, or a `(module, namespace, name, span)` key derived at the
   `CheckResult` boundary?
@@ -386,6 +397,28 @@ Manual smoke tests:
 
 ## Current Next Step
 
-Run an editor smoke test for the new `saga-lsp` binary, then decide whether the
-next implementation slice is project/module state or richer semantic
-completion/hover behavior.
+Scope and implement the first incremental project-checking slice from
+`docs/planning/incremental-checking.md`:
+
+1. [x] add timing instrumentation around the current rebuilt LSP pipeline
+2. [x] introduce an LSP-owned project semantic state without changing behavior
+3. [x] move parse/import graph/source overlay data into that state
+4. [x] cache dependency module interfaces outside a single cloned `Checker`
+5. [x] cache workspace module interfaces outside a single cloned `Checker`
+6. [x] invalidate reverse dependents only when a dependency's public interface
+   fingerprint changes
+7. [x] coalesce scheduling so slow checks cannot overlap per file
+8. [x] use trace output on a real Generic-heavy project to identify the
+   remaining slow compiler phase
+9. [x] reduce repeated cache/update/base-clone overhead found from that trace
+10. [x] avoid recursively cloning imported module `CheckResult`s for LSP
+    snapshots
+11. [x] seed import caches with exports only and read cross-module definition
+    spans from the project cache
+12. [x] lower semantic debounce after per-file in-flight coalescing proved
+    stable
+13. [ ] replace the temporary interface fingerprint with a stable sorted
+   projection
+
+Richer completion, references, and rename stay behind this work. Typechecking
+correctness and edit-time performance are the priority.

@@ -27,6 +27,45 @@ use codegen_info::{collect_codegen_info, ctor_arity};
 use header_scope::resolve_header_import;
 use import_scope::{resolve_import, synthesize_all_exposed};
 
+fn import_trace_enabled() -> bool {
+    std::env::var_os("SAGA_TYPECHECK_TRACE").is_some()
+}
+
+fn trace_import_phase(module_name: &str, phase: &str, duration: std::time::Duration) {
+    if !import_trace_enabled() {
+        return;
+    }
+
+    let line = format!(
+        "[saga-typecheck] import={} phase={} elapsed={:.1}ms",
+        module_name,
+        phase,
+        duration.as_secs_f64() * 1000.0,
+    );
+    if let Some(path) = std::env::var_os("SAGA_TYPECHECK_TRACE_FILE") {
+        use std::io::Write;
+        if let Ok(mut file) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+        {
+            let _ = writeln!(file, "{line}");
+        }
+    } else {
+        eprintln!("{line}");
+    }
+}
+
+fn timed_import_phase<T>(module_name: &str, phase: &str, f: impl FnOnce() -> T) -> T {
+    if !import_trace_enabled() {
+        return f();
+    }
+    let start = std::time::Instant::now();
+    let result = f();
+    trace_import_phase(module_name, phase, start.elapsed());
+    result
+}
+
 impl Checker {
     // --- Module import typechecking ---
 
@@ -54,7 +93,9 @@ impl Checker {
             return Ok(());
         }
 
-        let exports = self.load_module(module_path, span)?;
+        let exports = timed_import_phase(&module_name, "load_module", || {
+            self.load_module(module_path, span)
+        })?;
         // Expand `(..)` to an explicit list of every public export so the rest
         // of the import pipeline can treat all-exposing imports as if they had
         // listed every name. This makes `(..)` equivalent by construction.
@@ -633,8 +674,12 @@ impl Checker {
         exposing: Option<&[crate::ast::ExposedItem]>,
         span: Span,
     ) -> Result<(), Diagnostic> {
-        self.register_module_canonical_exports(exports, module_name, Some(prefix), exposing);
-        self.merge_import_scope(exports, module_name, prefix, exposing, span)
+        timed_import_phase(module_name, "register_canonical_exports", || {
+            self.register_module_canonical_exports(exports, module_name, Some(prefix), exposing)
+        });
+        timed_import_phase(module_name, "merge_import_scope", || {
+            self.merge_import_scope(exports, module_name, prefix, exposing, span)
+        })
     }
 
     /// Merge an import's scope_map entries (and exposing-list LSP/records side
