@@ -11341,6 +11341,48 @@ fn inferred_query_result_bubbles_anonymous_select_record_to_prepared() {
 }
 
 #[test]
+fn let_hover_preserves_fundep_improved_generic_result() {
+    let source = "import Std.Generic (Generic, Leaf, Labeled, And, Record)\n\
+         type Column (n : Symbol) a = Column a\n\
+         type Prepared row = Prepared row\n\
+         trait Selectable selection row | selection -> row {\n\
+           fun selected : selection -> row\n\
+         }\n\
+         impl Selectable (Leaf a) for (Leaf (Column n a)) {\n\
+           selected _ = todo ()\n\
+         }\n\
+         impl Selectable (Labeled n out) for (Labeled n field) where {Selectable field out} {\n\
+           selected _ = todo ()\n\
+         }\n\
+         impl Selectable (And lo ro) for (And l r) where {Selectable l lo, Selectable r ro} {\n\
+           selected _ = todo ()\n\
+         }\n\
+         impl Selectable (Record out) for (Record fields) where {Selectable fields out} {\n\
+           selected _ = todo ()\n\
+         }\n\
+         fun db_select : selection -> Prepared row\n\
+           where {selection: Generic selection_rep, selection_rep: Selectable row_rep, row: Generic row_rep}\n\
+         db_select selection = Prepared (from (selected (to selection)))\n\
+         fun q : Unit -> Unit\n\
+         q () = {\n\
+           let prepared = db_select {\n\
+             user_id: Column 42,\n\
+             post_title: Column \"title\",\n\
+           }\n\
+           ()\n\
+         }\n";
+    let checker = check(source).unwrap();
+    let result = checker.to_result();
+    let prepared_span = result
+        .type_at_span
+        .keys()
+        .find(|span| source[span.start..span.end] == *"prepared")
+        .expect("prepared span");
+    let ty = result.type_at_span(prepared_span).expect("prepared type");
+    assert_eq!(ty, "Prepared { post_title: String, user_id: Int }");
+}
+
+#[test]
 fn imported_anonymous_record_generic_selectable_shape_typechecks() {
     let db = "module Db
 
