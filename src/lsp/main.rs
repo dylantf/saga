@@ -34,6 +34,7 @@ struct ParseJobResult {
     semantic: Option<SemanticSnapshot>,
     diagnostics: Vec<Diagnostic>,
     module_interfaces: Vec<ModuleInterfaceUpdate>,
+    semantic_index_update: Option<ProjectSemanticIndexUpdate>,
     force_dependents: bool,
 }
 
@@ -163,6 +164,14 @@ impl SemanticIndex {
         include_declaration: bool,
     ) -> Option<Vec<Location>> {
         let name = self.type_name_at_position(uri, position)?;
+        Some(self.type_reference_locations_for_name(name, include_declaration))
+    }
+
+    fn type_reference_locations_for_name(
+        &self,
+        name: &str,
+        include_declaration: bool,
+    ) -> Vec<Location> {
         let mut locations: Vec<Location> = self
             .type_occurrences_by_name
             .get(name)
@@ -174,7 +183,7 @@ impl SemanticIndex {
             .map(|occurrence| occurrence.location.clone())
             .collect();
         sort_and_dedup_locations(&mut locations);
-        Some(locations)
+        locations
     }
 
     fn identity_for_node(&self, node_id: ast::NodeId) -> ast::NodeId {
@@ -229,6 +238,7 @@ struct ProjectSemanticState {
     dep_graph: DependencyGraph,
     base_checker: Option<typechecker::Checker>,
     module_interfaces: HashMap<String, CachedModuleInterface>,
+    semantic_indexes: HashMap<String, CachedSemanticIndex>,
 }
 
 #[derive(Clone)]
@@ -239,6 +249,11 @@ struct CachedModuleInterface {
     exports: typechecker::ModuleExports,
     codegen_info: Option<typechecker::ModuleCodegenInfo>,
     check_result: Option<typechecker::CheckResult>,
+}
+
+struct CachedSemanticIndex {
+    uri: Url,
+    index: SemanticIndex,
 }
 
 struct ModuleInterfaceUpdate {
@@ -252,6 +267,12 @@ struct ModuleInterfaceUpdate {
     is_current: bool,
 }
 
+struct ProjectSemanticIndexUpdate {
+    module_name: String,
+    uri: Url,
+    index: SemanticIndex,
+}
+
 impl ProjectSemanticState {
     fn new() -> Self {
         Self {
@@ -259,6 +280,7 @@ impl ProjectSemanticState {
             dep_graph: DependencyGraph::default(),
             base_checker: None,
             module_interfaces: HashMap::new(),
+            semantic_indexes: HashMap::new(),
         }
     }
 }
@@ -311,8 +333,50 @@ impl ProjectSemanticStore {
     fn remove_file_from_all_projects(&mut self, uri: &Url) {
         for project in self.projects.values_mut() {
             project.dep_graph.remove_file(uri);
+            project
+                .semantic_indexes
+                .retain(|_, cached| cached.uri != *uri);
             project.generation = project.generation.saturating_add(1);
         }
+    }
+
+    fn update_semantic_index(
+        &mut self,
+        project_root: Option<PathBuf>,
+        update: ProjectSemanticIndexUpdate,
+    ) {
+        let project = self.project_mut(project_root);
+        project
+            .semantic_indexes
+            .retain(|_, cached| cached.uri != update.uri);
+        project.semantic_indexes.insert(
+            update.module_name,
+            CachedSemanticIndex {
+                uri: update.uri,
+                index: update.index,
+            },
+        );
+    }
+
+    fn project_type_reference_locations(
+        &self,
+        project_root: &Option<PathBuf>,
+        type_name: &str,
+        include_declaration: bool,
+    ) -> Vec<Location> {
+        let Some(project) = self.projects.get(project_root) else {
+            return Vec::new();
+        };
+        let mut locations = Vec::new();
+        for cached in project.semantic_indexes.values() {
+            locations.extend(
+                cached
+                    .index
+                    .type_reference_locations_for_name(type_name, include_declaration),
+            );
+        }
+        sort_and_dedup_locations(&mut locations);
+        locations
     }
 
     fn seed_module_interfaces(
@@ -1326,6 +1390,7 @@ fn analyze_document(
                 semantic: None,
                 diagnostics,
                 module_interfaces: Vec::new(),
+                semantic_index_update: None,
                 force_dependents: true,
             };
         }
@@ -1374,6 +1439,7 @@ fn analyze_document(
                         semantic: None,
                         diagnostics,
                         module_interfaces: Vec::new(),
+                        semantic_index_update: None,
                         force_dependents: true,
                     };
                 }
@@ -1433,6 +1499,7 @@ fn analyze_document(
                     semantic: None,
                     diagnostics: Vec::new(),
                     module_interfaces: Vec::new(),
+                    semantic_index_update: None,
                     force_dependents: false,
                 };
             }
@@ -1514,6 +1581,15 @@ fn analyze_document(
                 diagnostics.len(),
             );
 
+            let semantic_index_update = uri.and_then(|uri| {
+                let (module_name, _) = extract_module_info(&semantic_program);
+                module_name.map(|module_name| ProjectSemanticIndexUpdate {
+                    module_name,
+                    uri: uri.clone(),
+                    index: semantic_index.clone(),
+                })
+            });
+
             ParseJobResult {
                 version,
                 parse: Some(parse),
@@ -1526,6 +1602,7 @@ fn analyze_document(
                 }),
                 diagnostics,
                 module_interfaces,
+                semantic_index_update,
                 force_dependents: !include_current_interface,
             }
         }
@@ -1546,6 +1623,7 @@ fn analyze_document(
                 semantic: None,
                 diagnostics,
                 module_interfaces: Vec::new(),
+                semantic_index_update: None,
                 force_dependents: true,
             }
         }
@@ -1576,6 +1654,7 @@ fn analyze_syntax_document(uri: Option<&Url>, version: i32, text: &str) -> Parse
                 semantic: None,
                 diagnostics,
                 module_interfaces: Vec::new(),
+                semantic_index_update: None,
                 force_dependents: false,
             };
         }
@@ -1599,6 +1678,7 @@ fn analyze_syntax_document(uri: Option<&Url>, version: i32, text: &str) -> Parse
                 semantic: None,
                 diagnostics: Vec::new(),
                 module_interfaces: Vec::new(),
+                semantic_index_update: None,
                 force_dependents: false,
             }
         }
@@ -1619,6 +1699,7 @@ fn analyze_syntax_document(uri: Option<&Url>, version: i32, text: &str) -> Parse
                 semantic: None,
                 diagnostics,
                 module_interfaces: Vec::new(),
+                semantic_index_update: None,
                 force_dependents: false,
             }
         }
@@ -3265,6 +3346,15 @@ fn apply_parse_result(
         let mut projects = shared.projects.lock().ok()?;
         projects.apply_module_interface_updates(project_root.clone(), result.module_interfaces)
     };
+    if let Some(update) = result.semantic_index_update {
+        let module_name = update.module_name.clone();
+        let mut projects = shared.projects.lock().ok()?;
+        projects.update_semantic_index(project_root.clone(), update);
+        trace(format!(
+            "project semantic index updated module={module_name} root={}",
+            display_project_root(project_root.as_ref())
+        ));
+    }
     if interface_apply.updated > 0 {
         trace(format!(
             "cached module interfaces root={} count={} current_changed={} saw_current={}",
@@ -3905,12 +3995,29 @@ impl LanguageServer for Backend {
             return Ok(None);
         }
 
-        let locations = references_at(
+        let mut locations = references_at(
             &uri,
             &semantic,
             position,
             params.context.include_declaration,
         );
+        if let Some(type_name) = semantic
+            .semantic_index
+            .type_name_at_position(&uri, position)
+        {
+            let project_root = project_root_for_uri(&uri);
+            let projects = self
+                .shared
+                .projects
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            locations.extend(projects.project_type_reference_locations(
+                &project_root,
+                type_name,
+                params.context.include_declaration,
+            ));
+            sort_and_dedup_locations(&mut locations);
+        }
         if locations.is_empty() {
             Ok(None)
         } else {

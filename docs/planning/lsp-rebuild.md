@@ -265,6 +265,8 @@ explicitly deferred until project typechecking is solid and fast.
 - [x] Port cross-module go-to-definition to use cached semantic definition
   locations built during analysis, not request-time file reads.
 - [x] Port value find-references to query this index.
+- [x] Add a project-level per-module `SemanticIndex` cache for type/record
+  references across checked modules.
 - [x] Add occurrence kinds before rename so binding declarations, definitions,
   and ordinary references can be filtered precisely.
 - [x] Correct local value references with resolver lexical binding identity so

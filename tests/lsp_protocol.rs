@@ -873,6 +873,240 @@ main () = forty_two ()
 }
 
 #[test]
+fn type_navigation_uses_imported_type_definition_location() {
+    let root = temp_project("cross-module-type-navigation");
+    let types_path = root.join("src/Types.saga");
+    let main_path = root.join("src/Main.saga");
+
+    std::fs::write(
+        &types_path,
+        "\
+module Types
+
+pub type BoardType =
+  | Twintip
+  | Hydrofoil
+",
+    )
+    .expect("write types module");
+
+    let main_source = "\
+module Main
+
+import Types (BoardType)
+
+fun id_board : BoardType -> BoardType
+id_board board = board
+";
+    std::fs::write(&main_path, main_source).expect("write main module");
+
+    let result = {
+        let mut lsp = LspHarness::start();
+        lsp.initialize();
+        let uri = file_uri(&main_path);
+
+        lsp.send_notification(
+            "textDocument/didOpen",
+            json!({
+                "textDocument": {
+                    "uri": uri,
+                    "languageId": "saga",
+                    "version": 1,
+                    "text": main_source
+                }
+            }),
+        );
+        let params = wait_for_diagnostics(&lsp, &uri, 1, 2);
+        assert_eq!(
+            params["diagnostics"].as_array().map(Vec::len),
+            Some(0),
+            "fixture must typecheck before type definition request, got {params:?}"
+        );
+
+        let definition_id = lsp.send_request(
+            "textDocument/definition",
+            json!({
+                "textDocument": {
+                    "uri": file_uri(&main_path)
+                },
+                "position": {
+                    "line": 4,
+                    "character": 15
+                }
+            }),
+        );
+        let definition = lsp
+            .recv_until(Duration::from_secs(5), |message| {
+                message.get("id").and_then(Value::as_i64) == Some(definition_id)
+            })
+            .expect("definition response");
+
+        let references_id = lsp.send_request(
+            "textDocument/references",
+            json!({
+                "textDocument": {
+                    "uri": file_uri(&main_path)
+                },
+                "position": {
+                    "line": 4,
+                    "character": 15
+                },
+                "context": {
+                    "includeDeclaration": true
+                }
+            }),
+        );
+        let references = lsp
+            .recv_until(Duration::from_secs(5), |message| {
+                message.get("id").and_then(Value::as_i64) == Some(references_id)
+            })
+            .expect("references response");
+        (definition, references)
+    };
+
+    let _ = std::fs::remove_dir_all(&root);
+
+    let (definition, references) = result;
+    assert_eq!(
+        definition["result"]["uri"].as_str(),
+        Some(file_uri(&types_path).as_str()),
+        "expected imported type definition: {definition:?}"
+    );
+    assert_eq!(
+        definition["result"]["range"]["start"]["line"].as_u64(),
+        Some(2),
+        "expected BoardType name span, not broad type decl: {definition:?}"
+    );
+
+    let references = references["result"]
+        .as_array()
+        .expect("references result array");
+    assert!(
+        references.iter().any(|location| {
+            location["uri"].as_str() == Some(file_uri(&types_path).as_str())
+                && location["range"]["start"]["line"].as_u64() == Some(2)
+        }),
+        "expected imported type declaration location: {references:?}"
+    );
+    assert!(
+        references.iter().any(|location| {
+            location["uri"].as_str() == Some(file_uri(&main_path).as_str())
+                && location["range"]["start"]["line"].as_u64() == Some(4)
+        }),
+        "expected local type annotation references: {references:?}"
+    );
+}
+
+#[test]
+fn type_references_from_definition_include_importing_modules() {
+    let root = temp_project("project-type-references");
+    let types_path = root.join("src/Types.saga");
+    let main_path = root.join("src/Main.saga");
+
+    let types_source = "\
+module Types
+
+pub type BoardType =
+  | Twintip
+  | Hydrofoil
+";
+    std::fs::write(&types_path, types_source).expect("write types module");
+
+    let main_source = "\
+module Main
+
+import Types (BoardType)
+
+fun id_board : BoardType -> BoardType
+id_board board = board
+";
+    std::fs::write(&main_path, main_source).expect("write main module");
+
+    let result = {
+        let mut lsp = LspHarness::start();
+        lsp.initialize();
+        let main_uri = file_uri(&main_path);
+        let types_uri = file_uri(&types_path);
+
+        lsp.send_notification(
+            "textDocument/didOpen",
+            json!({
+                "textDocument": {
+                    "uri": main_uri,
+                    "languageId": "saga",
+                    "version": 1,
+                    "text": main_source
+                }
+            }),
+        );
+        let main_params = wait_for_diagnostics(&lsp, &main_uri, 1, 2);
+        assert_eq!(
+            main_params["diagnostics"].as_array().map(Vec::len),
+            Some(0),
+            "main fixture must typecheck before references request, got {main_params:?}"
+        );
+
+        lsp.send_notification(
+            "textDocument/didOpen",
+            json!({
+                "textDocument": {
+                    "uri": types_uri,
+                    "languageId": "saga",
+                    "version": 1,
+                    "text": types_source
+                }
+            }),
+        );
+        let types_params = wait_for_diagnostics(&lsp, &types_uri, 1, 2);
+        assert_eq!(
+            types_params["diagnostics"].as_array().map(Vec::len),
+            Some(0),
+            "types fixture must typecheck before references request, got {types_params:?}"
+        );
+
+        let references_id = lsp.send_request(
+            "textDocument/references",
+            json!({
+                "textDocument": {
+                    "uri": file_uri(&types_path)
+                },
+                "position": {
+                    "line": 2,
+                    "character": 10
+                },
+                "context": {
+                    "includeDeclaration": true
+                }
+            }),
+        );
+        lsp.recv_until(Duration::from_secs(5), |message| {
+            message.get("id").and_then(Value::as_i64) == Some(references_id)
+        })
+        .expect("references response")
+    };
+
+    let _ = std::fs::remove_dir_all(&root);
+
+    let references = result["result"]
+        .as_array()
+        .expect("references result array");
+    assert!(
+        references.iter().any(|location| {
+            location["uri"].as_str() == Some(file_uri(&types_path).as_str())
+                && location["range"]["start"]["line"].as_u64() == Some(2)
+        }),
+        "expected defining type declaration location: {references:?}"
+    );
+    assert!(
+        references.iter().any(|location| {
+            location["uri"].as_str() == Some(file_uri(&main_path).as_str())
+                && location["range"]["start"]["line"].as_u64() == Some(4)
+        }),
+        "expected importing module type annotation reference: {references:?}"
+    );
+}
+
+#[test]
 fn changing_imported_open_module_rechecks_open_dependents() {
     let root = temp_project("dependent-recheck");
     let helper_path = root.join("src/Helper.saga");
