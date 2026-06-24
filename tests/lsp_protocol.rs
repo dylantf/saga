@@ -503,6 +503,117 @@ main () = id ()
 }
 
 #[test]
+fn find_references_uses_semantic_identity() {
+    let mut lsp = LspHarness::start();
+    lsp.initialize();
+    let uri = saga_uri("references");
+    let source = "\
+module Main
+
+fun id : Unit -> Unit
+id x = x
+
+fun main : Unit -> Unit
+main () = id (id ())
+";
+
+    lsp.send_notification(
+        "textDocument/didOpen",
+        json!({
+            "textDocument": {
+                "uri": uri,
+                "languageId": "saga",
+                "version": 1,
+                "text": source
+            }
+        }),
+    );
+    let params = wait_for_diagnostics(&lsp, &uri, 1, 2);
+    assert_eq!(
+        params["diagnostics"].as_array().map(Vec::len),
+        Some(0),
+        "fixture must typecheck before references request, got {params:?}"
+    );
+
+    let id = lsp.send_request(
+        "textDocument/references",
+        json!({
+            "textDocument": {
+                "uri": saga_uri("references")
+            },
+            "position": {
+                "line": 6,
+                "character": 11
+            },
+            "context": {
+                "includeDeclaration": true
+            }
+        }),
+    );
+    let response = lsp
+        .recv_until(Duration::from_secs(5), |message| {
+            message.get("id").and_then(Value::as_i64) == Some(id)
+        })
+        .expect("references response");
+    let references = response["result"]
+        .as_array()
+        .expect("references result array");
+
+    assert!(
+        references.len() >= 3,
+        "expected declaration and both call sites: {response:?}"
+    );
+    assert!(
+        references.iter().any(|location| {
+            location["range"]["start"]["line"].as_u64() == Some(2)
+                || location["range"]["start"]["line"].as_u64() == Some(3)
+        }),
+        "expected declaration location: {response:?}"
+    );
+    assert!(
+        references
+            .iter()
+            .filter(|location| location["range"]["start"]["line"].as_u64() == Some(6))
+            .count()
+            >= 2,
+        "expected both call sites: {response:?}"
+    );
+
+    let id = lsp.send_request(
+        "textDocument/references",
+        json!({
+            "textDocument": {
+                "uri": saga_uri("references")
+            },
+            "position": {
+                "line": 6,
+                "character": 11
+            },
+            "context": {
+                "includeDeclaration": false
+            }
+        }),
+    );
+    let response = lsp
+        .recv_until(Duration::from_secs(5), |message| {
+            message.get("id").and_then(Value::as_i64) == Some(id)
+        })
+        .expect("references response");
+    let references = response["result"]
+        .as_array()
+        .expect("references result array");
+
+    assert!(
+        references
+            .iter()
+            .filter(|location| location["range"]["start"]["line"].as_u64() == Some(6))
+            .count()
+            >= 2,
+        "expected both call sites without requiring declarations: {response:?}"
+    );
+}
+
+#[test]
 fn hover_uses_project_imports() {
     let root = temp_project("imports");
     let helper_path = root.join("src/Helper.saga");
@@ -658,6 +769,99 @@ main () = forty_two ()
     assert!(
         line == 2 || line == 3,
         "unexpected definition response: {result:?}"
+    );
+}
+
+#[test]
+fn find_references_includes_imported_definition_location() {
+    let root = temp_project("cross-module-references");
+    let helper_path = root.join("src/Helper.saga");
+    let main_path = root.join("src/Main.saga");
+
+    std::fs::write(
+        &helper_path,
+        "\
+module Helper
+
+pub fun forty_two : Unit -> Int
+forty_two () = 42
+",
+    )
+    .expect("write helper module");
+
+    let main_source = "\
+module Main
+
+import Helper (forty_two)
+
+fun main : Unit -> Int
+main () = forty_two ()
+";
+    std::fs::write(&main_path, main_source).expect("write main module");
+
+    let result = {
+        let mut lsp = LspHarness::start();
+        lsp.initialize();
+        let uri = file_uri(&main_path);
+
+        lsp.send_notification(
+            "textDocument/didOpen",
+            json!({
+                "textDocument": {
+                    "uri": uri,
+                    "languageId": "saga",
+                    "version": 1,
+                    "text": main_source
+                }
+            }),
+        );
+        let params = wait_for_diagnostics(&lsp, &uri, 1, 2);
+        assert_eq!(
+            params["diagnostics"].as_array().map(Vec::len),
+            Some(0),
+            "fixture must typecheck before references request, got {params:?}"
+        );
+
+        let id = lsp.send_request(
+            "textDocument/references",
+            json!({
+                "textDocument": {
+                    "uri": file_uri(&main_path)
+                },
+                "position": {
+                    "line": 5,
+                    "character": 11
+                },
+                "context": {
+                    "includeDeclaration": true
+                }
+            }),
+        );
+        lsp.recv_until(Duration::from_secs(5), |message| {
+            message.get("id").and_then(Value::as_i64) == Some(id)
+        })
+        .expect("references response")
+    };
+
+    let _ = std::fs::remove_dir_all(&root);
+
+    let references = result["result"]
+        .as_array()
+        .expect("references result array");
+    assert!(
+        references.iter().any(|location| {
+            location["uri"].as_str() == Some(file_uri(&helper_path).as_str())
+                && (location["range"]["start"]["line"].as_u64() == Some(2)
+                    || location["range"]["start"]["line"].as_u64() == Some(3))
+        }),
+        "expected imported definition location: {result:?}"
+    );
+    assert!(
+        references.iter().any(|location| {
+            location["uri"].as_str() == Some(file_uri(&main_path).as_str())
+                && location["range"]["start"]["line"].as_u64() == Some(5)
+        }),
+        "expected local call-site reference: {result:?}"
     );
 }
 

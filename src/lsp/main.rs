@@ -48,7 +48,66 @@ struct SemanticSnapshot {
     source: Arc<str>,
     line_index: LineIndex,
     check: typechecker::CheckResult,
+    semantic_index: SemanticIndex,
+}
+
+#[derive(Clone, Default)]
+struct SemanticIndex {
     definition_locations: HashMap<ast::NodeId, Location>,
+    references: HashMap<ast::NodeId, ast::NodeId>,
+    references_by_definition: HashMap<ast::NodeId, Vec<Location>>,
+}
+
+impl SemanticIndex {
+    fn new(definition_locations: HashMap<ast::NodeId, Location>) -> Self {
+        Self {
+            definition_locations,
+            references: HashMap::new(),
+            references_by_definition: HashMap::new(),
+        }
+    }
+
+    fn add_references(&mut self, references: &HashMap<ast::NodeId, ast::NodeId>) {
+        for (&usage_id, &definition_id) in references {
+            self.references.insert(usage_id, definition_id);
+            if let Some(location) = self.definition_locations.get(&usage_id) {
+                self.references_by_definition
+                    .entry(definition_id)
+                    .or_default()
+                    .push(location.clone());
+            }
+        }
+    }
+
+    fn identity_for_node(&self, node_id: ast::NodeId) -> ast::NodeId {
+        self.references.get(&node_id).copied().unwrap_or(node_id)
+    }
+
+    fn definition_location_for_node(&self, node_id: ast::NodeId) -> Option<Location> {
+        let definition_id = self.identity_for_node(node_id);
+        self.definition_locations.get(&definition_id).cloned()
+    }
+
+    fn reference_locations_for_node(
+        &self,
+        node_id: ast::NodeId,
+        include_declaration: bool,
+    ) -> Vec<Location> {
+        let definition_id = self.identity_for_node(node_id);
+        let mut locations = self
+            .references_by_definition
+            .get(&definition_id)
+            .cloned()
+            .unwrap_or_default();
+
+        if include_declaration && let Some(location) = self.definition_locations.get(&definition_id)
+        {
+            locations.push(location.clone());
+        }
+
+        sort_and_dedup_locations(&mut locations);
+        locations
+    }
 }
 
 #[derive(Default)]
@@ -253,6 +312,7 @@ struct ModuleInterfaceApplyResult {
     saw_current: bool,
 }
 
+#[derive(Clone, Copy)]
 struct CachedDefinitionSources<'a> {
     projects: &'a ProjectSemanticStore,
     project_root: &'a Option<PathBuf>,
@@ -1313,9 +1373,9 @@ fn analyze_document(
                     module_interfaces.len()
                 ));
             }
-            let definition_locations = timed(&mut timings.definitions, || {
+            let semantic_index = timed(&mut timings.definitions, || {
                 let projects = shared.projects.lock().unwrap_or_else(|e| e.into_inner());
-                build_definition_locations(
+                build_semantic_index(
                     uri,
                     &line_index,
                     text,
@@ -1358,7 +1418,7 @@ fn analyze_document(
                     source,
                     line_index,
                     check,
-                    definition_locations,
+                    semantic_index,
                 }),
                 diagnostics,
                 module_interfaces,
@@ -1545,6 +1605,47 @@ fn build_definition_locations(
     locations
 }
 
+fn build_semantic_index(
+    current_uri: Option<&Url>,
+    current_line_index: &LineIndex,
+    current_source: &str,
+    check: &typechecker::CheckResult,
+    source_overlay: &HashMap<PathBuf, String>,
+    cached: CachedDefinitionSources<'_>,
+) -> SemanticIndex {
+    let definition_locations = build_definition_locations(
+        current_uri,
+        current_line_index,
+        current_source,
+        check,
+        source_overlay,
+        cached,
+    );
+    let mut index = SemanticIndex::new(definition_locations);
+    index.add_references(&check.references);
+
+    for module_result in check.module_check_results().values() {
+        index.add_references(&module_result.references);
+    }
+
+    if let Some(project) = cached.projects.projects.get(cached.project_root) {
+        for module_name in cached.direct_imports {
+            if check.module_check_results().contains_key(module_name) {
+                continue;
+            }
+            let Some(entry) = project.module_interfaces.get(module_name) else {
+                continue;
+            };
+            let Some(module_result) = entry.check_result.as_ref() else {
+                continue;
+            };
+            index.add_references(&module_result.references);
+        }
+    }
+
+    index
+}
+
 fn store_document(shared: &SharedState, uri: Url, version: i32, text: String) {
     let mut documents = shared.documents.lock().unwrap_or_else(|e| e.into_inner());
     let previous_parse = documents.get(&uri).and_then(|doc| doc.parse.clone());
@@ -1692,6 +1793,21 @@ fn span_to_range(span: &saga::token::Span, line_index: &LineIndex, source: &str)
         start: line_index.offset_to_position(span.start, source),
         end: line_index.offset_to_position(span.end, source),
     }
+}
+
+fn sort_and_dedup_locations(locations: &mut Vec<Location>) {
+    locations.sort_by(|a, b| {
+        a.uri
+            .as_str()
+            .cmp(b.uri.as_str())
+            .then(a.range.start.line.cmp(&b.range.start.line))
+            .then(a.range.start.character.cmp(&b.range.start.character))
+            .then(a.range.end.line.cmp(&b.range.end.line))
+            .then(a.range.end.character.cmp(&b.range.end.character))
+    });
+    locations.dedup_by(|a, b| {
+        a.uri == b.uri && a.range.start == b.range.start && a.range.end == b.range.end
+    });
 }
 
 #[allow(deprecated)]
@@ -1969,23 +2085,33 @@ fn local_definition_at(
         .line_index
         .position_to_offset(position, &semantic.source);
     let (node_id, _) = smallest_node_at_offset(&semantic.check.node_spans, offset)?;
-    let def_id = semantic
-        .check
-        .references
-        .get(&node_id)
-        .copied()
-        .unwrap_or(node_id);
     semantic
-        .definition_locations
-        .get(&def_id)
-        .cloned()
+        .semantic_index
+        .definition_location_for_node(node_id)
         .or_else(|| {
+            let def_id = semantic.semantic_index.identity_for_node(node_id);
             let def_span = semantic.check.node_spans.get(&def_id)?;
             Some(Location {
                 uri: uri.clone(),
                 range: span_to_range(def_span, &semantic.line_index, &semantic.source),
             })
         })
+}
+
+fn references_at(
+    semantic: &SemanticSnapshot,
+    position: Position,
+    include_declaration: bool,
+) -> Vec<Location> {
+    let offset = semantic
+        .line_index
+        .position_to_offset(position, &semantic.source);
+    let Some((node_id, _)) = smallest_node_at_offset(&semantic.check.node_spans, offset) else {
+        return Vec::new();
+    };
+    semantic
+        .semantic_index
+        .reference_locations_for_node(node_id, include_declaration)
 }
 
 #[tower_lsp::async_trait]
@@ -2000,6 +2126,7 @@ impl LanguageServer for Backend {
                 completion_provider: Some(CompletionOptions::default()),
                 hover_provider: Some(HoverProviderCapability::Simple(true)),
                 definition_provider: Some(OneOf::Left(true)),
+                references_provider: Some(OneOf::Left(true)),
                 ..Default::default()
             },
             ..Default::default()
@@ -2161,6 +2288,28 @@ impl LanguageServer for Backend {
         }
 
         Ok(local_definition_at(&uri, &semantic, position).map(GotoDefinitionResponse::Scalar))
+    }
+
+    async fn references(&self, params: ReferenceParams) -> Result<Option<Vec<Location>>> {
+        let uri = params.text_document_position.text_document.uri;
+        let position = params.text_document_position.position;
+        let Some(document) = current_document(&self.shared, &uri) else {
+            return Ok(None);
+        };
+        let Some(semantic) = document.semantic else {
+            return Ok(None);
+        };
+
+        if semantic.version != document.version {
+            return Ok(None);
+        }
+
+        let locations = references_at(&semantic, position, params.context.include_declaration);
+        if locations.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(locations))
+        }
     }
 }
 
@@ -2583,6 +2732,61 @@ main () = id ()
             location.range.start.line == 2 || location.range.start.line == 3,
             "unexpected definition line: {:?}",
             location.range
+        );
+    }
+
+    #[test]
+    fn semantic_index_groups_references_by_definition_identity() {
+        let uri = uri();
+        let source = "\
+module Main
+
+fun id : Unit -> Unit
+id x = x
+
+fun main : Unit -> Unit
+main () = id (id ())
+";
+        let shared = SharedState::default();
+        let result = analyze_document(&shared, Some(&uri), 1, source, None);
+        let semantic = result.semantic.expect("semantic snapshot");
+
+        let outer_offset = source.find("id (").expect("outer id") + 1;
+        let inner_offset = source.rfind("id ()").expect("inner id") + 1;
+        let outer_position = semantic.line_index.offset_to_position(outer_offset, source);
+        let inner_position = semantic.line_index.offset_to_position(inner_offset, source);
+
+        let outer_refs = references_at(&semantic, outer_position, true);
+        let inner_refs = references_at(&semantic, inner_position, true);
+
+        assert_eq!(outer_refs, inner_refs);
+        assert!(
+            outer_refs.len() >= 3,
+            "expected declaration and both call sites, got {outer_refs:?}"
+        );
+        assert!(
+            outer_refs
+                .iter()
+                .any(|location| location.range.start.line == 2 || location.range.start.line == 3),
+            "expected declaration location, got {outer_refs:?}"
+        );
+        assert!(
+            outer_refs
+                .iter()
+                .filter(|location| location.range.start.line == 6)
+                .count()
+                >= 2,
+            "expected both call sites, got {outer_refs:?}"
+        );
+
+        let usage_refs = references_at(&semantic, outer_position, false);
+        assert!(
+            usage_refs
+                .iter()
+                .filter(|location| location.range.start.line == 6)
+                .count()
+                >= 2,
+            "expected both call sites without requiring declarations: {usage_refs:?}"
         );
     }
 
