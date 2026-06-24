@@ -503,6 +503,9 @@ derive/import-heavy file with current diagnostics:
   0.28s analysis / 0.41s wall to diagnostics publication
 - after caching pathless builtin module interfaces such as `Std.DateTime`:
   about 0.13s analysis / 0.25s wall to diagnostics publication
+- cold open now publishes syntax diagnostics and the parse snapshot in about
+  3ms, while full first semantic diagnostics still take about 5.4s as the
+  project/dependency base checker warms
 
 The big cloned-result hotspot is gone: `to_result` dropped from roughly 517ms
 to roughly 40ms for this file. The cached-interface seed hotspot is also gone:
@@ -514,6 +517,8 @@ modules: `Std.DateTime` was being typechecked on every edit because interface
 cache entries required filesystem paths. Builtin modules now use an
 embedded-source fingerprint and pathless cache entry. The remaining warm-edit
 cost is mostly the current file's own semantic pass at roughly 80ms plus the
-100ms debounce. Next target the measured typechecker/body path, then replace
+100ms debounce. Cold-open editor responsiveness is improved by applying the
+syntax snapshot before semantic analysis starts; the remaining cold-start work
+is project/dependency base warming. Next target that cold warmup path or replace
 the temporary debug-format interface fingerprint with a stable sorted interface
 projection.

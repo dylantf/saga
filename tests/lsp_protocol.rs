@@ -153,6 +153,22 @@ fn diagnostics_for_uri<'a>(message: &'a Value, uri: &str) -> Option<&'a Value> {
     (params["uri"].as_str() == Some(uri)).then_some(params)
 }
 
+fn wait_for_diagnostics(lsp: &LspHarness, uri: &str, version: i64, ordinal: usize) -> Value {
+    let mut seen = 0;
+    lsp.recv_until(Duration::from_secs(5), |message| {
+        let Some(params) = diagnostics_for_uri(message, uri) else {
+            return false;
+        };
+        if params["version"].as_i64() != Some(version) {
+            return false;
+        }
+        seen += 1;
+        seen >= ordinal
+    })
+    .and_then(|message| publish_diagnostics(&message).cloned())
+    .expect("publish diagnostics notification")
+}
+
 fn saga_uri(name: &str) -> String {
     format!("file:///tmp/{name}.saga")
 }
@@ -177,12 +193,13 @@ fn temp_project(name: &str) -> PathBuf {
 fn publishes_syntax_diagnostics_with_document_version() {
     let mut lsp = LspHarness::start();
     lsp.initialize();
+    let uri = saga_uri("broken");
 
     lsp.send_notification(
         "textDocument/didOpen",
         json!({
             "textDocument": {
-                "uri": saga_uri("broken"),
+                "uri": uri,
                 "languageId": "saga",
                 "version": 1,
                 "text": "module Main\n\nfun main : Unit -> Unit\nmain () = "
@@ -190,12 +207,7 @@ fn publishes_syntax_diagnostics_with_document_version() {
         }),
     );
 
-    let params = lsp
-        .recv_until(Duration::from_secs(5), |message| {
-            publish_diagnostics(message).is_some()
-        })
-        .and_then(|message| publish_diagnostics(&message).cloned())
-        .expect("publish diagnostics notification");
+    let params = wait_for_diagnostics(&lsp, &uri, 1, 1);
 
     assert_eq!(params["version"], 1);
     assert!(
@@ -236,12 +248,7 @@ fn coalesces_changes_and_publishes_only_current_version() {
         }),
     );
 
-    let params = lsp
-        .recv_until(Duration::from_secs(5), |message| {
-            publish_diagnostics(message).is_some()
-        })
-        .and_then(|message| publish_diagnostics(&message).cloned())
-        .expect("publish diagnostics notification");
+    let params = wait_for_diagnostics(&lsp, &uri, 2, 1);
 
     assert_eq!(params["version"], 2);
     assert_eq!(
@@ -269,12 +276,7 @@ fn document_symbols_come_from_latest_parse_snapshot() {
         }),
     );
 
-    let params = lsp
-        .recv_until(Duration::from_secs(5), |message| {
-            publish_diagnostics(message).is_some()
-        })
-        .and_then(|message| publish_diagnostics(&message).cloned())
-        .expect("publish diagnostics notification");
+    let params = wait_for_diagnostics(&lsp, &uri, 1, 1);
     assert_eq!(
         params["diagnostics"].as_array().map(Vec::len),
         Some(0),
@@ -409,12 +411,7 @@ main () = id ()
             }
         }),
     );
-    let params = lsp
-        .recv_until(Duration::from_secs(5), |message| {
-            publish_diagnostics(message).is_some()
-        })
-        .and_then(|message| publish_diagnostics(&message).cloned())
-        .expect("publish diagnostics notification");
+    let params = wait_for_diagnostics(&lsp, &uri, 1, 2);
     assert_eq!(
         params["diagnostics"].as_array().map(Vec::len),
         Some(0),
@@ -471,12 +468,7 @@ main () = id ()
             }
         }),
     );
-    let params = lsp
-        .recv_until(Duration::from_secs(5), |message| {
-            publish_diagnostics(message).is_some()
-        })
-        .and_then(|message| publish_diagnostics(&message).cloned())
-        .expect("publish diagnostics notification");
+    let params = wait_for_diagnostics(&lsp, &uri, 1, 2);
     assert_eq!(
         params["diagnostics"].as_array().map(Vec::len),
         Some(0),
@@ -553,12 +545,7 @@ main () = forty_two ()
                 }
             }),
         );
-        let params = lsp
-            .recv_until(Duration::from_secs(5), |message| {
-                publish_diagnostics(message).is_some()
-            })
-            .and_then(|message| publish_diagnostics(&message).cloned())
-            .expect("publish diagnostics notification");
+        let params = wait_for_diagnostics(&lsp, &uri, 1, 2);
         assert_eq!(
             params["diagnostics"].as_array().map(Vec::len),
             Some(0),
@@ -634,12 +621,7 @@ main () = forty_two ()
                 }
             }),
         );
-        let params = lsp
-            .recv_until(Duration::from_secs(5), |message| {
-                publish_diagnostics(message).is_some()
-            })
-            .and_then(|message| publish_diagnostics(&message).cloned())
-            .expect("publish diagnostics notification");
+        let params = wait_for_diagnostics(&lsp, &uri, 1, 2);
         assert_eq!(
             params["diagnostics"].as_array().map(Vec::len),
             Some(0),

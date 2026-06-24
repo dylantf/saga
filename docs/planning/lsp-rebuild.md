@@ -419,7 +419,9 @@ Scope and implement the first incremental project-checking slice from
     stable
 13. [x] cache pathless builtin module interfaces using embedded-source
     fingerprints
-14. [ ] replace the temporary interface fingerprint with a stable sorted
+14. [x] publish syntax diagnostics and parse snapshots before cold semantic
+    warmup completes
+15. [ ] replace the temporary interface fingerprint with a stable sorted
    projection
 
 Richer completion, references, and rename stay behind this work. Typechecking

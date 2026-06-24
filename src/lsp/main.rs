@@ -1124,6 +1124,79 @@ fn analyze_document(
     }
 }
 
+fn analyze_syntax_document(uri: Option<&Url>, version: i32, text: &str) -> ParseJobResult {
+    let total_start = StdInstant::now();
+    let mut timings = AnalysisTimings::default();
+    let line_index = LineIndex::new(text);
+
+    let tokens = match timed(&mut timings.lex, || lexer::Lexer::new(text).lex()) {
+        Ok(tokens) => tokens,
+        Err(e) => {
+            let diagnostics = vec![diagnostic_at(&line_index, text, e.pos, e.message)];
+            timings.total = total_start.elapsed();
+            trace_analysis(
+                uri,
+                version,
+                None,
+                "syntax-lex-error",
+                &timings,
+                diagnostics.len(),
+            );
+            return ParseJobResult {
+                version,
+                parse: None,
+                semantic: None,
+                diagnostics,
+                module_interfaces: Vec::new(),
+                force_dependents: false,
+            };
+        }
+    };
+
+    let mut parser = parser::Parser::new(tokens);
+    match timed(&mut timings.parse, || parser.parse_program()) {
+        Ok(program) => {
+            let source: Arc<str> = Arc::from(text);
+            let parse = ParseSnapshot {
+                version,
+                source,
+                line_index,
+                program,
+            };
+            timings.total = total_start.elapsed();
+            trace_analysis(uri, version, None, "syntax-ok", &timings, 0);
+            ParseJobResult {
+                version,
+                parse: Some(parse),
+                semantic: None,
+                diagnostics: Vec::new(),
+                module_interfaces: Vec::new(),
+                force_dependents: false,
+            }
+        }
+        Err(e) => {
+            let diagnostics = vec![diagnostic_at(&line_index, text, e.span.start, e.message)];
+            timings.total = total_start.elapsed();
+            trace_analysis(
+                uri,
+                version,
+                None,
+                "syntax-parse-error",
+                &timings,
+                diagnostics.len(),
+            );
+            ParseJobResult {
+                version,
+                parse: None,
+                semantic: None,
+                diagnostics,
+                module_interfaces: Vec::new(),
+                force_dependents: false,
+            }
+        }
+    }
+}
+
 fn build_definition_locations(
     current_uri: Option<&Url>,
     current_line_index: &LineIndex,
@@ -1240,6 +1313,7 @@ fn apply_parse_result(
     }
 
     let mut parsed_program = None;
+    let had_semantic = result.semantic.is_some();
     if let Some(parse) = result.parse {
         debug_assert_eq!(parse.version, result.version);
         debug_assert!(!parse.program.is_empty());
@@ -1280,8 +1354,8 @@ fn apply_parse_result(
         ));
     }
 
-    let should_recheck_dependents =
-        result.force_dependents || !interface_apply.saw_current || interface_apply.current_changed;
+    let should_recheck_dependents = result.force_dependents
+        || (had_semantic && (!interface_apply.saw_current || interface_apply.current_changed));
     let dependents = if should_recheck_dependents {
         let projects = shared.projects.lock().ok()?;
         projects.dependents_of(&project_root, uri)
@@ -1302,6 +1376,25 @@ fn apply_parse_result(
 fn current_document(shared: &SharedState, uri: &Url) -> Option<DocumentState> {
     let documents = shared.documents.lock().ok()?;
     documents.get(uri).cloned()
+}
+
+async fn publish_syntax_snapshot(
+    client: &Client,
+    shared: &SharedState,
+    uri: &Url,
+    version: i32,
+    text: &str,
+) {
+    let result = analyze_syntax_document(Some(uri), version, text);
+    if let Some(applied) = apply_parse_result(shared, uri, result) {
+        trace(format!(
+            "publish syntax diagnostics uri={uri} version={version} count={}",
+            applied.diagnostics.len()
+        ));
+        client
+            .publish_diagnostics(uri.clone(), applied.diagnostics, Some(version))
+            .await;
+    }
 }
 
 fn document_version_is_current(shared: &SharedState, uri: Option<&Url>, version: i32) -> bool {
@@ -1665,6 +1758,7 @@ impl LanguageServer for Backend {
         let text = params.text_document.text;
         let project_root = project_root_for_uri(&uri);
         store_document(&self.shared, uri.clone(), version, text.clone());
+        publish_syntax_snapshot(&self.client, &self.shared, &uri, version, &text).await;
         let _ = self.check_tx.send(CheckRequest {
             uri,
             version,
@@ -1683,6 +1777,7 @@ impl LanguageServer for Backend {
         };
         let text = change.text;
         store_document(&self.shared, uri.clone(), version, text.clone());
+        publish_syntax_snapshot(&self.client, &self.shared, &uri, version, &text).await;
         let _ = self.check_tx.send(CheckRequest {
             uri,
             version,
@@ -1701,6 +1796,7 @@ impl LanguageServer for Backend {
         let text = params.text.unwrap_or(doc.text);
         let version = doc.version;
         store_document(&self.shared, uri.clone(), version, text.clone());
+        publish_syntax_snapshot(&self.client, &self.shared, &uri, version, &text).await;
         let _ = self.check_tx.send(CheckRequest {
             uri,
             version,
