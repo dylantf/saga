@@ -171,7 +171,13 @@ impl Checker {
     /// Used by the LSP to avoid false "duplicate impl" errors when re-checking
     /// a stdlib file that was already loaded via the prelude.
     pub fn evict_module(&mut self, module_name: &str) {
-        if let Some(exports) = self.modules.exports.remove(module_name) {
+        let exports = self.modules.exports.remove(module_name).or_else(|| {
+            self.modules
+                .prelude_snapshot
+                .as_ref()
+                .and_then(|snapshot| snapshot.modules.exports.get(module_name).cloned())
+        });
+        if let Some(exports) = exports {
             for key in exports.trait_impls.keys() {
                 self.trait_state.impls.remove(key);
             }

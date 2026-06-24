@@ -42,7 +42,6 @@ impl Checker {
         }
     }
 
-
     /// Phase 2: Fill in effect op signatures (after all effect stubs are registered).
     pub(crate) fn register_effect_ops(
         &mut self,
@@ -178,7 +177,6 @@ impl Checker {
         Ok(())
     }
 
-
     /// Register an effect operation's own `where` constraints as where-bound
     /// assumptions, so a handler arm body implementing that operation may use
     /// the trait on the operation's abstract type variable.
@@ -199,7 +197,6 @@ impl Checker {
             }
         }
     }
-
 
     pub(crate) fn register_handler(&mut self, decl: &ast::Decl) -> Result<(), Diagnostic> {
         let ast::Decl::HandlerDef {
@@ -692,5 +689,4 @@ impl Checker {
     }
 
     // --- Trait constraint checking ---
-
 }

@@ -66,7 +66,6 @@ pub(crate) fn derive_record_stringify(
     }
 }
 
-
 /// Generate `impl Default for R { default = R { field: default, ... } }`.
 pub(crate) fn derive_record_default(
     record_name: &str,
@@ -141,7 +140,6 @@ pub(crate) fn derive_record_default(
         dangling_trivia: vec![],
     }
 }
-
 
 /// Build the debug string expression for a record. For fields with anonymous
 /// record types, generates inline formatting instead of calling `debug`.
@@ -236,7 +234,6 @@ pub(crate) fn build_record_debug_expr(
         .unwrap()
 }
 
-
 pub(crate) fn generate_derive(
     trait_name: &str,
     type_name: &str,
@@ -272,7 +269,6 @@ pub(crate) fn generate_derive(
         _ => None,
     }
 }
-
 
 /// Generate `impl Show/Debug for T { show/debug x = case x { ... } }`
 pub(crate) fn derive_stringify(
@@ -456,7 +452,6 @@ pub(crate) fn derive_stringify(
         dangling_trivia: vec![],
     }
 }
-
 
 /// Generate `impl Ord for T { compare x y = ... }` using declaration-order
 /// constructor indexing and left-to-right field comparison.
@@ -670,7 +665,6 @@ pub(crate) fn derive_ord(
     }
 }
 
-
 /// Build a left-to-right field comparison chain:
 /// `case compare a0 b0 { Eq -> case compare a1 b1 { Eq -> ... Eq; o -> o }; o -> o }`
 pub(crate) fn build_field_compare(a_vars: &[String], b_vars: &[String], span: Span) -> Expr {
@@ -751,7 +745,6 @@ pub(crate) fn build_field_compare(a_vars: &[String], b_vars: &[String], span: Sp
     result
 }
 
-
 /// Generate a method-less impl for an operator trait (e.g. Eq).
 /// The trait is dispatched via BEAM BIFs, so no methods are needed --
 /// we just register the impl so the typechecker accepts the constraint.
@@ -794,10 +787,13 @@ pub(crate) fn derive_marker_trait(
     }
 }
 
-
 /// Generate `impl Enum for T { to_enum x = case x { ... }; from_enum n = case n { ... } }`
 /// Only valid for types with all nullary constructors.
-pub(crate) fn derive_enum(type_name: &str, variants: &[Annotated<TypeConstructor>], span: Span) -> Decl {
+pub(crate) fn derive_enum(
+    type_name: &str,
+    variants: &[Annotated<TypeConstructor>],
+    span: Span,
+) -> Decl {
     for ann_v in variants {
         let v = &ann_v.node;
         if !v.fields.is_empty() {
@@ -951,4 +947,3 @@ pub(crate) fn derive_enum(type_name: &str, variants: &[Annotated<TypeConstructor
         dangling_trivia: vec![],
     }
 }
-

@@ -381,7 +381,11 @@ fun run : Unit -> User
 run () = project (mk_users ())
 "#;
 
-    with_temp_project_files(&[("lib/Core.saga", core)], main_src, |_checker, _program| {});
+    with_temp_project_files(
+        &[("lib/Core.saga", core)],
+        main_src,
+        |_checker, _program| {},
+    );
 }
 
 fn emitted_function(out: &str, name: &str, arity: usize) -> String {

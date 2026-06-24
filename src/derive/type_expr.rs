@@ -11,7 +11,6 @@ pub(crate) fn te_head(te: &TypeExpr) -> Option<String> {
     }
 }
 
-
 /// Prefix every type variable's name so two type expressions can be unified in a
 /// shared substitution without their variables colliding.
 pub(crate) fn te_rename_vars(te: &TypeExpr, prefix: &str) -> TypeExpr {
@@ -37,7 +36,6 @@ pub(crate) fn te_rename_vars(te: &TypeExpr, prefix: &str) -> TypeExpr {
     }
 }
 
-
 pub(crate) fn te_resolve(te: &TypeExpr, subst: &HashMap<String, TypeExpr>) -> TypeExpr {
     match te {
         TypeExpr::Var { name, .. } => match subst.get(name) {
@@ -47,7 +45,6 @@ pub(crate) fn te_resolve(te: &TypeExpr, subst: &HashMap<String, TypeExpr>) -> Ty
         _ => te.clone(),
     }
 }
-
 
 pub(crate) fn te_unify(a: &TypeExpr, b: &TypeExpr, subst: &mut HashMap<String, TypeExpr>) -> bool {
     let a = te_resolve(a, subst);
@@ -80,7 +77,6 @@ pub(crate) fn te_unify(a: &TypeExpr, b: &TypeExpr, subst: &mut HashMap<String, T
     }
 }
 
-
 pub(crate) fn te_apply(te: &TypeExpr, subst: &HashMap<String, TypeExpr>) -> TypeExpr {
     match te {
         TypeExpr::Var { name, .. } => match subst.get(name) {
@@ -103,7 +99,6 @@ pub(crate) fn te_apply(te: &TypeExpr, subst: &HashMap<String, TypeExpr>) -> Type
     }
 }
 
-
 pub(crate) fn te_is_concrete(te: &TypeExpr) -> bool {
     match te {
         TypeExpr::Var { .. } => false,
@@ -112,7 +107,6 @@ pub(crate) fn te_is_concrete(te: &TypeExpr) -> bool {
         _ => true,
     }
 }
-
 
 pub(crate) fn te_structural_eq(a: &TypeExpr, b: &TypeExpr) -> bool {
     match (a, b) {
@@ -133,11 +127,9 @@ pub(crate) fn te_structural_eq(a: &TypeExpr, b: &TypeExpr) -> bool {
     }
 }
 
-
 pub(crate) fn is_type_param_ref(ty: &TypeExpr, param_name: &str) -> bool {
     matches!(ty, TypeExpr::Var { name, .. } if name == param_name)
 }
-
 
 pub(crate) fn is_supported_applied_row_type(ty: &TypeExpr) -> bool {
     if ty.head_name().is_some_and(|head| head == "Tuple") {
@@ -151,7 +143,6 @@ pub(crate) fn is_supported_applied_row_type(ty: &TypeExpr) -> bool {
         _ => false,
     }
 }
-
 
 pub(crate) fn rep_type_for_named_type(ty: &TypeExpr) -> Option<TypeExpr> {
     let zero_span = Span { start: 0, end: 0 };
@@ -171,7 +162,6 @@ pub(crate) fn rep_type_for_named_type(ty: &TypeExpr) -> Option<TypeExpr> {
     }
 }
 
-
 pub(crate) fn rep_name_for_type_head(head: &str) -> String {
     if let Some((module, name)) = head.rsplit_once('.') {
         format!("{module}.Rep__{name}")
@@ -179,7 +169,6 @@ pub(crate) fn rep_name_for_type_head(head: &str) -> String {
         format!("Rep__{head}")
     }
 }
-
 
 /// Extract the bare head name and left-to-right type arguments from a
 /// possibly-applied TypeExpr. Returns None if the TypeExpr isn't a named
@@ -196,22 +185,22 @@ pub(crate) fn extract_head_and_args(te: &TypeExpr) -> Option<(String, Vec<TypeEx
     }
 }
 
-
 pub(crate) fn is_self_var(te: &TypeExpr, self_var: &str) -> bool {
     matches!(te, TypeExpr::Var { name, .. } if name == self_var)
 }
 
-
 /// Build a `[(param_name, call_arg)]` substitution pairing a wrapper's declared
 /// type parameters with the type arguments it's applied to at the call site.
-pub(crate) fn param_subst(type_params: &[TypeParam], call_args: &[TypeExpr]) -> Vec<(String, TypeExpr)> {
+pub(crate) fn param_subst(
+    type_params: &[TypeParam],
+    call_args: &[TypeExpr],
+) -> Vec<(String, TypeExpr)> {
     type_params
         .iter()
         .map(|p| p.name.clone())
         .zip(call_args.iter().cloned())
         .collect()
 }
-
 
 /// Substitute type-parameter variables in `te` according to `subst`. Used to
 /// resolve a wrapper's declared field types against the call-site type
@@ -280,7 +269,6 @@ pub(crate) fn subst_type_params(te: &TypeExpr, subst: &[(String, TypeExpr)]) -> 
     }
 }
 
-
 pub(crate) fn type_expr_contains_var(te: &TypeExpr, name: &str) -> bool {
     match te {
         TypeExpr::Var { name: n, .. } => n == name,
@@ -298,13 +286,11 @@ pub(crate) fn type_expr_contains_var(te: &TypeExpr, name: &str) -> bool {
     }
 }
 
-
 /// Build a TypeExpr that applies `name` to each of `type_params` as a Var.
 /// e.g. (`Rep__Box`, `["a"]`) -> `App(Named(Rep__Box), Var(a))`.
 pub(crate) fn apply_type_params(name: &str, type_params: &[TypeParam]) -> TypeExpr {
     apply_type_params_specialized(name, type_params, &HashMap::new())
 }
-
 
 /// Like `apply_type_params`, but substitutes any parameter present in
 /// `bindings` with its concrete type (used to pin a parameterized record's
@@ -334,4 +320,3 @@ pub(crate) fn apply_type_params_specialized(
     }
     acc
 }
-

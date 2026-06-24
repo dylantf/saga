@@ -119,7 +119,11 @@ pub(crate) fn generic_ctor(name: &str) -> String {
     format!("Std.Generic.{name}")
 }
 
-pub(crate) fn match_type_pattern(pattern: &Type, actual: &Type, subst: &mut HashMap<u32, Type>) -> bool {
+pub(crate) fn match_type_pattern(
+    pattern: &Type,
+    actual: &Type,
+    subst: &mut HashMap<u32, Type>,
+) -> bool {
     match (pattern, actual) {
         (Type::Var(id), actual) => match subst.get(id).cloned() {
             Some(existing) => existing == *actual,

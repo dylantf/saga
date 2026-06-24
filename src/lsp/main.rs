@@ -5295,6 +5295,95 @@ answer () = 42
     }
 
     #[test]
+    fn cleared_lsp_base_can_recheck_builtin_importing_std_base() {
+        let mut checker = typechecker::Checker::with_prelude(None).expect("checker");
+        checker.clear_module_semantic_caches();
+
+        checker
+            .try_typecheck_import_by_name("Std.String")
+            .expect("typecheck builtin module after cache clear");
+    }
+
+    #[test]
+    fn cleared_lsp_base_can_load_dependency_importing_std_base() {
+        let root = temp_project("dependency-std-base-import");
+        let dep_root = root.join("deps/kraken");
+        let dep_src = dep_root.join("src");
+        std::fs::create_dir_all(&dep_src).expect("create dependency src");
+        std::fs::write(
+            root.join("project.toml"),
+            "\
+[project]
+name = \"app\"
+
+[deps]
+kraken = { path = \"deps/kraken\" }
+",
+        )
+        .expect("write app project.toml");
+        std::fs::write(
+            dep_root.join("project.toml"),
+            "\
+[project]
+name = \"kraken\"
+
+[library]
+module = \"Kraken\"
+expose = [\"Kraken.Core\"]
+",
+        )
+        .expect("write dependency project.toml");
+        std::fs::write(
+            dep_src.join("Core.saga"),
+            "\
+module Kraken.Core
+
+import Std.Base (Semigroup)
+
+pub fun answer : Unit -> Int
+answer () = 42
+",
+        )
+        .expect("write dependency module");
+
+        let mut base = checker_base_for_project(Some(root.clone())).expect("base checker");
+        base.clear_module_semantic_caches();
+        let mut checker =
+            prepare_checker_for_analysis(base, Some(root.clone()), HashMap::new(), HashMap::new());
+        let source = "\
+module Main
+
+import Kraken.Core
+
+fun main : Unit -> Int
+main () = Kraken.Core.answer ()
+";
+        let tokens = lexer::Lexer::new(source).lex().expect("lex main");
+        let mut program = parser::Parser::new(tokens)
+            .parse_program()
+            .expect("parse main");
+        let imported = derive::collect_imported_decls_with_sources(
+            &program,
+            checker.module_map(),
+            &HashMap::new(),
+        );
+        derive::expand_derives(&mut program, &imported);
+        desugar::desugar_program(&mut program);
+        let check = checker.check_program_lsp(&mut program);
+        let errors: Vec<_> = check
+            .diagnostics
+            .iter()
+            .filter(|diagnostic| matches!(diagnostic.severity, typechecker::Severity::Error))
+            .collect();
+        let _ = std::fs::remove_dir_all(&root);
+
+        assert!(
+            errors.is_empty(),
+            "expected dependency module to typecheck, got: {errors:?}"
+        );
+    }
+
+    #[test]
     fn module_interface_fingerprint_uses_stable_projection() {
         let int_scheme = typechecker::Scheme {
             forall: Vec::new(),

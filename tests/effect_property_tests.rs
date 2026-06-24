@@ -683,7 +683,11 @@ result () = {
   col2_name r.x
 }
 "#;
-    check_result_string("unannotated_derived_subquery_result_is_not_generalized", src, "x");
+    check_result_string(
+        "unannotated_derived_subquery_result_is_not_generalized",
+        src,
+        "x",
+    );
 }
 
 #[test]

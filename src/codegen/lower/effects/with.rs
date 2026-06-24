@@ -1,8 +1,8 @@
 use super::*;
 use crate::ast::{Annotated, Expr, ExprKind, Handler, HandlerArm, Pat, Stmt};
 use crate::codegen::cerl::{CArm, CExpr, CLit, CPat};
-use std::collections::{HashMap, HashSet};
 use crate::codegen::lower::*;
+use std::collections::{HashMap, HashSet};
 
 impl<'a> Lowerer<'a> {
     /// Lower a `with` expression: `expr with handler`.
@@ -12,7 +12,6 @@ impl<'a> Lowerer<'a> {
     pub(crate) fn lower_with(&mut self, expr: &Expr, handler: &Handler) -> CExpr {
         self.lower_with_inherited_return_k(expr, handler, None)
     }
-
 
     pub(crate) fn lower_with_inherited_return_k(
         &mut self,
@@ -194,7 +193,8 @@ impl<'a> Lowerer<'a> {
                         CExpr::Var(var.clone())
                     })
                     .collect();
-                let entry = crate::codegen::lower::evidence::build_evidence_entry(&eff, op_closures);
+                let entry =
+                    crate::codegen::lower::evidence::build_evidence_entry(&eff, op_closures);
                 acc = crate::codegen::lower::evidence::insert_canonical(acc, entry);
             }
             let new_var = self.fresh();
@@ -353,7 +353,6 @@ impl<'a> Lowerer<'a> {
         self.attach_scoped_handler_bindings(result, condition_bindings, handler_bindings)
     }
 
-
     /// If a nested `with` chain uses handler values bound inside the wrapped
     /// block, the handler evidence cannot dominate the prefix that creates
     /// those values. Lower:
@@ -453,7 +452,6 @@ impl<'a> Lowerer<'a> {
         Some(self.lower_expr_with_installed_return_k(&rewritten, inherited_return_k))
     }
 
-
     /// Build a per-op handler function from a single handler arm.
     ///
     /// Produces: `fun (Arg0, ..., ArgN, K) -> body`
@@ -511,7 +509,12 @@ impl<'a> Lowerer<'a> {
         // `DictMethodAccess` references (`__dict_<Trait>_<var>`) bind here.
         let dict_param_vars: Vec<String> = op_info
             .as_ref()
-            .map(|op| op.dict_param_names.iter().map(|n| crate::codegen::lower::core_var(n)).collect())
+            .map(|op| {
+                op.dict_param_names
+                    .iter()
+                    .map(|n| crate::codegen::lower::core_var(n))
+                    .collect()
+            })
             .unwrap_or_default();
 
         let mut fun_params: Vec<String> = param_vars.clone();
@@ -594,7 +597,6 @@ impl<'a> Lowerer<'a> {
         CExpr::Fun(fun_params, Box::new(body_ce))
     }
 
-
     pub(crate) fn build_inline_op_handler_fun(&mut self, arms: &[HandlerArm]) -> CExpr {
         match arms {
             [] => self.build_passthrough_handler_fun(),
@@ -602,7 +604,6 @@ impl<'a> Lowerer<'a> {
             [first, ..] => self.build_multi_arm_inline_op_handler_fun(first, arms),
         }
     }
-
 
     pub(crate) fn build_multi_arm_inline_op_handler_fun(
         &mut self,
@@ -724,5 +725,4 @@ impl<'a> Lowerer<'a> {
             Box::new(CExpr::Case(Box::new(scrutinee), case_arms)),
         )
     }
-
 }

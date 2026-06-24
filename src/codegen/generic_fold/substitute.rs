@@ -16,7 +16,6 @@ pub(crate) fn substitute_dict_vars(expr: &mut Expr, subst: &HashMap<&str, &Expr>
     }
 }
 
-
 /// Collect carried side-table ids from `expr` and descendant patterns in a
 /// deterministic pre-order. Run before and after `freshen_expr_ids` on the same
 /// structurally unchanged tree to build an old->new id mapping by position.
@@ -51,7 +50,6 @@ pub(crate) fn collect_carried_ids(expr: &mut Expr, out: &mut Vec<NodeId>) {
         collect_carried_ids(child, out);
     }
 }
-
 
 pub(crate) fn collect_pat_ids(pat: &mut Pat, out: &mut Vec<NodeId>) {
     out.push(pat.id());
@@ -91,7 +89,6 @@ pub(crate) fn collect_pat_ids(pat: &mut Pat, out: &mut Vec<NodeId>) {
     }
 }
 
-
 pub(crate) fn collect_constructor_names(expr: &mut Expr, out: &mut Vec<String>) {
     match &mut expr.kind {
         ExprKind::Constructor { name } => out.push(base_name(name).to_string()),
@@ -124,7 +121,6 @@ pub(crate) fn collect_constructor_names(expr: &mut Expr, out: &mut Vec<String>) 
         collect_constructor_names(child, out);
     }
 }
-
 
 pub(crate) fn collect_pat_constructor_names(pat: &mut Pat, out: &mut Vec<String>) {
     match pat {
@@ -171,7 +167,6 @@ pub(crate) fn collect_pat_constructor_names(pat: &mut Pat, out: &mut Vec<String>
         Pat::Wildcard { .. } | Pat::Var { .. } | Pat::Lit { .. } => {}
     }
 }
-
 
 /// Replace free occurrences of `Var{name}` with `replacement` (cloned with fresh
 /// ids per occurrence), **capture-avoiding**: substitution does not descend into
@@ -344,7 +339,6 @@ pub(crate) fn substitute_var(expr: &mut Expr, name: &str, replacement: &Expr) {
     }
 }
 
-
 /// Does `pat` bind `name`? (Used to stop capture-avoiding substitution at a
 /// shadowing binder.)
 pub(crate) fn pat_binds(pat: &Pat, name: &str) -> bool {
@@ -368,14 +362,12 @@ pub(crate) fn pat_binds(pat: &Pat, name: &str) -> bool {
     }
 }
 
-
 pub(crate) fn record_fields_bind(fields: &[(String, Option<Pat>)], name: &str) -> bool {
     fields.iter().any(|(fname, sub)| match sub {
         Some(p) => pat_binds(p, name),
         None => fname == name,
     })
 }
-
 
 pub(crate) fn substitute_in_handler(handler: &mut Handler, name: &str, replacement: &Expr) {
     match handler {
@@ -393,7 +385,6 @@ pub(crate) fn substitute_in_handler(handler: &mut Handler, name: &str, replaceme
     }
 }
 
-
 pub(crate) fn substitute_in_handler_arm(arm: &mut HandlerArm, name: &str, replacement: &Expr) {
     // The arm's operation parameters bind for its body and finally block.
     if arm.params.iter().any(|p| pat_binds(p, name)) {
@@ -404,7 +395,6 @@ pub(crate) fn substitute_in_handler_arm(arm: &mut HandlerArm, name: &str, replac
         substitute_var(fb, name, replacement);
     }
 }
-
 
 /// Names bound by a pattern (appended to `out`). Used by the case-of-case capture
 /// guard and is the dual of [`pat_binds`].
@@ -449,7 +439,6 @@ pub(crate) fn pat_bound_names(pat: &Pat, out: &mut Vec<String>) {
     }
 }
 
-
 pub(crate) fn record_field_bound_names(fields: &[(String, Option<Pat>)], out: &mut Vec<String>) {
     for (fname, sub) in fields {
         match sub {
@@ -458,7 +447,6 @@ pub(crate) fn record_field_bound_names(fields: &[(String, Option<Pat>)], out: &m
         }
     }
 }
-
 
 /// Free variables across a list of case arms (each arm pattern binds within its
 /// guard + body). Binder-aware so a name bound *inside* an arm isn't counted as
@@ -478,11 +466,14 @@ pub(crate) fn free_vars_arms(arms: &[Annotated<CaseArm>]) -> std::collections::H
     acc
 }
 
-
 /// Collect free `Var` names of `expr` into `acc`, treating names in `bound` (and
 /// any binders encountered along the way) as not free. Mirrors the binder
 /// structure of [`substitute_var`].
-pub(crate) fn collect_free_vars(expr: &Expr, bound: &[String], acc: &mut std::collections::HashSet<String>) {
+pub(crate) fn collect_free_vars(
+    expr: &Expr,
+    bound: &[String],
+    acc: &mut std::collections::HashSet<String>,
+) {
     match &expr.kind {
         ExprKind::Var { name } => {
             if !bound.contains(name) {
@@ -588,7 +579,6 @@ pub(crate) fn collect_free_vars(expr: &Expr, bound: &[String], acc: &mut std::co
         }
     }
 }
-
 
 /// Mutable references to the direct child expressions of `expr`. Descends into
 /// `DictMethodAccess.dict` (the dictionary sub-expression). The match is
@@ -762,7 +752,6 @@ pub(crate) fn child_exprs_mut(expr: &mut Expr) -> Vec<&mut Expr> {
     out
 }
 
-
 pub(crate) fn push_stmt_child_exprs<'e>(stmt: &'e mut Stmt, out: &mut Vec<&'e mut Expr>) {
     match stmt {
         Stmt::Let { value, .. } => out.push(value),
@@ -775,7 +764,6 @@ pub(crate) fn push_stmt_child_exprs<'e>(stmt: &'e mut Stmt, out: &mut Vec<&'e mu
         Stmt::Expr(e) => out.push(e),
     }
 }
-
 
 pub(crate) fn push_handler_child_exprs<'e>(handler: &'e mut Handler, out: &mut Vec<&'e mut Expr>) {
     match handler {
@@ -793,18 +781,21 @@ pub(crate) fn push_handler_child_exprs<'e>(handler: &'e mut Handler, out: &mut V
     }
 }
 
-
-pub(crate) fn push_handler_body_child_exprs<'e>(body: &'e mut HandlerBody, out: &mut Vec<&'e mut Expr>) {
+pub(crate) fn push_handler_body_child_exprs<'e>(
+    body: &'e mut HandlerBody,
+    out: &mut Vec<&'e mut Expr>,
+) {
     for arm in &mut body.arms {
         push_handler_arm_child_exprs(&mut arm.node, out);
     }
 }
 
-
-pub(crate) fn push_handler_arm_child_exprs<'e>(arm: &'e mut HandlerArm, out: &mut Vec<&'e mut Expr>) {
+pub(crate) fn push_handler_arm_child_exprs<'e>(
+    arm: &'e mut HandlerArm,
+    out: &mut Vec<&'e mut Expr>,
+) {
     out.push(&mut arm.body);
     if let Some(fb) = &mut arm.finally_block {
         out.push(fb);
     }
 }
-

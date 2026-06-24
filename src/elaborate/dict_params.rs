@@ -13,7 +13,6 @@ impl Elaborator {
         self.op_dict_params_lookup(effect.as_deref(), &arm.op_name)
     }
 
-
     /// Per-operation dict params for an `op!` call site, looked up by the call's
     /// resolved (or qualified) effect and op name.
     pub(crate) fn op_dict_params_for_call(
@@ -30,7 +29,6 @@ impl Elaborator {
         self.op_dict_params_lookup(effect.as_deref(), op_name)
     }
 
-
     /// If `expr` is an App spine whose head is an `EffectCall` for an operation
     /// with its own `where` constraints, elaborate it and append the per-call
     /// dictionary arguments (outermost, so they follow the user args). Returns
@@ -45,7 +43,9 @@ impl Elaborator {
                     user_args.push(arg);
                     current = func;
                 }
-                ExprKind::EffectCall { name, qualifier, .. } => {
+                ExprKind::EffectCall {
+                    name, qualifier, ..
+                } => {
                     break (current, name.clone(), qualifier.clone());
                 }
                 _ => return None,
@@ -76,9 +76,7 @@ impl Elaborator {
         let mut trait_occurrences: HashMap<&str, usize> = HashMap::new();
         for (trait_name, _) in &op_pairs {
             let occ = trait_occurrences.entry(trait_name.as_str()).or_insert(0);
-            if let Some(dict_expr) =
-                self.resolve_dict_nth(trait_name, head.id, head.span, *occ)
-            {
+            if let Some(dict_expr) = self.resolve_dict_nth(trait_name, head.id, head.span, *occ) {
                 result = Expr::synth(
                     expr.span,
                     ExprKind::App {
@@ -92,8 +90,11 @@ impl Elaborator {
         Some(result)
     }
 
-
-    pub(crate) fn op_dict_params_lookup(&self, effect: Option<&str>, op_name: &str) -> Vec<(String, String)> {
+    pub(crate) fn op_dict_params_lookup(
+        &self,
+        effect: Option<&str>,
+        op_name: &str,
+    ) -> Vec<(String, String)> {
         let Some(effect) = effect else {
             return Vec::new();
         };
@@ -103,7 +104,6 @@ impl Elaborator {
             .unwrap_or_default()
     }
 
-
     /// Extract dict param info from a where clause: [(trait_name, type_var_name)]
     /// for traits that use dictionary dispatch (excludes Num/Eq which use BIFs).
     ///
@@ -111,7 +111,10 @@ impl Elaborator {
     /// Dict params are keyed by (trait_name, self_type_var) - one dict per constraint.
     /// The extra type args (e.g. `b` in `a: ConvertTo b`) are resolved separately
     /// through TraitEvidence when looking up which concrete dict to pass at call sites.
-    pub(crate) fn dict_params_from_where(&self, where_clause: &[TraitBound]) -> Vec<(String, String)> {
+    pub(crate) fn dict_params_from_where(
+        &self,
+        where_clause: &[TraitBound],
+    ) -> Vec<(String, String)> {
         let mut dict_params = Vec::new();
         for bound in where_clause {
             for tr in &bound.traits {
@@ -125,7 +128,6 @@ impl Elaborator {
         }
         dict_params
     }
-
 
     /// Like [`dict_params_from_where`], but emits bounds that carry trait type
     /// arguments (multi-parameter traits, e.g. `field: ReadLeft out`) ahead of
@@ -171,8 +173,10 @@ impl Elaborator {
         with_args
     }
 
-
-    pub(crate) fn dict_params_from_where_apps(&self, where_apps: &[TraitApp]) -> Vec<(String, String)> {
+    pub(crate) fn dict_params_from_where_apps(
+        &self,
+        where_apps: &[TraitApp],
+    ) -> Vec<(String, String)> {
         let mut dict_params = Vec::new();
         for app in where_apps {
             if matches!(app.trait_name.as_str(), "Num" | "Eq") {
@@ -190,7 +194,6 @@ impl Elaborator {
         dict_params
     }
 
-
     pub(crate) fn impl_type_param_id(type_params: &[TypeParam], name: &str) -> Option<u32> {
         type_params
             .iter()
@@ -198,14 +201,12 @@ impl Elaborator {
             .map(|idx| u32::MAX - idx as u32)
     }
 
-
     pub(crate) fn impl_type_param_subst(args: &[Type]) -> HashMap<u32, Type> {
         args.iter()
             .enumerate()
             .map(|(idx, arg)| (u32::MAX - idx as u32, arg.clone()))
             .collect()
     }
-
 
     pub(crate) fn type_expr_to_constraint_type(
         &self,
@@ -248,7 +249,6 @@ impl Elaborator {
             TypeExpr::Arrow { .. } => None,
         }
     }
-
 
     pub(crate) fn resolve_functional_where_app_fresh_vars(
         &self,
@@ -296,7 +296,6 @@ impl Elaborator {
             }
         }
     }
-
 
     pub(crate) fn where_app_dict_params_for_impl(
         &self,
@@ -352,7 +351,6 @@ impl Elaborator {
         params
     }
 
-
     /// Set up `current_dict_params` from a where clause, saving the previous state.
     /// Returns the saved state to be restored later via `restore_dict_params`.
     pub(crate) fn setup_dict_params_from_pairs(
@@ -374,7 +372,6 @@ impl Elaborator {
         saved
     }
 
-
     pub(crate) fn setup_dict_params(
         &mut self,
         where_clause: &[TraitBound],
@@ -382,7 +379,6 @@ impl Elaborator {
         let dict_params = self.dict_params_from_where(where_clause);
         self.setup_dict_params_from_pairs(&dict_params)
     }
-
 
     /// Add dict params on top of the current ones (without clearing), returning
     /// the prior maps so the caller can restore them. Used for handler arms
@@ -406,7 +402,6 @@ impl Elaborator {
         saved
     }
 
-
     /// Restore `current_dict_params` from a previous `setup_dict_params` call.
     pub(crate) fn restore_dict_params(
         &mut self,
@@ -415,5 +410,4 @@ impl Elaborator {
         self.current_dict_params = saved.0;
         self.current_dict_params_by_var = saved.1;
     }
-
 }

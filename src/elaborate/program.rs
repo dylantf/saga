@@ -442,7 +442,6 @@ impl Elaborator {
         output
     }
 
-
     /// Resolve the record type name from a node's inferred type.
     pub(crate) fn resolve_record_name(&self, node_id: crate::ast::NodeId) -> Option<String> {
         let ty = self.type_at_node.get(&node_id)?;
@@ -455,5 +454,4 @@ impl Elaborator {
             _ => None,
         }
     }
-
 }

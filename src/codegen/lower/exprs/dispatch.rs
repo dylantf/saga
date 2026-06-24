@@ -1,9 +1,9 @@
 use crate::ast::{self, BitSegment, Expr, ExprKind, Lit, Pat};
 use crate::codegen::cerl::{CArm, CBinSeg, CExpr, CLit, CPat};
-use std::collections::{HashMap};
-use crate::codegen::lower::util::*;
 use crate::codegen::lower::pats::*;
+use crate::codegen::lower::util::*;
 use crate::codegen::lower::*;
+use std::collections::HashMap;
 
 impl<'a> Lowerer<'a> {
     /// Lower a `<<seg1, seg2, ...>>` bitstring expression to `CExpr::Binary`.
@@ -638,9 +638,9 @@ impl<'a> Lowerer<'a> {
                 if let Some(resolved) = self.resolved.get(&expr.id).cloned() {
                     match &resolved.kind {
                         crate::codegen::resolve::ResolvedCodegenKind::BeamFunction { .. }
-                        | crate::codegen::resolve::ResolvedCodegenKind::ExternalFunction { .. } => {
-                            self.lower_resolved_value_ref(expr.id, resolved)
-                        }
+                        | crate::codegen::resolve::ResolvedCodegenKind::ExternalFunction {
+                            ..
+                        } => self.lower_resolved_value_ref(expr.id, resolved),
                         crate::codegen::resolve::ResolvedCodegenKind::Intrinsic { .. } => {
                             panic!(
                                 "dict ref resolved to non-dictionary codegen kind: {}",

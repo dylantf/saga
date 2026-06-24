@@ -853,10 +853,10 @@ mod render_tests {
     #[test]
     fn qualified_render_recurses_into_args() {
         let inner = Type::Con("Std.Int.Int".into(), vec![]);
-        let dict = Type::Con(
-            "Std.Dict.Dict".into(),
-            vec![inner.clone(), inner],
+        let dict = Type::Con("Std.Dict.Dict".into(), vec![inner.clone(), inner]);
+        assert_eq!(
+            render_type_qualified(&dict),
+            "Std.Dict.Dict Std.Int.Int Std.Int.Int"
         );
-        assert_eq!(render_type_qualified(&dict), "Std.Dict.Dict Std.Int.Int Std.Int.Int");
     }
 }

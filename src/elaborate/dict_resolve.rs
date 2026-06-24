@@ -12,7 +12,6 @@ impl Elaborator {
         self.resolve_dict_nth(trait_name, node_id, span, 0)
     }
 
-
     pub(crate) fn resolve_call_dict_nth(
         &self,
         trait_name: &str,
@@ -29,12 +28,15 @@ impl Elaborator {
             })
     }
 
-
-    pub(crate) fn resolve_dict_from_arg_type(&self, trait_name: &str, arg: &Expr, span: Span) -> Option<Expr> {
+    pub(crate) fn resolve_dict_from_arg_type(
+        &self,
+        trait_name: &str,
+        arg: &Expr,
+        span: Span,
+    ) -> Option<Expr> {
         let ty = self.type_at_node.get(&arg.id)?.clone();
         self.dict_for_type(trait_name, &[], &ty, span)
     }
-
 
     /// Resolve the `occurrence`-th evidence entry for `trait_name` at `node_id`.
     /// When a function has multiple where-clause bounds for the same trait
@@ -115,15 +117,17 @@ impl Elaborator {
         None
     }
 
-
-    pub(crate) fn supertrait_index(&self, subtrait: &str, required_supertrait: &str) -> Option<usize> {
+    pub(crate) fn supertrait_index(
+        &self,
+        subtrait: &str,
+        required_supertrait: &str,
+    ) -> Option<usize> {
         self.traits.get(subtrait).and_then(|info| {
             info.supertraits
                 .iter()
                 .position(|supertrait| supertrait == required_supertrait)
         })
     }
-
 
     pub(crate) fn project_supertrait_dict(
         &self,
@@ -144,7 +148,6 @@ impl Elaborator {
                 )
             })
     }
-
 
     pub(crate) fn dict_param_for_trait_var(
         &self,
@@ -192,8 +195,11 @@ impl Elaborator {
         None
     }
 
-
-    pub(crate) fn current_dict_param_or_supertrait(&self, trait_name: &str, span: Span) -> Option<Expr> {
+    pub(crate) fn current_dict_param_or_supertrait(
+        &self,
+        trait_name: &str,
+        span: Span,
+    ) -> Option<Expr> {
         if let Some(name) = self.current_dict_params.get(trait_name) {
             return Some(Expr::synth(span, ExprKind::Var { name: name.clone() }));
         }
@@ -217,7 +223,6 @@ impl Elaborator {
         None
     }
 
-
     /// Build the show function expression for a concrete type.
     /// Returns an expression that, when applied to a value of that type, produces a string.
     pub(crate) fn show_fn_for_type(&self, trait_name: &str, ty: &Type, span: Span) -> Option<Expr> {
@@ -231,7 +236,6 @@ impl Elaborator {
             },
         ))
     }
-
 
     /// Build the dict expression for a concrete type (the dict itself, not the method).
     /// `trait_type_args` are the resolved extra type arguments for multi-param traits.
@@ -501,5 +505,4 @@ impl Elaborator {
             _ => None,
         }
     }
-
 }

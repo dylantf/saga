@@ -1112,7 +1112,10 @@ fn field_access_on_application_keeps_parens() {
 
 #[test]
 fn field_access_on_plain_var_stays_unparenthesized() {
-    assert_eq!(fmt80("f x = println user.name"), "f x = println user.name\n");
+    assert_eq!(
+        fmt80("f x = println user.name"),
+        "f x = println user.name\n"
+    );
 }
 
 // --- Records ---
@@ -1726,9 +1729,7 @@ fn impl_for_target_with_concrete_arg_keeps_parens() {
     // `Db.Required` is a concrete type argument, so the parens around the
     // `for` target are required to round-trip and must be preserved.
     assert_eq!(
-        fmt80(
-            "impl Selectable User for (Users source Db.Required) {\n  to_projection u = u\n}"
-        ),
+        fmt80("impl Selectable User for (Users source Db.Required) {\n  to_projection u = u\n}"),
         "impl Selectable User for (Users source Db.Required) {\n  to_projection u = u\n}\n"
     );
 }

@@ -1,10 +1,10 @@
 use super::*;
 use crate::ast::{BinOp, Expr, Pat};
 use crate::codegen::cerl::{CArm, CExpr, CLit, CPat};
-use crate::token::Span;
-use crate::typechecker::Type;
 use crate::codegen::lower::util::*;
 use crate::codegen::lower::*;
+use crate::token::Span;
+use crate::typechecker::Type;
 
 impl<'a> Lowerer<'a> {
     /// Lower a saturated constructor call to the appropriate Core Erlang form.
@@ -20,7 +20,8 @@ impl<'a> Lowerer<'a> {
             "True" if args.is_empty() => return CExpr::Lit(CLit::Atom("true".to_string())),
             "False" if args.is_empty() => return CExpr::Lit(CLit::Atom("false".to_string())),
             _ if args.is_empty()
-                && crate::codegen::lower::beam_interop::exit_reason_bare_atom(bare_name).is_some() =>
+                && crate::codegen::lower::beam_interop::exit_reason_bare_atom(bare_name)
+                    .is_some() =>
             {
                 return CExpr::Lit(CLit::Atom(
                     crate::codegen::lower::beam_interop::exit_reason_bare_atom(bare_name)
@@ -95,7 +96,6 @@ impl<'a> Lowerer<'a> {
         }
     }
 
-
     /// Bind a possibly-effectful expression to `var_name` for use in `body`.
     /// If the expression is effectful, this CPS-chains it so that an aborting
     /// handler bypasses `body` entirely; otherwise emits a plain `let`.
@@ -128,7 +128,6 @@ impl<'a> Lowerer<'a> {
         }
     }
 
-
     /// Assemble a composite expression from `slots`, then apply `k_var` to
     /// the result. Effectful slots are CPS-chained so an aborting handler
     /// bypasses both the assembly and the outer continuation.
@@ -158,7 +157,6 @@ impl<'a> Lowerer<'a> {
         }
         body
     }
-
 
     /// Lower a saturated constructor call and apply `k_var` to the constructed
     /// value. Effectful args are CPS-chained so an aborting handler skips the
@@ -229,7 +227,6 @@ impl<'a> Lowerer<'a> {
         })
     }
 
-
     /// Tuple-literal variant of [`Self::lower_ctor_with_k`]: CPS-chain
     /// effectful elements so an aborting handler bypasses the tuple build
     /// and the outer continuation.
@@ -245,7 +242,6 @@ impl<'a> Lowerer<'a> {
             CExpr::Tuple(vars.iter().map(|v| CExpr::Var(v.clone())).collect())
         })
     }
-
 
     /// BinOp variant of [`Self::lower_ctor_with_k`]: CPS-chain effectful
     /// operands so an aborting handler bypasses the arithmetic/comparison
@@ -287,7 +283,6 @@ impl<'a> Lowerer<'a> {
         )
     }
 
-
     pub(crate) fn lower_short_circuit_with_k(
         &mut self,
         left: &Expr,
@@ -322,7 +317,6 @@ impl<'a> Lowerer<'a> {
         self.lower_bind_expr_with_cps(left, left_var, None, case_expr)
     }
 
-
     /// Field-access variant: `(eff_expr).field`. CPS-chains the record
     /// sub-expression so an aborting handler skips the `element/2` call
     /// (which would otherwise crash with `badarg` on the abort tuple).
@@ -350,7 +344,6 @@ impl<'a> Lowerer<'a> {
             },
         )
     }
-
 
     /// Record-update variant of [`Self::lower_record_create_with_k`]: CPS-chain
     /// effectful field updates (and the base record sub-expression) so an
@@ -409,7 +402,6 @@ impl<'a> Lowerer<'a> {
         self.lower_bind_expr_with_cps(record_expr, rec_var, None, destructured)
     }
 
-
     /// Build `case rec_var of <{TagVar, ...field pats...}> when 'true' -> body`,
     /// binding the record's tag and its untouched fields so subsequent reads use
     /// `get_tuple_element` (arity proven locally) rather than `erlang:element/2`.
@@ -439,7 +431,6 @@ impl<'a> Lowerer<'a> {
         )
     }
 
-
     pub(crate) fn lower_value_to_k_with_ce(&mut self, ce: CExpr, k_var: &str) -> CExpr {
         let v = self.fresh();
         CExpr::Let(
@@ -451,7 +442,6 @@ impl<'a> Lowerer<'a> {
             )),
         )
     }
-
 
     pub(crate) fn lower_binop(
         &mut self,
@@ -482,7 +472,6 @@ impl<'a> Lowerer<'a> {
             )),
         )
     }
-
 
     /// `a && b` -> `case a of true -> b; false -> false end`
     /// `a || b` -> `case a of true -> true; false -> b end`
@@ -517,7 +506,6 @@ impl<'a> Lowerer<'a> {
         )
     }
 
-
     /// Apply an optional return continuation to a final value.
     pub(crate) fn apply_return_k_with(&mut self, return_k: Option<CExpr>, val: CExpr) -> CExpr {
         if let Some(k) = return_k {
@@ -532,7 +520,6 @@ impl<'a> Lowerer<'a> {
         }
     }
 
-
     /// Bind a pattern to a single variable name, wrapping the body in a
     /// destructuring `case` if the pattern is non-trivial (tuple, constructor, etc.).
     /// Returns `(var_name, body)` where `var_name` is safe to use in a `Let` or `Fun` param.
@@ -540,11 +527,14 @@ impl<'a> Lowerer<'a> {
         self.destructure_pat_inner(pat, body, false, None)
     }
 
-
-    pub(crate) fn destructure_pat_assert(&mut self, pat: &Pat, body: CExpr, span: Span) -> (String, CExpr) {
+    pub(crate) fn destructure_pat_assert(
+        &mut self,
+        pat: &Pat,
+        body: CExpr,
+        span: Span,
+    ) -> (String, CExpr) {
         self.destructure_pat_inner(pat, body, true, Some(span))
     }
-
 
     pub(crate) fn destructure_pat_inner(
         &mut self,
@@ -569,11 +559,14 @@ impl<'a> Lowerer<'a> {
             arms.push(CArm {
                 pat: CPat::Wildcard,
                 guard: None,
-                body: self.make_error(crate::codegen::lower::errors::ErrorKind::AssertFail, msg, span.as_ref()),
+                body: self.make_error(
+                    crate::codegen::lower::errors::ErrorKind::AssertFail,
+                    msg,
+                    span.as_ref(),
+                ),
             });
         }
         let wrapped = CExpr::Case(Box::new(CExpr::Var(tmp.clone())), arms);
         (tmp, wrapped)
     }
-
 }

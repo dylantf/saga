@@ -40,7 +40,6 @@ pub struct RoutedTraitInfo {
     pub defining_module_constructors: std::collections::HashSet<String>,
 }
 
-
 /// A trait impl captured at derive time, used to resolve the scope parameter of
 /// a parameterized record when applying a routed functional derive (see
 /// `determine_scope_specialization`). Only impls with a structured target are
@@ -54,7 +53,6 @@ pub(crate) struct DeriveImplInfo {
     pub(crate) row: TypeExpr,
 }
 
-
 pub(crate) struct DeriveScope<'a> {
     pub(crate) imported: &'a ImportedDecls,
     pub(crate) current_module: Option<&'a str>,
@@ -63,7 +61,6 @@ pub(crate) struct DeriveScope<'a> {
     pub(crate) local_records: HashMap<String, SummaryEntry<WrapperRecordInfo>>,
     pub(crate) local_impls: Vec<DeriveImplInfo>,
 }
-
 
 impl<'a> DeriveScope<'a> {
     pub(crate) fn new(imported: &'a ImportedDecls, current_module: Option<&'a str>) -> Self {
@@ -89,11 +86,17 @@ impl<'a> DeriveScope<'a> {
         insert_local(&mut self.local_records, self.current_module, name, info);
     }
 
-    pub(crate) fn trait_entry(&self, name: &str) -> Result<Option<&SummaryEntry<RoutedTraitInfo>>, String> {
+    pub(crate) fn trait_entry(
+        &self,
+        name: &str,
+    ) -> Result<Option<&SummaryEntry<RoutedTraitInfo>>, String> {
         lookup_summary(name, &self.local_traits, &self.imported.traits, "trait")
     }
 
-    pub(crate) fn type_entry(&self, name: &str) -> Result<Option<&SummaryEntry<WrapperTypeInfo>>, String> {
+    pub(crate) fn type_entry(
+        &self,
+        name: &str,
+    ) -> Result<Option<&SummaryEntry<WrapperTypeInfo>>, String> {
         lookup_summary(
             name,
             &self.local_types,
@@ -102,7 +105,10 @@ impl<'a> DeriveScope<'a> {
         )
     }
 
-    pub(crate) fn record_entry(&self, name: &str) -> Result<Option<&SummaryEntry<WrapperRecordInfo>>, String> {
+    pub(crate) fn record_entry(
+        &self,
+        name: &str,
+    ) -> Result<Option<&SummaryEntry<WrapperRecordInfo>>, String> {
         lookup_summary(
             name,
             &self.local_records,
@@ -111,7 +117,6 @@ impl<'a> DeriveScope<'a> {
         )
     }
 }
-
 
 /// Qualify a bare trait name in a `synthesizes` clause to the trait's defining
 /// module, so it resolves at any derive site (imported modules register every
@@ -144,7 +149,6 @@ pub(crate) fn qualify_synthesis_spec(
     }
 }
 
-
 pub(crate) fn insert_local<T: Clone>(
     map: &mut HashMap<String, SummaryEntry<T>>,
     current_module: Option<&str>,
@@ -160,7 +164,6 @@ pub(crate) fn insert_local<T: Clone>(
         map.insert(format!("{module}.{name}"), entry);
     }
 }
-
 
 pub(crate) fn lookup_summary<'a, T>(
     name: &str,
@@ -188,7 +191,6 @@ pub(crate) fn lookup_summary<'a, T>(
     }
 }
 
-
 pub(crate) fn is_hardcoded_derive(bare: &str) -> bool {
     matches!(
         bare,
@@ -204,7 +206,6 @@ pub(crate) fn is_hardcoded_derive(bare: &str) -> bool {
 // are treated as unification holes; `Named`/`Symbol` are rigid constructors.
 // Callers rename each side's variables with a distinct prefix so the two
 // namespaces don't collide.
-
 
 /// Determine concrete values for a parameterized record's type parameters when
 /// applying a routed functional derive. For each record field, find the unique
@@ -317,4 +318,3 @@ pub(crate) fn determine_scope_specialization(
     }
     bindings
 }
-

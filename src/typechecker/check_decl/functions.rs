@@ -563,11 +563,14 @@ impl Checker {
         Ok(())
     }
 
-
     /// Look up the source-level type variable name for a resolved type var ID.
     /// `where_bound_var_names` is keyed by original (pre-substitution) var IDs,
     /// so we resolve each bound ID through substitution to find the match.
-    pub(crate) fn resolve_where_var_name(&self, trait_name: &str, resolved_id: u32) -> Option<String> {
+    pub(crate) fn resolve_where_var_name(
+        &self,
+        trait_name: &str,
+        resolved_id: u32,
+    ) -> Option<String> {
         self.trait_state
             .where_bounds
             .iter()
@@ -596,7 +599,6 @@ impl Checker {
             })
     }
 
-
     pub(crate) fn trait_implies(&self, bound_trait: &str, required_trait: &str) -> bool {
         let bound = self
             .resolve_trait_name(bound_trait)
@@ -606,7 +608,6 @@ impl Checker {
             .unwrap_or_else(|| required_trait.to_string());
         self.trait_implies_canonical(&bound, &required, &mut std::collections::HashSet::new())
     }
-
 
     pub(crate) fn trait_implies_canonical(
         &self,
@@ -629,7 +630,6 @@ impl Checker {
                 })
             })
     }
-
 
     /// Partition pending constraints into scheme-level (polymorphic) vs global
     /// (concrete), then generalize the function type into a scheme with constraints.
@@ -675,7 +675,10 @@ impl Checker {
                     if is_generic_trait_name(&trait_name) {
                         let mut extra_vars = Vec::new();
                         for extra in &trait_type_arg_types {
-                            crate::typechecker::collect_free_vars(&self.sub.apply(extra), &mut extra_vars);
+                            crate::typechecker::collect_free_vars(
+                                &self.sub.apply(extra),
+                                &mut extra_vars,
+                            );
                         }
                         if extra_vars.iter().any(|extra| !type_vars.contains(extra)) {
                             self.trait_state.pending_constraints.push((
@@ -712,7 +715,10 @@ impl Checker {
                             resolved_type: None,
                             resolved_record_type: None,
                             type_var_name: var_name,
-                            trait_type_args: trait_type_arg_types.iter().map(|t| self.sub.apply(t)).collect(),
+                            trait_type_args: trait_type_arg_types
+                                .iter()
+                                .map(|t| self.sub.apply(t))
+                                .collect(),
                             resolved_symbol: None,
                         });
                         continue;
@@ -749,7 +755,10 @@ impl Checker {
                                 resolved_type: None,
                                 resolved_record_type: None,
                                 type_var_name: var_name,
-                                trait_type_args: trait_type_arg_types.iter().map(|t| self.sub.apply(t)).collect(),
+                                trait_type_args: trait_type_arg_types
+                                    .iter()
+                                    .map(|t| self.sub.apply(t))
+                                    .collect(),
                                 resolved_symbol: None,
                             });
                             continue;
@@ -905,7 +914,6 @@ impl Checker {
         Ok(scheme)
     }
 
-
     /// Check exhaustiveness of multi-clause function patterns using Maranget.
     pub(crate) fn check_fun_exhaustiveness(
         &self,
@@ -999,5 +1007,4 @@ impl Checker {
     }
 
     // --- Registration helpers ---
-
 }

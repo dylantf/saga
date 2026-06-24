@@ -9,7 +9,6 @@ pub(crate) fn base_name(name: &str) -> &str {
     name.rsplit('.').next().unwrap_or(name)
 }
 
-
 /// True for a `Std.Generic` representation constructor or a per-type `Rep__T`
 /// wrapper — the only constructors the fusion engine cancels.
 pub(crate) fn is_rep_ctor(name: &str) -> bool {
@@ -17,13 +16,11 @@ pub(crate) fn is_rep_ctor(name: &str) -> bool {
     base.starts_with("Rep__") || REP_CTORS.contains(&base)
 }
 
-
 /// Like [`known_ctor`], but only for `Rep` constructors (see [`is_rep_ctor`]).
 pub(crate) fn known_rep_ctor(expr: &Expr) -> Option<(&str, Vec<&Expr>)> {
     let (name, args) = known_ctor(expr)?;
     is_rep_ctor(name).then_some((name, args))
 }
-
 
 /// If `expr` is a saturated data-constructor application `Con a1 … an`, return
 /// the constructor name and its arguments in source order. `None` otherwise.
@@ -44,7 +41,6 @@ pub(crate) fn known_ctor(expr: &Expr) -> Option<(&str, Vec<&Expr>)> {
         }
     }
 }
-
 
 /// `case Con(args) of { … }` where the scrutinee is *any* known constructor:
 /// select the matching arm and bind its sub-patterns to `args`, dropping the
@@ -102,7 +98,6 @@ pub(crate) fn project_record_field(expr: &Expr) -> Option<Expr> {
     }
 }
 
-
 pub(crate) fn case_of_known_constructor(expr: &Expr) -> Option<Expr> {
     let ExprKind::Case {
         scrutinee, arms, ..
@@ -134,7 +129,6 @@ pub(crate) fn case_of_known_constructor(expr: &Expr) -> Option<Expr> {
     None
 }
 
-
 /// True if `body`'s result `case` would statically commit to one arm when its
 /// scrutinee parameter `param` is known to be the nullary constructor `ctor_name`.
 /// This is the "will inlining this function immediately collapse?" gate for
@@ -162,7 +156,6 @@ pub(crate) fn body_cancels_with(param: &str, ctor_name: &str, body: &Expr) -> bo
     decides_against(arms, &synthetic)
 }
 
-
 /// True if a `case` over the known constructor `value` statically commits to one
 /// arm (some arm `static_match`es `Yes` with no guard, and no earlier arm is
 /// `Unknown`). The bool half of [`case_of_known_constructor`]'s arm scan.
@@ -177,14 +170,12 @@ pub(crate) fn decides_against(arms: &[Annotated<CaseArm>], value: &Expr) -> bool
     false
 }
 
-
 /// Result of statically deciding whether `pat` matches a (partially) known value.
 pub(crate) enum Match {
     Yes,
     No,
     Unknown,
 }
-
 
 /// Decide whether `pat` matches `value`, recursing through nested constructors.
 /// A multi-variant `Generic.from` has several arms sharing an outer constructor
@@ -227,7 +218,6 @@ pub(crate) fn static_match(pat: &Pat, value: &Expr) -> Match {
     }
 }
 
-
 /// Bind a definitely-matching arm's pattern against the known scrutinee value and
 /// return the rewritten arm body. The pattern's match was already confirmed
 /// `Match::Yes` by [`static_match`].
@@ -247,7 +237,6 @@ pub(crate) fn commit_matched_arm(pat: &Pat, scrutinee: &Expr, body: &Expr) -> Ex
         _ => body.clone(),
     }
 }
-
 
 /// Bind a constructor pattern's sub-patterns to the scrutinee's arguments in the
 /// arm body. `subpats[i]` binds `cargs[i]`:
@@ -291,7 +280,6 @@ pub(crate) fn bind_subpats(subpats: &[Pat], cargs: &[&Expr], body: &Expr) -> Exp
     result
 }
 
-
 /// True for expressions that are pure and cheap enough to substitute inline
 /// (possibly at several use sites) without changing evaluation effects or
 /// duplicating significant work. Substituting a non-duplicable argument could
@@ -329,7 +317,6 @@ pub(crate) fn is_duplicable(expr: &Expr) -> bool {
         _ => false,
     }
 }
-
 
 /// `f (case s of { p -> e, … })` ⟶ `case s of { p -> f e, … }`, floating a case
 /// out of an application's argument so the codec meets the constructor each arm
@@ -379,13 +366,11 @@ pub(crate) fn float_case_out_of_arg(expr: &Expr) -> Option<Expr> {
     ))
 }
 
-
 pub(crate) fn clone_fresh_pat(pat: &Pat) -> Pat {
     let mut p = pat.clone();
     freshen_pat_ids(&mut p);
     p
 }
-
 
 pub(crate) fn clone_fresh_arm(arm: &CaseArm) -> Annotated<CaseArm> {
     let mut body = arm.body.clone();
@@ -402,7 +387,6 @@ pub(crate) fn clone_fresh_arm(arm: &CaseArm) -> Annotated<CaseArm> {
         span: arm.span,
     })
 }
-
 
 /// case-of-case commuting conversion (Phase 6, decode direction):
 /// `case (case S { p_i -> e_i }) { outer }` ⟶ `case S { p_i -> case e_i { outer } }`.
@@ -491,7 +475,6 @@ pub(crate) fn case_of_case(expr: &Expr) -> Option<Expr> {
     ))
 }
 
-
 /// True when `body` is a `Rep`-producing `case` — the routed-from bridge codec
 /// shape `case _ { Ok x -> Ok (Rep__T x); Err e -> Err e }`. Sees through a
 /// leading ascription. Anchoring on a *`Rep`* constructor (not any ctor) keeps
@@ -506,7 +489,6 @@ pub(crate) fn body_is_rep_producing_case(body: &Expr) -> bool {
     }
 }
 
-
 /// True when `e` builds a `Rep` constructor, possibly under wrapper constructors
 /// (`Ok (Rep__T …)`, `Ok (Adt …)`). Used to anchor the decode rewrites to actual
 /// `Rep`-tree production so they don't fire on unrelated `Result`-returning code.
@@ -516,7 +498,6 @@ pub(crate) fn produces_rep_ctor(e: &Expr) -> bool {
         None => false,
     }
 }
-
 
 /// True when `e` builds a `Rep` constructor *anywhere* in its subtree. A record's
 /// `And` node is built deep inside the field-codec's nested `Result` threading
@@ -533,7 +514,6 @@ pub(crate) fn subtree_produces_rep(e: &Expr) -> bool {
         .into_iter()
         .any(|c| subtree_produces_rep(c))
 }
-
 
 /// Peel a chain of `App` nodes, returning the innermost non-`App` head and the
 /// applied arguments in source order.
@@ -580,7 +560,6 @@ pub(crate) fn beta_reduce_lambda_app(expr: &Expr) -> Option<Expr> {
     Some(bind_subpats(params, &args, body))
 }
 
-
 pub(crate) fn peel_app(expr: &Expr) -> (&Expr, Vec<&Expr>) {
     let mut args: Vec<&Expr> = Vec::new();
     let mut current = expr;
@@ -591,4 +570,3 @@ pub(crate) fn peel_app(expr: &Expr) -> (&Expr, Vec<&Expr>) {
     args.reverse();
     (current, args)
 }
-

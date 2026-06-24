@@ -10,7 +10,6 @@ pub(crate) fn is_fn_ref(kind: &ResolvedCodegenKind) -> bool {
     )
 }
 
-
 /// Collect every module's parameterized `DictConstructor`s as external ctors,
 /// borrowing each producer's resolution map for carrying. Used at consumer emit
 /// time, where `ctx.modules` holds all other compiled modules.
@@ -43,7 +42,6 @@ pub fn external_ctors_from_modules(
     }
     map
 }
-
 
 /// Collect carryable plain functions ([`carryable_fun`]) from every compiled
 /// module, borrowing each producer's resolution map. A bare name defined as a
@@ -85,7 +83,6 @@ pub fn external_funs_from_modules(
     map
 }
 
-
 /// If `decl` is a plain function eligible for "inline-to-cancel" carry, return its
 /// `(name, params, body)`. Eligibility: a `FunBinding` with **no guard**, a body
 /// that **dispatches on one of its own parameters** (`case Var(param) of …`, the
@@ -121,7 +118,6 @@ pub(crate) fn carryable_fun(decl: &Decl) -> Option<(&str, &[Pat], &Expr)> {
     Some((name, params, body))
 }
 
-
 /// The block tail (the value of a `Block` is its last `Stmt::Expr`) or `expr`
 /// itself for a non-block — i.e. the expression in result position.
 pub(crate) fn result_expr(expr: &Expr) -> &Expr {
@@ -133,7 +129,6 @@ pub(crate) fn result_expr(expr: &Expr) -> &Expr {
         _ => expr,
     }
 }
-
 
 /// If `body`'s result expression is a `case` scrutinizing one of `params`
 /// directly (`case Var(p) of …`), return that parameter's name.
@@ -150,7 +145,6 @@ pub(crate) fn body_dispatch_param<'a>(params: &'a [Pat], body: &Expr) -> Option<
     })
 }
 
-
 /// Number of expression nodes in `expr` (a cheap size bound for the carry filter).
 pub(crate) fn expr_node_count(expr: &Expr) -> usize {
     let mut e = expr.clone();
@@ -159,4 +153,3 @@ pub(crate) fn expr_node_count(expr: &Expr) -> usize {
         .map(|c| expr_node_count(c))
         .sum::<usize>()
 }
-

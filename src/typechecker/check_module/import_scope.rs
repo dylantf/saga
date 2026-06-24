@@ -353,7 +353,8 @@ pub(super) fn resolve_import(
                 if crate::typechecker::BUILTIN_TYPE_CANONICAL
                     .iter()
                     .any(|(bare, canonical)| {
-                        *bare == name && canonical.rsplit_once('.').map(|(m, _)| m) == Some(module_name)
+                        *bare == name
+                            && canonical.rsplit_once('.').map(|(m, _)| m) == Some(module_name)
                     })
                 {
                     found = true;

@@ -38,12 +38,10 @@ pub(crate) use substitute::*;
 /// (bounded by field/constructor nesting), so this is generous in practice.
 pub(crate) const INLINE_FUEL: u32 = 64;
 
-
 /// Maximum body size (expression node count) of a plain function eligible for
 /// "inline-to-cancel" carry. Keeps the carried-function set small (dispatch
 /// helpers like `apply_name_style`) and bounds the code a single inline can add.
 pub(crate) const FUN_INLINE_SIZE_CAP: usize = 64;
-
 
 /// The `Generic` routing trait and its `to` method index. The fusion driver
 /// inlines `to` (the `Rep` builder) so its constructor result can be cancelled
@@ -56,7 +54,6 @@ pub(crate) const GENERIC_TO_METHOD: usize = 0;
 /// the consuming `case rep { Rep__T (…) -> T … }` so the produced `Rep` cancels.
 pub(crate) const GENERIC_FROM_METHOD: usize = 1;
 
-
 /// The `Std.Generic` representation constructors. The fusion engine only cancels
 /// *these* (plus the per-type `Rep__T` wrappers), which scopes it to the
 /// Generic-routing machinery — trait-agnostic across `ToJson`/`PostgresRow`/… —
@@ -65,7 +62,6 @@ pub(crate) const GENERIC_FROM_METHOD: usize = 1;
 pub(crate) const REP_CTORS: &[&str] = &[
     "U1", "Leaf", "Labeled", "And", "Or_Left", "Or_Right", "Variant", "Record", "Adt",
 ];
-
 
 /// A parameterized `DictConstructor` defined in another compiled module, with
 /// the producer's resolution map for carrying its body's name resolutions.
@@ -78,10 +74,8 @@ pub struct ExternalCtor<'a> {
     pub constructors: &'a HashMap<NodeId, String>,
 }
 
-
 /// External dict constructors keyed by dict-constructor name.
 pub type ExternalCtors<'a> = HashMap<String, ExternalCtor<'a>>;
-
 
 /// A plain function from another compiled module, carried for "inline-to-cancel"
 /// (see [`Folder::try_inline_fun`]). Only single-clause, guardless, dispatch-shaped,
@@ -97,10 +91,8 @@ pub struct ExternalFun<'a> {
     pub constructors: &'a HashMap<NodeId, String>,
 }
 
-
 /// External carryable plain functions keyed by bare function name.
 pub type ExternalFuns<'a> = HashMap<String, ExternalFun<'a>>;
-
 
 /// Result of folding a module: the rewritten program plus resolution entries for
 /// inlined cross-module nodes (keyed by their fresh NodeId), to be merged into
@@ -124,7 +116,6 @@ pub struct FoldOutput {
     pub carried_names: HashMap<String, ResolvedSymbol>,
 }
 
-
 /// One dict constructor available for inlining — local (`resolution: None`) or
 /// external (carry the producer's resolution).
 pub(crate) struct CtorView<'a> {
@@ -135,7 +126,6 @@ pub(crate) struct CtorView<'a> {
     pub(crate) record_types: Option<&'a HashMap<NodeId, String>>,
     pub(crate) constructors: Option<&'a HashMap<NodeId, String>>,
 }
-
 
 /// One plain function available for "inline-to-cancel" — local (`resolution: None`)
 /// or external (carry the producer's resolution).
@@ -148,7 +138,6 @@ pub(crate) struct FunView<'a> {
     pub(crate) constructors: Option<&'a HashMap<NodeId, String>>,
 }
 
-
 pub(crate) struct Folder<'a> {
     pub(crate) ctors: HashMap<&'a str, CtorView<'a>>,
     pub(crate) funs: HashMap<&'a str, FunView<'a>>,
@@ -158,4 +147,3 @@ pub(crate) struct Folder<'a> {
     pub(crate) carried_constructor_names: HashMap<String, String>,
     pub(crate) carried_names: HashMap<String, ResolvedSymbol>,
 }
-

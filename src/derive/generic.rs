@@ -41,7 +41,6 @@ pub(crate) fn generate_record_derive(
     }
 }
 
-
 /// Build `type Rep__R = Rep__R <inner-rep>` + `impl Generic R (Rep__R) { to, from }`.
 /// Handles parameterized and recursive records: the Rep type carries the same
 /// type parameters as the user record, and field types referencing the user
@@ -198,7 +197,6 @@ pub(crate) fn derive_record_generic(
 
     Ok(vec![rep_typedef, impl_def])
 }
-
 
 /// Build `type Rep__T = Rep__T <inner>` + `impl Generic Rep__T for T { to, from }`
 /// for an ADT (`Decl::TypeDef`). Mirrors `derive_record_generic`'s shape but
@@ -402,7 +400,6 @@ pub(crate) fn derive_adt_generic(
     Ok(vec![rep_typedef, impl_def])
 }
 
-
 /// Build the inner Rep type for an ADT: right-leaning `Or` chain wrapping
 /// `Labeled <variant_shape>` for each variant.
 pub(crate) fn build_adt_rep_inner_type(variants: &[Annotated<TypeConstructor>]) -> TypeExpr {
@@ -424,7 +421,6 @@ pub(crate) fn build_adt_rep_inner_type(variants: &[Annotated<TypeConstructor>]) 
     acc
 }
 
-
 /// Variant shape type: U1 for 0 fields, single field rep for 1, right-leaning
 /// And chain for >=2.
 pub(crate) fn build_variant_shape_type(fields: &[(Option<String>, TypeExpr)]) -> TypeExpr {
@@ -445,7 +441,6 @@ pub(crate) fn build_variant_shape_type(fields: &[(Option<String>, TypeExpr)]) ->
     acc
 }
 
-
 /// For a single ADT constructor field: `Labeled 'lbl (Leaf T)` if labeled,
 /// else `Leaf T`.
 pub(crate) fn field_rep_type_adt(label: &Option<String>, ty: &TypeExpr) -> TypeExpr {
@@ -455,7 +450,6 @@ pub(crate) fn field_rep_type_adt(label: &Option<String>, ty: &TypeExpr) -> TypeE
         None => leaf,
     }
 }
-
 
 /// Expression form of `build_variant_shape_type`: builds the And/Labeled/Leaf
 /// expression tree from already-bound field variables.
@@ -492,7 +486,6 @@ pub(crate) fn build_variant_shape_expr(
     }
     acc
 }
-
 
 /// Pattern form of the variant shape, binding each field to the matching name
 /// in `field_vars`.
@@ -545,7 +538,6 @@ pub(crate) fn build_variant_shape_pat(
     acc
 }
 
-
 /// `Or_Right^i (Or_Left inner)` for i < total-1; `Or_Right^(total-1) inner`
 /// for the last variant; bare `inner` if there's only one variant.
 pub(crate) fn or_wrap_expr(inner: Expr, index: usize, total: usize, span: Span) -> Expr {
@@ -562,7 +554,6 @@ pub(crate) fn or_wrap_expr(inner: Expr, index: usize, total: usize, span: Span) 
     }
     e
 }
-
 
 /// Pattern counterpart to `or_wrap_expr`.
 pub(crate) fn or_wrap_pat(inner: Pat, index: usize, total: usize, span: Span) -> Pat {
@@ -590,7 +581,6 @@ pub(crate) fn or_wrap_pat(inner: Pat, index: usize, total: usize, span: Span) ->
     p
 }
 
-
 /// Build a curried application of `ctor` to each `field_var`. For nullary
 /// constructors, returns just `Ctor`.
 pub(crate) fn build_ctor_application(ctor: &str, field_vars: &[String], span: Span) -> Expr {
@@ -607,7 +597,6 @@ pub(crate) fn build_ctor_application(ctor: &str, field_vars: &[String], span: Sp
     e
 }
 
-
 /// Build the inner Rep type (without the outer newtype wrapping). Right-leaning
 /// And chain for >=2 fields; `Labeled 'name (Leaf T)` for 1 field; U1 for 0.
 pub(crate) fn build_rep_type_inner(fields: &[(String, TypeExpr)]) -> TypeExpr {
@@ -623,7 +612,6 @@ pub(crate) fn build_rep_type_inner(fields: &[(String, TypeExpr)]) -> TypeExpr {
     acc
 }
 
-
 /// Record field rep type: `Labeled 'fieldname (Leaf T)`. The field name is
 /// carried as a type-level symbol; library codecs recover the string via
 /// `KnownSymbol`.
@@ -634,9 +622,12 @@ pub(crate) fn field_rep_type(name: &str, ty: &TypeExpr) -> TypeExpr {
     )
 }
 
-
 /// Build the `to` body's inner expression (everything inside the __Rep_R newtype wrap).
-pub(crate) fn build_rep_to_expr(fields: &[(String, TypeExpr)], record_var: &Expr, span: Span) -> Expr {
+pub(crate) fn build_rep_to_expr(
+    fields: &[(String, TypeExpr)],
+    record_var: &Expr,
+    span: Span,
+) -> Expr {
     if fields.is_empty() {
         return Expr::synth(
             span,
@@ -667,7 +658,6 @@ pub(crate) fn build_rep_to_expr(fields: &[(String, TypeExpr)], record_var: &Expr
     }
     acc
 }
-
 
 /// Build the inner pattern matched by `from`: matches the And/Labeled/Leaf tree
 /// and binds each field's value to the corresponding variable in `field_vars`.
@@ -712,4 +702,3 @@ pub(crate) fn build_rep_from_pattern(field_vars: &[String], span: Span) -> Pat {
     }
     acc
 }
-

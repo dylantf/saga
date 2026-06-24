@@ -213,6 +213,15 @@ impl Checker {
         if let Some(exports) = self.modules.exports.get(&module_name).cloned() {
             return Ok(exports);
         }
+        if is_builtin_resolved
+            && let Some(exports) = self
+                .modules
+                .prelude_snapshot
+                .as_ref()
+                .and_then(|snapshot| snapshot.modules.exports.get(&module_name).cloned())
+        {
+            return Ok(exports);
+        }
 
         if !is_builtin
             && self.modules.active_scc_headers.is_none()
@@ -288,10 +297,24 @@ impl Checker {
             self.seed_builtin_checker(&mut mc);
             mc
         };
-        // Share the module cache so transitive imports benefit from caching
-        mod_checker.modules.exports = self.modules.exports.clone();
-        mod_checker.modules.codegen_info = self.modules.codegen_info.clone();
-        mod_checker.modules.programs = self.modules.programs.clone();
+        // Share the module cache so transitive imports benefit from caching.
+        // Non-builtin module checkers start from the prelude snapshot, whose
+        // trait impl registry already includes stdlib impls. Keep its cached
+        // Std.* exports too; replacing them would let an explicit stdlib import
+        // recheck that module and trip duplicate-impl detection against the
+        // prelude's own impls.
+        mod_checker
+            .modules
+            .exports
+            .extend(self.modules.exports.clone());
+        mod_checker
+            .modules
+            .codegen_info
+            .extend(self.modules.codegen_info.clone());
+        mod_checker
+            .modules
+            .programs
+            .extend(self.modules.programs.clone());
         mod_checker.modules.map = self.modules.map.clone();
         mod_checker.modules.module_graph = self.modules.module_graph.clone();
         mod_checker.modules.source_overlay = self.modules.source_overlay.clone();
@@ -643,9 +666,11 @@ impl Checker {
         };
         mc.allow_bodyless_annotations = is_builtin;
         mc.next_var = self.next_var;
-        mc.modules.exports = self.modules.exports.clone();
-        mc.modules.codegen_info = self.modules.codegen_info.clone();
-        mc.modules.programs = self.modules.programs.clone();
+        mc.modules.exports.extend(self.modules.exports.clone());
+        mc.modules
+            .codegen_info
+            .extend(self.modules.codegen_info.clone());
+        mc.modules.programs.extend(self.modules.programs.clone());
         mc.modules.map = self.modules.map.clone();
         mc.modules.module_graph = self.modules.module_graph.clone();
         mc.modules.source_overlay = self.modules.source_overlay.clone();

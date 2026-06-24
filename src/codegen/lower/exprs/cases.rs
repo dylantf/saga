@@ -33,8 +33,11 @@ impl<'a> Lowerer<'a> {
         self.lower_case_expr_chain(scrut_var, &arms_ref)
     }
 
-
-    pub(crate) fn lower_case_arms_inner(&mut self, _scrut_var: &str, arms: &[&CaseArm]) -> Vec<CArm> {
+    pub(crate) fn lower_case_arms_inner(
+        &mut self,
+        _scrut_var: &str,
+        arms: &[&CaseArm],
+    ) -> Vec<CArm> {
         let mut result = Vec::new();
 
         for arm in arms {
@@ -67,7 +70,6 @@ impl<'a> Lowerer<'a> {
 
         result
     }
-
 
     pub(crate) fn lower_case_expr_chain(&mut self, scrut_var: &str, arms: &[&CaseArm]) -> CExpr {
         let mut rest = self.case_clause_error_expr();
@@ -168,7 +170,6 @@ impl<'a> Lowerer<'a> {
         rest
     }
 
-
     pub(crate) fn case_clause_error_expr(&self) -> CExpr {
         CExpr::Call(
             "erlang".to_string(),
@@ -177,11 +178,9 @@ impl<'a> Lowerer<'a> {
         )
     }
 
-
     pub(crate) fn is_catchall_pat(pat: &Pat) -> bool {
         matches!(pat, Pat::Wildcard { .. } | Pat::Var { .. })
     }
-
 
     pub(crate) fn bind_catchall_pattern(&self, scrut_var: &str, pat: &Pat, body: CExpr) -> CExpr {
         match pat {
@@ -194,5 +193,4 @@ impl<'a> Lowerer<'a> {
             _ => unreachable!("only catchall patterns should be rebound directly"),
         }
     }
-
 }

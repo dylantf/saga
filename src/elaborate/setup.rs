@@ -5,7 +5,6 @@ impl Elaborator {
         self.resolution.trait_ref(id).unwrap_or(source).to_string()
     }
 
-
     pub(crate) fn resolved_impl_trait_name(&self, id: crate::ast::NodeId, source: &str) -> String {
         self.resolution
             .impl_trait_ref(id)
@@ -14,7 +13,6 @@ impl Elaborator {
             .to_string()
     }
 
-
     pub(crate) fn resolved_impl_target_type(&self, id: crate::ast::NodeId, source: &str) -> String {
         self.resolution
             .impl_target_type_ref(id)
@@ -22,11 +20,9 @@ impl Elaborator {
             .to_string()
     }
 
-
     pub(crate) fn resolved_type_name(&self, id: crate::ast::NodeId, source: &str) -> String {
         self.resolution.type_ref(id).unwrap_or(source).to_string()
     }
-
 
     pub(crate) fn resolved_global_value_name(&self, id: crate::ast::NodeId) -> Option<&str> {
         match self.resolution.value(id) {
@@ -34,7 +30,6 @@ impl Elaborator {
             _ => None,
         }
     }
-
 
     pub(crate) fn fun_dict_params_for_callee(
         &self,
@@ -72,7 +67,6 @@ impl Elaborator {
         None
     }
 
-
     /// Resolve trait type args via the resolution map. For App heads (e.g.
     /// `Rep__Box a`), uses the head name — only the head identifies the impl
     /// for dict-name purposes.
@@ -84,7 +78,6 @@ impl Elaborator {
             })
             .collect()
     }
-
 
     pub(crate) fn impl_target_key(
         &self,
@@ -98,7 +91,6 @@ impl Elaborator {
             .unwrap_or(type_params.len());
         crate::typechecker::arity_keyed_target_name(canonical_target, arity)
     }
-
 
     pub(crate) fn new(result: &CheckResult, module_name: &str) -> Self {
         // Build inferred dict params from checker's env (for functions without
@@ -287,5 +279,4 @@ impl Elaborator {
             where_bound_var_names: result.where_bound_var_names.clone(),
         }
     }
-
 }

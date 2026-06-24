@@ -126,7 +126,6 @@ pub fn fold_program(
     }
 }
 
-
 impl Folder<'_> {
     fn fold_decl(&mut self, decl: &mut Decl) {
         match decl {
@@ -494,4 +493,3 @@ impl Folder<'_> {
         Some(bind_subpats(params, &args, &fresh_body))
     }
 }
-

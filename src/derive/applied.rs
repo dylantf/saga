@@ -241,7 +241,6 @@ pub(crate) fn derive_applied_functional_bridge(
     Ok(vec![bridge_impl, delegating_impl])
 }
 
-
 /// A record-synthesizing derive: `deriving (Trait NewName)` on a carrier record,
 /// where `Trait` carries a `synthesizes via <Map> deriving (...)` clause. Unlike
 /// the applied functional bridge above, the argument names a type that does
@@ -382,7 +381,8 @@ pub(crate) fn derive_synthesize(
         .rsplit('.')
         .next()
         .unwrap_or(&synth.via_trait);
-    let mut new_fields: Vec<Annotated<(String, TypeExpr)>> = Vec::with_capacity(carrier_fields.len());
+    let mut new_fields: Vec<Annotated<(String, TypeExpr)>> =
+        Vec::with_capacity(carrier_fields.len());
     for field in carrier_fields {
         let (fname, fty) = &field.node;
         let mapped = map_field_via_trait(fty, via_bare, scope).map_err(|reason| Diagnostic {
@@ -500,7 +500,6 @@ pub(crate) fn derive_synthesize(
     Ok(decls)
 }
 
-
 /// Rewrite one field type through a field-map trait's impls, read syntactically:
 /// find the impl whose target pattern (the `for` type) unifies with the field
 /// type and return its substituted row (the other trait argument). E.g. with
@@ -539,7 +538,6 @@ pub(crate) fn map_field_via_trait(
         format!("has no `{via_bare}` mapping (no impl's `for` type matches its column type)")
     })
 }
-
 
 pub(crate) fn ensure_row_generic_available(
     trait_display: &str,
@@ -593,7 +591,6 @@ pub(crate) fn ensure_row_generic_available(
     }
 }
 
-
 pub(crate) fn canonicalize_applied_row_type(ty: &TypeExpr, scope: &DeriveScope<'_>) -> TypeExpr {
     match ty {
         TypeExpr::Named { id, name, span } => {
@@ -631,7 +628,6 @@ pub(crate) fn canonicalize_applied_row_type(ty: &TypeExpr, scope: &DeriveScope<'
     }
 }
 
-
 #[derive(Clone)]
 pub(crate) enum AppliedBridgeReturn {
     Bare,
@@ -639,12 +635,10 @@ pub(crate) enum AppliedBridgeReturn {
     MappedWrapper { map_name: String },
 }
 
-
 pub(crate) enum AppliedRowWrap {
     Constructor(String),
     Function(String),
 }
-
 
 pub(crate) fn classify_applied_bridge_return(
     return_type: &TypeExpr,
@@ -669,7 +663,6 @@ pub(crate) fn classify_applied_bridge_return(
         map_name: map_name_for_wrapper_head(&head),
     })
 }
-
 
 pub(crate) fn transparent_unary_wrapper_ctor(
     head: &str,
@@ -702,13 +695,11 @@ pub(crate) fn transparent_unary_wrapper_ctor(
     Err(format!("return wrapper `{head}` is not in scope"))
 }
 
-
 pub(crate) fn map_name_for_wrapper_head(head: &str) -> String {
     head.rsplit_once('.')
         .map(|(module, _)| format!("{module}.map"))
         .unwrap_or_else(|| "map".to_string())
 }
-
 
 pub(crate) fn qualify_ctor_like(type_canonical: &str, ctor_name: &str) -> String {
     if ctor_name.contains('.') {
@@ -720,14 +711,12 @@ pub(crate) fn qualify_ctor_like(type_canonical: &str, ctor_name: &str) -> String
     }
 }
 
-
 pub(crate) fn is_applied_bridge_method(method: &TraitMethod, self_var: &str) -> bool {
     method.params.len() == 1
         && method.effects.is_empty()
         && method.effect_row_var.is_empty()
         && matches!(&method.params[0].1, TypeExpr::Var { name, .. } if name == self_var)
 }
-
 
 pub(crate) fn synth_applied_bridge_method(
     method: &TraitMethod,
@@ -761,7 +750,6 @@ pub(crate) fn synth_applied_bridge_method(
     }
 }
 
-
 pub(crate) fn synth_applied_delegating_method(
     method: &TraitMethod,
     return_shape: &AppliedBridgeReturn,
@@ -787,7 +775,6 @@ pub(crate) fn synth_applied_delegating_method(
         body,
     }
 }
-
 
 pub(crate) fn synth_applied_return_wrap(
     return_shape: &AppliedBridgeReturn,
@@ -831,14 +818,12 @@ pub(crate) fn synth_applied_return_wrap(
     }
 }
 
-
 pub(crate) fn apply_applied_row_wrap(wrap: &AppliedRowWrap, value: Expr, span: Span) -> Expr {
     match wrap {
         AppliedRowWrap::Constructor(name) => apply_ctor(name, value, span),
         AppliedRowWrap::Function(name) => app_expr(value_expr(name, span), value, span),
     }
 }
-
 
 impl AppliedRowWrap {
     fn into_expr(self, span: Span) -> Expr {
@@ -848,4 +833,3 @@ impl AppliedRowWrap {
         }
     }
 }
-

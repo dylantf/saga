@@ -1,4 +1,4 @@
-use super::{canonicalize_type_name, Checker, ImplInfo, Scheme, TraitInfo, Type};
+use super::{Checker, ImplInfo, Scheme, TraitInfo, Type, canonicalize_type_name};
 
 impl Checker {
     /// Helper to get the canonical name of a builtin type.
