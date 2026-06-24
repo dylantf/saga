@@ -417,7 +417,9 @@ Scope and implement the first incremental project-checking slice from
     spans from the project cache
 12. [x] lower semantic debounce after per-file in-flight coalescing proved
     stable
-13. [ ] replace the temporary interface fingerprint with a stable sorted
+13. [x] cache pathless builtin module interfaces using embedded-source
+    fingerprints
+14. [ ] replace the temporary interface fingerprint with a stable sorted
    projection
 
 Richer completion, references, and rename stay behind this work. Typechecking

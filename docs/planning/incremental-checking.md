@@ -501,13 +501,19 @@ derive/import-heavy file with current diagnostics:
   0.87s wall to diagnostics publication
 - after export-only interface seeding plus a 100ms semantic debounce: about
   0.28s analysis / 0.41s wall to diagnostics publication
+- after caching pathless builtin module interfaces such as `Std.DateTime`:
+  about 0.13s analysis / 0.25s wall to diagnostics publication
 
 The big cloned-result hotspot is gone: `to_result` dropped from roughly 517ms
 to roughly 40ms for this file. The cached-interface seed hotspot is also gone:
 seeding direct imports now takes roughly 1ms instead of roughly 147ms because
 the checker receives only the exports it needs for typechecking, while
 cross-module definition locations read cached `CheckResult` spans from the
-project store. The remaining warm-edit cost is mostly the current file's
-typecheck at roughly 230ms plus the 100ms debounce. Next target the measured
-typechecker/body path, then replace the temporary debug-format interface
-fingerprint with a stable sorted interface projection.
+project store. The remaining hidden import hotspot was uncached embedded stdlib
+modules: `Std.DateTime` was being typechecked on every edit because interface
+cache entries required filesystem paths. Builtin modules now use an
+embedded-source fingerprint and pathless cache entry. The remaining warm-edit
+cost is mostly the current file's own semantic pass at roughly 80ms plus the
+100ms debounce. Next target the measured typechecker/body path, then replace
+the temporary debug-format interface fingerprint with a stable sorted interface
+projection.

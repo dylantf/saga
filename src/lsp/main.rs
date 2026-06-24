@@ -71,7 +71,7 @@ struct ProjectSemanticState {
 
 #[derive(Clone)]
 struct CachedModuleInterface {
-    path: PathBuf,
+    path: Option<PathBuf>,
     source_fingerprint: u64,
     interface_fingerprint: u64,
     exports: typechecker::ModuleExports,
@@ -81,7 +81,7 @@ struct CachedModuleInterface {
 
 struct ModuleInterfaceUpdate {
     module_name: String,
-    path: PathBuf,
+    path: Option<PathBuf>,
     source_fingerprint: u64,
     interface_fingerprint: u64,
     exports: typechecker::ModuleExports,
@@ -169,9 +169,11 @@ impl ProjectSemanticStore {
             if requested_modules.is_some_and(|modules| !modules.contains(module_name)) {
                 continue;
             }
-            let Some(current_fingerprint) =
-                source_fingerprint_for_path(&entry.path, source_overlay)
-            else {
+            let current_fingerprint = match &entry.path {
+                Some(path) => source_fingerprint_for_path(path, source_overlay),
+                None => builtin_module_source_fingerprint(module_name),
+            };
+            let Some(current_fingerprint) = current_fingerprint else {
                 continue;
             };
             if current_fingerprint != entry.source_fingerprint {
@@ -484,6 +486,11 @@ fn source_fingerprint_for_path(
         .map(|source| source_fingerprint(&source))
 }
 
+fn builtin_module_source_fingerprint(module_name: &str) -> Option<u64> {
+    let path: Vec<String> = module_name.split('.').map(str::to_string).collect();
+    typechecker::builtin_module_source(&path).map(source_fingerprint)
+}
+
 fn collect_module_interface_updates(
     current_uri: Option<&Url>,
     current_program: &ast::Program,
@@ -496,10 +503,12 @@ fn collect_module_interface_updates(
     let mut updates = Vec::new();
 
     for (module_name, exports) in check.module_exports() {
-        let Some(path) = check.resolve_module_path(module_name) else {
-            continue;
+        let path = check.resolve_module_path(module_name);
+        let source_fingerprint = match &path {
+            Some(path) => source_fingerprint_for_path(path, source_overlay),
+            None => builtin_module_source_fingerprint(module_name),
         };
-        let Some(source_fingerprint) = source_fingerprint_for_path(&path, source_overlay) else {
+        let Some(source_fingerprint) = source_fingerprint else {
             continue;
         };
         if cached_source_fingerprints.get(module_name) == Some(&source_fingerprint) {
@@ -532,7 +541,7 @@ fn collect_module_interface_updates(
         let exports = typechecker::ModuleExports::collect(current_program, checker);
         updates.push(ModuleInterfaceUpdate {
             module_name,
-            path,
+            path: Some(path),
             source_fingerprint,
             interface_fingerprint: module_interface_fingerprint(&exports),
             exports,
@@ -1172,13 +1181,16 @@ fn build_definition_locations(
             let Some(module_result) = entry.check_result.as_ref() else {
                 continue;
             };
-            let Ok(uri) = Url::from_file_path(&entry.path) else {
+            let Some(path) = entry.path.as_ref() else {
+                continue;
+            };
+            let Ok(uri) = Url::from_file_path(path) else {
                 continue;
             };
             let source = source_overlay
-                .get(&entry.path)
+                .get(path)
                 .cloned()
-                .or_else(|| std::fs::read_to_string(&entry.path).ok());
+                .or_else(|| std::fs::read_to_string(path).ok());
             let Some(source) = source else { continue };
             let line_index = LineIndex::new(&source);
             for (node_id, span) in &module_result.node_spans {
@@ -2039,7 +2051,7 @@ mod tests {
     fn interface_update(module_name: &str, interface_fingerprint: u64) -> ModuleInterfaceUpdate {
         ModuleInterfaceUpdate {
             module_name: module_name.to_string(),
-            path: PathBuf::from(format!("/tmp/{module_name}.saga")),
+            path: Some(PathBuf::from(format!("/tmp/{module_name}.saga"))),
             source_fingerprint: 1,
             interface_fingerprint,
             exports: typechecker::ModuleExports::default(),
@@ -2262,5 +2274,31 @@ answer () = 42
             result.module_exports().contains_key("Kraken.Core"),
             "dependency exports were not warmed"
         );
+    }
+
+    #[test]
+    fn interface_updates_cache_builtin_modules_without_paths() {
+        let mut checker = typechecker::Checker::with_prelude(None).expect("checker");
+        checker
+            .try_typecheck_import_by_name("Std.DateTime")
+            .expect("typecheck builtin module");
+        let result = checker.to_lsp_result();
+
+        let updates = collect_module_interface_updates(
+            None,
+            &Vec::new(),
+            &checker,
+            &result,
+            &HashMap::new(),
+            &HashMap::new(),
+            false,
+        );
+        let date_time = updates
+            .iter()
+            .find(|update| update.module_name == "Std.DateTime")
+            .expect("Std.DateTime interface update");
+
+        assert!(date_time.path.is_none());
+        assert!(date_time.source_fingerprint != 0);
     }
 }
