@@ -403,6 +403,11 @@ impl Checker {
         self.modules.module_graph = None;
     }
 
+    pub fn set_source_overlay(&mut self, overlay: HashMap<std::path::PathBuf, String>) {
+        self.modules.source_overlay = overlay;
+        self.modules.module_graph = None;
+    }
+
     pub fn module_map(&self) -> Option<&check_module::ModuleMap> {
         self.modules.map.as_ref()
     }
@@ -430,10 +435,19 @@ impl Checker {
 
     /// Typecheck a module by name, triggering the full dependency walk.
     /// Used for library builds where there is no Main.saga entry point.
-    pub fn typecheck_import_by_name(&mut self, module_name: &str) {
+    pub fn try_typecheck_import_by_name(
+        &mut self,
+        module_name: &str,
+    ) -> std::result::Result<(), Diagnostic> {
         let parts: Vec<String> = module_name.split('.').map(|s| s.to_string()).collect();
         let span = crate::token::Span { start: 0, end: 0 };
-        if let Err(e) = self.typecheck_import(&parts, None, None, span) {
+        self.typecheck_import(&parts, None, None, span)
+    }
+
+    /// Typecheck a module by name, triggering the full dependency walk.
+    /// Used for library builds where there is no Main.saga entry point.
+    pub fn typecheck_import_by_name(&mut self, module_name: &str) {
+        if let Err(e) = self.try_typecheck_import_by_name(module_name) {
             eprintln!("Error typechecking module '{}': {}", module_name, e);
             std::process::exit(1);
         }

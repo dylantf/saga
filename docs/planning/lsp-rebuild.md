@@ -204,10 +204,24 @@ Done when:
 
 Goal: stop treating each file as an island.
 
-- Build and refresh the module map at project load.
-- Watch or rescan project files when modules are added/removed.
-- Track import edges from parse snapshots.
-- Recheck changed files plus reverse dependents.
+- [x] Find the containing `project.toml` for an open file and run the semantic
+  analysis job in project mode.
+- [x] Track import edges for open files and recheck open dependents when a
+  primary module changes.
+- [x] Cache prelude-loaded base checkers per project root so every edit does not
+  reload the prelude and stdlib surface.
+- [x] Resolve path/git dependency module exports from `project.toml`, preserving
+  dependency visibility/private-module metadata during local module refreshes.
+- [x] Warm dependency module exports in the cached base checker so edit-time
+  analysis clones do not repeatedly typecheck unchanged dependency packages.
+- [x] Refresh the project module map for each semantic analysis clone, so added
+  or removed modules do not require restarting the server.
+- Watch project files so added/removed modules can trigger affected open files
+  without waiting for the user to edit one of them.
+- [x] Track import edges from parse snapshots.
+- [x] Recheck changed open files plus reverse open dependents.
+- [x] Add an open-document source overlay so unsaved edits in imported modules are
+  used when checking dependents.
 - Cache clean dependency results at the project level.
 
 This phase should borrow from `docs/planning/incremental-checking.md`, but the
@@ -222,7 +236,8 @@ Done when:
 
 ### Phase 5: Semantic Navigation
 
-Goal: rebuild definition/references/rename on semantic identity.
+Goal: rebuild definition first on semantic identity. References and rename are
+explicitly deferred until project typechecking is solid and fast.
 
 - Create a single `SemanticIndex` from `CheckResult`:
   - definition id -> location
@@ -230,7 +245,10 @@ Goal: rebuild definition/references/rename on semantic identity.
   - type/effect/trait/handler references
   - module name -> file
   - docs by semantic key
-- Port go-to-definition to query this index.
+- [x] Port local go-to-definition to use `CheckResult.references` and
+  `node_spans`.
+- [x] Port cross-module go-to-definition to use cached semantic definition
+  locations built during analysis, not request-time file reads.
 - Port find-references to query this index.
 - Port rename only after references are trustworthy.
 
@@ -346,6 +364,9 @@ Manual smoke tests:
 
 - Should the parser grow a recovery mode for top-level items, or should the LSP
   own a lighter pre-parser for module/import/declaration outlines?
+- Should project-mode typechecking accept an in-memory source overlay for open
+  unsaved modules? Current dependent rechecks handle saved/on-disk module
+  changes, but imported modules are still read from disk by the compiler.
 - What semantic key should become the public LSP identity: `NodeId`, a new
   stable `DefId`, or a `(module, namespace, name, span)` key derived at the
   `CheckResult` boundary?

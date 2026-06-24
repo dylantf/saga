@@ -235,19 +235,27 @@ pub fn import_modules_for_program(program: &[crate::ast::Decl]) -> Vec<String> {
 }
 
 pub fn build_module_graph(module_map: &ModuleMap) -> Result<ModuleGraph, String> {
+    build_module_graph_with_sources(module_map, &HashMap::new())
+}
+
+pub fn build_module_graph_with_sources(
+    module_map: &ModuleMap,
+    source_overlay: &HashMap<std::path::PathBuf, String>,
+) -> Result<ModuleGraph, String> {
     let mut adjacency = HashMap::new();
     for (module_name, path) in module_map {
         adjacency.insert(
             module_name.clone(),
-            module_dependencies_from_file(module_name, path)?,
+            module_dependencies_from_file(module_name, path, source_overlay)?,
         );
     }
     Ok(ModuleGraph { adjacency })
 }
 
-pub fn build_reachable_module_graph(
+pub fn build_reachable_module_graph_with_sources(
     module_map: &ModuleMap,
     root_module: &str,
+    source_overlay: &HashMap<std::path::PathBuf, String>,
 ) -> Result<ModuleGraph, String> {
     let mut adjacency = HashMap::new();
     let mut stack = vec![root_module.to_string()];
@@ -260,7 +268,7 @@ pub fn build_reachable_module_graph(
             adjacency.insert(module_name, Vec::new());
             continue;
         };
-        let dependencies = module_dependencies_from_file(&module_name, path)?;
+        let dependencies = module_dependencies_from_file(&module_name, path, source_overlay)?;
         for dependency in &dependencies {
             if module_map.contains_key(dependency) && !seen.contains(dependency) {
                 stack.push(dependency.clone());
@@ -274,8 +282,13 @@ pub fn build_reachable_module_graph(
 fn module_dependencies_from_file(
     module_name: &str,
     path: &std::path::Path,
+    source_overlay: &HashMap<std::path::PathBuf, String>,
 ) -> Result<Vec<String>, String> {
-    let source = std::fs::read_to_string(path)
+    let source = source_overlay
+        .get(path)
+        .cloned()
+        .map(Ok)
+        .unwrap_or_else(|| std::fs::read_to_string(path))
         .map_err(|e| format!("cannot read module '{}': {}", module_name, e))?;
     let tokens = crate::lexer::Lexer::new(&source)
         .lex()

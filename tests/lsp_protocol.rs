@@ -1,10 +1,12 @@
 use std::io::{BufRead, BufReader, Write};
+use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::mpsc::{self, Receiver};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
+use tower_lsp::lsp_types::Url;
 
 struct LspHarness {
     child: Child,
@@ -146,8 +148,29 @@ fn publish_diagnostics(message: &Value) -> Option<&Value> {
         .then(|| message.get("params"))?
 }
 
+fn diagnostics_for_uri<'a>(message: &'a Value, uri: &str) -> Option<&'a Value> {
+    let params = publish_diagnostics(message)?;
+    (params["uri"].as_str() == Some(uri)).then_some(params)
+}
+
 fn saga_uri(name: &str) -> String {
     format!("file:///tmp/{name}.saga")
+}
+
+fn file_uri(path: &Path) -> String {
+    Url::from_file_path(path).expect("file URL").to_string()
+}
+
+fn temp_project(name: &str) -> PathBuf {
+    let unique = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("clock before epoch")
+        .as_nanos();
+    let root =
+        std::env::temp_dir().join(format!("saga-lsp-{name}-{}-{unique}", std::process::id()));
+    std::fs::create_dir_all(root.join("src")).expect("create temp project src");
+    std::fs::write(root.join("project.toml"), "").expect("write project.toml");
+    root
 }
 
 #[test]
@@ -420,4 +443,599 @@ main () = id ()
         .expect("hover markdown value");
 
     assert!(value.contains("id: Unit -> Unit"), "{value}");
+}
+
+#[test]
+fn goto_definition_uses_local_semantic_references() {
+    let mut lsp = LspHarness::start();
+    lsp.initialize();
+    let uri = saga_uri("definition");
+    let source = "\
+module Main
+
+fun id : Unit -> Unit
+id x = x
+
+fun main : Unit -> Unit
+main () = id ()
+";
+
+    lsp.send_notification(
+        "textDocument/didOpen",
+        json!({
+            "textDocument": {
+                "uri": uri,
+                "languageId": "saga",
+                "version": 1,
+                "text": source
+            }
+        }),
+    );
+    let params = lsp
+        .recv_until(Duration::from_secs(5), |message| {
+            publish_diagnostics(message).is_some()
+        })
+        .and_then(|message| publish_diagnostics(&message).cloned())
+        .expect("publish diagnostics notification");
+    assert_eq!(
+        params["diagnostics"].as_array().map(Vec::len),
+        Some(0),
+        "fixture must typecheck before definition request, got {params:?}"
+    );
+
+    let id = lsp.send_request(
+        "textDocument/definition",
+        json!({
+            "textDocument": {
+                "uri": saga_uri("definition")
+            },
+            "position": {
+                "line": 6,
+                "character": 10
+            }
+        }),
+    );
+    let response = lsp
+        .recv_until(Duration::from_secs(5), |message| {
+            message.get("id").and_then(Value::as_i64) == Some(id)
+        })
+        .expect("definition response");
+
+    let line = response["result"]["range"]["start"]["line"]
+        .as_u64()
+        .expect("definition start line");
+    assert!(
+        line == 2 || line == 3,
+        "unexpected definition response: {response:?}"
+    );
+}
+
+#[test]
+fn hover_uses_project_imports() {
+    let root = temp_project("imports");
+    let helper_path = root.join("src/Helper.saga");
+    let main_path = root.join("src/Main.saga");
+
+    std::fs::write(
+        &helper_path,
+        "\
+module Helper
+
+pub fun forty_two : Unit -> Int
+forty_two () = 42
+",
+    )
+    .expect("write helper module");
+
+    let main_source = "\
+module Main
+
+import Helper (forty_two)
+
+fun main : Unit -> Int
+main () = forty_two ()
+";
+    std::fs::write(&main_path, main_source).expect("write main module");
+
+    let result = {
+        let mut lsp = LspHarness::start();
+        lsp.initialize();
+        let uri = file_uri(&main_path);
+
+        lsp.send_notification(
+            "textDocument/didOpen",
+            json!({
+                "textDocument": {
+                    "uri": uri,
+                    "languageId": "saga",
+                    "version": 1,
+                    "text": main_source
+                }
+            }),
+        );
+        let params = lsp
+            .recv_until(Duration::from_secs(5), |message| {
+                publish_diagnostics(message).is_some()
+            })
+            .and_then(|message| publish_diagnostics(&message).cloned())
+            .expect("publish diagnostics notification");
+        assert_eq!(
+            params["diagnostics"].as_array().map(Vec::len),
+            Some(0),
+            "fixture must typecheck before hover request, got {params:?}"
+        );
+
+        let id = lsp.send_request(
+            "textDocument/hover",
+            json!({
+                "textDocument": {
+                    "uri": file_uri(&main_path)
+                },
+                "position": {
+                    "line": 5,
+                    "character": 11
+                }
+            }),
+        );
+        lsp.recv_until(Duration::from_secs(5), |message| {
+            message.get("id").and_then(Value::as_i64) == Some(id)
+        })
+        .expect("hover response")
+    };
+
+    let _ = std::fs::remove_dir_all(&root);
+
+    let value = result["result"]["contents"]["value"]
+        .as_str()
+        .expect("hover markdown value");
+    assert!(value.contains("forty_two: Unit -> Int"), "{value}");
+}
+
+#[test]
+fn goto_definition_uses_cached_cross_module_locations() {
+    let root = temp_project("cross-module-definition");
+    let helper_path = root.join("src/Helper.saga");
+    let main_path = root.join("src/Main.saga");
+
+    std::fs::write(
+        &helper_path,
+        "\
+module Helper
+
+pub fun forty_two : Unit -> Int
+forty_two () = 42
+",
+    )
+    .expect("write helper module");
+
+    let main_source = "\
+module Main
+
+import Helper (forty_two)
+
+fun main : Unit -> Int
+main () = forty_two ()
+";
+    std::fs::write(&main_path, main_source).expect("write main module");
+
+    let result = {
+        let mut lsp = LspHarness::start();
+        lsp.initialize();
+        let uri = file_uri(&main_path);
+
+        lsp.send_notification(
+            "textDocument/didOpen",
+            json!({
+                "textDocument": {
+                    "uri": uri,
+                    "languageId": "saga",
+                    "version": 1,
+                    "text": main_source
+                }
+            }),
+        );
+        let params = lsp
+            .recv_until(Duration::from_secs(5), |message| {
+                publish_diagnostics(message).is_some()
+            })
+            .and_then(|message| publish_diagnostics(&message).cloned())
+            .expect("publish diagnostics notification");
+        assert_eq!(
+            params["diagnostics"].as_array().map(Vec::len),
+            Some(0),
+            "fixture must typecheck before definition request, got {params:?}"
+        );
+
+        let id = lsp.send_request(
+            "textDocument/definition",
+            json!({
+                "textDocument": {
+                    "uri": file_uri(&main_path)
+                },
+                "position": {
+                    "line": 5,
+                    "character": 11
+                }
+            }),
+        );
+        lsp.recv_until(Duration::from_secs(5), |message| {
+            message.get("id").and_then(Value::as_i64) == Some(id)
+        })
+        .expect("definition response")
+    };
+
+    let _ = std::fs::remove_dir_all(&root);
+
+    assert_eq!(
+        result["result"]["uri"].as_str(),
+        Some(file_uri(&helper_path).as_str())
+    );
+    let line = result["result"]["range"]["start"]["line"]
+        .as_u64()
+        .expect("definition start line");
+    assert!(
+        line == 2 || line == 3,
+        "unexpected definition response: {result:?}"
+    );
+}
+
+#[test]
+fn changing_imported_open_module_rechecks_open_dependents() {
+    let root = temp_project("dependent-recheck");
+    let helper_path = root.join("src/Helper.saga");
+    let main_path = root.join("src/Main.saga");
+
+    let helper_valid = "\
+module Helper
+
+pub fun forty_two : Unit -> Int
+forty_two () = 42
+";
+    std::fs::write(&helper_path, helper_valid).expect("write helper module");
+
+    let main_source = "\
+module Main
+
+import Helper (forty_two)
+
+fun main : Unit -> Int
+main () = forty_two ()
+";
+    std::fs::write(&main_path, main_source).expect("write main module");
+
+    let main_uri = file_uri(&main_path);
+    let helper_uri = file_uri(&helper_path);
+
+    let result = {
+        let mut lsp = LspHarness::start();
+        lsp.initialize();
+
+        lsp.send_notification(
+            "textDocument/didOpen",
+            json!({
+                "textDocument": {
+                    "uri": main_uri,
+                    "languageId": "saga",
+                    "version": 1,
+                    "text": main_source
+                }
+            }),
+        );
+        lsp.recv_until(Duration::from_secs(5), |message| {
+            diagnostics_for_uri(message, &file_uri(&main_path))
+                .is_some_and(|params| params["diagnostics"].as_array().map(Vec::len) == Some(0))
+        })
+        .expect("initial main diagnostics");
+
+        lsp.send_notification(
+            "textDocument/didOpen",
+            json!({
+                "textDocument": {
+                    "uri": helper_uri,
+                    "languageId": "saga",
+                    "version": 1,
+                    "text": helper_valid
+                }
+            }),
+        );
+        lsp.recv_until(Duration::from_secs(5), |message| {
+            diagnostics_for_uri(message, &file_uri(&helper_path))
+                .is_some_and(|params| params["diagnostics"].as_array().map(Vec::len) == Some(0))
+        })
+        .expect("initial helper diagnostics");
+
+        let helper_invalid = "\
+module Helper
+
+pub fun forty_two : Unit -> Int
+forty_two () = \"nope\"
+";
+        std::fs::write(&helper_path, helper_invalid).expect("write invalid helper module");
+        lsp.send_notification(
+            "textDocument/didChange",
+            json!({
+                "textDocument": {
+                    "uri": file_uri(&helper_path),
+                    "version": 2
+                },
+                "contentChanges": [{
+                    "text": helper_invalid
+                }]
+            }),
+        );
+
+        lsp.recv_until(Duration::from_secs(5), |message| {
+            diagnostics_for_uri(message, &file_uri(&main_path)).is_some_and(|params| {
+                params["version"].as_i64() == Some(1)
+                    && params["diagnostics"]
+                        .as_array()
+                        .is_some_and(|diagnostics| !diagnostics.is_empty())
+            })
+        })
+        .expect("dependent main diagnostics after helper change")
+    };
+
+    let _ = std::fs::remove_dir_all(&root);
+    assert!(publish_diagnostics(&result).is_some());
+}
+
+#[test]
+fn adding_imported_module_refreshes_project_module_map_without_restart() {
+    let root = temp_project("module-map-refresh");
+    let helper_path = root.join("src/Helper.saga");
+    let main_path = root.join("src/Main.saga");
+
+    let main_source = "\
+module Main
+
+import Helper (forty_two)
+
+fun main : Unit -> Int
+main () = forty_two ()
+";
+    std::fs::write(&main_path, main_source).expect("write main module");
+
+    let main_uri = file_uri(&main_path);
+
+    let result = {
+        let mut lsp = LspHarness::start();
+        lsp.initialize();
+
+        lsp.send_notification(
+            "textDocument/didOpen",
+            json!({
+                "textDocument": {
+                    "uri": main_uri,
+                    "languageId": "saga",
+                    "version": 1,
+                    "text": main_source
+                }
+            }),
+        );
+        lsp.recv_until(Duration::from_secs(5), |message| {
+            diagnostics_for_uri(message, &file_uri(&main_path)).is_some_and(|params| {
+                params["version"].as_i64() == Some(1)
+                    && params["diagnostics"]
+                        .as_array()
+                        .is_some_and(|diagnostics| !diagnostics.is_empty())
+            })
+        })
+        .expect("missing import diagnostics");
+
+        std::fs::write(
+            &helper_path,
+            "\
+module Helper
+
+pub fun forty_two : Unit -> Int
+forty_two () = 42
+",
+        )
+        .expect("write helper module");
+
+        lsp.send_notification(
+            "textDocument/didChange",
+            json!({
+                "textDocument": {
+                    "uri": file_uri(&main_path),
+                    "version": 2
+                },
+                "contentChanges": [{
+                    "text": main_source
+                }]
+            }),
+        );
+
+        lsp.recv_until(Duration::from_secs(5), |message| {
+            diagnostics_for_uri(message, &file_uri(&main_path)).is_some_and(|params| {
+                params["version"].as_i64() == Some(2)
+                    && params["diagnostics"].as_array().map(Vec::len) == Some(0)
+            })
+        })
+        .expect("diagnostics to clear after module map refresh")
+    };
+
+    let _ = std::fs::remove_dir_all(&root);
+    assert!(publish_diagnostics(&result).is_some());
+}
+
+#[test]
+fn unsaved_imported_module_change_rechecks_dependents_with_open_text() {
+    let root = temp_project("unsaved-dependent-recheck");
+    let helper_path = root.join("src/Helper.saga");
+    let main_path = root.join("src/Main.saga");
+
+    let helper_valid = "\
+module Helper
+
+pub fun value : Unit -> Int
+value () = 42
+";
+    std::fs::write(&helper_path, helper_valid).expect("write helper module");
+
+    let main_source = "\
+module Main
+
+import Helper (value)
+
+fun main : Unit -> Int
+main () = value ()
+";
+    std::fs::write(&main_path, main_source).expect("write main module");
+
+    let result = {
+        let mut lsp = LspHarness::start();
+        lsp.initialize();
+
+        lsp.send_notification(
+            "textDocument/didOpen",
+            json!({
+                "textDocument": {
+                    "uri": file_uri(&main_path),
+                    "languageId": "saga",
+                    "version": 1,
+                    "text": main_source
+                }
+            }),
+        );
+        lsp.recv_until(Duration::from_secs(5), |message| {
+            diagnostics_for_uri(message, &file_uri(&main_path))
+                .is_some_and(|params| params["diagnostics"].as_array().map(Vec::len) == Some(0))
+        })
+        .expect("initial main diagnostics");
+
+        lsp.send_notification(
+            "textDocument/didOpen",
+            json!({
+                "textDocument": {
+                    "uri": file_uri(&helper_path),
+                    "languageId": "saga",
+                    "version": 1,
+                    "text": helper_valid
+                }
+            }),
+        );
+        lsp.recv_until(Duration::from_secs(5), |message| {
+            diagnostics_for_uri(message, &file_uri(&helper_path))
+                .is_some_and(|params| params["diagnostics"].as_array().map(Vec::len) == Some(0))
+        })
+        .expect("initial helper diagnostics");
+
+        let helper_unsaved = "\
+module Helper
+
+pub fun value : Unit -> String
+value () = \"forty two\"
+";
+        lsp.send_notification(
+            "textDocument/didChange",
+            json!({
+                "textDocument": {
+                    "uri": file_uri(&helper_path),
+                    "version": 2
+                },
+                "contentChanges": [{
+                    "text": helper_unsaved
+                }]
+            }),
+        );
+
+        lsp.recv_until(Duration::from_secs(5), |message| {
+            diagnostics_for_uri(message, &file_uri(&main_path)).is_some_and(|params| {
+                params["version"].as_i64() == Some(1)
+                    && params["diagnostics"]
+                        .as_array()
+                        .is_some_and(|diagnostics| !diagnostics.is_empty())
+            })
+        })
+        .expect("dependent main diagnostics from unsaved helper text")
+    };
+
+    let on_disk_helper = std::fs::read_to_string(&helper_path).expect("read helper from disk");
+    let _ = std::fs::remove_dir_all(&root);
+
+    assert_eq!(on_disk_helper, helper_valid);
+    assert!(publish_diagnostics(&result).is_some());
+}
+
+#[test]
+fn project_path_dependency_exposed_modules_are_available() {
+    let root = temp_project("path-dependency");
+    let dep_root = root.join("deps/kraken");
+    let dep_src = dep_root.join("src");
+    let main_path = root.join("src/Main.saga");
+    let kraken_core_path = dep_src.join("Core.saga");
+
+    std::fs::create_dir_all(&dep_src).expect("create dependency src");
+    std::fs::write(
+        root.join("project.toml"),
+        "\
+[project]
+name = \"app\"
+
+[deps]
+kraken = { path = \"deps/kraken\" }
+",
+    )
+    .expect("write app project.toml");
+    std::fs::write(
+        dep_root.join("project.toml"),
+        "\
+[project]
+name = \"kraken\"
+
+[library]
+module = \"Kraken\"
+expose = [\"Kraken.Core\"]
+",
+    )
+    .expect("write dependency project.toml");
+    std::fs::write(
+        &kraken_core_path,
+        "\
+module Kraken.Core
+
+pub fun answer : Unit -> Int
+answer () = 42
+",
+    )
+    .expect("write dependency module");
+
+    let main_source = "\
+module Main
+
+import Kraken.Core (answer)
+
+fun main : Unit -> Int
+main () = answer ()
+";
+    std::fs::write(&main_path, main_source).expect("write main module");
+
+    let result = {
+        let mut lsp = LspHarness::start();
+        lsp.initialize();
+
+        lsp.send_notification(
+            "textDocument/didOpen",
+            json!({
+                "textDocument": {
+                    "uri": file_uri(&main_path),
+                    "languageId": "saga",
+                    "version": 1,
+                    "text": main_source
+                }
+            }),
+        );
+
+        lsp.recv_until(Duration::from_secs(5), |message| {
+            diagnostics_for_uri(message, &file_uri(&main_path)).is_some_and(|params| {
+                params["version"].as_i64() == Some(1)
+                    && params["diagnostics"].as_array().map(Vec::len) == Some(0)
+            })
+        })
+        .expect("dependency import diagnostics to clear")
+    };
+
+    let _ = std::fs::remove_dir_all(&root);
+    assert!(publish_diagnostics(&result).is_some());
 }

@@ -199,7 +199,7 @@ impl Checker {
             src.to_string()
         } else {
             let file_path = resolved_path.expect("non-builtin path resolved above");
-            std::fs::read_to_string(&file_path).map_err(|e| {
+            self.module_source(&file_path).map_err(|e| {
                 Diagnostic::error_at(span, format!("cannot read module '{}': {}", module_name, e))
             })?
         };
@@ -218,7 +218,11 @@ impl Checker {
                     format!("parse error in module '{}': {}", module_name, e.message),
                 )
             })?;
-        let imported = crate::derive::collect_imported_decls(&program, self.modules.map.as_ref());
+        let imported = crate::derive::collect_imported_decls_with_sources(
+            &program,
+            self.modules.map.as_ref(),
+            &self.modules.source_overlay,
+        );
         crate::derive::expand_derives(&mut program, &imported);
         crate::desugar::desugar_program(&mut program);
 
@@ -249,6 +253,7 @@ impl Checker {
         mod_checker.modules.programs = self.modules.programs.clone();
         mod_checker.modules.map = self.modules.map.clone();
         mod_checker.modules.module_graph = self.modules.module_graph.clone();
+        mod_checker.modules.source_overlay = self.modules.source_overlay.clone();
         mod_checker.modules.visibility = self.modules.visibility.clone();
         mod_checker.modules.private_modules = self.modules.private_modules.clone();
         mod_checker.modules.loading = self.modules.loading.clone();
@@ -350,6 +355,7 @@ impl Checker {
         };
         snapshot.modules.map = self.modules.map.clone();
         snapshot.modules.module_graph = self.modules.module_graph.clone();
+        snapshot.modules.source_overlay = self.modules.source_overlay.clone();
         snapshot.modules.visibility = self.modules.visibility.clone();
         snapshot.modules.private_modules = self.modules.private_modules.clone();
         let prelude_src = include_str!("../stdlib/prelude.saga");
@@ -387,7 +393,7 @@ impl Checker {
                     format!("unknown module '{}' in import cycle", module_name),
                 )
             })?;
-            let source = std::fs::read_to_string(path).map_err(|e| {
+            let source = self.module_source(path).map_err(|e| {
                 Diagnostic::error_at(span, format!("cannot read module '{}': {}", module_name, e))
             })?;
             let tokens = crate::lexer::Lexer::new(&source).lex().map_err(|e| {
@@ -404,8 +410,11 @@ impl Checker {
                         format!("parse error in module '{}': {}", module_name, e.message),
                     )
                 })?;
-            let imported =
-                crate::derive::collect_imported_decls(&program, self.modules.map.as_ref());
+            let imported = crate::derive::collect_imported_decls_with_sources(
+                &program,
+                self.modules.map.as_ref(),
+                &self.modules.source_overlay,
+            );
             crate::derive::expand_derives(&mut program, &imported);
             crate::desugar::desugar_program(&mut program);
             self.modules
@@ -598,10 +607,20 @@ impl Checker {
         mc.modules.programs = self.modules.programs.clone();
         mc.modules.map = self.modules.map.clone();
         mc.modules.module_graph = self.modules.module_graph.clone();
+        mc.modules.source_overlay = self.modules.source_overlay.clone();
         mc.modules.visibility = self.modules.visibility.clone();
         mc.modules.private_modules = self.modules.private_modules.clone();
         mc.modules.base_trait_impls = self.modules.base_trait_impls.clone();
         mc
+    }
+
+    fn module_source(&self, path: &std::path::Path) -> std::io::Result<String> {
+        self.modules
+            .source_overlay
+            .get(path)
+            .cloned()
+            .map(Ok)
+            .unwrap_or_else(|| std::fs::read_to_string(path))
     }
 
     /// Inject all exports from a module into this checker.

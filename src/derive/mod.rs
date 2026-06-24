@@ -26,8 +26,8 @@ mod type_expr;
 // Public API surface (used by other crates / integration tests).
 pub use expand::expand_derives;
 pub use imports::{
-    collect_from_project_root, collect_imported_decls, ImportedDecls, SummaryEntry,
-    WrapperRecordInfo, WrapperTypeInfo,
+    ImportedDecls, SummaryEntry, WrapperRecordInfo, WrapperTypeInfo, collect_from_project_root,
+    collect_imported_decls, collect_imported_decls_with_sources,
 };
 pub use scope::RoutedTraitInfo;
 
